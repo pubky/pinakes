@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+pinakes_database_url="${DATABASE_URL:-postgresql:///pinakes?host=/var/run/postgresql}"
+psql --dbname="$pinakes_database_url" -v ON_ERROR_STOP=1 <<'SQL'
+DO $$ BEGIN
+IF EXISTS(SELECT 1 FROM resource WHERE resolver='osm' AND
+  (osm_type IS NULL OR osm_id IS NULL OR name IS NOT NULL OR point IS NOT NULL OR
+   category IS NOT NULL OR type IS NOT NULL OR type_path IS NOT NULL OR
+   doc-ARRAY['type','url','osm_id','source','status']::text[]<>'{}'::jsonb))
+THEN RAISE EXCEPTION 'OSM-derived values leaked into resource'; END IF;
+IF EXISTS(SELECT 1 FROM resource r LEFT JOIN osm_place o USING(osm_type,osm_id)
+  WHERE r.resolver='osm' AND r.resolved_at IS NOT NULL AND o.osm_id IS NULL)
+THEN RAISE EXCEPTION 'Resolved OSM reference has no derivative row'; END IF;
+END $$;
+SELECT count(*) AS derivative_rows, count(*) FILTER(WHERE status='ok') AS resolved_places FROM osm_place;
+SELECT table_name,column_name FROM information_schema.columns
+ WHERE table_schema='public' AND column_name IN ('osm_type','osm_id') ORDER BY 1,2;
+SQL
+# Export only the derivative table; caller supplies a destination to retain the proof.
+pg_dump --dbname="$pinakes_database_url" --table=osm_place --no-owner --no-acl --file="${1:-/dev/null}"

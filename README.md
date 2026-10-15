@@ -114,6 +114,8 @@ configuration, never supplied by the caller.
 # This role needs CREATEDB and permission to create the PostGIS extension.
 export DATABASE_URL='postgresql:///postgres?host=/var/run/postgresql'
 scripts/test
+# Read-only acceptance check and optional ODbL-only SQL export of a resolved database.
+DATABASE_URL='postgresql:///pinakes?host=/var/run/postgresql' scripts/verify-osm-boundary .runtime/osm_place.sql
 ```
 
 `scripts/test` runs fmt, clippy with warnings denied, and all workspace tests. sqlx
