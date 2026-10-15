@@ -10,3 +10,6 @@ pub mod spatial;
 pub mod store;
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
+
+pub mod adapter;
+pub mod scheduler;

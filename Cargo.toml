@@ -22,7 +22,7 @@ serde_json = "1"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "json", "macros", "migrate"] }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
-url = "2"
+url = { version = "2", features = ["serde"] }
 utoipa = { version = "5", features = ["axum_extras", "chrono"] }
 # Replace this unchanged snapshot with the pubky-nexus git dependency once its PR merges.
 pubky-resource-id = { path = "crates/pubky-resource-id" }

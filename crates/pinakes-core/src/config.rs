@@ -7,6 +7,9 @@ use std::{collections::BTreeMap, path::Path};
 pub struct Config {
     pub database_url: String,
     pub listen: String,
+    pub admin_listen: String,
+    pub refresh: RefreshConfig,
+    pub canary: CanaryConfig,
     pub nexus_url: String,
     pub poll_secs: u64,
     pub grace_days: u32,
@@ -24,6 +27,9 @@ impl Default for Config {
         Self {
             database_url: "postgresql:///pinakes?host=/var/run/postgresql".into(),
             listen: "127.0.0.1:8090".into(),
+            admin_listen: "127.0.0.1:9090".into(),
+            refresh: RefreshConfig::default(),
+            canary: CanaryConfig::default(),
             nexus_url: "http://127.0.0.1:8080".into(),
             poll_secs: 5,
             grace_days: 7,
@@ -154,6 +160,38 @@ impl Default for SearchConfig {
         }
     }
 }
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RefreshConfig {
+    pub resource_secs: [u64; 4],
+    pub container_secs: [u64; 4],
+    pub cursor_secs: u64,
+    pub retention_days: u32,
+}
+impl Default for RefreshConfig {
+    fn default() -> Self {
+        Self {
+            resource_secs: [7 * 86400, 2 * 86400, 6 * 3600, 3600],
+            container_secs: [86400, 12 * 3600, 6 * 3600, 3600],
+            cursor_secs: 300,
+            retention_days: 90,
+        }
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CanaryConfig {
+    pub enabled: bool,
+    pub interval_secs: u64,
+}
+impl Default for CanaryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_secs: 6 * 3600,
+        }
+    }
+}
 impl Config {
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let mut value = serde_json::to_value(Self::default())?;
@@ -187,6 +225,20 @@ impl Config {
     }
     pub fn validate(&self) -> Result<()> {
         self.listen.parse::<std::net::SocketAddr>()?;
+        self.admin_listen.parse::<std::net::SocketAddr>()?;
+        if self.admin_listen == self.listen
+            || self
+                .refresh
+                .resource_secs
+                .iter()
+                .chain(self.refresh.container_secs.iter())
+                .any(|s| *s == 0 || *s > 31536000)
+            || !(1..=86400).contains(&self.refresh.cursor_secs)
+            || !(1..=3650).contains(&self.refresh.retention_days)
+            || !(3600..=604800).contains(&self.canary.interval_secs)
+        {
+            bail!("invalid refresh, canary or admin configuration");
+        }
         let nexus = url::Url::parse(&self.nexus_url)?;
         if !matches!(nexus.scheme(), "http" | "https") || nexus.host_str().is_none() {
             bail!("invalid Nexus URL");
