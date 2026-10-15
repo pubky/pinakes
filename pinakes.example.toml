@@ -1,0 +1,41 @@
+# Use a peer-authenticated Unix socket locally, or a secret supplied via PINAKES__DATABASE_URL.
+database_url = "postgresql:///pinakes?host=/var/run/postgresql"
+listen = "127.0.0.1:8090"
+nexus_url = "http://127.0.0.1:8080"
+poll_secs = 5
+grace_days = 7
+
+[web]
+enabled = true
+concurrency = 4
+requests_per_second = 4.0
+ttl_secs = 86400
+
+[pubky]
+enabled = true
+concurrency = 2
+requests_per_second = 2.0
+ttl_secs = 86400
+
+[egress]
+host_requests_per_second = 1.0
+# Exact names or *.example.org. An empty allow list permits all public hosts.
+# Lists never override the IP policy. Deny wins.
+allow_hosts = []
+deny_hosts = []
+
+# [egress.host_rates]
+# "example.org" = 0.5
+
+[queue]
+max_failures = 5
+backoff_secs = 30
+max_backoff_secs = 3600
+lease_secs = 60
+missing_ttl_secs = 3600
+author_requests_per_second = 1.0
+
+[preview]
+requests_per_minute = 30
+uri_requests_per_minute = 30
+cache_capacity = 10000

@@ -15,4 +15,18 @@ same base.
 
 ## Status
 
-Skeleton. Nothing runs yet.
+Rust workspace with the `pinakesd` binary, TOML/env configuration, sqlx migrations
+and `/v1/info`. Ingestion and resource resolution follow in the next commit.
+
+## Running locally
+
+Install PostgreSQL 16, PostGIS and `pg_trgm`, create a `pinakes` database, then:
+
+```sh
+cp pinakes.example.toml pinakes-dev.toml
+cargo run -p pinakesd -- --config pinakes-dev.toml
+```
+
+The daemon migrates on startup and listens on port 8090 by default. Config values
+can be overridden with `PINAKES__KEY` or `PINAKES__SECTION__KEY`. The local config
+is ignored by Git; keep credentials outside the repository.

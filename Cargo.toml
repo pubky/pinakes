@@ -1,0 +1,29 @@
+[workspace]
+members = ["crates/pinakes-core", "crates/pinakesd", "crates/pubky-resource-id"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/pubky/pinakes"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
+base64 = "0.22"
+blake3 = "1"
+chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "gzip", "brotli", "deflate"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "json", "macros", "migrate"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+url = "2"
+utoipa = { version = "5", features = ["axum_extras", "chrono"] }
+# Replace this unchanged snapshot with the pubky-nexus git dependency once its PR merges.
+pubky-resource-id = { path = "crates/pubky-resource-id" }
+pinakes-core = { path = "crates/pinakes-core" }
