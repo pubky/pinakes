@@ -1,0 +1,11 @@
+{
+  "opengraph": {
+    "website": "WebPage", "article": "Article", "profile": "Person",
+    "book": "Book", "video.movie": "Movie", "video.episode": "TVEpisode",
+    "video.tv_show": "TVSeries", "video.other": "VideoObject",
+    "music.song": "MusicRecording", "music.album": "MusicAlbum", "music.playlist": "MusicPlaylist",
+    "music.radio_station": "RadioStation", "product": "Product", "place": "Place"
+  },
+  "oembed": { "photo": "ImageObject", "video": "VideoObject", "link": "WebPage", "rich": "CreativeWork" },
+  "microformats": { "h-event": "Event", "h-card": "Person", "h-entry": "Article" }
+}
