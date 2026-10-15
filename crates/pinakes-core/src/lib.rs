@@ -1,4 +1,5 @@
 //! Pinakes indexes resource facts; Nexus remains the social source of truth.
+pub mod api;
 pub mod config;
 pub mod ingest;
 pub mod model;
