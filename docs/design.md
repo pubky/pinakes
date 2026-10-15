@@ -102,6 +102,8 @@ A resolver turns a URI into one small typed document, on demand and never inline
 
 Egress policy: private ranges refused and redirects re-checked; a 10 s timeout, a 1 MB page cap and at most 3 redirects **(arbitrary)**; one fetch per URI per TTL no matter who asks; per-host limits with allow and deny lists; every upstream URL and rate limit in config, so development runs on the public Nominatim and Photon under slow limits and staging and production on our own planet instances. Images are never re-hosted; clients proxy.
 
+Refresh follows the time to an event's start and stops after its end; a change is a difference in the typed document, confirmed twice before a cancellation, and becomes a line in Pinakes's own change feed. Every source is one adapter manifest (mode, cadence, identity, cancellation signal, expected fields, canary), and the same manifest drives the Prometheus metrics and Grafana alerts, so a platform that changes its markup or puts up a wall is an alert before it is a blank card ([details 5.2](details.html#changes), [5.7](details.html#operations)).
+
 [Details: each stage, the module table, the event-source matrix, the egress policy](details.html#resolution)
 
 ### 5.3 Document {#document}
@@ -135,6 +137,8 @@ Postgres with PostGIS and full-text search **(arbitrary)**; any database with sp
 | `GET /v1/resources/{id}/occurrences?from&to` | the events of a feed |
 | `POST /v1/resolve {uri}` | compose-time preview; three seconds synchronous, then `pending` **(arbitrary)**; open, protected per URI and per IP |
 | `GET /v1/info`, admin routes | resolver status and ingestion lag; re-resolve, deny a host, read budgets |
+| `GET /v1/changes`, `POST /v1/changes/lookup` | what changed: Pinakes's own change feed, and the changes to a client's own resources since its last visit |
+| `GET /metrics` (admin listener) | Prometheus series per source: fetch outcomes, changes, canaries, queue, ingestion lag |
 | `collapse=group` on search, `GET /v1/groups/{id}` | later: one row per group of URIs that are one thing, with its members |
 
 `tags` at most five, `match=all` at most three **(arbitrary)**. Nothing in Pinakes returns a user, a follow, a post body or a viewer's own tag state.
@@ -182,6 +186,7 @@ The client plans: [Maps](maps.html) and [Events](events.html).
 1. Which schema.org vocabulary version to pin and how often to bump it.
 2. Who owns the Nominatim and Photon instances: the planet import, replication, disk growth, the occasional full re-import.
 3. Whether Nexus retires its resource streams once Pinakes serves lists.
+4. Who delivers `event_changed` for external events: the client, through `POST /v1/changes/lookup` (proposal), or a worker that reads the change feed.
 
 [Details: the open questions with their options](details.html#open)
 
