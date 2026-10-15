@@ -9,6 +9,27 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/v1/dumps/osm_place.ndjson": {
+      "get": {
+        "tags": [],
+        "operationId": "osm_dump",
+        "responses": {
+          "200": {
+            "description": "Streaming ODbL derivative database; first line is the licence notice",
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Dump request budget exhausted"
+          }
+        }
+      }
+    },
     "/v1/info": {
       "get": {
         "tags": [],
@@ -495,6 +516,15 @@
           "document"
         ]
       },
+      "LocationSource": {
+        "type": "string",
+        "enum": [
+          "uri",
+          "osm",
+          "page",
+          "geocoded"
+        ]
+      },
       "LookupRequest": {
         "type": "object",
         "properties": {
@@ -558,10 +588,18 @@
           "attributes",
           "source",
           "fetched_at",
-          "ttl_secs",
           "status"
         ],
         "properties": {
+          "address": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
           "aliases": {
             "type": "array",
             "items": {
@@ -575,6 +613,22 @@
             },
             "propertyNames": {
               "type": "string"
+            }
+          },
+          "attribution": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "bbox": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "number",
+              "format": "double"
             }
           },
           "category": {
@@ -616,7 +670,23 @@
               }
             ]
           },
+          "location_source": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LocationSource"
+              }
+            ]
+          },
           "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "osm_id": {
             "type": [
               "string",
               "null"
@@ -667,6 +737,12 @@
           "score"
         ],
         "properties": {
+          "attribution": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "category": {
             "type": [
               "string",
@@ -703,6 +779,12 @@
             ]
           },
           "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "osm_id": {
             "type": [
               "string",
               "null"

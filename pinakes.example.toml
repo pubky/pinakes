@@ -4,6 +4,7 @@ listen = "127.0.0.1:8090"
 nexus_url = "http://127.0.0.1:8080"
 poll_secs = 5
 grace_days = 7
+geo_enabled = true
 
 [web]
 enabled = true
@@ -39,3 +40,20 @@ author_requests_per_second = 1.0
 requests_per_minute = 30
 uri_requests_per_minute = 30
 cache_capacity = 10000
+
+# Canonical referenced OSM objects only; no search/reverse-geocoding proxy.
+# Public service is for the small development run; staging/production use our own URL.
+[osm]
+enabled = true
+nominatim_url = "https://nominatim.openstreetmap.org"
+requests_per_second = 0.5
+# Always one concurrent request; the public host has a hard maximum of 1/s.
+ttl_secs = 2592000
+fallback_enabled = false
+api_url = "https://api.openstreetmap.org"
+dump_requests_per_minute = 2
+
+[search]
+max_radius_m = 200000.0
+# Index is map zoom 0..22; value is H3 resolution, capped at 11.
+h3_resolutions = [0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 11, 11, 11, 11, 11, 11, 11]

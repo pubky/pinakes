@@ -21,8 +21,9 @@ pub async fn insert_resource(
     let host = url::Url::parse(uri)
         .ok()
         .and_then(|u| u.host_str().map(str::to_owned));
-    sqlx::query("INSERT INTO resource(id, uri, scheme, host, resolver) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO NOTHING")
-        .bind(id).bind(uri).bind(scheme).bind(host).bind(classify(uri)).execute(&mut **tx).await?;
+    let osm = crate::resolver::osm::parse_id(uri);
+    sqlx::query("INSERT INTO resource(id, uri, scheme, host, resolver,osm_type,osm_id,type_path) VALUES($1,$2,$3,$4,$5,$6,$7,CASE WHEN $7::bigint IS NULL THEN '{}'::text[] ELSE NULL END) ON CONFLICT(id) DO NOTHING")
+        .bind(id).bind(uri).bind(scheme).bind(host).bind(classify(uri)).bind(osm.as_ref().map(|o|&o.osm_type)).bind(osm.as_ref().map(|o|o.id)).execute(&mut **tx).await?;
     Ok(())
 }
 pub async fn recompute_scores(tx: &mut Transaction<'_, Postgres>, ids: &[String]) -> Result<()> {
@@ -60,10 +61,18 @@ pub async fn save_document(
     generation: i64,
     doc: &ResourceMeta,
 ) -> Result<()> {
+    if doc.source == "osm" {
+        let osm = crate::resolver::osm::parse_id(&doc.url)
+            .ok_or_else(|| anyhow::anyhow!("invalid OSM document identity"))?;
+        let minimal = serde_json::json!({"type":"Place","url":doc.url,"osm_id":osm.key(),"source":"osm","status":doc.status});
+        sqlx::query("UPDATE resource SET osm_type=$3,osm_id=$4,type=NULL,type_path=NULL,name=NULL,category=NULL,point=NULL,doc=$5,status=$6,resolved_at=now(),refresh_at=to_timestamp($7::float8/1000)+$8*interval '1 second',next_attempt_at=to_timestamp($7::float8/1000)+$8*interval '1 second',attempts=0,dead_letter=false,last_error=NULL,lease_until=NULL WHERE id=$1 AND generation=$2")
+            .bind(id).bind(generation).bind(osm.osm_type).bind(osm.id).bind(minimal).bind(doc.status.as_str()).bind(doc.fetched_at as f64).bind(doc.ttl_secs as f64).execute(pool).await?;
+        return Ok(());
+    }
     sqlx::query(r#"UPDATE resource SET type=$3, type_path=$4, name=$5, category=$6,
         point=CASE WHEN $7::double precision IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint($8,$7),4326) END,
         start_at=$9, end_at=$10, doc=$11, status=$12, resolved_at=now(),
-        refresh_at=now()+$13*interval '1 second', next_attempt_at=now()+$13*interval '1 second',
+        refresh_at=now()+NULLIF($13,0)*interval '1 second', next_attempt_at=coalesce(now()+NULLIF($13,0)*interval '1 second','infinity'::timestamptz), final=($13=0),
         attempts=0, dead_letter=false, last_error=NULL, lease_until=NULL
         WHERE id=$1 AND generation=$2"#)
         .bind(id).bind(generation).bind(&doc.type_name).bind(&doc.type_path).bind(&doc.name).bind(&doc.category)

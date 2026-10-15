@@ -11,6 +11,9 @@ pub struct Config {
     pub poll_secs: u64,
     pub grace_days: u32,
     pub web: ResolverConfig,
+    pub geo_enabled: bool,
+    pub osm: OsmConfig,
+    pub search: SearchConfig,
     pub pubky: ResolverConfig,
     pub egress: EgressConfig,
     pub queue: QueueConfig,
@@ -30,6 +33,9 @@ impl Default for Config {
                 ..Default::default()
             },
             pubky: ResolverConfig::default(),
+            geo_enabled: true,
+            osm: OsmConfig::default(),
+            search: SearchConfig::default(),
             egress: EgressConfig::default(),
             queue: QueueConfig::default(),
             preview: PreviewConfig::default(),
@@ -110,6 +116,44 @@ impl Default for PreviewConfig {
         }
     }
 }
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OsmConfig {
+    pub enabled: bool,
+    pub nominatim_url: String,
+    pub requests_per_second: f64,
+    pub ttl_secs: u64,
+    pub fallback_enabled: bool,
+    pub api_url: String,
+    pub dump_requests_per_minute: usize,
+}
+impl Default for OsmConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            nominatim_url: "https://nominatim.openstreetmap.org".into(),
+            requests_per_second: 0.5,
+            ttl_secs: 30 * 86400,
+            fallback_enabled: false,
+            api_url: "https://api.openstreetmap.org".into(),
+            dump_requests_per_minute: 2,
+        }
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SearchConfig {
+    pub max_radius_m: f64,
+    pub h3_resolutions: Vec<u8>,
+}
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            max_radius_m: 200_000.0,
+            h3_resolutions: (0u8..=22).map(|z| z.saturating_sub(4).min(11)).collect(),
+        }
+    }
+}
 impl Config {
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let mut value = serde_json::to_value(Self::default())?;
@@ -146,6 +190,34 @@ impl Config {
         let nexus = url::Url::parse(&self.nexus_url)?;
         if !matches!(nexus.scheme(), "http" | "https") || nexus.host_str().is_none() {
             bail!("invalid Nexus URL");
+        }
+        for endpoint in [&self.osm.nominatim_url, &self.osm.api_url] {
+            let url = url::Url::parse(endpoint)?;
+            if !matches!(url.scheme(), "http" | "https")
+                || url.host_str().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+            {
+                bail!("invalid OSM upstream URL");
+            }
+        }
+        if !self.osm.requests_per_second.is_finite()
+            || !(0.001..=1000.0).contains(&self.osm.requests_per_second)
+            || url::Url::parse(&self.osm.nominatim_url)?.host_str()
+                == Some("nominatim.openstreetmap.org")
+                && self.osm.requests_per_second > 1.0
+            || self.osm.ttl_secs == 0
+            || self.osm.ttl_secs > 31536000
+            || self.osm.dump_requests_per_minute == 0
+            || !self.search.max_radius_m.is_finite()
+            || !(1.0..=200_000.0).contains(&self.search.max_radius_m)
+            || self.search.h3_resolutions.is_empty()
+            || self.search.h3_resolutions.len() > 31
+            || self.search.h3_resolutions.iter().any(|r| *r > 11)
+        {
+            bail!("invalid OSM or spatial budget (public Nominatim maximum 1 request/s)");
         }
         for r in [&self.web, &self.pubky] {
             if r.concurrency == 0

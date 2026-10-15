@@ -1,11 +1,55 @@
 {
   "opengraph": {
-    "website": "WebPage", "article": "Article", "profile": "Person",
-    "book": "Book", "video.movie": "Movie", "video.episode": "TVEpisode",
-    "video.tv_show": "TVSeries", "video.other": "VideoObject",
-    "music.song": "MusicRecording", "music.album": "MusicAlbum", "music.playlist": "MusicPlaylist",
-    "music.radio_station": "RadioStation", "product": "Product", "place": "Place"
+    "website": "WebPage",
+    "article": "Article",
+    "profile": "Person",
+    "book": "Book",
+    "video.movie": "Movie",
+    "video.episode": "TVEpisode",
+    "video.tv_show": "TVSeries",
+    "video.other": "VideoObject",
+    "music.song": "MusicRecording",
+    "music.album": "MusicAlbum",
+    "music.playlist": "MusicPlaylist",
+    "music.radio_station": "RadioStation",
+    "product": "Product",
+    "place": "Place"
   },
-  "oembed": { "photo": "ImageObject", "video": "VideoObject", "link": "WebPage", "rich": "CreativeWork" },
-  "microformats": { "h-event": "Event", "h-card": "Person", "h-entry": "Article" }
+  "oembed": {
+    "photo": "ImageObject",
+    "video": "VideoObject",
+    "link": "WebPage",
+    "rich": "CreativeWork"
+  },
+  "microformats": {
+    "h-event": "Event",
+    "h-card": "Person",
+    "h-entry": "Article"
+  },
+  "osm": {
+    "amenity/cafe": "CafeOrCoffeeShop",
+    "amenity/restaurant": "Restaurant",
+    "amenity/bar": "BarOrPub",
+    "amenity/pub": "BarOrPub",
+    "tourism/hotel": "Hotel",
+    "tourism/attraction": "TouristAttraction",
+    "tourism/museum": "Museum",
+    "shop/*": "Store",
+    "shop/books": "BookStore",
+    "shop/bakery": "Bakery",
+    "shop/clothes": "ClothingStore",
+    "shop/supermarket": "GroceryStore",
+    "shop/bicycle": "BikeStore",
+    "leisure/park": "Park",
+    "natural/peak": "Mountain",
+    "natural/beach": "Beach",
+    "place/city": "City",
+    "place/town": "City",
+    "place/village": "City",
+    "boundary/administrative": "AdministrativeArea",
+    "railway/station": "TrainStation",
+    "public_transport/station": "BusStation",
+    "amenity/bus_station": "BusStation",
+    "amenity/place_of_worship": "PlaceOfWorship"
+  }
 }

@@ -118,10 +118,10 @@ mod tests {
             crate::resolver::classify(&uri.replace("other.app", "pubky.app")),
             None
         );
-        assert_eq!(crate::resolver::classify("geo:1,2"), None);
+        assert_eq!(crate::resolver::classify("geo:1,2"), Some("geo"));
         assert_eq!(
             crate::resolver::classify("https://www.openstreetmap.org/node/1"),
-            None
+            Some("osm")
         );
     }
 }

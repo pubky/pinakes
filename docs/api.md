@@ -14,6 +14,7 @@ Nexus in a separate call. All paths below are relative to the Pinakes origin.
 | `POST /v1/resources/lookup` | Exactly one of `{"ids":[...]}` or `{"uris":[...]}` | Array in request order, including duplicates, skipping unknowns; 1–500 entries |
 | `POST /v1/resolve` | `{"uri":"https://example.org/"}` | Resource immediately or after up to 3 seconds; 202 with `status=pending` while queued |
 | `GET /v1/info` | None | Version, resolver configuration/status, dead letters, counts, feed cursors/epochs/lag |
+| `GET /v1/dumps/osm_place.ndjson` | None | Streaming ODbL notice followed by every `osm_place` row; 2 requests/minute per socket IP by default |
 | `GET /v1/openapi.json` | None | Generated OpenAPI 3.1 |
 
 `lookup` also accepts the Nexus-compatible alias `resource_ids` for `ids`.
@@ -75,7 +76,7 @@ Cards include `resource_id`, `uri`, `type`, `name`, `description`, `image`, `sit
 `score`, `status`. Missing card values are null. `facets` adds `type_path`, optional
 `category`, `point:{lat,lon}`, `start` and `end`. `document` adds the bounded
 `ResourceMeta` with source, fetched time in Unix milliseconds, TTL seconds,
-attributes and aliases. The document is at most 8 KB; its flat string attributes
+attributes and aliases. `geo` omits `ttl_secs` because it is final. The document is at most 8 KB; its flat string attributes
 are resolver-allowlisted and capped at 32. An unresolved resource has no document.
 Reads outside search do not calculate a ranking and return `score=0`.
 
@@ -84,6 +85,29 @@ means the upstream denied access; `error` can have a scheduled retry or be in de
 letter. Failed refreshes preserve the last good document, whose own status/time
 reflects that older fetch. Alias URLs do not change resource identity. Image URLs
 point to the origin; Pinakes does not serve or proxy image bytes.
+
+`location_source` is `uri`, `osm`, `page` or `geocoded`. The geo resolver accepts the
+RFC 5870 grammar, including altitude, WGS84 CRS, uncertainty and extension parameters;
+altitude/uncertainty are ignored. Unsupported CRS and malformed coordinates resolve
+to an error. Geo names preserve the latitude/longitude spelling and
+`attributes.precision` estimates formatting resolution from the less precise axis:
+five+ decimals ≈1 m, four ≈10 m, three ≈100 m, two ≈1 km, zero/one ≈10 km (clamped).
+This is a formatting hint, not a measurement-uncertainty claim. No reverse geocoding.
+
+OSM documents include `osm_id`, `location_source:osm`, `bbox` in API bbox order,
+`address` (street, house_number, postcode, city, country_code when present), category,
+allowlisted attributes and attribution. OSM metadata is composed from `osm_place`
+at read time. The resource table contains only OSM IDs and a minimal envelope.
+`/v1/info` declares ODbL and the dump URL; the dump's first NDJSON line declares its
+licence, followed by a repeatable-read snapshot of the table. It includes cached
+missing records, with null geometry. No Pubky references or scores are exported.
+
+The OSM matcher accepts only `https://www.openstreetmap.org/{node|way|relation}/{id}`
+with a positive decimal ID and no suffix. Host/scheme variants, trailing slashes,
+queries and map-only URLs use web resolution. Identity is always the unchanged
+shared crate: fragments are removed **before** storage/classification, so an object
+URL with a fragment is already the canonical resource. The raw matcher rejects it;
+Pinakes cannot recover discarded text or assign a second resource ID.
 
 ## Compose-time previews
 
@@ -118,4 +142,4 @@ Handler errors use `{"error":"..."}`; Axum's query/JSON parsing errors may be te
 Malformed query parameters return 400, malformed JSON returns 400, JSON shape
 errors return 422, and request bodies over 2 MB return 413. Internal errors return
 500 without database diagnostics. There are no resource write, social-state,
-admin, occurrence, map, or group routes in this step.
+admin, occurrence, reverse-geocoding, place-search or group routes in this step.

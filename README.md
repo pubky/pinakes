@@ -15,14 +15,14 @@ same base.
 
 ## Status
 
-The Rust service, Postgres storage, Nexus ingestion, web/Pubky resolvers and base
-API run locally. Spatial and event modules are later steps.
+The Rust service, Postgres storage, Nexus ingestion, web/Pubky/geo/OSM resolvers and
+base API run locally. Viewport search, event extraction and change tracking follow separately.
 
 ## Running locally
 
 Requires Rust (2021 edition; the current Pubky SDK requires Rust 1.89 or newer),
-PostgreSQL **16**, PostGIS and `pg_trgm`. Docker is not required. On Ubuntu, install
-`postgresql-16 postgresql-16-postgis-3 postgresql-contrib-16`; if version 16 is not
+PostgreSQL **16**, PostGIS, `pg_trgm` and `h3`. Docker is not required. On Ubuntu, install
+`postgresql-16 postgresql-16-postgis-3 postgresql-contrib-16 postgresql-16-h3`; if version 16 is not
 in the distribution, use the [official PGDG repository](https://www.postgresql.org/download/linux/ubuntu/).
 
 For a disposable local development environment:
@@ -78,10 +78,24 @@ it will become a git dependency on pubky-nexus after that PR merges. No social
 specs are parsed here. The pinned schema.org vocabulary and its separate license
 are documented in [data/README.md](data/README.md).
 
-Web and other-app Pubky cards are implemented. OSM object URLs and `geo:` are reserved
-for later resolvers, so ingested resources of those kinds remain pending. Spatial,
-time and cluster search filters return explicit 400s in this step. Occurrences have
-a table but no producer or route yet. No Nominatim, Photon or planet data is used.
+`geo:` URIs resolve locally to final places. Canonical OSM object URLs use batched
+Nominatim lookup (up to 50 IDs/request, 30-day cache). OSM-derived fields live only
+in `osm_place`, under ODbL; a non-materialized SQL view joins them for reads and
+search. Pubky references keep their independent IDs and data. The public
+`/v1/dumps/osm_place.ndjson` stream and `pg_dump --table osm_place` export the
+complete derivative database. OSM documents, cards and clusters carry attribution.
+
+The default development upstream is the public Nominatim. Its
+[usage policy](https://operations.osmfoundation.org/policies/nominatim/) requires
+an identifying User-Agent, caching and one thread, with an absolute maximum of
+one request/second. This service defaults to 0.5 requests/second and never proxies
+place search, autocomplete or reverse geocoding. The one-time development run is
+51 user-referenced objects in two calls. Configure your own `osm.nominatim_url` for
+ongoing/staging/production use; recurring public bulk work must stay below four
+requests/minute. OSM API fallback is disabled by default and has the same serialized
+budget when explicitly enabled. Requests have a ten-second timeout, no redirects,
+no environment proxy, gzip and a two-MB decoded response cap. URLs are operator
+configuration, never supplied by the caller.
 
 ## Verification
 
@@ -100,8 +114,8 @@ backends; the production IP policy has no localhost bypass.
 ## Operations
 
 The durable queue leases rows with `SKIP LOCKED` and fences stale completions by a
-generation counter. A crashed worker's lease expires after 60 seconds. Successful
-resolutions refresh after their TTL; missing objects use the shorter TTL. Transient
+generation counter. A single job lease lasts at least 60 seconds; a 50-object batch gets 760 seconds. Successful
+resolutions refresh after their TTL; missing web/Pubky objects use the shorter TTL, and OSM negative results use the OSM cache TTL. `geo:` has no TTL and never refreshes. Transient
 failures back off exponentially and enter dead letter after five failures. Last good
 facets survive failed refreshes. A preview shares the same resource/queue entry as
 ingestion and cannot revive a dead letter or bypass the TTL.

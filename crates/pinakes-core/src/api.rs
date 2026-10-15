@@ -32,6 +32,7 @@ pub struct AppState {
     pub nexus: Nexus,
     pub wake: Arc<Notify>,
     limiter: Arc<Mutex<HashMap<String, (Instant, usize)>>>,
+    dumps: Arc<tokio::sync::Semaphore>,
 }
 impl AppState {
     pub fn new(pool: PgPool, config: Config) -> anyhow::Result<Self> {
@@ -41,6 +42,7 @@ impl AppState {
             config,
             wake: Arc::default(),
             limiter: Arc::default(),
+            dumps: Arc::new(tokio::sync::Semaphore::new(4)),
         })
     }
     async fn preview_budget(&self, ip: std::net::IpAddr, id: &str) -> Result<(), ApiError> {
@@ -77,6 +79,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/resources/{id}", get(resource))
         .route("/v1/resolve", post(resolve))
         .route("/v1/openapi.json", get(openapi))
+        .route("/v1/dumps/osm_place.ndjson", get(osm_dump))
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .with_state(state)
 }
@@ -176,6 +179,10 @@ pub struct ResourceView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub point: Option<model::Point>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub osm_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub start: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end: Option<DateTime<Utc>>,
@@ -212,7 +219,7 @@ pub struct ResolveRequest {
     pub uri: String,
 }
 
-fn view(row: &Value, fields: Fields) -> Result<ResourceView, ApiError> {
+fn view(row: &Value, fields: Fields, spatial: bool) -> Result<ResourceView, ApiError> {
     let doc: Option<ResourceMeta> = if row["doc"].get("type").is_some() {
         Some(serde_json::from_value(row["doc"].clone())?)
     } else {
@@ -240,7 +247,14 @@ fn view(row: &Value, fields: Fields) -> Result<ResourceView, ApiError> {
         category: facets
             .then(|| doc.as_ref().and_then(|d| d.category.clone()))
             .flatten(),
-        point: facets
+        osm_id: row["osm_type"]
+            .as_str()
+            .zip(row["osm_id"].as_i64())
+            .map(|(kind, id)| format!("{kind}/{id}")),
+        attribution: row["osm_id"]
+            .as_i64()
+            .map(|_| crate::resolver::osm::ATTRIBUTION.into()),
+        point: (facets || spatial)
             .then(|| doc.as_ref().and_then(|d| d.location.clone()))
             .flatten(),
         start: facets.then(|| doc.as_ref().and_then(|d| d.start)).flatten(),
@@ -394,7 +408,7 @@ pub async fn search(
             .push("::timestamptz-s.updated_at)))/2592000.0),0)::double precision");
     }
     sql.push(
-        " AS rank FROM resource r LEFT JOIN resource_score s ON s.resource_id=r.id WHERE true",
+        " AS rank FROM resource_document r LEFT JOIN resource_score s ON s.resource_id=r.id WHERE true",
     );
     if let Some(t) = &q.type_name {
         let name = model::type_path(t).pop().unwrap();
@@ -500,7 +514,7 @@ pub async fn search(
     Ok(Json(SearchResponse {
         items: items
             .iter()
-            .map(|r| view(r, q.fields.unwrap_or(Fields::Card)))
+            .map(|r| view(r, q.fields.unwrap_or(Fields::Card), false))
             .collect::<Result<_, _>>()?,
         cursor: next,
         reach_truncated: reach.is_some_and(|r| r.truncated),
@@ -508,11 +522,12 @@ pub async fn search(
     }))
 }
 async fn read(pool: &PgPool, id: &str, fields: Fields) -> Result<Option<ResourceView>, ApiError> {
-    let value: Option<Value> = sqlx::query_scalar("SELECT to_jsonb(r) FROM resource r WHERE id=$1")
-        .bind(id)
-        .fetch_optional(pool)
-        .await?;
-    value.as_ref().map(|r| view(r, fields)).transpose()
+    let value: Option<Value> =
+        sqlx::query_scalar("SELECT to_jsonb(r) FROM resource_document r WHERE id=$1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+    value.as_ref().map(|r| view(r, fields, false)).transpose()
 }
 #[utoipa::path(get,path="/v1/resources/{id}",params(("id"=String,Path,description="32 lowercase hex resource ID"),FieldQuery),responses((status=200,body=ResourceView),(status=400,description="Invalid ID"),(status=404,description="Unknown resource")))]
 pub async fn resource(
@@ -554,10 +569,10 @@ pub async fn lookup(
     if !(1..=500).contains(&ids.len()) {
         return Err(ApiError::bad("lookup requires 1–500 entries"));
     }
-    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(r) FROM unnest($1::text[]) WITH ORDINALITY AS wanted(id,n) JOIN resource r ON r.id=wanted.id ORDER BY wanted.n").bind(ids).fetch_all(&state.pool).await?;
+    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(r) FROM unnest($1::text[]) WITH ORDINALITY AS wanted(id,n) JOIN resource_document r ON r.id=wanted.id ORDER BY wanted.n").bind(ids).fetch_all(&state.pool).await?;
     Ok(Json(
         rows.iter()
-            .map(|r| view(r, fields.fields.unwrap_or(Fields::Facets)))
+            .map(|r| view(r, fields.fields.unwrap_or(Fields::Facets), false))
             .collect::<Result<_, _>>()?,
     ))
 }
@@ -572,6 +587,8 @@ pub async fn resolve(
         .ok_or_else(|| ApiError::bad("no resolver available for this URI"))?;
     if (resolver == "web" && !state.config.web.enabled)
         || (resolver == "pubky" && !state.config.pubky.enabled)
+        || (resolver == "geo" && !state.config.geo_enabled)
+        || (resolver == "osm" && !state.config.osm.enabled)
     {
         return Err(ApiError::bad("resolver is disabled"));
     }
@@ -598,7 +615,7 @@ pub async fn info(State(state): State<AppState>) -> Result<Json<Value>, ApiError
     let ingestion:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('nexus',nexus,'cursor',cursor,'feed_length',feed_length,'lag',greatest(feed_length-cursor,0),'epoch',epoch,'updated_at',updated_at) FROM feed_cursor ORDER BY nexus").fetch_all(&state.pool).await?;
     let statuses:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('resolver',resolver,'status',status,'count',count(*),'dead_letter',count(*) FILTER (WHERE dead_letter),'leased',count(*) FILTER (WHERE lease_until>now())) FROM resource GROUP BY resolver,status ORDER BY resolver,status").fetch_all(&state.pool).await?;
     Ok(Json(
-        json!({"version":env!("CARGO_PKG_VERSION"),"ingestion":ingestion,"counts":{"resources":row.try_get::<i64,_>("resources")?,"references":row.try_get::<i64,_>("references")?,"occurrences":row.try_get::<i64,_>("occurrences")?},"resolvers":{"web":{"enabled":state.config.web.enabled,"concurrency":state.config.web.concurrency},"pubky":{"enabled":state.config.pubky.enabled,"concurrency":state.config.pubky.concurrency},"statuses":statuses}}),
+        json!({"version":env!("CARGO_PKG_VERSION"),"ingestion":ingestion,"counts":{"resources":row.try_get::<i64,_>("resources")?,"references":row.try_get::<i64,_>("references")?,"occurrences":row.try_get::<i64,_>("occurrences")?},"osm_licence":{"licence":"ODbL-1.0","attribution":crate::resolver::osm::ATTRIBUTION,"url":"https://opendatacommons.org/licenses/odbl/1-0/","dump":"/v1/dumps/osm_place.ndjson"},"resolvers":{"geo":{"enabled":state.config.geo_enabled,"network":false},"osm":{"enabled":state.config.osm.enabled,"concurrency":1,"batch_size":50,"requests_per_second":state.config.osm.requests_per_second},"web":{"enabled":state.config.web.enabled,"concurrency":state.config.web.concurrency},"pubky":{"enabled":state.config.pubky.enabled,"concurrency":state.config.pubky.concurrency},"statuses":statuses}}),
     ))
 }
 #[derive(OpenApi)]
@@ -609,13 +626,14 @@ pub async fn info(State(state): State<AppState>) -> Result<Json<Value>, ApiError
         description = "Pinakes ranks, Nexus hydrates. External resource metadata and search.",
         license(name = "MIT")
     ),
-    paths(search, resource, lookup, resolve, info, openapi),
+    paths(search, resource, lookup, resolve, info, openapi, osm_dump),
     components(schemas(
         ResourceMeta,
         model::Point,
         model::Status,
         ResourceView,
         SearchResponse,
+        model::LocationSource,
         Fields,
         LookupRequest,
         ResolveRequest,
@@ -630,4 +648,55 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
 #[utoipa::path(get,path="/v1/openapi.json",responses((status=200,body=Value)))]
 async fn openapi() -> Json<Value> {
     Json(serde_json::to_value(openapi_document()).expect("OpenAPI serialization"))
+}
+
+#[utoipa::path(get,path="/v1/dumps/osm_place.ndjson",responses((status=200,description="Streaming ODbL derivative database; first line is the licence notice",content_type="application/x-ndjson",body=String),(status=429,description="Dump request budget exhausted")))]
+async fn osm_dump(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+) -> Result<Response, ApiError> {
+    {
+        let mut limits = state.limiter.lock().await;
+        limits.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(60));
+        let key = format!("dump:{}", peer.ip());
+        if limits
+            .get(&key)
+            .is_some_and(|(_, n)| *n >= state.config.osm.dump_requests_per_minute)
+            || (!limits.contains_key(&key) && limits.len() >= state.config.preview.cache_capacity)
+        {
+            return Err(ApiError(
+                StatusCode::TOO_MANY_REQUESTS,
+                "dump rate limit exceeded".into(),
+            ));
+        }
+        limits.entry(key).or_insert_with(|| (Instant::now(), 0)).1 += 1;
+    }
+    let permit = state.dumps.clone().try_acquire_owned().map_err(|_| {
+        ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "dump concurrency limit exceeded".into(),
+        )
+    })?;
+    // One repeatable-read snapshot, streamed with backpressure and released on disconnect.
+    let mut tx = state.pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    let stream: std::pin::Pin<
+        Box<dyn futures_util::Stream<Item = Result<axum::body::Bytes, std::io::Error>> + Send>,
+    > = Box::pin(async_stream::try_stream! {
+        let _permit=permit;
+        use futures_util::TryStreamExt;
+        yield axum::body::Bytes::from(format!("{}\n",json!({"notice":crate::resolver::osm::ATTRIBUTION,"licence":"ODbL-1.0","licence_url":"https://opendatacommons.org/licenses/odbl/1-0/","attribution_url":"https://www.openstreetmap.org/copyright","table":"osm_place"})));
+        let mut rows=sqlx::query_scalar::<_,Value>("SELECT to_jsonb(o)-'point' || jsonb_build_object('point',CASE WHEN point IS NULL THEN NULL ELSE jsonb_build_object('lat',ST_Y(point),'lon',ST_X(point)) END) FROM osm_place o ORDER BY osm_type,osm_id").fetch(&mut *tx);
+        while let Some(row)=rows.try_next().await.map_err(std::io::Error::other)? {yield axum::body::Bytes::from(format!("{row}\n"));}
+    });
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/x-ndjson"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        axum::body::Body::from_stream(stream),
+    )
+        .into_response())
 }

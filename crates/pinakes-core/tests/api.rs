@@ -121,7 +121,7 @@ async fn every_read_route_and_document_projection(pool: PgPool) {
     let (code, spec) = call(&app, "GET", "/v1/openapi.json", None).await;
     assert_eq!(code, 200);
     assert!(spec["paths"]["/v1/resolve"]["post"].is_object());
-    assert_eq!(spec["paths"].as_object().unwrap().len(), 6);
+    assert_eq!(spec["paths"].as_object().unwrap().len(), 7);
     for field in ["card", "facets", "document"] {
         let (code, item) = call(
             &app,
@@ -490,9 +490,14 @@ async fn preview_pending_cached_completion_and_per_ip_uri_budgets(pool: PgPool) 
         429
     );
     assert_eq!(
-        call(&app, "POST", "/v1/resolve", Some(json!({"uri":"geo:1,2"})))
-            .await
-            .0,
+        call(
+            &app,
+            "POST",
+            "/v1/resolve",
+            Some(json!({"uri":"urn:unsupported"}))
+        )
+        .await
+        .0,
         400
     );
     assert_eq!(

@@ -1,7 +1,10 @@
 use crate::{
     config::{Config, QueueConfig},
     model::Status,
-    resolver::{egress::Egress, pubky::PubkyResolver, web::WebResolver, Resolver},
+    resolver::{
+        egress::Egress, geo::GeoResolver, osm::OsmResolver, pubky::PubkyResolver, web::WebResolver,
+        Resolver,
+    },
     store,
 };
 use anyhow::{bail, Result};
@@ -21,11 +24,21 @@ pub struct Job {
     pub generation: i64,
 }
 pub async fn claim(pool: &PgPool, resolver: &str, cfg: &QueueConfig) -> Result<Option<Job>> {
-    Ok(sqlx::query_as(r#"UPDATE resource SET lease_until=now()+$2*interval '1 second', generation=generation+1
-        WHERE id=(SELECT id FROM resource WHERE resolver=$1 AND NOT dead_letter AND next_attempt_at<=now()
-          AND (lease_until IS NULL OR lease_until<now()) ORDER BY next_attempt_at,id FOR UPDATE SKIP LOCKED LIMIT 1)
-        RETURNING id,uri,attempts,generation"#).bind(resolver).bind(cfg.lease_secs as f64).fetch_optional(pool).await?)
+    Ok(claim_batch(pool, resolver, cfg, 1).await?.pop())
 }
+pub async fn claim_batch(
+    pool: &PgPool,
+    resolver: &str,
+    cfg: &QueueConfig,
+    size: usize,
+) -> Result<Vec<Job>> {
+    let size = size.clamp(1, 50);
+    Ok(sqlx::query_as(r#"UPDATE resource SET lease_until=now()+$2*interval '1 second', generation=generation+1
+        WHERE id IN (SELECT id FROM resource WHERE resolver=$1 AND NOT dead_letter AND NOT final AND next_attempt_at<=now()
+          AND (lease_until IS NULL OR lease_until<now()) ORDER BY next_attempt_at,id FOR UPDATE SKIP LOCKED LIMIT $3)
+        RETURNING id,uri,attempts,generation"#).bind(resolver).bind(cfg.lease_secs.max(15 * size as u64 + 10) as f64).bind(size as i64).fetch_all(pool).await?)
+}
+
 pub fn backoff(cfg: &QueueConfig, attempt: u32) -> u64 {
     cfg.backoff_secs
         .saturating_mul(
@@ -49,20 +62,36 @@ pub async fn run_job(
     cfg: &QueueConfig,
     job: &Job,
 ) -> Result<()> {
-    let resolved = tokio::time::timeout(Duration::from_secs(15), resolver.resolve(&job.uri)).await;
+    let result = tokio::time::timeout(Duration::from_secs(15), resolver.resolve(&job.uri))
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|r| r);
+    finish_job(pool, resolver, cfg, job, result).await
+}
+async fn finish_job(
+    pool: &PgPool,
+    resolver: &dyn Resolver,
+    cfg: &QueueConfig,
+    job: &Job,
+    result: Result<crate::model::ResourceMeta>,
+) -> Result<()> {
     let result = async {
-        let mut doc = resolved??;
+        let mut doc = result?;
         if doc.status == Status::Error {
             bail!("upstream returned a transient HTTP error");
         }
-        doc.ttl_secs = if doc.status == Status::Missing {
-            cfg.missing_ttl_secs
-        } else {
-            resolver.refresh_after(&doc).as_secs()
-        };
+        if resolver.name() != "osm" {
+            doc.ttl_secs = if doc.status == Status::Missing {
+                cfg.missing_ttl_secs
+            } else {
+                resolver.refresh_after(&doc).as_secs()
+            };
+        }
         let attrs = match resolver.name() {
             "web" => crate::resolver::web::ATTRIBUTES,
             "pubky" => crate::resolver::pubky::ATTRIBUTES,
+            "geo" => crate::resolver::geo::ATTRIBUTES,
+            "osm" => crate::resolver::osm::ATTRIBUTES,
             _ => &[],
         };
         doc.validate(attrs)?;
@@ -72,6 +101,30 @@ pub async fn run_job(
     if let Err(error) = result {
         tracing::warn!(resource_id=%job.id,resolver=resolver.name(),error=%error,"resolution failed");
         failed(pool, job, cfg, &error.to_string()).await?;
+    }
+    Ok(())
+}
+pub async fn run_batch(
+    pool: &PgPool,
+    resolver: &dyn Resolver,
+    cfg: &QueueConfig,
+    jobs: &[Job],
+) -> Result<()> {
+    let uris = jobs.iter().map(|j| j.uri.clone()).collect::<Vec<_>>();
+    let results = tokio::time::timeout(
+        Duration::from_secs(15 * jobs.len() as u64),
+        resolver.resolve_batch(&uris),
+    )
+    .await;
+    let results = match results {
+        Ok(results) if results.len() == jobs.len() => results,
+        _ => jobs
+            .iter()
+            .map(|_| Err(anyhow::anyhow!("batch timeout or invalid response count")))
+            .collect(),
+    };
+    for (job, result) in jobs.iter().zip(results) {
+        finish_job(pool, resolver, cfg, job, result).await?;
     }
     Ok(())
 }
@@ -135,6 +188,27 @@ pub fn spawn(
             config.pubky.clone(),
         ));
     }
+    if config.geo_enabled {
+        resolvers.push((
+            Arc::new(GeoResolver),
+            crate::config::ResolverConfig {
+                concurrency: 1,
+                requests_per_second: 100.0,
+                ..Default::default()
+            },
+        ));
+    }
+    if config.osm.enabled {
+        resolvers.push((
+            Arc::new(OsmResolver::new(pool.clone(), config.osm.clone())?),
+            crate::config::ResolverConfig {
+                concurrency: 1,
+                requests_per_second: config.osm.requests_per_second,
+                ttl_secs: config.osm.ttl_secs,
+                enabled: true,
+            },
+        ));
+    }
     for (resolver, budget) in resolvers {
         let rate = Arc::new(Mutex::new(Instant::now()));
         for _ in 0..budget.concurrency {
@@ -153,17 +227,21 @@ pub fn spawn(
                         _=shutdown.changed()=>break,
                         _=async {
                             { let mut next=rate.lock().await; tokio::time::sleep_until(*next).await; *next=Instant::now()+Duration::from_secs_f64(1.0/budget.requests_per_second); }
-                            match claim(&pool,resolver.name(),&cfg).await {
-                                Ok(Some(job))=>{
+                            match claim_batch(&pool,resolver.name(),&cfg,resolver.batch_size()).await {
+                                Ok(jobs) if !jobs.is_empty()=>{
                                     let result=async {
-                                        if authors.admit(&pool,&job,cfg.author_requests_per_second).await? {
-                                            run_job(&pool,resolver.as_ref(),&cfg,&job).await?;
+                                        if resolver.name()=="geo" || authors.admit(&pool,&jobs[0],cfg.author_requests_per_second).await? {
+                                            run_batch(&pool,resolver.as_ref(),&cfg,&jobs).await?;
+                                        } else {
+                                            for job in jobs.iter().skip(1) {
+                                                sqlx::query("UPDATE resource SET lease_until=NULL,next_attempt_at=now()+interval '1 second' WHERE id=$1 AND generation=$2").bind(&job.id).bind(job.generation).execute(&pool).await?;
+                                            }
                                         }
                                         Ok::<_,anyhow::Error>(())
                                     }.await;
                                     if let Err(e)=result { tracing::error!(error=%e,"queue persistence failed"); }
                                 },
-                                Ok(None)=>{ tokio::select! { _=wake.notified()=>{},_=tokio::time::sleep(Duration::from_millis(250))=>{} } },
+                                Ok(_)=>{ tokio::select! { _=wake.notified()=>{},_=tokio::time::sleep(Duration::from_millis(250))=>{} } },
                                 Err(e)=>{ tracing::error!(error=%e,"queue claim failed"); tokio::time::sleep(Duration::from_secs(1)).await; }
                             }
                         }=>{}

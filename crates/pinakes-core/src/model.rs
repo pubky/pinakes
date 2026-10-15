@@ -36,6 +36,20 @@ pub struct Point {
     pub lat: f64,
     pub lon: f64,
 }
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LocationSource {
+    Uri,
+    Osm,
+    Page,
+    Geocoded,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize, Serialize, ToSchema)]
+pub struct OsmId {
+    #[serde(rename = "type")]
+    pub osm_type: String,
+    pub id: i64,
+}
 #[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
 pub struct ResourceMeta {
     #[serde(rename = "type")]
@@ -51,6 +65,16 @@ pub struct ResourceMeta {
     pub site: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<Point>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location_source: Option<LocationSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub osm_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bbox: Option<[f64; 4]>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub address: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -62,8 +86,12 @@ pub struct ResourceMeta {
     pub aliases: Vec<String>,
     pub source: String,
     pub fetched_at: i64,
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub ttl_secs: u64,
     pub status: Status,
+}
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 impl ResourceMeta {
     pub fn new(uri: &str, source: &str, ttl_secs: u64) -> Self {
@@ -137,6 +165,9 @@ impl ResourceMeta {
             if let Some(s) = value {
                 truncate(s, max);
             }
+        }
+        for value in self.address.values_mut() {
+            truncate(value, 256);
         }
         if self.image.as_ref().is_some_and(|s| s.len() > 2048) {
             self.image = None;
