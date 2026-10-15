@@ -85,6 +85,7 @@ pub struct ResourceMeta {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
     pub source: String,
+    #[serde(default)]
     pub fetched_at: i64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub ttl_secs: u64,

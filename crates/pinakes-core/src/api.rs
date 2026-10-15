@@ -31,6 +31,7 @@ pub struct AppState {
     pub config: Config,
     pub nexus: Nexus,
     pub wake: Arc<Notify>,
+    pub metrics: Arc<crate::telemetry::Metrics>,
     limiter: Arc<Mutex<HashMap<String, (Instant, usize)>>>,
     dumps: Arc<tokio::sync::Semaphore>,
 }
@@ -41,6 +42,7 @@ impl AppState {
             nexus: Nexus::new(&config.nexus_url)?,
             config,
             wake: Arc::default(),
+            metrics: Arc::new(crate::telemetry::Metrics::new()?),
             limiter: Arc::default(),
             dumps: Arc::new(tokio::sync::Semaphore::new(4)),
         })
@@ -74,6 +76,12 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/info", get(info))
+        .route("/v1/changes", get(crate::change_api::feed))
+        .route("/v1/changes/lookup", post(crate::change_api::lookup))
+        .route(
+            "/v1/resources/{id}/changes",
+            get(crate::change_api::resource),
+        )
         .route("/v1/search", get(search))
         .route("/v1/resources/lookup", post(lookup))
         .route("/v1/resources/{id}", get(resource))
@@ -84,9 +92,9 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 #[derive(Debug)]
-pub struct ApiError(StatusCode, String);
+pub struct ApiError(pub(crate) StatusCode, pub(crate) String);
 impl ApiError {
-    fn bad(s: impl Into<String>) -> Self {
+    pub(crate) fn bad(s: impl Into<String>) -> Self {
         Self(StatusCode::BAD_REQUEST, s.into())
     }
 }
@@ -668,6 +676,8 @@ pub async fn lookup(
     if !(1..=500).contains(&ids.len()) {
         return Err(ApiError::bad("lookup requires 1–500 entries"));
     }
+    store::expedite(&state.pool, &ids).await?;
+    state.wake.notify_waiters();
     let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(r) FROM unnest($1::text[]) WITH ORDINALITY AS wanted(id,n) JOIN resource_document r ON r.id=wanted.id ORDER BY wanted.n").bind(ids).fetch_all(&state.pool).await?;
     Ok(Json(
         rows.iter()
@@ -693,6 +703,7 @@ pub async fn resolve(
     }
     state.preview_budget(peer.ip(), &id).await?;
     store::ensure_resource(&state.pool, &uri).await?;
+    store::expedite(&state.pool, std::slice::from_ref(&id)).await?;
     state.wake.notify_waiters();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     loop {
@@ -710,11 +721,17 @@ pub async fn resolve(
 }
 #[utoipa::path(get,path="/v1/info",responses((status=200,body=Value)))]
 pub async fn info(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    state.metrics.refresh(&state.pool).await?;
+    let sources: Vec<Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(s)-'keys'-'held_keys'-'missing_keys' FROM source_state s ORDER BY source",
+    )
+    .fetch_all(&state.pool)
+    .await?;
     let row=sqlx::query("SELECT (SELECT count(*) FROM resource) AS resources,(SELECT count(*) FROM reference) AS references,(SELECT count(*) FROM occurrence) AS occurrences").fetch_one(&state.pool).await?;
     let ingestion:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('nexus',nexus,'cursor',cursor,'feed_length',feed_length,'lag',greatest(feed_length-cursor,0),'epoch',epoch,'updated_at',updated_at) FROM feed_cursor ORDER BY nexus").fetch_all(&state.pool).await?;
     let statuses:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('resolver',resolver,'status',status,'count',count(*),'dead_letter',count(*) FILTER (WHERE dead_letter),'leased',count(*) FILTER (WHERE lease_until>now())) FROM resource GROUP BY resolver,status ORDER BY resolver,status").fetch_all(&state.pool).await?;
     Ok(Json(
-        json!({"version":env!("CARGO_PKG_VERSION"),"ingestion":ingestion,"counts":{"resources":row.try_get::<i64,_>("resources")?,"references":row.try_get::<i64,_>("references")?,"occurrences":row.try_get::<i64,_>("occurrences")?},"osm_licence":{"licence":"ODbL-1.0","attribution":crate::resolver::osm::ATTRIBUTION,"url":"https://opendatacommons.org/licenses/odbl/1-0/","dump":"/v1/dumps/osm_place.ndjson"},"resolvers":{"geo":{"enabled":state.config.geo_enabled,"network":false},"osm":{"enabled":state.config.osm.enabled,"concurrency":1,"batch_size":50,"requests_per_second":state.config.osm.requests_per_second},"web":{"enabled":state.config.web.enabled,"concurrency":state.config.web.concurrency},"pubky":{"enabled":state.config.pubky.enabled,"concurrency":state.config.pubky.concurrency},"statuses":statuses}}),
+        json!({"version":env!("CARGO_PKG_VERSION"),"manifests":crate::adapter::configured(&state.config),"sources":sources,"metrics":state.metrics.summary(),"ingestion":ingestion,"counts":{"resources":row.try_get::<i64,_>("resources")?,"references":row.try_get::<i64,_>("references")?,"occurrences":row.try_get::<i64,_>("occurrences")?},"osm_licence":{"licence":"ODbL-1.0","attribution":crate::resolver::osm::ATTRIBUTION,"url":"https://opendatacommons.org/licenses/odbl/1-0/","dump":"/v1/dumps/osm_place.ndjson"},"resolvers":{"geo":{"enabled":state.config.geo_enabled,"network":false},"osm":{"enabled":state.config.osm.enabled,"concurrency":1,"batch_size":50,"requests_per_second":state.config.osm.requests_per_second},"web":{"enabled":state.config.web.enabled,"concurrency":state.config.web.concurrency},"pubky":{"enabled":state.config.pubky.enabled,"concurrency":state.config.pubky.concurrency},"statuses":statuses}}),
     ))
 }
 #[derive(OpenApi)]
@@ -725,9 +742,24 @@ pub async fn info(State(state): State<AppState>) -> Result<Json<Value>, ApiError
         description = "Pinakes ranks, Nexus hydrates. External resource metadata and search.",
         license(name = "MIT")
     ),
-    paths(search, resource, lookup, resolve, info, openapi, osm_dump),
+    paths(
+        search,
+        resource,
+        lookup,
+        resolve,
+        info,
+        openapi,
+        osm_dump,
+        crate::change_api::feed,
+        crate::change_api::lookup,
+        crate::change_api::resource,
+        metrics
+    ),
     components(schemas(
         ResourceMeta,
+        crate::change_api::ChangeLine,
+        crate::change_api::ChangePage,
+        crate::change_api::ChangeLookup,
         model::Point,
         model::Status,
         ResourceView,
@@ -745,7 +777,14 @@ pub async fn info(State(state): State<AppState>) -> Result<Json<Value>, ApiError
 )]
 pub struct ApiDoc;
 pub fn openapi_document() -> utoipa::openapi::OpenApi {
-    ApiDoc::openapi()
+    let mut document = ApiDoc::openapi();
+    document
+        .paths
+        .paths
+        .get_mut("/metrics")
+        .expect("admin path")
+        .servers = Some(vec![utoipa::openapi::Server::new("http://127.0.0.1:9090")]);
+    document
 }
 #[utoipa::path(get,path="/v1/openapi.json",responses((status=200,body=Value)))]
 async fn openapi() -> Json<Value> {
@@ -799,6 +838,24 @@ async fn osm_dump(
             (header::CACHE_CONTROL, "no-store"),
         ],
         axum::body::Body::from_stream(stream),
+    )
+        .into_response())
+}
+
+pub fn admin_router(state: AppState) -> Router {
+    Router::new()
+        .route("/metrics", get(metrics))
+        .with_state(state)
+}
+#[utoipa::path(get,path="/metrics",responses((status=200,content_type="text/plain; version=0.0.4",body=String)),description="Separate admin listener only; URL is controlled by admin_listen.")]
+async fn metrics(State(state): State<AppState>) -> Result<Response, ApiError> {
+    state.metrics.refresh(&state.pool).await?;
+    Ok((
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        state.metrics.encode()?,
     )
         .into_response())
 }

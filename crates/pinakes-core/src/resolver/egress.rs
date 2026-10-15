@@ -224,7 +224,10 @@ impl Egress {
             }
             // Pin checked addresses to the connection; a second DNS lookup could rebind to a private IP.
             let _permit = self.host_permit(&host).await;
+            let mut observation = crate::telemetry::FetchGuard::start();
             let response = self.transport.get(&url, &addresses).await?;
+            observation.status(response.status);
+            drop(observation);
             if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
                 if redirects == 3 {
                     bail!("more than 3 redirects");

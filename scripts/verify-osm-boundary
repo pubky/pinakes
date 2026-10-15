@@ -13,6 +13,13 @@ IF EXISTS(SELECT 1 FROM resource r LEFT JOIN osm_place o USING(osm_type,osm_id)
   WHERE r.resolver='osm' AND r.resolved_at IS NOT NULL AND o.osm_id IS NULL)
 THEN RAISE EXCEPTION 'Resolved OSM reference has no derivative row'; END IF;
 END $$;
+DO $$ BEGIN
+IF to_regclass('resource_change') IS NOT NULL THEN
+  IF EXISTS(SELECT 1 FROM resource_change WHERE source='osm' AND
+    (type_path IS NOT NULL OR before-ARRAY['osm_id','version']::text[]<>'{}'::jsonb OR after-ARRAY['osm_id','version']::text[]<>'{}'::jsonb))
+  THEN RAISE EXCEPTION 'OSM-derived values leaked into resource_change'; END IF;
+END IF;
+END $$;
 SELECT count(*) AS derivative_rows, count(*) FILTER(WHERE status='ok') AS resolved_places FROM osm_place;
 SELECT table_name,column_name FROM information_schema.columns
  WHERE table_schema='public' AND column_name IN ('osm_type','osm_id') ORDER BY 1,2;

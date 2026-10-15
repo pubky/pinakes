@@ -11,6 +11,12 @@ pub mod web;
 
 #[async_trait]
 pub trait Resolver: Send + Sync {
+    fn manifest(&self) -> crate::adapter::Manifest {
+        crate::adapter::manifest(self.name())
+    }
+    async fn probe(&self, uri: &str) -> Result<ResourceMeta> {
+        self.resolve(uri).await
+    }
     fn name(&self) -> &'static str;
     fn matches(&self, uri: &str) -> bool;
     async fn resolve(&self, uri: &str) -> Result<ResourceMeta>;
@@ -46,3 +52,12 @@ pub fn classify(uri: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+
+#[derive(Debug)]
+pub struct NotModified;
+impl std::fmt::Display for NotModified {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("upstream not modified")
+    }
+}
+impl std::error::Error for NotModified {}

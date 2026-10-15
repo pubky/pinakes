@@ -213,7 +213,9 @@ impl OsmResolver {
             self.config.requests_per_second
         };
         *next = Instant::now() + Duration::from_secs_f64(1.0 / rate);
+        let mut observation = crate::telemetry::FetchGuard::start();
         let response = self.client.get(url.clone()).send().await?;
+        observation.status(response.status().as_u16());
         let status = response.status();
         tracing::info!(
             source = "osm",
@@ -221,6 +223,9 @@ impl OsmResolver {
             status = status.as_u16(),
             "OSM upstream request"
         );
+        if status.as_u16() == 304 {
+            return Err(super::NotModified.into());
+        }
         if status.as_u16() == 429 {
             let seconds = response
                 .headers()
@@ -250,7 +255,7 @@ impl OsmResolver {
     }
     async fn cached(&self, id: &OsmId) -> Result<Option<ResourceMeta>> {
         let value: Option<Value> = sqlx::query_scalar(
-            "SELECT doc FROM osm_place WHERE osm_type=$1 AND osm_id=$2 AND refresh_at>now()",
+            "SELECT coalesce(fetch_doc,doc) FROM osm_place WHERE osm_type=$1 AND osm_id=$2 AND refresh_at>now()",
         )
         .bind(&id.osm_type)
         .bind(id.id)
@@ -266,9 +271,9 @@ impl OsmResolver {
         if let Some(s) = &mut display_name {
             crate::model::truncate(s, 2048);
         }
-        sqlx::query(r#"INSERT INTO osm_place(osm_type,osm_id,point,bbox,name,category,address,tags,display_name,type,type_path,doc,fetched_at,refresh_at,status)
-          VALUES($1,$2,CASE WHEN $3::float8 IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint($4,$3),4326) END,$5,$6,$7,$8,$9,$10,$11,$12,$13,to_timestamp($14::float8/1000),to_timestamp($14::float8/1000)+$15*interval '1 second',$16)
-          ON CONFLICT(osm_type,osm_id) DO UPDATE SET point=excluded.point,bbox=excluded.bbox,name=excluded.name,category=excluded.category,address=excluded.address,tags=excluded.tags,display_name=excluded.display_name,type=excluded.type,type_path=excluded.type_path,doc=excluded.doc,fetched_at=excluded.fetched_at,refresh_at=excluded.refresh_at,status=excluded.status
+        sqlx::query(r#"INSERT INTO osm_place(osm_type,osm_id,point,bbox,name,category,address,tags,display_name,type,type_path,doc,fetched_at,refresh_at,status,fetch_doc,versions,fetch_display_name)
+          VALUES($1,$2,CASE WHEN $3::float8 IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint($4,$3),4326) END,$5,$6,$7,$8,$9,$10,$11,$12,$13,to_timestamp($14::float8/1000),to_timestamp($14::float8/1000)+$15*interval '1 second',$16,$13,jsonb_build_object(md5(($13::jsonb-ARRAY['fetched_at','ttl_secs']::text[])::text),$13::jsonb-ARRAY['fetched_at','ttl_secs']::text[]),$10)
+          ON CONFLICT(osm_type,osm_id) DO UPDATE SET fetch_doc=excluded.fetch_doc,fetch_display_name=excluded.fetch_display_name,versions=osm_place.versions || excluded.versions,fetched_at=excluded.fetched_at,refresh_at=excluded.refresh_at
           WHERE osm_place.fetched_at<=excluded.fetched_at"#)
           .bind(&id.osm_type).bind(id.id).bind(doc.location.as_ref().map(|p|p.lat)).bind(doc.location.as_ref().map(|p|p.lon)).bind(doc.bbox.map(|b|b.to_vec()))
           .bind(&doc.name).bind(&doc.category).bind(json!(doc.address)).bind(json!(doc.attributes)).bind(display_name).bind(&doc.type_name).bind(&doc.type_path).bind(json!(doc)).bind(doc.fetched_at as f64).bind(doc.ttl_secs as f64).bind(doc.status.as_str()).execute(&self.pool).await?;
@@ -355,7 +360,7 @@ impl OsmResolver {
             json!({"osm_type":id.osm_type,"osm_id":id.id,"lat":lat,"lon":lon,"category":category,"type":text(&tags[category]).unwrap_or("unknown"),"namedetails":tags,"display_name":text(&tags["name"]).unwrap_or_default(),"address":address,"extratags":tags,"boundingbox":[points.iter().map(|p|p.lat).fold(f64::INFINITY,f64::min),points.iter().map(|p|p.lat).fold(f64::NEG_INFINITY,f64::max),points.iter().map(|p|p.lon).fold(f64::INFINITY,f64::min),points.iter().map(|p|p.lon).fold(f64::NEG_INFINITY,f64::max)]}),
         ))
     }
-    async fn batch(&self, uris: &[String]) -> Result<Vec<ResourceMeta>> {
+    async fn batch(&self, uris: &[String], probe: bool) -> Result<Vec<ResourceMeta>> {
         ensure!(uris.len() <= 50, "OSM batch exceeds 50 objects");
         let ids = uris
             .iter()
@@ -367,7 +372,7 @@ impl OsmResolver {
             if found.contains_key(id) {
                 continue;
             }
-            if let Some(doc) = self.cached(id).await? {
+            if let Some(doc) = if probe { None } else { self.cached(id).await? } {
                 found.insert(id.clone(), doc);
             } else if !pending.contains(id) {
                 pending.push(id.clone());
@@ -396,9 +401,13 @@ impl OsmResolver {
             let rows = body
                 .as_array()
                 .context("Nominatim response is not a list")?;
+            if rows.is_empty() {
+                crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "missing");
+            }
             let mut places = HashMap::new();
             for row in rows {
                 let doc = map_place(row, self.config.ttl_secs)?;
+                crate::telemetry::document(crate::telemetry::last_fetch(), &self.manifest(), &doc);
                 let id = parse_id(&doc.url).unwrap();
                 ensure!(
                     pending.contains(&id),
@@ -422,7 +431,10 @@ impl OsmResolver {
                 } else {
                     (missing(&id, self.config.ttl_secs), None)
                 };
-                self.save(&id, &doc, display.as_deref()).await?;
+                crate::telemetry::document(crate::telemetry::last_fetch(), &self.manifest(), &doc);
+                if !probe {
+                    self.save(&id, &doc, display.as_deref()).await?;
+                }
                 found.insert(id, doc);
             }
         }
@@ -433,6 +445,11 @@ impl OsmResolver {
 }
 #[async_trait]
 impl Resolver for OsmResolver {
+    fn manifest(&self) -> crate::adapter::Manifest {
+        let mut manifest = crate::adapter::manifest("osm");
+        manifest.cadence_floor = self.config.ttl_secs.max(3600);
+        manifest
+    }
     fn name(&self) -> &'static str {
         "osm"
     }
@@ -443,16 +460,31 @@ impl Resolver for OsmResolver {
         50
     }
     async fn resolve(&self, uri: &str) -> Result<ResourceMeta> {
-        self.batch(&[uri.into()])
+        self.batch(&[uri.into()], false)
             .await?
             .pop()
             .context("empty OSM batch")
     }
     async fn resolve_batch(&self, uris: &[String]) -> Vec<Result<ResourceMeta>> {
-        match self.batch(uris).await {
+        match self.batch(uris, false).await {
             Ok(docs) => docs.into_iter().map(Ok).collect(),
-            Err(e) => uris.iter().map(|_| Err(anyhow::anyhow!("{e:#}"))).collect(),
+            Err(e) => uris
+                .iter()
+                .map(|_| {
+                    if e.is::<super::NotModified>() {
+                        Err(super::NotModified.into())
+                    } else {
+                        Err(anyhow::anyhow!("{e:#}"))
+                    }
+                })
+                .collect(),
         }
+    }
+    async fn probe(&self, uri: &str) -> Result<ResourceMeta> {
+        self.batch(&[uri.into()], true)
+            .await?
+            .pop()
+            .context("empty OSM probe")
     }
     fn refresh_after(&self, _: &ResourceMeta) -> Duration {
         Duration::from_secs(self.config.ttl_secs)

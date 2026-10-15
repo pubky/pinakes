@@ -36,6 +36,7 @@ struct Mock {
     calls: Arc<Mutex<Vec<Vec<String>>>>,
     paths: Arc<Mutex<Vec<String>>>,
     limited: Arc<AtomicBool>,
+    omit: Arc<AtomicBool>,
 }
 async fn nominatim(
     State(state): State<Mock>,
@@ -71,6 +72,9 @@ async fn nominatim(
             "limited",
         )
             .into_response();
+    }
+    if state.omit.load(Ordering::SeqCst) {
+        return Json(json!([])).into_response();
     }
     let fixtures: Vec<Value> =
         serde_json::from_str(include_str!("fixtures/nominatim.json")).unwrap();
@@ -165,14 +169,20 @@ async fn fifty_one_jobs_two_calls_cache_refresh_and_separation(pool: PgPool) {
     for uri in &uris {
         store::ensure_resource(&pool, uri).await.unwrap();
     }
+    let metrics = pinakes_core::telemetry::Metrics::new().unwrap();
     for size in [50, 1] {
         let jobs = queue::claim_batch(&pool, "osm", &QueueConfig::default(), 50)
             .await
             .unwrap();
         assert_eq!(jobs.len(), size);
-        queue::run_batch(&pool, &resolver, &QueueConfig::default(), &jobs)
-            .await
-            .unwrap();
+        let (result, observations) = pinakes_core::telemetry::observe(
+            &metrics,
+            &resolver.manifest(),
+            queue::run_batch(&pool, &resolver, &QueueConfig::default(), &jobs),
+        )
+        .await;
+        result.unwrap();
+        assert_eq!(observations.len(), 1);
     }
     assert_eq!(
         state
@@ -530,6 +540,101 @@ async fn viewport_distance_time_facets_clustering_and_etag(pool: PgPool) {
         .await
         .0,
         200
+    );
+    server.abort();
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn osm_history_and_unconfirmed_fetches_stay_in_derivative_table(pool: PgPool) {
+    let (state, resolver, server) = mock(&pool).await;
+    let uri = "https://www.openstreetmap.org/node/240109189";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut doc = resolver.resolve(uri).await.unwrap();
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    reference(&pool, &id, "city").await;
+    doc.name = Some("Synthetic renamed city".into());
+    doc.fetched_at += 1;
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (status, _, feed) = call(&app, "/v1/changes?source=osm&type=Place", None).await;
+    assert_eq!(status, 200, "{feed}");
+    assert_eq!(feed["lines"][1]["before"]["name"], "Berlin");
+    assert_eq!(feed["lines"][1]["after"]["name"], "Synthetic renamed city");
+    assert_eq!(feed["lines"][1]["attribution"], osm::ATTRIBUTION);
+    let leaked:i64=sqlx::query_scalar("SELECT count(*) FROM resource_change WHERE source='osm' AND (type_path IS NOT NULL OR before-ARRAY['osm_id','version']::text[]<>'{}'::jsonb OR after-ARRAY['osm_id','version']::text[]<>'{}'::jsonb)").fetch_one(&pool).await.unwrap();
+    assert_eq!(leaked, 0);
+    state.omit.store(true, Ordering::SeqCst);
+    sqlx::query("UPDATE osm_place SET refresh_at=now()-interval '1 second'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let missing = resolver.resolve(uri).await.unwrap();
+    assert_eq!(missing.status, Status::Missing);
+    assert_eq!(
+        call(&app, &format!("/v1/resources/{id}"), None).await.2["name"],
+        "Synthetic renamed city"
+    );
+    store::save_document(&pool, &id, 0, &missing).await.unwrap();
+    let (_, _, spatial) = call(&app, "/v1/search?bbox=13,52,14,53", None).await;
+    assert_eq!(spatial["items"][0]["name"], "Synthetic renamed city");
+    assert_eq!(spatial["items"][0]["status"], "ok");
+    // A cache hit of the same observation is not a second successful fetch.
+    store::save_document(&pool, &id, 0, &resolver.resolve(uri).await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i32>("SELECT missing_streak FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    sqlx::query("UPDATE osm_place SET refresh_at=now()-interval '1 second'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    store::save_document(&pool, &id, 0, &resolver.resolve(uri).await.unwrap())
+        .await
+        .unwrap();
+    let (_, _, feed) = call(
+        &app,
+        &format!("/v1/resources/{id}/changes?class=cancelled"),
+        None,
+    )
+    .await;
+    assert_eq!(feed["lines"].as_array().unwrap().len(), 1);
+    assert_eq!(feed["lines"][0]["after"]["name"], "Synthetic renamed city");
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM resource_change")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let cache: Value = sqlx::query_scalar("SELECT to_jsonb(o) FROM osm_place o")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    resolver.probe(uri).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, Value>("SELECT to_jsonb(o) FROM osm_place o")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        cache
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource_change")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        before
+    );
+    pinakes_core::changes::retain(&pool, 90).await.unwrap();
+    assert_eq!(
+        call(&app, "/v1/changes?class=renamed&source=osm", None)
+            .await
+            .2["lines"][0]["before"]["name"],
+        "Berlin"
     );
     server.abort();
 }

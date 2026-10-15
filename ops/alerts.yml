@@ -1,0 +1,49 @@
+groups:
+  - name: pinakes
+    rules:
+      - alert: IngestionStalled
+        expr: time() - pinakes_ingest_last_success_timestamp_seconds > 900
+        labels: {severity: critical, reason: no_success}
+        annotations: {summary: "Pinakes has not applied a successful Nexus poll for 15 minutes"}
+      - alert: IngestionStalled
+        expr: pinakes_ingest_lag_lines > 1000
+        for: 10m
+        labels: {severity: critical, reason: lag}
+        annotations: {summary: "Pinakes ingestion lag has exceeded 1000 lines for 10 minutes"}
+      - alert: CanaryDown
+        expr: pinakes_canary_consecutive_failures >= 3
+        labels: {severity: warning}
+        annotations: {summary: "Pinakes canary failed three consecutive runs for {{ $labels.source }}"}
+      - alert: SchemaDrift
+        expr: sum by (source) (increase(pinakes_fetch_total{outcome="drift"}[1h])) > 0
+        labels: {severity: warning}
+        annotations: {summary: "Pinakes parser lost expected fields for {{ $labels.source }}"}
+      - alert: WallUp
+        expr: (sum by (source) (increase(pinakes_fetch_total{outcome="unreachable"}[2h])) / sum by (source) (increase(pinakes_fetch_total[2h])) > 0.5) and (sum by (source) (increase(pinakes_fetch_total[2h])) >= 20)
+        labels: {severity: warning}
+        annotations: {summary: "More than half of {{ $labels.source }} fetches are blocked"}
+      - alert: FeedHeld
+        expr: increase(pinakes_feed_held_total[1h]) > 0
+        labels: {severity: warning}
+        annotations: {summary: "Pinakes quarantined a container snapshot for {{ $labels.source }}"}
+      - alert: CancellationBurst
+        expr: sum by (source) (increase(pinakes_changes_total{class="cancelled"}[1h])) > 20
+        labels: {severity: warning}
+        annotations: {summary: "More than twenty cancellations in one hour for {{ $labels.source }}"}
+      - alert: CursorReset
+        expr: (increase(pinakes_source_cursor_resets_total[1h]) > 0) or label_replace(increase(pinakes_ingest_epoch_resets_total[1h]) > 0, "source", "nexus", "", "")
+        labels: {severity: info}
+        annotations: {summary: "Pinakes resynchronized the {{ $labels.source }} cursor"}
+      - alert: RateLimited
+        expr: sum by (source) (increase(pinakes_fetch_total{outcome="rate_limited"}[1h])) > 0
+        labels: {severity: warning}
+        annotations: {summary: "Pinakes received HTTP 429 from {{ $labels.source }}"}
+      - alert: DeadLetters
+        expr: delta(pinakes_queue_depth{state="dead"}[1h]) >= 50
+        labels: {severity: warning}
+        annotations: {summary: "Pinakes dead letters grew by fifty in one hour for {{ $labels.resolver }}"}
+      - alert: QueueBacklog
+        expr: sum(pinakes_refresh_overdue) > 1000
+        for: 30m
+        labels: {severity: warning}
+        annotations: {summary: "More than a thousand Pinakes refreshes overdue for thirty minutes"}

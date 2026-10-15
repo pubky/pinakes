@@ -5,7 +5,6 @@ use crate::{
         egress::Egress, geo::GeoResolver, osm::OsmResolver, pubky::PubkyResolver, web::WebResolver,
         Resolver,
     },
-    store,
 };
 use anyhow::{bail, Result};
 use sqlx::{FromRow, PgPool};
@@ -34,8 +33,8 @@ pub async fn claim_batch(
 ) -> Result<Vec<Job>> {
     let size = size.clamp(1, 50);
     Ok(sqlx::query_as(r#"UPDATE resource SET lease_until=now()+$2*interval '1 second', generation=generation+1
-        WHERE id IN (SELECT id FROM resource WHERE resolver=$1 AND NOT dead_letter AND NOT final AND next_attempt_at<=now()
-          AND (lease_until IS NULL OR lease_until<now()) ORDER BY next_attempt_at,id FOR UPDATE SKIP LOCKED LIMIT $3)
+        WHERE id IN (SELECT id FROM resource WHERE resolver=$1 AND NOT dead_letter AND NOT final AND next_attempt_at<=now() AND NOT EXISTS(SELECT 1 FROM source_state WHERE source=$1 AND held_until>now())
+          AND (lease_until IS NULL OR lease_until<now()) ORDER BY priority_at DESC NULLS LAST,next_attempt_at,id FOR UPDATE SKIP LOCKED LIMIT $3)
         RETURNING id,uri,attempts,generation"#).bind(resolver).bind(cfg.lease_secs.max(15 * size as u64 + 10) as f64).bind(size as i64).fetch_all(pool).await?)
 }
 
@@ -66,15 +65,43 @@ pub async fn run_job(
         .await
         .map_err(anyhow::Error::from)
         .and_then(|r| r);
-    finish_job(pool, resolver, cfg, job, result).await
+    finish_job(
+        pool,
+        resolver,
+        cfg,
+        &crate::config::RefreshConfig::default(),
+        job,
+        result,
+    )
+    .await
 }
 async fn finish_job(
     pool: &PgPool,
     resolver: &dyn Resolver,
     cfg: &QueueConfig,
+    refresh: &crate::config::RefreshConfig,
     job: &Job,
     result: Result<crate::model::ResourceMeta>,
 ) -> Result<()> {
+    let result = match result {
+        Err(error) if error.is::<crate::resolver::NotModified>() => {
+            let value: Option<serde_json::Value> =
+                sqlx::query_scalar("SELECT doc FROM resource_document WHERE id=$1")
+                    .bind(&job.id)
+                    .fetch_optional(pool)
+                    .await?;
+            value
+                .ok_or_else(|| anyhow::anyhow!("304 without an accepted document"))
+                .and_then(|v| {
+                    serde_json::from_value::<crate::model::ResourceMeta>(v).map_err(Into::into)
+                })
+                .map(|mut doc| {
+                    doc.fetched_at = chrono::Utc::now().timestamp_millis();
+                    doc
+                })
+        }
+        other => other,
+    };
     let result = async {
         let mut doc = result?;
         if doc.status == Status::Error {
@@ -87,6 +114,34 @@ async fn finish_job(
                 resolver.refresh_after(&doc).as_secs()
             };
         }
+        if doc.status == Status::Missing {
+            let dates: (
+                Option<chrono::DateTime<chrono::Utc>>,
+                Option<chrono::DateTime<chrono::Utc>>,
+            ) = sqlx::query_as("SELECT start_at,end_at FROM resource WHERE id=$1")
+                .bind(&job.id)
+                .fetch_one(pool)
+                .await?;
+            doc.start = doc.start.or(dates.0);
+            doc.end = doc.end.or(dates.1);
+        }
+        if matches!(resolver.name(), "web" | "pubky" | "geo" | "osm") {
+            let now = chrono::Utc::now();
+            let mut manifest = resolver.manifest();
+            if resolver.name() == "osm" {
+                manifest.cadence_floor = doc.ttl_secs;
+            }
+            if doc.status != Status::Missing
+                || doc
+                    .end
+                    .is_some_and(|end| now >= end + chrono::Duration::hours(24))
+            {
+                doc.ttl_secs = crate::scheduler::next(&manifest, &doc, now, refresh)
+                    .map_or(0, |at| (at - now).num_seconds().max(0) as u64);
+            } else if resolver.name() != "osm" {
+                doc.ttl_secs = doc.ttl_secs.max(3600);
+            }
+        }
         let attrs = match resolver.name() {
             "web" => crate::resolver::web::ATTRIBUTES,
             "pubky" => crate::resolver::pubky::ATTRIBUTES,
@@ -95,7 +150,7 @@ async fn finish_job(
             _ => &[],
         };
         doc.validate(attrs)?;
-        store::save_document(pool, &job.id, job.generation, &doc).await
+        crate::changes::save(pool, &job.id, job.generation, &doc, cfg.missing_ttl_secs).await
     }
     .await;
     if let Err(error) = result {
@@ -108,6 +163,22 @@ pub async fn run_batch(
     pool: &PgPool,
     resolver: &dyn Resolver,
     cfg: &QueueConfig,
+    jobs: &[Job],
+) -> Result<()> {
+    run_batch_config(
+        pool,
+        resolver,
+        cfg,
+        &crate::config::RefreshConfig::default(),
+        jobs,
+    )
+    .await
+}
+async fn run_batch_config(
+    pool: &PgPool,
+    resolver: &dyn Resolver,
+    cfg: &QueueConfig,
+    refresh: &crate::config::RefreshConfig,
     jobs: &[Job],
 ) -> Result<()> {
     let uris = jobs.iter().map(|j| j.uri.clone()).collect::<Vec<_>>();
@@ -123,8 +194,24 @@ pub async fn run_batch(
             .map(|_| Err(anyhow::anyhow!("batch timeout or invalid response count")))
             .collect(),
     };
+    if results.iter().any(|r| {
+        r.as_ref()
+            .is_err_and(|e| !e.is::<crate::resolver::NotModified>())
+    }) {
+        crate::telemetry::parser_error();
+    }
+    let error = results.iter().find_map(|r| match r {
+        Err(e) if !e.is::<crate::resolver::NotModified>() => Some(e.to_string()),
+        Ok(doc) if matches!(doc.status, Status::Unreachable | Status::Error) => {
+            Some(doc.status.as_str().into())
+        }
+        _ => None,
+    });
+    if crate::telemetry::last_fetch().is_some() {
+        crate::source::outcome(pool, resolver.name(), error.as_deref()).await?;
+    }
     for (job, result) in jobs.iter().zip(results) {
-        finish_job(pool, resolver, cfg, job, result).await?;
+        finish_job(pool, resolver, cfg, refresh, job, result).await?;
     }
     Ok(())
 }
@@ -169,6 +256,7 @@ pub fn spawn(
     config: Config,
     wake: Arc<Notify>,
     shutdown: watch::Receiver<bool>,
+    metrics: Arc<crate::telemetry::Metrics>,
 ) -> Result<JoinSet<()>> {
     let mut workers = JoinSet::new();
     let authors = Arc::new(AuthorBudget::default());
@@ -213,6 +301,9 @@ pub fn spawn(
         let rate = Arc::new(Mutex::new(Instant::now()));
         for _ in 0..budget.concurrency {
             let authors = authors.clone();
+            let metrics = metrics.clone();
+            let refresh = config.refresh.clone();
+            let canary = config.canary.clone();
             let (pool, resolver, cfg, wake, mut shutdown, rate) = (
                 pool.clone(),
                 resolver.clone(),
@@ -227,11 +318,17 @@ pub fn spawn(
                         _=shutdown.changed()=>break,
                         _=async {
                             { let mut next=rate.lock().await; tokio::time::sleep_until(*next).await; *next=Instant::now()+Duration::from_secs_f64(1.0/budget.requests_per_second); }
+                            match crate::canary::claim(&pool,&resolver.manifest(),&canary).await {
+                                Ok(Some(generation))=>{if let Err(e)=crate::canary::run(&pool,resolver.as_ref(),&canary,&metrics,generation).await {tracing::warn!(error=%e,"canary bookkeeping failed");}return;},
+                                Err(e)=>tracing::warn!(error=%e,"canary claim failed"),
+                                _=>{}
+                            }
                             match claim_batch(&pool,resolver.name(),&cfg,resolver.batch_size()).await {
                                 Ok(jobs) if !jobs.is_empty()=>{
                                     let result=async {
                                         if resolver.name()=="geo" || authors.admit(&pool,&jobs[0],cfg.author_requests_per_second).await? {
-                                            run_batch(&pool,resolver.as_ref(),&cfg,&jobs).await?;
+                                            let (result,_)=crate::telemetry::observe(&metrics,&resolver.manifest(),run_batch_config(&pool,resolver.as_ref(),&cfg,&refresh,&jobs)).await;
+                                            result?;
                                         } else {
                                             for job in jobs.iter().skip(1) {
                                                 sqlx::query("UPDATE resource SET lease_until=NULL,next_attempt_at=now()+interval '1 second' WHERE id=$1 AND generation=$2").bind(&job.id).bind(job.generation).execute(&pool).await?;

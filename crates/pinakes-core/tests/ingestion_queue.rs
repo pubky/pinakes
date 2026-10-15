@@ -332,10 +332,24 @@ async fn missing_responses_get_short_refresh_without_losing_references(pool: PgP
     queue::run_job(&pool, &MissingResolver, &cfg, &jobs[0])
         .await
         .unwrap();
+    let status: String = sqlx::query_scalar("SELECT status FROM resource")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "pending");
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    sqlx::query("UPDATE resource SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let next = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    queue::run_job(&pool, &MissingResolver, &cfg, &next)
+        .await
+        .unwrap();
     let (status,ttl,seconds):(String,i32,f64)=sqlx::query_as("SELECT status,(doc->>'ttl_secs')::int,extract(epoch FROM refresh_at-now())::float8 FROM resource").fetch_one(&pool).await.unwrap();
     assert_eq!(status, "missing");
-    assert_eq!(ttl, 60);
-    assert!(seconds > 59.0 && seconds <= 60.0);
+    assert_eq!(ttl, 3600);
+    assert!(seconds > 3590.0 && seconds <= 3600.0);
     assert_eq!(refs(&pool).await, 1);
 }
 #[sqlx::test(migrations = "../../migrations")]
@@ -362,4 +376,30 @@ async fn author_budgets_defer_without_counting_a_failure(pool: PgPool) {
     let other = change(&second.uri, "b", "/pub/app/tags/c");
     batch(&pool, vec![other], Some("one")).await;
     assert!(budget.admit(&pool, &second, 0.1).await.unwrap());
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn new_reference_reopens_final_pages_but_never_geo(pool: PgPool) {
+    let page = change("https://example.org/final", "a", "/pub/app/tags/a");
+    let geo = change("geo:46,8", "b", "/pub/app/tags/b");
+    batch(&pool, vec![page.clone(), geo.clone()], Some("one")).await;
+    sqlx::query("UPDATE resource SET final=true,next_attempt_at='infinity'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut page2 = page;
+    page2.object_path = "/pub/app/tags/new-page".into();
+    let mut geo2 = geo;
+    geo2.object_path = "/pub/app/tags/new-geo".into();
+    batch(&pool, vec![page2, geo2], Some("one")).await;
+    let final_geo: bool = sqlx::query_scalar("SELECT final FROM resource WHERE scheme='geo'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let final_page: bool = sqlx::query_scalar("SELECT final FROM resource WHERE scheme='https'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(final_geo);
+    assert!(!final_page);
 }

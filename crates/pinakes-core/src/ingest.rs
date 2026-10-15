@@ -53,7 +53,7 @@ pub async fn apply(
         sqlx::query("UPDATE resource SET orphaned_at=coalesce(orphaned_at,now())")
             .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE feed_cursor SET cursor=0, epoch=$2, feed_length=$3, updated_at=now() WHERE nexus=$1")
+        sqlx::query("UPDATE feed_cursor SET cursor=0, epoch=$2, feed_length=$3, updated_at=now(),resets=resets+1 WHERE nexus=$1")
             .bind(nexus).bind(epoch).bind(feed.length).execute(&mut *tx).await?;
         tx.commit().await?;
         tracing::warn!(nexus, "Nexus feed reset; rebuilding references");
@@ -80,14 +80,17 @@ pub async fn apply(
         .bind(&line.object_path)
         .fetch_optional(&mut *tx)
         .await?;
-        if let Some(old) = old {
-            affected.insert(old);
+        if let Some(old) = &old {
+            affected.insert(old.clone());
         }
         match line.op {
             Op::Put => {
                 let (_, scheme) =
                     pubky_resource_id::normalize_uri(&line.uri).map_err(anyhow::Error::msg)?;
                 store::insert_resource(&mut tx, &line.resource_id, &line.uri, &scheme).await?;
+                if old.as_deref() != Some(&line.resource_id) {
+                    sqlx::query("UPDATE resource SET final=false,refresh_at=now(),next_attempt_at=now(),dead_letter=false,attempts=0 WHERE id=$1 AND final AND resolver<>'geo'").bind(&line.resource_id).execute(&mut *tx).await?;
+                }
                 sqlx::query(r#"INSERT INTO reference(resource_id,kind,author,label,object_path,recurrence_id,start_at,end_at,created_at)
                     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
                     ON CONFLICT(author,object_path) DO UPDATE SET resource_id=excluded.resource_id, kind=excluded.kind,

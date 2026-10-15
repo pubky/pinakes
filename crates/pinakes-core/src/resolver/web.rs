@@ -36,6 +36,10 @@ impl Resolver for WebResolver {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         tokio::time::timeout_at(deadline, async {
             let fetched = self.egress.fetch(uri).await?;
+            if fetched.status == 304 {
+                return Err(super::NotModified.into());
+            }
+            let observation = crate::telemetry::last_fetch();
             let mut extracted = extract(uri, &fetched, self.config.ttl_secs);
             if let Some(endpoint) = extracted.oembed.take() {
                 // Discovery is the only additional fetch; it follows the same policy as the page.
@@ -57,7 +61,9 @@ impl Resolver for WebResolver {
             }
             fill(&mut extracted.doc.name, extracted.title);
             fill(&mut extracted.doc.description, extracted.description);
-            extracted.doc.bounded(ATTRIBUTES)
+            let doc = extracted.doc.bounded(ATTRIBUTES)?;
+            crate::telemetry::document(observation, &self.manifest(), &doc);
+            Ok(doc)
         })
         .await?
     }

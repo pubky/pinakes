@@ -121,7 +121,7 @@ async fn every_read_route_and_document_projection(pool: PgPool) {
     let (code, spec) = call(&app, "GET", "/v1/openapi.json", None).await;
     assert_eq!(code, 200);
     assert!(spec["paths"]["/v1/resolve"]["post"].is_object());
-    assert_eq!(spec["paths"].as_object().unwrap().len(), 7);
+    assert_eq!(spec["paths"].as_object().unwrap().len(), 11);
     for field in ["card", "facets", "document"] {
         let (code, item) = call(
             &app,

@@ -9,6 +9,151 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/metrics": {
+      "servers": [
+        {
+          "url": "http://127.0.0.1:9090"
+        }
+      ],
+      "get": {
+        "tags": [],
+        "description": "Separate admin listener only; URL is controlled by admin_listen.",
+        "operationId": "metrics",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "text/plain; version=0.0.4": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/changes": {
+      "get": {
+        "tags": [
+          "crate::change_api"
+        ],
+        "operationId": "feed",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "class",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filter"
+          },
+          "410": {
+            "description": "Cursor no longer retained"
+          }
+        }
+      }
+    },
+    "/v1/changes/lookup": {
+      "post": {
+        "tags": [
+          "crate::change_api"
+        ],
+        "operationId": "lookup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangeLookup"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid IDs or since"
+          },
+          "410": {
+            "description": "Cursor expired"
+          }
+        }
+      }
+    },
     "/v1/dumps/osm_place.ndjson": {
       "get": {
         "tags": [],
@@ -203,6 +348,100 @@
           },
           "404": {
             "description": "Unknown resource"
+          }
+        }
+      }
+    },
+    "/v1/resources/{id}/changes": {
+      "get": {
+        "tags": [
+          "crate::change_api"
+        ],
+        "operationId": "resource",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Resource ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "class",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid resource ID"
+          },
+          "410": {
+            "description": "Cursor expired"
           }
         }
       }
@@ -497,6 +736,115 @@
   },
   "components": {
     "schemas": {
+      "ChangeLine": {
+        "type": "object",
+        "required": [
+          "seq",
+          "resource_id",
+          "at",
+          "class",
+          "fields",
+          "source"
+        ],
+        "properties": {
+          "after": {},
+          "at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "attribution": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "before": {},
+          "class": {
+            "type": "string"
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "occurrence": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "resource_id": {
+            "type": "string"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "source": {
+            "type": "string"
+          }
+        }
+      },
+      "ChangeLookup": {
+        "type": "object",
+        "required": [
+          "resource_ids",
+          "since"
+        ],
+        "properties": {
+          "cursor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "resource_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "since": {}
+        },
+        "additionalProperties": false
+      },
+      "ChangePage": {
+        "type": "object",
+        "required": [
+          "lines",
+          "next_cursor",
+          "has_more",
+          "oldest_cursor"
+        ],
+        "properties": {
+          "has_more": {
+            "type": "boolean"
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChangeLine"
+            }
+          },
+          "next_cursor": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "oldest_cursor": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "Cluster": {
         "type": "object",
         "required": [
@@ -673,7 +1021,6 @@
           "site",
           "attributes",
           "source",
-          "fetched_at",
           "status"
         ],
         "properties": {

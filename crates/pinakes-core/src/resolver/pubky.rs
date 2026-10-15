@@ -35,11 +35,16 @@ impl Resolver for PubkyResolver {
     async fn resolve(&self, uri: &str) -> Result<ResourceMeta> {
         tokio::time::timeout(Duration::from_secs(10), async {
             // Only an unauthenticated public-storage GET. No social specs or linked objects are fetched.
+            let mut observation = crate::telemetry::FetchGuard::start();
             let mut response = match self.client.public_storage().get(uri).await {
-                Ok(r) => r,
+                Ok(r) => {
+                    observation.status(r.status().as_u16());
+                    r
+                }
                 Err(pubky::Error::Request(pubky::errors::RequestError::Server {
                     status, ..
                 })) if matches!(status.as_u16(), 404 | 410 | 401 | 403) => {
+                    observation.status(status.as_u16());
                     let mut doc = ResourceMeta::new(uri, "pubky", self.config.ttl_secs);
                     doc.status = if matches!(status.as_u16(), 404 | 410) {
                         Status::Missing
@@ -48,7 +53,22 @@ impl Resolver for PubkyResolver {
                     };
                     return Ok(doc);
                 }
-                Err(e) => return Err(e.into()),
+                Err(pubky::Error::Request(pubky::errors::RequestError::Server {
+                    status, ..
+                })) if status.as_u16() == 304 => {
+                    observation.status(304);
+                    return Err(super::NotModified.into());
+                }
+                Err(e) => {
+                    if let pubky::Error::Request(pubky::errors::RequestError::Server {
+                        status,
+                        ..
+                    }) = &e
+                    {
+                        observation.status(status.as_u16());
+                    }
+                    return Err(e.into());
+                }
             };
             if response
                 .content_length()
@@ -69,7 +89,10 @@ impl Resolver for PubkyResolver {
                 }
                 bytes.extend_from_slice(&chunk);
             }
-            card(uri, &content_type, &bytes, self.config.ttl_secs).bounded(ATTRIBUTES)
+            let doc = card(uri, &content_type, &bytes, self.config.ttl_secs).bounded(ATTRIBUTES)?;
+            drop(observation);
+            crate::telemetry::document(crate::telemetry::last_fetch(), &self.manifest(), &doc);
+            Ok(doc)
         })
         .await?
     }
