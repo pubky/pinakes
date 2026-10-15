@@ -6,6 +6,7 @@ pub mod model;
 pub mod nexus;
 pub mod queue;
 pub mod resolver;
+pub mod spatial;
 pub mod store;
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");

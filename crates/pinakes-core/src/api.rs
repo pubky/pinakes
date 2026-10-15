@@ -6,7 +6,7 @@ use crate::{
 };
 use axum::{
     extract::{ConnectInfo, DefaultBodyLimit, Path, Query, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -206,6 +206,26 @@ pub struct SearchResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub facets: Option<Facets>,
 }
+#[derive(Serialize, ToSchema)]
+pub struct Cluster {
+    pub cell: String,
+    pub count: i64,
+    pub lat: f64,
+    pub lon: f64,
+    pub top: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<String>,
+}
+#[derive(Serialize, ToSchema)]
+pub struct ClusterResponse {
+    pub clusters: Vec<Cluster>,
+    pub points: Vec<ResourceView>,
+    pub truncated: bool,
+    pub total: i64,
+    pub reach_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub facets: Option<Facets>,
+}
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LookupRequest {
@@ -267,16 +287,7 @@ fn view(row: &Value, fields: Fields, spatial: bool) -> Result<ResourceView, ApiE
     })
 }
 fn validate_search(q: &SearchQuery) -> Result<Vec<String>, ApiError> {
-    for (name, value) in [
-        ("bbox", &q.bbox),
-        ("near", &q.near),
-        ("radius", &q.radius),
-        ("from", &q.from),
-        ("to", &q.to),
-        ("cluster", &q.cluster),
-        ("venue", &q.venue),
-        ("collapse", &q.collapse),
-    ] {
+    for (name, value) in [("venue", &q.venue), ("collapse", &q.collapse)] {
         if value.is_some() {
             return Err(ApiError::bad(format!(
                 "{name} is not available in this release"
@@ -286,9 +297,12 @@ fn validate_search(q: &SearchQuery) -> Result<Vec<String>, ApiError> {
     if !(1..=500).contains(&q.limit.unwrap_or(50)) {
         return Err(ApiError::bad("limit must be 1–500"));
     }
-    if !matches!(q.sort.as_deref(), None | Some("activity" | "recent")) {
+    if !matches!(
+        q.sort.as_deref(),
+        None | Some("activity" | "recent" | "distance" | "start")
+    ) {
         return Err(ApiError::bad(
-            "sort must be activity or recent; distance/start are not available",
+            "sort must be activity, recent, distance or start",
         ));
     }
     if !matches!(q.match_mode.as_deref(), None | Some("any" | "all")) {
@@ -357,12 +371,15 @@ fn scope(
             .push(")");
     }
 }
-#[utoipa::path(get,path="/v1/search",params(SearchQuery),responses((status=200,body=SearchResponse),(status=400,description="Invalid or unavailable filter"),(status=502,description="Nexus reach unavailable")))]
+#[utoipa::path(get,path="/v1/search",params(SearchQuery),responses((status=200,body=SearchResult),(status=304,description="ETag unchanged"),(status=400,description="Invalid or unavailable filter"),(status=502,description="Nexus reach unavailable")))]
 pub async fn search(
     State(state): State<AppState>,
     Query(q): Query<SearchQuery>,
-) -> Result<Json<SearchResponse>, ApiError> {
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
     let tags = validate_search(&q)?;
+    let spatial = crate::spatial::Filters::parse(&q, &state.config.search)
+        .map_err(|e| ApiError::bad(e.to_string()))?;
     let reach = if let (Some(viewer), Some(reach)) = (&q.viewer, &q.reach) {
         Some(state.nexus.reach(viewer, reach).await.map_err(|e| {
             tracing::warn!(error=%e,"reach unavailable");
@@ -400,7 +417,12 @@ pub async fn search(
     };
     let at = cursor.as_ref().map_or_else(Utc::now, |c| c.at);
     let mut sql = QueryBuilder::<Postgres>::new("WITH filtered AS (SELECT r.*, ");
-    if q.sort.as_deref() == Some("recent") {
+    if q.sort.as_deref() == Some("distance") {
+        sql.push("-");
+        spatial.distance(&mut sql);
+    } else if q.sort.as_deref() == Some("start") {
+        sql.push("-extract(epoch FROM r.start_at)::double precision");
+    } else if q.sort.as_deref() == Some("recent") {
         sql.push("coalesce(extract(epoch FROM s.newest_at),0)::double precision");
     } else {
         sql.push("coalesce(s.score * exp(-ln(2.0)*greatest(0,extract(epoch FROM (")
@@ -410,6 +432,10 @@ pub async fn search(
     sql.push(
         " AS rank FROM resource_document r LEFT JOIN resource_score s ON s.resource_id=r.id WHERE true",
     );
+    spatial.apply(&mut sql);
+    if q.sort.as_deref() == Some("start") {
+        sql.push(" AND r.start_at IS NOT NULL");
+    }
     if let Some(t) = &q.type_name {
         let name = model::type_path(t).pop().unwrap();
         sql.push(" AND r.type_path @> ").push_bind(vec![name]);
@@ -464,15 +490,29 @@ pub async fn search(
             sql.push(")");
         }
     }
-    sql.push("), page AS (SELECT * FROM filtered");
-    if let Some(c) = &cursor {
-        sql.push(" WHERE (rank,id)<(")
-            .push_bind(c.score)
-            .push(",")
-            .push_bind(c.id.clone())
-            .push(")");
+    if let Some(resolution) = spatial.resolution {
+        sql.push("), cells AS (SELECT *, h3_latlng_to_cell(point(ST_X(point),ST_Y(point)),")
+            .push_bind(i32::from(u8::from(resolution)))
+            .push(")::text AS cell FROM filtered), groups AS (SELECT cell,count(*) AS count,avg(ST_Y(point)) AS lat,degrees(atan2(avg(sin(radians(ST_X(point)))),avg(cos(radians(ST_X(point)))))) AS lon,(array_agg(id ORDER BY rank DESC,id DESC))[1:3] AS top,max(rank) AS rank,CASE WHEN bool_or(osm_id IS NOT NULL) THEN ")
+            .push_bind(crate::resolver::osm::ATTRIBUTION)
+            .push(" ELSE NULL END AS attribution FROM cells GROUP BY cell), entries AS (SELECT 'cluster' AS kind,cell AS id,rank,to_jsonb(g)-'rank' AS item FROM groups g WHERE count>1 AND (SELECT count(*) FROM filtered)>")
+            .push_bind(q.limit.unwrap_or(50) as i64)
+            .push(" UNION ALL SELECT 'point',c.id,c.rank,to_jsonb(c) FROM cells c JOIN groups g USING(cell) WHERE g.count=1 OR (SELECT count(*) FROM filtered)<=")
+            .push_bind(q.limit.unwrap_or(50) as i64)
+            .push("), page AS (SELECT * FROM entries ORDER BY rank DESC,id DESC LIMIT ")
+            .push_bind((q.limit.unwrap_or(50)+1) as i64)
+            .push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p) ORDER BY rank DESC,id DESC) FROM page p),'[]') AS items, (SELECT count(*) FROM filtered) AS total, ");
+    } else {
+        sql.push("), page AS (SELECT * FROM filtered");
+        if let Some(c) = &cursor {
+            sql.push(" WHERE (rank,id)<(")
+                .push_bind(c.score)
+                .push(",")
+                .push_bind(c.id.clone())
+                .push(")");
+        }
+        sql.push(" ORDER BY rank DESC,id DESC LIMIT ").push_bind((q.limit.unwrap_or(50)+1) as i64).push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p) ORDER BY rank DESC,id DESC) FROM page p),'[]') AS items, ");
     }
-    sql.push(" ORDER BY rank DESC,id DESC LIMIT ").push_bind((q.limit.unwrap_or(50)+1) as i64).push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p) ORDER BY rank DESC,id DESC) FROM page p),'[]') AS items, ");
     if q.facet.as_deref() == Some("tags") {
         sql.push("coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY count DESC,label) FROM (SELECT f.label,count(DISTINCT f.resource_id) AS count FROM reference f JOIN filtered r ON r.id=f.resource_id WHERE f.label IS NOT NULL");
         scope(&mut sql, &q, &reach);
@@ -480,12 +520,12 @@ pub async fn search(
     } else {
         sql.push("'[]'::jsonb");
     }
-    sql.push(" AS facets");
+    sql.push(" AS facets, jsonb_build_array((SELECT jsonb_agg(jsonb_build_array(cursor,epoch) ORDER BY nexus) FROM feed_cursor),(SELECT count(*) FROM reference),(SELECT max(created_at) FROM reference),(SELECT max(resolved_at) FROM resource),(SELECT max(fetched_at) FROM osm_place)) AS revision");
     let row = sql.build().fetch_one(&state.pool).await?;
     let mut items: Vec<Value> = serde_json::from_value(row.try_get("items")?)?;
     let has_more = items.len() > q.limit.unwrap_or(50);
     items.truncate(q.limit.unwrap_or(50));
-    let next = if has_more {
+    let next = if has_more && spatial.resolution.is_none() {
         let last = items.last().expect("nonempty page");
         Some(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&PageCursor {
             version: 1,
@@ -511,16 +551,75 @@ pub async fn search(
     } else {
         None
     };
-    Ok(Json(SearchResponse {
-        items: items
-            .iter()
-            .map(|r| view(r, q.fields.unwrap_or(Fields::Card), false))
-            .collect::<Result<_, _>>()?,
-        cursor: next,
-        reach_truncated: reach.is_some_and(|r| r.truncated),
-        facets,
-    }))
+    let revision: Value = row.try_get("revision")?;
+    let etag = format!(
+        "\"{}\"",
+        blake3::hash(&serde_json::to_vec(&(q.clone(), revision))?).to_hex()
+    );
+    let mut response = if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|h| h.to_str().ok())
+        .is_some_and(|h| {
+            h.split(',')
+                .any(|v| v.trim().trim_start_matches("W/") == etag || v.trim() == "*")
+        }) {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else if spatial.resolution.is_some() {
+        let mut clusters = Vec::new();
+        let mut points = Vec::new();
+        for entry in items {
+            let item = &entry["item"];
+            if entry["kind"] == "cluster" {
+                clusters.push(Cluster {
+                    cell: item["cell"].as_str().unwrap_or_default().into(),
+                    count: item["count"].as_i64().unwrap_or(0),
+                    lat: item["lat"].as_f64().unwrap_or(0.0),
+                    lon: item["lon"].as_f64().unwrap_or(0.0),
+                    top: serde_json::from_value(item["top"].clone())?,
+                    attribution: item["attribution"].as_str().map(str::to_owned),
+                });
+            } else {
+                points.push(view(item, q.fields.unwrap_or(Fields::Card), true)?);
+            }
+        }
+        Json(ClusterResponse {
+            clusters,
+            points,
+            truncated: has_more,
+            total: row.try_get("total")?,
+            reach_truncated: reach.is_some_and(|r| r.truncated),
+            facets,
+        })
+        .into_response()
+    } else {
+        Json(SearchResponse {
+            items: items
+                .iter()
+                .map(|r| view(r, q.fields.unwrap_or(Fields::Card), spatial.is_spatial()))
+                .collect::<Result<_, _>>()?,
+            cursor: next,
+            reach_truncated: reach.is_some_and(|r| r.truncated),
+            facets,
+        })
+        .into_response()
+    };
+    response
+        .headers_mut()
+        .insert(header::ETAG, etag.parse().expect("hash header"));
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("public, max-age=30"),
+    );
+    Ok(response)
 }
+#[derive(ToSchema)]
+#[allow(dead_code)]
+#[serde(untagged)]
+pub enum SearchResult {
+    Page(SearchResponse),
+    Cluster(ClusterResponse),
+}
+
 async fn read(pool: &PgPool, id: &str, fields: Fields) -> Result<Option<ResourceView>, ApiError> {
     let value: Option<Value> =
         sqlx::query_scalar("SELECT to_jsonb(r) FROM resource_document r WHERE id=$1")
@@ -633,6 +732,9 @@ pub async fn info(State(state): State<AppState>) -> Result<Json<Value>, ApiError
         model::Status,
         ResourceView,
         SearchResponse,
+        SearchResult,
+        ClusterResponse,
+        Cluster,
         model::LocationSource,
         Fields,
         LookupRequest,

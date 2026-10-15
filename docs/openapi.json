@@ -477,10 +477,13 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SearchResponse"
+                  "$ref": "#/components/schemas/SearchResult"
                 }
               }
             }
+          },
+          "304": {
+            "description": "ETag unchanged"
           },
           "400": {
             "description": "Invalid or unavailable filter"
@@ -494,6 +497,89 @@
   },
   "components": {
     "schemas": {
+      "Cluster": {
+        "type": "object",
+        "required": [
+          "cell",
+          "count",
+          "lat",
+          "lon",
+          "top"
+        ],
+        "properties": {
+          "attribution": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cell": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "lat": {
+            "type": "number",
+            "format": "double"
+          },
+          "lon": {
+            "type": "number",
+            "format": "double"
+          },
+          "top": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ClusterResponse": {
+        "type": "object",
+        "required": [
+          "clusters",
+          "points",
+          "truncated",
+          "total",
+          "reach_truncated"
+        ],
+        "properties": {
+          "clusters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Cluster"
+            }
+          },
+          "facets": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Facets"
+              }
+            ]
+          },
+          "points": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ResourceView"
+            }
+          },
+          "reach_truncated": {
+            "type": "boolean"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        }
+      },
       "Facets": {
         "type": "object",
         "required": [
@@ -873,6 +959,16 @@
             "type": "boolean"
           }
         }
+      },
+      "SearchResult": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SearchResponse"
+          },
+          {
+            "$ref": "#/components/schemas/ClusterResponse"
+          }
+        ]
       },
       "Status": {
         "type": "string",

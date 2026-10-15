@@ -35,16 +35,42 @@ not an HTTP 404 from the Pinakes resource route.
 | `author` | Resources referenced by this 52-character z-base-32 public author ID |
 | `reach` | `following` or `friends`; requires `viewer`; restricts reference/tag filters |
 | `viewer` | Nexus user ID used only for the reach set |
-| `sort` | `activity` (default) or `recent` |
+| `sort` | `activity` (default), `recent`, `distance` (requires `near`) or `start` |
 | `limit` | 1–500, default 50 |
 | `cursor` | Opaque next-page token returned by the previous page |
 | `facet` | `tags`: counts distinct resources per label over the entire filtered set |
+| `bbox` | `minLon,minLat,maxLon,maxLat`, degrees; west > east crosses the antimeridian |
+| `near`, `radius` | `lat,lon` plus a positive metre radius, max 200,000 by default; mutually exclusive with `bbox` |
+| `from`, `to` | Inclusive start-time bounds, RFC 3339 or Unix milliseconds; `from` must not follow `to` |
+| `cluster` | Integer map zoom with `bbox`; returns viewport clusters/points; incompatible with cursor |
 | `fields` | `card` (default), `facets`, or `document` |
 
-`bbox`, `near`, `radius`, `from`, `to`, `cluster`, `venue`, and `collapse` return 400
-with a message naming the unavailable filter. `reach=wot_2` returns 400
-`"wot_2 is not available"`. Distance/start sorting is not available. Unknown
-parameters and invalid field selections also return 400.
+`venue`, `collapse` and `reach=wot_2` return 400. Unknown parameters, invalid
+coordinates/dates, out-of-range radius/zoom and incompatible options also return 400.
+The `start` sort excludes resources without a start. Distance and start ranks are
+negative metres and negative Unix seconds respectively, so nearest/earliest comes
+first while preserving the descending keyset contract.
+
+Spatial search includes `point` even with `fields=card`. OSM cards always include
+`osm_id` (for example `node/123`) and `attribution: "© OpenStreetMap contributors
+(ODbL)"`. Type ancestry includes both parents of `LocalBusiness`, so `type=Place`
+includes cafés and other businesses. Spatial, time, text, type, tag and reach filters
+can be combined; tag facets count the complete filtered set before pagination.
+
+`cluster=<zoom>` returns `{clusters, points, truncated, total, reach_truncated,
+facets?}`. Each cluster is `{cell,count,lat,lon,top:[resource_ids],attribution?}`.
+`top` contains at most three IDs ordered by the selected rank. The centroid comes
+from member points (circular longitude mean handles the dateline). H3 resolution
+is `clamp(zoom-4,0,11)` by default for zooms 0..22, configurable via a table.
+Singleton cells are points; if total filtered resources <= limit, all are points.
+The limit caps returned clusters plus singleton points, and `truncated` marks any
+omitted units. When not truncated, sum(cluster counts)+points.length equals total.
+There is no cursor in cluster mode; refine the viewport/zoom to retrieve omitted units.
+
+Search responses carry `Cache-Control: public, max-age=30` and an `ETag` hashing
+parameters, ingestion cursors/epochs, reference revision and latest resolution/cache
+revision. `If-None-Match` returns 304 when unchanged. The reference scope belongs in
+the URL, so reach/viewer searches have separate cache keys.
 
 One SQL statement performs type/facet and text filtering, reference/tag/reach
 filtering, ranking, tag aggregation and pagination. Facets are computed before the

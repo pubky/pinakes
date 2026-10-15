@@ -16,7 +16,7 @@ same base.
 ## Status
 
 The Rust service, Postgres storage, Nexus ingestion, web/Pubky/geo/OSM resolvers and
-base API run locally. Viewport search, event extraction and change tracking follow separately.
+viewport API run locally. Event extraction and change tracking follow separately.
 
 ## Running locally
 
@@ -84,6 +84,17 @@ in `osm_place`, under ODbL; a non-materialized SQL view joins them for reads and
 search. Pubky references keep their independent IDs and data. The public
 `/v1/dumps/osm_place.ndjson` stream and `pg_dump --table osm_place` export the
 complete derivative database. OSM documents, cards and clusters carry attribution.
+
+Search supports bounding boxes (including the antimeridian), distance in metres,
+time windows and H3 viewport clusters. PostgreSQL filters, ranks, aggregates tags
+and clusters before limiting the response. `h3o` validates the zoom table, with a
+PostgreSQL integration test comparing every supported cell resolution. Occurrences
+have a table but no producer or route yet.
+
+```sh
+curl 'http://127.0.0.1:8090/v1/search?bbox=5.9,45.8,10.6,47.9&cluster=8&type=Place&facet=tags'
+curl 'http://127.0.0.1:8090/v1/search?near=46.0051,8.9528&radius=1000&sort=distance'
+```
 
 The default development upstream is the public Nominatim. Its
 [usage policy](https://operations.osmfoundation.org/policies/nominatim/) requires

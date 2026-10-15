@@ -264,7 +264,7 @@ async fn search_filters_facets_true_keyset_and_invalid_options(pool: PgPool) {
         400
     );
     for query in [
-        "bbox=0,0,1,1",
+        "bbox=0,0,1",
         "near=1,2",
         "radius=100",
         "from=2026-01-01",
@@ -276,7 +276,7 @@ async fn search_filters_facets_true_keyset_and_invalid_options(pool: PgPool) {
         "reach=following",
         "reach=strangers",
         "sort=distance",
-        "sort=start",
+        "sort=unknown",
         "limit=0",
         "limit=501",
         "match=bad",
