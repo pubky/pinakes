@@ -16,7 +16,8 @@ same base.
 ## Status
 
 The Rust service, Postgres storage, Nexus ingestion, web/Pubky/geo/OSM resolvers and
-viewport API run locally. Event extraction and change tracking follow separately.
+viewport API, change tracking and admin telemetry run locally. Event-specific
+parsers remain a later step.
 
 ## Running locally
 
@@ -127,11 +128,16 @@ backends; the production IP policy has no localhost bypass.
 ## Operations
 
 The durable queue leases rows with `SKIP LOCKED` and fences stale completions by a
-generation counter. A single job lease lasts at least 60 seconds; a 50-object batch gets 760 seconds. Successful
-resolutions refresh after their TTL; missing web/Pubky objects use the shorter TTL, and OSM negative results use the OSM cache TTL. `geo:` has no TTL and never refreshes. Transient
+generation counter. A single job lease lasts at least 60 seconds; a 50-object batch gets 760 seconds.
+Refresh cadence follows the manifest and time to start; no-start web/Pubky pages
+refresh after seven days, OSM after its configured cache TTL. `geo:` is final.
+Two fresh successful missing observations confirm cancellation; a cached copy
+cannot count twice. The first missing result schedules a confirmation with a
+one-hour floor. Transient
 failures back off exponentially and enter dead letter after five failures. Last good
-facets survive failed refreshes. A preview shares the same resource/queue entry as
-ingestion and cannot revive a dead letter or bypass the TTL.
+facets survive failed refreshes. A lookup or preview prioritizes an overdue resource inside its existing TTL,
+author budget and retry schedule. It cannot revive a dead letter. A new public
+reference can reopen a final non-geo resource.
 
 A database advisory lock permits one daemon per database. Resolver, host, author,
 reach-cache and IP budgets are process-local; the lock keeps their guarantees intact.
@@ -158,3 +164,42 @@ A feed epoch change (or requested cursor beyond the feed length) clears the refe
 projection and scores, retains resource documents during the grace period, and starts
 at zero. Resources with no references expire seven days after becoming orphaned;
 preview-only entries follow the same policy. Search excludes unreferenced resources.
+
+## Refresh, changes and monitoring
+
+Every adapter declares its mode, cadence floor, identity, cancellation signal,
+expected fields and optional canary. `/v1/info` exposes these declarations and
+source state. Near-start resources refresh more often (7 days, 2 days, 6 hours,
+1 hour); one successful fetch at/after end+24h makes the resource final. Container
+and cursor scheduling primitives are present for future adapters. The container
+key-set guard holds losses over half the set until an identical successful result
+confirms them, then applies changes per key.
+
+`/v1/changes`, `/v1/changes/lookup` and `/v1/resources/{id}/changes` expose normalized
+changes: created, rescheduled, relocated, cancelled, uncancelled, renamed, details
+and deleted. Fetch timestamps, TTL and body length do not generate changes.
+Failures preserve the last accepted document. Records are retained 90 days by
+default; sequence allocation is serialized with commits so a reader cannot skip
+a lower uncommitted sequence. OSM history remains inside `osm_place.versions`;
+change records reference those versions, and reads join them with attribution.
+
+Prometheus is served **only** on `admin_listen` (`127.0.0.1:9090` by default):
+
+```sh
+curl http://127.0.0.1:9090/metrics
+curl 'http://127.0.0.1:8090/v1/changes?cursor=0&limit=100'
+scripts/check-ops
+```
+
+Canaries run every six hours, first scheduled one interval after startup. They
+share the existing resolver workers, host serialization and request rates. Probe
+results update only metrics/source state, never documents, OSM cache or change
+records. Their due time, lease, result and failure streak survive restart. A bad
+parser produces `outcome=drift` when an otherwise successful result lacks a declared
+field. Each actual upstream request is counted once; OSM batches and cache hits do
+not multiply request counts by the number of resources.
+
+See [ops/README.md](ops/README.md) for alert rules, the Grafana dashboard, counters
+and scrape setup. `scripts/test` checks every alert/dashboard metric against the
+registry and runs `promtool check rules` when available (`apt install promtool`
+on this host). No alert contact point is provisioned by this repository.

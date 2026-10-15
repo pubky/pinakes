@@ -1,6 +1,7 @@
 # Use a peer-authenticated Unix socket locally, or a secret supplied via PINAKES__DATABASE_URL.
 database_url = "postgresql:///pinakes?host=/var/run/postgresql"
 listen = "127.0.0.1:8090"
+admin_listen = "127.0.0.1:9090"
 nexus_url = "http://127.0.0.1:8080"
 poll_secs = 5
 grace_days = 7
@@ -57,3 +58,16 @@ dump_requests_per_minute = 2
 max_radius_m = 200000.0
 # Index is map zoom 0..22; value is H3 resolution, capped at 11.
 h3_resolutions = [0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 11, 11, 11, 11, 11, 11, 11]
+
+# Rows: >30 days/no start, 7–30 days, 24h–7 days, <24h/running.
+# Resource/container floors are one hour; OSM also respects its cache TTL.
+[refresh]
+resource_secs = [604800, 172800, 21600, 3600]
+container_secs = [86400, 43200, 21600, 3600]
+cursor_secs = 300
+retention_days = 90
+
+[canary]
+enabled = true
+interval_secs = 21600
+# First run is scheduled one interval after first startup; subsequent due times persist.

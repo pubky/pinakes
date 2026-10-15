@@ -22,7 +22,7 @@ This page is the overview: what Pinakes is, what it needs from Nexus and what it
 
 Every external thing people reference is a `Resource` in Nexus: an id and a URI, nothing else. That is the right scope for a social indexer, and it gives a card and nothing more. "Cafés tagged cappuccino in this map area by people I follow" or "events next week" need an indexer that knows what the resource is, and filtering after Nexus's list caps gives silently wrong answers.
 
-MapKy and Eventky each built a private indexer for this. One shared one does the work once and makes cross-kind queries possible.
+Maps and Events each built a private indexer for this. One shared one does the work once and makes cross-kind queries possible.
 
 Scale today (public graph, 2026-10-14): 921 users, 215 posts and 496 tags a week, 123 resources. Nothing here is an efficiency argument.
 

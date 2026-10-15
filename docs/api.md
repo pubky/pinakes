@@ -13,12 +13,16 @@ Nexus in a separate call. All paths below are relative to the Pinakes origin.
 | `GET /v1/resources/{id}` | `fields=card\|facets\|document` | One resource; default `document`; 404 if absent |
 | `POST /v1/resources/lookup` | Exactly one of `{"ids":[...]}` or `{"uris":[...]}` | Array in request order, including duplicates, skipping unknowns; 1–500 entries |
 | `POST /v1/resolve` | `{"uri":"https://example.org/"}` | Resource immediately or after up to 3 seconds; 202 with `status=pending` while queued |
-| `GET /v1/info` | None | Version, resolver configuration/status, dead letters, counts, feed cursors/epochs/lag |
+| `GET /v1/info` | None | Version, manifests, resolver configuration/status, source/canary state, metrics, counts and ingestion lag |
+| `GET /v1/changes` | `cursor`, `class`, `type`, `source`, `limit` | Change page with ascending sequence cursor |
+| `POST /v1/changes/lookup` | `{resource_ids:[...], since, cursor?, limit?}` | Changes to 1–500 requested IDs since a timestamp |
+| `GET /v1/resources/{id}/changes` | Same filters as changes | Resource history, including after expiry |
 | `GET /v1/dumps/osm_place.ndjson` | None | Streaming ODbL notice followed by every `osm_place` row; 2 requests/minute per socket IP by default |
 | `GET /v1/openapi.json` | None | Generated OpenAPI 3.1 |
 
 `lookup` also accepts the Nexus-compatible alias `resource_ids` for `ids`.
-It is a read: unknown URIs do not cause a fetch. URIs are normalized and IDs computed
+Unknown URIs do not cause a fetch. Known overdue resources are moved to the front
+of the refresh queue without bypassing TTL, backoff, leases or final state. URIs are normalized and IDs computed
 by `pubky-resource-id`. Each URI is at most 2048 bytes; IDs are 32 lowercase hex
 characters. A missing upstream object is a known resource with `status=missing`,
 not an HTTP 404 from the Pinakes resource route.
@@ -106,9 +110,11 @@ attributes and aliases. `geo` omits `ttl_secs` because it is final. The document
 are resolver-allowlisted and capped at 32. An unresolved resource has no document.
 Reads outside search do not calculate a ranking and return `score=0`.
 
-Statuses are `ok`, `pending`, `missing`, `unreachable`, and `error`. `unreachable`
+Statuses are `ok`, `pending`, `missing`, `unreachable`, and `error`. Missing must
+be confirmed by two fresh successful fetches; one missing response keeps the last
+accepted status/document, and a repeated cached observation does not count twice. `unreachable`
 means the upstream denied access; `error` can have a scheduled retry or be in dead
-letter. Failed refreshes preserve the last good document, whose own status/time
+letter. Failed refreshes preserve the last accepted document, whose own status/time
 reflects that older fetch. Alias URLs do not change resource identity. Image URLs
 point to the origin; Pinakes does not serve or proxy image bytes.
 
@@ -168,4 +174,55 @@ Handler errors use `{"error":"..."}`; Axum's query/JSON parsing errors may be te
 Malformed query parameters return 400, malformed JSON returns 400, JSON shape
 errors return 422, and request bodies over 2 MB return 413. Internal errors return
 500 without database diagnostics. There are no resource write, social-state,
-admin, occurrence, reverse-geocoding, place-search or group routes in this step.
+public admin, occurrence, reverse-geocoding, place-search or group routes in this step.
+
+## Change feed and refresh
+
+A page is `{lines, next_cursor, has_more, oldest_cursor}`. Each line contains
+`seq`, `at` (Unix milliseconds), `resource_id`, optional `occurrence`, `source`,
+`class`, `fields`, `before` and `after`. Before/after contain normalized document
+facts; fetch time, TTL and body length are excluded. An OSM line also carries
+attribution, and its historical document is hydrated from `osm_place.versions`.
+
+`GET /v1/changes` accepts a nonnegative integer `cursor` (default 0), a class,
+schema.org type (ancestor-aware), source and limit (1–500, default 100). Lines
+are ordered by sequence ascending. Continue with `next_cursor`, keeping filters
+unchanged; when caught up, it advances to the current head even if filters match
+no lines. Cursor 0 starts at the oldest retained line. A nonzero cursor older
+than retained history returns **410**; restart at 0 and refresh your saved resources.
+
+`POST /v1/changes/lookup` accepts 1–500 `resource_ids` and `since` as RFC3339 text
+or Unix milliseconds (integer or decimal text). The timestamp is inclusive.
+Optional `cursor` and `limit` page large histories. IDs may be known or unknown;
+only matching retained changes are returned. Resource history remains accessible
+after orphan expiry because change records do not cascade with resource deletion.
+
+Classes are `created`, `rescheduled` (start/end), `relocated` (location/venue),
+`cancelled`, `uncancelled`, `renamed`, `details`, and `deleted`. If several fields
+change together, this order chooses one class: lifecycle change, time, location,
+name, details; `fields` still lists every changed field. Physical orphan expiry
+emits `deleted`. A fetch failure emits no change and never cancels a resource.
+The default retention is 90 days; pruning runs hourly.
+
+Refresh rows use time to start: >30 days/no start → 7 days, 7–30 days → 2 days,
+24 hours–7 days → 6 hours, <24 hours/running → 1 hour. Adapter floors may lengthen
+these intervals; OSM respects its configurable cache TTL. After an end, one fetch
+at end+24 hours makes the resource final. A final resource stays frozen until a
+new public reference reopens it; `geo:` stays final permanently. Missing
+confirmation can require one additional fetch before finalization. `lookup` and
+`resolve` prioritize overdue jobs without advancing their earliest allowed retry.
+
+## Admin metrics and canaries
+
+`GET /metrics` is available only on the separately configured admin listener,
+by default `127.0.0.1:9090`; the public route returns 404. It uses Prometheus text
+format. The admin listener has no resource routes. Keep it on a trusted network.
+
+`/v1/info` exposes adapter `mode`, `cadence_floor` (seconds), `identity`,
+`cancellation`, `expected_fields` and canary URL, plus source state and numerical
+metric samples. Source state includes cursor, successful fetch time, last error,
+consecutive failures, hold deadline and canary bookkeeping. Internal container key
+sets are omitted. Canaries default to six hours, share worker/host budgets, and do
+not alter resource data. OSM probes deliberately bypass the data cache to exercise
+the parser without writing the cache. Before a canary's first run its result is
+null and no result gauge is exported. Metric/alert details are in [ops](../ops/README.md).
