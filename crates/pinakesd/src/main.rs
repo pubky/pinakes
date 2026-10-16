@@ -59,6 +59,7 @@ async fn main() -> Result<()> {
     if !owns_database {
         bail!("another pinakesd already owns this database");
     }
+    pinakes_core::groups::configure(&pool, &config.groups).await?;
     let api_pool = api::pool_options().connect(&config.database_url).await?;
     let state = AppState::new(api_pool, config.clone())?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -92,8 +93,14 @@ async fn main() -> Result<()> {
     let mut group_shutdown = shutdown_rx.clone();
     let group_task = tokio::spawn(async move {
         loop {
-            if let Err(error) = pinakes_core::groups::drain(&group_pool, &group_config, 25).await {
-                tracing::warn!(%error,"group reconciliation will retry");
+            let batch = tokio::select! { _=group_shutdown.changed()=>break,result=pinakes_core::groups::drain(&group_pool,&group_config,25)=>result };
+            match batch {
+                Ok(25) => {
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                Err(error) => tracing::warn!(%error,"group reconciliation will retry"),
+                _ => {}
             }
             tokio::select! {_=group_shutdown.changed()=>break,_=tokio::time::sleep(Duration::from_secs(2))=>{}}
         }

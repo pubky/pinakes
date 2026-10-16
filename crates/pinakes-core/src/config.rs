@@ -371,7 +371,8 @@ impl Config {
         if !(10000..=100000).contains(&self.groups.max_graph_units)
             || !(1024 * 1024..=128 * 1024 * 1024).contains(&self.groups.max_graph_bytes)
             || !(2..=1000).contains(&self.groups.max_members)
-            || !(1..=1000).contains(&self.groups.max_members_per_origin)
+            || !(1..=self.groups.max_members).contains(&self.groups.max_members_per_origin)
+            || self.groups.max_graph_units < self.groups.max_members
             || !self.groups.max_distance_m.is_finite()
             || !(1.0..=10000.0).contains(&self.groups.max_distance_m)
         {

@@ -43,6 +43,7 @@ pub struct Metrics {
     pub resources: IntGaugeVec,
     pub blocked: IntGaugeVec,
     pub group_url_demotions: IntCounter,
+    pub group_pair_budget: IntCounter,
     pub ingest_lag: IntGauge,
     pub ingest_success: IntGauge,
     pub ingest_resets: IntCounter,
@@ -83,7 +84,13 @@ impl Metrics {
             "Shared URL identity keys demoted by publisher",
         )?;
         registry.register(Box::new(group_url_demotions.clone()))?;
+        let group_pair_budget = IntCounter::new(
+            "pinakes_group_pair_budget_total",
+            "Grouping plans committed with bounded partial evidence",
+        )?;
+        registry.register(Box::new(group_pair_budget.clone()))?;
         let out = Self {
+            group_pair_budget,
             group_url_demotions,
             ingest_rejected: metric!(
                 IntCounterVec,
@@ -217,6 +224,12 @@ impl Metrics {
         self.overdue.reset();
         self.resources.reset();
         self.blocked.reset();
+        sync_counter(
+            &self.group_pair_budget,
+            sqlx::query_scalar("SELECT pair_budget_total FROM group_runtime WHERE id")
+                .fetch_one(pool)
+                .await?,
+        );
         sync_counter(
             &self.group_url_demotions,
             sqlx::query_scalar("SELECT count(*) FROM group_demoted_url")

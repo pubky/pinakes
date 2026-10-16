@@ -211,7 +211,10 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = self.0;
         let mut response = (status, Json(json!({"error":self.1}))).into_response();
-        if status == StatusCode::TOO_MANY_REQUESTS {
+        if matches!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+        ) {
             response
                 .headers_mut()
                 .insert(header::RETRY_AFTER, header::HeaderValue::from_static("60"));
@@ -1283,6 +1286,12 @@ pub async fn curate_group(
         .map(Json)
         .map_err(|e| {
             tracing::warn!(error=%e,"group curation failed");
+            if e.is::<crate::groups::GroupBusy>() {
+                return ApiError(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "group writer busy; retry later".into(),
+                );
+            }
             if !e.is::<crate::groups::CurationError>() {
                 ApiError(
                     StatusCode::INTERNAL_SERVER_ERROR,

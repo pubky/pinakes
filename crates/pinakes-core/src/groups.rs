@@ -362,6 +362,7 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
        HAVING count(DISTINCT resource_id)>2 AND count(DISTINCT substring(uri from '^https?://[^/]+([^?#]*)'))>2
       UNION SELECT d.key,d.origin FROM group_demoted_url d WHERE d.key=ANY($3)
     "#).bind(json!(claims)).bind(id).bind(&keys).fetch_all(&mut **tx).await?.into_iter().collect();
+    check_revisions(tx, &revisions).await?;
     let mut incoming = Vec::new();
     let mut incoming_bytes = 0usize;
     for (unit, row) in units.iter().zip(&rows) {
@@ -444,8 +445,9 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
         .flat_map(|u| u.keys.iter().map(|k| json!([u.unit_id, k.key])))
         .collect();
     sqlx::query("DELETE FROM resource_group k WHERE resource_id=$1 AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements($2) v WHERE v->>0=k.unit_id AND v->>1=k.key)").bind(id).bind(json!(retained)).execute(&mut **tx).await?;
+    let degraded = plan.degraded;
     apply(tx, plan).await?;
-    sqlx::query("INSERT INTO group_input(resource_id,fingerprint) VALUES($1,$2) ON CONFLICT(resource_id) DO UPDATE SET fingerprint=excluded.fingerprint").bind(id).bind(fingerprint).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO group_input(resource_id,fingerprint,last_error) VALUES($1,$2,$3) ON CONFLICT(resource_id) DO UPDATE SET fingerprint=excluded.fingerprint,last_error=excluded.last_error").bind(id).bind(fingerprint).bind(degraded.then_some("pair_budget")).execute(&mut **tx).await?;
     sqlx::query("DELETE FROM group_dirty WHERE resource_id=$1")
         .bind(id)
         .execute(&mut **tx)
@@ -496,14 +498,19 @@ fn distance(a: (f64, f64), b: (f64, f64)) -> f64 {
         + a.0.to_radians().cos() * b.0.to_radians().cos() * (dlon / 2.).sin().powi(2);
     6371000. * 2. * h.sqrt().min(1.).asin()
 }
-const MAX_PAIR_EVALUATIONS: usize = 100_000;
-fn charge_pair(evaluations: &mut usize) -> Result<()> {
+fn pair_budget(cfg: &GroupConfig) -> usize {
+    // Two passes over a full admitted component, with a modest floor for small groups.
+    cfg.max_members
+        .saturating_mul(cfg.max_members)
+        .saturating_mul(2)
+        .clamp(100_000, 2_000_000)
+}
+fn charge_pair(evaluations: &mut usize, budget: usize) -> bool {
+    if *evaluations >= budget {
+        return false;
+    }
     *evaluations += 1;
-    ensure!(
-        *evaluations <= MAX_PAIR_EVALUATIONS,
-        "group pair evaluation budget exceeded"
-    );
-    Ok(())
+    true
 }
 // pg_trgm show_trgm supplies sorted unique trigrams after the same 'simple' name
 // normalization as search_text. Its similarity is intersection / union.
@@ -551,6 +558,7 @@ async fn load_edges(
     Ok(edges)
 }
 struct Plan {
+    degraded: bool,
     assignments: Vec<Value>,
     groups: Vec<String>,
     old: Vec<String>,
@@ -593,6 +601,7 @@ async fn plan(
     let mut resource_ids = vec![String::new(); names.len()];
     let mut claims = vec![BTreeSet::new(); names.len()];
     let mut overrides = vec![None; names.len()];
+    let mut established = vec![None; names.len()];
     let mut bykey: BTreeMap<String, Vec<(usize, &Edge)>> = BTreeMap::new();
     let mut resources = BTreeSet::new();
     let mut old: BTreeSet<String> = previous.iter().cloned().collect();
@@ -606,6 +615,7 @@ async fn plan(
         resource_ids[i] = e.resource_id.clone();
         claims[i].insert(e.key.clone());
         overrides[i] = e.override_id.clone();
+        established[i] = e.group_id.clone();
         resources.insert(e.resource_id.clone());
         old.extend(e.group_id.clone());
         let key = if let Some(g) = &e.override_id {
@@ -624,7 +634,9 @@ async fn plan(
             .then_with(|| a.0.cmp(&b.0))
     });
     let mut evaluations = 0usize;
-    for (key, mut entries) in keys {
+    let budget = pair_budget(cfg);
+    let mut degraded = false;
+    'keys: for (key, mut entries) in keys {
         let curated = entries.iter().all(|(_, e)| {
             e.override_id
                 .as_ref()
@@ -650,7 +662,6 @@ async fn plan(
         entries.truncate(cfg.max_members);
         for (pos, (i, ie)) in entries.iter().enumerate() {
             for (j, je) in &entries[..pos] {
-                charge_pair(&mut evaluations)?;
                 let reciprocal = claims[*i].contains(&format!("url:{}", resource_ids[*j]))
                     && claims[*j].contains(&format!("url:{}", resource_ids[*i]));
                 let same_origin = origins[*i] == origins[*j];
@@ -683,11 +694,18 @@ async fn plan(
                 if a == b || sets[a].len() + sets[b].len() > cfg.max_members {
                     continue;
                 }
+                if !charge_pair(&mut evaluations, budget) {
+                    degraded = true;
+                    break 'keys;
+                }
                 let mut incompatible = false;
                 if !curated {
                     'pairs: for i in &sets[a] {
                         for j in &sets[b] {
-                            charge_pair(&mut evaluations)?;
+                            if !charge_pair(&mut evaluations, budget) {
+                                degraded = true;
+                                break 'keys;
+                            }
                             let cross_occurrence = occurrence_key && origins[*i] != origins[*j];
                             if (cross_occurrence
                                 && (cfg.cross_container_occurrences
@@ -756,9 +774,20 @@ async fn plan(
     }
     let assignments: Vec<_> = (0..names.len())
         .map(|i| {
-            let gid = overrides[i]
-                .clone()
-                .or_else(|| automatic.get(&roots[i]).cloned());
+            let candidate = if degraded {
+                // Partial evidence must neither split an established group nor attach a
+                // newcomer to an incompletely checked established component.
+                established[i].clone().or_else(|| {
+                    sets[roots[i]]
+                        .iter()
+                        .all(|j| established[*j].is_none())
+                        .then(|| automatic.get(&roots[i]).cloned())
+                        .flatten()
+                })
+            } else {
+                automatic.get(&roots[i]).cloned()
+            };
+            let gid = overrides[i].clone().or(candidate);
             json!({"unit":names[i],"group":gid})
         })
         .collect();
@@ -769,6 +798,7 @@ async fn plan(
         .into_iter()
         .collect();
     Ok(Plan {
+        degraded,
         assignments,
         groups,
         old: old.into_iter().collect(),
@@ -779,7 +809,7 @@ async fn plan(
 struct SnapshotChanged;
 impl std::fmt::Display for SnapshotChanged {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("group input changed; retry immediately")
+        f.write_str("group input changed; retry with backoff")
     }
 }
 impl std::error::Error for SnapshotChanged {}
@@ -798,6 +828,12 @@ async fn fence(
     revisions: &BTreeMap<String, Option<i64>>,
 ) -> Result<()> {
     crate::store::lock_search_revision(tx).await?;
+    check_revisions(tx, revisions).await
+}
+async fn check_revisions(
+    tx: &mut Transaction<'_, Postgres>,
+    revisions: &BTreeMap<String, Option<i64>>,
+) -> Result<()> {
     let current: BTreeMap<String, i64> =
         sqlx::query_as("SELECT id,group_revision FROM resource WHERE id=ANY($1)")
             .bind(revisions.keys().collect::<Vec<_>>())
@@ -815,11 +851,17 @@ async fn fence(
 }
 async fn apply(tx: &mut Transaction<'_, Postgres>, plan: Plan) -> Result<()> {
     let Plan {
+        degraded,
         assignments,
         groups,
         old,
         resources,
     } = plan;
+    if degraded {
+        sqlx::query("UPDATE group_runtime SET pair_budget_total=pair_budget_total+1 WHERE id")
+            .execute(&mut **tx)
+            .await?;
+    }
     for chunk in groups.chunks(256) {
         sqlx::query("INSERT INTO \"group\"(id) SELECT unnest($1::text[]) ON CONFLICT DO NOTHING")
             .bind(chunk)
@@ -858,26 +900,24 @@ pub async fn reconcile(pool: &PgPool, id: &str, cfg: &GroupConfig) -> bool {
     if !cfg.enabled {
         return false;
     }
-    let mut result = Ok(());
-    for _ in 0..3 {
-        result = async {
-            let mut tx = pool.begin().await?;
-            sqlx::query("SET LOCAL statement_timeout='2s'")
-                .execute(&mut *tx)
-                .await?;
-            sync(&mut tx, id, cfg).await?;
-            tx.commit().await?;
-            Ok::<_, anyhow::Error>(())
-        }
-        .await;
-        if !result.as_ref().is_err_and(|e| e.is::<SnapshotChanged>()) {
-            break;
-        }
-        tokio::task::yield_now().await;
+    // Saves and the drain respect the same durable retry window, even under reference churn.
+    let due = sqlx::query_scalar::<_,bool>("SELECT coalesce((SELECT next_attempt_at<=now() FROM group_dirty WHERE resource_id=$1),true)").bind(id).fetch_one(pool).await.unwrap_or(false);
+    if !due {
+        return false;
     }
+    let result = async {
+        let mut tx = pool.begin().await?;
+        sqlx::query("SET LOCAL statement_timeout='2s'")
+            .execute(&mut *tx)
+            .await?;
+        sync(&mut tx, id, cfg).await?;
+        tx.commit().await?;
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
     if let Err(error) = result {
         if error.is::<SnapshotChanged>() {
-            sqlx::query("INSERT INTO group_dirty(resource_id) SELECT id FROM resource WHERE id=$1 ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=now(),last_error=NULL")
+            sqlx::query("INSERT INTO group_dirty(resource_id,fence_attempts,last_error,next_attempt_at) SELECT id,1,'snapshot_changed',now()+(5+random()*5)*interval '1 second' FROM resource WHERE id=$1 ON CONFLICT(resource_id) DO UPDATE SET fence_attempts=least(group_dirty.fence_attempts+1,32),last_error='snapshot_changed',next_attempt_at=now()+least(3600,(5+random()*5)*power(2,least(group_dirty.fence_attempts,10)))*interval '1 second'")
                 .bind(id).execute(pool).await.ok();
             return false;
         }
@@ -901,6 +941,14 @@ pub async fn drain(pool: &PgPool, cfg: &GroupConfig, limit: i64) -> Result<usize
     }
     Ok(ids.len())
 }
+#[derive(Debug)]
+pub struct GroupBusy;
+impl std::fmt::Display for GroupBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("group writer busy; retry later")
+    }
+}
+impl std::error::Error for GroupBusy {}
 #[derive(Debug)]
 pub struct CurationError(pub &'static str);
 impl std::fmt::Display for CurationError {
@@ -930,7 +978,19 @@ pub async fn curate(pool: &PgPool, id: &str, body: Curation, cfg: &GroupConfig) 
     sqlx::query("SET LOCAL statement_timeout='2s'")
         .execute(&mut *tx)
         .await?;
-    group_lock(&mut tx).await?;
+    // Curation waits for the active writer within the transaction's two-second limit.
+    sqlx::query("SELECT pg_advisory_xact_lock(73491620)")
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            if e.as_database_error()
+                .is_some_and(|d| d.code().as_deref() == Some("57014"))
+            {
+                anyhow::Error::new(GroupBusy)
+            } else {
+                e.into()
+            }
+        })?;
     crate::store::lock_search_revision(&mut tx).await?;
     let mut units = vec![];
     let mut previous: Vec<String> =
@@ -976,4 +1036,28 @@ pub async fn curate(pool: &PgPool, id: &str, body: Curation, cfg: &GroupConfig) 
         .await?;
     tx.commit().await?;
     Ok(result)
+}
+
+/// Invalidate derived memberships when an operator changes grouping policy.
+pub async fn configure(pool: &PgPool, cfg: &GroupConfig) -> Result<bool> {
+    let settings = serde_json::json!({"config":cfg,"tenants":cfg.tenant_rules});
+    let mut tx = pool.begin().await?;
+    let old: Option<Value> =
+        sqlx::query_scalar("SELECT settings FROM group_runtime WHERE id FOR UPDATE")
+            .fetch_one(&mut *tx)
+            .await?;
+    if old.as_ref() == Some(&settings) {
+        return Ok(false);
+    }
+    sqlx::query("UPDATE group_runtime SET settings=$1 WHERE id")
+        .bind(settings)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM group_input")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("INSERT INTO group_dirty(resource_id) SELECT DISTINCT resource_id FROM group_unit ON CONFLICT DO NOTHING").execute(&mut *tx).await?;
+    tx.commit().await?;
+    tracing::info!("grouping policy changed; derived memberships queued for reconciliation");
+    Ok(true)
 }

@@ -92,7 +92,36 @@ async fn round2_group_fence_ignores_unrelated_saves_and_retries_changed_inputs(p
         sqlx::query("UPDATE resource SET doc=jsonb_set(doc,'{name}', '\"Concurrent save\"'),name='Concurrent save' WHERE id=$1")
             .bind(changed).execute(&mut *writer).await.unwrap();
         writer.commit().await.unwrap();
-        assert!(pending.await.unwrap());
+        assert_eq!(pending.await.unwrap(), changed == &other);
+        if changed == &b {
+            let retry:(i32,f64)=sqlx::query_as("SELECT fence_attempts,extract(epoch FROM(next_attempt_at-now()))::float8 FROM group_dirty WHERE resource_id=$1").bind(&b).fetch_one(&pool).await.unwrap();
+            assert_eq!(retry.0, 1);
+            assert!(retry.1 > 4.0 && retry.1 <= 10.0);
+            for _ in 0..3 {
+                sqlx::query("UPDATE resource SET group_revision=group_revision+1 WHERE id=$1")
+                    .bind(&b)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                assert!(!groups::reconcile(&pool, &b, &Default::default()).await);
+            }
+            assert_eq!(
+                sqlx::query_scalar::<_, i32>(
+                    "SELECT fence_attempts FROM group_dirty WHERE resource_id=$1"
+                )
+                .bind(&b)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+                1
+            );
+            sqlx::query("UPDATE group_dirty SET next_attempt_at=now() WHERE resource_id=$1")
+                .bind(&b)
+                .execute(&pool)
+                .await
+                .unwrap();
+            assert!(groups::reconcile(&pool, &b, &Default::default()).await);
+        }
         assert_eq!(gid(&pool, &a).await, gid(&pool, &b).await);
         let state: (i32, bool, i32, bool) = sqlx::query_as("SELECT r.attempts,r.dead_letter,coalesce(d.attempts,0),coalesce(d.next_attempt_at>now(),false) FROM resource r LEFT JOIN group_dirty d ON d.resource_id=r.id WHERE r.id=$1")
             .bind(&b).fetch_one(&pool).await.unwrap();
@@ -595,7 +624,7 @@ async fn round2_own_and_legacy_keys_survive_reserved_or_full_stored_evidence(poo
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn round2_pair_budget_parks_config_cap_without_losing_resource(pool: PgPool) {
+async fn round3_scaled_pair_budget_handles_config_cap_without_parking(pool: PgPool) {
     let shared = "USAAA2600003";
     sqlx::query("INSERT INTO resource(id,uri,scheme,host) SELECT md5('budget-'||i),'https://budget.example/'||i,'https','budget.example' FROM generate_series(1,999) i").execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO group_unit(unit_id,resource_id) SELECT id,id FROM resource")
@@ -619,14 +648,10 @@ async fn round2_pair_budget_parks_config_cap_without_losing_resource(pool: PgPoo
     pinakes_core::changes::save(&pool, &id, 0, &d, &cfg)
         .await
         .unwrap();
-    let state:(String,i32,bool,i32)=sqlx::query_as("SELECT r.name,r.attempts,r.dead_letter,g.attempts FROM resource r JOIN group_dirty g ON g.resource_id=r.id WHERE r.id=$1").bind(&id).fetch_one(&pool).await.unwrap();
-    assert_eq!(state, ("Saved despite pair budget".into(), 0, false, 1));
+    let state:(String,i32,bool,bool)=sqlx::query_as("SELECT r.name,r.attempts,r.dead_letter,EXISTS(SELECT 1 FROM group_dirty WHERE resource_id=r.id) FROM resource r WHERE r.id=$1").bind(&id).fetch_one(&pool).await.unwrap();
+    assert_eq!(state, ("Saved despite pair budget".into(), 0, false, false));
     let mut tx = pool.begin().await.unwrap();
-    let error = groups::sync(&mut tx, &id, &cfg.groups).await.unwrap_err();
-    assert!(
-        error.to_string().contains("pair evaluation budget"),
-        "{error}"
-    );
+    groups::sync(&mut tx, &id, &cfg.groups).await.unwrap();
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -1079,4 +1104,117 @@ async fn round3_aliases_do_not_group_and_shared_canonicals_demote_every_claimant
         .encode()
         .unwrap()
         .contains("pinakes_group_url_demotions_total 1"));
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round3_exhausted_pair_budget_commits_partial_plan_and_preserves_established_groups(
+    pool: PgPool,
+) {
+    sqlx::query("INSERT INTO resource(id,uri,scheme,host,point) SELECT md5('partial-'||i),'https://partial.example/'||i,'https','partial.example',ST_SetSRID(ST_MakePoint(8,40+i/100.0),4326) FROM generate_series(1,399) i").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO group_unit(unit_id,resource_id) SELECT id,id FROM resource")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO resource_group(unit_id,resource_id,key,basis,confidence,origin) SELECT id,id,'isrc:USTST260000'||i,'isrc',1,'partial.example' FROM resource CROSS JOIN generate_series(1,4) i").execute(&pool).await.unwrap();
+    let old = "f".repeat(32);
+    sqlx::query("INSERT INTO \"group\"(id) VALUES($1)")
+        .bind(&old)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE group_unit SET group_id=$1 WHERE resource_id IN(SELECT id FROM resource ORDER BY id LIMIT 2)").bind(&old).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE resource_group k SET group_id=u.group_id FROM group_unit u WHERE u.unit_id=k.unit_id").execute(&pool).await.unwrap();
+    let uri = "https://partial.example/new";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut d = ResourceMeta::new(uri, "web", 3600);
+    d.name = Some("Saved on partial plan".into());
+    d.location = Some(Point {
+        lat: 45.0,
+        lon: 8.0,
+    });
+    for i in 1..=4 {
+        group_keys::add(&mut d, "isrc", &format!("USTST260000{i}"));
+    }
+    let cfg = pinakes_core::config::QueueConfig {
+        groups: groups::GroupConfig {
+            max_members: 400,
+            max_members_per_origin: 400,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    pinakes_core::changes::save(&pool, &id, 0, &d, &cfg)
+        .await
+        .unwrap();
+    let marker: Option<String> =
+        sqlx::query_scalar("SELECT last_error FROM group_input WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(marker.as_deref(), Some("pair_budget"));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM group_unit WHERE group_id=$1")
+            .bind(old)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM group_dirty WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    let metrics = pinakes_core::telemetry::Metrics::new().unwrap();
+    metrics.refresh(&pool).await.unwrap();
+    assert!(metrics
+        .encode()
+        .unwrap()
+        .contains("pinakes_group_pair_budget_total 1"));
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round3_curation_waits_for_writer_and_policy_changes_redirty(pool: PgPool) {
+    let (a, _) = save(&pool, "operator", &[], None).await;
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(73491620)")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let app = api::admin_router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let body = json!({"members":[{"resource_id":a}],"name":"Curated"});
+    let put = move || {
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/v1/groups/{}", "a".repeat(32)))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let response = app.oneshot(put()).await.unwrap();
+    assert_eq!(response.status(), 503);
+    assert!(response.headers().contains_key("retry-after"));
+    lock.rollback().await.unwrap();
+    assert!(groups::configure(&pool, &Default::default()).await.unwrap());
+    sqlx::query("DELETE FROM group_dirty")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(!groups::configure(&pool, &Default::default()).await.unwrap());
+    let cfg = groups::GroupConfig {
+        cross_container_occurrences: groups::CrossContainerOccurrences::Corroborated,
+        ..Default::default()
+    };
+    assert!(groups::configure(&pool, &cfg).await.unwrap());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM group_dirty")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
 }
