@@ -253,7 +253,9 @@ pages), charged before any Nexus call even when the reach cache hits. Other rout
 one unit. Exceeding the budget returns 429 with `Retry-After: 60`.
 Oldest keys are evicted when the bounded budget cache fills. Existing preview/dump limits
 still apply. Dumps have per-chunk read/send deadlines (10 seconds) and a total deadline
-(120 seconds), even when a reader stops polling; partial streams end in an error.
+(120 seconds), even when a reader stops polling; partial streams end in an error. The
+dump's read-only transaction disables the SQL statement timeout locally, so an active
+reader can drain a large snapshot beyond five seconds. Other API queries retain the limit.
 
 `cluster` accepts finite fractional zooms, floors and clamps them to the configured table.
 Large viewports coarsen to the `search.max_cluster_cells` budget (default 10000); responses

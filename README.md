@@ -258,6 +258,8 @@ limits, and all `/v1` routes have a configurable direct-peer IP budget. Search r
 are maintained on writes; ETags include the current cached reach set. Large cluster
 views coarsen to `search.max_cluster_cells`, while fractional zooms are accepted. OSM
 dumps release database connections and permits on per-chunk or total deadline expiry.
+Their read-only transactions locally disable the five-second SQL statement timeout;
+the streaming deadlines still bound slow readers, without changing other API queries.
 Reach pagination has one `search.reach_timeout_secs` deadline (default five seconds),
 with no network I/O under the shared cache lock. Reach-enabled searches cost
 `api.reach_cost` budget units (default six), including cache hits. Search cursors use

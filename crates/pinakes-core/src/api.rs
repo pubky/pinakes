@@ -990,6 +990,14 @@ async fn osm_dump(
                 .execute(&mut *tx)
                 .await
                 .map_err(std::io::Error::other)?;
+            // Streaming SELECT stays open while the client drains the rows. Its
+            // lifetime is bounded by the producer's chunk/total deadlines, not
+            // the API pool's short statement timeout. LOCAL restores the limit
+            // when this read-only transaction is dropped.
+            sqlx::query("SET LOCAL statement_timeout = 0")
+                .execute(&mut *tx)
+                .await
+                .map_err(std::io::Error::other)?;
             send_dump(&sender,format!("{}\n",json!({"notice":crate::resolver::osm::ATTRIBUTION,"licence":"ODbL-1.0","licence_url":"https://opendatacommons.org/licenses/odbl/1-0/","attribution_url":"https://www.openstreetmap.org/copyright","table":"osm_place"})),chunk).await?;
             let mut rows=sqlx::query_scalar::<_,Value>("SELECT to_jsonb(o)-'point' || jsonb_build_object('point',CASE WHEN point IS NULL THEN NULL ELSE jsonb_build_object('lat',ST_Y(point),'lon',ST_X(point)) END) FROM osm_place o ORDER BY osm_type,osm_id").fetch(&mut *tx);
             while let Some(row) = tokio::time::timeout(chunk, rows.try_next())

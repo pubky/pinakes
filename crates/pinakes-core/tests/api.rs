@@ -643,6 +643,53 @@ async fn api_pool_enforces_query_timeout(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
+async fn slowly_consumed_dump_outlives_api_sql_timeout(pool: PgPool) {
+    // Enough data to fill Postgres/the driver's buffers so SELECT remains open
+    // as the consumer reads: Talos's 4,000 rows of roughly 6 KB at 2 ms/frame.
+    sqlx::query("INSERT INTO osm_place(osm_type,osm_id,type,type_path,doc,fetched_at,refresh_at,status) SELECT 'node',n,'Place',ARRAY['Thing','Place'],jsonb_build_object('type','Place','name',repeat('x',6000)),now(),now(),'ok' FROM generate_series(1,4000) n")
+        .execute(&pool).await.unwrap();
+    let api_pool = api::pool_options()
+        .max_connections(1)
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(api_pool.clone(), Config::default()).unwrap());
+    let mut request = Request::builder()
+        .uri("/v1/dumps/osm_place.ndjson")
+        .body(Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
+    ));
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let start = std::time::Instant::now();
+    let mut body = response.into_body();
+    let mut lines = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let bytes = frame
+            .expect("slow but active dump must complete")
+            .into_data()
+            .unwrap();
+        let row: Value = serde_json::from_slice(&bytes).unwrap();
+        lines.push(row["osm_id"].as_i64());
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+    assert!(start.elapsed() > std::time::Duration::from_secs(5));
+    assert_eq!(lines[0], None, "first line is the licence notice");
+    assert_eq!(lines[1..], (1..=4000).map(Some).collect::<Vec<_>>());
+    // The transaction-local override must not relax subsequent API queries.
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SHOW statement_timeout")
+            .fetch_one(&api_pool)
+            .await
+            .unwrap(),
+        "5s"
+    );
+    api_pool.close().await;
+}
+
+#[sqlx::test(migrations = "../../migrations")]
 async fn reach_searches_pay_for_upstream_pages_before_fetching(pool: PgPool) {
     let (nexus_url, calls, task) = mock_nexus(vec![]).await;
     let mut config = Config {
