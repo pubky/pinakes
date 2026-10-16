@@ -57,6 +57,7 @@ impl Transport for TransportMock {
             _=>bail!("unexpected request"),
         };
         Ok(Fetched {
+            permanent_redirect: false,
             truncated: false,
             url: u.clone(),
             status: 200,
@@ -73,7 +74,7 @@ const RSS: &str = r#"<rss xmlns:podcast="https://podcastindex.org/namespace/1.0"
 #[test]
 fn round2_namespace_alone_does_not_make_a_podcast_series() {
     for items in ["", "<item><guid>news</guid><title>News</title></item>"] {
-        let f=Fetched { truncated:false,url:"https://feed.example/rss".parse().unwrap(),status:200,
+        let f=Fetched { permanent_redirect: false, truncated:false,url:"https://feed.example/rss".parse().unwrap(),status:200,
             body:format!(r#"<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>News feed</title>{items}</channel></rss>"#).into_bytes(),
             content_type:"application/rss+xml".into(),retry_after_secs:60,location:None,validators:Default::default() };
         assert_eq!(
@@ -107,6 +108,7 @@ async fn round2_optional_fetch_policy_and_metrics() {
                 r#"<script type="application/ld+json">{"@type":"Article","name":"Complete","image":"https://images.example/page.jpg"}</script>"#.into()
             };
             Ok(Fetched {
+                permanent_redirect: false,
                 truncated: u.path() == "/truncated",
                 url: u.clone(),
                 status: 200,
@@ -322,6 +324,7 @@ async fn registry_identifiers_negotiation_discovery_and_switches() {
 #[test]
 fn podcast_selection_and_schema_media_keys() {
     let f = Fetched {
+        permanent_redirect: false,
         truncated: false,
         url: "https://podcast.example/feed".parse().unwrap(),
         body: RSS.as_bytes().to_vec(),
@@ -436,7 +439,7 @@ async fn review_blog_rss_preserves_jsonld_and_single_episode_feed_is_series() {
         "DataFeed"
     );
     for enclosure in ["audio/mpeg", "video/mp4"] {
-        let f = Fetched {truncated: false,url:"https://podcast.example/feed".parse().unwrap(),status:200,body:format!("<rss><channel><title>Podcast</title><item><guid>one</guid><title>Episode</title><link>https://podcast.example/one</link><enclosure type='{enclosure}'/></item></channel></rss>").into_bytes(),content_type:"application/rss+xml".into(),location:None,retry_after_secs:60,validators:Default::default()};
+        let f = Fetched {permanent_redirect: false,truncated: false,url:"https://podcast.example/feed".parse().unwrap(),status:200,body:format!("<rss><channel><title>Podcast</title><item><guid>one</guid><title>Episode</title><link>https://podcast.example/one</link><enclosure type='{enclosure}'/></item></channel></rss>").into_bytes(),content_type:"application/rss+xml".into(),location:None,retry_after_secs:60,validators:Default::default()};
         assert_eq!(
             cards::podcast(f.url.as_str(), &f, 3600, 10)
                 .unwrap()
@@ -583,7 +586,7 @@ fn review_identifier_dates_domains_media_attributes_and_social_excerpt() {
             .scheme()
             == "https"
     );
-    let f=Fetched{truncated:false,url:"https://doi.org/10.1234/work".parse().unwrap(),body:serde_json::to_vec(&json!({"type":"article-journal","title":"Dated","issued":{"date-parts":[[2024,5,12]]},"container-title":"Journal"})).unwrap(),content_type:"application/json".into(),status:200,location:None,retry_after_secs:60,validators:Default::default()};
+    let f=Fetched{permanent_redirect: false,truncated:false,url:"https://doi.org/10.1234/work".parse().unwrap(),body:serde_json::to_vec(&json!({"type":"article-journal","title":"Dated","issued":{"date-parts":[[2024,5,12]]},"container-title":"Journal"})).unwrap(),content_type:"application/json".into(),status:200,location:None,retry_after_secs:60,validators:Default::default()};
     let d = cards::parse_doi("doi:10.1234/work", &f, 3600).unwrap();
     assert_eq!(d.attributes["published"], "2024-05-12");
     assert_eq!(d.attributes["container"], "Journal");
@@ -682,6 +685,7 @@ async fn review_oembed_first_keeps_rich_page_types_and_ap_denial_falls_back() {
                 ("text/html",r#"<script type="application/ld+json">{"@type":"Article","name":"JSON first","author":"page author","duration":"PT3M","isrcCode":"USABC2600001"}</script>"#.into())
             };
             Ok(Fetched {
+                permanent_redirect: false,
                 truncated: false,
                 url: u.clone(),
                 status,

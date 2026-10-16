@@ -185,6 +185,7 @@ pub struct QueueConfig {
     pub max_backoff_secs: u64,
     pub lease_secs: u64,
     pub missing_ttl_secs: u64,
+    pub blocked_ttl_secs: u64,
     pub author_requests_per_second: f64,
 }
 impl Default for QueueConfig {
@@ -197,6 +198,7 @@ impl Default for QueueConfig {
             max_backoff_secs: 3600,
             lease_secs: 60,
             missing_ttl_secs: 3600,
+            blocked_ttl_secs: 86400,
             author_requests_per_second: 1.0,
         }
     }
@@ -495,6 +497,7 @@ impl Config {
             || self.queue.max_backoff_secs > 86400
             || self.queue.max_backoff_secs < self.queue.backoff_secs
             || !(1..=86400).contains(&self.queue.missing_ttl_secs)
+            || !(3600..=2592000).contains(&self.queue.blocked_ttl_secs)
             || self.preview.requests_per_minute == 0
             || self.preview.uri_requests_per_minute == 0
             || !(1..=100000).contains(&self.preview.cache_capacity)

@@ -131,6 +131,7 @@ impl Transport for Fixture {
             _=>bail!("no fixture for upstream host {}",u.host_str().unwrap_or("")),
         };
         Ok(Fetched {
+            permanent_redirect: false,
             truncated: false,
             url: u.clone(),
             status: 200,

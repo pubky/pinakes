@@ -90,6 +90,8 @@ pub fn public_ip(ip: IpAddr) -> bool {
 }
 #[derive(Clone, Debug)]
 pub struct Fetched {
+    /// True only when every redirect from the requested URI was HTTP 301/308.
+    pub permanent_redirect: bool,
     pub truncated: bool,
     pub validators: Validators,
     pub url: Url,
@@ -280,6 +282,7 @@ pub async fn read_response_with(
         }
     }
     Ok(Fetched {
+        permanent_redirect: false,
         truncated,
         validators,
         url,
@@ -323,6 +326,7 @@ impl Egress {
             .cached(key, 3600, async {
                 let values = self.nostr_request_inner(uri, filter, deadline_ms).await?;
                 Ok(Fetched {
+                    permanent_redirect: false,
                     truncated: false,
                     url: Url::parse(uri)?,
                     validators: Default::default(),
@@ -436,7 +440,9 @@ impl Egress {
                 })
                 .map_err(|error| {
                     // A reqwest cause can embed the complete URL, including API credentials.
-                    if error.is::<BodyTooLarge>() {
+                    if error.is::<super::interstitial::Blocked>() {
+                        anyhow::Error::new(super::interstitial::Blocked)
+                    } else if error.is::<BodyTooLarge>() {
                         anyhow::Error::new(BodyTooLarge)
                     } else if let Some(retry) = error.downcast_ref::<super::RetryLater>() {
                         anyhow::Error::new(super::RetryLater {
@@ -569,7 +575,9 @@ impl Egress {
             .await
     }
     async fn fetch_options_inner(&self, uri: &str, options: &FetchOptions) -> Result<Fetched> {
-        let mut url = Url::parse(uri)?;
+        let requested = Url::parse(uri)?;
+        let mut url = requested.clone();
+        let mut permanent = true;
         for redirects in 0..=3 {
             if !matches!(url.scheme(), "http" | "https")
                 || !url.username().is_empty()
@@ -603,9 +611,30 @@ impl Egress {
             // Pin checked addresses to the connection; a second DNS lookup could rebind to a private IP.
             let _permit = self.host_permit(&host).await;
             let mut observation = crate::telemetry::FetchGuard::start();
-            let response = self.transport.get_with(&url, &addresses, options).await?;
+            let mut response = self.transport.get_with(&url, &addresses, options).await?;
             observation.status(response.status);
             drop(observation);
+            let input = response.clone();
+            let original = requested.clone();
+            let page = tokio::task::spawn_blocking(move || {
+                super::interstitial::inspect(&original, &input)
+            })
+            .await?;
+            if page == super::interstitial::Page::Blocked {
+                crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "blocked");
+                return Err(super::interstitial::Blocked.into());
+            }
+            if let super::interstitial::Page::Redirect(target) = page {
+                if options.sensitive || options.json_body.is_some() || !options.headers.is_empty() {
+                    bail!("redirect of authenticated/API request refused");
+                }
+                if redirects == 3 {
+                    bail!("more than 3 redirects");
+                }
+                permanent = false;
+                url = url.join(&target)?;
+                continue;
+            }
             if response.status == 429 {
                 return Err(super::RetryLater {
                     class: "http_4xx",
@@ -620,6 +649,7 @@ impl Egress {
                 if redirects == 3 {
                     bail!("more than 3 redirects");
                 }
+                permanent &= matches!(response.status, 301 | 308);
                 url = url.join(
                     response
                         .location
@@ -628,6 +658,7 @@ impl Egress {
                 )?;
                 continue;
             }
+            response.permanent_redirect = redirects > 0 && permanent;
             return Ok(response);
         }
         unreachable!()
@@ -741,6 +772,7 @@ mod tests {
         impl Transport for Graphql {
             async fn get(&self, url: &Url, _: &[SocketAddr]) -> Result<Fetched> {
                 Ok(Fetched {
+                    permanent_redirect: false,
                     truncated: false,
                     url: url.clone(),
                     status: 200,
@@ -811,6 +843,7 @@ mod tests {
             .await
             .is_err());
         let response = Fetched {
+            permanent_redirect: false,
             truncated: false,
             validators: Default::default(),
             url: Url::parse("https://example.org/").unwrap(),
@@ -873,6 +906,7 @@ mod tests {
             egress
                 .cached(key.into(), 3600, async {
                     Ok(Fetched {
+                        permanent_redirect: false,
                         truncated: false,
                         validators: Default::default(),
                         url: Url::parse("https://example.org/").unwrap(),
@@ -978,6 +1012,7 @@ mod tests {
             assert!(addresses.iter().all(|s| public_ip(s.ip())));
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(Fetched {
+                permanent_redirect: false,
                 truncated: false,
                 validators: Validators::default(),
                 url: url.clone(),

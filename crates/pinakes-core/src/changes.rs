@@ -199,6 +199,24 @@ pub async fn save(
     // The transient container is serde-skipped: copy only the small parent document,
     // without cloning thousands of already-prepared occurrence documents.
     let mut doc: ResourceMeta = serde_json::from_value(serde_json::to_value(doc)?)?;
+    if doc.status == Status::Blocked {
+        // Access walls cannot prove absence. Keep accepted event/feed facts and never
+        // fabricate an empty container observation or advance missing confirmation.
+        if let Some(old) = before.as_ref() {
+            let mut retained: ResourceMeta = serde_json::from_value(old.clone())?;
+            retained.status = Status::Blocked;
+            retained.fetched_at = doc.fetched_at;
+            retained.ttl_secs = cfg.blocked_ttl_secs;
+            doc = retained;
+        }
+        doc.name = None;
+        doc.description = None;
+        doc.image = None;
+        doc.group_keys.clear();
+        doc.aliases.clear();
+        doc.ttl_secs = cfg.blocked_ttl_secs;
+        prepared = None;
+    }
     let social_missing = doc.status == Status::Missing
         && before.as_ref().is_some_and(|v| {
             serde_json::from_value::<ResourceMeta>(v.clone())

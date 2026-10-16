@@ -6,6 +6,7 @@ use std::time::Duration;
 pub mod cards;
 pub mod egress;
 pub mod geo;
+pub mod interstitial;
 pub mod osm;
 pub mod pubky;
 mod pubky_policy;

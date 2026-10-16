@@ -649,6 +649,7 @@ mod deadline_tests {
             async fn get(&self, url: &Url, _: &[SocketAddr]) -> Result<Fetched> {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 Ok(Fetched {
+                    permanent_redirect: false,
                     truncated: false,
                     url: url.clone(),
                     status: 200,

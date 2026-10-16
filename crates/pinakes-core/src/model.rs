@@ -18,6 +18,7 @@ pub enum Status {
     Pending,
     Missing,
     Unreachable,
+    Blocked,
     Error,
 }
 impl Status {
@@ -27,6 +28,7 @@ impl Status {
             Self::Pending => "pending",
             Self::Missing => "missing",
             Self::Unreachable => "unreachable",
+            Self::Blocked => "blocked",
             Self::Error => "error",
         }
     }

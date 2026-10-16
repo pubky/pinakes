@@ -1,0 +1,18 @@
+{
+  "federal-register-wall": {
+    "url": "https://unblock.federalregister.gov/",
+    "final_url": "https://unblock.federalregister.gov/",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "recorded_at": "2026-10-16T10:47:24.559245+00:00",
+    "bytes": 10596
+  },
+  "pubky-redirect": {
+    "url": "https://pubky.org/explore/pubky-protocol/pkarr/architecture/",
+    "final_url": "https://pubky.org/explore/pubky-protocol/pkarr/architecture/",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "recorded_at": "2026-10-16T10:47:24.762391+00:00",
+    "bytes": 329
+  }
+}

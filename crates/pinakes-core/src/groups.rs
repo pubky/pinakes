@@ -205,7 +205,7 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
     .bind(id)
     .fetch_all(&mut **tx)
     .await?;
-    let mut stream=sqlx::query_scalar::<_,Value>("SELECT jsonb_build_object('unit_id',unit_id,'uri',uri,'keys',coalesce(doc->'group_keys','[]'),'aliases',coalesce(doc->'aliases','[]'),'occurrence',occurrence,'event',event,'source',doc->>'source','lat',ST_Y(point),'lon',ST_X(point),'event_uri',(SELECT uri FROM resource WHERE id=occurrence->>'event_resource_id'),'trigrams',show_trgm(array_to_string(tsvector_to_array(to_tsvector('simple',coalesce(name,''))),' ')),'feed',doc#>>'{attributes,podcast_feed}','start',to_char(start_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')) FROM search_unit WHERE id=$1 LIMIT $2").bind(id).bind((cfg.max_graph_units+1) as i64).fetch(&mut **tx);
+    let mut stream=sqlx::query_scalar::<_,Value>("SELECT jsonb_build_object('unit_id',unit_id,'uri',uri,'keys',coalesce(doc->'group_keys','[]'),'aliases',coalesce(doc->'aliases','[]'),'occurrence',occurrence,'event',event,'source',doc->>'source','lat',ST_Y(point),'lon',ST_X(point),'event_uri',(SELECT uri FROM resource WHERE id=occurrence->>'event_resource_id'),'trigrams',show_trgm(array_to_string(tsvector_to_array(to_tsvector('simple',coalesce(name,''))),' ')),'feed',doc#>>'{attributes,podcast_feed}','start',to_char(start_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')) FROM search_unit WHERE id=$1 AND status<>'blocked' LIMIT $2").bind(id).bind((cfg.max_graph_units+1) as i64).fetch(&mut **tx);
     use futures_util::TryStreamExt;
     let mut rows = Vec::new();
     let mut bytes = 0usize;

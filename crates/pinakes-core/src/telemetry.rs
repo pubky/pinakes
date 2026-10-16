@@ -19,6 +19,7 @@ pub const OUTCOMES: &[&str] = &[
     "not_modified",
     "missing",
     "unreachable",
+    "blocked",
     "rate_limited",
     "error",
     "drift",
@@ -40,6 +41,7 @@ pub struct Metrics {
     pub queue: IntGaugeVec,
     pub overdue: IntGaugeVec,
     pub resources: IntGaugeVec,
+    pub blocked: IntGaugeVec,
     pub ingest_lag: IntGauge,
     pub ingest_success: IntGauge,
     pub ingest_resets: IntCounter,
@@ -149,6 +151,12 @@ impl Metrics {
                 "Resources past refresh time",
                 &["resolver"]
             ),
+            blocked: metric!(
+                IntGaugeVec,
+                "pinakes_blocked_resources",
+                "Resources blocked by upstream access walls, by requested host",
+                &["host"]
+            ),
             resources: metric!(
                 IntGaugeVec,
                 "pinakes_resources",
@@ -201,6 +209,10 @@ impl Metrics {
         self.queue.reset();
         self.overdue.reset();
         self.resources.reset();
+        self.blocked.reset();
+        for (host, count) in sqlx::query_as::<_, (String, i64)>("SELECT coalesce(host,scheme),count(*) FROM resource WHERE status='blocked' GROUP BY coalesce(host,scheme)").fetch_all(pool).await? {
+            self.blocked.with_label_values(&[&host]).set(count);
+        }
         for manifest in crate::adapter::manifests() {
             for state in ["pending", "leased", "dead"] {
                 self.queue
@@ -208,7 +220,14 @@ impl Metrics {
                     .set(0);
             }
             self.overdue.with_label_values(&[&manifest.source]).set(0);
-            for status in ["ok", "pending", "missing", "unreachable", "error"] {
+            for status in [
+                "ok",
+                "pending",
+                "missing",
+                "unreachable",
+                "blocked",
+                "error",
+            ] {
                 self.resources
                     .with_label_values(&[&manifest.source, status])
                     .set(0);

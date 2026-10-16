@@ -226,6 +226,16 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
         title: None,
         description: None,
     };
+    if Url::parse(uri).is_ok_and(|url| {
+        super::interstitial::inspect(&url, fetched) != super::interstitial::Page::Content
+    }) {
+        out.doc.status = Status::Blocked;
+        out.doc.aliases.clear();
+        return out;
+    }
+    if fetched.permanent_redirect {
+        add_alias(&mut out.doc, fetched.url.to_string());
+    }
     match fetched.status {
         404 | 410 | 451 => {
             out.doc.status = Status::Missing;
@@ -616,6 +626,7 @@ mod tests {
     fn extraction_precedence_and_promoted_facets() {
         let body = r#"<title>Title fallback</title><meta property="og:title" content="OG"><meta property="og:image" content="/pic.png"><link rel="alternate" type="application/json+oembed" href="/embed"><link rel="canonical" href="/canonical"><div class="h-event"><span class="p-name">MF</span><span class="p-summary">MF summary</span></div><script type="application/ld+json">{"@type":"MusicEvent","name":"JSON first","startDate":"2026-10-01T12:00:00Z","location":{"geo":{"latitude":46.0,"longitude":8.0}}}</script>"#;
         let fetched = Fetched {
+            permanent_redirect: false,
             truncated: false,
             validators: Default::default(),
             url: Url::parse("https://example.org/").unwrap(),
@@ -688,7 +699,7 @@ mod tests {
                 if url.path() != "/page" {
                     std::future::pending::<()>().await;
                 }
-                Ok(Fetched {truncated: false, validators:Default::default(),url:url.clone(),status:200,retry_after_secs:60,location:None,content_type:"text/html".into(),body:br#"<title>Page survives</title><link rel="alternate" type="application/json+oembed" href="/embed">"#.to_vec() })
+                Ok(Fetched {permanent_redirect: false,truncated: false, validators:Default::default(),url:url.clone(),status:200,retry_after_secs:60,location:None,content_type:"text/html".into(),body:br#"<title>Page survives</title><link rel="alternate" type="application/json+oembed" href="/embed">"#.to_vec() })
             }
         }
         let resolver = WebResolver {

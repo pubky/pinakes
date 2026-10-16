@@ -780,6 +780,7 @@ impl Transport for ProtocolTransport {
             o.validators.etag.is_some(),
         ));
         let mut f = Fetched {
+            permanent_redirect: false,
             truncated: false,
             validators: Default::default(),
             url: url.clone(),
@@ -1941,6 +1942,7 @@ impl Transport for ConditionalSnapshots {
         };
         calls.push((conditional, status));
         Ok(Fetched {
+            permanent_redirect: false,
             truncated: false,
             validators: pinakes_core::resolver::egress::Validators {
                 etag: Some(etag.into()),
@@ -2221,6 +2223,7 @@ impl Transport for ReviewSnapshots {
         };
         calls.push((conditional, status));
         Ok(Fetched {
+            permanent_redirect: false,
             truncated: false,
             url: url.clone(),
             status,

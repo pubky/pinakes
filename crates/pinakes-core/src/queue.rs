@@ -201,6 +201,12 @@ async fn finish_job(
         cfg
     };
     let result = match result {
+        Err(error) if error.is::<crate::resolver::interstitial::Blocked>() => {
+            let mut doc =
+                crate::model::ResourceMeta::new(&job.uri, resolver.name(), cfg.blocked_ttl_secs);
+            doc.status = Status::Blocked;
+            Ok(doc)
+        }
         Err(error) if error.is::<crate::resolver::NotModified>() => {
             let value: Option<serde_json::Value> =
                 sqlx::query_scalar("SELECT doc FROM resource_document WHERE id=$1")
@@ -318,6 +324,9 @@ async fn finish_job(
             "osm" => crate::resolver::osm::ATTRIBUTES,
             _ => &[],
         };
+        if doc.status == Status::Blocked {
+            doc.ttl_secs = cfg.blocked_ttl_secs;
+        }
         doc.validate(attrs)?;
         crate::changes::save(pool, &job.id, job.generation, &doc, cfg).await
     }

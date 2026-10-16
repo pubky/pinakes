@@ -295,6 +295,7 @@ impl Transport for SecondaryFailure {
     async fn get(&self, u: &url::Url, _: &[SocketAddr]) -> anyhow::Result<Fetched> {
         let secondary = u.path().starts_with("/api/") || u.host_str() == Some("api.lu.ma");
         Ok(Fetched {
+            permanent_redirect: false,
             truncated: false,
             url: u.clone(),
             status: if secondary { self.0 } else { 200 },
@@ -402,6 +403,7 @@ impl Transport for WikiFailure {
             anyhow::bail!("fixture transport failure");
         }
         Ok(Fetched {
+            permanent_redirect: false,
             truncated: false,
             url: u.clone(),
             status: if entity { self.failure } else { 200 },
@@ -1499,6 +1501,7 @@ impl Transport for Replies {
             .pop_front()
             .expect("unexpected HTTP request");
         Ok(Fetched {
+            permanent_redirect: false,
             truncated: false,
             url: url.clone(),
             validators: Default::default(),
@@ -1909,6 +1912,7 @@ fn own_calendar_links_and_deterministic_platform_endpoints() {
         );
     }
     let f = Fetched {
+        permanent_redirect: false,
         truncated: false,
         url: base,
         validators: Default::default(),
@@ -2103,6 +2107,7 @@ fn all_page_and_calendar_adapters_parse_their_public_contracts() {
     {
         let bytes=b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:contract\r\nDTSTART;TZID=Europe/Zurich:20261020T190000\r\nDTEND;TZID=Europe/Zurich:20261020T210000\r\nSUMMARY:Contract fixture\r\nSTATUS:CANCELLED\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
         let f = Fetched {
+            permanent_redirect: false,
             truncated: false,
             url: uri.parse().unwrap(),
             validators: Default::default(),
@@ -2303,6 +2308,7 @@ async fn recorded_public_adapter_responses_replay_without_network(pool: PgPool) 
                 r["sha256"].as_str().unwrap()
             );
             Ok(Fetched {
+                permanent_redirect: false,
                 truncated: false,
                 url: uri.parse().unwrap(),
                 status: r["status"].as_u64().unwrap_or(200) as u16,
@@ -2882,6 +2888,7 @@ fn recorded_egress(rows: Vec<(&str, &str, Value)>) -> Egress {
                     }
                 ),
                 Ok(Fetched {
+                    permanent_redirect: false,
                     truncated: false,
                     url: uri.parse().unwrap(),
                     body: body.as_bytes().to_vec(),
@@ -3280,6 +3287,7 @@ impl Transport for HintedGraphql {
     async fn get(&self, u: &url::Url, _: &[SocketAddr]) -> anyhow::Result<Fetched> {
         let api = u.path() == "/api";
         Ok(Fetched {
+            permanent_redirect: false,
             truncated: false,
             url: u.clone(),
             status: 200,

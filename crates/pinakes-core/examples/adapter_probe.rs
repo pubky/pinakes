@@ -124,6 +124,7 @@ async fn main() -> Result<()> {
             Err(e.to_owned())
         } else {
             Ok(Fetched {
+                permanent_redirect: false,
                 truncated: false,
                 url: uri.parse()?,
                 status: v["status"].as_u64().unwrap_or(200) as u16,
