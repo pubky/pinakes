@@ -909,6 +909,7 @@ pub fn parse(
         Option<DateTime<Utc>>,
         bool,
     );
+    let mut retained_bytes = 0usize;
     let mut events: BTreeMap<(String, String), EventRevision<'_>> = BTreeMap::new();
     for c in cal.children.iter().filter(|c| c.name == "VEVENT") {
         ensure!(
@@ -1007,6 +1008,23 @@ pub fn parse(
                 continue;
             }
         }
+        let prior_bytes = events
+            .get(&key)
+            .map(|old| serde_json::to_vec(&old.1).map(|v| v.len()))
+            .transpose()?
+            .unwrap_or(0);
+        let new_bytes = serde_json::to_vec(&doc)?.len();
+        retained_bytes = retained_bytes
+            .saturating_sub(prior_bytes)
+            .saturating_add(new_bytes);
+        ensure!(
+            events.len() < cfg.max_event_revisions || events.contains_key(&key),
+            "event revision cap"
+        );
+        ensure!(
+            retained_bytes <= cfg.max_event_document_bytes,
+            "event document memory cap"
+        );
         events.insert(key, (c, doc, start, sequence, modified, volatile));
     }
     let mut hashes: BTreeMap<usize, String> = BTreeMap::new();
@@ -1041,82 +1059,81 @@ pub fn parse(
                 result.len() < cfg.max_occurrences_per_feed,
                 "calendar occurrence cap"
             );
-            let key = if recurring {
-                if start.date {
-                    zones.wall_at(start, at)?.date().to_string()
+            let occurrence = (|| -> Result<Option<Occurrence>> {
+                let key = if recurring {
+                    if start.date {
+                        zones.wall_at(start, at)?.date().to_string()
+                    } else {
+                        at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                    }
                 } else {
-                    at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-                }
-            } else {
-                String::new()
-            };
-            let mut d = doc.clone();
-            d.container = None;
-            d.start = Some(at);
-            d.end = at.checked_add_signed(
-                duration.unwrap_or_else(|| doc.end.unwrap_or(start.at) - start.at),
-            );
-            if d.end.is_none() {
-                container.warnings.push("occurrence_end_overflow".into());
-                continue;
-            }
-            if start.date && duration.is_none() {
-                let days = if let Some(end) = c.get("DTEND") {
-                    zones.stamp(end, &end.value)?.wall - start.wall
-                } else {
-                    c.value("DURATION")
-                        .and_then(time::duration)
-                        .unwrap_or(Duration::days(1))
+                    String::new()
                 };
-                let wall = zones.wall_at(start, at)?;
-                d.end = Some(
-                    zones.at_wall(
-                        start,
-                        wall.checked_add_signed(days)
-                            .context("all-day occurrence overflow")?,
-                    )?,
-                );
-            }
-            let mut source = *c;
-            let mut sequence = *seq;
-            let mut changed = *modified;
-            // RANGE applies the shift and new fields to subsequent original instance keys.
-            let override_ = events.iter().rfind(|((u, r), (c, _, _, _, _, _))| {
-                u == uid
-                    && !r.is_empty()
-                    && (r == &key
-                        || (r <= &key
-                            && c.get("RECURRENCE-ID")
-                                .and_then(|p| p.params.get("RANGE"))
-                                .is_some_and(|s| s == "THISANDFUTURE")))
-            });
-            if let Some(((_, r), (c, override_doc, override_start, s, m, _))) = override_ {
-                let original = c.get("RECURRENCE-ID").context("override key")?;
-                let original = zones.stamp(original, &original.value)?;
-                d = override_doc.clone();
-                d.start = at.checked_add_signed(override_start.at - original.at);
-                if d.start.is_none() {
-                    container.warnings.push("override_start_overflow".into());
-                    continue;
-                }
-                d.end = d.start.unwrap().checked_add_signed(
-                    override_doc.end.unwrap_or(override_start.at) - override_start.at,
+                let mut d = doc.clone();
+                d.container = None;
+                d.start = Some(at);
+                d.end = at.checked_add_signed(
+                    duration.unwrap_or_else(|| doc.end.unwrap_or(start.at) - start.at),
                 );
                 if d.end.is_none() {
-                    container.warnings.push("override_end_overflow".into());
-                    continue;
+                    container.warnings.push("occurrence_end_overflow".into());
+                    return Ok(None);
                 }
-                source = c;
-                sequence = *s;
-                changed = *m;
-                if r == &key {
-                    d.start = override_doc.start;
-                    d.end = override_doc.end;
+                if start.date && duration.is_none() {
+                    let days = if let Some(end) = c.get("DTEND") {
+                        zones.stamp(end, &end.value)?.wall - start.wall
+                    } else {
+                        c.value("DURATION")
+                            .and_then(time::duration)
+                            .unwrap_or(Duration::days(1))
+                    };
+                    let wall = zones.wall_at(start, at)?;
+                    d.end = Some(
+                        zones.at_wall(
+                            start,
+                            wall.checked_add_signed(days)
+                                .context("all-day occurrence overflow")?,
+                        )?,
+                    );
                 }
-            }
-            result.insert(
-                (uid.clone(), key.clone()),
-                Occurrence {
+                let mut source = *c;
+                let mut sequence = *seq;
+                let mut changed = *modified;
+                // RANGE applies the shift and new fields to subsequent original instance keys.
+                let override_ = events.iter().rfind(|((u, r), (c, _, _, _, _, _))| {
+                    u == uid
+                        && !r.is_empty()
+                        && (r == &key
+                            || (r <= &key
+                                && c.get("RECURRENCE-ID")
+                                    .and_then(|p| p.params.get("RANGE"))
+                                    .is_some_and(|s| s == "THISANDFUTURE")))
+                });
+                if let Some(((_, r), (c, override_doc, override_start, s, m, _))) = override_ {
+                    let original = c.get("RECURRENCE-ID").context("override key")?;
+                    let original = zones.stamp(original, &original.value)?;
+                    d = override_doc.clone();
+                    d.start = at.checked_add_signed(override_start.at - original.at);
+                    if d.start.is_none() {
+                        container.warnings.push("override_start_overflow".into());
+                        return Ok(None);
+                    }
+                    d.end = d.start.unwrap().checked_add_signed(
+                        override_doc.end.unwrap_or(override_start.at) - override_start.at,
+                    );
+                    if d.end.is_none() {
+                        container.warnings.push("override_end_overflow".into());
+                        return Ok(None);
+                    }
+                    source = c;
+                    sequence = *s;
+                    changed = *m;
+                    if r == &key {
+                        d.start = override_doc.start;
+                        d.end = override_doc.end;
+                    }
+                }
+                Ok(Some(Occurrence {
                     uid: uid.clone(),
                     recurrence_id: key,
                     doc: d,
@@ -1127,8 +1144,15 @@ pub fn parse(
                         .or_insert_with(|| content_hash(source))
                         .clone(),
                     volatile: *volatile,
-                },
-            );
+                }))
+            })();
+            match occurrence {
+                Ok(Some(row)) => {
+                    result.insert((uid.clone(), row.recurrence_id.clone()), row);
+                }
+                Ok(None) => (),
+                Err(_) => container.warnings.push("invalid_vevent_occurrence".into()),
+            }
         }
     }
     // Orphans and moved overrides whose original instance is outside the window remain addressable.
@@ -1191,95 +1215,20 @@ pub fn structured_feed(
     cfg: &EventConfig,
     now: DateTime<Utc>,
 ) -> Result<Option<ResourceMeta>> {
-    let mut events = vec![];
+    ensure!(bytes.len() <= cfg.feed_body_bytes, "feed body cap");
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(cfg.parse_timeout_ms);
+    let check_budget = || -> Result<()> {
+        ensure!(
+            std::time::Instant::now() < deadline,
+            "structured feed parse budget"
+        );
+        Ok(())
+    };
     let mut name = None;
     let mut items = 0usize;
-    if let Ok(v) = serde_json::from_slice::<Value>(bytes) {
-        if !v["items"].is_array() {
-            return Ok(None);
-        }
-        name = page::string(&v["title"]);
-        for v in v["items"].as_array().unwrap() {
-            items += 1;
-            let event = v.get("_gancio").or_else(|| v.get("event")).unwrap_or(v);
-            let start = event
-                .get("start_datetime")
-                .or_else(|| event.get("start"))
-                .or_else(|| event.get("startTime"));
-            if let Some(start) = start {
-                events.push((
-                    page::string(&v["id"]),
-                    page::string(&v["title"]).or_else(|| page::string(&event["title"])),
-                    page::string(&v["url"]),
-                    start.clone(),
-                    event
-                        .get("end_datetime")
-                        .or_else(|| event.get("end"))
-                        .cloned(),
-                    event.get("place").cloned(),
-                    page::string(&v["content_text"]),
-                ));
-            }
-        }
-    } else {
-        let text = std::str::from_utf8(bytes)?;
-        let Ok(xml) = roxmltree::Document::parse(text) else {
-            return Ok(None);
-        };
-        if !matches!(xml.root_element().tag_name().name(), "rss" | "feed" | "RDF") {
-            return Ok(None);
-        }
-        for node in xml
-            .descendants()
-            .filter(|n| n.has_tag_name("entry") || n.has_tag_name("item"))
-        {
-            items += 1;
-            let text = |names: &[&str]| {
-                node.descendants()
-                    .find(|n| names.contains(&n.tag_name().name()))
-                    .and_then(|n| n.text())
-                    .map(str::to_owned)
-            };
-            let start = text(&["dtstart", "startdate", "startDate", "start", "dateStart"]);
-            let start = start.or_else(|| {
-                node.descendants()
-                    .find(|n| n.tag_name().name() == "date")
-                    .and_then(|n| n.attribute("start").or_else(|| n.attribute("startdate")))
-                    .map(str::to_owned)
-            });
-            if let Some(start) = start {
-                let url = node
-                    .children()
-                    .find(|n| n.has_tag_name("link"))
-                    .and_then(|n| n.attribute("href").or_else(|| n.text()))
-                    .map(str::to_owned);
-                let location = node
-                    .descendants()
-                    .find(|n| n.tag_name().name() == "location");
-                let place=location.map(|n|serde_json::json!({"name":n.descendants().find(|n|n.has_tag_name("name")).and_then(|n|n.text()),"latitude":n.descendants().find(|n|matches!(n.tag_name().name(),"latitude"|"lat")).and_then(|n|n.text()),"longitude":n.descendants().find(|n|matches!(n.tag_name().name(),"longitude"|"long"|"lon")).and_then(|n|n.text())}));
-                events.push((
-                    text(&["id", "guid"]),
-                    text(&["title"]),
-                    url,
-                    Value::String(start),
-                    text(&["dtend", "enddate", "endDate", "end", "dateEnd"]).map(Value::String),
-                    place,
-                    text(&["description", "summary"]),
-                ));
-            }
-        }
-    }
-    // An ordinary RSS/JSON feed is not an authoritative empty event snapshot.
-    if events.is_empty() && items > 0 {
-        return Ok(None);
-    }
-    ensure!(
-        events.len() == items,
-        "feed contains undated entries; refusing partial snapshot"
-    );
-    if items == 0 && !super::service::is_feed(uri) {
-        return Ok(None);
-    }
+    let mut dated = 0usize;
+    let mut retained_bytes = 0usize;
     let base = Url::parse(uri)?;
     let lo = now
         .checked_sub_months(Months::new(cfg.months_back))
@@ -1294,7 +1243,16 @@ pub fn structured_feed(
         held_retry_secs: cfg.held_retry_secs,
         ..Default::default()
     };
-    for (uid, title, url, start, end, place, description) in events {
+    let mut append = |uid: Option<String>,
+                      title: Option<String>,
+                      url: Option<String>,
+                      start: Value,
+                      end: Option<Value>,
+                      place: Option<Value>,
+                      description: Option<String>|
+     -> Result<()> {
+        check_budget()?;
+        dated += 1;
         let parse = |v: &Value| {
             v.as_i64()
                 .and_then(|n| DateTime::from_timestamp(n, 0))
@@ -1307,7 +1265,7 @@ pub fn structured_feed(
             bail!("invalid feed event date")
         };
         if start < lo || start > hi {
-            continue;
+            return Ok(());
         }
         let mut d = ResourceMeta::new(uri, "event_feed", 86400);
         d.set_type("Event");
@@ -1344,6 +1302,11 @@ pub fn structured_feed(
             container.occurrences.len() < cfg.max_occurrences_per_feed,
             "feed occurrence cap"
         );
+        retained_bytes = retained_bytes.saturating_add(serde_json::to_vec(&d)?.len());
+        ensure!(
+            retained_bytes <= cfg.max_event_document_bytes,
+            "feed document memory cap"
+        );
         container.occurrences.push(Occurrence {
             uid,
             recurrence_id: String::new(),
@@ -1353,6 +1316,102 @@ pub fn structured_feed(
             content_hash,
             volatile,
         });
+        Ok(())
+    };
+    if let Ok(v) = serde_json::from_slice::<Value>(bytes) {
+        if !v["items"].is_array() {
+            return Ok(None);
+        }
+        name = page::string(&v["title"]);
+        for v in v["items"].as_array().unwrap() {
+            check_budget()?;
+            items += 1;
+            ensure!(items <= cfg.max_components, "structured feed item cap");
+            let event = v.get("_gancio").or_else(|| v.get("event")).unwrap_or(v);
+            let start = event
+                .get("start_datetime")
+                .or_else(|| event.get("start"))
+                .or_else(|| event.get("startTime"));
+            if let Some(start) = start {
+                append(
+                    page::string(&v["id"]),
+                    page::string(&v["title"]).or_else(|| page::string(&event["title"])),
+                    page::string(&v["url"]),
+                    start.clone(),
+                    event
+                        .get("end_datetime")
+                        .or_else(|| event.get("end"))
+                        .cloned(),
+                    event.get("place").cloned(),
+                    page::string(&v["content_text"]),
+                )?;
+            }
+        }
+    } else {
+        let text = std::str::from_utf8(bytes)?;
+        let options = roxmltree::ParsingOptions {
+            nodes_limit: cfg.max_components.saturating_mul(16).min(u32::MAX as usize) as u32,
+            ..Default::default()
+        };
+        let Ok(xml) = roxmltree::Document::parse_with_options(text, options) else {
+            return Ok(None);
+        };
+        if !matches!(xml.root_element().tag_name().name(), "rss" | "feed" | "RDF") {
+            return Ok(None);
+        }
+        for node in xml
+            .descendants()
+            .filter(|n| n.has_tag_name("entry") || n.has_tag_name("item"))
+        {
+            check_budget()?;
+            items += 1;
+            ensure!(items <= cfg.max_components, "structured feed item cap");
+            let text = |names: &[&str]| {
+                node.descendants()
+                    .find(|n| names.contains(&n.tag_name().name()))
+                    .and_then(|n| n.text())
+                    .map(str::to_owned)
+            };
+            let start = text(&["dtstart", "startdate", "startDate", "start", "dateStart"]);
+            let start = start.or_else(|| {
+                node.descendants()
+                    .find(|n| n.tag_name().name() == "date")
+                    .and_then(|n| n.attribute("start").or_else(|| n.attribute("startdate")))
+                    .map(str::to_owned)
+            });
+            if let Some(start) = start {
+                let url = node
+                    .children()
+                    .find(|n| n.has_tag_name("link"))
+                    .and_then(|n| n.attribute("href").or_else(|| n.text()))
+                    .map(str::to_owned);
+                let location = node
+                    .descendants()
+                    .find(|n| n.tag_name().name() == "location");
+                let place=location.map(|n|serde_json::json!({"name":n.descendants().find(|n|n.has_tag_name("name")).and_then(|n|n.text()),"latitude":n.descendants().find(|n|matches!(n.tag_name().name(),"latitude"|"lat")).and_then(|n|n.text()),"longitude":n.descendants().find(|n|matches!(n.tag_name().name(),"longitude"|"long"|"lon")).and_then(|n|n.text())}));
+                append(
+                    text(&["id", "guid"]),
+                    text(&["title"]),
+                    url,
+                    Value::String(start),
+                    text(&["dtend", "enddate", "endDate", "end", "dateEnd"]).map(Value::String),
+                    place,
+                    text(&["description", "summary"]),
+                )?;
+            }
+        }
+    }
+    // An ordinary RSS/JSON feed is not an authoritative empty event snapshot.
+    check_budget()?;
+    if dated == 0 && items > 0 {
+        return Ok(None);
+    }
+    ensure!(
+        dated == items,
+        "feed contains undated entries; refusing partial snapshot"
+    );
+    if items == 0 && !super::service::is_feed(uri) {
+        return Ok(None);
     }
     let mut d = ResourceMeta::new(uri, "event", 86400);
     d.set_type("DataFeed");

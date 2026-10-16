@@ -716,3 +716,48 @@ async fn finish_panic_fails_one_job_and_same_worker_finishes_rest(pool: PgPool) 
         .await
         .unwrap();
 }
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn invalid_non_event_feed_clock_has_its_own_rejection_reason(pool: PgPool) {
+    let mut line = change(
+        "https://example.org/clock",
+        "fixture",
+        "/pub/app/tags/clock",
+    );
+    line.at = i64::MAX;
+    let metrics = pinakes_core::telemetry::Metrics::new().unwrap();
+    let saved = ingest::cursor(&pool, "clock-fixture").await.unwrap();
+    let page = FeedPage {
+        page: pinakes_core::nexus::Changes {
+            lines: vec![line],
+            next_cursor: 1,
+        },
+        length: 1,
+        epoch: Some("one".into()),
+    };
+    ingest::apply(
+        &pool,
+        "clock-fixture",
+        &saved,
+        &page,
+        &Default::default(),
+        &metrics,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        metrics
+            .ingest_rejected
+            .with_label_values(&["timestamp"])
+            .get(),
+        1
+    );
+    assert_eq!(
+        metrics.ingest_rejected.with_label_values(&["event"]).get(),
+        0
+    );
+    assert_eq!(
+        ingest::cursor(&pool, "clock-fixture").await.unwrap().cursor,
+        1
+    );
+}

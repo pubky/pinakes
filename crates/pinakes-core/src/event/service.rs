@@ -254,10 +254,15 @@ impl EventService {
                 .await
                 {
                     if response.status == 200 {
-                        if let Ok(v) = serde_json::from_slice(&response.body) {
-                            if page::activity(&mut event, &v, &response.url) {
-                                break;
-                            }
+                        let (parsed, matched) = tokio::task::spawn_blocking(move || {
+                            let matched = serde_json::from_slice(&response.body)
+                                .is_ok_and(|v| page::activity(&mut event, &v, &response.url));
+                            (event, matched)
+                        })
+                        .await?;
+                        event = parsed;
+                        if matched {
+                            break;
                         }
                     }
                 }
@@ -498,6 +503,8 @@ impl crate::resolver::Resolver for CalendarResolver {
 
 fn tls_unsupported(error: &anyhow::Error) -> bool {
     // Certificate, DNS, policy, timeout and HTTP errors never justify plaintext.
+    // reqwest/rustls exposes no stable typed protocol-mismatch cause here. These
+    // two messages are deliberately narrow: changed wording fails closed.
     error.chain().any(|e| {
         let s = e.to_string().to_ascii_lowercase();
         s.contains("wrong version number")

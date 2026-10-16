@@ -2059,3 +2059,101 @@ async fn repeated_key_growth_confirms_but_total_row_limit_stays_hard(pool: PgPoo
         .unwrap();
     assert_eq!(holds, 0);
 }
+
+#[test]
+fn bad_custom_zone_occurrence_does_not_discard_good_siblings() {
+    let zone = "BEGIN:VTIMEZONE\nTZID:Broken\nEND:VTIMEZONE";
+    let body = cal(&[zone.into(),event("UID:broken-recurring\nDTSTART;VALUE=DATE;TZID=Broken:20261020T000000Z\nDURATION:P1D\nRDATE:20261021T000000Z\nSUMMARY:Bad reverse zone"), event("UID:broken-single\nDTSTART;VALUE=DATE;TZID=Broken:20261020T000000Z\nDURATION:P1D"),event("UID:good\nDTSTART:20261022T180000Z\nSUMMARY:Good sibling")].join("\n"));
+    let c = parse(&body).container.unwrap();
+    assert_eq!(c.occurrences.len(), 1);
+    assert_eq!(c.occurrences[0].uid, "good");
+    assert!(c.warnings.iter().any(|w| w == "invalid_vevent_occurrence"));
+}
+#[test]
+fn retained_revision_memory_is_bounded() {
+    let cfg = EventConfig {
+        max_event_revisions: 1,
+        ..Default::default()
+    };
+    let body = cal(&[
+        event("UID:a\nDTSTART:20261020T000000Z"),
+        event("UID:b\nDTSTART:20261021T000000Z"),
+    ]
+    .join("\n"));
+    assert!(
+        calendar::parse("https://example.org/f.ics", body.as_bytes(), &cfg, now())
+            .unwrap_err()
+            .to_string()
+            .contains("revision cap")
+    );
+    let cfg = EventConfig {
+        max_event_document_bytes: 1024,
+        ..Default::default()
+    };
+    let body = cal(&event(&format!(
+        "UID:a\nDTSTART:20261020T000000Z\nDESCRIPTION:{}",
+        "x".repeat(2048)
+    )));
+    assert!(
+        calendar::parse("https://example.org/f.ics", body.as_bytes(), &cfg, now())
+            .unwrap_err()
+            .to_string()
+            .contains("memory cap")
+    );
+}
+
+#[test]
+fn structured_feed_work_is_bounded() {
+    // Many dated items must stop at insertion, before materialising an unbounded tuple list.
+    let rss = format!(
+        "<rss><channel>{}</channel></rss>",
+        "<item><guid>id</guid><title>Fixture</title><start>2026-10-20T18:00:00Z</start></item>"
+            .repeat(1000)
+    );
+    let atom = format!(
+        "<feed>{}</feed>",
+        "<entry><id>id</id><title>Fixture</title><start>2026-10-20T18:00:00Z</start></entry>"
+            .repeat(1000)
+    );
+    let json=json!({"items":vec![json!({"id":"id","title":"Fixture","event":{"start":"2026-10-20T18:00:00Z"}});1000]}).to_string();
+    for body in [rss, atom, json] {
+        let cfg = EventConfig {
+            max_occurrences_per_feed: 2,
+            ..Default::default()
+        };
+        assert!(calendar::structured_feed(
+            "https://example.org/f.ics",
+            body.as_bytes(),
+            &cfg,
+            now()
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("occurrence cap"));
+        let cfg = EventConfig {
+            parse_timeout_ms: 0,
+            ..Default::default()
+        };
+        assert!(calendar::structured_feed(
+            "https://example.org/f.ics",
+            body.as_bytes(),
+            &cfg,
+            now()
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("parse budget"));
+    }
+    let cfg = EventConfig {
+        max_components: 2,
+        ..Default::default()
+    };
+    let body =
+        json!({"items":vec![json!({"id":"old","start":"2000-01-01T00:00:00Z"});3]}).to_string();
+    assert!(
+        calendar::structured_feed("https://example.org/f.ics", body.as_bytes(), &cfg, now())
+            .unwrap_err()
+            .to_string()
+            .contains("item cap")
+    );
+}

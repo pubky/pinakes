@@ -72,6 +72,8 @@ pub struct EventConfig {
     pub max_occurrences_per_series: usize,
     pub max_occurrences_per_feed: usize,
     pub max_components: usize,
+    pub max_event_revisions: usize,
+    pub max_event_document_bytes: usize,
     pub max_recurrence_steps: usize,
     pub parse_timeout_ms: u64,
     pub months_back: u32,
@@ -98,6 +100,8 @@ impl Default for EventConfig {
             max_occurrences_per_series: 50,
             max_occurrences_per_feed: 10000,
             max_components: 100000,
+            max_event_revisions: 10000,
+            max_event_document_bytes: 8 * 1024 * 1024,
             max_recurrence_steps: 100000,
             parse_timeout_ms: 2000,
             months_back: 1,
@@ -339,6 +343,8 @@ impl Config {
             || !(1..=1000).contains(&e.max_occurrences_per_series)
             || !(1..=10000).contains(&e.max_occurrences_per_feed)
             || !(1..=100000).contains(&e.max_components)
+            || !(1..=10000).contains(&e.max_event_revisions)
+            || !(1024..=32 * 1024 * 1024).contains(&e.max_event_document_bytes)
             || !(1..=1000000).contains(&e.max_recurrence_steps)
             || !(1..=5000).contains(&e.parse_timeout_ms)
             || e.months_back > 12

@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgPool};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const REJECT_REASONS: &[&str] = &["author", "label", "object_path", "event"];
+pub const REJECT_REASONS: &[&str] = &["author", "label", "object_path", "timestamp", "event"];
 fn rejection_reason(line: &Change, limits: &IngestConfig) -> Option<&'static str> {
     if !crate::nexus::valid_author(&line.author) {
         Some("author")
@@ -22,6 +22,8 @@ fn rejection_reason(line: &Change, limits: &IngestConfig) -> Option<&'static str
         || line.object_path.contains('\0')
     {
         Some("object_path")
+    } else if invalid_timestamp(line.at) {
+        Some("timestamp")
     } else if line
         .recurrence_id
         .as_ref()
@@ -30,19 +32,20 @@ fn rejection_reason(line: &Change, limits: &IngestConfig) -> Option<&'static str
             .start
             .into_iter()
             .chain(line.end)
-            .chain([line.at])
-            .any(|ms| {
-                DateTime::<Utc>::from_timestamp_millis(ms).is_none_or(|t| {
-                    use chrono::Datelike;
-                    !(1..=9999).contains(&t.year())
-                })
-            })
+            .any(invalid_timestamp)
         || line.start.zip(line.end).is_some_and(|(a, b)| b < a)
     {
         Some("event")
     } else {
         None
     }
+}
+
+fn invalid_timestamp(ms: i64) -> bool {
+    DateTime::<Utc>::from_timestamp_millis(ms).is_none_or(|t| {
+        use chrono::Datelike;
+        !(1..=9999).contains(&t.year())
+    })
 }
 
 #[derive(Clone, Debug, FromRow)]

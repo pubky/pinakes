@@ -253,9 +253,9 @@ Denied web canaries are skipped, and each worker checks due canaries at most onc
 
 `[web]`/`[pubky] ttl_secs` supplies the parser document's initial TTL; scheduling is
 controlled by `[refresh]`. Conditional responses preserve accepted facts, but validators
-are not persisted for ordinary web/Pubky pages. Calendar validators are persisted
-and sent as hints; a 304 triggers a full GET so snapshot confirmation always uses
-a new complete body.
+are not persisted for ordinary web/Pubky pages. Calendar validators commit atomically with parsed snapshots. Conditional headers are
+suppressed until an initial snapshot is saved and while missing keys or a held snapshot
+need confirmation. Otherwise a 304 renews TTL without an additional GET.
 
 Public queries use a separate pool with five-second PostgreSQL statement/acquisition
 limits, and all `/v1` routes have a configurable direct-peer IP budget. Search revisions
@@ -280,7 +280,7 @@ step 2 schema and the reviewed step 3 schema.
 
 `[event]` controls JSON-LD Event/subtypes, microformats h-event, ActivityPub Event
 negotiation and calendar containers. Missing fields are filled in that order;
-OpenGraph alone remains a WebPage. ActivityPub is negotiated only for an advertised alternate, or an event-looking page with no extracted Event. An Event page can follow a same-host link to its own ICS; discovered URLs share a one-hour-minimum TTL cache, including failures. Platform state adapters are the next branch. A calendar can run
+OpenGraph alone remains a WebPage. ActivityPub is negotiated for an advertised alternate, an event-looking page with no extracted Event, or an extracted Event lacking a zone. Each resolution permits one cached negotiation request. An Event page can follow a same-host link to its own ICS; discovered URLs share a one-hour-minimum TTL cache, including failures. Platform state adapters are the next branch. A calendar can run
 with web disabled; its workers share the web host budget and the OSM lookup mutex.
 With calendars disabled, feed URLs fall back to the enabled web module and its
 page-sized card extraction; stored routing hints remain valid when re-enabled.
@@ -288,9 +288,14 @@ page-sized card extraction; stored routing hints remain valid when re-enabled.
 ICS, event RSS/Atom and Gancio JSON feeds become DataFeed resources with occurrence
 rows. Calendar GETs use the normal pinned-IP/redirect policy, decompression and a
 32 MB cap; physical ICS lines are read incrementally from that bounded body, unfolded,
-and parsed on a blocking worker. A malformed VEVENT is skipped with a warning; exceeded work or feed caps reject the snapshot. Calendar 304 responses renew the accepted snapshot without a second GET or a disappearance observation. HTTPS downgrade is disabled by default; `event.webcal_http_fallback` permits it only for `webcal://` and an explicit TLS-protocol mismatch, never `webcals://`, policy errors, certificate errors or timeouts.
+and parsed on a blocking worker. A malformed VEVENT is skipped with a warning; exceeded work or feed caps reject the snapshot. Conditional requests pause during disappearance/hold confirmation; after confirmation, 304 responses renew the accepted snapshot without a second GET. HTTPS downgrade is disabled by default; `event.webcal_http_fallback` permits it only for `webcal://` and an explicit TLS-protocol mismatch, never `webcals://`, policy errors, certificate errors or timeouts. The two permitted TLS-protocol error messages are
+matched narrowly; a reqwest/rustls wording change fails closed.
 The default horizon is one month back/twelve forward, with 50 instances per series
-and 10,000 per feed. See the example config for caps and individual path switches.
+and 10,000 per feed. Before expansion, at most 10,000 event revisions and 8 MiB of
+serialized bounded event documents are retained (`max_event_revisions`,
+`max_event_document_bytes`). RSS/Atom/JSON event items are converted directly into
+bounded occurrence rows, with item, document-memory and parse-deadline checks.
+See the example config for caps and individual path switches.
 
 Each `(feed, UID, recurrence_id)` keeps its own version, cancellation state and change
 history. Two distinct successful observations confirm disappearance; an over-50% loss
@@ -302,7 +307,9 @@ URL-less instances have no link to their own feed. Regenerated UIDs supersede th
 old key without a cancellation; the new creation carries `supersedes`.
 
 `[event.container]` limits changes, total retained rows, and new keys per refresh.
-Changes contain field patches; a burst over the cap becomes one feed-level count.
+Changes contain field patches; a burst over the cap becomes one summary with
+occurrence and parent counts, plus the parent change class and fields. Repeated
+identical key growth can confirm a legitimate addition; the total row cap stays hard.
 Consecutive holds back off exponentially from the normal cadence and dead-letter
 after five attempts by default. Bookkeeping lives in `event_fetch`, with aggregate
 `source="event"` metrics. Hourly maintenance removes cancelled/superseded and

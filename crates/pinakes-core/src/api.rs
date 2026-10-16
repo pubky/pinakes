@@ -74,6 +74,10 @@ impl AppState {
             return Err(ApiError(StatusCode::TOO_MANY_REQUESTS, message.into()));
         }
         for (key, _) in keys {
+            // Memory is bounded by eviction. At >10,000 distinct public source IPs/minute
+            // this is intentionally fail-open for evicted entries, not a global quota.
+            // IPv6 /64 bucketing could limit rotation but would share budgets across users;
+            // keep exact-IP semantics and let the deployment edge enforce network quotas.
             if !limits.contains_key(key) && limits.len() >= capacity {
                 if let Some(oldest) = limits
                     .iter()

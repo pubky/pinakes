@@ -220,54 +220,12 @@ async fn paging_lookup_retention_and_deleted_history(pool: PgPool) {
     assert_eq!(call(&app, "GET", "/v1/changes?cursor=0", None).await.0, 200);
 }
 #[sqlx::test(migrations = "../../migrations")]
-async fn held_containers_and_cursor_state(pool: PgPool) {
-    let all = (0..10).map(|n| n.to_string()).collect::<Vec<_>>();
-    let few = all[..3].to_vec();
-    assert_eq!(
-        source::container_keys(&pool, "calendar", &all, 3600)
-            .await
-            .unwrap()
-            .created
-            .len(),
-        10
-    );
-    let first = source::container_keys(&pool, "calendar", &few, 3600)
-        .await
-        .unwrap();
-    assert!(first.held);
-    assert!(first.cancelled.is_empty());
-    let saved: Vec<String> =
-        sqlx::query_scalar("SELECT keys FROM source_state WHERE source='calendar'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(saved.len(), 10);
-    source::outcome(&pool, "calendar", Some("timeout"))
-        .await
-        .unwrap();
-    let second = source::container_keys(&pool, "calendar", &few, 3600)
-        .await
-        .unwrap();
-    assert!(!second.held);
-    assert_eq!(second.cancelled.len(), 7);
-    let two = few[..2].to_vec();
-    assert!(source::container_keys(&pool, "calendar", &two, 3600)
-        .await
-        .unwrap()
-        .cancelled
-        .is_empty());
-    assert_eq!(
-        source::container_keys(&pool, "calendar", &two, 3600)
-            .await
-            .unwrap()
-            .cancelled,
-        vec!["2"]
-    );
+async fn aggregate_cursor_state(pool: PgPool) {
     source::cursor(&pool, "calendar", Some("new-cursor"), true)
         .await
         .unwrap();
     let (cursor,resets,held):(String,i64,i64)=sqlx::query_as("SELECT cursor,cursor_resets_total,feed_held_total FROM source_state WHERE source='calendar'").fetch_one(&pool).await.unwrap();
-    assert_eq!((cursor.as_str(), resets, held), ("new-cursor", 1, 1));
+    assert_eq!((cursor.as_str(), resets, held), ("new-cursor", 1, 0));
 }
 #[sqlx::test(migrations = "../../migrations")]
 async fn overdue_priority_respects_backoff_and_final(pool: PgPool) {

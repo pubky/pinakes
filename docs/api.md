@@ -333,5 +333,6 @@ and optional status. The reference key includes author, object_path, venue resou
 and recurrence so deleting one occurrence leaves other instances/venues intact.
 Bad recurrence keys (over 128 bytes or NUL), out-of-range timestamps and end before
 start are skipped and
-counted as `pinakes_ingest_rejected_total{reason="event"}` after commit. Unknown
+counted as `pinakes_ingest_rejected_total{reason="event"}` after commit. An invalid
+feed `at` timestamp uses reason `timestamp`, for every reference kind. Unknown
 lifecycle strings are treated as absent and keep the otherwise valid reference.
