@@ -44,6 +44,18 @@ fn upstream_status(f: &Fetched) -> Result<()> {
     Ok(())
 }
 
+fn enrichment_status(f: &Fetched) -> Result<()> {
+    upstream_status(f)?;
+    if matches!(f.status, 401 | 403 | 451) {
+        return Err(crate::resolver::RetryLater {
+            class: "upstream_denied",
+            seconds: 3600,
+        }
+        .into());
+    }
+    Ok(())
+}
+
 pub struct PlatformResolver {
     pub web: WebResolver,
 }
@@ -205,7 +217,7 @@ impl PlatformResolver {
                                     .egress
                                     .discover(&target, &opts, m.cadence_floor)
                                     .await?;
-                                upstream_status(&f)?;
+                                enrichment_status(&f)?;
                                 if f.status == 200 {
                                     if d.id == "luma" {
                                         if let Some(id) = serde_json::from_slice::<Value>(&f.body)
@@ -237,7 +249,7 @@ impl PlatformResolver {
                                                     .egress
                                                     .discover(url.as_str(), &opts, m.cadence_floor)
                                                     .await?;
-                                                upstream_status(&feed)?;
+                                                enrichment_status(&feed)?;
                                                 if feed.status == 200 {
                                                     if let Some(calendar) =
                                                         calendar_blocking(uri, d, &feed, &local)
@@ -276,7 +288,12 @@ impl PlatformResolver {
                 page::finalize(&mut doc, local.coordinate_timezone);
                 if !probe {
                     let events = self.web.events.as_ref().unwrap();
-                    tokio::time::timeout(Duration::from_secs(2), events.venue(&mut doc)).await??;
+                    if !matches!(
+                        tokio::time::timeout(Duration::from_secs(2), events.venue(&mut doc)).await,
+                        Ok(Ok(()))
+                    ) {
+                        doc.event.warnings.push("venue_unavailable".into());
+                    }
                 }
                 page::finalize(&mut doc, false);
             }
@@ -412,7 +429,11 @@ pub(crate) async fn enrichment_blocking(
             .is_some_and(|v| v["errors"].as_array().is_some_and(|a| !a.is_empty()))
     {
         crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
-        return Ok(None);
+        return Err(crate::resolver::RetryLater {
+            class: "graphql",
+            seconds: 300,
+        }
+        .into());
     }
     let (uri, id, body) = (uri.to_owned(), d.id.clone(), f.body.clone());
     Ok(tokio::task::spawn_blocking(move || state::parse(&id, &uri, &body)).await?)
@@ -458,7 +479,15 @@ impl Resolver for PlatformResolver {
                 .is_some_and(|u| self.web.egress.allows(u.as_str()))
     }
     async fn resolve(&self, uri: &str) -> Result<ResourceMeta> {
-        tokio::time::timeout(Duration::from_secs(14), self.inner(uri, false, None)).await?
+        tokio::time::timeout(
+            crate::queue::RESOLVE_TIMEOUT - Duration::from_secs(1),
+            self.inner(uri, false, None),
+        )
+        .await
+        .map_err(|_| crate::resolver::RetryLater {
+            class: "timeout",
+            seconds: 60,
+        })?
     }
     async fn probe_manifest(
         &self,
@@ -695,7 +724,12 @@ async fn wiki(uri: &str, f: &Fetched, egress: &Egress) -> Result<ResourceMeta> {
                 86400,
             )
             .await?;
-        upstream_status(&f)?;
+        enrichment_status(&f)?;
+        if matches!(f.status, 404 | 410) {
+            let mut doc = ResourceMeta::new(uri, "wikidata", 3600);
+            doc.status = crate::model::Status::Missing;
+            return Ok(doc);
+        }
         if f.status != 200 {
             return Err(crate::resolver::RetryLater {
                 class: "wikidata_unavailable",
@@ -771,11 +805,9 @@ pub async fn wikipedia(uri: &str, f: &Fetched, egress: &Egress) -> Result<Option
         Err(e) if e.is::<ParseFailure>() => return Ok(None),
         Err(e) => return Err(e),
     };
-    Ok(doc
-        .type_path
-        .iter()
-        .any(|t| t == "Event" || t == "Place")
-        .then_some(doc))
+    Ok((doc.status == crate::model::Status::Missing
+        || doc.type_path.iter().any(|t| t == "Event" || t == "Place"))
+    .then_some(doc))
 }
 pub fn wiki_value(uri: &str, v: &Value) -> Result<ResourceMeta> {
     let entity = v["entities"]

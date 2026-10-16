@@ -66,7 +66,7 @@ async fn round2_paginated_nostr_and_inconclusive_queue_retry(pool: PgPool) {
         .is_err());
     let mut cfg = EventConfig::default();
     cfg.adapters.max_indexer_pages = 1;
-    let (egress, _) = mock_egress(vec![(200, json!(vec![other; 100])), (200, json!([]))]);
+    let (egress, transport) = mock_egress(vec![(200, json!(vec![other; 100])), (200, json!([]))]);
     let r = platform(&pool, cfg, egress);
     let uri = target.uri().unwrap();
     let id = store::ensure_resource(&pool, &uri).await.unwrap();
@@ -88,6 +88,19 @@ async fn round2_paginated_nostr_and_inconclusive_queue_retry(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(state, (0, false, "inconclusive".into()));
+    use pinakes_core::resolver::Resolver;
+    let err = r.resolve(&uri).await.unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<pinakes_core::resolver::RetryLater>()
+            .unwrap()
+            .seconds,
+        300
+    );
+    assert_eq!(
+        transport.seen.lock().unwrap().len(),
+        2,
+        "retry reuses fetched pages"
+    );
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -275,7 +288,7 @@ impl Transport for WikiFailure {
 #[sqlx::test(migrations = "../../migrations")]
 async fn round2_only_parse_errors_fall_back_and_plain_wikipedia_skips_fetch(pool: PgPool) {
     use pinakes_core::resolver::Resolver;
-    for failure in [0, 1, 503, 404] {
+    for failure in [0, 1, 401, 403, 451, 503] {
         let uri = "https://www.wikidata.org/wiki/Q67890";
         let id = store::ensure_resource(&pool, uri).await.unwrap();
         let mut doc = ResourceMeta::new(uri, "wikidata", 3600);
@@ -382,6 +395,188 @@ async fn round2_only_parse_errors_fall_back_and_plain_wikipedia_skips_fetch(pool
         recorded_egress(vec![(uri, body, Value::Null)]),
     );
     assert_eq!(r.web.resolve(uri).await.unwrap().type_name, "Article");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round3_slow_optional_venue_keeps_single_event_and_attempts(pool: PgPool) {
+    use pinakes_core::{queue, resolver::osm::OsmResolver};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            axum::Router::new().route(
+                "/search",
+                axum::routing::get(|| async {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    axum::Json(json!([]))
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+    let cfg = EventConfig {
+        activitypub: false,
+        coordinate_timezone: false,
+        ..Default::default()
+    };
+    let (egress, _) = mock_egress(vec![
+        (200, json!({})),
+        (
+            200,
+            json!({"data":{"event":{"name":"Slow venue", "start_at":(Utc::now()+Duration::days(1)).to_rfc3339(),"geo_address_info":{"name":"Hall","address":{"streetAddress":"1 Main St","addressLocality":"Zurich"}}}}}),
+        ),
+    ]);
+    let mut r = platform(&pool, cfg, egress);
+    Arc::get_mut(r.web.events.as_mut().unwrap()).unwrap().osm = Arc::new(
+        OsmResolver::new(
+            pool.clone(),
+            pinakes_core::config::OsmConfig {
+                nominatim_url: format!("http://{address}"),
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    );
+    let uri = "https://luma.com/slow-venue";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let q = pinakes_core::config::QueueConfig {
+        max_failures: 1,
+        ..Default::default()
+    };
+    let job = queue::claim(&pool, "event_platform", &q)
+        .await
+        .unwrap()
+        .unwrap();
+    queue::run_job(&pool, &r, &q, &job).await.unwrap();
+    server.abort();
+    let (doc, attempts, dead): (Value, i32, bool) =
+        sqlx::query_as("SELECT doc,attempts,dead_letter FROM resource WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(doc["type"], "Event");
+    assert!(doc["start"].is_string());
+    assert!(doc["warnings"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("venue_unavailable")));
+    assert_eq!((attempts, dead), (0, false));
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn round3_graphql_failure_preserves_accepted_event(pool: PgPool) {
+    use pinakes_core::{queue, resolver::RetryLater};
+    let uri = "https://mobilizon.fr/events/86a665ae-e495-4e4f-88d4-4cffd44a82f1";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut accepted = ResourceMeta::new(uri, "mobilizon", 3600);
+    accepted.set_type("Event");
+    accepted.start = Some(Utc::now() + Duration::days(1));
+    store::save_document(&pool, &id, 0, &accepted)
+        .await
+        .unwrap();
+    let before: Value = sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let (egress, _) = mock_egress(vec![
+        (200, json!({})),
+        (
+            200,
+            json!({"errors":[{"message":"temporary upstream error"}]}),
+        ),
+    ]);
+    let r = platform(
+        &pool,
+        EventConfig {
+            activitypub: false,
+            geocoding: false,
+            ..Default::default()
+        },
+        egress,
+    );
+    use pinakes_core::resolver::Resolver;
+    let error = r.resolve(uri).await.unwrap_err();
+    assert_eq!(error.downcast_ref::<RetryLater>().unwrap().class, "graphql");
+    // Reuse the same secondary failure cache when the queue retries.
+    let (egress, _) = mock_egress(vec![
+        (200, json!({})),
+        (200, json!({"errors":[{"message":"temporary"}]})),
+    ]);
+    let r = platform(
+        &pool,
+        EventConfig {
+            activitypub: false,
+            geocoding: false,
+            ..Default::default()
+        },
+        egress,
+    );
+    queue::run_job(
+        &pool,
+        &r,
+        &pinakes_core::config::QueueConfig {
+            max_failures: 1,
+            ..Default::default()
+        },
+        &queue::Job {
+            id: id.clone(),
+            uri: uri.into(),
+            generation: 0,
+            attempts: 0,
+        },
+    )
+    .await
+    .unwrap();
+    let (after, attempts, dead): (Value, i32, bool) =
+        sqlx::query_as("SELECT doc,attempts,dead_letter FROM resource WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(before, after);
+    assert_eq!((attempts, dead), (0, false));
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn round3_deleted_wikidata_confirms_missing_twice(pool: PgPool) {
+    use pinakes_core::{model::Status, resolver::Resolver};
+    for status in [404, 410] {
+        let uri = format!("https://en.wikipedia.org/wiki/Deleted_{status}");
+        let id = store::ensure_resource(&pool, &uri).await.unwrap();
+        let mut doc = ResourceMeta::new(&uri, "wikidata", 3600);
+        doc.set_type("Event");
+        doc.start = Some(Utc::now() + Duration::days(1));
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+        for expected in ["ok", "missing"] {
+            // Each observation is a fresh fetch, as it is after the one-hour Missing cadence.
+            let r = platform(
+                &pool,
+                EventConfig {
+                    geocoding: false,
+                    ..Default::default()
+                },
+                Egress::with_backends(
+                    Default::default(),
+                    Arc::new(AdapterDns),
+                    Arc::new(WikiFailure {
+                        failure: status,
+                        calls: Default::default(),
+                    }),
+                ),
+            );
+            let d = r.web.resolve(&uri).await.unwrap();
+            assert_eq!(d.status, Status::Missing);
+            store::save_document(&pool, &id, 0, &d).await.unwrap();
+            let state: String = sqlx::query_scalar("SELECT status FROM resource WHERE id=$1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(state, expected);
+        }
+    }
 }
 
 #[test]

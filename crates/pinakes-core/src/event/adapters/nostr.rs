@@ -168,6 +168,30 @@ fn rows(v: &Value) -> Vec<Value> {
         })
 }
 pub async fn lookup(target: &Target, egress: &Egress, cfg: &EventConfig) -> Result<Option<Event>> {
+    // Leave one second for the platform wrapper and one for completion bookkeeping.
+    let budget = crate::queue::RESOLVE_TIMEOUT - std::time::Duration::from_secs(2);
+    tokio::time::timeout(budget, lookup_inner(target, egress, cfg))
+        .await
+        .map_err(|_| crate::resolver::RetryLater {
+            class: "inconclusive",
+            seconds: 300,
+        })?
+}
+fn indexer_budget(cfg: &EventConfig) -> std::time::Duration {
+    let relay = if cfg.adapters.websocket {
+        cfg.adapters.websocket_deadline_ms
+    } else {
+        0
+    };
+    (crate::queue::RESOLVE_TIMEOUT - std::time::Duration::from_secs(2))
+        .saturating_sub(std::time::Duration::from_millis(relay))
+        .min(std::time::Duration::from_secs(10))
+}
+async fn lookup_inner(
+    target: &Target,
+    egress: &Egress,
+    cfg: &EventConfig,
+) -> Result<Option<Event>> {
     let mut wine = Url::parse("https://api.nostr.wine/search")?;
     {
         let mut q = wine.query_pairs_mut();
@@ -201,7 +225,7 @@ pub async fn lookup(target: &Target, egress: &Egress, cfg: &EventConfig) -> Resu
     let mut inconclusive = false;
     // Inclusive timestamp windows do not skip tied timestamps. A full tied page
     // or an indexer that ignores `until` is inconclusive, never a disappearance.
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + indexer_budget(cfg);
     for (index, base) in [wine, archive].into_iter().enumerate() {
         let mut until = None;
         let mut answered = false;
@@ -221,7 +245,7 @@ pub async fn lookup(target: &Target, egress: &Egress, cfg: &EventConfig) -> Resu
                 if tokio::time::Instant::now() >= deadline {
                     return Err(crate::resolver::RetryLater {
                         class: "inconclusive",
-                        seconds: 3600,
+                        seconds: 300,
                     }
                     .into());
                 }
@@ -295,7 +319,7 @@ pub async fn lookup(target: &Target, egress: &Egress, cfg: &EventConfig) -> Resu
     if inconclusive {
         return Err(crate::resolver::RetryLater {
             class: "inconclusive",
-            seconds: 3600,
+            seconds: 300,
         }
         .into());
     }
@@ -588,4 +612,20 @@ pub async fn resolve(
         .into());
     }
     Ok(doc)
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    #[test]
+    fn relay_time_is_reserved_within_the_queue_budget() {
+        let mut cfg = EventConfig::default();
+        cfg.adapters.websocket_deadline_ms = 5000;
+        assert_eq!(indexer_budget(&cfg), std::time::Duration::from_secs(8));
+        assert!(
+            indexer_budget(&cfg)
+                + std::time::Duration::from_millis(cfg.adapters.websocket_deadline_ms)
+                < crate::queue::RESOLVE_TIMEOUT - std::time::Duration::from_secs(1)
+        );
+    }
 }

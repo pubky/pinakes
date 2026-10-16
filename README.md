@@ -427,7 +427,11 @@ an authoritative absence. Portal cold starts read its head cursor before the ful
 BTC Map cursors never advance beyond the local fetch time, even when an upstream clock is fast.
 
 Only parser failures trigger the platform web-card fallback. Upstream failures, including
-cached discovery failures, retain the accepted document and retry. The captured Guidle
+cached discovery failures, retain the accepted document and retry. Optional venue geocoding
+records `venue_unavailable` and keeps the event; accepted venue data is preserved.
+Denied secondary requests and GraphQL failures defer, while Wikidata 404/410 follow
+two-observation disappearance. Nostr reserves relay time inside the queue budget and
+retries incomplete scans after five minutes, reusing cached pages. The captured Guidle
 calendar request is now correctly replayed as an egress failure (its HTML card used to hide
 that failure). Wikipedia entity enrichment requires event/place JSON-LD or infobox cues;
 ordinary articles stay web cards without a speculative Wikidata fetch.

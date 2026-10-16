@@ -16,6 +16,8 @@ use tokio::{
     time::Instant,
 };
 
+pub const RESOLVE_TIMEOUT: Duration = Duration::from_secs(15);
+
 #[derive(Debug, FromRow)]
 pub struct Job {
     pub id: String,
@@ -74,13 +76,21 @@ pub async fn run_job(
     job: &Job,
 ) -> Result<()> {
     let result = std::panic::AssertUnwindSafe(tokio::time::timeout(
-        Duration::from_secs(15),
+        RESOLVE_TIMEOUT,
         resolver.resolve(&job.uri),
     ))
     .catch_unwind()
     .await
     .map_err(|_| anyhow::anyhow!("resolver panic"))
-    .and_then(|r| r.map_err(Into::into))
+    .and_then(|r| {
+        r.map_err(|_| {
+            crate::resolver::RetryLater {
+                class: "timeout",
+                seconds: 60,
+            }
+            .into()
+        })
+    })
     .and_then(|r| r);
     guarded_finish_job(
         pool,
@@ -279,7 +289,7 @@ async fn run_batch_config(
 ) -> Result<()> {
     let uris = jobs.iter().map(|j| j.uri.clone()).collect::<Vec<_>>();
     let results = tokio::time::timeout(
-        Duration::from_secs(15 * jobs.len() as u64),
+        RESOLVE_TIMEOUT * jobs.len() as u32,
         std::panic::AssertUnwindSafe(resolver.resolve_batch(&uris)).catch_unwind(),
     )
     .await;
