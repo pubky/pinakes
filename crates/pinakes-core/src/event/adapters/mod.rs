@@ -16,6 +16,7 @@ pub mod state;
 #[serde(default, deny_unknown_fields)]
 pub struct AdapterConfig {
     pub enabled: bool,
+    pub derive_resources: bool,
     pub websocket: bool,
     pub websocket_deadline_ms: u64,
     pub max_cursor_pages: usize,
@@ -27,6 +28,7 @@ impl Default for AdapterConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            derive_resources: true,
             websocket: true,
             websocket_deadline_ms: 2000,
             max_cursor_pages: 10,
@@ -36,12 +38,41 @@ impl Default for AdapterConfig {
         }
     }
 }
+#[derive(Clone, Deserialize)]
+#[serde(transparent)]
+pub struct SecretKey(String);
+impl std::fmt::Debug for SecretKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+impl Serialize for SecretKey {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str("[REDACTED]")
+    }
+}
+impl std::ops::Deref for SecretKey {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+impl From<String> for SecretKey {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+impl From<&str> for SecretKey {
+    fn from(s: &str) -> Self {
+        Self(s.into())
+    }
+}
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Options {
     pub enabled: Option<bool>,
     // Never serialize adapter config into the public info response.
-    pub key: Option<String>,
+    pub key: Option<SecretKey>,
     pub canary: Option<Url>,
     pub ua_profile: Option<String>,
     pub cadence_floor: Option<u64>,
@@ -50,6 +81,7 @@ pub struct Options {
     pub max_occurrences: Option<usize>,
 }
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Definition {
     pub id: String,
     pub domains: Vec<String>,
@@ -82,7 +114,8 @@ pub fn detect(uri: &str) -> Option<&'static Definition> {
     let host = u.host_str().unwrap_or("").trim_end_matches('.');
     let path = u.path();
     if host == "api.nostr.wine" {
-        return definition("nip52");
+        return definition("nip52")
+            .filter(|d| d.canary.as_ref().is_some_and(|c| c.as_str() == uri));
     }
     if u.scheme() == "nostr" {
         return definition("nip52");
@@ -95,16 +128,50 @@ pub fn detect(uri: &str) -> Option<&'static Definition> {
     if (host == "icloud.com" || host.ends_with(".icloud.com")) && path.contains("/published/") {
         return definition("icloud");
     }
-    if host == "www.googleapis.com" && path.starts_with("/calendar/v3/calendars/") {
-        return definition("google_calendar_api");
+    for (id, matches) in [
+        ("google_calendar_api", host == "www.googleapis.com"),
+        (
+            "billetto_api",
+            host == "api.billetto.com" || host == "billetto.dk" && path.starts_with("/api/"),
+        ),
+        ("eventfrog_api", host == "api.eventfrog.net"),
+    ] {
+        if matches {
+            return service::keyed_url(id, uri)
+                .ok()
+                .and_then(|_| definition(id));
+        }
     }
-    if host == "api.billetto.com"
-        || host == "billetto.dk" && path.starts_with("/api/v3/public/events/")
+    if host == "api.btcmap.org" {
+        return (path == "/v4/events"
+            || path
+                .strip_prefix("/v4/events/")
+                .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())))
+        .then(|| definition("btcmap"))
+        .flatten();
+    }
+    if host == "portal.einundzwanzig.space" {
+        return (matches!(path, "/api/changes" | "/api/meetup-events")
+            || path.contains("/meetup/")
+                && path.rsplit_once("/event/").is_some_and(|(_, id)| {
+                    !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())
+                }))
+        .then(|| definition("einundzwanzig"))
+        .flatten();
+    }
+    if [
+        "flockstr.com",
+        "njump.me",
+        "nostr.at",
+        "honey.hivetalk.org",
+        "letsmiti.app",
+    ]
+    .contains(&host)
     {
-        return definition("billetto_api");
-    }
-    if host == "api.eventfrog.net" {
-        return definition("eventfrog_api");
+        return nostr::Target::decode(uri)
+            .ok()
+            .filter(|t| t.kind.is_none() || t.kind.is_some_and(|k| (31922..=31925).contains(&k)))
+            .and_then(|_| definition("nip52"));
     }
     if path == "/starticket/wwwroot/ticketing/feeds/starticketfeed_D.xml" {
         return definition("starticket");
@@ -170,15 +237,25 @@ pub fn manifest(d: &Definition, cfg: &EventConfig) -> Manifest {
             .unwrap_or(d.cadence_floor)
             .max(if d.mode == Mode::None {
                 7 * 86400
+            } else if d.mode == Mode::Cursor {
+                60
             } else {
                 3600
             }),
         identity: d.identity.clone(),
         cancellation: d.cancellation.clone(),
         expected_fields: d.expected_fields.clone(),
-        canary: opts
-            .and_then(|o| o.canary.clone())
-            .or_else(|| d.canary.clone()),
+        canary: opts.and_then(|o| o.canary.clone()).or_else(|| {
+            let mut url = d.canary.clone()?;
+            if d.id == "btcmap" && url.path() == "/v4/events" {
+                url.set_query(None);
+                url.query_pairs_mut().append_pair(
+                    "updated_since",
+                    &(chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339(),
+                );
+            }
+            Some(url)
+        }),
         canary_note: d.canary_note.clone(),
         ua_profile: opts
             .and_then(|o| o.ua_profile.clone())
@@ -223,6 +300,50 @@ pub fn validate(cfg: &EventConfig) -> anyhow::Result<()> {
             && (100..=5000).contains(&cfg.adapters.websocket_deadline_ms),
         "invalid adapter limits"
     );
+    for d in definitions() {
+        anyhow::ensure!(
+            d.domains
+                .iter()
+                .all(|h| *h == h.to_ascii_lowercase() && !h.contains('/'))
+                && d.paths.iter().all(|p| p.starts_with('/'))
+                && [
+                    "page",
+                    "card",
+                    "dice",
+                    "ents24",
+                    "ticketino",
+                    "xceed",
+                    "calendar",
+                    "portal",
+                    "btcmap",
+                    "nostr",
+                    "luma",
+                    "meetup",
+                    "eventbrite",
+                    "partiful",
+                    "posh",
+                    "ringcentral",
+                    "airmeet",
+                    "mobilizon",
+                    "gancio",
+                    "wikidata",
+                    "ics_link",
+                    "jsonld",
+                    "ticketmaster",
+                    "skiddle",
+                    "billetto_api",
+                    "eventfrog_api",
+                    "google_calendar_api",
+                    "resident_advisor",
+                    "none",
+                    "state"
+                ]
+                .contains(&d.parser.as_str())
+                && ["pinakes", "plain", "browser", "firefox"].contains(&d.ua_profile.as_str()),
+            "invalid adapter declaration {}",
+            d.id
+        );
+    }
     for (id, o) in &cfg.adapters.platforms {
         anyhow::ensure!(definition(id).is_some(), "unknown event adapter {id}");
         anyhow::ensure!(
@@ -233,7 +354,12 @@ pub fn validate(cfg: &EventConfig) -> anyhow::Result<()> {
         );
         anyhow::ensure!(
             o.cadence_floor
-                .is_none_or(|n| (3600..=31536000).contains(&n))
+                .is_none_or(|n| ((if definition(id).unwrap().mode == Mode::Cursor {
+                    60
+                } else {
+                    3600
+                })..=31536000)
+                    .contains(&n))
                 && o.months_back.is_none_or(|n| n <= 120)
                 && o.months_forward.is_none_or(|n| (1..=120).contains(&n))
                 && o.max_occurrences.is_none_or(|n| (1..=10000).contains(&n)),

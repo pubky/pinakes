@@ -279,6 +279,7 @@ fn checkpoint(doc: &mut ResourceMeta, id: &str, previous: Option<&str>, next: &s
         previous: previous.map(str::to_owned),
         next: next.into(),
         reset,
+        resync: false,
     });
 }
 async fn saved_cursor(pool: &PgPool, id: &str) -> Option<String> {
@@ -605,7 +606,7 @@ async fn nostr_indexer_outage_is_not_disappearance_and_private_relays_never_conn
         .unwrap()
         .is_none());
     assert!(egress
-        .nostr_request("ws://private.example/", target.filter(), 100)
+        .nostr_request("wss://private.example/", target.filter(), 100)
         .await
         .unwrap_err()
         .to_string()
@@ -685,6 +686,7 @@ async fn nostr_calendar_queues_members_and_reads_accepted_children(pool: PgPool)
         .unwrap()
         .uri()
         .unwrap();
+    store::ensure_resource(&pool, &parent_uri).await.unwrap();
     let (egress, t) = mock_egress(vec![(200, json!([parent]))]);
     let error = nip52::resolve(&parent_uri, &egress, &EventConfig::default(), &pool, false)
         .await
@@ -726,14 +728,14 @@ async fn cursor_http_resync_pagination_and_tombstones(pool: PgPool) {
         coordinate_timezone: false,
         ..Default::default()
     };
-    let uri = "https://portal.einundzwanzig.space/api/meetup-events";
+    let uri = "https://portal.einundzwanzig.space/api/changes";
     let definition = adapters::definition("einundzwanzig").unwrap();
     let at = (Utc::now() + Duration::days(2)).to_rfc3339();
     let event = json!({"id":7,"title":"Meetup","start":at,"link":"https://luma.com/fixture"});
     let (egress, t) = mock_egress(vec![
         (
             200,
-            json!({"next_since":12,"has_more":true,"cursor_expired":false,"changes":[]}),
+            json!({"next_since":12,"has_more":false,"cursor_expired":false,"changes":[]}),
         ),
         (200, json!([event])),
     ]);
@@ -802,11 +804,10 @@ async fn cursor_http_resync_pagination_and_tombstones(pool: PgPool) {
         200,
         json!({"next_since":13,"has_more":true,"changes":[]}),
     )]);
-    assert!(
-        cursor::resolve(&pool, uri, definition, &egress, &cfg, false)
-            .await
-            .is_err()
-    );
+    let partial = cursor::resolve(&pool, uri, definition, &egress, &cfg, false)
+        .await
+        .unwrap();
+    assert_eq!(partial.container.unwrap().cursor.unwrap().next, "13");
     cfg.adapters.max_cursor_pages = 10;
     let btc_uri = "https://api.btcmap.org/v4/events";
     let (egress, t) = mock_egress(vec![(
@@ -886,6 +887,9 @@ async fn google_expiration_resets_then_commits_only_final_token(pool: PgPool) {
         let seen = t.seen.lock().unwrap();
         assert!(seen[0].0.contains("syncToken=expired"));
         assert!(!seen[1].0.contains("syncToken"));
+        assert!(!seen[0].0.contains("timeMin="));
+        assert!(seen[1].0.contains("timeMin=") && seen[1].0.contains("timeMax="));
+        assert!(seen[2].0.contains("timeMin=") && seen[2].0.contains("timeMax="));
         assert!(seen[2].0.contains("pageToken=page-two"));
         assert!(seen.iter().all(|(_, o)| o.sensitive));
     }
@@ -1042,7 +1046,7 @@ async fn adapter_upgrade_reclassifies_legacy_routes_and_keeps_ids(pool: PgPool) 
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn portal_explicit_osm_and_btc_website_are_separate_resources(pool: PgPool) {
+async fn portal_coordinates_are_page_facts_and_btc_website_has_lineage(pool: PgPool) {
     use pinakes_core::{
         event::service::EventService,
         resolver::{osm::OsmResolver, web::WebResolver, Resolver},
@@ -1069,21 +1073,24 @@ async fn portal_explicit_osm_and_btc_website_are_separate_resources(pool: PgPool
         .await
         .unwrap();
     assert!(doc.container.is_none());
-    assert!(doc.location.is_none());
+    assert!(matches!(
+        doc.location_source,
+        Some(pinakes_core::model::LocationSource::Page)
+    ));
     let venue = doc.event.venue.as_ref().unwrap();
-    assert_eq!(venue.osm_id.as_deref(), Some("node/42"));
-    assert!(venue.osm_version.is_some());
-    assert!(venue.resource_id.is_some());
+    assert!(venue.osm_id.is_none() && venue.osm_version.is_none() && venue.resource_id.is_none());
+    assert_eq!(doc.location.as_ref().unwrap().lat, 47.3);
     assert_eq!(doc.event.tz.as_deref(), Some("Europe/Zurich"));
-    let osm: Value = sqlx::query_scalar(
-        "SELECT versions->$1 FROM osm_place WHERE osm_type='node' AND osm_id=42",
-    )
-    .bind(&venue.osm_version)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(osm["name"], "Explicit Hall");
-    assert!(serde_json::to_value(&doc).unwrap().get("address").is_none());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM osm_place")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    store::ensure_resource(&pool, "https://api.btcmap.org/v4/events/1")
+        .await
+        .unwrap();
     let (egress, _) = mock_egress(vec![(
         200,
         json!({"id":1,"status":"live","starts_at":at,"name":"BTC","website":"https://luma.com/chained"}),
@@ -1400,4 +1407,901 @@ async fn recorded_public_adapter_responses_replay_without_network(pool: PgPool) 
         );
         assert_eq!(json!(doc.event.tz), case["tz"], "{id}");
     }
+}
+
+fn platform(
+    pool: &PgPool,
+    config: EventConfig,
+    egress: Egress,
+) -> adapters::service::PlatformResolver {
+    adapters::service::PlatformResolver {
+        web: pinakes_core::resolver::web::WebResolver {
+            egress,
+            config: Default::default(),
+            events: Some(Arc::new(pinakes_core::event::service::EventService {
+                pool: pool.clone(),
+                config,
+                osm: Arc::new(
+                    pinakes_core::resolver::osm::OsmResolver::new(pool.clone(), Default::default())
+                        .unwrap(),
+                ),
+            })),
+        },
+    }
+}
+
+#[test]
+fn review_registry_credentials_and_cadence() {
+    use pinakes_core::{adapter::Mode, resolver::classify};
+    adapters::validate(&EventConfig::default()).unwrap();
+    for uri in [
+        "https://en.wikipedia.org/wiki/Bitcoin",
+        "https://facebook.com/person",
+        "https://zoom.us/about",
+        "https://api.btcmap.org/v4/users",
+        "https://portal.einundzwanzig.space/api/anything",
+    ] {
+        assert_eq!(classify(uri), Some("web"), "{uri}");
+    }
+    assert_eq!(classify("https://api.nostr.wine/search?kind=0"), None);
+    for (id, uri, path) in [
+        ("billetto_api", "https://api.billetto.com/v3/public/events/42?admin=true", "/api/v3/public/events/42"),
+        ("eventfrog_api", "https://api.eventfrog.net/public/v1/events?id=42&admin=true", "/public/v1/events"),
+        ("google_calendar_api", "https://www.googleapis.com/calendar/v3/calendars/abc%40example.org/events?syncToken=attacker", "/calendar/v3/calendars/abc@example.org/events"),
+    ] {
+        let url = adapters::service::keyed_url(id, uri).unwrap();
+        assert_eq!(url.path(), path);
+        assert!(!url.as_str().contains("admin") && !url.as_str().contains("attacker"));
+    }
+    for (id, uri) in [
+        ("billetto_api", "https://api.billetto.com/v3/admin/events"),
+        (
+            "eventfrog_api",
+            "https://api.eventfrog.net/public/v1/orders?id=42",
+        ),
+        (
+            "eventfrog_api",
+            "https://api.eventfrog.net/public/v1/events?id=42&id=43",
+        ),
+        (
+            "google_calendar_api",
+            "https://www.googleapis.com/calendar/v3/calendars/a/acl",
+        ),
+        (
+            "google_calendar_api",
+            "https://www.googleapis.com/calendar/v3/calendars/a%2fb/events",
+        ),
+    ] {
+        assert!(adapters::service::keyed_url(id, uri).is_err());
+        assert!(adapters::detect(uri).is_none());
+    }
+    let options = adapters::Options {
+        key: Some("never-print-this".into()),
+        ..Default::default()
+    };
+    assert!(!format!("{options:?}").contains("never-print-this"));
+    assert!(!serde_json::to_string(&options)
+        .unwrap()
+        .contains("never-print-this"));
+    let now = Utc::now();
+    for (id, seconds) in [
+        ("einundzwanzig", 300),
+        ("btcmap", 900),
+        ("google_calendar_api", 900),
+    ] {
+        let m = adapters::manifest(adapters::definition(id).unwrap(), &Default::default());
+        assert_eq!(m.mode, Mode::Cursor);
+        assert_eq!(
+            pinakes_core::scheduler::container_next(
+                &m,
+                [(Some(now + Duration::hours(1)), None)],
+                None,
+                now,
+                &Default::default()
+            )
+            .unwrap()
+                - now,
+            Duration::seconds(seconds)
+        );
+        assert_eq!(m.expected_fields, ["cursor"]);
+    }
+    assert_eq!(
+        adapters::manifest(adapters::definition("nip52").unwrap(), &Default::default()).mode,
+        Mode::Resource
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn review_shared_roots_and_derived_author_budgets(pool: PgPool) {
+    use pinakes_core::queue::{AuthorBudget, Job};
+    let cfg = EventConfig::default();
+    let (egress, transport) = mock_egress(vec![]);
+    let root_uri = "https://api.btcmap.org/v4/events";
+    for n in 0..20 {
+        let uri = format!("{root_uri}?x={n}");
+        let doc = cursor::resolve(
+            &pool,
+            &uri,
+            adapters::definition("btcmap").unwrap(),
+            &egress,
+            &cfg,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(doc.container.is_none());
+        assert_eq!(doc.url, uri);
+        assert!(doc.aliases.contains(&root_uri.to_owned()));
+    }
+    assert!(transport.seen.lock().unwrap().is_empty());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(DISTINCT root_id) FROM cursor_alias")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    let parent = store::ensure_resource(&pool, "https://example.org/parent")
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO reference(resource_id,author,object_path,kind,created_at) VALUES($1,'sponsor','/pub/test/tag','tag',now())").bind(&parent).execute(&pool).await.unwrap();
+    let a = store::derive_resource(
+        &pool,
+        "https://example.org/parent",
+        "https://example.org/a",
+        "btcmap",
+        2,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let b = store::derive_resource(
+        &pool,
+        "https://example.org/parent",
+        "https://example.org/b",
+        "btcmap",
+        2,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(store::derive_resource(
+        &pool,
+        "https://example.org/parent",
+        "https://example.org/c",
+        "btcmap",
+        2
+    )
+    .await
+    .unwrap()
+    .is_none());
+    assert!(store::derive_resource(
+        &pool,
+        "https://example.org/parent",
+        "https://example.org/a",
+        "btcmap",
+        2
+    )
+    .await
+    .unwrap()
+    .is_some());
+    let budgets = AuthorBudget::default();
+    let job = |id| Job {
+        id,
+        uri: String::new(),
+        attempts: 0,
+        generation: 0,
+    };
+    assert!(budgets.admit(&pool, &job(a), 0.01).await.unwrap());
+    assert!(!budgets.admit(&pool, &job(b), 0.01).await.unwrap());
+    // A derived variant must still sponsor the canonical root's actual fetch.
+    let alias_uri = "https://api.btcmap.org/v4/events?derived=1";
+    store::derive_resource(&pool, "https://example.org/parent", alias_uri, "btcmap", 3)
+        .await
+        .unwrap()
+        .unwrap();
+    cursor::resolve(
+        &pool,
+        alias_uri,
+        adapters::definition("btcmap").unwrap(),
+        &egress,
+        &cfg,
+        false,
+    )
+    .await
+    .unwrap();
+    let root = pinakes_core::model::identity(root_uri).unwrap().0;
+    assert!(!budgets.admit(&pool, &job(root), 0.01).await.unwrap());
+
+    let orphan = "https://example.org/no-author";
+    store::ensure_resource(&pool, orphan).await.unwrap();
+    let c = store::derive_resource(&pool, orphan, "https://example.org/c", "nip52", 2)
+        .await
+        .unwrap()
+        .unwrap();
+    let d = store::derive_resource(&pool, orphan, "https://example.org/d", "nip52", 2)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(budgets.admit(&pool, &job(c), 0.01).await.unwrap());
+    assert!(!budgets.admit(&pool, &job(d), 0.01).await.unwrap());
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn review_portal_cap_commits_progress_and_expires_on_later_page(pool: PgPool) {
+    let uri = "https://portal.einundzwanzig.space/api/changes";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut cfg = EventConfig::default();
+    cfg.adapters.max_cursor_pages = 1;
+    let def = adapters::definition("einundzwanzig").unwrap();
+    let at = (Utc::now() + Duration::days(1)).to_rfc3339();
+    let row = json!({"id":1,"title":"One","start":at});
+    let (egress, _) = mock_egress(vec![(
+        200,
+        json!({"changes":[{"resource":"meetup-event","action":"created","data":row}],"has_more":true,"next_since":10}),
+    )]);
+    let doc = cursor::resolve(&pool, uri, def, &egress, &cfg, false)
+        .await
+        .unwrap();
+    assert!(
+        doc.container
+            .as_ref()
+            .unwrap()
+            .cursor
+            .as_ref()
+            .unwrap()
+            .resync
+    );
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    assert_eq!(saved_cursor(&pool, &id).await.as_deref(), Some("10"));
+    let (egress, t) = mock_egress(vec![
+        (200, json!({"changes":[],"has_more":false,"next_since":11})),
+        (200, json!([row])),
+    ]);
+    let mut doc = cursor::resolve(&pool, uri, def, &egress, &cfg, false)
+        .await
+        .unwrap();
+    doc.fetched_at += 1;
+    assert!(!doc.container.as_ref().unwrap().delta);
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    assert!(t.seen.lock().unwrap()[0].0.contains("since_sequence=10"));
+    assert_eq!(saved_cursor(&pool, &id).await.as_deref(), Some("11"));
+    assert!(!sqlx::query_scalar::<_, bool>(
+        "SELECT adapter_resync FROM event_fetch WHERE resource_id=$1"
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+    cfg.adapters.max_cursor_pages = 2;
+    let (egress, _) = mock_egress(vec![
+        (200, json!({"changes":[],"has_more":true,"next_since":12})),
+        (
+            200,
+            json!({"changes":[],"has_more":false,"next_since":20,"cursor_expired":true}),
+        ),
+        (200, json!([row])),
+    ]);
+    let doc = cursor::resolve(&pool, uri, def, &egress, &cfg, false)
+        .await
+        .unwrap();
+    assert!(
+        doc.container
+            .as_ref()
+            .unwrap()
+            .cursor
+            .as_ref()
+            .unwrap()
+            .reset
+    );
+    assert_eq!(doc.container.unwrap().cursor.unwrap().next, "20");
+    for invalid in [
+        json!("bad"),
+        json!(-1),
+        json!("9".repeat(4097)),
+        json!("9999999999999999"),
+    ] {
+        let (egress, _) = mock_egress(vec![(
+            200,
+            json!({"changes":[],"has_more":true,"next_since":invalid}),
+        )]);
+        assert!(cursor::resolve(&pool, uri, def, &egress, &cfg, false)
+            .await
+            .is_err());
+        assert_eq!(saved_cursor(&pool, &id).await.as_deref(), Some("11"));
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn review_delta_reschedule_unknown_status_hold_and_labels(pool: PgPool) {
+    let uri = "https://api.btcmap.org/v4/events";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let now = Utc::now().timestamp_millis();
+    let mut original = snapshot(uri, 3, now);
+    original.source = "btcmap".into();
+    checkpoint(&mut original, &id, None, "2026-10-15T00:00:00Z", false);
+    store::save_document(&pool, &id, 0, &original)
+        .await
+        .unwrap();
+    let cfg = EventConfig::default();
+    let far = (Utc::now() + Duration::days(1000)).to_rfc3339();
+    let (egress, _) = mock_egress(vec![(
+        200,
+        json!([
+            {"id":0,"status":"live","name":"Moved","starts_at":far,"updated_at":"2035-01-01T00:00:00Z"},
+            {"id":1,"status":"new-unknown","updated_at":"2026-10-15T01:00:00Z"},
+            {"id":99,"status":"live","name":"New outside","starts_at":far,"updated_at":"2026-10-15T01:00:00Z"}
+        ]),
+    )]);
+    let mut doc = cursor::resolve(
+        &pool,
+        uri,
+        adapters::definition("btcmap").unwrap(),
+        &egress,
+        &cfg,
+        false,
+    )
+    .await
+    .unwrap();
+    doc.source = "btcmap".into();
+    doc.fetched_at = now + 1;
+    let next: chrono::DateTime<Utc> = doc
+        .container
+        .as_ref()
+        .unwrap()
+        .cursor
+        .as_ref()
+        .unwrap()
+        .next
+        .parse()
+        .unwrap();
+    assert!(next <= Utc::now() + Duration::minutes(5));
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT name FROM occurrence WHERE resource_id=$1 AND uid='0'"
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        "Moved"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM occurrence WHERE resource_id=$1 AND uid='1'"
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        "scheduled"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM occurrence WHERE uid='99'")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    let next = saved_cursor(&pool, &id).await.unwrap();
+    let mut deleted = snapshot(uri, 0, now + 2);
+    deleted.source = "btcmap".into();
+    deleted.container.as_mut().unwrap().delta = true;
+    deleted.container.as_mut().unwrap().deleted_uids = vec!["1".into(), "2".into()];
+    checkpoint(&mut deleted, &id, Some(&next), "next", false);
+    store::save_document(&pool, &id, 0, &deleted).await.unwrap();
+    assert_eq!(
+        saved_cursor(&pool, &id).await.as_deref(),
+        Some(next.as_str()),
+        "held tombstones must not checkpoint"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT feed_held_total FROM source_state WHERE source='btcmap'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
+    deleted.fetched_at += 1;
+    store::save_document(&pool, &id, 0, &deleted).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource_change WHERE source='btcmap' AND class='cancelled'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource_change WHERE source IN ('event','event_platform')"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn review_full_indexer_page_is_inconclusive_and_ws_is_forbidden() {
+    use adapters::nostr::{self as nip52, Target};
+    let event = signed(
+        31923,
+        100,
+        &[
+            &["d", "unrelated"],
+            &["title", "Other"],
+            &["start", "1792519200"],
+        ],
+    );
+    let target = Target::coordinate(&format!(
+        "31923:{}:not-in-first-page",
+        event.pubkey.to_hex()
+    ))
+    .unwrap();
+    let (egress, _) = mock_egress(vec![(200, json!(vec![event; 100])), (200, json!([]))]);
+    assert!(nip52::lookup(&target, &egress, &Default::default())
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("inconclusive"));
+    let error = egress
+        .nostr_request("ws://example.org/", target.filter(), 100)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("invalid relay"), "{error}");
+}
+
+#[sqlx::test(migrations = false)]
+async fn review_upgrade_preserves_dead_letters_and_staggers_due_rows(pool: PgPool) {
+    let before = sqlx::migrate::Migrator {
+        migrations: std::borrow::Cow::Owned(
+            pinakes_core::MIGRATOR.iter().take(11).cloned().collect(),
+        ),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    before.run(&pool).await.unwrap();
+    let wiki = store::ensure_resource(&pool, "https://en.wikipedia.org/wiki/Article")
+        .await
+        .unwrap();
+    let dead = store::ensure_resource(&pool, "https://luma.com/dead")
+        .await
+        .unwrap();
+    let live = store::ensure_resource(&pool, "https://luma.com/live")
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET resolver='web',attempts=7,dead_letter=true,final=true,next_attempt_at='infinity' WHERE id=$1").bind(&dead).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE resource SET resolver='web' WHERE id=ANY($1)")
+        .bind([&wiki, &live])
+        .execute(&pool)
+        .await
+        .unwrap();
+    pinakes_core::migrate(&pool).await.unwrap();
+    let state: (i32, bool, bool, bool) = sqlx::query_as(
+        "SELECT attempts,dead_letter,final,next_attempt_at='infinity' FROM resource WHERE id=$1",
+    )
+    .bind(&dead)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(state, (7, true, true, true));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT resolver FROM resource WHERE id=$1")
+            .bind(wiki)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "web"
+    );
+    assert!(sqlx::query_scalar::<_,bool>("SELECT next_attempt_at>=now() AND next_attempt_at<=now()+interval '1 hour' FROM resource WHERE id=$1").bind(live).fetch_one(&pool).await.unwrap());
+}
+
+fn recorded_egress(rows: Vec<(&str, &str, Value)>) -> Egress {
+    let map = rows
+        .into_iter()
+        .map(|(uri, body, request)| {
+            (
+                format!(
+                    "{}:{}",
+                    uri,
+                    if request.is_null() {
+                        String::new()
+                    } else {
+                        request.to_string()
+                    }
+                ),
+                Ok(Fetched {
+                    url: uri.parse().unwrap(),
+                    body: body.as_bytes().to_vec(),
+                    content_type: if body.starts_with('<') {
+                        "text/html".into()
+                    } else {
+                        "application/json".into()
+                    },
+                    status: 200,
+                    retry_after_secs: 60,
+                    location: None,
+                    validators: Default::default(),
+                }),
+            )
+        })
+        .collect();
+    Egress::with_backends(
+        pinakes_core::config::EgressConfig {
+            host_requests_per_second: 1000.,
+            ..Default::default()
+        },
+        Arc::new(AdapterDns),
+        Arc::new(RecordedResponses(map)),
+    )
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn review_wikipedia_primary_item_and_plain_web_fallback(pool: PgPool) {
+    use pinakes_core::resolver::Resolver;
+    let uri = "https://en.wikipedia.org/wiki/Bitcoin_Conference";
+    let html = include_str!("fixtures/adapters/wikipedia-item.html");
+    assert_eq!(
+        adapters::service::wikipedia_item(html).as_deref(),
+        Some("Q12345")
+    );
+    assert_eq!(
+        adapters::service::wikipedia_item(
+            "<a href='https://www.wikidata.org/wiki/Q999'>unrelated</a>"
+        ),
+        None
+    );
+    assert_eq!(
+        adapters::service::wikipedia_item(
+            "<a href='https://www.wikidata.org/wiki/Special:EntityPage/Q123'>item</a>"
+        )
+        .as_deref(),
+        Some("Q123")
+    );
+    let entity = "https://www.wikidata.org/wiki/Special:EntityData/Q12345.json";
+    let cfg = EventConfig {
+        geocoding: false,
+        activitypub: false,
+        ..Default::default()
+    };
+    let event=json!({"entities":{"Q12345":{"id":"Q12345","labels":{"en":{"value":"Conference"}},"claims":{"P580":[{"mainsnak":{"datavalue":{"value":{"time":"+2026-10-20T00:00:00Z","precision":11}}}}]}}}}).to_string();
+    let resolver = platform(
+        &pool,
+        cfg.clone(),
+        recorded_egress(vec![
+            (uri, html, Value::Null),
+            (entity, &event, Value::Null),
+        ]),
+    );
+    assert_eq!(resolver.web.resolve(uri).await.unwrap().type_name, "Event");
+    let person=json!({"entities":{"Q12345":{"id":"Q12345","labels":{"en":{"value":"Person"}},"claims":{"P31":[{"mainsnak":{"datavalue":{"value":{"id":"Q5"}}}}]}}}}).to_string();
+    let resolver = platform(
+        &pool,
+        cfg.clone(),
+        recorded_egress(vec![
+            (uri, html, Value::Null),
+            (entity, &person, Value::Null),
+        ]),
+    );
+    assert_eq!(
+        resolver.web.resolve(uri).await.unwrap().type_name,
+        "Article"
+    );
+    let resolver = platform(
+        &pool,
+        cfg,
+        recorded_egress(vec![(
+            uri,
+            "<title>Plain article</title><meta property='og:type' content='article'>",
+            Value::Null,
+        )]),
+    );
+    let doc = resolver.resolve(uri).await.unwrap(); // stale event_platform routing hint is harmless
+    assert_eq!(doc.type_name, "Article");
+    assert_eq!(doc.name.as_deref(), Some("Plain article"));
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn review_portal_missing_title_join_and_derivation_disabled(pool: PgPool) {
+    use pinakes_core::{model::Status, resolver::Resolver};
+    let cfg = EventConfig {
+        geocoding: false,
+        ..Default::default()
+    };
+    let uri = "https://portal.einundzwanzig.space/de/meetup/one/event/7";
+    let (egress, _) = mock_egress(vec![(200, json!([])), (200, json!([]))]);
+    let doc = platform(&pool, cfg.clone(), egress)
+        .resolve(uri)
+        .await
+        .unwrap();
+    assert!(matches!(doc.status, Status::Missing));
+    let (egress, t) = mock_egress(vec![
+        (
+            200,
+            json!([{"id":7,"title":null,"meetup_id":3,"start":(Utc::now()+Duration::days(1)).to_rfc3339()}]),
+        ),
+        (200, json!([{"id":3,"name":"Local Meetup"}])),
+    ]);
+    let doc = platform(&pool, cfg.clone(), egress)
+        .resolve(uri)
+        .await
+        .unwrap();
+    assert_eq!(doc.name.as_deref(), Some("Local Meetup"));
+    assert!(t.seen.lock().unwrap()[1].0.ends_with("/api/meetups"));
+    let uri = "https://api.btcmap.org/v4/events/1";
+    store::ensure_resource(&pool, uri).await.unwrap();
+    let mut cfg = cfg;
+    cfg.adapters.derive_resources = false;
+    let (egress, _) = mock_egress(vec![(
+        200,
+        json!({"id":1,"status":"live","name":"Event","starts_at":(Utc::now()+Duration::days(1)).to_rfc3339(),"website":"https://example.org/no-derivation"}),
+    )]);
+    platform(&pool, cfg, egress).resolve(uri).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource_derivation")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource WHERE uri='https://example.org/no-derivation'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn review_public_canary_redaction_unknown_size_and_disabled_nostr(pool: PgPool) {
+    use pinakes_core::{
+        api::{self, AppState},
+        config::Config,
+        queue,
+        resolver::{web::WebResolver, Resolver},
+    };
+    use tower::ServiceExt;
+    let mut cfg = Config::default();
+    cfg.event.adapters.platforms.insert(
+        "proton".into(),
+        adapters::Options {
+            canary: Some(
+                "https://calendar.proton.me/share/secret-capability?key=private"
+                    .parse()
+                    .unwrap(),
+            ),
+            ..Default::default()
+        },
+    );
+    let state = AppState::new(pool.clone(), cfg.clone()).unwrap();
+    for (app, private) in [
+        (api::router(state.clone()), false),
+        (api::admin_router(state), true),
+    ] {
+        let r = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v1/info")
+                    .extension(axum::extract::ConnectInfo(
+                        "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
+                    ))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let bytes = axum::body::to_bytes(r.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&bytes).contains("secret-capability"),
+            private
+        );
+    }
+    let m = adapters::manifest(adapters::definition("btcmap").unwrap(), &cfg.event);
+    let url = m.canary.as_ref().unwrap();
+    let since: chrono::DateTime<Utc> = url
+        .query_pairs()
+        .find(|(k, _)| k == "updated_since")
+        .unwrap()
+        .1
+        .parse()
+        .unwrap();
+    assert!((Utc::now() - since - Duration::days(1)).num_seconds().abs() <= 1);
+    sqlx::query("INSERT INTO source_state(source,canary_generation,canary_ok,canary_failures) VALUES('btcmap',1,false,12)").execute(&pool).await.unwrap();
+    pinakes_core::canary::record(
+        &pool,
+        &m,
+        1,
+        &Err(pinakes_core::resolver::egress::BodyTooLarge.into()),
+        3600,
+    )
+    .await
+    .unwrap();
+    let state: (Option<bool>, i32) =
+        sqlx::query_as("SELECT canary_ok,canary_failures FROM source_state WHERE source='btcmap'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, (None, 0));
+    let uri = "nostr:naddr1invalid-fixture";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let (egress, t) = mock_egress(vec![]);
+    let web = WebResolver {
+        egress,
+        events: None,
+        config: Default::default(),
+    };
+    assert!(web.queue_sources().contains(&"event_platform"));
+    let q = Default::default();
+    let job = queue::claim(&pool, "event_platform", &q)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.id, id);
+    queue::run_job(&pool, &web, &q, &job).await.unwrap();
+    let state: (i32, bool) =
+        sqlx::query_as("SELECT attempts,dead_letter FROM resource WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, (0, false));
+    assert!(t.seen.lock().unwrap().is_empty());
+}
+
+#[test]
+fn review_nested_flight_and_nuxt_share_one_deadline() {
+    let nested = json!(["{\"noise\":[1,2,3]}"]);
+    let strings = vec![nested; 10000];
+    let html = format!(
+        "<script>{}</script>",
+        serde_json::to_string(&strings).unwrap()
+    );
+    for id in ["xceed", "ents24"] {
+        let before = std::time::Instant::now();
+        assert!(state::parse(id, "https://example.org/event", html.as_bytes()).is_none());
+        assert!(
+            before.elapsed() < std::time::Duration::from_millis(1200),
+            "deadline exceeded for {id}"
+        );
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn review_alias_references_scope_search_and_occurrence_reads(pool: PgPool) {
+    use pinakes_core::api::{self, AppState};
+    use tower::ServiceExt;
+    let alias_uri = "https://api.btcmap.org/v4/events?variant=one";
+    let alias = store::ensure_resource(&pool, alias_uri).await.unwrap();
+    sqlx::query("INSERT INTO reference(resource_id,author,object_path,kind,label,created_at) VALUES($1,$2,'/pub/tag/1','tag','review',now())").bind(&alias).bind("y".repeat(52)).execute(&pool).await.unwrap();
+    let (egress, _) = mock_egress(vec![]);
+    cursor::resolve(
+        &pool,
+        alias_uri,
+        adapters::definition("btcmap").unwrap(),
+        &egress,
+        &Default::default(),
+        false,
+    )
+    .await
+    .unwrap();
+    let root_uri = "https://api.btcmap.org/v4/events";
+    let root = pinakes_core::model::identity(root_uri).unwrap().0;
+    let doc = snapshot(root_uri, 3, Utc::now().timestamp_millis());
+    store::save_document(&pool, &root, 0, &doc).await.unwrap();
+    let app = api::router(AppState::new(pool.clone(), Default::default()).unwrap());
+    for path in [
+        format!("/v1/resources/{alias}/occurrences?limit=2"),
+        "/v1/search?type=Event&tags=review&facet=tags".into(),
+    ] {
+        let r = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(&path)
+                    .extension(axum::extract::ConnectInfo(
+                        "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
+                    ))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: Value = serde_json::from_slice(
+            &axum::body::to_bytes(r.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let items = v["items"].as_array().unwrap();
+        assert_eq!(
+            items.len(),
+            if path.contains("occurrences") { 2 } else { 3 }
+        );
+        assert!(items.iter().all(|v| v["resource_id"] == root));
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn review_future_stored_cursor_resyncs_without_skipping_data(pool: PgPool) {
+    let uri = "https://api.btcmap.org/v4/events";
+    install_cursor(&pool, uri, "2035-01-01T00:00:00Z").await;
+    let (egress, t) = mock_egress(vec![(200, json!([]))]);
+    let doc = cursor::resolve(
+        &pool,
+        uri,
+        adapters::definition("btcmap").unwrap(),
+        &egress,
+        &Default::default(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(doc.container.unwrap().cursor.unwrap().reset);
+    assert!(t.seen.lock().unwrap()[0].0.contains("updated_since=1970"));
+    let uri = "https://portal.einundzwanzig.space/api/changes";
+    install_cursor(&pool, uri, "9999999999999999").await;
+    let (egress, t) = mock_egress(vec![
+        (200, json!({"next_since":20,"has_more":false,"changes":[]})),
+        (200, json!([])),
+    ]);
+    let doc = cursor::resolve(
+        &pool,
+        uri,
+        adapters::definition("einundzwanzig").unwrap(),
+        &egress,
+        &Default::default(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(doc.container.unwrap().cursor.unwrap().reset);
+    assert!(t.seen.lock().unwrap()[0].0.contains("since_sequence=0"));
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn review_luma_calendar_discovery_and_non_calendar_client_url(pool: PgPool) {
+    use nostr::nips::nip19::ToBech32;
+    use pinakes_core::resolver::Resolver;
+    let event = signed(31923, 100, &[&["d", "fixture"]]);
+    let npub = event.pubkey.to_bech32().unwrap();
+    assert_eq!(
+        pinakes_core::resolver::classify(&format!("https://njump.me/{npub}")),
+        Some("web")
+    );
+    let uri = "https://luma.com/fixture-calendar";
+    let start = (Utc::now() + Duration::days(1)).format("%Y%m%dT%H%M%SZ");
+    let ics=format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:luma-calendar\r\nDTSTART:{start}\r\nSUMMARY:Calendar member\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n");
+    let egress = recorded_egress(vec![
+        (uri, "<title>My calendar</title>", Value::Null),
+        (
+            "https://api.lu.ma/url?url=fixture-calendar",
+            r#"{"data":{"calendar":{"api_id":"cal-fixture"}}}"#,
+            Value::Null,
+        ),
+        (
+            "https://api.lu.ma/ics/get?entity=calendar&id=cal-fixture",
+            &ics,
+            Value::Null,
+        ),
+    ]);
+    let cfg = EventConfig {
+        geocoding: false,
+        activitypub: false,
+        ..Default::default()
+    };
+    let doc = platform(&pool, cfg, egress).resolve(uri).await.unwrap();
+    assert_eq!(doc.type_name, "DataFeed");
+    assert_eq!(doc.container.unwrap().occurrences.len(), 1);
 }

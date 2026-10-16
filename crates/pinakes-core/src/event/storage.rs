@@ -6,6 +6,7 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub struct Prepared {
+    pub(crate) source: String,
     validators: Option<Value>,
     last: Option<i64>,
     fetched_at: i64,
@@ -174,7 +175,13 @@ pub async fn prepare(
     let mut incoming: BTreeSet<_> = container
         .occurrences
         .iter()
-        .filter(|o| mutable(&o.doc) || !old.contains_key(&o.key()))
+        .filter(|o| {
+            (mutable(&o.doc) || !old.contains_key(&o.key()))
+                && (old.contains_key(&o.key())
+                    || o.doc.start.is_some_and(|at| {
+                        at >= container.horizon_start && at <= container.horizon_end
+                    }))
+        })
         .map(|o| o.key())
         .collect();
     let fetched_keys = incoming.clone();
@@ -198,7 +205,7 @@ pub async fn prepare(
     let row_growth = incoming.iter().filter(|k| !old.contains_key(*k)).count();
     let excessive = old.len() + row_growth > container.limits.max_rows
         || (!repeated && !old.is_empty() && fresh.len() > container.limits.max_new_keys);
-    let hold = excessive || (!container.delta && losses.len() * 2 > keys.len() && !repeated);
+    let hold = excessive || (losses.len() * 2 > keys.len() && !repeated);
     let holds = if hold { old_holds.saturating_add(1) } else { 0 };
     let floor = normal_ttl
         .max(container.limits.cadence_floor)
@@ -212,6 +219,10 @@ pub async fn prepare(
         .min(7 * 86400)
         .max(floor);
     let mut plan = Prepared {
+        source: container
+            .cursor
+            .as_ref()
+            .map_or_else(|| "event".to_owned(), |c| c.adapter.clone()),
         validators: container
             .validators
             .as_ref()
@@ -282,8 +293,16 @@ pub async fn prepare(
     for item in &container.occurrences {
         let key = item.key();
         let previous = old.get(&key);
+        if previous.is_none()
+            && item
+                .doc
+                .start
+                .is_some_and(|at| at < container.horizon_start || at > container.horizon_end)
+        {
+            continue;
+        }
         if previous.is_some_and(|(_, _, d, _, _, seq, modified)| {
-            !mutable(d)
+            (!container.delta && !mutable(d))
                 || *seq > item.sequence
                 || *seq == item.sequence && modified.zip(item.modified).is_some_and(|(a, b)| a > b)
         }) {
@@ -381,7 +400,7 @@ pub async fn apply(
     sqlx::query("UPDATE event_fetch SET last_snapshot_at=$2,keys=$3,held_keys=$4,missing_keys=$5,hold_count=$6,horizon_start=$7,retention_days=$8,validators=coalesce($9,validators),horizon_end=$10 WHERE resource_id=$1").bind(id).bind(plan.fetched_at).bind(&plan.keys).bind(&plan.held).bind(json!(plan.missing)).bind(plan.holds as i32).bind(plan.horizon).bind(plan.retention_days as i32).bind(&plan.validators).bind(plan.horizon_end).execute(&mut **tx).await?;
 
     if !plan.applied {
-        sqlx::query("INSERT INTO source_state(source,feed_held_total) VALUES('event',1) ON CONFLICT(source) DO UPDATE SET feed_held_total=source_state.feed_held_total+1").execute(&mut **tx).await?;
+        sqlx::query("INSERT INTO source_state(source,feed_held_total) VALUES($1,1) ON CONFLICT(source) DO UPDATE SET feed_held_total=source_state.feed_held_total+1").bind(&plan.source).execute(&mut **tx).await?;
         return Ok(Some(false));
     }
     for chunk in plan.purge.chunks(256) {
@@ -409,7 +428,7 @@ impl Prepared {
         changes::append(
             tx,
             id,
-            "event",
+            &self.source,
             None,
             Some(json!({"occurrence_changes":self.change_count,"resource_changes":usize::from(parent.is_some()),"change_count":self.change_count+usize::from(parent.is_some()),"resource_change":parent.map(|d|json!({"class":d.class,"fields":d.fields})),"type_path":["Thing","Event"]})),
             changes::Diff {
@@ -431,7 +450,7 @@ impl Prepared {
             changes::append(
                 tx,
                 id,
-                "event",
+                &self.source,
                 change.before.clone(),
                 change.after.clone(),
                 changes::Diff {
@@ -562,7 +581,13 @@ pub async fn list(
             "occurrence cursor belongs to another resource or window",
         ));
     }
-    let horizon: Option<Option<chrono::DateTime<chrono::Utc>>> = sqlx::query_scalar("SELECT e.horizon_start FROM resource r LEFT JOIN event_fetch e ON e.resource_id=r.id WHERE r.id=$1").bind(&id).fetch_optional(&state.pool).await?;
+    let root: String = sqlx::query_scalar(
+        "SELECT coalesce((SELECT root_id FROM cursor_alias WHERE alias_id=$1),$1)",
+    )
+    .bind(&id)
+    .fetch_one(&state.pool)
+    .await?;
+    let horizon: Option<Option<chrono::DateTime<chrono::Utc>>> = sqlx::query_scalar("SELECT e.horizon_start FROM resource r LEFT JOIN event_fetch e ON e.resource_id=r.id WHERE r.id=$1").bind(&root).fetch_optional(&state.pool).await?;
     let Some(horizon) = horizon else {
         return Err(ApiError(
             axum::http::StatusCode::NOT_FOUND,
@@ -583,7 +608,7 @@ pub async fn list(
     if to.is_some_and(|to| from > to) {
         return Err(ApiError::bad("invalid occurrence window"));
     }
-    let values:Vec<Value>=sqlx::query_scalar("SELECT (to_jsonb(o)-ARRAY['point','effective_point','doc','document','content_hash','modified','sequence','search_text']::text[])||jsonb_build_object('document',document,'occurrence',jsonb_build_object('uid',uid,'recurrence_id',nullif(recurrence_id,''),'event_resource_id',event_resource_id)) FROM event_occurrence o WHERE resource_id=$1 AND start_at>=$2 AND ($3::timestamptz IS NULL OR start_at<=$3) AND ($4::timestamptz IS NULL OR (start_at,uid,recurrence_id)>($4,$5,$6)) ORDER BY start_at,uid,recurrence_id LIMIT $7").bind(&id).bind(from).bind(to).bind(cursor.as_ref().map(|c|c.at)).bind(cursor.as_ref().map(|c|&c.uid)).bind(cursor.as_ref().map(|c|&c.rid)).bind((limit+1) as i64).fetch_all(&state.pool).await?;
+    let values:Vec<Value>=sqlx::query_scalar("SELECT (to_jsonb(o)-ARRAY['point','effective_point','doc','document','content_hash','modified','sequence','search_text']::text[])||jsonb_build_object('document',document,'occurrence',jsonb_build_object('uid',uid,'recurrence_id',nullif(recurrence_id,''),'event_resource_id',event_resource_id)) FROM event_occurrence o WHERE resource_id=$1 AND start_at>=$2 AND ($3::timestamptz IS NULL OR start_at<=$3) AND ($4::timestamptz IS NULL OR (start_at,uid,recurrence_id)>($4,$5,$6)) ORDER BY start_at,uid,recurrence_id LIMIT $7").bind(&root).bind(from).bind(to).bind(cursor.as_ref().map(|c|c.at)).bind(cursor.as_ref().map(|c|&c.uid)).bind(cursor.as_ref().map(|c|&c.rid)).bind((limit+1) as i64).fetch_all(&state.pool).await?;
     let more = values.len() > limit;
     let items: Vec<OccurrenceRecord> = values
         .into_iter()

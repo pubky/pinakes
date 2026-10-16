@@ -13,6 +13,15 @@ use tokio::{
 };
 use url::{Host, Url};
 
+#[derive(Debug)]
+pub struct BodyTooLarge;
+impl std::fmt::Display for BodyTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("body exceeds cap (pages 1 MB)")
+    }
+}
+impl std::error::Error for BodyTooLarge {}
+
 pub const BODY_CAP: usize = 1024 * 1024;
 pub const USER_AGENT: &str = concat!(
     "pinakes/",
@@ -234,11 +243,11 @@ pub async fn read_response_with(
         }
         let max = options.feed_cap.unwrap_or(BODY_CAP);
         if response.content_length().is_some_and(|n| n > max as u64) {
-            bail!("body exceeds cap (pages 1 MB)");
+            return Err(BodyTooLarge.into());
         }
         while let Some(chunk) = response.chunk().await? {
             if body.len() + chunk.len() > max {
-                bail!("body exceeds cap (pages 1 MB)");
+                return Err(BodyTooLarge.into());
             }
             body.extend_from_slice(&chunk);
             let sniff = String::from_utf8_lossy(&body[..body.len().min(256)])
@@ -320,10 +329,7 @@ impl Egress {
         use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
         tokio::time::timeout(Duration::from_millis(deadline_ms), async {
             let url = Url::parse(uri)?;
-            if !matches!(url.scheme(), "ws" | "wss")
-                || !url.username().is_empty()
-                || url.password().is_some()
-            {
+            if url.scheme() != "wss" || !url.username().is_empty() || url.password().is_some() {
                 bail!("invalid relay URL");
             }
             let host = url
@@ -407,7 +413,9 @@ impl Egress {
                 })
                 .map_err(|error| {
                     // A reqwest cause can embed the complete URL, including API credentials.
-                    if let Some(retry) = error.downcast_ref::<super::RetryLater>() {
+                    if error.is::<BodyTooLarge>() {
+                        anyhow::Error::new(BodyTooLarge)
+                    } else if let Some(retry) = error.downcast_ref::<super::RetryLater>() {
                         anyhow::Error::new(super::RetryLater {
                             class: retry.class,
                             seconds: retry.seconds,

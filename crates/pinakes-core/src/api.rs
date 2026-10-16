@@ -634,14 +634,14 @@ pub async fn search(
             .push_bind(text.clone())
             .push(")");
     }
-    sql.push(" AND EXISTS (SELECT 1 FROM reference f WHERE f.resource_id=r.id");
+    sql.push(" AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id");
     scope(&mut sql, &q, &reach);
     sql.push(")");
     if !tags.is_empty() {
         if q.match_mode.as_deref() == Some("all") {
             for tag in &tags {
                 sql.push(
-                    " AND EXISTS (SELECT 1 FROM reference f WHERE f.resource_id=r.id AND f.label=",
+                    " AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id AND f.label=",
                 )
                 .push_bind(tag.clone());
                 scope(&mut sql, &q, &reach);
@@ -649,7 +649,7 @@ pub async fn search(
             }
         } else {
             sql.push(
-                " AND EXISTS (SELECT 1 FROM reference f WHERE f.resource_id=r.id AND f.label=ANY(",
+                " AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id AND f.label=ANY(",
             )
             .push_bind(tags)
             .push(")");
@@ -683,7 +683,7 @@ pub async fn search(
         sql.push(" ORDER BY rank DESC,unit_id DESC LIMIT ").push_bind((q.limit.unwrap_or(50)+1) as i64).push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p) ORDER BY rank DESC,unit_id DESC) FROM page p),'[]') AS items, ");
     }
     if q.facet.as_deref() == Some("tags") {
-        sql.push("coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY count DESC,label) FROM (SELECT f.label,count(DISTINCT r.unit_id) AS count FROM reference f JOIN filtered r ON r.id=f.resource_id WHERE f.label IS NOT NULL");
+        sql.push("coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY count DESC,label) FROM (SELECT f.label,count(DISTINCT r.unit_id) AS count FROM effective_reference f JOIN filtered r ON r.id=f.resource_id WHERE f.label IS NOT NULL");
         scope(&mut sql, &q, &reach);
         sql.push(" GROUP BY f.label) t),'[]')");
     } else {
@@ -898,13 +898,40 @@ pub async fn resolve(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
-#[utoipa::path(get,path="/v1/info",responses((status=200,body=Value)),description="Public summary only; the same path on admin_listen includes source diagnostics and metrics. Cached for 15 seconds.")]
+#[derive(Serialize, ToSchema)]
+pub struct Info {
+    pub version: String,
+    pub manifests: Vec<crate::adapter::Manifest>,
+    pub counts: InfoCounts,
+    pub ingestion: Vec<Value>,
+    pub osm_licence: OsmLicence,
+    pub resolvers: Value,
+}
+#[derive(Serialize, ToSchema)]
+pub struct InfoCounts {
+    pub resources: i64,
+    pub references: i64,
+    pub occurrences: i64,
+}
+#[derive(Serialize, ToSchema)]
+pub struct OsmLicence {
+    pub licence: String,
+    pub attribution: String,
+    pub url: String,
+    pub dump: String,
+}
+#[utoipa::path(get,path="/v1/info",responses((status=200,body=Info)),description="Public summary only; the same path on admin_listen includes source diagnostics and metrics. Cached for 15 seconds.")]
 pub async fn info(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let mut body = full_info(&state).await?;
     body.as_object_mut().unwrap().remove("sources");
     body.as_object_mut().unwrap().remove("metrics");
     for row in body["ingestion"].as_array_mut().unwrap() {
         row.as_object_mut().unwrap().remove("nexus");
+    }
+    for m in body["manifests"].as_array_mut().unwrap() {
+        if let Some(url) = m["canary"].as_str().and_then(|s| url::Url::parse(s).ok()) {
+            m["canary"] = url.host_str().map(|h| json!(h)).unwrap_or(Value::Null);
+        }
     }
     Ok(Json(body))
 }

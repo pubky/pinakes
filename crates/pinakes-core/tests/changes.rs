@@ -8,7 +8,7 @@ use pinakes_core::{
     model::{ResourceMeta, Status},
     queue,
     resolver::Resolver,
-    source, store,
+    store,
     telemetry::{self, Metrics},
 };
 use serde_json::{json, Value};
@@ -218,14 +218,6 @@ async fn paging_lookup_retention_and_deleted_history(pool: PgPool) {
     changes::retain(&pool, 90).await.unwrap();
     assert_eq!(call(&app, "GET", "/v1/changes?cursor=1", None).await.0, 410);
     assert_eq!(call(&app, "GET", "/v1/changes?cursor=0", None).await.0, 200);
-}
-#[sqlx::test(migrations = "../../migrations")]
-async fn aggregate_cursor_state(pool: PgPool) {
-    source::cursor(&pool, "calendar", Some("new-cursor"), true)
-        .await
-        .unwrap();
-    let (cursor,resets,held):(String,i64,i64)=sqlx::query_as("SELECT cursor,cursor_resets_total,feed_held_total FROM source_state WHERE source='calendar'").fetch_one(&pool).await.unwrap();
-    assert_eq!((cursor.as_str(), resets, held), ("new-cursor", 1, 0));
 }
 #[sqlx::test(migrations = "../../migrations")]
 async fn overdue_priority_respects_backoff_and_final(pool: PgPool) {
@@ -643,7 +635,7 @@ async fn public_info_is_redacted_and_source_errors_are_classes(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    source::outcome(
+    pinakes_core::source::outcome(
         &pool,
         "web",
         Some("connect https://upstream.example/private?token=secret"),

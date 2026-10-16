@@ -2321,7 +2321,8 @@ async fn vanished_feed_confirms_twice_and_recovers_through_queue(pool: PgPool) {
         } else {
             "example.org"
         };
-        let uri = format!("https://{host}/vanished-{status}.ics");
+        let path = if platform { "/calendar/ical" } else { "" };
+        let uri = format!("https://{host}{path}/vanished-{status}.ics");
         let id = store::ensure_resource(&pool, &uri).await.unwrap();
         let calendar = (200, "text/calendar".into(), future_calendar(5).into_bytes());
         let missing = (

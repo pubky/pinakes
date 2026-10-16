@@ -201,8 +201,6 @@ pub struct Container {
     /// Committed with the snapshot, never before parsing or a generation fence.
     pub validators: Option<crate::resolver::egress::Validators>,
     pub limits: ContainerLimits,
-    /// Explicit upstream OSM facts; saved only to osm_place before attaching version references.
-    pub osm_venues: Vec<(String, ResourceMeta)>,
     pub delta: bool,
     pub deleted_uids: Vec<String>,
     pub cursor: Option<adapters::cursor::Checkpoint>,

@@ -53,6 +53,20 @@ impl Resolver for WebResolver {
             .is_none_or(|u| self.egress.allows(u.as_str()))
     }
     async fn resolve(&self, uri: &str) -> Result<ResourceMeta> {
+        if !url::Url::parse(uri)
+            .is_ok_and(|u| matches!(u.scheme(), "http" | "https" | "webcal" | "webcals"))
+        {
+            return Err(super::RetryLater {
+                class: "disabled",
+                seconds: 3600,
+            }
+            .into());
+        }
+        if Url::parse(uri).is_ok_and(|u| u.host_str() == Some("api.nostr.wine"))
+            && crate::event::adapters::detect(uri).is_none()
+        {
+            return Err(super::ErrorClass("policy").into());
+        }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         tokio::time::timeout_at(deadline, async {
             let fetched = if let Some(events) = &self.events {
@@ -95,6 +109,17 @@ impl Resolver for WebResolver {
                 extracted.doc.start = None;
                 extracted.doc.end = None;
                 extracted.doc.event = Default::default();
+            }
+            if self
+                .events
+                .as_ref()
+                .is_some_and(|e| e.config.adapters.enabled)
+            {
+                if let Some(doc) =
+                    crate::event::adapters::service::wikipedia(uri, &fetched, &self.egress).await
+                {
+                    extracted.doc = doc;
+                }
             }
             if let Some(endpoint) = extracted.oembed.take() {
                 // Discovery is the only additional fetch; it follows the same policy as the page.

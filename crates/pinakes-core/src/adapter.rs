@@ -2,7 +2,7 @@ use crate::model::ResourceMeta;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
     Cursor,
@@ -20,7 +20,7 @@ impl Mode {
         }
     }
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct Manifest {
     pub source: String,
     pub mode: Mode,
@@ -28,6 +28,7 @@ pub struct Manifest {
     pub identity: String,
     pub cancellation: String,
     pub expected_fields: Vec<String>,
+    #[schema(value_type = Option<String>)]
     pub canary: Option<Url>,
     pub canary_note: Option<String>,
     pub ua_profile: String,
@@ -115,6 +116,9 @@ impl Manifest {
         self.expected_fields
             .iter()
             .filter(|field| {
+                if field.as_str() == "cursor" {
+                    return doc.container.as_ref().is_none_or(|c| c.cursor.is_none());
+                }
                 let value = field.split('.').try_fold(&value, |v, k| v.get(k));
                 value.is_none_or(|v| {
                     v.is_null()

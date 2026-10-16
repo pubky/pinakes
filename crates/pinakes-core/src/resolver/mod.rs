@@ -69,6 +69,12 @@ pub fn classify(uri: &str) -> Option<&'static str> {
         {
             Some("pubky")
         }
+        "http" | "https"
+            if url.host_str() == Some("api.nostr.wine")
+                && crate::event::adapters::detect(uri).is_none() =>
+        {
+            None
+        }
         "http" | "https" if osm::parse_id(uri).is_some() => Some("osm"),
         "nostr" => Some("event_platform"),
         "http" | "https" | "webcal" | "webcals"

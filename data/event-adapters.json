@@ -7,10 +7,12 @@
     "paths": [],
     "parser": "portal",
     "mode": "cursor",
-    "cadence_floor": 3600,
+    "cadence_floor": 300,
     "identity": "meetup_event_id/nostr_address",
     "cancellation": "explicit_or_missing_twice",
-    "expected_fields": [],
+    "expected_fields": [
+      "cursor"
+    ],
     "canary": "https://portal.einundzwanzig.space/api/changes?since_sequence=0&limit=1",
     "canary_note": null,
     "ua_profile": "pinakes",
@@ -28,10 +30,12 @@
     ],
     "parser": "btcmap",
     "mode": "cursor",
-    "cadence_floor": 3600,
+    "cadence_floor": 900,
     "identity": "platform_id",
     "cancellation": "explicit_or_missing_twice",
-    "expected_fields": [],
+    "expected_fields": [
+      "cursor"
+    ],
     "canary": "https://api.btcmap.org/v4/events?updated_since=2026-10-15T00%3A00%3A00Z&include_deleted=true",
     "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
     "ua_profile": "pinakes",
@@ -50,7 +54,7 @@
     ],
     "paths": [],
     "parser": "nostr",
-    "mode": "cursor",
+    "mode": "resource",
     "cadence_floor": 3600,
     "identity": "kind:pubkey:d_or_event_id",
     "cancellation": "explicit_or_missing_twice",
@@ -70,7 +74,9 @@
     "domains": [
       "calendar.google.com"
     ],
-    "paths": [],
+    "paths": [
+      "/calendar/ical/"
+    ],
     "parser": "calendar",
     "mode": "container",
     "cadence_floor": 3600,
@@ -89,7 +95,9 @@
     "domains": [
       "icloud.com"
     ],
-    "paths": [],
+    "paths": [
+      "/published/"
+    ],
     "parser": "calendar",
     "mode": "container",
     "cadence_floor": 3600,
@@ -97,7 +105,7 @@
     "cancellation": "explicit_or_missing_twice",
     "expected_fields": [],
     "canary": "webcal://p29-caldav.icloud.com/published/2/MTcyMDQzMDA3OTcxNzIwNBo0YWxLi9E9wE87BujEc05s_wNSlxHYpVqZebpx8p79",
-    "canary_note": "Alberta public diploma exam November schedule; source: 2026–27 bulletin p.73.",
+    "canary_note": "Alberta public diploma exam November schedule; source: 2026\u201327 bulletin p.73.",
     "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
@@ -109,7 +117,10 @@
       "outlook.office365.com",
       "outlook.live.com"
     ],
-    "paths": [],
+    "paths": [
+      "/owa/calendar/",
+      "/owa/0/calendar/"
+    ],
     "parser": "calendar",
     "mode": "container",
     "cadence_floor": 3600,
@@ -128,7 +139,11 @@
     "domains": [
       "nch.nerdraum.de"
     ],
-    "paths": [],
+    "paths": [
+      "/remote.php/dav/public-calendars/",
+      "/apps/calendar/p/",
+      "/apps/calendar/embed/"
+    ],
     "parser": "calendar",
     "mode": "container",
     "cadence_floor": 3600,
@@ -410,10 +425,13 @@
   {
     "id": "wikidata",
     "domains": [
-      "wikidata.org",
-      "wikipedia.org"
+      "wikidata.org"
     ],
-    "paths": [],
+    "paths": [
+      "/wiki/Q",
+      "/entity/Q",
+      "/wiki/Special:EntityData/"
+    ],
     "parser": "wikidata",
     "mode": "resource",
     "cadence_floor": 3600,
@@ -1099,10 +1117,12 @@
     "paths": [],
     "parser": "google_calendar_api",
     "mode": "cursor",
-    "cadence_floor": 3600,
+    "cadence_floor": 900,
     "identity": "platform_id",
     "cancellation": "explicit_or_missing_twice",
-    "expected_fields": [],
+    "expected_fields": [
+      "cursor"
+    ],
     "canary": null,
     "canary_note": "operator must configure a public sample",
     "ua_profile": "pinakes",
@@ -1138,7 +1158,9 @@
       "facebook.com",
       "fb.me"
     ],
-    "paths": [],
+    "paths": [
+      "/events/"
+    ],
     "parser": "card",
     "mode": "none",
     "cadence_floor": 2592000,
@@ -1264,7 +1286,12 @@
       "teams.microsoft.com",
       "teams.live.com"
     ],
-    "paths": [],
+    "paths": [
+      "/j/",
+      "/w/",
+      "/my/",
+      "/l/meetup-join/"
+    ],
     "parser": "card",
     "mode": "none",
     "cadence_floor": 2592000,

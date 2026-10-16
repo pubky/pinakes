@@ -116,6 +116,7 @@ pub fn object(id: &str, uri: &str, v: &Value) -> Option<ResourceMeta> {
     .and_then(|v| v.as_str())
     .or_else(|| v.pointer("/startDate/timezone").and_then(Value::as_str))
     .or_else(|| v.pointer("/dates/timezone").and_then(Value::as_str))
+    .or_else(|| v.pointer("/options/timezone").and_then(Value::as_str))
     .or_else(|| v.pointer("/start/timeZone").and_then(Value::as_str))
     .or_else(|| {
         v.pointer("/venue/area/ianaTimeZone")
@@ -219,7 +220,12 @@ pub fn object(id: &str, uri: &str, v: &Value) -> Option<ResourceMeta> {
 /// Read JSON values at balanced braces, including JSON strings in React flight payloads.
 /// The work is bounded by the transport cap and a fixed number of candidates.
 pub fn values(text: &str) -> Vec<Value> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+    values_before(
+        text,
+        std::time::Instant::now() + std::time::Duration::from_millis(100),
+    )
+}
+fn values_before(text: &str, deadline: std::time::Instant) -> Vec<Value> {
     let mut bytes_scanned = 0usize;
     let mut out = vec![];
     let bytes = text.as_bytes();
@@ -252,8 +258,13 @@ pub fn values(text: &str) -> Vec<Value> {
     }
     out
 }
-fn candidate<'a>(v: &'a Value, depth: usize, remaining: &mut usize) -> Option<&'a Value> {
-    if depth > 24 || *remaining == 0 {
+fn candidate<'a>(
+    v: &'a Value,
+    depth: usize,
+    remaining: &mut usize,
+    deadline: std::time::Instant,
+) -> Option<&'a Value> {
+    if depth > 24 || *remaining == 0 || std::time::Instant::now() >= deadline {
         return None;
     }
     *remaining -= 1;
@@ -274,7 +285,10 @@ fn candidate<'a>(v: &'a Value, depth: usize, remaining: &mut usize) -> Option<&'
         "result",
         "initialState",
     ] {
-        if let Some(found) = v.get(key).and_then(|v| candidate(v, depth + 1, remaining)) {
+        if let Some(found) = v
+            .get(key)
+            .and_then(|v| candidate(v, depth + 1, remaining, deadline))
+        {
             return Some(found);
         }
     }
@@ -287,8 +301,10 @@ fn candidate<'a>(v: &'a Value, depth: usize, remaining: &mut usize) -> Option<&'
                     "recommendations" | "relatedEvents" | "similarEvents" | "analytics"
                 )
             })
-            .find_map(|(_, v)| candidate(v, depth + 1, remaining)),
-        Value::Array(a) => a.iter().find_map(|v| candidate(v, depth + 1, remaining)),
+            .find_map(|(_, v)| candidate(v, depth + 1, remaining, deadline)),
+        Value::Array(a) => a
+            .iter()
+            .find_map(|v| candidate(v, depth + 1, remaining, deadline)),
         _ => None,
     }
 }
@@ -309,7 +325,7 @@ pub fn parse(id: &str, uri: &str, body: &[u8]) -> Option<ResourceMeta> {
                 break;
             }
             let content = node.text().collect::<String>();
-            roots.extend(values(&content));
+            roots.extend(values_before(&content, deadline));
         }
         if id == "ticketino" {
             let get = |s: &str| {
@@ -324,20 +340,20 @@ pub fn parse(id: &str, uri: &str, body: &[u8]) -> Option<ResourceMeta> {
     // Decode JSON string payloads without executing scripts or accepting unbounded recursion.
     for _ in 0..3 {
         let mut extra = vec![];
-        fn strings(v: &Value, depth: usize, out: &mut Vec<Value>) {
-            if depth > 16 || out.len() > 256 {
+        fn strings(v: &Value, depth: usize, out: &mut Vec<Value>, deadline: std::time::Instant) {
+            if depth > 16 || out.len() >= 256 || std::time::Instant::now() >= deadline {
                 return;
             }
             match v {
-                Value::String(s) if s.contains('{') => out.extend(values(s)),
+                Value::String(s) if s.contains('{') => out.extend(values_before(s, deadline)),
                 Value::Array(a) => {
                     for v in a {
-                        strings(v, depth + 1, out)
+                        strings(v, depth + 1, out, deadline)
                     }
                 }
                 Value::Object(m) => {
                     for v in m.values() {
-                        strings(v, depth + 1, out)
+                        strings(v, depth + 1, out, deadline)
                     }
                 }
                 _ => (),
@@ -347,7 +363,7 @@ pub fn parse(id: &str, uri: &str, body: &[u8]) -> Option<ResourceMeta> {
             if extra.len() >= 256 || std::time::Instant::now() >= deadline {
                 break;
             }
-            strings(root, 0, &mut extra);
+            strings(root, 0, &mut extra, deadline);
         }
         if extra.is_empty() {
             break;
@@ -360,9 +376,12 @@ pub fn parse(id: &str, uri: &str, body: &[u8]) -> Option<ResourceMeta> {
     }
     if id == "ents24" {
         for root in &roots {
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
             if let Some(a) = root.as_array() {
-                let expanded = nuxt(&Value::from(0), a, 0, &mut 10000);
-                if let Some(v) = candidate(&expanded, 0, &mut 10000) {
+                let expanded = nuxt(&Value::from(0), a, 0, &mut 10000, deadline);
+                if let Some(v) = candidate(&expanded, 0, &mut 10000, deadline) {
                     if let Some(d) = object(id, uri, v) {
                         return Some(d);
                     }
@@ -382,7 +401,7 @@ pub fn parse(id: &str, uri: &str, body: &[u8]) -> Option<ResourceMeta> {
         if std::time::Instant::now() >= deadline {
             return None;
         }
-        if let Some(v) = candidate(root, 0, &mut nodes) {
+        if let Some(v) = candidate(root, 0, &mut nodes, deadline) {
             if let Some(fallback) = object(id, uri, v) {
                 if !doc.type_path.contains(&"Event".into()) {
                     doc.set_type("Event");
@@ -403,8 +422,14 @@ pub fn parse(id: &str, uri: &str, body: &[u8]) -> Option<ResourceMeta> {
     doc.source = id.into();
     Some(doc)
 }
-fn nuxt(v: &Value, table: &[Value], depth: usize, budget: &mut usize) -> Value {
-    if depth > 20 || *budget == 0 {
+fn nuxt(
+    v: &Value,
+    table: &[Value],
+    depth: usize,
+    budget: &mut usize,
+    deadline: std::time::Instant,
+) -> Value {
+    if depth > 20 || *budget == 0 || std::time::Instant::now() >= deadline {
         return Value::Null;
     }
     *budget -= 1;
@@ -414,15 +439,16 @@ fn nuxt(v: &Value, table: &[Value], depth: usize, budget: &mut usize) -> Value {
             table,
             depth + 1,
             budget,
+            deadline,
         ),
         Value::Object(m) => Value::Object(
             m.iter()
-                .map(|(k, v)| (k.clone(), nuxt(v, table, depth + 1, budget)))
+                .map(|(k, v)| (k.clone(), nuxt(v, table, depth + 1, budget, deadline)))
                 .collect(),
         ),
         Value::Array(a) => Value::Array(
             a.iter()
-                .map(|v| nuxt(v, table, depth + 1, budget))
+                .map(|v| nuxt(v, table, depth + 1, budget, deadline))
                 .collect(),
         ),
         _ => v.clone(),

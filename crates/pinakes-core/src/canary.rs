@@ -28,6 +28,16 @@ pub async fn record(
     result: &Result<ResourceMeta>,
     interval: u64,
 ) -> Result<()> {
+    if result.as_ref().err().is_some_and(|e| {
+        e.downcast_ref::<crate::resolver::egress::BodyTooLarge>()
+            .is_some()
+    }) {
+        // An over-budget sample is inconclusive. Keep the size policy and retry the
+        // next moving-window sample, without claiming either health or an outage.
+        sqlx::query("UPDATE source_state SET canary_at=now(),canary_ok=NULL,canary_missing='{}',canary_failures=0,canary_due_at=now()+$3*interval '1 second',canary_lease_until=NULL WHERE source=$1 AND canary_generation=$2")
+            .bind(&manifest.source).bind(generation).bind(interval as f64).execute(pool).await?;
+        return Ok(());
+    }
     let missing = result
         .as_ref()
         .map(|doc| manifest.missing_fields(doc))

@@ -67,6 +67,9 @@ pub fn container_next(
     now: DateTime<Utc>,
     config: &RefreshConfig,
 ) -> Option<DateTime<Utc>> {
+    if manifest.mode == Mode::Cursor {
+        return next_times(manifest, None, None, now, config);
+    }
     let mut config = config.clone();
     if let Some(ttl) = feed_ttl {
         config.container_secs[0] = ttl;

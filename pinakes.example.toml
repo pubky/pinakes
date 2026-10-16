@@ -52,7 +52,7 @@ months_forward = 12
 geocode_score = 0.8
 # Retained for old configs; hold retry now uses max(normal cadence, container floor).
 # Additional hold retry floor (1 second–7 days); normal cadence / one hour still apply.
-held_retry_secs = 60
+held_retry_secs = 60 # Additional hold floor; normal cadence and 3600s minimum still apply.
 max_line_bytes = 65536
 max_date_values = 4096
 # Enabling accepts plaintext integrity under an active network attacker for webcal:// hosts.
@@ -70,6 +70,7 @@ link_hosts = [] # Extra exact hosts permitted for occurrence -> existing resourc
 # Platform IDs and default canaries: data/event-adapters.json; effective policies: /v1/info.
 [event.adapters]
 enabled = true
+derive_resources = true # Charge derived work to parent authors; lifetime cap per parent.
 websocket = true # One relay hint only, after both HTTP indexers miss.
 websocket_deadline_ms = 2000
 max_cursor_pages = 10
@@ -77,7 +78,7 @@ max_calendar_members = 50
 max_linked_resources = 100 # BTC website resources / explicit portal OSM venues per fetch.
 
 # Every platform accepts enabled, key, canary, ua_profile (pinakes/browser/firefox/plain),
-# cadence_floor (minimum 3600s), months_back, months_forward and max_occurrences.
+# cadence_floor (cursor minimum 60s; other modes 3600s), months_back, months_forward and max_occurrences.
 # Missing keys disable only the relevant adapter; secrets never appear in /v1/info.
 # [event.adapters.platforms.ticketmaster]
 # key = "" # Supply through protected config or PINAKES__EVENT__ADAPTERS__PLATFORMS__TICKETMASTER__KEY.

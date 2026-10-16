@@ -35,9 +35,9 @@ impl PlatformResolver {
         selected: Option<&Definition>,
     ) -> Result<ResourceMeta> {
         let cfg = self.config();
-        let d = selected
-            .or_else(|| detect(uri))
-            .context("unknown event platform")?;
+        let Some(d) = selected.or_else(|| detect(uri)) else {
+            return self.web.resolve(uri).await;
+        };
         let m = manifest(d, cfg);
         if !m.enabled {
             if self.web.config.enabled
@@ -51,17 +51,6 @@ impl PlatformResolver {
                 seconds: 3600,
             }
             .into());
-        }
-        if !probe {
-            let held: Option<f64> = sqlx::query_scalar("SELECT extract(epoch FROM held_until-now())::float8 FROM source_state WHERE source=$1 AND held_until>now()")
-                .bind(&m.source).fetch_optional(&self.web.events.as_ref().unwrap().pool).await?;
-            if let Some(seconds) = held {
-                return Err(crate::resolver::RetryLater {
-                    class: "source_held",
-                    seconds: seconds.ceil() as u64,
-                }
-                .into());
-            }
         }
         let local = super::configured_event(cfg, d);
         if d.parser == "nostr" {
@@ -102,18 +91,27 @@ impl PlatformResolver {
             doc.source = d.id.clone();
             return Ok(doc);
         }
-        let target = endpoint(d, uri, None, cfg)?;
+        let target = match endpoint(d, uri, None, cfg) {
+            Ok(target) => target,
+            Err(_) if !probe => return self.web.resolve(uri).await,
+            Err(error) => return Err(error),
+        };
         let (target, mut opts) = target.unwrap_or((uri.to_owned(), FetchOptions::default()));
         opts.user_agent = Some(profile(&m.ua_profile).into());
         opts.feed_hint = crate::event::service::is_feed(&target)
-            || d.mode == Mode::Container
+            || (d.mode == Mode::Container && feed_path(&target))
             || (d.id == "starticket" && target.ends_with(".xml"));
         opts.feed_cap = opts.feed_hint.then_some(local.feed_body_bytes);
-        let fetched = self
+        let fetched = match self
             .web
             .egress
             .fetch_with(&calendar::canonical_feed(&target), &opts)
-            .await?;
+            .await
+        {
+            Ok(f) => f,
+            Err(_) if !probe && target != uri => return self.web.resolve(uri).await,
+            Err(error) => return Err(error),
+        };
         if fetched.status == 304 {
             return Err(crate::resolver::NotModified.into());
         }
@@ -140,79 +138,135 @@ impl PlatformResolver {
             return Ok(extract_blocking(uri, &fetched, 3600).await?.doc);
         }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
-        let mut doc = if d.parser == "wikidata" {
-            wiki(uri, &fetched, &self.web.egress).await?
-        } else if let Some(doc) = calendar_blocking(uri, d, &fetched, &local).await? {
-            doc
-        } else {
-            if let Some(doc) = self
-                .web
-                .events
-                .as_ref()
-                .unwrap()
-                .disappeared(uri, fetched.status)
-                .await?
-            {
-                return Ok(doc);
-            }
-            let card = extract_blocking(uri, &fetched, 3600).await?.doc;
-            let events = self.web.events.as_ref().unwrap();
-            let mut doc = events
-                .page(uri, &fetched, card, &self.web.egress, deadline)
-                .await?;
-            // APIs and calendar links fill only absent page fields. Never query an unrelated recommendation.
-            if !d.requires_key
-                && (doc.start.is_none()
-                    || doc.event.tz.is_none()
-                    || doc.location.is_none()
-                        && doc.event.attendance != Some(crate::event::Attendance::Online))
-            {
-                if let Some((target, mut opts)) = endpoint(d, uri, Some(&fetched), cfg)? {
-                    if target != fetched.url.as_str() {
-                        opts.feed_hint = crate::event::service::is_feed(&target)
-                            || d.mode == Mode::Container
-                            || (d.id == "starticket" && target.ends_with(".xml"));
-                        opts.feed_cap = opts.feed_hint.then_some(local.feed_body_bytes);
-                        opts.user_agent = Some(profile(&m.ua_profile).into());
-                        if let Ok(f) = self
-                            .web
-                            .egress
-                            .discover(&target, &opts, m.cadence_floor)
-                            .await
-                        {
-                            if f.status == 200 {
-                                if let Some(extra) = enrichment_blocking(uri, d, &f, &local).await?
-                                {
-                                    merge(&mut doc, &extra)?;
+        let parsed: Result<ResourceMeta> = async {
+            let mut doc = if d.parser == "wikidata" {
+                wiki(uri, &fetched, &self.web.egress).await?
+            } else if let Some(doc) = calendar_blocking(uri, d, &fetched, &local).await? {
+                doc
+            } else {
+                if let Some(doc) = self
+                    .web
+                    .events
+                    .as_ref()
+                    .unwrap()
+                    .disappeared(uri, fetched.status)
+                    .await?
+                {
+                    return Ok(doc);
+                }
+                let card = extract_blocking(uri, &fetched, 3600).await?.doc;
+                let events = self.web.events.as_ref().unwrap();
+                let mut doc = events
+                    .page(uri, &fetched, card, &self.web.egress, deadline)
+                    .await?;
+                // APIs and calendar links fill only absent page fields. Never query an unrelated recommendation.
+                if !d.requires_key
+                    && (doc.start.is_none()
+                        || doc.event.tz.is_none()
+                        || doc.location.is_none()
+                            && doc.event.attendance != Some(crate::event::Attendance::Online))
+                {
+                    if let Some((target, mut opts)) = endpoint(d, uri, Some(&fetched), cfg)? {
+                        if target != fetched.url.as_str() {
+                            opts.feed_hint = crate::event::service::is_feed(&target)
+                                || (d.mode == Mode::Container && feed_path(&target))
+                                || (d.id == "starticket" && target.ends_with(".xml"));
+                            opts.feed_cap = opts.feed_hint.then_some(local.feed_body_bytes);
+                            opts.user_agent = Some(profile(&m.ua_profile).into());
+                            if let Ok(f) = self
+                                .web
+                                .egress
+                                .discover(&target, &opts, m.cadence_floor)
+                                .await
+                            {
+                                if f.status == 200 {
+                                    if d.id == "luma" {
+                                        if let Some(id) = serde_json::from_slice::<Value>(&f.body)
+                                            .ok()
+                                            .and_then(|v| {
+                                                v.pointer("/data/calendar/api_id")
+                                                    .and_then(Value::as_str)
+                                                    .map(str::to_owned)
+                                            })
+                                            .filter(|s| {
+                                                s.len() <= 128
+                                                    && s.bytes().all(|c| {
+                                                        c.is_ascii_alphanumeric() || c == b'-'
+                                                    })
+                                            })
+                                        {
+                                            let mut url = Url::parse("https://api.lu.ma/ics/get")?;
+                                            url.query_pairs_mut()
+                                                .append_pair("entity", "calendar")
+                                                .append_pair("id", &id);
+                                            let opts = FetchOptions {
+                                                feed_hint: true,
+                                                feed_cap: Some(local.feed_body_bytes),
+                                                ..Default::default()
+                                            };
+                                            if let Ok(feed) = self
+                                                .web
+                                                .egress
+                                                .discover(url.as_str(), &opts, m.cadence_floor)
+                                                .await
+                                            {
+                                                if feed.status == 200 {
+                                                    if let Some(calendar) =
+                                                        calendar_blocking(uri, d, &feed, &local)
+                                                            .await?
+                                                    {
+                                                        doc = calendar;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if let Some(extra) =
+                                        enrichment_blocking(uri, d, &f, &local).await?
+                                    {
+                                        merge(&mut doc, &extra)?;
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
-            doc
-        };
-        if !probe {
-            if let Some(container) = &mut doc.container {
-                self.web
-                    .events
-                    .as_ref()
-                    .unwrap()
-                    .enrich_container(container, deadline)
-                    .await?;
-            }
-        }
-        if doc.type_path.contains(&"Event".into()) {
-            // API zones must replace coordinate-derived enrichment, not the other way around.
-            page::finalize(&mut doc, local.coordinate_timezone);
+                doc
+            };
             if !probe {
-                let events = self.web.events.as_ref().unwrap();
-                let _ = tokio::time::timeout(Duration::from_secs(2), events.venue(&mut doc)).await;
+                if let Some(container) = &mut doc.container {
+                    self.web
+                        .events
+                        .as_ref()
+                        .unwrap()
+                        .enrich_container(container, deadline)
+                        .await?;
+                }
             }
-            page::finalize(&mut doc, false);
+            if doc.type_path.contains(&"Event".into()) {
+                // API zones must replace coordinate-derived enrichment, not the other way around.
+                page::finalize(&mut doc, local.coordinate_timezone);
+                if !probe {
+                    let events = self.web.events.as_ref().unwrap();
+                    let _ =
+                        tokio::time::timeout(Duration::from_secs(2), events.venue(&mut doc)).await;
+                }
+                page::finalize(&mut doc, false);
+            }
+            doc.source = d.id.clone();
+            doc.bounded(crate::resolver::web::ATTRIBUTES)
         }
-        doc.source = d.id.clone();
-        doc.bounded(crate::resolver::web::ATTRIBUTES)
+        .await;
+        match parsed {
+            Ok(doc) => Ok(doc),
+            Err(error) if probe => Err(error),
+            Err(_) => {
+                crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
+                let mut card = extract_blocking(uri, &fetched, m.cadence_floor).await?.doc;
+                card.source = d.id.clone();
+                Ok(card)
+            }
+        }
     }
     async fn enrich_cursor(
         &self,
@@ -238,57 +292,26 @@ impl PlatformResolver {
             })
             .map(|u| u.to_string())
             .collect();
-        ensure!(
-            links.len() <= cfg.adapters.max_linked_resources,
-            "linked event resource cap"
-        );
-        for link in links {
-            crate::store::ensure_resource(&events.pool, &link).await?;
-            let host = Url::parse(&link)?
-                .host_str()
-                .context("event link host")?
-                .to_owned();
-            if !c.limits.link_hosts.contains(&host) {
-                c.limits.link_hosts.push(host);
-            }
-        }
-        let indices: std::collections::BTreeMap<_, _> = c
-            .occurrences
-            .iter()
-            .enumerate()
-            .map(|(i, o)| (o.uid.clone(), i))
-            .collect();
-        let mut saved: std::collections::BTreeMap<String, (String, String)> =
-            std::collections::BTreeMap::new();
-        for (uid, place) in std::mem::take(&mut c.osm_venues) {
-            let key = crate::resolver::osm::parse_id(&place.url)
-                .context("invalid explicit OSM identity")?;
-            let (resource_id, version) = if let Some(saved) = saved.get(&key.key()) {
-                saved.clone()
-            } else {
-                ensure!(
-                    saved.len() < cfg.adapters.max_linked_resources,
-                    "explicit OSM venue cap"
-                );
-                let version = events.osm.save(&key, &place, None).await?;
-                let resource_id = crate::store::ensure_resource(&events.pool, &place.url).await?;
-                saved.insert(key.key(), (resource_id.clone(), version.clone()));
-                (resource_id, version)
-            };
-            if let Some(i) = indices.get(&uid) {
-                let row = &mut c.occurrences[*i];
-                row.doc.location = None;
-                row.doc.location_source = None;
-                let venue = row.doc.event.venue.get_or_insert_with(Default::default);
-                venue.osm_id = Some(key.key());
-                venue.osm_version = Some(version);
-                venue.resource_id = Some(resource_id);
-                venue.location = None;
-                venue.location_source = Some(crate::model::LocationSource::Osm);
-                row.content_hash =
-                    blake3::hash(&serde_json::to_vec(&crate::changes::normalize(&row.doc))?)
-                        .to_hex()
-                        .to_string();
+        if cfg.adapters.derive_resources {
+            for link in links.into_iter().take(cfg.adapters.max_linked_resources) {
+                if crate::store::derive_resource(
+                    &events.pool,
+                    &doc.url,
+                    &link,
+                    &d.id,
+                    cfg.adapters.max_linked_resources,
+                )
+                .await?
+                .is_some()
+                {
+                    let host = Url::parse(&link)?
+                        .host_str()
+                        .context("event link host")?
+                        .to_owned();
+                    if !c.limits.link_hosts.contains(&host) {
+                        c.limits.link_hosts.push(host);
+                    }
+                }
             }
         }
         Ok(())
@@ -302,6 +325,10 @@ async fn extract_blocking(
     ensure!(
         f.body.len() <= crate::resolver::egress::BODY_CAP,
         "non-feed page exceeds cap"
+    );
+    ensure!(
+        f.body.len() <= crate::resolver::egress::BODY_CAP,
+        "non-feed fallback exceeds page cap"
     );
     let (uri, f) = (uri.to_owned(), f.clone());
     Ok(tokio::task::spawn_blocking(move || crate::resolver::web::extract(&uri, &f, ttl)).await?)
@@ -342,6 +369,14 @@ pub(crate) async fn enrichment_blocking(
         f.body.len() <= crate::resolver::egress::BODY_CAP,
         "non-feed enrichment exceeds cap"
     );
+    if d.parser == "mobilizon"
+        && serde_json::from_slice::<Value>(&f.body)
+            .ok()
+            .is_some_and(|v| v["errors"].as_array().is_some_and(|a| !a.is_empty()))
+    {
+        crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
+        return Ok(None);
+    }
     let (uri, id, body) = (uri.to_owned(), d.id.clone(), f.body.clone());
     Ok(tokio::task::spawn_blocking(move || state::parse(&id, &uri, &body)).await?)
 }
@@ -365,9 +400,16 @@ impl Resolver for PlatformResolver {
         crate::resolver::classify(uri) == Some(self.name())
     }
     fn manifest_for(&self, uri: &str) -> crate::adapter::Manifest {
-        detect(uri)
+        let mut m = detect(uri)
             .map(|d| manifest(d, self.config()))
-            .unwrap_or_else(|| crate::adapter::manifest("event_platform"))
+            .unwrap_or_else(|| crate::adapter::manifest("web"));
+        if super::cursor::canonical_root(uri).is_some_and(|root| root != uri) {
+            m.expected_fields = vec!["aliases".into()];
+        } else if m.mode == Mode::Cursor && super::cursor::canonical_root(uri).is_none() {
+            m.mode = Mode::Resource;
+            m.expected_fields = vec!["name".into(), "start".into()];
+        }
+        m
     }
     fn manifests(&self) -> Vec<crate::adapter::Manifest> {
         super::manifests(self.config())
@@ -483,7 +525,7 @@ pub fn endpoint(
             u.join("/api")?.into(),
             FetchOptions {
                 json_body: Some(
-                    json!({"query":"query($uuid: UUID!) { event(uuid: $uuid) { uuid title description beginsOn endsOn status timezone onlineAddress physicalAddress { description street locality postalCode country geom } } }","variables":{"uuid":id}}),
+                    json!({"query":"query($uuid: UUID!) { event(uuid: $uuid) { uuid title description beginsOn endsOn status options { timezone } onlineAddress physicalAddress { description street locality postalCode country geom } } }","variables":{"uuid":id}}),
                 ),
                 ..opts
             },
@@ -511,7 +553,7 @@ pub fn endpoint(
             },
         )),
         "billetto_api" => Some((
-            uri.into(),
+            keyed_url("billetto_api",uri)?.into(),
             FetchOptions {
                 headers: vec![("Api-Keypair".into(), key()?.into())],
                 sensitive: true,
@@ -519,7 +561,7 @@ pub fn endpoint(
             },
         )),
         "eventfrog_api" => Some((
-            uri.into(),
+            keyed_url("eventfrog_api",uri)?.into(),
             FetchOptions {
                 headers: vec![("authorization".into(), format!("Bearer {}", key()?))],
                 sensitive: true,
@@ -603,17 +645,7 @@ async fn wiki(uri: &str, f: &Fetched, egress: &Egress) -> Result<ResourceMeta> {
     let (mut value, qid) = tokio::task::spawn_blocking(move || {
         let value: Value = serde_json::from_slice(&f.body).unwrap_or(Value::Null);
         let text = String::from_utf8_lossy(&f.body);
-        let qid = ["wikidata.org/wiki/", "wikidata.org/entity/"]
-            .iter()
-            .find_map(|prefix| {
-                text.split(prefix).skip(1).find_map(|s| {
-                    let id = s.split(|c: char| !c.is_ascii_alphanumeric()).next()?;
-                    (id.starts_with('Q')
-                        && id.len() > 1
-                        && id[1..].chars().all(|c| c.is_ascii_digit()))
-                    .then_some(id.to_owned())
-                })
-            });
+        let qid = wikipedia_item(&text);
         (value, qid)
     })
     .await?;
@@ -631,6 +663,45 @@ async fn wiki(uri: &str, f: &Fetched, egress: &Egress) -> Result<ResourceMeta> {
     }
     let uri = uri.to_owned();
     tokio::task::spawn_blocking(move || wiki_value(&uri, &value)).await?
+}
+pub fn wikipedia_item(text: &str) -> Option<String> {
+    let valid = |s: &str| {
+        let s = s.trim_start_matches([' ', ':', '\"', '\'']);
+        let id = s.split(|c: char| !c.is_ascii_alphanumeric()).next()?;
+        (id.starts_with('Q') && id.len() > 1 && id[1..].bytes().all(|b| b.is_ascii_digit()))
+            .then(|| id.to_owned())
+    };
+    text.split_once("wgWikibaseItemId")
+        .and_then(|(_, s)| valid(s))
+        .or_else(|| {
+            text.split_once("wikidata.org/wiki/Special:EntityPage/")
+                .and_then(|(_, s)| valid(s))
+        })
+        .or_else(|| {
+            let html = scraper::Html::parse_document(text);
+            html.select(&scraper::Selector::parse("script[type='application/ld+json']").unwrap())
+                .find_map(|node| {
+                    let v: Value = serde_json::from_str(&node.inner_html()).ok()?;
+                    let main = v.get("mainEntity")?;
+                    let id = main.as_str().or_else(|| main["@id"].as_str())?;
+                    let url = Url::parse(id).ok()?;
+                    (url.host_str() == Some("www.wikidata.org")
+                        || url.host_str() == Some("wikidata.org"))
+                    .then(|| valid(url.path().rsplit('/').next()?))
+                    .flatten()
+                })
+        })
+}
+pub async fn wikipedia(uri: &str, f: &Fetched, egress: &Egress) -> Option<ResourceMeta> {
+    let host = Url::parse(uri).ok()?.host_str()?.to_owned();
+    if host != "wikipedia.org" && !host.ends_with(".wikipedia.org") {
+        return None;
+    }
+    let doc = wiki(uri, f, egress).await.ok()?;
+    doc.type_path
+        .iter()
+        .any(|t| t == "Event" || t == "Place")
+        .then_some(doc)
 }
 pub fn wiki_value(uri: &str, v: &Value) -> Result<ResourceMeta> {
     let entity = v["entities"]
@@ -710,4 +781,87 @@ pub fn wiki_value(uri: &str, v: &Value) -> Result<ResourceMeta> {
         ));
     }
     Ok(doc)
+}
+
+fn feed_path(uri: &str) -> bool {
+    Url::parse(uri).is_ok_and(|u| {
+        crate::event::service::is_feed(uri)
+            || u.path().contains("/published/")
+            || u.path().contains("/remote.php/dav/public-calendars/")
+    })
+}
+/// Parse only the public event lookup contract, then discard all caller query/fragment data.
+pub fn keyed_url(adapter: &str, uri: &str) -> Result<Url> {
+    let u = Url::parse(uri)?;
+    ensure!(
+        u.username().is_empty()
+            && u.password().is_none()
+            && u.scheme() == "https"
+            && u.port().is_none(),
+        "invalid keyed URI"
+    );
+    let number = |s: &str| -> Result<String> {
+        ensure!(
+            !s.is_empty() && s.len() <= 32 && s.bytes().all(|b| b.is_ascii_digit()),
+            "invalid event ID"
+        );
+        Ok(s.into())
+    };
+    match adapter {
+        "billetto_api" => {
+            ensure!(
+                matches!(u.host_str(), Some("billetto.dk" | "api.billetto.com")),
+                "invalid Billetto host"
+            );
+            let id = number(
+                u.path()
+                    .strip_prefix("/api/v3/public/events/")
+                    .or_else(|| u.path().strip_prefix("/v3/public/events/"))
+                    .context("invalid Billetto path")?,
+            )?;
+            Ok(Url::parse(&format!(
+                "https://billetto.dk/api/v3/public/events/{id}"
+            ))?)
+        }
+        "eventfrog_api" => {
+            ensure!(
+                u.host_str() == Some("api.eventfrog.net") && u.path() == "/public/v1/events",
+                "invalid Eventfrog path"
+            );
+            let ids: Vec<_> = u.query_pairs().filter(|(k, _)| k == "id").collect();
+            ensure!(ids.len() == 1, "one Eventfrog ID required");
+            let id = number(&ids[0].1)?;
+            Ok(Url::parse(&format!(
+                "https://api.eventfrog.net/public/v1/events?id={id}"
+            ))?)
+        }
+        "google_calendar_api" => {
+            ensure!(
+                u.host_str() == Some("www.googleapis.com"),
+                "invalid Google host"
+            );
+            let part = u
+                .path()
+                .strip_prefix("/calendar/v3/calendars/")
+                .and_then(|s| s.strip_suffix("/events"))
+                .context("invalid Google path")?;
+            let id = percent_encoding::percent_decode_str(part).decode_utf8()?;
+            ensure!(
+                !id.is_empty()
+                    && id.len() <= 320
+                    && id
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "@._+-#".contains(c)),
+                "invalid calendar ID"
+            );
+            let mut url = Url::parse("https://www.googleapis.com/calendar/v3/calendars/")?;
+            url.path_segments_mut()
+                .unwrap()
+                .pop_if_empty()
+                .push(&id)
+                .push("events");
+            Ok(url)
+        }
+        _ => anyhow::bail!("unknown keyed adapter"),
+    }
 }

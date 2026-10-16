@@ -100,6 +100,13 @@ A resolver turns a URI into one small typed document, on demand and never inline
 - **Generic web**: one fetch, then JSON-LD, microformats, OpenGraph, oEmbed, title, in that order; ActivityPub when advertised; ICS and RSS by content type.
 - **Chains**: an event's venue to a place from the page's own coordinates, else geocoding above a confidence threshold, else nothing. Never a guessed OSM URL.
 
+Adapter derivation is an explicit, configurable exception to direct-reference-only fetching:
+NIP-52 calendars may resolve their listed event members, and BTC Map may resolve the event's
+own website. `event.adapters.derive_resources` defaults on. Persistent per-parent limits and
+parent-author budgets (or a synthetic per-adapter sponsor when no author exists) cover this
+work; repeated polls cannot reset the cap. Portal coordinates remain page-sourced venue facts,
+with no writes to the OSM cache and no implicit OSM fetch.
+
 Egress policy: private ranges refused and redirects re-checked; a 10 s timeout, a 1 MB page cap and at most 3 redirects **(arbitrary)**; one fetch per URI per TTL no matter who asks; per-host limits with allow and deny lists; every upstream URL and rate limit in config, so development runs on the public Nominatim and Photon under slow limits and staging and production on our own planet instances. Images are never re-hosted; clients proxy.
 
 Refresh follows the time to an event's start and stops after its end; a change is a difference in the typed document, confirmed twice before a cancellation, and becomes a line in Pinakes's own change feed. Every source is one adapter manifest (mode, cadence, identity, cancellation signal, expected fields, canary), and the same manifest drives the Prometheus metrics and Grafana alerts, so a platform that changes its markup or puts up a wall is an alert before it is a blank card ([details 5.2](details.html#changes), [5.7](details.html#operations)).

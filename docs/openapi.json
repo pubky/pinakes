@@ -186,7 +186,9 @@
             "description": "",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/Info"
+                }
               }
             }
           }
@@ -1178,6 +1180,61 @@
           "document"
         ]
       },
+      "Info": {
+        "type": "object",
+        "required": [
+          "version",
+          "manifests",
+          "counts",
+          "ingestion",
+          "osm_licence",
+          "resolvers"
+        ],
+        "properties": {
+          "counts": {
+            "$ref": "#/components/schemas/InfoCounts"
+          },
+          "ingestion": {
+            "type": "array",
+            "items": {}
+          },
+          "manifests": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Manifest"
+            }
+          },
+          "osm_licence": {
+            "$ref": "#/components/schemas/OsmLicence"
+          },
+          "resolvers": {},
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "InfoCounts": {
+        "type": "object",
+        "required": [
+          "resources",
+          "references",
+          "occurrences"
+        ],
+        "properties": {
+          "occurrences": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "references": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "resources": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "LocationSource": {
         "type": "string",
         "enum": [
@@ -1210,6 +1267,85 @@
           }
         },
         "additionalProperties": false
+      },
+      "Manifest": {
+        "type": "object",
+        "required": [
+          "source",
+          "mode",
+          "cadence_floor",
+          "identity",
+          "cancellation",
+          "expected_fields",
+          "ua_profile",
+          "requires_key",
+          "enabled",
+          "fragile"
+        ],
+        "properties": {
+          "cadence_floor": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "canary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "canary_note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cancellation": {
+            "type": "string"
+          },
+          "disabled_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "expected_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "fragile": {
+            "type": "boolean"
+          },
+          "identity": {
+            "type": "string"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/Mode"
+          },
+          "requires_key": {
+            "type": "boolean"
+          },
+          "source": {
+            "type": "string"
+          },
+          "ua_profile": {
+            "type": "string"
+          }
+        }
+      },
+      "Mode": {
+        "type": "string",
+        "enum": [
+          "cursor",
+          "container",
+          "resource",
+          "none"
+        ]
       },
       "OccurrencePage": {
         "type": "object",
@@ -1370,6 +1506,29 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "OsmLicence": {
+        "type": "object",
+        "required": [
+          "licence",
+          "attribution",
+          "url",
+          "dump"
+        ],
+        "properties": {
+          "attribution": {
+            "type": "string"
+          },
+          "dump": {
+            "type": "string"
+          },
+          "licence": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
           }
         }
       },

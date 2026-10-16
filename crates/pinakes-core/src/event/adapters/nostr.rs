@@ -197,6 +197,7 @@ pub async fn lookup(target: &Target, egress: &Egress, cfg: &EventConfig) -> Resu
         }
     }
     let mut successful = 0;
+    let mut inconclusive = false;
     for url in [wine, archive] {
         if let Ok(f) = egress
             .discover(url.as_str(), &Default::default(), 3600)
@@ -204,8 +205,8 @@ pub async fn lookup(target: &Target, egress: &Egress, cfg: &EventConfig) -> Resu
         {
             if f.status == 200 {
                 let target = target.clone();
-                if let Ok(Ok(event)) =
-                    tokio::task::spawn_blocking(move || -> Result<Option<Event>> {
+                if let Ok(Ok((event, full))) =
+                    tokio::task::spawn_blocking(move || -> Result<(Option<Event>, bool)> {
                         let v: Value = serde_json::from_slice(&f.body)?;
                         ensure!(
                             v.is_array()
@@ -214,11 +215,13 @@ pub async fn lookup(target: &Target, egress: &Egress, cfg: &EventConfig) -> Resu
                                 || v.get("id").is_some(),
                             "invalid indexer envelope"
                         );
-                        Ok(newest(&target, &rows(&v)))
+                        let values = rows(&v);
+                        Ok((newest(&target, &values), values.len() >= 100))
                     })
                     .await
                 {
                     successful += 1;
+                    inconclusive |= full;
                     if event.is_some() {
                         return Ok(event);
                     }
@@ -228,6 +231,10 @@ pub async fn lookup(target: &Target, egress: &Egress, cfg: &EventConfig) -> Resu
             }
         }
     }
+    ensure!(
+        successful == 2,
+        "Nostr indexers unavailable; refusing partial disappearance"
+    );
     if cfg.adapters.websocket {
         if let Some(relay) = target.relays.first() {
             if let Ok(values) = egress
@@ -240,8 +247,8 @@ pub async fn lookup(target: &Target, egress: &Egress, cfg: &EventConfig) -> Resu
         }
     }
     ensure!(
-        successful == 2,
-        "Nostr indexers unavailable; refusing partial disappearance"
+        !inconclusive,
+        "Nostr indexer page is incomplete; absence is inconclusive"
     );
     Ok(None)
 }
@@ -383,7 +390,12 @@ pub async fn resolve(
     probe: bool,
 ) -> Result<ResourceMeta> {
     // A manifest HTTP canary checks the protocol payload, not the indexer's HTML shell.
-    if uri.starts_with("https://api.nostr.wine/search?") {
+    if Url::parse(uri).is_ok_and(|u| u.host_str() == Some("api.nostr.wine")) {
+        let m = super::manifest(super::definition("nip52").unwrap(), cfg);
+        ensure!(
+            m.canary.as_ref().is_some_and(|u| u.as_str() == uri),
+            "not the configured Nostr canary"
+        );
         let f = egress.fetch(uri).await?;
         ensure!(f.status == 200, "Nostr canary HTTP failure");
         let (uri, cfg) = (uri.to_owned(), cfg.clone());
@@ -416,6 +428,7 @@ pub async fn resolve(
         return tokio::task::spawn_blocking(move || parse(&uri, &event, &cfg)).await?;
     }
     let mut doc = super::cursor::container(uri, cfg);
+    doc.source = "nip52".into();
     doc.name = tag(&event, "title").map(str::to_owned);
     doc.description = Some(event.content.clone());
     let refs: Vec<_> = event
@@ -442,14 +455,29 @@ pub async fn resolve(
         refs.len() <= cfg.adapters.max_calendar_members,
         "Nostr calendar member cap exceeded"
     );
-    if probe {
+    if probe || !cfg.adapters.derive_resources {
+        doc.container = None;
         return Ok(doc);
     }
     let mut pending = false;
     let mut retained_bytes = 0usize;
     for target in refs {
         let resource = target.uri()?;
-        let id = crate::store::ensure_resource(pool, &resource).await?;
+        let Some(id) = crate::store::derive_resource(
+            pool,
+            uri,
+            &resource,
+            "nip52",
+            cfg.adapters.max_calendar_members,
+        )
+        .await?
+        else {
+            return Err(crate::resolver::RetryLater {
+                class: "derivation_cap",
+                seconds: 86400,
+            }
+            .into());
+        };
         let value: Value = sqlx::query_scalar("SELECT doc FROM resource_document WHERE id=$1")
             .bind(&id)
             .fetch_one(pool)

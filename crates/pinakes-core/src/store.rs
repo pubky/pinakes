@@ -12,6 +12,60 @@ pub async fn ensure_resource(pool: &PgPool, uri: &str) -> Result<String> {
     tx.commit().await?;
     Ok(id)
 }
+/// Admit derived identities once per parent, including across subsequent polls.
+/// The lineage survives refreshes so author budgets apply when the child is claimed.
+pub async fn derive_resource(
+    pool: &PgPool,
+    parent: &str,
+    uri: &str,
+    adapter: &str,
+    cap: usize,
+) -> Result<Option<String>> {
+    let (parent_id, _, _) = identity(parent)?;
+    let (id, uri, scheme) = identity(uri)?;
+    if parent_id == id {
+        return Ok(None);
+    }
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,17613))")
+        .bind(&parent_id)
+        .execute(&mut *tx)
+        .await?;
+    // A resolver probe or a removed parent must never create background work.
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource WHERE id=$1)")
+        .bind(&parent_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if !exists {
+        return Ok(None);
+    }
+    let known: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM resource_derivation WHERE parent_id=$1 AND child_id=$2)",
+    )
+    .bind(&parent_id)
+    .bind(&id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !known {
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM resource_derivation WHERE parent_id=$1")
+                .bind(&parent_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if count >= cap as i64 {
+            return Ok(None);
+        }
+        insert_resource(&mut tx, &id, &uri, &scheme).await?;
+        sqlx::query("INSERT INTO resource_derivation(parent_id,child_id,adapter) VALUES($1,$2,$3)")
+            .bind(parent_id)
+            .bind(&id)
+            .bind(adapter)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(Some(id))
+}
 pub async fn insert_resource(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,

@@ -31,6 +31,15 @@ pub async fn migrate(pool: &sqlx::PgPool) -> anyhow::Result<()> {
         WHERE uri ~ '^https://www[.]openstreetmap[.]org/(node|way|relation)/[1-9][0-9]{0,17}$';
       END IF;
     END $$"#).execute(pool).await?;
+    // Preserve durable queue decisions before the already-published broad reroute.
+    // The additive review migration consumes this crash-safe snapshot.
+    sqlx::query(r#"DO $$ BEGIN
+      IF to_regclass('resource') IS NOT NULL AND NOT EXISTS(
+        SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='event_fetch' AND column_name='adapter_cursor') THEN
+        CREATE TABLE IF NOT EXISTS adapter_routing_backup AS
+          SELECT id,attempts,dead_letter,coalesce((to_jsonb(resource)->>'final')::boolean,false) AS final,next_attempt_at FROM resource;
+      END IF;
+    END $$"#).execute(pool).await?;
     MIGRATOR.run(pool).await?;
     Ok(())
 }

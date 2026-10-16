@@ -396,3 +396,25 @@ never enables geocoding or writes calendar members. Recorded compressed response
 and mock cursor/relay tests run in `scripts/test` without public upstream access.
 
 The calendar `held_retry_secs` option is an additional hold retry floor (up to seven days); normal cadence and the one-hour minimum still apply before exponential backoff. Embedded VTIMEZONE transitions share the parser deadline and enforce `max_date_values` per expansion. Enabling `webcal_http_fallback` emits a startup warning about plaintext integrity.
+
+
+Adapter review behavior: cursor URI variants share a canonical dataset container and checkpoint;
+resource identities and references retain their original URI. Portal history checkpoints each
+bounded page batch and takes a full snapshot after reaching the head, including after expiry.
+BTC Map timestamp cursors allow five minutes of clock skew; portal sequences are numeric,
+monotonic and bounded, with implausible future-sized values rejected rather than committed.
+Initial Google Calendar syncs use the configured horizon. Public `/v1/info` shows only canary
+hosts; the admin listener retains full URLs. Over-budget canary samples are inconclusive
+(`canary_ok = null`), retried at the next interval, and still count as transport errors.
+
+`event.adapters.derive_resources` defaults to true: NIP-52 calendar members and BTC Map
+website pages count against the referring authors (or a bounded per-adapter sponsor), with
+persistent per-parent caps. Set false to disable this additional work. Portal-supplied OSM
+fields are untrusted page coordinates, never writes to `osm_place`; an independently referenced
+OSM URL resolves through Nominatim normally. No `osm_id` or version is attached to those facts.
+
+The `browser` and `firefox` user-agent profiles impersonate browsers to pass bot walls;
+operators must consider the provider's terms before enabling them. NIP-52 `D` tags are only
+checked for the legacy warning; their value is not read or used for event identity. Self-hosted
+HTML substring detection (`gancio`, `mobilizon`, `/export/event/`) is a heuristic and can cause
+an unnecessary bounded discovery request; it never evaluates embedded JavaScript.

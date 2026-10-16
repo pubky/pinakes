@@ -38,7 +38,7 @@ rrule = "=0.14.0"
 roxmltree = "=0.21.1"
 sha2 = "=0.10.9"
 tzf-rs = { version = "=1.1.4", default-features = false }
-nostr = "=0.45.5"
+nostr = { version = "=0.45.5", default-features = false, features = ["std"] }
 tokio-tungstenite = { version = "=0.28.0", features = ["rustls-tls-webpki-roots"] }
 
 [dev-dependencies]

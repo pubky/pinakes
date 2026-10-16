@@ -42,7 +42,7 @@ pub async fn claim_sources(
 ) -> Result<Vec<Job>> {
     let size = size.clamp(1, 50);
     Ok(sqlx::query_as(r#"UPDATE resource SET lease_until=now()+$2*interval '1 second', generation=generation+1
-        WHERE id IN (SELECT id FROM resource WHERE resolver=ANY($1) AND NOT dead_letter AND NOT final AND next_attempt_at<=now() AND NOT EXISTS(SELECT 1 FROM source_state WHERE source=ANY($1) AND held_until>now())
+        WHERE id IN (SELECT id FROM resource WHERE resolver=ANY($1) AND NOT dead_letter AND NOT final AND next_attempt_at<=now()
           AND (lease_until IS NULL OR lease_until<now()) ORDER BY priority_at DESC NULLS LAST,next_attempt_at,id FOR UPDATE SKIP LOCKED LIMIT $3)
         RETURNING id,uri,attempts,generation"#).bind(sources).bind(cfg.lease_secs.max(15 * size as u64 + 10) as f64).bind(size as i64).fetch_all(pool).await?)
 }
@@ -187,7 +187,11 @@ async fn finish_job(
                 })
             {
                 let next = if let Some(container) = &doc.container {
-                    manifest.mode = crate::adapter::Mode::Container;
+                    if container.cursor.is_some() {
+                        manifest.mode = crate::adapter::Mode::Cursor;
+                    } else {
+                        manifest.mode = crate::adapter::Mode::Container;
+                    }
                     crate::scheduler::container_next(
                         &manifest,
                         container
@@ -331,7 +335,12 @@ pub struct AuthorBudget(Mutex<HashMap<String, Instant>>);
 impl AuthorBudget {
     pub async fn admit(&self, pool: &PgPool, job: &Job, rate: f64) -> Result<bool> {
         let authors: Vec<String> = sqlx::query_scalar(
-            "SELECT DISTINCT author FROM reference WHERE resource_id=$1 ORDER BY author",
+            "WITH inputs AS (SELECT $1::text AS id UNION SELECT alias_id FROM cursor_alias WHERE root_id=$1)
+            SELECT DISTINCT author FROM (
+                SELECT f.author FROM inputs i JOIN effective_reference f ON f.resource_id=i.id
+                UNION ALL SELECT f.author FROM inputs i JOIN resource_derivation d ON d.child_id=i.id JOIN effective_reference f ON f.resource_id=d.parent_id
+                UNION ALL SELECT 'adapter:'||d.adapter FROM inputs i JOIN resource_derivation d ON d.child_id=i.id WHERE NOT EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=d.parent_id)
+            ) sponsors ORDER BY author",
         )
         .bind(&job.id)
         .fetch_all(pool)

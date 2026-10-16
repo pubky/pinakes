@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# Adapters may reference accepted OSM facts, but never write the derivative cache.
+if rg -n 'osm[.]save\(|(?:INSERT INTO|UPDATE|DELETE FROM) osm_place' crates/pinakes-core/src/event/adapters; then
+  echo 'Adapter writes to osm_place are forbidden' >&2
+  exit 1
+fi
 pinakes_database_url="${DATABASE_URL:-postgresql:///pinakes?host=/var/run/postgresql}"
 psql --dbname="$pinakes_database_url" -v ON_ERROR_STOP=1 <<'SQL'
 DO $$ BEGIN

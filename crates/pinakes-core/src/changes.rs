@@ -148,7 +148,7 @@ pub async fn save(
     doc: &ResourceMeta,
     cfg: &crate::config::QueueConfig,
 ) -> Result<()> {
-    let prepared = if let Some(container) = &doc.container {
+    let mut prepared = if let Some(container) = &doc.container {
         Some(
             crate::event::storage::prepare(pool, id, container, doc.fetched_at, doc.ttl_secs)
                 .await?,
@@ -156,13 +156,18 @@ pub async fn save(
     } else {
         None
     };
+    let adapter_source = crate::event::adapters::definition(&doc.source).map(|d| d.id.as_str());
+    if let (Some(plan), Some(source)) = (&mut prepared, adapter_source) {
+        plan.source = source.into();
+    }
     let mut tx = pool.begin().await?;
     crate::store::lock_search_revision(&mut tx).await?;
     let row=sqlx::query("SELECT r.*,CASE WHEN r.osm_id IS NULL THEN r.doc ELSE o.versions->r.osm_version END AS accepted FROM resource r LEFT JOIN osm_place o ON r.osm_type=o.osm_type AND r.osm_id=o.osm_id WHERE r.id=$1 AND r.generation=$2 FOR UPDATE OF r")
         .bind(id).bind(generation).fetch_optional(&mut *tx).await?;
     let Some(row) = row else { return Ok(()) };
-    let source = row
-        .try_get::<Option<String>, _>("resolver")?
+    let source = adapter_source
+        .map(str::to_owned)
+        .or(row.try_get::<Option<String>, _>("resolver")?)
         .unwrap_or_else(|| doc.source.clone());
     if matches!(
         doc.status,
@@ -270,7 +275,7 @@ pub async fn save(
 pub async fn delete_orphans(pool: &PgPool, grace_days: u32) -> Result<u64> {
     let mut tx = pool.begin().await?;
     crate::store::lock_search_revision(&mut tx).await?;
-    let rows=sqlx::query("SELECT r.id,r.resolver,r.ever_existed,d.doc FROM resource r JOIN resource_document d ON d.id=r.id WHERE r.orphaned_at<now()-$1*interval '1 day' AND NOT EXISTS(SELECT 1 FROM reference f WHERE f.resource_id=r.id) AND NOT EXISTS(SELECT 1 FROM resource v WHERE v.venue_id=r.id) AND NOT EXISTS(SELECT 1 FROM occurrence o WHERE o.venue_id=r.id OR o.event_resource_id=r.id) AND (r.lease_until IS NULL OR r.lease_until<now()) FOR UPDATE OF r SKIP LOCKED LIMIT 1000")
+    let rows=sqlx::query("SELECT r.id,r.resolver,r.ever_existed,d.doc FROM resource r JOIN resource_document d ON d.id=r.id WHERE r.orphaned_at<now()-$1*interval '1 day' AND NOT EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id) AND NOT EXISTS(SELECT 1 FROM resource_derivation d JOIN resource p ON p.id=d.parent_id WHERE (d.child_id=r.id OR d.child_id IN(SELECT alias_id FROM cursor_alias WHERE root_id=r.id)) AND (p.orphaned_at IS NULL OR p.orphaned_at>=now()-$1*interval '1 day' OR EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=p.id))) AND NOT EXISTS(SELECT 1 FROM resource v WHERE v.venue_id=r.id) AND NOT EXISTS(SELECT 1 FROM occurrence o WHERE o.venue_id=r.id OR o.event_resource_id=r.id) AND (r.lease_until IS NULL OR r.lease_until<now()) FOR UPDATE OF r SKIP LOCKED LIMIT 1000")
         .bind(grace_days as f64).fetch_all(&mut *tx).await?;
     for row in &rows {
         let id: String = row.try_get("id")?;

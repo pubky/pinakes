@@ -808,5 +808,46 @@
       "last_modified": null
     },
     "sha256": "627eecc143834f6ed4288bcb8ef9904771b91104af704161633699794ba82fcf"
+  },
+  {
+    "at": "2026-10-16T06:12:58.384149326Z",
+    "blake3": "d53d18c23212ea7b6300594bb89bce60218f6eff2b9d628b8cc42d3e79bbd5ab",
+    "bytes": 2,
+    "content_type": "application/json",
+    "feed_hint": true,
+    "json_body": null,
+    "location": null,
+    "path": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945.gz",
+    "status": 200,
+    "uri": "https://api.btcmap.org/v4/events?updated_since=2026-10-15T00%3A00%3A00Z&include_deleted=true&status=all",
+    "user_agent": null,
+    "validators": {
+      "etag": null,
+      "last_modified": null
+    },
+    "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+  },
+  {
+    "at": "2026-10-16T06:12:59.677123302Z",
+    "blake3": "f39044c23acc8a506f609c475ae6768a21c31d774a7c12d875a604ef273d84a2",
+    "bytes": 2148,
+    "content_type": "application/json",
+    "feed_hint": false,
+    "json_body": {
+      "query": "query($uuid: UUID!) { event(uuid: $uuid) { uuid title description beginsOn endsOn status options { timezone } onlineAddress physicalAddress { description street locality postalCode country geom } } }",
+      "variables": {
+        "uuid": "86a665ae-e495-4e4f-88d4-4cffd44a82f1"
+      }
+    },
+    "location": null,
+    "path": "815ae60b0766d54dfc2384bc233256008480c2751703aaa73ef986bd09f22499.gz",
+    "status": 200,
+    "uri": "https://mobilizon.fr/api",
+    "user_agent": "pinakes/0.1.0 (+https://github.com/pubky/pinakes)",
+    "validators": {
+      "etag": null,
+      "last_modified": null
+    },
+    "sha256": "815ae60b0766d54dfc2384bc233256008480c2751703aaa73ef986bd09f22499"
   }
 ]
