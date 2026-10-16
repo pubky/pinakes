@@ -160,6 +160,12 @@ async fn round2_optional_fetch_policy_and_metrics() {
             2,
             true,
         ),
+        (
+            cards::OembedPolicy::WhenNeeded,
+            "https://vimeo.com/channels/music/123",
+            2,
+            true,
+        ),
     ] {
         let seen = Arc::new(Cost {
             seen: Mutex::default(),

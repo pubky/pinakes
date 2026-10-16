@@ -199,11 +199,12 @@ fn provider_match(uri: &str) -> Option<(Url, bool)> {
             {
                 continue;
             }
-            if let Some(pattern) = e
+            let matching: Vec<_> = e
                 .schemes
                 .iter()
-                .find(|pattern| scheme_matches(pattern, &target))
-            {
+                .filter(|pattern| scheme_matches(pattern, &target))
+                .collect();
+            if !matching.is_empty() {
                 let mut u = Url::parse(&e.url.replace("{format}", "json")).ok()?;
                 if u.scheme() != "https" {
                     continue;
@@ -211,12 +212,13 @@ fn provider_match(uri: &str) -> Option<(Url, bool)> {
                 u.query_pairs_mut()
                     .append_pair("url", target.as_str())
                     .append_pair("format", "json");
-                let path = pattern
-                    .split_once("://")?
-                    .1
-                    .split_once('/')
-                    .map_or("", |v| v.1);
-                let specific = !path.trim_matches(['*', '/']).is_empty();
+                let specific = matching.iter().any(|pattern| {
+                    let path = pattern
+                        .split_once("://")
+                        .and_then(|(_, rest)| rest.split_once('/'))
+                        .map_or("", |(_, path)| path);
+                    !path.trim_matches(['*', '/']).is_empty()
+                });
                 return Some((u, specific));
             }
         }

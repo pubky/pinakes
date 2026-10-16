@@ -481,12 +481,13 @@ pub fn spawn(
 /// Injectable upstream transport for deterministic integration stacks. Production uses `spawn`.
 pub fn spawn_with_egress(
     pool: PgPool,
-    config: Config,
+    mut config: Config,
     wake: Arc<Notify>,
     shutdown: watch::Receiver<bool>,
     metrics: Arc<crate::telemetry::Metrics>,
     egress: Egress,
 ) -> Result<JoinSet<()>> {
+    config.queue.groups = config.groups.clone();
     let mut workers = JoinSet::new();
     let authors = Arc::new(AuthorBudget::default());
     let mut resolvers: Vec<(Arc<dyn Resolver>, crate::config::ResolverConfig)> = vec![];

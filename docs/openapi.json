@@ -1134,6 +1134,13 @@
           "group"
         ]
       },
+      "CrossContainerOccurrences": {
+        "type": "string",
+        "enum": [
+          "off",
+          "corroborated"
+        ]
+      },
       "Curation": {
         "type": "object",
         "required": [
@@ -1300,6 +1307,14 @@
       "GroupConfig": {
         "type": "object",
         "properties": {
+          "cross_container_occurrences": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CrossContainerOccurrences"
+              }
+            ],
+            "default": "off"
+          },
           "enabled": {
             "type": "boolean",
             "default": true
@@ -1328,6 +1343,13 @@
             "type": "integer",
             "default": 16,
             "minimum": 0
+          },
+          "multi_tenant_hosts_path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
           }
         },
         "additionalProperties": false
@@ -1355,7 +1377,7 @@
               "string",
               "null"
             ],
-            "description": "Destination registrable domain; the key retains the target identity. Never a fetch instruction."
+            "description": "Destination URL (older documents contain a publisher origin). Never a fetch instruction."
           }
         }
       },
@@ -1420,6 +1442,16 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "location": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Point"
+              }
             ]
           },
           "members": {

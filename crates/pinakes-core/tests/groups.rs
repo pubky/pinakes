@@ -492,6 +492,13 @@ async fn review_directional_aliases_and_typed_self_claims_cannot_poison_groups(p
         member["items"][0]["document"]["location"]["lat"].as_f64(),
         card["location"]["lat"].as_f64()
     );
+    let records = get(&app, &format!("/v1/resources/{}/occurrences", feeds[0])).await;
+    assert_eq!(records["items"][0]["document"]["name"], card["name"]);
+    assert_eq!(records["items"][0]["document"]["image"], card["image"]);
+    assert_eq!(
+        records["items"][0]["document"]["location"]["lat"].as_f64(),
+        Some(47.0)
+    );
 }
 
 #[test]
@@ -864,41 +871,101 @@ async fn review_populated_collapse_uses_equality_facets_and_builds_only_page_car
     sqlx::query("INSERT INTO group_unit(unit_id,resource_id,group_id) SELECT md5('bench-'||i),md5('bench-'||i),md5('bench-group-'||((i-1)/2)) FROM generate_series(1,$1) i").bind(count).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) SELECT md5('bench-'||i),repeat('a',52),'tag','/pub/test/tags/'||i,'bench',now() FROM generate_series(1,$1) i").bind(count).execute(&pool).await.unwrap();
     sqlx::query("ANALYZE").execute(&pool).await.unwrap();
-    // The same collapse/facet/page shape, with a fixed rank to keep EXPLAIN deterministic.
-    let plan:Value=sqlx::query_scalar(r#"EXPLAIN(ANALYZE,BUFFERS,VERBOSE,FORMAT JSON)
-    WITH eligible AS (SELECT r.*,0::float8 AS rank FROM search_unit r WHERE r.host='bench.example' AND EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id AND f.label='bench')),
-    filtered AS (SELECT DISTINCT ON(b.unit_id) b.*,e.rank FROM eligible e LEFT JOIN group_unit u ON u.unit_id=e.unit_id JOIN grouped_search_unit b ON b.unit_id=coalesce(u.group_id,e.unit_id) ORDER BY b.unit_id,e.rank DESC,e.unit_id),
-    page AS (SELECT * FROM filtered ORDER BY rank DESC,unit_id DESC LIMIT 21)
-    SELECT (SELECT jsonb_agg(to_jsonb(p)||jsonb_build_object('group',group_card(p.unit_id))) FROM page p) AS items,
-    (SELECT jsonb_agg(to_jsonb(t)) FROM (SELECT f.label,count(DISTINCT r.unit_id) AS count FROM
-      (SELECT r.unit_id,u.resource_id FROM filtered r JOIN group_unit u ON u.group_id=r.unit_id
-      UNION ALL SELECT r.unit_id,r.id FROM filtered r WHERE NOT EXISTS(SELECT 1 FROM "group" g WHERE g.id=r.unit_id)) r
-      JOIN effective_reference f ON f.resource_id=r.resource_id WHERE f.label IS NOT NULL GROUP BY f.label) t) AS facets"#).fetch_one(&pool).await.unwrap();
-    if let Ok(path) = std::env::var("PINAKES_GROUP_PLAN_FILE") {
-        std::fs::write(path, serde_json::to_vec_pretty(&plan).unwrap()).unwrap();
+    sqlx::query("INSERT INTO resource_score(resource_id,score,updated_at,newest_at) SELECT id,1,now(),now() FROM resource").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO group_score(group_id,score,updated_at,newest_at,taggers,references_count) SELECT id,1,now(),now(),1,2 FROM \"group\"").execute(&pool).await.unwrap();
+    sqlx::query("UPDATE resource SET point=ST_SetSRID(ST_MakePoint(8.0,47.0+((substring(uri from '[0-9]+$'))::integer)/100000.0),4326),doc=doc||jsonb_build_object('location',jsonb_build_object('lat',47.0+((substring(uri from '[0-9]+$'))::integer)/100000.0,'lon',8.0))").execute(&pool).await.unwrap();
+    sqlx::query("ANALYZE").execute(&pool).await.unwrap();
+    let mut evidence = Vec::new();
+    for request in [
+        "/v1/search?collapse=group&bbox=7.9,47.0,8.1,47.006&limit=20",
+        "/v1/search?collapse=group&facet=tags&limit=20",
+    ] {
+        // One connection retains the exact production statement prepared by the API.
+        let connection = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with((*pool.connect_options()).clone())
+            .await
+            .unwrap();
+        let app = api::router(AppState::new(connection.clone(), Config::default()).unwrap());
+        let started = std::time::Instant::now();
+        let response = get(&app, request).await;
+        let api_ms = started.elapsed().as_secs_f64() * 1000.0;
+        assert!(api_ms < 5000.0, "{request}: {api_ms} ms");
+        assert_eq!(response["items"].as_array().unwrap().len(), 20);
+        if request.contains("facet") {
+            assert_eq!(response["facets"]["tags"][0]["count"], count / 2);
+        }
+        assert!(response["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["group"]["members"].as_array().unwrap().len() == 2));
+        let (name,statement,types):(String,String,Vec<String>)=sqlx::query_as("SELECT name,statement,ARRAY(SELECT t::text FROM unnest(parameter_types) t) FROM pg_prepared_statements WHERE statement LIKE 'WITH eligible%' ").fetch_one(&connection).await.unwrap();
+        assert!(name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'));
+        let mut coords = [7.9, 47.0, 8.1, 47.006].into_iter();
+        let params: Vec<String> = types
+            .iter()
+            .map(|ty| match ty.as_str() {
+                "timestamp with time zone" => {
+                    format!("'{}'::timestamptz", chrono::Utc::now().to_rfc3339())
+                }
+                "double precision" => coords.next().unwrap().to_string(),
+                "bigint" | "integer" => "21".into(),
+                _ => panic!("unexpected search parameter type {ty}"),
+            })
+            .collect();
+        let explain = format!(
+            "EXPLAIN(ANALYZE,BUFFERS,VERBOSE,FORMAT JSON) EXECUTE {name}({})",
+            params.join(",")
+        );
+        let plan: Value = sqlx::query_scalar(&explain)
+            .fetch_one(&connection)
+            .await
+            .unwrap();
+        assert!(
+            plan[0]["Execution Time"].as_f64().unwrap() < 5000.0,
+            "{request}: {plan}"
+        );
+        fn scans(value: &Value, out: &mut Vec<Value>) {
+            match value {
+                Value::Object(map) => {
+                    if value["Relation Name"] == "group_unit" {
+                        out.push(value.clone());
+                    }
+                    for v in map.values() {
+                        scans(v, out);
+                    }
+                }
+                Value::Array(values) => {
+                    for v in values {
+                        scans(v, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut group_scans = Vec::new();
+        scans(&plan, &mut group_scans);
+        assert!(!group_scans.is_empty());
+        assert!(
+            group_scans.iter().all(|s| s["Node Type"] != "Seq Scan"),
+            "{request}: {}",
+            serde_json::to_string_pretty(&group_scans).unwrap()
+        );
+        assert!(group_scans.iter().any(|s| s["Index Cond"]
+            .as_str()
+            .is_some_and(|c| c.contains("unit_id"))));
+        evidence.push(json!({"request":request,"api_ms":api_ms,"statement":statement,"parameters":params,"explain":plan,"group_unit_scans":group_scans}));
+        connection.close().await;
     }
-    assert!(
-        plan[0]["Execution Time"].as_f64().unwrap() < 5000.,
-        "{plan}"
-    );
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
-    let api_started = std::time::Instant::now();
-    let response = get(
-        &app,
-        "/v1/search?host=bench.example&tags=bench&collapse=group&facet=tags&limit=20",
-    )
-    .await;
-    let api_ms = api_started.elapsed().as_secs_f64() * 1000.;
-    assert!(api_ms < 5000., "API wall time {api_ms} ms");
     if let Ok(path) = std::env::var("PINAKES_GROUP_PLAN_FILE") {
-        let evidence = json!({"resources":count,"groups":count/2,"page_limit":20,"api_ms":api_ms,"explain":plan});
-        std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
+        std::fs::write(
+            path,
+            serde_json::to_vec_pretty(
+                &json!({"resources":count,"groups":count/2,"queries":evidence}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
     }
-    assert_eq!(response["items"].as_array().unwrap().len(), 20);
-    assert_eq!(response["facets"]["tags"][0]["count"], count / 2);
-    assert!(response["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|r| r["group"]["members"].as_array().unwrap().len() == 2));
 }

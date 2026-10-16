@@ -967,6 +967,6 @@ async fn review_group_osm_best_member_keeps_attribution_and_resource_own_name(po
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (_, _, doc) = call(&app, &format!("/v1/resources/{page}"), None).await;
     assert_eq!(doc["name"], "Own page");
-    assert_eq!(doc["group"]["name"], "Own page");
+    assert_eq!(doc["group"]["name"], "Berlin"); // Curated metadata survives member reads (C2).
     server.abort();
 }

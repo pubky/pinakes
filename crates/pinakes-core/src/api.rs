@@ -698,7 +698,7 @@ pub async fn search(
                     .push("::timestamptz-s.updated_at)))/2592000.0),e.rank)::double precision");
             }
         }
-        sql.push(" AS rank FROM eligible e LEFT JOIN group_unit u ON u.unit_id=e.unit_id JOIN grouped_search_unit b ON b.unit_id=coalesce(u.group_id,e.unit_id) CROSS JOIN LATERAL (SELECT b.point) r LEFT JOIN group_score s ON s.group_id=u.group_id ORDER BY b.unit_id,e.rank DESC,e.unit_id");
+        sql.push(" AS rank FROM eligible e LEFT JOIN LATERAL (SELECT group_id FROM group_unit WHERE unit_id=e.unit_id OFFSET 0) u ON true JOIN LATERAL (SELECT b.* FROM group_search_unit b WHERE b.unit_id=u.group_id UNION ALL SELECT e.id,e.uri,e.scheme,e.host,e.type,e.type_path,e.name,e.category,e.point,e.start_at,e.end_at,e.venue_id,e.doc,e.search_text,e.resolver,e.resolved_at,e.refresh_at,e.status,e.osm_type,e.osm_id,e.unit_id,e.occurrence,e.event,e.event_author,NULL::jsonb WHERE u.group_id IS NULL OFFSET 0) b ON true CROSS JOIN LATERAL (SELECT b.point) r LEFT JOIN group_score s ON s.group_id=u.group_id ORDER BY b.unit_id,e.rank DESC,e.unit_id");
     }
     if let Some(resolution) = spatial.resolution {
         sql.push("), cells AS (SELECT *, h3_latlng_to_cell(point(ST_X(point),ST_Y(point)),")
@@ -738,7 +738,7 @@ pub async fn search(
     if q.facet.as_deref() == Some("tags") {
         sql.push("coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY count DESC,label) FROM (SELECT f.label,count(DISTINCT r.unit_id) AS count FROM ");
         if q.collapse.is_some() {
-            sql.push("(SELECT r.unit_id,u.resource_id FROM filtered r JOIN group_unit u ON u.group_id=r.unit_id UNION ALL SELECT r.unit_id,r.id AS resource_id FROM filtered r WHERE NOT EXISTS(SELECT 1 FROM \"group\" g WHERE g.id=r.unit_id)) r JOIN effective_reference f ON f.resource_id=r.resource_id");
+            sql.push("(SELECT r.unit_id,u.resource_id FROM filtered r CROSS JOIN LATERAL (SELECT resource_id FROM group_unit WHERE group_id=r.unit_id OFFSET 0) u UNION ALL SELECT r.unit_id,r.id AS resource_id FROM filtered r WHERE NOT EXISTS(SELECT 1 FROM \"group\" g WHERE g.id=r.unit_id)) r JOIN effective_reference f ON f.resource_id=r.resource_id");
         } else {
             sql.push("filtered r JOIN effective_reference f ON r.id=f.resource_id");
         }

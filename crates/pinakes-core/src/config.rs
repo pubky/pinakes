@@ -515,9 +515,45 @@ fn merge(dst: &mut serde_json::Value, src: serde_json::Value) {
     }
 }
 
+fn ensure_no_duplicate_groups(value: &serde_json::Value) -> Result<()> {
+    if value.get("groups").is_some() {
+        bail!("use groups or legacy queue.groups, not both");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn round2_root_group_and_discovery_config_reach_workers() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.runtime");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join(format!("round2-config-{}.toml", std::process::id()));
+        for section in ["groups", "queue.groups"] {
+            std::fs::write(&path,format!("[{section}]\ncross_container_occurrences='corroborated'\n[media]\noembed='always'\n[web]\ndiscover_feeds=true\n")).unwrap();
+            let cfg = Config::load(Some(&path)).unwrap();
+            assert_eq!(
+                cfg.groups.cross_container_occurrences,
+                crate::groups::CrossContainerOccurrences::Corroborated
+            );
+            assert_eq!(
+                cfg.queue.groups.cross_container_occurrences,
+                cfg.groups.cross_container_occurrences
+            );
+            assert_eq!(
+                cfg.media.oembed,
+                crate::resolver::cards::OembedPolicy::Always
+            );
+            assert!(cfg.web.discover_feeds);
+        }
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(
+            Config::default().groups.cross_container_occurrences,
+            crate::groups::CrossContainerOccurrences::Off
+        );
+        assert!(!Config::default().web.discover_feeds);
+    }
     #[test]
     fn config_merges_sections_and_refuses_unknown_keys_and_unbounded_budgets() {
         let mut value = serde_json::to_value(Config::default()).unwrap();
@@ -559,11 +595,4 @@ mod tests {
                 .is_err());
         }
     }
-}
-
-fn ensure_no_duplicate_groups(value: &serde_json::Value) -> Result<()> {
-    if value.get("groups").is_some() {
-        bail!("use groups or legacy queue.groups, not both");
-    }
-    Ok(())
 }

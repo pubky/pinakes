@@ -349,10 +349,11 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
             .or_insert(Some(e.revision));
     }
     let mut incoming = Vec::new();
+    let mut incoming_bytes = 0usize;
     for (unit, row) in units.iter().zip(&rows) {
         let old = edges.iter().find(|e| e.unit_id == unit.unit_id);
         for k in &unit.keys {
-            incoming.push(Edge {
+            let edge = Edge {
                 unit_id: unit.unit_id.clone(),
                 resource_id: id.into(),
                 revision: revision.unwrap_or(0),
@@ -378,7 +379,13 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
                 override_id: old.and_then(|e| e.override_id.clone()),
                 lat: row["lat"].as_f64(),
                 lon: row["lon"].as_f64(),
-            });
+            };
+            incoming_bytes = incoming_bytes.saturating_add(edge.bytes());
+            ensure!(
+                incoming_bytes <= cfg.max_graph_bytes,
+                "group evidence budget exceeded"
+            );
+            incoming.push(edge);
         }
     }
     edges.retain(|e| e.resource_id != id);
