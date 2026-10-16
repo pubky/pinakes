@@ -226,3 +226,9 @@ sets are omitted. Canaries default to six hours, share worker/host budgets, and 
 not alter resource data. OSM probes deliberately bypass the data cache to exercise
 the parser without writing the cache. Before a canary's first run its result is
 null and no result gauge is exported. Metric/alert details are in [ops](../ops/README.md).
+
+Review corrections: changes use the wall clock after acquiring the sequence lock.
+Prefer `cursor`; for `since`, reuse a previous response's `at` (inclusive, so deduplicate
+by `seq`), not the client's wall clock. Never-observed missing resources emit no creation
+or deletion. Events without an end become final at start + 24 hours. Epoch replay only
+reopens final resources for references newer than their last resolution.

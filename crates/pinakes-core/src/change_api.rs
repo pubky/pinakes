@@ -96,7 +96,7 @@ async fn query(
     if let Some(since) = since {
         sql.push(" AND c.at>=").push_bind(since);
     }
-    sql.push(" ORDER BY seq LIMIT ").push_bind((limit+1) as i64).push(") SELECT head.*,coalesce((SELECT jsonb_agg((to_jsonb(c)-'type_path'-'occurrence_key'-'at') || jsonb_build_object('at',(extract(epoch FROM at)*1000)::bigint,'occurrence',occurrence_key) ORDER BY seq) FROM filtered c),'[]') AS lines FROM head");
+    sql.push(" ORDER BY seq LIMIT ").push_bind((limit+1) as i64).push(") SELECT head.*,coalesce((SELECT jsonb_agg((to_jsonb(c)-'type_path'-'occurrence_key'-'at') || jsonb_build_object('at',floor(extract(epoch FROM at)*1000)::bigint,'occurrence',occurrence_key) ORDER BY seq) FROM filtered c),'[]') AS lines FROM head");
     let row = sql.build().fetch_one(&state.pool).await?;
     let oldest: i64 = row.try_get("oldest")?;
     if cursor > 0 && cursor < oldest {

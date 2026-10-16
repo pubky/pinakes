@@ -137,7 +137,7 @@ async fn append(
     } else {
         (before, after)
     };
-    sqlx::query("INSERT INTO resource_change(resource_id,class,fields,before,after,source,type_path,osm_type,osm_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)")
+    sqlx::query("INSERT INTO resource_change(resource_id,class,fields,before,after,source,type_path,osm_type,osm_id,at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,clock_timestamp())")
         .bind(id).bind(diff.class).bind(diff.fields).bind(before).bind(after).bind(source).bind(type_path).bind(osm.as_ref().map(|o|&o.osm_type)).bind(osm.as_ref().map(|o|o.id)).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO source_state(source,change_totals) VALUES($1,jsonb_build_object($2::text,1)) ON CONFLICT(source) DO UPDATE SET change_totals=source_state.change_totals || jsonb_build_object($2::text,coalesce((source_state.change_totals->>$2)::bigint,0)+1)")
         .bind(source).bind(diff.class).execute(&mut **tx).await?;
@@ -148,7 +148,7 @@ pub async fn save(
     id: &str,
     generation: i64,
     doc: &ResourceMeta,
-    confirmation_secs: u64,
+    cfg: &crate::config::QueueConfig,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
     lock_sequence(&mut tx).await?;
@@ -162,13 +162,15 @@ pub async fn save(
         doc.status,
         Status::Unreachable | Status::Error | Status::Pending
     ) {
-        sqlx::query("UPDATE resource SET status=$2,lease_until=NULL,priority_at=NULL,next_attempt_at=now()+$3*interval '1 second' WHERE id=$1")
-            .bind(id).bind(doc.status.as_str()).bind(confirmation_secs.max(3600) as f64).execute(&mut *tx).await?;
+        let attempt = row.try_get::<i32, _>("attempts")? as u32 + 1;
+        sqlx::query("UPDATE resource SET status=$2,lease_until=NULL,priority_at=NULL,attempts=attempts+1,dead_letter=$4,last_error='http_4xx',next_attempt_at=now()+$3*interval '1 second' WHERE id=$1")
+            .bind(id).bind(doc.status.as_str()).bind(crate::queue::backoff(cfg,attempt) as f64).bind(attempt>=cfg.max_failures).execute(&mut *tx).await?;
         tx.commit().await?;
         return Ok(());
     }
     let accepted: Option<Value> = row.try_get("accepted")?;
-    let before = accepted.filter(|v| v.get("type").is_some());
+    // A never-observed object can be missing without having been created or cancelled.
+    let before = accepted.filter(|v| v.get("type").is_some() && row.get::<bool, _>("ever_existed"));
     let mut doc = doc.clone();
     if doc.status == Status::Missing {
         let fetched = chrono::DateTime::from_timestamp_millis(doc.fetched_at)
@@ -187,7 +189,7 @@ pub async fn save(
             .execute(&mut *tx)
             .await?;
         if streak < 2 {
-            let retry = confirmation_secs.max(3600) as f64;
+            let retry = cfg.missing_ttl_secs.max(3600) as f64;
             sqlx::query("UPDATE resource SET lease_until=NULL,priority_at=NULL,attempts=0,last_error=NULL,refresh_at=now()+$2*interval '1 second',next_attempt_at=now()+$2*interval '1 second' WHERE id=$1").bind(id).bind(retry).execute(&mut *tx).await?;
             if source == "osm" {
                 sqlx::query("UPDATE osm_place SET refresh_at=least(refresh_at,now()+$3*interval '1 second') WHERE osm_type=$1 AND osm_id=$2").bind(row.try_get::<Option<String>,_>("osm_type")?).bind(row.try_get::<Option<i64>,_>("osm_id")?).bind(retry).execute(&mut *tx).await?;
@@ -213,7 +215,9 @@ pub async fn save(
         .transpose()?;
     let after = normalize(&doc);
     crate::store::write_document(&mut tx, id, generation, &doc).await?;
-    if let Some(diff) = diff(before.as_ref(), Some(&after)) {
+    if let Some(diff) = diff(before.as_ref(), Some(&after))
+        .filter(|_| before.is_some() || doc.status != Status::Missing)
+    {
         append(&mut tx, id, &source, before, Some(after), diff).await?;
     }
     tx.commit().await?;
@@ -222,13 +226,16 @@ pub async fn save(
 pub async fn delete_orphans(pool: &PgPool, grace_days: u32) -> Result<u64> {
     let mut tx = pool.begin().await?;
     lock_sequence(&mut tx).await?;
-    let rows=sqlx::query("SELECT r.id,r.resolver,d.doc FROM resource r JOIN resource_document d ON d.id=r.id WHERE r.orphaned_at<now()-$1*interval '1 day' AND NOT EXISTS(SELECT 1 FROM reference f WHERE f.resource_id=r.id) AND (r.lease_until IS NULL OR r.lease_until<now()) FOR UPDATE OF r SKIP LOCKED LIMIT 1000")
+    let rows=sqlx::query("SELECT r.id,r.resolver,r.ever_existed,d.doc FROM resource r JOIN resource_document d ON d.id=r.id WHERE r.orphaned_at<now()-$1*interval '1 day' AND NOT EXISTS(SELECT 1 FROM reference f WHERE f.resource_id=r.id) AND (r.lease_until IS NULL OR r.lease_until<now()) FOR UPDATE OF r SKIP LOCKED LIMIT 1000")
         .bind(grace_days as f64).fetch_all(&mut *tx).await?;
     for row in &rows {
         let id: String = row.try_get("id")?;
         let source: Option<String> = row.try_get("resolver")?;
         let doc: Value = row.try_get("doc")?;
-        if let Ok(doc) = serde_json::from_value::<ResourceMeta>(doc) {
+        if let Some(doc) = serde_json::from_value::<ResourceMeta>(doc)
+            .ok()
+            .filter(|_| row.get::<bool, _>("ever_existed"))
+        {
             let before = normalize(&doc);
             let change = diff(Some(&before), None).unwrap();
             append(
@@ -256,8 +263,14 @@ pub async fn retain(pool: &PgPool, days: u32) -> Result<()> {
         .bind(days as f64)
         .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     // Preserve any historical version still referenced by a retained change or accepted resource.
-    sqlx::query("UPDATE osm_place o SET versions=coalesce((SELECT jsonb_object_agg(v.key,v.value) FROM jsonb_each(o.versions) v WHERE v.key=md5((o.doc-ARRAY['fetched_at','ttl_secs']::text[])::text) OR EXISTS(SELECT 1 FROM resource r WHERE r.osm_type=o.osm_type AND r.osm_id=o.osm_id AND r.osm_version=v.key) OR EXISTS(SELECT 1 FROM resource_change c WHERE c.osm_type=o.osm_type AND c.osm_id=o.osm_id AND (c.before->>'version'=v.key OR c.after->>'version'=v.key))),'{}'::jsonb)").execute(&mut *tx).await?;
+    // Lock candidate rows before inspecting references so a concurrent append cannot lose its snapshot.
+    let mut tx = pool.begin().await?;
+    let candidates: Vec<(String, i64)> = sqlx::query_as("SELECT osm_type,osm_id FROM osm_place WHERE (SELECT count(*) FROM jsonb_object_keys(versions))>1 FOR UPDATE SKIP LOCKED").fetch_all(&mut *tx).await?;
+    for (kind, id) in candidates {
+        sqlx::query("WITH kept AS (SELECT coalesce(jsonb_object_agg(v.key,v.value),'{}'::jsonb) AS versions FROM osm_place o CROSS JOIN LATERAL jsonb_each(o.versions) v WHERE o.osm_type=$1 AND o.osm_id=$2 AND (v.key=md5((o.doc-ARRAY['fetched_at','ttl_secs']::text[])::text) OR v.key=md5((o.fetch_doc-ARRAY['fetched_at','ttl_secs']::text[])::text) OR EXISTS(SELECT 1 FROM resource r WHERE r.osm_type=o.osm_type AND r.osm_id=o.osm_id AND r.osm_version=v.key) OR EXISTS(SELECT 1 FROM resource_change c WHERE c.osm_type=o.osm_type AND c.osm_id=o.osm_id AND (c.before->>'version'=v.key OR c.after->>'version'=v.key)))) UPDATE osm_place o SET versions=k.versions FROM kept k WHERE o.osm_type=$1 AND o.osm_id=$2 AND o.versions IS DISTINCT FROM k.versions").bind(kind).bind(id).execute(&mut *tx).await?;
+    }
     tx.commit().await?;
     Ok(())
 }

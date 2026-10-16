@@ -14,11 +14,12 @@ pub fn next(
     if manifest.mode == Mode::None {
         return None;
     }
-    let final_at = doc.end.map(|end| end + Duration::hours(24));
+    let end = doc.end.or(doc.start);
+    let final_at = end.map(|end| end + Duration::hours(24));
     if final_at.is_some_and(|at| now >= at) {
         return None;
     }
-    if doc.end.is_some_and(|end| now >= end) {
+    if end.is_some_and(|end| now >= end) {
         return final_at;
     }
     let until = doc.start.map(|start| start - now);
@@ -80,7 +81,6 @@ mod tests {
             (Some(7 * 24 - 1), 6),
             (Some(24), 6),
             (Some(23), 1),
-            (Some(-1), 1),
         ] {
             let doc = ResourceMeta {
                 start: hours.map(|h| now + Duration::hours(h)),
@@ -101,6 +101,28 @@ mod tests {
         );
         doc.end = Some(now - Duration::hours(24));
         assert_eq!(next(&manifest, &doc, now, &config), None);
+        let start_only = ResourceMeta {
+            start: Some(now - Duration::hours(1)),
+            ..Default::default()
+        };
+        assert_eq!(
+            next(&manifest, &start_only, now, &config),
+            Some(now + Duration::hours(23))
+        );
+        let past = ResourceMeta {
+            start: Some(now - Duration::hours(24)),
+            ..Default::default()
+        };
+        assert_eq!(next(&manifest, &past, now, &config), None);
+        let running = ResourceMeta {
+            start: Some(now - Duration::days(2)),
+            end: Some(now + Duration::days(10)),
+            ..Default::default()
+        };
+        assert_eq!(
+            next(&manifest, &running, now, &config),
+            Some(now + Duration::hours(1))
+        );
         assert_eq!(
             next(
                 &crate::adapter::manifest("geo"),

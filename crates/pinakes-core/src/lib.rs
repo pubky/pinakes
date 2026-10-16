@@ -6,6 +6,7 @@ pub mod change_api;
 pub mod changes;
 pub mod config;
 pub mod ingest;
+pub mod maintenance;
 pub mod model;
 pub mod nexus;
 pub mod queue;

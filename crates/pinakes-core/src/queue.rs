@@ -134,6 +134,7 @@ async fn finish_job(
             if doc.status != Status::Missing
                 || doc
                     .end
+                    .or(doc.start)
                     .is_some_and(|end| now >= end + chrono::Duration::hours(24))
             {
                 doc.ttl_secs = crate::scheduler::next(&manifest, &doc, now, refresh)
@@ -150,7 +151,7 @@ async fn finish_job(
             _ => &[],
         };
         doc.validate(attrs)?;
-        crate::changes::save(pool, &job.id, job.generation, &doc, cfg.missing_ttl_secs).await
+        crate::changes::save(pool, &job.id, job.generation, &doc, cfg).await
     }
     .await;
     if let Err(error) = result {

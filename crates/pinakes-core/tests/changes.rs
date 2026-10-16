@@ -527,3 +527,146 @@ async fn not_modified_renews_budget_without_replacing_facts(pool: PgPool) {
     );
     assert_eq!(classes(&pool, &id).await, vec!["created"]);
 }
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn unreachable_backoff_stops_and_missing_never_invents_existence(pool: PgPool) {
+    let (id, mut doc) = seed(&pool, "https://example.org/blocked").await;
+    doc.status = Status::Unreachable;
+    let probe = Probe {
+        doc,
+        calls: AtomicUsize::new(0),
+    };
+    let cfg = QueueConfig {
+        max_failures: 2,
+        backoff_secs: 2,
+        ..Default::default()
+    };
+    for attempt in 1..=2 {
+        sqlx::query("UPDATE resource SET next_attempt_at=now()")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+        queue::run_job(&pool, &probe, &cfg, &job).await.unwrap();
+        let (tries,dead,delay,status,name):(i32,bool,f64,String,String)=sqlx::query_as("SELECT attempts,dead_letter,extract(epoch FROM next_attempt_at-now())::float8,status,name FROM resource WHERE id=$1").bind(&id).fetch_one(&pool).await.unwrap();
+        assert_eq!(tries, attempt);
+        assert_eq!(dead, attempt == 2);
+        assert!(delay > (queue::backoff(&cfg, attempt as u32) - 1) as f64);
+        assert_eq!(status, "unreachable");
+        assert_eq!(name, "Initial");
+    }
+    assert!(queue::claim(&pool, "web", &cfg).await.unwrap().is_none());
+    let metrics = Metrics::new().unwrap();
+    metrics.refresh(&pool).await.unwrap();
+    assert!(metrics
+        .encode()
+        .unwrap()
+        .contains("pinakes_refresh_overdue{resolver=\"web\"} 0"));
+    let uri = "https://example.org/never-existed";
+    let never = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut missing = ResourceMeta::new(uri, "web", 3600);
+    missing.status = Status::Missing;
+    for _ in 0..3 {
+        missing.fetched_at += 1;
+        store::save_document(&pool, &never, 0, &missing)
+            .await
+            .unwrap();
+    }
+    assert!(classes(&pool, &never).await.is_empty());
+    missing.status = Status::Ok;
+    store::save_document(&pool, &never, 0, &missing)
+        .await
+        .unwrap();
+    assert_eq!(classes(&pool, &never).await, vec!["created"]);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn new_preview_is_prioritized_and_change_time_follows_lock(pool: PgPool) {
+    let _old = store::ensure_resource(&pool, "https://example.org/backlog")
+        .await
+        .unwrap();
+    let uri = "https://example.org/new-preview";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    store::expedite(&pool, std::slice::from_ref(&id))
+        .await
+        .unwrap();
+    let job = queue::claim(&pool, "web", &QueueConfig::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.id, id);
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(73822918)")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let worker_pool = pool.clone();
+    let worker_id = id.clone();
+    let worker = tokio::spawn(async move {
+        store::save_document(
+            &worker_pool,
+            &worker_id,
+            job.generation,
+            &ResourceMeta::new(uri, "web", 3600),
+        )
+        .await
+        .unwrap()
+    });
+    for _ in 0..100 {
+        let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event='advisory')").fetch_one(&pool).await.unwrap();
+        if blocked {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!worker.is_finished());
+    let released = chrono::Utc::now();
+    lock.commit().await.unwrap();
+    worker.await.unwrap();
+    let at: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT at FROM resource_change WHERE resource_id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(at >= released, "timestamp must follow lock acquisition");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn maintenance_runs_without_an_idle_ingestion_tick(pool: PgPool) {
+    let (id, _) = seed(&pool, "https://example.org/orphan").await;
+    sqlx::query("UPDATE resource SET orphaned_at=now()-interval '10 days'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource_change SET at=now()-interval '100 days'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (stop, rx) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(pinakes_core::maintenance::run(
+        pool.clone(),
+        7,
+        90,
+        Duration::from_millis(20),
+        rx,
+    ));
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                == 0
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    stop.send(true).unwrap();
+    task.await.unwrap();
+    assert_eq!(classes(&pool, &id).await, vec!["deleted"]);
+}

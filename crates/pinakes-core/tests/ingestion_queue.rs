@@ -383,7 +383,7 @@ async fn new_reference_reopens_final_pages_but_never_geo(pool: PgPool) {
     let page = change("https://example.org/final", "a", "/pub/app/tags/a");
     let geo = change("geo:46,8", "b", "/pub/app/tags/b");
     batch(&pool, vec![page.clone(), geo.clone()], Some("one")).await;
-    sqlx::query("UPDATE resource SET final=true,next_attempt_at='infinity'")
+    sqlx::query("UPDATE resource SET final=true,resolved_at=now()-interval '1 day',next_attempt_at='infinity'")
         .execute(&pool)
         .await
         .unwrap();
@@ -402,4 +402,28 @@ async fn new_reference_reopens_final_pages_but_never_geo(pool: PgPool) {
         .unwrap();
     assert!(final_geo);
     assert!(!final_page);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn epoch_replay_does_not_reopen_final_resource(pool: PgPool) {
+    let old = change("https://example.org/finished", "a", "/pub/app/old");
+    batch(&pool, vec![old.clone()], Some("before")).await;
+    sqlx::query("UPDATE resource SET final=true,resolved_at=now(),next_attempt_at='infinity'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(!batch(&pool, vec![old.clone()], Some("after")).await);
+    batch(&pool, vec![old.clone()], Some("after")).await;
+    assert!(sqlx::query_scalar::<_, bool>("SELECT final FROM resource")
+        .fetch_one(&pool)
+        .await
+        .unwrap());
+    let mut new = old;
+    new.object_path = "/pub/app/new".into();
+    new.at = Utc::now().timestamp_millis() + 10;
+    batch(&pool, vec![new], Some("after")).await;
+    assert!(!sqlx::query_scalar::<_, bool>("SELECT final FROM resource")
+        .fetch_one(&pool)
+        .await
+        .unwrap());
 }

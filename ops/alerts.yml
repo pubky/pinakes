@@ -2,7 +2,7 @@ groups:
   - name: pinakes
     rules:
       - alert: IngestionStalled
-        expr: time() - pinakes_ingest_last_success_timestamp_seconds > 900
+        expr: (time() - pinakes_ingest_last_success_timestamp_seconds > 900) or absent(pinakes_ingest_last_success_timestamp_seconds)
         labels: {severity: critical, reason: no_success}
         annotations: {summary: "Pinakes has not applied a successful Nexus poll for 15 minutes"}
       - alert: IngestionStalled

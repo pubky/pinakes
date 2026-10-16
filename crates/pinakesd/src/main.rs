@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use pinakes_core::{
     api::{self, AppState},
     config::Config,
-    ingest, queue, store, MIGRATOR,
+    ingest, queue, MIGRATOR,
 };
 use std::{path::PathBuf, time::Duration};
 use tokio::sync::watch;
@@ -70,7 +70,6 @@ async fn main() -> Result<()> {
     let ingest_state = state.clone();
     let mut ingest_shutdown = shutdown_rx.clone();
     let ingest_task = tokio::spawn(async move {
-        let mut retention_at = tokio::time::Instant::now();
         loop {
             let applied = tokio::select! { _=ingest_shutdown.changed()=>break,result=ingest::poll_once(&ingest_state.pool,&ingest_state.config.nexus_url,&ingest_state.nexus)=>result };
             match applied {
@@ -82,24 +81,16 @@ async fn main() -> Result<()> {
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error=%e,"ingestion will retry"),
             }
-            if tokio::time::Instant::now() >= retention_at {
-                if let Err(e) = pinakes_core::changes::retain(
-                    &ingest_state.pool,
-                    ingest_state.config.refresh.retention_days,
-                )
-                .await
-                {
-                    tracing::warn!(error=%e,"change retention failed");
-                }
-                retention_at = tokio::time::Instant::now() + Duration::from_secs(3600);
-            }
-            if let Err(e) = store::cleanup(&ingest_state.pool, ingest_state.config.grace_days).await
-            {
-                tracing::warn!(error=%e,"cleanup failed");
-            }
             tokio::select! { _=ingest_shutdown.changed()=>break,_=tokio::time::sleep(Duration::from_secs(ingest_state.config.poll_secs))=>{} }
         }
     });
+    let maintenance_task = tokio::spawn(pinakes_core::maintenance::run(
+        pool.clone(),
+        config.grace_days,
+        config.refresh.retention_days,
+        Duration::from_secs(3600),
+        shutdown_rx.clone(),
+    ));
     let admin = tokio::net::TcpListener::bind(&config.admin_listen).await?;
     let admin_app = api::admin_router(state.clone());
     let mut admin_shutdown = shutdown_rx.clone();
@@ -125,6 +116,7 @@ async fn main() -> Result<()> {
     .await?;
     admin_task.await??;
     ingest_task.await?;
+    maintenance_task.await?;
     while let Some(result) = workers.join_next().await {
         result?;
     }

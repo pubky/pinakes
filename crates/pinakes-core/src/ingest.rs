@@ -89,7 +89,7 @@ pub async fn apply(
                     pubky_resource_id::normalize_uri(&line.uri).map_err(anyhow::Error::msg)?;
                 store::insert_resource(&mut tx, &line.resource_id, &line.uri, &scheme).await?;
                 if old.as_deref() != Some(&line.resource_id) {
-                    sqlx::query("UPDATE resource SET final=false,refresh_at=now(),next_attempt_at=now(),dead_letter=false,attempts=0 WHERE id=$1 AND final AND resolver<>'geo'").bind(&line.resource_id).execute(&mut *tx).await?;
+                    sqlx::query("UPDATE resource SET final=false,refresh_at=now(),next_attempt_at=now(),dead_letter=false,attempts=0 WHERE id=$1 AND final AND resolver<>'geo' AND $2>resolved_at").bind(&line.resource_id).bind(timestamp(Some(line.at))?).execute(&mut *tx).await?;
                 }
                 sqlx::query(r#"INSERT INTO reference(resource_id,kind,author,label,object_path,recurrence_id,start_at,end_at,created_at)
                     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
