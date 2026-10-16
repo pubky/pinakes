@@ -10,6 +10,7 @@ use std::time::Duration;
 pub const ATTRIBUTES: &[&str] = &["content_type", "content_length"];
 pub struct PubkyResolver {
     client: pubky::Pubky,
+    preflight: super::pubky_policy::Preflight,
     config: ResolverConfig,
 }
 impl PubkyResolver {
@@ -20,6 +21,7 @@ impl PubkyResolver {
             .read_timeout(Duration::from_secs(10))
             .build()?;
         Ok(Self {
+            preflight: super::pubky_policy::Preflight::new(client.pkarr().clone()),
             client: pubky::Pubky::with_client(client),
             config,
         })
@@ -35,6 +37,8 @@ impl Resolver for PubkyResolver {
     }
     async fn resolve(&self, uri: &str) -> Result<ResourceMeta> {
         tokio::time::timeout(Duration::from_secs(10), async {
+            // Includes SDK feature discovery; refusal happens before SDK network requests/probes.
+            self.preflight.check(uri).await?;
             // Only an unauthenticated public-storage GET. No social specs or linked objects are fetched.
             let mut observation = crate::telemetry::FetchGuard::start();
             let mut response = match self.client.public_storage().get(uri).await {

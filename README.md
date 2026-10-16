@@ -147,6 +147,35 @@ blocks. The 1 MB cap applies to decoded body bytes. Discovery permits one additi
 oEmbed JSON fetch within the original ten-second resolution deadline. It cannot
 replace an already extracted field. Images remain origin URLs.
 
+Nominatim, the OSM editing API and Nexus are trusted, operator-configured upstreams.
+Their HTTP clients deliberately do not apply web DNS pinning or private-address refusal
+(Nexus defaults to loopback). Configure these URLs and their DNS through trusted operator
+controls. Upstream Retry-After delays are still capped at one hour.
+
+Pubky deployment: before any SDK fetch or TCP probe, Pinakes resolves the owner's PKARR
+HTTPS endpoints, including delegated homeservers and the SDK's `/info` discovery target.
+It refuses empty resolutions or any endpoint with a non-public address, checking every
+DNS answer for ICANN endpoints; ports are unrestricted. The preflight shares the SDK's
+PKARR cache and ten-second resolution deadline. **Run Pinakes with an egress firewall
+that denies private, loopback, link-local and metadata ranges. Set `[pubky] enabled = false`
+if you cannot enforce that boundary.** Preserve explicitly required access to trusted
+operator services, such as the local Nexus/database, in that deployment policy.
+
+Pinned-source audit: Pubky 0.16.2's `actors/storage/resource.rs::to_transport_url` constructs
+HTTPS URLs; direct endpoints use PKARR raw-public-key TLS (`pkarr` 8.1.0 `extra/tls.rs`).
+However, `client/http_targets/native.rs::build_transport_request` accepts ICANN fallback
+with ordinary CA-validated TLS in production, without pinning it to a homeserver key.
+`client/core.rs::build` retains reqwest 0.13.5's default redirects and `https_only=false`:
+an HTTPS response can redirect to plaintext HTTP outside testnet. Thus the transport is
+not universally pinned TLS, and private destinations cannot be assumed to be only blind
+handshake probes. These findings supersede the earlier RPK-only deployment note.
+
+The SDK exposes no connection/address-validation hook; its HTTP clients remain private.
+The preflight is not connection pinning: a PKARR record republished between validation
+and the SDK's resolution, changed DNS answers, cached transport choices, redirects and
+ambient SDK proxy behavior can escape it. The firewall must enforce the boundary
+independently of the SDK. Public info exposes no transport diagnostics.
+
 Preview limits use the socket peer IP; forwarded headers are deliberately ignored.
 If deploying behind a reverse proxy, its shared peer IP gets the aggregate budget;
 configure the edge's own client-IP limits. `/v1/info` includes the last observed
@@ -211,14 +240,6 @@ errors. Stored source errors are restricted to dns/connect/timeout/http_4xx/http
 parse/policy classes. Generic web pages declare no expected fields, since images and
 pages without titles are valid; platform adapters can opt into drift detection.
 Denied web canaries are skipped, and each worker checks due canaries at most once/minute.
-
-The pinned Pubky 0.16.2 builder exposes PKARR configuration and timeouts but no socket
-or address-validation hook; both HTTP clients are private. Its native PKARR connection
-path therefore cannot apply Pinakes's `egress::public_ip` check. A malicious endpoint
-can cause a blind connection to an operator-network IP (RPK TLS still authenticates the
-server). Use network-level egress restrictions or disable `[pubky]` where that boundary
-is required. Public info never exposes these transport failures. No SDK fork or partial,
-rebindable preflight check is used.
 
 `[web]`/`[pubky] ttl_secs` supplies the parser document's initial TTL; scheduling is
 controlled by `[refresh]`. Conditional responses preserve accepted facts, but validators

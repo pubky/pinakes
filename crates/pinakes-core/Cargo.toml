@@ -23,6 +23,7 @@ tracing.workspace = true
 url.workspace = true
 utoipa.workspace = true
 pubky = "=0.16.2"
+pkarr = { version = "=8.1.0", features = ["endpoints"] }
 scraper = "0.24"
 toml = "0.9"
 ipnet = "2"

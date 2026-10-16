@@ -2312,6 +2312,7 @@ dependencies = [
  "h3o",
  "http-body-util",
  "ipnet",
+ "pkarr",
  "prometheus",
  "pubky",
  "pubky-resource-id",
