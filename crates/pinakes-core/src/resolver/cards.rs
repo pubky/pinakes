@@ -504,10 +504,55 @@ pub fn parse_isbn(uri: &str, number: &str, f: &Fetched, ttl: u64) -> Result<Reso
             d.attributes.insert(k.into(), v);
         }
     }
-    if let Some(url) = v["url"].as_str().and_then(|s| web::origin_url(&f.url, s)) {
-        d.aliases.push(url);
+    // Open Library names the edition page; Goodreads/LibraryThing ids stay identifiers only.
+    let editions = v
+        .pointer("/identifiers/openlibrary")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(4)
+        .filter_map(Value::as_str)
+        .filter(|id| {
+            id.len() > 3
+                && id.starts_with("OL")
+                && id.ends_with('M')
+                && id[2..id.len() - 1].bytes().all(|b| b.is_ascii_digit())
+        })
+        .map(|id| format!("/books/{id}"));
+    let pages = [
+        v["url"].as_str(),
+        v["key"].as_str().filter(|k| k.starts_with("/books/")),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::to_owned)
+    .chain(editions)
+    .collect::<Vec<_>>();
+    for page in pages {
+        registry_url(&mut d, &f.url, &page);
     }
     d.bounded(web::ATTRIBUTES)
+}
+/// A landing page named by the identifier registry is authoritative grouping evidence for
+/// that identifier. Legacy `http` registrations also claim the `https` form publishers serve.
+fn registry_url(d: &mut ResourceMeta, base: &Url, s: &str) {
+    let Some(url) = web::origin_url(base, s) else {
+        return;
+    };
+    // The DOI proxy is the identifier itself, not a publisher landing page.
+    if Url::parse(&url)
+        .ok()
+        .is_some_and(|u| matches!(u.host_str(), Some("doi.org" | "dx.doi.org")))
+    {
+        return;
+    }
+    crate::group_keys::add(d, "registry", &url);
+    if let Some(rest) = url.strip_prefix("http://") {
+        crate::group_keys::add(d, "registry", &format!("https://{rest}"));
+    }
+    if d.aliases.len() < 4 && !d.aliases.contains(&url) {
+        d.aliases.push(url);
+    }
 }
 pub fn parse_doi(uri: &str, f: &Fetched, ttl: u64) -> Result<ResourceMeta> {
     if let Some(d) = check_status(uri, "doi", f, ttl)? {
@@ -543,6 +588,29 @@ pub fn parse_doi(uri: &str, f: &Fetched, ttl: u64) -> Result<ResourceMeta> {
     if let Some(number) = doi(uri) {
         crate::group_keys::add(&mut d, "doi", &number);
         d.aliases.push(format!("https://doi.org/{number}"));
+    }
+    // Crossref puts the landing page in resource.primary.URL and its CSL `URL` is the DOI
+    // proxy; DataCite's CSL `URL` is the landing page. Publisher HTML links name it too.
+    let html_links = v["link"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(8)
+        .filter(|l| {
+            l["content-type"]
+                .as_str()
+                .is_some_and(|t| t.eq_ignore_ascii_case("text/html"))
+        })
+        .filter_map(|l| l["URL"].as_str());
+    let pages = [v.pointer("/resource/primary/URL"), v.get("URL")]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .chain(html_links)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for page in pages {
+        registry_url(&mut d, &f.url, &page);
     }
     d.bounded(web::ATTRIBUTES)
 }

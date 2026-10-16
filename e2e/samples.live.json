@@ -26,8 +26,14 @@
   },
   {
     "kind": "doi",
-    "uri": "doi:10.1038/nphys1170",
+    "uri": "doi:10.1038/nature12373",
     "type": "ScholarlyArticle"
+  },
+  {
+    "kind": "doi_page",
+    "uri": "https://www.nature.com/articles/nature12373",
+    "type": "CreativeWork",
+    "group_with": "doi"
   },
   {
     "kind": "isbn",

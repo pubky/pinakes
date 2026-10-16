@@ -1329,3 +1329,194 @@ async fn round3_upgrade_isolates_stale_container_claims_and_requeues_legacy_podc
         0
     );
 }
+
+fn recorded_json(url: &str, body: &[u8]) -> pinakes_core::resolver::egress::Fetched {
+    pinakes_core::resolver::egress::Fetched {
+        permanent_redirect: false,
+        truncated: false,
+        url: url.parse().unwrap(),
+        body: body.to_vec(),
+        content_type: "application/json".into(),
+        status: 200,
+        location: None,
+        retry_after_secs: 60,
+        validators: Default::default(),
+    }
+}
+async fn page(pool: &PgPool, uri: &str, name: &str, claims: &[(&str, &str)]) -> String {
+    let id = store::ensure_resource(pool, uri).await.unwrap();
+    let mut d = ResourceMeta::new(uri, "web", 86400);
+    d.name = Some(name.into());
+    d.set_type("ScholarlyArticle");
+    for (basis, value) in claims {
+        group_keys::add(&mut d, basis, value);
+    }
+    store::save_document(pool, &id, 0, &d).await.unwrap();
+    id
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round4_registry_landing_pages_group_publisher_pages_with_identifiers(pool: PgPool) {
+    use pinakes_core::resolver::cards;
+    let landing = "https://www.nature.com/articles/nature12373";
+    let csl = recorded_json(
+        "https://api.crossref.org/v1/works/10.1038%2Fnature12373/transform",
+        include_bytes!("fixtures/registry/crossref-nature12373.csl.json"),
+    );
+    // The page carries everything the live candidate showed: a page-supplied DOI, a
+    // one-directional sameAs to doi.org and its own canonical.
+    let claims = [
+        ("doi", "10.1038/nature12373"),
+        ("same_as", "https://doi.org/10.1038/nature12373"),
+        ("canonical", landing),
+    ];
+    let mut identifiers = Vec::new();
+    for uri in [
+        "doi:10.1038/nature12373",
+        "https://dx.doi.org/10.1038/nature12373",
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let d = cards::parse_doi(uri, &csl, 86400).unwrap();
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        identifiers.push(id);
+    }
+    // Before the exact page exists, a same-origin variant whose own canonical is the
+    // registry page meets the identifier directly (rule b); that canonical is not trusted.
+    let variant = page(
+        &pool,
+        "https://www.nature.com/articles/nature12373?error=cookies_not_supported",
+        "Variant",
+        &[("canonical", landing)],
+    )
+    .await;
+    let group = gid(&pool, &variant).await;
+    assert_eq!(gid(&pool, &identifiers[0]).await, group);
+    let publisher = page(&pool, landing, "Publisher page", &claims).await;
+    assert_eq!(gid(&pool, &publisher).await, group);
+    for id in &identifiers {
+        assert_eq!(gid(&pool, id).await, group);
+    }
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT bool_and(trusted) FROM resource_group WHERE basis='registry' AND resource_id=ANY($1)"
+    )
+    .bind(&identifiers)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+
+    // A page claiming the DOI and the publisher's canonical from another origin does not:
+    // doi.org names nature.com, never the copier.
+    let copier = page(&pool, "https://copy.example/nature12373", "Copy", &claims).await;
+    assert_ne!(gid(&pool, &copier).await, group);
+    // A web document cannot mint registry evidence for itself.
+    let forger = store::ensure_resource(&pool, "https://forger.example/a")
+        .await
+        .unwrap();
+    let mut forged = ResourceMeta::new("https://forger.example/a", "web", 86400);
+    forged.group_keys.push(group_keys::GroupKey {
+        key: format!("url:{}", pinakes_core::model::identity(landing).unwrap().0),
+        basis: "registry".into(),
+        confidence: 0.9,
+        target: Some(landing.into()),
+    });
+    store::save_document(&pool, &forger, 0, &forged)
+        .await
+        .unwrap();
+    assert_ne!(gid(&pool, &forger).await, group);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource_group WHERE resource_id=$1 AND basis='registry'"
+        )
+        .bind(&forger)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+
+    // Rule 4 picks the best member by distinct taggers, not by identifier provenance.
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    tag(&pool, &publisher, &"p".repeat(52), "paper").await;
+    tag(&pool, &publisher, &"q".repeat(52), "paper").await;
+    tag(&pool, &identifiers[0], &"p".repeat(52), "paper").await;
+    let card = get(&app, &format!("/v1/groups/{group}")).await;
+    assert_eq!(card["name"], "Publisher page");
+    assert_eq!(card["member_count"], 4);
+    for author in ["r", "s", "t"] {
+        tag(&pool, &identifiers[0], &author.repeat(52), "paper").await;
+    }
+    let card = get(&app, &format!("/v1/groups/{group}")).await;
+    assert_eq!(card["name"], "Nanometre-scale thermometry in a living cell");
+
+    // Open Library: the tagged edition page (no slug) and its ISBN resource group.
+    let edition = page(
+        &pool,
+        "https://openlibrary.org/books/OL7353617M",
+        "Edition page",
+        &[(
+            "canonical",
+            "https://openlibrary.org/books/OL7353617M/Fantastic_Mr._Fox",
+        )],
+    )
+    .await;
+    let isbn = store::ensure_resource(&pool, "isbn:9780140328721")
+        .await
+        .unwrap();
+    let ol = recorded_json(
+        "https://openlibrary.org/api/books?bibkeys=ISBN:9780140328721&format=json&jscmd=data",
+        include_bytes!("fixtures/registry/openlibrary-9780140328721.json"),
+    );
+    let d = cards::parse_isbn("isbn:9780140328721", "9780140328721", &ol, 86400).unwrap();
+    store::save_document(&pool, &isbn, 0, &d).await.unwrap();
+    assert_eq!(gid(&pool, &edition).await, gid(&pool, &isbn).await);
+    assert_ne!(gid(&pool, &edition).await, group);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round4_upgrade_requeues_identifier_cards_without_registry_pages(pool: PgPool) {
+    let mut ids = Vec::new();
+    for (uri, source) in [
+        ("doi:10.1038/nature12373", "doi"),
+        ("isbn:9780140328721", "isbn"),
+        ("https://example.org/web", "web"),
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, source, 86400);
+        d.name = Some("Old card".into());
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.push(id);
+    }
+    // A card that already records its registry page is not refetched.
+    let current = store::ensure_resource(&pool, "doi:10.1000/current")
+        .await
+        .unwrap();
+    let mut d = ResourceMeta::new("doi:10.1000/current", "doi", 86400);
+    group_keys::add(&mut d, "registry", "https://publisher.example/current");
+    store::save_document(&pool, &current, 0, &d).await.unwrap();
+    ids.push(current);
+    sqlx::query("UPDATE resource SET lease_until=now()+interval '1 hour',next_attempt_at=now()+interval '30 days' WHERE id=ANY($1)").bind(&ids).execute(&pool).await.unwrap();
+    let before: Vec<i64> = sqlx::query_scalar(
+        "SELECT generation FROM resource WHERE id=ANY($1) ORDER BY array_position($1,id)",
+    )
+    .bind(&ids)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/202610160028_registry_landing_pages.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let after: Vec<(i64, bool, f64)> = sqlx::query_as("SELECT generation,lease_until IS NULL,extract(epoch FROM(next_attempt_at-now()))::float8 FROM resource WHERE id=ANY($1) ORDER BY array_position($1,id)").bind(&ids).fetch_all(&pool).await.unwrap();
+    for (i, (generation, unleased, delay)) in after.iter().enumerate() {
+        if i < 2 {
+            assert_eq!(*generation, before[i] + 1);
+            assert!(*unleased);
+            assert!((-1.0..3600.0).contains(delay), "{delay}");
+        } else {
+            assert_eq!(*generation, before[i]);
+            assert!(*delay > 86400.0);
+        }
+    }
+}

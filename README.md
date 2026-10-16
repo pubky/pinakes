@@ -476,7 +476,13 @@ on disappearance; explicitly unlisted posts retain no post content.
 Groups connect immutable resource or occurrence identities using corroborated keys.
 URL claims bridge only within a registrable domain or with a reciprocal backlink.
 Cross-domain typed identifiers require verified evidence from both members or
-reciprocity; unverified self-claims do not merge. The PSL and hosted-blog tenant
+reciprocity; unverified self-claims do not merge. DOI and ISBN cards record the
+landing pages their registries name (Crossref `resource.primary.URL`, a non-proxy CSL
+`URL`, `text/html` links; the Open Library edition page) as trusted `registry` URL
+keys, so the publisher page groups with its identifier when the page's own URI or its
+same-origin canonical is that landing page. A page naming a DOI it does not own never
+merges, and only the DOI/ISBN resolvers can supply registry evidence. Migration 0028
+refetches older DOI/ISBN cards once, staggered over an hour. The PSL and hosted-blog tenant
 boundaries separate independent publishers. `collapse=group` filters members, then
 ranks and pages groups with distinct taggers and preselected best-member facets.
 Occurrence groups reject instance starts more than five minutes apart. Ordinary event pages can differ by seconds.
@@ -503,7 +509,7 @@ deleting evidence. OSM facts remain in `osm_place`.
 
 Run `scripts/e2e --mock` for the fixture flow or `scripts/e2e --isolated-live` for a
 scoped real SDK run. Both use an owned temporary database; the live driver resolves
-only its nine samples. [The harness guide](e2e/README.md) documents identity setup,
+only its listed samples (ten; the nature.com article must group with its DOI). [The harness guide](e2e/README.md) documents identity setup,
 configuration, CI commands, sample replacement and cleanup. It writes universal
 tags under `/pub/pinakes.e2e/tags/`, waits for Nexus and Pinakes, then deletes its
 own tags. The existing dev stack can also be tested by running `scripts/e2e`.

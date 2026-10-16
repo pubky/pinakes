@@ -1,5 +1,6 @@
 //! Isolated e2e stack with real migrations, ingestion, resolver parsers, storage and API.
-//! Default mode mocks external boundaries with no public network; --live scopes real fetches to nine IDs.
+//! Default mode mocks external boundaries with no public network; --live scopes real fetches
+//! to the (at most twelve) sample IDs.
 use anyhow::{bail, ensure, Result};
 use async_trait::async_trait;
 use axum::{
@@ -76,8 +77,10 @@ impl Fixture {
             {"kind":"ics","uri":"https://calendar.example/e2e.ics","type":"DataFeed","expectedOccurrences":2},
             {"kind":"naddr","uri":naddr,"type":"Event"},
             {"kind":"doi","uri":"doi:10.1234/pinakes","type":"ScholarlyArticle"},
+            {"kind":"doi_page","uri":"https://publisher.example/articles/pinakes","type":"CreativeWork","group_with":"doi"},
             {"kind":"isbn","uri":"isbn:9780140328721","type":"Book"},
-            {"kind":"isbn_twin","uri":"isbn:0140328726","type":"Book"},
+            {"kind":"isbn_twin","uri":"isbn:0140328726","type":"Book","group_with":"isbn"},
+            {"kind":"isbn_page","uri":"https://openlibrary.org/books/OL7353617M","type":"CreativeWork","group_with":"isbn"},
             {"kind":"media","uri":"https://www.youtube.com/watch?v=fixture","type":"VideoObject"},
             {"kind":"web","uri":"https://web.example/e2e","type":"WebPage"}
         ]);
@@ -104,6 +107,7 @@ impl Dns for FixtureDns {
                 | "api.nostrarchives.com"
                 | "doi.org"
                 | "openlibrary.org"
+                | "publisher.example"
                 | "www.youtube.com"
                 | "web.example"
         ) {
@@ -124,8 +128,11 @@ impl Transport for Fixture {
             "events.example" => ("text/html",format!("<script type='application/ld+json'>{}</script>",json!({"@type":"Event","name":"Fixture meetup","startDate":self.start,"location":{"@type":"Place","name":"Fixture Cafe","address":{"@type":"PostalAddress","streetAddress":"1 Main Street","addressLocality":"Zurich","postalCode":"8000","addressCountry":"CH"}}}))),
             "calendar.example" => ("text/calendar",format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:e2e-series\r\nDTSTART:{}\r\nRRULE:FREQ=DAILY;COUNT=2\r\nSUMMARY:Fixture calendar meetup\r\nGEO:47;8\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",self.start.format("%Y%m%dT%H%M%SZ"))),
             "api.nostr.wine"|"api.nostrarchives.com"=>("application/json",json!([self.event]).to_string()),
-            "doi.org"=>{ensure!(o.accept.as_deref()==Some("application/vnd.citationstyles.csl+json"),"missing CSL negotiation");("application/json",json!({"type":"article-journal","title":"Fixture research"}).to_string())},
-            "openlibrary.org"=>("application/json",json!({"ISBN:9780140328721":{"title":"Matilda","authors":[{"name":"Roald Dahl"}],"url":"https://openlibrary.org/books/OL7353617M"},"ISBN:0140328726":{"title":"Matilda","authors":[{"name":"Roald Dahl"}],"url":"https://openlibrary.org/books/OL7353617M"}}).to_string()),
+            // Crossref shape: CSL `URL` is the DOI proxy, the landing page is resource.primary.
+            "doi.org"=>{ensure!(o.accept.as_deref()==Some("application/vnd.citationstyles.csl+json"),"missing CSL negotiation");("application/json",json!({"type":"article-journal","title":"Fixture research","URL":"http://dx.doi.org/10.1234/pinakes","resource":{"primary":{"URL":"https://publisher.example/articles/pinakes"}}}).to_string())},
+            "publisher.example"=>("text/html","<title>Fixture research | Publisher</title><link rel=\"canonical\" href=\"https://publisher.example/articles/pinakes\">".into()),
+            "openlibrary.org" if u.path().starts_with("/books/")=>("text/html","<title>Matilda | Open Library</title><link rel=\"canonical\" href=\"https://openlibrary.org/books/OL7353617M/Matilda\">".into()),
+            "openlibrary.org"=>("application/json",json!({"ISBN:9780140328721":{"title":"Matilda","authors":[{"name":"Roald Dahl"}],"url":"https://openlibrary.org/books/OL7353617M/Matilda","key":"/books/OL7353617M"},"ISBN:0140328726":{"title":"Matilda","authors":[{"name":"Roald Dahl"}],"url":"https://openlibrary.org/books/OL7353617M/Matilda","key":"/books/OL7353617M"}}).to_string()),
             "www.youtube.com"=>("application/json",json!({"type":"video","title":"Fixture video","thumbnail_url":"https://image.example/a.jpg"}).to_string()),
             "web.example"=>("text/html","<title>Fixture page</title>".into()),
             _=>bail!("no fixture for upstream host {}",u.host_str().unwrap_or("")),
@@ -447,9 +454,10 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
             .clone();
         selected.push((id, resolver));
     }
+    // The scope stays small and explicit: only listed samples are ever fetched.
     ensure!(
-        selected.len() == 9,
-        "live driver requires exactly nine sample resources"
+        (1..=12).contains(&selected.len()),
+        "live driver requires one to twelve sample resources"
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);

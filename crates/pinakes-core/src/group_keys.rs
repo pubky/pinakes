@@ -71,6 +71,8 @@ pub fn add(doc: &mut ResourceMeta, basis: &str, value: &str) {
         "isbn" => ("isbn", 1.0),
         "doi" => ("doi", 1.0),
         "same_as" | "canonical" => ("url", 0.8),
+        // Landing pages named by DOI/ISBN registries; only those resolvers emit this basis.
+        "registry" => ("url", 0.9),
         _ => return,
     };
     let target = (kind == "url").then(|| value.to_owned());

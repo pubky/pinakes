@@ -918,3 +918,104 @@ async fn round3_advertised_oembed_uses_policy_and_origin_checks() {
         }
     }
 }
+
+fn recorded(url: &str, body: &[u8]) -> Fetched {
+    Fetched {
+        permanent_redirect: false,
+        truncated: false,
+        url: url.parse().unwrap(),
+        body: body.to_vec(),
+        content_type: "application/json".into(),
+        status: 200,
+        location: None,
+        retry_after_secs: 60,
+        validators: Default::default(),
+    }
+}
+fn url_key(uri: &str) -> String {
+    format!("url:{}", pinakes_core::model::identity(uri).unwrap().0)
+}
+#[test]
+fn round4_identifier_registries_name_landing_pages() {
+    // Recorded Crossref CSL: `URL` is the DOI proxy, the landing page is resource.primary.
+    let f = recorded(
+        "https://api.crossref.org/v1/works/10.1038%2Fnature12373/transform",
+        include_bytes!("fixtures/registry/crossref-nature12373.csl.json"),
+    );
+    let d = cards::parse_doi("doi:10.1038/nature12373", &f, 3600).unwrap();
+    let registry: Vec<_> = d
+        .group_keys
+        .iter()
+        .filter(|k| k.basis == "registry")
+        .map(|k| k.key.clone())
+        .collect();
+    assert!(registry.contains(&url_key("https://www.nature.com/articles/nature12373")));
+    // The text/html link is a legacy http registration; its https form is also claimed.
+    assert!(registry.contains(&url_key("http://www.nature.com/articles/nature12373")));
+    // PDFs, the DOI proxy and the doi.org identity are never landing pages.
+    for absent in [
+        "http://www.nature.com/articles/nature12373.pdf",
+        "http://dx.doi.org/10.1038/nature12373",
+        "https://doi.org/10.1038/nature12373",
+    ] {
+        assert!(!registry.contains(&url_key(absent)), "{absent}");
+    }
+    assert_eq!(registry.len(), 2, "{registry:?}");
+    assert!(d
+        .group_keys
+        .iter()
+        .any(|k| k.key == "doi:10.1038/nature12373"));
+    assert!(d
+        .aliases
+        .contains(&"https://www.nature.com/articles/nature12373".to_string()));
+    // DataCite-style CSL carries the landing page in `URL`; relative or credentialed
+    // values are refused by the shared URL filter.
+    let f = recorded(
+        "https://doi.org/10.5281/zenodo.1",
+        &serde_json::to_vec(&json!({"type":"dataset","title":"Data","URL":"https://zenodo.org/records/1",
+            "link":[{"URL":"https://user:pw@zenodo.org/x","content-type":"text/html"},{"URL":"javascript:alert(1)","content-type":"text/html"}]}))
+        .unwrap(),
+    );
+    let d = cards::parse_doi("doi:10.5281/zenodo.1", &f, 3600).unwrap();
+    let registry: Vec<_> = d
+        .group_keys
+        .iter()
+        .filter(|k| k.basis == "registry")
+        .collect();
+    assert_eq!(registry.len(), 1);
+    assert_eq!(registry[0].key, url_key("https://zenodo.org/records/1"));
+    assert_eq!(registry[0].confidence, 0.9);
+
+    // Recorded Open Library: the edition page (with and without its slug) is the landing
+    // page; Goodreads/LibraryThing ids are not URL identity.
+    let f = recorded(
+        "https://openlibrary.org/api/books?bibkeys=ISBN:9780140328721&format=json&jscmd=data",
+        include_bytes!("fixtures/registry/openlibrary-9780140328721.json"),
+    );
+    let d = cards::parse_isbn("isbn:9780140328721", "9780140328721", &f, 3600).unwrap();
+    let registry: Vec<_> = d
+        .group_keys
+        .iter()
+        .filter(|k| k.basis == "registry")
+        .map(|k| k.key.clone())
+        .collect();
+    for page in [
+        "https://openlibrary.org/books/OL7353617M",
+        "https://openlibrary.org/books/OL7353617M/Fantastic_Mr._Fox",
+        "http://openlibrary.org/books/OL7353617M/Fantastic_Mr._Fox",
+    ] {
+        assert!(registry.contains(&url_key(page)), "{page}");
+    }
+    assert_eq!(registry.len(), 3, "{registry:?}");
+    assert!(d.group_keys.iter().any(|k| k.key == "isbn:9780140328721"));
+    assert!(!serde_json::to_string(&d.group_keys)
+        .unwrap()
+        .contains("goodreads"));
+    // Malformed edition ids from the registry are ignored.
+    let f = recorded(
+        "https://openlibrary.org/api/books",
+        &serde_json::to_vec(&json!({"ISBN:9780140328721":{"title":"T","key":"/authors/OL1A","identifiers":{"openlibrary":["OL../x","OLM","OL12W"]}}})).unwrap(),
+    );
+    let d = cards::parse_isbn("isbn:9780140328721", "9780140328721", &f, 3600).unwrap();
+    assert!(d.group_keys.iter().all(|k| k.basis != "registry"));
+}

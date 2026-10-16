@@ -128,20 +128,20 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
       await waitFor('group collapse', async () => {
         const collapsed = await search({ collapse: 'group', limit: '500' });
         if (!collapsed.items.length) return false;
-        if (docs.has('isbn_twin')) {
-          const twinIds = [docs.get('isbn').resource_id, docs.get('isbn_twin').resource_id];
-          let twinsGrouped = false;
-          for (const row of collapsed.items.filter(row => row.group)) {
-            const detail = await json(`${pinakes}/v1/groups/${row.group.id}`);
-            if (twinIds.every(id => detail.members.some(member => member.resource_id === id))) twinsGrouped = true;
-          }
-          if (!twinsGrouped) return false;
-          assert(collapsed.items.length < results.items.length, 'ISBN twins must collapse into one row');
+        // Samples naming `group_with` must share one group: ISBN twins, and publisher
+        // pages with the DOI/ISBN resource whose registry names them as landing page.
+        const pairs = samples.filter(s => s.group_with).map(s => [s.kind, s.group_with]);
+        const details = [];
+        for (const row of collapsed.items.filter(row => row.group)) details.push(await json(`${pinakes}/v1/groups/${row.group.id}`));
+        for (const [kind, other] of pairs) {
+          const ids = [docs.get(kind).resource_id, docs.get(other).resource_id];
+          if (!details.some(detail => ids.every(id => detail.members.some(member => member.resource_id === id)))) return false;
         }
+        if (pairs.length) assert(collapsed.items.length < results.items.length, 'grouped samples must collapse');
         for (const row of collapsed.items) if (row.group) { assert(row.group.member_count > 0); assert(!("members" in row.group)); }
         return true;
       }, timeout, signal);
-      report.assertions.push('group collapse and membership');
+      report.assertions.push(`group collapse and membership (${samples.filter(s => s.group_with).map(s => `${s.kind}~${s.group_with}`).join(', ') || 'no pairs'})`);
     }, report, journal);
     assert(report.cleanup.every(c => c.deleted), 'Tag cleanup failed; retry using journal');
     await waitFor('Nexus deletions', async () => { await poll(); return tags.every(tag => feed.get(tag.path)?.op === 'del'); }, timeout, signal);

@@ -1,0 +1,23 @@
+{
+  "crossref-nature12373.csl": {
+    "url": "https://doi.org/10.1038/nature12373",
+    "accept": "application/vnd.citationstyles.csl+json",
+    "final_url": "https://api.crossref.org/v1/works/10.1038%2Fnature12373/transform",
+    "status": 200,
+    "content_type": "application/vnd.citationstyles.csl+json",
+    "recorded_at": "2026-10-16T11:52:00+00:00",
+    "bytes": 13476,
+    "sha256": "2115c8965764602afd79745048ff3d3537990638ec3eeee9081491b6092a9750",
+    "note": "Public bibliographic metadata, recorded once as a parser regression fixture; tests make no public requests."
+  },
+  "openlibrary-9780140328721": {
+    "url": "https://openlibrary.org/api/books?bibkeys=ISBN:9780140328721&format=json&jscmd=data",
+    "final_url": "https://openlibrary.org/api/books?bibkeys=ISBN:9780140328721&format=json&jscmd=data",
+    "status": 200,
+    "content_type": "application/json",
+    "recorded_at": "2026-10-16T11:52:00+00:00",
+    "bytes": 4149,
+    "sha256": "df362ca52382cb12b210f87c9b05af5497724899fa4cd8692f7c8a94b3100751",
+    "note": "Public bibliographic metadata, recorded once as a parser regression fixture; tests make no public requests."
+  }
+}

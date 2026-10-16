@@ -154,6 +154,10 @@ fn evidence(
     let stored: Vec<crate::group_keys::GroupKey> =
         serde_json::from_value(row["keys"].clone()).unwrap_or_default();
     for k in stored.into_iter().filter(crate::group_keys::valid_stored) {
+        // Only identifier registries name landing pages; a page cannot claim that basis.
+        if k.basis == "registry" && !matches!(row["source"].as_str(), Some("isbn" | "doi")) {
+            continue;
+        }
         if let Some(url) = k.key.strip_prefix("url:").filter(|s| s.starts_with("http")) {
             crate::group_keys::add(&mut d, &k.basis, url);
         } else if d.group_keys.len() < 16 && !d.group_keys.iter().any(|own| own.key == k.key) {
@@ -667,6 +671,10 @@ async fn plan(
                     && claims[*j].contains(&format!("url:{}", resource_ids[*i]));
                 let same_origin = origins[*i] == origins[*j];
                 let url_owned = |e: &Edge| e.target.as_deref() == Some(e.origin.as_str());
+                // A registry-named landing page meets the publisher's own same-origin canonical.
+                let registry = |a: &Edge, b: &Edge| {
+                    a.basis == "registry" && a.trusted && b.basis == "canonical" && url_owned(b)
+                };
                 let corroborated = cfg.cross_container_occurrences
                     == CrossContainerOccurrences::Corroborated
                     && key.starts_with("ics_uid:")
@@ -684,6 +692,7 @@ async fn plan(
                     } else {
                         reciprocal
                             || (ie.trusted && je.trusted)
+                            || (key.starts_with("url:") && (registry(ie, je) || registry(je, ie)))
                             || (same_origin
                                 && (!key.starts_with("url:") || (url_owned(ie) && url_owned(je))))
                     };

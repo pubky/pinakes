@@ -23,8 +23,9 @@ Mock mode runs the same JavaScript assertions and real tag builder. A local Rust
 stack runs the actual migrations, ingestion, resolver queue, parsers, storage,
 groups and API; only homeserver storage, Nexus and external HTTP boundaries use
 fixtures. No identity secret or public-network access is needed after dependencies
-are installed. The fixture venue test requires a positive match. An additional ISBN-10 tag pairs
-with the ISBN-13 sample to prove a real asynchronous merge. Injected transports
+are installed. The fixture venue test requires a positive match. Samples with `group_with` must end in
+one group: an ISBN-10 tag pairs with the ISBN-13 sample, and publisher pages pair with
+the DOI and ISBN resources whose registries name them as landing pages. Injected transports
 disable direct relay sockets; unknown fixture DNS names resolve to TEST-NET.
 
 Both `--mock` and `--isolated-live` create a unique `pinakes_e2e_owned_*` database
@@ -45,8 +46,8 @@ CARGO_PROFILE_DEV_DEBUG=0 scripts/e2e --isolated-live
 ```
 
 `--isolated-live` uses the real SDK, homeserver, Nexus and public upstreams. Its
-private Pinakes driver reads the Nexus feed but resolves only the nine selected
-sample IDs, using the production queue completion/leases and resolver policy.
+private Pinakes driver reads the Nexus feed but resolves only the selected
+sample IDs (ten by default, at most twelve), using the production queue completion/leases and resolver policy.
 Canaries and unrelated backlog fetching are off. Use this mode for a scoped live
 smoke test. Run `scripts/e2e` without a mode to use an already configured dev stack
 at `PINAKES_E2E_PINAKES` (default `http://127.0.0.1:8090`).
@@ -65,7 +66,7 @@ and SIGINT/SIGTERM as well as success, retries deletion, and records each result
 If the process is killed or cleanup fails, use the printed journal with the same
 identity to delete only its listed paths; do not clear the whole namespace.
 
-`PINAKES_E2E_SAMPLES` may select a JSON file with the same nine kinds as
+`PINAKES_E2E_SAMPLES` may select a JSON file with the same kinds as
 `samples.live.json`; update stale public samples explicitly. The ICS default is
 Google’s published Swiss holiday calendar, public by design with no capability
 token. `PINAKES_E2E_ICS_URL` optionally selects another public feed; never commit

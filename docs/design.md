@@ -249,7 +249,9 @@ or matching page link, never an arbitrary item from a multi-episode feed.
 IDs. `resource_group` holds directional evidence, origins, trust and admission time.
 A URL claim joins only within a registrable domain or reciprocally. Cross-domain
 typed identifiers require authority on both members or reciprocal links; arbitrary
-self-claims cannot nominate a new best member. Only ICS UID is scoped to exact
+self-claims cannot nominate a new best member. A landing page named by the DOI or ISBN
+registry is authority for the identifier member, and meets the publisher page's own URI
+or same-origin canonical, so "the paper on doi.org and on the journal's site" groups. Only ICS UID is scoped to exact
 start; occurrence joins additionally require starts within five minutes. Default
 component/per-origin caps are 256/16. New excess joiners are ignored while admitted
 members remain, and located members must agree within 500 m unless curated.
