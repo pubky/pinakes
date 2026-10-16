@@ -21,6 +21,7 @@ pub struct Config {
     pub egress: EgressConfig,
     pub queue: QueueConfig,
     pub preview: PreviewConfig,
+    pub api: ApiConfig,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -45,6 +46,7 @@ impl Default for Config {
             egress: EgressConfig::default(),
             queue: QueueConfig::default(),
             preview: PreviewConfig::default(),
+            api: ApiConfig::default(),
         }
     }
 }
@@ -132,6 +134,8 @@ pub struct OsmConfig {
     pub fallback_enabled: bool,
     pub api_url: String,
     pub dump_requests_per_minute: usize,
+    pub dump_chunk_secs: u64,
+    pub dump_total_secs: u64,
 }
 impl Default for OsmConfig {
     fn default() -> Self {
@@ -143,6 +147,8 @@ impl Default for OsmConfig {
             fallback_enabled: false,
             api_url: "https://api.openstreetmap.org".into(),
             dump_requests_per_minute: 2,
+            dump_chunk_secs: 10,
+            dump_total_secs: 120,
         }
     }
 }
@@ -151,12 +157,28 @@ impl Default for OsmConfig {
 pub struct SearchConfig {
     pub max_radius_m: f64,
     pub h3_resolutions: Vec<u8>,
+    pub max_cluster_cells: usize,
 }
 impl Default for SearchConfig {
     fn default() -> Self {
         Self {
             max_radius_m: 200_000.0,
             h3_resolutions: (0u8..=22).map(|z| z.saturating_sub(4).min(11)).collect(),
+            max_cluster_cells: 10000,
+        }
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ApiConfig {
+    pub requests_per_minute: usize,
+    pub cache_capacity: usize,
+}
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            requests_per_minute: 120,
+            cache_capacity: 10000,
         }
     }
 }
@@ -266,6 +288,11 @@ impl Config {
             || self.osm.ttl_secs == 0
             || self.osm.ttl_secs > 31536000
             || self.osm.dump_requests_per_minute == 0
+            || !(1..=60).contains(&self.osm.dump_chunk_secs)
+            || !(1..=600).contains(&self.osm.dump_total_secs)
+            || !(122..=100000).contains(&self.search.max_cluster_cells)
+            || !(1..=10000).contains(&self.api.requests_per_minute)
+            || !(2..=100000).contains(&self.api.cache_capacity)
             || !self.search.max_radius_m.is_finite()
             || !(1.0..=200_000.0).contains(&self.search.max_radius_m)
             || self.search.h3_resolutions.is_empty()

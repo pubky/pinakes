@@ -223,3 +223,9 @@ rebindable preflight check is used.
 `[web]`/`[pubky] ttl_secs` supplies the parser document's initial TTL; scheduling is
 controlled by `[refresh]`. Conditional responses preserve accepted facts, but validators
 are not yet persisted or sent: normal web/Pubky requests remain unconditional.
+
+Public queries use a separate pool with five-second PostgreSQL statement/acquisition
+limits, and all `/v1` routes have a configurable direct-peer IP budget. Search revisions
+are maintained on writes; ETags include the current cached reach set. Large cluster
+views coarsen to `search.max_cluster_cells`, while fractional zooms are accepted. OSM
+dumps release database connections and permits on per-chunk or total deadline expiry.

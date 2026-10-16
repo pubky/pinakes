@@ -557,3 +557,128 @@ async fn preview_returns_completion_within_synchronous_window(pool: PgPool) {
     assert!(start.elapsed() < std::time::Duration::from_secs(3));
     worker.await.unwrap();
 }
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn public_budget_covers_reads_and_evicts_old_ips(pool: PgPool) {
+    let config = Config {
+        api: pinakes_core::config::ApiConfig {
+            requests_per_minute: 2,
+            cache_capacity: 2,
+        },
+        ..Default::default()
+    };
+    let app = api::router(AppState::new(pool, config).unwrap());
+    async fn read_from(app: &Router, path: &str, peer: &str) -> u16 {
+        let mut r = Request::builder().uri(path).body(Body::empty()).unwrap();
+        r.extensions_mut().insert(axum::extract::ConnectInfo(
+            peer.parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        app.clone().oneshot(r).await.unwrap().status().as_u16()
+    }
+    assert_eq!(read_from(&app, "/v1/info", "127.0.0.1:1").await, 200);
+    assert_eq!(
+        read_from(&app, "/v1/openapi.json", "127.0.0.1:2").await,
+        200
+    );
+    assert_eq!(read_from(&app, "/v1/search", "127.0.0.1:3").await, 429);
+    assert_eq!(read_from(&app, "/v1/info", "127.0.0.2:1").await, 200);
+    assert_eq!(read_from(&app, "/v1/info", "127.0.0.3:1").await, 200);
+    assert_eq!(
+        read_from(&app, "/v1/info", "127.0.0.1:1").await,
+        200,
+        "oldest IP is evicted instead of denying all new clients"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn api_pool_enforces_query_timeout(pool: PgPool) {
+    let api_pool = api::pool_options()
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SHOW statement_timeout")
+            .fetch_one(&api_pool)
+            .await
+            .unwrap(),
+        "5s"
+    );
+    let start = std::time::Instant::now();
+    let error = sqlx::query("SELECT pg_sleep(6)")
+        .execute(&api_pool)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.as_database_error().unwrap().code().as_deref(),
+        Some("57014")
+    );
+    assert!(start.elapsed() < std::time::Duration::from_secs(6));
+    api_pool.close().await;
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn reach_membership_changes_invalidate_etags_without_resource_writes(pool: PgPool) {
+    seed(&pool).await;
+    let expanded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = expanded.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let config = Config {
+        nexus_url: format!("http://{}", listener.local_addr().unwrap()),
+        ..Default::default()
+    };
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route(
+                "/v0/user/{id}/following",
+                get(move || {
+                    let flag = flag.clone();
+                    async move {
+                        Json(if flag.load(Ordering::SeqCst) {
+                            vec![author(0), author(1)]
+                        } else {
+                            vec![author(0)]
+                        })
+                    }
+                }),
+            ),
+        )
+        .await
+        .unwrap()
+    });
+    let path = format!("/v1/search?reach=following&viewer={}", author(999));
+    let first = api::router(AppState::new(pool.clone(), config.clone()).unwrap());
+    let mut request = Request::builder().uri(&path).body(Body::empty()).unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:1".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = first.oneshot(request).await.unwrap();
+    let etag = response.headers()["etag"].clone();
+    assert_eq!(response.status(), 200);
+    let revision: i64 = sqlx::query_scalar("SELECT revision FROM search_revision")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    expanded.store(true, Ordering::SeqCst);
+    // A new state represents the next reach refresh after the normal five-minute cache expires.
+    let refreshed = api::router(AppState::new(pool.clone(), config).unwrap());
+    let mut request = Request::builder()
+        .uri(path)
+        .header("if-none-match", &etag)
+        .body(Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:1".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = refreshed.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_ne!(response.headers()["etag"], etag);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT revision FROM search_revision")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        revision
+    );
+    server.abort();
+}

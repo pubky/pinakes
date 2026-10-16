@@ -152,6 +152,7 @@ pub async fn save(
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
     lock_sequence(&mut tx).await?;
+    crate::store::lock_search_revision(&mut tx).await?;
     let row=sqlx::query("SELECT r.*,CASE WHEN r.osm_id IS NULL THEN r.doc ELSE o.versions->r.osm_version END AS accepted FROM resource r LEFT JOIN osm_place o ON r.osm_type=o.osm_type AND r.osm_id=o.osm_id WHERE r.id=$1 AND r.generation=$2 FOR UPDATE OF r")
         .bind(id).bind(generation).fetch_optional(&mut *tx).await?;
     let Some(row) = row else { return Ok(()) };
@@ -226,6 +227,7 @@ pub async fn save(
 pub async fn delete_orphans(pool: &PgPool, grace_days: u32) -> Result<u64> {
     let mut tx = pool.begin().await?;
     lock_sequence(&mut tx).await?;
+    crate::store::lock_search_revision(&mut tx).await?;
     let rows=sqlx::query("SELECT r.id,r.resolver,r.ever_existed,d.doc FROM resource r JOIN resource_document d ON d.id=r.id WHERE r.orphaned_at<now()-$1*interval '1 day' AND NOT EXISTS(SELECT 1 FROM reference f WHERE f.resource_id=r.id) AND (r.lease_until IS NULL OR r.lease_until<now()) FOR UPDATE OF r SKIP LOCKED LIMIT 1000")
         .bind(grace_days as f64).fetch_all(&mut *tx).await?;
     for row in &rows {

@@ -512,7 +512,7 @@ async fn viewport_distance_time_facets_clustering_and_etag(pool: PgPool) {
         "near=0,0&radius=200001",
         "near=91,0&radius=1",
         "near=0,0&radius=NaN",
-        "bbox=0,0,1,1&cluster=23",
+        "bbox=0,0,1,1&cluster=NaN",
         "bbox=0,0,1,1&cluster=8&cursor=abc",
         "from=2027-01-01T00:00:00Z&to=2026-01-01T00:00:00Z",
     ] {
@@ -638,6 +638,19 @@ async fn osm_history_and_unconfirmed_fetches_stay_in_derivative_table(pool: PgPo
             .2["lines"][0]["before"]["name"],
         "Berlin"
     );
+    let xid: String = sqlx::query_scalar("SELECT xmin::text FROM osm_place")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    pinakes_core::changes::retain(&pool, 90).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT xmin::text FROM osm_place")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        xid,
+        "retention must not rewrite unchanged versions"
+    );
     server.abort();
 }
 
@@ -650,6 +663,7 @@ async fn batch_failures_are_per_object_and_upstream_retries_do_not_charge(pool: 
     let url = format!("http://{}", listener.local_addr().unwrap());
     let app=Router::new().route("/lookup",get(move || {let mode=mode.clone();async move {
         let status=mode.load(Ordering::SeqCst);
+        if status==413 {return (StatusCode::OK,vec![b'x';2*1024*1024+1]).into_response();}
         if status!=200 {return (StatusCode::from_u16(status).unwrap(),[("retry-after","7200")],"retry").into_response();}
         Json(json!([
             {"osm_type":"node","osm_id":1,"lat":"broken","lon":"8","namedetails":{"name":"Bad"}},
@@ -697,7 +711,7 @@ async fn batch_failures_are_per_object_and_upstream_retries_do_not_charge(pool: 
             .unwrap(),
         0
     );
-    for status in [429, 503] {
+    for status in [429, 503, 413] {
         code.store(status, Ordering::SeqCst);
         sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE osm_id=3")
             .execute(&pool)
@@ -724,7 +738,11 @@ async fn batch_failures_are_per_object_and_upstream_retries_do_not_charge(pool: 
         let (attempts,dead,delay):(i32,bool,f64)=sqlx::query_as("SELECT attempts,dead_letter,extract(epoch FROM next_attempt_at-now())::float8 FROM resource WHERE osm_id=3").fetch_one(&pool).await.unwrap();
         assert_eq!(attempts, 0);
         assert!(!dead);
-        assert!(delay > 3590.0 && delay <= 3600.0);
+        if status == 413 {
+            assert!(delay > 50.0 && delay <= 60.0);
+        } else {
+            assert!(delay > 3590.0 && delay <= 3600.0);
+        }
     }
     server.abort();
 }
@@ -766,5 +784,55 @@ async fn object_aliases_share_only_the_derivative_data(pool: PgPool) {
             .await
             .is_err()
     );
+    server.abort();
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn unpolled_dumps_release_permits_and_connections(pool: PgPool) {
+    let (_, resolver, server) = mock(&pool).await;
+    resolver
+        .resolve("https://www.openstreetmap.org/node/240109189")
+        .await
+        .unwrap();
+    let config = Config {
+        osm: OsmConfig {
+            dump_requests_per_minute: 100,
+            dump_chunk_secs: 1,
+            dump_total_secs: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    async fn unread(app: &Router) -> axum::response::Response {
+        let mut r = Request::builder()
+            .uri("/v1/dumps/osm_place.ndjson")
+            .body(Body::empty())
+            .unwrap();
+        r.extensions_mut().insert(ConnectInfo(
+            "127.0.0.1:1".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        app.clone().oneshot(r).await.unwrap()
+    }
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        let r = unread(&app).await;
+        assert_eq!(r.status(), 200);
+        held.push(r);
+    }
+    assert_eq!(unread(&app).await.status(), 429);
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    assert_eq!(
+        unread(&app).await.status(),
+        200,
+        "deadlines release permits even without body polling"
+    );
+    let idle:i64=sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND state='idle in transaction'").fetch_one(&pool).await.unwrap();
+    assert_eq!(idle, 0);
+    assert!(
+        held.remove(0).into_body().collect().await.is_err(),
+        "an incomplete dump must not look successful"
+    );
+    drop(held);
     server.abort();
 }

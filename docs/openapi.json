@@ -94,7 +94,8 @@
                 "integer",
                 "null"
               ],
-              "minimum": 0
+              "maximum": 500,
+              "minimum": 1
             }
           }
         ],
@@ -423,7 +424,8 @@
                 "integer",
                 "null"
               ],
-              "minimum": 0
+              "maximum": 500,
+              "minimum": 1
             }
           }
         ],
@@ -582,7 +584,8 @@
                 "integer",
                 "null"
               ],
-              "minimum": 0
+              "maximum": 500,
+              "minimum": 1
             }
           },
           {
@@ -625,6 +628,7 @@
           {
             "name": "bbox",
             "in": "query",
+            "description": "West,south,east,north in degrees; west > east crosses the antimeridian.",
             "required": false,
             "schema": {
               "type": [
@@ -636,6 +640,7 @@
           {
             "name": "near",
             "in": "query",
+            "description": "Latitude,longitude in degrees; requires radius and excludes bbox.",
             "required": false,
             "schema": {
               "type": [
@@ -647,6 +652,7 @@
           {
             "name": "radius",
             "in": "query",
+            "description": "Positive metres, at most the configured maximum (200000 by default).",
             "required": false,
             "schema": {
               "type": [
@@ -658,6 +664,7 @@
           {
             "name": "from",
             "in": "query",
+            "description": "Inclusive start time lower bound: RFC3339 or Unix milliseconds.",
             "required": false,
             "schema": {
               "type": [
@@ -669,6 +676,7 @@
           {
             "name": "to",
             "in": "query",
+            "description": "Inclusive start time upper bound: RFC3339 or Unix milliseconds.",
             "required": false,
             "schema": {
               "type": [
@@ -680,6 +688,7 @@
           {
             "name": "cluster",
             "in": "query",
+            "description": "Finite map zoom; fractional zooms are floored and clamped to the table. Requires bbox; large views coarsen to the configured cell budget.",
             "required": false,
             "schema": {
               "type": [
@@ -806,7 +815,8 @@
               "integer",
               "null"
             ],
-            "minimum": 0
+            "maximum": 500,
+            "minimum": 1
           },
           "resource_ids": {
             "type": "array",
@@ -888,6 +898,7 @@
       "ClusterResponse": {
         "type": "object",
         "required": [
+          "resolution",
           "clusters",
           "points",
           "truncated",
@@ -919,6 +930,11 @@
           },
           "reach_truncated": {
             "type": "boolean"
+          },
+          "resolution": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
           },
           "total": {
             "type": "integer",

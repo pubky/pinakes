@@ -58,7 +58,8 @@ async fn main() -> Result<()> {
     if !owns_database {
         bail!("another pinakesd already owns this database");
     }
-    let state = AppState::new(pool.clone(), config.clone())?;
+    let api_pool = api::pool_options().connect(&config.database_url).await?;
+    let state = AppState::new(api_pool, config.clone())?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut workers = queue::spawn(
         pool.clone(),
@@ -68,10 +69,11 @@ async fn main() -> Result<()> {
         state.metrics.clone(),
     )?;
     let ingest_state = state.clone();
+    let ingest_pool = pool.clone();
     let mut ingest_shutdown = shutdown_rx.clone();
     let ingest_task = tokio::spawn(async move {
         loop {
-            let applied = tokio::select! { _=ingest_shutdown.changed()=>break,result=ingest::poll_once(&ingest_state.pool,&ingest_state.config.nexus_url,&ingest_state.nexus)=>result };
+            let applied = tokio::select! { _=ingest_shutdown.changed()=>break,result=ingest::poll_once(&ingest_pool,&ingest_state.config.nexus_url,&ingest_state.nexus)=>result };
             match applied {
                 Ok(n) if n > 0 => {
                     tracing::info!(lines = n, "ingested Nexus batch");

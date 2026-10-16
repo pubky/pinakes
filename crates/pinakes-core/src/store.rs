@@ -101,3 +101,11 @@ pub(crate) async fn write_document(
         .execute(&mut **tx).await?;
     Ok(())
 }
+
+/// Acquire before explicit resource row locks, matching the write triggers' lock order.
+pub(crate) async fn lock_search_revision(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+    sqlx::query("SELECT revision FROM search_revision WHERE id=1 FOR UPDATE")
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}

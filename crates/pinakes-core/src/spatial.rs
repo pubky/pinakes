@@ -46,7 +46,9 @@ pub fn timestamp(raw: &str) -> Result<DateTime<Utc>> {
         Ok(DateTime::parse_from_rfc3339(raw)?.with_timezone(&Utc))
     }
 }
-pub fn resolution(zoom: usize, config: &SearchConfig) -> Result<h3o::Resolution> {
+pub fn resolution(zoom: f64, config: &SearchConfig) -> Result<h3o::Resolution> {
+    ensure!(zoom.is_finite(), "zoom must be finite");
+    let zoom = (zoom.floor().max(0.0) as usize).min(config.h3_resolutions.len().saturating_sub(1));
     let res = *config
         .h3_resolutions
         .get(zoom)
@@ -107,7 +109,23 @@ impl Filters {
             out.near = Some((p[0], p[1], radius));
         }
         if let Some(zoom) = &q.cluster {
-            out.resolution = Some(resolution(zoom.parse()?, config)?);
+            let mut res = resolution(zoom.parse()?, config)?;
+            let [w, s, e, n] = out.bbox.as_ref().expect("required bbox").0;
+            let width = if e < w { e + 360.0 - w } else { e - w };
+            let fraction = width / 360.0 * (n.to_radians().sin() - s.to_radians().sin()) / 2.0;
+            // Conservative area and edge allowance; SQL also checks the actual group count.
+            while u8::from(res) > 0 {
+                let cells = res.cell_count() as f64;
+                let estimate = (cells * fraction * 4.0
+                    + cells.sqrt() * (width / 360.0 + (n - s) / 180.0) * 8.0
+                    + 16.0)
+                    .min(cells);
+                if estimate <= config.max_cluster_cells as f64 {
+                    break;
+                }
+                res = (u8::from(res) - 1).try_into()?;
+            }
+            out.resolution = Some(res);
         }
         ensure!(
             out.from.zip(out.to).is_none_or(|(f, t)| f <= t),
@@ -177,11 +195,39 @@ mod tests {
         let config = SearchConfig::default();
         for zoom in 0usize..=22 {
             assert_eq!(
-                u8::from(resolution(zoom, &config).unwrap()),
+                u8::from(resolution(zoom as f64, &config).unwrap()),
                 zoom.saturating_sub(4).min(11) as u8
             );
         }
-        assert!(resolution(23, &config).is_err());
+        assert_eq!(
+            resolution(23.0, &config).unwrap(),
+            resolution(22.0, &config).unwrap()
+        );
+        assert_eq!(
+            resolution(8.4, &config).unwrap(),
+            resolution(8.0, &config).unwrap()
+        );
+        assert!(resolution(f64::NAN, &config).is_err());
+        let world = Filters::parse(
+            &SearchQuery {
+                bbox: Some("-180,-90,180,90".into()),
+                cluster: Some("1000.5".into()),
+                ..Default::default()
+            },
+            &config,
+        )
+        .unwrap();
+        assert!(world.resolution.unwrap().cell_count() <= config.max_cluster_cells as u64);
+        let tiny = Filters::parse(
+            &SearchQuery {
+                bbox: Some("8,46,8.00001,46.00001".into()),
+                cluster: Some("8.4".into()),
+                ..Default::default()
+            },
+            &config,
+        )
+        .unwrap();
+        assert_eq!(u8::from(tiny.resolution.unwrap()), 4);
         assert_eq!(timestamp("0").unwrap().timestamp(), 0);
         assert_eq!(
             timestamp("2026-10-15T10:00:00+02:00").unwrap(),

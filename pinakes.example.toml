@@ -56,9 +56,13 @@ ttl_secs = 2592000
 fallback_enabled = false
 api_url = "https://api.openstreetmap.org"
 dump_requests_per_minute = 2
+dump_chunk_secs = 10
+dump_total_secs = 120
 
 [search]
 max_radius_m = 200000.0
+# Coarsen large viewports; reject any actual group count above this cap.
+max_cluster_cells = 10000
 # Index is map zoom 0..22; value is H3 resolution, capped at 11.
 h3_resolutions = [0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 11, 11, 11, 11, 11, 11, 11]
 
@@ -74,3 +78,8 @@ retention_days = 90
 enabled = true
 interval_secs = 21600
 # First run is scheduled one interval after first startup; subsequent due times persist.
+
+# Applied to every public /v1 route using the direct peer IP; oldest budget keys are evicted.
+[api]
+requests_per_minute = 120
+cache_capacity = 10000

@@ -21,6 +21,7 @@ pub struct ChangeQuery {
     #[serde(rename = "type")]
     pub type_name: Option<String>,
     pub source: Option<String>,
+    #[param(minimum = 1, maximum = 500)]
     pub limit: Option<usize>,
 }
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -51,6 +52,7 @@ pub struct ChangeLookup {
     pub resource_ids: Vec<String>,
     pub since: Value,
     pub cursor: Option<i64>,
+    #[schema(minimum = 1, maximum = 500)]
     pub limit: Option<usize>,
 }
 async fn query(

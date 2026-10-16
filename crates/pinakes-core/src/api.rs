@@ -4,6 +4,7 @@ use crate::{
     nexus::Nexus,
     store,
 };
+use anyhow::Context;
 use axum::{
     extract::{ConnectInfo, DefaultBodyLimit, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
@@ -49,32 +50,97 @@ impl AppState {
             info_cache: Arc::default(),
         })
     }
-    async fn preview_budget(&self, ip: std::net::IpAddr, id: &str) -> Result<(), ApiError> {
+    async fn budget(
+        &self,
+        keys: &[(String, usize)],
+        capacity: usize,
+        message: &str,
+    ) -> Result<(), ApiError> {
         let mut limits = self.limiter.lock().await;
         limits.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(60));
-        let keys = [
-            (format!("ip:{ip}"), self.config.preview.requests_per_minute),
-            (
-                format!("uri:{id}"),
-                self.config.preview.uri_requests_per_minute,
-            ),
-        ];
-        for (key, limit) in &keys {
-            if limits.get(key).is_some_and(|(_, n)| n >= limit)
-                || (!limits.contains_key(key) && limits.len() >= self.config.preview.cache_capacity)
-            {
-                return Err(ApiError(
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "preview rate limit exceeded".into(),
-                ));
-            }
+        if keys
+            .iter()
+            .any(|(key, limit)| limits.get(key).is_some_and(|(_, n)| n >= limit))
+        {
+            return Err(ApiError(StatusCode::TOO_MANY_REQUESTS, message.into()));
         }
         for (key, _) in keys {
-            limits.entry(key).or_insert_with(|| (Instant::now(), 0)).1 += 1;
+            if !limits.contains_key(key) && limits.len() >= capacity {
+                if let Some(oldest) = limits
+                    .iter()
+                    .filter(|(k, _)| !keys.iter().any(|(key, _)| key == *k))
+                    .min_by_key(|(_, v)| v.0)
+                    .map(|(k, _)| k.clone())
+                {
+                    limits.remove(&oldest);
+                }
+            }
+            limits
+                .entry(key.clone())
+                .or_insert_with(|| (Instant::now(), 0))
+                .1 += 1;
         }
         Ok(())
     }
+    async fn preview_budget(&self, ip: std::net::IpAddr, id: &str) -> Result<(), ApiError> {
+        self.budget(
+            &[
+                (
+                    format!("preview-ip:{ip}"),
+                    self.config.preview.requests_per_minute,
+                ),
+                (
+                    format!("uri:{id}"),
+                    self.config.preview.uri_requests_per_minute,
+                ),
+            ],
+            self.config.preview.cache_capacity.max(2),
+            "preview rate limit exceeded",
+        )
+        .await
+    }
 }
+pub fn pool_options() -> sqlx::postgres::PgPoolOptions {
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(10)
+        .acquire_timeout(Duration::from_secs(5))
+        .after_connect(|conn, _| {
+            Box::pin(async move {
+                sqlx::query("SET statement_timeout = '5s'")
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
+}
+async fn public_budget(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let Some(peer) = request.extensions().get::<ConnectInfo<SocketAddr>>() else {
+        return ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "missing peer address".into(),
+        )
+        .into_response();
+    };
+    if let Err(error) = state
+        .budget(
+            &[(
+                format!("api-ip:{}", peer.0.ip()),
+                state.config.api.requests_per_minute,
+            )],
+            state.config.api.cache_capacity,
+            "API rate limit exceeded",
+        )
+        .await
+    {
+        return error.into_response();
+    }
+    next.run(request).await
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/info", get(info))
@@ -90,6 +156,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/resolve", post(resolve))
         .route("/v1/openapi.json", get(openapi))
         .route("/v1/dumps/osm_place.ndjson", get(osm_dump))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            public_budget,
+        ))
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .with_state(state)
 }
@@ -149,15 +219,22 @@ pub struct SearchQuery {
     pub reach: Option<String>,
     pub viewer: Option<String>,
     pub sort: Option<String>,
+    #[param(minimum = 1, maximum = 500)]
     pub limit: Option<usize>,
     pub cursor: Option<String>,
     pub facet: Option<String>,
     pub fields: Option<Fields>,
+    /// West,south,east,north in degrees; west > east crosses the antimeridian.
     pub bbox: Option<String>,
+    /// Latitude,longitude in degrees; requires radius and excludes bbox.
     pub near: Option<String>,
+    /// Positive metres, at most the configured maximum (200000 by default).
     pub radius: Option<String>,
+    /// Inclusive start time lower bound: RFC3339 or Unix milliseconds.
     pub from: Option<String>,
+    /// Inclusive start time upper bound: RFC3339 or Unix milliseconds.
     pub to: Option<String>,
+    /// Finite map zoom; fractional zooms are floored and clamped to the table. Requires bbox; large views coarsen to the configured cell budget.
     pub cluster: Option<String>,
     pub venue: Option<String>,
     pub collapse: Option<String>,
@@ -228,6 +305,7 @@ pub struct Cluster {
 }
 #[derive(Serialize, ToSchema)]
 pub struct ClusterResponse {
+    pub resolution: u8,
     pub clusters: Vec<Cluster>,
     pub points: Vec<ResourceView>,
     pub truncated: bool,
@@ -401,7 +479,18 @@ pub async fn search(
     let mut fingerprint = q.clone();
     fingerprint.cursor = None;
     fingerprint.limit = None;
-    let filter = blake3::hash(&serde_json::to_vec(&fingerprint)?)
+    let reach_revision = reach.as_ref().map(|r| {
+        let mut authors = r.authors.clone();
+        authors.sort();
+        authors.dedup();
+        (
+            blake3::hash(authors.join("\n").as_bytes())
+                .to_hex()
+                .to_string(),
+            r.truncated,
+        )
+    });
+    let filter = blake3::hash(&serde_json::to_vec(&(&fingerprint, &reach_revision))?)
         .to_hex()
         .to_string();
     let cursor = if let Some(s) = &q.cursor {
@@ -505,13 +594,15 @@ pub async fn search(
             .push_bind(i32::from(u8::from(resolution)))
             .push(")::text AS cell FROM filtered), groups AS (SELECT cell,count(*) AS count,avg(ST_Y(point)) AS lat,degrees(atan2(avg(sin(radians(ST_X(point)))),avg(cos(radians(ST_X(point)))))) AS lon,(array_agg(id ORDER BY rank DESC,id DESC))[1:3] AS top,max(rank) AS rank,CASE WHEN bool_or(osm_id IS NOT NULL) THEN ")
             .push_bind(crate::resolver::osm::ATTRIBUTION)
-            .push(" ELSE NULL END AS attribution FROM cells GROUP BY cell), entries AS (SELECT 'cluster' AS kind,cell AS id,rank,to_jsonb(g)-'rank' AS item FROM groups g WHERE count>1 AND (SELECT count(*) FROM filtered)>")
+            .push(" ELSE NULL END AS attribution FROM cells GROUP BY cell LIMIT ")
+            .push_bind((state.config.search.max_cluster_cells+1) as i64)
+            .push("), entries AS (SELECT 'cluster' AS kind,cell AS id,rank,to_jsonb(g)-'rank' AS item FROM groups g WHERE count>1 AND (SELECT count(*) FROM filtered)>")
             .push_bind(q.limit.unwrap_or(50) as i64)
             .push(" UNION ALL SELECT 'point',c.id,c.rank,to_jsonb(c) FROM cells c JOIN groups g USING(cell) WHERE g.count=1 OR (SELECT count(*) FROM filtered)<=")
             .push_bind(q.limit.unwrap_or(50) as i64)
             .push("), page AS (SELECT * FROM entries ORDER BY rank DESC,id DESC LIMIT ")
             .push_bind((q.limit.unwrap_or(50)+1) as i64)
-            .push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p) ORDER BY rank DESC,id DESC) FROM page p),'[]') AS items, (SELECT count(*) FROM filtered) AS total, ");
+            .push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p) ORDER BY rank DESC,id DESC) FROM page p),'[]') AS items, (SELECT count(*) FROM filtered) AS total, (SELECT count(*) FROM groups) AS cell_count, ");
     } else {
         sql.push("), page AS (SELECT * FROM filtered");
         if let Some(c) = &cursor {
@@ -530,8 +621,15 @@ pub async fn search(
     } else {
         sql.push("'[]'::jsonb");
     }
-    sql.push(" AS facets, jsonb_build_array((SELECT jsonb_agg(jsonb_build_array(cursor,epoch) ORDER BY nexus) FROM feed_cursor),(SELECT count(*) FROM reference),(SELECT max(created_at) FROM reference),(SELECT max(resolved_at) FROM resource),(SELECT max(fetched_at) FROM osm_place)) AS revision");
+    sql.push(" AS facets, jsonb_build_array((SELECT jsonb_agg(jsonb_build_array(cursor,epoch) ORDER BY nexus) FROM feed_cursor),(SELECT revision FROM search_revision WHERE id=1)) AS revision");
     let row = sql.build().fetch_one(&state.pool).await?;
+    if spatial.resolution.is_some()
+        && row.try_get::<i64, _>("cell_count")? > state.config.search.max_cluster_cells as i64
+    {
+        return Err(ApiError::bad(
+            "cluster cell budget exceeded; use a smaller viewport",
+        ));
+    }
     let mut items: Vec<Value> = serde_json::from_value(row.try_get("items")?)?;
     let has_more = items.len() > q.limit.unwrap_or(50);
     items.truncate(q.limit.unwrap_or(50));
@@ -539,8 +637,8 @@ pub async fn search(
         let last = items.last().expect("nonempty page");
         Some(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&PageCursor {
             version: 1,
-            score: last["rank"].as_f64().expect("rank"),
-            id: last["id"].as_str().expect("id").into(),
+            score: last["rank"].as_f64().context("missing rank")?,
+            id: last["id"].as_str().context("missing resource ID")?.into(),
             at,
             filter,
         })?))
@@ -564,7 +662,7 @@ pub async fn search(
     let revision: Value = row.try_get("revision")?;
     let etag = format!(
         "\"{}\"",
-        blake3::hash(&serde_json::to_vec(&(q.clone(), revision))?).to_hex()
+        blake3::hash(&serde_json::to_vec(&(q.clone(), revision, reach_revision))?).to_hex()
     );
     let mut response = if headers
         .get(header::IF_NONE_MATCH)
@@ -593,6 +691,7 @@ pub async fn search(
             }
         }
         Json(ClusterResponse {
+            resolution: u8::from(spatial.resolution.expect("cluster mode")),
             clusters,
             points,
             truncated: has_more,
@@ -816,42 +915,58 @@ async fn osm_dump(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
 ) -> Result<Response, ApiError> {
-    {
-        let mut limits = state.limiter.lock().await;
-        limits.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(60));
-        let key = format!("dump:{}", peer.ip());
-        if limits
-            .get(&key)
-            .is_some_and(|(_, n)| *n >= state.config.osm.dump_requests_per_minute)
-            || (!limits.contains_key(&key) && limits.len() >= state.config.preview.cache_capacity)
-        {
-            return Err(ApiError(
-                StatusCode::TOO_MANY_REQUESTS,
-                "dump rate limit exceeded".into(),
-            ));
-        }
-        limits.entry(key).or_insert_with(|| (Instant::now(), 0)).1 += 1;
-    }
+    state
+        .budget(
+            &[(
+                format!("dump:{}", peer.ip()),
+                state.config.osm.dump_requests_per_minute,
+            )],
+            state.config.api.cache_capacity,
+            "dump rate limit exceeded",
+        )
+        .await?;
     let permit = state.dumps.clone().try_acquire_owned().map_err(|_| {
         ApiError(
             StatusCode::TOO_MANY_REQUESTS,
             "dump concurrency limit exceeded".into(),
         )
     })?;
-    // One repeatable-read snapshot, streamed with backpressure and released on disconnect.
-    let mut tx = state.pool.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-        .execute(&mut *tx)
-        .await?;
-    let stream: std::pin::Pin<
-        Box<dyn futures_util::Stream<Item = Result<axum::body::Bytes, std::io::Error>> + Send>,
-    > = Box::pin(async_stream::try_stream! {
-        let _permit=permit;
-        use futures_util::TryStreamExt;
-        yield axum::body::Bytes::from(format!("{}\n",json!({"notice":crate::resolver::osm::ATTRIBUTION,"licence":"ODbL-1.0","licence_url":"https://opendatacommons.org/licenses/odbl/1-0/","attribution_url":"https://www.openstreetmap.org/copyright","table":"osm_place"})));
-        let mut rows=sqlx::query_scalar::<_,Value>("SELECT to_jsonb(o)-'point' || jsonb_build_object('point',CASE WHEN point IS NULL THEN NULL ELSE jsonb_build_object('lat',ST_Y(point),'lon',ST_X(point)) END) FROM osm_place o ORDER BY osm_type,osm_id").fetch(&mut *tx);
-        while let Some(row)=rows.try_next().await.map_err(std::io::Error::other)? {yield axum::body::Bytes::from(format!("{row}\n"));}
+    let (sender, mut receiver) =
+        tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(1);
+    let (completed, completion) = tokio::sync::oneshot::channel();
+    // The producer owns deadlines even when the client stops polling the response body.
+    tokio::spawn(async move {
+        let _permit = permit;
+        let chunk = Duration::from_secs(state.config.osm.dump_chunk_secs);
+        let total = Duration::from_secs(state.config.osm.dump_total_secs);
+        let produce = async {
+            use futures_util::TryStreamExt;
+            let mut tx = state.pool.begin().await.map_err(std::io::Error::other)?;
+            sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *tx)
+                .await
+                .map_err(std::io::Error::other)?;
+            send_dump(&sender,format!("{}\n",json!({"notice":crate::resolver::osm::ATTRIBUTION,"licence":"ODbL-1.0","licence_url":"https://opendatacommons.org/licenses/odbl/1-0/","attribution_url":"https://www.openstreetmap.org/copyright","table":"osm_place"})),chunk).await?;
+            let mut rows=sqlx::query_scalar::<_,Value>("SELECT to_jsonb(o)-'point' || jsonb_build_object('point',CASE WHEN point IS NULL THEN NULL ELSE jsonb_build_object('lat',ST_Y(point),'lon',ST_X(point)) END) FROM osm_place o ORDER BY osm_type,osm_id").fetch(&mut *tx);
+            while let Some(row) = tokio::time::timeout(chunk, rows.try_next())
+                .await
+                .map_err(std::io::Error::other)?
+                .map_err(std::io::Error::other)?
+            {
+                send_dump(&sender, format!("{row}\n"), chunk).await?;
+            }
+            Ok::<_, std::io::Error>(())
+        };
+        let result = tokio::time::timeout(total, produce)
+            .await
+            .map_err(std::io::Error::other)
+            .and_then(|r| r);
+        let _ = completed.send(result.map_err(|_| "OSM dump deadline or read failure"));
     });
+    let stream = async_stream::stream! {
+        while let Some(item)=receiver.recv().await {yield item;}
+        if let Ok(Err(message))=completion.await {yield Err(std::io::Error::other(message));}
+    };
     Ok((
         [
             (header::CONTENT_TYPE, "application/x-ndjson"),
@@ -860,6 +975,17 @@ async fn osm_dump(
         axum::body::Body::from_stream(stream),
     )
         .into_response())
+}
+
+async fn send_dump(
+    sender: &tokio::sync::mpsc::Sender<Result<axum::body::Bytes, std::io::Error>>,
+    line: String,
+    deadline: Duration,
+) -> Result<(), std::io::Error> {
+    tokio::time::timeout(deadline, sender.send(Ok(line.into())))
+        .await
+        .map_err(std::io::Error::other)?
+        .map_err(std::io::Error::other)
 }
 
 pub fn admin_router(state: AppState) -> Router {

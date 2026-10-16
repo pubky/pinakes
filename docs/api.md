@@ -236,3 +236,17 @@ Prefer `cursor`; for `since`, reuse a previous response's `at` (inclusive, so de
 by `seq`), not the client's wall clock. Never-observed missing resources emit no creation
 or deletion. Events without an end become final at start + 24 hours. Epoch replay only
 reopens final resources for references newer than their last resolution.
+
+Public queries use a separate ten-connection pool with a five-second PostgreSQL statement
+and acquisition timeout. Every public `/v1` route shares the direct-peer per-IP budget
+(default 120/minute, configurable in `[api]`); forwarded IP headers are not trusted.
+Oldest keys are evicted when the bounded budget cache fills. Existing preview/dump limits
+still apply. Dumps have per-chunk read/send deadlines (10 seconds) and a total deadline
+(120 seconds), even when a reader stops polling; partial streams end in an error.
+
+`cluster` accepts finite fractional zooms, floors and clamps them to the configured table.
+Large viewports coarsen to the `search.max_cluster_cells` budget (default 10000); responses
+report the effective `resolution`. If the actual group count still exceeds the cap, the
+request returns 400. Search ETags include the reach-author-set hash and truncation flag,
+the feed cursor and a transactionally maintained write revision. Computing the revision
+does not scan resources, OSM places or references.
