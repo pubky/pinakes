@@ -36,6 +36,7 @@ pub async fn apply(
     sqlx::query("SELECT pg_advisory_xact_lock(73822916)")
         .execute(&mut *tx)
         .await?;
+    store::lock_search_revision(&mut tx).await?;
     let saved: Cursor =
         sqlx::query_as("SELECT cursor, epoch FROM feed_cursor WHERE nexus=$1 FOR UPDATE")
             .bind(nexus)

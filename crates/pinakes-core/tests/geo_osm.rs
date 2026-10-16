@@ -836,3 +836,66 @@ async fn unpolled_dumps_release_permits_and_connections(pool: PgPool) {
     drop(held);
     server.abort();
 }
+
+#[sqlx::test(migrations = false)]
+async fn reviewed_database_upgrade_scrubs_legacy_web_osm_history(pool: PgPool) {
+    for migration in pinakes_core::MIGRATOR
+        .iter()
+        .filter(|m| m.version <= 202610150004)
+    {
+        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+    }
+    let uri = "https://osm.org/node/240109189/?x=1";
+    let id = pubky_resource_id::resource_id(uri);
+    let mut doc = ResourceMeta::new(uri, "web", 86400);
+    doc.name = Some("Legacy OSM title".into());
+    sqlx::query("INSERT INTO resource(id,uri,scheme,host,resolver,name,type,type_path,doc,status,resolved_at,attempts,dead_letter) VALUES($1,$2,'https','osm.org','web',$3,'WebPage',ARRAY['Thing','WebPage'],$4,'ok',now(),4,true)")
+        .bind(&id).bind(uri).bind(&doc.name).bind(json!(doc)).execute(&pool).await.unwrap();
+    for resource_id in [&id, "11111111111111111111111111111111"] {
+        sqlx::query("INSERT INTO resource_change(resource_id,class,fields,after,source) VALUES($1,'created',ARRAY['name'],$2,'web')").bind(resource_id).bind(json!(doc)).execute(&pool).await.unwrap();
+    }
+    for migration in pinakes_core::MIGRATOR
+        .iter()
+        .filter(|m| m.version > 202610150004)
+    {
+        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+    }
+    let (resolver, name, status, attempts, dead, kind): (
+        String,
+        Option<String>,
+        String,
+        i32,
+        bool,
+        String,
+    ) = sqlx::query_as(
+        "SELECT resolver,name,status,attempts,dead_letter,doc->>'type' FROM resource WHERE id=$1",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (
+            resolver.as_str(),
+            name,
+            status.as_str(),
+            attempts,
+            dead,
+            kind.as_str()
+        ),
+        ("osm", None, "pending", 0, false, "Place")
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource_change")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(sqlx::query("UPDATE resource SET name='leak' WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .is_err());
+    assert!(sqlx::query("INSERT INTO resource_change(resource_id,class,fields,after,source) VALUES($1,'created',ARRAY['name'],$2,'web')").bind(&id).bind(json!(doc)).execute(&pool).await.is_err());
+}
