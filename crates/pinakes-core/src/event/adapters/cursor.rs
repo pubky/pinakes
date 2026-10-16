@@ -211,6 +211,7 @@ async fn json(
     } else {
         egress.fetch_with(uri, &options).await?
     };
+    super::service::upstream_status(&f)?;
     if matches!(f.status, 404 | 410) {
         return Ok((f.status, Value::Null));
     }
@@ -384,6 +385,7 @@ pub async fn resolve(
                 expired = true;
                 reset = true;
                 resync = true;
+                since = "0".into();
                 doc = container(uri, cfg);
                 doc.container.as_mut().unwrap().delta = true;
             }
@@ -559,6 +561,13 @@ fn single(uri: &str, adapter: &str, row: &Value, cfg: &EventConfig) -> Result<Re
     c.horizon_end = DateTime::<Utc>::MAX_UTC;
     append(&mut doc, adapter, row, cfg)?;
     if doc.container.as_ref().unwrap().occurrences.is_empty() {
+        if adapter == "btcmap" && doc.container.as_ref().unwrap().deleted_uids.is_empty() {
+            return Err(crate::resolver::RetryLater {
+                class: "drift",
+                seconds: 900,
+            }
+            .into());
+        }
         return Ok(missing(uri, adapter));
     }
     Ok(doc)

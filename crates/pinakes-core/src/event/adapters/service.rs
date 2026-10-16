@@ -29,7 +29,7 @@ impl std::error::Error for ParseFailure {}
 fn parse_error(e: impl std::fmt::Display) -> anyhow::Error {
     ParseFailure(e.to_string()).into()
 }
-fn upstream_status(f: &Fetched) -> Result<()> {
+pub(super) fn upstream_status(f: &Fetched) -> Result<()> {
     if f.status >= 500 || matches!(f.status, 408 | 429) {
         return Err(crate::resolver::RetryLater {
             class: if f.status >= 500 {

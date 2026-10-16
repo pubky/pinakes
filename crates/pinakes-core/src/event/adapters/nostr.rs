@@ -170,7 +170,17 @@ fn rows(v: &Value) -> Vec<Value> {
 pub async fn lookup(target: &Target, egress: &Egress, cfg: &EventConfig) -> Result<Option<Event>> {
     // Leave one second for the platform wrapper and one for completion bookkeeping.
     let budget = crate::queue::RESOLVE_TIMEOUT - std::time::Duration::from_secs(2);
-    tokio::time::timeout(budget, lookup_inner(target, egress, cfg))
+    let relay = async {
+        if cfg.adapters.websocket {
+            if let Some(relay) = target.relays.first() {
+                return egress
+                    .nostr_request(relay, target.filter(), cfg.adapters.websocket_deadline_ms)
+                    .await;
+            }
+        }
+        Ok(Vec::new())
+    };
+    tokio::time::timeout(budget, lookup_inner(target, egress, cfg, relay))
         .await
         .map_err(|_| crate::resolver::RetryLater {
             class: "inconclusive",
@@ -191,6 +201,7 @@ async fn lookup_inner(
     target: &Target,
     egress: &Egress,
     cfg: &EventConfig,
+    relay: impl std::future::Future<Output = Result<Vec<Value>>>,
 ) -> Result<Option<Event>> {
     let mut wine = Url::parse("https://api.nostr.wine/search")?;
     {
@@ -305,15 +316,12 @@ async fn lookup_inner(
         }
         .into());
     }
-    if cfg.adapters.websocket {
-        if let Some(relay) = target.relays.first() {
-            if let Ok(values) = egress
-                .nostr_request(relay, target.filter(), cfg.adapters.websocket_deadline_ms)
-                .await
-            {
-                let target = target.clone();
-                return Ok(tokio::task::spawn_blocking(move || newest(&target, &values)).await?);
-            }
+    // A hint can supply a signed match, but cannot certify the absence of an
+    // event outside the bounded indexer scan. Poll the relay only after both answer.
+    if let Ok(values) = relay.await {
+        let target = target.clone();
+        if let Some(event) = tokio::task::spawn_blocking(move || newest(&target, &values)).await? {
+            return Ok(Some(event));
         }
     }
     if inconclusive {
@@ -617,6 +625,82 @@ pub async fn resolve(
 #[cfg(test)]
 mod deadline_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn empty_or_unrelated_relay_cannot_confirm_an_inconclusive_indexer_scan() {
+        use crate::resolver::egress::{Dns, Fetched, Transport};
+        use nostr::prelude::*;
+        use std::{net::SocketAddr, sync::Arc};
+        struct Fixture;
+        #[async_trait::async_trait]
+        impl Dns for Fixture {
+            async fn lookup(&self, _: &str, port: u16) -> Result<Vec<SocketAddr>> {
+                Ok(vec![SocketAddr::new("93.184.216.34".parse()?, port)])
+            }
+        }
+        #[async_trait::async_trait]
+        impl Transport for Fixture {
+            async fn get(&self, url: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+                Ok(Fetched {
+                    url: url.clone(),
+                    status: 200,
+                    validators: Default::default(),
+                    retry_after_secs: 60,
+                    content_type: "application/json".into(),
+                    location: None,
+                    body: serde_json::to_vec(&if url.host_str() == Some("api.nostr.wine") {
+                        vec![json!({"created_at":200}); 100]
+                    } else {
+                        vec![]
+                    })?,
+                })
+            }
+        }
+        // A public fixture key, never used by a live identity.
+        let keys = Keys::parse(&"01".repeat(32)).unwrap();
+        let unsigned = EventBuilder::new(Kind::from(31923), "fixture")
+            .tags([Tag::parse(["d", "wanted"]).unwrap()])
+            .finalize_unsigned(keys.public_key());
+        let signature = keys.sign_schnorr_with_aux_rand(
+            &secp256k1::Secp256k1::new(),
+            unsigned.compute_id().as_bytes(),
+            &[0; 32],
+        );
+        let event = unsigned.add_signature(signature).unwrap();
+        let mut target =
+            Target::coordinate(&format!("31923:{}:wanted", keys.public_key())).unwrap();
+        target.relays.push("wss://hint.example/".into());
+        let mut cfg = EventConfig::default();
+        cfg.adapters.max_indexer_pages = 1;
+        let egress =
+            Egress::with_backends(Default::default(), Arc::new(Fixture), Arc::new(Fixture));
+        for values in [vec![], vec![json!({"kind":31923,"content":"unsigned"})]] {
+            let error = lookup_inner(&target, &egress, &cfg, std::future::ready(Ok(values)))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error
+                    .downcast_ref::<crate::resolver::RetryLater>()
+                    .unwrap()
+                    .class,
+                "inconclusive"
+            );
+        }
+        assert_eq!(
+            lookup_inner(
+                &target,
+                &egress,
+                &cfg,
+                std::future::ready(Ok(vec![json!(event)]))
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+            event.id
+        );
+    }
+
     #[test]
     fn relay_time_is_reserved_within_the_queue_budget() {
         let mut cfg = EventConfig::default();

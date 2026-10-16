@@ -162,7 +162,6 @@ async fn round2_cursor_resets_head_clock_missing_and_title_fallback(pool: PgPool
         (410, Value::Null),
         (200, json!({"id":1,"status":"deleted"})),
         (200, json!({"id":1,"status":"rejected"})),
-        (200, json!({"id":1,"status":"unknown"})),
     ] {
         let (egress, _) = mock_egress(vec![(status, body)]);
         let d = cursor::resolve(
@@ -395,6 +394,259 @@ async fn round2_only_parse_errors_fall_back_and_plain_wikipedia_skips_fetch(pool
         recorded_egress(vec![(uri, body, Value::Null)]),
     );
     assert_eq!(r.web.resolve(uri).await.unwrap().type_name, "Article");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round3_billetto_denied_venue_never_dead_letters(pool: PgPool) {
+    use pinakes_core::{
+        queue,
+        resolver::{osm::OsmResolver, Resolver},
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let requests = calls.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            axum::Router::new().route(
+                "/search",
+                axum::routing::get(move || {
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    async { (axum::http::StatusCode::FORBIDDEN, "Forbidden") }
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+    let uri = "https://billetto.co.uk/e/venue-denied-tickets-123";
+    let body = format!(
+        "<script type='application/ld+json'>{}</script>",
+        json!({
+            "@type":"Event", "name":"Billetto fixture", "startDate":(Utc::now()+Duration::days(1)).to_rfc3339(),
+            "location":{"@type":"Place","name":"Hall","address":{"@type":"PostalAddress","streetAddress":"1 Main St","addressLocality":"London","postalCode":"SW1A 1AA"}}
+        })
+    );
+    let mut r = platform(
+        &pool,
+        EventConfig {
+            activitypub: false,
+            coordinate_timezone: false,
+            ..Default::default()
+        },
+        recorded_egress(vec![(uri, &body, Value::Null)]),
+    );
+    Arc::get_mut(r.web.events.as_mut().unwrap()).unwrap().osm = Arc::new(
+        OsmResolver::new(
+            pool.clone(),
+            pinakes_core::config::OsmConfig {
+                nominatim_url: format!("http://{address}"),
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    );
+    let doc = r.resolve(uri).await.unwrap();
+    assert_eq!(doc.type_name, "Event");
+    assert!(doc.event.warnings.iter().any(|w| w == "venue_unavailable"));
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let q = pinakes_core::config::QueueConfig::default();
+    for _ in 0..5 {
+        sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let job = queue::claim(&pool, "event_platform", &q)
+            .await
+            .unwrap()
+            .unwrap();
+        queue::run_job(&pool, &r, &q, &job).await.unwrap();
+        let (doc, attempts, dead): (Value, i32, bool) =
+            sqlx::query_as("SELECT doc,attempts,dead_letter FROM resource WHERE id=$1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(doc["type"], "Event");
+        assert!(doc["start"].is_string());
+        assert!(doc["warnings"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("venue_unavailable")));
+        assert_eq!((attempts, dead), (0, false));
+    }
+    server.abort();
+    assert!(
+        calls.load(Ordering::SeqCst) > 0,
+        "the denied geocode was requested"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round3_cursor_outages_preserve_documents_and_checkpoints(pool: PgPool) {
+    use pinakes_core::{
+        queue,
+        resolver::{Resolver, RetryLater},
+    };
+    let mut cfg = EventConfig {
+        geocoding: false,
+        ..Default::default()
+    };
+    cfg.adapters.platforms.insert(
+        "google_calendar_api".into(),
+        adapters::Options {
+            key: Some("fixture-key".into()),
+            ..Default::default()
+        },
+    );
+    for (uri, source, previous) in [
+        (
+            "https://portal.einundzwanzig.space/api/changes",
+            "einundzwanzig",
+            "42",
+        ),
+        (
+            "https://api.btcmap.org/v4/events",
+            "btcmap",
+            "2026-10-15T00:00:00Z",
+        ),
+        (
+            "https://www.googleapis.com/calendar/v3/calendars/public/events",
+            "google_calendar_api",
+            "accepted-token",
+        ),
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut doc = ResourceMeta::new(uri, source, 3600);
+        doc.set_type("Collection");
+        doc.name = Some("Accepted collection".into());
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+        install_cursor(&pool, uri, previous).await;
+        let before: Value = sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        for status in [503, 408, 429] {
+            let (egress, _) = mock_egress_with_retry(vec![(status, Value::Null); 6], 720);
+            let r = platform(&pool, cfg.clone(), egress);
+            let error = r.resolve(uri).await.unwrap_err();
+            let retry = error.downcast_ref::<RetryLater>().unwrap();
+            assert_eq!(retry.seconds, 720);
+            assert_eq!(
+                retry.class,
+                if status == 503 {
+                    "http_5xx"
+                } else {
+                    "http_4xx"
+                }
+            );
+            for _ in 0..5 {
+                let job = queue::Job {
+                    id: id.clone(),
+                    uri: uri.into(),
+                    generation: 0,
+                    attempts: 0,
+                };
+                queue::run_job(&pool, &r, &Default::default(), &job)
+                    .await
+                    .unwrap();
+            }
+            let (after, attempts, dead, delay): (Value, i32, bool, bool) = sqlx::query_as("SELECT doc,attempts,dead_letter,next_attempt_at>now()+interval '11 minutes' FROM resource WHERE id=$1").bind(&id).fetch_one(&pool).await.unwrap();
+            assert_eq!(after, before);
+            assert_eq!((attempts, dead, delay), (0, false, true));
+            assert_eq!(saved_cursor(&pool, &id).await.as_deref(), Some(previous));
+        }
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round3_btc_status_drift_preserves_single_event(pool: PgPool) {
+    use pinakes_core::{
+        queue,
+        resolver::{Resolver, RetryLater},
+    };
+    let uri = "https://api.btcmap.org/v4/events/1";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut doc = ResourceMeta::new(uri, "btcmap", 3600);
+    doc.set_type("Event");
+    doc.start = Some(Utc::now() + Duration::days(1));
+    doc.name = Some("Accepted event".into());
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let before: Value = sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    for body in [json!({"id":1,"status":"new-unknown"}), json!({"id":1})] {
+        let (egress, _) = mock_egress(vec![(200, body); 6]);
+        let r = platform(&pool, EventConfig::default(), egress);
+        let error = r.resolve(uri).await.unwrap_err();
+        assert_eq!(error.downcast_ref::<RetryLater>().unwrap().class, "drift");
+        for _ in 0..5 {
+            queue::run_job(
+                &pool,
+                &r,
+                &Default::default(),
+                &queue::Job {
+                    id: id.clone(),
+                    uri: uri.into(),
+                    generation: 0,
+                    attempts: 0,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let (after, attempts, dead, misses): (Value, i32, bool, i32) = sqlx::query_as(
+            "SELECT doc,attempts,dead_letter,missing_streak FROM resource WHERE id=$1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(after, before);
+        assert_eq!((attempts, dead, misses), (0, false, 0));
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round3_portal_expiration_restarts_comparison_baseline(pool: PgPool) {
+    let uri = "https://portal.einundzwanzig.space/api/changes";
+    install_cursor(&pool, uri, "900").await;
+    let (egress, transport) = mock_egress(vec![
+        (
+            200,
+            json!({"next_since":10,"cursor_expired":true,"has_more":true,"changes":[]}),
+        ),
+        (200, json!({"next_since":11,"has_more":false,"changes":[]})),
+        (200, json!([])),
+    ]);
+    let doc = cursor::resolve(
+        &pool,
+        uri,
+        adapters::definition("einundzwanzig").unwrap(),
+        &egress,
+        &Default::default(),
+        false,
+    )
+    .await
+    .unwrap();
+    let c = doc.container.as_ref().unwrap();
+    let checkpoint = c.cursor.as_ref().unwrap();
+    assert_eq!(checkpoint.previous.as_deref(), Some("900"));
+    assert_eq!(checkpoint.next, "11");
+    assert!(checkpoint.reset);
+    assert!(!checkpoint.resync && !c.delta);
+    assert!(transport.seen.lock().unwrap()[1]
+        .0
+        .contains("since_sequence=10"));
+    let id = pinakes_core::model::identity(uri).unwrap().0;
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    assert_eq!(saved_cursor(&pool, &id).await.as_deref(), Some("11"));
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -1087,6 +1339,7 @@ impl Dns for AdapterDns {
     }
 }
 struct Replies {
+    retry_after_secs: u64,
     replies: Mutex<VecDeque<(u16, Value)>>,
     seen: Mutex<Vec<(String, FetchOptions)>>,
 }
@@ -1116,14 +1369,21 @@ impl Transport for Replies {
             validators: Default::default(),
             content_type: "application/json".into(),
             status,
-            retry_after_secs: 60,
+            retry_after_secs: self.retry_after_secs,
             location: (status == 302).then(|| "https://foreign.example/".into()),
             body: serde_json::to_vec(&body)?,
         })
     }
 }
 fn mock_egress(replies: Vec<(u16, Value)>) -> (Egress, Arc<Replies>) {
+    mock_egress_with_retry(replies, 60)
+}
+fn mock_egress_with_retry(
+    replies: Vec<(u16, Value)>,
+    retry_after_secs: u64,
+) -> (Egress, Arc<Replies>) {
     let transport = Arc::new(Replies {
+        retry_after_secs,
         replies: Mutex::new(replies.into()),
         seen: Mutex::default(),
     });
