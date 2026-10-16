@@ -138,14 +138,12 @@ fn refresh(content: &str) -> (f64, Option<String>) {
     };
     let delay = delay.trim().parse().unwrap_or(0.0);
     let target = rest.map(str::trim).map(|s| {
-        if s.len() >= 3 && s[..3].eq_ignore_ascii_case("url") {
-            s[3..]
-                .trim_start()
-                .strip_prefix('=')
-                .unwrap_or(&s[3..])
-                .trim()
-        } else {
-            s
+        // Page content: byte 3 may fall inside a multi-byte character.
+        match s.get(..3).zip(s.get(3..)) {
+            Some((p, rest)) if p.eq_ignore_ascii_case("url") => {
+                rest.trim_start().strip_prefix('=').unwrap_or(rest).trim()
+            }
+            _ => s,
         }
     });
     let target = target
@@ -189,8 +187,12 @@ pub fn inspect_with(requested: &Url, f: &Fetched, walls: &Walls) -> Page {
         }
     }
     // A requested page redirected to a sign-in path (LinkedIn /authwall, Facebook /login/).
+    // Case or slash normalisation is not a redirect, and a sign-in page moving within its
+    // own flow (/signin to /signin/callback) is the page that was asked for.
+    let normal = |p: &str| p.trim_end_matches('/').to_ascii_lowercase();
     if walls_apply
-        && f.url.path().trim_end_matches('/') != requested.path().trim_end_matches('/')
+        && normal(f.url.path()) != normal(requested.path())
+        && !wall_path(walls, requested.path())
         && wall_path(walls, f.url.path())
     {
         return Page::Blocked;
@@ -304,4 +306,36 @@ pub fn inspect_with(requested: &Url, f: &Fetched, walls: &Walls) -> Page {
         }
     }
     Page::Content
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refresh_parsing_survives_multi_byte_content() {
+        let tokens = [
+            "0", "5", ";", ",", " ", "url", "URL", "=", "'", "\"", "€", "é", "😀", "a", "/x", "ü",
+        ];
+        // Every sequence of up to four tokens, so each byte offset meets a multi-byte char.
+        let mut inputs = vec![String::new()];
+        for _ in 0..4 {
+            let next: Vec<String> = inputs
+                .iter()
+                .flat_map(|s| tokens.iter().map(move |t| format!("{s}{t}")))
+                .collect();
+            inputs.extend(next);
+            inputs.sort();
+            inputs.dedup();
+        }
+        assert!(inputs.len() > 60_000);
+        for s in &inputs {
+            let (_, target) = refresh(s);
+            assert!(target.is_none_or(|t| !t.is_empty()), "{s}");
+        }
+        assert_eq!(refresh("5; a€b"), (5.0, Some("a€b".into())));
+        assert_eq!(refresh("0;url€=x"), (0.0, Some("€=x".into())));
+        assert_eq!(refresh("1; URL='/next'"), (1.0, Some("/next".into())));
+        assert_eq!(refresh("1, ur"), (1.0, Some("ur".into())));
+    }
 }

@@ -685,3 +685,85 @@ async fn round4_wall_flips_are_classed_hidden_from_search_and_metrics_bounded(po
     cfg.api.blocked_metric_hosts = 0;
     assert!(cfg.validate().is_err());
 }
+
+#[test]
+fn round5_multi_byte_refresh_content_and_sign_in_flows_are_content() {
+    // Meta-refresh content is page text: multi-byte characters at any offset never panic,
+    // and every page still classifies.
+    let requested = Url::parse("https://example.org/a").unwrap();
+    let long = "Article text. ".repeat(200);
+    let mut seed = 0x2545_f491_u64;
+    let parts = [
+        "5", ";", ",", " ", "url", "=", "'", "€", "é", "😀", "/x", "ü",
+    ];
+    for n in 0..2000 {
+        let content: String = (0..1 + n % 7)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                parts[(seed % parts.len() as u64) as usize]
+            })
+            .collect();
+        let content = content.replace('"', "");
+        for body in [String::new(), long.clone()] {
+            let f = page(
+                "https://example.org/a",
+                &format!(r#"<meta http-equiv="refresh" content="{content}"><body>{body}</body>"#),
+                200,
+            );
+            let _ = interstitial::inspect(&requested, &f);
+        }
+    }
+    let f = page(
+        "https://example.org/a",
+        &format!(r#"<meta http-equiv="refresh" content="5; a€b"><body>{long}</body>"#),
+        200,
+    );
+    assert_eq!(
+        interstitial::inspect(&requested, &f),
+        Page::Redirect("a€b".into())
+    );
+
+    // Case or trailing-slash normalisation is not a sign-in redirect, and a sign-in page
+    // continuing its own flow is the page that was asked for.
+    for (asked, landed) in [
+        ("https://example.com/Login", "https://example.com/login"),
+        ("https://example.com/SignIn/", "https://example.com/signin"),
+        (
+            "https://example.com/signin",
+            "https://example.com/signin/callback",
+        ),
+        (
+            "https://example.com/login",
+            "https://example.com/accounts/login",
+        ),
+    ] {
+        let f = page(
+            landed,
+            &format!("<title>Sign in</title><body>{long}</body>"),
+            200,
+        );
+        assert_eq!(
+            interstitial::inspect(&asked.parse().unwrap(), &f),
+            Page::Content,
+            "{asked} -> {landed}"
+        );
+    }
+    // A content page sent to a sign-in path is still a wall, whatever the path's case.
+    for landed in [
+        "https://example.com/LOGIN?next=/a",
+        "https://example.com/signin/",
+    ] {
+        let f = page(
+            landed,
+            &format!("<title>Sign in</title><body>{long}</body>"),
+            200,
+        );
+        assert_eq!(
+            interstitial::inspect(&"https://example.com/posts/1".parse().unwrap(), &f),
+            Page::Blocked,
+            "{landed}"
+        );
+    }
+}
