@@ -157,8 +157,8 @@ link.
 
 Threat model for page markup: identity claims come only from the publisher's document head
 (meta, canonical/alternate/oEmbed links) and from the page's own JSON-LD entity: the chosen
-entity must name the page or its head canonical by `url`/`@id`, or name nothing and sit in the
-head. JSON-LD itself stays document-wide because plugins put it in the body. A `<script>`
+entity of a head script, or of a body script that names the page or its head canonical by
+`url`/`@id`. JSON-LD itself stays document-wide because plugins put it in the body. A `<script>`
 injected into the body by user content is cross-site scripting on that site and outside this
 threat model. Rendered user `<meta>`/`<link>` elements, which some sites allow, are not.
 

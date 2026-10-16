@@ -303,8 +303,9 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
     }
     let html = Html::parse_document(&text);
     // JSON-LD stays document-wide (plugins put it in the body), but only the chosen entity
-    // may carry claims (url/@id, sameAs, identifiers), and only when it names this page or
-    // its head canonical, or names nothing and sits in the head.
+    // may carry claims (url/@id, sameAs, identifiers): from a head script, as with head meta
+    // and links (its main-entity url is the publisher's canonical declaration), or from a
+    // body script that names this page or its head canonical.
     let scripts: Vec<(Value, bool)> = html
         .select(&selector("script[type='application/ld+json']"))
         .filter_map(|script| {
@@ -330,11 +331,7 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
         let named = entity_urls(entity)
             .filter_map(|u| origin_url(&fetched.url, u).and_then(|u| entity_identity(&u)))
             .collect::<Vec<_>>();
-        let claims = if named.is_empty() {
-            *head
-        } else {
-            named.iter().any(|id| page.contains(id))
-        };
+        let claims = *head || named.iter().any(|id| page.contains(id));
         apply_jsonld(&mut out.doc, entity, &fetched.url, claims);
     }
     for (class, kind) in [
