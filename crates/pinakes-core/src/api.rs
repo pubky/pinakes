@@ -37,7 +37,7 @@ pub struct AppState {
     limiter: Arc<Mutex<HashMap<String, (Instant, usize)>>>,
     dumps: Arc<tokio::sync::Semaphore>,
     info_cache: Arc<Mutex<Option<(Instant, Value)>>>,
-    cursor_mac: SimpleHmac<blake3::Hasher>,
+    pub(crate) cursor_mac: SimpleHmac<blake3::Hasher>,
 }
 impl AppState {
     pub fn new(pool: PgPool, config: Config) -> anyhow::Result<Self> {
@@ -260,6 +260,7 @@ pub struct SearchQuery {
     pub to: Option<String>,
     /// Finite map zoom; fractional zooms are floored and clamped to the table. Requires bbox; large views coarsen to the configured cell budget.
     pub cluster: Option<String>,
+    /// Resource ID of the accepted event venue; filters event units.
     pub venue: Option<String>,
     pub collapse: Option<String>,
 }
@@ -301,8 +302,10 @@ impl PageCursor {
 pub struct ResourceView {
     pub resource_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<crate::event::storage::OccurrenceRef>)]
     pub occurrence: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<crate::event::storage::ReferenceEvent>)]
     pub event: Option<Value>,
     pub uri: String,
     #[serde(rename = "type")]
@@ -653,7 +656,7 @@ pub async fn search(
     if let Some(resolution) = spatial.resolution {
         sql.push("), cells AS (SELECT *, h3_latlng_to_cell(point(ST_X(point),ST_Y(point)),")
             .push_bind(i32::from(u8::from(resolution)))
-            .push(")::text AS cell FROM filtered), groups AS (SELECT cell,count(*) AS count,avg(ST_Y(point)) AS lat,degrees(atan2(avg(sin(radians(ST_X(point)))),avg(cos(radians(ST_X(point)))))) AS lon,(array_agg(id ORDER BY rank DESC,id DESC))[1:3] AS top,max(rank) AS rank,CASE WHEN bool_or(osm_id IS NOT NULL OR doc->>'attribution' IS NOT NULL) THEN ")
+            .push(")::text AS cell FROM filtered), groups AS (SELECT cell,count(*) AS count,avg(ST_Y(point)) AS lat,degrees(atan2(avg(sin(radians(ST_X(point)))),avg(cos(radians(ST_X(point)))))) AS lon,ARRAY(SELECT id FROM (SELECT DISTINCT ON (id) id,rank,unit_id FROM cells t WHERE t.cell=cells.cell ORDER BY id,rank DESC,unit_id DESC) unique_ids ORDER BY rank DESC,unit_id DESC LIMIT 3) AS top,max(rank) AS rank,CASE WHEN bool_or(osm_id IS NOT NULL OR doc->>'attribution' IS NOT NULL) THEN ")
             .push_bind(crate::resolver::osm::ATTRIBUTION)
             .push(" ELSE NULL END AS attribution FROM cells GROUP BY cell LIMIT ")
             .push_bind((state.config.search.max_cluster_cells+1) as i64)
@@ -661,7 +664,7 @@ pub async fn search(
             .push_bind(q.limit.unwrap_or(50) as i64)
             .push(" UNION ALL SELECT 'point',c.id,c.unit_id,c.rank,to_jsonb(c) FROM cells c JOIN groups g USING(cell) WHERE g.count=1 OR (SELECT count(*) FROM filtered)<=")
             .push_bind(q.limit.unwrap_or(50) as i64)
-            .push("), page AS (SELECT * FROM entries ORDER BY rank DESC,id DESC LIMIT ")
+            .push("), page AS (SELECT * FROM entries ORDER BY rank DESC,unit_id DESC LIMIT ")
             .push_bind((q.limit.unwrap_or(50)+1) as i64)
             .push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p) ORDER BY rank DESC,unit_id DESC) FROM page p),'[]') AS items, (SELECT count(*) FROM filtered) AS total, (SELECT count(*) FROM groups) AS cell_count, ");
     } else {
@@ -945,6 +948,10 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
     ),
     components(schemas(
         ResourceMeta,
+        crate::event::storage::OccurrencePage,
+        crate::event::storage::OccurrenceRecord,
+        crate::event::storage::OccurrenceRef,
+        crate::event::storage::ReferenceEvent,
         crate::change_api::ChangeLine,
         crate::change_api::ChangePage,
         crate::change_api::ChangeLookup,

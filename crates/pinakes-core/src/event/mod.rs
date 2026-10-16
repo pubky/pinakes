@@ -171,8 +171,33 @@ impl Occurrence {
         serde_json::to_string(&(&self.uid, &self.recurrence_id)).expect("strings")
     }
 }
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ContainerLimits {
+    pub max_changes: usize,
+    pub max_rows: usize,
+    pub max_new_keys: usize,
+    pub retention_days: u32,
+    pub max_holds: u32,
+    pub cadence_floor: u64,
+    pub link_hosts: Vec<String>,
+}
+impl Default for ContainerLimits {
+    fn default() -> Self {
+        Self {
+            max_changes: 100,
+            max_rows: 10000,
+            max_new_keys: 1000,
+            retention_days: 30,
+            max_holds: 5,
+            cadence_floor: 3600,
+            link_hosts: vec![],
+        }
+    }
+}
 #[derive(Clone, Debug, Default)]
 pub struct Container {
+    pub limits: ContainerLimits,
     pub occurrences: Vec<Occurrence>,
     pub feed_ttl: Option<u64>,
     pub warnings: Vec<String>,

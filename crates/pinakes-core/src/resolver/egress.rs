@@ -313,7 +313,9 @@ impl Egress {
     /// A discovered URL is fetched at most once per TTL, including failed/oversized results.
     /// Concurrent references share the same flight; retained bodies total at most 32 MB.
     pub async fn discover(&self, uri: &str, options: &FetchOptions, ttl: u64) -> Result<Fetched> {
-        let key = Url::parse(uri)?.to_string();
+        let mut url = Url::parse(uri)?;
+        url.set_fragment(None);
+        let key = url.to_string();
         let lock = {
             let mut flights = self.discoveries.lock().await;
             flights.retain(|_, lock| Arc::strong_count(lock) > 1);

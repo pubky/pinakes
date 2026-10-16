@@ -275,6 +275,16 @@ impl Zones<'_> {
             unknown: !zulu && name.is_some() && zone.is_none() && custom.is_none(),
         })
     }
+    fn series_stamp(&self, p: &Property, value: &str, start: &Stamp) -> Result<Stamp> {
+        if !value.ends_with('Z') && !p.params.contains_key("TZID") {
+            if let Some(zone) = &start.zone {
+                let mut p = p.clone();
+                p.params.insert("TZID".into(), zone.clone());
+                return self.stamp(&p, value);
+            }
+        }
+        self.stamp(p, value)
+    }
     fn at_wall(&self, stamp: &Stamp, wall: NaiveDateTime) -> Result<DateTime<Utc>> {
         if let Some(zone) = stamp.zone.as_deref() {
             if let Some(zone) = time::zone(zone) {
@@ -803,13 +813,13 @@ fn expand(
                 "RDATE work budget"
             );
             let (s, end) = v.split_once('/').map_or((v, None), |(s, e)| (s, Some(e)));
-            let at = zones.stamp(p, s)?.at;
+            let at = zones.series_stamp(p, s, start)?.at;
             let duration = end
                 .map(|e| {
                     if e.starts_with(['P', '+', '-']) {
                         time::duration(e).context("RDATE duration")
                     } else {
-                        Ok(zones.stamp(p, e)?.at - at)
+                        Ok(zones.series_stamp(p, e, start)?.at - at)
                     }
                 })
                 .transpose()?;
@@ -832,7 +842,7 @@ fn expand(
                 values <= cfg.max_date_values && std::time::Instant::now() < deadline,
                 "EXDATE work budget"
             );
-            let s = zones.stamp(p, v)?;
+            let s = zones.series_stamp(p, v, start)?;
             if s.date {
                 dates.insert(s.wall.date());
             } else {
@@ -880,6 +890,7 @@ pub fn parse(
         .checked_add_months(Months::new(cfg.months_forward))
         .context("horizon overflow")?;
     let mut container = Container {
+        limits: cfg.container.clone(),
         horizon_start: lo,
         horizon_end: hi,
         held_retry_secs: cfg.held_retry_secs,
@@ -963,7 +974,11 @@ pub fn parse(
         }
         let rid = c
             .get("RECURRENCE-ID")
-            .map(|p| zones.stamp(p, &p.value).map(|s| recurrence_key(&s)))
+            .map(|p| {
+                zones
+                    .series_stamp(p, &p.value, &start)
+                    .map(|s| recurrence_key(&s))
+            })
             .transpose();
         let rid = match rid {
             Ok(r) => r.unwrap_or_default(),
@@ -1267,6 +1282,7 @@ pub fn structured_feed(
         .checked_add_months(Months::new(cfg.months_forward))
         .context("horizon")?;
     let mut container = Container {
+        limits: cfg.container.clone(),
         horizon_start: lo,
         horizon_end: hi,
         held_retry_secs: cfg.held_retry_secs,

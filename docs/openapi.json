@@ -452,10 +452,10 @@
     "/v1/resources/{id}/occurrences": {
       "get": {
         "tags": [
-          "crate::event::storage"
+          "events"
         ],
-        "description": "Calendar instances inside an inclusive start window. Stable UID/recurrence keys; bounded by the configured feed cap.",
-        "operationId": "list",
+        "description": "Calendar instances ordered by start, UID and recurrence ID. Inclusive window, default limit 100, maximum 500. Superseded keys are omitted.",
+        "operationId": "list_occurrences",
         "parameters": [
           {
             "name": "id",
@@ -468,6 +468,7 @@
           {
             "name": "from",
             "in": "query",
+            "description": "Inclusive start time; defaults to this feed's last accepted horizon start.",
             "required": false,
             "schema": {
               "type": [
@@ -488,6 +489,31 @@
               ],
               "format": "date-time"
             }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "maximum": 500,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Signed keyset cursor, scoped to this resource and window; invalid after restart.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -495,9 +521,17 @@
             "description": "",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/OccurrencePage"
+                }
               }
             }
+          },
+          "400": {
+            "description": "Invalid window, limit or cursor"
+          },
+          "404": {
+            "description": "Resource not found"
           }
         }
       }
@@ -754,6 +788,7 @@
           {
             "name": "venue",
             "in": "query",
+            "description": "Resource ID of the accepted event venue; filters event units.",
             "required": false,
             "schema": {
               "type": [
@@ -1176,6 +1211,126 @@
         },
         "additionalProperties": false
       },
+      "OccurrencePage": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OccurrenceRecord"
+            }
+          }
+        }
+      },
+      "OccurrenceRecord": {
+        "type": "object",
+        "required": [
+          "resource_id",
+          "uid",
+          "recurrence_id",
+          "start_at",
+          "status",
+          "document",
+          "occurrence",
+          "volatile"
+        ],
+        "properties": {
+          "document": {
+            "$ref": "#/components/schemas/ResourceMeta"
+          },
+          "end_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "event_resource_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "occurrence": {
+            "$ref": "#/components/schemas/OccurrenceRef"
+          },
+          "recurrence_id": {
+            "type": "string"
+          },
+          "resource_id": {
+            "type": "string"
+          },
+          "start_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string"
+          },
+          "supersedes": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "uid": {
+            "type": "string"
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "venue_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "volatile": {
+            "type": "boolean"
+          }
+        }
+      },
+      "OccurrenceRef": {
+        "type": "object",
+        "required": [
+          "uid"
+        ],
+        "properties": {
+          "event_resource_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recurrence_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "uid": {
+            "type": "string"
+          }
+        }
+      },
       "Offers": {
         "type": "object",
         "properties": {
@@ -1232,6 +1387,41 @@
           "lon": {
             "type": "number",
             "format": "double"
+          }
+        }
+      },
+      "ReferenceEvent": {
+        "type": "object",
+        "required": [
+          "author",
+          "object_path",
+          "recurrence_id",
+          "start",
+          "status"
+        ],
+        "properties": {
+          "author": {
+            "type": "string"
+          },
+          "end": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "object_path": {
+            "type": "string"
+          },
+          "recurrence_id": {
+            "type": "string"
+          },
+          "start": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string"
           }
         }
       },
@@ -1446,7 +1636,16 @@
             ],
             "format": "date-time"
           },
-          "event": {},
+          "event": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReferenceEvent"
+              }
+            ]
+          },
           "image": {
             "type": [
               "string",
@@ -1459,7 +1658,16 @@
               "null"
             ]
           },
-          "occurrence": {},
+          "occurrence": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/OccurrenceRef"
+              }
+            ]
+          },
           "osm_id": {
             "type": [
               "string",

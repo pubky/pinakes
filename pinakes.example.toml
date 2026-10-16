@@ -48,10 +48,20 @@ months_back = 1
 months_forward = 12
 # default_timezone = "Europe/Zurich" # Floating ICS times only; otherwise keep local time.
 geocode_score = 0.8
+# Retained for old configs; hold retry now uses max(normal cadence, container floor).
 held_retry_secs = 60
 max_line_bytes = 65536
 max_date_values = 4096
 webcal_http_fallback = false
+
+[event.container]
+max_changes = 100 # Above this, one feed-level details change records the count.
+max_rows = 10000 # Includes retained cancelled/superseded instances.
+max_new_keys = 1000 # Per refresh after the initial snapshot.
+retention_days = 30
+max_holds = 5 # Consecutive loss/churn holds, then dead-letter.
+cadence_floor = 3600 # Exponential backoff never below the feed's normal cadence.
+link_hosts = [] # Extra exact hosts permitted for occurrence -> existing resource links.
 
 [egress]
 host_requests_per_second = 1.0

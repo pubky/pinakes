@@ -57,6 +57,7 @@ impl Default for Config {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EventConfig {
+    pub container: crate::event::ContainerLimits,
     pub max_line_bytes: usize,
     pub max_date_values: usize,
     pub webcal_http_fallback: bool,
@@ -83,6 +84,7 @@ impl Default for EventConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            container: Default::default(),
             max_line_bytes: 65536,
             max_date_values: 4096,
             webcal_http_fallback: false,
@@ -321,6 +323,16 @@ impl Config {
     }
     pub fn validate(&self) -> Result<()> {
         let e = &self.event;
+        let c = &e.container;
+        if !(1..=1000).contains(&c.max_changes)
+            || !(1..=10000).contains(&c.max_rows)
+            || !(1..=10000).contains(&c.max_new_keys)
+            || !(1..=3650).contains(&c.retention_days)
+            || !(1..=32).contains(&c.max_holds)
+            || !(3600..=604800).contains(&c.cadence_floor)
+        {
+            bail!("invalid container storage limits");
+        }
         if !(1024..=262144).contains(&e.max_line_bytes)
             || !(1..=10000).contains(&e.max_date_values)
             || !(1024..=64 * 1024 * 1024).contains(&e.feed_body_bytes)

@@ -441,8 +441,8 @@ async fn calendar_snapshots_atomic_held_disappearance_freeze_and_changes(pool: P
     store::save_document(&pool, &id, 0, &fewer).await.unwrap();
     assert_eq!(count().await, 0);
     let held: bool =
-        sqlx::query_scalar("SELECT held_keys IS NOT NULL FROM source_state WHERE source=$1")
-            .bind(format!("calendar:{id}"))
+        sqlx::query_scalar("SELECT held_keys IS NOT NULL FROM event_fetch WHERE resource_id=$1")
+            .bind(&id)
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -1369,4 +1369,328 @@ async fn talos_non_feed_xml_is_refused_at_the_page_cap(pool: PgPool) {
         .to_string()
         .contains("cap"));
     server.abort();
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn review_container_caps_patches_rotation_backoff_retention_and_labels(pool: PgPool) {
+    let uri = "https://example.org/limits.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut d = dynamic_parse(uri, &future_calendar(5));
+    d.ttl_secs = 7200;
+    let limits = &mut d.container.as_mut().unwrap().limits;
+    limits.max_changes = 2;
+    limits.max_rows = 6;
+    limits.max_new_keys = 2;
+    limits.max_holds = 3;
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let changes: Vec<Value> = sqlx::query_scalar(
+        "SELECT after FROM resource_change WHERE source='event' AND class='details'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0]["occurrence_changes"], 5);
+    let mut renamed = fresh(&d);
+    renamed.container.as_mut().unwrap().occurrences[0].doc.name = Some("Renamed".into());
+    store::save_document(&pool, &id, 0, &renamed).await.unwrap();
+    let patch: Value = sqlx::query_scalar(
+        "SELECT after FROM resource_change WHERE class='renamed' ORDER BY seq DESC LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(patch["name"], "Renamed");
+    assert!(patch.get("description").is_none() && patch.get("start").is_none());
+    assert!(patch.as_object().unwrap().len() <= 2);
+    // Rotating a single key (<50%) twice would exceed the total row cap.
+    let mut churn = fresh(&renamed);
+    churn.container.as_mut().unwrap().occurrences[0].uid = "rotated1".into();
+    store::save_document(&pool, &id, 0, &churn).await.unwrap();
+    churn.container.as_mut().unwrap().occurrences[0].uid = "rotated2".into();
+    for i in 1..=3 {
+        churn = fresh(&churn);
+        store::save_document(&pool, &id, 0, &churn).await.unwrap();
+        let (count,dead,delay):(i32,bool,f64)=sqlx::query_as("SELECT e.hold_count,r.dead_letter,extract(epoch FROM r.next_attempt_at-now())::float8 FROM event_fetch e JOIN resource r ON r.id=e.resource_id WHERE r.id=$1").bind(&id).fetch_one(&pool).await.unwrap();
+        assert_eq!(count, i);
+        assert_eq!(dead, i == 3);
+        assert!(delay >= 7200.0 * 2f64.powi(i - 1) - 2.0, "{delay}");
+    }
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM occurrence")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 6);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM source_state WHERE source LIKE 'calendar:%'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT feed_held_total FROM source_state WHERE source='event'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        3
+    );
+    sqlx::query("UPDATE occurrence SET start_at=now()-interval '50 days',end_at=now()-interval '49 days' WHERE uid='id0'").execute(&pool).await.unwrap();
+    pinakes_core::changes::retain(&pool, 90).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM occurrence")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        5
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn review_links_supersession_and_coordinate_constraints(pool: PgPool) {
+    let uri = "https://example.org/link.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let safe = store::ensure_resource(&pool, "https://example.org/event")
+        .await
+        .unwrap();
+    let foreign = store::ensure_resource(&pool, "https://foreign.example/event")
+        .await
+        .unwrap();
+    let mut d = dynamic_parse(uri, &future_calendar(3));
+    d.container.as_mut().unwrap().occurrences[1].doc.url = "https://EXAMPLE.org:443/event".into();
+    d.container.as_mut().unwrap().occurrences[2].doc.url = "https://foreign.example/event".into();
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let links: Vec<(String, Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT uid,url,event_resource_id FROM occurrence ORDER BY uid")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(links[0].1, None);
+    assert_eq!(links[0].2, None);
+    assert_eq!(links[1].1.as_deref(), Some("https://example.org/event"));
+    assert_eq!(links[1].2.as_ref(), Some(&safe));
+    assert_eq!(links[2].2, None);
+    assert_ne!(safe, foreign);
+    let mut next = fresh(&d);
+    next.container.as_mut().unwrap().occurrences[0].uid = "replacement".into();
+    store::save_document(&pool, &id, 0, &next).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM occurrence WHERE uid='id0'")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "superseded"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource_change WHERE class='cancelled'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+    let change: Value = sqlx::query_scalar(
+        "SELECT after FROM resource_change WHERE occurrence_key='[\"replacement\",\"\"]'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(change["supersedes"], "[\"id0\",\"\"]");
+    let invalid = json!({"venue":{"location_source":"geocoded"},"location":{"lat":1,"lon":2}});
+    assert!(sqlx::query("UPDATE resource SET doc=$2 WHERE id=$1")
+        .bind(&id)
+        .bind(&invalid)
+        .execute(&pool)
+        .await
+        .is_err());
+    assert!(
+        sqlx::query("UPDATE occurrence SET doc=$2 WHERE resource_id=$1")
+            .bind(&id)
+            .bind(&invalid)
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("UPDATE resource_change SET after=$2 WHERE resource_id=$1")
+            .bind(&id)
+            .bind(&invalid)
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    let invalid = json!({"venue":{"location_source":"osm","location":{"lat":1,"lon":2}}});
+    assert!(sqlx::query("UPDATE resource SET doc=$2 WHERE id=$1")
+        .bind(&id)
+        .bind(&invalid)
+        .execute(&pool)
+        .await
+        .is_err());
+    let no_coords = json!({"venue":{"location_source":"geocoded"}});
+    assert!(sqlx::query(
+        "UPDATE resource SET doc=$2,point=ST_SetSRID(ST_MakePoint(2,1),4326) WHERE id=$1"
+    )
+    .bind(&id)
+    .bind(&no_coords)
+    .execute(&pool)
+    .await
+    .is_err());
+    assert!(sqlx::query("UPDATE occurrence SET status='invalid'")
+        .execute(&pool)
+        .await
+        .is_err());
+}
+
+#[test]
+fn review_accepted_venue_survives_failed_enrichment_and_floating_date_lists_use_series_zone() {
+    let mut old=parse(&cal(&event("UID:v\nDTSTART:20261024T090000\nGEO:47;8\nLOCATION:Main Street 1, 8000 Zurich, Switzerland"))).container.unwrap().occurrences[0].doc.clone();
+    old.location = None;
+    let venue = old.event.venue.as_mut().unwrap();
+    venue.location = None;
+    venue.osm_id = Some("node/123".into());
+    venue.osm_version = Some("accepted".into());
+    venue.location_source = Some(pinakes_core::model::LocationSource::Geocoded);
+    let mut retry = old.clone();
+    retry.event.venue.as_mut().unwrap().osm_version = None;
+    retry.event.warnings.push("geocoding budget".into());
+    pinakes_core::event::storage::preserve_venue(&mut retry, &old);
+    assert_eq!(
+        pinakes_core::changes::normalize(&old),
+        pinakes_core::changes::normalize(&retry)
+    );
+    retry.event.venue.as_mut().unwrap().osm_version = None;
+    retry.event.venue.as_mut().unwrap().text = "New address".into();
+    pinakes_core::event::storage::preserve_venue(&mut retry, &old);
+    assert!(retry.event.venue.as_ref().unwrap().osm_version.is_none());
+    let body=cal(&event("UID:z\nDTSTART:20261024T090000\nGEO:47;8\nRRULE:FREQ=DAILY;COUNT=4\nEXDATE:20261025T090000\nRDATE:20261028T090000\nSTATUS:TENTATIVE\nSUMMARY:A title longer than seventy five octets is accepted because feeds often do not fold lines correctly"));
+    let d = parse(&body.replace('\n', "\r\n"));
+    let c = d.container.unwrap();
+    assert_eq!(c.occurrences.len(), 4);
+    assert_eq!(
+        c.occurrences[3].doc.start.unwrap().to_rfc3339(),
+        "2026-10-28T08:00:00+00:00"
+    );
+    assert!(!c
+        .occurrences
+        .iter()
+        .any(|o| o.doc.start.unwrap().date_naive().to_string() == "2026-10-25"));
+    assert_eq!(
+        c.occurrences[0].doc.event.event_status,
+        Some(EventStatus::Scheduled)
+    );
+    let ttl = parse(&body.replace("VERSION:2.0", "VERSION:2.0\nX-PUBLISHED-TTL:PT6H"));
+    assert_eq!(ttl.container.unwrap().feed_ttl, Some(21600));
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn review_occurrences_signed_paging_windows_and_indexed_views(pool: PgPool) {
+    let uri = "https://example.org/page.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut d = dynamic_parse(uri, &future_calendar(5));
+    // Equal starts exercise every keyset component, including a recurrence tie.
+    let first = d.container.as_ref().unwrap().occurrences[0].doc.start;
+    for o in &mut d.container.as_mut().unwrap().occurrences {
+        o.doc.start = first;
+    }
+    d.container.as_mut().unwrap().occurrences[1].uid = "id0".into();
+    d.container.as_mut().unwrap().occurrences[1].recurrence_id = "second".into();
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let app = api::router(api::AppState::new(pool.clone(), Config::default()).unwrap());
+    let mut next = format!("/v1/resources/{id}/occurrences?limit=2");
+    let mut keys = std::collections::BTreeSet::new();
+    let mut first_cursor = None;
+    loop {
+        let (code, v) = call(&app, &next).await;
+        assert_eq!(code, 200, "{v}");
+        for o in v["items"].as_array().unwrap() {
+            assert!(keys.insert((
+                o["uid"].clone().to_string(),
+                o["recurrence_id"].clone().to_string()
+            )));
+            assert!(o.get("search_text").is_none());
+        }
+        let Some(cursor) = v["cursor"].as_str() else {
+            break;
+        };
+        first_cursor.get_or_insert(cursor.to_owned());
+        next = format!("/v1/resources/{id}/occurrences?limit=2&cursor={cursor}");
+    }
+    assert_eq!(keys.len(), 5);
+    let cursor = first_cursor.unwrap();
+    for query in [
+        "limit=501".to_owned(),
+        "limit=0".into(),
+        format!("cursor=x{cursor}"),
+        format!("cursor={cursor}&from=2000-01-01T00:00:00Z"),
+    ] {
+        assert_eq!(
+            call(&app, &format!("/v1/resources/{id}/occurrences?{query}"))
+                .await
+                .0,
+            400
+        );
+    }
+    let foreign = store::ensure_resource(&pool, "https://example.org/other.ics")
+        .await
+        .unwrap();
+    assert_eq!(
+        call(
+            &app,
+            &format!("/v1/resources/{foreign}/occurrences?cursor={cursor}")
+        )
+        .await
+        .0,
+        400
+    );
+    let at = first
+        .unwrap()
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let (code, v) = call(
+        &app,
+        &format!("/v1/resources/{id}/occurrences?from={at}&to={at}"),
+    )
+    .await;
+    assert_eq!(code, 200, "{v}");
+    assert_eq!(v["items"].as_array().unwrap().len(), 5);
+    let (code, v) = call(
+        &app,
+        &format!(
+            "/v1/resources/{id}/occurrences?from=2000-01-01T00:00:00Z&to=2001-01-01T00:00:00Z"
+        ),
+    )
+    .await;
+    assert_eq!(code, 200, "{v}");
+    assert_eq!(v["items"].as_array().unwrap().len(), 0);
+    sqlx::query("UPDATE event_fetch SET horizon_start=now()+interval '1 year'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        call(&app, &format!("/v1/resources/{id}/occurrences"))
+            .await
+            .1["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL enable_seqscan=off")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    for (query,index) in [
+        ("EXPLAIN SELECT id FROM resource_document WHERE point && ST_MakeEnvelope(7,46,9,48,4326)","resource_point_idx"),
+        ("EXPLAIN SELECT resource_id FROM event_occurrence WHERE effective_point && ST_MakeEnvelope(7,46,9,48,4326)","occurrence_point_idx"),
+        ("EXPLAIN SELECT resource_id FROM event_occurrence WHERE search_text @@ plainto_tsquery('simple','event')","occurrence_search_idx"),
+        ("EXPLAIN SELECT resource_id FROM event_occurrence WHERE ST_DWithin(effective_point::geography,ST_SetSRID(ST_MakePoint(8,47),4326)::geography,1000)","osm_place_geography_idx"),
+    ] {
+        let plan:Vec<String>=sqlx::query_scalar(query).fetch_all(&mut *tx).await.unwrap();
+        assert!(plan.join("\n").contains(index),"{index}: {plan:?}");
+    }
 }

@@ -294,7 +294,19 @@ Each `(feed, UID, recurrence_id)` keeps its own version, cancellation state and 
 history. Two distinct successful observations confirm disappearance; an over-50% loss
 holds the snapshot until a matching fresh fetch. Older/replayed snapshots are fenced.
 Ended instances freeze after 24 hours; horizon roll-off does not cancel them. A URI in
-an occurrence links to an existing resource without causing an unsolicited fetch.
+an occurrence links only to a different existing resource on the same host or an
+explicitly configured `event.container.link_hosts` host, without an unsolicited fetch.
+URL-less instances have no link to their own feed. Regenerated UIDs supersede the
+old key without a cancellation; the new creation carries `supersedes`.
+
+`[event.container]` limits changes, total retained rows, and new keys per refresh.
+Changes contain field patches; a burst over the cap becomes one feed-level count.
+Consecutive holds back off exponentially from the normal cadence and dead-letter
+after five attempts by default. Bookkeeping lives in `event_fetch`, with aggregate
+`source="event"` metrics. Hourly maintenance removes cancelled/superseded and
+past-horizon rows after end + 30 days (configurable). Occurrence reads use signed
+keyset pagination (100 default, 500 maximum) and default to the feed horizon.
+Spatial and text queries use geometry/geography and stored tsvector indexes.
 
 Page coordinates win. Online events skip geocoding. A structured Nominatim search is
 accepted only for a single sufficiently matching address; an OSM venue link additionally

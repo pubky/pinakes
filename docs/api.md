@@ -13,7 +13,7 @@ Nexus in a separate call. All paths below are relative to the Pinakes origin.
 | `GET /v1/resources/{id}` | `fields=card\|facets\|document` | One resource; default `document`; 404 if absent |
 | `POST /v1/resources/lookup` | Exactly one of `{"ids":[...]}` or `{"uris":[...]}` | Array in request order, including duplicates, skipping unknowns; 1–500 entries |
 | `POST /v1/resolve` | `{"uri":"https://example.org/"}` | Resource immediately or after up to 3 seconds; 202 with `status=pending` while queued |
-| `GET /v1/resources/{id}/occurrences` | Optional RFC 3339 `from`, `to` inclusive start bounds | `{items:[...]}` in start/key order; unknown resource 404 |
+| `GET /v1/resources/{id}/occurrences` | Optional RFC 3339 `from`, `to`, `limit` (1–500), signed `cursor` | `{items:[...],cursor}` in start/key order; default horizon/100 rows; unknown resource 404 |
 | `GET /v1/info` | None | Public version, manifests, resolver status, counts, ingestion cursor/epoch/length/lag/time and licence |
 | `GET /v1/changes` | `cursor`, `class`, `type`, `source`, `limit` | Change page with ascending sequence cursor |
 | `POST /v1/changes/lookup` | `{resource_ids:[...], since, cursor?, limit?}` | Changes to 1–500 requested IDs since a timestamp |
@@ -278,7 +278,9 @@ alone. Opaque cursor keys distinguish instances even when their ranks and owner 
 A feed result adds `occurrence: {uid, recurrence_id, event_resource_id?}`. A null
 recurrence_id represents a non-recurring instance; recurring keys are UTC instants
 or all-day dates. An existing page matching the occurrence URL is linked by
-`event_resource_id`; it is never fetched just because a feed mentions it.
+`event_resource_id`, only for a different resource on the same host or a configured
+`event.container.link_hosts` host. URL-less instances have a null URL/link; references
+never trigger an unsolicited fetch.
 A located Pubky result adds `event: {author, object_path, recurrence_id, start, end,
 status}` for Nexus post hydration. Its name is intentionally absent: Pinakes does
 not fetch the post body. Author/reach filters also constrain that post's author.
@@ -286,12 +288,15 @@ not fetch the post body. Author/reach filters also constrain that post's author.
 Cancelled units retain their lifecycle status and remain addressable.
 
 `GET /v1/resources/{id}/occurrences?from=...&to=...` returns accepted occurrences
-ordered by start, UID and recurrence key, capped by `event.max_occurrences_per_feed`.
+ordered by start, UID and recurrence key. `limit` defaults to 100 and cannot exceed
+500. Use the returned signed `cursor` for the next page; it fixes the resource and
+time window, and expires on daemon restart. A tampered or mismatched cursor is 400.
 Items include the full bounded `document`, their identity handle, start/end, name,
 status, URL, venue/page link, volatile flag and optional supersedes key. This route
 accepts RFC 3339 dates; search additionally accepts Unix milliseconds. A known
-non-calendar returns an empty array. Snapshot rows retained outside the rolling
-expansion horizon remain readable, so pass a window for a calendar view.
+non-calendar returns an empty array. `from` defaults to the last accepted horizon
+start (otherwise the configured horizon); an explicit earlier bound can read
+retained older rows. Superseded rows are excluded.
 
 Event documents add `tz?`, `all_day?`, `event_status`, `attendance`,
 `venue: {text,name?,address?,resource_id?,location?,location_source?,osm_id?,osm_version?}`,
@@ -312,12 +317,21 @@ Calendar rows use SEQUENCE/LAST-MODIFIED and normalized content hashes; DTSTAMP,
 unknown vendor props and fetch noise do not create changes. Explicit cancellations
 apply immediately. Disappearance needs two fresh complete snapshots. Losing over half
 the active keys holds all updates until the next identical successful snapshot.
-Each occurrence emits its own change with `occurrence` equal to the serialized
-`[uid,recurrence_id]` key. Snapshots older than or equal to the last observation are
-ignored; past end+24h and horizon roll-off never imply cancellation.
+Occurrence changes are field patches with `occurrence` equal to the serialized
+`[uid,recurrence_id]` key. Above `event.container.max_changes` (100 default), a
+single feed-level `details` change has `after.occurrence_changes` with the count;
+clients refresh the occurrence window. New UID keys with identical content
+supersede the old row without cancellation, with `supersedes` on the created
+change. Snapshots older than or equal to the last observation are ignored; past
+end+24h and horizon roll-off never imply cancellation. Retained cancelled,
+superseded or past-horizon rows are purged after end + configured retention.
+Total rows/new-key rotation are capped; repeated holds back off from the normal
+cadence and eventually dead-letter, instead of polling every minute.
 
 Nexus `kind:event` puts/deletes accept `recurrence_id`, start/end Unix milliseconds
 and optional status. The reference key includes author, object_path, venue resource
 and recurrence so deleting one occurrence leaves other instances/venues intact.
-Bad recurrence keys (over 128 bytes or NUL) or lifecycle values are skipped and
-counted as `pinakes_ingest_rejected_total{reason="event"}` after commit.
+Bad recurrence keys (over 128 bytes or NUL), out-of-range timestamps and end before
+start are skipped and
+counted as `pinakes_ingest_rejected_total{reason="event"}` after commit. Unknown
+lifecycle strings are treated as absent and keep the otherwise valid reference.

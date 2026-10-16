@@ -134,6 +134,7 @@ pub(crate) async fn append(
     } else {
         (before, after)
     };
+    lock_sequence(tx).await?;
     sqlx::query("INSERT INTO resource_change(resource_id,class,fields,before,after,source,type_path,osm_type,osm_id,at,occurrence_key) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,clock_timestamp(),$10)")
         .bind(id).bind(diff.class).bind(diff.fields).bind(before).bind(after).bind(source).bind(type_path).bind(osm.as_ref().map(|o|&o.osm_type)).bind(osm.as_ref().map(|o|o.id)).bind(occurrence).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO source_state(source,change_totals) VALUES($1,jsonb_build_object($2::text,1)) ON CONFLICT(source) DO UPDATE SET change_totals=source_state.change_totals || jsonb_build_object($2::text,coalesce((source_state.change_totals->>$2)::bigint,0)+1)")
@@ -147,8 +148,15 @@ pub async fn save(
     doc: &ResourceMeta,
     cfg: &crate::config::QueueConfig,
 ) -> Result<()> {
+    let prepared = if let Some(container) = &doc.container {
+        Some(
+            crate::event::storage::prepare(pool, id, container, doc.fetched_at, doc.ttl_secs)
+                .await?,
+        )
+    } else {
+        None
+    };
     let mut tx = pool.begin().await?;
-    lock_sequence(&mut tx).await?;
     crate::store::lock_search_revision(&mut tx).await?;
     let row=sqlx::query("SELECT r.*,CASE WHEN r.osm_id IS NULL THEN r.doc ELSE o.versions->r.osm_version END AS accepted FROM resource r LEFT JOIN osm_place o ON r.osm_type=o.osm_type AND r.osm_id=o.osm_id WHERE r.id=$1 AND r.generation=$2 FOR UPDATE OF r")
         .bind(id).bind(generation).fetch_optional(&mut *tx).await?;
@@ -208,18 +216,29 @@ pub async fn save(
             .execute(&mut *tx)
             .await?;
     }
-    if let Some(container) = doc.container.take() {
-        if !crate::event::storage::apply(&mut tx, id, &container, doc.fetched_at).await? {
-            sqlx::query("UPDATE resource SET lease_until=NULL,priority_at=NULL,next_attempt_at=now()+$2*interval '1 second' WHERE id=$1").bind(id).bind(container.held_retry_secs as f64).execute(&mut *tx).await?;
+    doc.container = None;
+    if let Some(plan) = &prepared {
+        let applied = crate::event::storage::apply(&mut tx, id, plan).await?;
+        if applied != Some(true) {
+            sqlx::query("UPDATE resource SET lease_until=NULL,priority_at=NULL,dead_letter=coalesce($3,dead_letter),next_attempt_at=now()+$2*interval '1 second' WHERE id=$1").bind(id).bind(if applied==Some(false){plan.retry_secs as f64}else{doc.ttl_secs.max(3600) as f64}).bind((applied==Some(false)).then_some(plan.dead_letter)).execute(&mut *tx).await?;
             tx.commit().await?;
             return Ok(());
         }
+    }
+    if let Some(old) = before
+        .as_ref()
+        .and_then(|v| serde_json::from_value::<ResourceMeta>(v.clone()).ok())
+    {
+        crate::event::storage::preserve_venue(&mut doc, &old);
     }
     let before = before
         .map(|v| serde_json::from_value::<ResourceMeta>(v).map(|d| normalize(&d)))
         .transpose()?;
     let after = normalize(&doc);
     crate::store::write_document(&mut tx, id, generation, &doc).await?;
+    if let Some(plan) = prepared {
+        plan.append_changes(&mut tx, id).await?;
+    }
     if let Some(diff) = diff(before.as_ref(), Some(&after))
         .filter(|_| before.is_some() || doc.status != Status::Missing)
     {
@@ -230,9 +249,8 @@ pub async fn save(
 }
 pub async fn delete_orphans(pool: &PgPool, grace_days: u32) -> Result<u64> {
     let mut tx = pool.begin().await?;
-    lock_sequence(&mut tx).await?;
     crate::store::lock_search_revision(&mut tx).await?;
-    let rows=sqlx::query("SELECT r.id,r.resolver,r.ever_existed,d.doc FROM resource r JOIN resource_document d ON d.id=r.id WHERE r.orphaned_at<now()-$1*interval '1 day' AND NOT EXISTS(SELECT 1 FROM reference f WHERE f.resource_id=r.id) AND (r.lease_until IS NULL OR r.lease_until<now()) FOR UPDATE OF r SKIP LOCKED LIMIT 1000")
+    let rows=sqlx::query("SELECT r.id,r.resolver,r.ever_existed,d.doc FROM resource r JOIN resource_document d ON d.id=r.id WHERE r.orphaned_at<now()-$1*interval '1 day' AND NOT EXISTS(SELECT 1 FROM reference f WHERE f.resource_id=r.id) AND NOT EXISTS(SELECT 1 FROM resource v WHERE v.venue_id=r.id) AND NOT EXISTS(SELECT 1 FROM occurrence o WHERE o.venue_id=r.id OR o.event_resource_id=r.id) AND (r.lease_until IS NULL OR r.lease_until<now()) FOR UPDATE OF r SKIP LOCKED LIMIT 1000")
         .bind(grace_days as f64).fetch_all(&mut *tx).await?;
     for row in &rows {
         let id: String = row.try_get("id")?;
@@ -264,6 +282,7 @@ pub async fn delete_orphans(pool: &PgPool, grace_days: u32) -> Result<u64> {
     Ok(rows.len() as u64)
 }
 pub async fn retain(pool: &PgPool, days: u32) -> Result<()> {
+    sqlx::query("DELETE FROM occurrence o USING event_fetch e WHERE o.resource_id=e.resource_id AND (o.status IN ('cancelled','superseded') OR o.start_at<e.horizon_start) AND coalesce(o.end_at,o.start_at)<now()-e.retention_days*interval '1 day'").execute(pool).await?;
     let mut tx = pool.begin().await?;
     lock_sequence(&mut tx).await?;
     sqlx::query("DELETE FROM resource_change WHERE at<now()-$1*interval '1 day'")
