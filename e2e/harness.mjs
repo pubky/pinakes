@@ -130,10 +130,15 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
         if (!collapsed.items.length) return false;
         if (docs.has('isbn_twin')) {
           const twinIds = [docs.get('isbn').resource_id, docs.get('isbn_twin').resource_id];
-          if (!collapsed.items.some(row => twinIds.every(id => row.group?.members?.some(m => m.resource_id === id)))) return false;
+          let twinsGrouped = false;
+          for (const row of collapsed.items.filter(row => row.group)) {
+            const detail = await json(`${pinakes}/v1/groups/${row.group.id}`);
+            if (twinIds.every(id => detail.members.some(member => member.resource_id === id))) twinsGrouped = true;
+          }
+          if (!twinsGrouped) return false;
           assert(collapsed.items.length < results.items.length, 'ISBN twins must collapse into one row');
         }
-        for (const row of collapsed.items) if (row.group) assert(row.group.members.length > 0);
+        for (const row of collapsed.items) if (row.group) { assert(row.group.member_count > 0); assert(!("members" in row.group)); }
         return true;
       }, timeout, signal);
       report.assertions.push('group collapse and membership');

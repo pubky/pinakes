@@ -63,6 +63,19 @@ impl GroupConfig {
     }
 }
 #[derive(Deserialize, Serialize, ToSchema)]
+pub struct GroupCard {
+    pub id: String,
+    pub kind: Option<String>,
+    pub name: Option<String>,
+    pub image: Option<String>,
+    pub curated: bool,
+    pub location: Option<crate::model::Point>,
+    pub taggers: i64,
+    pub references: i64,
+    pub member_count: i64,
+    pub attribution: Option<String>,
+}
+#[derive(Deserialize, Serialize, ToSchema)]
 pub struct GroupView {
     pub id: String,
     pub kind: Option<String>,
@@ -72,6 +85,7 @@ pub struct GroupView {
     pub location: Option<crate::model::Point>,
     pub taggers: i64,
     pub references: i64,
+    pub member_count: i64,
     pub members: Vec<GroupMemberView>,
     pub attribution: Option<String>,
 }
@@ -956,7 +970,7 @@ pub async fn curate(pool: &PgPool, id: &str, body: Curation, cfg: &GroupConfig) 
             .fetch_all(&mut *tx)
             .await?;
     rebuild(&mut tx, &units, &keys, &previous, cfg).await?;
-    let result = sqlx::query_scalar("SELECT group_card($1)")
+    let result = sqlx::query_scalar("SELECT group_detail($1)")
         .bind(id)
         .fetch_one(&mut *tx)
         .await?;

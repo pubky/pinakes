@@ -313,7 +313,7 @@ impl PageCursor {
 #[derive(Serialize, ToSchema)]
 pub struct ResourceView {
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<crate::groups::GroupView>)]
+    #[schema(value_type = Option<crate::groups::GroupCard>)]
     pub group: Option<Value>,
     pub resource_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1264,7 +1264,7 @@ pub async fn group(
     if !model::valid_id(&id) || !state.config.groups.enabled {
         return Err(ApiError::bad("invalid or disabled group"));
     }
-    let value: Option<Value> = sqlx::query_scalar("SELECT group_card($1)")
+    let value: Option<Value> = sqlx::query_scalar("SELECT group_detail($1)")
         .bind(id)
         .fetch_one(&state.pool)
         .await?;

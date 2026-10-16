@@ -879,6 +879,10 @@ async fn review_populated_collapse_uses_equality_facets_and_builds_only_page_car
     sqlx::query("INSERT INTO group_score(group_id,score,updated_at,newest_at,taggers,references_count) SELECT id,1,now(),now(),1,2 FROM \"group\"").execute(&pool).await.unwrap();
     sqlx::query("UPDATE resource SET point=ST_SetSRID(ST_MakePoint(8.0,47.0+((substring(uri from '[0-9]+$'))::integer)/100000.0),4326),doc=doc||jsonb_build_object('location',jsonb_build_object('lat',47.0+((substring(uri from '[0-9]+$'))::integer)/100000.0,'lon',8.0))").execute(&pool).await.unwrap();
     sqlx::query("ANALYZE").execute(&pool).await.unwrap();
+    sqlx::query("SELECT refresh_group_best(ARRAY(SELECT id FROM \"group\"))")
+        .execute(&pool)
+        .await
+        .unwrap();
     if let Ok(path) = std::env::var("PINAKES_GROUP_FUNCTION_PLAN_FILE") {
         let body: String =
             sqlx::query_scalar("SELECT prosrc FROM pg_proc WHERE proname='group_card'")
@@ -903,6 +907,25 @@ async fn review_populated_collapse_uses_equality_facets_and_builds_only_page_car
         )
         .unwrap();
     }
+    let mut hydration = Vec::new();
+    for groups in [3000, 1500] {
+        let mut tx = pool.begin().await.unwrap();
+        if groups == 1500 {
+            sqlx::query("DELETE FROM \"group\" WHERE id IN (SELECT id FROM \"group\" ORDER BY id OFFSET 1500)").execute(&mut *tx).await.unwrap();
+        }
+        let plan:Value=sqlx::query_scalar("EXPLAIN(ANALYZE,BUFFERS,VERBOSE,FORMAT JSON) SELECT jsonb_agg(group_card(id)) FROM (SELECT id FROM \"group\" ORDER BY id LIMIT 20) page").fetch_one(&mut *tx).await.unwrap();
+        let ms = plan[0]["Execution Time"].as_f64().unwrap();
+        if ms > 100.0 {
+            eprintln!("SOFT group-card hydration target exceeded: {ms} ms");
+        }
+        assert!(ms < 5000.0);
+        hydration.push(json!({"groups":groups,"plan":plan}));
+        // Keep the production-size API benchmark intact.
+        tx.rollback().await.unwrap();
+    }
+    if let Ok(path) = std::env::var("PINAKES_GROUP_HYDRATION_PLAN_FILE") {
+        std::fs::write(path, serde_json::to_vec_pretty(&hydration).unwrap()).unwrap();
+    }
     let mut evidence = Vec::new();
     for request in [
         "/v1/search?collapse=group&bbox=7.9,47.0,8.1,47.006&limit=20",
@@ -918,6 +941,11 @@ async fn review_populated_collapse_uses_equality_facets_and_builds_only_page_car
         let started = std::time::Instant::now();
         let response = get(&app, request).await;
         let api_ms = started.elapsed().as_secs_f64() * 1000.0;
+        if api_ms > 100.0 {
+            eprintln!(
+                "SOFT performance target exceeded: {request}: {api_ms:.3} ms (target 100 ms)"
+            );
+        }
         assert!(api_ms < 5000.0, "{request}: {api_ms} ms");
         assert_eq!(response["items"].as_array().unwrap().len(), 20);
         if request.contains("facet") {
@@ -927,7 +955,7 @@ async fn review_populated_collapse_uses_equality_facets_and_builds_only_page_car
             .as_array()
             .unwrap()
             .iter()
-            .all(|r| r["group"]["members"].as_array().unwrap().len() == 2));
+            .all(|r| r["group"]["member_count"] == 2 && r["group"].get("members").is_none()));
         let (name,statement,types):(String,String,Vec<String>)=sqlx::query_as("SELECT name,statement,ARRAY(SELECT t::text FROM unnest(parameter_types) t) FROM pg_prepared_statements WHERE statement LIKE 'WITH eligible%' ").fetch_one(&connection).await.unwrap();
         assert!(name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'));
         let mut coords = [7.9, 47.0, 8.1, 47.006].into_iter();

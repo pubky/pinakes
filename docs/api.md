@@ -123,7 +123,7 @@ Cards include `resource_id`, `uri`, `type`, `name`, `description`, `image`, `sit
 attributes and aliases. `geo` omits `ttl_secs` because it is final. The document is at most 8 KB; its flat string attributes
 are resolver-allowlisted and capped at 32. An unresolved resource has no document.
 
-Statuses are `ok`, `pending`, `missing`, `unreachable`, and `error`. Missing must
+Statuses are `ok`, `pending`, `missing`, `unreachable`, `blocked`, and `error`. Missing must
 be confirmed by two fresh successful fetches; one missing response keeps the last
 accepted status/document, and a repeated cached observation does not count twice. `unreachable`
 means the upstream denied access; `error` can have a scheduled retry or be in dead
@@ -443,3 +443,9 @@ audio/video enclosure; plain RSS is a DataFeed. Direct podcast feeds, including
 single-item feeds, are PodcastSeries; `?guid=` or the episode page’s matching RSS
 link selects an episode. No embed HTML or media bytes are served. Disabled non-HTTP identifier routes defer; enabled web can
 still render ordinary HTTP fallback cards.
+
+Group cards embedded in resource/search rows are compact: `id`, `kind`, `name`, `image`,
+`location`, `attribution`, `curated`, `taggers`, `references`, and `member_count`.
+Fetch `GET /v1/groups/{id}` for the member array. Cached group fields refresh with membership,
+reference counts, accepted document changes and curation. OSM-derived fields use indexed
+OSM references at read time and retain attribution.

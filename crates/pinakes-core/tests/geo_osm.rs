@@ -963,6 +963,17 @@ async fn review_group_osm_best_member_keeps_attribution_and_resource_own_name(po
     .await
     .unwrap();
     assert_eq!(group["attribution"], osm::ATTRIBUTION);
+    let cached: serde_json::Value = sqlx::query_scalar("SELECT card FROM \"group\" WHERE id=$1")
+        .bind(group["id"].as_str().unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        cached["location"].is_null() && cached["name"].is_null() && cached["kind"].is_null(),
+        "{cached}"
+    );
+    assert_eq!(group["member_count"], 2);
+
     assert_eq!(group["name"], "Berlin");
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (_, _, doc) = call(&app, &format!("/v1/resources/{page}"), None).await;

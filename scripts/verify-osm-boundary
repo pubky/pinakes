@@ -38,6 +38,14 @@ IF to_regclass('event_fetch') IS NOT NULL THEN
   THEN RAISE EXCEPTION 'Geocoded coordinates leaked outside osm_place'; END IF;
 END IF;
 END $$;
+DO $$ BEGIN
+IF EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='group' AND column_name='card') THEN
+ IF EXISTS(SELECT 1 FROM "group" WHERE card_osm_id IS NOT NULL AND
+  (card->'location'<>'null'::jsonb OR (card_osm_resource AND
+   ((name IS NULL AND card->'name'<>'null'::jsonb) OR (image IS NULL AND card->'image'<>'null'::jsonb) OR card->'kind'<>'null'::jsonb))))
+ THEN RAISE EXCEPTION 'OSM-derived facts leaked into cached group card'; END IF;
+END IF;
+END $$;
 SELECT count(*) AS derivative_rows, count(*) FILTER(WHERE status='ok') AS resolved_places FROM osm_place;
 SELECT table_name,column_name FROM information_schema.columns
  WHERE table_schema='public' AND column_name IN ('osm_type','osm_id') ORDER BY 1,2;
