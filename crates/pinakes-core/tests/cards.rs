@@ -178,6 +178,7 @@ async fn round2_optional_fetch_policy_and_metrics() {
             kind: "media",
             config: Arc::new(cfg),
             web: WebResolver {
+                oembed_policy: Default::default(),
                 cards: None,
                 events: None,
                 config: Default::default(),
@@ -257,6 +258,7 @@ fn resolver(kind: &'static str, cfg: Config, transport: Arc<TransportMock>) -> C
     CardResolver {
         kind,
         web: WebResolver {
+            oembed_policy: Default::default(),
             cards: Some(Arc::new(cfg.cards.clone())),
             events: None,
             egress: Egress::with_backends(Default::default(), Arc::new(PublicDns), transport),
@@ -530,6 +532,7 @@ async fn review_recorded_youtube_head_and_oembed_survive_oversize_or_failed_page
         kind: "media",
         config: Arc::new(Config::default()),
         web: WebResolver {
+            oembed_policy: Default::default(),
             cards: None,
             events: None,
             egress: Egress::with_backends(
@@ -701,6 +704,7 @@ async fn review_oembed_first_keeps_rich_page_types_and_ap_denial_falls_back() {
         kind,
         config: Arc::new(Config::default()),
         web: WebResolver {
+            oembed_policy: Default::default(),
             cards: None,
             events: None,
             config: Default::default(),
@@ -774,4 +778,143 @@ async fn review_social_deletion_purges_content_history(pool: sqlx::PgPool) {
         .unwrap();
     assert_eq!(d["status"], "missing");
     assert!(d["description"].is_null());
+}
+
+#[tokio::test]
+async fn round3_redirected_feed_cannot_inherit_destination_container() {
+    struct RedirectFeed;
+    #[async_trait]
+    impl Transport for RedirectFeed {
+        async fn get(&self, u: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+            Ok(Fetched {
+                permanent_redirect: false,
+                truncated: false,
+                validators: Default::default(),
+                url: u.clone(),
+                content_type: "application/rss+xml".into(),
+                status: if u.host_str() == Some("attacker.example") {
+                    302
+                } else {
+                    200
+                },
+                retry_after_secs: 60,
+                location: Some("https://podcast.example/feed".into()),
+                body: RSS.as_bytes().to_vec(),
+            })
+        }
+    }
+    let e = Egress::with_backends(
+        Default::default(),
+        Arc::new(PublicDns),
+        Arc::new(RedirectFeed),
+    );
+    let r = WebResolver {
+        oembed_policy: Default::default(),
+        cards: Some(Arc::new(Default::default())),
+        events: None,
+        config: Default::default(),
+        egress: e,
+    };
+    let victim = r.resolve("https://podcast.example/feed").await.unwrap();
+    assert!(victim
+        .group_keys
+        .iter()
+        .any(|k| k.basis == "podcast_series_guid"));
+    let redirect = r.resolve("https://attacker.example/feed").await.unwrap();
+    assert_eq!(redirect.type_name, "PodcastSeries");
+    assert_eq!(
+        redirect.attributes["podcast_feed"],
+        "https://attacker.example/feed"
+    );
+    assert!(!redirect
+        .group_keys
+        .iter()
+        .any(|k| k.basis.starts_with("podcast")));
+}
+
+#[tokio::test]
+async fn round3_advertised_oembed_uses_policy_and_origin_checks() {
+    struct Advertised {
+        target: &'static str,
+        complete: bool,
+        seen: Mutex<Vec<String>>,
+    }
+    #[async_trait]
+    impl Transport for Advertised {
+        async fn get(&self, u: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+            self.seen.lock().unwrap().push(u.to_string());
+            let body = if u.path().contains("embed") {
+                json!({"title":"Embed","thumbnail_url":"https://images.example/image.jpg"})
+                    .to_string()
+            } else {
+                format!("<title>Title</title>{}<link rel='alternate' type='application/json+oembed' href='{}'>",if self.complete {"<meta property='og:image' content='/image.jpg'>"}else{""},self.target)
+            };
+            Ok(Fetched {
+                permanent_redirect: false,
+                truncated: false,
+                validators: Default::default(),
+                url: u.clone(),
+                status: 200,
+                content_type: if u.path().contains("embed") {
+                    "application/json"
+                } else {
+                    "text/html"
+                }
+                .into(),
+                body: body.into_bytes(),
+                retry_after_secs: 60,
+                location: None,
+            })
+        }
+    }
+    use cards::OembedPolicy::{Always, WhenNeeded};
+    for (target, complete, policy, count) in [
+        ("/embed", true, WhenNeeded, 1),
+        ("/embed", true, Always, 2),
+        ("/embed", false, WhenNeeded, 2),
+        ("https://evil.example/embed", false, Always, 1),
+    ] {
+        let t = Arc::new(Advertised {
+            target,
+            complete,
+            seen: Mutex::default(),
+        });
+        let r = WebResolver {
+            oembed_policy: policy,
+            cards: None,
+            events: None,
+            config: Default::default(),
+            egress: Egress::with_backends(Default::default(), Arc::new(PublicDns), t.clone()),
+        };
+        let metrics = pinakes_core::telemetry::Metrics::new().unwrap();
+        let (doc, _) = pinakes_core::telemetry::observe(
+            &metrics,
+            &r.manifest(),
+            r.resolve("https://page.example/item"),
+        )
+        .await;
+        assert_eq!(
+            doc.unwrap().name.as_deref(),
+            Some(if count == 2 { "Embed" } else { "Title" })
+        );
+        assert_eq!(t.seen.lock().unwrap().len(), count);
+        if !complete && count == 2 {
+            assert_eq!(
+                metrics
+                    .discovery
+                    .with_label_values(&["oembed", "missing_image"])
+                    .get(),
+                1
+            );
+        }
+        if target.starts_with("https://evil") {
+            assert_eq!(
+                metrics
+                    .discovery
+                    .with_label_values(&["oembed", "untrusted"])
+                    .get(),
+                1
+            );
+        }
+    }
 }

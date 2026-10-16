@@ -30,6 +30,7 @@ pub const ATTRIBUTES: &[&str] = &[
     "isrc",
 ];
 pub struct WebResolver {
+    pub oembed_policy: super::cards::OembedPolicy,
     pub cards: Option<std::sync::Arc<super::cards::CardConfig>>,
     pub events: Option<std::sync::Arc<crate::event::service::EventService>>,
     pub egress: Egress,
@@ -72,6 +73,18 @@ impl Resolver for WebResolver {
             .is_none_or(|u| self.egress.allows(u.as_str()))
     }
     async fn resolve(&self, uri: &str) -> Result<ResourceMeta> {
+        self.resolve_with_policy(uri, self.oembed_policy).await
+    }
+    fn refresh_after(&self, doc: &ResourceMeta) -> Duration {
+        Duration::from_secs(doc.ttl_secs)
+    }
+}
+impl WebResolver {
+    pub async fn resolve_with_policy(
+        &self,
+        uri: &str,
+        policy: super::cards::OembedPolicy,
+    ) -> Result<ResourceMeta> {
         if !url::Url::parse(uri)
             .is_ok_and(|u| matches!(u.scheme(), "http" | "https" | "webcal" | "webcals"))
         {
@@ -153,11 +166,30 @@ impl Resolver for WebResolver {
                 )
                 .await?;
             }
-            if let Some(endpoint) = extracted
-                .oembed
-                .take()
-                .filter(|_| super::cards::needs_embed(&extracted.doc))
-            {
+            // Account for the title fallback when deciding whether another request is
+            // needed, while retaining oEmbed's established precedence if fetched.
+            let mut candidate = extracted.doc.clone();
+            fill(&mut candidate.name, extracted.title.clone());
+            if let Some(endpoint) = extracted.oembed.take().filter(|endpoint| {
+                let trusted = endpoint.origin() == fetched.url.origin()
+                    || super::cards::provider_endpoint(uri).is_some_and(|registered| {
+                        registered.origin() == endpoint.origin()
+                            && registered.path() == endpoint.path()
+                    });
+                if !trusted {
+                    crate::telemetry::discovery("oembed", "untrusted");
+                }
+                trusted
+                    && (policy == super::cards::OembedPolicy::Always
+                        || super::cards::needs_embed(&candidate))
+            }) {
+                if policy == super::cards::OembedPolicy::WhenNeeded
+                    && extracted.doc.status == Status::Ok
+                    && candidate.name.is_some()
+                    && extracted.doc.image.is_none()
+                {
+                    crate::telemetry::discovery("oembed", "missing_image");
+                }
                 crate::telemetry::discovery("oembed", "requested");
                 // Discovery is the only additional fetch; it follows the same policy as the page.
                 let remaining = deadline
@@ -197,9 +229,6 @@ impl Resolver for WebResolver {
             Ok(doc)
         })
         .await?
-    }
-    fn refresh_after(&self, doc: &ResourceMeta) -> Duration {
-        Duration::from_secs(doc.ttl_secs)
     }
 }
 pub struct Extracted {
@@ -718,6 +747,7 @@ mod tests {
             }
         }
         let resolver = WebResolver {
+            oembed_policy: Default::default(),
             cards: None,
             events: None,
             egress: Egress::with_backends(Default::default(), Arc::new(TestDns), Arc::new(Pages)),

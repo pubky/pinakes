@@ -379,7 +379,7 @@ licence boundary. All existing resource and occurrence routes and cursors are un
 
 Resources and lookup responses include `group` when membership has been computed.
 A group card has `id`, `kind`, `name`, `image`, `attribution`, `curated`, `taggers`, `references`
-and `members: [{resource_id, uri, site, occurrence?}]`. The optional occurrence
+and `member_count`. The detail route adds `members: [{resource_id, uri, site, occurrence?}]`. The optional occurrence
 contains `uid` and `recurrence_id`. Group IDs are views and can change when evidence
 joins or splits a group; member resource IDs and references never change. Ranking
 scores remain internal. Resource reads keep their own name/image in the attached
@@ -398,7 +398,7 @@ individual results until the bounded grouping pass reaches them.
 Automatic grouping uses typed identifiers, podcast GUIDs, ICS UID, `sameAs`,
 canonical URLs and accepted OSM URL identity. URL claims require the same
 registrable domain or reciprocity. Cross-domain typed keys require verified evidence
-on both members or reciprocal links. Only ICS UID keys are scoped to exact start;
+on both members or reciprocal links. ICS UID candidates use the configured container policy and a five-minute start guard;
 occurrence joins also reject starts more than five minutes apart. Any pair of points
 over `queue.groups.max_distance_m` (default 500 m) prevents an automatic merge.
 FIFO and per-origin admission caps reject new excess joiners without dropping

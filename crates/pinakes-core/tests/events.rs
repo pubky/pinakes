@@ -862,6 +862,7 @@ async fn advertised_event_negotiation_and_calendar_not_modified(pool: PgPool) {
         osm: Arc::new(OsmResolver::new(pool.clone(), OsmConfig::default()).unwrap()),
     });
     let resolver = WebResolver {
+        oembed_policy: Default::default(),
         cards: None,
         egress,
         config: Default::default(),
@@ -1323,6 +1324,7 @@ async fn review_plain_pages_have_no_discovery_and_advertised_urls_share_ttl(pool
         osm: Arc::new(OsmResolver::new(pool, OsmConfig::default()).unwrap()),
     });
     let resolver = WebResolver {
+        oembed_policy: Default::default(),
         cards: None,
         egress,
         config: Default::default(),
@@ -1788,6 +1790,7 @@ async fn review_disabled_calendars_use_web_queue_and_preview(pool: PgPool) {
         osm: Arc::new(OsmResolver::new(pool.clone(), Default::default()).unwrap()),
     });
     let web = pinakes_core::resolver::web::WebResolver {
+        oembed_policy: Default::default(),
         cards: None,
         events: Some(service),
         egress: Egress::new(cfg.egress.clone()),
@@ -1973,6 +1976,7 @@ async fn conditional_feed_confirms_small_loss_and_held_snapshot_through_queue(po
             calls: Mutex::default(),
         });
         let resolver = WebResolver {
+            oembed_policy: Default::default(),
             cards: None,
             egress: Egress::with_backends(
                 EgressConfig {
@@ -2345,6 +2349,7 @@ async fn vanished_feed_confirms_twice_and_recovers_through_queue(pool: PgPool) {
             calls: Mutex::default(),
         });
         let resolver = WebResolver {
+            oembed_policy: Default::default(),
             cards: None,
             egress: Egress::with_backends(
                 EgressConfig {

@@ -25,3 +25,20 @@ Startup persists the grouping policy (including tenant rules) and re-dirties mem
 it changes. For a manual rebuild use `DELETE FROM group_input; INSERT INTO group_dirty(resource_id)
 SELECT DISTINCT resource_id FROM group_unit ON CONFLICT DO NOTHING;`. Existing retry windows
 remain in force. Changing `groups.cross_container_occurrences` takes effect as that queue drains.
+
+Tenant rules support `"subdomain"`, `"first_path_segment"` and `{"path_segment":3}` (one-based,
+1–8). Prefix segments remain part of the scope. Tests cover the concrete URL shapes for every
+seed, including constant-prefix Acast, Anchor, Google, SoundCloud and Podbean feed URLs.
+Capability-only iCloud/Outlook path rules are removed; native calendars already use their
+referenced feed identity as the container scope, without treating shared service paths as tenants.
+The public feed shapes were checked against [Spotify's hosting guide](https://support.spotify.com/se/creators/article/switching-your-show-hosting-to-spotify-for-creators/),
+[Acast's RSS guide](https://learn.acast.com/en/articles/3404332-how-to-add-your-podcast-to-tunein),
+and [Podbean's feed guide](https://help.podbean.com/support/solutions/articles/25000004906-validating-my-podcast-feed).
+Redirected RSS keeps the referenced URI as its publisher and cannot borrow the destination's
+podcast GUID evidence. Migration 0027 isolates stale container origins and staggers re-fetches
+for historical podcast cards without feed provenance.
+
+The capability-URL guard scans every tracked source file and every nonignored new source file,
+including root configuration, Rust and scripts. Git-ignored runtime credentials/artifacts and
+`.git`, `target`, `node_modules` are excluded. Exact synthetic fixture URLs are allowed only
+in named test files; failures print paths without URL values.

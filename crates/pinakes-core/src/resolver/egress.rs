@@ -614,12 +614,30 @@ impl Egress {
             let mut response = self.transport.get_with(&url, &addresses, options).await?;
             observation.status(response.status);
             drop(observation);
-            let input = response.clone();
-            let original = requested.clone();
-            let page = tokio::task::spawn_blocking(move || {
-                super::interstitial::inspect(&original, &input)
-            })
-            .await?;
+            if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+                if options.sensitive || options.json_body.is_some() || !options.headers.is_empty() {
+                    bail!("redirect of authenticated/API request refused");
+                }
+                if redirects == 3 {
+                    bail!("more than 3 redirects");
+                }
+                permanent &= matches!(response.status, 301 | 308);
+                url = url.join(
+                    response
+                        .location
+                        .as_deref()
+                        .context("redirect omitted location")?,
+                )?;
+                continue;
+            }
+            let page = if response.content_type.contains("html") {
+                let input = response.clone();
+                let original = requested.clone();
+                tokio::task::spawn_blocking(move || super::interstitial::inspect(&original, &input))
+                    .await?
+            } else {
+                super::interstitial::inspect(&requested, &response)
+            };
             if page == super::interstitial::Page::Blocked {
                 crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "blocked");
                 return Err(super::interstitial::Blocked.into());
@@ -641,22 +659,6 @@ impl Egress {
                     seconds: response.retry_after_secs,
                 }
                 .into());
-            }
-            if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
-                if options.sensitive || options.json_body.is_some() || !options.headers.is_empty() {
-                    bail!("redirect of authenticated/API request refused");
-                }
-                if redirects == 3 {
-                    bail!("more than 3 redirects");
-                }
-                permanent &= matches!(response.status, 301 | 308);
-                url = url.join(
-                    response
-                        .location
-                        .as_deref()
-                        .context("redirect omitted location")?,
-                )?;
-                continue;
             }
             response.permanent_redirect = redirects > 0 && permanent;
             return Ok(response);
@@ -1205,6 +1207,7 @@ mod osm_policy_tests {
         }
         assert!(egress.allows("https://openstreetmap.org.example.net/"));
         let web = crate::resolver::web::WebResolver {
+            oembed_policy: Default::default(),
             cards: None,
             events: None,
             egress: Egress::new(EgressConfig {

@@ -121,6 +121,7 @@ impl Transport for Pages {
                 f.body = b"<script>location.replace('http://private.example/')</script>".to_vec()
             }
             "/permanent" => {
+                f.body = b"<title>Redirecting to: /ignored-html-target</title>".to_vec();
                 f.status = 308;
                 f.location = Some("/end".into());
             }

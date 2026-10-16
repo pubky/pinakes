@@ -149,6 +149,9 @@ impl std::fmt::Display for ErrorClass {
 }
 impl std::error::Error for ErrorClass {}
 pub fn error_class(error: &anyhow::Error) -> &'static str {
+    if error.is::<interstitial::Blocked>() {
+        return "blocked";
+    }
     if let Some(class) = error.downcast_ref::<ErrorClass>() {
         return class.0;
     }

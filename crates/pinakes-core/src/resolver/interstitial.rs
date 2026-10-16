@@ -114,7 +114,10 @@ pub fn inspect(requested: &Url, f: &Fetched) -> Page {
             return Page::Blocked;
         }
     }
-    for script in html.select(&select("script")) {
+    for script in html
+        .select(&select("script"))
+        .filter(|_| visible.trim().len() < 500)
+    {
         let body = script.inner_html();
         for marker in ["location.replace(", "location.assign("] {
             if let Some((_, tail)) = body.split_once(marker) {

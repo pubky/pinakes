@@ -1,0 +1,147 @@
+{
+  "anchor.fm": [
+    "https://anchor.fm/s/123abc/podcast/rss",
+    "https://anchor.fm/s/123abc/podcast/rss?format=xml",
+    "https://anchor.fm/s/456def/podcast/rss"
+  ],
+  "blogspot.com": [
+    "https://alice.blogspot.com/post/one",
+    "https://alice.blogspot.com/post/two",
+    "https://bob.blogspot.com/post/one"
+  ],
+  "calendar.google.com": [
+    "https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics",
+    "https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics?format=xml",
+    "https://calendar.google.com/calendar/ical/en.usa%23holiday%40group.v.calendar.google.com/public/basic.ics"
+  ],
+  "carrd.co": [
+    "https://alice.carrd.co/post/one",
+    "https://alice.carrd.co/post/two",
+    "https://bob.carrd.co/post/one"
+  ],
+  "feed.podbean.com": [
+    "https://feed.podbean.com/alice/feed.xml",
+    "https://feed.podbean.com/alice/feed.xml?format=xml",
+    "https://feed.podbean.com/bob/feed.xml"
+  ],
+  "feeds.acast.com": [
+    "https://feeds.acast.com/public/shows/alice",
+    "https://feeds.acast.com/public/shows/alice?format=xml",
+    "https://feeds.acast.com/public/shows/bob"
+  ],
+  "feeds.buzzsprout.com": [
+    "https://feeds.buzzsprout.com/123456.rss",
+    "https://feeds.buzzsprout.com/123456.rss?format=xml",
+    "https://feeds.buzzsprout.com/654321.rss"
+  ],
+  "feeds.libsyn.com": [
+    "https://feeds.libsyn.com/123456/rss",
+    "https://feeds.libsyn.com/123456/rss?format=xml",
+    "https://feeds.libsyn.com/654321/rss"
+  ],
+  "feeds.megaphone.fm": [
+    "https://feeds.megaphone.fm/alice",
+    "https://feeds.megaphone.fm/alice?format=xml",
+    "https://feeds.megaphone.fm/bob"
+  ],
+  "feeds.redcircle.com": [
+    "https://feeds.redcircle.com/alice",
+    "https://feeds.redcircle.com/alice?format=xml",
+    "https://feeds.redcircle.com/bob"
+  ],
+  "feeds.simplecast.com": [
+    "https://feeds.simplecast.com/alice",
+    "https://feeds.simplecast.com/alice?format=xml",
+    "https://feeds.simplecast.com/bob"
+  ],
+  "feeds.soundcloud.com": [
+    "https://feeds.soundcloud.com/users/soundcloud:users:123456/sounds.rss",
+    "https://feeds.soundcloud.com/users/soundcloud:users:123456/sounds.rss?format=xml",
+    "https://feeds.soundcloud.com/users/soundcloud:users:654321/sounds.rss"
+  ],
+  "feeds.transistor.fm": [
+    "https://feeds.transistor.fm/alice",
+    "https://feeds.transistor.fm/alice?format=xml",
+    "https://feeds.transistor.fm/bob"
+  ],
+  "github.io": [
+    "https://alice.github.io/post/one",
+    "https://alice.github.io/post/two",
+    "https://bob.github.io/post/one"
+  ],
+  "gitlab.io": [
+    "https://alice.gitlab.io/post/one",
+    "https://alice.gitlab.io/post/two",
+    "https://bob.gitlab.io/post/one"
+  ],
+  "linktr.ee": [
+    "https://linktr.ee/alice/feed",
+    "https://linktr.ee/alice/feed?format=xml",
+    "https://linktr.ee/bob/feed"
+  ],
+  "medium.com": [
+    "https://medium.com/@alice/feed",
+    "https://medium.com/@alice/feed?format=xml",
+    "https://medium.com/@bob/feed"
+  ],
+  "neocities.org": [
+    "https://alice.neocities.org/post/one",
+    "https://alice.neocities.org/post/two",
+    "https://bob.neocities.org/post/one"
+  ],
+  "netlify.app": [
+    "https://alice.netlify.app/post/one",
+    "https://alice.netlify.app/post/two",
+    "https://bob.netlify.app/post/one"
+  ],
+  "notion.site": [
+    "https://alice.notion.site/post/one",
+    "https://alice.notion.site/post/two",
+    "https://bob.notion.site/post/one"
+  ],
+  "pages.dev": [
+    "https://alice.pages.dev/post/one",
+    "https://alice.pages.dev/post/two",
+    "https://bob.pages.dev/post/one"
+  ],
+  "rss.com": [
+    "https://rss.com/podcasts/alice/feed.xml",
+    "https://rss.com/podcasts/alice/feed.xml?format=xml",
+    "https://rss.com/podcasts/bob/feed.xml"
+  ],
+  "sites.google.com": [
+    "https://sites.google.com/view/alice/home",
+    "https://sites.google.com/view/alice/home?format=xml",
+    "https://sites.google.com/view/bob/home"
+  ],
+  "squarespace.com": [
+    "https://alice.squarespace.com/post/one",
+    "https://alice.squarespace.com/post/two",
+    "https://bob.squarespace.com/post/one"
+  ],
+  "substack.com": [
+    "https://alice.substack.com/post/one",
+    "https://alice.substack.com/post/two",
+    "https://bob.substack.com/post/one"
+  ],
+  "tumblr.com": [
+    "https://alice.tumblr.com/post/one",
+    "https://alice.tumblr.com/post/two",
+    "https://bob.tumblr.com/post/one"
+  ],
+  "vercel.app": [
+    "https://alice.vercel.app/post/one",
+    "https://alice.vercel.app/post/two",
+    "https://bob.vercel.app/post/one"
+  ],
+  "wixsite.com": [
+    "https://alice.wixsite.com/post/one",
+    "https://alice.wixsite.com/post/two",
+    "https://bob.wixsite.com/post/one"
+  ],
+  "wordpress.com": [
+    "https://alice.wordpress.com/post/one",
+    "https://alice.wordpress.com/post/two",
+    "https://bob.wordpress.com/post/one"
+  ]
+}

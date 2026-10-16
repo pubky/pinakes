@@ -152,6 +152,7 @@ async fn main() -> Result<()> {
     };
     let resolver = PlatformResolver {
         web: WebResolver {
+            oembed_policy: Default::default(),
             cards: None,
             config: Default::default(),
             egress: Egress::with_backends(

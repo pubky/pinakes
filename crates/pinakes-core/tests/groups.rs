@@ -536,18 +536,21 @@ async fn review_directional_aliases_and_typed_self_claims_cannot_poison_groups(p
 
 #[test]
 fn round2_multi_tenant_publishers_and_overrides() {
-    for (host, rule) in group_keys::TENANT_RULES.iter() {
-        let (a, b) = match rule {
-            group_keys::TenantRule::Subdomain => (
-                format!("https://alice.{host}/item"),
-                format!("https://bob.{host}/item"),
-            ),
-            group_keys::TenantRule::FirstPathSegment => (
-                format!("https://{host}/alice/item"),
-                format!("https://{host}/bob/item"),
-            ),
-        };
-        assert_ne!(group_keys::origin(&a), group_keys::origin(&b), "{host}");
+    let shapes: std::collections::BTreeMap<String, Vec<String>> =
+        serde_json::from_str(include_str!("fixtures/tenant-url-shapes.json")).unwrap();
+    assert_eq!(shapes.len(), group_keys::TENANT_RULES.len());
+    for host in group_keys::TENANT_RULES.keys() {
+        let urls = &shapes[host];
+        assert_ne!(
+            group_keys::origin(&urls[0]),
+            group_keys::origin(&urls[2]),
+            "{host}"
+        );
+        assert_eq!(
+            group_keys::origin(&urls[0]),
+            group_keys::origin(&urls[1]),
+            "{host}"
+        );
     }
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.runtime");
     std::fs::create_dir_all(&root).unwrap();
@@ -926,9 +929,26 @@ async fn review_populated_collapse_uses_equality_facets_and_builds_only_page_car
         .fetch_one(&pool)
         .await
         .unwrap();
+        let refresh_body: String =
+            sqlx::query_scalar("SELECT prosrc FROM pg_proc WHERE proname='refresh_group_best'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let mut refresh_plans = Vec::new();
+        for statement in refresh_body.split(';').filter(|s| !s.trim().is_empty()) {
+            let plan: Value = sqlx::query_scalar(&format!(
+                "EXPLAIN(ANALYZE,BUFFERS,VERBOSE,FORMAT JSON) {}",
+                statement.replace("ANY(ids)", "ANY($1)")
+            ))
+            .bind(vec![&group])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            refresh_plans.push(plan);
+        }
         std::fs::write(
             path,
-            serde_json::to_vec_pretty(&json!({"body":body,"group":group,"plan":plan})).unwrap(),
+            serde_json::to_vec_pretty(&json!({"body":body,"group":group,"plan":plan,"refresh_body":refresh_body,"refresh_plans":refresh_plans})).unwrap(),
         )
         .unwrap();
     }
@@ -1216,5 +1236,52 @@ async fn round3_curation_waits_for_writer_and_policy_changes_redirty(pool: PgPoo
             .await
             .unwrap(),
         1
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round3_upgrade_isolates_stale_container_claims_and_requeues_legacy_podcasts(pool: PgPool) {
+    let (id, mut doc) = save(&pool, "old-podcast", &[], None).await;
+    doc.set_type("PodcastEpisode");
+    group_keys::add(&mut doc, "podcast_guid", "episode-one");
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    sqlx::query("UPDATE resource_group SET origin='example.org' WHERE resource_id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET dead_letter=true,attempts=5,last_error='parse',lease_until=now()+interval '1 hour' WHERE id=$1").bind(&id).execute(&pool).await.unwrap();
+    let generation: i64 = sqlx::query_scalar("SELECT generation FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/202610160027_publisher_repair.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let origin: String = sqlx::query_scalar(
+        "SELECT origin FROM resource_group WHERE resource_id=$1 AND basis='podcast_guid'",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(origin.starts_with("stale:"));
+    let state:(bool,i32,bool,i64,f64)=sqlx::query_as("SELECT dead_letter,attempts,lease_until IS NULL,generation,extract(epoch FROM(next_attempt_at-now()))::float8 FROM resource WHERE id=$1").bind(&id).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        (state.0, state.1, state.2, state.3),
+        (false, 0, true, generation + 1)
+    );
+    assert!((-1.0..3600.0).contains(&state.4));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM group_input WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
     );
 }

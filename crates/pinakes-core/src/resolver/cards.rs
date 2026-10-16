@@ -735,8 +735,10 @@ pub async fn enrich(
         }
     }
     if cfg.media.enabled && doc.source != "activitypub" {
-        let direct = f.content_type.contains("xml") || f.content_type.contains("rss");
-        let feed = if direct {
+        let is_feed = f.content_type.contains("xml") || f.content_type.contains("rss");
+        let direct = crate::model::identity(uri).ok().map(|v| v.0)
+            == crate::model::identity(f.url.as_str()).ok().map(|v| v.0);
+        let feed = if is_feed {
             Some(f.clone())
         } else if let Some(url) = rss {
             if !discover_feeds || typed_card(&doc) {
@@ -764,12 +766,22 @@ pub async fn enrich(
         };
         if let Some(f) = feed {
             let (uri, cap, ttl) = (uri.to_owned(), cfg.podcast_items, cfg.media.ttl_secs);
-            if let Ok(Some(d)) =
-                tokio::task::spawn_blocking(move || podcast_body(&uri, &f, ttl, cap, direct))
-                    .await?
+            let referenced = uri.clone();
+            if let Ok(Some(mut d)) = tokio::task::spawn_blocking(move || {
+                podcast_body(&uri, &f, ttl, cap, direct && is_feed)
+            })
+            .await?
             {
                 // A multi-episode feed must not replace an episode page with the whole series.
-                if direct || d.type_name == "PodcastEpisode" {
+                if is_feed && !direct {
+                    // A redirecting URI is a different publisher, even if it serves a
+                    // byte-identical feed. Keep the card but withhold borrowed GUIDs.
+                    d.attributes.insert("podcast_feed".into(), referenced);
+                    d.group_keys.retain(|k| {
+                        !matches!(k.basis.as_str(), "podcast_guid" | "podcast_series_guid")
+                    });
+                }
+                if is_feed || d.type_name == "PodcastEpisode" {
                     doc = d;
                 }
             }
@@ -973,12 +985,23 @@ impl CardResolver {
         } else {
             deadline
         };
-        let page = tokio::time::timeout_at(page_deadline, self.web.resolve(uri)).await;
+        let page = tokio::time::timeout_at(
+            page_deadline,
+            self.web.resolve_with_policy(uri, self.config.media.oembed),
+        )
+        .await;
         if let Some((endpoint, _)) = endpoint.filter(|_| !first) {
             if !page
                 .as_ref()
                 .is_ok_and(|r| r.as_ref().is_ok_and(|d| !needs_embed(d)))
             {
+                if page.as_ref().is_ok_and(|r| {
+                    r.as_ref().is_ok_and(|d| {
+                        d.status == Status::Ok && d.name.is_some() && d.image.is_none()
+                    })
+                }) {
+                    crate::telemetry::discovery("oembed", "missing_image");
+                }
                 embed = tokio::time::timeout_at(deadline, self.fetch_embed(uri, endpoint, ttl))
                     .await
                     .ok()

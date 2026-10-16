@@ -10,6 +10,8 @@ use utoipa::ToSchema;
 pub enum TenantRule {
     Subdomain,
     FirstPathSegment,
+    /// One-based path segment; constant prefixes remain part of the publisher scope.
+    PathSegment(usize),
 }
 pub type TenantRules = BTreeMap<String, TenantRule>;
 pub static TENANT_RULES: LazyLock<TenantRules> = LazyLock::new(|| {
@@ -233,17 +235,29 @@ pub fn origin_with(uri: &str, rules: &TenantRules) -> Option<String> {
         return None;
     }
     let host = u.host_str()?.trim_end_matches('.').to_ascii_lowercase();
-    if let Some((base, rule)) = rules
+    if let Some((_, rule)) = rules
         .iter()
         .filter(|(base, _)| host == **base || host.ends_with(&format!(".{base}")))
         .max_by_key(|(base, _)| base.len())
     {
         return Some(match rule {
             TenantRule::Subdomain => host,
-            TenantRule::FirstPathSegment => format!(
-                "{host}/{}",
-                u.path_segments()?.find(|s| !s.is_empty()).unwrap_or(base)
-            ),
+            TenantRule::FirstPathSegment | TenantRule::PathSegment(_) => {
+                let n = match rule {
+                    TenantRule::PathSegment(n) => *n,
+                    _ => 1,
+                };
+                let path: Vec<_> = u
+                    .path_segments()?
+                    .filter(|s| !s.is_empty())
+                    .take(n)
+                    .collect();
+                if path.len() < n {
+                    format!("{host}/unscoped:{}", pubky_resource_id::resource_id(uri))
+                } else {
+                    format!("{host}/{}", path.join("/"))
+                }
+            }
         });
     }
     Some(psl::domain_str(&host).unwrap_or(&host).to_owned())

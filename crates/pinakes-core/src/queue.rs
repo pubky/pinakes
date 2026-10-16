@@ -511,6 +511,7 @@ pub fn spawn_with_egress(
     if config.web.enabled {
         resolvers.push((
             Arc::new(WebResolver {
+                oembed_policy: config.media.oembed,
                 cards: Some(Arc::new(config.cards.clone())),
                 events: events.clone(),
                 egress: egress.clone(),
@@ -523,6 +524,7 @@ pub fn spawn_with_egress(
         resolvers.push((
             Arc::new(crate::event::adapters::service::PlatformResolver {
                 web: WebResolver {
+                    oembed_policy: config.media.oembed,
                     cards: Some(Arc::new(config.cards.clone())),
                     egress: egress.clone(),
                     config: config.web.clone(),
@@ -536,6 +538,7 @@ pub fn spawn_with_egress(
         resolvers.push((
             Arc::new(crate::event::service::CalendarResolver {
                 web: WebResolver {
+                    oembed_policy: config.media.oembed,
                     cards: Some(Arc::new(config.cards.clone())),
                     egress: egress.clone(),
                     config: config.web.clone(),
@@ -552,6 +555,7 @@ pub fn spawn_with_egress(
                     kind,
                     config: Arc::new(config.clone()),
                     web: WebResolver {
+                        oembed_policy: config.media.oembed,
                         cards: Some(Arc::new(config.cards.clone())),
                         events: None,
                         egress: egress.clone(),

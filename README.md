@@ -517,14 +517,18 @@ This restores the event-on-Luma/organiser case in design §5.3, at the price of
 being copyable by a determined publisher. Automatic cards limit that harm by
 preferring distinct taggers, then references, then oldest admission, before
 metadata completeness. Curated groups preserve their chosen best member.
-`data/multi-tenant-hosts.json` scopes other identifiers by subdomain or first path
-segment; `groups.multi_tenant_hosts_path` loads a replacement JSON map at startup.
+`data/multi-tenant-hosts.json` scopes other identifiers by subdomain or a one-based path-segment index; `groups.multi_tenant_hosts_path` loads a replacement JSON map at startup.
 The older `[queue.groups]` file section remains accepted; use only one location.
-Pair comparisons are capped at 100,000 per sync; breaches park grouping independently.
+Pair comparisons scale from 100,000 to two million with the member cap. Exhaustion commits
+a partial plan that preserves established assignments and records a metric/diagnostic.
+Grouping conflicts use jittered backoff up to one hour; full dirty batches drain continuously.
+Startup policy changes re-dirty existing memberships. See [operations](docs/operations.md).
 
 Optional discovery defaults to `media.oembed = "when_needed"` and
 `web.discover_feeds = false`. `media.oembed = "always"` restores eager provider
-fetches. Enabling feed discovery follows RSS alternates only for pages without a
+fetches and trusted page-advertised endpoints. Advertised endpoints must have the page's
+exact origin or match its registry provider endpoint. Enabling feed discovery follows RSS alternates only for pages without a
 typed card; direct feed URLs still parse regardless of this switch.
-`pinakes_discovery_decisions_total{kind="oembed"|"feed",decision="requested"|"skipped"|"disabled"}`
-counts these decisions on `/metrics`; requested discoveries may reuse the bounded cache.
+`pinakes_discovery_decisions_total{kind="oembed"|"feed",decision="requested"|"skipped"|"disabled"|"missing_image"|"untrusted"}`
+counts these decisions on `/metrics`; `missing_image` separately counts eager fallback caused
+by an otherwise named page lacking an image. Requested discoveries may reuse the bounded cache.

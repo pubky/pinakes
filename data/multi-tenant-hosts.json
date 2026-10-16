@@ -1,30 +1,41 @@
 {
-  "anchor.fm": "first_path_segment",
+  "anchor.fm": {
+    "path_segment": 2
+  },
   "blogspot.com": "subdomain",
-  "calendar.google.com": "first_path_segment",
+  "calendar.google.com": {
+    "path_segment": 3
+  },
   "carrd.co": "subdomain",
-  "feed.podbean.com": "subdomain",
-  "feeds.acast.com": "first_path_segment",
+  "feed.podbean.com": {
+    "path_segment": 1
+  },
+  "feeds.acast.com": {
+    "path_segment": 3
+  },
   "feeds.buzzsprout.com": "first_path_segment",
   "feeds.libsyn.com": "first_path_segment",
   "feeds.megaphone.fm": "first_path_segment",
   "feeds.redcircle.com": "first_path_segment",
   "feeds.simplecast.com": "first_path_segment",
-  "feeds.soundcloud.com": "first_path_segment",
+  "feeds.soundcloud.com": {
+    "path_segment": 2
+  },
   "feeds.transistor.fm": "first_path_segment",
   "github.io": "subdomain",
   "gitlab.io": "subdomain",
-  "icloud.com": "first_path_segment",
   "linktr.ee": "first_path_segment",
   "medium.com": "first_path_segment",
   "neocities.org": "subdomain",
   "netlify.app": "subdomain",
   "notion.site": "subdomain",
-  "outlook.live.com": "first_path_segment",
-  "outlook.office365.com": "first_path_segment",
   "pages.dev": "subdomain",
-  "rss.com": "first_path_segment",
-  "sites.google.com": "first_path_segment",
+  "rss.com": {
+    "path_segment": 2
+  },
+  "sites.google.com": {
+    "path_segment": 2
+  },
   "squarespace.com": "subdomain",
   "substack.com": "subdomain",
   "tumblr.com": "subdomain",

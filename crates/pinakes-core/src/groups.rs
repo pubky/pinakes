@@ -56,6 +56,7 @@ impl GroupConfig {
             );
             self.tenant_rules = rules;
         }
+        ensure!(self.tenant_rules.values().all(|rule| !matches!(rule,crate::group_keys::TenantRule::PathSegment(n) if !(1..=8).contains(n))),"tenant segment index must be 1–8");
         Ok(())
     }
     fn origin(&self, uri: &str) -> Option<String> {

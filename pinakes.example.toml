@@ -90,7 +90,7 @@ max_linked_resources = 100 # Active future-event website resources per BTC Map r
 # [event.adapters.platforms.posh]
 # enabled = false
 # [event.adapters.platforms.proton]
-# canary = "https://calendar.proton.me/api/calendar/v1/url/.../calendar.ics?CacheKey=..."
+# canary = "" # Private capability: set only in uncommitted operator configuration.
 
 [egress]
 host_requests_per_second = 1.0
