@@ -12,6 +12,7 @@ pub struct GroupConfig {
     pub max_distance_m: f64,
     pub max_graph_units: usize,
     pub max_graph_bytes: usize,
+    pub max_members_per_origin: usize,
 }
 impl Default for GroupConfig {
     fn default() -> Self {
@@ -21,6 +22,7 @@ impl Default for GroupConfig {
             max_distance_m: 500.0,
             max_graph_units: 20000,
             max_graph_bytes: 32 * 1024 * 1024,
+            max_members_per_origin: 16,
         }
     }
 }
@@ -34,6 +36,7 @@ pub struct GroupView {
     pub taggers: i64,
     pub references: i64,
     pub members: Vec<GroupMemberView>,
+    pub attribution: Option<String>,
 }
 #[derive(Deserialize, Serialize, ToSchema)]
 pub struct GroupMemberView {
@@ -55,12 +58,16 @@ pub struct Curation {
     pub name: Option<String>,
     pub image: Option<String>,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Unit {
     unit_id: String,
     resource_id: String,
     occurrence_key: String,
     keys: Vec<crate::group_keys::GroupKey>,
+    origin: String,
+    authoritative: Vec<String>,
+    occurrence: Option<Value>,
+    event: Option<Value>,
 }
 
 pub async fn scores(tx: &mut Transaction<'_, Postgres>, ids: &[String]) -> Result<()> {
@@ -99,6 +106,7 @@ fn evidence(row: &Value) -> Vec<crate::group_keys::GroupKey> {
                 key: format!("osm:{}", osm.key()),
                 basis: "canonical".into(),
                 confidence: 1.0,
+                target: None,
             });
         }
     }
@@ -110,12 +118,14 @@ fn evidence(row: &Value) -> Vec<crate::group_keys::GroupKey> {
             key: format!("url:{id}"),
             basis: "canonical".into(),
             confidence: 0.8,
+            target: row["event_uri"]
+                .as_str()
+                .and_then(crate::group_keys::origin),
         });
     }
-    // A recurring UID or shared event page must not merge different dates.
-    // Every dated key uses the same scope, including typed IDs and page URLs.
+    // Only recurrence identities use exact start time; ordinary event aliases can differ by seconds.
     for key in &mut d.group_keys {
-        if key.basis == "ics_uid" || row["start"].is_string() {
+        if key.basis == "ics_uid" {
             key.key = format!("{}:{}", key.key, row["start"].as_str().unwrap_or("undated"));
         }
     }
@@ -123,6 +133,7 @@ fn evidence(row: &Value) -> Vec<crate::group_keys::GroupKey> {
         key: format!("unit:{}", row["unit_id"].as_str().unwrap()),
         basis: "identity".into(),
         confidence: 1.0,
+        target: None,
     });
     d.group_keys
 }
@@ -130,14 +141,17 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
     if !cfg.enabled {
         return Ok(());
     }
-    // Caller owns search_revision before row locks. Group edits use the same ordering.
+    // Read and compute without holding the global ingestion/search revision lock.
+    let revision: i64 = sqlx::query_scalar("SELECT revision FROM search_revision WHERE id=1")
+        .fetch_one(&mut **tx)
+        .await?;
     let previous: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT group_id FROM group_unit WHERE resource_id=$1 AND group_id IS NOT NULL",
     )
     .bind(id)
     .fetch_all(&mut **tx)
     .await?;
-    let mut stream=sqlx::query_scalar::<_,Value>("SELECT jsonb_build_object('unit_id',unit_id,'uri',uri,'keys',coalesce(doc->'group_keys','[]'),'aliases',coalesce(doc->'aliases','[]'),'occurrence',occurrence,'event',event,'start',to_char(start_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')) FROM search_unit WHERE id=$1 LIMIT $2").bind(id).bind((cfg.max_graph_units+1) as i64).fetch(&mut **tx);
+    let mut stream=sqlx::query_scalar::<_,Value>("SELECT jsonb_build_object('unit_id',unit_id,'uri',uri,'keys',coalesce(doc->'group_keys','[]'),'aliases',coalesce(doc->'aliases','[]'),'occurrence',occurrence,'event',event,'source',doc->>'source','lat',ST_Y(point),'lon',ST_X(point),'event_uri',(SELECT uri FROM resource WHERE id=occurrence->>'event_resource_id'),'start',to_char(start_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')) FROM search_unit WHERE id=$1 LIMIT $2").bind(id).bind((cfg.max_graph_units+1) as i64).fetch(&mut **tx);
     use futures_util::TryStreamExt;
     let mut rows = Vec::new();
     let mut bytes = 0usize;
@@ -165,28 +179,107 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
                 .unwrap()
             },
             keys: evidence(r),
+            origin: match r["source"].as_str() {
+                Some("isbn") => "openlibrary.org".into(),
+                Some("doi") => "doi.org".into(),
+                _ => crate::group_keys::origin(r["uri"].as_str().unwrap_or(""))
+                    .unwrap_or_else(|| id.into()),
+            },
+            authoritative: {
+                let mut own =
+                    crate::model::ResourceMeta::new(r["uri"].as_str().unwrap_or(""), "groups", 0);
+                crate::group_keys::url_keys(&mut own, r["uri"].as_str().unwrap_or(""));
+                crate::group_keys::add(&mut own, "canonical", r["uri"].as_str().unwrap_or(""));
+                let mut keys: Vec<_> = own.group_keys.into_iter().map(|k| k.key).collect();
+                if let Some(osm) = crate::resolver::osm::parse_id(r["uri"].as_str().unwrap_or("")) {
+                    keys.push(format!("osm:{}", osm.key()));
+                }
+                if matches!(r["source"].as_str(), Some("isbn" | "doi")) {
+                    keys.extend(evidence(r).into_iter().map(|k| k.key));
+                }
+                keys
+            },
+            occurrence: r.get("occurrence").filter(|v| !v.is_null()).cloned(),
+            event: r.get("event").filter(|v| !v.is_null()).cloned(),
         })
         .collect();
     let ids: Vec<_> = units.iter().map(|u| u.unit_id.clone()).collect();
+    let keys: Vec<_> = units
+        .iter()
+        .flat_map(|u| u.keys.iter().map(|k| k.key.clone()))
+        .collect();
+    let fingerprint = blake3::hash(&serde_json::to_vec(&(
+        &units,
+        cfg,
+        rows.iter()
+            .map(|r| (&r["lat"], &r["lon"], &r["start"]))
+            .collect::<Vec<_>>(),
+    ))?)
+    .to_hex()
+    .to_string();
+    let old_fingerprint: Option<String> =
+        sqlx::query_scalar("SELECT fingerprint FROM group_input WHERE resource_id=$1")
+            .bind(id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    if old_fingerprint.as_deref() == Some(&fingerprint) {
+        fence(tx, revision).await?;
+        refresh_best(tx, &previous).await?;
+        sqlx::query("DELETE FROM group_dirty WHERE resource_id=$1")
+            .bind(id)
+            .execute(&mut **tx)
+            .await?;
+        return Ok(());
+    }
+    let mut edges = load_edges(tx, &ids, &keys, &previous, cfg).await?;
+    let mut incoming = Vec::new();
+    for (unit, row) in units.iter().zip(&rows) {
+        let old = edges.iter().find(|e| e.unit_id == unit.unit_id);
+        for k in &unit.keys {
+            incoming.push(Edge {
+                unit_id: unit.unit_id.clone(),
+                resource_id: id.into(),
+                key: k.key.clone(),
+                basis: k.basis.clone(),
+                confidence: k.confidence,
+                origin: unit.origin.clone(),
+                target: k.target.clone(),
+                trusted: unit.authoritative.contains(&k.key),
+                occurrence: unit.occurrence.is_some(),
+                start_at: row["start"].as_str().and_then(|v| v.parse().ok()),
+                admitted_at: edges
+                    .iter()
+                    .find(|e| e.unit_id == unit.unit_id && e.key == k.key)
+                    .map_or_else(chrono::Utc::now, |e| e.admitted_at),
+                group_id: old.and_then(|e| e.group_id.clone()),
+                override_id: old.and_then(|e| e.override_id.clone()),
+                lat: row["lat"].as_f64(),
+                lon: row["lon"].as_f64(),
+            });
+        }
+    }
+    edges.retain(|e| e.resource_id != id);
+    edges.extend(incoming);
+    let plan = plan(tx, edges, &previous, cfg).await?;
+    fence(tx, revision).await?;
     sqlx::query("DELETE FROM group_unit WHERE resource_id=$1 AND NOT(unit_id=ANY($2))")
         .bind(id)
         .bind(&ids)
         .execute(&mut **tx)
         .await?;
-    sqlx::query("DELETE FROM resource_group WHERE resource_id=$1")
-        .bind(id)
-        .execute(&mut **tx)
-        .await?;
+
     for chunk in units.chunks(256) {
-        let data:Vec<_>=chunk.iter().map(|u|json!({"unit":u.unit_id,"resource":u.resource_id,"occurrence":u.occurrence_key,"keys":u.keys})).collect();
-        sqlx::query("INSERT INTO group_unit(unit_id,resource_id,occurrence_key) SELECT v->>'unit',v->>'resource',v->>'occurrence' FROM jsonb_array_elements($1) v ON CONFLICT(unit_id) DO UPDATE SET occurrence_key=excluded.occurrence_key").bind(json!(data)).execute(&mut **tx).await?;
-        sqlx::query("INSERT INTO resource_group(unit_id,resource_id,key,basis,confidence) SELECT v->>'unit',v->>'resource',k->>'key',k->>'basis',(k->>'confidence')::float8 FROM jsonb_array_elements($1) v CROSS JOIN LATERAL jsonb_array_elements(v->'keys') k ON CONFLICT(unit_id,key) DO NOTHING").bind(json!(data)).execute(&mut **tx).await?;
+        let data:Vec<_>=chunk.iter().map(|u|json!({"unit":u.unit_id,"resource":u.resource_id,"occurrence":u.occurrence_key,"keys":u.keys,"origin":u.origin,"authoritative":u.authoritative,"occurrence_ref":u.occurrence,"event_ref":u.event})).collect();
+        sqlx::query("INSERT INTO group_unit(unit_id,resource_id,occurrence_key,occurrence,event) SELECT v->>'unit',v->>'resource',v->>'occurrence',nullif(v->'occurrence_ref','null'::jsonb),nullif(v->'event_ref','null'::jsonb) FROM jsonb_array_elements($1) v ON CONFLICT(unit_id) DO UPDATE SET occurrence_key=excluded.occurrence_key,occurrence=excluded.occurrence,event=excluded.event").bind(json!(data)).execute(&mut **tx).await?;
+        sqlx::query("INSERT INTO resource_group(unit_id,resource_id,key,basis,confidence,origin,target,trusted) SELECT v->>'unit',v->>'resource',k->>'key',k->>'basis',(k->>'confidence')::float8,v->>'origin',k->>'target',(v->'authoritative') ? (k->>'key') FROM jsonb_array_elements($1) v CROSS JOIN LATERAL jsonb_array_elements(v->'keys') k ON CONFLICT(unit_id,key) DO UPDATE SET basis=excluded.basis,confidence=excluded.confidence,origin=excluded.origin,target=excluded.target,trusted=excluded.trusted").bind(json!(data)).execute(&mut **tx).await?;
     }
-    let keys: Vec<_> = units
+    let retained: Vec<_> = units
         .iter()
-        .flat_map(|u| u.keys.iter().map(|k| k.key.clone()))
+        .flat_map(|u| u.keys.iter().map(|k| json!([u.unit_id, k.key])))
         .collect();
-    rebuild(tx, &ids, &keys, &previous, cfg).await?;
+    sqlx::query("DELETE FROM resource_group k WHERE resource_id=$1 AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements($2) v WHERE v->>0=k.unit_id AND v->>1=k.key)").bind(id).bind(json!(retained)).execute(&mut **tx).await?;
+    apply(tx, plan).await?;
+    sqlx::query("INSERT INTO group_input(resource_id,fingerprint) VALUES($1,$2) ON CONFLICT(resource_id) DO UPDATE SET fingerprint=excluded.fingerprint").bind(id).bind(fingerprint).execute(&mut **tx).await?;
     sqlx::query("DELETE FROM group_dirty WHERE resource_id=$1")
         .bind(id)
         .execute(&mut **tx)
@@ -200,17 +293,32 @@ struct Edge {
     key: String,
     basis: String,
     confidence: f64,
-    eligible: bool,
+    origin: String,
+    target: Option<String>,
+    trusted: bool,
+    occurrence: bool,
+    start_at: Option<chrono::DateTime<chrono::Utc>>,
+    admitted_at: chrono::DateTime<chrono::Utc>,
     group_id: Option<String>,
     override_id: Option<String>,
     lat: Option<f64>,
     lon: Option<f64>,
 }
-fn root(parents: &mut [usize], i: usize) -> usize {
-    if parents[i] != i {
-        parents[i] = root(parents, parents[i]);
+impl Edge {
+    fn bytes(&self) -> usize {
+        self.key.len()
+            + self.basis.len()
+            + self.origin.len()
+            + self.target.as_ref().map_or(0, String::len)
+            + 256
     }
-    parents[i]
+}
+fn root(parents: &mut [usize], mut i: usize) -> usize {
+    while parents[i] != i {
+        parents[i] = parents[parents[i]];
+        i = parents[i];
+    }
+    i
 }
 fn distance(a: (f64, f64), b: (f64, f64)) -> f64 {
     let dlat = (b.0 - a.0).to_radians();
@@ -219,27 +327,30 @@ fn distance(a: (f64, f64), b: (f64, f64)) -> f64 {
         + a.0.to_radians().cos() * b.0.to_radians().cos() * (dlon / 2.).sin().powi(2);
     6371000. * 2. * h.sqrt().min(1.).asin()
 }
-async fn rebuild(
+async fn load_edges(
     tx: &mut Transaction<'_, Postgres>,
     units: &[String],
     keys: &[String],
     previous: &[String],
     cfg: &GroupConfig,
-) -> Result<()> {
+) -> Result<Vec<Edge>> {
     use futures_util::TryStreamExt;
     let max_edges = cfg.max_graph_units.saturating_mul(20);
-    let mut stream=sqlx::query_as::<_,Edge>(r#"WITH relevant_keys AS (
-      SELECT key FROM unnest($2::text[]) AS wanted(key) WHERE (SELECT count(*) FROM (SELECT 1 FROM resource_group k WHERE k.key=wanted.key LIMIT $4) sample)<$4
-    ), affected AS (SELECT unnest($1::text[]) AS unit_id UNION SELECT unit_id FROM group_unit WHERE group_id=ANY($3) UNION SELECT u.unit_id FROM group_unit u WHERE u.group_id IN (SELECT DISTINCT k.group_id FROM resource_group k JOIN relevant_keys USING(key)) UNION SELECT k.unit_id FROM resource_group k JOIN relevant_keys USING(key)), degrees AS MATERIALIZED (
-      SELECT wanted.key, (SELECT count(*) FROM (SELECT 1 FROM resource_group all_keys WHERE all_keys.key=wanted.key LIMIT $4) sample)<$4 AS eligible
-      FROM (SELECT DISTINCT key FROM resource_group JOIN affected USING(unit_id)) wanted
-    )
-    SELECT k.unit_id,k.resource_id,k.key,k.basis,k.confidence,d.eligible,u.group_id,o.group_id AS override_id,ST_Y(s.point) AS lat,ST_X(s.point) AS lon FROM resource_group k JOIN affected a USING(unit_id) JOIN degrees d USING(key) JOIN group_unit u USING(unit_id) LEFT JOIN group_override o USING(unit_id) LEFT JOIN search_unit s USING(unit_id) ORDER BY k.unit_id,k.key LIMIT $5"#)
-        .bind(units).bind(keys).bind(previous).bind((cfg.max_members+1) as i64).bind((max_edges+1) as i64).fetch(&mut **tx);
+    let mut stream=sqlx::query_as::<_,Edge>(r#"WITH wanted AS (
+      SELECT DISTINCT picked.unit_id,picked.group_id FROM unnest($2::text[]) wanted(key) CROSS JOIN LATERAL
+      (SELECT k.unit_id,k.group_id FROM resource_group k WHERE k.key=wanted.key ORDER BY k.trusted DESC,k.admitted_at,k.unit_id LIMIT $4) picked
+    ), affected AS (SELECT unnest($1::text[]) AS unit_id UNION SELECT unit_id FROM group_unit WHERE group_id=ANY($3)
+      UNION SELECT u.unit_id FROM group_unit u WHERE u.group_id IN(SELECT group_id FROM wanted) UNION SELECT unit_id FROM wanted)
+    SELECT k.unit_id,k.resource_id,k.key,k.basis,k.confidence,k.origin,k.target,k.trusted,k.admitted_at,
+      u.occurrence IS NOT NULL AS occurrence,s.start_at,u.group_id,o.group_id AS override_id,ST_Y(s.point) AS lat,ST_X(s.point) AS lon
+    FROM resource_group k JOIN affected a USING(unit_id) JOIN group_unit u USING(unit_id)
+    LEFT JOIN group_override o USING(unit_id) LEFT JOIN group_member_document s USING(unit_id)
+    ORDER BY k.unit_id,k.key LIMIT $5"#)
+        .bind(units).bind(keys).bind(previous).bind(cfg.max_members as i64).bind((max_edges+1) as i64).fetch(&mut **tx);
     let mut edges = Vec::new();
     let mut bytes = 0usize;
     while let Some(edge) = stream.try_next().await? {
-        bytes = bytes.saturating_add(edge.key.len() + edge.basis.len() + 256);
+        bytes = bytes.saturating_add(edge.bytes());
         ensure!(
             bytes <= cfg.max_graph_bytes && edges.len() < max_edges,
             "group evidence budget exceeded"
@@ -247,6 +358,25 @@ async fn rebuild(
         edges.push(edge);
     }
     drop(stream);
+    Ok(edges)
+}
+struct Plan {
+    assignments: Vec<Value>,
+    groups: Vec<String>,
+    old: Vec<String>,
+    resources: Vec<String>,
+}
+async fn plan(
+    tx: &mut Transaction<'_, Postgres>,
+    edges: Vec<Edge>,
+    previous: &[String],
+    cfg: &GroupConfig,
+) -> Result<Plan> {
+    ensure!(
+        edges.len() <= cfg.max_graph_units.saturating_mul(20)
+            && edges.iter().map(|e| e.bytes()).sum::<usize>() <= cfg.max_graph_bytes,
+        "group evidence budget exceeded"
+    );
     // At most bounded metadata per unit, no resource documents in this graph.
     let names: Vec<_> = edges
         .iter()
@@ -266,86 +396,138 @@ async fn rebuild(
     let mut parents: Vec<_> = (0..names.len()).collect();
     let mut sets: Vec<Vec<usize>> = (0..names.len()).map(|i| vec![i]).collect();
     let mut points = vec![None; names.len()];
+    let mut starts = vec![None; names.len()];
+    let mut occurrences = vec![false; names.len()];
+    let mut origins = vec![String::new(); names.len()];
+    let mut resource_ids = vec![String::new(); names.len()];
+    let mut claims = vec![BTreeSet::new(); names.len()];
     let mut overrides = vec![None; names.len()];
-    let mut bykey: BTreeMap<String, Vec<(usize, f64)>> = BTreeMap::new();
+    let mut bykey: BTreeMap<String, Vec<(usize, &Edge)>> = BTreeMap::new();
     let mut resources = BTreeSet::new();
     let mut old: BTreeSet<String> = previous.iter().cloned().collect();
     for e in &edges {
         let i = indices[&e.unit_id];
         points[i] = e.lat.zip(e.lon);
+        starts[i] = e.start_at;
+        occurrences[i] = e.occurrence;
+        origins[i] = e.origin.clone();
+        resource_ids[i] = e.resource_id.clone();
+        claims[i].insert(e.key.clone());
         overrides[i] = e.override_id.clone();
         resources.insert(e.resource_id.clone());
         old.extend(e.group_id.clone());
-        if !e.eligible && e.override_id.is_none() {
-            continue;
-        }
         let key = if let Some(g) = &e.override_id {
             format!("curated:{g}")
         } else {
             e.key.clone()
         };
-        bykey.entry(key).or_default().push((
-            i,
-            if e.basis == "identity" {
-                0.0
-            } else {
-                e.confidence
-            },
-        ));
+        bykey.entry(key).or_default().push((i, e));
     }
     let mut keys: Vec<_> = bykey.into_iter().collect();
     keys.sort_by(|a, b| {
         b.1.iter()
-            .map(|v| v.1)
+            .map(|v| v.1.confidence)
             .fold(0.0, f64::max)
-            .total_cmp(&a.1.iter().map(|v| v.1).fold(0.0, f64::max))
+            .total_cmp(&a.1.iter().map(|v| v.1.confidence).fold(0.0, f64::max))
             .then_with(|| a.0.cmp(&b.0))
     });
     for (key, mut entries) in keys {
-        entries.sort_by_key(|e| e.0);
-        entries.dedup_by_key(|e| e.0);
-        if entries.len() > cfg.max_members {
-            continue;
-        }
-        let mut first = None;
-        for (i, _) in entries {
-            let Some(a) = first else {
-                first = Some(i);
-                continue;
-            };
-            let a = root(&mut parents, a);
-            let b = root(&mut parents, i);
-            if a == b {
-                continue;
+        let curated = key.starts_with("curated:");
+        entries.sort_by(|a, b| {
+            b.1.trusted
+                .cmp(&a.1.trusted)
+                .then(a.1.admitted_at.cmp(&b.1.admitted_at))
+                .then(a.0.cmp(&b.0))
+        });
+        let mut seen = BTreeSet::new();
+        let mut per_origin = BTreeMap::<&str, usize>::new();
+        entries.retain(|(i, e)| {
+            if !seen.insert(*i) {
+                return false;
             }
-            let curated = key.starts_with("curated:");
-            if sets[a].len() + sets[b].len() > cfg.max_members {
-                continue;
-            }
-            if !curated
-                && sets[a].iter().any(|i| {
-                    sets[b].iter().any(|j| {
-                        points[*i]
-                            .zip(points[*j])
-                            .is_some_and(|(a, b)| distance(a, b) > cfg.max_distance_m)
+            let n = per_origin.entry(&e.origin).or_default();
+            *n += 1;
+            curated || *n <= cfg.max_members_per_origin
+        });
+        // Keep established admissions. Excess new claimants never disable the key for everyone.
+        entries.truncate(cfg.max_members);
+        for (pos, (i, ie)) in entries.iter().enumerate() {
+            for (j, je) in &entries[..pos] {
+                let reciprocal = claims[*i].contains(&format!("url:{}", resource_ids[*j]))
+                    && claims[*j].contains(&format!("url:{}", resource_ids[*i]));
+                let same_origin = origins[*i] == origins[*j];
+                let url_owned = |e: &Edge| e.target.as_deref() == Some(e.origin.as_str());
+                let allowed = curated
+                    || reciprocal
+                    || (ie.trusted && je.trusted)
+                    || (same_origin
+                        && (!key.starts_with("url:") || (url_owned(ie) && url_owned(je))));
+                if !allowed {
+                    continue;
+                }
+                let mut a = root(&mut parents, *i);
+                let mut b = root(&mut parents, *j);
+                if a == b || sets[a].len() + sets[b].len() > cfg.max_members {
+                    continue;
+                }
+                if !curated
+                    && sets[a].iter().any(|i| {
+                        sets[b].iter().any(|j| {
+                            points[*i]
+                                .zip(points[*j])
+                                .is_some_and(|(a, b)| distance(a, b) > cfg.max_distance_m)
+                                || ((occurrences[*i] || occurrences[*j])
+                                    && starts[*i]
+                                        .zip(starts[*j])
+                                        .is_some_and(|(a, b)| (a - b).num_seconds().abs() > 300))
+                        })
                     })
-                })
-            {
-                continue;
+                {
+                    continue;
+                }
+                // Iterative path compression and union by size bound both stack and lookup depth.
+                if sets[a].len() < sets[b].len() {
+                    std::mem::swap(&mut a, &mut b);
+                }
+                parents[b] = a;
+                let moved = std::mem::take(&mut sets[b]);
+                sets[a].extend(moved);
             }
-            let (a, b) = if a < b { (a, b) } else { (b, a) };
-            parents[b] = a;
-            let moved = std::mem::take(&mut sets[b]);
-            sets[a].extend(moved);
-            first = Some(a);
+        }
+    }
+    let roots: Vec<_> = (0..names.len()).map(|i| root(&mut parents, i)).collect();
+    let mut automatic = BTreeMap::new();
+    for r in &roots {
+        if sets[*r].len() > 1 {
+            let first = sets[*r].iter().map(|i| &names[*i]).min().unwrap();
+            automatic
+                .entry(*r)
+                .or_insert_with(|| pubky_resource_id::resource_id(&format!("group:auto:{first}")));
+        }
+    }
+    // Operators may curate the ID they just saw. Never reuse that ID for the unpinned remainder.
+    for salt in 0..=16 {
+        let reserved: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM \"group\" WHERE curated AND id=ANY($1)")
+                .bind(automatic.values().cloned().collect::<Vec<_>>())
+                .fetch_all(&mut **tx)
+                .await?;
+        if reserved.is_empty() {
+            break;
+        }
+        ensure!(salt < 16, "automatic group namespace exhausted");
+        for (r, gid) in &mut automatic {
+            if reserved.contains(gid) {
+                let first = sets[*r].iter().map(|i| &names[*i]).min().unwrap();
+                *gid = pubky_resource_id::resource_id(&format!("group:auto:{first}:{salt}"));
+            }
         }
     }
     let assignments: Vec<_> = (0..names.len())
         .map(|i| {
-            let r = root(&mut parents, i);
             let gid = overrides[i]
                 .clone()
-                .unwrap_or_else(|| pubky_resource_id::resource_id(&format!("group:{}", names[r])));
+                .or_else(|| automatic.get(&roots[i]).cloned());
             json!({"unit":names[i],"group":gid})
         })
         .collect();
@@ -355,6 +537,28 @@ async fn rebuild(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
+    Ok(Plan {
+        assignments,
+        groups,
+        old: old.into_iter().collect(),
+        resources: resources.into_iter().collect(),
+    })
+}
+async fn fence(tx: &mut Transaction<'_, Postgres>, revision: i64) -> Result<()> {
+    let current: i64 =
+        sqlx::query_scalar("SELECT revision FROM search_revision WHERE id=1 FOR UPDATE")
+            .fetch_one(&mut **tx)
+            .await?;
+    ensure!(current == revision, "group snapshot changed; retry");
+    Ok(())
+}
+async fn apply(tx: &mut Transaction<'_, Postgres>, plan: Plan) -> Result<()> {
+    let Plan {
+        assignments,
+        groups,
+        old,
+        resources,
+    } = plan;
     for chunk in groups.chunks(256) {
         sqlx::query("INSERT INTO \"group\"(id) SELECT unnest($1::text[]) ON CONFLICT DO NOTHING")
             .bind(chunk)
@@ -365,25 +569,59 @@ async fn rebuild(
         sqlx::query("UPDATE group_unit u SET group_id=v->>'group' FROM jsonb_array_elements($1) v WHERE u.unit_id=v->>'unit'").bind(json!(chunk)).execute(&mut **tx).await?;
         sqlx::query("UPDATE resource_group k SET group_id=v->>'group' FROM jsonb_array_elements($1) v WHERE k.unit_id=v->>'unit'").bind(json!(chunk)).execute(&mut **tx).await?;
     }
-    sqlx::query(r#"UPDATE "group" g SET best_unit=b.unit_id FROM (SELECT DISTINCT ON(u.group_id) u.group_id,s.unit_id FROM group_unit u JOIN search_unit s USING(unit_id) LEFT JOIN resource_score r ON r.resource_id=u.resource_id WHERE u.group_id=ANY($1) ORDER BY u.group_id,(s.point IS NOT NULL) DESC,(s.status='ok') DESC,(s.start_at IS NOT NULL) DESC,(s.name IS NOT NULL) DESC,(s.doc->>'image' IS NOT NULL) DESC,coalesce(r.score,0) DESC,s.unit_id) b WHERE g.id=b.group_id"#).bind(&groups).execute(&mut **tx).await?;
-    sqlx::query("DELETE FROM \"group\" g WHERE g.id=ANY($1) AND NOT g.curated AND NOT EXISTS(SELECT 1 FROM group_unit u WHERE u.group_id=g.id)").bind(old.into_iter().collect::<Vec<_>>()).execute(&mut **tx).await?;
-    scores(tx, &resources.into_iter().collect::<Vec<_>>()).await?;
+    refresh_best(tx, &groups).await?;
+    sqlx::query("DELETE FROM \"group\" g WHERE g.id=ANY($1) AND NOT g.curated AND NOT EXISTS(SELECT 1 FROM group_unit u WHERE u.group_id=g.id)").bind(old).execute(&mut **tx).await?;
+    scores(tx, &resources).await?;
     Ok(())
+}
+async fn refresh_best(tx: &mut Transaction<'_, Postgres>, groups: &[String]) -> Result<()> {
+    sqlx::query(r#"UPDATE "group" g SET best_unit=b.unit_id,best_resource_id=b.resource_id,best_occurrence_key=b.occurrence_key,kind=b.type,member_count=(SELECT count(*) FROM group_unit u WHERE u.group_id=g.id) FROM (SELECT DISTINCT ON(u.group_id) u.group_id,s.unit_id,u.resource_id,u.occurrence_key,s.type FROM group_unit u JOIN group_member_document s USING(unit_id) LEFT JOIN resource_score r ON r.resource_id=u.resource_id WHERE u.group_id=ANY($1) ORDER BY u.group_id,(s.point IS NOT NULL) DESC,(s.status='ok') DESC,(s.start_at IS NOT NULL) DESC,(s.name IS NOT NULL) DESC,(s.doc->>'image' IS NOT NULL) DESC,coalesce(r.score,0) DESC,s.unit_id) b WHERE g.id=b.group_id"#).bind(groups).execute(&mut **tx).await?;
+    Ok(())
+}
+async fn rebuild(
+    tx: &mut Transaction<'_, Postgres>,
+    units: &[String],
+    keys: &[String],
+    previous: &[String],
+    cfg: &GroupConfig,
+) -> Result<()> {
+    let edges = load_edges(tx, units, keys, previous, cfg).await?;
+    let plan = plan(tx, edges, previous, cfg).await?;
+    apply(tx, plan).await
+}
+/// Failures are parked independently of resource resolution. The dirty row survives for retry.
+pub async fn reconcile(pool: &PgPool, id: &str, cfg: &GroupConfig) -> bool {
+    if !cfg.enabled {
+        return false;
+    }
+    let result = async {
+        let mut tx = pool.begin().await?;
+        sqlx::query("SET LOCAL statement_timeout='2s'")
+            .execute(&mut *tx)
+            .await?;
+        sync(&mut tx, id, cfg).await?;
+        tx.commit().await?;
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    if let Err(error) = result {
+        tracing::warn!(resource_id=id,error=%error,"group_failed; reconciliation deferred");
+        let parked=sqlx::query("INSERT INTO group_dirty(resource_id,attempts,last_error,next_attempt_at) SELECT id,1,'group_failed',now()+interval '1 minute' FROM resource WHERE id=$1 ON CONFLICT(resource_id) DO UPDATE SET attempts=group_dirty.attempts+1,last_error='group_failed',next_attempt_at=now()+least(3600,60*power(2,least(group_dirty.attempts,6))) * interval '1 second'").bind(id).execute(pool).await;
+        if let Err(error) = parked {
+            tracing::warn!(error=%error,"failed to park grouping retry");
+        }
+        return false;
+    }
+    true
 }
 pub async fn drain(pool: &PgPool, cfg: &GroupConfig, limit: i64) -> Result<usize> {
     if !cfg.enabled {
         return Ok(0);
     }
-    let ids: Vec<String> =
-        sqlx::query_scalar("SELECT resource_id FROM group_dirty ORDER BY resource_id LIMIT $1")
-            .bind(limit)
-            .fetch_all(pool)
-            .await?;
+    let ids: Vec<String> = sqlx::query_scalar("SELECT resource_id FROM group_dirty WHERE next_attempt_at<=now() ORDER BY next_attempt_at,resource_id LIMIT $1")
+        .bind(limit.clamp(1,100)).fetch_all(pool).await?;
     for id in &ids {
-        let mut tx = pool.begin().await?;
-        crate::store::lock_search_revision(&mut tx).await?;
-        sync(&mut tx, id, cfg).await?;
-        tx.commit().await?;
+        reconcile(pool, id, cfg).await;
     }
     Ok(ids.len())
 }
@@ -405,6 +643,9 @@ pub async fn curate(pool: &PgPool, id: &str, body: Curation, cfg: &GroupConfig) 
         "invalid curated fields"
     );
     let mut tx = pool.begin().await?;
+    sqlx::query("SET LOCAL statement_timeout='2s'")
+        .execute(&mut *tx)
+        .await?;
     crate::store::lock_search_revision(&mut tx).await?;
     let mut units = vec![];
     let mut previous: Vec<String> =
@@ -414,7 +655,6 @@ pub async fn curate(pool: &PgPool, id: &str, body: Curation, cfg: &GroupConfig) 
             .await?;
     for m in &body.members {
         ensure!(crate::model::valid_id(&m.resource_id), "invalid member ID");
-        sync(&mut tx, &m.resource_id, cfg).await?;
         let key = m
             .occurrence
             .as_ref()

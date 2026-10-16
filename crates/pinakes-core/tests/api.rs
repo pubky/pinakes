@@ -875,3 +875,44 @@ async fn reach_membership_changes_invalidate_etags_without_resource_writes(pool:
     );
     server.abort();
 }
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn review_admin_bearer_and_network_bind_policy(pool: sqlx::PgPool) {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+    let mut cfg = pinakes_core::config::Config {
+        admin_listen: "0.0.0.0:9090".into(),
+        ..Default::default()
+    };
+    assert!(cfg.validate().is_err());
+    cfg.admin_token = Some("review-only-operator-token".into());
+    assert!(cfg.validate().is_ok());
+    let app = pinakes_core::api::admin_router(pinakes_core::api::AppState::new(pool, cfg).unwrap());
+    for credential in [
+        None,
+        Some("Bearer wrong"),
+        Some("Basic review-only-operator-token"),
+        Some("Bearer review-only-operator-token"),
+    ] {
+        for path in [
+            "/v1/info",
+            "/metrics",
+            "/v1/groups/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            let mut r = Request::builder().uri(path);
+            if let Some(value) = credential {
+                r = r.header("authorization", value);
+            }
+            let response = app
+                .clone()
+                .oneshot(r.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            if credential == Some("Bearer review-only-operator-token") {
+                assert_ne!(response.status(), 401);
+            } else {
+                assert_eq!(response.status(), 401);
+            }
+        }
+    }
+}

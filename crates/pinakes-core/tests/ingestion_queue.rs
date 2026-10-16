@@ -796,6 +796,68 @@ async fn resolver_panic_is_a_failed_job_and_next_batch_can_run(pool: PgPool) {
 }
 
 struct FinishPanic;
+#[sqlx::test(migrations = "../../migrations")]
+async fn review_denials_expire_to_unreachable_backoff_and_recover(pool: PgPool) {
+    let uri = "https://example.org/denied";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let accepted = ResourceMeta::new(uri, "web", 3600);
+    store::save_document(&pool, &id, 0, &accepted)
+        .await
+        .unwrap();
+    let cfg = QueueConfig {
+        max_failures: 1,
+        ..Default::default()
+    };
+    let mut stale = None;
+    for (kind, expired, expected) in [
+        ("graphql", false, "ok"),
+        ("upstream_denied", true, "unreachable"),
+        ("graphql", true, "unreachable"),
+    ] {
+        sqlx::query("UPDATE resource SET next_attempt_at=now(),denied_since=CASE WHEN $2 THEN now()-interval '4 days' ELSE denied_since END WHERE id=$1")
+            .bind(&id).bind(expired).execute(&pool).await.unwrap();
+        let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+        queue::run_job(&pool, &DeferredResolver(kind), &cfg, &job)
+            .await
+            .unwrap();
+        if let Some(old) = &stale {
+            queue::run_job(&pool, &DeferredResolver(kind), &cfg, old)
+                .await
+                .unwrap();
+        }
+        let state: (String, i32, bool, serde_json::Value) =
+            sqlx::query_as("SELECT status,denial_streak,dead_letter,doc FROM resource WHERE id=$1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(state.0, expected);
+        assert_eq!(
+            state.1,
+            if stale.is_none() {
+                1
+            } else if kind == "graphql" {
+                3
+            } else {
+                2
+            }
+        );
+        assert!(!state.2);
+        assert_eq!(state.3["url"], uri);
+        stale = Some(job);
+    }
+    store::save_document(&pool, &id, stale.unwrap().generation, &accepted)
+        .await
+        .unwrap();
+    let state: (String, i32, bool) = sqlx::query_as(
+        "SELECT status,denial_streak,denied_since IS NULL FROM resource WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(state, ("ok".into(), 0, true));
+}
 #[async_trait::async_trait]
 impl Resolver for FinishPanic {
     fn name(&self) -> &'static str {
@@ -890,5 +952,71 @@ async fn invalid_non_event_feed_clock_has_its_own_rejection_reason(pool: PgPool)
     assert_eq!(
         ingest::cursor(&pool, "clock-fixture").await.unwrap().cursor,
         1
+    );
+}
+
+#[sqlx::test(migrations = false)]
+async fn review_route_upgrade_revives_only_rerouted_failures_once(pool: PgPool) {
+    let before = sqlx::migrate::Migrator {
+        migrations: std::borrow::Cow::Owned(
+            pinakes_core::MIGRATOR.iter().take(14).cloned().collect(),
+        ),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    before.run(&pool).await.unwrap();
+    let youtube = store::ensure_resource(&pool, "https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        .await
+        .unwrap();
+    let other = store::ensure_resource(&pool, "https://unrelated.example/dead")
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET resolver='web',dead_letter=true,attempts=5,last_error='body exceeds cap (pages 1 MB)',next_attempt_at='infinity',generation=17 WHERE id=ANY($1)").bind([&youtube,&other]).execute(&pool).await.unwrap();
+    pinakes_core::migrate(&pool).await.unwrap();
+    let state:(String,i32,bool,bool,i64)=sqlx::query_as("SELECT resolver,attempts,dead_letter,next_attempt_at BETWEEN now() AND now()+interval '1 hour',generation FROM resource WHERE id=$1").bind(&youtube).fetch_one(&pool).await.unwrap();
+    assert_eq!(state, ("media".into(), 0, false, true, 18));
+    let state: (i32, bool) =
+        sqlx::query_as("SELECT attempts,dead_letter FROM resource WHERE id=$1")
+            .bind(&other)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, (5, true));
+    // Later failures retain their resolver provenance; a real route change revives once.
+    sqlx::query("UPDATE resource SET attempts=5,dead_letter=true,last_error='parse' WHERE id=$1")
+        .bind(&youtube)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT last_error_resolver FROM resource WHERE id=$1")
+            .bind(&youtube)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "media"
+    );
+    sqlx::query("UPDATE resource SET resolver='media' WHERE id=$1")
+        .bind(&youtube)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        sqlx::query_scalar::<_, bool>("SELECT dead_letter FROM resource WHERE id=$1")
+            .bind(&youtube)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    );
+    sqlx::query("UPDATE resource SET resolver='web' WHERE id=$1")
+        .bind(&youtube)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        !sqlx::query_scalar::<_, bool>("SELECT dead_letter FROM resource WHERE id=$1")
+            .bind(&youtube)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
     );
 }

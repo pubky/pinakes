@@ -44,7 +44,7 @@ impl Transport for TransportMock {
             "www.youtube.com" => ("application/json",json!({"type":"video","title":"Video","thumbnail_url":"https://images.example/video.jpg","html":"<script>never store this</script>"}).to_string()),
             "ap.example" => {
                 if u.path()=="/page" {("text/html","<title>Fallback</title><link rel='alternate' type='application/activity+json' href='/actor'>".into())}
-                else {assert_eq!(options.accept.as_deref(),Some("application/activity+json"));("application/activity+json",json!({"type":"Person","preferredUsername":"alice","summary":"<p>About Alice</p>","icon":{"url":"/avatar.png"}}).to_string())}
+                else {assert_eq!(options.accept.as_deref(),Some("application/activity+json"));("application/activity+json",json!({"id":"https://ap.example/actor","type":"Person","preferredUsername":"alice","summary":"<p>About Alice</p>","icon":{"url":"/avatar.png"}}).to_string())}
             },
             "blog.example" => {
                 if u.path()=="/post" {("text/html",r#"<title>Blog</title><script type="application/ld+json">{"@type":"BlogPosting","name":"Original blog"}</script><link rel="alternate" type="application/rss+xml" href="/feed">"#.into())}
@@ -57,6 +57,7 @@ impl Transport for TransportMock {
             _=>bail!("unexpected request"),
         };
         Ok(Fetched {
+            truncated: false,
             url: u.clone(),
             status: 200,
             body: body.into_bytes(),
@@ -137,6 +138,7 @@ async fn registry_identifiers_negotiation_discovery_and_switches() {
 #[test]
 fn podcast_selection_and_schema_media_keys() {
     let f = Fetched {
+        truncated: false,
         url: "https://podcast.example/feed".parse().unwrap(),
         body: RSS.as_bytes().to_vec(),
         content_type: "application/rss+xml".into(),
@@ -192,6 +194,8 @@ fn generic_nostr_signed_profile_note_and_nip52_routing() {
             "Person",
         ),
         (1, "Hello nostr", "SocialMediaPosting"),
+        (6, "Reposted", "CreativeWork"),
+        (7, "+", "CreativeWork"),
     ] {
         let unsigned = EventBuilder::new(Kind::from(kind), content)
             .custom_created_at(Timestamp::from_secs(1700000000))
@@ -248,7 +252,7 @@ async fn review_blog_rss_preserves_jsonld_and_single_episode_feed_is_series() {
         "DataFeed"
     );
     for enclosure in ["audio/mpeg", "video/mp4"] {
-        let f = Fetched {url:"https://podcast.example/feed".parse().unwrap(),status:200,body:format!("<rss><channel><title>Podcast</title><item><guid>one</guid><title>Episode</title><link>https://podcast.example/one</link><enclosure type='{enclosure}'/></item></channel></rss>").into_bytes(),content_type:"application/rss+xml".into(),location:None,retry_after_secs:60,validators:Default::default()};
+        let f = Fetched {truncated: false,url:"https://podcast.example/feed".parse().unwrap(),status:200,body:format!("<rss><channel><title>Podcast</title><item><guid>one</guid><title>Episode</title><link>https://podcast.example/one</link><enclosure type='{enclosure}'/></item></channel></rss>").into_bytes(),content_type:"application/rss+xml".into(),location:None,retry_after_secs:60,validators:Default::default()};
         assert_eq!(
             cards::podcast(f.url.as_str(), &f, 3600, 10)
                 .unwrap()
@@ -264,4 +268,322 @@ async fn review_blog_rss_preserves_jsonld_and_single_episode_feed_is_series() {
             "PodcastEpisode"
         );
     }
+}
+
+#[tokio::test]
+async fn review_recorded_youtube_head_and_oembed_survive_oversize_or_failed_page() {
+    use axum::{routing::get, Router};
+    use std::{
+        io::Read,
+        sync::atomic::{AtomicBool, Ordering},
+    };
+    let mut body = Vec::new();
+    flate2::read::GzDecoder::new(include_bytes!("fixtures/media/youtube-watch.html.gz").as_slice())
+        .read_to_end(&mut body)
+        .unwrap();
+    assert!(body.len() > pinakes_core::resolver::egress::BODY_CAP);
+    let fail = Arc::new(AtomicBool::new(false));
+    let flag = fail.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route(
+            "/watch",
+            get(move || {
+                let body = body.clone();
+                let fail = flag.clone();
+                async move {
+                    (
+                        if fail.load(Ordering::SeqCst) {
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE
+                        } else {
+                            axum::http::StatusCode::OK
+                        },
+                        [("content-type", "text/html")],
+                        body,
+                    )
+                }
+            }),
+        )
+        .route(
+            "/oembed",
+            get(|| async {
+                (
+                    [("content-type", "application/json")],
+                    include_str!("fixtures/media/youtube-oembed.json"),
+                )
+            }),
+        );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    struct Replay {
+        base: String,
+        seen: Mutex<Vec<String>>,
+    }
+    #[async_trait]
+    impl Transport for Replay {
+        async fn get(&self, u: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+            self.seen.lock().unwrap().push(u.path().into());
+            let path = if u.path().contains("oembed") {
+                "/oembed"
+            } else {
+                "/watch"
+            };
+            pinakes_core::resolver::egress::read_response(
+                u.clone(),
+                reqwest::get(format!("{}{path}", self.base)).await?,
+            )
+            .await
+        }
+    }
+    let transport = Arc::new(Replay {
+        base,
+        seen: Default::default(),
+    });
+    let make = || CardResolver {
+        kind: "media",
+        config: Arc::new(Config::default()),
+        web: WebResolver {
+            cards: None,
+            events: None,
+            egress: Egress::with_backends(
+                Default::default(),
+                Arc::new(PublicDns),
+                transport.clone(),
+            ),
+            config: Default::default(),
+        },
+    };
+    let uri = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+    let (doc, observations) = pinakes_core::telemetry::observe(
+        &pinakes_core::telemetry::Metrics::new().unwrap(),
+        &pinakes_core::adapter::manifest("web"),
+        make().web.resolve(uri),
+    )
+    .await;
+    let doc = doc.unwrap();
+    assert_eq!(doc.status, pinakes_core::model::Status::Ok);
+    assert!(doc.name.as_ref().unwrap().contains("Rick Astley"));
+    assert!(doc.event.warnings.iter().any(|w| w == "truncated"));
+    assert!(observations.iter().any(|o| o.outcome == "drift"));
+    for failed in [false, true] {
+        fail.store(failed, Ordering::SeqCst);
+        transport.seen.lock().unwrap().clear();
+        let doc = make().resolve(uri).await.unwrap();
+        assert_eq!(doc.type_name, "VideoObject");
+        assert_eq!(doc.source, "media");
+        assert_eq!(doc.status, pinakes_core::model::Status::Ok);
+        assert_eq!(transport.seen.lock().unwrap()[0], "/oembed");
+    }
+    server.abort();
+}
+#[test]
+fn review_identifier_dates_domains_media_attributes_and_social_excerpt() {
+    assert_eq!(cards::classify("https://doi.org/"), None);
+    assert_eq!(
+        cards::classify("https://doi.org/the-identifier-resolver.html"),
+        None
+    );
+    assert_eq!(
+        cards::classify("https://dx.doi.org/10.1234/work"),
+        Some("doi")
+    );
+    for uri in [
+        "https://evil.com/?x=.spotify.com/track/abc",
+        "https://evil.com/path/youtube.com/watch?v=x",
+    ] {
+        assert!(cards::provider_endpoint(uri).is_none());
+    }
+    assert!(
+        cards::provider_endpoint("https://open.spotify.com/track/abc")
+            .unwrap()
+            .scheme()
+            == "https"
+    );
+    let f=Fetched{truncated:false,url:"https://doi.org/10.1234/work".parse().unwrap(),body:serde_json::to_vec(&json!({"type":"article-journal","title":"Dated","issued":{"date-parts":[[2024,5,12]]},"container-title":"Journal"})).unwrap(),content_type:"application/json".into(),status:200,location:None,retry_after_secs:60,validators:Default::default()};
+    let d = cards::parse_doi("doi:10.1234/work", &f, 3600).unwrap();
+    assert_eq!(d.attributes["published"], "2024-05-12");
+    assert_eq!(d.attributes["container"], "Journal");
+    let base = "https://social.example/@alice/1".parse().unwrap();
+    assert!(cards::activitypub(
+        "https://attacker.example/page",
+        &json!({"type":"Person","id":"https://social.example/@alice"}),
+        &base,
+        3600
+    )
+    .is_none());
+    let body = "🦀".repeat(1000);
+    let d=cards::activitypub(base.as_str(),&json!({"type":"Note","id":base.as_str(),"content":body,"to":["https://www.w3.org/ns/activitystreams#Public"]}),&base,86400).unwrap();
+    assert_eq!(d.description.unwrap().chars().count(), 200);
+    assert_eq!(d.ttl_secs, 3600);
+    let d=cards::activitypub(base.as_str(),&json!({"type":"Note","id":base.as_str(),"content":"unlisted text","to":["https://social.example/followers"],"cc":["https://www.w3.org/ns/activitystreams#Public"]}),&base,86400).unwrap();
+    assert!(!serde_json::to_string(&d).unwrap().contains("unlisted text"));
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn review_bad_identifiers_are_final_missing_and_ap_promotes_to_worker(pool: sqlx::PgPool) {
+    use pinakes_core::{queue, store};
+    for uri in ["isbn:9780140328722", "doi:invalid"] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let r = resolver(
+            if uri.starts_with("isbn:") {
+                "isbn"
+            } else {
+                "doi"
+            },
+            Config::default(),
+            Arc::new(TransportMock::default()),
+        );
+        let job = queue::Job {
+            id: id.clone(),
+            uri: uri.into(),
+            attempts: 0,
+            generation: 0,
+        };
+        queue::run_job(&pool, &r, &Default::default(), &job)
+            .await
+            .unwrap();
+        let state: (String, bool, i32, bool) =
+            sqlx::query_as("SELECT status,final,attempts,dead_letter FROM resource WHERE id=$1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(state, ("missing".into(), true, 0, false));
+    }
+    let uri = "https://ap.example/page";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let r = resolver(
+        "activitypub",
+        Config::default(),
+        Arc::new(TransportMock::default()),
+    );
+    let d = r.web.resolve(uri).await.unwrap();
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT resolver FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "activitypub"
+    );
+}
+
+#[tokio::test]
+async fn review_oembed_first_keeps_rich_page_types_and_ap_denial_falls_back() {
+    struct Rich;
+    #[async_trait]
+    impl Transport for Rich {
+        async fn get(&self, u: &Url, a: &[SocketAddr]) -> Result<Fetched> {
+            self.get_with(u, a, &Default::default()).await
+        }
+        async fn get_with(&self, u: &Url, _: &[SocketAddr], o: &FetchOptions) -> Result<Fetched> {
+            let mut status = 200;
+            let (ct, body) = if u.path().contains("oembed") {
+                (
+                    "application/json",
+                    json!({"type":"rich","title":"Embed fallback","author_name":"embed author"})
+                        .to_string(),
+                )
+            } else if u.host_str() == Some("ap.example") {
+                if o.accept
+                    .as_deref()
+                    .is_some_and(|s| s.contains("activity+json"))
+                {
+                    status = 403;
+                }
+                ("text/html", "<title>Public web card</title>".into())
+            } else if u.host_str() == Some("soundcloud.com") {
+                ("text/html", "<title>Sound</title>".into())
+            } else {
+                ("text/html",r#"<script type="application/ld+json">{"@type":"Article","name":"JSON first","author":"page author","duration":"PT3M","isrcCode":"USABC2600001"}</script>"#.into())
+            };
+            Ok(Fetched {
+                truncated: false,
+                url: u.clone(),
+                status,
+                body: body.into_bytes(),
+                content_type: ct.into(),
+                location: None,
+                retry_after_secs: 60,
+                validators: Default::default(),
+            })
+        }
+    }
+    let make = |kind| CardResolver {
+        kind,
+        config: Arc::new(Config::default()),
+        web: WebResolver {
+            cards: None,
+            events: None,
+            config: Default::default(),
+            egress: Egress::with_backends(Default::default(), Arc::new(PublicDns), Arc::new(Rich)),
+        },
+    };
+    let d = make("media")
+        .resolve("https://test.wordpress.com/post")
+        .await
+        .unwrap();
+    assert_eq!(d.type_name, "Article");
+    assert_eq!(d.name.as_deref(), Some("JSON first"));
+    assert_eq!(d.attributes["author"], "page author");
+    assert_eq!(d.attributes["duration"], "PT3M");
+    assert_eq!(d.attributes["isrc"], "USABC2600001");
+    assert_eq!(
+        make("media")
+            .resolve("https://soundcloud.com/artist/song")
+            .await
+            .unwrap()
+            .type_name,
+        "AudioObject"
+    );
+    assert_eq!(
+        make("activitypub")
+            .resolve("https://ap.example/page")
+            .await
+            .unwrap()
+            .name
+            .as_deref(),
+        Some("Public web card")
+    );
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn review_social_deletion_purges_content_history(pool: sqlx::PgPool) {
+    use pinakes_core::{model::Status, store};
+    let uri = "https://social.example/post/one";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut d = ResourceMeta::new(uri, "activitypub", 3600);
+    d.set_type("SocialMediaPosting");
+    d.name = Some("Note".into());
+    d.description = Some("Retained excerpt".into());
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    d.description = Some("Updated excerpt".into());
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    assert!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource_change WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            > 0
+    );
+    d.status = Status::Missing;
+    for _ in 0..2 {
+        d.fetched_at += 1;
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource_change WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    let d: Value = sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(d["status"], "missing");
+    assert!(d["description"].is_null());
 }

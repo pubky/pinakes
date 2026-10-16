@@ -36,21 +36,22 @@ try {
     const keypair = Keypair.fromSecret(secret); secret.fill(0);
     const pubky = new Pubky(); const signer = pubky.signer(keypair);
     author = signer.publicKey.z32();
-    let created = false;
     try { session = await signer.signin('pinakes.e2e'); }
     catch (error) {
       if (error.data?.statusCode !== 404 || !process.env.PINAKES_E2E_SIGNUP_TOKEN) throw new Error(`Pubky sign-in failed (${error.name})`);
-      await signer.signup(PublicKey.from(process.env.PINAKES_E2E_HOMESERVER), process.env.PINAKES_E2E_SIGNUP_TOKEN);
-      session = await signer.signin('pinakes.e2e'); created = true;
+      try {
+        await signer.signup(PublicKey.from(process.env.PINAKES_E2E_HOMESERVER), process.env.PINAKES_E2E_SIGNUP_TOKEN);
+        session = await signer.signin('pinakes.e2e');
+      } catch { throw new Error('Pubky signup or subsequent sign-in failed'); }
     }
     storage = session.storage;
     if (!await storage.exists('/pub/pubky.app/profile.json')) {
-      if (!created) throw new Error('Existing identity needs a profile before e2e');
       const { PubkySpecsBuilder } = await import('pubky-app-specs');
       const b = new PubkySpecsBuilder(author); const user = b.createUser('Pinakes E2E', null, null, []);
       await storage.putJson('/pub/pubky.app/profile.json', user.user.toJson()); user.free(); b.free();
     }
     samples = JSON.parse(await readFile(process.env.PINAKES_E2E_SAMPLES ?? 'e2e/samples.live.json', 'utf8'));
+    for (const sample of samples) if (sample.kind === 'ics' && process.env.PINAKES_E2E_ICS_URL) sample.uri = process.env.PINAKES_E2E_ICS_URL;
   }
   const journal = (tags, cleanup) => writeFile(journalFile, JSON.stringify({ author, tags, cleanup }, null, 2), { mode: 0o600 });
   report = await runFlow({ storage, author, samples, pinakes, nexus, positiveVenue, journal, signal: control.signal, timeout: Number(process.env.PINAKES_E2E_TIMEOUT_MS ?? 120000) });

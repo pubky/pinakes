@@ -73,10 +73,11 @@ impl Fixture {
             {"kind":"osm","uri":"https://www.openstreetmap.org/node/501","type":"Place"},
             {"kind":"geo","uri":"geo:47,8","type":"Place"},
             {"kind":"event","uri":"https://events.example/e2e","type":"Event"},
-            {"kind":"ics","uri":"https://calendar.example/e2e.ics","type":"DataFeed"},
+            {"kind":"ics","uri":"https://calendar.example/e2e.ics","type":"DataFeed","expectedOccurrences":2},
             {"kind":"naddr","uri":naddr,"type":"Event"},
             {"kind":"doi","uri":"doi:10.1234/pinakes","type":"ScholarlyArticle"},
             {"kind":"isbn","uri":"isbn:9780140328721","type":"Book"},
+            {"kind":"isbn_twin","uri":"isbn:0140328726","type":"Book"},
             {"kind":"media","uri":"https://www.youtube.com/watch?v=fixture","type":"VideoObject"},
             {"kind":"web","uri":"https://web.example/e2e","type":"WebPage"}
         ]);
@@ -94,8 +95,23 @@ impl Fixture {
 struct FixtureDns;
 #[async_trait]
 impl Dns for FixtureDns {
-    async fn lookup(&self, _: &str, port: u16) -> Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("93.184.216.34".parse()?, port)])
+    async fn lookup(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+        let ip = if matches!(
+            host,
+            "events.example"
+                | "calendar.example"
+                | "api.nostr.wine"
+                | "api.nostrarchives.com"
+                | "doi.org"
+                | "openlibrary.org"
+                | "www.youtube.com"
+                | "web.example"
+        ) {
+            "93.184.216.34"
+        } else {
+            "192.0.2.1"
+        };
+        Ok(vec![SocketAddr::new(ip.parse()?, port)])
     }
 }
 #[async_trait]
@@ -109,12 +125,13 @@ impl Transport for Fixture {
             "calendar.example" => ("text/calendar",format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:e2e-series\r\nDTSTART:{}\r\nRRULE:FREQ=DAILY;COUNT=2\r\nSUMMARY:Fixture calendar meetup\r\nGEO:47;8\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",self.start.format("%Y%m%dT%H%M%SZ"))),
             "api.nostr.wine"|"api.nostrarchives.com"=>("application/json",json!([self.event]).to_string()),
             "doi.org"=>{ensure!(o.accept.as_deref()==Some("application/vnd.citationstyles.csl+json"),"missing CSL negotiation");("application/json",json!({"type":"article-journal","title":"Fixture research"}).to_string())},
-            "openlibrary.org"=>("application/json",json!({"ISBN:9780140328721":{"title":"Matilda","authors":[{"name":"Roald Dahl"}]}}).to_string()),
+            "openlibrary.org"=>("application/json",json!({"ISBN:9780140328721":{"title":"Matilda","authors":[{"name":"Roald Dahl"}],"url":"https://openlibrary.org/books/OL7353617M"},"ISBN:0140328726":{"title":"Matilda","authors":[{"name":"Roald Dahl"}],"url":"https://openlibrary.org/books/OL7353617M"}}).to_string()),
             "www.youtube.com"=>("application/json",json!({"type":"video","title":"Fixture video","thumbnail_url":"https://image.example/a.jpg"}).to_string()),
             "web.example"=>("text/html","<title>Fixture page</title>".into()),
             _=>bail!("no fixture for upstream host {}",u.host_str().unwrap_or("")),
         };
         Ok(Fetched {
+            truncated: false,
             url: u.clone(),
             status: 200,
             content_type: ct.into(),
@@ -217,7 +234,7 @@ async fn hydrate(State(f): State<Fixture>, Json(q): Json<Value>) -> Json<Value> 
 async fn main() -> Result<()> {
     let fixture = Fixture::new()?;
     let args: Vec<_> = std::env::args().collect();
-    let live = if args.get(1).is_some_and(|s| s == "--live") {
+    let mut live = if args.get(1).is_some_and(|s| s == "--live") {
         Some(serde_json::from_slice::<Value>(&std::fs::read(
             args.get(2)
                 .ok_or_else(|| anyhow::anyhow!("missing live samples"))?,
@@ -225,6 +242,16 @@ async fn main() -> Result<()> {
     } else {
         None
     };
+    if let (Some(samples), Ok(uri)) = (
+        live.as_mut().and_then(Value::as_array_mut),
+        std::env::var("PINAKES_E2E_ICS_URL"),
+    ) {
+        for sample in samples {
+            if sample["kind"] == "ics" {
+                sample["uri"] = json!(uri);
+            }
+        }
+    }
     let admin = PgPoolOptions::new()
         .max_connections(2)
         .connect(
@@ -305,13 +332,23 @@ async fn run(pool: sqlx::PgPool, f: Fixture) -> Result<()> {
             .with_state(f.clone()),
     );
     let (shutdown, rx) = tokio::sync::watch::channel(false);
+    let egress = Egress::with_backends(cfg.egress.clone(), Arc::new(FixtureDns), Arc::new(f));
+    ensure!(
+        egress
+            .nostr_request("wss://api.nostr.wine", json!({}), 100)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("disabled"),
+        "mock relay must never connect"
+    );
     let mut workers = queue::spawn_with_egress(
         pool.clone(),
         cfg.clone(),
         wake.clone(),
         rx,
         metrics.clone(),
-        Egress::with_backends(cfg.egress.clone(), Arc::new(FixtureDns), Arc::new(f)),
+        egress,
     )?;
     let nexus = Nexus::new(&base)?;
     let url = base.clone();

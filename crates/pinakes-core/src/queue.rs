@@ -91,6 +91,31 @@ async fn timed_out(pool: &PgPool, job: &Job, cfg: &QueueConfig, seconds: u64) ->
     tx.commit().await?;
     Ok(())
 }
+async fn denied(
+    pool: &PgPool,
+    job: &Job,
+    cfg: &QueueConfig,
+    retry: &crate::resolver::RetryLater,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    crate::store::lock_search_revision(&mut tx).await?;
+    let row: Option<(i32,i32,bool)> = sqlx::query_as("SELECT denial_streak,attempts,coalesce(denied_since<=now()-interval '3 days',false) FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE")
+        .bind(&job.id).bind(job.generation).fetch_optional(&mut *tx).await?;
+    if let Some((streak, attempts, expired)) = row {
+        let attempts = attempts.saturating_add(i32::from(expired));
+        let delay = if expired {
+            backoff(cfg, attempts as u32).max(retry.seconds)
+        } else {
+            retry.seconds.clamp(1, 3600)
+        };
+        // Continue recovery probes at normal backoff; denial never dead-letters a
+        // shared feed, and accepted facts remain available with an honest status.
+        sqlx::query("UPDATE resource SET denial_streak=$2,denied_since=coalesce(denied_since,now()),attempts=$3,status=CASE WHEN $4 THEN 'unreachable' ELSE status END,timeout_streak=0,dead_letter=false,lease_until=NULL,priority_at=NULL,last_error=$5,next_attempt_at=now()+$6*interval '1 second' WHERE id=$1")
+            .bind(&job.id).bind(streak.saturating_add(1)).bind(attempts).bind(expired).bind(retry.class).bind(delay as f64).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
 pub async fn run_job(
     pool: &PgPool,
     resolver: &dyn Resolver,
@@ -189,7 +214,9 @@ async fn finish_job(
         if doc.status == Status::Error {
             bail!("upstream returned a transient HTTP error");
         }
-        if resolver.name() != "osm" {
+        let invalid_identifier =
+            doc.status == Status::Missing && crate::resolver::cards::invalid_identifier(&job.uri);
+        if resolver.name() != "osm" && !invalid_identifier {
             doc.ttl_secs = if doc.status == Status::Missing {
                 cfg.missing_ttl_secs
             } else {
@@ -267,6 +294,12 @@ async fn finish_job(
                 doc.ttl_secs = doc.ttl_secs.max(3600);
             }
         }
+        if invalid_identifier {
+            doc.ttl_secs = 0;
+        }
+        if crate::resolver::cards::social(&doc) {
+            doc.ttl_secs = doc.ttl_secs.min(3600);
+        }
         let attrs = match resolver.name() {
             "web" | "event" | "event_platform" | "media" | "isbn" | "doi" | "nostr"
             | "activitypub" => crate::resolver::web::ATTRIBUTES,
@@ -284,6 +317,8 @@ async fn finish_job(
         if let Some(retry) = error.downcast_ref::<crate::resolver::RetryLater>() {
             if retry.class == "timeout" {
                 timed_out(pool, job, cfg, retry.seconds).await?;
+            } else if matches!(retry.class, "upstream_denied" | "graphql") {
+                denied(pool, job, cfg, retry).await?;
             } else {
                 sqlx::query("UPDATE resource SET timeout_streak=0,lease_until=NULL,priority_at=NULL,next_attempt_at=now()+$3*interval '1 second',last_error=$4 WHERE id=$1 AND generation=$2")
                     .bind(&job.id).bind(job.generation).bind(retry.seconds.clamp(1,3600) as f64).bind(if retry.class=="rate_limited" {"http_4xx"} else {retry.class}).execute(pool).await?;

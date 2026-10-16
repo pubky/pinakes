@@ -881,11 +881,16 @@
           {
             "name": "collapse",
             "in": "query",
+            "description": "Return one row per verified or curated group; standalone resources remain separate.",
             "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/CollapseMode"
+                }
               ]
             }
           }
@@ -1123,6 +1128,12 @@
           }
         }
       },
+      "CollapseMode": {
+        "type": "string",
+        "enum": [
+          "group"
+        ]
+      },
       "Curation": {
         "type": "object",
         "required": [
@@ -1312,6 +1323,11 @@
             "type": "integer",
             "default": 256,
             "minimum": 0
+          },
+          "max_members_per_origin": {
+            "type": "integer",
+            "default": 16,
+            "minimum": 0
           }
         },
         "additionalProperties": false
@@ -1333,6 +1349,13 @@
           },
           "key": {
             "type": "string"
+          },
+          "target": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Destination registrable domain; the key retains the target identity. Never a fetch instruction."
           }
         }
       },
@@ -1375,6 +1398,12 @@
           "members"
         ],
         "properties": {
+          "attribution": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "curated": {
             "type": "boolean"
           },

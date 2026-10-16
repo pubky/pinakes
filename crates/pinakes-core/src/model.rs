@@ -161,6 +161,7 @@ impl ResourceMeta {
         self.event.bound();
         self.group_keys.retain(|k| {
             k.key.len() <= 2100
+                && k.target.as_ref().is_none_or(|s| s.len() <= 253)
                 && k.basis.len() <= 32
                 && k.confidence.is_finite()
                 && (0.0..=1.0).contains(&k.confidence)

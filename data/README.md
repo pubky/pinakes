@@ -61,3 +61,9 @@ endpoints, and applies normal DNS/redirect/size/host budgets to every request. I
 retains typed metadata and origin image URLs only; it never serves embed HTML or
 rehosts media. Provider membership is not a promise that its public endpoint is
 available or permits a particular use.
+
+Group origin checks use the compiled `psl = 2.1.241` public suffix data pinned in
+Cargo.lock, including private suffixes. The dependency’s Cargo manifest declares MIT/Apache-2.0;
+its source and license ship in the crate.
+WordPress tenant hosts are treated separately even though that boundary is absent
+from the list. No suffix data is fetched at runtime.

@@ -33,6 +33,7 @@ async fn main() -> anyhow::Result<()> {
         let fetch = if let Some(path) = entry["replay"].as_str() {
             result["replayed_from"] = json!(path);
             Ok(Fetched {
+                truncated: false,
                 url: uri.parse()?,
                 status: 200,
                 content_type: entry["content_type"]

@@ -780,6 +780,7 @@ impl Transport for ProtocolTransport {
             o.validators.etag.is_some(),
         ));
         let mut f = Fetched {
+            truncated: false,
             validators: Default::default(),
             url: url.clone(),
             status: 200,
@@ -967,11 +968,11 @@ async fn feed_transport_stream_cap_wrong_type_sniff_and_page_cap() {
     .await
     .is_err());
     let uri: url::Url = format!("http://{addr}/page").parse().unwrap();
-    assert!(
-        read_response_with(uri.clone(), client.get(uri).send().await.unwrap(), &options)
-            .await
-            .is_err()
-    );
+    let page = read_response_with(uri.clone(), client.get(uri).send().await.unwrap(), &options)
+        .await
+        .unwrap();
+    assert!(page.truncated);
+    assert_eq!(page.body.len(), pinakes_core::resolver::egress::BODY_CAP);
     server.abort();
 }
 #[test]
@@ -1940,6 +1941,7 @@ impl Transport for ConditionalSnapshots {
         };
         calls.push((conditional, status));
         Ok(Fetched {
+            truncated: false,
             validators: pinakes_core::resolver::egress::Validators {
                 etag: Some(etag.into()),
                 ..Default::default()
@@ -2219,6 +2221,7 @@ impl Transport for ReviewSnapshots {
         };
         calls.push((conditional, status));
         Ok(Fetched {
+            truncated: false,
             url: url.clone(),
             status,
             content_type: content_type.clone(),

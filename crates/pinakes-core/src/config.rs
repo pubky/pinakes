@@ -8,6 +8,7 @@ pub struct Config {
     pub database_url: String,
     pub listen: String,
     pub admin_listen: String,
+    pub admin_token: Option<String>,
     pub refresh: RefreshConfig,
     pub canary: CanaryConfig,
     pub nexus_url: String,
@@ -32,6 +33,7 @@ impl Default for Config {
             database_url: "postgresql:///pinakes?host=/var/run/postgresql".into(),
             listen: "127.0.0.1:8090".into(),
             admin_listen: "127.0.0.1:9090".into(),
+            admin_token: None,
             refresh: RefreshConfig::default(),
             canary: CanaryConfig::default(),
             nexus_url: "http://127.0.0.1:8080".into(),
@@ -335,9 +337,20 @@ impl Config {
     }
     pub fn validate(&self) -> Result<()> {
         self.cards.validate()?;
+        let admin: std::net::SocketAddr =
+            self.admin_listen.parse().context("invalid admin_listen")?;
+        if self.admin_token.as_ref().is_some_and(|t| {
+            t.trim().is_empty() || t.len() > 4096 || t.chars().any(char::is_control)
+        }) {
+            bail!("invalid admin_token");
+        }
+        if !admin.ip().is_loopback() && self.admin_token.is_none() {
+            bail!("non-loopback admin_listen requires admin_token (PINAKES__ADMIN_TOKEN)");
+        }
         if !(10000..=100000).contains(&self.queue.groups.max_graph_units)
             || !(1024 * 1024..=128 * 1024 * 1024).contains(&self.queue.groups.max_graph_bytes)
             || !(2..=1000).contains(&self.queue.groups.max_members)
+            || !(1..=1000).contains(&self.queue.groups.max_members_per_origin)
             || !self.queue.groups.max_distance_m.is_finite()
             || !(1.0..=10000.0).contains(&self.queue.groups.max_distance_m)
         {

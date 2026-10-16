@@ -97,6 +97,25 @@ pub fn container(uri: &str, cfg: &EventConfig) -> ResourceMeta {
     doc
 }
 pub fn append(doc: &mut ResourceMeta, adapter: &str, v: &Value, cfg: &EventConfig) -> Result<()> {
+    append_row(doc, adapter, v, cfg).map_err(row_error)?;
+    ensure!(
+        doc.container.as_ref().unwrap().occurrences.len() <= cfg.max_occurrences_per_feed,
+        "cursor event cap exceeded"
+    );
+    Ok(())
+}
+#[derive(Debug)]
+struct RowFailure(String);
+impl std::fmt::Display for RowFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for RowFailure {}
+fn row_error(error: impl std::fmt::Display) -> anyhow::Error {
+    RowFailure(error.to_string()).into()
+}
+fn append_row(doc: &mut ResourceMeta, adapter: &str, v: &Value, cfg: &EventConfig) -> Result<()> {
     let id = uid(v).context("event feed row has no identity")?;
     ensure!(id.len() <= 256, "event identity too long");
     let c = doc.container.as_mut().context("not a container")?;
@@ -185,10 +204,6 @@ pub fn append(doc: &mut ResourceMeta, adapter: &str, v: &Value, cfg: &EventConfi
         content_hash,
         volatile: false,
     });
-    ensure!(
-        c.occurrences.len() <= cfg.max_occurrences_per_feed,
-        "cursor event cap exceeded"
-    );
     Ok(())
 }
 async fn json(
@@ -212,10 +227,16 @@ async fn json(
         egress.fetch_with(uri, &options).await?
     };
     super::service::upstream_status(&f)?;
-    if matches!(f.status, 404 | 410) {
+    if gone(f.status) {
         return Ok((f.status, Value::Null));
     }
-    ensure!(f.status == 200, "cursor HTTP failure");
+    if f.status != 200 {
+        return Err(crate::resolver::RetryLater {
+            class: "upstream_denied",
+            seconds: 3600,
+        }
+        .into());
+    }
     Ok((
         f.status,
         tokio::task::spawn_blocking(move || serde_json::from_slice(&f.body)).await??,
@@ -275,7 +296,7 @@ pub async fn resolve(
             .and_then(|mut s| s.next_back())
             .context("portal event ID missing")?
             .to_owned();
-        let (_, mut v) = json(
+        let (status, mut v) = json(
             egress,
             "https://portal.einundzwanzig.space/api/meetup-events",
             cfg,
@@ -283,17 +304,23 @@ pub async fn resolve(
             true,
         )
         .await?;
+        if gone(status) {
+            return Ok(missing(uri, &d.id));
+        }
         if rows(&v).is_some_and(|rows| !rows.iter().any(|r| uid(r).as_deref() == Some(&id))) {
             // A shared cached miss cannot confirm a fresh disappearance.
-            v = json(
+            let (status, fresh) = json(
                 egress,
                 "https://portal.einundzwanzig.space/api/meetup-events",
                 cfg,
                 false,
                 false,
             )
-            .await?
-            .1;
+            .await?;
+            if gone(status) {
+                return Ok(missing(uri, &d.id));
+            }
+            v = fresh;
         }
         portal_names(&mut v, egress, cfg).await?;
         let uri = uri.to_owned();
@@ -366,7 +393,10 @@ pub async fn resolve(
             }
             url.query_pairs_mut()
                 .append_pair("limit", if probe || head { "1" } else { "1000" });
-            let (_, mut v) = json(egress, url.as_str(), cfg, false, false).await?;
+            let (status, mut v) = json(egress, url.as_str(), cfg, false, false).await?;
+            if gone(status) {
+                return Ok(missing_container(uri, &d.id, cfg));
+            }
             next = v["next_since"]
                 .as_u64()
                 .map(|v| v.to_string())
@@ -408,7 +438,7 @@ pub async fn resolve(
         }
         delta = true;
         if done && resync && !probe {
-            let (_, mut full) = json(
+            let (status, mut full) = json(
                 egress,
                 "https://portal.einundzwanzig.space/api/meetup-events",
                 cfg,
@@ -416,6 +446,9 @@ pub async fn resolve(
                 false,
             )
             .await?;
+            if gone(status) {
+                return Ok(missing_container(uri, &d.id, cfg));
+            }
             portal_names(&mut full, egress, cfg).await?;
             // Take the snapshot after reaching the head: replaying old deltas over a
             // current snapshot can otherwise resurrect or cancel newer records.
@@ -435,7 +468,7 @@ pub async fn resolve(
             .is_some_and(|s| s.parse::<u64>().is_ok())
         {
             let (status, v) = json(egress, uri, cfg, false, false).await?;
-            if matches!(status, 404 | 410) {
+            if gone(status) {
                 return Ok(missing(uri, "btcmap"));
             }
             let uri = uri.to_owned();
@@ -473,7 +506,10 @@ pub async fn resolve(
                 url.query_pairs_mut().append_pair(key, value);
             }
         }
-        let (_, v) = json(egress, url.as_str(), cfg, false, false).await?;
+        let (status, v) = json(egress, url.as_str(), cfg, false, false).await?;
+        if gone(status) {
+            return Ok(missing_container(uri, &d.id, cfg));
+        }
         let (parsed, latest) =
             append_batch(doc, &d.id, v, "btcmap", cfg, Some(since.to_owned())).await?;
         doc = parsed;
@@ -525,6 +561,9 @@ pub async fn resolve(
                 doc.container.as_mut().unwrap().deleted_uids.clear();
                 continue;
             }
+            if gone(status) {
+                return Ok(missing_container(uri, &d.id, cfg));
+            }
             page_token = v["nextPageToken"].as_str().map(str::to_owned);
             let sync = v["nextSyncToken"].as_str().map(str::to_owned);
             doc = append_batch(doc, &d.id, v, "full", cfg, None).await?.0;
@@ -537,7 +576,8 @@ pub async fn resolve(
         ensure!(done, "Google pagination cap exceeded");
     }
     let c = doc.container.as_mut().unwrap();
-    c.delta = delta;
+    // Quarantined rows cannot imply disappearance of previously accepted members.
+    c.delta = delta || c.warnings.iter().any(|w| w == "invalid_cursor_row");
     c.cursor = Some(Checkpoint {
         source,
         adapter: d.id.clone(),
@@ -547,6 +587,16 @@ pub async fn resolve(
         resync,
     });
     Ok(doc)
+}
+
+fn gone(status: u16) -> bool {
+    matches!(status, 401 | 403 | 404 | 410 | 451)
+}
+fn missing_container(uri: &str, source: &str, cfg: &EventConfig) -> ResourceMeta {
+    let mut doc = container(uri, cfg);
+    doc.source = source.into();
+    doc.status = crate::model::Status::Missing;
+    doc
 }
 
 fn missing(uri: &str, source: &str) -> ResourceMeta {
@@ -623,26 +673,50 @@ async fn append_batch(
         for row in entries {
             ensure!(std::time::Instant::now() < deadline, "cursor parse budget");
             let before = doc.container.as_ref().unwrap().occurrences.len();
-            if kind == "portal" {
-                if row["resource"] != "meetup-event" {
-                    continue;
-                }
-                if row["action"] == "deleted" {
-                    let id = uid(row).context("portal tombstone omitted identity")?;
-                    ensure!(id.len() <= 256, "tombstone identity cap");
-                    operations.insert(id.clone(), false);
-                    doc.container.as_mut().unwrap().deleted_uids.push(id);
+            let before_deleted = doc.container.as_ref().unwrap().deleted_uids.len();
+            let result: Result<()> = (|| {
+                if kind == "portal" {
+                    if row["resource"] != "meetup-event" {
+                        return Ok(());
+                    }
+                    if row["action"] == "deleted" {
+                        let id = uid(row)
+                            .context("portal tombstone omitted identity")
+                            .map_err(row_error)?;
+                        if id.len() > 256 {
+                            return Err(row_error("tombstone identity cap"));
+                        }
+                        operations.insert(id.clone(), false);
+                        doc.container.as_mut().unwrap().deleted_uids.push(id);
+                    } else {
+                        let id = uid(&row["data"])
+                            .context("portal row identity")
+                            .map_err(row_error)?;
+                        append(&mut doc, &adapter, &row["data"], &cfg)?;
+                        operations.insert(id, true);
+                    }
                 } else {
-                    operations.insert(uid(&row["data"]).context("portal row identity")?, true);
-                    append(&mut doc, &adapter, &row["data"], &cfg)?;
+                    if kind == "btcmap" {
+                        let at = timestamp(&row["updated_at"])
+                            .context("BTC Map delta omitted updated_at")
+                            .map_err(row_error)?;
+                        latest = Some(latest.map_or(at, |old| old.max(at)));
+                    }
+                    append(&mut doc, &adapter, row, &cfg)?;
                 }
-            } else {
-                if kind == "btcmap" {
-                    let at = timestamp(&row["updated_at"])
-                        .context("BTC Map delta omitted updated_at")?;
-                    latest = Some(latest.map_or(at, |old| old.max(at)));
+                Ok(())
+            })();
+            if let Err(error) = result {
+                if !error.is::<RowFailure>() {
+                    return Err(error);
                 }
-                append(&mut doc, &adapter, row, &cfg)?;
+                let c = doc.container.as_mut().unwrap();
+                c.occurrences.truncate(before);
+                c.deleted_uids.truncate(before_deleted);
+                if !c.warnings.iter().any(|w| w == "invalid_cursor_row") {
+                    c.warnings.push("invalid_cursor_row".into());
+                }
+                crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
             }
             let c = doc.container.as_ref().unwrap();
             if c.occurrences.len() > before {

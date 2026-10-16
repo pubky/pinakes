@@ -8,7 +8,7 @@ use crate::{
     config::{Config, ResolverConfig},
     model::{ResourceMeta, Status},
 };
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{bail, ensure, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -146,6 +146,19 @@ fn wildcard(pattern: &str, value: &str) -> bool {
     }
     i == p.len()
 }
+fn scheme_matches(pattern: &str, target: &Url) -> bool {
+    let Some((scheme, rest)) = pattern.split_once("://") else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // A registry host wildcard never consumes a path or a query string.
+    scheme == target.scheme()
+        && wildcard(
+            host,
+            &target[url::Position::BeforeHost..url::Position::AfterPort],
+        )
+        && wildcard(pattern, target.as_str())
+}
 pub fn provider_endpoint(uri: &str) -> Option<Url> {
     let target = Url::parse(uri).ok()?;
     if !matches!(target.scheme(), "http" | "https")
@@ -164,10 +177,10 @@ pub fn provider_endpoint(uri: &str) -> Option<Url> {
             }
             if e.schemes
                 .iter()
-                .any(|pattern| wildcard(pattern, target.as_str()))
+                .any(|pattern| scheme_matches(pattern, &target))
             {
                 let mut u = Url::parse(&e.url.replace("{format}", "json")).ok()?;
-                if !matches!(u.scheme(), "http" | "https") {
+                if u.scheme() != "https" {
                     continue;
                 }
                 u.query_pairs_mut()
@@ -225,7 +238,7 @@ pub fn doi(uri: &str) -> Option<String> {
         s.to_owned()
     } else {
         let u = Url::parse(uri).ok()?;
-        if u.host_str() != Some("doi.org") {
+        if !matches!(u.host_str(), Some("doi.org" | "dx.doi.org")) {
             return None;
         }
         percent_encoding::percent_decode_str(u.path().trim_start_matches('/'))
@@ -246,7 +259,7 @@ pub fn classify(uri: &str) -> Option<&'static str> {
     if uri.starts_with("isbn:") {
         return Some("isbn");
     }
-    if uri.starts_with("doi:") || Url::parse(uri).is_ok_and(|u| u.host_str() == Some("doi.org")) {
+    if uri.starts_with("doi:") || doi(uri).is_some() {
         return Some("doi");
     }
     if uri.starts_with("nostr:")
@@ -309,7 +322,7 @@ impl Resolver for CardResolver {
         let result = tokio::time::timeout(budget, async {
             match self.kind {
                 "isbn" => {
-                    let number = isbn(uri).context("invalid ISBN checksum")?;
+                    let Some(number) = isbn(uri) else { return Ok(missing(uri,"isbn",0)); };
                     let mut url = Url::parse(&self.config.cards.openlibrary_url)?;
                     url.query_pairs_mut()
                         .append_pair("bibkeys", &format!("ISBN:{number}"))
@@ -320,7 +333,7 @@ impl Resolver for CardResolver {
                     tokio::task::spawn_blocking(move || parse_isbn(&uri, &number, &f, ttl)).await?
                 }
                 "doi" => {
-                    let number = doi(uri).context("invalid DOI")?;
+                    let Some(number) = doi(uri) else { return Ok(missing(uri,"doi",0)); };
                     let mut url = Url::parse(&self.config.cards.doi_url)?;
                     url.set_path(&format!(
                         "{}{}",
@@ -365,29 +378,10 @@ impl Resolver for CardResolver {
                     let uri=uri.to_owned();
                     tokio::task::spawn_blocking(move || parse_nostr(&uri, &event, ttl)).await?
                 }
-                "media" => {
-                    if let Some(endpoint) = provider_endpoint(uri) {
-                        let f = self.web.egress.discover(endpoint.as_str(), &Default::default(), ttl).await?;
-                        {
-                            retry_status(&f)?;
-                            if f.status == 200 {
-                                if let Ok(v) = serde_json::from_slice::<Value>(&f.body) {
-                                    let mut d = ResourceMeta::new(uri, "web", ttl);
-                                    web::apply_oembed(&mut d, &v, &f.url);
-                                    if d.name.is_some() {
-                                        d.source = "media".into();
-                                        return d.bounded(web::ATTRIBUTES);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    self.web.resolve(uri).await
-                }
+                "media" => self.media(uri,ttl).await,
                 "activitypub" => {
                     let f=self.web.egress.fetch_with(uri,&FetchOptions{accept:Some("application/activity+json, application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\"".into()),..Default::default()}).await?;
-                    if let Some(d)=check_status(uri,"activitypub",&f,ttl)? {return Ok(d);}
-                    if let Some(d)=parse_activitypub(uri,&f,ttl).await? {return Ok(d);}
+                    if (200..300).contains(&f.status) { if let Some(d)=parse_activitypub(uri,&f,ttl).await? {return Ok(d);} }
                     self.web.resolve(uri).await
                 }
                 _ => self.web.resolve(uri).await,
@@ -498,6 +492,15 @@ pub fn parse_doi(uri: &str, f: &Fetched, ttl: u64) -> Result<ResourceMeta> {
         ("author", names(v.get("author"))),
         ("publisher", text(v.get("publisher"))),
         ("doi", doi(uri)),
+        (
+            "container",
+            text(v.get("container-title")).or_else(|| {
+                v["container-title"]
+                    .as_array()
+                    .and_then(|a| text(a.first()))
+            }),
+        ),
+        ("published", csl_date(&v)),
     ] {
         if let Some(v) = v {
             d.attributes.insert(k.into(), v);
@@ -540,9 +543,15 @@ pub fn parse_nostr(uri: &str, e: &nostr::event::Event, ttl: u64) -> Result<Resou
                         .flatten()
                 })
                 .or_else(|| Some(e.content.chars().take(120).collect()));
-            d.description = Some(e.content.clone());
+            d.description = Some(e.content.chars().take(200).collect());
+            d.ttl_secs = ttl.min(3600);
         }
-        _ => bail!("unsupported Nostr card kind"),
+        _ => {
+            d.set_type("CreativeWork");
+            d.name = Some(format!("Nostr event (kind {})", e.kind.as_u16()));
+            d.description = Some(e.content.chars().take(200).collect());
+            d.ttl_secs = ttl.min(3600);
+        }
     }
     d.bounded(web::ATTRIBUTES)
 }
@@ -560,12 +569,36 @@ pub fn activitypub(uri: &str, v: &Value, base: &Url, ttl: u64) -> Option<Resourc
         "Person" => "Person",
         _ => return None,
     };
+    let id = v["id"].as_str()?;
+    if !crate::group_keys::same_origin(uri, base.as_str())
+        || !crate::group_keys::same_origin(uri, id)
+    {
+        return None;
+    }
     let mut d = ResourceMeta::new(uri, "activitypub", ttl);
+    d.aliases.push(id.into());
+    if matches!(kind, "SocialMediaPosting" | "Article") {
+        d.ttl_secs = ttl.min(3600);
+        let public = "https://www.w3.org/ns/activitystreams#Public";
+        if (v.get("to").is_some() || v.get("cc").is_some())
+            && !(v["to"] == public
+                || v["to"]
+                    .as_array()
+                    .is_some_and(|a| a.iter().any(|x| x == public)))
+        {
+            d.name = Some(base.host_str().unwrap_or("ActivityPub object").into());
+            d.description = Some(String::new());
+            return Some(d);
+        }
+    }
     d.set_type(kind);
     d.name = text(v.get("name")).or_else(|| text(v.get("preferredUsername")));
     d.description = text(v.get("summary"))
         .or_else(|| text(v.get("content")))
         .map(|s| plain(&s));
+    if matches!(kind, "SocialMediaPosting" | "Article") {
+        d.description = d.description.map(|s| s.chars().take(200).collect());
+    }
     if d.name.is_none() {
         d.name = d
             .description
@@ -644,7 +677,9 @@ pub async fn enrich(
     let ap = ap.or_else(|| {
         crate::event::service::header_alternate(f.validators.link.as_deref(), &f.url).map(|v| v.0)
     });
-    if let Some(url) = ap.filter(|_| cfg.activitypub.enabled) {
+    if let Some(url) =
+        ap.filter(|url| cfg.activitypub.enabled && crate::group_keys::same_origin(uri, url))
+    {
         if let Ok(Ok(f)) = tokio::time::timeout(
             Duration::from_secs(2),
             egress.discover(
@@ -815,4 +850,107 @@ fn podcast_body(
             .and_then(|n| field(n, "title"));
     }
     Ok(Some(d.bounded(web::ATTRIBUTES)?))
+}
+
+pub fn invalid_identifier(uri: &str) -> bool {
+    (uri.starts_with("isbn:") && isbn(uri).is_none())
+        || (uri.starts_with("doi:") && doi(uri).is_none())
+}
+fn csl_date(v: &Value) -> Option<String> {
+    let parts = v.pointer("/issued/date-parts/0")?.as_array()?;
+    let year = i32::try_from(parts.first()?.as_i64()?).ok()?;
+    let month = u32::try_from(parts.get(1).and_then(Value::as_u64).unwrap_or(1)).ok()?;
+    let day = u32::try_from(parts.get(2).and_then(Value::as_u64).unwrap_or(1)).ok()?;
+    let date = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
+    Some(
+        date.format(match parts.len() {
+            1 => "%Y",
+            2 => "%Y-%m",
+            _ => "%Y-%m-%d",
+        })
+        .to_string(),
+    )
+}
+pub fn social(doc: &ResourceMeta) -> bool {
+    matches!(doc.source.as_str(), "nostr" | "activitypub")
+        && matches!(
+            doc.type_name.as_str(),
+            "SocialMediaPosting" | "Article" | "CreativeWork"
+        )
+}
+impl CardResolver {
+    async fn media(&self, uri: &str, ttl: u64) -> Result<ResourceMeta> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(9);
+        let mut embed = None;
+        if let Some(endpoint) = provider_endpoint(uri) {
+            if let Ok(Ok(f)) = tokio::time::timeout(
+                Duration::from_secs(3),
+                self.web
+                    .egress
+                    .discover(endpoint.as_str(), &Default::default(), ttl),
+            )
+            .await
+            {
+                if f.status == 200 {
+                    if let Ok(v) = serde_json::from_slice::<Value>(&f.body) {
+                        let mut d = ResourceMeta::new(uri, "web", ttl);
+                        web::apply_oembed(&mut d, &v, &f.url);
+                        if d.name.is_some() {
+                            d.source = "media".into();
+                            media_type(&mut d, uri);
+                            embed = Some((d, v, f.url));
+                        }
+                    }
+                }
+            }
+        }
+        match tokio::time::timeout_at(deadline, self.web.resolve(uri)).await {
+            Ok(Ok(mut page))
+                if page.status == Status::Ok
+                    && !page.event.warnings.iter().any(|w| w == "truncated") =>
+            {
+                if let Some((_, v, base)) = embed {
+                    web::apply_oembed(&mut page, &v, &base);
+                }
+                media_type(&mut page, uri);
+                page.bounded(web::ATTRIBUTES)
+            }
+            result => {
+                if let Some((mut d, _, _)) = embed {
+                    if let Ok(Ok(page)) = &result {
+                        d.event.warnings.extend(page.event.warnings.iter().cloned());
+                    }
+                    return d.bounded(web::ATTRIBUTES);
+                }
+                match result {
+                    Ok(result) => result,
+                    Err(_) => Err(super::RetryLater {
+                        class: "timeout",
+                        seconds: 60,
+                    }
+                    .into()),
+                }
+            }
+        }
+    }
+}
+fn media_type(d: &mut ResourceMeta, uri: &str) {
+    if !matches!(d.type_name.as_str(), "WebPage" | "CreativeWork") {
+        return;
+    }
+    let host = Url::parse(uri)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned));
+    let kind = match host.as_deref() {
+        Some("open.spotify.com") => Some("MusicRecording"),
+        Some("soundcloud.com" | "www.soundcloud.com") => Some("AudioObject"),
+        Some("youtube.com" | "www.youtube.com" | "youtu.be" | "vimeo.com" | "www.vimeo.com") => {
+            Some("VideoObject")
+        }
+        _ => None,
+    };
+    if let Some(kind) = kind {
+        d.set_type(kind);
+        d.source = "media".into();
+    }
 }

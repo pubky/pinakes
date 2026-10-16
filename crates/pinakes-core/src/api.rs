@@ -267,7 +267,14 @@ pub struct SearchQuery {
     pub cluster: Option<String>,
     /// Resource ID of the accepted event venue; filters event units.
     pub venue: Option<String>,
+    /// Return one row per verified or curated group; standalone resources remain separate.
+    #[param(value_type = Option<CollapseMode>)]
     pub collapse: Option<String>,
+}
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CollapseMode {
+    Group,
 }
 #[derive(Deserialize, Serialize)]
 struct PageCursor {
@@ -696,7 +703,7 @@ pub async fn search(
     if let Some(resolution) = spatial.resolution {
         sql.push("), cells AS (SELECT *, h3_latlng_to_cell(point(ST_X(point),ST_Y(point)),")
             .push_bind(i32::from(u8::from(resolution)))
-            .push(")::text AS cell FROM filtered), groups AS (SELECT cell,count(*) AS count,avg(ST_Y(point)) AS lat,degrees(atan2(avg(sin(radians(ST_X(point)))),avg(cos(radians(ST_X(point)))))) AS lon,ARRAY(SELECT id FROM (SELECT DISTINCT ON (id) id,rank,unit_id FROM cells t WHERE t.cell=cells.cell ORDER BY id,rank DESC,unit_id DESC) unique_ids ORDER BY rank DESC,unit_id DESC LIMIT 3) AS top,max(rank) AS rank,CASE WHEN bool_or(osm_id IS NOT NULL OR doc->>'attribution' IS NOT NULL) THEN ")
+            .push(")::text AS cell FROM filtered WHERE point IS NOT NULL), groups AS (SELECT cell,count(*) AS count,avg(ST_Y(point)) AS lat,degrees(atan2(avg(sin(radians(ST_X(point)))),avg(cos(radians(ST_X(point)))))) AS lon,ARRAY(SELECT id FROM (SELECT DISTINCT ON (id) id,rank,unit_id FROM cells t WHERE t.cell=cells.cell ORDER BY id,rank DESC,unit_id DESC) unique_ids ORDER BY rank DESC,unit_id DESC LIMIT 3) AS top,max(rank) AS rank,CASE WHEN bool_or(osm_id IS NOT NULL OR doc->>'attribution' IS NOT NULL) THEN ")
             .push_bind(crate::resolver::osm::ATTRIBUTION)
             .push(" ELSE NULL END AS attribution FROM cells GROUP BY cell LIMIT ")
             .push_bind((state.config.search.max_cluster_cells+1) as i64)
@@ -706,7 +713,11 @@ pub async fn search(
             .push_bind(q.limit.unwrap_or(50) as i64)
             .push("), page AS (SELECT * FROM entries ORDER BY rank DESC,unit_id DESC LIMIT ")
             .push_bind((q.limit.unwrap_or(50)+1) as i64)
-            .push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p) ORDER BY rank DESC,unit_id DESC) FROM page p),'[]') AS items, (SELECT count(*) FROM filtered) AS total, (SELECT count(*) FROM groups) AS cell_count, ");
+            .push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p)");
+        if q.collapse.is_some() {
+            sql.push(" || CASE WHEN p.kind='point' THEN jsonb_build_object('item',p.item||jsonb_build_object('group',group_card(p.unit_id))) ELSE '{}'::jsonb END");
+        }
+        sql.push(" ORDER BY rank DESC,unit_id DESC) FROM page p),'[]') AS items, (SELECT count(*) FROM filtered) AS total, (SELECT count(*) FROM groups) AS cell_count, ");
     } else {
         sql.push("), page AS (SELECT * FROM filtered");
         if let Some(c) = &cursor {
@@ -716,14 +727,20 @@ pub async fn search(
                 .push_bind(c.id.clone())
                 .push(")");
         }
-        sql.push(" ORDER BY rank DESC,unit_id DESC LIMIT ").push_bind((q.limit.unwrap_or(50)+1) as i64).push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p) ORDER BY rank DESC,unit_id DESC) FROM page p),'[]') AS items, ");
+        sql.push(" ORDER BY rank DESC,unit_id DESC LIMIT ")
+            .push_bind((q.limit.unwrap_or(50) + 1) as i64)
+            .push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p)");
+        if q.collapse.is_some() {
+            sql.push(" || jsonb_build_object('group',group_card(p.unit_id))");
+        }
+        sql.push(" ORDER BY rank DESC,unit_id DESC) FROM page p),'[]') AS items, ");
     }
     if q.facet.as_deref() == Some("tags") {
-        sql.push("coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY count DESC,label) FROM (SELECT f.label,count(DISTINCT r.unit_id) AS count FROM effective_reference f JOIN filtered r ON ");
+        sql.push("coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY count DESC,label) FROM (SELECT f.label,count(DISTINCT r.unit_id) AS count FROM ");
         if q.collapse.is_some() {
-            sql.push("(r.id=f.resource_id OR EXISTS(SELECT 1 FROM group_unit u WHERE u.group_id=r.unit_id AND u.resource_id=f.resource_id))");
+            sql.push("(SELECT r.unit_id,u.resource_id FROM filtered r JOIN group_unit u ON u.group_id=r.unit_id UNION ALL SELECT r.unit_id,r.id AS resource_id FROM filtered r WHERE NOT EXISTS(SELECT 1 FROM \"group\" g WHERE g.id=r.unit_id)) r JOIN effective_reference f ON f.resource_id=r.resource_id");
         } else {
-            sql.push("r.id=f.resource_id");
+            sql.push("filtered r JOIN effective_reference f ON r.id=f.resource_id");
         }
         sql.push(" WHERE f.label IS NOT NULL");
 
@@ -853,7 +870,7 @@ async fn read(
     groups: bool,
 ) -> Result<Option<ResourceView>, ApiError> {
     let value: Option<Value> =
-        sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_card(u.group_id) END) FROM resource_document r LEFT JOIN group_unit u ON u.unit_id=r.id WHERE r.id=$1")
+        sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_card(u.group_id)||jsonb_build_object('name',r.name,'image',r.doc->>'image') END) FROM resource_document r LEFT JOIN group_unit u ON u.unit_id=r.id WHERE r.id=$1")
             .bind(id)
             .bind(groups)
             .fetch_optional(pool)
@@ -907,7 +924,7 @@ pub async fn lookup(
     }
     store::expedite(&state.pool, &ids).await?;
     state.wake.notify_waiters();
-    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_card(u.group_id) END) FROM unnest($1::text[]) WITH ORDINALITY AS wanted(id,n) JOIN resource_document r ON r.id=wanted.id LEFT JOIN group_unit u ON u.unit_id=r.id ORDER BY wanted.n").bind(ids).bind(state.config.queue.groups.enabled).fetch_all(&state.pool).await?;
+    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_card(u.group_id)||jsonb_build_object('name',r.name,'image',r.doc->>'image') END) FROM unnest($1::text[]) WITH ORDINALITY AS wanted(id,n) JOIN resource_document r ON r.id=wanted.id LEFT JOIN group_unit u ON u.unit_id=r.id ORDER BY wanted.n").bind(ids).bind(state.config.queue.groups.enabled).fetch_all(&state.pool).await?;
     Ok(Json(
         rows.iter()
             .map(|r| view(r, fields.fields.unwrap_or(Fields::Facets), false))
@@ -1048,6 +1065,7 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
     ),
     components(schemas(
         ResourceMeta,
+        CollapseMode,
         crate::event::storage::OccurrencePage,
         crate::event::storage::OccurrenceRecord,
         crate::event::storage::OccurrenceRef,
@@ -1187,7 +1205,43 @@ pub fn admin_router(state: AppState) -> Router {
         .route("/v1/groups/{id}", axum::routing::put(curate_group))
         .route("/metrics", get(metrics))
         .route("/v1/info", get(admin_info))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            admin_auth,
+        ))
         .with_state(state)
+}
+async fn admin_auth(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if let Some(expected) = &state.config.admin_token {
+        let supplied = request
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "));
+        let valid = supplied.is_some_and(|supplied| {
+            // Compare fixed-size MACs with RustCrypto's constant-time verifier, including wrong-length credentials.
+            let mut wanted = SimpleHmac::<blake3::Hasher>::new_from_slice(expected.as_bytes())
+                .expect("HMAC accepts any key length");
+            wanted.update(b"pinakes admin bearer credential");
+            let mut got = SimpleHmac::<blake3::Hasher>::new_from_slice(supplied.as_bytes())
+                .expect("HMAC accepts any key length");
+            got.update(b"pinakes admin bearer credential");
+            wanted.verify_slice(&got.finalize().into_bytes()).is_ok()
+        });
+        if !valid {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, "Bearer")],
+                "admin credential required",
+            )
+                .into_response();
+        }
+    }
+    next.run(request).await
 }
 #[utoipa::path(get,path="/metrics",responses((status=200,content_type="text/plain; version=0.0.4",body=String)),description="Separate admin listener only; URL is controlled by admin_listen.")]
 async fn metrics(State(state): State<AppState>) -> Result<Response, ApiError> {
@@ -1229,6 +1283,13 @@ pub async fn curate_group(
         .map(Json)
         .map_err(|e| {
             tracing::warn!(error=%e,"group curation failed");
-            ApiError::bad("invalid group curation")
+            if e.downcast_ref::<sqlx::Error>().is_some() {
+                ApiError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "group curation unavailable".into(),
+                )
+            } else {
+                ApiError::bad("invalid group curation")
+            }
         })
 }

@@ -78,7 +78,7 @@ impl EventService {
     /// An established feed becoming HTML or missing is an empty snapshot, subject to the
     /// same two-observation confirmation as missing keys. Transport/parse errors do not qualify.
     pub async fn disappeared(&self, uri: &str, status: u16) -> Result<Option<ResourceMeta>> {
-        if !self.config.calendars || !matches!(status, 200 | 404 | 410) {
+        if !self.config.calendars || !matches!(status, 200 | 404 | 410 | 451) {
             return Ok(None);
         }
         let horizon: Option<StoredHorizon> =
@@ -185,7 +185,7 @@ impl EventService {
         &self,
         uri: &str,
         fetched: &Fetched,
-        card: ResourceMeta,
+        mut card: ResourceMeta,
         egress: &Egress,
         deadline: tokio::time::Instant,
     ) -> Result<ResourceMeta> {
@@ -396,31 +396,34 @@ impl EventService {
             opts.feed_cap = opts.feed_hint.then_some(self.config.feed_body_bytes);
             opts.user_agent = Some(super::adapters::profile(&manifest.ua_profile).into());
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let response = tokio::time::timeout(
-                remaining.min(Duration::from_secs(2)),
-                super::adapters::service::discover_enrichment(
+            let enrichment = tokio::time::timeout(remaining.min(Duration::from_secs(2)), async {
+                let response = super::adapters::service::discover_enrichment(
                     egress,
                     &target,
                     &opts,
                     manifest.cadence_floor,
                     d,
-                ),
-            )
-            .await
-            .map_err(|_| crate::resolver::RetryLater {
-                class: "timeout",
-                seconds: 60,
-            })??;
-            if response.status == 200 {
+                )
+                .await?;
+                anyhow::ensure!(response.status == 200, "optional platform unavailable");
                 let config = super::adapters::configured_event(&self.config, d);
-                if let Some(extra) =
-                    super::adapters::service::enrichment_blocking(uri, d, &response, &config)
-                        .await?
-                {
+                super::adapters::service::enrichment_blocking(uri, d, &response, &config).await
+            })
+            .await;
+            // HTML detection on an unregistered host is only a hint. An unrelated
+            // API, policy denial or parse error must not veto the page's own facts.
+            match enrichment {
+                Ok(Ok(Some(extra))) => {
                     if extra.type_path.contains(&"Event".into()) {
                         event.set_type("Event");
                         page::merge_missing(&mut event, &extra)?;
                     }
+                }
+                Ok(Ok(None)) => {}
+                _ => {
+                    crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
+                    card.event.warnings.push("enrichment_unavailable".into());
+                    event.event.warnings.push("enrichment_unavailable".into());
                 }
             }
         }

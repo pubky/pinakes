@@ -8,6 +8,9 @@ pub struct GroupKey {
     pub key: String,
     pub basis: String,
     pub confidence: f64,
+    /// Destination registrable domain; the key retains the target identity. Never a fetch instruction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
 }
 pub fn add(doc: &mut ResourceMeta, basis: &str, value: &str) {
     let value = value.trim();
@@ -27,6 +30,7 @@ pub fn add(doc: &mut ResourceMeta, basis: &str, value: &str) {
         "same_as" | "canonical" => ("url", 0.8),
         _ => return,
     };
+    let target = (kind == "url").then(|| origin(value)).flatten();
     let value = if kind == "url" {
         let Ok((id, _, scheme)) = identity(value) else {
             return;
@@ -92,11 +96,16 @@ pub fn add(doc: &mut ResourceMeta, basis: &str, value: &str) {
         return;
     }
     let key = format!("{kind}:{value}");
-    if doc.group_keys.len() < 16 && !doc.group_keys.iter().any(|k| k.key == key) {
+    if let Some(existing) = doc.group_keys.iter_mut().find(|k| k.key == key) {
+        if existing.target.is_none() {
+            existing.target = target;
+        }
+    } else if doc.group_keys.len() < 16 {
         doc.group_keys.push(GroupKey {
             key,
             basis: basis.into(),
             confidence,
+            target,
         });
     }
 }
@@ -112,7 +121,18 @@ pub fn url_keys(doc: &mut ResourceMeta, url: &str) {
             "wikidata.org" | "www.wikidata.org" => add(doc, "wikidata", last),
             "imdb.com" | "www.imdb.com" => add(doc, "imdb", last),
             "musicbrainz.org" => add(doc, "musicbrainz", u.path()),
-            "themoviedb.org" | "www.themoviedb.org" => add(doc, "tmdb", u.path()),
+            "themoviedb.org" | "www.themoviedb.org" => {
+                let mut parts = u.path().trim_matches('/').split('/');
+                if let (Some(kind), Some(id)) = (parts.next(), parts.next()) {
+                    let id = id.split('-').next().unwrap_or("");
+                    if matches!(kind, "movie" | "tv")
+                        && !id.is_empty()
+                        && id.bytes().all(|c| c.is_ascii_digit())
+                    {
+                        add(doc, "tmdb", &format!("{kind}/{id}"));
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -162,4 +182,22 @@ pub fn jsonld(doc: &mut ResourceMeta, v: &Value, base: &url::Url) {
             }
         }
     }
+}
+
+/// The PSL includes private suffixes (e.g. separate hosted-blog tenants).
+pub fn origin(uri: &str) -> Option<String> {
+    let u = url::Url::parse(uri).ok()?;
+    if !matches!(u.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = u.host_str()?;
+    // WordPress tenants are independent publishers although this provider does not
+    // register its hosting boundary in the PSL.
+    if host.ends_with(".wordpress.com") {
+        return Some(host.to_ascii_lowercase());
+    }
+    Some(psl::domain_str(host).unwrap_or(host).to_ascii_lowercase())
+}
+pub fn same_origin(a: &str, b: &str) -> bool {
+    origin(a).zip(origin(b)).is_some_and(|(a, b)| a == b)
 }

@@ -1,8 +1,8 @@
 # End-to-end checks
 
 The harness builds tags with `pubky-app-specs` and, in live mode, writes them with
-`@synonymdev/pubky`. Nine samples cover an OSM node, geo pin, event page, recurring
-ICS feed, NIP-52 naddr, DOI, ISBN, oEmbed video and ordinary web page. It checks the
+`@synonymdev/pubky`. Nine samples cover an OSM node, geo pin, event page,
+ICS feed (the mock exercises recurrence), NIP-52 naddr, DOI, ISBN, oEmbed video and ordinary web page. It checks the
 Nexus reference feed, Pinakes typed documents, facets, bbox/Event/venue search,
 occurrences, changes, group membership and Nexus `by_ids` hydration, then deletes
 its tags and waits for both indexes to remove their references.
@@ -23,7 +23,9 @@ Mock mode runs the same JavaScript assertions and real tag builder. A local Rust
 stack runs the actual migrations, ingestion, resolver queue, parsers, storage,
 groups and API; only homeserver storage, Nexus and external HTTP boundaries use
 fixtures. No identity secret or public-network access is needed after dependencies
-are installed. The fixture venue test requires a positive match.
+are installed. The fixture venue test requires a positive match. An additional ISBN-10 tag pairs
+with the ISBN-13 sample to prove a real asynchronous merge. Injected transports
+disable direct relay sockets; unknown fixture DNS names resolve to TEST-NET.
 
 Both `--mock` and `--isolated-live` create a unique `pinakes_e2e_owned_*` database
 through `DATABASE_URL` (default `postgresql:///postgres?host=/var/run/postgresql`).
@@ -49,9 +51,9 @@ Canaries and unrelated backlog fetching are off. Use this mode for a scoped live
 smoke test. Run `scripts/e2e` without a mode to use an already configured dev stack
 at `PINAKES_E2E_PINAKES` (default `http://127.0.0.1:8090`).
 
-An existing identity must already have `/pub/pubky.app/profile.json`. It is never
-overwritten. A new identity needs the signup token and gets a minimal profile
-before tags are written. The secret is read only from the named file, never logged.
+The harness creates a minimal `/pub/pubky.app/profile.json` only when missing,
+including on an existing identity; an existing profile is never overwritten. A new
+identity needs the signup token. Signup/sign-in failures are redacted. The secret is read only from the named file, never logged.
 Do not commit secrets, session state or invite tokens. SDK sessions are signed out
 at the end. The development identity supplied for this task needs no signup.
 
@@ -64,9 +66,14 @@ If the process is killed or cleanup fails, use the printed journal with the same
 identity to delete only its listed paths; do not clear the whole namespace.
 
 `PINAKES_E2E_SAMPLES` may select a JSON file with the same nine kinds as
-`samples.live.json`; update stale public samples explicitly. `PINAKES_E2E_TIMEOUT_MS`
-sets the per-stage polling deadline (default 120,000 ms). Network errors and missing
-samples fail the report; live mode never substitutes fixture data. A live event
-without an accepted OSM venue may produce zero `venue=` matches; positive venue
-matching is asserted by the mock run. Reports contain public IDs/URIs and cleanup
+`samples.live.json`; update stale public samples explicitly. The ICS default is
+Google’s published Swiss holiday calendar, public by design with no capability
+token. `PINAKES_E2E_ICS_URL` optionally selects another public feed; never commit
+Outlook/iCloud/Nextcloud/Proton share URLs or capability tokens.
+`PINAKES_E2E_TIMEOUT_MS`
+sets the per-stage polling deadline (default 120,000 ms). Terminal missing/error/
+unreachable samples fail immediately; live mode never substitutes fixture data. A live event
+with an accepted venue must produce a positive `venue=` match; an unresolved venue
+may produce zero matches. Facet counts, each bbox/window row, fixture recurrence
+count and created-change classes are checked. Collapse waits for reconciliation. Reports contain public IDs/URIs and cleanup
 paths, never the secret. Journals stay under ignored `.runtime/` with mode 0600.

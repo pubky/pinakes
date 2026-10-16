@@ -275,7 +275,10 @@ pub fn last_fetch() -> Option<usize> {
         .flatten()
 }
 pub fn document(index: Option<usize>, manifest: &Manifest, doc: &ResourceMeta) {
-    if doc.status == Status::Ok && !manifest.missing_fields(doc).is_empty() {
+    if doc.status == Status::Ok
+        && (!manifest.missing_fields(doc).is_empty()
+            || doc.event.warnings.iter().any(|w| w == "truncated"))
+    {
         let _ = FETCHES.try_with(|v| {
             let mut records = v.lock().unwrap();
             if let Some(observation) = index.and_then(|i| records.get_mut(i)) {

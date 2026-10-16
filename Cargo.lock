@@ -2651,6 +2651,7 @@ dependencies = [
  "percent-encoding",
  "pkarr",
  "prometheus",
+ "psl",
  "pubky",
  "pubky-resource-id",
  "reqwest 0.12.28",
@@ -2934,6 +2935,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e36c2f31e0a47f9280fb347ef5e461ffcd2c52dd520d8e216b52f93b0b0d7d6"
 dependencies = [
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "psl"
+version = "2.1.241"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7319b480e204d67e759cad7886178335d26324c7c8573c126cc9dfa7350d064"
+dependencies = [
+ "psl-types",
 ]
 
 [[package]]

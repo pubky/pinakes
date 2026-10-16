@@ -148,7 +148,8 @@ A database advisory lock permits one daemon per database. Resolver, host, author
 reach-cache and IP budgets are process-local; the lock keeps their guarantees intact.
 Web connections bypass environment proxies, validate all DNS answers, pin checked
 addresses, and repeat policy checks at every redirect. Host rules never override IP
-blocks. The 1 MB cap applies to decoded body bytes. Discovery permits one additional
+blocks. The 1 MB HTML cap applies to decoded body bytes; oversized pages retain
+head metadata with `truncated` rather than failing. Discovery permits one additional
 oEmbed JSON fetch within the original ten-second resolution deadline. It cannot
 replace an already extracted field. Images remain origin URLs.
 
@@ -226,7 +227,11 @@ default; sequence allocation is serialized with commits so a reader cannot skip
 a lower uncommitted sequence. OSM history remains inside `osm_place.versions`;
 change records reference those versions, and reads join them with attribution.
 
-Prometheus is served **only** on `admin_listen` (`127.0.0.1:9090` by default):
+Prometheus is served **only** on `admin_listen` (`127.0.0.1:9090` by default).
+Set `PINAKES__ADMIN_TOKEN` (or `admin_token`) to require `Authorization: Bearer <token>`
+on every admin route, including metrics and group curation. A non-loopback bind
+without a token is refused at startup; terminate TLS at a trusted reverse proxy.
+Loopback without a token retains the local development workflow:
 
 ```sh
 curl http://127.0.0.1:9090/metrics
@@ -432,7 +437,14 @@ BTC Map cursors never advance beyond the local fetch time, even when an upstream
 Only parser failures trigger the platform web-card fallback. Upstream failures, including
 cached discovery failures, retain the accepted document and retry. Optional venue geocoding
 records `venue_unavailable` and keeps the event; accepted venue data is preserved.
-Denied secondary requests and GraphQL failures defer. A refresh cannot replace an
+Registry-listed secondary denials and GraphQL failures defer; after three consecutive
+days they become `unreachable` and use normal backoff without a dead letter. The
+durable denial counter resets on another outcome. HTTP 451 follows confirmed
+disappearance. Self-hosted platform hints are optional: failed enrichment records
+`enrichment_unavailable`/drift and keeps the page facts. Cursor 401/403/404/451
+responses use two-observation disappearance; other non-transient unexpected statuses
+retry hourly and share the denial escalation. Malformed cursor rows are skipped with
+`invalid_cursor_row`/drift; that snapshot cannot imply omitted-member deletion. A refresh cannot replace an
 accepted dated Event with a start-less card: it retains the event, records drift and
 retries. Direct Wikidata 404/410 follow two-observation disappearance; a missing
 entity does not remove a live Wikipedia article. Nostr reserves relay time inside the queue budget and
@@ -451,22 +463,43 @@ RSS scan limits and switches are in `pinakes.example.toml`; public requests reta
 the shared DNS, body, redirect and host policies. The pinned 390-provider oEmbed
 registry and its license are under `data/`. Metadata includes schema.org video,
 audio, music, podcast and image cards. Images keep their origin URLs; media and
-embed HTML are never re-hosted.
+embed HTML are never re-hosted. Registry oEmbed runs first, then healthy page JSON-LD
+remains authoritative and oEmbed fills gaps. A failed or >1 MB HTML page still gets
+the successful oEmbed card; other oversized pages retain their bounded head metadata
+with a `truncated` warning and drift. Feed caps remain strict. Podcast types require
+a podcast namespace or a selected audio/video enclosure; ordinary RSS is a DataFeed.
+ActivityPub alternates and object IDs must share the page’s registrable domain.
+Social notes retain at most 200 characters, refresh within an hour, and purge history
+on disappearance; explicitly unlisted posts retain no post content.
 
-Groups connect immutable resource or occurrence identities using extracted keys.
-`collapse=group` filters members then ranks and pages precomputed groups, with
-distinct taggers and best-member facets. Dated keys include start time, preserving
-recurrence dates even when they share a UID or page URL. Automatic merges refuse
-point disagreements over 500 m by default; a bounded admin curation route can
-explicitly join or split membership. `GET /v1/groups/{id}` and a resource's `group`
-provide the member list for Nexus hydration. See [the API contract](docs/api.md).
+Groups connect immutable resource or occurrence identities using corroborated keys.
+URL claims bridge only within a registrable domain or with a reciprocal backlink.
+Cross-domain typed identifiers require verified evidence from both members or
+reciprocity; unverified self-claims do not merge. The PSL and hosted-blog tenant
+boundaries separate independent publishers. `collapse=group` filters members, then
+ranks and pages groups with distinct taggers and preselected best-member facets.
+Only ICS UID keys include exact start time; occurrence groups also reject instance
+starts more than five minutes apart. Ordinary event pages can differ by seconds.
+Automatic merges refuse point disagreements over 500 m. Singletons stay individual.
+Resource reads keep their own name/image; OSM-derived group cards include attribution.
+`GET /v1/groups/{id}` provides the member list for Nexus hydration. Admin curation
+exclusively pins a member set and can override automatic rules; removing a pin allows
+automatic regrouping. See [the API contract](docs/api.md).
 
-Migration 0015 creates grouping tables/views and queues existing resources for a
-bounded background grouping pass. It preserves IDs, references, failed-job state
-and historical migrations. The `queue.groups` limits bound members and affected
-key metadata; `enabled=false` stops grouping and hides group APIs without deleting
-stored evidence. Names, coordinates and images remain in the original document
-views; OSM facts stay in `osm_place`.
+Migrations 0017–0019 harden the 0015 grouping upgrade, preserve IDs/references and
+retain all published migrations. Old unverified automatic groups are cleared for a
+bounded backfill; curated groups survive. Group reconciliation runs after document
+commit, parks failures with its own backoff and continues the dirty queue. Evidence
+fingerprints avoid rewriting unchanged keys; graph work precedes the short revision
+fence. FIFO admission and `max_members_per_origin` preserve existing members under
+key floods. The `queue.groups` limits bound graph size and key metadata. Group cards
+are built only for returned page rows; facets use equality joins.
+
+Migration 0018 revives failed identifier/common-media routes introduced by 0015,
+staggering retries within an hour. Future resolver changes clear failures from the
+previous worker once, using stored error provenance; unrelated dead letters remain.
+`queue.groups.enabled=false` hides group APIs and stops reconciliation without
+deleting evidence. OSM facts remain in `osm_place`.
 
 Run `scripts/e2e --mock` for the fixture flow or `scripts/e2e --isolated-live` for a
 scoped real SDK run. Both use an owned temporary database; the live driver resolves

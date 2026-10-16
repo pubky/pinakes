@@ -295,6 +295,7 @@ impl Transport for SecondaryFailure {
     async fn get(&self, u: &url::Url, _: &[SocketAddr]) -> anyhow::Result<Fetched> {
         let secondary = u.path().starts_with("/api/") || u.host_str() == Some("api.lu.ma");
         Ok(Fetched {
+            truncated: false,
             url: u.clone(),
             status: if secondary { self.0 } else { 200 },
             content_type: "text/html".into(),
@@ -327,7 +328,7 @@ async fn round4_secondary_denial_or_miss_never_erases_event_start(pool: PgPool) 
             .fetch_one(&pool)
             .await
             .unwrap();
-        for status in [401, 403, 451, 400, 404] {
+        for status in [401, 403, 400, 404] {
             let r = platform(
                 &pool,
                 EventConfig {
@@ -341,7 +342,7 @@ async fn round4_secondary_denial_or_miss_never_erases_event_start(pool: PgPool) 
                     Arc::new(SecondaryFailure(status)),
                 ),
             );
-            if matches!(status, 401 | 403 | 451) {
+            if uri.starts_with("https://luma.com/") && matches!(status, 401 | 403) {
                 assert!(r
                     .resolve(uri)
                     .await
@@ -401,6 +402,7 @@ impl Transport for WikiFailure {
             anyhow::bail!("fixture transport failure");
         }
         Ok(Fetched {
+            truncated: false,
             url: u.clone(),
             status: if entity { self.failure } else { 200 },
             content_type: "text/html".into(),
@@ -1497,6 +1499,7 @@ impl Transport for Replies {
             .pop_front()
             .expect("unexpected HTTP request");
         Ok(Fetched {
+            truncated: false,
             url: url.clone(),
             validators: Default::default(),
             content_type: "application/json".into(),
@@ -1906,6 +1909,7 @@ fn own_calendar_links_and_deterministic_platform_endpoints() {
         );
     }
     let f = Fetched {
+        truncated: false,
         url: base,
         validators: Default::default(),
         content_type: "text/html".into(),
@@ -2099,6 +2103,7 @@ fn all_page_and_calendar_adapters_parse_their_public_contracts() {
     {
         let bytes=b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:contract\r\nDTSTART;TZID=Europe/Zurich:20261020T190000\r\nDTEND;TZID=Europe/Zurich:20261020T210000\r\nSUMMARY:Contract fixture\r\nSTATUS:CANCELLED\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
         let f = Fetched {
+            truncated: false,
             url: uri.parse().unwrap(),
             validators: Default::default(),
             content_type: "text/calendar".into(),
@@ -2298,6 +2303,7 @@ async fn recorded_public_adapter_responses_replay_without_network(pool: PgPool) 
                 r["sha256"].as_str().unwrap()
             );
             Ok(Fetched {
+                truncated: false,
                 url: uri.parse().unwrap(),
                 status: r["status"].as_u64().unwrap_or(200) as u16,
                 content_type: r["content_type"].as_str().unwrap_or("text/html").into(),
@@ -2876,6 +2882,7 @@ fn recorded_egress(rows: Vec<(&str, &str, Value)>) -> Egress {
                     }
                 ),
                 Ok(Fetched {
+                    truncated: false,
                     url: uri.parse().unwrap(),
                     body: body.as_bytes().to_vec(),
                     content_type: if body.starts_with('<') {
@@ -3265,4 +3272,239 @@ async fn review_luma_calendar_discovery_and_non_calendar_client_url(pool: PgPool
     let doc = platform(&pool, cfg, egress).resolve(uri).await.unwrap();
     assert_eq!(doc.type_name, "DataFeed");
     assert_eq!(doc.container.unwrap().occurrences.len(), 1);
+}
+
+struct HintedGraphql;
+#[async_trait::async_trait]
+impl Transport for HintedGraphql {
+    async fn get(&self, u: &url::Url, _: &[SocketAddr]) -> anyhow::Result<Fetched> {
+        let api = u.path() == "/api";
+        Ok(Fetched {
+            truncated: false,
+            url: u.clone(),
+            status: 200,
+            content_type: if api { "application/json" } else { "text/html" }.into(),
+            body: if api {
+                br#"{"errors":[{"message":"not that GraphQL API"}]}"#.to_vec()
+            } else {
+                b"<title>A page about mobilizon</title>".to_vec()
+            },
+            validators: Default::default(),
+            location: None,
+            retry_after_secs: 60,
+        })
+    }
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn review_unregistered_platform_hint_cannot_veto_page(pool: PgPool) {
+    use pinakes_core::{queue, resolver::Resolver};
+    let uri = "https://generic.example/events/86a665ae-e495-4e4f-88d4-4cffd44a82f1";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let r = platform(
+        &pool,
+        EventConfig {
+            activitypub: false,
+            geocoding: false,
+            ..Default::default()
+        },
+        Egress::with_backends(
+            Default::default(),
+            Arc::new(AdapterDns),
+            Arc::new(HintedGraphql),
+        ),
+    );
+    let doc = r.resolve(uri).await.unwrap();
+    assert_eq!(doc.name.as_deref(), Some("A page about mobilizon"));
+    assert!(doc
+        .event
+        .warnings
+        .iter()
+        .any(|w| w == "enrichment_unavailable"));
+    queue::run_job(
+        &pool,
+        &r,
+        &Default::default(),
+        &queue::Job {
+            id: id.clone(),
+            uri: uri.into(),
+            attempts: 0,
+            generation: 0,
+        },
+    )
+    .await
+    .unwrap();
+    let state: (String, i32, bool) =
+        sqlx::query_as("SELECT status,attempts,dead_letter FROM resource WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, ("ok".into(), 0, false));
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn review_registered_secondary_451_confirms_disappearance(pool: PgPool) {
+    use pinakes_core::resolver::Resolver;
+    let uri = "https://luma.com/event-removed";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut doc = ResourceMeta::new(uri, "luma", 3600);
+    doc.set_type("Event");
+    doc.start = Some(Utc::now() + Duration::days(1));
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let r = platform(
+        &pool,
+        EventConfig {
+            activitypub: false,
+            geocoding: false,
+            ..Default::default()
+        },
+        Egress::with_backends(
+            Default::default(),
+            Arc::new(AdapterDns),
+            Arc::new(SecondaryFailure(451)),
+        ),
+    );
+    for n in 1..=2 {
+        let mut missing = r.resolve(uri).await.unwrap();
+        assert_eq!(missing.status, pinakes_core::model::Status::Missing);
+        missing.fetched_at += n * 1000;
+        store::save_document(&pool, &id, 0, &missing).await.unwrap();
+        let state: (String, i32, bool) =
+            sqlx::query_as("SELECT status,missing_streak,dead_letter FROM resource WHERE id=$1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            state,
+            (
+                if n == 1 { "ok" } else { "missing" }.into(),
+                n as i32,
+                false
+            )
+        );
+    }
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn review_cursor_privacy_is_confirmed_and_bad_requests_back_off(pool: PgPool) {
+    let mut cfg = EventConfig {
+        geocoding: false,
+        ..Default::default()
+    };
+    cfg.adapters.platforms.insert(
+        "google_calendar_api".into(),
+        adapters::Options {
+            key: Some("fixture".into()),
+            ..Default::default()
+        },
+    );
+    for (uri, source) in [
+        (
+            "https://portal.einundzwanzig.space/api/changes",
+            "einundzwanzig",
+        ),
+        ("https://api.btcmap.org/v4/events", "btcmap"),
+        (
+            "https://www.googleapis.com/calendar/v3/calendars/public/events",
+            "google_calendar_api",
+        ),
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        for (index, status) in [401, 403, 404, 451].into_iter().enumerate() {
+            let mut accepted = cursor::container(uri, &cfg);
+            accepted.fetched_at += index as i64 * 10000;
+            store::save_document(&pool, &id, 0, &accepted)
+                .await
+                .unwrap();
+            for n in 1..=2 {
+                let (egress, _) = mock_egress(vec![(status, Value::Null)]);
+                let mut doc = cursor::resolve(
+                    &pool,
+                    uri,
+                    adapters::definition(source).unwrap(),
+                    &egress,
+                    &cfg,
+                    false,
+                )
+                .await
+                .unwrap();
+                assert_eq!(doc.status, pinakes_core::model::Status::Missing);
+                assert!(doc
+                    .container
+                    .as_ref()
+                    .is_some_and(|c| !c.delta && c.cursor.is_none()));
+                doc.fetched_at = accepted.fetched_at + n * 1000;
+                store::save_document(&pool, &id, 0, &doc).await.unwrap();
+                let state: (String, i32, bool) = sqlx::query_as(
+                    "SELECT status,missing_streak,dead_letter FROM resource WHERE id=$1",
+                )
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert_eq!(
+                    state,
+                    (
+                        if n == 1 { "ok" } else { "missing" }.into(),
+                        n as i32,
+                        false
+                    ),
+                    "{source} {status}"
+                );
+            }
+        }
+        for status in [400, 418] {
+            let (egress, _) = mock_egress(vec![(status, Value::Null)]);
+            let err = cursor::resolve(
+                &pool,
+                uri,
+                adapters::definition(source).unwrap(),
+                &egress,
+                &cfg,
+                false,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                err.downcast_ref::<pinakes_core::resolver::RetryLater>()
+                    .unwrap()
+                    .seconds,
+                3600
+            );
+        }
+    }
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn review_cursor_quarantines_bad_rows_without_inventing_deletions(pool: PgPool) {
+    let uri = "https://portal.einundzwanzig.space/api/changes";
+    let cfg = EventConfig {
+        coordinate_timezone: false,
+        ..Default::default()
+    };
+    let good = json!({"id":7,"title":"Good","start":(Utc::now()+Duration::days(1)).to_rfc3339()});
+    let (egress, _) = mock_egress(vec![
+        (
+            200,
+            json!({"next_since":12,"has_more":false,"changes":[{"resource":"meetup-event","action":"created","data":{"title":"No id"}}]}),
+        ),
+        (
+            200,
+            json!([{"id":1,"title":"Bad date","start":"garbage"},{"title":"No id"},good]),
+        ),
+    ]);
+    let doc = cursor::resolve(
+        &pool,
+        uri,
+        adapters::definition("einundzwanzig").unwrap(),
+        &egress,
+        &cfg,
+        false,
+    )
+    .await
+    .unwrap();
+    let c = doc.container.unwrap();
+    assert_eq!(c.occurrences.len(), 1);
+    assert_eq!(c.occurrences[0].uid, "7");
+    assert!(c.delta);
+    assert!(c.warnings.iter().any(|w| w == "invalid_cursor_row"));
+    assert_eq!(c.cursor.unwrap().next, "12");
 }

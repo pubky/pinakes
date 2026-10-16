@@ -199,12 +199,27 @@ pub async fn save(
     // The transient container is serde-skipped: copy only the small parent document,
     // without cloning thousands of already-prepared occurrence documents.
     let mut doc: ResourceMeta = serde_json::from_value(serde_json::to_value(doc)?)?;
+    let social_missing = doc.status == Status::Missing
+        && before.as_ref().is_some_and(|v| {
+            serde_json::from_value::<ResourceMeta>(v.clone())
+                .ok()
+                .as_ref()
+                .is_some_and(crate::resolver::cards::social)
+        });
+    if social_missing {
+        sqlx::query("DELETE FROM resource_change WHERE resource_id=$1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
     if doc.status == Status::Missing {
         let fetched = chrono::DateTime::from_timestamp_millis(doc.fetched_at)
             .context("invalid fetch time")?;
         let last: Option<chrono::DateTime<chrono::Utc>> = row.try_get("last_missing_at")?;
         let streak: i32 = row.try_get("missing_streak")?;
-        let streak = if last.is_some_and(|last| last >= fetched) {
+        let streak = if crate::resolver::cards::invalid_identifier(&doc.url) {
+            2
+        } else if last.is_some_and(|last| last >= fetched) {
             streak
         } else {
             streak + 1
@@ -240,6 +255,11 @@ pub async fn save(
             retained["fetched_at"] = json!(doc.fetched_at);
             retained["ttl_secs"] = json!(doc.ttl_secs);
             retained["status"] = json!("missing");
+            if social_missing {
+                for field in ["name", "description", "image"] {
+                    retained.as_object_mut().unwrap().remove(field);
+                }
+            }
             doc = serde_json::from_value(retained)?;
         }
     } else {
@@ -268,9 +288,8 @@ pub async fn save(
         .transpose()?;
     let after = normalize(&doc);
     crate::store::write_document(&mut tx, id, generation, &doc).await?;
-    crate::groups::sync(&mut tx, id, &cfg.groups).await?;
     let diff = diff(before.as_ref(), Some(&after))
-        .filter(|_| before.is_some() || doc.status != Status::Missing);
+        .filter(|_| !social_missing && (before.is_some() || doc.status != Status::Missing));
     if let Some(plan) = prepared
         .as_ref()
         .filter(|p| p.exceeds_limit(usize::from(diff.is_some())))
@@ -285,6 +304,8 @@ pub async fn save(
         }
     }
     tx.commit().await?;
+    // Grouping is derived work. Its failure must never roll back accepted facts or charge the resolver.
+    crate::groups::reconcile(pool, id, &cfg.groups).await;
     Ok(())
 }
 pub async fn delete_orphans(pool: &PgPool, grace_days: u32) -> Result<u64> {

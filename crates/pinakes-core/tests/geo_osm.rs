@@ -928,3 +928,45 @@ async fn skeleton_upgrade_prepares_osm_before_original_constraint(pool: PgPool) 
     // A repeat startup validates the original checksums rather than rewriting migration history.
     pinakes_core::migrate(&pool).await.unwrap();
 }
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn review_group_osm_best_member_keeps_attribution_and_resource_own_name(pool: PgPool) {
+    let (_, resolver, server) = mock(&pool).await;
+    let uri = "https://www.openstreetmap.org/node/240109189";
+    let osm_id = store::ensure_resource(&pool, uri).await.unwrap();
+    let doc = resolver.resolve(uri).await.unwrap();
+    store::save_document(&pool, &osm_id, 0, &doc).await.unwrap();
+    let uri = "https://example.org/berlin";
+    let page = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut doc = pinakes_core::model::ResourceMeta::new(uri, "web", 3600);
+    doc.name = Some("Own page".into());
+    store::save_document(&pool, &page, 0, &doc).await.unwrap();
+    let group = pinakes_core::groups::curate(
+        &pool,
+        &"c".repeat(32),
+        pinakes_core::groups::Curation {
+            members: vec![
+                pinakes_core::groups::Member {
+                    resource_id: osm_id,
+                    occurrence: None,
+                },
+                pinakes_core::groups::Member {
+                    resource_id: page.clone(),
+                    occurrence: None,
+                },
+            ],
+            name: None,
+            image: None,
+        },
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(group["attribution"], osm::ATTRIBUTION);
+    assert_eq!(group["name"], "Berlin");
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (_, _, doc) = call(&app, &format!("/v1/resources/{page}"), None).await;
+    assert_eq!(doc["name"], "Own page");
+    assert_eq!(doc["group"]["name"], "Own page");
+    server.abort();
+}

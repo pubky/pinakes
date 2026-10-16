@@ -232,7 +232,9 @@ confirmation can require one additional fetch before finalization. `lookup` and
 
 `GET /metrics` is available only on the separately configured admin listener,
 by default `127.0.0.1:9090`; the public route returns 404. It uses Prometheus text
-format. The admin listener has no resource routes. Keep it on a trusted network.
+format. The admin listener has no resource routes. `admin_token` (env
+`PINAKES__ADMIN_TOKEN`) requires a constant-time Bearer check on all admin routes.
+Non-loopback binds without a token are refused; use TLS at the reverse proxy.
 
 Public `/v1/info` exposes manifests and status but no Nexus URL, source errors or metric
 samples. Admin `GET /v1/info` includes full ingestion/source/canary state and numerical
@@ -376,11 +378,13 @@ licence boundary. All existing resource and occurrence routes and cursors are un
 ## Groups and identifier cards
 
 Resources and lookup responses include `group` when membership has been computed.
-A group card has `id`, `kind`, `name`, `image`, `curated`, `taggers`, `references`
+A group card has `id`, `kind`, `name`, `image`, `attribution`, `curated`, `taggers`, `references`
 and `members: [{resource_id, uri, site, occurrence?}]`. The optional occurrence
 contains `uid` and `recurrence_id`. Group IDs are views and can change when evidence
 joins or splits a group; member resource IDs and references never change. Ranking
-scores remain internal.
+scores remain internal. Resource reads keep their own name/image in the attached
+group summary; group lookup and collapsed search use the best member. OSM best
+members carry attribution.
 
 `collapse=group` applies all filters to individual members first, then returns the
 group's preselected best member with its group card. Thus a group can match a tag,
@@ -392,15 +396,20 @@ to hydrate every member through Nexus `by_ids`. Unprocessed upgrade rows remain
 individual results until the bounded grouping pass reaches them.
 
 Automatic grouping uses typed identifiers, podcast GUIDs, ICS UID, `sameAs`,
-canonical URLs and accepted OSM URL identity. Dated event keys are scoped to start,
-so a recurring UID or reused page URL does not collapse different dates. Any pair
-of points over `queue.groups.max_distance_m` (default 500 m) prevents an automatic
-merge. Membership and evidence are bounded; over-popular keys are ignored.
+canonical URLs and accepted OSM URL identity. URL claims require the same
+registrable domain or reciprocity. Cross-domain typed keys require verified evidence
+on both members or reciprocal links. Only ICS UID keys are scoped to exact start;
+occurrence joins also reject starts more than five minutes apart. Any pair of points
+over `queue.groups.max_distance_m` (default 500 m) prevents an automatic merge.
+FIFO and per-origin admission caps reject new excess joiners without dropping
+established groups. Singletons stay individual; grouping failures back off separately
+and cannot prevent a resource save.
 
 On the **admin listener only**:
 
 ```http
 PUT /v1/groups/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 {"name":"A curated recording","image":null,"members":[{"resource_id":"0123456789abcdef0123456789abcdef","occurrence":null}]}
@@ -408,19 +417,29 @@ Content-Type: application/json
 
 This replaces the explicit member set and optional name/image. An occurrence member
 uses `{"uid":"calendar-uid","recurrence_id":"2026-10-20T17:00:00Z"}`. Members must
-already exist. Curation can deliberately override the automatic distance/evidence
-rules; removing a member allows its automatic evidence to be reconsidered. The
-route shares the existing loopback/admin network boundary and has no public auth
-flow. `queue.groups.enabled=false` disables grouping reads, writes and collapse;
+already exist and have been reconciled. Curation exclusively pins these members
+away from automatic groups and can override automatic distance/evidence rules;
+removing a member allows its automatic evidence to be reconsidered. Every admin
+route requires a Bearer token when `admin_token`/`PINAKES__ADMIN_TOKEN` is configured,
+and a non-loopback admin bind requires it. Database failures return 500; invalid
+curation returns 400. `queue.groups.enabled=false` disables grouping reads, writes and collapse;
 stored membership remains available if the module is re-enabled.
 
 Five independent manifests (`media`, `isbn`, `doi`, `nostr`, `activitypub`) appear in
 `/v1/info`, alongside card-worker status and the effective grouping limits; configure them under `[cards.<kind>]`. `isbn:` checks ISBN-10/13 checksums
-and calls Open Library. `doi:` and `https://doi.org/…` request CSL JSON. Generic Nostr
+and calls Open Library. Valid `doi:`, `https://doi.org/…` and `https://dx.doi.org/…`
+request CSL JSON, including publication date and container. Invalid bare identifiers
+are final Missing; informational DOI URLs fall back to web. Generic Nostr
 profiles/notes use the signed-event indexer path; NIP-52 events retain their event
 schema. Advertised ActivityPub endpoints or ActivityStreams JSON yield Person,
-Article or SocialMediaPosting cards. Media uses the pinned oEmbed registry and RSS
-episode GUIDs; no embed HTML or media bytes are served. A direct podcast feed with
-multiple episodes is a PodcastSeries; `?guid=` or the episode page's matching RSS
-link selects an episode. Disabled non-HTTP identifier routes defer; enabled web can
+Article or SocialMediaPosting cards only when the fetched URL and object ID share
+the page’s registrable domain. Social note excerpts are capped at 200 characters,
+refresh at most hourly and lose history on disappearance. Unlisted AP content is
+omitted. Unknown signed Nostr kinds yield a generic card. Media queries oEmbed
+first; healthy page JSON-LD takes precedence. A successful oEmbed answer survives
+a failed or truncated page; oversized HTML yields head metadata with `truncated`
+and drift. Feed caps remain strict. Podcast types require a namespace or a selected
+audio/video enclosure; plain RSS is a DataFeed. Direct podcast feeds, including
+single-item feeds, are PodcastSeries; `?guid=` or the episode page’s matching RSS
+link selects an episode. No embed HTML or media bytes are served. Disabled non-HTTP identifier routes defer; enabled web can
 still render ordinary HTTP fallback cards.

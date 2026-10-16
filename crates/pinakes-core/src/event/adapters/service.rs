@@ -46,7 +46,7 @@ pub(super) fn upstream_status(f: &Fetched) -> Result<()> {
 
 pub(crate) fn enrichment_status(f: &Fetched) -> Result<()> {
     upstream_status(f)?;
-    if matches!(f.status, 401 | 403 | 451) {
+    if matches!(f.status, 401 | 403) {
         return Err(crate::resolver::RetryLater {
             class: "upstream_denied",
             seconds: 3600,
@@ -250,6 +250,9 @@ impl PlatformResolver {
                                     d,
                                 )
                                 .await?;
+                                if f.status == 451 {
+                                    return self.enrichment_gone(uri, &d.id).await;
+                                }
                                 if f.status == 200 {
                                     if d.id == "luma" {
                                         if let Some(id) = serde_json::from_slice::<Value>(&f.body)
@@ -282,6 +285,9 @@ impl PlatformResolver {
                                                     .discover(url.as_str(), &opts, m.cadence_floor)
                                                     .await?;
                                                 enrichment_status(&feed)?;
+                                                if feed.status == 451 {
+                                                    return self.enrichment_gone(uri, &d.id).await;
+                                                }
                                                 if feed.status == 200 {
                                                     if let Some(calendar) =
                                                         calendar_blocking(uri, d, &feed, &local)
@@ -344,6 +350,19 @@ impl PlatformResolver {
                 Ok(card)
             }
         }
+    }
+    async fn enrichment_gone(&self, uri: &str, source: &str) -> Result<ResourceMeta> {
+        let mut doc = self
+            .web
+            .events
+            .as_ref()
+            .unwrap()
+            .disappeared(uri, 451)
+            .await?
+            .unwrap_or_else(|| ResourceMeta::new(uri, source, 3600));
+        doc.source = source.into();
+        doc.status = crate::model::Status::Missing;
+        Ok(doc)
     }
     async fn enrich_cursor(
         &self,

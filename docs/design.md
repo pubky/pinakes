@@ -235,16 +235,22 @@ CSL negotiation, generic Nostr reuses signed HTTP-indexer resolution, and advert
 ActivityStreams objects use one negotiated fetch. RSS episode selection is by GUID
 or matching page link, never an arbitrary item from a multi-episode feed.
 
-`group_unit` identifies resource and occurrence members without changing their
-upstream IDs. `resource_group` holds bounded evidence; updates rebuild the affected
-components so removing a bridge can split a group. Typed music IDs and episode
-GUIDs precede Wikidata/IMDb/TMDB, ICS UID and URL evidence. Dated event evidence is
-scoped to the instance start. The default component cap is 256 and every pair of
-located members must agree within 500 m unless explicitly curated. Upgrade and
-reference dirty work is drained in bounded batches under the search-revision fence.
+`group_unit` identifies resource and occurrence members without changing upstream
+IDs. `resource_group` holds directional evidence, origins, trust and admission time.
+A URL claim joins only within a registrable domain or reciprocally. Cross-domain
+typed identifiers require authority on both members or reciprocal links; arbitrary
+self-claims cannot nominate a new best member. Only ICS UID is scoped to exact
+start; occurrence joins additionally require starts within five minutes. Default
+component/per-origin caps are 256/16. New excess joiners are ignored while admitted
+members remain, and located members must agree within 500 m unless curated.
 
-A preselected best member supplies group facets; precomputed group scores count
-unique taggers across member references. Resource documents and OSM derivative
-facts remain in their existing tables. Search filters members before the grouping
-join, then uses group ranking for pagination and group units for clustering. The
-admin member set overrides automatic links; it never edits Nexus references.
+Grouping commits separately after resource persistence. Its own dirty queue parks
+failed graphs with backoff and advances past failures. Unchanged evidence fingerprints
+avoid structural rewrites. Iterative union/find and graph budgets bound work before
+the revision fence. Automatic IDs have their own namespace and skip curated IDs;
+curation exclusively pins its member set, permitting splits as pins or keys change.
+
+Best-member identity and distinct-author scores are stored. Facets join memberships
+by equality, and group-card aggregation happens after pagination. Resource reads
+retain their own names/images; OSM-derived group cards include attribution. No OSM
+facts or Nexus references move into the group tables. Singletons remain ungrouped.

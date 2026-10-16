@@ -143,7 +143,7 @@ async fn main() -> Result<()> {
 
 fn warn_admin_listener(address: std::net::SocketAddr) {
     if !address.ip().is_loopback() {
-        tracing::warn!(admin_listen=%address, "admin listener is not loopback and has no authentication; restrict access to a trusted network");
+        tracing::warn!(admin_listen=%address, "admin listener is not loopback; bearer authentication is required, use TLS at the network edge");
     }
 }
 
@@ -190,7 +190,7 @@ mod tests {
             }
         });
         let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
-        assert_eq!(logs.matches("has no authentication").count(), 3);
+        assert_eq!(logs.matches("bearer authentication is required").count(), 3);
         assert!(logs.contains("0.0.0.0:9090"));
         assert!(logs.contains("[::]:9090"));
     }

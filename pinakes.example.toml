@@ -2,6 +2,7 @@
 database_url = "postgresql:///pinakes?host=/var/run/postgresql"
 listen = "127.0.0.1:8090"
 admin_listen = "127.0.0.1:9090"
+# admin_token = "" # Prefer PINAKES__ADMIN_TOKEN; required for a non-loopback admin bind.
 nexus_url = "http://127.0.0.1:8080"
 poll_secs = 5
 grace_days = 7
@@ -193,7 +194,8 @@ ttl_secs = 86400
 
 [queue.groups]
 enabled = true
-max_members = 256 # Per component; excessive-degree automatic keys are ignored.
+max_members = 256
+max_members_per_origin = 16 # Per key/origin; excess new joiners cannot evict existing members.
 max_distance_m = 500.0 # Any two points farther apart prevent an automatic merge.
 max_graph_units = 20000 # Affected graph, including splits after evidence changes.
 max_graph_bytes = 33554432 # Bounded key metadata; resource documents stay in their tables.

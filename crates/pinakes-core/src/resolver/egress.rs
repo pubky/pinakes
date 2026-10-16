@@ -90,6 +90,7 @@ pub fn public_ip(ip: IpAddr) -> bool {
 }
 #[derive(Clone, Debug)]
 pub struct Fetched {
+    pub truncated: bool,
     pub validators: Validators,
     pub url: Url,
     pub content_type: String,
@@ -223,6 +224,7 @@ pub async fn read_response_with(
         .trim()
         .to_ascii_lowercase();
     let mut body = vec![];
+    let mut truncated = false;
     if !(300..400).contains(&status) && (200..300).contains(&status) {
         let feed_type = matches!(
             content_type.as_str(),
@@ -242,13 +244,23 @@ pub async fn read_response_with(
         if !ALLOWED_TYPES.contains(&content_type.as_str()) && !possible {
             bail!("content type is not allowed");
         }
-        let max = options.feed_cap.unwrap_or(BODY_CAP);
-        if response.content_length().is_some_and(|n| n > max as u64) {
+        let html = matches!(content_type.as_str(), "text/html" | "application/xhtml+xml");
+        let max = if html {
+            BODY_CAP
+        } else {
+            options.feed_cap.unwrap_or(BODY_CAP)
+        };
+        if !html && response.content_length().is_some_and(|n| n > max as u64) {
             return Err(BodyTooLarge.into());
         }
         while let Some(chunk) = response.chunk().await? {
-            if body.len() + chunk.len() > max {
-                return Err(BodyTooLarge.into());
+            if body.len().saturating_add(chunk.len()) > max {
+                if !html {
+                    return Err(BodyTooLarge.into());
+                }
+                body.extend_from_slice(&chunk[..max.saturating_sub(body.len())]);
+                truncated = true;
+                break;
             }
             body.extend_from_slice(&chunk);
             let sniff = String::from_utf8_lossy(&body[..body.len().min(256)])
@@ -257,7 +269,7 @@ pub async fn read_response_with(
             if body.len() > BODY_CAP
                 && !(options.feed_cap.is_some() && (feed_type || options.feed_hint || sniff))
             {
-                bail!("body exceeds 1 MB");
+                return Err(BodyTooLarge.into());
             }
         }
         let sniff = String::from_utf8_lossy(&body[..body.len().min(256)])
@@ -268,6 +280,7 @@ pub async fn read_response_with(
         }
     }
     Ok(Fetched {
+        truncated,
         validators,
         url,
         status,
@@ -287,6 +300,7 @@ type DiscoveryCache = Arc<Mutex<HashMap<String, DiscoveryEntry>>>;
 #[derive(Clone)]
 pub struct Egress {
     cfg: EgressConfig,
+    network_relays: bool,
     dns: Arc<dyn Dns>,
     transport: Arc<dyn Transport>,
     hosts: Arc<Mutex<HashMap<String, HostBudget>>>,
@@ -309,6 +323,7 @@ impl Egress {
             .cached(key, 3600, async {
                 let values = self.nostr_request_inner(uri, filter, deadline_ms).await?;
                 Ok(Fetched {
+                    truncated: false,
                     url: Url::parse(uri)?,
                     validators: Default::default(),
                     content_type: "application/json".into(),
@@ -348,6 +363,10 @@ impl Egress {
             if addresses.is_empty() || addresses.iter().any(|a| !public_ip(a.ip())) {
                 bail!("relay DNS resolved to non-public address");
             }
+            anyhow::ensure!(
+                self.network_relays,
+                "relay network disabled for injected transports"
+            );
             let _permit = self.host_permit(&host).await;
             let stream = tokio::net::TcpStream::connect(addresses.as_slice()).await?;
             let config = WebSocketConfig::default()
@@ -376,7 +395,9 @@ impl Egress {
                 || self.cfg.allow_hosts.iter().any(|h| host_matches(&host, h)))
     }
     pub fn new(cfg: EgressConfig) -> Self {
-        Self::with_backends(cfg, Arc::new(SystemDns), Arc::new(PinnedTransport))
+        let mut e = Self::with_backends(cfg, Arc::new(SystemDns), Arc::new(PinnedTransport));
+        e.network_relays = true;
+        e
     }
     pub fn with_backends(
         cfg: EgressConfig,
@@ -385,6 +406,7 @@ impl Egress {
     ) -> Self {
         Self {
             cfg,
+            network_relays: false,
             dns,
             transport,
             hosts: Arc::default(),
@@ -719,6 +741,7 @@ mod tests {
         impl Transport for Graphql {
             async fn get(&self, url: &Url, _: &[SocketAddr]) -> Result<Fetched> {
                 Ok(Fetched {
+                    truncated: false,
                     url: url.clone(),
                     status: 200,
                     content_type: "application/json".into(),
@@ -788,6 +811,7 @@ mod tests {
             .await
             .is_err());
         let response = Fetched {
+            truncated: false,
             validators: Default::default(),
             url: Url::parse("https://example.org/").unwrap(),
             content_type: "text/html".into(),
@@ -849,6 +873,7 @@ mod tests {
             egress
                 .cached(key.into(), 3600, async {
                     Ok(Fetched {
+                        truncated: false,
                         validators: Default::default(),
                         url: Url::parse("https://example.org/").unwrap(),
                         content_type: "text/calendar".into(),
@@ -953,6 +978,7 @@ mod tests {
             assert!(addresses.iter().all(|s| public_ip(s.ip())));
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(Fetched {
+                truncated: false,
                 validators: Validators::default(),
                 url: url.clone(),
                 status: 302,
@@ -1028,11 +1054,9 @@ mod tests {
             let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
             let url = Url::parse(&format!("http://{addr}/")).unwrap();
             let response = reqwest::get(url.clone()).await.unwrap();
-            assert!(read_response(url, response)
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("1 MB"));
+            let f = read_response(url, response).await.unwrap();
+            assert!(f.truncated);
+            assert_eq!(f.body.len(), BODY_CAP);
             task.abort();
         }
     }

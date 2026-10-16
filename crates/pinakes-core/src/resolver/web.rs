@@ -21,6 +21,7 @@ pub const ATTRIBUTES: &[&str] = &[
     "language",
     "publisher",
     "published",
+    "container",
     "isbn",
     "doi",
     "podcast_guid",
@@ -168,6 +169,16 @@ impl Resolver for WebResolver {
             }
             fill(&mut extracted.doc.name, extracted.title);
             fill(&mut extracted.doc.description, extracted.description);
+            if fetched.truncated
+                && !extracted
+                    .doc
+                    .event
+                    .warnings
+                    .iter()
+                    .any(|w| w == "truncated")
+            {
+                extracted.doc.event.warnings.push("truncated".into());
+            }
             let doc = extracted.doc.bounded(ATTRIBUTES)?;
             crate::telemetry::document(observation, &self.manifest(), &doc);
             Ok(doc)
@@ -186,6 +197,9 @@ pub struct Extracted {
 }
 pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
     let mut doc = ResourceMeta::new(uri, "web", ttl);
+    if fetched.truncated {
+        doc.event.warnings.push("truncated".into());
+    }
     doc.attributes
         .insert("content_type".into(), fetched.content_type.clone());
     doc.attributes
@@ -200,11 +214,11 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
         description: None,
     };
     match fetched.status {
-        404 | 410 => {
+        404 | 410 | 451 => {
             out.doc.status = Status::Missing;
             return out;
         }
-        401 | 403 | 451 => {
+        401 | 403 => {
             out.doc.status = Status::Unreachable;
             return out;
         }
@@ -483,6 +497,13 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url) {
         doc.source = "jsonld".into();
     }
     crate::group_keys::jsonld(doc, v, base);
+    for (field, attribute) in [("duration", "duration"), ("isrcCode", "isrc")] {
+        if let Some(value) = v.get(field).and_then(Value::as_str) {
+            doc.attributes
+                .entry(attribute.into())
+                .or_insert_with(|| value.into());
+        }
+    }
     for field in ["author", "creator"] {
         if !doc.attributes.contains_key("author") {
             if let Some(value) = v.get(field) {
@@ -571,7 +592,7 @@ pub fn apply_oembed(doc: &mut ResourceMeta, v: &Value, base: &Url) {
     }
     for (key, field) in [("author", "author_name"), ("provider", "provider_name")] {
         if let Some(v) = v.get(field).and_then(string) {
-            doc.attributes.insert(key.into(), v);
+            doc.attributes.entry(key.into()).or_insert(v);
         }
     }
 }
@@ -582,6 +603,7 @@ mod tests {
     fn extraction_precedence_and_promoted_facets() {
         let body = r#"<title>Title fallback</title><meta property="og:title" content="OG"><meta property="og:image" content="/pic.png"><link rel="alternate" type="application/json+oembed" href="/embed"><link rel="canonical" href="/canonical"><div class="h-event"><span class="p-name">MF</span><span class="p-summary">MF summary</span></div><script type="application/ld+json">{"@type":"MusicEvent","name":"JSON first","startDate":"2026-10-01T12:00:00Z","location":{"geo":{"latitude":46.0,"longitude":8.0}}}</script>"#;
         let fetched = Fetched {
+            truncated: false,
             validators: Default::default(),
             url: Url::parse("https://example.org/").unwrap(),
             status: 200,
@@ -653,7 +675,7 @@ mod tests {
                 if url.path() != "/page" {
                     std::future::pending::<()>().await;
                 }
-                Ok(Fetched { validators:Default::default(),url:url.clone(),status:200,retry_after_secs:60,location:None,content_type:"text/html".into(),body:br#"<title>Page survives</title><link rel="alternate" type="application/json+oembed" href="/embed">"#.to_vec() })
+                Ok(Fetched {truncated: false, validators:Default::default(),url:url.clone(),status:200,retry_after_secs:60,location:None,content_type:"text/html".into(),body:br#"<title>Page survives</title><link rel="alternate" type="application/json+oembed" href="/embed">"#.to_vec() })
             }
         }
         let resolver = WebResolver {
