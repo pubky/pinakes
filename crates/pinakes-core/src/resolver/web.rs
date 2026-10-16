@@ -143,10 +143,22 @@ impl Resolver for WebResolver {
             }
 
             if let Some(cards) = &self.cards {
-                extracted.doc =
-                    super::cards::enrich(uri, &fetched, extracted.doc, &self.egress, cards).await?;
+                extracted.doc = super::cards::enrich(
+                    uri,
+                    &fetched,
+                    extracted.doc,
+                    &self.egress,
+                    cards,
+                    self.config.discover_feeds,
+                )
+                .await?;
             }
-            if let Some(endpoint) = extracted.oembed.take() {
+            if let Some(endpoint) = extracted
+                .oembed
+                .take()
+                .filter(|_| super::cards::needs_embed(&extracted.doc))
+            {
+                crate::telemetry::discovery("oembed", "requested");
                 // Discovery is the only additional fetch; it follows the same policy as the page.
                 let remaining = deadline
                     .saturating_duration_since(tokio::time::Instant::now())

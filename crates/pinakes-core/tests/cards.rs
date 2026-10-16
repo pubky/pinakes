@@ -68,7 +68,183 @@ impl Transport for TransportMock {
         })
     }
 }
-const RSS: &str = r#"<rss xmlns:podcast="https://podcastindex.org/namespace/1.0"><channel><title>Podcast</title><podcast:guid>channel-id</podcast:guid><item><guid>episode-1</guid><title>Episode One</title><link>https://podcast.example/episode</link></item><item><guid>episode-2</guid><title>Episode Two</title></item></channel></rss>"#;
+const RSS: &str = r#"<rss xmlns:podcast="https://podcastindex.org/namespace/1.0"><channel><title>Podcast</title><podcast:guid>channel-id</podcast:guid><item><guid>episode-1</guid><title>Episode One</title><link>https://podcast.example/episode</link><enclosure type="audio/mpeg" url="https://audio.example/one.mp3"/></item><item><guid>episode-2</guid><title>Episode Two</title></item></channel></rss>"#;
+
+#[test]
+fn round2_namespace_alone_does_not_make_a_podcast_series() {
+    for items in ["", "<item><guid>news</guid><title>News</title></item>"] {
+        let f=Fetched { truncated:false,url:"https://feed.example/rss".parse().unwrap(),status:200,
+            body:format!(r#"<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>News feed</title>{items}</channel></rss>"#).into_bytes(),
+            content_type:"application/rss+xml".into(),retry_after_secs:60,location:None,validators:Default::default() };
+        assert_eq!(
+            cards::podcast(f.url.as_str(), &f, 3600, 10)
+                .unwrap()
+                .unwrap()
+                .type_name,
+            "DataFeed"
+        );
+    }
+}
+
+#[tokio::test]
+async fn round2_optional_fetch_policy_and_metrics() {
+    struct Cost {
+        seen: Mutex<Vec<String>>,
+    }
+    #[async_trait]
+    impl Transport for Cost {
+        async fn get(&self, u: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+            self.seen.lock().unwrap().push(u.to_string());
+            let embed = u.path().contains("oembed");
+            if u.path() == "/failed" {
+                bail!("upstream failed");
+            }
+            let body = if embed {
+                json!({"type":"video","title":"Embed fallback","thumbnail_url":"https://images.example/embed.jpg"}).to_string()
+            } else if u.path() == "/incomplete" {
+                "<title>Incomplete</title>".into()
+            } else {
+                r#"<script type="application/ld+json">{"@type":"Article","name":"Complete","image":"https://images.example/page.jpg"}</script>"#.into()
+            };
+            Ok(Fetched {
+                truncated: u.path() == "/truncated",
+                url: u.clone(),
+                status: 200,
+                body: body.into_bytes(),
+                content_type: if embed {
+                    "application/json"
+                } else {
+                    "text/html"
+                }
+                .into(),
+                retry_after_secs: 60,
+                location: None,
+                validators: Default::default(),
+            })
+        }
+    }
+    for (policy, uri, count, first_embed) in [
+        (
+            cards::OembedPolicy::WhenNeeded,
+            "https://vimeo.com/complete",
+            1,
+            false,
+        ),
+        (
+            cards::OembedPolicy::Always,
+            "https://vimeo.com/complete",
+            2,
+            true,
+        ),
+        (
+            cards::OembedPolicy::WhenNeeded,
+            "https://vimeo.com/incomplete",
+            2,
+            false,
+        ),
+        (
+            cards::OembedPolicy::WhenNeeded,
+            "https://vimeo.com/failed",
+            2,
+            false,
+        ),
+        (
+            cards::OembedPolicy::WhenNeeded,
+            "https://vimeo.com/truncated",
+            2,
+            false,
+        ),
+        (
+            cards::OembedPolicy::WhenNeeded,
+            "https://www.youtube.com/watch?v=abc",
+            2,
+            true,
+        ),
+    ] {
+        let seen = Arc::new(Cost {
+            seen: Mutex::default(),
+        });
+        let mut cfg = Config::default();
+        cfg.media.oembed = policy;
+        let r = CardResolver {
+            kind: "media",
+            config: Arc::new(cfg),
+            web: WebResolver {
+                cards: None,
+                events: None,
+                config: Default::default(),
+                egress: Egress::with_backends(
+                    Default::default(),
+                    Arc::new(PublicDns),
+                    seen.clone(),
+                ),
+            },
+        };
+        let metrics = pinakes_core::telemetry::Metrics::new().unwrap();
+        let (doc, _) =
+            pinakes_core::telemetry::observe(&metrics, &r.manifest(), r.resolve(uri)).await;
+        assert!(doc.unwrap().name.is_some());
+        let requests = seen.seen.lock().unwrap();
+        assert_eq!(requests.len(), count, "{uri}");
+        assert_eq!(requests[0].contains("oembed"), first_embed, "{uri}");
+        assert_eq!(
+            metrics
+                .discovery
+                .with_label_values(&["oembed", if count == 1 { "skipped" } else { "requested" }])
+                .get(),
+            1
+        );
+        assert!(metrics
+            .encode()
+            .unwrap()
+            .contains("pinakes_discovery_decisions_total"));
+    }
+    for discover in [false, true] {
+        for typed in [false, true] {
+            let seen = Arc::new(TransportMock::default());
+            let mut cfg = Config::default();
+            cfg.web.discover_feeds = discover;
+            let r = resolver("media", cfg, seen.clone());
+            let metrics = pinakes_core::telemetry::Metrics::new().unwrap();
+            let uri = if typed {
+                "https://blog.example/post"
+            } else {
+                "https://podcast.example/episode"
+            };
+            let (doc, _) =
+                pinakes_core::telemetry::observe(&metrics, &r.manifest(), r.web.resolve(uri)).await;
+            let doc = doc.unwrap();
+            assert_eq!(
+                seen.seen.lock().unwrap().len(),
+                if discover && !typed { 2 } else { 1 }
+            );
+            assert_eq!(
+                doc.type_name,
+                if typed {
+                    "BlogPosting"
+                } else if discover {
+                    "PodcastEpisode"
+                } else {
+                    "WebPage"
+                }
+            );
+            let decision = if !discover {
+                "disabled"
+            } else if typed {
+                "skipped"
+            } else {
+                "requested"
+            };
+            assert_eq!(
+                metrics
+                    .discovery
+                    .with_label_values(&["feed", decision])
+                    .get(),
+                1
+            );
+        }
+    }
+}
 fn resolver(kind: &'static str, cfg: Config, transport: Arc<TransportMock>) -> CardResolver {
     CardResolver {
         kind,
@@ -95,7 +271,9 @@ async fn registry_identifiers_negotiation_discovery_and_switches() {
         ("media", "https://ap.example/page", "Person"),
         ("media", "https://podcast.example/episode", "PodcastEpisode"),
     ] {
-        let d = resolver(kind, Config::default(), seen.clone())
+        let mut cfg = Config::default();
+        cfg.web.discover_feeds = true;
+        let d = resolver(kind, cfg, seen.clone())
             .resolve(uri)
             .await
             .unwrap();

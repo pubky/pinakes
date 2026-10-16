@@ -18,6 +18,27 @@ use std::{
 };
 use url::Url;
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OembedPolicy {
+    Always,
+    #[default]
+    WhenNeeded,
+}
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MediaConfig {
+    pub oembed: OembedPolicy,
+}
+pub fn typed_card(doc: &ResourceMeta) -> bool {
+    !matches!(doc.type_name.as_str(), "Thing" | "WebPage" | "CreativeWork")
+}
+pub fn needs_embed(doc: &ResourceMeta) -> bool {
+    doc.status != Status::Ok
+        || doc.name.is_none()
+        || doc.image.is_none()
+        || doc.event.warnings.iter().any(|w| w == "truncated")
+}
 pub const KINDS: [&str; 5] = ["media", "isbn", "doi", "nostr", "activitypub"];
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -160,6 +181,9 @@ fn scheme_matches(pattern: &str, target: &Url) -> bool {
         && wildcard(pattern, target.as_str())
 }
 pub fn provider_endpoint(uri: &str) -> Option<Url> {
+    provider_match(uri).map(|v| v.0)
+}
+fn provider_match(uri: &str) -> Option<(Url, bool)> {
     let target = Url::parse(uri).ok()?;
     if !matches!(target.scheme(), "http" | "https")
         || !target.username().is_empty()
@@ -175,9 +199,10 @@ pub fn provider_endpoint(uri: &str) -> Option<Url> {
             {
                 continue;
             }
-            if e.schemes
+            if let Some(pattern) = e
+                .schemes
                 .iter()
-                .any(|pattern| scheme_matches(pattern, &target))
+                .find(|pattern| scheme_matches(pattern, &target))
             {
                 let mut u = Url::parse(&e.url.replace("{format}", "json")).ok()?;
                 if u.scheme() != "https" {
@@ -186,7 +211,13 @@ pub fn provider_endpoint(uri: &str) -> Option<Url> {
                 u.query_pairs_mut()
                     .append_pair("url", target.as_str())
                     .append_pair("format", "json");
-                return Some(u);
+                let path = pattern
+                    .split_once("://")?
+                    .1
+                    .split_once('/')
+                    .map_or("", |v| v.1);
+                let specific = !path.trim_matches(['*', '/']).is_empty();
+                return Some((u, specific));
             }
         }
     }
@@ -633,6 +664,7 @@ pub async fn enrich(
     mut doc: ResourceMeta,
     egress: &Egress,
     cfg: &CardConfig,
+    discover_feeds: bool,
 ) -> Result<ResourceMeta> {
     if doc.status != Status::Ok || doc.type_path.iter().any(|s| s == "Event") {
         return Ok(doc);
@@ -705,6 +737,18 @@ pub async fn enrich(
         let feed = if direct {
             Some(f.clone())
         } else if let Some(url) = rss {
+            if !discover_feeds || typed_card(&doc) {
+                crate::telemetry::discovery(
+                    "feed",
+                    if discover_feeds {
+                        "skipped"
+                    } else {
+                        "disabled"
+                    },
+                );
+                return doc.bounded(web::ATTRIBUTES);
+            }
+            crate::telemetry::discovery("feed", "requested");
             tokio::time::timeout(
                 Duration::from_secs(2),
                 egress.discover(&url, &Default::default(), cfg.media.ttl_secs),
@@ -794,10 +838,10 @@ fn podcast_body(
     let mut d = ResourceMeta::new(uri, "media", ttl);
     d.attributes
         .insert("podcast_feed".into(), f.url.to_string());
-    let is_podcast = podcast_namespace
-        || chosen
-            .map(enclosure)
-            .unwrap_or_else(|| items.iter().any(|n| enclosure(*n)));
+    let episode = chosen.filter(|_| !direct || guid.is_some());
+    let is_podcast = episode
+        .map(|item| podcast_namespace || enclosure(item))
+        .unwrap_or_else(|| items.iter().any(|n| enclosure(*n)));
     if !is_podcast {
         if !direct {
             return Ok(None);
@@ -807,7 +851,7 @@ fn podcast_body(
         d.name = field(channel, "title");
         return Ok(Some(d.bounded(web::ATTRIBUTES)?));
     }
-    if let Some(item) = chosen.filter(|_| !direct || guid.is_some()) {
+    if let Some(item) = episode {
         let Some(guid) = field(item, "guid") else {
             return Ok(None);
         };
@@ -881,32 +925,67 @@ pub fn social(doc: &ResourceMeta) -> bool {
         )
 }
 impl CardResolver {
-    async fn media(&self, uri: &str, ttl: u64) -> Result<ResourceMeta> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(9);
-        let mut embed = None;
-        if let Some(endpoint) = provider_endpoint(uri) {
-            if let Ok(Ok(f)) = tokio::time::timeout(
-                Duration::from_secs(3),
-                self.web
-                    .egress
-                    .discover(endpoint.as_str(), &Default::default(), ttl),
-            )
-            .await
-            {
-                if f.status == 200 {
-                    if let Ok(v) = serde_json::from_slice::<Value>(&f.body) {
-                        let mut d = ResourceMeta::new(uri, "web", ttl);
-                        web::apply_oembed(&mut d, &v, &f.url);
-                        if d.name.is_some() {
-                            d.source = "media".into();
-                            media_type(&mut d, uri);
-                            embed = Some((d, v, f.url));
-                        }
+    async fn fetch_embed(
+        &self,
+        uri: &str,
+        endpoint: Url,
+        ttl: u64,
+    ) -> Option<(ResourceMeta, Value, Url)> {
+        crate::telemetry::discovery("oembed", "requested");
+        if let Ok(Ok(f)) = tokio::time::timeout(
+            Duration::from_secs(3),
+            self.web
+                .egress
+                .discover(endpoint.as_str(), &Default::default(), ttl),
+        )
+        .await
+        {
+            if f.status == 200 {
+                if let Ok(v) = serde_json::from_slice::<Value>(&f.body) {
+                    let mut d = ResourceMeta::new(uri, "web", ttl);
+                    web::apply_oembed(&mut d, &v, &f.url);
+                    if d.name.is_some() {
+                        d.source = "media".into();
+                        media_type(&mut d, uri);
+                        return Some((d, v, f.url));
                     }
                 }
             }
         }
-        match tokio::time::timeout_at(deadline, self.web.resolve(uri)).await {
+        None
+    }
+    async fn media(&self, uri: &str, ttl: u64) -> Result<ResourceMeta> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(9);
+        let endpoint = provider_match(uri);
+        let first = endpoint.as_ref().is_some_and(|(_, specific)| {
+            *specific || self.config.media.oembed == OembedPolicy::Always
+        });
+        let mut embed = if first {
+            self.fetch_embed(uri, endpoint.as_ref().unwrap().0.clone(), ttl)
+                .await
+        } else {
+            None
+        };
+        let page_deadline = if endpoint.is_some() && !first {
+            deadline - Duration::from_secs(3)
+        } else {
+            deadline
+        };
+        let page = tokio::time::timeout_at(page_deadline, self.web.resolve(uri)).await;
+        if let Some((endpoint, _)) = endpoint.filter(|_| !first) {
+            if !page
+                .as_ref()
+                .is_ok_and(|r| r.as_ref().is_ok_and(|d| !needs_embed(d)))
+            {
+                embed = tokio::time::timeout_at(deadline, self.fetch_embed(uri, endpoint, ttl))
+                    .await
+                    .ok()
+                    .flatten();
+            } else {
+                crate::telemetry::discovery("oembed", "skipped");
+            }
+        }
+        match page {
             Ok(Ok(mut page))
                 if page.status == Status::Ok
                     && !page.event.warnings.iter().any(|w| w == "truncated") =>

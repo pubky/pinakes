@@ -463,11 +463,12 @@ RSS scan limits and switches are in `pinakes.example.toml`; public requests reta
 the shared DNS, body, redirect and host policies. The pinned 390-provider oEmbed
 registry and its license are under `data/`. Metadata includes schema.org video,
 audio, music, podcast and image cards. Images keep their origin URLs; media and
-embed HTML are never re-hosted. Registry oEmbed runs first, then healthy page JSON-LD
-remains authoritative and oEmbed fills gaps. A failed or >1 MB HTML page still gets
+embed HTML are never re-hosted. Path-specific registry oEmbed runs first; broad provider patterns wait for an incomplete,
+failed or truncated page. Healthy page JSON-LD remains authoritative and oEmbed fills gaps. A failed or >1 MB HTML page still gets
 the successful oEmbed card; other oversized pages retain their bounded head metadata
 with a `truncated` warning and drift. Feed caps remain strict. Podcast types require
-a podcast namespace or a selected audio/video enclosure; ordinary RSS is a DataFeed.
+an audio/video enclosure for series; episode selection also accepts a podcast namespace.
+Ordinary RSS is a DataFeed.
 ActivityPub alternates and object IDs must share the page’s registrable domain.
 Social notes retain at most 200 characters, refresh within an hour, and purge history
 on disappearance; explicitly unlisted posts retain no post content.
@@ -478,8 +479,7 @@ Cross-domain typed identifiers require verified evidence from both members or
 reciprocity; unverified self-claims do not merge. The PSL and hosted-blog tenant
 boundaries separate independent publishers. `collapse=group` filters members, then
 ranks and pages groups with distinct taggers and preselected best-member facets.
-Only ICS UID keys include exact start time; occurrence groups also reject instance
-starts more than five minutes apart. Ordinary event pages can differ by seconds.
+Occurrence groups reject instance starts more than five minutes apart. Ordinary event pages can differ by seconds.
 Automatic merges refuse point disagreements over 500 m. Singletons stay individual.
 Resource reads keep their own name/image; OSM-derived group cards include attribution.
 `GET /v1/groups/{id}` provides the member list for Nexus hydration. Admin curation
@@ -492,7 +492,7 @@ bounded backfill; curated groups survive. Group reconciliation runs after docume
 commit, parks failures with its own backoff and continues the dirty queue. Evidence
 fingerprints avoid rewriting unchanged keys; graph work precedes the short revision
 fence. FIFO admission and `max_members_per_origin` preserve existing members under
-key floods. The `queue.groups` limits bound graph size and key metadata. Group cards
+key floods. The `groups` limits bound graph size and key metadata. Group cards
 are built only for returned page rows; facets use equality joins.
 
 Migration 0018 revives failed identifier/common-media routes introduced by 0015,
@@ -521,3 +521,10 @@ metadata completeness. Curated groups preserve their chosen best member.
 segment; `groups.multi_tenant_hosts_path` loads a replacement JSON map at startup.
 The older `[queue.groups]` file section remains accepted; use only one location.
 Pair comparisons are capped at 100,000 per sync; breaches park grouping independently.
+
+Optional discovery defaults to `media.oembed = "when_needed"` and
+`web.discover_feeds = false`. `media.oembed = "always"` restores eager provider
+fetches. Enabling feed discovery follows RSS alternates only for pages without a
+typed card; direct feed URLs still parse regardless of this switch.
+`pinakes_discovery_decisions_total{kind="oembed"|"feed",decision="requested"|"skipped"|"disabled"}`
+counts these decisions on `/metrics`; requested discoveries may reuse the bounded cache.

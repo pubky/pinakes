@@ -28,6 +28,7 @@ pub struct Metrics {
     registry: Registry,
     refresh_lock: Arc<tokio::sync::Mutex<Option<Instant>>>,
     pub fetch: IntCounterVec,
+    pub discovery: IntCounterVec,
     pub duration: HistogramVec,
     pub changes: IntCounterVec,
     pub held: IntCounterVec,
@@ -80,6 +81,12 @@ impl Metrics {
                 "pinakes_ingest_rejected_total",
                 "Rejected feed lines in committed batches by bounded reason",
                 &["reason"]
+            ),
+            discovery: metric!(
+                IntCounterVec,
+                "pinakes_discovery_decisions_total",
+                "Optional metadata discovery decisions (requests may use cache)",
+                &["kind", "decision"]
             ),
             fetch: metric!(
                 IntCounterVec,
@@ -233,7 +240,10 @@ pub struct Observation {
     pub outcome: &'static str,
     pub seconds: f64,
 }
-tokio::task_local! {static FETCHES: Arc<Mutex<Vec<Observation>>>;}
+tokio::task_local! {static FETCHES: Arc<Mutex<Vec<Observation>>>; static DISCOVERY: IntCounterVec;}
+pub fn discovery(kind: &'static str, decision: &'static str) {
+    let _ = DISCOVERY.try_with(|counter| counter.with_label_values(&[kind, decision]).inc());
+}
 pub struct FetchGuard {
     start: Instant,
     status: Option<u16>,
@@ -315,7 +325,12 @@ where
     F: Future<Output = T>,
 {
     let sink = Arc::new(Mutex::new(Vec::new()));
-    let result = FETCHES.scope(sink.clone(), future).await;
+    let result = DISCOVERY
+        .scope(
+            metrics.discovery.clone(),
+            FETCHES.scope(sink.clone(), future),
+        )
+        .await;
     let observations = sink.lock().unwrap().clone();
     for observation in &observations {
         metrics

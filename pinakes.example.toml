@@ -15,6 +15,7 @@ max_label_bytes = 128
 max_object_path_bytes = 2048
 
 [web]
+discover_feeds = false # Follow RSS alternates only on pages without a typed card.
 enabled = true
 concurrency = 4
 requests_per_second = 4.0
@@ -192,10 +193,15 @@ concurrency = 2
 requests_per_second = 2.0
 ttl_secs = 86400
 
-[queue.groups]
+[groups]
+cross_container_occurrences = "off" # Or "corroborated"; see publisher policy in README.
+# multi_tenant_hosts_path = "data/multi-tenant-hosts.json"
 enabled = true
 max_members = 256
 max_members_per_origin = 16 # Per key/origin; excess new joiners cannot evict existing members.
 max_distance_m = 500.0 # Any two points farther apart prevent an automatic merge.
 max_graph_units = 20000 # Affected graph, including splits after evidence changes.
 max_graph_bytes = 33554432 # Bounded key metadata; resource documents stay in their tables.
+
+[media]
+oembed = "when_needed" # "always" restores eager registry discovery.

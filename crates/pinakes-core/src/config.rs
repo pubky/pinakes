@@ -17,6 +17,7 @@ pub struct Config {
     pub grace_days: u32,
     pub web: ResolverConfig,
     pub cards: crate::resolver::cards::CardConfig,
+    pub media: crate::resolver::cards::MediaConfig,
     pub event: EventConfig,
     pub geo_enabled: bool,
     pub osm: OsmConfig,
@@ -48,6 +49,7 @@ impl Default for Config {
             },
             pubky: ResolverConfig::default(),
             cards: Default::default(),
+            media: Default::default(),
             event: EventConfig::default(),
             geo_enabled: true,
             osm: OsmConfig::default(),
@@ -137,6 +139,7 @@ impl Default for IngestConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ResolverConfig {
+    pub discover_feeds: bool,
     pub enabled: bool,
     pub concurrency: usize,
     pub requests_per_second: f64,
@@ -145,6 +148,7 @@ pub struct ResolverConfig {
 impl Default for ResolverConfig {
     fn default() -> Self {
         Self {
+            discover_feeds: false,
             enabled: true,
             concurrency: 2,
             requests_per_second: 2.0,
