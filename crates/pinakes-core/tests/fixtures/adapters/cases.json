@@ -37,7 +37,7 @@
   },
   {
     "id": "icloud",
-    "uri": "webcal://p29-caldav.icloud.com/published/2/MTcyMDQzMDA3OTcxNzIwNBo0YWxLi9E9wE87BujEc05s_wNSlxHYpVqZebpx8p79",
+    "uri": "https://p29-caldav.icloud.com/published/2/synthetic-fixture",
     "error": false,
     "status": "ok",
     "type": "DataFeed",
@@ -46,7 +46,7 @@
   },
   {
     "id": "outlook",
-    "uri": "https://outlook.office365.com/owa/calendar/e19b78d2fbc34df5a4176f3f03fdb1c2@virginia.edu/4a4f2fc2e41b4a91b5da9bcda73f5f7a12370440417110585045/calendar.ics",
+    "uri": "https://outlook.office365.com/owa/calendar/00000000-0000-4000-8000-000000000000@example.edu/11111111-1111-4111-8111-111111111111/calendar.ics",
     "error": false,
     "status": "ok",
     "type": "DataFeed",
@@ -55,7 +55,7 @@
   },
   {
     "id": "nextcloud",
-    "uri": "https://nch.nerdraum.de/remote.php/dav/public-calendars/kEgPjYnceaax6jct?export",
+    "uri": "https://calendar.example.org/remote.php/dav/public-calendars/synthetic-fixture?export",
     "error": false,
     "status": "ok",
     "type": "DataFeed",

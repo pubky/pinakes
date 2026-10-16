@@ -228,7 +228,7 @@
     "location": null,
     "path": "c080452ab5488c1733b0b817d8c05282b1952e10200fe13b2352fb8fc6954312.gz",
     "status": 200,
-    "uri": "https://nch.nerdraum.de/remote.php/dav/public-calendars/kEgPjYnceaax6jct?export",
+    "uri": "https://calendar.example.org/remote.php/dav/public-calendars/synthetic-fixture?export",
     "user_agent": "pinakes/0.1.0 (+https://github.com/pubky/pinakes)",
     "validators": {
       "etag": null,
@@ -783,7 +783,7 @@
     "location": null,
     "path": "bd220f64a73d65944299e79e4db8aa848bf8f0867c54d70611f80762ed77224f.gz",
     "status": 200,
-    "uri": "https://p29-caldav.icloud.com/published/2/MTcyMDQzMDA3OTcxNzIwNBo0YWxLi9E9wE87BujEc05s_wNSlxHYpVqZebpx8p79",
+    "uri": "https://p29-caldav.icloud.com/published/2/synthetic-fixture",
     "user_agent": "pinakes/0.1.0 (+https://github.com/pubky/pinakes)",
     "validators": {
       "etag": "\"HwoQEgwAAB7VAH3KGgAAAAEYAhgAIhYI54LB0KyJ3+TNARCt2ZS+wv3NxZcBKAA=\"",
@@ -801,7 +801,7 @@
     "location": null,
     "path": "627eecc143834f6ed4288bcb8ef9904771b91104af704161633699794ba82fcf.gz",
     "status": 200,
-    "uri": "https://outlook.office365.com/owa/calendar/e19b78d2fbc34df5a4176f3f03fdb1c2@virginia.edu/4a4f2fc2e41b4a91b5da9bcda73f5f7a12370440417110585045/calendar.ics",
+    "uri": "https://outlook.office365.com/owa/calendar/00000000-0000-4000-8000-000000000000@example.edu/11111111-1111-4111-8111-111111111111/calendar.ics",
     "user_agent": "pinakes/0.1.0 (+https://github.com/pubky/pinakes)",
     "validators": {
       "etag": null,

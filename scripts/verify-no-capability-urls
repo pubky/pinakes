@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+"""Reject calendar capabilities without ever echoing the capability itself."""
+import argparse
+import gzip
+from pathlib import Path
+import re
+import sys
+
+PATTERN = re.compile(
+    r"outlook\.(?:office365|live)\.com/owa/calendar/"
+    r"|icloud\.com/published/"
+    r"|calendar\.google\.com/calendar/ical/[^\s\"<>]*/private-"
+    r"|/remote\.php/dav/public-calendars/[^\s\"<>]"
+    r"|proton\.me/api/calendar/v1/url/", re.IGNORECASE)
+SYNTHETIC = (
+    "https://outlook.office365.com/owa/calendar/00000000-0000-4000-8000-000000000000@example.edu/11111111-1111-4111-8111-111111111111/calendar.ics",
+    "https://p29-caldav.icloud.com/published/2/synthetic-fixture",
+    "https://calendar.example.org/remote.php/dav/public-calendars/synthetic-fixture?export",
+)
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
+args = parser.parse_args()
+failed = False
+for directory in ("data", "e2e", "docs", "tests/fixtures", "crates/pinakes-core/tests/fixtures"):
+    for path in sorted((args.root / directory).rglob("*")):
+        if not path.is_file() or "node_modules" in path.parts:
+            continue
+        raw = gzip.decompress(path.read_bytes()) if path.suffix == ".gz" else path.read_bytes()
+        text = raw.decode("utf-8", errors="replace").replace("\\/", "/")
+        # Exact, non-secret parser fixtures only; no domain-wide exception.
+        if path.relative_to(args.root).as_posix() in (
+            "crates/pinakes-core/tests/fixtures/adapters/cases.json",
+            "crates/pinakes-core/tests/fixtures/adapters/responses.json",
+        ):
+            for value in SYNTHETIC:
+                text = re.sub(re.escape(value) + r'(?=[\s"<>]|$)', "", text)
+        if PATTERN.search(text):
+            print(f"Capability URL pattern in {path.relative_to(args.root)} (value redacted)", file=sys.stderr)
+            failed = True
+sys.exit(int(failed))
