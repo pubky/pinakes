@@ -333,6 +333,20 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
             .collect::<Vec<_>>();
         let claims = *head || named.iter().any(|id| page.contains(id));
         apply_jsonld(&mut out.doc, entity, &fetched.url, claims);
+        // A plugin's body Article can outrank the head's WebPage for the card; the head's
+        // identity claims still apply.
+        if !head {
+            let head_best = scripts
+                .iter()
+                .filter(|(_, head)| *head)
+                .fold(None, |best, (v, _)| match best {
+                    Some(b) if entity_priority(v) <= entity_priority(b) => Some(b),
+                    _ => Some(v),
+                });
+            if let Some(v) = head_best {
+                jsonld_claims(&mut out.doc, v, &fetched.url);
+            }
+        }
     }
     for (class, kind) in [
         ("h-event", "Event"),
@@ -588,13 +602,55 @@ fn entity_urls(v: &Value) -> impl Iterator<Item = &str> {
                 .chain(v.get("mainEntity").filter(|m| m.is_object()))
                 .chain(graph.into_iter().flatten().take(16))
         })
-        .flat_map(|n| ["url", "@id"].map(move |f| n.get(f).and_then(Value::as_str)))
+        .flat_map(|n| {
+            // Google's Article shape names its page through mainEntityOfPage (a URL or a
+            // WebPage node).
+            let page = n.get("mainEntityOfPage");
+            [
+                n.get("url"),
+                n.get("@id"),
+                page.filter(|p| p.is_string()),
+                page.and_then(|p| p.get("@id")),
+                page.and_then(|p| p.get("url")),
+            ]
+            .map(|v| v.and_then(Value::as_str))
+        })
         .flatten()
 }
 fn entity_identity(url: &str) -> Option<String> {
     let mut u = Url::parse(url).ok()?;
     u.set_fragment(None);
     crate::model::identity(u.as_str()).ok().map(|v| v.0)
+}
+/// Identity claims (url/@id aliases, typed identifiers, sameAs) of the entity `apply_jsonld`
+/// would choose in `v`, without its card fields. Returns whether an entity was found.
+fn jsonld_claims(doc: &mut ResourceMeta, v: &Value, base: &Url) -> bool {
+    if let Some(values) = v.as_array() {
+        let best = values.iter().fold(None, |best, v| match best {
+            Some(b) if entity_priority(v) <= entity_priority(b) => Some(b),
+            _ => Some(v),
+        });
+        return best.is_some_and(|b| jsonld_claims(doc, b, base));
+    }
+    for nested in ["mainEntity", "@graph"] {
+        if v.get(nested).is_some_and(|n| jsonld_claims(doc, n, base)) {
+            return true;
+        }
+    }
+    if schema_type(v).is_none() {
+        return false;
+    }
+    for field in ["url", "@id", "sameAs"] {
+        if let Some(url) = v
+            .get(field)
+            .and_then(string)
+            .and_then(|s| origin_url(base, &s))
+        {
+            add_alias(doc, url);
+        }
+    }
+    crate::group_keys::jsonld(doc, v, base);
+    true
 }
 /// `claims` gates identity-bearing fields (aliases from url/@id/sameAs, typed identifiers):
 /// they come only from an entity that is the page's own.
@@ -911,6 +967,53 @@ mod tests {
                 "{head}{body}"
             );
         }
+    }
+    #[test]
+    fn body_entities_name_their_page_through_main_entity_of_page_and_head_claims_stay() {
+        let extract_keys = |html: &str| {
+            let fetched = Fetched {
+                permanent_redirect: false,
+                truncated: false,
+                url: Url::parse("https://news.example/story").unwrap(),
+                body: html.as_bytes().to_vec(),
+                content_type: "text/html".into(),
+                status: 200,
+                location: None,
+                retry_after_secs: 60,
+                validators: Default::default(),
+            };
+            let d = extract("https://news.example/story", &fetched, 100).doc;
+            (
+                d.type_name.clone(),
+                d.group_keys.into_iter().map(|k| k.key).collect::<Vec<_>>(),
+            )
+        };
+        // V36: Google's Article shape names the page via mainEntityOfPage (URL or WebPage).
+        for page in [
+            r#""https://news.example/story""#,
+            r#"{"@type":"WebPage","@id":"https://news.example/story"}"#,
+            r#"{"@type":"WebPage","url":"https://news.example/story#main"}"#,
+        ] {
+            let (_, keys) = extract_keys(&format!(
+                r#"<head><title>Story</title></head><body><p>Text</p><script type="application/ld+json">{{"@type":"NewsArticle","mainEntityOfPage":{page},"sameAs":"https://doi.org/10.1234/abc"}}</script></body>"#
+            ));
+            assert!(
+                keys.contains(&"doi:10.1234/abc".to_owned()),
+                "{page}: {keys:?}"
+            );
+        }
+        let (_, keys) = extract_keys(
+            r#"<head><title>Story</title></head><body><p>Text</p><script type="application/ld+json">{"@type":"NewsArticle","mainEntityOfPage":"https://elsewhere.example/x","sameAs":"https://doi.org/10.1234/abc"}</script></body>"#,
+        );
+        assert!(!keys.contains(&"doi:10.1234/abc".to_owned()));
+        // V37: a body Article outranks the head WebPage for the card, and the head's claims
+        // still apply; the body node, naming nothing, adds none.
+        let (kind, keys) = extract_keys(
+            r#"<head><title>Story</title><script type="application/ld+json">{"@type":"WebPage","sameAs":"https://doi.org/10.1234/head"}</script></head><body><p>Text</p><script type="application/ld+json">{"@type":"NewsArticle","headline":"Story","sameAs":"https://doi.org/10.5555/body"}</script></body>"#,
+        );
+        assert_eq!(kind, "NewsArticle");
+        assert!(keys.contains(&"doi:10.1234/head".to_owned()), "{keys:?}");
+        assert!(!keys.contains(&"doi:10.5555/body".to_owned()), "{keys:?}");
     }
     #[test]
     fn oembed_fills_only_missing_and_never_keeps_html() {
