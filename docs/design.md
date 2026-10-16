@@ -127,7 +127,7 @@ Postgres with PostGIS and full-text search **(arbitrary)**; any database with sp
 
 ### 5.5 API {#api}
 
-`/v1` from day one. Lists return `{resource_id, uri, type, name, facets…, score, status}` with an opaque cursor; limit default 50, maximum 500 **(arbitrary)**.
+`/v1` from day one. Lists return `{resource_id, uri, type, name, facets…, status}` with an opaque cursor; limit default 50, maximum 500 **(arbitrary)**. Score stays internal to ranking, pagination and cluster `top` selection.
 
 | Route | What it does |
 |---|---|

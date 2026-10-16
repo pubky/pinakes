@@ -1184,8 +1184,7 @@
           "resource_id",
           "uri",
           "site",
-          "status",
-          "score"
+          "status"
         ],
         "properties": {
           "attribution": {
@@ -1253,10 +1252,6 @@
           },
           "resource_id": {
             "type": "string"
-          },
-          "score": {
-            "type": "number",
-            "format": "double"
           },
           "site": {
             "type": "string"

@@ -102,7 +102,8 @@ Activity ranking uses distinct taggers and reference counts:
 
 Scores are recomputed on reference changes and continue to decay at search time.
 `recent` ranks by the newest reference timestamp. Pagination orders descending on
-`(rank, resource_id)`; the returned `score` is that sort's rank. The cursor pins the
+`(rank, resource_id)`. Scores are internal to ordering, pagination and cluster `top`
+selection; public resource responses omit them. The cursor pins the
 decay timestamp and binds to the filters. Keep all filters, field selection and
 sort unchanged; `limit` may change. Concurrent reference/resolver updates are
 visible (this is not a frozen database snapshot). Corrupt or mismatched cursors
@@ -111,12 +112,11 @@ return 400. A null cursor ends the result set.
 ## Resource fields and status
 
 Cards include `resource_id`, `uri`, `type`, `name`, `description`, `image`, `site`,
-`score`, `status`. Missing card values are null. `facets` adds `type_path`, optional
+`status`. Missing card values are null. `facets` adds `type_path`, optional
 `category`, `point:{lat,lon}`, `start` and `end`. `document` adds the bounded
 `ResourceMeta` with source, fetched time in Unix milliseconds, TTL seconds,
 attributes and aliases. `geo` omits `ttl_secs` because it is final. The document is at most 8 KB; its flat string attributes
 are resolver-allowlisted and capped at 32. An unresolved resource has no document.
-Reads outside search do not calculate a ranking and return `score=0`.
 
 Statuses are `ok`, `pending`, `missing`, `unreachable`, and `error`. Missing must
 be confirmed by two fresh successful fetches; one missing response keeps the last

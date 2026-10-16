@@ -497,6 +497,11 @@ async fn viewport_distance_time_facets_clustering_and_etag(pool: PgPool) {
     .await;
     assert_eq!(view["clusters"], json!([]));
     assert_eq!(view["points"].as_array().unwrap().len(), 4);
+    assert!(view["points"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|point| point.get("score").is_none()));
     let (_, _, view) = call(
         &app,
         "/v1/search?bbox=13,52,14,53&type=Place&scheme=https&facet=tags",

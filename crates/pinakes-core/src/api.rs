@@ -304,7 +304,6 @@ pub struct ResourceView {
     pub image: Option<String>,
     pub site: String,
     pub status: String,
-    pub score: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub type_path: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -392,7 +391,6 @@ fn view(row: &Value, fields: Fields, spatial: bool) -> Result<ResourceView, ApiE
             .map(|d| d.site.clone())
             .unwrap_or_else(|| row["host"].as_str().unwrap_or_default().into()),
         status: row["status"].as_str().unwrap_or("pending").into(),
-        score: row["rank"].as_f64().unwrap_or(0.0),
         type_path: facets.then(|| {
             doc.as_ref()
                 .map(|d| d.type_path.clone())

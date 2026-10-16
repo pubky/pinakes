@@ -124,6 +124,9 @@ async fn every_read_route_and_document_projection(pool: PgPool) {
     let (code, spec) = call(&app, "GET", "/v1/openapi.json", None).await;
     assert_eq!(code, 200);
     assert!(spec["paths"]["/v1/resolve"]["post"].is_object());
+    assert!(spec["components"]["schemas"]["ResourceView"]["properties"]
+        .get("score")
+        .is_none());
     assert_eq!(spec["paths"].as_object().unwrap().len(), 11);
     for field in ["card", "facets", "document"] {
         let (code, item) = call(
@@ -135,6 +138,7 @@ async fn every_read_route_and_document_projection(pool: PgPool) {
         .await;
         assert_eq!(code, 200);
         assert_eq!(item["type"], "MusicEvent");
+        assert!(item.get("score").is_none());
         assert_eq!(item.get("document").is_some(), field == "document");
         assert_eq!(item.get("type_path").is_some(), field != "card");
     }
@@ -171,6 +175,11 @@ async fn every_read_route_and_document_projection(pool: PgPool) {
     assert_eq!(code, 200);
     assert_eq!(items.as_array().unwrap().len(), 2);
     assert!(items[0]["document"].is_object());
+    assert!(items
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|item| item.get("score").is_none()));
     let (_, items) = call(
         &app,
         "POST",
@@ -179,6 +188,7 @@ async fn every_read_route_and_document_projection(pool: PgPool) {
     )
     .await;
     assert_eq!(items[0]["resource_id"], ids[0]);
+    assert!(items[0].get("score").is_none());
     for body in [
         json!({}),
         json!({"ids":[]}),
@@ -214,6 +224,7 @@ async fn search_filters_facets_true_keyset_and_invalid_options(pool: PgPool) {
     assert_eq!(code, 200, "{page}");
     assert_eq!(page["items"].as_array().unwrap().len(), 1);
     assert_eq!(page["items"][0]["resource_id"], ids[0]);
+    assert!(page["items"][0].get("score").is_none());
     assert_eq!(page["facets"]["tags"].as_array().unwrap().len(), 2);
     let (_, page) = call(&app, "GET", "/v1/search?q=Even&facet=tags", None).await;
     assert_eq!(page["items"].as_array().unwrap().len(), 1);
@@ -234,6 +245,11 @@ async fn search_filters_facets_true_keyset_and_invalid_options(pool: PgPool) {
             let (code, page) = call(&app, "GET", &path, None).await;
             assert_eq!(code, 200, "{page}");
             assert_eq!(page["facets"]["tags"][0]["count"], 5);
+            assert!(page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item.get("score").is_none()));
             seen.extend(
                 page["items"]
                     .as_array()
@@ -249,6 +265,9 @@ async fn search_filters_facets_true_keyset_and_invalid_options(pool: PgPool) {
             }
         }
         assert_eq!(seen.len(), 5);
+        let mut expected = ids.clone();
+        expected.sort_by(|a, b| b.cmp(a));
+        assert_eq!(seen, expected, "internal rank/ID tie-breaking is unchanged");
         seen.sort();
         seen.dedup();
         assert_eq!(seen.len(), 5);
@@ -479,6 +498,7 @@ async fn preview_pending_cached_completion_and_per_ip_uri_budgets(pool: PgPool) 
     .await;
     assert_eq!(code, 202);
     assert_eq!(preview["status"], "pending");
+    assert!(preview.get("score").is_none());
     assert!(start.elapsed() >= std::time::Duration::from_secs(3));
     assert!(start.elapsed() < std::time::Duration::from_secs(5));
     let job = queue::claim(&pool, "web", &config.queue)
@@ -499,6 +519,7 @@ async fn preview_pending_cached_completion_and_per_ip_uri_budgets(pool: PgPool) 
     .await;
     assert_eq!(code, 200);
     assert_eq!(preview["name"], "A preview");
+    assert!(preview.get("score").is_none());
     assert!(queue::claim(&pool, "web", &config.queue)
         .await
         .unwrap()
