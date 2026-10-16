@@ -591,6 +591,7 @@
           {
             "name": "cursor",
             "in": "query",
+            "description": "Authenticated opaque keyset cursor from this daemon; invalid after restart. Restart pagination on HTTP 400.",
             "required": false,
             "schema": {
               "type": [

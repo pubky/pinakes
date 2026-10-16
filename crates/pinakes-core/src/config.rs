@@ -155,6 +155,7 @@ impl Default for OsmConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SearchConfig {
+    pub reach_timeout_secs: u64,
     pub max_radius_m: f64,
     pub h3_resolutions: Vec<u8>,
     pub max_cluster_cells: usize,
@@ -162,6 +163,7 @@ pub struct SearchConfig {
 impl Default for SearchConfig {
     fn default() -> Self {
         Self {
+            reach_timeout_secs: 5,
             max_radius_m: 200_000.0,
             h3_resolutions: (0u8..=22).map(|z| z.saturating_sub(4).min(11)).collect(),
             max_cluster_cells: 10000,
@@ -173,12 +175,14 @@ impl Default for SearchConfig {
 pub struct ApiConfig {
     pub requests_per_minute: usize,
     pub cache_capacity: usize,
+    pub reach_cost: usize,
 }
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
             requests_per_minute: 120,
             cache_capacity: 10000,
+            reach_cost: 6,
         }
     }
 }
@@ -293,6 +297,8 @@ impl Config {
             || !(122..=100000).contains(&self.search.max_cluster_cells)
             || !(1..=10000).contains(&self.api.requests_per_minute)
             || !(2..=100000).contains(&self.api.cache_capacity)
+            || !(2..=100).contains(&self.api.reach_cost)
+            || !(1..=60).contains(&self.search.reach_timeout_secs)
             || !self.search.max_radius_m.is_finite()
             || !(1.0..=200_000.0).contains(&self.search.max_radius_m)
             || self.search.h3_resolutions.is_empty()

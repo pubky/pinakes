@@ -41,7 +41,7 @@ not an HTTP 404 from the Pinakes resource route.
 | `viewer` | Nexus user ID used only for the reach set |
 | `sort` | `activity` (default), `recent`, `distance` (requires `near`) or `start` |
 | `limit` | 1–500, default 50 |
-| `cursor` | Opaque next-page token returned by the previous page |
+| `cursor` | Authenticated next-page token returned by this daemon; restart pagination after a daemon restart or an invalid-cursor 400 |
 | `facet` | `tags`: counts distinct resources per label over the entire filtered set |
 | `bbox` | `minLon,minLat,maxLon,maxLat`, degrees; west > east crosses the antimeridian |
 | `near`, `radius` | `lat,lon` plus a positive metre radius, max 200,000 by default; mutually exclusive with `bbox` |
@@ -84,8 +84,14 @@ page limit and use the same author/reach scope. Resources without public referen
 are excluded. Following/friends lists come from Nexus in pages of 200, cached per
 viewer and reach kind for five minutes, with at most 1,000 authors. A further page
 probes for truncation; `reach_truncated=true` warns that the reach set was capped.
-An unknown Nexus user has an empty reach set; Nexus errors return 502, not an empty
-successful search.
+The cache lock is released during fetching, so one slow viewer does not block another.
+All pages share a total five-second deadline (`search.reach_timeout_secs`); incomplete
+sets are not cached. An unknown Nexus user has an empty reach set; errors or deadline
+expiry return 502, not an empty successful search.
+
+Keyset cursors authenticate the complete payload with HMAC-BLAKE3. The random key is
+created at daemon startup and never persisted or exposed. Tampered/unsigned cursors
+and cursors from a previous daemon return 400; restart pagination without a cursor.
 
 Activity ranking uses distinct taggers and reference counts:
 
@@ -241,7 +247,10 @@ reopens final resources for references newer than their last resolution.
 
 Public queries use a separate ten-connection pool with a five-second PostgreSQL statement
 and acquisition timeout. Every public `/v1` route shares the direct-peer per-IP budget
-(default 120/minute, configurable in `[api]`); forwarded IP headers are not trusted.
+(default 120 units/minute, configurable in `[api]`); forwarded IP headers are not trusted.
+Reach-enabled searches cost `api.reach_cost` units (default 6, for up to six upstream
+pages), charged before any Nexus call even when the reach cache hits. Other routes cost
+one unit. Exceeding the budget returns 429 with `Retry-After: 60`.
 Oldest keys are evicted when the bounded budget cache fills. Existing preview/dump limits
 still apply. Dumps have per-chunk read/send deadlines (10 seconds) and a total deadline
 (120 seconds), even when a reader stops polling; partial streams end in an error.

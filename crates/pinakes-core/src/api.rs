@@ -14,6 +14,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::{DateTime, Utc};
+use hmac::{KeyInit, Mac, SimpleHmac};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
@@ -36,18 +37,26 @@ pub struct AppState {
     limiter: Arc<Mutex<HashMap<String, (Instant, usize)>>>,
     dumps: Arc<tokio::sync::Semaphore>,
     info_cache: Arc<Mutex<Option<(Instant, Value)>>>,
+    cursor_mac: SimpleHmac<blake3::Hasher>,
 }
 impl AppState {
     pub fn new(pool: PgPool, config: Config) -> anyhow::Result<Self> {
+        let mut cursor_key = [0; 32];
+        getrandom::fill(&mut cursor_key).context("cursor key entropy unavailable")?;
         Ok(Self {
             pool,
-            nexus: Nexus::new(&config.nexus_url)?,
+            nexus: Nexus::with_reach_timeout(
+                &config.nexus_url,
+                Duration::from_secs(config.search.reach_timeout_secs),
+            )?,
             config,
             wake: Arc::default(),
             metrics: Arc::new(crate::telemetry::Metrics::new()?),
             limiter: Arc::default(),
             dumps: Arc::new(tokio::sync::Semaphore::new(4)),
             info_cache: Arc::default(),
+            cursor_mac: SimpleHmac::<blake3::Hasher>::new_from_slice(&cursor_key)
+                .context("initialize cursor MAC")?,
         })
     }
     async fn budget(
@@ -55,13 +64,13 @@ impl AppState {
         keys: &[(String, usize)],
         capacity: usize,
         message: &str,
+        cost: usize,
     ) -> Result<(), ApiError> {
         let mut limits = self.limiter.lock().await;
         limits.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(60));
-        if keys
-            .iter()
-            .any(|(key, limit)| limits.get(key).is_some_and(|(_, n)| n >= limit))
-        {
+        if keys.iter().any(|(key, limit)| {
+            limits.get(key).map_or(0, |(_, n)| *n).saturating_add(cost) > *limit
+        }) {
             return Err(ApiError(StatusCode::TOO_MANY_REQUESTS, message.into()));
         }
         for (key, _) in keys {
@@ -78,7 +87,7 @@ impl AppState {
             limits
                 .entry(key.clone())
                 .or_insert_with(|| (Instant::now(), 0))
-                .1 += 1;
+                .1 += cost;
         }
         Ok(())
     }
@@ -96,6 +105,7 @@ impl AppState {
             ],
             self.config.preview.cache_capacity.max(2),
             "preview rate limit exceeded",
+            1,
         )
         .await
     }
@@ -125,6 +135,14 @@ async fn public_budget(
         )
         .into_response();
     };
+    let cost = if request.uri().path() == "/v1/search"
+        && url::form_urlencoded::parse(request.uri().query().unwrap_or_default().as_bytes())
+            .any(|(key, _)| key == "reach")
+    {
+        state.config.api.reach_cost
+    } else {
+        1
+    };
     if let Err(error) = state
         .budget(
             &[(
@@ -133,6 +151,7 @@ async fn public_budget(
             )],
             state.config.api.cache_capacity,
             "API rate limit exceeded",
+            cost,
         )
         .await
     {
@@ -221,6 +240,7 @@ pub struct SearchQuery {
     pub sort: Option<String>,
     #[param(minimum = 1, maximum = 500)]
     pub limit: Option<usize>,
+    /// Authenticated opaque keyset cursor from this daemon; invalid after restart. Restart pagination on HTTP 400.
     pub cursor: Option<String>,
     pub facet: Option<String>,
     pub fields: Option<Fields>,
@@ -246,6 +266,32 @@ struct PageCursor {
     id: String,
     at: DateTime<Utc>,
     filter: String,
+}
+impl PageCursor {
+    fn encode(&self, template: &SimpleHmac<blake3::Hasher>) -> anyhow::Result<String> {
+        let payload = serde_json::to_vec(self)?;
+        let mut mac = template.clone();
+        mac.update(&payload);
+        let mut signed = mac.finalize().into_bytes().to_vec();
+        signed.extend_from_slice(&payload);
+        Ok(URL_SAFE_NO_PAD.encode(signed))
+    }
+    fn decode(s: &str, template: &SimpleHmac<blake3::Hasher>) -> Result<Self, ApiError> {
+        let invalid = || ApiError::bad("invalid cursor");
+        if s.len() > 2048 {
+            return Err(invalid());
+        }
+        let signed = URL_SAFE_NO_PAD.decode(s).map_err(|_| invalid())?;
+        if signed.len() <= 32 {
+            return Err(invalid());
+        }
+        let (tag, payload) = signed.split_at(32);
+        let mut mac = template.clone();
+        mac.update(payload);
+        // RustCrypto's verify_slice compares the complete MAC in constant time.
+        mac.verify_slice(tag).map_err(|_| invalid())?;
+        serde_json::from_slice(payload).map_err(|_| invalid())
+    }
 }
 #[derive(Serialize, ToSchema)]
 pub struct ResourceView {
@@ -468,6 +514,11 @@ pub async fn search(
     let tags = validate_search(&q)?;
     let spatial = crate::spatial::Filters::parse(&q, &state.config.search)
         .map_err(|e| ApiError::bad(e.to_string()))?;
+    let cursor = q
+        .cursor
+        .as_deref()
+        .map(|s| PageCursor::decode(s, &state.cursor_mac))
+        .transpose()?;
     let reach = if let (Some(viewer), Some(reach)) = (&q.viewer, &q.reach) {
         Some(state.nexus.reach(viewer, reach).await.map_err(|e| {
             tracing::warn!(error=%e,"reach unavailable");
@@ -493,16 +544,8 @@ pub async fn search(
     let filter = blake3::hash(&serde_json::to_vec(&(&fingerprint, &reach_revision))?)
         .to_hex()
         .to_string();
-    let cursor = if let Some(s) = &q.cursor {
-        if s.len() > 2048 {
-            return Err(ApiError::bad("invalid cursor"));
-        }
-        let c: PageCursor = URL_SAFE_NO_PAD
-            .decode(s)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .ok_or_else(|| ApiError::bad("invalid cursor"))?;
-        if c.version != 1
+    if let Some(c) = &cursor {
+        if c.version != 2
             || c.filter != filter
             || !c.score.is_finite()
             || !model::valid_id(&c.id)
@@ -510,10 +553,7 @@ pub async fn search(
         {
             return Err(ApiError::bad("cursor does not match this search"));
         }
-        Some(c)
-    } else {
-        None
-    };
+    }
     let at = cursor.as_ref().map_or_else(Utc::now, |c| c.at);
     let mut sql = QueryBuilder::<Postgres>::new("WITH filtered AS (SELECT r.*, ");
     if q.sort.as_deref() == Some("distance") {
@@ -635,13 +675,16 @@ pub async fn search(
     items.truncate(q.limit.unwrap_or(50));
     let next = if has_more && spatial.resolution.is_none() {
         let last = items.last().expect("nonempty page");
-        Some(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&PageCursor {
-            version: 1,
-            score: last["rank"].as_f64().context("missing rank")?,
-            id: last["id"].as_str().context("missing resource ID")?.into(),
-            at,
-            filter,
-        })?))
+        Some(
+            PageCursor {
+                version: 2,
+                score: last["rank"].as_f64().context("missing rank")?,
+                id: last["id"].as_str().context("missing resource ID")?.into(),
+                at,
+                filter,
+            }
+            .encode(&state.cursor_mac)?,
+        )
     } else {
         None
     };
@@ -923,6 +966,7 @@ async fn osm_dump(
             )],
             state.config.api.cache_capacity,
             "dump rate limit exceeded",
+            1,
         )
         .await?;
     let permit = state.dumps.clone().try_acquire_owned().map_err(|_| {

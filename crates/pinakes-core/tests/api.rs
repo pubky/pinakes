@@ -564,6 +564,7 @@ async fn public_budget_covers_reads_and_evicts_old_ips(pool: PgPool) {
         api: pinakes_core::config::ApiConfig {
             requests_per_minute: 2,
             cache_capacity: 2,
+            ..Default::default()
         },
         ..Default::default()
     };
@@ -614,6 +615,100 @@ async fn api_pool_enforces_query_timeout(pool: PgPool) {
     );
     assert!(start.elapsed() < std::time::Duration::from_secs(6));
     api_pool.close().await;
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn reach_searches_pay_for_upstream_pages_before_fetching(pool: PgPool) {
+    let (nexus_url, calls, task) = mock_nexus(vec![]).await;
+    let mut config = Config {
+        nexus_url,
+        ..Default::default()
+    };
+    config.api.requests_per_minute = 7;
+    let app = api::router(AppState::new(pool, config).unwrap());
+    let path = format!("/v1/search?%72each=following&viewer={}", author(0));
+    assert_eq!(call(&app, "GET", &path, None).await.0, 200);
+    assert_eq!(calls.load(Ordering::SeqCst), 6);
+    let rotated = format!("/v1/search?reach=following&viewer={}", author(1));
+    assert_eq!(call(&app, "GET", &rotated, None).await.0, 429);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        6,
+        "rejected before Nexus fetch"
+    );
+    assert_eq!(call(&app, "GET", "/v1/info", None).await.0, 200);
+    assert_eq!(call(&app, "GET", "/v1/search", None).await.0, 429);
+    task.abort();
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn cursors_reject_payload_tampering_unsigned_forgery_and_another_daemon_key(pool: PgPool) {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    seed(&pool).await;
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (_, first) = call(&app, "GET", "/v1/search?limit=2", None).await;
+    let cursor = first["cursor"].as_str().unwrap();
+    let signed = URL_SAFE_NO_PAD.decode(cursor).unwrap();
+    let original: Value = serde_json::from_slice(&signed[32..]).unwrap();
+    for (field, value) in [
+        ("score", json!(99999)),
+        ("id", json!("f".repeat(32))),
+        ("at", json!("2025-01-01T00:00:00Z")),
+        ("filter", json!("0".repeat(64))),
+    ] {
+        let mut edited = original.clone();
+        edited[field] = value;
+        let payload = serde_json::to_vec(&edited).unwrap();
+        for tag in [
+            signed[..32].to_vec(),
+            blake3::hash(&payload).as_bytes().to_vec(),
+        ] {
+            let mut forged = tag;
+            forged.extend_from_slice(&payload);
+            let cursor = URL_SAFE_NO_PAD.encode(forged);
+            assert_eq!(
+                call(
+                    &app,
+                    "GET",
+                    &format!("/v1/search?limit=2&cursor={cursor}"),
+                    None
+                )
+                .await
+                .0,
+                400
+            );
+        }
+    }
+    let unsigned = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&original).unwrap());
+    assert_eq!(
+        call(&app, "GET", &format!("/v1/search?cursor={unsigned}"), None)
+            .await
+            .0,
+        400
+    );
+    assert_eq!(
+        call(
+            &app,
+            "GET",
+            &format!("/v1/search?limit=2&cursor={cursor}"),
+            None
+        )
+        .await
+        .0,
+        200
+    );
+    let restarted = api::router(AppState::new(pool, Config::default()).unwrap());
+    assert_eq!(
+        call(
+            &restarted,
+            "GET",
+            &format!("/v1/search?limit=2&cursor={cursor}"),
+            None
+        )
+        .await
+        .0,
+        400
+    );
 }
 
 #[sqlx::test(migrations = "../../migrations")]
