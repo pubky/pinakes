@@ -118,8 +118,39 @@ struct Unit {
     keys: Vec<crate::group_keys::GroupKey>,
     origin: String,
     authoritative: Vec<String>,
+    /// URL claims that count toward demotion: not authoritative and not a same-page variant.
+    counted: Vec<String>,
     occurrence: Option<Value>,
     event: Option<Value>,
+}
+/// The same page under another URL (AMP, print, a query variant) naming its canonical is
+/// not a competing claimant. A homepage canonical never qualifies.
+fn same_page_variant(own: &str, target: &str) -> bool {
+    let (Ok(a), Ok(b)) = (url::Url::parse(own), url::Url::parse(target)) else {
+        return false;
+    };
+    let (pa, pb) = (
+        a.path().trim_end_matches('/'),
+        b.path().trim_end_matches('/'),
+    );
+    a.host_str() == b.host_str()
+        && pb.len() > 1
+        && (pa == pb || pa.starts_with(&format!("{pb}/")) || pa.ends_with(pb))
+}
+/// Stored URL claims whose target is the same page as the claimant's own URI.
+fn variants(row: &Value) -> BTreeSet<String> {
+    let uri = row["uri"].as_str().unwrap_or("");
+    serde_json::from_value::<Vec<crate::group_keys::GroupKey>>(row["keys"].clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|k| k.key.starts_with("url:"))
+        .filter(|k| {
+            k.target
+                .as_deref()
+                .is_some_and(|t| t.starts_with("http") && same_page_variant(uri, t))
+        })
+        .map(|k| k.key)
+        .collect()
 }
 
 pub async fn scores(tx: &mut Transaction<'_, Postgres>, ids: &[String]) -> Result<()> {
@@ -305,10 +336,23 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
                 }
                 keys
             },
+            counted: Vec::new(),
             occurrence: r.get("occurrence").filter(|v| !v.is_null()).cloned(),
             event: r.get("event").filter(|v| !v.is_null()).cloned(),
         })
         .collect();
+    for (unit, row) in units.iter_mut().zip(&rows) {
+        let variants = variants(row);
+        unit.counted = unit
+            .keys
+            .iter()
+            .map(|k| &k.key)
+            .filter(|k| {
+                k.starts_with("url:") && !unit.authoritative.contains(k) && !variants.contains(*k)
+            })
+            .cloned()
+            .collect();
+    }
     let ids: Vec<_> = units.iter().map(|u| u.unit_id.clone()).collect();
     let keys: Vec<_> = units
         .iter()
@@ -339,7 +383,10 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
     .to_hex()
     .to_string();
     let old_fingerprint: Option<String> =
-        sqlx::query_scalar("SELECT fingerprint FROM group_input WHERE resource_id=$1")
+        // A partial (pair-budget) plan is never cached: its neighbours may since allow a full one.
+        sqlx::query_scalar(
+            "SELECT fingerprint FROM group_input WHERE resource_id=$1 AND last_error IS NULL",
+        )
             .bind(id)
             .fetch_optional(&mut **tx)
             .await?;
@@ -358,15 +405,28 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
             .entry(e.resource_id.clone())
             .or_insert(Some(e.revision));
     }
-    let claims: Vec<_> = units.iter().flat_map(|u| u.keys.iter().filter(|k| k.key.starts_with("url:")).map(|k| json!({"key":k.key,"origin":u.origin,"resource_id":id,"uri":rows.first().and_then(|r|r["uri"].as_str()).unwrap_or("")}))).collect();
+    let uri = rows.first().and_then(|r| r["uri"].as_str()).unwrap_or("");
+    let claims: Vec<_> = units
+        .iter()
+        .flat_map(|u| {
+            u.keys
+                .iter()
+                .filter(|k| k.key.starts_with("url:"))
+                .map(|k| json!({"key":k.key,"origin":u.origin,"resource_id":id,"uri":uri,"counts":u.counted.contains(&k.key)||u.authoritative.contains(&k.key)}))
+        })
+        .collect();
+    // Demotion is recomputed from live claims: more than two claimants on distinct paths,
+    // same-page variants not counted. Only non-authoritative claims are ever demoted, so
+    // squatters cannot take a page's own (or registry-named) identity key away from it.
     let demoted: BTreeSet<(String, String)> = sqlx::query_as(r#"
       WITH wanted AS (SELECT DISTINCT v->>'key' AS key,v->>'origin' AS origin FROM jsonb_array_elements($1) v),
-      claims AS (SELECT k.key,k.origin,k.resource_id,r.uri FROM wanted w JOIN resource_group k USING(key,origin) JOIN resource r ON r.id=k.resource_id WHERE k.resource_id<>$2
-        UNION SELECT v->>'key',v->>'origin',v->>'resource_id',v->>'uri' FROM jsonb_array_elements($1) v)
+      claims AS (SELECT k.key,k.origin,k.resource_id,r.uri FROM wanted w JOIN resource_group k USING(key,origin) JOIN resource r ON r.id=k.resource_id WHERE k.resource_id<>$2 AND (k.counted OR k.trusted)
+        UNION SELECT v->>'key',v->>'origin',v->>'resource_id',v->>'uri' FROM jsonb_array_elements($1) v WHERE (v->>'counts')::boolean)
       SELECT key,origin FROM claims GROUP BY key,origin
        HAVING count(DISTINCT resource_id)>2 AND count(DISTINCT substring(uri from '^https?://[^/]+([^?#]*)'))>2
-      UNION SELECT d.key,d.origin FROM group_demoted_url d WHERE d.key=ANY($3)
-    "#).bind(json!(claims)).bind(id).bind(&keys).fetch_all(&mut **tx).await?.into_iter().collect();
+    "#).bind(json!(claims)).bind(id).fetch_all(&mut **tx).await?.into_iter().collect();
+    let previously_demoted: BTreeSet<(String, String)> = sqlx::query_as("SELECT DISTINCT k.key,k.origin FROM jsonb_array_elements($1) v JOIN resource_group k ON k.key=v->>'key' AND k.origin=v->>'origin' WHERE k.demoted")
+        .bind(json!(claims)).fetch_all(&mut **tx).await?.into_iter().collect();
     check_revisions(tx, &revisions).await?;
     let mut incoming = Vec::new();
     let mut incoming_bytes = 0usize;
@@ -389,6 +449,7 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
                 origin: unit.origin.clone(),
                 target: k.target.clone(),
                 trusted: unit.authoritative.contains(&k.key),
+                counted: unit.counted.contains(&k.key),
                 occurrence: unit.occurrence.is_some(),
                 start_at: row["start"].as_str().and_then(|v| v.parse().ok()),
                 admitted_at: edges
@@ -410,30 +471,23 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
     }
     edges.retain(|e| e.resource_id != id);
     edges.extend(incoming);
-    edges.retain(|e| !demoted.contains(&(e.key.clone(), e.origin.clone())));
-    for u in &mut units {
-        u.keys
-            .retain(|k| !demoted.contains(&(k.key.clone(), u.origin.clone())));
-    }
+    edges.retain(|e| !(e.counted && demoted.contains(&(e.key.clone(), e.origin.clone()))));
     let plan = plan(tx, edges, &previous, cfg).await?;
     fence(tx, &revisions).await?;
-    for (key, origin) in &demoted {
-        sqlx::query(
-            "INSERT INTO group_demoted_url(key,origin) VALUES($1,$2) ON CONFLICT DO NOTHING",
-        )
-        .bind(key)
-        .bind(origin)
-        .execute(&mut **tx)
-        .await?;
-        // Invalidate every claimant, including members outside the admission window.
-        sqlx::query("INSERT INTO group_dirty(resource_id) SELECT DISTINCT resource_id FROM resource_group WHERE key=$1 AND origin=$2 ON CONFLICT DO NOTHING").bind(key).bind(origin).execute(&mut **tx).await?;
-        sqlx::query("DELETE FROM group_input WHERE resource_id IN(SELECT resource_id FROM resource_group WHERE key=$1 AND origin=$2)").bind(key).bind(origin).execute(&mut **tx).await?;
-        sqlx::query("DELETE FROM resource_group WHERE key=$1 AND origin=$2")
-            .bind(key)
-            .bind(origin)
+    let newly = demoted.difference(&previously_demoted).count() as i64;
+    if newly > 0 {
+        sqlx::query("UPDATE group_runtime SET url_demotions_total=url_demotions_total+$1 WHERE id")
+            .bind(newly)
             .execute(&mut **tx)
             .await?;
     }
+    // Other claimants follow the recomputed state; flipped ones re-plan from scratch.
+    sqlx::query(r#"WITH state AS (SELECT DISTINCT v->>'key' AS key,v->>'origin' AS origin,
+        EXISTS(SELECT 1 FROM jsonb_array_elements($2) d WHERE d->>0=v->>'key' AND d->>1=v->>'origin') AS demote FROM jsonb_array_elements($1) v),
+      flipped AS (UPDATE resource_group k SET demoted=s.demote FROM state s WHERE k.key=s.key AND k.origin=s.origin AND k.counted AND k.resource_id<>$3 AND k.demoted<>s.demote RETURNING k.resource_id),
+      cleared AS (DELETE FROM group_input WHERE resource_id IN(SELECT resource_id FROM flipped))
+      INSERT INTO group_dirty(resource_id) SELECT DISTINCT resource_id FROM flipped ON CONFLICT DO NOTHING"#)
+        .bind(json!(claims)).bind(json!(demoted.iter().map(|(k,o)|json!([k,o])).collect::<Vec<_>>())).bind(id).execute(&mut **tx).await?;
     sqlx::query("DELETE FROM group_unit WHERE resource_id=$1 AND NOT(unit_id=ANY($2))")
         .bind(id)
         .bind(&ids)
@@ -441,9 +495,9 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
         .await?;
 
     for chunk in units.chunks(256) {
-        let data:Vec<_>=chunk.iter().map(|u|json!({"unit":u.unit_id,"resource":u.resource_id,"occurrence":u.occurrence_key,"keys":u.keys,"origin":u.origin,"authoritative":u.authoritative,"occurrence_ref":u.occurrence,"event_ref":u.event})).collect();
+        let data:Vec<_>=chunk.iter().map(|u|json!({"unit":u.unit_id,"resource":u.resource_id,"occurrence":u.occurrence_key,"keys":u.keys,"origin":u.origin,"authoritative":u.authoritative,"counted":u.counted,"demoted":u.keys.iter().filter(|k|u.counted.contains(&k.key)&&demoted.contains(&(k.key.clone(),u.origin.clone()))).map(|k|&k.key).collect::<Vec<_>>(),"occurrence_ref":u.occurrence,"event_ref":u.event})).collect();
         sqlx::query("INSERT INTO group_unit(unit_id,resource_id,occurrence_key,occurrence,event) SELECT v->>'unit',v->>'resource',v->>'occurrence',nullif(v->'occurrence_ref','null'::jsonb),nullif(v->'event_ref','null'::jsonb) FROM jsonb_array_elements($1) v ON CONFLICT(unit_id) DO UPDATE SET occurrence_key=excluded.occurrence_key,occurrence=excluded.occurrence,event=excluded.event").bind(json!(data)).execute(&mut **tx).await?;
-        sqlx::query("INSERT INTO resource_group(unit_id,resource_id,key,basis,confidence,origin,target,trusted) SELECT v->>'unit',v->>'resource',k->>'key',k->>'basis',(k->>'confidence')::float8,v->>'origin',k->>'target',(v->'authoritative') ? (k->>'key') FROM jsonb_array_elements($1) v CROSS JOIN LATERAL jsonb_array_elements(v->'keys') k ON CONFLICT(unit_id,key) DO UPDATE SET basis=excluded.basis,confidence=excluded.confidence,origin=excluded.origin,target=excluded.target,trusted=excluded.trusted").bind(json!(data)).execute(&mut **tx).await?;
+        sqlx::query("INSERT INTO resource_group(unit_id,resource_id,key,basis,confidence,origin,target,trusted,counted,demoted) SELECT v->>'unit',v->>'resource',k->>'key',k->>'basis',(k->>'confidence')::float8,v->>'origin',k->>'target',(v->'authoritative') ? (k->>'key'),(v->'counted') ? (k->>'key'),(v->'demoted') ? (k->>'key') FROM jsonb_array_elements($1) v CROSS JOIN LATERAL jsonb_array_elements(v->'keys') k ON CONFLICT(unit_id,key) DO UPDATE SET basis=excluded.basis,confidence=excluded.confidence,origin=excluded.origin,target=excluded.target,trusted=excluded.trusted,counted=excluded.counted,demoted=excluded.demoted").bind(json!(data)).execute(&mut **tx).await?;
     }
     let retained: Vec<_> = units
         .iter()
@@ -471,6 +525,7 @@ struct Edge {
     origin: String,
     target: Option<String>,
     trusted: bool,
+    counted: bool,
     occurrence: bool,
     start_at: Option<chrono::DateTime<chrono::Utc>>,
     admitted_at: chrono::DateTime<chrono::Utc>,
@@ -539,14 +594,14 @@ async fn load_edges(
     let max_edges = cfg.max_graph_units.saturating_mul(20);
     let mut stream=sqlx::query_as::<_,Edge>(r#"WITH wanted AS (
       SELECT DISTINCT picked.unit_id,picked.group_id FROM unnest($2::text[]) wanted(key) CROSS JOIN LATERAL
-      (SELECT k.unit_id,k.group_id FROM resource_group k WHERE k.key=wanted.key ORDER BY k.trusted DESC,k.admitted_at,k.unit_id LIMIT $4) picked
+      (SELECT k.unit_id,k.group_id FROM resource_group k WHERE k.key=wanted.key AND NOT k.demoted ORDER BY k.trusted DESC,k.admitted_at,k.unit_id LIMIT $4) picked
     ), affected AS (SELECT unnest($1::text[]) AS unit_id UNION SELECT unit_id FROM group_unit WHERE group_id=ANY($3)
       UNION SELECT u.unit_id FROM group_unit u WHERE u.group_id IN(SELECT group_id FROM wanted) UNION SELECT unit_id FROM wanted)
-    SELECT show_trgm(array_to_string(tsvector_to_array(to_tsvector('simple',coalesce(s.name,''))),' ')) AS trigrams,r.group_revision AS revision,k.unit_id,k.resource_id,k.key,k.basis,k.confidence,k.origin,k.target,k.trusted,k.admitted_at,
+    SELECT show_trgm(array_to_string(tsvector_to_array(to_tsvector('simple',coalesce(s.name,''))),' ')) AS trigrams,r.group_revision AS revision,k.unit_id,k.resource_id,k.key,k.basis,k.confidence,k.origin,k.target,k.trusted,k.counted,k.admitted_at,
       u.occurrence IS NOT NULL AS occurrence,s.start_at,u.group_id,o.group_id AS override_id,ST_Y(s.point) AS lat,ST_X(s.point) AS lon
     FROM resource_group k JOIN affected a USING(unit_id) JOIN group_unit u USING(unit_id) JOIN resource r ON r.id=k.resource_id
     LEFT JOIN group_override o USING(unit_id) LEFT JOIN group_member_document s USING(unit_id)
-    ORDER BY k.unit_id,k.key LIMIT $5"#)
+    WHERE NOT k.demoted ORDER BY k.unit_id,k.key LIMIT $5"#)
         .bind(units).bind(keys).bind(previous).bind(cfg.max_members as i64).bind((max_edges+1) as i64).fetch(&mut **tx);
     let mut edges = Vec::new();
     let mut bytes = 0usize;
@@ -829,10 +884,19 @@ async fn group_lock(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
         .fetch_one(&mut **tx)
         .await?;
     if !acquired {
-        return Err(SnapshotChanged.into());
+        return Err(LockBusy.into());
     }
     Ok(())
 }
+/// Another writer holds the group lock. Not a conflict: retry shortly without escalating.
+#[derive(Debug)]
+pub struct LockBusy;
+impl std::fmt::Display for LockBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("group writer busy; retry shortly")
+    }
+}
+impl std::error::Error for LockBusy {}
 async fn fence(
     tx: &mut Transaction<'_, Postgres>,
     revisions: &BTreeMap<String, Option<i64>>,
@@ -926,6 +990,13 @@ pub async fn reconcile(pool: &PgPool, id: &str, cfg: &GroupConfig) -> bool {
     }
     .await;
     if let Err(error) = result {
+        if error.is::<LockBusy>() {
+            // A busy writer is contention, not a revision conflict: a short jittered retry that
+            // neither charges nor advances the conflict backoff.
+            sqlx::query("INSERT INTO group_dirty(resource_id,last_error,next_attempt_at) SELECT id,'lock_busy',now()+(1+random()*2)*interval '1 second' FROM resource WHERE id=$1 ON CONFLICT(resource_id) DO UPDATE SET last_error='lock_busy',next_attempt_at=greatest(group_dirty.next_attempt_at,now()+(1+random()*2)*interval '1 second')")
+                .bind(id).execute(pool).await.ok();
+            return false;
+        }
         if error.is::<SnapshotChanged>() {
             sqlx::query("INSERT INTO group_dirty(resource_id,fence_attempts,last_error,next_attempt_at) SELECT id,1,'snapshot_changed',now()+(5+random()*5)*interval '1 second' FROM resource WHERE id=$1 ON CONFLICT(resource_id) DO UPDATE SET fence_attempts=least(group_dirty.fence_attempts+1,32),last_error='snapshot_changed',next_attempt_at=now()+least(3600,(5+random()*5)*power(2,least(group_dirty.fence_attempts,10)))*interval '1 second'")
                 .bind(id).execute(pool).await.ok();

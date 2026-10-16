@@ -23,9 +23,19 @@ heal when someone cares about the page.
 
 Redirect aliases do not establish group identity. Only explicit canonical/main-entity metadata,
 validated sameAs evidence, or an entirely permanent HTTP redirect chain contributes URL keys.
-A URL key claimed by three distinct paths within one publisher is demoted for every claimant;
-the persistent demotion prevents unchanged metadata from reintroducing it. See
-`pinakes_group_url_demotions_total`. Aliases remain available as navigation metadata.
+A URL key claimed by more than two resources on distinct paths within one publisher is
+demoted, but only for non-authoritative claimants: a page's own URI and registry-named
+landing pages are never demoted, so squatting pages cannot take a page's identity. Same-page
+variants (AMP, print, query variants whose path contains the target path) are not counted.
+Demotion is recomputed from live claims on every reconciliation; demoted claims stay stored
+(hidden from planning), and removing a claim (document change or orphan deletion) re-queues
+the remaining demoted claimants, so groups heal without operator action. There is no
+permanent tombstone. `pinakes_group_url_demotions_total` counts demotion events. In an
+automatic group, a member whose live canonical names another member ranks below that member
+for the card, before taggers; registry and sameAs evidence still follow the tagger rule.
+Aliases remain available as navigation metadata. Lock contention between group writers
+retries after 1–3 seconds without advancing the conflict backoff; inputs recorded under a
+partial (pair-budget) plan are recomputed on the next reconciliation instead of cached.
 
 Grouping conflicts use a separate durable retry counter with 5–10 seconds of initial jitter,
 exponential growth and a one-hour ceiling. Saves respect that window, and the daemon drains

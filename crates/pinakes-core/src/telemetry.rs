@@ -234,7 +234,7 @@ impl Metrics {
         );
         sync_counter(
             &self.group_url_demotions,
-            sqlx::query_scalar("SELECT count(*) FROM group_demoted_url")
+            sqlx::query_scalar("SELECT url_demotions_total FROM group_runtime WHERE id")
                 .fetch_one(pool)
                 .await?,
         );

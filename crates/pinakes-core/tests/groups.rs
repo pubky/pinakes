@@ -1146,12 +1146,15 @@ async fn round3_aliases_do_not_group_and_shared_canonicals_demote_every_claimant
             .unwrap()
             .0
     );
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM resource_group WHERE key=$1")
-        .bind(key)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(count, 0);
+    // Round 4: demoted claims stay live (and hidden from planning) so demotion can heal.
+    let count: (i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER(WHERE NOT demoted),count(*) FILTER(WHERE demoted) FROM resource_group WHERE key=$1",
+    )
+    .bind(key)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, (0, 3));
     for (id, _) in &ids {
         let alias: bool = sqlx::query_scalar(
             "SELECT (doc->'aliases') ? 'https://example.org/landing' FROM resource WHERE id=$1",
@@ -1519,4 +1522,169 @@ async fn round4_upgrade_requeues_identifier_cards_without_registry_pages(pool: P
             assert!(*delay > 86400.0);
         }
     }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round4_squatters_cannot_take_identity_and_demotion_heals_from_live_claims(pool: PgPool) {
+    let owner_uri = "https://shared.example/article";
+    let twin_uri = "https://twin.example/article";
+    let owner = page(&pool, owner_uri, "Owner", &[("same_as", twin_uri)]).await;
+    let twin = page(&pool, twin_uri, "Twin", &[("same_as", owner_uri)]).await;
+    // Automatic group IDs follow the smallest member unit; compare with the owner's group.
+    let group = || gid(&pool, &owner);
+    assert_eq!(gid(&pool, &twin).await, group().await);
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let owner_key = format!(
+        "url:{}",
+        pinakes_core::model::identity(owner_uri).unwrap().0
+    );
+    let row = |id: String| {
+        let pool = pool.clone();
+        let key = owner_key.clone();
+        async move {
+            sqlx::query_as::<_, (bool, bool, bool)>(
+                "SELECT trusted,counted,demoted FROM resource_group WHERE resource_id=$1 AND key=$2",
+            )
+            .bind(id)
+            .bind(key)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let drain = || {
+        let pool = pool.clone();
+        async move {
+            while groups::drain(&pool, &Default::default(), 100)
+                .await
+                .unwrap()
+                > 0
+            {}
+        }
+    };
+    // K40: one squatter on the shared origin may join, but never takes the card, however
+    // many taggers it farms. The owner is named by the squatter's canonical.
+    let squat = &[("canonical", owner_uri)];
+    let s1 = page(&pool, "https://shared.example/s1", "Squatter one", squat).await;
+    assert_eq!(gid(&pool, &s1).await, group().await);
+    for author in ["a", "b", "c"] {
+        tag(&pool, &s1, &author.repeat(52), "farm").await;
+    }
+    drain().await;
+    let card = get(&app, &format!("/v1/groups/{}", group().await)).await;
+    assert_eq!(card["name"], "Owner");
+
+    // V13: owner plus two squatters demotes the squatters only; the owner keeps its own key
+    // and its reciprocal twin.
+    let s2 = page(&pool, "https://shared.example/s2", "Squatter two", squat).await;
+    drain().await;
+    assert_eq!(row(owner.clone()).await, (true, false, false));
+    assert_eq!(row(s1.clone()).await, (false, true, true));
+    assert_eq!(row(s2.clone()).await, (false, true, true));
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT group_id IS NOT NULL FROM group_unit WHERE resource_id=$1"
+    )
+    .bind(&owner)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+    assert_eq!(gid(&pool, &twin).await, group().await);
+    assert_ne!(gid(&pool, &s1).await, group().await);
+    assert_ne!(gid(&pool, &s2).await, group().await);
+    // V21: AMP/print variants of the page name it too, but are the same page, not claimants.
+    let amp = page(&pool, "https://shared.example/amp/article", "AMP", squat).await;
+    let print = page(
+        &pool,
+        "https://shared.example/article/print",
+        "Print",
+        squat,
+    )
+    .await;
+    drain().await;
+    for variant in [&amp, &print] {
+        assert_eq!(row(variant.clone()).await, (false, false, false));
+        assert_eq!(gid(&pool, variant).await, group().await);
+    }
+    let metrics = pinakes_core::telemetry::Metrics::new().unwrap();
+    metrics.refresh(&pool).await.unwrap();
+    assert!(metrics
+        .encode()
+        .unwrap()
+        .contains("pinakes_group_url_demotions_total 1"));
+
+    // K40b: dropping one squatter's claim heals the other through the normal drain.
+    let mut d = ResourceMeta::new("https://shared.example/s2", "web", 86400);
+    d.name = Some("Squatter two, reformed".into());
+    store::save_document(&pool, &s2, 0, &d).await.unwrap();
+    drain().await;
+    assert_eq!(row(s1.clone()).await, (false, true, false));
+    assert_eq!(gid(&pool, &s1).await, group().await);
+    // A re-demotion counts again, and an orphan deletion (cascade) heals it as well.
+    let s3 = page(&pool, "https://shared.example/s3", "Squatter three", squat).await;
+    drain().await;
+    assert_eq!(row(s1.clone()).await, (false, true, true));
+    // Metrics refresh at most every 15 s; a fresh registry reads the durable total.
+    let metrics = pinakes_core::telemetry::Metrics::new().unwrap();
+    metrics.refresh(&pool).await.unwrap();
+    assert!(metrics
+        .encode()
+        .unwrap()
+        .contains("pinakes_group_url_demotions_total 2"));
+    sqlx::query("DELETE FROM resource WHERE id=$1")
+        .bind(&s3)
+        .execute(&pool)
+        .await
+        .unwrap();
+    drain().await;
+    assert_eq!(row(s1.clone()).await, (false, true, false));
+    assert_eq!(gid(&pool, &s1).await, group().await);
+    let card = get(&app, &format!("/v1/groups/{}", group().await)).await;
+    assert_eq!(card["name"], "Owner");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round4_lock_contention_retries_shortly_and_partial_plans_are_not_cached(pool: PgPool) {
+    let (a, _) = save(&pool, "lock-a", &["https://example.org/lock-shared"], None).await;
+    let (b, _) = save(&pool, "lock-b", &["https://example.org/lock-shared"], None).await;
+    assert_eq!(gid(&pool, &a).await, gid(&pool, &b).await);
+    // V19: while another writer holds the group lock, retries stay short and uncharged.
+    let mut holder = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(73491620)")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    for _ in 0..6 {
+        sqlx::query("INSERT INTO group_dirty(resource_id) VALUES($1) ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=now()")
+            .bind(&a).execute(&pool).await.unwrap();
+        assert!(!groups::reconcile(&pool, &a, &Default::default()).await);
+        let (fence, attempts, error, delay): (i32, i32, String, f64) = sqlx::query_as("SELECT fence_attempts,attempts,last_error,extract(epoch FROM next_attempt_at-now())::float8 FROM group_dirty WHERE resource_id=$1").bind(&a).fetch_one(&pool).await.unwrap();
+        assert_eq!((fence, attempts, error.as_str()), (0, 0, "lock_busy"));
+        assert!((0.5..=3.1).contains(&delay), "{delay}");
+    }
+    sqlx::query("SELECT pg_advisory_unlock(73491620)")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    drop(holder);
+    sqlx::query("UPDATE group_dirty SET next_attempt_at=now() WHERE resource_id=$1")
+        .bind(&a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(groups::reconcile(&pool, &a, &Default::default()).await);
+    // K44: an input recorded under a partial plan is recomputed, not served from the
+    // fingerprint cache, and its marker clears once a full plan succeeds.
+    sqlx::query("UPDATE group_input SET last_error='pair_budget' WHERE resource_id=$1")
+        .bind(&a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(groups::reconcile(&pool, &a, &Default::default()).await);
+    let marker: Option<String> =
+        sqlx::query_scalar("SELECT last_error FROM group_input WHERE resource_id=$1")
+            .bind(&a)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(marker, None);
 }
