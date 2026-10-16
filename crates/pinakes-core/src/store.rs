@@ -142,6 +142,9 @@ pub async fn recompute_scores(tx: &mut Transaction<'_, Postgres>, ids: &[String]
     Ok(())
 }
 pub async fn cleanup(pool: &PgPool, grace_days: u32) -> Result<u64> {
+    sqlx::query("DELETE FROM blocked_reprobe WHERE day<(now() AT TIME ZONE 'UTC')::date-1")
+        .execute(pool)
+        .await?;
     crate::changes::delete_orphans(pool, grace_days).await
 }
 pub async fn expedite(pool: &PgPool, ids: &[String]) -> Result<()> {

@@ -13,9 +13,13 @@ geo_enabled = true
 # Authors must be exactly 52 lowercase z-base-32 characters.
 max_label_bytes = 128
 max_object_path_bytes = 2048
+# A new reference re-probes a blocked page early; per host per UTC day, 0 disables.
+blocked_reprobes_per_host_per_day = 20
 
 [web]
 discover_feeds = false # Follow RSS alternates only on pages without a typed card.
+# wall_markers_path = "/etc/pinakes/interstitial-markers.json" # replaces data/interstitial-markers.json
+# wall_overrides = { "example.org" = "content", "walled.example" = "blocked" }
 enabled = true
 concurrency = 4
 requests_per_second = 4.0

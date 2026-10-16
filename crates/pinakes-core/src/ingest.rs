@@ -160,6 +160,13 @@ pub async fn apply(
                 store::insert_resource(&mut tx, &line.resource_id, &line.uri, &scheme).await?;
                 if old.as_deref() != Some(&line.resource_id) {
                     sqlx::query("UPDATE resource SET final=false,refresh_at=now(),next_attempt_at=now(),dead_letter=false,attempts=0 WHERE id=$1 AND final AND resolver<>'geo' AND $2>resolved_at").bind(&line.resource_id).bind(timestamp(Some(line.at))?).execute(&mut *tx).await?;
+                    // Someone cares about a blocked page again: a wall false positive heals early.
+                    sqlx::query(r#"WITH target AS (SELECT id,coalesce(host,'') AS host FROM resource WHERE id=$1 AND status='blocked'
+                        AND next_attempt_at>now() AND NOT dead_letter AND (lease_until IS NULL OR lease_until<now()) AND resolved_at<now()-interval '1 hour'),
+                      spent AS (INSERT INTO blocked_reprobe(host,day,count) SELECT host,(now() AT TIME ZONE 'UTC')::date,1 FROM target WHERE $2>0
+                        ON CONFLICT(host,day) DO UPDATE SET count=blocked_reprobe.count+1 WHERE blocked_reprobe.count<$2 RETURNING host)
+                      UPDATE resource r SET next_attempt_at=now(),priority_at=now() FROM target t WHERE r.id=t.id AND EXISTS(SELECT 1 FROM spent)"#)
+                        .bind(&line.resource_id).bind(limits.blocked_reprobes_per_host_per_day as i32).execute(&mut *tx).await?;
                 }
                 sqlx::query(r#"INSERT INTO reference(resource_id,kind,author,label,object_path,recurrence_id,start_at,end_at,created_at,unit_key,event_status)
                     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)

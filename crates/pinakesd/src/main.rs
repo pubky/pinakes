@@ -42,6 +42,7 @@ async fn main() -> Result<()> {
         }
     }
     let config = Config::load(config.as_deref())?;
+    pinakes_core::resolver::interstitial::install(config.walls()?);
     warn_webcal_fallback(config.event.webcal_http_fallback);
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(20)

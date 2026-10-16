@@ -213,6 +213,7 @@ async fn rejects_oversized_feed_fields_without_stalling_or_truncating_keys(pool:
     let limits = IngestConfig {
         max_label_bytes: 6,
         max_object_path_bytes: 32,
+        ..Default::default()
     };
     let metrics = Metrics::new().unwrap();
     let saved = ingest::cursor(&pool, "fixture").await.unwrap();
@@ -1019,4 +1020,99 @@ async fn review_route_upgrade_revives_only_rerouted_failures_once(pool: PgPool) 
             .await
             .unwrap()
     );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round4_new_references_reprobe_blocked_pages_within_a_host_budget(pool: PgPool) {
+    let limits = IngestConfig {
+        blocked_reprobes_per_host_per_day: 2,
+        ..Default::default()
+    };
+    let metrics = Metrics::new().unwrap();
+    let uris: Vec<String> = (0..3)
+        .map(|i| format!("https://walled.example/page-{i}"))
+        .collect();
+    let mut ids = Vec::new();
+    for uri in &uris {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "web", 86400);
+        d.status = Status::Blocked;
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.push(id);
+    }
+    // Blocked an hour and a half ago; the next attempt is a day away.
+    sqlx::query("UPDATE resource SET resolved_at=now()-interval '90 minutes',next_attempt_at=now()+interval '1 day' WHERE id=ANY($1)").bind(&ids).execute(&pool).await.unwrap();
+    let due = |pool: PgPool, ids: Vec<String>| async move {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT next_attempt_at<=now() FROM resource WHERE id=ANY($1) ORDER BY array_position($1,id)",
+        )
+        .bind(ids)
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    for (i, uri) in uris.iter().enumerate() {
+        let saved = ingest::cursor(&pool, "fixture").await.unwrap();
+        let line = change(uri, "reprobe", &format!("/pub/app/tags/r{i}"));
+        assert!(ingest::apply(
+            &pool,
+            "fixture",
+            &saved,
+            &FeedPage {
+                page: Changes {
+                    lines: vec![line],
+                    next_cursor: saved.cursor + 1
+                },
+                length: saved.cursor + 1,
+                epoch: None
+            },
+            &limits,
+            &metrics,
+        )
+        .await
+        .unwrap());
+    }
+    // Two re-probes per host per day; the third waits for its normal blocked cadence.
+    assert_eq!(
+        due(pool.clone(), ids.clone()).await,
+        vec![true, true, false]
+    );
+    let spent: i32 =
+        sqlx::query_scalar("SELECT count FROM blocked_reprobe WHERE host='walled.example'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(spent, 2);
+    // Re-tagging a page blocked within the last hour does not re-probe it again.
+    sqlx::query(
+        "UPDATE resource SET resolved_at=now(),next_attempt_at=now()+interval '1 day' WHERE id=$1",
+    )
+    .bind(&ids[0])
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM blocked_reprobe")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let saved = ingest::cursor(&pool, "fixture").await.unwrap();
+    let line = change(&uris[0], "another", "/pub/app/tags/again");
+    ingest::apply(
+        &pool,
+        "fixture",
+        &saved,
+        &FeedPage {
+            page: Changes {
+                lines: vec![line],
+                next_cursor: saved.cursor + 1,
+            },
+            length: saved.cursor + 1,
+            epoch: None,
+        },
+        &limits,
+        &metrics,
+    )
+    .await
+    .unwrap();
+    assert_eq!(due(pool.clone(), vec![ids[0].clone()]).await, vec![false]);
 }

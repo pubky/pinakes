@@ -361,3 +361,218 @@ fn main_entity_canonical_is_identity_but_publisher_nodes_are_not() {
         .iter()
         .any(|k| k.target.as_deref() == Some("https://example.org/wrapper")));
 }
+
+#[test]
+fn round4_wall_heuristics_need_context_and_cover_more_vendors() {
+    let uri = "https://app.example/dashboard";
+    let at = |body: &str, status: u16| {
+        interstitial::inspect(&uri.parse().unwrap(), &page(uri, body, status))
+    };
+    let long = "Useful article text. ".repeat(120);
+    // V12: a client-rendered shell's <noscript> notice is not visible text.
+    let shell = "<title>Dashboard</title><meta property='og:title' content='Dashboard'><body><noscript>You need to enable JavaScript to run this app.</noscript><div id='root'></div></body>";
+    assert_eq!(at(shell, 200), Page::Content);
+    assert_eq!(
+        web::extract(uri, &page(uri, shell, 200), 86400)
+            .doc
+            .name
+            .as_deref(),
+        Some("Dashboard")
+    );
+    // A captcha in a comment form of a full page is content; on a short or 403 page it is a wall.
+    let comments = format!(
+        "<title>Post</title><body>{long}<form><div class='g-recaptcha'></div></form></body>"
+    );
+    assert_eq!(at(&comments, 200), Page::Content);
+    assert_eq!(at(&comments, 403), Page::Blocked);
+    assert_eq!(
+        at("<body><div class='g-recaptcha'></div></body>", 200),
+        Page::Blocked
+    );
+    // An auto-reload (no URL), a slow self-refresh and a slow refresh of a full page are content.
+    assert_eq!(
+        at(
+            &format!("<head><meta http-equiv='refresh' content='300'></head><body>{long}</body>"),
+            200
+        ),
+        Page::Content
+    );
+    assert_eq!(
+        at(
+            "<head><meta http-equiv='refresh' content='300'></head><body>Live score</body>",
+            200
+        ),
+        Page::Content
+    );
+    assert_eq!(
+        at(&format!("<head><meta http-equiv='refresh' content='600; url={uri}'></head><body>Ticker</body>"), 200),
+        Page::Content
+    );
+    assert_eq!(
+        at(&format!("<head><meta http-equiv='refresh' content='900;url=/home'></head><body>{long}</body>"), 200),
+        Page::Content
+    );
+    for content in [
+        "0; url=/next",
+        "0;URL='/next'",
+        "2, /next",
+        "0; url = '/next'",
+    ] {
+        assert_eq!(
+            at(
+                &format!("<head><meta http-equiv='refresh' content=\"{content}\"></head>"),
+                200
+            ),
+            Page::Redirect("/next".into()),
+            "{content}"
+        );
+    }
+    // A long page titled like a marker is content; the same title on a challenge is a wall.
+    let film = format!(
+        "<title>Just a Moment (2026 film)</title><body><h1>Just a Moment</h1>{long}</body>"
+    );
+    assert_eq!(at(&film, 200), Page::Content);
+    assert_eq!(at(&film, 503), Page::Blocked);
+    // V16: more vendor walls.
+    for body in [
+        "<title>bloomberg.com</title><body><h1>Are you a robot?</h1></body>",
+        "<body>Request unsuccessful. Incapsula incident ID: 123-456</body>",
+        "<body>Please enable JS and disable any ad blocker</body>",
+        "<body><iframe src='https://geo.captcha-delivery.com/captcha/?initialCid=x'></iframe></body>",
+        "<body><div id='px-captcha'></div>Press &amp; Hold</body>",
+    ] {
+        assert_eq!(at(body, 200), Page::Blocked, "{body}");
+    }
+    let requested: Url = "https://www.linkedin.com/posts/someone_activity-1"
+        .parse()
+        .unwrap();
+    for wall in [
+        "https://www.linkedin.com/authwall?trk=gf&sessionRedirect=x",
+        "https://www.facebook.com/login/?next=https%3A%2F%2Fwww.facebook.com%2Fevents%2F1",
+        "https://example.com/signin",
+        "https://www.instagram.com/accounts/login/",
+    ] {
+        let f = page(
+            wall,
+            &format!("<title>Sign in</title><body>{long}</body>"),
+            200,
+        );
+        assert_eq!(
+            interstitial::inspect(&requested, &f),
+            Page::Blocked,
+            "{wall}"
+        );
+    }
+    // Tagging the sign-in page itself, or a path merely starting with "login", is content.
+    for own in ["https://example.com/signin/", "https://example.com/loginfo"] {
+        let f = page(
+            own,
+            &format!("<title>Sign in</title><body>{long}</body>"),
+            200,
+        );
+        let requested: Url = own.trim_end_matches('/').parse().unwrap();
+        assert_eq!(
+            interstitial::inspect(&requested, &f),
+            Page::Content,
+            "{own}"
+        );
+    }
+}
+
+#[test]
+fn round4_wall_overrides_and_marker_files_are_validated() {
+    use interstitial::{WallOverride, Walls};
+    use std::collections::BTreeMap;
+    let uri = "https://news.example.org/a";
+    let wall = page(uri, "<body>Access denied</body>", 200);
+    let content = page(uri, &"Fine article. ".repeat(300), 200);
+    let walls = Walls::load(
+        None,
+        &BTreeMap::from([
+            ("example.org".to_string(), WallOverride::Content),
+            ("blocked.example".to_string(), WallOverride::Blocked),
+        ]),
+    )
+    .unwrap();
+    // Longest-suffix host match; a content override still follows redirect stubs.
+    assert_eq!(
+        interstitial::inspect_with(&wall.url, &wall, &walls),
+        Page::Content
+    );
+    let stub = page(uri, "<title>Redirecting to: /b</title>", 200);
+    assert_eq!(
+        interstitial::inspect_with(&stub.url, &stub, &walls),
+        Page::Redirect("/b".into())
+    );
+    let blocked = page(
+        "https://www.blocked.example/a",
+        &"Fine article. ".repeat(300),
+        200,
+    );
+    assert_eq!(
+        interstitial::inspect_with(&blocked.url, &blocked, &walls),
+        Page::Blocked
+    );
+    assert_eq!(
+        interstitial::inspect_with(&content.url, &content, &Walls::default()),
+        Page::Content
+    );
+    // Replacement files are validated like the built-in one.
+    let dir = std::env::temp_dir().join(format!("pinakes-walls-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, body, ok) in [
+        (
+            "good.json",
+            r#"{"text":["custom wall"],"captcha_selectors":[".x"],"wall_host_prefixes":["gate."],"wall_paths":["/gate"]}"#,
+            true,
+        ),
+        (
+            "selector.json",
+            r#"{"text":["a"],"captcha_selectors":["[["],"wall_host_prefixes":[],"wall_paths":[]}"#,
+            false,
+        ),
+        (
+            "case.json",
+            r#"{"text":["Upper"],"captcha_selectors":[],"wall_host_prefixes":[],"wall_paths":[]}"#,
+            false,
+        ),
+        (
+            "path.json",
+            r#"{"text":["a"],"captcha_selectors":[],"wall_host_prefixes":[],"wall_paths":["login"]}"#,
+            false,
+        ),
+        (
+            "host.json",
+            r#"{"text":["a"],"captcha_selectors":[],"wall_host_prefixes":[],"wall_paths":[],"overrides":{"Bad Host":"content"}}"#,
+            false,
+        ),
+    ] {
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        let loaded = Walls::load(path.to_str(), &BTreeMap::new());
+        assert_eq!(loaded.is_ok(), ok, "{name}");
+        if ok {
+            let custom = loaded.unwrap();
+            let f = page(uri, "<body>Custom wall</body>", 200);
+            assert_eq!(
+                interstitial::inspect_with(&f.url, &f, &custom),
+                Page::Blocked
+            );
+            assert_eq!(
+                interstitial::inspect_with(&wall.url, &wall, &custom),
+                Page::Content
+            );
+        }
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+    let mut cfg = pinakes_core::config::Config::default();
+    cfg.web
+        .wall_overrides
+        .insert("Bad".into(), WallOverride::Content);
+    assert!(cfg.validate().is_err());
+    let mut cfg = pinakes_core::config::Config::default();
+    cfg.pubky
+        .wall_overrides
+        .insert("example.org".into(), WallOverride::Content);
+    assert!(cfg.validate().is_err());
+}

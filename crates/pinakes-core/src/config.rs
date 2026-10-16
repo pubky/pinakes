@@ -127,12 +127,15 @@ impl Default for EventConfig {
 pub struct IngestConfig {
     pub max_label_bytes: usize,
     pub max_object_path_bytes: usize,
+    /// New references re-probe blocked pages early, at most this often per host per UTC day.
+    pub blocked_reprobes_per_host_per_day: u32,
 }
 impl Default for IngestConfig {
     fn default() -> Self {
         Self {
             max_label_bytes: 128,
             max_object_path_bytes: 2048,
+            blocked_reprobes_per_host_per_day: 20,
         }
     }
 }
@@ -140,6 +143,10 @@ impl Default for IngestConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct ResolverConfig {
     pub discover_feeds: bool,
+    /// Web only: replacement for `data/interstitial-markers.json`.
+    pub wall_markers_path: Option<String>,
+    /// Web only: host → `content` | `blocked`, over the marker file's own overrides.
+    pub wall_overrides: BTreeMap<String, crate::resolver::interstitial::WallOverride>,
     pub enabled: bool,
     pub concurrency: usize,
     pub requests_per_second: f64,
@@ -149,6 +156,8 @@ impl Default for ResolverConfig {
     fn default() -> Self {
         Self {
             discover_feeds: false,
+            wall_markers_path: None,
+            wall_overrides: BTreeMap::new(),
             enabled: true,
             concurrency: 2,
             requests_per_second: 2.0,
@@ -356,8 +365,25 @@ impl Config {
         cfg.validate()?;
         Ok(cfg)
     }
+    /// Interstitial heuristics for the daemon to install; validated at load.
+    pub fn walls(&self) -> Result<crate::resolver::interstitial::Walls> {
+        crate::resolver::interstitial::Walls::load(
+            self.web.wall_markers_path.as_deref(),
+            &self.web.wall_overrides,
+        )
+    }
     pub fn validate(&self) -> Result<()> {
         self.cards.validate()?;
+        self.walls().context("invalid web wall settings")?;
+        for other in std::iter::once(&self.pubky).chain(
+            crate::resolver::cards::KINDS
+                .iter()
+                .map(|k| self.cards.resolver(k)),
+        ) {
+            if other.wall_markers_path.is_some() || !other.wall_overrides.is_empty() {
+                bail!("wall settings belong to [web]");
+            }
+        }
         let admin: std::net::SocketAddr =
             self.admin_listen.parse().context("invalid admin_listen")?;
         if self.admin_token.as_ref().is_some_and(|t| {

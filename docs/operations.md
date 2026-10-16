@@ -5,6 +5,19 @@ never charge failures or dead-letter the resource. Access failure is not evidenc
 accepted event dates and feed occurrences survive, and only two subsequent disappearance
 observations can cancel them. `pinakes_blocked_resources{host}` reports the current count.
 HTML meta-refresh and literal JavaScript redirects share the HTTP three-hop egress budget.
+A meta refresh without a URL is an auto-reload and content; a refresh slower than ten seconds
+is a hop only on a short page that does not refresh itself.
+
+Wall heuristics live in `data/interstitial-markers.json` (text markers, captcha selectors,
+wall host prefixes, sign-in paths, host overrides); `web.wall_markers_path` replaces the file
+and `web.wall_overrides = { "example.org" = "content" }` (or `"blocked"`) decides a host and
+its subdomains outright. Visible text excludes `script`, `style`, `noscript` and `template`.
+Title, heading and captcha markers count only on short pages (under 2,000 visible bytes) or
+challenge statuses (403/429/503); a redirect of the requested path to a listed sign-in path
+(`/login`, `/authwall`, `/signin`, `/checkpoint`, …) is a wall. A new reference re-probes a
+blocked page early, at most `ingest.blocked_reprobes_per_host_per_day` times per host per UTC
+day (default 20; 0 disables) and not within an hour of the last attempt, so false positives
+heal when someone cares about the page.
 
 Redirect aliases do not establish group identity. Only explicit canonical/main-entity metadata,
 validated sameAs evidence, or an entirely permanent HTTP redirect chain contributes URL keys.
