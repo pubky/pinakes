@@ -5,7 +5,9 @@ The harness builds tags with `pubky-app-specs` and, in live mode, writes them wi
 ICS feed (the mock exercises recurrence), NIP-52 naddr, DOI, ISBN, oEmbed video and ordinary web page. It checks the
 Nexus reference feed, Pinakes typed documents, facets, bbox/Event/venue search,
 occurrences, changes, group membership and Nexus `by_ids` hydration, then deletes
-its tags and waits for both indexes to remove their references.
+its tags and waits for both indexes to remove their references. `by_ids` lists at most five
+tags per resource, so when a shared live resource already carries five other tags the
+run's own tag is confirmed through `/v0/resource/{id}/tags` instead.
 
 Requires Node >=20, Rust, and PostgreSQL 16 with PostGIS and h3 extensions installed
 as described in the main README. `npm ci --prefix e2e` installs the pinned SDKs.

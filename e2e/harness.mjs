@@ -41,6 +41,21 @@ export async function withTags(storage, tags, action, report, journal = async ()
     await journal(attempted, report.cleanup);
   }
 }
+/** `by_ids` lists at most five tags per resource; a full list without the run's label is
+ * confirmed through that resource's own tag route. Returns how many needed it. */
+export async function ownTags(hydrated, ids, label, author, tagsOf) {
+  const own = tags => tags.some(t => t.label === label && t.taggers.includes(author));
+  let confirmed = 0;
+  for (const id of ids) {
+    const row = hydrated.find(r => r.details.id === id);
+    assert(row, `Missing Nexus hydration: ${id}`);
+    if (own(row.tags)) continue;
+    assert(row.tags.length >= 5, `Missing Nexus hydration: ${id}`);
+    assert(own((await tagsOf(id)).tags), `Missing own tag on Nexus: ${id}`);
+    confirmed++;
+  }
+  return confirmed;
+}
 export async function runFlow({ storage, author, samples, pinakes, nexus, positiveVenue = false, timeout = 120000, journal, signal }) {
   const report = { at: new Date().toISOString(), run: randomUUID(), author, samples: [], assertions: [], cleanup: [] };
   const label = `e2e-${report.run.replaceAll("-", "").slice(0, 16)}`;
@@ -123,8 +138,8 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
       assert(changePage.lines.length > 0 && changePage.next_cursor > 0);
       report.assertions.push('change feed and lookup');
       const hydrated = await json(`${nexus}/v0/stream/resources/by_ids`, { resource_ids: ids, viewer_id: author });
-      for (const id of ids) assert(hydrated.some(r => r.details.id === id && r.tags.some(t => t.label === label && t.taggers.includes(author))), `Missing Nexus hydration: ${id}`);
-      report.assertions.push('Nexus by_ids hydration and own tags');
+      const confirmed = await ownTags(hydrated, ids, label, author, id => json(`${nexus}/v0/resource/${id}/tags?limit_tags=100&viewer_id=${author}`));
+      report.assertions.push(confirmed ? `Nexus by_ids hydration and own tags (${confirmed} through the resource tag route)` : 'Nexus by_ids hydration and own tags');
       await waitFor('group collapse', async () => {
         const collapsed = await search({ collapse: 'group', limit: '500' });
         if (!collapsed.items.length) return false;
