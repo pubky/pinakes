@@ -114,6 +114,8 @@ backoff_secs = 30
 max_backoff_secs = 3600
 lease_secs = 60
 missing_ttl_secs = 3600
+# Retry interval for pages behind an interstitial wall (3600–2592000 seconds).
+blocked_ttl_secs = 86400
 author_requests_per_second = 1.0
 
 [preview]
@@ -164,6 +166,8 @@ requests_per_minute = 120
 cache_capacity = 10000
 # Reach-enabled searches cost six budget units, even on a reach-cache hit.
 reach_cost = 6
+# pinakes_blocked_resources keeps this many registrable domains plus "other" (1–500).
+blocked_metric_hosts = 20
 
 [cards]
 openlibrary_url = "https://openlibrary.org/api/books"

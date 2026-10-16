@@ -608,6 +608,26 @@ mod tests {
         assert!(config.validate().is_err());
     }
     #[test]
+    fn the_example_config_loads_validates_and_lists_the_blocked_keys() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../pinakes.example.toml");
+        let config = Config::load(Some(&path)).unwrap();
+        config.validate().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        for key in [
+            "blocked_ttl_secs",
+            "blocked_metric_hosts",
+            "blocked_reprobes_per_host_per_day",
+        ] {
+            assert!(
+                text.lines().any(|l| l.starts_with(&format!("{key} = "))),
+                "{key}"
+            );
+        }
+        assert_eq!(config.queue.blocked_ttl_secs, 86400);
+        assert_eq!(config.api.blocked_metric_hosts, 20);
+    }
+    #[test]
     fn reach_and_ingest_limits_have_safe_defaults_and_config_bounds() {
         let config = Config::default();
         assert_eq!(config.search.reach_timeout_secs, 5);

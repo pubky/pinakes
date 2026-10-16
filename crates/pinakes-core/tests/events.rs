@@ -797,6 +797,10 @@ impl Transport for ProtocolTransport {
         if url.path() == "/ld" && o.accept.is_none() {
             f.body = b"<link rel='alternate' type='application/ld+json' href='/ld'>".to_vec();
         }
+        if url.path() == "/ld-comments" {
+            // A rendered comment's link sits in the body.
+            f.body = b"<title>Comments</title><p>Nice event</p><link rel='alternate' type='application/ld+json' href='/ld'>".to_vec();
+        }
         if url.path() == "/event" && o.accept.is_some() {
             f.status = 301;
             f.location = Some("/federation/m/1".into());
@@ -879,6 +883,19 @@ async fn advertised_event_negotiation_and_calendar_not_modified(pool: PgPool) {
     assert_eq!(d.name.as_deref(), Some("Event 0"));
     let d = resolver.resolve("https://example.org/ld").await.unwrap();
     assert_eq!(d.name.as_deref(), Some("LD negotiation"));
+    // V40: the same alternate link in the body advertises nothing.
+    t.seen.lock().unwrap().clear();
+    let d = resolver
+        .resolve("https://example.org/ld-comments")
+        .await
+        .unwrap();
+    assert_eq!(d.name.as_deref(), Some("Comments"));
+    assert!(t
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|(path, accept, _)| path == "/ld-comments" && accept.is_none()));
     for _ in 0..2 {
         let d = resolver
             .resolve("https://example.org/jsonld-event")
