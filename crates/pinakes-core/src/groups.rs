@@ -1,4 +1,4 @@
-use anyhow::{ensure, Context, Result};
+use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -8,6 +8,11 @@ use utoipa::ToSchema;
 #[serde(default, deny_unknown_fields)]
 pub struct GroupConfig {
     pub enabled: bool,
+    pub cross_container_occurrences: CrossContainerOccurrences,
+    pub multi_tenant_hosts_path: Option<String>,
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub tenant_rules: crate::group_keys::TenantRules,
     pub max_members: usize,
     pub max_distance_m: f64,
     pub max_graph_units: usize,
@@ -18,12 +23,43 @@ impl Default for GroupConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            cross_container_occurrences: CrossContainerOccurrences::Off,
+            multi_tenant_hosts_path: None,
+            tenant_rules: crate::group_keys::TENANT_RULES.clone(),
             max_members: 256,
             max_distance_m: 500.0,
             max_graph_units: 20000,
             max_graph_bytes: 32 * 1024 * 1024,
             max_members_per_origin: 16,
         }
+    }
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CrossContainerOccurrences {
+    Off,
+    Corroborated,
+}
+impl GroupConfig {
+    pub fn load_tenants(&mut self) -> Result<()> {
+        if let Some(path) = &self.multi_tenant_hosts_path {
+            let rules: crate::group_keys::TenantRules =
+                serde_json::from_slice(&std::fs::read(path)?)?;
+            ensure!(
+                rules.len() <= 4096
+                    && rules.keys().all(|host| !host.is_empty()
+                        && host.len() <= 253
+                        && host == &host.to_ascii_lowercase()
+                        && !host.contains('/')
+                        && url::Host::parse(host).is_ok()),
+                "invalid multi-tenant host rules"
+            );
+            self.tenant_rules = rules;
+        }
+        Ok(())
+    }
+    fn origin(&self, uri: &str) -> Option<String> {
+        crate::group_keys::origin_with(uri, &self.tenant_rules)
     }
 }
 #[derive(Deserialize, Serialize, ToSchema)]
@@ -33,6 +69,7 @@ pub struct GroupView {
     pub name: Option<String>,
     pub image: Option<String>,
     pub curated: bool,
+    pub location: Option<crate::model::Point>,
     pub taggers: i64,
     pub references: i64,
     pub members: Vec<GroupMemberView>,
@@ -76,31 +113,20 @@ pub async fn scores(tx: &mut Transaction<'_, Postgres>, ids: &[String]) -> Resul
     counts AS (SELECT m.group_id,count(DISTINCT f.author) FILTER(WHERE f.kind='tag') AS taggers,count(*) FILTER(WHERE f.kind='reply') AS replies,count(*) FILTER(WHERE f.kind IN ('embed','collection')) AS embeds,count(f.author) AS refs,max(f.created_at) AS newest FROM (SELECT DISTINCT group_id FROM members) m LEFT JOIN facts f USING(group_id) GROUP BY m.group_id)
     INSERT INTO group_score(group_id,score,updated_at,newest_at,taggers,references_count) SELECT group_id,(ln(1.0+taggers)+0.5*ln(1.0+replies)+0.3*ln(1.0+embeds))*exp(-ln(2.0)*greatest(0,coalesce(extract(epoch FROM(now()-newest)),0))/2592000.0),now(),newest,taggers,refs FROM counts
     ON CONFLICT(group_id) DO UPDATE SET score=excluded.score,updated_at=excluded.updated_at,newest_at=excluded.newest_at,taggers=excluded.taggers,references_count=excluded.references_count"#).bind(ids).execute(&mut **tx).await?;
+    sqlx::query("SELECT refresh_group_best(ARRAY(SELECT DISTINCT group_id FROM group_unit WHERE resource_id=ANY($1) AND group_id IS NOT NULL))").bind(ids).execute(&mut **tx).await?;
     Ok(())
 }
-fn evidence(row: &Value) -> Vec<crate::group_keys::GroupKey> {
+fn evidence(
+    row: &Value,
+    cfg: &GroupConfig,
+    targets: &BTreeMap<String, String>,
+) -> Vec<crate::group_keys::GroupKey> {
     let uri = row["uri"].as_str().unwrap_or("");
     let mut d = crate::model::ResourceMeta::new(uri, "groups", 0);
-    d.group_keys = serde_json::from_value(row["keys"].clone()).unwrap_or_default();
-    d.group_keys.retain(|k| {
-        k.key.len() <= 2100
-            && k.basis.len() <= 32
-            && k.confidence.is_finite()
-            && (0.0..=1.0).contains(&k.confidence)
-    });
-    d.group_keys.truncate(16);
+    // Own identity always occupies the bounded slots before publisher-supplied claims.
     if row["occurrence"].is_null() && row["event"].is_null() {
         crate::group_keys::url_keys(&mut d, uri);
         crate::group_keys::add(&mut d, "canonical", uri);
-        for alias in row["aliases"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .take(4)
-            .filter_map(Value::as_str)
-        {
-            crate::group_keys::add(&mut d, "canonical", alias);
-        }
         if let Some(osm) = crate::resolver::osm::parse_id(uri) {
             d.group_keys.push(crate::group_keys::GroupKey {
                 key: format!("osm:{}", osm.key()),
@@ -110,23 +136,47 @@ fn evidence(row: &Value) -> Vec<crate::group_keys::GroupKey> {
             });
         }
     }
+    let stored: Vec<crate::group_keys::GroupKey> =
+        serde_json::from_value(row["keys"].clone()).unwrap_or_default();
+    for k in stored.into_iter().filter(crate::group_keys::valid_stored) {
+        if let Some(url) = k.key.strip_prefix("url:").filter(|s| s.starts_with("http")) {
+            crate::group_keys::add(&mut d, &k.basis, url);
+        } else if d.group_keys.len() < 16 && !d.group_keys.iter().any(|own| own.key == k.key) {
+            d.group_keys.push(k);
+        }
+    }
+    for alias in row["aliases"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(4)
+        .filter_map(Value::as_str)
+    {
+        crate::group_keys::add(&mut d, "canonical", alias);
+    }
     if let Some(uid) = row["occurrence"]["uid"].as_str() {
         crate::group_keys::add(&mut d, "ics_uid", uid);
     }
     if let Some(id) = row["occurrence"]["event_resource_id"].as_str() {
-        d.group_keys.push(crate::group_keys::GroupKey {
-            key: format!("url:{id}"),
-            basis: "canonical".into(),
-            confidence: 0.8,
-            target: row["event_uri"]
-                .as_str()
-                .and_then(crate::group_keys::origin),
-        });
+        if d.group_keys.len() < 16 {
+            d.group_keys.push(crate::group_keys::GroupKey {
+                key: format!("url:{id}"),
+                basis: "canonical".into(),
+                confidence: 0.8,
+                target: row["event_uri"].as_str().map(str::to_owned),
+            });
+        }
     }
-    // Only recurrence identities use exact start time; ordinary event aliases can differ by seconds.
     for key in &mut d.group_keys {
-        if key.basis == "ics_uid" {
-            key.key = format!("{}:{}", key.key, row["start"].as_str().unwrap_or("undated"));
+        if let Some(id) = key.key.strip_prefix("url:") {
+            let candidate = key
+                .target
+                .as_deref()
+                .filter(|s| s.starts_with("http"))
+                .or_else(|| targets.get(id).map(String::as_str));
+            if let Some(url) = candidate {
+                key.target = cfg.origin(url);
+            }
         }
     }
     d.group_keys.push(crate::group_keys::GroupKey {
@@ -155,7 +205,7 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
     .bind(id)
     .fetch_all(&mut **tx)
     .await?;
-    let mut stream=sqlx::query_scalar::<_,Value>("SELECT jsonb_build_object('unit_id',unit_id,'uri',uri,'keys',coalesce(doc->'group_keys','[]'),'aliases',coalesce(doc->'aliases','[]'),'occurrence',occurrence,'event',event,'source',doc->>'source','lat',ST_Y(point),'lon',ST_X(point),'event_uri',(SELECT uri FROM resource WHERE id=occurrence->>'event_resource_id'),'start',to_char(start_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')) FROM search_unit WHERE id=$1 LIMIT $2").bind(id).bind((cfg.max_graph_units+1) as i64).fetch(&mut **tx);
+    let mut stream=sqlx::query_scalar::<_,Value>("SELECT jsonb_build_object('unit_id',unit_id,'uri',uri,'keys',coalesce(doc->'group_keys','[]'),'aliases',coalesce(doc->'aliases','[]'),'occurrence',occurrence,'event',event,'source',doc->>'source','lat',ST_Y(point),'lon',ST_X(point),'event_uri',(SELECT uri FROM resource WHERE id=occurrence->>'event_resource_id'),'trigrams',show_trgm(array_to_string(tsvector_to_array(to_tsvector('simple',coalesce(name,''))),' ')),'feed',doc#>>'{attributes,podcast_feed}','start',to_char(start_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')) FROM search_unit WHERE id=$1 LIMIT $2").bind(id).bind((cfg.max_graph_units+1) as i64).fetch(&mut **tx);
     use futures_util::TryStreamExt;
     let mut rows = Vec::new();
     let mut bytes = 0usize;
@@ -168,6 +218,30 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
         rows.push(row);
     }
     drop(stream);
+    // Pre-0017 URL keys were hashed; recover destinations from known resources or aliases
+    // without fetching. Raw URL legacy keys are also accepted and normalized in evidence().
+    let target_ids: Vec<String> = rows
+        .iter()
+        .flat_map(|r| r["keys"].as_array().into_iter().flatten())
+        .filter_map(|k| k["key"].as_str()?.strip_prefix("url:").map(str::to_owned))
+        .take(cfg.max_graph_units.saturating_mul(16))
+        .collect();
+    let mut targets: BTreeMap<String, String> =
+        sqlx::query_as("SELECT id,uri FROM resource WHERE id=ANY($1)")
+            .bind(target_ids)
+            .fetch_all(&mut **tx)
+            .await?
+            .into_iter()
+            .collect();
+    for r in &rows {
+        for uri in std::iter::once(&r["uri"]).chain(r["aliases"].as_array().into_iter().flatten()) {
+            if let Some(uri) = uri.as_str() {
+                if let Ok((id, _, _)) = crate::model::identity(uri) {
+                    targets.insert(id, uri.into());
+                }
+            }
+        }
+    }
     let units: Vec<Unit> = rows
         .iter()
         .map(|r| Unit {
@@ -182,12 +256,30 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
                 ))
                 .unwrap()
             },
-            keys: evidence(r),
-            origin: match r["source"].as_str() {
-                Some("isbn") => "openlibrary.org".into(),
-                Some("doi") => "doi.org".into(),
-                _ => crate::group_keys::origin(r["uri"].as_str().unwrap_or(""))
-                    .unwrap_or_else(|| id.into()),
+            keys: evidence(r, cfg, &targets),
+            origin: if !r["occurrence"].is_null()
+                || evidence(r, cfg, &targets).iter().any(|k| {
+                    matches!(
+                        k.basis.as_str(),
+                        "ics_uid" | "podcast_guid" | "podcast_series_guid"
+                    )
+                }) {
+                format!(
+                    "container:{}",
+                    r["feed"]
+                        .as_str()
+                        .and_then(|u| crate::model::identity(u).ok())
+                        .map(|v| v.0)
+                        .unwrap_or_else(|| id.into())
+                )
+            } else {
+                match r["source"].as_str() {
+                    Some("isbn") => "openlibrary.org".into(),
+                    Some("doi") => "doi.org".into(),
+                    _ => cfg
+                        .origin(r["uri"].as_str().unwrap_or(""))
+                        .unwrap_or_else(|| id.into()),
+                }
             },
             authoritative: {
                 let mut own =
@@ -199,7 +291,7 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
                     keys.push(format!("osm:{}", osm.key()));
                 }
                 if matches!(r["source"].as_str(), Some("isbn" | "doi")) {
-                    keys.extend(evidence(r).into_iter().map(|k| k.key));
+                    keys.extend(evidence(r, cfg, &targets).into_iter().map(|k| k.key));
                 }
                 keys
             },
@@ -215,8 +307,23 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
     let fingerprint = blake3::hash(&serde_json::to_vec(&(
         &units,
         cfg,
+        &cfg.tenant_rules,
         rows.iter()
-            .map(|r| (&r["lat"], &r["lon"], &r["start"]))
+            .map(|r| {
+                (
+                    &r["lat"],
+                    &r["lon"],
+                    &r["start"],
+                    if evidence(r, cfg, &targets)
+                        .iter()
+                        .any(|k| k.basis == "ics_uid")
+                    {
+                        &r["trigrams"]
+                    } else {
+                        &Value::Null
+                    },
+                )
+            })
             .collect::<Vec<_>>(),
     ))?)
     .to_hex()
@@ -249,6 +356,12 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
                 unit_id: unit.unit_id.clone(),
                 resource_id: id.into(),
                 revision: revision.unwrap_or(0),
+                trigrams: {
+                    let mut values: Vec<String> =
+                        serde_json::from_value(row["trigrams"].clone()).unwrap_or_default();
+                    values.sort();
+                    values
+                },
                 key: k.key.clone(),
                 basis: k.basis.clone(),
                 confidence: k.confidence,
@@ -298,6 +411,7 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
 }
 #[derive(sqlx::FromRow)]
 struct Edge {
+    trigrams: Vec<String>,
     revision: i64,
     unit_id: String,
     resource_id: String,
@@ -321,6 +435,7 @@ impl Edge {
             + self.basis.len()
             + self.origin.len()
             + self.target.as_ref().map_or(0, String::len)
+            + self.trigrams.iter().map(String::len).sum::<usize>()
             + 256
     }
 }
@@ -338,6 +453,26 @@ fn distance(a: (f64, f64), b: (f64, f64)) -> f64 {
         + a.0.to_radians().cos() * b.0.to_radians().cos() * (dlon / 2.).sin().powi(2);
     6371000. * 2. * h.sqrt().min(1.).asin()
 }
+const MAX_PAIR_EVALUATIONS: usize = 100_000;
+fn charge_pair(evaluations: &mut usize) -> Result<()> {
+    *evaluations += 1;
+    ensure!(
+        *evaluations <= MAX_PAIR_EVALUATIONS,
+        "group pair evaluation budget exceeded"
+    );
+    Ok(())
+}
+// pg_trgm show_trgm supplies sorted unique trigrams after the same 'simple' name
+// normalization as search_text. Its similarity is intersection / union.
+fn name_similarity(a: &[String], b: &[String]) -> f64 {
+    let common = a.iter().filter(|v| b.binary_search(v).is_ok()).count();
+    let union = a.len() + b.len() - common;
+    if union == 0 {
+        0.0
+    } else {
+        common as f64 / union as f64
+    }
+}
 async fn load_edges(
     tx: &mut Transaction<'_, Postgres>,
     units: &[String],
@@ -352,7 +487,7 @@ async fn load_edges(
       (SELECT k.unit_id,k.group_id FROM resource_group k WHERE k.key=wanted.key ORDER BY k.trusted DESC,k.admitted_at,k.unit_id LIMIT $4) picked
     ), affected AS (SELECT unnest($1::text[]) AS unit_id UNION SELECT unit_id FROM group_unit WHERE group_id=ANY($3)
       UNION SELECT u.unit_id FROM group_unit u WHERE u.group_id IN(SELECT group_id FROM wanted) UNION SELECT unit_id FROM wanted)
-    SELECT r.group_revision AS revision,k.unit_id,k.resource_id,k.key,k.basis,k.confidence,k.origin,k.target,k.trusted,k.admitted_at,
+    SELECT show_trgm(array_to_string(tsvector_to_array(to_tsvector('simple',coalesce(s.name,''))),' ')) AS trigrams,r.group_revision AS revision,k.unit_id,k.resource_id,k.key,k.basis,k.confidence,k.origin,k.target,k.trusted,k.admitted_at,
       u.occurrence IS NOT NULL AS occurrence,s.start_at,u.group_id,o.group_id AS override_id,ST_Y(s.point) AS lat,ST_X(s.point) AS lon
     FROM resource_group k JOIN affected a USING(unit_id) JOIN group_unit u USING(unit_id) JOIN resource r ON r.id=k.resource_id
     LEFT JOIN group_override o USING(unit_id) LEFT JOIN group_member_document s USING(unit_id)
@@ -360,7 +495,8 @@ async fn load_edges(
         .bind(units).bind(keys).bind(previous).bind(cfg.max_members as i64).bind((max_edges+1) as i64).fetch(&mut **tx);
     let mut edges = Vec::new();
     let mut bytes = 0usize;
-    while let Some(edge) = stream.try_next().await? {
+    while let Some(mut edge) = stream.try_next().await? {
+        edge.trigrams.sort();
         bytes = bytes.saturating_add(edge.bytes());
         ensure!(
             bytes <= cfg.max_graph_bytes && edges.len() < max_edges,
@@ -409,6 +545,7 @@ async fn plan(
     let mut points = vec![None; names.len()];
     let mut starts = vec![None; names.len()];
     let mut occurrences = vec![false; names.len()];
+    let mut trigrams = vec![Vec::new(); names.len()];
     let mut origins = vec![String::new(); names.len()];
     let mut resource_ids = vec![String::new(); names.len()];
     let mut claims = vec![BTreeSet::new(); names.len()];
@@ -421,6 +558,7 @@ async fn plan(
         points[i] = e.lat.zip(e.lon);
         starts[i] = e.start_at;
         occurrences[i] = e.occurrence;
+        trigrams[i] = e.trigrams.clone();
         origins[i] = e.origin.clone();
         resource_ids[i] = e.resource_id.clone();
         claims[i].insert(e.key.clone());
@@ -442,8 +580,13 @@ async fn plan(
             .total_cmp(&a.1.iter().map(|v| v.1.confidence).fold(0.0, f64::max))
             .then_with(|| a.0.cmp(&b.0))
     });
+    let mut evaluations = 0usize;
     for (key, mut entries) in keys {
-        let curated = key.starts_with("curated:");
+        let curated = entries.iter().all(|(_, e)| {
+            e.override_id
+                .as_ref()
+                .is_some_and(|g| key == format!("curated:{g}"))
+        });
         entries.sort_by(|a, b| {
             b.1.trusted
                 .cmp(&a.1.trusted)
@@ -464,15 +607,31 @@ async fn plan(
         entries.truncate(cfg.max_members);
         for (pos, (i, ie)) in entries.iter().enumerate() {
             for (j, je) in &entries[..pos] {
+                charge_pair(&mut evaluations)?;
                 let reciprocal = claims[*i].contains(&format!("url:{}", resource_ids[*j]))
                     && claims[*j].contains(&format!("url:{}", resource_ids[*i]));
                 let same_origin = origins[*i] == origins[*j];
                 let url_owned = |e: &Edge| e.target.as_deref() == Some(e.origin.as_str());
+                let corroborated = cfg.cross_container_occurrences
+                    == CrossContainerOccurrences::Corroborated
+                    && key.starts_with("ics_uid:")
+                    && points[*i]
+                        .zip(points[*j])
+                        .is_some_and(|(a, b)| distance(a, b) <= 500.0)
+                    && starts[*i]
+                        .zip(starts[*j])
+                        .is_some_and(|(a, b)| (a - b).num_seconds().abs() <= 300)
+                    && name_similarity(&ie.trigrams, &je.trigrams) >= 0.5;
+                let occurrence_key = key.starts_with("ics_uid:");
                 let allowed = curated
-                    || reciprocal
-                    || (ie.trusted && je.trusted)
-                    || (same_origin
-                        && (!key.starts_with("url:") || (url_owned(ie) && url_owned(je))));
+                    || if occurrence_key && !same_origin {
+                        corroborated
+                    } else {
+                        reciprocal
+                            || (ie.trusted && je.trusted)
+                            || (same_origin
+                                && (!key.starts_with("url:") || (url_owned(ie) && url_owned(je))))
+                    };
                 if !allowed {
                     continue;
                 }
@@ -481,19 +640,37 @@ async fn plan(
                 if a == b || sets[a].len() + sets[b].len() > cfg.max_members {
                     continue;
                 }
-                if !curated
-                    && sets[a].iter().any(|i| {
-                        sets[b].iter().any(|j| {
-                            points[*i]
-                                .zip(points[*j])
-                                .is_some_and(|(a, b)| distance(a, b) > cfg.max_distance_m)
+                let mut incompatible = false;
+                if !curated {
+                    'pairs: for i in &sets[a] {
+                        for j in &sets[b] {
+                            charge_pair(&mut evaluations)?;
+                            let cross_occurrence = occurrence_key && origins[*i] != origins[*j];
+                            if (cross_occurrence
+                                && (cfg.cross_container_occurrences
+                                    != CrossContainerOccurrences::Corroborated
+                                    || !points[*i]
+                                        .zip(points[*j])
+                                        .is_some_and(|(a, b)| distance(a, b) <= 500.0)
+                                    || !starts[*i]
+                                        .zip(starts[*j])
+                                        .is_some_and(|(a, b)| (a - b).num_seconds().abs() <= 300)
+                                    || name_similarity(&trigrams[*i], &trigrams[*j]) < 0.5))
+                                || points[*i]
+                                    .zip(points[*j])
+                                    .is_some_and(|(a, b)| distance(a, b) > cfg.max_distance_m)
                                 || ((occurrences[*i] || occurrences[*j])
                                     && starts[*i]
                                         .zip(starts[*j])
                                         .is_some_and(|(a, b)| (a - b).num_seconds().abs() > 300))
-                        })
-                    })
-                {
+                            {
+                                incompatible = true;
+                                break 'pairs;
+                            }
+                        }
+                    }
+                }
+                if incompatible {
                     continue;
                 }
                 // Iterative path compression and union by size bound both stack and lookup depth.
@@ -616,7 +793,10 @@ async fn apply(tx: &mut Transaction<'_, Postgres>, plan: Plan) -> Result<()> {
     Ok(())
 }
 async fn refresh_best(tx: &mut Transaction<'_, Postgres>, groups: &[String]) -> Result<()> {
-    sqlx::query(r#"UPDATE "group" g SET best_unit=b.unit_id,best_resource_id=b.resource_id,best_occurrence_key=b.occurrence_key,kind=b.type,member_count=(SELECT count(*) FROM group_unit u WHERE u.group_id=g.id) FROM (SELECT DISTINCT ON(u.group_id) u.group_id,s.unit_id,u.resource_id,u.occurrence_key,s.type FROM group_unit u JOIN group_member_document s USING(unit_id) LEFT JOIN resource_score r ON r.resource_id=u.resource_id WHERE u.group_id=ANY($1) ORDER BY u.group_id,(s.point IS NOT NULL) DESC,(s.status='ok') DESC,(s.start_at IS NOT NULL) DESC,(s.name IS NOT NULL) DESC,(s.doc->>'image' IS NOT NULL) DESC,coalesce(r.score,0) DESC,s.unit_id) b WHERE g.id=b.group_id"#).bind(groups).execute(&mut **tx).await?;
+    sqlx::query("SELECT refresh_group_best($1)")
+        .bind(groups)
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 async fn rebuild(
@@ -678,14 +858,22 @@ pub async fn drain(pool: &PgPool, cfg: &GroupConfig, limit: i64) -> Result<usize
     }
     Ok(ids.len())
 }
+#[derive(Debug)]
+pub struct CurationError(pub &'static str);
+impl std::fmt::Display for CurationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+impl std::error::Error for CurationError {}
 pub async fn curate(pool: &PgPool, id: &str, body: Curation, cfg: &GroupConfig) -> Result<Value> {
     ensure!(
         cfg.enabled && crate::model::valid_id(id),
-        "invalid or disabled group"
+        CurationError("invalid or disabled group")
     );
     ensure!(
         !body.members.is_empty() && body.members.len() <= cfg.max_members,
-        "invalid group member count"
+        CurationError("invalid group member count")
     );
     ensure!(
         body.name.as_ref().is_none_or(|s| s.len() <= 512)
@@ -693,7 +881,7 @@ pub async fn curate(pool: &PgPool, id: &str, body: Curation, cfg: &GroupConfig) 
                 && url::Url::parse(s).is_ok_and(|u| matches!(u.scheme(), "http" | "https")
                     && u.username().is_empty()
                     && u.password().is_none())),
-        "invalid curated fields"
+        CurationError("invalid curated fields")
     );
     let mut tx = pool.begin().await?;
     sqlx::query("SET LOCAL statement_timeout='2s'")
@@ -708,7 +896,10 @@ pub async fn curate(pool: &PgPool, id: &str, body: Curation, cfg: &GroupConfig) 
             .fetch_all(&mut *tx)
             .await?;
     for m in &body.members {
-        ensure!(crate::model::valid_id(&m.resource_id), "invalid member ID");
+        ensure!(
+            crate::model::valid_id(&m.resource_id),
+            CurationError("invalid member ID")
+        );
         let key = m
             .occurrence
             .as_ref()
@@ -717,7 +908,7 @@ pub async fn curate(pool: &PgPool, id: &str, body: Curation, cfg: &GroupConfig) 
             })
             .unwrap_or_default();
         let row:Option<(String,Option<String>)>=sqlx::query_as("SELECT unit_id,group_id FROM group_unit WHERE resource_id=$1 AND occurrence_key=$2 AND ($2<>'' OR unit_id=resource_id)").bind(&m.resource_id).bind(key).fetch_optional(&mut *tx).await?;
-        let (unit, old) = row.context("unknown group member")?;
+        let (unit, old) = row.ok_or(CurationError("unknown group member"))?;
         units.push(unit);
         previous.extend(old);
     }

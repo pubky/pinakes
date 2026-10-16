@@ -792,6 +792,8 @@ fn podcast_body(
         })
         .copied();
     let mut d = ResourceMeta::new(uri, "media", ttl);
+    d.attributes
+        .insert("podcast_feed".into(), f.url.to_string());
     let is_podcast = podcast_namespace
         || chosen
             .map(enclosure)

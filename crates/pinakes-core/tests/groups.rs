@@ -200,7 +200,7 @@ async fn counts_filters_facets_clusters_and_deleted_best_member(pool: PgPool) {
     assert_eq!(card["group"]["taggers"], 2);
     let group = card["group"]["id"].as_str().unwrap();
     let mut disabled = Config::default();
-    disabled.queue.groups.enabled = false;
+    disabled.groups.enabled = false;
     let disabled = api::router(AppState::new(pool.clone(), disabled).unwrap());
     assert!(get(&disabled, &format!("/v1/resources/{a}")).await["group"].is_null());
     assert_eq!(get(&disabled, "/v1/info").await["groups"]["enabled"], false);
@@ -278,7 +278,7 @@ async fn recurring_uid_is_scoped_to_start_and_page_matches_occurrence(pool: PgPo
     let date = chrono::Utc::now() + chrono::Duration::days(1);
     let feed = "https://example.org/test.ics";
     let id = store::ensure_resource(&pool, feed).await.unwrap();
-    let text=format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:stable-series\r\nDTSTART:{}\r\nRRULE:FREQ=DAILY;COUNT=2\r\nSUMMARY:Series\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",date.format("%Y%m%dT%H%M%SZ"));
+    let text=format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:stable-series\r\nDTSTART:{}\r\nRRULE:FREQ=DAILY;COUNT=2\r\nSUMMARY:Series\r\nGEO:47;8\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",date.format("%Y%m%dT%H%M%SZ"));
     let d = calendar::parse(
         feed,
         text.as_bytes(),
@@ -296,6 +296,11 @@ async fn recurring_uid_is_scoped_to_start_and_page_matches_occurrence(pool: PgPo
     assert_eq!(count, 2);
     let (page, mut doc) = save(&pool, "page", &[], None).await;
     doc.set_type("Event");
+    doc.name = Some("Series".into());
+    doc.location = Some(Point {
+        lat: 47.0,
+        lon: 8.0,
+    });
     doc.start = Some(date.with_nanosecond(0).unwrap());
     group_keys::add(&mut doc, "ics_uid", "stable-series");
     store::save_document(&pool, &page, 0, &doc).await.unwrap();
@@ -304,7 +309,13 @@ async fn recurring_uid_is_scoped_to_start_and_page_matches_occurrence(pool: PgPo
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(count, 2);
+    assert_eq!(count, 0); // Default off: a page's copied UID cannot join a feed.
+    let cfg = groups::GroupConfig {
+        cross_container_occurrences: groups::CrossContainerOccurrences::Corroborated,
+        ..Default::default()
+    };
+    assert!(groups::reconcile(&pool, &page, &cfg).await);
+    assert_ne!(gid(&pool, &page).await, page);
     // The same URL reused for every date links the matching page only once.
     sqlx::query("UPDATE occurrence SET event_resource_id=$1 WHERE resource_id=$2")
         .bind(&page)
@@ -312,9 +323,7 @@ async fn recurring_uid_is_scoped_to_start_and_page_matches_occurrence(pool: PgPo
         .execute(&pool)
         .await
         .unwrap();
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    groups::drain(&pool, &cfg, 100).await.unwrap();
     let count: i64 = sqlx::query_scalar("SELECT count(DISTINCT coalesce(group_id,unit_id)) FROM group_unit WHERE resource_id=$1 AND occurrence_key<>''")
         .bind(&id).fetch_one(&pool).await.unwrap();
     assert_eq!(count, 2);
@@ -415,6 +424,261 @@ async fn review_directional_aliases_and_typed_self_claims_cannot_poison_groups(p
         "https://a.wordpress.com/x",
         "https://b.wordpress.com/y"
     ));
+
+    // Two tenants can copy the complete public occurrence; default-off prevents joining.
+    let cfg = groups::GroupConfig {
+        cross_container_occurrences: groups::CrossContainerOccurrences::Corroborated,
+        ..Default::default()
+    };
+    let date = chrono::Utc::now() + chrono::Duration::days(1);
+    let mut feeds = Vec::new();
+    for (tenant, name, lat) in [
+        ("victim", "Community concert", 47.0),
+        ("copy", "Community concert copied", 47.001),
+    ] {
+        let uri = format!("https://calendar.google.com/calendar/ical/{tenant}/public/basic.ics");
+        let id = store::ensure_resource(&pool, &uri).await.unwrap();
+        let text=format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:public-event\r\nDTSTART:{}\r\nSUMMARY:{name}\r\nGEO:{lat};8\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",date.format("%Y%m%dT%H%M%SZ"));
+        let d = pinakes_core::event::calendar::parse(
+            &uri,
+            text.as_bytes(),
+            &Default::default(),
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        sqlx::query("UPDATE occurrence SET doc=doc||jsonb_build_object('image',$2::text) WHERE resource_id=$1").bind(&id).bind(format!("https://images.example/{tenant}.jpg")).execute(&pool).await.unwrap();
+        assert!(groups::reconcile(&pool, &id, &Default::default()).await);
+        if tenant == "victim" {
+            tag(&pool, &id, &"v".repeat(52), "protected").await;
+        }
+        feeds.push(id);
+    }
+    let occurrence_group = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_,Option<String>>("SELECT group_id FROM group_unit WHERE resource_id=$1 AND occurrence_key<>'' LIMIT 1").bind(id).fetch_one(&pool).await.unwrap()
+        }
+    };
+    assert!(occurrence_group(feeds[0].clone()).await.is_none());
+    assert!(occurrence_group(feeds[1].clone()).await.is_none());
+    assert!(groups::reconcile(&pool, &feeds[1], &cfg).await);
+    let group = occurrence_group(feeds[0].clone()).await.unwrap();
+    assert_eq!(
+        occurrence_group(feeds[1].clone()).await.as_deref(),
+        Some(group.as_str())
+    );
+    let card = get(&app, &format!("/v1/groups/{group}")).await;
+    assert_eq!(card["name"], "Community concert");
+    assert_eq!(card["image"], "https://images.example/victim.jpg");
+    assert_eq!(card["location"]["lat"], 47.0);
+    let collapsed = get(
+        &app,
+        "/v1/search?collapse=group&type=Event&tags=protected&fields=document",
+    )
+    .await;
+    let hit = &collapsed["items"][0];
+    assert_eq!(hit["name"], card["name"]);
+    assert_eq!(hit["image"], card["image"]);
+    assert_eq!(
+        hit["document"]["location"]["lat"].as_f64(),
+        card["location"]["lat"].as_f64()
+    );
+    // A member occurrence read through search also retains the victim's own facts.
+    let member = get(&app, "/v1/search?tags=protected&type=Event&fields=document").await;
+    assert_eq!(member["items"][0]["name"], card["name"]);
+    assert_eq!(member["items"][0]["image"], card["image"]);
+    assert_eq!(
+        member["items"][0]["document"]["location"]["lat"].as_f64(),
+        card["location"]["lat"].as_f64()
+    );
+}
+
+#[test]
+fn round2_multi_tenant_publishers_and_overrides() {
+    for (host, rule) in group_keys::TENANT_RULES.iter() {
+        let (a, b) = match rule {
+            group_keys::TenantRule::Subdomain => (
+                format!("https://alice.{host}/item"),
+                format!("https://bob.{host}/item"),
+            ),
+            group_keys::TenantRule::FirstPathSegment => (
+                format!("https://{host}/alice/item"),
+                format!("https://{host}/bob/item"),
+            ),
+        };
+        assert_ne!(group_keys::origin(&a), group_keys::origin(&b), "{host}");
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.runtime");
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join(format!("tenants-{}.json", std::process::id()));
+    std::fs::write(&path, r#"{"tenant.example":"first_path_segment"}"#).unwrap();
+    let mut cfg = groups::GroupConfig {
+        multi_tenant_hosts_path: Some(path.to_string_lossy().into_owned()),
+        ..Default::default()
+    };
+    cfg.load_tenants().unwrap();
+    assert_ne!(
+        group_keys::origin_with("https://tenant.example/a/x", &cfg.tenant_rules),
+        group_keys::origin_with("https://tenant.example/b/x", &cfg.tenant_rules)
+    );
+    std::fs::remove_file(path).unwrap();
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round2_own_and_legacy_keys_survive_reserved_or_full_stored_evidence(pool: PgPool) {
+    let uri = "https://www.wikidata.org/wiki/Q42";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut d = ResourceMeta::new(uri, "web", 3600);
+    for i in 100..116 {
+        group_keys::add(&mut d, "wikidata", &format!("Q{i}"));
+    }
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let keys: Vec<String> =
+        sqlx::query_scalar("SELECT key FROM resource_group WHERE resource_id=$1 AND trusted")
+            .bind(&id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(keys.contains(&"wikidata:Q42".into()));
+    assert!(keys.contains(&format!("url:{id}")));
+    d.group_keys.clear();
+    for kind in ["curated", "unit", "group", "identity", "automatic"] {
+        d.group_keys.push(group_keys::GroupKey {
+            key: format!("{kind}:reserved"),
+            basis: "same_as".into(),
+            confidence: 1.0,
+            target: None,
+        });
+    }
+    assert!(d.clone().bounded(&[]).unwrap().group_keys.is_empty());
+    store::save_document(&pool, &id, 0, &d).await.unwrap(); // bypasses bounded(), exercises stored evidence filter
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM resource_group WHERE resource_id=$1 AND key LIKE '%:reserved'",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+    for hashed in [false, true] {
+        let canonical = format!("https://legacy.example/canonical-{hashed}");
+        let (a, _) = claimed(&pool, &canonical, &canonical, false).await;
+        let uri = format!("https://legacy.example/alias-{hashed}");
+        let b = store::ensure_resource(&pool, &uri).await.unwrap();
+        let key = if hashed {
+            format!("url:{a}")
+        } else {
+            format!("url:{canonical}")
+        };
+        let mut d = ResourceMeta::new(&uri, "web", 3600);
+        d.group_keys.push(group_keys::GroupKey {
+            key,
+            basis: "canonical".into(),
+            confidence: 0.8,
+            target: None,
+        });
+        store::save_document(&pool, &b, 0, &d).await.unwrap();
+        assert_eq!(gid(&pool, &a).await, gid(&pool, &b).await);
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round2_pair_budget_parks_config_cap_without_losing_resource(pool: PgPool) {
+    let shared = pubky_resource_id::resource_id("https://budget.example/shared");
+    sqlx::query("INSERT INTO resource(id,uri,scheme,host) SELECT md5('budget-'||i),'https://budget.example/'||i,'https','budget.example' FROM generate_series(1,999) i").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO group_unit(unit_id,resource_id) SELECT id,id FROM resource")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO resource_group(unit_id,resource_id,key,basis,confidence,origin,target) SELECT id,id,'url:'||$1,'same_as',0.8,'budget.example','budget.example' FROM resource").bind(&shared).execute(&pool).await.unwrap();
+    let uri = "https://budget.example/new";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut d = ResourceMeta::new(uri, "web", 3600);
+    d.name = Some("Saved despite pair budget".into());
+    group_keys::add(&mut d, "same_as", "https://budget.example/shared");
+    let cfg = pinakes_core::config::QueueConfig {
+        groups: groups::GroupConfig {
+            max_members: 1000,
+            max_members_per_origin: 1000,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    pinakes_core::changes::save(&pool, &id, 0, &d, &cfg)
+        .await
+        .unwrap();
+    let state:(String,i32,bool,i32)=sqlx::query_as("SELECT r.name,r.attempts,r.dead_letter,g.attempts FROM resource r JOIN group_dirty g ON g.resource_id=r.id WHERE r.id=$1").bind(&id).fetch_one(&pool).await.unwrap();
+    assert_eq!(state, ("Saved despite pair budget".into(), 0, false, 1));
+    let mut tx = pool.begin().await.unwrap();
+    let error = groups::sync(&mut tx, &id, &cfg.groups).await.unwrap_err();
+    assert!(
+        error.to_string().contains("pair evaluation budget"),
+        "{error}"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round2_curated_cards_keep_metadata_and_invalid_curation_is_400(pool: PgPool) {
+    let (a, _) = save(&pool, "member", &[], None).await;
+    let id = "c".repeat(32);
+    let body = json!({"members":[{"resource_id":a}],"name":"Curator title","image":"https://images.example/curated.jpg"});
+    let state = AppState::new(pool.clone(), Config::default()).unwrap();
+    let admin = api::admin_router(state.clone());
+    let put = |body: Value| {
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/v1/groups/{id}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    assert_eq!(
+        admin
+            .clone()
+            .oneshot(put(body.clone()))
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    let app = api::router(state);
+    let read = get(&app, &format!("/v1/resources/{a}")).await;
+    assert_eq!(read["group"]["name"], body["name"]);
+    assert_eq!(read["group"]["image"], body["image"]);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/resources/lookup?fields=document")
+                .extension(axum::extract::ConnectInfo(
+                    "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"ids":[a]}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let lookup: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(lookup[0]["group"]["name"], body["name"], "{lookup}");
+    for invalid in [
+        json!({"members":[]}),
+        json!({"members":[{"resource_id":"x"}]}),
+        json!({"members":[{"resource_id":"e".repeat(32)}]}),
+        json!({"members":[{"resource_id":a}],"name":"x".repeat(513)}),
+    ] {
+        assert_eq!(
+            admin.clone().oneshot(put(invalid)).await.unwrap().status(),
+            400
+        );
+    }
+    sqlx::query("DROP FUNCTION refresh_group_best(text[])")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(admin.oneshot(put(body)).await.unwrap().status(), 500);
 }
 #[sqlx::test(migrations = "../../migrations")]
 async fn review_curating_an_automatic_id_pins_exactly_requested_members(pool: PgPool) {

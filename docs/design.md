@@ -125,6 +125,16 @@ Refresh follows the time to an event's start and stops after its end; a change i
 
 **Groups.** One thing often lives at several URIs: a recording on Spotify, Tidal, Deezer and Qobuz, a podcast episode at its host and in every directory, a film on IMDb and Letterboxd, an event on Luma and on the organiser's site, a place under two spellings of its OSM URL. Nexus sees as many resources as URIs, which is right: each is what someone referenced. Pinakes adds a group over them, from the keys resolution finds (ISRC, podcast GUID, Wikidata and IMDb ids, ICS UID, schema.org `sameAs`, a canonical URL) and from links an operator curates, which also covers intentional merges of ids or spellings. A group is a view, never an identity: ids and references stay per URI, so no key change needs a backfill. Search collapses to one row per group on request: the unit of a result is then the group, a filter matches when any member matches, counts are distinct authors across members, a cluster counts groups, and a group's score is precomputed like a resource's. A resource read lists its group. Groups ship with the media module.
 
+Feed-derived grouping evidence is scoped to its container resource. Cross-container
+ICS UID matching is off by default (`groups.cross_container_occurrences = "off"`).
+The opt-in `"corroborated"` mode requires two points within 500 m, starts within
+300 s, and pg_trgm similarity of normalized names ≥ 0.5. This restores the §5.3
+Luma/organiser event case at the price of being copyable by a determined publisher.
+The harm bound is the automatic best-member ordering: distinct taggers descending,
+references descending, admission time ascending, then completeness. Curated best
+members remain pinned. Other typed IDs use publisher boundaries from
+`data/multi-tenant-hosts.json`, with an operator-configurable replacement path.
+
 [Details: the two example documents, the venue chain, time zones and cancellation, groups](details.html#document)
 
 ### 5.4 Storage {#storage}

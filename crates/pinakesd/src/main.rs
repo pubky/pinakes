@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
         }
     });
     let group_pool = pool.clone();
-    let group_config = config.queue.groups.clone();
+    let group_config = config.groups.clone();
     let mut group_shutdown = shutdown_rx.clone();
     let group_task = tokio::spawn(async move {
         loop {

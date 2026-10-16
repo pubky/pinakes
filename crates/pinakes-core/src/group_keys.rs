@@ -2,13 +2,52 @@
 use crate::model::{identity, ResourceMeta};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::{collections::BTreeMap, sync::LazyLock};
 use utoipa::ToSchema;
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TenantRule {
+    Subdomain,
+    FirstPathSegment,
+}
+pub type TenantRules = BTreeMap<String, TenantRule>;
+pub static TENANT_RULES: LazyLock<TenantRules> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("../../../data/multi-tenant-hosts.json"))
+        .expect("tenant rules")
+});
+
+pub fn valid_stored(key: &GroupKey) -> bool {
+    key.key.split_once(':').is_some_and(|(kind, value)| {
+        !value.is_empty()
+            && matches!(
+                kind,
+                "url"
+                    | "isrc"
+                    | "iswc"
+                    | "musicbrainz"
+                    | "podcast_guid"
+                    | "podcast_series_guid"
+                    | "wikidata"
+                    | "imdb"
+                    | "tmdb"
+                    | "ics_uid"
+                    | "isbn"
+                    | "doi"
+                    | "osm"
+            )
+    }) && key.key.len() <= 2100
+        && key.basis.len() <= 32
+        && key.target.as_ref().is_none_or(|s| s.len() <= 2048)
+        && key.confidence.is_finite()
+        && (0.0..=1.0).contains(&key.confidence)
+}
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq)]
 pub struct GroupKey {
     pub key: String,
     pub basis: String,
     pub confidence: f64,
-    /// Destination registrable domain; the key retains the target identity. Never a fetch instruction.
+    /// Destination URL (older documents contain a publisher origin). Never a fetch instruction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
 }
@@ -30,7 +69,7 @@ pub fn add(doc: &mut ResourceMeta, basis: &str, value: &str) {
         "same_as" | "canonical" => ("url", 0.8),
         _ => return,
     };
-    let target = (kind == "url").then(|| origin(value)).flatten();
+    let target = (kind == "url").then(|| value.to_owned());
     let value = if kind == "url" {
         let Ok((id, _, scheme)) = identity(value) else {
             return;
@@ -186,17 +225,28 @@ pub fn jsonld(doc: &mut ResourceMeta, v: &Value, base: &url::Url) {
 
 /// The PSL includes private suffixes (e.g. separate hosted-blog tenants).
 pub fn origin(uri: &str) -> Option<String> {
+    origin_with(uri, &TENANT_RULES)
+}
+pub fn origin_with(uri: &str, rules: &TenantRules) -> Option<String> {
     let u = url::Url::parse(uri).ok()?;
     if !matches!(u.scheme(), "http" | "https") {
         return None;
     }
-    let host = u.host_str()?;
-    // WordPress tenants are independent publishers although this provider does not
-    // register its hosting boundary in the PSL.
-    if host.ends_with(".wordpress.com") {
-        return Some(host.to_ascii_lowercase());
+    let host = u.host_str()?.trim_end_matches('.').to_ascii_lowercase();
+    if let Some((base, rule)) = rules
+        .iter()
+        .filter(|(base, _)| host == **base || host.ends_with(&format!(".{base}")))
+        .max_by_key(|(base, _)| base.len())
+    {
+        return Some(match rule {
+            TenantRule::Subdomain => host,
+            TenantRule::FirstPathSegment => format!(
+                "{host}/{}",
+                u.path_segments()?.find(|s| !s.is_empty()).unwrap_or(base)
+            ),
+        });
     }
-    Some(psl::domain_str(host).unwrap_or(host).to_ascii_lowercase())
+    Some(psl::domain_str(&host).unwrap_or(&host).to_owned())
 }
 pub fn same_origin(a: &str, b: &str) -> bool {
     origin(a).zip(origin(b)).is_some_and(|(a, b)| a == b)

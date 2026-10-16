@@ -498,7 +498,7 @@ are built only for returned page rows; facets use equality joins.
 Migration 0018 revives failed identifier/common-media routes introduced by 0015,
 staggering retries within an hour. Future resolver changes clear failures from the
 previous worker once, using stored error provenance; unrelated dead letters remain.
-`queue.groups.enabled=false` hides group APIs and stops reconciliation without
+`groups.enabled=false` hides group APIs and stops reconciliation without
 deleting evidence. OSM facts remain in `osm_place`.
 
 Run `scripts/e2e --mock` for the fixture flow or `scripts/e2e --isolated-live` for a
@@ -507,3 +507,17 @@ only its nine samples. [The harness guide](e2e/README.md) documents identity set
 configuration, CI commands, sample replacement and cleanup. It writes universal
 tags under `/pub/pinakes.e2e/tags/`, waits for Nexus and Pinakes, then deletes its
 own tags. The existing dev stack can also be tested by running `scripts/e2e`.
+
+Grouping publisher policy: feed-derived keys belong to the containing feed resource,
+not its host. `groups.cross_container_occurrences = "off"` is the default;
+`"corroborated"` permits shared ICS UIDs only with both points within 500 m,
+starts within 300 s and pg_trgm name similarity at least 0.5 after `simple`
+search normalization. `PINAKES__GROUPS__CROSS_CONTAINER_OCCURRENCES` overrides it.
+This restores the event-on-Luma/organiser case in design §5.3, at the price of
+being copyable by a determined publisher. Automatic cards limit that harm by
+preferring distinct taggers, then references, then oldest admission, before
+metadata completeness. Curated groups preserve their chosen best member.
+`data/multi-tenant-hosts.json` scopes other identifiers by subdomain or first path
+segment; `groups.multi_tenant_hosts_path` loads a replacement JSON map at startup.
+The older `[queue.groups]` file section remains accepted; use only one location.
+Pair comparisons are capped at 100,000 per sync; breaches park grouping independently.

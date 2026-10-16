@@ -25,6 +25,7 @@ pub const ATTRIBUTES: &[&str] = &[
     "isbn",
     "doi",
     "podcast_guid",
+    "podcast_feed",
     "duration",
     "isrc",
 ];

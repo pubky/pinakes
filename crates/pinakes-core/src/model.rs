@@ -159,13 +159,7 @@ impl ResourceMeta {
     }
     pub fn bounded(mut self, allowed_attributes: &[&str]) -> Result<Self> {
         self.event.bound();
-        self.group_keys.retain(|k| {
-            k.key.len() <= 2100
-                && k.target.as_ref().is_none_or(|s| s.len() <= 253)
-                && k.basis.len() <= 32
-                && k.confidence.is_finite()
-                && (0.0..=1.0).contains(&k.confidence)
-        });
+        self.group_keys.retain(crate::group_keys::valid_stored);
         self.group_keys.sort_by(|a, b| a.key.cmp(&b.key));
         self.group_keys.dedup_by(|a, b| a.key == b.key);
         self.group_keys.truncate(16);

@@ -24,6 +24,7 @@ pub struct Config {
     pub pubky: ResolverConfig,
     pub egress: EgressConfig,
     pub queue: QueueConfig,
+    pub groups: crate::groups::GroupConfig,
     pub preview: PreviewConfig,
     pub api: ApiConfig,
 }
@@ -53,6 +54,7 @@ impl Default for Config {
             search: SearchConfig::default(),
             egress: EgressConfig::default(),
             queue: QueueConfig::default(),
+            groups: Default::default(),
             preview: PreviewConfig::default(),
             api: ApiConfig::default(),
         }
@@ -171,6 +173,7 @@ impl Default for EgressConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct QueueConfig {
+    #[serde(skip)]
     pub groups: crate::groups::GroupConfig,
     pub max_failures: u32,
     pub timeout_grace: u32,
@@ -312,7 +315,17 @@ impl Config {
                 &std::fs::read_to_string(path)
                     .with_context(|| format!("read {}", path.display()))?,
             )?;
-            merge(&mut value, serde_json::to_value(file)?);
+            let mut file = serde_json::to_value(file)?;
+            // Preserve the original config location while exposing the documented root section.
+            if let Some(legacy) = file
+                .get_mut("queue")
+                .and_then(|v| v.as_object_mut())
+                .and_then(|v| v.remove("groups"))
+            {
+                ensure_no_duplicate_groups(&file)?;
+                file["groups"] = legacy;
+            }
+            merge(&mut value, file);
         }
         for (key, val) in std::env::vars()
             .filter_map(|(k, v)| k.strip_prefix("PINAKES__").map(|s| (s.to_lowercase(), v)))
@@ -331,7 +344,9 @@ impl Config {
                 serde_json::from_str(&val).context("env override requires JSON value")?
             };
         }
-        let cfg: Self = serde_json::from_value(value)?;
+        let mut cfg: Self = serde_json::from_value(value)?;
+        cfg.groups.load_tenants()?;
+        cfg.queue.groups = cfg.groups.clone();
         cfg.validate()?;
         Ok(cfg)
     }
@@ -347,12 +362,12 @@ impl Config {
         if !admin.ip().is_loopback() && self.admin_token.is_none() {
             bail!("non-loopback admin_listen requires admin_token (PINAKES__ADMIN_TOKEN)");
         }
-        if !(10000..=100000).contains(&self.queue.groups.max_graph_units)
-            || !(1024 * 1024..=128 * 1024 * 1024).contains(&self.queue.groups.max_graph_bytes)
-            || !(2..=1000).contains(&self.queue.groups.max_members)
-            || !(1..=1000).contains(&self.queue.groups.max_members_per_origin)
-            || !self.queue.groups.max_distance_m.is_finite()
-            || !(1.0..=10000.0).contains(&self.queue.groups.max_distance_m)
+        if !(10000..=100000).contains(&self.groups.max_graph_units)
+            || !(1024 * 1024..=128 * 1024 * 1024).contains(&self.groups.max_graph_bytes)
+            || !(2..=1000).contains(&self.groups.max_members)
+            || !(1..=1000).contains(&self.groups.max_members_per_origin)
+            || !self.groups.max_distance_m.is_finite()
+            || !(1.0..=10000.0).contains(&self.groups.max_distance_m)
         {
             bail!("invalid grouping limits");
         }
@@ -540,4 +555,11 @@ mod tests {
                 .is_err());
         }
     }
+}
+
+fn ensure_no_duplicate_groups(value: &serde_json::Value) -> Result<()> {
+    if value.get("groups").is_some() {
+        bail!("use groups or legacy queue.groups, not both");
+    }
+    Ok(())
 }

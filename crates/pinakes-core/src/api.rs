@@ -539,7 +539,7 @@ pub async fn search(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let tags = validate_search(&q)?;
-    if q.collapse.is_some() && !state.config.queue.groups.enabled {
+    if q.collapse.is_some() && !state.config.groups.enabled {
         return Err(ApiError::bad("groups are disabled"));
     }
     let spatial = crate::spatial::Filters::parse(&q, &state.config.search)
@@ -870,7 +870,7 @@ async fn read(
     groups: bool,
 ) -> Result<Option<ResourceView>, ApiError> {
     let value: Option<Value> =
-        sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_card(u.group_id)||jsonb_build_object('name',r.name,'image',r.doc->>'image') END) FROM resource_document r LEFT JOIN group_unit u ON u.unit_id=r.id WHERE r.id=$1")
+        sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_card(u.group_id)||CASE WHEN g.curated THEN '{}'::jsonb ELSE jsonb_build_object('name',r.name,'image',r.doc->>'image') END END) FROM resource_document r LEFT JOIN group_unit u ON u.unit_id=r.id LEFT JOIN \"group\" g ON g.id=u.group_id WHERE r.id=$1")
             .bind(id)
             .bind(groups)
             .fetch_optional(pool)
@@ -890,7 +890,7 @@ pub async fn resource(
         &state.pool,
         &id,
         fields.fields.unwrap_or(Fields::Document),
-        state.config.queue.groups.enabled,
+        state.config.groups.enabled,
     )
     .await?
     .map(Json)
@@ -924,7 +924,7 @@ pub async fn lookup(
     }
     store::expedite(&state.pool, &ids).await?;
     state.wake.notify_waiters();
-    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_card(u.group_id)||jsonb_build_object('name',r.name,'image',r.doc->>'image') END) FROM unnest($1::text[]) WITH ORDINALITY AS wanted(id,n) JOIN resource_document r ON r.id=wanted.id LEFT JOIN group_unit u ON u.unit_id=r.id ORDER BY wanted.n").bind(ids).bind(state.config.queue.groups.enabled).fetch_all(&state.pool).await?;
+    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_card(u.group_id)||CASE WHEN g.curated THEN '{}'::jsonb ELSE jsonb_build_object('name',r.name,'image',r.doc->>'image') END END) FROM unnest($1::text[]) WITH ORDINALITY AS wanted(id,n) JOIN resource_document r ON r.id=wanted.id LEFT JOIN group_unit u ON u.unit_id=r.id LEFT JOIN \"group\" g ON g.id=u.group_id ORDER BY wanted.n").bind(ids).bind(state.config.groups.enabled).fetch_all(&state.pool).await?;
     Ok(Json(
         rows.iter()
             .map(|r| view(r, fields.fields.unwrap_or(Fields::Facets), false))
@@ -961,7 +961,7 @@ pub async fn resolve(
             &state.pool,
             &id,
             Fields::Document,
-            state.config.queue.groups.enabled,
+            state.config.groups.enabled,
         )
         .await?
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "resource expired".into()))?;
@@ -1031,7 +1031,7 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
     let row=sqlx::query("SELECT (SELECT count(*) FROM resource) AS resources,(SELECT count(*) FROM reference) AS references,(SELECT count(*) FROM occurrence) AS occurrences").fetch_one(&state.pool).await?;
     let ingestion:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('nexus',nexus,'cursor',cursor,'feed_length',feed_length,'lag',greatest(feed_length-cursor,0),'epoch',epoch,'updated_at',updated_at) FROM feed_cursor ORDER BY nexus").fetch_all(&state.pool).await?;
     let statuses:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('resolver',resolver,'status',status,'count',count(*),'dead_letter',count(*) FILTER (WHERE dead_letter),'leased',count(*) FILTER (WHERE lease_until>now())) FROM resource GROUP BY resolver,status ORDER BY resolver,status").fetch_all(&state.pool).await?;
-    let mut body = json!({"groups":state.config.queue.groups,"version":env!("CARGO_PKG_VERSION"),"manifests":crate::adapter::configured(&state.config),"sources":sources,"metrics":state.metrics.summary(),"ingestion":ingestion,"counts":{"resources":row.try_get::<i64,_>("resources")?,"references":row.try_get::<i64,_>("references")?,"occurrences":row.try_get::<i64,_>("occurrences")?},"osm_licence":{"licence":"ODbL-1.0","attribution":crate::resolver::osm::ATTRIBUTION,"url":"https://opendatacommons.org/licenses/odbl/1-0/","dump":"/v1/dumps/osm_place.ndjson"},"resolvers":{"event":{"enabled":state.config.event.enabled,"calendar":state.config.event.calendars,"jsonld":state.config.event.jsonld,"microformats":state.config.event.microformats,"activitypub":state.config.event.activitypub,"geocoding":state.config.event.geocoding,"coordinate_timezone":state.config.event.coordinate_timezone,"months_back":state.config.event.months_back,"months_forward":state.config.event.months_forward},"geo":{"enabled":state.config.geo_enabled,"network":false},"osm":{"enabled":state.config.osm.enabled,"concurrency":1,"batch_size":50,"requests_per_second":state.config.osm.requests_per_second},"web":{"enabled":state.config.web.enabled,"concurrency":state.config.web.concurrency},"pubky":{"enabled":state.config.pubky.enabled,"concurrency":state.config.pubky.concurrency},"statuses":statuses}});
+    let mut body = json!({"groups":state.config.groups,"version":env!("CARGO_PKG_VERSION"),"manifests":crate::adapter::configured(&state.config),"sources":sources,"metrics":state.metrics.summary(),"ingestion":ingestion,"counts":{"resources":row.try_get::<i64,_>("resources")?,"references":row.try_get::<i64,_>("references")?,"occurrences":row.try_get::<i64,_>("occurrences")?},"osm_licence":{"licence":"ODbL-1.0","attribution":crate::resolver::osm::ATTRIBUTION,"url":"https://opendatacommons.org/licenses/odbl/1-0/","dump":"/v1/dumps/osm_place.ndjson"},"resolvers":{"event":{"enabled":state.config.event.enabled,"calendar":state.config.event.calendars,"jsonld":state.config.event.jsonld,"microformats":state.config.event.microformats,"activitypub":state.config.event.activitypub,"geocoding":state.config.event.geocoding,"coordinate_timezone":state.config.event.coordinate_timezone,"months_back":state.config.event.months_back,"months_forward":state.config.event.months_forward},"geo":{"enabled":state.config.geo_enabled,"network":false},"osm":{"enabled":state.config.osm.enabled,"concurrency":1,"batch_size":50,"requests_per_second":state.config.osm.requests_per_second},"web":{"enabled":state.config.web.enabled,"concurrency":state.config.web.concurrency},"pubky":{"enabled":state.config.pubky.enabled,"concurrency":state.config.pubky.concurrency},"statuses":statuses}});
     for kind in crate::resolver::cards::KINDS {
         let c = state.config.cards.resolver(kind);
         body["resolvers"][kind] = json!({"enabled":c.enabled,"concurrency":c.concurrency,"requests_per_second":c.requests_per_second});
@@ -1261,7 +1261,7 @@ pub async fn group(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    if !model::valid_id(&id) || !state.config.queue.groups.enabled {
+    if !model::valid_id(&id) || !state.config.groups.enabled {
         return Err(ApiError::bad("invalid or disabled group"));
     }
     let value: Option<Value> = sqlx::query_scalar("SELECT group_card($1)")
@@ -1278,12 +1278,12 @@ pub async fn curate_group(
     Path(id): Path<String>,
     Json(body): Json<crate::groups::Curation>,
 ) -> Result<Json<Value>, ApiError> {
-    crate::groups::curate(&state.pool, &id, body, &state.config.queue.groups)
+    crate::groups::curate(&state.pool, &id, body, &state.config.groups)
         .await
         .map(Json)
         .map_err(|e| {
             tracing::warn!(error=%e,"group curation failed");
-            if e.downcast_ref::<sqlx::Error>().is_some() {
+            if !e.is::<crate::groups::CurationError>() {
                 ApiError(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "group curation unavailable".into(),
