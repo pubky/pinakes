@@ -280,6 +280,23 @@ pub async fn read_response_with(
         if !ALLOWED_TYPES.contains(&content_type.as_str()) && !feed_type && !sniff {
             bail!("content type is not allowed");
         }
+    } else if matches!(status, 403 | 429 | 503)
+        && matches!(
+            content_type.as_str(),
+            "text/html" | "application/xhtml+xml" | "text/plain" | ""
+        )
+    {
+        // Error pages previously discarded their bodies, hiding challenges from the
+        // interstitial classifier. Inspect only a bounded prefix and preserve the status.
+        const ERROR_BODY_CAP: usize = 64 * 1024;
+        while let Some(chunk) = response.chunk().await? {
+            let remaining = ERROR_BODY_CAP.saturating_sub(body.len());
+            body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+            if chunk.len() >= remaining {
+                truncated = true;
+                break;
+            }
+        }
     }
     Ok(Fetched {
         permanent_redirect: false,

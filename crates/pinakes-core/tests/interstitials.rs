@@ -86,6 +86,75 @@ fn captured_walls_stubs_and_content_are_distinguished() {
         Page::Content
     );
 }
+
+#[tokio::test]
+async fn real_http_error_bodies_reach_interstitial_detection_with_a_cap() {
+    use axum::{http::StatusCode, routing::get, Router};
+    use pinakes_core::resolver::egress::read_response;
+    let app = Router::new()
+        .route(
+            "/forbidden",
+            get(|| async {
+                (
+                    StatusCode::FORBIDDEN,
+                    [("content-type", "text/html")],
+                    "<title>Request Access</title>",
+                )
+            }),
+        )
+        .route(
+            "/limited",
+            get(|| async {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [("content-type", "text/plain")],
+                    "Verify you are human",
+                )
+            }),
+        )
+        .route(
+            "/unavailable",
+            get(|| async {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [("content-type", "text/html")],
+                    format!("<title>Just a moment</title>{}", "x".repeat(100_000)),
+                )
+            }),
+        )
+        .route(
+            "/ordinary",
+            get(|| async {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [("content-type", "text/html")],
+                    "<title>Maintenance</title>",
+                )
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = reqwest::Client::new();
+    for (path, status, expected) in [
+        ("forbidden", 403, Page::Blocked),
+        ("limited", 429, Page::Blocked),
+        ("unavailable", 503, Page::Blocked),
+        ("ordinary", 503, Page::Content),
+    ] {
+        let uri: Url = format!("http://{address}/{path}").parse().unwrap();
+        let f = read_response(uri.clone(), client.get(uri.clone()).send().await.unwrap())
+            .await
+            .unwrap();
+        assert_eq!(f.status, status);
+        assert_eq!(interstitial::inspect(&uri, &f), expected);
+        if path == "unavailable" {
+            assert_eq!(f.body.len(), 64 * 1024);
+            assert!(f.truncated);
+        }
+    }
+    server.abort();
+}
 struct PublicDns;
 #[async_trait]
 impl Dns for PublicDns {

@@ -51,7 +51,10 @@ pub fn inspect(requested: &Url, f: &Fetched) -> Page {
             return Page::Blocked;
         }
     }
-    if !f.content_type.contains("html") {
+    if !f.content_type.contains("html")
+        && !(matches!(f.status, 403 | 429 | 503)
+            && matches!(f.content_type.as_str(), "text/plain" | ""))
+    {
         return Page::Content;
     }
     let text = String::from_utf8_lossy(&f.body);
