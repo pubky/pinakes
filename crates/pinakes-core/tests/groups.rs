@@ -2073,6 +2073,9 @@ async fn round7_double_encoding_and_other_schemes_or_ports_are_claimants(pool: P
         ("http://shared.example:443/article/print", false),
         ("https://shared.example:8443/article/print", false),
         ("https://shared.example:443/amp/article", true),
+        ("https://shared.example/article/..;/print", false),
+        ("https://shared.example/article/print;jsessionid=1", false),
+        ("https://shared.example/article/x%3By", false),
     ] {
         let id = page(&pool, uri, uri, &[("canonical", owner_uri)]).await;
         let counted: bool = sqlx::query_scalar(
@@ -2147,6 +2150,67 @@ async fn round7_upgrade_refetches_resources_with_non_authoritative_canonicals(po
     .await
     .unwrap();
     assert!(delay <= 0.0, "{delay}");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round8_upgrade_refetches_every_holder_of_a_foreign_canonical_or_same_as(pool: PgPool) {
+    let mut ids = Vec::new();
+    for (uri, claims) in [
+        // Body JSON-LD sameAs only (0035 skipped these).
+        (
+            "https://a.example/post",
+            vec![("same_as", "https://elsewhere.example/x")],
+        ),
+        // A same-origin body canonical: trusted, so 0035 skipped it too.
+        (
+            "https://b.example/post",
+            vec![("canonical", "https://b.example/other")],
+        ),
+        // A double-encoded claimant.
+        (
+            "https://c.example/article/..%252Fevil",
+            vec![("canonical", "https://c.example/article")],
+        ),
+        // Only its own URI: untouched.
+        (
+            "https://d.example/post",
+            vec![("canonical", "https://d.example/post")],
+        ),
+    ] {
+        ids.push(page(&pool, uri, uri, &claims).await);
+    }
+    // A registry card: untouched.
+    let card = store::ensure_resource(&pool, "doi:10.5555/r")
+        .await
+        .unwrap();
+    let mut d = ResourceMeta::new("doi:10.5555/r", "doi", 86400);
+    group_keys::add(&mut d, "registry", "https://e.example/landing");
+    store::save_document(&pool, &card, 0, &d).await.unwrap();
+    ids.push(card);
+    sqlx::query("UPDATE resource SET status='ok',lease_until=now()+interval '1 hour',next_attempt_at=now()+interval '30 days' WHERE id=ANY($1)").bind(&ids).execute(&pool).await.unwrap();
+    let before: Vec<i64> = sqlx::query_scalar(
+        "SELECT generation FROM resource WHERE id=ANY($1) ORDER BY array_position($1,id)",
+    )
+    .bind(&ids)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/202610160036_url_claimant_refetch.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let after: Vec<(i64, bool, f64)> = sqlx::query_as("SELECT generation,lease_until IS NULL,extract(epoch FROM(next_attempt_at-now()))::float8 FROM resource WHERE id=ANY($1) ORDER BY array_position($1,id)").bind(&ids).fetch_all(&pool).await.unwrap();
+    for (i, (generation, unleased, delay)) in after.iter().enumerate() {
+        if i < 3 {
+            assert_eq!(*generation, before[i] + 1, "{i}");
+            assert!(*unleased && (-1.0..21600.0).contains(delay), "{i}: {delay}");
+        } else {
+            assert_eq!(*generation, before[i], "{i}");
+            assert!(*delay > 86400.0, "{i}");
+        }
+    }
 }
 
 #[sqlx::test(migrations = "../../migrations")]

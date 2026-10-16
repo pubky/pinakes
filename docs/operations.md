@@ -31,8 +31,9 @@ landing pages are never demoted, so squatting pages cannot take a page's identit
 variants are not counted: the same path (query variants), a path extending the target
 (`/article/print`) or the target behind a listed leading segment (`/amp`, `/m`, `/mobile`).
 Any other path ending in the target (`/~user/article`) is a claimant, and so is a path with a
-segment that decodes to a separator, a dot segment or a further escape (`/article/..%2Fevil`,
-`/article/..%252Fevil`), or a URL with another scheme or port. Migration 0033 re-plans
+segment that decodes to a separator, a dot segment, a further escape or a path parameter
+(`/article/..%2Fevil`, `/article/..%252Fevil`, `/article/..;/x`), or a URL with another scheme
+or port. Migration 0033 re-plans
 every resource holding a non-authoritative URL claim once so stored flags follow this rule
 (it also settles 0031's backfill, which counted variants until each resource re-planned).
 Demotion is recomputed from live claims on every reconciliation; demoted claims stay stored
@@ -56,10 +57,15 @@ chain A→B→C both A and B are claimants and taggers order them, so only the n
 the chain is guaranteed on top. Demoted claims carry no penalty: three or more same-origin
 claimants naming one page on distinct paths are demoted, stop naming it for ranking and fall
 back to the no-claim baseline where taggers decide (they also stop joining through that key).
-Canonical, alternate and oEmbed links are read from the document head only, and JSON-LD
-identity fields only from the page's own entity. Migration 0035 refetches resources holding a
-non-authoritative canonical claim once, staggered over six hours (never later than their
-scheduled refresh).
+Canonical, alternate and oEmbed links are read from the document head only. JSON-LD identity
+fields come only from the page's own entity: a head script's, plus a body script's chosen entity
+when it names the page or its head canonical by `url`, `@id` or `mainEntityOfPage`. When a body
+entity is chosen for the card, the head script's claims still apply. Migration 0035 refetches
+resources holding a non-authoritative canonical claim once, staggered over six hours (never
+later than their scheduled refresh). Migration 0036 does the same, in batches of 1000, for
+every resource holding a canonical or sameAs URL claim other than its own URI: body JSON-LD
+sameAs, same-origin body canonicals and claimants with double-encoded or path-parameter
+segments.
 Aliases remain available as navigation metadata. Lock contention between group writers
 retries after 1–3 seconds without advancing the conflict backoff; inputs recorded under a
 partial (pair-budget) plan are recomputed on the next reconciliation instead of cached.
