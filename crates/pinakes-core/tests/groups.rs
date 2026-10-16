@@ -57,6 +57,46 @@ async fn tag(pool: &PgPool, id: &str, author: &str, label: &str) {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
+async fn round2_group_fence_ignores_unrelated_saves_and_retries_changed_inputs(pool: PgPool) {
+    let (a, _) = save(&pool, "fence-a", &["https://example.org/shared"], None).await;
+    let (b, _) = save(&pool, "fence-b", &["https://example.org/shared"], None).await;
+    let (other, _) = save(&pool, "unrelated", &[], None).await;
+    for changed in [&other, &b] {
+        // Holding the publication lock lets the sync compute evidence, then pauses its fence.
+        let mut writer = pool.begin().await.unwrap();
+        sqlx::query("SELECT revision FROM search_revision WHERE id=1 FOR UPDATE")
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM group_input WHERE resource_id=$1")
+            .bind(&b)
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        let pool2 = pool.clone();
+        let id = b.clone();
+        let pending =
+            tokio::spawn(async move { groups::reconcile(&pool2, &id, &Default::default()).await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query='SELECT revision FROM search_revision WHERE id=1 FOR UPDATE')")
+                    .fetch_one(&pool).await.unwrap();
+                if waiting { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }).await.unwrap();
+        sqlx::query("UPDATE resource SET doc=jsonb_set(doc,'{name}', '\"Concurrent save\"'),name='Concurrent save' WHERE id=$1")
+            .bind(changed).execute(&mut *writer).await.unwrap();
+        writer.commit().await.unwrap();
+        assert!(pending.await.unwrap());
+        assert_eq!(gid(&pool, &a).await, gid(&pool, &b).await);
+        let state: (i32, bool, i32, bool) = sqlx::query_as("SELECT r.attempts,r.dead_letter,coalesce(d.attempts,0),coalesce(d.next_attempt_at>now(),false) FROM resource r LEFT JOIN group_dirty d ON d.resource_id=r.id WHERE r.id=$1")
+            .bind(&b).fetch_one(&pool).await.unwrap();
+        assert_eq!(state, (0, false, 0, false));
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
 async fn transitive_keys_split_and_curation_preserve_identity(pool: PgPool) {
     let (a, _) = save(&pool, "a", &["https://example.org/ids/one"], Some(47.)).await;
     let (b, _) = save(&pool, "b", &["https://example.org/ids/two"], Some(47.001)).await;

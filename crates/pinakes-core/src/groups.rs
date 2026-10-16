@@ -141,10 +141,14 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
     if !cfg.enabled {
         return Ok(());
     }
-    // Read and compute without holding the global ingestion/search revision lock.
-    let revision: i64 = sqlx::query_scalar("SELECT revision FROM search_revision WHERE id=1")
-        .fetch_one(&mut **tx)
-        .await?;
+    // Serialize group writers, while resource ingestion continues during computation.
+    group_lock(tx).await?;
+    let revision: Option<i64> =
+        sqlx::query_scalar("SELECT group_revision FROM resource WHERE id=$1")
+            .bind(id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    let mut revisions = BTreeMap::from([(id.to_owned(), revision)]);
     let previous: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT group_id FROM group_unit WHERE resource_id=$1 AND group_id IS NOT NULL",
     )
@@ -223,7 +227,7 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
             .fetch_optional(&mut **tx)
             .await?;
     if old_fingerprint.as_deref() == Some(&fingerprint) {
-        fence(tx, revision).await?;
+        fence(tx, &revisions).await?;
         refresh_best(tx, &previous).await?;
         sqlx::query("DELETE FROM group_dirty WHERE resource_id=$1")
             .bind(id)
@@ -232,6 +236,11 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
         return Ok(());
     }
     let mut edges = load_edges(tx, &ids, &keys, &previous, cfg).await?;
+    for e in &edges {
+        revisions
+            .entry(e.resource_id.clone())
+            .or_insert(Some(e.revision));
+    }
     let mut incoming = Vec::new();
     for (unit, row) in units.iter().zip(&rows) {
         let old = edges.iter().find(|e| e.unit_id == unit.unit_id);
@@ -239,6 +248,7 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
             incoming.push(Edge {
                 unit_id: unit.unit_id.clone(),
                 resource_id: id.into(),
+                revision: revision.unwrap_or(0),
                 key: k.key.clone(),
                 basis: k.basis.clone(),
                 confidence: k.confidence,
@@ -261,7 +271,7 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
     edges.retain(|e| e.resource_id != id);
     edges.extend(incoming);
     let plan = plan(tx, edges, &previous, cfg).await?;
-    fence(tx, revision).await?;
+    fence(tx, &revisions).await?;
     sqlx::query("DELETE FROM group_unit WHERE resource_id=$1 AND NOT(unit_id=ANY($2))")
         .bind(id)
         .bind(&ids)
@@ -288,6 +298,7 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
 }
 #[derive(sqlx::FromRow)]
 struct Edge {
+    revision: i64,
     unit_id: String,
     resource_id: String,
     key: String,
@@ -341,9 +352,9 @@ async fn load_edges(
       (SELECT k.unit_id,k.group_id FROM resource_group k WHERE k.key=wanted.key ORDER BY k.trusted DESC,k.admitted_at,k.unit_id LIMIT $4) picked
     ), affected AS (SELECT unnest($1::text[]) AS unit_id UNION SELECT unit_id FROM group_unit WHERE group_id=ANY($3)
       UNION SELECT u.unit_id FROM group_unit u WHERE u.group_id IN(SELECT group_id FROM wanted) UNION SELECT unit_id FROM wanted)
-    SELECT k.unit_id,k.resource_id,k.key,k.basis,k.confidence,k.origin,k.target,k.trusted,k.admitted_at,
+    SELECT r.group_revision AS revision,k.unit_id,k.resource_id,k.key,k.basis,k.confidence,k.origin,k.target,k.trusted,k.admitted_at,
       u.occurrence IS NOT NULL AS occurrence,s.start_at,u.group_id,o.group_id AS override_id,ST_Y(s.point) AS lat,ST_X(s.point) AS lon
-    FROM resource_group k JOIN affected a USING(unit_id) JOIN group_unit u USING(unit_id)
+    FROM resource_group k JOIN affected a USING(unit_id) JOIN group_unit u USING(unit_id) JOIN resource r ON r.id=k.resource_id
     LEFT JOIN group_override o USING(unit_id) LEFT JOIN group_member_document s USING(unit_id)
     ORDER BY k.unit_id,k.key LIMIT $5"#)
         .bind(units).bind(keys).bind(previous).bind(cfg.max_members as i64).bind((max_edges+1) as i64).fetch(&mut **tx);
@@ -544,12 +555,42 @@ async fn plan(
         resources: resources.into_iter().collect(),
     })
 }
-async fn fence(tx: &mut Transaction<'_, Postgres>, revision: i64) -> Result<()> {
-    let current: i64 =
-        sqlx::query_scalar("SELECT revision FROM search_revision WHERE id=1 FOR UPDATE")
-            .fetch_one(&mut **tx)
-            .await?;
-    ensure!(current == revision, "group snapshot changed; retry");
+#[derive(Debug)]
+struct SnapshotChanged;
+impl std::fmt::Display for SnapshotChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("group input changed; retry immediately")
+    }
+}
+impl std::error::Error for SnapshotChanged {}
+async fn group_lock(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+    // This lock must precede the final search revision lock, including in curation.
+    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(73491620)")
+        .fetch_one(&mut **tx)
+        .await?;
+    if !acquired {
+        return Err(SnapshotChanged.into());
+    }
+    Ok(())
+}
+async fn fence(
+    tx: &mut Transaction<'_, Postgres>,
+    revisions: &BTreeMap<String, Option<i64>>,
+) -> Result<()> {
+    crate::store::lock_search_revision(tx).await?;
+    let current: BTreeMap<String, i64> =
+        sqlx::query_as("SELECT id,group_revision FROM resource WHERE id=ANY($1)")
+            .bind(revisions.keys().collect::<Vec<_>>())
+            .fetch_all(&mut **tx)
+            .await?
+            .into_iter()
+            .collect();
+    if revisions
+        .iter()
+        .any(|(id, revision)| current.get(id) != revision.as_ref())
+    {
+        return Err(SnapshotChanged.into());
+    }
     Ok(())
 }
 async fn apply(tx: &mut Transaction<'_, Postgres>, plan: Plan) -> Result<()> {
@@ -594,17 +635,29 @@ pub async fn reconcile(pool: &PgPool, id: &str, cfg: &GroupConfig) -> bool {
     if !cfg.enabled {
         return false;
     }
-    let result = async {
-        let mut tx = pool.begin().await?;
-        sqlx::query("SET LOCAL statement_timeout='2s'")
-            .execute(&mut *tx)
-            .await?;
-        sync(&mut tx, id, cfg).await?;
-        tx.commit().await?;
-        Ok::<_, anyhow::Error>(())
+    let mut result = Ok(());
+    for _ in 0..3 {
+        result = async {
+            let mut tx = pool.begin().await?;
+            sqlx::query("SET LOCAL statement_timeout='2s'")
+                .execute(&mut *tx)
+                .await?;
+            sync(&mut tx, id, cfg).await?;
+            tx.commit().await?;
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        if !result.as_ref().is_err_and(|e| e.is::<SnapshotChanged>()) {
+            break;
+        }
+        tokio::task::yield_now().await;
     }
-    .await;
     if let Err(error) = result {
+        if error.is::<SnapshotChanged>() {
+            sqlx::query("INSERT INTO group_dirty(resource_id) SELECT id FROM resource WHERE id=$1 ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=now(),last_error=NULL")
+                .bind(id).execute(pool).await.ok();
+            return false;
+        }
         tracing::warn!(resource_id=id,error=%error,"group_failed; reconciliation deferred");
         let parked=sqlx::query("INSERT INTO group_dirty(resource_id,attempts,last_error,next_attempt_at) SELECT id,1,'group_failed',now()+interval '1 minute' FROM resource WHERE id=$1 ON CONFLICT(resource_id) DO UPDATE SET attempts=group_dirty.attempts+1,last_error='group_failed',next_attempt_at=now()+least(3600,60*power(2,least(group_dirty.attempts,6))) * interval '1 second'").bind(id).execute(pool).await;
         if let Err(error) = parked {
@@ -646,6 +699,7 @@ pub async fn curate(pool: &PgPool, id: &str, body: Curation, cfg: &GroupConfig) 
     sqlx::query("SET LOCAL statement_timeout='2s'")
         .execute(&mut *tx)
         .await?;
+    group_lock(&mut tx).await?;
     crate::store::lock_search_revision(&mut tx).await?;
     let mut units = vec![];
     let mut previous: Vec<String> =
