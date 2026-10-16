@@ -409,7 +409,8 @@ hosts; the admin listener retains full URLs. Over-budget canary samples are inco
 
 `event.adapters.derive_resources` defaults to true: NIP-52 calendar members and BTC Map
 website pages count against the referring authors (or a bounded per-adapter sponsor), with
-persistent per-parent caps. Set false to disable this additional work. Portal-supplied OSM
+per-parent and per-adapter caps. BTC Map sponsorships expire with the event; historical
+events cannot permanently exhaust admission. Set false to disable this additional work. Portal-supplied OSM
 fields are untrusted page coordinates, never writes to `osm_place`; an independently referenced
 OSM URL resolves through Nominatim normally. No `osm_id` or version is attached to those facts.
 
@@ -418,3 +419,15 @@ operators must consider the provider's terms before enabling them. NIP-52 `D` ta
 checked for the legacy warning; their value is not read or used for event identity. Self-hosted
 HTML substring detection (`gancio`, `mobilizon`, `/export/event/`) is a heuristic and can cause
 an unnecessary bounded discovery request; it never evaluates embedded JavaScript.
+
+Nostr HTTP lookups paginate inclusive `until` windows (up to `max_indexer_pages` per
+indexer within ten seconds). A full tied page, ignored window or exhausted budget remains
+inconclusive and retries without consuming failure attempts; a search-endpoint 404 is not
+an authoritative absence. Portal cold starts read its head cursor before the full snapshot.
+BTC Map cursors never advance beyond the local fetch time, even when an upstream clock is fast.
+
+Only parser failures trigger the platform web-card fallback. Upstream failures, including
+cached discovery failures, retain the accepted document and retry. The captured Guidle
+calendar request is now correctly replayed as an egress failure (its HTML card used to hide
+that failure). Wikipedia entity enrichment requires event/place JSON-LD or infobox cues;
+ordinary articles stay web cards without a speculative Wikidata fetch.

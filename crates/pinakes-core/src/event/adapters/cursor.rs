@@ -211,8 +211,8 @@ async fn json(
     } else {
         egress.fetch_with(uri, &options).await?
     };
-    if f.status == 410 {
-        return Ok((410, Value::Null));
+    if matches!(f.status, 404 | 410) {
+        return Ok((f.status, Value::Null));
     }
     ensure!(f.status == 200, "cursor HTTP failure");
     Ok((
@@ -247,15 +247,19 @@ pub async fn resolve(
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
-            let value: Value = sqlx::query_scalar("SELECT doc FROM resource_document WHERE id=$1")
-                .bind(id)
-                .fetch_one(pool)
-                .await?;
-            let mut doc = if value.get("type").is_some() {
-                serde_json::from_value(value)?
-            } else {
-                container(uri, cfg)
+            let value: Option<Value> =
+                sqlx::query_scalar("SELECT doc FROM resource_document WHERE id=$1")
+                    .bind(id)
+                    .fetch_optional(pool)
+                    .await?;
+            let Some(value) = value.filter(|v| v.get("type").is_some()) else {
+                return Err(crate::resolver::RetryLater {
+                    class: "cursor_root_pending",
+                    seconds: 60,
+                }
+                .into());
             };
+            let mut doc: ResourceMeta = serde_json::from_value(value)?;
             doc.container = None;
             doc.url = uri.into();
             doc.aliases.push(root);
@@ -348,13 +352,19 @@ pub async fn resolve(
                 "0".into()
             });
         let mut done = false;
+        let mut expired = false;
         // Partial history is a delta. Only a complete, fresh full list may imply absence.
         doc.container.as_mut().unwrap().delta = true;
-        for _ in 0..cfg.adapters.max_cursor_pages {
+        for page in 0..cfg.adapters.max_cursor_pages {
             let mut url = Url::parse("https://portal.einundzwanzig.space/api/changes")?;
+            // The portal's API default (no since_sequence) returns the head.
+            // Read it before the full snapshot; subsequent changes replay from that head.
+            let head = page == 0 && previous.is_none() && !probe;
+            if !head {
+                url.query_pairs_mut().append_pair("since_sequence", &since);
+            }
             url.query_pairs_mut()
-                .append_pair("since_sequence", &since)
-                .append_pair("limit", if probe { "1" } else { "1000" });
+                .append_pair("limit", if probe || head { "1" } else { "1000" });
             let (_, mut v) = json(egress, url.as_str(), cfg, false, false).await?;
             next = v["next_since"]
                 .as_u64()
@@ -370,7 +380,8 @@ pub async fn resolve(
             );
             let more = v["has_more"] == true;
             if v["cursor_expired"] == true {
-                ensure!(!reset, "repeated portal cursor expiration");
+                ensure!(!expired, "repeated portal cursor expiration");
+                expired = true;
                 reset = true;
                 resync = true;
                 doc = container(uri, cfg);
@@ -421,7 +432,10 @@ pub async fn resolve(
             .next()
             .is_some_and(|s| s.parse::<u64>().is_ok())
         {
-            let (_, v) = json(egress, uri, cfg, false, false).await?;
+            let (status, v) = json(egress, uri, cfg, false, false).await?;
+            if matches!(status, 404 | 410) {
+                return Ok(missing(uri, "btcmap"));
+            }
             let uri = uri.to_owned();
             let cfg = cfg.clone();
             return tokio::task::spawn_blocking(move || single(&uri, "btcmap", &v, &cfg)).await?;
@@ -464,7 +478,10 @@ pub async fn resolve(
         next = latest
             .context("BTC Map cursor missing")?
             .parse::<DateTime<Utc>>()?
-            .min(ceiling)
+            .min(
+                DateTime::<Utc>::from_timestamp_millis(doc.fetched_at)
+                    .context("invalid fetch time")?,
+            )
             .to_rfc3339();
         delta = true;
     } else {
@@ -530,16 +547,20 @@ pub async fn resolve(
     Ok(doc)
 }
 
+fn missing(uri: &str, source: &str) -> ResourceMeta {
+    let mut doc = ResourceMeta::new(uri, source, 3600);
+    doc.status = crate::model::Status::Missing;
+    doc
+}
 fn single(uri: &str, adapter: &str, row: &Value, cfg: &EventConfig) -> Result<ResourceMeta> {
     let mut doc = container(uri, cfg);
     let c = doc.container.as_mut().unwrap();
     c.horizon_start = DateTime::<Utc>::MIN_UTC;
     c.horizon_end = DateTime::<Utc>::MAX_UTC;
     append(&mut doc, adapter, row, cfg)?;
-    ensure!(
-        !doc.container.as_ref().unwrap().occurrences.is_empty(),
-        "event is not public"
-    );
+    if doc.container.as_ref().unwrap().occurrences.is_empty() {
+        return Ok(missing(uri, adapter));
+    }
     Ok(doc)
 }
 
@@ -702,19 +723,24 @@ async fn portal_names(v: &mut Value, egress: &Egress, cfg: &EventConfig) -> Resu
     }) {
         return Ok(());
     }
-    let (_, names) = json(
+    let Ok((_, names)) = json(
         egress,
         "https://portal.einundzwanzig.space/api/meetups",
         cfg,
         false,
         true,
     )
-    .await?;
-    let names = names
+    .await
+    else {
+        return Ok(());
+    };
+    let Some(names) = names
         .as_array()
         .or_else(|| names["meetups"].as_array())
         .or_else(|| names["data"].as_array())
-        .context("invalid meetup list")?;
+    else {
+        return Ok(());
+    };
     let names: std::collections::BTreeMap<_, _> = names
         .iter()
         .filter_map(|r| Some((uid(r)?, r["name"].as_str()?.to_owned())))

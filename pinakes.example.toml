@@ -70,12 +70,14 @@ link_hosts = [] # Extra exact hosts permitted for occurrence -> existing resourc
 # Platform IDs and default canaries: data/event-adapters.json; effective policies: /v1/info.
 [event.adapters]
 enabled = true
-derive_resources = true # Charge derived work to parent authors; lifetime cap per parent.
+derive_resources = true # Charge derived work to parent authors; BTC slots expire with events.
 websocket = true # One relay hint only, after both HTTP indexers miss.
 websocket_deadline_ms = 2000
 max_cursor_pages = 10
+max_indexer_pages = 10 # Inclusive until windows; shared 10s deadline, incomplete -> retry.
+max_derived_resources = 10000 # Active sponsorship rows per adapter, across all parents.
 max_calendar_members = 50
-max_linked_resources = 100 # BTC website resources / explicit portal OSM venues per fetch.
+max_linked_resources = 100 # Active future-event website resources per BTC Map root.
 
 # Every platform accepts enabled, key, canary, ua_profile (pinakes/browser/firefox/plain),
 # cadence_floor (cursor minimum 60s; other modes 3600s), months_back, months_forward and max_occurrences.

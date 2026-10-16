@@ -21,12 +21,31 @@ pub async fn derive_resource(
     adapter: &str,
     cap: usize,
 ) -> Result<Option<String>> {
+    derive_resource_until(pool, parent, uri, adapter, cap, 10000, None).await
+}
+/// Time-scoped sponsorship frees expired event slots without fetching every historical link.
+pub async fn derive_resource_until(
+    pool: &PgPool,
+    parent: &str,
+    uri: &str,
+    adapter: &str,
+    cap: usize,
+    global_cap: usize,
+    expires: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<Option<String>> {
+    if expires.is_some_and(|at| at <= chrono::Utc::now()) {
+        return Ok(None);
+    }
     let (parent_id, _, _) = identity(parent)?;
     let (id, uri, scheme) = identity(uri)?;
     if parent_id == id {
         return Ok(None);
     }
     let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,17614))")
+        .bind(adapter)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,17613))")
         .bind(&parent_id)
         .execute(&mut *tx)
@@ -40,7 +59,7 @@ pub async fn derive_resource(
         return Ok(None);
     }
     let known: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM resource_derivation WHERE parent_id=$1 AND child_id=$2)",
+        "SELECT EXISTS(SELECT 1 FROM resource_derivation WHERE parent_id=$1 AND child_id=$2 AND (expires_at IS NULL OR expires_at>now()))",
     )
     .bind(&parent_id)
     .bind(&id)
@@ -48,20 +67,36 @@ pub async fn derive_resource(
     .await?;
     if !known {
         let count: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM resource_derivation WHERE parent_id=$1")
+            sqlx::query_scalar("SELECT count(*) FROM resource_derivation WHERE parent_id=$1 AND (expires_at IS NULL OR expires_at>now())")
                 .bind(&parent_id)
                 .fetch_one(&mut *tx)
                 .await?;
-        if count >= cap as i64 {
+        let total: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM resource_derivation WHERE adapter=$1 AND (expires_at IS NULL OR expires_at>now())")
+                .bind(adapter)
+                .fetch_one(&mut *tx)
+                .await?;
+        if count >= cap as i64 || total >= global_cap as i64 {
             return Ok(None);
         }
         insert_resource(&mut tx, &id, &uri, &scheme).await?;
-        sqlx::query("INSERT INTO resource_derivation(parent_id,child_id,adapter) VALUES($1,$2,$3)")
-            .bind(parent_id)
+        sqlx::query("INSERT INTO resource_derivation(parent_id,child_id,adapter,expires_at) VALUES($1,$2,$3,$4) ON CONFLICT(parent_id,child_id) DO UPDATE SET expires_at=excluded.expires_at")
+            .bind(&parent_id)
             .bind(&id)
             .bind(adapter)
+            .bind(expires)
             .execute(&mut *tx)
             .await?;
+    }
+    if known {
+        sqlx::query(
+            "UPDATE resource_derivation SET expires_at=$3 WHERE parent_id=$1 AND child_id=$2",
+        )
+        .bind(&parent_id)
+        .bind(&id)
+        .bind(expires)
+        .execute(&mut *tx)
+        .await?;
     }
     tx.commit().await?;
     Ok(Some(id))

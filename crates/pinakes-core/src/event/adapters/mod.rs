@@ -20,6 +20,8 @@ pub struct AdapterConfig {
     pub websocket: bool,
     pub websocket_deadline_ms: u64,
     pub max_cursor_pages: usize,
+    pub max_indexer_pages: usize,
+    pub max_derived_resources: usize,
     pub max_calendar_members: usize,
     pub max_linked_resources: usize,
     pub platforms: BTreeMap<String, Options>,
@@ -32,6 +34,8 @@ impl Default for AdapterConfig {
             websocket: true,
             websocket_deadline_ms: 2000,
             max_cursor_pages: 10,
+            max_indexer_pages: 10,
+            max_derived_resources: 10000,
             max_calendar_members: 50,
             max_linked_resources: 100,
             platforms: BTreeMap::new(),
@@ -295,6 +299,8 @@ pub fn configured_event(cfg: &EventConfig, d: &Definition) -> EventConfig {
 pub fn validate(cfg: &EventConfig) -> anyhow::Result<()> {
     anyhow::ensure!(
         (1..=100).contains(&cfg.adapters.max_cursor_pages)
+            && (1..=20).contains(&cfg.adapters.max_indexer_pages)
+            && (1..=100000).contains(&cfg.adapters.max_derived_resources)
             && (1..=500).contains(&cfg.adapters.max_calendar_members)
             && (1..=1000).contains(&cfg.adapters.max_linked_resources)
             && (100..=5000).contains(&cfg.adapters.websocket_deadline_ms),

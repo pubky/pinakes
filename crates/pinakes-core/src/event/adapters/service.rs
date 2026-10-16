@@ -16,6 +16,34 @@ use serde_json::{json, Value};
 use std::time::Duration;
 use url::Url;
 
+// Only explicitly classified parser failures may fall back to a plain web card.
+// Transport, policy, database and task errors preserve the accepted document.
+#[derive(Debug)]
+struct ParseFailure(String);
+impl std::fmt::Display for ParseFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for ParseFailure {}
+fn parse_error(e: impl std::fmt::Display) -> anyhow::Error {
+    ParseFailure(e.to_string()).into()
+}
+fn upstream_status(f: &Fetched) -> Result<()> {
+    if f.status >= 500 || matches!(f.status, 408 | 429) {
+        return Err(crate::resolver::RetryLater {
+            class: if f.status >= 500 {
+                "http_5xx"
+            } else {
+                "http_4xx"
+            },
+            seconds: f.retry_after_secs.max(60),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 pub struct PlatformResolver {
     pub web: WebResolver,
 }
@@ -102,16 +130,11 @@ impl PlatformResolver {
             || (d.mode == Mode::Container && feed_path(&target))
             || (d.id == "starticket" && target.ends_with(".xml"));
         opts.feed_cap = opts.feed_hint.then_some(local.feed_body_bytes);
-        let fetched = match self
+        let fetched = self
             .web
             .egress
             .fetch_with(&calendar::canonical_feed(&target), &opts)
-            .await
-        {
-            Ok(f) => f,
-            Err(_) if !probe && target != uri => return self.web.resolve(uri).await,
-            Err(error) => return Err(error),
-        };
+            .await?;
         if fetched.status == 304 {
             return Err(crate::resolver::NotModified.into());
         }
@@ -124,6 +147,7 @@ impl PlatformResolver {
             doc.status = extracted.doc.status;
             return doc.bounded(crate::resolver::web::ATTRIBUTES);
         }
+        upstream_status(&fetched)?;
         if fetched.status != 200 {
             if let Some(doc) = self
                 .web
@@ -166,19 +190,22 @@ impl PlatformResolver {
                         || doc.location.is_none()
                             && doc.event.attendance != Some(crate::event::Attendance::Online))
                 {
-                    if let Some((target, mut opts)) = endpoint(d, uri, Some(&fetched), cfg)? {
+                    if let Some((target, mut opts)) =
+                        endpoint(d, uri, Some(&fetched), cfg).map_err(parse_error)?
+                    {
                         if target != fetched.url.as_str() {
                             opts.feed_hint = crate::event::service::is_feed(&target)
                                 || (d.mode == Mode::Container && feed_path(&target))
                                 || (d.id == "starticket" && target.ends_with(".xml"));
                             opts.feed_cap = opts.feed_hint.then_some(local.feed_body_bytes);
                             opts.user_agent = Some(profile(&m.ua_profile).into());
-                            if let Ok(f) = self
-                                .web
-                                .egress
-                                .discover(&target, &opts, m.cadence_floor)
-                                .await
                             {
+                                let f = self
+                                    .web
+                                    .egress
+                                    .discover(&target, &opts, m.cadence_floor)
+                                    .await?;
+                                upstream_status(&f)?;
                                 if f.status == 200 {
                                     if d.id == "luma" {
                                         if let Some(id) = serde_json::from_slice::<Value>(&f.body)
@@ -204,12 +231,13 @@ impl PlatformResolver {
                                                 feed_cap: Some(local.feed_body_bytes),
                                                 ..Default::default()
                                             };
-                                            if let Ok(feed) = self
-                                                .web
-                                                .egress
-                                                .discover(url.as_str(), &opts, m.cadence_floor)
-                                                .await
                                             {
+                                                let feed = self
+                                                    .web
+                                                    .egress
+                                                    .discover(url.as_str(), &opts, m.cadence_floor)
+                                                    .await?;
+                                                upstream_status(&feed)?;
                                                 if feed.status == 200 {
                                                     if let Some(calendar) =
                                                         calendar_blocking(uri, d, &feed, &local)
@@ -224,7 +252,7 @@ impl PlatformResolver {
                                     if let Some(extra) =
                                         enrichment_blocking(uri, d, &f, &local).await?
                                     {
-                                        merge(&mut doc, &extra)?;
+                                        merge(&mut doc, &extra).map_err(parse_error)?;
                                     }
                                 }
                             }
@@ -248,18 +276,18 @@ impl PlatformResolver {
                 page::finalize(&mut doc, local.coordinate_timezone);
                 if !probe {
                     let events = self.web.events.as_ref().unwrap();
-                    let _ =
-                        tokio::time::timeout(Duration::from_secs(2), events.venue(&mut doc)).await;
+                    tokio::time::timeout(Duration::from_secs(2), events.venue(&mut doc)).await??;
                 }
                 page::finalize(&mut doc, false);
             }
             doc.source = d.id.clone();
             doc.bounded(crate::resolver::web::ATTRIBUTES)
+                .map_err(parse_error)
         }
         .await;
         match parsed {
             Ok(doc) => Ok(doc),
-            Err(error) if probe => Err(error),
+            Err(error) if probe || !error.is::<ParseFailure>() => Err(error),
             Err(_) => {
                 crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
                 let mut card = extract_blocking(uri, &fetched, m.cadence_floor).await?.doc;
@@ -278,28 +306,40 @@ impl PlatformResolver {
         let Some(c) = doc.container.as_mut() else {
             return Ok(());
         };
-        let links: std::collections::BTreeSet<_> = c
-            .occurrences
-            .iter()
-            .filter(|_| d.id == "btcmap")
-            .map(|o| o.doc.url.as_str())
-            .filter(|u| *u != doc.url)
-            .filter_map(|u| Url::parse(u).ok())
-            .filter(|u| {
-                matches!(u.scheme(), "http" | "https")
-                    && u.username().is_empty()
-                    && u.password().is_none()
-            })
-            .map(|u| u.to_string())
-            .collect();
+        let mut links = std::collections::BTreeMap::new();
+        for o in c.occurrences.iter().filter(|_| d.id == "btcmap") {
+            let Some(until) = o
+                .doc
+                .end
+                .or(o.doc.start)
+                .filter(|at| *at > chrono::Utc::now())
+            else {
+                continue;
+            };
+            let Ok(url) = Url::parse(&o.doc.url) else {
+                continue;
+            };
+            if o.doc.url != doc.url
+                && matches!(url.scheme(), "http" | "https")
+                && url.username().is_empty()
+                && url.password().is_none()
+            {
+                links
+                    .entry(url.to_string())
+                    .and_modify(|at: &mut chrono::DateTime<chrono::Utc>| *at = (*at).max(until))
+                    .or_insert(until);
+            }
+        }
         if cfg.adapters.derive_resources {
-            for link in links.into_iter().take(cfg.adapters.max_linked_resources) {
-                if crate::store::derive_resource(
+            for (link, until) in links.into_iter().take(cfg.adapters.max_linked_resources) {
+                if crate::store::derive_resource_until(
                     &events.pool,
                     &doc.url,
                     &link,
                     &d.id,
                     cfg.adapters.max_linked_resources,
+                    cfg.adapters.max_derived_resources,
+                    Some(until),
                 )
                 .await?
                 .is_some()
@@ -326,10 +366,6 @@ async fn extract_blocking(
         f.body.len() <= crate::resolver::egress::BODY_CAP,
         "non-feed page exceeds cap"
     );
-    ensure!(
-        f.body.len() <= crate::resolver::egress::BODY_CAP,
-        "non-feed fallback exceeds page cap"
-    );
     let (uri, f) = (uri.to_owned(), f.clone());
     Ok(tokio::task::spawn_blocking(move || crate::resolver::web::extract(&uri, &f, ttl)).await?)
 }
@@ -355,6 +391,7 @@ async fn calendar_blocking(
         Ok(None)
     })
     .await?
+    .map_err(parse_error)
 }
 pub(crate) async fn enrichment_blocking(
     uri: &str,
@@ -650,7 +687,7 @@ async fn wiki(uri: &str, f: &Fetched, egress: &Egress) -> Result<ResourceMeta> {
     })
     .await?;
     if value.get("entities").is_none() {
-        let qid = qid.context("Wikipedia page has no Wikidata entity")?;
+        let qid = qid.ok_or_else(|| parse_error("Wikipedia page has no Wikidata entity"))?;
         let f = egress
             .discover(
                 &format!("https://www.wikidata.org/wiki/Special:EntityData/{qid}.json"),
@@ -658,11 +695,22 @@ async fn wiki(uri: &str, f: &Fetched, egress: &Egress) -> Result<ResourceMeta> {
                 86400,
             )
             .await?;
-        ensure!(f.status == 200, "Wikidata unavailable");
-        value = tokio::task::spawn_blocking(move || serde_json::from_slice(&f.body)).await??;
+        upstream_status(&f)?;
+        if f.status != 200 {
+            return Err(crate::resolver::RetryLater {
+                class: "wikidata_unavailable",
+                seconds: 3600,
+            }
+            .into());
+        }
+        value = tokio::task::spawn_blocking(move || serde_json::from_slice(&f.body))
+            .await?
+            .map_err(parse_error)?;
     }
     let uri = uri.to_owned();
-    tokio::task::spawn_blocking(move || wiki_value(&uri, &value)).await?
+    tokio::task::spawn_blocking(move || wiki_value(&uri, &value))
+        .await?
+        .map_err(parse_error)
 }
 pub fn wikipedia_item(text: &str) -> Option<String> {
     let valid = |s: &str| {
@@ -692,16 +740,42 @@ pub fn wikipedia_item(text: &str) -> Option<String> {
                 })
         })
 }
-pub async fn wikipedia(uri: &str, f: &Fetched, egress: &Egress) -> Option<ResourceMeta> {
-    let host = Url::parse(uri).ok()?.host_str()?.to_owned();
-    if host != "wikipedia.org" && !host.ends_with(".wikipedia.org") {
-        return None;
+fn wikipedia_candidate(f: &Fetched) -> bool {
+    let text = String::from_utf8_lossy(&f.body);
+    let html = scraper::Html::parse_document(&text);
+    let selector=scraper::Selector::parse(".infobox.vevent, .infobox.geography, .infobox .geo, meta[property='place:location:latitude']").unwrap();
+    if html.select(&selector).next().is_some() {
+        return true;
     }
-    let doc = wiki(uri, f, egress).await.ok()?;
-    doc.type_path
+    let card = crate::resolver::web::extract(f.url.as_str(), f, 86400).doc;
+    card.type_path
+        .iter()
+        .any(|t| matches!(t.as_str(), "Event" | "Place"))
+}
+pub async fn wikipedia(uri: &str, f: &Fetched, egress: &Egress) -> Result<Option<ResourceMeta>> {
+    let Some(host) = Url::parse(uri)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+    else {
+        return Ok(None);
+    };
+    if host != "wikipedia.org" && !host.ends_with(".wikipedia.org") {
+        return Ok(None);
+    }
+    let input = f.clone();
+    if !tokio::task::spawn_blocking(move || wikipedia_candidate(&input)).await? {
+        return Ok(None);
+    }
+    let doc = match wiki(uri, f, egress).await {
+        Ok(doc) => doc,
+        Err(e) if e.is::<ParseFailure>() => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    Ok(doc
+        .type_path
         .iter()
         .any(|t| t == "Event" || t == "Place")
-        .then_some(doc)
+        .then_some(doc))
 }
 pub fn wiki_value(uri: &str, v: &Value) -> Result<ResourceMeta> {
     let entity = v["entities"]

@@ -189,6 +189,7 @@ pub async fn lookup(target: &Target, egress: &Egress, cfg: &EventConfig) -> Resu
         archive.set_path(&format!("/v1/events/{id}"));
     } else {
         let mut q = archive.query_pairs_mut();
+        q.append_pair("limit", "100");
         if let Some(k) = target.kind {
             q.append_pair("kind", &k.to_string());
         }
@@ -198,43 +199,88 @@ pub async fn lookup(target: &Target, egress: &Egress, cfg: &EventConfig) -> Resu
     }
     let mut successful = 0;
     let mut inconclusive = false;
-    for url in [wine, archive] {
-        if let Ok(f) = egress
-            .discover(url.as_str(), &Default::default(), 3600)
-            .await
-        {
-            if f.status == 200 {
-                let target = target.clone();
-                if let Ok(Ok((event, full))) =
-                    tokio::task::spawn_blocking(move || -> Result<(Option<Event>, bool)> {
-                        let v: Value = serde_json::from_slice(&f.body)?;
-                        ensure!(
-                            v.is_array()
-                                || v["data"].is_array()
-                                || v["events"].is_array()
-                                || v.get("id").is_some(),
-                            "invalid indexer envelope"
-                        );
-                        let values = rows(&v);
-                        Ok((newest(&target, &values), values.len() >= 100))
-                    })
-                    .await
-                {
-                    successful += 1;
-                    inconclusive |= full;
-                    if event.is_some() {
-                        return Ok(event);
-                    }
-                }
-            } else if f.status == 404 {
-                successful += 1;
+    // Inclusive timestamp windows do not skip tied timestamps. A full tied page
+    // or an indexer that ignores `until` is inconclusive, never a disappearance.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    for (index, base) in [wine, archive].into_iter().enumerate() {
+        let mut until = None;
+        let mut answered = false;
+        let mut exhausted = false;
+        for _ in 0..cfg.adapters.max_indexer_pages {
+            let mut url = base.clone();
+            if let Some(until) = until {
+                url.query_pairs_mut()
+                    .append_pair("until", &format!("{until}"));
             }
+            let response = tokio::time::timeout_at(
+                deadline,
+                egress.discover(url.as_str(), &Default::default(), 3600),
+            )
+            .await;
+            let Ok(Ok(f)) = response else {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(crate::resolver::RetryLater {
+                        class: "inconclusive",
+                        seconds: 3600,
+                    }
+                    .into());
+                }
+                answered = false;
+                break;
+            };
+            // Search endpoint 404 is an outage; only an archive ID lookup can
+            // authoritatively say that its particular event is absent.
+            if f.status == 404 && index == 1 && target.id.is_some() {
+                answered = true;
+                exhausted = true;
+                break;
+            }
+            if f.status != 200 {
+                answered = false;
+                break;
+            }
+            let target = target.clone();
+            let parsed = tokio::task::spawn_blocking(move || -> Result<_> {
+                let v: Value = serde_json::from_slice(&f.body)?;
+                ensure!(
+                    v.is_array()
+                        || v["data"].is_array()
+                        || v["events"].is_array()
+                        || v.get("id").is_some(),
+                    "invalid indexer envelope"
+                );
+                let values = rows(&v);
+                let oldest = values.iter().filter_map(|v| v["created_at"].as_u64()).min();
+                Ok((newest(&target, &values), values.len() >= 100, oldest))
+            })
+            .await?;
+            let Ok((event, full, oldest)) = parsed else {
+                answered = false;
+                break;
+            };
+            answered = true;
+            if event.is_some() {
+                return Ok(event);
+            }
+            if !full {
+                exhausted = true;
+                break;
+            }
+            let Some(oldest) = oldest.filter(|v| until.is_none_or(|previous| *v < previous)) else {
+                break;
+            };
+            until = Some(oldest);
         }
+        successful += usize::from(answered);
+        inconclusive |= !exhausted;
     }
-    ensure!(
-        successful == 2,
-        "Nostr indexers unavailable; refusing partial disappearance"
-    );
+    if successful != 2 {
+        return Err(crate::resolver::RetryLater {
+            class: "indexer_unavailable",
+            seconds: 300,
+        }
+        .into());
+    }
     if cfg.adapters.websocket {
         if let Some(relay) = target.relays.first() {
             if let Ok(values) = egress
@@ -246,10 +292,13 @@ pub async fn lookup(target: &Target, egress: &Egress, cfg: &EventConfig) -> Resu
             }
         }
     }
-    ensure!(
-        !inconclusive,
-        "Nostr indexer page is incomplete; absence is inconclusive"
-    );
+    if inconclusive {
+        return Err(crate::resolver::RetryLater {
+            class: "inconclusive",
+            seconds: 3600,
+        }
+        .into());
+    }
     Ok(None)
 }
 pub fn parse(uri: &str, event: &Event, cfg: &EventConfig) -> Result<ResourceMeta> {
@@ -463,12 +512,14 @@ pub async fn resolve(
     let mut retained_bytes = 0usize;
     for target in refs {
         let resource = target.uri()?;
-        let Some(id) = crate::store::derive_resource(
+        let Some(id) = crate::store::derive_resource_until(
             pool,
             uri,
             &resource,
             "nip52",
             cfg.adapters.max_calendar_members,
+            cfg.adapters.max_derived_resources,
+            None,
         )
         .await?
         else {

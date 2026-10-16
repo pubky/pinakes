@@ -43,7 +43,11 @@ pub async fn claim_sources(
     let size = size.clamp(1, 50);
     Ok(sqlx::query_as(r#"UPDATE resource SET lease_until=now()+$2*interval '1 second', generation=generation+1
         WHERE id IN (SELECT id FROM resource WHERE resolver=ANY($1) AND NOT dead_letter AND NOT final AND next_attempt_at<=now()
-          AND (lease_until IS NULL OR lease_until<now()) ORDER BY priority_at DESC NULLS LAST,next_attempt_at,id FOR UPDATE SKIP LOCKED LIMIT $3)
+          AND (lease_until IS NULL OR lease_until<now())
+          AND (NOT EXISTS(SELECT 1 FROM resource_derivation d WHERE d.child_id=resource.id)
+               OR EXISTS(SELECT 1 FROM resource_derivation d WHERE d.child_id=resource.id AND (d.expires_at IS NULL OR d.expires_at>now()))
+               OR EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=resource.id))
+          ORDER BY priority_at DESC NULLS LAST,next_attempt_at,id FOR UPDATE SKIP LOCKED LIMIT $3)
         RETURNING id,uri,attempts,generation"#).bind(sources).bind(cfg.lease_secs.max(15 * size as u64 + 10) as f64).bind(size as i64).fetch_all(pool).await?)
 }
 

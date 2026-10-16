@@ -218,11 +218,12 @@
   {
     "id": "guidle",
     "uri": "https://www.guidle.com/de/veranstaltungen/dies-das/ueberlingen/gregor-haegele-live-2027_A2rCGkH",
-    "error": false,
+    "error": true,
     "status": "ok",
     "type": "Event",
     "missing_fields": [],
-    "tz": null
+    "tz": null,
+    "note": "T7: captured calendar-discovery egress policy failure must be propagated, never committed as a successful refresh."
   },
   {
     "id": "eventfrog",
@@ -401,14 +402,15 @@
   {
     "id": "dice",
     "uri": "https://dice.fm/event/6a06e51b6c518c00013a998c",
-    "error": false,
+    "error": true,
     "status": "error",
     "type": "WebPage",
     "missing_fields": [
       "name",
       "start"
     ],
-    "tz": null
+    "tz": null,
+    "note": "T7: recorded 503 propagates RetryLater and leaves the accepted document intact."
   },
   {
     "id": "fever",

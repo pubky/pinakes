@@ -15,6 +15,375 @@ use pinakes_core::{
 use serde_json::{json, Value};
 use sqlx::PgPool;
 
+#[sqlx::test(migrations = "../../migrations")]
+async fn round2_paginated_nostr_and_inconclusive_queue_retry(pool: PgPool) {
+    use adapters::nostr::{self as nip52, Target};
+    let other = signed(
+        31923,
+        200,
+        &[
+            &["d", "other"],
+            &["title", "Other"],
+            &["start", "1792519200"],
+        ],
+    );
+    let wanted = signed(
+        31923,
+        100,
+        &[
+            &["d", "wanted"],
+            &["title", "Wanted"],
+            &["start", "1792519200"],
+        ],
+    );
+    let target = Target::coordinate(&format!("31923:{}:wanted", wanted.pubkey.to_hex())).unwrap();
+    let (egress, t) = mock_egress(vec![
+        (200, json!(vec![other.clone(); 100])),
+        (200, json!([wanted.clone()])),
+    ]);
+    assert_eq!(
+        nip52::lookup(&target, &egress, &Default::default())
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        wanted.id
+    );
+    assert!(t.seen.lock().unwrap()[1].0.contains("until=200"));
+    let (egress, t) = mock_egress(vec![
+        (200, json!([])),
+        (200, json!(vec![other.clone(); 100])),
+        (200, json!([wanted])),
+    ]);
+    assert!(nip52::lookup(&target, &egress, &Default::default())
+        .await
+        .unwrap()
+        .is_some());
+    assert!(t.seen.lock().unwrap()[2].0.contains("until=200"));
+    let (egress, _) = mock_egress(vec![(404, Value::Null), (200, json!([]))]);
+    assert!(nip52::lookup(&target, &egress, &Default::default())
+        .await
+        .is_err());
+    let mut cfg = EventConfig::default();
+    cfg.adapters.max_indexer_pages = 1;
+    let (egress, _) = mock_egress(vec![(200, json!(vec![other; 100])), (200, json!([]))]);
+    let r = platform(&pool, cfg, egress);
+    let uri = target.uri().unwrap();
+    let id = store::ensure_resource(&pool, &uri).await.unwrap();
+    let q = pinakes_core::config::QueueConfig {
+        max_failures: 1,
+        ..Default::default()
+    };
+    let job = pinakes_core::queue::claim(&pool, "event_platform", &q)
+        .await
+        .unwrap()
+        .unwrap();
+    pinakes_core::queue::run_job(&pool, &r, &q, &job)
+        .await
+        .unwrap();
+    let state: (i32, bool, String) =
+        sqlx::query_as("SELECT attempts,dead_letter,last_error FROM resource WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, (0, false, "inconclusive".into()));
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round2_cursor_resets_head_clock_missing_and_title_fallback(pool: PgPool) {
+    let cfg = EventConfig::default();
+    let uri = "https://portal.einundzwanzig.space/api/changes";
+    let def = adapters::definition("einundzwanzig").unwrap();
+    store::ensure_resource(&pool, uri).await.unwrap();
+    let (egress, t) = mock_egress(vec![
+        (
+            200,
+            json!({"next_since":3000,"has_more":false,"changes":[]}),
+        ),
+        (200, json!([])),
+    ]);
+    let d = cursor::resolve(&pool, uri, def, &egress, &cfg, false)
+        .await
+        .unwrap();
+    assert_eq!(d.container.unwrap().cursor.unwrap().next, "3000");
+    assert!(!t.seen.lock().unwrap()[0].0.contains("since_sequence"));
+    install_cursor(&pool, uri, "9999999999999999").await;
+    let row = json!({"id":7,"meetup_id":1,"title":null,"start":(Utc::now()+Duration::days(1)).to_rfc3339()});
+    let (egress, _) = mock_egress(vec![
+        (
+            200,
+            json!({"next_since":3001,"cursor_expired":true,"has_more":false,"changes":[]}),
+        ),
+        (200, json!([row])),
+        (503, Value::Null),
+    ]);
+    let d = cursor::resolve(&pool, uri, def, &egress, &cfg, false)
+        .await
+        .unwrap();
+    let c = d.container.unwrap();
+    assert!(c.cursor.unwrap().reset);
+    assert_eq!(c.occurrences[0].doc.name.as_deref(), Some("Meetup 7"));
+    let uri = "https://api.btcmap.org/v4/events";
+    let def = adapters::definition("btcmap").unwrap();
+    let (egress, _) = mock_egress(vec![(
+        200,
+        json!([{"id":1,"status":"deleted","updated_at":"2035-01-01T00:00:00Z"}]),
+    )]);
+    let d = cursor::resolve(&pool, uri, def, &egress, &cfg, false)
+        .await
+        .unwrap();
+    let next = d
+        .container
+        .as_ref()
+        .unwrap()
+        .cursor
+        .as_ref()
+        .unwrap()
+        .next
+        .parse::<chrono::DateTime<Utc>>()
+        .unwrap();
+    assert_eq!(next.timestamp_millis(), d.fetched_at);
+    for (status, body) in [
+        (404, Value::Null),
+        (410, Value::Null),
+        (200, json!({"id":1,"status":"deleted"})),
+        (200, json!({"id":1,"status":"rejected"})),
+        (200, json!({"id":1,"status":"unknown"})),
+    ] {
+        let (egress, _) = mock_egress(vec![(status, body)]);
+        let d = cursor::resolve(
+            &pool,
+            "https://api.btcmap.org/v4/events/1",
+            def,
+            &egress,
+            &cfg,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(d.status, pinakes_core::model::Status::Missing);
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round2_derivation_slots_expire_and_adapter_total_is_bounded(pool: PgPool) {
+    for p in [
+        "https://example.org/parent-a",
+        "https://example.org/parent-b",
+    ] {
+        store::ensure_resource(&pool, p).await.unwrap();
+    }
+    let until = Some(Utc::now() + Duration::days(1));
+    let a = store::derive_resource_until(
+        &pool,
+        "https://example.org/parent-a",
+        "https://example.org/a",
+        "btcmap",
+        1,
+        1,
+        until,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(store::derive_resource_until(
+        &pool,
+        "https://example.org/parent-b",
+        "https://example.org/b",
+        "btcmap",
+        1,
+        1,
+        until
+    )
+    .await
+    .unwrap()
+    .is_none());
+    sqlx::query(
+        "UPDATE resource_derivation SET expires_at=now()-interval '1 second' WHERE child_id=$1",
+    )
+    .bind(&a)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(store::derive_resource_until(
+        &pool,
+        "https://example.org/parent-a",
+        "https://example.org/b",
+        "btcmap",
+        1,
+        1,
+        until
+    )
+    .await
+    .unwrap()
+    .is_some());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource_derivation WHERE expires_at IS NULL OR expires_at>now()"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        store::ensure_resource(&pool, "https://example.org/a")
+            .await
+            .unwrap(),
+        a
+    );
+}
+
+struct WikiFailure {
+    failure: u16,
+    calls: std::sync::atomic::AtomicUsize,
+}
+#[async_trait::async_trait]
+impl Transport for WikiFailure {
+    async fn get(&self, u: &url::Url, _: &[SocketAddr]) -> anyhow::Result<Fetched> {
+        // The initial entity endpoint redirects to an HTML page identifying Q12345.
+        let entity = u.path().ends_with("Special:EntityData/Q12345.json");
+        if entity {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        if entity && self.failure == 0 {
+            return Err(pinakes_core::resolver::RetryLater {
+                class: "fixture_timeout",
+                seconds: 60,
+            }
+            .into());
+        }
+        if entity && self.failure == 1 {
+            anyhow::bail!("fixture transport failure");
+        }
+        Ok(Fetched {
+            url: u.clone(),
+            status: if entity { self.failure } else { 200 },
+            content_type: "text/html".into(),
+            body: if !entity {
+                include_bytes!("fixtures/adapters/wikipedia-item.html").to_vec()
+            } else {
+                b"invalid JSON".to_vec()
+            },
+            validators: Default::default(),
+            location: None,
+            retry_after_secs: 60,
+        })
+    }
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn round2_only_parse_errors_fall_back_and_plain_wikipedia_skips_fetch(pool: PgPool) {
+    use pinakes_core::resolver::Resolver;
+    for failure in [0, 1, 503, 404] {
+        let uri = "https://www.wikidata.org/wiki/Q67890";
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut doc = ResourceMeta::new(uri, "wikidata", 3600);
+        doc.set_type("Event");
+        doc.start = Some(Utc::now() + Duration::days(1));
+        doc.name = Some("Accepted".into());
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+        let before: Value = sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let changes: i64 = sqlx::query_scalar("SELECT count(*) FROM resource_change")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let transport = Arc::new(WikiFailure {
+            failure,
+            calls: Default::default(),
+        });
+        let egress =
+            Egress::with_backends(Default::default(), Arc::new(AdapterDns), transport.clone());
+        let r = platform(
+            &pool,
+            EventConfig {
+                geocoding: false,
+                ..Default::default()
+            },
+            egress,
+        );
+        // Two calls also cover a negatively cached transport failure.
+        assert!(r.resolve(uri).await.is_err());
+        if failure == 0 {
+            assert!(r.resolve(uri).await.is_err());
+        }
+        assert!(r
+            .web
+            .resolve("https://en.wikipedia.org/wiki/Bitcoin_Conference")
+            .await
+            .is_err());
+        let job = pinakes_core::queue::Job {
+            id: id.clone(),
+            uri: uri.into(),
+            generation: 0,
+            attempts: 0,
+        };
+        pinakes_core::queue::run_job(&pool, &r, &Default::default(), &job)
+            .await
+            .unwrap();
+        if failure <= 1 {
+            assert_eq!(
+                transport.calls.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "EntityData negative cache must survive page refetch"
+            );
+        }
+        let after: Value = sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(before, after);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource_change")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            changes
+        );
+        // Reset fixture state for the next error case without changing immutable IDs.
+        sqlx::query("UPDATE resource SET attempts=0,dead_letter=false WHERE id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let r = platform(
+        &pool,
+        EventConfig {
+            geocoding: false,
+            ..Default::default()
+        },
+        Egress::with_backends(
+            Default::default(),
+            Arc::new(AdapterDns),
+            Arc::new(WikiFailure {
+                failure: 200,
+                calls: Default::default(),
+            }),
+        ),
+    );
+    assert_eq!(
+        r.resolve("https://www.wikidata.org/wiki/Q67890")
+            .await
+            .unwrap()
+            .type_name,
+        "Article"
+    );
+    let uri = "https://en.wikipedia.org/wiki/Person";
+    let body="<title>Person</title><meta property='og:type' content='article'><script>mw.config.set({\"wgWikibaseItemId\":\"Q42\"})</script>";
+    let r = platform(
+        &pool,
+        EventConfig::default(),
+        recorded_egress(vec![(uri, body, Value::Null)]),
+    );
+    assert_eq!(r.web.resolve(uri).await.unwrap().type_name, "Article");
+}
+
 #[test]
 fn manifests_cover_research_and_keys_disable_without_exposing_credentials() {
     let mut cfg = EventConfig::default();
@@ -1519,7 +1888,7 @@ async fn review_shared_roots_and_derived_author_budgets(pool: PgPool) {
     let root_uri = "https://api.btcmap.org/v4/events";
     for n in 0..20 {
         let uri = format!("{root_uri}?x={n}");
-        let doc = cursor::resolve(
+        let error = cursor::resolve(
             &pool,
             &uri,
             adapters::definition("btcmap").unwrap(),
@@ -1528,10 +1897,8 @@ async fn review_shared_roots_and_derived_author_budgets(pool: PgPool) {
             false,
         )
         .await
-        .unwrap();
-        assert!(doc.container.is_none());
-        assert_eq!(doc.url, uri);
-        assert!(doc.aliases.contains(&root_uri.to_owned()));
+        .unwrap_err();
+        assert!(error.is::<pinakes_core::resolver::RetryLater>());
     }
     assert!(transport.seen.lock().unwrap().is_empty());
     assert_eq!(
@@ -1609,7 +1976,7 @@ async fn review_shared_roots_and_derived_author_budgets(pool: PgPool) {
         false,
     )
     .await
-    .unwrap();
+    .unwrap_err();
     let root = pinakes_core::model::identity(root_uri).unwrap().0;
     assert!(!budgets.admit(&pool, &job(root), 0.01).await.unwrap());
 
@@ -1845,11 +2212,12 @@ async fn review_full_indexer_page_is_inconclusive_and_ws_is_forbidden() {
     ))
     .unwrap();
     let (egress, _) = mock_egress(vec![(200, json!(vec![event; 100])), (200, json!([]))]);
-    assert!(nip52::lookup(&target, &egress, &Default::default())
+    let mut cfg = EventConfig::default();
+    cfg.adapters.max_indexer_pages = 1;
+    assert!(nip52::lookup(&target, &egress, &cfg)
         .await
         .unwrap_err()
-        .to_string()
-        .contains("inconclusive"));
+        .is::<pinakes_core::resolver::RetryLater>());
     let error = egress
         .nostr_request("ws://example.org/", target.filter(), 100)
         .await
@@ -2194,7 +2562,7 @@ async fn review_alias_references_scope_search_and_occurrence_reads(pool: PgPool)
         false,
     )
     .await
-    .unwrap();
+    .unwrap_err();
     let root_uri = "https://api.btcmap.org/v4/events";
     let root = pinakes_core::model::identity(root_uri).unwrap().0;
     let doc = snapshot(root_uri, 3, Utc::now().timestamp_millis());
