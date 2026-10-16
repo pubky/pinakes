@@ -59,13 +59,17 @@ claimants naming one page on distinct paths are demoted, stop naming it for rank
 back to the no-claim baseline where taggers decide (they also stop joining through that key).
 Canonical, alternate and oEmbed links are read from the document head only. JSON-LD identity
 fields come only from the page's own entity: a head script's, plus a body script's chosen entity
-when it names the page or its head canonical by `url`, `@id` or `mainEntityOfPage`. When a body
-entity is chosen for the card, the head script's claims still apply. Migration 0035 refetches
+when it names the page or its head canonical by `url`, `@id` or `mainEntityOfPage` (a URL, node
+or array). When a body entity is chosen for the card, the head script's claims still apply if
+its entity is a WebPage or better; a head Organization/WebSite/Person node donates nothing. Migration 0035 refetches
 resources holding a non-authoritative canonical claim once, staggered over six hours (never
 later than their scheduled refresh). Migration 0036 does the same, in batches of 1000, for
-every resource holding a canonical or sameAs URL claim other than its own URI: body JSON-LD
-sameAs, same-origin body canonicals and claimants with double-encoded or path-parameter
-segments.
+every resource holding a canonical or sameAs URL claim other than its own URI, trusted or not.
+Its new coverage over 0035 is sameAs-basis claims (body JSON-LD sameAs, and claimants with
+double-encoded or path-parameter segments that hold only sameAs). Same-origin canonicals were
+never trusted (only own-URI and registry keys are), so 0035 already covered them. A deployment
+that ran 0035 refetches those resources a second time, which is harmless; the 0036 header
+calls them trusted, but it is published and stays byte-identical.
 Aliases remain available as navigation metadata. Lock contention between group writers
 retries after 1–3 seconds without advancing the conflict backoff; inputs recorded under a
 partial (pair-budget) plan are recomputed on the next reconciliation instead of cached.
