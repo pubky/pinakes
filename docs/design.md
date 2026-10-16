@@ -130,10 +130,20 @@ ICS UID matching is off by default (`groups.cross_container_occurrences = "off"`
 The opt-in `"corroborated"` mode requires two points within 500 m, starts within
 300 s, and pg_trgm similarity of normalized names ≥ 0.5. This restores the §5.3
 Luma/organiser event case at the price of being copyable by a determined publisher.
-The harm bound is the automatic best-member ordering: distinct taggers descending,
-references descending, admission time ascending, then completeness. Curated best
-members remain pinned. Other typed IDs use publisher boundaries from
-`data/multi-tenant-hosts.json`, with an operator-configurable replacement path.
+The harm bound is the automatic best-member ordering: claimants below the member they
+name, then distinct taggers descending, references descending, admission time ascending,
+then completeness. Curated best members remain pinned. Other typed IDs use publisher
+boundaries from `data/multi-tenant-hosts.json`, with an operator-configurable replacement
+path.
+
+Accepted residual: on a shared registrable domain that the tenant list does not scope
+(github.com, for example), every user's pages count as one publisher, so a page whose
+canonical or sameAs names another user's page joins that page's group through the
+same-origin rule. Claimant ranking keeps the named page as the card whatever the joiner's
+taggers, and with the named page present a second claimant on another path demotes both
+joiners. What remains is pollution of the membership list (and the group's tagger score) by
+one joiner per key. The lever is the tenant list: adding the host with a subdomain or path-segment rule
+makes each user a separate publisher, so cross-user claims no longer join.
 
 [Details: the two example documents, the venue chain, time zones and cancellation, groups](details.html#document)
 
