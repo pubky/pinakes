@@ -144,12 +144,15 @@ fn same_page_variant(own: &str, target: &str) -> bool {
         b.path().trim_end_matches('/'),
     );
     // A segment that decodes to a separator or dot segment (`/article/..%2Fevil`) may be
-    // served as another path entirely, so such a claimant is never a variant.
+    // served as another path entirely, so such a claimant is never a variant; nor is one with
+    // an encoded percent (`%252F`), which servers that decode twice turn into a separator.
     let traverses = pa.split('/').any(|s| {
         let decoded = percent_encoding::percent_decode_str(s).decode_utf8_lossy();
-        decoded.contains(['/', '\\']) || decoded == "." || decoded == ".."
+        decoded.contains(['/', '\\', '%']) || decoded == "." || decoded == ".."
     });
-    a.host_str() == b.host_str()
+    a.scheme() == b.scheme()
+        && a.host_str() == b.host_str()
+        && a.port_or_known_default() == b.port_or_known_default()
         && pb.len() > 1
         && !traverses
         && (pa == pb

@@ -223,7 +223,8 @@ impl EventService {
                     if advertised.is_none() {
                         advertised = html
                             .select(
-                                &scraper::Selector::parse("link[rel~=alternate][href]").unwrap(),
+                                &scraper::Selector::parse("head link[rel~=alternate][href]")
+                                    .unwrap(),
                             )
                             .find_map(|e| {
                                 let mime = e.value().attr("type")?;

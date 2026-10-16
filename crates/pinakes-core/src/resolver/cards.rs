@@ -513,8 +513,11 @@ pub fn parse_isbn(uri: &str, number: &str, f: &Fetched, ttl: u64) -> Result<Reso
             .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
     });
     let slugged = v["url"].as_str().filter(|u| {
-        own.zip(Url::parse(u).ok())
-            .is_some_and(|(key, u)| u.path() == key || u.path().starts_with(&format!("{key}/")))
+        own.zip(Url::parse(u).ok()).is_some_and(|(key, u)| {
+            u.host_str()
+                .is_some_and(|h| h == "openlibrary.org" || h.ends_with(".openlibrary.org"))
+                && (u.path() == key || u.path().starts_with(&format!("{key}/")))
+        })
     });
     let pages = [own, slugged]
         .into_iter()
@@ -750,7 +753,7 @@ pub async fn enrich(
         let html = scraper::Html::parse_document(&String::from_utf8_lossy(&body));
         let (mut ap, mut rss) = (None, None);
         for el in html
-            .select(&scraper::Selector::parse("link[rel='alternate']").unwrap())
+            .select(&scraper::Selector::parse("head link[rel='alternate']").unwrap())
             .take(64)
         {
             let Some(ty) = el.value().attr("type") else {

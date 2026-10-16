@@ -297,16 +297,46 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
     let text = String::from_utf8_lossy(&fetched.body);
     if fetched.content_type.ends_with("json") {
         if let Ok(v) = serde_json::from_str::<Value>(&text) {
-            apply_jsonld(&mut out.doc, &v, &fetched.url);
+            apply_jsonld(&mut out.doc, &v, &fetched.url, true);
         }
         return out;
     }
     let html = Html::parse_document(&text);
-    let jsonld: Vec<Value> = html
+    // JSON-LD stays document-wide (plugins put it in the body), but only the chosen entity
+    // may carry claims (url/@id, sameAs, identifiers), and only when it names this page or
+    // its head canonical, or names nothing and sits in the head.
+    let scripts: Vec<(Value, bool)> = html
         .select(&selector("script[type='application/ld+json']"))
-        .filter_map(|script| crate::event::page::lenient_json(&script.inner_html()))
+        .filter_map(|script| {
+            let head = script
+                .ancestors()
+                .any(|a| a.value().as_element().is_some_and(|e| e.name() == "head"));
+            crate::event::page::lenient_json(&script.inner_html()).map(|v| (v, head))
+        })
         .collect();
-    apply_jsonld(&mut out.doc, &Value::Array(jsonld), &fetched.url);
+    if let Some(best) = (1..scripts.len()).fold((!scripts.is_empty()).then_some(0), |best, i| {
+        best.filter(|b| entity_priority(&scripts[i].0) <= entity_priority(&scripts[*b].0))
+            .or(Some(i))
+    }) {
+        let page: Vec<String> = [uri.to_owned(), fetched.url.to_string()]
+            .into_iter()
+            .chain(
+                html.select(&selector("head link[rel~=canonical][href]"))
+                    .filter_map(|l| origin_url(&fetched.url, l.value().attr("href")?)),
+            )
+            .filter_map(|u| entity_identity(&u))
+            .collect();
+        let (entity, head) = &scripts[best];
+        let named = entity_urls(entity)
+            .filter_map(|u| origin_url(&fetched.url, u).and_then(|u| entity_identity(&u)))
+            .collect::<Vec<_>>();
+        let claims = if named.is_empty() {
+            *head
+        } else {
+            named.iter().any(|id| page.contains(id))
+        };
+        apply_jsonld(&mut out.doc, entity, &fetched.url, claims);
+    }
     for (class, kind) in [
         ("h-event", "Event"),
         ("h-card", "Person"),
@@ -396,7 +426,9 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
     if let Some(alias) = meta.get("og:url").and_then(|s| origin_url(&fetched.url, s)) {
         add_alias(&mut out.doc, alias);
     }
-    for link in html.select(&selector("link")) {
+    // canonical, alternate and oEmbed links belong in the head (they are not body-ok); a body
+    // `<link>` may come from user content and must not claim identity or advertise endpoints.
+    for link in html.select(&selector("head link")) {
         if let Some(href) = link.value().attr("href") {
             if link
                 .value()
@@ -547,7 +579,29 @@ fn entity_priority(v: &Value) -> u8 {
     };
     own.max(nested)
 }
-fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url) {
+/// The `url`/`@id` values of a JSON-LD node (or array of nodes), its main entity and its
+/// graph nodes.
+fn entity_urls(v: &Value) -> impl Iterator<Item = &str> {
+    v.as_array()
+        .map_or_else(|| vec![v], |a| a.iter().take(16).collect())
+        .into_iter()
+        .flat_map(|v| {
+            let graph = v.get("@graph").and_then(Value::as_array);
+            std::iter::once(v)
+                .chain(v.get("mainEntity").filter(|m| m.is_object()))
+                .chain(graph.into_iter().flatten().take(16))
+        })
+        .flat_map(|n| ["url", "@id"].map(move |f| n.get(f).and_then(Value::as_str)))
+        .flatten()
+}
+fn entity_identity(url: &str) -> Option<String> {
+    let mut u = Url::parse(url).ok()?;
+    u.set_fragment(None);
+    crate::model::identity(u.as_str()).ok().map(|v| v.0)
+}
+/// `claims` gates identity-bearing fields (aliases from url/@id/sameAs, typed identifiers):
+/// they come only from an entity that is the page's own.
+fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url, claims: bool) {
     if let Some(values) = v.as_array() {
         // A page's article/event outranks its publisher or breadcrumb helper nodes.
         // Extract one entity so unrelated graph nodes cannot donate misleading fields.
@@ -557,18 +611,18 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url) {
                     best = value;
                 }
             }
-            apply_jsonld(doc, best, base);
+            apply_jsonld(doc, best, base, claims);
         }
         return;
     }
     if let Some(v) = v.get("mainEntity") {
-        apply_jsonld(doc, v, base);
+        apply_jsonld(doc, v, base, claims);
         if doc.source != "web" {
             return;
         }
     }
     if let Some(v) = v.get("@graph") {
-        apply_jsonld(doc, v, base);
+        apply_jsonld(doc, v, base, claims);
         if doc.source != "web" {
             return;
         }
@@ -579,7 +633,7 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url) {
     if doc.source == "web" {
         doc.set_type(kind);
         doc.source = "jsonld".into();
-        for field in ["url", "@id"] {
+        for field in ["url", "@id"].into_iter().filter(|_| claims) {
             if let Some(url) = v
                 .get(field)
                 .and_then(Value::as_str)
@@ -589,7 +643,9 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url) {
             }
         }
     }
-    crate::group_keys::jsonld(doc, v, base);
+    if claims {
+        crate::group_keys::jsonld(doc, v, base);
+    }
     for (field, attribute) in [("duration", "duration"), ("isrcCode", "isrc")] {
         if let Some(value) = v.get(field).and_then(Value::as_str) {
             doc.attributes
@@ -644,6 +700,7 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url) {
         .get("url")
         .and_then(string)
         .and_then(|s| origin_url(base, &s))
+        .filter(|_| claims)
     {
         add_alias(doc, alias);
     }
@@ -651,6 +708,7 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url) {
         .get("sameAs")
         .and_then(string)
         .and_then(|s| origin_url(base, &s))
+        .filter(|_| claims)
     {
         add_alias(doc, alias);
     }
@@ -778,6 +836,86 @@ mod tests {
         }
     }
     #[test]
+    fn body_links_and_foreign_json_ld_nodes_claim_nothing() {
+        let page = |html: &str| {
+            let fetched = Fetched {
+                permanent_redirect: false,
+                truncated: false,
+                url: Url::parse("https://victim.example/post").unwrap(),
+                body: html.as_bytes().to_vec(),
+                content_type: "text/html".into(),
+                status: 200,
+                location: None,
+                retry_after_secs: 60,
+                validators: Default::default(),
+            };
+            extract("https://victim.example/post", &fetched, 100)
+        };
+        let claims = |out: &Extracted| {
+            out.doc
+                .group_keys
+                .iter()
+                .filter_map(|k| k.target.clone())
+                .filter(|t| !t.starts_with("https://victim.example/post"))
+                .collect::<Vec<_>>()
+        };
+        // V31: a comment's canonical/oEmbed links sit in the body and are ignored.
+        let out = page(
+            r#"<title>Post</title><body><p>Comment</p><link rel="canonical" href="https://attacker.example/a"><link rel="alternate" type="application/json+oembed" href="https://attacker.example/embed"></body>"#,
+        );
+        assert!(claims(&out).is_empty(), "{:?}", claims(&out));
+        assert!(out.oembed.is_none());
+        let out = page(
+            r#"<head><title>Post</title><link rel="canonical" href="/canonical"><link rel="alternate" type="application/json+oembed" href="/embed"></head><body><p>x</p></body>"#,
+        );
+        assert_eq!(claims(&out), ["https://victim.example/canonical"]);
+        assert!(out.oembed.is_some());
+
+        // K51: a second ld+json node in the body outranks the page's WebPage node, but names
+        // nothing (or another page), so it mints no claims; its card fields still apply.
+        for injected in [
+            r#"{"@type":"NewsArticle","headline":"Injected","sameAs":"https://attacker.example/a"}"#,
+            r#"{"@type":"NewsArticle","url":"https://attacker.example/a","sameAs":"https://attacker.example/b","identifier":"https://doi.org/10.5555/evil"}"#,
+        ] {
+            let out = page(&format!(
+                r#"<head><title>Post</title><script type="application/ld+json">{{"@type":"WebPage","name":"Post"}}</script></head><body><p>Comment</p><script type="application/ld+json">{injected}</script></body>"#
+            ));
+            assert!(claims(&out).is_empty(), "{injected}: {:?}", claims(&out));
+            assert!(out
+                .doc
+                .group_keys
+                .iter()
+                .all(|k| !k.key.starts_with("doi:")));
+        }
+        // The page's own entity keeps its claims: in the head without url/@id, or anywhere
+        // when it names this page or its head canonical.
+        for (head, body) in [
+            (
+                r#"<script type="application/ld+json">{"@type":"NewsArticle","sameAs":"https://doi.org/10.1234/abc"}</script>"#,
+                "",
+            ),
+            (
+                "",
+                r#"<script type="application/ld+json">{"@type":"NewsArticle","url":"https://victim.example/post","sameAs":"https://doi.org/10.1234/abc"}</script>"#,
+            ),
+            (
+                r#"<link rel="canonical" href="https://victim.example/canonical">"#,
+                r#"<script type="application/ld+json">{"@graph":[{"@type":"WebPage","@id":"https://victim.example/canonical#page"},{"@type":"NewsArticle","sameAs":"https://doi.org/10.1234/abc"}]}</script>"#,
+            ),
+        ] {
+            let out = page(&format!(
+                "<head><title>Post</title>{head}</head><body><p>Text</p>{body}</body>"
+            ));
+            assert!(
+                out.doc
+                    .group_keys
+                    .iter()
+                    .any(|k| k.key == "doi:10.1234/abc"),
+                "{head}{body}"
+            );
+        }
+    }
+    #[test]
     fn oembed_fills_only_missing_and_never_keeps_html() {
         let mut doc = ResourceMeta::new("https://example.org/", "web", 100);
         doc.name = Some("OG wins".into());
@@ -801,6 +939,7 @@ mod tests {
                 {"@type":"BreadcrumbList","name":"Home"}
             ]}),
             &Url::parse("https://example.org/story").unwrap(),
+            true,
         );
         assert_eq!(doc.type_name, "NewsArticle");
         assert_eq!(doc.name.as_deref(), Some("Actual story"));

@@ -2061,6 +2061,95 @@ async fn round6_upgrade_refetches_isbn_cards_and_replans_registry_and_encoded_cl
 }
 
 #[sqlx::test(migrations = "../../migrations")]
+async fn round7_double_encoding_and_other_schemes_or_ports_are_claimants(pool: PgPool) {
+    let owner_uri = "https://shared.example/article";
+    let owner = page(&pool, owner_uri, "Owner", &[("canonical", owner_uri)]).await;
+    let key = format!("url:{owner}");
+    for (uri, variant) in [
+        ("https://shared.example/article/print", true),
+        ("https://shared.example/article/..%252Fevil", false),
+        ("https://shared.example/article/%25", false),
+        ("http://shared.example/article/print", false),
+        ("http://shared.example:443/article/print", false),
+        ("https://shared.example:8443/article/print", false),
+        ("https://shared.example:443/amp/article", true),
+    ] {
+        let id = page(&pool, uri, uri, &[("canonical", owner_uri)]).await;
+        let counted: bool = sqlx::query_scalar(
+            "SELECT counted FROM resource_group WHERE resource_id=$1 AND key=$2",
+        )
+        .bind(&id)
+        .bind(&key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(counted, !variant, "{uri}");
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round7_upgrade_refetches_resources_with_non_authoritative_canonicals(pool: PgPool) {
+    let claimant = page(
+        &pool,
+        "https://victim.example/post",
+        "Post",
+        &[("canonical", "https://attacker.example/a")],
+    )
+    .await;
+    let own = page(
+        &pool,
+        "https://plain.example/post",
+        "Plain",
+        &[("canonical", "https://plain.example/post")],
+    )
+    .await;
+    let ids = vec![claimant, own];
+    sqlx::query("UPDATE resource SET status='ok',lease_until=now()+interval '1 hour',next_attempt_at=now()+interval '30 days' WHERE id=ANY($1)").bind(&ids).execute(&pool).await.unwrap();
+    let before: Vec<i64> = sqlx::query_scalar(
+        "SELECT generation FROM resource WHERE id=ANY($1) ORDER BY array_position($1,id)",
+    )
+    .bind(&ids)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/202610160035_head_links_refetch.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let after: Vec<(i64, bool, f64)> = sqlx::query_as("SELECT generation,lease_until IS NULL,extract(epoch FROM(next_attempt_at-now()))::float8 FROM resource WHERE id=ANY($1) ORDER BY array_position($1,id)").bind(&ids).fetch_all(&pool).await.unwrap();
+    assert_eq!(after[0].0, before[0] + 1);
+    assert!(
+        after[0].1 && (-1.0..21600.0).contains(&after[0].2),
+        "{:?}",
+        after[0]
+    );
+    assert_eq!(after[1].0, before[1]);
+    assert!(after[1].2 > 86400.0);
+    // A sooner scheduled refresh is never pushed back.
+    sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+        .bind(&ids[0])
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/202610160035_head_links_refetch.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let delay: f64 = sqlx::query_scalar(
+        "SELECT extract(epoch FROM(next_attempt_at-now()))::float8 FROM resource WHERE id=$1",
+    )
+    .bind(&ids[0])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(delay <= 0.0, "{delay}");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
 async fn round4_upgrade_requeues_identifier_cards_without_registry_pages(pool: PgPool) {
     let mut ids = Vec::new();
     for (uri, source) in [

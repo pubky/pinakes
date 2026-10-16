@@ -50,6 +50,7 @@ impl Transport for TransportMock {
                 if u.path()=="/post" {("text/html",r#"<title>Blog</title><script type="application/ld+json">{"@type":"BlogPosting","name":"Original blog"}</script><link rel="alternate" type="application/rss+xml" href="/feed">"#.into())}
                 else {("application/rss+xml",r#"<rss><channel><title>Blog feed</title><item><guid>blog-guid</guid><title>Post</title><link>https://blog.example/post</link></item></channel></rss>"#.into())}
             },
+            "comments.example" => ("text/html","<title>Episode discussion</title><p>Comment</p><link rel='alternate' type='application/rss+xml' href='https://podcast.example/feed'><link rel='alternate' type='application/activity+json' href='https://ap.example/actor'>".into()),
             "copier.example" => ("text/html","<title>Copied episode</title><link rel='alternate' type='application/rss+xml' href='https://podcast.example/feed'>".into()),
             "podcast.example" => {
                 if u.path()=="/episode" {("text/html","<title>Episode page</title><link rel='alternate' type='application/rss+xml' href='/feed'>".into())}
@@ -1019,6 +1020,19 @@ fn round4_identifier_registries_name_landing_pages() {
     );
     let d = cards::parse_isbn("isbn:9780140328721", "9780140328721", &f, 3600).unwrap();
     assert!(d.group_keys.iter().all(|k| k.basis != "registry"));
+    // V34/K50: a slugged url on another host is not Open Library's edition page.
+    let f = recorded(
+        "https://openlibrary.org/api/books",
+        &serde_json::to_vec(&json!({"ISBN:9780140328721":{"title":"T","key":"/books/OL7353617M","url":"https://evil.example/books/OL7353617M/slug"}})).unwrap(),
+    );
+    let d = cards::parse_isbn("isbn:9780140328721", "9780140328721", &f, 3600).unwrap();
+    let registry: Vec<_> = d
+        .group_keys
+        .iter()
+        .filter(|k| k.basis == "registry")
+        .filter_map(|k| k.target.clone())
+        .collect();
+    assert_eq!(registry, ["https://openlibrary.org/books/OL7353617M"]);
 }
 
 #[tokio::test]
@@ -1053,4 +1067,25 @@ async fn round4_discovered_feeds_from_other_origins_lend_no_guids() {
         .unwrap()
         .iter()
         .any(|(u, _)| u == "https://podcast.example/feed"));
+}
+
+#[tokio::test]
+async fn round7_body_links_advertise_no_feeds_or_actors() {
+    let mut cfg = Config::default();
+    cfg.web.discover_feeds = true;
+    let seen = Arc::new(TransportMock::default());
+    let r = resolver("media", cfg, seen.clone());
+    // V31/K51: alternate links rendered from user content (in the body) are not followed.
+    let d = r
+        .web
+        .resolve("https://comments.example/thread?guid=episode-1")
+        .await
+        .unwrap();
+    assert_ne!(d.type_name, "PodcastEpisode");
+    let seen = seen.seen.lock().unwrap();
+    assert!(
+        seen.iter()
+            .all(|(u, _)| u.starts_with("https://comments.example/")),
+        "{seen:?}"
+    );
 }
