@@ -33,7 +33,7 @@ CREATE OR REPLACE FUNCTION refresh_group_best(ids text[]) RETURNS void LANGUAGE 
    CROSS JOIN LATERAL (SELECT count(DISTINCT f.author) FILTER(WHERE f.kind='tag') AS taggers,count(*) AS refs FROM effective_reference f WHERE f.resource_id=u.resource_id) refs
    WHERE u.group_id=ANY(ids)
    ORDER BY u.group_id,(current.curated AND current.best_unit=u.unit_id) DESC,
-     -- A member whose live canonical names another member is a claimant; the named page
+     -- A member whose live canonical names another member is a claimant, and the named page
      -- outranks it whatever its taggers. Registry and sameAs evidence follow rule 4.
      (NOT current.curated AND EXISTS(SELECT 1 FROM resource_group k WHERE k.unit_id=u.unit_id AND k.basis='canonical' AND NOT k.demoted
        AND k.key<>'url:'||u.resource_id AND EXISTS(SELECT 1 FROM group_unit o WHERE o.group_id=u.group_id AND k.key='url:'||o.resource_id))) ASC,
