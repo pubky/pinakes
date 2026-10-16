@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use pinakes_core::{
     api::{self, AppState},
     config::Config,
-    ingest, queue, MIGRATOR,
+    ingest, migrate, queue,
 };
 use std::{path::PathBuf, time::Duration};
 use tokio::sync::watch;
@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
         .max_connections(20)
         .connect(&config.database_url)
         .await?;
-    MIGRATOR.run(&pool).await?;
+    migrate(&pool).await?;
     if migrate_only {
         return Ok(());
     }

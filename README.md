@@ -229,3 +229,9 @@ limits, and all `/v1` routes have a configurable direct-peer IP budget. Search r
 are maintained on writes; ETags include the current cached reach set. Large cluster
 views coarsen to `search.max_cluster_cells`, while fractional zooms are accepted. OSM
 dumps release database connections and permits on per-chunk or total deadline expiry.
+
+Use `pinakesd --config <path> --migrate` for upgrades. It prepares any legacy web-fetched
+canonical OSM rows before migration 0002 reclassifies them, preserving all historical
+SQLx migration checksums. Forward review migrations clear alias metadata/history and
+install the stricter Place-envelope constraint. This path is tested from both the
+step 2 schema and the reviewed step 3 schema.

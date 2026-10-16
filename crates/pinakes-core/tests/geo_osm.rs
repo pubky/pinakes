@@ -899,3 +899,27 @@ async fn reviewed_database_upgrade_scrubs_legacy_web_osm_history(pool: PgPool) {
         .is_err());
     assert!(sqlx::query("INSERT INTO resource_change(resource_id,class,fields,after,source) VALUES($1,'created',ARRAY['name'],$2,'web')").bind(&id).bind(json!(doc)).execute(&pool).await.is_err());
 }
+
+#[sqlx::test(migrations = false)]
+async fn skeleton_upgrade_prepares_osm_before_original_constraint(pool: PgPool) {
+    let first = sqlx::migrate::Migrator {
+        migrations: std::borrow::Cow::Owned(
+            pinakes_core::MIGRATOR.iter().take(1).cloned().collect(),
+        ),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    first.run(&pool).await.unwrap();
+    let uri = "https://www.openstreetmap.org/node/123";
+    let id = pubky_resource_id::resource_id(uri);
+    sqlx::query("INSERT INTO resource(id,uri,scheme,host,resolver,name,type,category,point,doc,status,resolved_at,attempts,dead_letter,lease_until) VALUES($1,$2,'https','www.openstreetmap.org','web','Old page title','WebPage','page',ST_SetSRID(ST_Point(8,46),4326),'{\"type\":\"WebPage\",\"name\":\"Old page title\"}','ok',now(),4,true,now()+interval '1 hour')").bind(&id).bind(uri).execute(&pool).await.unwrap();
+    pinakes_core::migrate(&pool).await.unwrap();
+    let state:Value=sqlx::query_scalar("SELECT jsonb_build_object('resolver',resolver,'name',name,'status',status,'attempts',attempts,'dead',dead_letter,'resolved',resolved_at,'leased',lease_until,'doc',doc) FROM resource WHERE id=$1").bind(id).fetch_one(&pool).await.unwrap();
+    assert_eq!(state["resolver"], "osm");
+    assert_eq!(state["status"], "pending");
+    assert_eq!(state["attempts"], 0);
+    assert_eq!(state["dead"], false);
+    assert!(state["name"].is_null() && state["resolved"].is_null() && state["leased"].is_null());
+    assert_eq!(state["doc"]["type"], "Place");
+    // A repeat startup validates the original checksums rather than rewriting migration history.
+    pinakes_core::migrate(&pool).await.unwrap();
+}
