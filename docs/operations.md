@@ -3,7 +3,9 @@ Web access interstitials are stored as `blocked` with no display fields or group
 `queue.blocked_ttl_secs` controls probes (default 86400; 3600–2592000 seconds); these probes
 never charge failures or dead-letter the resource. Access failure is not evidence of deletion:
 accepted event dates and feed occurrences survive, and only two subsequent disappearance
-observations can cancel them. `pinakes_blocked_resources{host}` reports the current count.
+observations can cancel them. `pinakes_blocked_resources{host}` reports current counts by
+registrable domain, the top `api.blocked_metric_hosts` (default 20) plus `other`. Wall flips
+are `blocked`/`recovered` change lines, and blocked rows are excluded from search.
 HTML meta-refresh and literal JavaScript redirects share the HTTP three-hop egress budget.
 A meta refresh without a URL is an auto-reload and content; a refresh slower than ten seconds
 is a hop only on a short page that does not refresh itself.

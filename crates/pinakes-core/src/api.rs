@@ -43,6 +43,9 @@ impl AppState {
     pub fn new(pool: PgPool, config: Config) -> anyhow::Result<Self> {
         let mut cursor_key = [0; 32];
         getrandom::fill(&mut cursor_key).context("cursor key entropy unavailable")?;
+        let metrics = Arc::new(
+            crate::telemetry::Metrics::new()?.with_blocked_hosts(config.api.blocked_metric_hosts),
+        );
         Ok(Self {
             pool,
             nexus: Nexus::with_reach_timeout(
@@ -51,7 +54,7 @@ impl AppState {
             )?,
             config,
             wake: Arc::default(),
-            metrics: Arc::new(crate::telemetry::Metrics::new()?),
+            metrics,
             limiter: Arc::default(),
             dumps: Arc::new(tokio::sync::Semaphore::new(4)),
             info_cache: Arc::default(),
@@ -606,7 +609,8 @@ pub async fn search(
             .push("::timestamptz-s.updated_at)))/2592000.0),0)::double precision");
     }
     sql.push(
-        " AS rank FROM search_unit r LEFT JOIN resource_score s ON s.resource_id=r.id WHERE true",
+        // Walled pages have no display facts; they stay reachable by id and in /v1/changes.
+        " AS rank FROM search_unit r LEFT JOIN resource_score s ON s.resource_id=r.id WHERE r.status<>'blocked'",
     );
     spatial.apply(&mut sql);
     if let Some(venue) = &q.venue {

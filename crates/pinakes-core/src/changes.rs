@@ -13,6 +13,8 @@ pub const CLASSES: &[&str] = &[
     "renamed",
     "details",
     "deleted",
+    "blocked",
+    "recovered",
 ];
 /// Fetch clocks and body length are observations, not changes to the resource's facts.
 pub fn normalize(doc: &ResourceMeta) -> Value {
@@ -52,9 +54,18 @@ pub fn diff(before: Option<&Value>, after: Option<&Value>) -> Option<Diff> {
     if fields.is_empty() {
         return None;
     }
+    let blocked = |v: &Value| v["status"] == "blocked";
     let class = match (before, after) {
         (None, _) => "created",
         (_, None) => "deleted",
+        // An access wall hides facts; it does not change them. Never a rename to null.
+        (Some(before), Some(after)) if !blocked(before) && blocked(after) => {
+            return Some(Diff {
+                class: "blocked",
+                fields: vec!["status".into()],
+            })
+        }
+        (Some(before), Some(after)) if blocked(before) && !blocked(after) => "recovered",
         (Some(before), Some(after)) if !cancelled(before) && cancelled(after) => "cancelled",
         (Some(before), Some(after)) if cancelled(before) && !cancelled(after) => "uncancelled",
         _ if fields.iter().any(|k| matches!(k.as_str(), "start" | "end")) => "rescheduled",
@@ -318,7 +329,17 @@ pub async fn save(
             plan.append_changes(&mut tx, id).await?;
         }
         if let Some(diff) = diff {
-            append(&mut tx, id, &source, before, Some(after), diff, None).await?;
+            // A wall line carries the last accepted facts with the new status, so consumers
+            // replaying `after` never see the name, image or place cleared.
+            let after = if diff.class == "blocked" {
+                before.clone().map(|mut v| {
+                    v["status"] = json!("blocked");
+                    v
+                })
+            } else {
+                Some(after)
+            };
+            append(&mut tx, id, &source, before, after, diff, None).await?;
         }
     }
     tx.commit().await?;

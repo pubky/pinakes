@@ -576,3 +576,112 @@ fn round4_wall_overrides_and_marker_files_are_validated() {
         .insert("example.org".into(), WallOverride::Content);
     assert!(cfg.validate().is_err());
 }
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round4_wall_flips_are_classed_hidden_from_search_and_metrics_bounded(pool: PgPool) {
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    let uri = "https://news.example/story";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut d = ResourceMeta::new(uri, "web", 86400);
+    d.set_type("Article");
+    d.name = Some("Story".into());
+    d.location = Some(pinakes_core::model::Point {
+        lat: 47.0,
+        lon: 8.0,
+    });
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','news','/pub/app/tags/n',now())").bind(&id).bind("a".repeat(52)).execute(&pool).await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    store::recompute_scores(&mut tx, std::slice::from_ref(&id))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let mut wall = ResourceMeta::new(uri, "web", 86400);
+    wall.status = Status::Blocked;
+    store::save_document(&pool, &id, 0, &wall).await.unwrap();
+    d.fetched_at += 1;
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    type Line = (String, Vec<String>, Option<String>, Option<String>);
+    let lines: Vec<Line> = sqlx::query_as(
+        "SELECT class,fields,after->>'name',after->>'status' FROM resource_change WHERE resource_id=$1 ORDER BY seq",
+    )
+    .bind(&id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    // V14: no rename to null on the flip; the recovery is its own class.
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert_eq!(lines[1].0, "blocked");
+    assert_eq!(lines[1].1, vec!["status".to_string()]);
+    assert_eq!(lines[1].2.as_deref(), Some("Story"));
+    assert_eq!(lines[1].3.as_deref(), Some("blocked"));
+    assert_eq!(lines[2].0, "recovered");
+    assert_eq!(lines[2].2.as_deref(), Some("Story"));
+    assert!(lines.iter().all(|l| l.0 != "renamed"));
+
+    // V15: a blocked row is absent from search, bbox and facets, but readable by id.
+    store::save_document(&pool, &id, 0, &wall).await.unwrap();
+    let app = pinakes_core::api::router(
+        pinakes_core::api::AppState::new(pool.clone(), Default::default()).unwrap(),
+    );
+    let get = |path: String| {
+        let app = app.clone();
+        async move {
+            let mut request = Request::builder().uri(path).body(Body::empty()).unwrap();
+            request.extensions_mut().insert(axum::extract::ConnectInfo(
+                "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
+            ));
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            )
+        }
+    };
+    for path in [
+        "/v1/search?tags=news".to_string(),
+        "/v1/search?bbox=7.9,46.9,8.1,47.1".to_string(),
+        "/v1/search?collapse=group&tags=news&facet=tags&fields=facets".to_string(),
+    ] {
+        let (status, body) = get(path.clone()).await;
+        assert_eq!(status, 200, "{path}");
+        assert!(
+            body["items"].as_array().unwrap().is_empty(),
+            "{path}: {body}"
+        );
+    }
+    let (status, body) = get(format!("/v1/resources/{id}")).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["status"], "blocked");
+
+    // V18/K42: hosts fold to registrable domains, top N plus `other`.
+    let series = telemetry::blocked_series(
+        vec![
+            ("a.walled.example".into(), 3),
+            ("b.walled.example".into(), 2),
+            ("one.example".into(), 4),
+            ("two.example".into(), 1),
+            ("three.example".into(), 1),
+        ],
+        2,
+    );
+    assert_eq!(
+        series,
+        vec![
+            ("walled.example".to_string(), 5),
+            ("one.example".to_string(), 4),
+            ("other".to_string(), 2)
+        ]
+    );
+    let metrics = telemetry::Metrics::new().unwrap().with_blocked_hosts(1);
+    metrics.refresh(&pool).await.unwrap();
+    let text = metrics.encode().unwrap();
+    assert!(text.contains("pinakes_blocked_resources{host=\"news.example\"} 1"));
+    let mut cfg = pinakes_core::config::Config::default();
+    cfg.api.blocked_metric_hosts = 0;
+    assert!(cfg.validate().is_err());
+}

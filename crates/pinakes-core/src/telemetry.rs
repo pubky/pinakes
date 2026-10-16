@@ -42,6 +42,7 @@ pub struct Metrics {
     pub overdue: IntGaugeVec,
     pub resources: IntGaugeVec,
     pub blocked: IntGaugeVec,
+    blocked_hosts: usize,
     pub group_url_demotions: IntCounter,
     pub group_pair_budget: IntCounter,
     pub ingest_lag: IntGauge,
@@ -168,9 +169,10 @@ impl Metrics {
             blocked: metric!(
                 IntGaugeVec,
                 "pinakes_blocked_resources",
-                "Resources blocked by upstream access walls, by requested host",
+                "Resources blocked by upstream access walls, by registrable domain (top N, then other)",
                 &["host"]
             ),
+            blocked_hosts: 20,
             resources: metric!(
                 IntGaugeVec,
                 "pinakes_resources",
@@ -236,7 +238,8 @@ impl Metrics {
                 .fetch_one(pool)
                 .await?,
         );
-        for (host, count) in sqlx::query_as::<_, (String, i64)>("SELECT coalesce(host,scheme),count(*) FROM resource WHERE status='blocked' GROUP BY coalesce(host,scheme)").fetch_all(pool).await? {
+        let rows = sqlx::query_as::<_, (String, i64)>("SELECT coalesce(host,scheme),count(*) FROM resource WHERE status='blocked' GROUP BY coalesce(host,scheme)").fetch_all(pool).await?;
+        for (host, count) in blocked_series(rows, self.blocked_hosts) {
             self.blocked.with_label_values(&[&host]).set(count);
         }
         for manifest in crate::adapter::manifests() {
@@ -264,6 +267,10 @@ impl Metrics {
         *refreshed = Some(Instant::now());
         Ok(())
     }
+    pub fn with_blocked_hosts(mut self, n: usize) -> Self {
+        self.blocked_hosts = n.max(1);
+        self
+    }
     pub fn encode(&self) -> Result<String> {
         let mut bytes = Vec::new();
         TextEncoder::new().encode(&self.registry.gather(), &mut bytes)?;
@@ -286,6 +293,23 @@ pub struct Observation {
     pub seconds: f64,
 }
 tokio::task_local! {static FETCHES: Arc<Mutex<Vec<Observation>>>; static DISCOVERY: IntCounterVec;}
+/// Bounded label set: requested hosts fold to registrable domains, then the top `n` by
+/// count (ties by name) keep their own series and the remainder sums into `other`.
+pub fn blocked_series(rows: Vec<(String, i64)>, n: usize) -> Vec<(String, i64)> {
+    let mut domains = std::collections::BTreeMap::<String, i64>::new();
+    for (host, count) in rows {
+        let domain = psl::domain_str(&host).unwrap_or(&host).to_owned();
+        *domains.entry(domain).or_default() += count;
+    }
+    let mut ranked: Vec<_> = domains.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let rest: i64 = ranked.iter().skip(n).map(|(_, c)| c).sum();
+    ranked.truncate(n);
+    if rest > 0 {
+        ranked.push(("other".into(), rest));
+    }
+    ranked
+}
 pub fn discovery(kind: &'static str, decision: &'static str) {
     let _ = DISCOVERY.try_with(|counter| counter.with_label_values(&[kind, decision]).inc());
 }

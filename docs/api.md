@@ -214,9 +214,14 @@ only matching retained changes are returned. Resource history remains accessible
 after orphan expiry because change records do not cascade with resource deletion.
 
 Classes are `created`, `rescheduled` (start/end), `relocated` (location/venue),
-`cancelled`, `uncancelled`, `renamed`, `details`, and `deleted`. If several fields
-change together, this order chooses one class: lifecycle change, time, location,
-name, details; `fields` still lists every changed field. Physical orphan expiry
+`cancelled`, `uncancelled`, `renamed`, `details`, `deleted`, `blocked` and `recovered`.
+If several fields change together, this order chooses one class: lifecycle change, time,
+location, name, details; `fields` still lists every changed field. An access wall is
+`blocked` with `fields: ["status"]` and an `after` that keeps the last accepted facts with
+`status: "blocked"`; the next accepted page is `recovered`. Blocked resources are excluded
+from search, bbox, facets and collapse, but stay readable by ID and in the change feed.
+`pinakes_blocked_resources{host}` folds hosts to registrable domains and keeps the top
+`api.blocked_metric_hosts` (default 20) plus `other`. Physical orphan expiry
 emits `deleted`. A fetch failure emits no change and never cancels a resource.
 The default retention is 90 days; pruning runs hourly.
 

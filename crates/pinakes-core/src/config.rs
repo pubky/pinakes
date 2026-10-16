@@ -280,6 +280,8 @@ pub struct ApiConfig {
     pub requests_per_minute: usize,
     pub cache_capacity: usize,
     pub reach_cost: usize,
+    /// `pinakes_blocked_resources` keeps this many registrable domains plus `other`.
+    pub blocked_metric_hosts: usize,
 }
 impl Default for ApiConfig {
     fn default() -> Self {
@@ -287,6 +289,7 @@ impl Default for ApiConfig {
             requests_per_minute: 120,
             cache_capacity: 10000,
             reach_cost: 6,
+            blocked_metric_hosts: 20,
         }
     }
 }
@@ -375,6 +378,9 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         self.cards.validate()?;
         self.walls().context("invalid web wall settings")?;
+        if !(1..=500).contains(&self.api.blocked_metric_hosts) {
+            bail!("api.blocked_metric_hosts must be 1–500");
+        }
         for other in std::iter::once(&self.pubky).chain(
             crate::resolver::cards::KINDS
                 .iter()
