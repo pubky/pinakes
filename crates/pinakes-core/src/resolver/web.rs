@@ -340,8 +340,10 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
             }
         }
     }
+    // Only the document head is the publisher's: a body `<meta>` may come from user content
+    // (a comment citing an attacker's DOI).
     let mut meta = std::collections::HashMap::new();
-    for el in html.select(&selector("meta")) {
+    for el in html.select(&selector("head meta")) {
         if let (Some(k), Some(v)) = (
             el.value()
                 .attr("property")
@@ -753,6 +755,17 @@ mod tests {
         assert_eq!(
             keys(r#"<meta name="citation_isbn" content="978-0-14-032872-1">"#),
             ["isbn:9780140328721"]
+        );
+        // A body meta (user content) cites nothing; the head's own citation still counts.
+        assert!(keys(
+            r#"<body><p>Comment</p><meta name="citation_doi" content="10.5555/evil"></body>"#
+        )
+        .is_empty());
+        assert_eq!(
+            keys(
+                r#"<head><meta name="citation_doi" content="10.1234/abc"></head><body><p>x</p><meta name="citation_doi" content="10.5555/evil"></body>"#
+            ),
+            ["doi:10.1234/abc"]
         );
         // Other identifiers and malformed values mint nothing, multi-byte text included.
         for head in [
