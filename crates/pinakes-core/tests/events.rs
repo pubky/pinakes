@@ -773,6 +773,13 @@ impl Transport for ProtocolTransport {
             f.status = 301;
             f.location = Some("/federation/m/1".into());
         }
+        if url.path() == "/jsonld-event" {
+            f.body = if o.accept.is_some() {
+                json!({"type":"Event","name":"AP fallback","startTime":"2027-01-20T18:00:00Z","timezone":"Europe/Paris","joinMode":"free","isOnline":true}).to_string().into_bytes()
+            } else {
+                br#"<script type="application/ld+json">{"@type":"Event","name":"Primary JSON-LD","startDate":"2027-01-20T18:00:00Z"}</script>"#.to_vec()
+            };
+        }
         if url.path() == "/gathio" {
             f.body = if o.accept.is_some() {
                 json!({"type":"Person","name":"Actor"})
@@ -842,15 +849,35 @@ async fn advertised_event_negotiation_and_calendar_not_modified(pool: PgPool) {
     assert_eq!(d.name.as_deref(), Some("Event 0"));
     let d = resolver.resolve("https://example.org/ld").await.unwrap();
     assert_eq!(d.name.as_deref(), Some("LD negotiation"));
+    for _ in 0..2 {
+        let d = resolver
+            .resolve("https://example.org/jsonld-event")
+            .await
+            .unwrap();
+        assert_eq!(d.name.as_deref(), Some("Primary JSON-LD"));
+        assert_eq!(d.event.tz.as_deref(), Some("Europe/Paris"));
+        assert_eq!(d.event.join_mode.as_deref(), Some("free"));
+        assert_eq!(d.event.attendance, Some(Attendance::Online));
+    }
+    assert_eq!(
+        t.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(path, accept, _)| path == "/jsonld-event" && accept.is_some())
+            .count(),
+        1
+    );
     t.seen.lock().unwrap().clear();
-    store::ensure_resource(&pool, "webcal://example.org/f.ics")
+    let id = store::ensure_resource(&pool, "webcal://example.org/f.ics")
         .await
         .unwrap();
     let d = resolver
         .resolve("webcal://example.org/f.ics")
         .await
         .unwrap();
-    assert_eq!(d.container.unwrap().occurrences.len(), 1);
+    assert_eq!(d.container.as_ref().unwrap().occurrences.len(), 1);
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
     assert!(resolver
         .resolve("webcal://example.org/f.ics")
         .await
@@ -1847,4 +1874,188 @@ async fn review_change_cap_includes_parent_metadata_change(pool: PgPool) {
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["occurrence_changes"], 2);
+    assert_eq!(rows[0]["resource_changes"], 1);
+    assert_eq!(rows[0]["change_count"], 3);
+    assert_eq!(rows[0]["resource_change"]["class"], "renamed");
+}
+
+struct ConditionalSnapshots {
+    remaining: usize,
+    unconditional: bool,
+    calls: Mutex<Vec<(bool, u16)>>,
+}
+#[async_trait::async_trait]
+impl Transport for ConditionalSnapshots {
+    async fn get(
+        &self,
+        url: &url::Url,
+        addresses: &[std::net::SocketAddr],
+    ) -> anyhow::Result<Fetched> {
+        self.get_with(url, addresses, &Default::default()).await
+    }
+    async fn get_with(
+        &self,
+        url: &url::Url,
+        _: &[std::net::SocketAddr],
+        o: &pinakes_core::resolver::egress::FetchOptions,
+    ) -> anyhow::Result<Fetched> {
+        let mut calls = self.calls.lock().unwrap();
+        let first = calls.is_empty();
+        let etag = if first { "first" } else { "removed" };
+        let conditional = o.validators.etag.is_some();
+        let status = if !self.unconditional && o.validators.etag.as_deref() == Some(etag) {
+            304
+        } else {
+            200
+        };
+        calls.push((conditional, status));
+        Ok(Fetched {
+            validators: pinakes_core::resolver::egress::Validators {
+                etag: Some(etag.into()),
+                ..Default::default()
+            },
+            url: url.clone(),
+            content_type: "text/calendar".into(),
+            status,
+            retry_after_secs: 60,
+            location: None,
+            body: if status == 304 {
+                vec![]
+            } else {
+                future_calendar(if first { 5 } else { self.remaining }).into_bytes()
+            },
+        })
+    }
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn conditional_feed_confirms_small_loss_and_held_snapshot_through_queue(pool: PgPool) {
+    use pinakes_core::{config::QueueConfig, queue};
+    for (remaining, unconditional) in [(4, false), (1, false), (4, true), (1, true)] {
+        let uri = format!("https://example.org/conditional-{remaining}-{unconditional}.ics");
+        let id = store::ensure_resource(&pool, &uri).await.unwrap();
+        let t = Arc::new(ConditionalSnapshots {
+            remaining,
+            unconditional,
+            calls: Mutex::default(),
+        });
+        let resolver = WebResolver {
+            egress: Egress::with_backends(
+                EgressConfig {
+                    host_requests_per_second: 1000.0,
+                    ..Default::default()
+                },
+                Arc::new(PublicDns),
+                t.clone(),
+            ),
+            config: Default::default(),
+            events: Some(Arc::new(pinakes_core::event::service::EventService {
+                pool: pool.clone(),
+                config: EventConfig {
+                    geocoding: false,
+                    ..Default::default()
+                },
+                osm: Arc::new(OsmResolver::new(pool.clone(), OsmConfig::default()).unwrap()),
+            })),
+        };
+        for round in 0..4 {
+            sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+                .bind(&id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let job = queue::claim(&pool, "event", &QueueConfig::default())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(job.id, id);
+            queue::run_job(&pool, &resolver, &QueueConfig::default(), &job)
+                .await
+                .unwrap();
+            let cancelled: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM occurrence WHERE resource_id=$1 AND status='cancelled'",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                cancelled,
+                if round < 2 { 0 } else { (5 - remaining) as i64 },
+                "round {round}, remaining {remaining}, unconditional {unconditional}"
+            );
+        }
+        assert_eq!(
+            *t.calls.lock().unwrap(),
+            vec![
+                (false, 200),
+                (true, 200),
+                (false, 200),
+                (true, if unconditional { 200 } else { 304 })
+            ]
+        );
+        let pending: bool = sqlx::query_scalar("SELECT held_keys IS NOT NULL OR missing_keys<>'{}' FROM event_fetch WHERE resource_id=$1").bind(&id).fetch_one(&pool).await.unwrap();
+        assert!(!pending);
+        let n: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM resource_change WHERE resource_id=$1 AND class='cancelled'",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(n, (5 - remaining) as i64);
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn webcal_url_less_occurrence_never_links_https_twin(pool: PgPool) {
+    let uri = "webcal://example.org/calendar.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    store::ensure_resource(&pool, "https://example.org/calendar.ics")
+        .await
+        .unwrap();
+    let doc = dynamic_parse(uri, &future_calendar(1));
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let link: (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT url,event_resource_id FROM occurrence WHERE resource_id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(link, (None, None));
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn repeated_key_growth_confirms_but_total_row_limit_stays_hard(pool: PgPool) {
+    let uri = "https://example.org/growth.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut d = dynamic_parse(uri, &future_calendar(1));
+    d.container.as_mut().unwrap().limits.max_new_keys = 1;
+    d.container.as_mut().unwrap().limits.max_rows = 4;
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let mut more = fresh(&dynamic_parse(uri, &future_calendar(4)));
+    more.fetched_at = d.fetched_at + 1;
+    more.container.as_mut().unwrap().limits = d.container.as_ref().unwrap().limits.clone();
+    store::save_document(&pool, &id, 0, &more).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM occurrence")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    more = fresh(&more);
+    store::save_document(&pool, &id, 0, &more).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM occurrence")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        4
+    );
+    let holds: i32 = sqlx::query_scalar("SELECT hold_count FROM event_fetch WHERE resource_id=$1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(holds, 0);
 }

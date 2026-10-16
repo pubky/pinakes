@@ -342,18 +342,23 @@ impl OsmResolver {
         id: &OsmId,
         doc: &ResourceMeta,
         display_name: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let mut display_name = display_name.map(str::to_owned);
         if let Some(s) = &mut display_name {
             crate::model::truncate(s, 2048);
         }
-        sqlx::query(r#"INSERT INTO osm_place(osm_type,osm_id,point,bbox,name,category,address,tags,display_name,type,type_path,doc,fetched_at,refresh_at,status,fetch_doc,versions,fetch_display_name)
+        let version: Option<String> = sqlx::query_scalar(r#"INSERT INTO osm_place(osm_type,osm_id,point,bbox,name,category,address,tags,display_name,type,type_path,doc,fetched_at,refresh_at,status,fetch_doc,versions,fetch_display_name)
           VALUES($1,$2,CASE WHEN $3::float8 IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint($4,$3),4326) END,$5,$6,$7,$8,$9,$10,$11,$12,$13,to_timestamp($14::float8/1000),to_timestamp($14::float8/1000)+$15*interval '1 second',$16,$13,jsonb_build_object(md5(($13::jsonb-ARRAY['fetched_at','ttl_secs']::text[])::text),$13::jsonb-ARRAY['fetched_at','ttl_secs']::text[]),$10)
           ON CONFLICT(osm_type,osm_id) DO UPDATE SET fetch_doc=excluded.fetch_doc,fetch_display_name=excluded.fetch_display_name,versions=osm_place.versions || excluded.versions,fetched_at=excluded.fetched_at,refresh_at=excluded.refresh_at
-          WHERE osm_place.fetched_at<=excluded.fetched_at"#)
+          WHERE osm_place.fetched_at<=excluded.fetched_at RETURNING md5((fetch_doc-ARRAY['fetched_at','ttl_secs']::text[])::text)"#)
           .bind(&id.osm_type).bind(id.id).bind(doc.location.as_ref().map(|p|p.lat)).bind(doc.location.as_ref().map(|p|p.lon)).bind(doc.bbox.map(|b|b.to_vec()))
-          .bind(&doc.name).bind(&doc.category).bind(json!(doc.address)).bind(json!(doc.attributes)).bind(display_name).bind(&doc.type_name).bind(&doc.type_path).bind(json!(doc)).bind(doc.fetched_at as f64).bind(doc.ttl_secs as f64).bind(doc.status.as_str()).execute(&self.pool).await?;
-        Ok(())
+          .bind(&doc.name).bind(&doc.category).bind(json!(doc.address)).bind(json!(doc.attributes)).bind(display_name).bind(&doc.type_name).bind(&doc.type_path).bind(json!(doc)).bind(doc.fetched_at as f64).bind(doc.ttl_secs as f64).bind(doc.status.as_str()).fetch_optional(&self.pool).await?;
+        // A late response cannot overwrite newer facts; return the actually stored version.
+        match version {
+            Some(version) => Ok(version),
+            None => Ok(sqlx::query_scalar("SELECT md5((fetch_doc-ARRAY['fetched_at','ttl_secs']::text[])::text) FROM osm_place WHERE osm_type=$1 AND osm_id=$2")
+                .bind(&id.osm_type).bind(id.id).fetch_one(&self.pool).await?),
+        }
     }
     async fn fallback(&self, id: &OsmId) -> Result<Option<Value>> {
         if id.osm_type != "node" {
@@ -631,5 +636,27 @@ mod tests {
         for kind in all["osm"].as_object().unwrap().values() {
             assert!(!crate::model::type_path(kind.as_str().unwrap()).is_empty());
         }
+    }
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn saved_version_is_the_key_even_with_diagnostic_fields(pool: PgPool) {
+        let resolver = OsmResolver::new(pool.clone(), OsmConfig::default()).unwrap();
+        let id = parse_id("https://www.openstreetmap.org/node/123").unwrap();
+        let mut doc = ResourceMeta::new(&id.uri(), "osm", 3600);
+        doc.set_type("Place");
+        doc.attributes.insert("content_length".into(), "42".into());
+        doc.event.warnings.push("fixture_warning".into());
+        let version = resolver.save(&id, &doc, None).await.unwrap();
+        let saved: Value =
+            sqlx::query_scalar("SELECT versions->$1 FROM osm_place WHERE osm_id=123")
+                .bind(&version)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(saved["warnings"], json!(["fixture_warning"]));
+        assert_eq!(saved["attributes"]["content_length"], "42");
+        assert!(saved.get("fetched_at").is_none());
+        doc.fetched_at -= 1000;
+        doc.name = Some("Stale".into());
+        assert_eq!(resolver.save(&id, &doc, None).await.unwrap(), version);
     }
 }

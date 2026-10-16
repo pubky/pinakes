@@ -197,6 +197,8 @@ impl Default for ContainerLimits {
 }
 #[derive(Clone, Debug, Default)]
 pub struct Container {
+    /// Committed with the snapshot, never before parsing or a generation fence.
+    pub validators: Option<crate::resolver::egress::Validators>,
     pub limits: ContainerLimits,
     pub occurrences: Vec<Occurrence>,
     pub feed_ttl: Option<u64>,

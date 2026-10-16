@@ -242,7 +242,7 @@ pub async fn save(
         .as_ref()
         .filter(|p| p.exceeds_limit(usize::from(diff.is_some())))
     {
-        plan.append_summary(&mut tx, id).await?;
+        plan.append_summary(&mut tx, id, diff.as_ref()).await?;
     } else {
         if let Some(plan) = prepared {
             plan.append_changes(&mut tx, id).await?;

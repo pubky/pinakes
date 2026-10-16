@@ -11,10 +11,19 @@ pub fn next(
     now: DateTime<Utc>,
     config: &RefreshConfig,
 ) -> Option<DateTime<Utc>> {
+    next_times(manifest, doc.start, doc.end, now, config)
+}
+fn next_times(
+    manifest: &Manifest,
+    start: Option<DateTime<Utc>>,
+    end: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    config: &RefreshConfig,
+) -> Option<DateTime<Utc>> {
     if manifest.mode == Mode::None {
         return None;
     }
-    let end = doc.end.or(doc.start);
+    let end = end.or(start);
     let final_at = end.map(|end| {
         end.checked_add_signed(Duration::hours(24))
             .unwrap_or(DateTime::<Utc>::MAX_UTC)
@@ -25,7 +34,7 @@ pub fn next(
     if end.is_some_and(|end| now >= end) {
         return final_at;
     }
-    let until = doc.start.map(|start| start - now);
+    let until = start.map(|start| start - now);
     let row = match until {
         None => 0,
         Some(d) if d > Duration::days(30) => 0,
@@ -53,7 +62,7 @@ pub fn next(
 /// Container TTL is meaningful only in the far/medium rows; near starts tighten it.
 pub fn container_next(
     manifest: &Manifest,
-    documents: &[ResourceMeta],
+    dates: impl IntoIterator<Item = (Option<DateTime<Utc>>, Option<DateTime<Utc>>)>,
     feed_ttl: Option<u64>,
     now: DateTime<Utc>,
     config: &RefreshConfig,
@@ -64,11 +73,11 @@ pub fn container_next(
         config.container_secs[1] = ttl;
         config.container_secs[2] = ttl.min(config.container_secs[2]);
     }
-    documents
-        .iter()
-        .filter_map(|doc| next(manifest, doc, now, &config))
+    dates
+        .into_iter()
+        .filter_map(|(start, end)| next_times(manifest, start, end, now, &config))
         .min()
-        .or_else(|| next(manifest, &ResourceMeta::default(), now, &config))
+        .or_else(|| next_times(manifest, None, None, now, &config))
 }
 #[cfg(test)]
 mod tests {
@@ -148,7 +157,7 @@ mod tests {
             Some(now + Duration::hours(4))
         );
         assert_eq!(
-            container_next(&manifest, &[], Some(8 * 3600), now, &config),
+            container_next(&manifest, [], Some(8 * 3600), now, &config),
             Some(now + Duration::hours(8))
         );
         manifest.mode = Mode::Cursor;

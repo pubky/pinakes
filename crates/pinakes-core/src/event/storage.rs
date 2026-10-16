@@ -6,6 +6,7 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub struct Prepared {
+    validators: Option<Value>,
     last: Option<i64>,
     fetched_at: i64,
     horizon: chrono::DateTime<chrono::Utc>,
@@ -73,12 +74,13 @@ pub fn preserve_venue(doc: &mut ResourceMeta, old: &ResourceMeta) {
 fn links(
     doc: &ResourceMeta,
     id: &str,
+    canonical_id: &str,
     source_host: Option<&str>,
     limits: &super::ContainerLimits,
 ) -> (Option<String>, Option<String>) {
     let Some((target, url, _)) = crate::model::identity(&doc.url)
         .ok()
-        .filter(|(target, _, _)| target != id)
+        .filter(|(target, _, _)| target != id && target != canonical_id)
     else {
         return (None, None);
     };
@@ -117,6 +119,7 @@ pub async fn prepare(
     let source_host = url::Url::parse(&source_uri)
         .ok()
         .and_then(|u| u.host_str().map(str::to_owned));
+    let canonical_id = crate::model::identity(&super::calendar::canonical_feed(&source_uri))?.0;
     let rows=sqlx::query("SELECT uid,recurrence_id,doc,status,content_hash,sequence,modified FROM occurrence WHERE resource_id=$1 ORDER BY uid,recurrence_id").bind(id).fetch_all(pool).await?;
     let now = chrono::Utc::now();
     let mutable = |d: &ResourceMeta| {
@@ -183,7 +186,7 @@ pub async fn prepare(
         .is_some_and(|h| h.iter().cloned().collect::<BTreeSet<_>>() == incoming);
     let row_growth = incoming.iter().filter(|k| !old.contains_key(*k)).count();
     let excessive = old.len() + row_growth > container.limits.max_rows
-        || (!old.is_empty() && fresh.len() > container.limits.max_new_keys);
+        || (!repeated && !old.is_empty() && fresh.len() > container.limits.max_new_keys);
     let hold = excessive || losses.len() * 2 > keys.len() && !repeated;
     let holds = if hold { old_holds.saturating_add(1) } else { 0 };
     let floor = normal_ttl.max(container.limits.cadence_floor).max(3600);
@@ -195,6 +198,11 @@ pub async fn prepare(
         .min(7 * 86400)
         .max(floor);
     let mut plan = Prepared {
+        validators: container
+            .validators
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?,
         retention_days: container.limits.retention_days,
         last,
         fetched_at,
@@ -280,7 +288,13 @@ pub async fn prepare(
         if let Some(change) = pending(before.as_ref(), &after, key.clone()) {
             plan.push_change(change, container.limits.max_changes);
         }
-        let (url, link) = links(&doc, id, source_host.as_deref(), &container.limits);
+        let (url, link) = links(
+            &doc,
+            id,
+            &canonical_id,
+            source_host.as_deref(),
+            &container.limits,
+        );
         plan.rows.push(json!({"uid":item.uid,"rid":item.recurrence_id,"start":doc.start,"end":doc.end,"name":doc.name,"venue_id":doc.event.venue.as_ref().and_then(|v|v.resource_id.as_deref()),"status":doc.event.event_status.as_ref().unwrap_or(&EventStatus::Scheduled).as_str(),"url":url,"link":link,"doc":doc,"lat":doc.location.as_ref().map(|p|p.lat),"lon":doc.location.as_ref().map(|p|p.lon),"sequence":item.sequence,"modified":item.modified,"hash":item.content_hash,"volatile":item.volatile,"supersedes":supersedes}));
     }
     for key in cancelled.iter().chain(superseded.iter()) {
@@ -308,7 +322,13 @@ pub async fn prepare(
         }
         plan.keys.retain(|k| k != key);
         plan.missing.remove(key);
-        let (url, link) = links(&doc, id, source_host.as_deref(), &container.limits);
+        let (url, link) = links(
+            &doc,
+            id,
+            &canonical_id,
+            source_host.as_deref(),
+            &container.limits,
+        );
         plan.rows.push(json!({"uid":uid,"rid":rid,"start":doc.start,"end":doc.end,"name":doc.name,"venue_id":doc.event.venue.as_ref().and_then(|v|v.resource_id.as_deref()),"status":status,"url":url,"link":link,"doc":doc,"lat":doc.location.as_ref().map(|p|p.lat),"lon":doc.location.as_ref().map(|p|p.lon),"sequence":seq,"modified":modified,"hash":hash,"volatile":false}));
     }
     Ok(plan)
@@ -331,7 +351,7 @@ pub async fn apply(
     if current != plan.last || current.is_some_and(|at| plan.fetched_at <= at) {
         return Ok(None);
     }
-    sqlx::query("UPDATE event_fetch SET last_snapshot_at=$2,keys=$3,held_keys=$4,missing_keys=$5,hold_count=$6,horizon_start=$7,retention_days=$8 WHERE resource_id=$1").bind(id).bind(plan.fetched_at).bind(&plan.keys).bind(&plan.held).bind(json!(plan.missing)).bind(plan.holds as i32).bind(plan.horizon).bind(plan.retention_days as i32).execute(&mut **tx).await?;
+    sqlx::query("UPDATE event_fetch SET last_snapshot_at=$2,keys=$3,held_keys=$4,missing_keys=$5,hold_count=$6,horizon_start=$7,retention_days=$8,validators=coalesce($9,validators) WHERE resource_id=$1").bind(id).bind(plan.fetched_at).bind(&plan.keys).bind(&plan.held).bind(json!(plan.missing)).bind(plan.holds as i32).bind(plan.horizon).bind(plan.retention_days as i32).bind(&plan.validators).execute(&mut **tx).await?;
     if !plan.applied {
         sqlx::query("INSERT INTO source_state(source,feed_held_total) VALUES('event',1) ON CONFLICT(source) DO UPDATE SET feed_held_total=source_state.feed_held_total+1").execute(&mut **tx).await?;
         return Ok(Some(false));
@@ -348,16 +368,21 @@ impl Prepared {
     pub fn exceeds_limit(&self, additional: usize) -> bool {
         self.change_count.saturating_add(additional) > self.change_limit
     }
-    pub async fn append_summary(&self, tx: &mut Transaction<'_, Postgres>, id: &str) -> Result<()> {
+    pub async fn append_summary(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        id: &str,
+        parent: Option<&changes::Diff>,
+    ) -> Result<()> {
         changes::append(
             tx,
             id,
             "event",
             None,
-            Some(json!({"occurrence_changes":self.change_count,"type_path":["Thing","Event"]})),
+            Some(json!({"occurrence_changes":self.change_count,"resource_changes":usize::from(parent.is_some()),"change_count":self.change_count+usize::from(parent.is_some()),"resource_change":parent.map(|d|json!({"class":d.class,"fields":d.fields})),"type_path":["Thing","Event"]})),
             changes::Diff {
                 class: "details",
-                fields: vec!["occurrence_changes".into()],
+                fields: if parent.is_some() { vec!["occurrence_changes".into(), "resource_change".into()] } else { vec!["occurrence_changes".into()] },
             },
             None,
         )

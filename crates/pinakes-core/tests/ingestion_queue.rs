@@ -663,3 +663,56 @@ async fn resolver_panic_is_a_failed_job_and_next_batch_can_run(pool: PgPool) {
         "ok"
     );
 }
+
+struct FinishPanic;
+#[async_trait::async_trait]
+impl Resolver for FinishPanic {
+    fn name(&self) -> &'static str {
+        "fixture"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, uri: &str) -> anyhow::Result<ResourceMeta> {
+        Ok(ResourceMeta::new(uri, "fixture", 3600))
+    }
+    fn refresh_after(&self, doc: &ResourceMeta) -> Duration {
+        assert!(!doc.url.ends_with("/poison"), "completion panic");
+        Duration::from_secs(3600)
+    }
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn finish_panic_fails_one_job_and_same_worker_finishes_rest(pool: PgPool) {
+    let mut jobs = vec![];
+    for path in ["poison", "healthy"] {
+        let uri = format!("https://example.org/{path}");
+        let id = store::ensure_resource(&pool, &uri).await.unwrap();
+        jobs.push(queue::Job {
+            id,
+            uri,
+            generation: 0,
+            attempts: 0,
+        });
+    }
+    queue::run_batch(&pool, &FinishPanic, &QueueConfig::default(), &jobs)
+        .await
+        .unwrap();
+    let first: (String, i32, Option<String>) =
+        sqlx::query_as("SELECT status,attempts,last_error FROM resource WHERE id=$1")
+            .bind(&jobs[0].id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(first, ("error".into(), 1, Some("parse".into())));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM resource WHERE id=$1")
+            .bind(&jobs[1].id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "ok"
+    );
+    queue::run_job(&pool, &FinishPanic, &QueueConfig::default(), &jobs[0])
+        .await
+        .unwrap();
+}

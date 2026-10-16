@@ -22,7 +22,7 @@ impl EventService {
         let feed_hint = is_feed(uri) && self.config.calendars;
         let validators = if feed_hint {
             sqlx::query_scalar::<_, serde_json::Value>(
-                "SELECT validators FROM event_fetch WHERE resource_id=$1",
+                "SELECT validators FROM event_fetch WHERE resource_id=$1 AND last_snapshot_at IS NOT NULL AND held_keys IS NULL AND missing_keys='{}'::jsonb",
             )
             .bind(crate::model::identity(uri)?.0)
             .fetch_optional(&self.pool)
@@ -51,10 +51,9 @@ impl EventService {
             }
             other => other?,
         };
-        // A 304 renews the accepted snapshot's TTL; it is not a disappearance observation.
-        if feed_hint && fetched.status == 200 {
-            sqlx::query("INSERT INTO event_fetch(resource_id,validators) SELECT id,$2 FROM resource WHERE id=$1 ON CONFLICT(resource_id) DO UPDATE SET validators=$2").bind(crate::model::identity(uri)?.0).bind(serde_json::to_value(&fetched.validators)?).execute(&self.pool).await?;
-        }
+        // Conditional requests resume only after a snapshot is accepted and key-loss/hold
+        // confirmation is complete. Otherwise a new ETag followed by perpetual 304s
+        // would leave the first disappearance observation pending forever.
         Ok(fetched)
     }
     pub async fn container(
@@ -99,6 +98,7 @@ impl EventService {
         .await??;
         if let Some(doc) = &mut result {
             if let Some(c) = &mut doc.container {
+                c.validators = Some(fetched.validators.clone());
                 // One request per distinct structured address, bounded by the total resolver deadline.
                 let mut venues: std::collections::BTreeMap<
                     String,
@@ -229,7 +229,11 @@ impl EventService {
             })
             .await?;
         let is_event = event.type_path.contains(&"Event".into());
-        if self.config.activitypub && (advertised.is_some() || (!is_event && event_candidate)) {
+        if self.config.activitypub
+            && (advertised.is_some()
+                || (!is_event && event_candidate)
+                || (is_event && event.event.tz.is_none()))
+        {
             let (alternate, accept) =
                 advertised.unwrap_or_else(|| (uri.to_owned(), "application/activity+json".into()));
             for _ in 0..1 {
@@ -429,12 +433,9 @@ impl EventService {
             place.name = hit["name"].as_str().map(str::to_owned);
         }
         let key = crate::resolver::osm::parse_id(&place.url).expect("mapped OSM id");
-        self.osm
+        let version = self
+            .osm
             .save(&key, &place, hit["display_name"].as_str())
-            .await?;
-        let version: String = sqlx::query_scalar("SELECT md5($1::jsonb::text)")
-            .bind(crate::changes::normalize(&place))
-            .fetch_one(&self.pool)
             .await?;
         venue.osm_id = Some(key.key());
         venue.osm_version = Some(version);

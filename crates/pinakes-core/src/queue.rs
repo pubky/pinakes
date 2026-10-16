@@ -69,11 +69,16 @@ pub async fn run_job(
     cfg: &QueueConfig,
     job: &Job,
 ) -> Result<()> {
-    let result = tokio::time::timeout(Duration::from_secs(15), resolver.resolve(&job.uri))
-        .await
-        .map_err(anyhow::Error::from)
-        .and_then(|r| r);
-    finish_job(
+    let result = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        Duration::from_secs(15),
+        resolver.resolve(&job.uri),
+    ))
+    .catch_unwind()
+    .await
+    .map_err(|_| anyhow::anyhow!("resolver panic"))
+    .and_then(|r| r.map_err(Into::into))
+    .and_then(|r| r);
+    guarded_finish_job(
         pool,
         resolver,
         cfg,
@@ -82,6 +87,26 @@ pub async fn run_job(
         result,
     )
     .await
+}
+async fn guarded_finish_job(
+    pool: &PgPool,
+    resolver: &dyn Resolver,
+    cfg: &QueueConfig,
+    refresh: &crate::config::RefreshConfig,
+    job: &Job,
+    result: Result<crate::model::ResourceMeta>,
+) -> Result<()> {
+    match std::panic::AssertUnwindSafe(finish_job(pool, resolver, cfg, refresh, job, result))
+        .catch_unwind()
+        .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            crate::telemetry::parser_error();
+            tracing::error!(resource_id=%job.id, resolver=resolver.name(), "job completion panicked");
+            failed(pool, job, cfg, "parse").await
+        }
+    }
 }
 async fn finish_job(
     pool: &PgPool,
@@ -149,11 +174,10 @@ async fn finish_job(
                     manifest.mode = crate::adapter::Mode::Container;
                     crate::scheduler::container_next(
                         &manifest,
-                        &container
+                        container
                             .occurrences
                             .iter()
-                            .map(|o| o.doc.clone())
-                            .collect::<Vec<_>>(),
+                            .map(|o| (o.doc.start, o.doc.end)),
                         container.feed_ttl,
                         now,
                         refresh,
@@ -265,7 +289,7 @@ async fn run_batch_config(
         crate::source::outcome(pool, resolver.name(), error.as_deref()).await?;
     }
     for (job, result) in jobs.iter().zip(results) {
-        finish_job(pool, resolver, cfg, refresh, job, result).await?;
+        guarded_finish_job(pool, resolver, cfg, refresh, job, result).await?;
     }
     Ok(())
 }
