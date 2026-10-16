@@ -682,3 +682,38 @@ async fn public_info_is_redacted_and_source_errors_are_classes(pool: PgPool) {
         "info snapshot is cached"
     );
 }
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn retention_preserves_normalized_current_and_cached_osm_versions(pool: PgPool) {
+    let mut current = ResourceMeta::new("https://www.openstreetmap.org/node/77", "osm", 3600);
+    current.set_type("Place");
+    current.event.warnings.push("diagnostic".into());
+    current
+        .attributes
+        .insert("content_length".into(), "42".into());
+    current.aliases = vec![
+        "https://example.org/z".into(),
+        "https://example.org/a".into(),
+        "https://example.org/z".into(),
+    ];
+    let mut fetched = current.clone();
+    fetched.name = Some("New cached name".into());
+    sqlx::query("INSERT INTO osm_place(osm_type,osm_id,type,type_path,doc,fetch_doc,versions,fetched_at,refresh_at,status) VALUES('node',77,'Place',ARRAY['Thing','Place'],$1,$2,jsonb_build_object(md5($3::jsonb::text),$3::jsonb,md5($4::jsonb::text),$4::jsonb,'unreferenced','{}'::jsonb),now(),now(),'ok')").bind(json!(current)).bind(json!(fetched)).bind(changes::normalize(&current)).bind(changes::normalize(&fetched)).execute(&pool).await.unwrap();
+    changes::retain(&pool, 90).await.unwrap();
+    let kept: Value = sqlx::query_scalar("SELECT versions FROM osm_place WHERE osm_id=77")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(kept.as_object().unwrap().len(), 2);
+    assert!(kept.get("unreferenced").is_none());
+    assert!(kept
+        .as_object()
+        .unwrap()
+        .values()
+        .any(|v| v == &changes::normalize(&current)));
+    assert!(kept
+        .as_object()
+        .unwrap()
+        .values()
+        .any(|v| v == &changes::normalize(&fetched)));
+}

@@ -306,7 +306,10 @@ Each `(feed, UID, recurrence_id)` keeps its own version, cancellation state and 
 history. Two distinct successful observations confirm disappearance; an over-50% loss
 holds the snapshot until a matching fresh fetch. A former feed returning HTML 200 or HTTP 404/410 follows the same two-observation
 rule; confirmed missing parents hide their occurrence units from search while retaining
-direct history. A fresh valid body can restore them. Older/replayed snapshots are fenced.
+direct history. A fresh valid body can restore them. The first vanished-feed observation
+is a held empty snapshot: it increments `feed_held_total` and may trigger `FeedHeld`,
+just like a large key loss; the next matching observation resolves it. Older/replayed
+snapshots are fenced.
 Ended instances freeze after 24 hours; horizon roll-off does not cancel them. A URI in
 an occurrence links only to a different existing resource on the same host or an
 explicitly configured `event.container.link_hosts` host, without an unsolicited fetch.

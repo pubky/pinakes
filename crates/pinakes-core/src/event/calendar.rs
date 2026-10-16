@@ -1302,7 +1302,9 @@ pub fn structured_feed(
                 })
         };
         let Some(start) = parse(&start) else {
-            bail!("invalid feed event date")
+            dated -= 1;
+            container.warnings.push("invalid_feed_item_date".into());
+            return Ok(());
         };
         if start < lo || start > hi {
             return Ok(());
@@ -1445,7 +1447,8 @@ pub fn structured_feed(
             }
         }
     }
-    // An ordinary RSS/JSON feed is not an authoritative empty event snapshot.
+    // Without usable dates this is not a new event feed. A previously accepted
+    // feed is handled by disappeared(), with empty-snapshot confirmation.
     check_budget()?;
     if dated == 0 && items > 0 {
         return Ok(None);

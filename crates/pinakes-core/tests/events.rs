@@ -2435,3 +2435,44 @@ async fn chunked_occurrence_upsert_remains_one_snapshot(pool: PgPool) {
     .unwrap();
     assert_eq!(count, 600);
 }
+
+#[test]
+fn malformed_structured_feed_dates_keep_healthy_siblings() {
+    for invalid in [
+        json!("TBD"),
+        json!("n/a"),
+        json!(1.5),
+        json!({"date":"later"}),
+    ] {
+        let body=json!({"items":[{"id":"bad","start":invalid},{"id":"good","start":"2026-10-20T18:00:00Z"}]}).to_string();
+        let d = calendar::structured_feed(
+            "https://example.org/feed.json",
+            body.as_bytes(),
+            &EventConfig::default(),
+            now(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(d.container.unwrap().occurrences.len(), 1);
+        assert!(d.event.warnings.contains(&"invalid_feed_item_date".into()));
+    }
+    let body=b"<feed><entry><id>bad</id><start>TBD</start></entry><entry><id>good</id><start>2026-10-20T18:00:00Z</start></entry></feed>";
+    let d = calendar::structured_feed(
+        "https://example.org/feed.xml",
+        body,
+        &EventConfig::default(),
+        now(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(d.container.unwrap().occurrences.len(), 1);
+    assert!(d.event.warnings.contains(&"invalid_feed_item_date".into()));
+    assert!(calendar::structured_feed(
+        "https://example.org/feed.json",
+        br#"{"items":[{"id":"bad","start":"TBD"}]}"#,
+        &EventConfig::default(),
+        now()
+    )
+    .unwrap()
+    .is_none());
+}

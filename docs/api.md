@@ -321,7 +321,9 @@ unconditional GET obtains a body for confirmation or recurrence expansion. Eligi
 A prior feed returning HTML 200 or HTTP 404/410 counts as an empty observation. Two
 observations cancel mutable rows and mark the parent missing, hiding its units from
 search; retained history remains available at the occurrence route. A valid body can
-restore the feed. Mixed dated/undated RSS/Atom/JSON feeds keep dated items and warn.
+restore the feed. The first observation counts toward `feed_held_total`/`FeedHeld`.
+Mixed dated/undated RSS/Atom/JSON feeds keep usable dated items and warn; unparseable
+starts add `invalid_feed_item_date` without failing healthy siblings.
 
 Calendar rows use SEQUENCE/LAST-MODIFIED and normalized content hashes; DTSTAMP,
 unknown vendor props and fetch noise do not create changes. Explicit cancellations

@@ -313,9 +313,16 @@ pub async fn retain(pool: &PgPool, days: u32) -> Result<()> {
     // Preserve any historical version still referenced by a retained change or accepted resource.
     // Lock candidate rows before inspecting references so a concurrent append cannot lose its snapshot.
     let mut tx = pool.begin().await?;
-    let candidates: Vec<(String, i64)> = sqlx::query_as("SELECT osm_type,osm_id FROM osm_place WHERE (SELECT count(*) FROM jsonb_object_keys(versions))>1 FOR UPDATE SKIP LOCKED").fetch_all(&mut *tx).await?;
-    for (kind, id) in candidates {
-        sqlx::query("WITH kept AS (SELECT coalesce(jsonb_object_agg(v.key,v.value),'{}'::jsonb) AS versions FROM osm_place o CROSS JOIN LATERAL jsonb_each(o.versions) v WHERE o.osm_type=$1 AND o.osm_id=$2 AND (v.key=md5((o.doc-ARRAY['fetched_at','ttl_secs']::text[])::text) OR v.key=md5((o.fetch_doc-ARRAY['fetched_at','ttl_secs']::text[])::text) OR EXISTS(SELECT 1 FROM resource r WHERE r.osm_type=o.osm_type AND r.osm_id=o.osm_id AND r.osm_version=v.key) OR EXISTS(SELECT 1 FROM resource r WHERE r.doc#>>'{venue,osm_id}'=o.osm_type||'/'||o.osm_id AND r.doc#>>'{venue,osm_version}'=v.key) OR EXISTS(SELECT 1 FROM occurrence x WHERE x.doc#>>'{venue,osm_id}'=o.osm_type||'/'||o.osm_id AND x.doc#>>'{venue,osm_version}'=v.key) OR EXISTS(SELECT 1 FROM resource_change c WHERE (c.before#>>'{venue,osm_id}'=o.osm_type||'/'||o.osm_id AND c.before#>>'{venue,osm_version}'=v.key) OR (c.after#>>'{venue,osm_id}'=o.osm_type||'/'||o.osm_id AND c.after#>>'{venue,osm_version}'=v.key)) OR EXISTS(SELECT 1 FROM resource_change c WHERE c.osm_type=o.osm_type AND c.osm_id=o.osm_id AND (c.before->>'version'=v.key OR c.after->>'version'=v.key)))) UPDATE osm_place o SET versions=k.versions FROM kept k WHERE o.osm_type=$1 AND o.osm_id=$2 AND o.versions IS DISTINCT FROM k.versions").bind(kind).bind(id).execute(&mut *tx).await?;
+    let candidates = sqlx::query("SELECT osm_type,osm_id,doc,fetch_doc FROM osm_place WHERE (SELECT count(*) FROM jsonb_object_keys(versions))>1 FOR UPDATE SKIP LOCKED").fetch_all(&mut *tx).await?;
+    for row in candidates {
+        let kind: String = row.get("osm_type");
+        let id: i64 = row.get("osm_id");
+        let current = normalize(&serde_json::from_value(row.get("doc"))?);
+        let fetched = row
+            .get::<Option<Value>, _>("fetch_doc")
+            .map(|value| serde_json::from_value(value).map(|doc| normalize(&doc)))
+            .transpose()?;
+        sqlx::query("WITH kept AS (SELECT coalesce(jsonb_object_agg(v.key,v.value),'{}'::jsonb) AS versions FROM osm_place o CROSS JOIN LATERAL jsonb_each(o.versions) v WHERE o.osm_type=$1 AND o.osm_id=$2 AND (v.key=md5($3::jsonb::text) OR v.key=md5($4::jsonb::text) OR EXISTS(SELECT 1 FROM resource r WHERE r.osm_type=o.osm_type AND r.osm_id=o.osm_id AND r.osm_version=v.key) OR EXISTS(SELECT 1 FROM resource r WHERE r.doc#>>'{venue,osm_id}'=o.osm_type||'/'||o.osm_id AND r.doc#>>'{venue,osm_version}'=v.key) OR EXISTS(SELECT 1 FROM occurrence x WHERE x.doc#>>'{venue,osm_id}'=o.osm_type||'/'||o.osm_id AND x.doc#>>'{venue,osm_version}'=v.key) OR EXISTS(SELECT 1 FROM resource_change c WHERE (c.before#>>'{venue,osm_id}'=o.osm_type||'/'||o.osm_id AND c.before#>>'{venue,osm_version}'=v.key) OR (c.after#>>'{venue,osm_id}'=o.osm_type||'/'||o.osm_id AND c.after#>>'{venue,osm_version}'=v.key)) OR EXISTS(SELECT 1 FROM resource_change c WHERE c.osm_type=o.osm_type AND c.osm_id=o.osm_id AND (c.before->>'version'=v.key OR c.after->>'version'=v.key)))) UPDATE osm_place o SET versions=k.versions FROM kept k WHERE o.osm_type=$1 AND o.osm_id=$2 AND o.versions IS DISTINCT FROM k.versions").bind(kind).bind(id).bind(current).bind(fetched).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     Ok(())
