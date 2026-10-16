@@ -104,6 +104,11 @@
     "https://alice.pages.dev/post/two",
     "https://bob.pages.dev/post/one"
   ],
+  "podbean.com": [
+    "https://alice.podbean.com/e/episode-one/",
+    "https://alice.podbean.com/e/episode-two/",
+    "https://bob.podbean.com/e/episode-one/"
+  ],
   "rss.com": [
     "https://rss.com/podcasts/alice/feed.xml",
     "https://rss.com/podcasts/alice/feed.xml?format=xml",

@@ -51,8 +51,13 @@ it changes. For a manual rebuild use `DELETE FROM group_input; INSERT INTO group
 SELECT DISTINCT resource_id FROM group_unit ON CONFLICT DO NOTHING;`. Existing retry windows
 remain in force. Changing `groups.cross_container_occurrences` takes effect as that queue drains.
 
-Tenant rules support `"subdomain"`, `"first_path_segment"` and `{"path_segment":3}` (one-based,
-1–8). Prefix segments remain part of the scope. Tests cover the concrete URL shapes for every
+Tenant rules support `"subdomain"`, `"first_path_segment"`, `{"path_segment":3}` (one-based,
+1–8) and `{"path":{"segment":3,"skip":["u/*"],"extend":["s"],"query":["src"]}}`: `skip`
+removes the first matching noise window (Google Calendar's per-user `u/{n}`), a tenant segment
+listed in `extend` takes the next segment too (anchor.fm `/s/{id}` feeds beside `/{show}`
+pages), and when the path is too short the first listed query parameter present scopes the
+tenant (`embed?src=`); otherwise each URL is its own scope. Prefix segments remain part of
+the scope. Hosted `*.podbean.com` sites are subdomain tenants. Tests cover the concrete URL shapes for every
 seed, including constant-prefix Acast, Anchor, Google, SoundCloud and Podbean feed URLs.
 Capability-only iCloud/Outlook path rules are removed; native calendars already use their
 referenced feed identity as the container scope, without treating shared service paths as tenants.

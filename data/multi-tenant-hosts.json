@@ -1,10 +1,24 @@
 {
   "anchor.fm": {
-    "path_segment": 2
+    "path": {
+      "segment": 1,
+      "extend": [
+        "s"
+      ]
+    }
   },
   "blogspot.com": "subdomain",
   "calendar.google.com": {
-    "path_segment": 3
+    "path": {
+      "segment": 3,
+      "skip": [
+        "u/*"
+      ],
+      "query": [
+        "src",
+        "cid"
+      ]
+    }
   },
   "carrd.co": "subdomain",
   "feed.podbean.com": {
@@ -30,6 +44,7 @@
   "netlify.app": "subdomain",
   "notion.site": "subdomain",
   "pages.dev": "subdomain",
+  "podbean.com": "subdomain",
   "rss.com": {
     "path_segment": 2
   },

@@ -1688,3 +1688,77 @@ async fn round4_lock_contention_retries_shortly_and_partial_plans_are_not_cached
             .unwrap();
     assert_eq!(marker, None);
 }
+
+#[test]
+fn round4_tenant_shapes_cover_user_prefixes_show_pages_and_podbean_sites() {
+    let o = |u: &str| group_keys::origin(u).unwrap();
+    // V20: /calendar/u/{n}/ is a per-user prefix, never a shared tenant.
+    let ical = "https://calendar.google.com/calendar/ical/alice%40example.org/public/basic.ics";
+    assert_eq!(
+        o(ical),
+        o("https://calendar.google.com/calendar/u/0/ical/alice%40example.org/public/basic.ics")
+    );
+    assert_ne!(
+        o("https://calendar.google.com/calendar/u/0/embed?src=alice@example.org"),
+        o("https://calendar.google.com/calendar/u/0/embed?src=bob@example.org")
+    );
+    assert_eq!(
+        o("https://calendar.google.com/calendar/u/0/embed?src=alice@example.org"),
+        o("https://calendar.google.com/calendar/embed?src=alice@example.org&ctz=Europe/Zurich")
+    );
+    // Without a tenant, each URL is its own scope.
+    assert_ne!(
+        o("https://calendar.google.com/calendar/u/0/r/week"),
+        o("https://calendar.google.com/calendar/u/0/r/day")
+    );
+    // anchor.fm: show pages scope by show, feeds by /s/{id}; the two never collide.
+    assert_eq!(
+        o("https://anchor.fm/alice"),
+        o("https://anchor.fm/alice/episodes/Episode-1-e1")
+    );
+    assert_ne!(o("https://anchor.fm/alice"), o("https://anchor.fm/bob"));
+    assert_eq!(
+        o("https://anchor.fm/s/123abc/podcast/rss"),
+        "anchor.fm/s/123abc"
+    );
+    assert_ne!(
+        o("https://anchor.fm/s/123abc/podcast/rss"),
+        o("https://anchor.fm/s")
+    );
+    // Hosted Podbean sites are subdomain tenants; the shared feed host keeps its path rule.
+    assert_ne!(
+        o("https://alice.podbean.com/e/one/"),
+        o("https://bob.podbean.com/e/one/")
+    );
+    assert_ne!(
+        o("https://feed.podbean.com/alice/feed.xml"),
+        o("https://feed.podbean.com/bob/feed.xml")
+    );
+    // Invalid structured rules are refused at load.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.runtime");
+    std::fs::create_dir_all(&root).unwrap();
+    for (name, body) in [
+        ("zero", r#"{"a.example":{"path":{"segment":0}}}"#),
+        (
+            "skip",
+            r#"{"a.example":{"path":{"segment":1,"skip":["u//x"]}}}"#,
+        ),
+        (
+            "extend",
+            r#"{"a.example":{"path":{"segment":1,"extend":["a/b"]}}}"#,
+        ),
+        (
+            "unknown",
+            r#"{"a.example":{"path":{"segment":1,"other":1}}}"#,
+        ),
+    ] {
+        let path = root.join(format!("tenants-{name}-{}.json", std::process::id()));
+        std::fs::write(&path, body).unwrap();
+        let mut cfg = groups::GroupConfig {
+            multi_tenant_hosts_path: Some(path.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        assert!(cfg.load_tenants().is_err(), "{name}");
+        std::fs::remove_file(path).unwrap();
+    }
+}

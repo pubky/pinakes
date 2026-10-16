@@ -523,7 +523,7 @@ This restores the event-on-Luma/organiser case in design §5.3, at the price of
 being copyable by a determined publisher. Automatic cards limit that harm by
 preferring distinct taggers, then references, then oldest admission, before
 metadata completeness. Curated groups preserve their chosen best member.
-`data/multi-tenant-hosts.json` scopes other identifiers by subdomain or a one-based path-segment index; `groups.multi_tenant_hosts_path` loads a replacement JSON map at startup.
+`data/multi-tenant-hosts.json` scopes other identifiers by subdomain, a one-based path-segment index, or a `path` rule (`segment`, noise windows to `skip` such as Google Calendar's `u/*`, `extend` segments such as anchor.fm's `s`, and a `query` fallback such as `embed?src=`); `groups.multi_tenant_hosts_path` loads a replacement JSON map at startup.
 The older `[queue.groups]` file section remains accepted; use only one location.
 Pair comparisons scale from 100,000 to two million with the member cap. Exhaustion commits
 a partial plan that preserves established assignments and records a metric/diagnostic.

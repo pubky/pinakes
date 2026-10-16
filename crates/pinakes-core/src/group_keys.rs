@@ -12,6 +12,69 @@ pub enum TenantRule {
     FirstPathSegment,
     /// One-based path segment; constant prefixes remain part of the publisher scope.
     PathSegment(usize),
+    /// A path segment after removing noise windows (`skip`, e.g. `u/*` in
+    /// `/calendar/u/0/…`); a tenant segment listed in `extend` takes the next one too
+    /// (anchor.fm `/s/{id}` feeds beside `/{show}` pages); without enough segments, the
+    /// first listed query parameter present scopes the tenant (`embed?src=`).
+    Path(PathRule),
+}
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PathRule {
+    pub segment: usize,
+    #[serde(default)]
+    pub skip: Vec<String>,
+    #[serde(default)]
+    pub extend: Vec<String>,
+    #[serde(default)]
+    pub query: Vec<String>,
+}
+impl PathRule {
+    pub fn valid(&self) -> bool {
+        (1..=8).contains(&self.segment)
+            && self.skip.len() <= 8
+            && self.extend.len() <= 32
+            && self.query.len() <= 8
+            && self
+                .skip
+                .iter()
+                .all(|p| !p.is_empty() && p.len() <= 64 && p.split('/').all(|s| !s.is_empty()))
+            && self
+                .extend
+                .iter()
+                .chain(&self.query)
+                .all(|v| !v.is_empty() && v.len() <= 64 && !v.contains('/'))
+    }
+    fn scope(&self, host: &str, u: &url::Url, uri: &str) -> String {
+        let mut path: Vec<&str> = u
+            .path_segments()
+            .map(|s| s.filter(|s| !s.is_empty()).collect())
+            .unwrap_or_default();
+        for pattern in &self.skip {
+            let pattern: Vec<_> = pattern.split('/').collect();
+            if let Some(at) = (0..path.len().saturating_sub(pattern.len() - 1)).find(|&i| {
+                pattern
+                    .iter()
+                    .zip(&path[i..])
+                    .all(|(p, s)| *p == "*" || p == s)
+            }) {
+                path.drain(at..at + pattern.len());
+            }
+        }
+        let mut n = self.segment;
+        if path.len() >= n && self.extend.iter().any(|e| e == path[n - 1]) {
+            n += 1;
+        }
+        if path.len() >= n {
+            return format!("{host}/{}", path[..n].join("/"));
+        }
+        for name in &self.query {
+            if let Some((_, v)) = u.query_pairs().find(|(k, v)| k == name && !v.is_empty()) {
+                return format!("{host}/?{name}={v}");
+            }
+        }
+        format!("{host}/unscoped:{}", pubky_resource_id::resource_id(uri))
+    }
 }
 pub type TenantRules = BTreeMap<String, TenantRule>;
 pub static TENANT_RULES: LazyLock<TenantRules> = LazyLock::new(|| {
@@ -275,6 +338,7 @@ pub fn origin_with(uri: &str, rules: &TenantRules) -> Option<String> {
     {
         return Some(match rule {
             TenantRule::Subdomain => host,
+            TenantRule::Path(rule) => rule.scope(&host, &u, uri),
             TenantRule::FirstPathSegment | TenantRule::PathSegment(_) => {
                 let n = match rule {
                     TenantRule::PathSegment(n) => *n,
