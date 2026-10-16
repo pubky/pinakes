@@ -2440,6 +2440,116 @@ async fn vanished_feed_confirms_twice_and_recovers_through_queue(pool: PgPool) {
         );
     }
 }
+/// Serves responses in order without validators, so no response becomes a 304.
+struct PlainSequence {
+    responses: Vec<Vec<u8>>,
+    calls: Mutex<usize>,
+}
+#[async_trait::async_trait]
+impl Transport for PlainSequence {
+    async fn get(&self, url: &url::Url, _: &[std::net::SocketAddr]) -> anyhow::Result<Fetched> {
+        let mut calls = self.calls.lock().unwrap();
+        let body = self.responses[(*calls).min(self.responses.len() - 1)].clone();
+        *calls += 1;
+        Ok(Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            url: url.clone(),
+            status: 200,
+            content_type: "text/calendar".into(),
+            body,
+            validators: Default::default(),
+            retry_after_secs: 60,
+            location: None,
+        })
+    }
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn round5_emptied_feed_is_held_then_confirmed_on_the_second_observation(pool: PgPool) {
+    use pinakes_core::{config::QueueConfig, queue};
+    // An emptied VCALENDAR at 200 is held on the first observation and confirmed on the
+    // second, an hour later; the round-4 observation came from the review harness turning
+    // every conditional calendar 200 into a 304.
+    let uri = "https://example.org/emptied.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let t = Arc::new(PlainSequence {
+        responses: vec![future_calendar(5).into_bytes(), cal("").into_bytes()],
+        calls: Mutex::default(),
+    });
+    let resolver = WebResolver {
+        oembed_policy: Default::default(),
+        cards: None,
+        egress: Egress::with_backends(
+            EgressConfig {
+                host_requests_per_second: 1000.0,
+                ..Default::default()
+            },
+            Arc::new(PublicDns),
+            t.clone(),
+        ),
+        config: Default::default(),
+        events: Some(Arc::new(pinakes_core::event::service::EventService {
+            pool: pool.clone(),
+            config: EventConfig {
+                geocoding: false,
+                ..Default::default()
+            },
+            osm: Arc::new(OsmResolver::new(pool.clone(), OsmConfig::default()).unwrap()),
+        })),
+    };
+    let count = |sql: &'static str| {
+        let (pool, id) = (pool.clone(), id.clone());
+        async move {
+            sqlx::query_scalar::<_, i64>(sql)
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    for (round, (holds, cancelled, live)) in
+        [(0, 0, 5), (1, 0, 5), (0, 5, 0)].into_iter().enumerate()
+    {
+        // The clock advances an hour between observations.
+        sqlx::query(
+            "UPDATE event_fetch SET last_snapshot_at=last_snapshot_at-3600000 WHERE resource_id=$1",
+        )
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let job = queue::claim(&pool, "event", &QueueConfig::default())
+            .await
+            .unwrap()
+            .unwrap();
+        queue::run_job(&pool, &resolver, &QueueConfig::default(), &job)
+            .await
+            .unwrap();
+        assert_eq!(
+            count("SELECT hold_count::bigint FROM event_fetch WHERE resource_id=$1").await,
+            holds,
+            "round {round}"
+        );
+        assert_eq!(
+            count("SELECT count(*) FROM occurrence WHERE resource_id=$1 AND status='cancelled'")
+                .await,
+            cancelled,
+            "round {round}"
+        );
+        assert_eq!(
+            count("SELECT count(*) FROM occurrence WHERE resource_id=$1 AND status<>'cancelled'")
+                .await,
+            live,
+            "round {round}"
+        );
+    }
+    assert_eq!(*t.calls.lock().unwrap(), 3);
+}
 #[test]
 fn expanded_documents_and_mixed_feeds_obey_budgets() {
     let cfg = EventConfig {
