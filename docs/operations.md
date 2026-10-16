@@ -31,7 +31,8 @@ landing pages are never demoted, so squatting pages cannot take a page's identit
 variants are not counted: the same path (query variants), a path extending the target
 (`/article/print`) or the target behind a listed leading segment (`/amp`, `/m`, `/mobile`).
 Any other path ending in the target (`/~user/article`) is a claimant, and so is a path with a
-segment that decodes to a separator or dot segment (`/article/..%2Fevil`). Migration 0033 re-plans
+segment that decodes to a separator, a dot segment or a further escape (`/article/..%2Fevil`,
+`/article/..%252Fevil`), or a URL with another scheme or port. Migration 0033 re-plans
 every resource holding a non-authoritative URL claim once so stored flags follow this rule
 (it also settles 0031's backfill, which counted variants until each resource re-planned).
 Demotion is recomputed from live claims on every reconciliation; demoted claims stay stored
@@ -50,7 +51,15 @@ Only Open Library's own edition pages are exempt, and an ISBN card names only it
 edition (records are wiki-editable). Any doi.org host is the DOI proxy, never a landing page.
 Migration 0032 re-plans cards holding registry claims once so earlier one-sided merges split.
 Migration 0034 refetches ISBN cards once over an hour and re-plans registry claimants and
-encoded-path claimants.
+encoded-path claimants. The penalty is a yes/no flag per candidate, not a pairwise order: in a
+chain A→B→C both A and B are claimants and taggers order them, so only the non-claimant end of
+the chain is guaranteed on top. Demoted claims carry no penalty: three or more same-origin
+claimants naming one page on distinct paths are demoted, stop naming it for ranking and fall
+back to the no-claim baseline where taggers decide (they also stop joining through that key).
+Canonical, alternate and oEmbed links are read from the document head only, and JSON-LD
+identity fields only from the page's own entity. Migration 0035 refetches resources holding a
+non-authoritative canonical claim once, staggered over six hours (never later than their
+scheduled refresh).
 Aliases remain available as navigation metadata. Lock contention between group writers
 retries after 1–3 seconds without advancing the conflict backoff; inputs recorded under a
 partial (pair-budget) plan are recomputed on the next reconciliation instead of cached.

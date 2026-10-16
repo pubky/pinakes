@@ -133,8 +133,11 @@ Luma/organiser event case at the price of being copyable by a determined publish
 The harm bound is the automatic best-member ordering. A copier that joins with a sameAs or
 canonical naming the victim's page ranks below that page, whatever its origin; only a
 sameAs to an identifier-registry resource on another origin, or one the named page returns,
-is exempt. After that come distinct taggers descending, references descending, admission time ascending,
-then completeness. Curated best members remain pinned. Other typed IDs use publisher
+is exempt. That bound covers only copiers that name the victim: a corroborated copier that
+names nobody is bounded by taggers alone, and a legitimate owner's one-way cross-origin sameAs
+(an organiser page naming its Luma event) ranks the owner below the page it names. After that
+come distinct taggers descending, references descending, admission time ascending, then
+completeness. Curated best members remain pinned. Other typed IDs use publisher
 boundaries from `data/multi-tenant-hosts.json`, with an operator-configurable replacement
 path.
 
@@ -146,6 +149,18 @@ taggers, and with the named page present a second claimant on another path demot
 joiners. What remains is pollution of the membership list (and the group's tagger score) by
 one joiner per key. The lever is the tenant list: adding the host with a subdomain or path-segment rule
 makes each user a separate publisher, so cross-user claims no longer join.
+
+Accepted residual: a sameAs to a URL its owner abandoned (a deleted profile or an expired
+platform account) can be re-registered by someone else, whose page then names the victim back,
+and the reciprocal pair joins in both modes. The lever is the publisher removing the dangling
+link.
+
+Threat model for page markup: identity claims come only from the publisher's document head
+(meta, canonical/alternate/oEmbed links) and from the page's own JSON-LD entity: the chosen
+entity must name the page or its head canonical by `url`/`@id`, or name nothing and sit in the
+head. JSON-LD itself stays document-wide because plugins put it in the body. A `<script>`
+injected into the body by user content is cross-site scripting on that site and outside this
+threat model. Rendered user `<meta>`/`<link>` elements, which some sites allow, are not.
 
 [Details: the two example documents, the venue chain, time zones and cancellation, groups](details.html#document)
 
