@@ -7,6 +7,12 @@ poll_secs = 5
 grace_days = 7
 geo_enabled = true
 
+[ingest]
+# Reject a bad line and advance the feed cursor; never truncate reference keys.
+# Authors must be exactly 52 lowercase z-base-32 characters.
+max_label_bytes = 128
+max_object_path_bytes = 2048
+
 [web]
 enabled = true
 concurrency = 4

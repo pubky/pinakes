@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
     let mut ingest_shutdown = shutdown_rx.clone();
     let ingest_task = tokio::spawn(async move {
         loop {
-            let applied = tokio::select! { _=ingest_shutdown.changed()=>break,result=ingest::poll_once(&ingest_pool,&ingest_state.config.nexus_url,&ingest_state.nexus)=>result };
+            let applied = tokio::select! { _=ingest_shutdown.changed()=>break,result=ingest::poll_once(&ingest_pool,&ingest_state.config.nexus_url,&ingest_state.nexus,&ingest_state.config.ingest,&ingest_state.metrics)=>result };
             match applied {
                 Ok(n) if n > 0 => {
                     tracing::info!(lines = n, "ingested Nexus batch");
@@ -94,6 +94,7 @@ async fn main() -> Result<()> {
         shutdown_rx.clone(),
     ));
     let admin = tokio::net::TcpListener::bind(&config.admin_listen).await?;
+    warn_admin_listener(admin.local_addr()?);
     let admin_app = api::admin_router(state.clone());
     let mut admin_shutdown = shutdown_rx.clone();
     let admin_task = tokio::spawn(async move {
@@ -125,4 +126,53 @@ async fn main() -> Result<()> {
     drop(instance_lock);
     pool.close().await;
     Ok(())
+}
+
+fn warn_admin_listener(address: std::net::SocketAddr) {
+    if !address.ip().is_loopback() {
+        tracing::warn!(admin_listen=%address, "admin listener is not loopback and has no authentication; restrict access to a trusted network");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        io::Write,
+        sync::{Arc, Mutex},
+    };
+    #[derive(Clone)]
+    struct LogWriter(Arc<Mutex<Vec<u8>>>);
+    impl Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    #[test]
+    fn warns_for_non_loopback_admin_binds_only() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = LogWriter(output.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            for local in ["127.0.0.1:9090", "[::1]:9090"] {
+                warn_admin_listener(local.parse().unwrap());
+            }
+            assert!(output.lock().unwrap().is_empty());
+            for exposed in ["0.0.0.0:9090", "[::]:9090", "192.168.1.1:9090"] {
+                warn_admin_listener(exposed.parse().unwrap());
+            }
+        });
+        let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert_eq!(logs.matches("has no authentication").count(), 3);
+        assert!(logs.contains("0.0.0.0:9090"));
+        assert!(logs.contains("[::]:9090"));
+    }
 }

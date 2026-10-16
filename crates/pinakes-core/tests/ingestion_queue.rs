@@ -1,24 +1,36 @@
 use chrono::Utc;
 use pinakes_core::{
-    config::QueueConfig,
+    config::{IngestConfig, QueueConfig},
     ingest,
     model::{identity, ResourceMeta, Status},
     nexus::{Change, Changes, FeedPage, Kind, Op},
     queue,
     resolver::Resolver,
     store,
+    telemetry::Metrics,
 };
 use sqlx::PgPool;
 use std::time::Duration;
 
-fn change(uri: &str, author: &str, path: &str) -> Change {
+fn author(seed: &str) -> String {
+    let mut bytes = [0; 52];
+    blake3::Hasher::new()
+        .update(seed.as_bytes())
+        .finalize_xof()
+        .fill(&mut bytes);
+    bytes
+        .iter()
+        .map(|b| b"ybndrfg8ejkmcpqxot1uwisza345h769"[(b & 31) as usize] as char)
+        .collect()
+}
+fn change(uri: &str, author_seed: &str, path: &str) -> Change {
     let (resource_id, uri, _) = identity(uri).unwrap();
     Change {
         op: Op::Put,
         resource_id,
         uri,
         kind: Kind::Tag,
-        author: author.into(),
+        author: author(author_seed),
         object_path: path.into(),
         label: Some("rust".into()),
         at: Utc::now().timestamp_millis(),
@@ -42,6 +54,8 @@ async fn batch(pool: &PgPool, lines: Vec<Change>, epoch: Option<&str>) -> bool {
             epoch: epoch.map(str::to_owned),
             length: next,
         },
+        &IngestConfig::default(),
+        &Metrics::new().unwrap(),
     )
     .await
     .unwrap()
@@ -57,7 +71,7 @@ async fn refs(pool: &PgPool) -> i64 {
 async fn put_delete_replay_retarget_and_grace(pool: PgPool) {
     let a = change("https://example.org/a", "author-a", "/pub/app/tags/shared");
     let mut b = a.clone();
-    b.author = "author-b".into();
+    b.author = author("author-b");
     assert!(batch(&pool, vec![a.clone(), a.clone(), b.clone()], Some("one")).await);
     assert_eq!(refs(&pool).await, 2);
     let score: f64 = sqlx::query_scalar("SELECT score FROM resource_score")
@@ -69,11 +83,11 @@ async fn put_delete_replay_retarget_and_grace(pool: PgPool) {
     edit.at = a.at - 100000;
     batch(&pool, vec![edit.clone()], Some("one")).await;
     assert_eq!(refs(&pool).await, 2);
-    let current: String =
-        sqlx::query_scalar("SELECT resource_id FROM reference WHERE author='author-a'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let current: String = sqlx::query_scalar("SELECT resource_id FROM reference WHERE author=$1")
+        .bind(author("author-a"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(current, edit.resource_id);
     // Delete keys, not target IDs; edits and replays need not be timestamp ordered.
     let mut del = a.clone();
@@ -99,6 +113,8 @@ async fn put_delete_replay_retarget_and_grace(pool: PgPool) {
 }
 #[sqlx::test(migrations = "../../migrations")]
 async fn epoch_headers_length_reset_and_transaction_rollback(pool: PgPool) {
+    let limits = IngestConfig::default();
+    let metrics = Metrics::new().unwrap();
     let a = change("https://example.org/a", "author-a", "/pub/app/tags/a");
     batch(&pool, vec![a.clone()], None).await;
     // First appearance of an epoch is not a reset.
@@ -117,9 +133,11 @@ async fn epoch_headers_length_reset_and_transaction_rollback(pool: PgPool) {
         epoch: None,
         length: 0,
     };
-    assert!(!ingest::apply(&pool, "fixture", &saved, &empty)
-        .await
-        .unwrap());
+    assert!(
+        !ingest::apply(&pool, "fixture", &saved, &empty, &limits, &metrics)
+            .await
+            .unwrap()
+    );
     assert_eq!(refs(&pool).await, 0);
     assert_eq!(
         ingest::cursor(&pool, "fixture")
@@ -140,18 +158,24 @@ async fn epoch_headers_length_reset_and_transaction_rollback(pool: PgPool) {
         epoch: None,
         length: 2,
     };
-    assert!(ingest::apply(&pool, "fixture", &saved, &invalid)
-        .await
-        .is_err());
+    assert!(
+        ingest::apply(&pool, "fixture", &saved, &invalid, &limits, &metrics)
+            .await
+            .is_err()
+    );
     assert_eq!(refs(&pool).await, 0);
     assert_eq!(ingest::cursor(&pool, "fixture").await.unwrap().cursor, 0);
     batch(&pool, vec![a], None).await;
-    assert!(!ingest::apply(&pool, "fixture", &saved, &invalid)
-        .await
-        .unwrap());
+    assert!(
+        !ingest::apply(&pool, "fixture", &saved, &invalid, &limits, &metrics)
+            .await
+            .unwrap()
+    );
 }
 #[sqlx::test(migrations = "../../migrations")]
 async fn concurrent_pollers_only_commit_a_batch_once(pool: PgPool) {
+    let limits = IngestConfig::default();
+    let metrics = Metrics::new().unwrap();
     let saved = ingest::cursor(&pool, "fixture").await.unwrap();
     let page = FeedPage {
         page: Changes {
@@ -162,11 +186,141 @@ async fn concurrent_pollers_only_commit_a_batch_once(pool: PgPool) {
         length: 1,
     };
     let (a, b) = tokio::join!(
-        ingest::apply(&pool, "fixture", &saved, &page),
-        ingest::apply(&pool, "fixture", &saved, &page)
+        ingest::apply(&pool, "fixture", &saved, &page, &limits, &metrics),
+        ingest::apply(&pool, "fixture", &saved, &page, &limits, &metrics)
     );
     assert_ne!(a.unwrap(), b.unwrap());
     assert_eq!(refs(&pool).await, 1);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn rejects_oversized_feed_fields_without_stalling_or_truncating_keys(pool: PgPool) {
+    let limits = IngestConfig {
+        max_label_bytes: 6,
+        max_object_path_bytes: 32,
+    };
+    let metrics = Metrics::new().unwrap();
+    let saved = ingest::cursor(&pool, "fixture").await.unwrap();
+    let mut good = change(
+        "https://example.org/kept",
+        "a",
+        &format!("/pub/app/{}", "p".repeat(23)),
+    );
+    good.label = Some("ééé".into()); // Six bytes, exactly the configured limit.
+    let mut lines = vec![good.clone()];
+    for invalid in [
+        "y".repeat(51),
+        "y".repeat(53),
+        "Y".repeat(52),
+        "0".repeat(52),
+    ] {
+        let mut bad = good.clone();
+        bad.author = invalid;
+        lines.push(bad);
+    }
+    for label in ["éééé", "", "a\0b"] {
+        let mut bad = good.clone();
+        bad.label = Some(label.into());
+        lines.push(bad);
+    }
+    for path in [
+        format!("{}x", good.object_path),
+        "".into(),
+        "/pub/\0".into(),
+    ] {
+        let mut bad = good.clone();
+        bad.op = Op::Del; // Truncating the oversized key would delete the good reference.
+        bad.object_path = path;
+        lines.push(bad);
+    }
+    let end = lines.len() as i64;
+    let page = FeedPage {
+        page: Changes {
+            lines,
+            next_cursor: end,
+        },
+        epoch: None,
+        length: end,
+    };
+    assert!(
+        ingest::apply(&pool, "fixture", &saved, &page, &limits, &metrics)
+            .await
+            .unwrap()
+    );
+    assert_eq!(ingest::cursor(&pool, "fixture").await.unwrap().cursor, end);
+    assert_eq!(refs(&pool).await, 1);
+    let stored: (String, String) = sqlx::query_as("SELECT label, object_path FROM reference")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, (good.label.unwrap(), good.object_path));
+    for (reason, count) in [("author", 4), ("label", 3), ("object_path", 3)] {
+        assert_eq!(
+            metrics.ingest_rejected.with_label_values(&[reason]).get(),
+            count
+        );
+    }
+    assert!(
+        !ingest::apply(&pool, "fixture", &saved, &page, &limits, &metrics)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        metrics.ingest_rejected.with_label_values(&["author"]).get(),
+        4
+    );
+    assert!(metrics
+        .encode()
+        .unwrap()
+        .contains("pinakes_ingest_rejected_total{reason=\"object_path\"} 3"));
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn rejected_counts_follow_commit_and_concurrent_cursor_fencing(pool: PgPool) {
+    let limits = IngestConfig::default();
+    let metrics = Metrics::new().unwrap();
+    let saved = ingest::cursor(&pool, "fixture").await.unwrap();
+    let mut rejected = change("https://example.org/rejected", "a", "/pub/a");
+    rejected.author = "invalid".into();
+    let mut invalid = change("https://example.org/rollback", "a", "/pub/b");
+    invalid.at = i64::MAX;
+    let mut page = FeedPage {
+        page: Changes {
+            lines: vec![rejected, invalid],
+            next_cursor: 2,
+        },
+        epoch: None,
+        length: 2,
+    };
+    assert!(
+        ingest::apply(&pool, "fixture", &saved, &page, &limits, &metrics)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        metrics.ingest_rejected.with_label_values(&["author"]).get(),
+        0
+    );
+    assert_eq!(ingest::cursor(&pool, "fixture").await.unwrap().cursor, 0);
+    page.page.lines.pop();
+    page.page.next_cursor = 1;
+    page.length = 1;
+    let (a, b) = tokio::join!(
+        ingest::apply(&pool, "fixture", &saved, &page, &limits, &metrics),
+        ingest::apply(&pool, "fixture", &saved, &page, &limits, &metrics)
+    );
+    assert_ne!(a.unwrap(), b.unwrap());
+    assert_eq!(
+        metrics.ingest_rejected.with_label_values(&["author"]).get(),
+        1
+    );
+    assert_eq!(ingest::cursor(&pool, "fixture").await.unwrap().cursor, 1);
+    assert_eq!(refs(&pool).await, 0);
+    let resources: i64 = sqlx::query_scalar("SELECT count(*) FROM resource")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(resources, 0);
 }
 struct FakeResolver {
     fail: bool,

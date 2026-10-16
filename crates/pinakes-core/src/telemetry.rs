@@ -42,6 +42,7 @@ pub struct Metrics {
     pub ingest_lag: IntGauge,
     pub ingest_success: IntGauge,
     pub ingest_resets: IntCounter,
+    pub ingest_rejected: IntCounterVec,
 }
 impl Metrics {
     pub fn new() -> Result<Self> {
@@ -74,6 +75,12 @@ impl Metrics {
         )?;
         registry.register(Box::new(ingest_resets.clone()))?;
         let out = Self {
+            ingest_rejected: metric!(
+                IntCounterVec,
+                "pinakes_ingest_rejected_total",
+                "Rejected feed lines in committed batches by bounded reason",
+                &["reason"]
+            ),
             fetch: metric!(
                 IntCounterVec,
                 "pinakes_fetch_total",
@@ -147,6 +154,9 @@ impl Metrics {
             ingest_success,
             ingest_resets,
         };
+        for reason in crate::ingest::REJECT_REASONS {
+            out.ingest_rejected.with_label_values(&[reason]);
+        }
         for manifest in crate::adapter::manifests() {
             for outcome in OUTCOMES {
                 out.fetch

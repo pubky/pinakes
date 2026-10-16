@@ -3,6 +3,8 @@
 Scrape the separate admin listener. Its default loopback bind is intended for a
 local Prometheus/agent; configure `admin_listen` explicitly for a trusted network.
 No authentication or reverse-proxy trust is added by this service.
+Startup emits a warning if the bound admin address is not loopback, including wildcard
+IPv4/IPv6 binds. The warning does not add authentication or prevent the bind.
 
 ```yaml
 scrape_configs:
@@ -24,6 +26,7 @@ No messages are sent or contact points provisioned by these files.
 | `pinakes_ingest_lag_lines` | Observed Nexus length minus committed cursor |
 | `pinakes_ingest_last_success_timestamp_seconds` | Last applied Nexus poll |
 | `pinakes_ingest_epoch_resets_total` | Persistent epoch/truncation rebuild count |
+| `pinakes_ingest_rejected_total{reason}` | Skipped feed lines from committed batches; fixed reasons `author`, `label`, `object_path`; resets on daemon restart |
 | `pinakes_fetch_total{source,mode,outcome}` | Actual upstream requests; outcomes ok, not_modified, missing, unreachable, rate_limited, error, drift |
 | `pinakes_fetch_duration_seconds{source}` | Network/body duration histogram, excluding worker rate waits |
 | `pinakes_changes_total{source,class}` | Persistent accepted change counts, unaffected by retention |
@@ -34,14 +37,15 @@ No messages are sent or contact points provisioned by these files.
 | `pinakes_canary_fields_missing{source}` | Missing declared fields in the last canary |
 | `pinakes_canary_consecutive_failures{source}` | Additional gauge needed to alert after exactly three failed runs, independent of scrape cadence or restarts |
 | `pinakes_queue_depth{resolver,state}` | Ready pending, currently leased or dead jobs; future refreshes are excluded from pending |
-| `pinakes_refresh_overdue{resolver}` | Non-final resources past refresh time, including failed/dead jobs |
+| `pinakes_refresh_overdue{resolver}` | Non-final resources past refresh time, including failed jobs but excluding dead letters |
 | `pinakes_resources{resolver,status}` | Current resource totals |
 
 Database metric refreshes are cached for 15 seconds. Overdue excludes dead letters.
 Full JSON diagnostics are on the admin `/v1/info`; public info is redacted.
 
-Fetch counters/histograms reset with the daemon. Ingestion, source and change
-counters are restored from durable database state at scrape time. Sources and modes
+Fetch counters/histograms and ingestion rejection counters reset with the daemon.
+Ingestion reset, source and change counters are restored from durable database state
+at scrape time. Sources and modes
 come from manifests; arbitrary user hostnames do not create metric labels. OSM
 lookup with 50 objects counts once; cache hits and local geo parsing count zero.
 A response is `drift` when parsing otherwise succeeds but an expected field is

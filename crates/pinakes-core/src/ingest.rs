@@ -1,11 +1,31 @@
 use crate::{
-    nexus::{FeedPage, Nexus, Op},
+    config::IngestConfig,
+    nexus::{Change, FeedPage, Nexus, Op},
     store,
+    telemetry::Metrics,
 };
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgPool};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+pub const REJECT_REASONS: &[&str] = &["author", "label", "object_path"];
+fn rejection_reason(line: &Change, limits: &IngestConfig) -> Option<&'static str> {
+    if !crate::nexus::valid_author(&line.author) {
+        Some("author")
+    } else if line.label.as_ref().is_some_and(|label| {
+        label.is_empty() || label.len() > limits.max_label_bytes || label.contains('\0')
+    }) {
+        Some("label")
+    } else if line.object_path.is_empty()
+        || line.object_path.len() > limits.max_object_path_bytes
+        || line.object_path.contains('\0')
+    {
+        Some("object_path")
+    } else {
+        None
+    }
+}
 
 #[derive(Clone, Debug, FromRow)]
 pub struct Cursor {
@@ -30,6 +50,8 @@ pub async fn apply(
     nexus: &str,
     requested: &Cursor,
     feed: &FeedPage,
+    limits: &IngestConfig,
+    metrics: &Metrics,
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
     // Reference state is a projection of one configured Nexus; serialize rebuilds with batches.
@@ -67,7 +89,12 @@ pub async fn apply(
         bail!("invalid Nexus cursor progression");
     }
     let mut affected = BTreeSet::new();
+    let mut rejected = BTreeMap::<&'static str, u64>::new();
     for line in &feed.page.lines {
+        if let Some(reason) = rejection_reason(line, limits) {
+            *rejected.entry(reason).or_default() += 1;
+            continue;
+        }
         // Feed IDs already encode Nexus's identity decision; never fold or migrate them here.
         if !crate::model::valid_id(&line.resource_id)
             || pubky_resource_id::resource_id(&line.uri) != line.resource_id
@@ -115,15 +142,30 @@ pub async fn apply(
     sqlx::query("UPDATE feed_cursor SET cursor=$2, epoch=$3, feed_length=$4, updated_at=now() WHERE nexus=$1")
         .bind(nexus).bind(feed.page.next_cursor).bind(epoch).bind(feed.length).execute(&mut *tx).await?;
     tx.commit().await?;
+    // Count only after cursor commit: rollbacks and losing concurrent pollers
+    // must not count the same rejected line on each retry.
+    for (reason, count) in rejected {
+        metrics
+            .ingest_rejected
+            .with_label_values(&[reason])
+            .inc_by(count);
+        tracing::warn!(reason, count, "rejected Nexus feed lines");
+    }
     Ok(true)
 }
 fn timestamp(ms: Option<i64>) -> Result<Option<DateTime<Utc>>> {
     ms.map(|ms| DateTime::from_timestamp_millis(ms).context("invalid feed timestamp"))
         .transpose()
 }
-pub async fn poll_once(pool: &PgPool, nexus_url: &str, nexus: &Nexus) -> Result<usize> {
+pub async fn poll_once(
+    pool: &PgPool,
+    nexus_url: &str,
+    nexus: &Nexus,
+    limits: &IngestConfig,
+    metrics: &Metrics,
+) -> Result<usize> {
     let cursor = cursor(pool, nexus_url).await?;
     let page = nexus.changes(cursor.cursor).await?;
-    let applied = apply(pool, nexus_url, &cursor, &page).await?;
+    let applied = apply(pool, nexus_url, &cursor, &page, limits, metrics).await?;
     Ok(if applied { page.page.lines.len() } else { 1000 })
 }

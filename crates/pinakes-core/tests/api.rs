@@ -9,11 +9,12 @@ use chrono::Utc;
 use http_body_util::BodyExt;
 use pinakes_core::{
     api::{self, AppState},
-    config::Config,
+    config::{Config, IngestConfig},
     ingest,
     model::{identity, ResourceMeta},
     nexus::{Change, Changes, FeedPage, Kind, Nexus, Op},
     queue, store,
+    telemetry::Metrics,
 };
 use serde_json::{json, Value};
 use sqlx::PgPool;
@@ -75,6 +76,8 @@ async fn seed(pool: &PgPool) -> Vec<String> {
             epoch: Some("fixture".into()),
             length: next,
         },
+        &IngestConfig::default(),
+        &Metrics::new().unwrap(),
     )
     .await
     .unwrap();
@@ -421,8 +424,30 @@ async fn polls_the_http_feed_and_replays_without_duplicates(pool: PgPool) {
     };
     let (url, _, task) = mock_nexus(vec![line.clone(), line]).await;
     let nexus = Nexus::new(&url).unwrap();
-    assert_eq!(ingest::poll_once(&pool, &url, &nexus).await.unwrap(), 2);
-    assert_eq!(ingest::poll_once(&pool, &url, &nexus).await.unwrap(), 0);
+    assert_eq!(
+        ingest::poll_once(
+            &pool,
+            &url,
+            &nexus,
+            &IngestConfig::default(),
+            &Metrics::new().unwrap()
+        )
+        .await
+        .unwrap(),
+        2
+    );
+    assert_eq!(
+        ingest::poll_once(
+            &pool,
+            &url,
+            &nexus,
+            &IngestConfig::default(),
+            &Metrics::new().unwrap()
+        )
+        .await
+        .unwrap(),
+        0
+    );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM reference")
             .fetch_one(&pool)

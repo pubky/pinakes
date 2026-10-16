@@ -191,7 +191,15 @@ UPDATE resource SET dead_letter=false, attempts=0, next_attempt_at=now(),
 
 A feed epoch change (or requested cursor beyond the feed length) clears the reference
 projection and scores, retains resource documents during the grace period, and starts
-at zero. Resources with no references expire seven days after becoming orphaned;
+at zero. Feed authors must be exactly 52 lowercase z-base-32 characters. Optional labels
+and object paths must be nonempty and NUL-free, bounded in UTF-8 bytes by
+`ingest.max_label_bytes` (default 128, maximum 1024) and `ingest.max_object_path_bytes`
+(default/maximum 2048). A bad line is skipped without truncating keys or modifying
+references; its cursor position still advances. `pinakes_ingest_rejected_total{reason}`
+counts the first rejected field after the batch commits, with fixed reasons `author`,
+`label`, `object_path`; rollback/retry does not inflate it. This counter resets on restart.
+Cursor/identity/timestamp errors still fail the transaction. Existing rows are preserved.
+Resources with no references expire seven days after becoming orphaned;
 preview-only entries follow the same policy. Search excludes unreferenced resources.
 
 ## Refresh, changes and monitoring

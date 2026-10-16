@@ -12,6 +12,7 @@ pub struct Config {
     pub canary: CanaryConfig,
     pub nexus_url: String,
     pub poll_secs: u64,
+    pub ingest: IngestConfig,
     pub grace_days: u32,
     pub web: ResolverConfig,
     pub geo_enabled: bool,
@@ -33,6 +34,7 @@ impl Default for Config {
             canary: CanaryConfig::default(),
             nexus_url: "http://127.0.0.1:8080".into(),
             poll_secs: 5,
+            ingest: IngestConfig::default(),
             grace_days: 7,
             web: ResolverConfig {
                 concurrency: 4,
@@ -47,6 +49,20 @@ impl Default for Config {
             queue: QueueConfig::default(),
             preview: PreviewConfig::default(),
             api: ApiConfig::default(),
+        }
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct IngestConfig {
+    pub max_label_bytes: usize,
+    pub max_object_path_bytes: usize,
+}
+impl Default for IngestConfig {
+    fn default() -> Self {
+        Self {
+            max_label_bytes: 128,
+            max_object_path_bytes: 2048,
         }
     }
 }
@@ -327,6 +343,8 @@ impl Config {
             }
         }
         if !(1..=3600).contains(&self.poll_secs)
+            || !(1..=1024).contains(&self.ingest.max_label_bytes)
+            || !(1..=2048).contains(&self.ingest.max_object_path_bytes)
             || self.grace_days > 3650
             || !(1..=32).contains(&self.queue.max_failures)
             || !(30..=3600).contains(&self.queue.lease_secs)
@@ -372,5 +390,30 @@ mod tests {
         assert!(serde_json::from_value::<Config>(value).is_err());
         config.web.requests_per_second = 1e-320;
         assert!(config.validate().is_err());
+    }
+    #[test]
+    fn reach_and_ingest_limits_have_safe_defaults_and_config_bounds() {
+        let config = Config::default();
+        assert_eq!(config.search.reach_timeout_secs, 5);
+        assert_eq!(config.api.reach_cost, 6);
+        assert_eq!(config.ingest.max_label_bytes, 128);
+        assert_eq!(config.ingest.max_object_path_bytes, 2048);
+        for override_ in [
+            serde_json::json!({"search":{"reach_timeout_secs":0}}),
+            serde_json::json!({"search":{"reach_timeout_secs":61}}),
+            serde_json::json!({"api":{"reach_cost":1}}),
+            serde_json::json!({"api":{"reach_cost":101}}),
+            serde_json::json!({"ingest":{"max_label_bytes":0}}),
+            serde_json::json!({"ingest":{"max_label_bytes":1025}}),
+            serde_json::json!({"ingest":{"max_object_path_bytes":0}}),
+            serde_json::json!({"ingest":{"max_object_path_bytes":2049}}),
+        ] {
+            let mut value = serde_json::to_value(&config).unwrap();
+            merge(&mut value, override_);
+            assert!(serde_json::from_value::<Config>(value)
+                .unwrap()
+                .validate()
+                .is_err());
+        }
     }
 }
