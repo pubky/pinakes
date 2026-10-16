@@ -48,9 +48,8 @@ pub fn backoff(cfg: &QueueConfig, attempt: u32) -> u64 {
 }
 pub async fn failed(pool: &PgPool, job: &Job, cfg: &QueueConfig, error: &str) -> Result<()> {
     let attempt = job.attempts as u32 + 1;
-    let mut message = error.to_string();
-    crate::model::truncate(&mut message, 512);
-    sqlx::query(r#"UPDATE resource SET attempts=attempts+1, dead_letter=$3, status='error', lease_until=NULL,
+    let message = error;
+    sqlx::query(r#"UPDATE resource SET attempts=attempts+1, dead_letter=$3, status='error', lease_until=NULL,priority_at=NULL,
         next_attempt_at=now()+$4*interval '1 second', last_error=$5 WHERE id=$1 AND generation=$2"#)
         .bind(&job.id).bind(job.generation).bind(attempt>=cfg.max_failures).bind(backoff(cfg,attempt) as f64).bind(message).execute(pool).await?;
     Ok(())
@@ -156,7 +155,20 @@ async fn finish_job(
     .await;
     if let Err(error) = result {
         tracing::warn!(resource_id=%job.id,resolver=resolver.name(),error=%error,"resolution failed");
-        failed(pool, job, cfg, &error.to_string()).await?;
+        if let Some(retry) = error.downcast_ref::<crate::resolver::RetryLater>() {
+            sqlx::query("UPDATE resource SET lease_until=NULL,priority_at=NULL,next_attempt_at=now()+$3*interval '1 second',last_error=$4 WHERE id=$1 AND generation=$2")
+                .bind(&job.id).bind(job.generation).bind(retry.seconds.clamp(1,3600) as f64).bind(if retry.class=="rate_limited" {"http_4xx"} else {retry.class}).execute(pool).await?;
+        } else {
+            let mut cfg = cfg.clone();
+            if resolver.name() == "geo"
+                || error
+                    .downcast_ref::<crate::resolver::ErrorClass>()
+                    .is_some_and(|c| c.0 == "policy")
+            {
+                cfg.max_failures = 1;
+            }
+            failed(pool, job, &cfg, crate::resolver::error_class(&error)).await?;
+        }
     }
     Ok(())
 }
@@ -190,6 +202,16 @@ async fn run_batch_config(
     .await;
     let results = match results {
         Ok(results) if results.len() == jobs.len() => results,
+        Err(_) if resolver.name() == "osm" => jobs
+            .iter()
+            .map(|_| {
+                Err(crate::resolver::RetryLater {
+                    class: "timeout",
+                    seconds: 60,
+                }
+                .into())
+            })
+            .collect(),
         _ => jobs
             .iter()
             .map(|_| Err(anyhow::anyhow!("batch timeout or invalid response count")))
@@ -202,10 +224,17 @@ async fn run_batch_config(
         crate::telemetry::parser_error();
     }
     let error = results.iter().find_map(|r| match r {
-        Err(e) if !e.is::<crate::resolver::NotModified>() => Some(e.to_string()),
-        Ok(doc) if matches!(doc.status, Status::Unreachable | Status::Error) => {
-            Some(doc.status.as_str().into())
+        Err(e) if !e.is::<crate::resolver::NotModified>() => {
+            Some(crate::resolver::error_class(e).to_owned())
         }
+        Ok(doc) if matches!(doc.status, Status::Unreachable | Status::Error) => Some(
+            if doc.status == Status::Unreachable {
+                "http_4xx"
+            } else {
+                "http_5xx"
+            }
+            .into(),
+        ),
         _ => None,
     });
     if crate::telemetry::last_fetch().is_some() {
@@ -314,15 +343,21 @@ pub fn spawn(
                 rate.clone(),
             );
             workers.spawn(async move {
+                let mut canary_check=Instant::now();
                 loop {
                     tokio::select! {
                         _=shutdown.changed()=>break,
                         _=async {
                             { let mut next=rate.lock().await; tokio::time::sleep_until(*next).await; *next=Instant::now()+Duration::from_secs_f64(1.0/budget.requests_per_second); }
+                            if Instant::now()>=canary_check {
+                                canary_check=Instant::now()+Duration::from_secs(60);
+                            if resolver.canary_allowed() {
                             match crate::canary::claim(&pool,&resolver.manifest(),&canary).await {
                                 Ok(Some(generation))=>{if let Err(e)=crate::canary::run(&pool,resolver.as_ref(),&canary,&metrics,generation).await {tracing::warn!(error=%e,"canary bookkeeping failed");}return;},
                                 Err(e)=>tracing::warn!(error=%e,"canary claim failed"),
                                 _=>{}
+                            }
+                            } else if let Err(e)=crate::canary::suspend(&pool,&resolver.manifest()).await {tracing::warn!(error=%e,"canary suspension failed");}
                             }
                             match claim_batch(&pool,resolver.name(),&cfg,resolver.batch_size()).await {
                                 Ok(jobs) if !jobs.is_empty()=>{

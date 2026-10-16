@@ -34,6 +34,7 @@ pub struct AppState {
     pub metrics: Arc<crate::telemetry::Metrics>,
     limiter: Arc<Mutex<HashMap<String, (Instant, usize)>>>,
     dumps: Arc<tokio::sync::Semaphore>,
+    info_cache: Arc<Mutex<Option<(Instant, Value)>>>,
 }
 impl AppState {
     pub fn new(pool: PgPool, config: Config) -> anyhow::Result<Self> {
@@ -45,6 +46,7 @@ impl AppState {
             metrics: Arc::new(crate::telemetry::Metrics::new()?),
             limiter: Arc::default(),
             dumps: Arc::new(tokio::sync::Semaphore::new(4)),
+            info_cache: Arc::default(),
         })
     }
     async fn preview_budget(&self, ip: std::net::IpAddr, id: &str) -> Result<(), ApiError> {
@@ -719,8 +721,26 @@ pub async fn resolve(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
-#[utoipa::path(get,path="/v1/info",responses((status=200,body=Value)))]
+#[utoipa::path(get,path="/v1/info",responses((status=200,body=Value)),description="Public summary only; the same path on admin_listen includes source diagnostics and metrics. Cached for 15 seconds.")]
 pub async fn info(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let mut body = full_info(&state).await?;
+    body.as_object_mut().unwrap().remove("sources");
+    body.as_object_mut().unwrap().remove("metrics");
+    for row in body["ingestion"].as_array_mut().unwrap() {
+        row.as_object_mut().unwrap().remove("nexus");
+    }
+    Ok(Json(body))
+}
+async fn admin_info(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    Ok(Json(full_info(&state).await?))
+}
+async fn full_info(state: &AppState) -> Result<Value, ApiError> {
+    let mut cache = state.info_cache.lock().await;
+    if let Some((at, body)) = &*cache {
+        if at.elapsed() < Duration::from_secs(15) {
+            return Ok(body.clone());
+        }
+    }
     state.metrics.refresh(&state.pool).await?;
     let sources: Vec<Value> = sqlx::query_scalar(
         "SELECT to_jsonb(s)-'keys'-'held_keys'-'missing_keys' FROM source_state s ORDER BY source",
@@ -730,9 +750,9 @@ pub async fn info(State(state): State<AppState>) -> Result<Json<Value>, ApiError
     let row=sqlx::query("SELECT (SELECT count(*) FROM resource) AS resources,(SELECT count(*) FROM reference) AS references,(SELECT count(*) FROM occurrence) AS occurrences").fetch_one(&state.pool).await?;
     let ingestion:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('nexus',nexus,'cursor',cursor,'feed_length',feed_length,'lag',greatest(feed_length-cursor,0),'epoch',epoch,'updated_at',updated_at) FROM feed_cursor ORDER BY nexus").fetch_all(&state.pool).await?;
     let statuses:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('resolver',resolver,'status',status,'count',count(*),'dead_letter',count(*) FILTER (WHERE dead_letter),'leased',count(*) FILTER (WHERE lease_until>now())) FROM resource GROUP BY resolver,status ORDER BY resolver,status").fetch_all(&state.pool).await?;
-    Ok(Json(
-        json!({"version":env!("CARGO_PKG_VERSION"),"manifests":crate::adapter::configured(&state.config),"sources":sources,"metrics":state.metrics.summary(),"ingestion":ingestion,"counts":{"resources":row.try_get::<i64,_>("resources")?,"references":row.try_get::<i64,_>("references")?,"occurrences":row.try_get::<i64,_>("occurrences")?},"osm_licence":{"licence":"ODbL-1.0","attribution":crate::resolver::osm::ATTRIBUTION,"url":"https://opendatacommons.org/licenses/odbl/1-0/","dump":"/v1/dumps/osm_place.ndjson"},"resolvers":{"geo":{"enabled":state.config.geo_enabled,"network":false},"osm":{"enabled":state.config.osm.enabled,"concurrency":1,"batch_size":50,"requests_per_second":state.config.osm.requests_per_second},"web":{"enabled":state.config.web.enabled,"concurrency":state.config.web.concurrency},"pubky":{"enabled":state.config.pubky.enabled,"concurrency":state.config.pubky.concurrency},"statuses":statuses}}),
-    ))
+    let body = json!({"version":env!("CARGO_PKG_VERSION"),"manifests":crate::adapter::configured(&state.config),"sources":sources,"metrics":state.metrics.summary(),"ingestion":ingestion,"counts":{"resources":row.try_get::<i64,_>("resources")?,"references":row.try_get::<i64,_>("references")?,"occurrences":row.try_get::<i64,_>("occurrences")?},"osm_licence":{"licence":"ODbL-1.0","attribution":crate::resolver::osm::ATTRIBUTION,"url":"https://opendatacommons.org/licenses/odbl/1-0/","dump":"/v1/dumps/osm_place.ndjson"},"resolvers":{"geo":{"enabled":state.config.geo_enabled,"network":false},"osm":{"enabled":state.config.osm.enabled,"concurrency":1,"batch_size":50,"requests_per_second":state.config.osm.requests_per_second},"web":{"enabled":state.config.web.enabled,"concurrency":state.config.web.concurrency},"pubky":{"enabled":state.config.pubky.enabled,"concurrency":state.config.pubky.concurrency},"statuses":statuses}});
+    *cache = Some((Instant::now(), body.clone()));
+    Ok(body)
 }
 #[derive(OpenApi)]
 #[openapi(
@@ -845,6 +865,7 @@ async fn osm_dump(
 pub fn admin_router(state: AppState) -> Router {
     Router::new()
         .route("/metrics", get(metrics))
+        .route("/v1/info", get(admin_info))
         .with_state(state)
 }
 #[utoipa::path(get,path="/metrics",responses((status=200,content_type="text/plain; version=0.0.4",body=String)),description="Separate admin listener only; URL is controlled by admin_listen.")]

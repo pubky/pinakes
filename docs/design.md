@@ -110,7 +110,7 @@ Refresh follows the time to an event's start and stops after its end; a change i
 
 `type` is any schema.org type, validated against a pinned vocabulary and stored with its ancestor chain, so `type=Event` matches `MusicEvent` and `type=Place` matches `CafeOrCoffeeShop`. Inputs that are not schema.org (OpenGraph, oEmbed, ActivityStreams, OSM tags, ICS, NIP-52) map through one table.
 
-- Common fields: name, description, image (the origin's URL), url, site, location with its source (`page | geocoded | osm`), address, category (source-specific, for OSM `amenity/cafe`), display-only attributes, and a status (`ok | pending | missing | unreachable | error`).
+- Common fields: name, description, image (the origin's URL), url, site, location with its source (`uri | page | geocoded | osm`), address (`street`, `house_number`, `postcode`, `city`, `country_code`), category (source-specific, for OSM `amenity/cafe`), display-only attributes, and a status (`ok | pending | missing | unreachable | error`).
 - Events add start, end, a derived time zone (no site's JSON-LD carries one), all-day, status, attendance, venue and organizer.
 - A calendar feed is one resource and a container. Its events are occurrence rows keyed by `(feed, UID, RECURRENCE-ID)`, since nothing in a feed URL names one event. An event that has its own page is a resource of its own once referenced, and its occurrence rows link to it.
 - Caps: 32 attributes and 8 KB per document **(arbitrary)**.
@@ -199,3 +199,9 @@ The client plans: [Maps](maps.html) and [Events](events.html).
 5. Media and further resolvers, groups; Nexus light plus Pinakes as the third-party kit.
 
 [Details: the delivery order with what each step unblocks](details.html#delivery)
+
+Review decisions: OSM object alias URLs keep separate resource identities but share the
+OSM derivative row; other OSM-host pages are denied by web. OSM missing objects use the
+configured 30-day negative cache after confirmation, rather than the generic short missing
+TTL: a deleted object stays deleted. Web/Pubky cadence comes from `[refresh]`, not parser
+`ttl_secs`. Conditional validators are not stored/sent in this version.

@@ -254,8 +254,7 @@ async fn unknown_429_and_optional_fallback(pool: PgPool) {
         .resolve("https://www.openstreetmap.org/node/112")
         .await
         .unwrap_err()
-        .to_string()
-        .contains("429"));
+        .is::<pinakes_core::resolver::RetryLater>());
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM osm_place WHERE osm_id=112")
             .fetch_one(&pool)
@@ -270,9 +269,13 @@ async fn unknown_429_and_optional_fallback(pool: PgPool) {
             .resolve(&format!("https://www.openstreetmap.org/{kind}/222"))
             .await
             .unwrap();
-        assert_eq!(doc.type_name, "CafeOrCoffeeShop");
-        assert_eq!(doc.attributes["currency:XBT"], "yes");
-        assert_eq!(doc.location.unwrap().lat, 46.0);
+        if kind == "node" {
+            assert_eq!(doc.type_name, "CafeOrCoffeeShop");
+            assert_eq!(doc.attributes["currency:XBT"], "yes");
+            assert_eq!(doc.location.unwrap().lat, 46.0);
+        } else {
+            assert_eq!(doc.status, Status::Missing);
+        }
     }
     for id in [404, 410] {
         assert_eq!(
@@ -286,10 +289,9 @@ async fn unknown_429_and_optional_fallback(pool: PgPool) {
     }
     let paths = state.paths.lock().await;
     assert!(paths.contains(&"/api/0.6/node/222.json".into()));
-    assert!(paths.contains(&"/api/0.6/way/222/full.json".into()));
-    assert!(paths.contains(&"/api/0.6/relation/222/full.json".into()));
+    assert!(!paths.iter().any(|p| p.contains("/full")));
     drop(paths);
-    let uri = "https://www.openstreetmap.org/way/222";
+    let uri = "https://www.openstreetmap.org/node/222";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
     let doc = resolver.resolve(uri).await.unwrap();
     store::save_document(&pool, &id, 0, &doc).await.unwrap();
@@ -635,6 +637,134 @@ async fn osm_history_and_unconfirmed_fetches_stay_in_derivative_table(pool: PgPo
             .await
             .2["lines"][0]["before"]["name"],
         "Berlin"
+    );
+    server.abort();
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn batch_failures_are_per_object_and_upstream_retries_do_not_charge(pool: PgPool) {
+    use std::sync::atomic::AtomicU16;
+    let code = Arc::new(AtomicU16::new(200));
+    let mode = code.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app=Router::new().route("/lookup",get(move || {let mode=mode.clone();async move {
+        let status=mode.load(Ordering::SeqCst);
+        if status!=200 {return (StatusCode::from_u16(status).unwrap(),[("retry-after","7200")],"retry").into_response();}
+        Json(json!([
+            {"osm_type":"node","osm_id":1,"lat":"broken","lon":"8","namedetails":{"name":"Bad"}},
+            {"osm_type":"node","osm_id":2,"lat":"46","lon":"8","namedetails":{"name":"Good"}},
+            {"osm_type":"node","osm_id":999,"lat":"47","lon":"9","namedetails":{"name":"Unrequested"}}
+        ])).into_response()
+    }})).fallback(get(||async {StatusCode::INTERNAL_SERVER_ERROR}));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let config = OsmConfig {
+        nominatim_url: url.clone(),
+        api_url: url,
+        requests_per_second: 1000.0,
+        fallback_enabled: true,
+        ..Default::default()
+    };
+    let resolver = OsmResolver::new(pool.clone(), config.clone()).unwrap();
+    for id in 1..=3 {
+        store::ensure_resource(&pool, &format!("https://www.openstreetmap.org/node/{id}"))
+            .await
+            .unwrap();
+    }
+    let cfg = QueueConfig::default();
+    let jobs = queue::claim_batch(&pool, "osm", &cfg, 50).await.unwrap();
+    queue::run_batch(&pool, &resolver, &cfg, &jobs)
+        .await
+        .unwrap();
+    let outcomes: Vec<(i64, i32, String, bool)> = sqlx::query_as(
+        "SELECT osm_id,attempts,status,lease_until IS NULL FROM resource ORDER BY osm_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        outcomes,
+        vec![
+            (1, 1, "error".into(), true),
+            (2, 0, "ok".into(), true),
+            (3, 0, "pending".into(), true)
+        ]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM osm_place WHERE osm_id=999")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    for status in [429, 503] {
+        code.store(status, Ordering::SeqCst);
+        sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE osm_id=3")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let jobs = queue::claim_batch(&pool, "osm", &cfg, 50).await.unwrap();
+        let resolver = OsmResolver::new(pool.clone(), config.clone()).unwrap();
+        let metrics = pinakes_core::telemetry::Metrics::new().unwrap();
+        let (result, observations) = pinakes_core::telemetry::observe(
+            &metrics,
+            &resolver.manifest(),
+            queue::run_batch(&pool, &resolver, &cfg, &jobs),
+        )
+        .await;
+        result.unwrap();
+        assert_eq!(
+            observations[0].outcome,
+            if status == 429 {
+                "rate_limited"
+            } else {
+                "error"
+            }
+        );
+        let (attempts,dead,delay):(i32,bool,f64)=sqlx::query_as("SELECT attempts,dead_letter,extract(epoch FROM next_attempt_at-now())::float8 FROM resource WHERE osm_id=3").fetch_one(&pool).await.unwrap();
+        assert_eq!(attempts, 0);
+        assert!(!dead);
+        assert!(delay > 3590.0 && delay <= 3600.0);
+    }
+    server.abort();
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn object_aliases_share_only_the_derivative_data(pool: PgPool) {
+    let (mock, resolver, server) = mock(&pool).await;
+    let uris = [
+        "https://www.openstreetmap.org/node/240109189",
+        "https://osm.org/node/240109189/",
+        "http://openstreetmap.org/node/240109189?x=1",
+    ];
+    let mut ids = Vec::new();
+    for uri in uris {
+        ids.push(store::ensure_resource(&pool, uri).await.unwrap());
+    }
+    let jobs = queue::claim_batch(&pool, "osm", &QueueConfig::default(), 50)
+        .await
+        .unwrap();
+    queue::run_batch(&pool, &resolver, &QueueConfig::default(), &jobs)
+        .await
+        .unwrap();
+    assert_eq!(
+        ids.iter().collect::<std::collections::HashSet<_>>().len(),
+        3
+    );
+    assert_eq!(mock.calls.lock().await[0], vec!["N240109189"]);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM osm_place")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM resource WHERE name IS NULL AND point IS NULL AND doc->>'type'='Place'").fetch_one(&pool).await.unwrap(),3);
+    assert!(
+        sqlx::query("UPDATE resource SET doc='{}' WHERE osm_id IS NOT NULL")
+            .execute(&pool)
+            .await
+            .is_err()
     );
     server.abort();
 }

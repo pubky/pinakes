@@ -178,6 +178,7 @@
     "/v1/info": {
       "get": {
         "tags": [],
+        "description": "Public summary only; the same path on admin_listen includes source diagnostics and metrics. Cached for 15 seconds.",
         "operationId": "info",
         "responses": {
           "200": {

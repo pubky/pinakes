@@ -257,8 +257,11 @@ impl Config {
         }
         if !self.osm.requests_per_second.is_finite()
             || !(0.001..=1000.0).contains(&self.osm.requests_per_second)
-            || url::Url::parse(&self.osm.nominatim_url)?.host_str()
-                == Some("nominatim.openstreetmap.org")
+            || [&self.osm.nominatim_url, &self.osm.api_url]
+                .iter()
+                .any(|u| {
+                    url::Url::parse(u).is_ok_and(|u| crate::resolver::osm::public_upstream(&u))
+                })
                 && self.osm.requests_per_second > 1.0
             || self.osm.ttl_secs == 0
             || self.osm.ttl_secs > 31536000

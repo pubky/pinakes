@@ -6,7 +6,7 @@ use std::time::Duration;
 pub const ATTRIBUTES: &[&str] = &["precision"];
 pub struct GeoResolver;
 
-fn number(s: &str, signed: bool, integer_digits: usize) -> Result<f64> {
+fn number(s: &str, signed: bool, _integer_digits: usize) -> Result<f64> {
     let unsigned = if signed {
         s.strip_prefix('-').unwrap_or(s)
     } else {
@@ -16,9 +16,7 @@ fn number(s: &str, signed: bool, integer_digits: usize) -> Result<f64> {
         .split_once('.')
         .map_or((unsigned, None), |(a, b)| (a, Some(b)));
     ensure!(
-        !whole.is_empty()
-            && whole.len() <= integer_digits
-            && whole.bytes().all(|c| c.is_ascii_digit()),
+        !whole.is_empty() && whole.bytes().all(|c| c.is_ascii_digit()),
         "invalid geo number"
     );
     ensure!(
@@ -151,6 +149,7 @@ mod tests {
     fn full_grammar_and_precision() {
         for uri in [
             "geo:46.0051,8.9528",
+            "geo:007.5,0008.0",
             "GEO:-90,180,-10.5;CRS=WGS84;U=0;foo=a%20b;flag",
             "geo:-0,0;u=2.0",
             "geo:1,2;foo=[:&+$]",
@@ -183,7 +182,6 @@ mod tests {
             "+1,0",
             "1.,2",
             ".1,2",
-            "001,2",
             "1,2,3,4",
             "1,2;u=-1",
             "1,2;u=+1",

@@ -37,6 +37,9 @@ No messages are sent or contact points provisioned by these files.
 | `pinakes_refresh_overdue{resolver}` | Non-final resources past refresh time, including failed/dead jobs |
 | `pinakes_resources{resolver,status}` | Current resource totals |
 
+Database metric refreshes are cached for 15 seconds. Overdue excludes dead letters.
+Full JSON diagnostics are on the admin `/v1/info`; public info is redacted.
+
 Fetch counters/histograms reset with the daemon. Ingestion, source and change
 counters are restored from durable database state at scrape time. Sources and modes
 come from manifests; arbitrary user hostnames do not create metric labels. OSM
@@ -52,6 +55,6 @@ extra delay on the first condition. `CanaryDown` uses the durable failure streak
 not repeated Prometheus scrapes of one failed run. For `FeedHeld`, `CursorReset`,
 `SchemaDrift` and `RateLimited`, a new event stays visible for an hour.
 
-Run `scripts/check-ops` for promtool syntax validation. `scripts/test` also parses
+Run `scripts/check-ops` for promtool syntax validation. If promtool is absent, this script runs the Rust YAML/metric-registry test as a required gate. `scripts/test` also parses
 the YAML/dashboard and checks every referenced metric against an initialized
 registry, so a renamed/unregistered metric fails CI even without promtool.

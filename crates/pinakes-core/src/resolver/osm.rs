@@ -3,7 +3,7 @@ use crate::{
     config::OsmConfig,
     model::{LocationSource, OsmId, Point, ResourceMeta, Status},
 };
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -56,8 +56,40 @@ impl OsmId {
         format!("https://www.openstreetmap.org/{}", self.key())
     }
 }
+pub fn osm_host(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    host == "openstreetmap.org"
+        || host.ends_with(".openstreetmap.org")
+        || host == "osm.org"
+        || host.ends_with(".osm.org")
+}
+pub fn public_upstream(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => super::egress::public_ip(ip.into()),
+        Some(url::Host::Ipv6(ip)) => super::egress::public_ip(ip.into()),
+        Some(url::Host::Domain(host)) => osm_host(host),
+        None => false,
+    }
+}
 pub fn parse_id(uri: &str) -> Option<OsmId> {
-    let path = uri.strip_prefix("https://www.openstreetmap.org/")?;
+    let url = url::Url::parse(uri).ok()?;
+    let host = url.host_str()?.trim_end_matches('.').to_ascii_lowercase();
+    if !matches!(url.scheme(), "http" | "https")
+        || !matches!(
+            host.as_str(),
+            "www.openstreetmap.org" | "openstreetmap.org" | "osm.org" | "www.osm.org"
+        )
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+    {
+        return None;
+    }
+    let path = url
+        .path()
+        .strip_prefix('/')?
+        .strip_suffix('/')
+        .unwrap_or(url.path().strip_prefix('/')?);
     let (osm_type, digits) = path.split_once('/')?;
     if !matches!(osm_type, "node" | "way" | "relation")
         || digits.is_empty()
@@ -71,6 +103,31 @@ pub fn parse_id(uri: &str) -> Option<OsmId> {
         osm_type: osm_type.into(),
         id,
     })
+}
+fn copy_error(error: &anyhow::Error) -> anyhow::Error {
+    if let Some(retry) = error.downcast_ref::<super::RetryLater>() {
+        return retry.clone().into();
+    }
+    if error.is::<super::NotModified>() {
+        return super::NotModified.into();
+    }
+    anyhow::anyhow!("{error:#}")
+}
+pub(super) fn retry_after(headers: &reqwest::header::HeaderMap) -> u64 {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| {
+            s.parse::<u64>().ok().or_else(|| {
+                chrono::DateTime::parse_from_rfc2822(s).ok().map(|at| {
+                    (at.with_timezone(&chrono::Utc) - chrono::Utc::now())
+                        .num_seconds()
+                        .max(1) as u64
+                })
+            })
+        })
+        .unwrap_or(60)
+        .clamp(1, 3600)
 }
 pub fn schema_type(category: &str) -> &'static str {
     static MAP: OnceLock<BTreeMap<String, String>> = OnceLock::new();
@@ -204,9 +261,7 @@ impl OsmResolver {
         // One lock covers the request too: all batches and fallback calls share the host budget.
         let mut next = self.next.lock().await;
         tokio::time::sleep_until(*next).await;
-        let public = url
-            .host_str()
-            .is_some_and(|s| s == "nominatim.openstreetmap.org" || s == "api.openstreetmap.org");
+        let public = public_upstream(&url);
         let rate = if public {
             self.config.requests_per_second.min(1.0)
         } else {
@@ -214,7 +269,15 @@ impl OsmResolver {
         };
         *next = Instant::now() + Duration::from_secs_f64(1.0 / rate);
         let mut observation = crate::telemetry::FetchGuard::start();
-        let response = self.client.get(url.clone()).send().await?;
+        let response =
+            self.client
+                .get(url.clone())
+                .send()
+                .await
+                .map_err(|e| super::RetryLater {
+                    class: if e.is_timeout() { "timeout" } else { "connect" },
+                    seconds: 60,
+                })?;
         observation.status(response.status().as_u16());
         let status = response.status();
         tracing::info!(
@@ -226,16 +289,18 @@ impl OsmResolver {
         if status.as_u16() == 304 {
             return Err(super::NotModified.into());
         }
-        if status.as_u16() == 429 {
-            let seconds = response
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|s| s.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(60)
-                .clamp(1, 86400);
+        if status.as_u16() == 429 || status.is_server_error() {
+            let seconds = retry_after(response.headers());
             *next = Instant::now() + Duration::from_secs(seconds);
-            bail!("OSM upstream rate_limited (429)");
+            return Err(super::RetryLater {
+                class: if status.as_u16() == 429 {
+                    "http_4xx"
+                } else {
+                    "http_5xx"
+                },
+                seconds,
+            }
+            .into());
         }
         if matches!(status.as_u16(), 404 | 410) {
             return Ok(None);
@@ -244,11 +309,17 @@ impl OsmResolver {
         let mut bytes = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            ensure!(
-                bytes.len() + chunk.len() <= 2 * 1024 * 1024,
-                "OSM response exceeds 2 MB"
-            );
+            let chunk = chunk.map_err(|e| super::RetryLater {
+                class: if e.is_timeout() { "timeout" } else { "connect" },
+                seconds: 60,
+            })?;
+            if bytes.len() + chunk.len() > 2 * 1024 * 1024 {
+                return Err(super::RetryLater {
+                    class: "policy",
+                    seconds: 60,
+                }
+                .into());
+            }
             bytes.extend_from_slice(&chunk);
         }
         Ok(Some(serde_json::from_slice(&bytes)?))
@@ -280,13 +351,11 @@ impl OsmResolver {
         Ok(())
     }
     async fn fallback(&self, id: &OsmId) -> Result<Option<Value>> {
-        let suffix = if id.osm_type == "node" {
-            ".json"
-        } else {
-            "/full.json"
-        };
+        if id.osm_type != "node" {
+            return Ok(None);
+        }
         let url = format!(
-            "{}/api/0.6/{}{suffix}",
+            "{}/api/0.6/{}.json",
             self.config.api_url.trim_end_matches('/'),
             id.key()
         )
@@ -304,31 +373,8 @@ impl OsmResolver {
         if object["visible"] == false {
             return Ok(None);
         }
-        let nodes: Vec<_> = if id.osm_type == "node" {
-            vec![object]
-        } else {
-            elements.iter().filter(|e| e["type"] == "node").collect()
-        };
-        ensure!(
-            !nodes.is_empty(),
-            "OSM full response has no member coordinates"
-        );
-        let points = nodes
-            .iter()
-            .map(|n| {
-                Ok(Point {
-                    lat: decimal(&n["lat"])?,
-                    lon: decimal(&n["lon"])?,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let lat = points.iter().map(|p| p.lat).sum::<f64>() / points.len() as f64;
-        let lon = points
-            .iter()
-            .map(|p| p.lon.to_radians().sin())
-            .sum::<f64>()
-            .atan2(points.iter().map(|p| p.lon.to_radians().cos()).sum())
-            .to_degrees();
+        let lat = decimal(&object["lat"])?;
+        let lon = decimal(&object["lon"])?;
         let tags = &object["tags"];
         let category = [
             "amenity",
@@ -357,89 +403,129 @@ impl OsmResolver {
             }
         }
         Ok(Some(
-            json!({"osm_type":id.osm_type,"osm_id":id.id,"lat":lat,"lon":lon,"category":category,"type":text(&tags[category]).unwrap_or("unknown"),"namedetails":tags,"display_name":text(&tags["name"]).unwrap_or_default(),"address":address,"extratags":tags,"boundingbox":[points.iter().map(|p|p.lat).fold(f64::INFINITY,f64::min),points.iter().map(|p|p.lat).fold(f64::NEG_INFINITY,f64::max),points.iter().map(|p|p.lon).fold(f64::INFINITY,f64::min),points.iter().map(|p|p.lon).fold(f64::NEG_INFINITY,f64::max)]}),
+            json!({"osm_type":id.osm_type,"osm_id":id.id,"lat":lat,"lon":lon,"category":category,"type":text(&tags[category]).unwrap_or("unknown"),"namedetails":tags,"display_name":text(&tags["name"]).unwrap_or_default(),"address":address,"extratags":tags,"boundingbox":[lat,lat,lon,lon]}),
         ))
     }
-    async fn batch(&self, uris: &[String], probe: bool) -> Result<Vec<ResourceMeta>> {
-        ensure!(uris.len() <= 50, "OSM batch exceeds 50 objects");
-        let ids = uris
-            .iter()
-            .map(|u| parse_id(u).context("noncanonical OSM URI"))
-            .collect::<Result<Vec<_>>>()?;
-        let mut found = HashMap::new();
+    async fn batch(&self, uris: &[String], probe: bool) -> Vec<Result<ResourceMeta>> {
+        if uris.len() > 50 {
+            return uris
+                .iter()
+                .map(|_| Err(anyhow::anyhow!("OSM batch exceeds 50 objects")))
+                .collect();
+        }
+        let ids = uris.iter().map(|u| parse_id(u)).collect::<Vec<_>>();
+        let mut found: HashMap<OsmId, Result<ResourceMeta>> = HashMap::new();
         let mut pending = Vec::new();
-        for id in &ids {
-            if found.contains_key(id) {
+        for id in ids.iter().flatten() {
+            if found.contains_key(id) || pending.contains(id) {
                 continue;
             }
-            if let Some(doc) = if probe { None } else { self.cached(id).await? } {
-                found.insert(id.clone(), doc);
-            } else if !pending.contains(id) {
-                pending.push(id.clone());
+            match if probe {
+                Ok(None)
+            } else {
+                self.cached(id).await
+            } {
+                Ok(Some(doc)) => {
+                    found.insert(id.clone(), Ok(doc));
+                }
+                Ok(None) => pending.push(id.clone()),
+                Err(e) => {
+                    found.insert(id.clone(), Err(e));
+                }
             }
         }
         if !pending.is_empty() {
-            let mut url: reqwest::Url =
-                format!("{}/lookup", self.config.nominatim_url.trim_end_matches('/')).parse()?;
-            url.query_pairs_mut()
-                .append_pair(
-                    "osm_ids",
-                    &pending
-                        .iter()
-                        .map(OsmId::lookup_id)
-                        .collect::<Vec<_>>()
-                        .join(","),
-                )
-                .append_pair("format", "jsonv2")
-                .append_pair("addressdetails", "1")
-                .append_pair("extratags", "1")
-                .append_pair("namedetails", "1");
-            let body = self
-                .request(url)
-                .await?
-                .context("Nominatim lookup endpoint missing")?;
-            let rows = body
-                .as_array()
-                .context("Nominatim response is not a list")?;
-            if rows.is_empty() {
-                crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "missing");
+            let response = async {
+                let mut url: reqwest::Url =
+                    format!("{}/lookup", self.config.nominatim_url.trim_end_matches('/'))
+                        .parse()?;
+                url.query_pairs_mut()
+                    .append_pair(
+                        "osm_ids",
+                        &pending
+                            .iter()
+                            .map(OsmId::lookup_id)
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    )
+                    .append_pair("format", "jsonv2")
+                    .append_pair("addressdetails", "1")
+                    .append_pair("extratags", "1")
+                    .append_pair("namedetails", "1");
+                let body = self
+                    .request(url)
+                    .await?
+                    .context("Nominatim lookup endpoint missing")?;
+                body.as_array()
+                    .cloned()
+                    .context("Nominatim response is not a list")
             }
-            let mut places = HashMap::new();
-            for row in rows {
-                let doc = map_place(row, self.config.ttl_secs)?;
-                crate::telemetry::document(crate::telemetry::last_fetch(), &self.manifest(), &doc);
-                let id = parse_id(&doc.url).unwrap();
-                ensure!(
-                    pending.contains(&id),
-                    "Nominatim returned an unrequested object"
-                );
-                places
-                    .entry(id)
-                    .or_insert((doc, text(&row["display_name"]).map(str::to_owned)));
-            }
-            for id in pending {
-                let (doc, display) = if let Some(place) = places.remove(&id) {
-                    place
-                } else if self.config.fallback_enabled {
-                    match self.fallback(&id).await? {
-                        Some(row) => (
-                            map_place(&row, self.config.ttl_secs)?,
-                            text(&row["display_name"]).map(str::to_owned),
-                        ),
-                        None => (missing(&id, self.config.ttl_secs), None),
+            .await;
+            match response {
+                Err(error) => {
+                    for id in pending {
+                        found.insert(id, Err(copy_error(&error)));
                     }
-                } else {
-                    (missing(&id, self.config.ttl_secs), None)
-                };
-                crate::telemetry::document(crate::telemetry::last_fetch(), &self.manifest(), &doc);
-                if !probe {
-                    self.save(&id, &doc, display.as_deref()).await?;
                 }
-                found.insert(id, doc);
+                Ok(rows) => {
+                    if rows.is_empty() {
+                        crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "missing");
+                    }
+                    let mut places = HashMap::new();
+                    for row in rows {
+                        let id = row["osm_type"]
+                            .as_str()
+                            .zip(row["osm_id"].as_i64())
+                            .and_then(|(kind, id)| {
+                                parse_id(&format!("https://www.openstreetmap.org/{kind}/{id}"))
+                            });
+                        // Unattributable/unrequested rows cannot poison otherwise valid members.
+                        let Some(id) = id.filter(|id| pending.contains(id)) else {
+                            continue;
+                        };
+                        places.entry(id).or_insert_with(|| {
+                            map_place(&row, self.config.ttl_secs)
+                                .map(|doc| (doc, text(&row["display_name"]).map(str::to_owned)))
+                        });
+                    }
+                    for id in pending {
+                        let result = async {
+                            let (doc, display) = if let Some(place) = places.remove(&id) {
+                                place?
+                            } else if self.config.fallback_enabled && id.osm_type == "node" {
+                                match self.fallback(&id).await? {
+                                    Some(row) => (
+                                        map_place(&row, self.config.ttl_secs)?,
+                                        text(&row["display_name"]).map(str::to_owned),
+                                    ),
+                                    None => (missing(&id, self.config.ttl_secs), None),
+                                }
+                            } else {
+                                (missing(&id, self.config.ttl_secs), None)
+                            };
+                            crate::telemetry::document(
+                                crate::telemetry::last_fetch(),
+                                &self.manifest(),
+                                &doc,
+                            );
+                            if !probe {
+                                self.save(&id, &doc, display.as_deref()).await?;
+                            }
+                            Ok(doc)
+                        }
+                        .await;
+                        found.insert(id, result);
+                    }
+                }
             }
         }
         ids.iter()
-            .map(|id| found.get(id).cloned().context("missing OSM URI in batch"))
+            .map(|id| {
+                id.as_ref()
+                    .and_then(|id| found.get(id))
+                    .map(|result| result.as_ref().cloned().map_err(copy_error))
+                    .unwrap_or_else(|| Err(anyhow::anyhow!("invalid OSM object URI")))
+            })
             .collect()
     }
 }
@@ -461,30 +547,18 @@ impl Resolver for OsmResolver {
     }
     async fn resolve(&self, uri: &str) -> Result<ResourceMeta> {
         self.batch(&[uri.into()], false)
-            .await?
+            .await
             .pop()
-            .context("empty OSM batch")
+            .context("empty OSM batch")?
     }
     async fn resolve_batch(&self, uris: &[String]) -> Vec<Result<ResourceMeta>> {
-        match self.batch(uris, false).await {
-            Ok(docs) => docs.into_iter().map(Ok).collect(),
-            Err(e) => uris
-                .iter()
-                .map(|_| {
-                    if e.is::<super::NotModified>() {
-                        Err(super::NotModified.into())
-                    } else {
-                        Err(anyhow::anyhow!("{e:#}"))
-                    }
-                })
-                .collect(),
-        }
+        self.batch(uris, false).await
     }
     async fn probe(&self, uri: &str) -> Result<ResourceMeta> {
         self.batch(&[uri.into()], true)
-            .await?
+            .await
             .pop()
-            .context("empty OSM probe")
+            .context("empty OSM probe")?
     }
     fn refresh_after(&self, _: &ResourceMeta) -> Duration {
         Duration::from_secs(self.config.ttl_secs)
@@ -494,27 +568,46 @@ impl Resolver for OsmResolver {
 mod tests {
     use super::*;
     #[test]
-    fn canonical_objects_only() {
-        for kind in ["node", "way", "relation"] {
-            assert!(parse_id(&format!("https://www.openstreetmap.org/{kind}/123")).is_some());
-        }
-        for url in [
+    fn object_aliases_preserve_resource_identity() {
+        for uri in [
+            "https://www.openstreetmap.org/node/1",
             "http://www.openstreetmap.org/node/1",
             "https://openstreetmap.org/node/1",
             "https://osm.org/node/1",
             "https://www.openstreetmap.org/node/1/",
             "https://www.openstreetmap.org/node/1?x=1",
-            "https://www.openstreetmap.org/node/1#map=1",
+            "https://www.openstreetmap.org./node/1#map=1",
+        ] {
+            assert_eq!(parse_id(uri).unwrap().key(), "node/1");
+            assert_eq!(super::super::classify(uri), Some("osm"));
+        }
+        assert_ne!(
+            pubky_resource_id::resource_id("https://osm.org/node/1"),
+            pubky_resource_id::resource_id("https://www.openstreetmap.org/node/1")
+        );
+        for uri in [
             "https://www.openstreetmap.org/go/abc",
             "https://www.openstreetmap.org/?mlat=1",
             "https://www.openstreetmap.org/node/0",
             "https://www.openstreetmap.org/node/-1",
             "https://www.openstreetmap.org/node/01",
             "https://www.openstreetmap.org/node/9223372036854775808",
+            "https://wiki.openstreetmap.org/node/1",
+            "https://evilopenstreetmap.org/node/1",
+            "https://www.openstreetmap.org/node/1//",
         ] {
-            assert!(parse_id(url).is_none(), "{url}");
-            assert_eq!(super::super::classify(url), Some("web"));
+            assert!(parse_id(uri).is_none(), "{uri}");
         }
+        for url in [
+            "https://NOMINATIM.OPENSTREETMAP.ORG./",
+            "https://www.openstreetmap.org",
+            "https://api.openstreetmap.org",
+            "https://93.184.216.34",
+            "https://[2606:4700:4700::1111]",
+        ] {
+            assert!(public_upstream(&url.parse().unwrap()), "{url}");
+        }
+        assert!(!public_upstream(&"http://127.0.0.1:1234".parse().unwrap()));
     }
     #[test]
     fn mappings_keep_multiple_inheritance() {

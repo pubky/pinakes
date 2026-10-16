@@ -11,12 +11,14 @@ geo_enabled = true
 enabled = true
 concurrency = 4
 requests_per_second = 4.0
+# Parser TTL hint; [refresh] controls the actual schedule.
 ttl_secs = 86400
 
 [pubky]
 enabled = true
 concurrency = 2
 requests_per_second = 2.0
+# Parser TTL hint; [refresh] controls the actual schedule.
 ttl_secs = 86400
 
 [egress]
@@ -42,7 +44,7 @@ requests_per_minute = 30
 uri_requests_per_minute = 30
 cache_capacity = 10000
 
-# Canonical referenced OSM objects only; no search/reverse-geocoding proxy.
+# Referenced OSM objects, including aliases; no search/reverse-geocoding proxy.
 # Public service is for the small development run; staging/production use our own URL.
 [osm]
 enabled = true
@@ -50,6 +52,7 @@ nominatim_url = "https://nominatim.openstreetmap.org"
 requests_per_second = 0.5
 # Always one concurrent request; the public host has a hard maximum of 1/s.
 ttl_secs = 2592000
+# Node-only editing-API fallback; unknown ways/relations stay missing.
 fallback_enabled = false
 api_url = "https://api.openstreetmap.org"
 dump_requests_per_minute = 2

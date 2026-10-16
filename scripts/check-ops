@@ -7,5 +7,7 @@ if command -v "$pinakes_promtool" >/dev/null 2>&1; then
 elif [[ -x .runtime/promtool/extracted/usr/bin/promtool ]]; then
   .runtime/promtool/extracted/usr/bin/promtool check rules ops/alerts.yml
 else
-  printf '%s\n' 'promtool unavailable; the workspace ops test parses YAML and checks every metric reference.'
+  printf '%s\n' 'promtool unavailable; running the required Rust YAML/metric-registry gate.'
+  export DATABASE_URL="${DATABASE_URL:-postgresql:///postgres?host=/var/run/postgresql}"
+  cargo test -p pinakes-core --test changes ops_artifacts_reference_registered_metrics
 fi

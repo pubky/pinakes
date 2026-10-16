@@ -22,7 +22,7 @@ pub async fn insert_resource(
         .ok()
         .and_then(|u| u.host_str().map(str::to_owned));
     let osm = crate::resolver::osm::parse_id(uri);
-    sqlx::query("INSERT INTO resource(id, uri, scheme, host, resolver,osm_type,osm_id,type_path) VALUES($1,$2,$3,$4,$5,$6,$7,CASE WHEN $7::bigint IS NULL THEN '{}'::text[] ELSE NULL END) ON CONFLICT(id) DO NOTHING")
+    sqlx::query("INSERT INTO resource(id, uri, scheme, host, resolver,osm_type,osm_id,doc,type_path) VALUES($1,$2,$3,$4,$5,$6,$7,CASE WHEN $7::bigint IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('type','Place','url',$2::text,'osm_id',$6::text||'/'||$7::text,'source','osm','status','pending') END,CASE WHEN $7::bigint IS NULL THEN '{}'::text[] ELSE NULL END) ON CONFLICT(id) DO NOTHING")
         .bind(id).bind(uri).bind(scheme).bind(host).bind(classify(uri)).bind(osm.as_ref().map(|o|&o.osm_type)).bind(osm.as_ref().map(|o|o.id)).execute(&mut **tx).await?;
     Ok(())
 }

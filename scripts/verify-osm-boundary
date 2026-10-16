@@ -7,11 +7,14 @@ DO $$ BEGIN
 IF EXISTS(SELECT 1 FROM resource WHERE resolver='osm' AND
   (osm_type IS NULL OR osm_id IS NULL OR name IS NOT NULL OR point IS NOT NULL OR
    category IS NOT NULL OR type IS NOT NULL OR type_path IS NOT NULL OR
+   (resolved_at IS NOT NULL AND doc->>'type' IS DISTINCT FROM 'Place') OR
    doc-ARRAY['type','url','osm_id','source','status']::text[]<>'{}'::jsonb))
 THEN RAISE EXCEPTION 'OSM-derived values leaked into resource'; END IF;
 IF EXISTS(SELECT 1 FROM resource r LEFT JOIN osm_place o USING(osm_type,osm_id)
   WHERE r.resolver='osm' AND r.resolved_at IS NOT NULL AND o.osm_id IS NULL)
 THEN RAISE EXCEPTION 'Resolved OSM reference has no derivative row'; END IF;
+IF EXISTS(SELECT 1 FROM resource WHERE resolver='web' AND lower(rtrim(host,'.')) ~ '(^|[.])(openstreetmap[.]org|osm[.]org)$' AND (name IS NOT NULL OR doc<>'{}'::jsonb))
+THEN RAISE EXCEPTION 'OSM-host web metadata leaked into resource'; END IF;
 END $$;
 DO $$ BEGIN
 IF to_regclass('resource_change') IS NOT NULL THEN

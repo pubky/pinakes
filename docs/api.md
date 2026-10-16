@@ -13,7 +13,7 @@ Nexus in a separate call. All paths below are relative to the Pinakes origin.
 | `GET /v1/resources/{id}` | `fields=card\|facets\|document` | One resource; default `document`; 404 if absent |
 | `POST /v1/resources/lookup` | Exactly one of `{"ids":[...]}` or `{"uris":[...]}` | Array in request order, including duplicates, skipping unknowns; 1–500 entries |
 | `POST /v1/resolve` | `{"uri":"https://example.org/"}` | Resource immediately or after up to 3 seconds; 202 with `status=pending` while queued |
-| `GET /v1/info` | None | Version, manifests, resolver configuration/status, source/canary state, metrics, counts and ingestion lag |
+| `GET /v1/info` | None | Public version, manifests, resolver status, counts, ingestion cursor/epoch/length/lag/time and licence |
 | `GET /v1/changes` | `cursor`, `class`, `type`, `source`, `limit` | Change page with ascending sequence cursor |
 | `POST /v1/changes/lookup` | `{resource_ids:[...], since, cursor?, limit?}` | Changes to 1–500 requested IDs since a timestamp |
 | `GET /v1/resources/{id}/changes` | Same filters as changes | Resource history, including after expiry |
@@ -134,12 +134,15 @@ at read time. The resource table contains only OSM IDs and a minimal envelope.
 licence, followed by a repeatable-read snapshot of the table. It includes cached
 missing records, with null geometry. No Pubky references or scores are exported.
 
-The OSM matcher accepts only `https://www.openstreetmap.org/{node|way|relation}/{id}`
-with a positive decimal ID and no suffix. Host/scheme variants, trailing slashes,
-queries and map-only URLs use web resolution. Identity is always the unchanged
-shared crate: fragments are removed **before** storage/classification, so an object
-URL with a fragment is already the canonical resource. The raw matcher rejects it;
-Pinakes cannot recover discarded text or assign a second resource ID.
+OSM object URLs on `www.openstreetmap.org`, `openstreetmap.org`, `osm.org` and
+`www.osm.org` use the OSM resolver over HTTP(S), including a trailing slash or query.
+Each spelling keeps its shared resource ID; matching object IDs share only the derivative
+`osm_place` row. The unchanged identity crate strips fragments before classification.
+Every other URL on OSM hosts (including subdomains, user pages, map views and changesets)
+is refused by web, also after redirects: status `error`, link-only card, no metadata.
+Malformed rows fail only their own object. Batch 429/5xx/timeout/body-cap outcomes defer
+jobs without charging attempts, with Retry-After bounded to one hour. Optional editing-API
+fallback is node-only.
 
 ## Compose-time previews
 
@@ -218,14 +221,15 @@ confirmation can require one additional fetch before finalization. `lookup` and
 by default `127.0.0.1:9090`; the public route returns 404. It uses Prometheus text
 format. The admin listener has no resource routes. Keep it on a trusted network.
 
-`/v1/info` exposes adapter `mode`, `cadence_floor` (seconds), `identity`,
-`cancellation`, `expected_fields` and canary URL, plus source state and numerical
-metric samples. Source state includes cursor, successful fetch time, last error,
-consecutive failures, hold deadline and canary bookkeeping. Internal container key
-sets are omitted. Canaries default to six hours, share worker/host budgets, and do
-not alter resource data. OSM probes deliberately bypass the data cache to exercise
-the parser without writing the cache. Before a canary's first run its result is
-null and no result gauge is exported. Metric/alert details are in [ops](../ops/README.md).
+Public `/v1/info` exposes manifests and status but no Nexus URL, source errors or metric
+samples. Admin `GET /v1/info` includes full ingestion/source/canary state and numerical
+metrics. Errors are stored only as sanitized classes; container key sets are omitted.
+Info and database metric refreshes are cached for 15 seconds. Canaries default to six
+hours and share worker/host budgets; due checks run at most once per worker per minute.
+A web canary denied by host policy is skipped without a failure streak. OSM probes bypass
+the data cache without writing it. Before the first run (or when disabled by policy), no
+result gauge is exported. Generic web declares no expected fields; titleless pages and
+images do not count as drift. Metric/alert details are in [ops](../ops/README.md).
 
 Review corrections: changes use the wall clock after acquiring the sequence lock.
 Prefer `cursor`; for `since`, reuse a previous response's `at` (inclusive, so deduplicate

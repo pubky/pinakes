@@ -83,6 +83,7 @@ pub struct Fetched {
     pub url: Url,
     pub content_type: String,
     pub status: u16,
+    pub retry_after_secs: u64,
     pub location: Option<String>,
     pub body: Vec<u8>,
 }
@@ -123,6 +124,7 @@ impl Transport for PinnedTransport {
 }
 pub async fn read_response(url: Url, mut response: reqwest::Response) -> Result<Fetched> {
     let status = response.status().as_u16();
+    let retry_after_secs = super::osm::retry_after(response.headers());
     let location = response
         .headers()
         .get("location")
@@ -159,6 +161,7 @@ pub async fn read_response(url: Url, mut response: reqwest::Response) -> Result<
     Ok(Fetched {
         url,
         status,
+        retry_after_secs,
         location,
         content_type,
         body,
@@ -173,6 +176,19 @@ pub struct Egress {
     hosts: Arc<Mutex<HashMap<String, HostBudget>>>,
 }
 impl Egress {
+    pub fn allows(&self, uri: &str) -> bool {
+        Url::parse(uri)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_owned))
+            .is_some_and(|host| self.allows_host(&host))
+    }
+    fn allows_host(&self, host: &str) -> bool {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        !super::osm::osm_host(&host)
+            && !self.cfg.deny_hosts.iter().any(|h| host_matches(&host, h))
+            && (self.cfg.allow_hosts.is_empty()
+                || self.cfg.allow_hosts.iter().any(|h| host_matches(&host, h)))
+    }
     pub fn new(cfg: EgressConfig) -> Self {
         Self::with_backends(cfg, Arc::new(SystemDns), Arc::new(PinnedTransport))
     }
@@ -207,20 +223,23 @@ impl Egress {
                 .context("missing host")?
                 .trim_end_matches('.')
                 .to_ascii_lowercase();
-            if self.cfg.deny_hosts.iter().any(|h| host_matches(&host, h))
-                || (!self.cfg.allow_hosts.is_empty()
-                    && !self.cfg.allow_hosts.iter().any(|h| host_matches(&host, h)))
-            {
-                bail!("host denied by operator policy");
+            if !self.allows_host(&host) {
+                return Err(anyhow::Error::new(super::ErrorClass("policy"))
+                    .context("host denied by operator/OSM policy"));
             }
             let port = url.port_or_known_default().context("missing port")?;
             let addresses = match url.host().context("missing host")? {
                 Host::Ipv4(v) => vec![SocketAddr::new(IpAddr::V4(v), port)],
                 Host::Ipv6(v) => vec![SocketAddr::new(IpAddr::V6(v), port)],
-                Host::Domain(_) => self.dns.lookup(&host, port).await?,
+                Host::Domain(_) => self
+                    .dns
+                    .lookup(&host, port)
+                    .await
+                    .context(super::ErrorClass("dns"))?,
             };
             if addresses.is_empty() || addresses.iter().any(|a| !public_ip(a.ip())) {
-                bail!("egress refused non-public address");
+                return Err(anyhow::Error::new(super::ErrorClass("policy"))
+                    .context("egress refused non-public address"));
             }
             // Pin checked addresses to the connection; a second DNS lookup could rebind to a private IP.
             let _permit = self.host_permit(&host).await;
@@ -228,6 +247,13 @@ impl Egress {
             let response = self.transport.get(&url, &addresses).await?;
             observation.status(response.status);
             drop(observation);
+            if response.status == 429 {
+                return Err(super::RetryLater {
+                    class: "http_4xx",
+                    seconds: response.retry_after_secs,
+                }
+                .into());
+            }
             if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
                 if redirects == 3 {
                     bail!("more than 3 redirects");
@@ -366,6 +392,7 @@ mod tests {
             Ok(Fetched {
                 url: url.clone(),
                 status: 302,
+                retry_after_secs: 60,
                 location: Some(self.target.into()),
                 content_type: "text/html".into(),
                 body: vec![],
@@ -537,5 +564,31 @@ mod tests {
             .to_string()
             .contains("content type"));
         task.abort();
+    }
+}
+
+#[cfg(test)]
+mod osm_policy_tests {
+    use super::*;
+    #[test]
+    fn osm_hosts_and_disabled_canaries_are_refused() {
+        let egress = Egress::new(EgressConfig::default());
+        for uri in [
+            "https://www.openstreetmap.org/user/alice",
+            "https://osm.org/",
+            "https://wiki.openstreetmap.org./node/1",
+        ] {
+            assert!(!egress.allows(uri));
+        }
+        assert!(egress.allows("https://openstreetmap.org.example.net/"));
+        let web = crate::resolver::web::WebResolver {
+            egress: Egress::new(EgressConfig {
+                allow_hosts: vec!["only.example".into()],
+                ..Default::default()
+            }),
+            config: Default::default(),
+        };
+        assert!(!crate::resolver::Resolver::canary_allowed(&web));
+        assert!(crate::adapter::manifest("web").expected_fields.is_empty());
     }
 }

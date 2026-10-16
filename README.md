@@ -105,7 +105,7 @@ place search, autocomplete or reverse geocoding. The one-time development run is
 51 user-referenced objects in two calls. Configure your own `osm.nominatim_url` for
 ongoing/staging/production use; recurring public bulk work must stay below four
 requests/minute. OSM API fallback is disabled by default and has the same serialized
-budget when explicitly enabled. Requests have a ten-second timeout, no redirects,
+budget when explicitly enabled, for nodes only (no way/relation `/full` downloads). Requests have a ten-second timeout, no redirects,
 no environment proxy, gzip and a two-MB decoded response cap. URLs are operator
 configuration, never supplied by the caller.
 
@@ -169,7 +169,8 @@ preview-only entries follow the same policy. Search excludes unreferenced resour
 
 Every adapter declares its mode, cadence floor, identity, cancellation signal,
 expected fields and optional canary. `/v1/info` exposes these declarations and
-source state. Near-start resources refresh more often (7 days, 2 days, 6 hours,
+the public summary. Full source state and metrics are on admin `/v1/info`. Both info
+and database-backed metrics are cached for 15 seconds. Near-start resources refresh more often (7 days, 2 days, 6 hours,
 1 hour); one successful fetch at/after end+24h makes the resource final. Container
 and cursor scheduling primitives are present for future adapters. The container
 key-set guard holds losses over half the set until an identical successful result
@@ -203,3 +204,22 @@ See [ops/README.md](ops/README.md) for alert rules, the Grafana dashboard, count
 and scrape setup. `scripts/test` checks every alert/dashboard metric against the
 registry and runs `promtool check rules` when available (`apt install promtool`
 on this host). No alert contact point is provisioned by this repository.
+
+Public `/v1/info` includes only version, counts, ingestion cursor/epoch/length/lag/time,
+resolver status, manifests and the OSM licence. It never exposes the Nexus URL or source
+errors. Stored source errors are restricted to dns/connect/timeout/http_4xx/http_5xx/
+parse/policy classes. Generic web pages declare no expected fields, since images and
+pages without titles are valid; platform adapters can opt into drift detection.
+Denied web canaries are skipped, and each worker checks due canaries at most once/minute.
+
+The pinned Pubky 0.16.2 builder exposes PKARR configuration and timeouts but no socket
+or address-validation hook; both HTTP clients are private. Its native PKARR connection
+path therefore cannot apply Pinakes's `egress::public_ip` check. A malicious endpoint
+can cause a blind connection to an operator-network IP (RPK TLS still authenticates the
+server). Use network-level egress restrictions or disable `[pubky]` where that boundary
+is required. Public info never exposes these transport failures. No SDK fork or partial,
+rebindable preflight check is used.
+
+`[web]`/`[pubky] ttl_secs` supplies the parser document's initial TTL; scheduling is
+controlled by `[refresh]`. Conditional responses preserve accepted facts, but validators
+are not yet persisted or sent: normal web/Pubky requests remain unconditional.

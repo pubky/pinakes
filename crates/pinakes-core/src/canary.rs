@@ -64,10 +64,15 @@ pub async fn run(
             pool,
             &manifest.source,
             match &result {
-                Err(e) => Some(e.to_string()),
-                Ok(doc) if matches!(doc.status, Status::Unreachable | Status::Error) => {
-                    Some(doc.status.as_str().into())
-                }
+                Err(e) => Some(crate::resolver::error_class(e).to_owned()),
+                Ok(doc) if matches!(doc.status, Status::Unreachable | Status::Error) => Some(
+                    if doc.status == Status::Unreachable {
+                        "http_4xx"
+                    } else {
+                        "http_5xx"
+                    }
+                    .into(),
+                ),
                 _ => None,
             }
             .as_deref(),
@@ -75,4 +80,10 @@ pub async fn run(
         .await?;
     }
     record(pool, &manifest, generation, &result, config.interval_secs).await
+}
+
+/// Policy-disabled probes do not leave a stale failing gauge behind after reconfiguration.
+pub async fn suspend(pool: &PgPool, manifest: &Manifest) -> Result<()> {
+    sqlx::query("UPDATE source_state SET canary_ok=NULL,canary_missing='{}',canary_failures=0,canary_lease_until=NULL WHERE source=$1 AND (canary_ok IS NOT NULL OR canary_failures<>0)").bind(&manifest.source).execute(pool).await?;
+    Ok(())
 }

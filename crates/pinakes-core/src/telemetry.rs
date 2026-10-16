@@ -26,7 +26,7 @@ pub const OUTCOMES: &[&str] = &[
 #[derive(Clone)]
 pub struct Metrics {
     registry: Registry,
-    refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    refresh_lock: Arc<tokio::sync::Mutex<Option<Instant>>>,
     pub fetch: IntCounterVec,
     pub duration: HistogramVec,
     pub changes: IntCounterVec,
@@ -164,11 +164,17 @@ impl Metrics {
         Ok(out)
     }
     pub async fn refresh(&self, pool: &PgPool) -> Result<()> {
-        let _guard = self.refresh_lock.lock().await;
+        let mut refreshed = self.refresh_lock.lock().await;
+        if refreshed.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(15)) {
+            return Ok(());
+        }
         let row=sqlx::query("SELECT coalesce(sum(greatest(feed_length-cursor,0)),0)::bigint AS lag,coalesce(extract(epoch FROM max(updated_at)),0)::bigint AS success,coalesce(sum(resets),0)::bigint AS resets FROM feed_cursor").fetch_one(pool).await?;
         self.ingest_lag.set(row.try_get("lag")?);
         self.ingest_success.set(row.try_get("success")?);
         sync_counter(&self.ingest_resets, row.try_get("resets")?);
+        self.canary_ok.reset();
+        self.canary_missing.reset();
+        self.canary_failures.reset();
         for source in sqlx::query("SELECT *,coalesce(extract(epoch FROM last_success_at),0)::bigint AS success FROM source_state").fetch_all(pool).await? {
             let name:String=source.try_get("source")?;self.success.with_label_values(&[&name]).set(source.try_get("success")?);
             sync_counter(&self.held.with_label_values(&[&name]),source.try_get("feed_held_total")?);sync_counter(&self.resets.with_label_values(&[&name]),source.try_get("cursor_resets_total")?);
@@ -193,6 +199,7 @@ impl Metrics {
         }
         for row in sqlx::query("SELECT resolver,status,count(*) AS n FROM resource WHERE resolver IS NOT NULL GROUP BY resolver,status").fetch_all(pool).await? {self.resources.with_label_values(&[&row.try_get::<String,_>("resolver")?,&row.try_get::<String,_>("status")?]).set(row.try_get("n")?);}
         for row in sqlx::query("SELECT resolver,count(*) FILTER(WHERE dead_letter) AS dead,count(*) FILTER(WHERE NOT dead_letter AND lease_until>now()) AS leased,count(*) FILTER(WHERE NOT dead_letter AND NOT final AND next_attempt_at<=now() AND (lease_until IS NULL OR lease_until<=now())) AS pending,count(*) FILTER(WHERE NOT final AND NOT dead_letter AND refresh_at<now()) AS overdue FROM resource WHERE resolver IS NOT NULL GROUP BY resolver").fetch_all(pool).await? {let resolver:String=row.try_get("resolver")?;for state in ["pending","leased","dead"] {self.queue.with_label_values(&[&resolver,state]).set(row.try_get(state)?);}self.overdue.with_label_values(&[&resolver]).set(row.try_get("overdue")?);}
+        *refreshed = Some(Instant::now());
         Ok(())
     }
     pub fn encode(&self) -> Result<String> {

@@ -32,6 +32,11 @@ impl Resolver for WebResolver {
     fn matches(&self, uri: &str) -> bool {
         super::classify(uri) == Some("web")
     }
+    fn canary_allowed(&self) -> bool {
+        self.manifest()
+            .canary
+            .is_none_or(|u| self.egress.allows(u.as_str()))
+    }
     async fn resolve(&self, uri: &str) -> Result<ResourceMeta> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         tokio::time::timeout_at(deadline, async {
@@ -465,6 +470,7 @@ mod tests {
         let fetched = Fetched {
             url: Url::parse("https://example.org/").unwrap(),
             status: 200,
+            retry_after_secs: 60,
             content_type: "text/html".into(),
             location: None,
             body: body.as_bytes().into(),
@@ -532,7 +538,7 @@ mod tests {
                 if url.path() != "/page" {
                     std::future::pending::<()>().await;
                 }
-                Ok(Fetched { url:url.clone(),status:200,location:None,content_type:"text/html".into(),body:br#"<title>Page survives</title><link rel="alternate" type="application/json+oembed" href="/embed">"#.to_vec() })
+                Ok(Fetched { url:url.clone(),status:200,retry_after_secs:60,location:None,content_type:"text/html".into(),body:br#"<title>Page survives</title><link rel="alternate" type="application/json+oembed" href="/embed">"#.to_vec() })
             }
         }
         let resolver = WebResolver {

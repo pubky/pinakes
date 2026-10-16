@@ -15,6 +15,7 @@ pub struct PubkyResolver {
 impl PubkyResolver {
     pub fn new(config: ResolverConfig) -> Result<Self> {
         let client = pubky::PubkyHttpClient::builder()
+            .max_error_body_bytes(super::egress::BODY_CAP)
             .request_timeout(Duration::from_secs(10))
             .read_timeout(Duration::from_secs(10))
             .build()?;
@@ -58,6 +59,16 @@ impl Resolver for PubkyResolver {
                 })) if status.as_u16() == 304 => {
                     observation.status(304);
                     return Err(super::NotModified.into());
+                }
+                Err(pubky::Error::Request(pubky::errors::RequestError::Server {
+                    status, ..
+                })) if status.as_u16() == 429 => {
+                    observation.status(429);
+                    return Err(super::RetryLater {
+                        class: "http_4xx",
+                        seconds: 60,
+                    }
+                    .into());
                 }
                 Err(e) => {
                     if let pubky::Error::Request(pubky::errors::RequestError::Server {

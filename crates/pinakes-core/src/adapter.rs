@@ -53,7 +53,7 @@ pub fn manifest(source: &str) -> Manifest {
             3600,
             "normalized_uri",
             "missing_twice",
-            vec!["name"],
+            vec![],
             Some("https://example.org/"),
         ),
         "pubky" => (

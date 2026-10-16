@@ -331,6 +331,11 @@ struct Probe {
 }
 #[async_trait::async_trait]
 impl Resolver for Probe {
+    fn manifest(&self) -> adapter::Manifest {
+        let mut manifest = adapter::manifest("web");
+        manifest.expected_fields = vec!["name".into()];
+        manifest
+    }
     fn name(&self) -> &'static str {
         "web"
     }
@@ -352,7 +357,8 @@ impl Resolver for Probe {
 #[sqlx::test(migrations = "../../migrations")]
 async fn canary_bookkeeping_metrics_and_separate_listener(pool: PgPool) {
     let config = CanaryConfig::default();
-    let manifest = adapter::manifest("web");
+    let mut manifest = adapter::manifest("web");
+    manifest.expected_fields = vec!["name".into()];
     let metrics = Metrics::new().unwrap();
     let mut probe = Probe {
         doc: ResourceMeta::new("https://example.org/", "web", 86400),
@@ -433,7 +439,7 @@ async fn canary_bookkeeping_metrics_and_separate_listener(pool: PgPool) {
         .as_str()
         .unwrap()
         .contains("# TYPE pinakes_fetch_total counter"));
-    assert_eq!(call(&admin, "GET", "/v1/info", None).await.0, 404);
+    assert_eq!(call(&admin, "GET", "/v1/info", None).await.0, 200);
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -669,4 +675,52 @@ async fn maintenance_runs_without_an_idle_ingestion_tick(pool: PgPool) {
     stop.send(true).unwrap();
     task.await.unwrap();
     assert_eq!(classes(&pool, &id).await, vec!["deleted"]);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn public_info_is_redacted_and_source_errors_are_classes(pool: PgPool) {
+    let secret = "http://private-relay.internal:8080/?token=do-not-publish";
+    sqlx::query("INSERT INTO feed_cursor(nexus) VALUES($1)")
+        .bind(secret)
+        .execute(&pool)
+        .await
+        .unwrap();
+    source::outcome(
+        &pool,
+        "web",
+        Some("connect https://upstream.example/private?token=secret"),
+    )
+    .await
+    .unwrap();
+    let error: String =
+        sqlx::query_scalar("SELECT last_error FROM source_state WHERE source='web'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(error, "parse");
+    assert!(
+        sqlx::query("UPDATE source_state SET last_error='https://secret'")
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    let state = AppState::new(pool.clone(), Config::default()).unwrap();
+    let public = api::router(state.clone());
+    let admin = api::admin_router(state);
+    let (_, body) = call(&public, "GET", "/v1/info", None).await;
+    assert!(body.get("sources").is_none() && body.get("metrics").is_none());
+    assert!(!body.to_string().contains("private-relay"));
+    assert!(body["ingestion"][0].get("nexus").is_none());
+    let (code, full) = call(&admin, "GET", "/v1/info", None).await;
+    assert_eq!(code, 200);
+    assert_eq!(full["ingestion"][0]["nexus"], secret);
+    assert!(full.get("sources").is_some() && full.get("metrics").is_some());
+    store::ensure_resource(&pool, "https://example.org/new")
+        .await
+        .unwrap();
+    assert_eq!(
+        call(&public, "GET", "/v1/info", None).await.1["counts"]["resources"],
+        0,
+        "info snapshot is cached"
+    );
 }
