@@ -18,7 +18,7 @@ Title, heading and captcha markers count only on short pages (under 2,000 visibl
 challenge statuses (403/429/503); a redirect of the requested path to a listed sign-in path
 (`/login`, `/authwall`, `/signin`, `/checkpoint`, …) is a wall. A new reference re-probes a
 blocked page early, at most `ingest.blocked_reprobes_per_host_per_day` times per host per UTC
-day (default 20; 0 disables) and not within an hour of the last attempt, so false positives
+day (default 20, 0–1000; 0 disables) and not within an hour of the last attempt, so false positives
 heal when someone cares about the page.
 
 Redirect aliases do not establish group identity. Only explicit canonical/main-entity metadata,

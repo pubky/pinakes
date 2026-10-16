@@ -522,6 +522,7 @@ impl Config {
         if !(1..=3600).contains(&self.poll_secs)
             || !(1..=1024).contains(&self.ingest.max_label_bytes)
             || !(1..=2048).contains(&self.ingest.max_object_path_bytes)
+            || self.ingest.blocked_reprobes_per_host_per_day > 1000
             || self.grace_days > 3650
             || !(1..=32).contains(&self.queue.max_failures)
             || self.queue.timeout_grace > 32
@@ -613,6 +614,13 @@ mod tests {
         assert_eq!(config.api.reach_cost, 6);
         assert_eq!(config.ingest.max_label_bytes, 128);
         assert_eq!(config.ingest.max_object_path_bytes, 2048);
+        assert_eq!(config.ingest.blocked_reprobes_per_host_per_day, 20);
+        // 0 disables blocked re-probes and 1000 is the ceiling; both are accepted.
+        for reprobes in [0, 1000] {
+            let mut accepted = config.clone();
+            accepted.ingest.blocked_reprobes_per_host_per_day = reprobes;
+            accepted.validate().unwrap();
+        }
         for override_ in [
             serde_json::json!({"search":{"reach_timeout_secs":0}}),
             serde_json::json!({"search":{"reach_timeout_secs":61}}),
@@ -622,6 +630,7 @@ mod tests {
             serde_json::json!({"ingest":{"max_label_bytes":1025}}),
             serde_json::json!({"ingest":{"max_object_path_bytes":0}}),
             serde_json::json!({"ingest":{"max_object_path_bytes":2049}}),
+            serde_json::json!({"ingest":{"blocked_reprobes_per_host_per_day":1001}}),
         ] {
             let mut value = serde_json::to_value(&config).unwrap();
             merge(&mut value, override_);

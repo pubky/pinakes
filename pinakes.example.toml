@@ -13,7 +13,8 @@ geo_enabled = true
 # Authors must be exactly 52 lowercase z-base-32 characters.
 max_label_bytes = 128
 max_object_path_bytes = 2048
-# A new reference re-probes a blocked page early; per host per UTC day, 0 disables.
+# A new reference re-probes a blocked page early, at most this often per host per UTC day
+# (0–1000, 0 disables).
 blocked_reprobes_per_host_per_day = 20
 
 [web]
