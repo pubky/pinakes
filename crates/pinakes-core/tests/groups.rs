@@ -1385,11 +1385,12 @@ async fn round4_registry_landing_pages_group_publisher_pages_with_identifiers(po
     }
     // Before the exact page exists, a same-origin variant whose own canonical is the
     // registry page meets the identifier directly (rule b); that canonical is not trusted.
+    // Like the live page, it cites the DOI back (round 5 reciprocity).
     let variant = page(
         &pool,
         "https://www.nature.com/articles/nature12373?error=cookies_not_supported",
         "Variant",
-        &[("canonical", landing)],
+        &[("doi", "10.1038/nature12373"), ("canonical", landing)],
     )
     .await;
     let group = gid(&pool, &variant).await;
@@ -1437,10 +1438,9 @@ async fn round4_registry_landing_pages_group_publisher_pages_with_identifiers(po
         0
     );
 
-    // Rule 4 picks the best member by distinct taggers, not by identifier provenance.
+    // The page a registry names outranks the identifier card whatever its taggers (K45b).
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     tag(&pool, &publisher, &"p".repeat(52), "paper").await;
-    tag(&pool, &publisher, &"q".repeat(52), "paper").await;
     tag(&pool, &identifiers[0], &"p".repeat(52), "paper").await;
     let card = get(&app, &format!("/v1/groups/{group}")).await;
     assert_eq!(card["name"], "Publisher page");
@@ -1449,7 +1449,7 @@ async fn round4_registry_landing_pages_group_publisher_pages_with_identifiers(po
         tag(&pool, &identifiers[0], &author.repeat(52), "paper").await;
     }
     let card = get(&app, &format!("/v1/groups/{group}")).await;
-    assert_eq!(card["name"], "Nanometre-scale thermometry in a living cell");
+    assert_eq!(card["name"], "Publisher page");
 
     // Open Library: the tagged edition page (no slug) and its ISBN resource group.
     let edition = page(
@@ -1473,6 +1473,203 @@ async fn round4_registry_landing_pages_group_publisher_pages_with_identifiers(po
     store::save_document(&pool, &isbn, 0, &d).await.unwrap();
     assert_eq!(gid(&pool, &edition).await, gid(&pool, &isbn).await);
     assert_ne!(gid(&pool, &edition).await, group);
+}
+
+fn recorded_html(url: &str, body: &[u8]) -> pinakes_core::resolver::egress::Fetched {
+    pinakes_core::resolver::egress::Fetched {
+        content_type: "text/html".into(),
+        ..recorded_json(url, body)
+    }
+}
+async fn doi_card(pool: &PgPool, uri: &str, csl: &Value) -> String {
+    let id = store::ensure_resource(pool, uri).await.unwrap();
+    let fetched = recorded_json(
+        "https://api.crossref.org/v1/works/x/transform",
+        &serde_json::to_vec(csl).unwrap(),
+    );
+    let d = pinakes_core::resolver::cards::parse_doi(uri, &fetched, 86400).unwrap();
+    store::save_document(pool, &id, 0, &d).await.unwrap();
+    id
+}
+async fn best_name(app: &axum::Router, group: &str) -> Value {
+    get(app, &format!("/v1/groups/{group}")).await["name"].clone()
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round5_registry_landing_pages_need_the_page_to_cite_the_identifier(pool: PgPool) {
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    // A victim article that cites no DOI, already tagged.
+    let victim = page(
+        &pool,
+        "https://victim.example/article",
+        "Victim article",
+        &[("canonical", "https://victim.example/article")],
+    )
+    .await;
+    tag(&pool, &victim, &"v".repeat(52), "paper").await;
+    // Registrants choose their landing URL: an attacker DOI names the victim's page and
+    // farms taggers on its own card.
+    let attacker = doi_card(
+        &pool,
+        "doi:10.5555/evil",
+        &json!({"type":"article-journal","title":"Attacker title","DOI":"10.5555/evil",
+            "URL":"https://victim.example/article",
+            "resource":{"primary":{"URL":"https://victim.example/article"}},
+            "link":[{"URL":"https://victim.example/article","content-type":"text/html"}]}),
+    )
+    .await;
+    for author in ["a", "b", "c", "d"] {
+        tag(&pool, &attacker, &author.repeat(52), "paper").await;
+    }
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT count(*)>0 FROM resource_group WHERE resource_id=$1 AND basis='registry'"
+    )
+    .bind(&attacker)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+    assert_ne!(gid(&pool, &attacker).await, gid(&pool, &victim).await);
+
+    // The live publisher page, extracted from the recorded page head: it cites its DOI in
+    // meta and JSON-LD, so the Crossref registration meets it.
+    let landing = "https://www.nature.com/articles/nature12373";
+    let html = recorded_html(
+        landing,
+        include_bytes!("fixtures/registry/nature12373-head.html"),
+    );
+    let mut d = pinakes_core::resolver::web::extract(landing, &html, 86400).doc;
+    assert!(d
+        .group_keys
+        .iter()
+        .any(|k| k.key == "doi:10.1038/nature12373"));
+    d.name = Some("Publisher page".into());
+    let publisher = store::ensure_resource(&pool, landing).await.unwrap();
+    store::save_document(&pool, &publisher, 0, &d)
+        .await
+        .unwrap();
+    let csl: Value = serde_json::from_slice(include_bytes!(
+        "fixtures/registry/crossref-nature12373.csl.json"
+    ))
+    .unwrap();
+    let genuine = doi_card(&pool, "doi:10.1038/nature12373", &csl).await;
+    let group = gid(&pool, &publisher).await;
+    assert_eq!(gid(&pool, &genuine).await, group);
+    // A second registration naming the same page is not cited by it and stays apart, even
+    // though the genuine card naming that page is already a member.
+    let squatter = doi_card(
+        &pool,
+        "doi:10.5555/squat",
+        &json!({"type":"article-journal","title":"Squatter title","DOI":"10.5555/squat",
+            "resource":{"primary":{"URL":landing}}}),
+    )
+    .await;
+    assert_ne!(gid(&pool, &squatter).await, group);
+    assert_ne!(gid(&pool, &squatter).await, gid(&pool, &attacker).await);
+    // The named page stays best whatever the identifier card's taggers.
+    for author in ["e", "f", "g"] {
+        tag(&pool, &genuine, &author.repeat(52), "paper").await;
+    }
+    assert_eq!(best_name(&app, &group).await, "Publisher page");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round5_same_as_squatters_on_the_owners_origin_rank_below_the_owner(pool: PgPool) {
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let owner_uri = "https://news.example/story";
+    let owner = page(
+        &pool,
+        owner_uri,
+        "Owner story",
+        &[
+            ("canonical", owner_uri),
+            ("doi", "10.5555/story"),
+            ("same_as", "https://doi.org/10.5555/story"),
+            ("same_as", "https://www.wikidata.org/wiki/Q42"),
+        ],
+    )
+    .await;
+    let squatter = page(
+        &pool,
+        "https://news.example/farm",
+        "Squatter page",
+        &[("same_as", owner_uri)],
+    )
+    .await;
+    let group = gid(&pool, &owner).await;
+    assert_eq!(gid(&pool, &squatter).await, group);
+    for author in ["a", "b", "c"] {
+        tag(&pool, &squatter, &author.repeat(52), "story").await;
+    }
+    assert_eq!(best_name(&app, &group).await, "Owner story");
+    // The owner's own sameAs to an identifier resource (here the doi.org URL the card was
+    // tagged as) never ranks it below that resource.
+    let card = doi_card(
+        &pool,
+        "https://doi.org/10.5555/story",
+        &json!({"type":"article-journal","title":"Identifier title","DOI":"10.5555/story",
+            "resource":{"primary":{"URL":owner_uri}}}),
+    )
+    .await;
+    let group = gid(&pool, &owner).await;
+    assert_eq!(gid(&pool, &card).await, group, "the owner cites the DOI");
+    for author in ["d", "e", "f", "g"] {
+        tag(&pool, &card, &author.repeat(52), "story").await;
+    }
+    assert_eq!(best_name(&app, &group).await, "Owner story");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round5_upgrade_splits_one_sided_registry_merges(pool: PgPool) {
+    let victim = page(
+        &pool,
+        "https://victim.example/a",
+        "Victim",
+        &[("canonical", "https://victim.example/a")],
+    )
+    .await;
+    let attacker = doi_card(
+        &pool,
+        "doi:10.5555/old",
+        &json!({"type":"article-journal","title":"Old attacker","DOI":"10.5555/old",
+            "resource":{"primary":{"URL":"https://victim.example/a"}}}),
+    )
+    .await;
+    let variant = page(
+        &pool,
+        "https://victim.example/a?ref=feed",
+        "Victim variant",
+        &[("canonical", "https://victim.example/a")],
+    )
+    .await;
+    // Model a merge the round-4 rule allowed: the card in the victim's group.
+    let group = gid(&pool, &victim).await;
+    assert_eq!(gid(&pool, &variant).await, group);
+    sqlx::query("UPDATE group_unit SET group_id=$1 WHERE resource_id=$2")
+        .bind(&group)
+        .bind(&attacker)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO group_input(resource_id,fingerprint) VALUES($1,'stale') ON CONFLICT(resource_id) DO UPDATE SET fingerprint='stale'").bind(&attacker).execute(&pool).await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/202610160032_registry_reciprocity.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<String>>(
+            "SELECT array_agg(resource_id ORDER BY resource_id) FROM group_dirty"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        vec![attacker.clone()]
+    );
+    groups::drain(&pool, &Config::default().groups, 10)
+        .await
+        .unwrap();
+    assert_ne!(gid(&pool, &attacker).await, gid(&pool, &victim).await);
 }
 
 #[sqlx::test(migrations = "../../migrations")]

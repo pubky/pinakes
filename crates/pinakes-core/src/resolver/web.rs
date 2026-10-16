@@ -352,6 +352,21 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
                 .or_insert_with(|| v.to_string());
         }
     }
+    // Scholarly pages cite their own identifiers in Highwire, PRISM and Dublin Core meta;
+    // a registry naming this page needs that citation before it may merge with it.
+    for key in [
+        "citation_doi",
+        "prism.doi",
+        "dc.identifier",
+        "bepress_citation_doi",
+    ] {
+        if let Some(doi) = meta.get(key).and_then(|v| cited_doi(v)) {
+            crate::group_keys::add(&mut out.doc, "doi", &doi);
+        }
+    }
+    if let Some(isbn) = meta.get("citation_isbn") {
+        crate::group_keys::add(&mut out.doc, "isbn", isbn);
+    }
     for key in ["og:title", "twitter:title"] {
         fill(&mut out.doc.name, meta.get(key).cloned());
     }
@@ -407,6 +422,14 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
         .map(|el| el.text().collect::<String>().trim().to_owned());
     out.description = meta.get("description").cloned();
     out
+}
+fn cited_doi(value: &str) -> Option<String> {
+    let value = value.trim();
+    let value = match value.get(..4) {
+        Some(p) if p.eq_ignore_ascii_case("doi:") => &value[4..],
+        _ => value,
+    };
+    super::cards::doi(value).or_else(|| super::cards::doi(&format!("doi:{}", value.trim())))
 }
 fn selector(s: &str) -> Selector {
     Selector::parse(s).expect("static selector")
@@ -696,6 +719,50 @@ mod tests {
             .doc
             .aliases
             .contains(&"https://example.org/canonical".into()));
+    }
+    #[test]
+    fn pages_cite_their_own_identifiers_from_meta() {
+        let keys = |head: &str| {
+            let fetched = Fetched {
+                permanent_redirect: false,
+                truncated: false,
+                url: Url::parse("https://journal.example/a").unwrap(),
+                body: format!("<title>Paper</title>{head}").into_bytes(),
+                content_type: "text/html".into(),
+                status: 200,
+                location: None,
+                retry_after_secs: 60,
+                validators: Default::default(),
+            };
+            extract("https://journal.example/a", &fetched, 100)
+                .doc
+                .group_keys
+                .into_iter()
+                .map(|k| k.key)
+                .filter(|k| !k.starts_with("url:"))
+                .collect::<Vec<_>>()
+        };
+        for head in [
+            r#"<meta name="citation_doi" content="10.1234/ABC">"#,
+            r#"<meta name="prism.doi" content="doi:10.1234/abc">"#,
+            r#"<meta name="DC.Identifier" content="DOI:10.1234/abc">"#,
+            r#"<meta name="citation_doi" content="https://doi.org/10.1234/abc">"#,
+        ] {
+            assert_eq!(keys(head), ["doi:10.1234/abc"], "{head}");
+        }
+        assert_eq!(
+            keys(r#"<meta name="citation_isbn" content="978-0-14-032872-1">"#),
+            ["isbn:9780140328721"]
+        );
+        // Other identifiers and malformed values mint nothing, multi-byte text included.
+        for head in [
+            r#"<meta name="dc.identifier" content="urn:issn:1234-5678">"#,
+            r#"<meta name="citation_doi" content="d€i:10.1234/abc">"#,
+            r#"<meta name="citation_doi" content="€">"#,
+            r#"<meta name="citation_isbn" content="not an isbn">"#,
+        ] {
+            assert!(keys(head).is_empty(), "{head}");
+        }
     }
     #[test]
     fn oembed_fills_only_missing_and_never_keeps_html() {

@@ -130,7 +130,7 @@ impl Transport for Fixture {
             "api.nostr.wine"|"api.nostrarchives.com"=>("application/json",json!([self.event]).to_string()),
             // Crossref shape: CSL `URL` is the DOI proxy, the landing page is resource.primary.
             "doi.org"=>{ensure!(o.accept.as_deref()==Some("application/vnd.citationstyles.csl+json"),"missing CSL negotiation");("application/json",json!({"type":"article-journal","title":"Fixture research","URL":"http://dx.doi.org/10.1234/pinakes","resource":{"primary":{"URL":"https://publisher.example/articles/pinakes"}}}).to_string())},
-            "publisher.example"=>("text/html","<title>Fixture research | Publisher</title><link rel=\"canonical\" href=\"https://publisher.example/articles/pinakes\">".into()),
+            "publisher.example"=>("text/html","<title>Fixture research | Publisher</title><link rel=\"canonical\" href=\"https://publisher.example/articles/pinakes\"><meta name=\"citation_doi\" content=\"10.1234/pinakes\">".into()),
             "openlibrary.org" if u.path().starts_with("/books/")=>("text/html","<title>Matilda | Open Library</title><link rel=\"canonical\" href=\"https://openlibrary.org/books/OL7353617M/Matilda\">".into()),
             "openlibrary.org"=>("application/json",json!({"ISBN:9780140328721":{"title":"Matilda","authors":[{"name":"Roald Dahl"}],"url":"https://openlibrary.org/books/OL7353617M/Matilda","key":"/books/OL7353617M"},"ISBN:0140328726":{"title":"Matilda","authors":[{"name":"Roald Dahl"}],"url":"https://openlibrary.org/books/OL7353617M/Matilda","key":"/books/OL7353617M"}}).to_string()),
             "www.youtube.com"=>("application/json",json!({"type":"video","title":"Fixture video","thumbnail_url":"https://image.example/a.jpg"}).to_string()),

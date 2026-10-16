@@ -482,7 +482,11 @@ reciprocity; unverified self-claims do not merge. DOI and ISBN cards record the
 landing pages their registries name (Crossref `resource.primary.URL`, a non-proxy CSL
 `URL`, `text/html` links; the Open Library edition page) as trusted `registry` URL
 keys, so the publisher page groups with its identifier when the page's own URI or its
-same-origin canonical is that landing page. A page naming a DOI it does not own never
+same-origin canonical is that landing page and the page cites the identifier back
+(`citation_doi`, `prism.doi`, `dc.identifier`, `citation_isbn` meta, or a JSON-LD
+identifier/sameAs; Open Library's own edition pages are exempt). Registrants choose their
+landing URL, so a registration naming someone else's page does not merge into it, and the
+named page always outranks the identifier card. A page naming a DOI it does not own never
 merges, and only the DOI/ISBN resolvers can supply registry evidence. Migration 0028
 refetches older DOI/ISBN cards once, staggered over an hour. The PSL and hosted-blog tenant
 boundaries separate independent publishers. `collapse=group` filters members, then
@@ -522,8 +526,8 @@ not its host. `groups.cross_container_occurrences = "off"` is the default;
 starts within 300 s and pg_trgm name similarity at least 0.5 after `simple`
 search normalization. `PINAKES__GROUPS__CROSS_CONTAINER_OCCURRENCES` overrides it.
 This restores the event-on-Luma/organiser case in design §5.3, at the price of
-being copyable by a determined publisher. Automatic cards limit that harm by
-preferring distinct taggers, then references, then oldest admission, before
+being copyable by a determined publisher. Automatic cards limit that harm by ranking
+claimants below the member they name, then preferring distinct taggers, then references, then oldest admission, before
 metadata completeness. Curated groups preserve their chosen best member.
 `data/multi-tenant-hosts.json` scopes other identifiers by subdomain, a one-based path-segment index, or a `path` rule (`segment`, noise windows to `skip` such as Google Calendar's `u/*`, `extend` segments such as anchor.fm's `s`, and a `query` fallback such as `embed?src=`); `groups.multi_tenant_hosts_path` loads a replacement JSON map at startup.
 The older `[queue.groups]` file section remains accepted; use only one location.

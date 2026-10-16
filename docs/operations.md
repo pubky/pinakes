@@ -31,8 +31,13 @@ Demotion is recomputed from live claims on every reconciliation; demoted claims 
 (hidden from planning), and removing a claim (document change or orphan deletion) re-queues
 the remaining demoted claimants, so groups heal without operator action. There is no
 permanent tombstone. `pinakes_group_url_demotions_total` counts demotion events. In an
-automatic group, a member whose live canonical names another member ranks below that member
-for the card, before taggers; registry and sameAs evidence still follow the tagger rule.
+automatic group, claimants rank below the member they name for the card, before taggers: a
+page whose canonical or sameAs names a page of its own publisher, and a DOI/ISBN card below
+the landing page its registry names. A publisher's sameAs to doi.org or Wikidata does not rank
+the publisher below that identifier resource. A registry key on another site groups only when
+the named page cites the identifier back (`citation_doi`, `prism.doi`, `dc.identifier`,
+`citation_isbn` meta, or a JSON-LD identifier/sameAs); migration 0032 re-plans cards holding
+registry claims once so earlier one-sided merges split.
 Aliases remain available as navigation metadata. Lock contention between group writers
 retries after 1–3 seconds without advancing the conflict backoff; inputs recorded under a
 partial (pair-budget) plan are recomputed on the next reconciliation instead of cached.

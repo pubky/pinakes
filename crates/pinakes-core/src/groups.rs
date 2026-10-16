@@ -737,6 +737,17 @@ async fn plan(
                 let registry = |a: &Edge, b: &Edge| {
                     a.basis == "registry" && a.trusted && b.basis == "canonical" && url_owned(b)
                 };
+                // Registrants choose their landing URL, so a registry key on another site only
+                // vouches for a page that cites the identifier back (doi:/isbn: of its own).
+                let cites = |a: usize, b: usize| {
+                    claims[a]
+                        .iter()
+                        .filter(|k| k.starts_with("doi:") || k.starts_with("isbn:"))
+                        .any(|k| claims[b].contains(k))
+                };
+                let vouched = |e: &Edge, a: usize, b: usize| {
+                    e.basis != "registry" || url_owned(e) || cites(a, b)
+                };
                 let corroborated = cfg.cross_container_occurrences
                     == CrossContainerOccurrences::Corroborated
                     && key.starts_with("ics_uid:")
@@ -749,15 +760,18 @@ async fn plan(
                     && name_similarity(&ie.trigrams, &je.trigrams) >= 0.5;
                 let occurrence_key = key.starts_with("ics_uid:");
                 let allowed = curated
-                    || if occurrence_key && !same_origin {
-                        corroborated
-                    } else {
-                        reciprocal
-                            || (ie.trusted && je.trusted)
-                            || (key.starts_with("url:") && (registry(ie, je) || registry(je, ie)))
-                            || (same_origin
-                                && (!key.starts_with("url:") || (url_owned(ie) && url_owned(je))))
-                    };
+                    || (vouched(ie, *i, *j) && vouched(je, *j, *i))
+                        && if occurrence_key && !same_origin {
+                            corroborated
+                        } else {
+                            reciprocal
+                                || (ie.trusted && je.trusted)
+                                || (key.starts_with("url:")
+                                    && (registry(ie, je) || registry(je, ie)))
+                                || (same_origin
+                                    && (!key.starts_with("url:")
+                                        || (url_owned(ie) && url_owned(je))))
+                        };
                 if !allowed {
                     continue;
                 }

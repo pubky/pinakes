@@ -19,5 +19,15 @@
     "bytes": 4149,
     "sha256": "df362ca52382cb12b210f87c9b05af5497724899fa4cd8692f7c8a94b3100751",
     "note": "Public bibliographic metadata, recorded once as a parser regression fixture; tests make no public requests."
+  },
+  "nature12373-head": {
+    "url": "https://www.nature.com/articles/nature12373",
+    "final_url": "https://www.nature.com/articles/nature12373?error=cookies_not_supported&code=497b0122-353f-42f1-ba92-cbb7f5a932e9",
+    "status": 200,
+    "content_type": "text/html",
+    "recorded_at": "2026-10-16T15:36:00+00:00",
+    "bytes": 337886,
+    "sha256": "04d36ae128055afb1bca9868dfe6fe04df24a9868ab8806f087de248f07e01ae",
+    "note": "Trimmed extract of one public GET: title, canonical link, the identifier/title meta tags and the JSON-LD page entity reduced to @type, headline, datePublished, sameAs and isPartOf.name. Article text, images and scripts removed; tests make no public requests."
   }
 }
