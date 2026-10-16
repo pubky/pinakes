@@ -196,4 +196,47 @@ mod tests {
             "policy"
         );
     }
+
+    #[tokio::test]
+    async fn delegated_pkarr_records_check_every_alternative() {
+        let owner = Keypair::random();
+        let public = Keypair::random();
+        let private = Keypair::random();
+        let public_name = public.public_key().to_string();
+        let private_name = private.public_key().to_string();
+        let mut owner_packet = SignedPacket::builder().https(
+            "_pubky".try_into().unwrap(),
+            SVCB::new(0, public_name.as_str().try_into().unwrap()),
+            3600,
+        );
+        let public_packet = direct(&public, ".", &["8.8.8.8"]);
+        let uri = format!("pubky://{}/pub/app/item", owner.public_key());
+        fixture(
+            &[
+                owner_packet.clone().sign(&owner).unwrap(),
+                public_packet.clone(),
+            ],
+            vec![],
+        )
+        .check(&uri)
+        .await
+        .unwrap();
+        owner_packet = owner_packet.https(
+            "_pubky".try_into().unwrap(),
+            SVCB::new(1, private_name.as_str().try_into().unwrap()),
+            3600,
+        );
+        let denied = fixture(
+            &[
+                owner_packet.sign(&owner).unwrap(),
+                public_packet,
+                direct(&private, ".", &["169.254.169.254"]),
+            ],
+            vec![],
+        );
+        assert_eq!(
+            crate::resolver::error_class(&denied.check(&uri).await.unwrap_err()),
+            "policy"
+        );
+    }
 }
