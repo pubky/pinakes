@@ -75,5 +75,6 @@ sets the per-stage polling deadline (default 120,000 ms). Terminal missing/error
 unreachable samples fail immediately; live mode never substitutes fixture data. A live event
 with an accepted venue must produce a positive `venue=` match; an unresolved venue
 may produce zero matches. Facet counts, each bbox/window row, fixture recurrence
-count and created-change classes are checked. Collapse waits for reconciliation. Reports contain public IDs/URIs and cleanup
+count and created-change classes are checked. Tagged search waits for reference
+ingestion even when a sample document is already cached; collapse waits for reconciliation. Reports contain public IDs/URIs and cleanup
 paths, never the secret. Journals stay under ignored `.runtime/` with mode 0600.

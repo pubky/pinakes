@@ -83,8 +83,12 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
         report.samples.push({ kind: tag.kind, uri: tag.uri, resource_id: id, type: d.type, status: d.status, source: d.document?.source });
       }
       report.assertions.push(`${tags.length} SDK tags reached Nexus and resolved with expected facets`);
-      const results = await search({ facet: 'tags', fields: 'facets', limit: '500' });
-      for (const d of docs.values()) assert(results.items.some(row => row.resource_id === d.resource_id), `Missing ${d.resource_id} in search`);
+      // A sample may already be resolved from an older public reference while
+      // Pinakes is still ingesting this run's new tag. Wait for the scoped rows too.
+      const results = await waitFor('Pinakes tagged search', async () => {
+        const result = await search({ facet: 'tags', fields: 'facets', limit: '500' });
+        return [...docs.values()].every(d => result.items.some(row => row.resource_id === d.resource_id)) && result;
+      }, timeout, signal);
       assert(results.facets.tags.some(f => f.label === label && f.count === results.items.length));
       report.assertions.push('search and tag facets');
       const point = docs.get('geo').point;
