@@ -3,3 +3,5 @@
 /pinakes-dev.toml
 .env
 *.bundle
+
+/e2e/node_modules/

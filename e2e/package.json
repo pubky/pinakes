@@ -1,0 +1,1 @@
+{"name":"pinakes-e2e","private":true,"type":"module","scripts":{"test":"node --test harness.test.mjs"},"dependencies":{"@synonymdev/pubky":"0.16.2","pubky-app-specs":"0.8.1"},"engines":{"node":">=20"}}

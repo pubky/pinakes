@@ -1,0 +1,72 @@
+# End-to-end checks
+
+The harness builds tags with `pubky-app-specs` and, in live mode, writes them with
+`@synonymdev/pubky`. Nine samples cover an OSM node, geo pin, event page, recurring
+ICS feed, NIP-52 naddr, DOI, ISBN, oEmbed video and ordinary web page. It checks the
+Nexus reference feed, Pinakes typed documents, facets, bbox/Event/venue search,
+occurrences, changes, group membership and Nexus `by_ids` hydration, then deletes
+its tags and waits for both indexes to remove their references.
+
+Requires Node >=20, Rust, and PostgreSQL 16 with PostGIS and h3 extensions installed
+as described in the main README. `npm ci --prefix e2e` installs the pinned SDKs.
+
+## Offline fixture flow (CI)
+
+```sh
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 scripts/test
+npm ci --prefix e2e
+npm test --prefix e2e
+CARGO_PROFILE_DEV_DEBUG=0 scripts/e2e --mock
+```
+
+Mock mode runs the same JavaScript assertions and real tag builder. A local Rust
+stack runs the actual migrations, ingestion, resolver queue, parsers, storage,
+groups and API; only homeserver storage, Nexus and external HTTP boundaries use
+fixtures. No identity secret or public-network access is needed after dependencies
+are installed. The fixture venue test requires a positive match.
+
+Both `--mock` and `--isolated-live` create a unique `pinakes_e2e_owned_*` database
+through `DATABASE_URL` (default `postgresql:///postgres?host=/var/run/postgresql`).
+The role needs `CREATEDB`; migrations need the extension privileges used by the test
+suite. Only that newly created database is dropped on exit. They never reset the
+development database. A force-killed process may leave its database for inspection.
+
+## Live identity and dev stack
+
+```sh
+export PINAKES_E2E_SECRET_FILE=/absolute/path/to/32-byte-secret.key
+export PINAKES_E2E_HOMESERVER=homeserver-public-key
+# Only for a new identity: export PINAKES_E2E_SIGNUP_TOKEN=invite-token
+export PINAKES_E2E_NEXUS=http://127.0.0.1:8080
+export PINAKES_E2E_REPORT=.runtime/e2e-live.json
+CARGO_PROFILE_DEV_DEBUG=0 scripts/e2e --isolated-live
+```
+
+`--isolated-live` uses the real SDK, homeserver, Nexus and public upstreams. Its
+private Pinakes driver reads the Nexus feed but resolves only the nine selected
+sample IDs, using the production queue completion/leases and resolver policy.
+Canaries and unrelated backlog fetching are off. Use this mode for a scoped live
+smoke test. Run `scripts/e2e` without a mode to use an already configured dev stack
+at `PINAKES_E2E_PINAKES` (default `http://127.0.0.1:8090`).
+
+An existing identity must already have `/pub/pubky.app/profile.json`. It is never
+overwritten. A new identity needs the signup token and gets a minimal profile
+before tags are written. The secret is read only from the named file, never logged.
+Do not commit secrets, session state or invite tokens. SDK sessions are signed out
+at the end. The development identity supplied for this task needs no signup.
+
+Tags use **`/pub/pinakes.e2e/tags/<SDK-id>`**, because Nexus's universal-tag handler
+accepts external URIs in non-`pubky.app` namespaces. The label is unique to the run.
+The harness refuses existing paths and journals each attempted write before PUT,
+so cleanup includes writes whose response was lost. Cleanup runs after failures
+and SIGINT/SIGTERM as well as success, retries deletion, and records each result.
+If the process is killed or cleanup fails, use the printed journal with the same
+identity to delete only its listed paths; do not clear the whole namespace.
+
+`PINAKES_E2E_SAMPLES` may select a JSON file with the same nine kinds as
+`samples.live.json`; update stale public samples explicitly. `PINAKES_E2E_TIMEOUT_MS`
+sets the per-stage polling deadline (default 120,000 ms). Network errors and missing
+samples fail the report; live mode never substitutes fixture data. A live event
+without an accepted OSM venue may produce zero `venue=` matches; positive venue
+matching is asserted by the mock run. Reports contain public IDs/URIs and cleanup
+paths, never the secret. Journals stay under ignored `.runtime/` with mode 0600.

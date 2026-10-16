@@ -1,0 +1,47 @@
+[
+  {
+    "kind": "osm",
+    "uri": "https://www.openstreetmap.org/node/341342368",
+    "type": "Place"
+  },
+  {
+    "kind": "geo",
+    "uri": "geo:47.3769,8.5417",
+    "type": "Place"
+  },
+  {
+    "kind": "event",
+    "uri": "https://luma.com/376whqyw",
+    "type": "Event"
+  },
+  {
+    "kind": "ics",
+    "uri": "https://outlook.office365.com/owa/calendar/e19b78d2fbc34df5a4176f3f03fdb1c2@virginia.edu/4a4f2fc2e41b4a91b5da9bcda73f5f7a12370440417110585045/calendar.ics",
+    "type": "DataFeed"
+  },
+  {
+    "kind": "naddr",
+    "uri": "nostr:naddr1qqjrvvp3vycxye33956nycec956x2ery94snqvfk95ergefnx9snqdeh8yekyq3qxfx8p5gzdyv0kgakc365pag8ej2p6g7l72k0hszt0g5m0k0wyymsxpqqqp7txuf3y56",
+    "type": "Event"
+  },
+  {
+    "kind": "doi",
+    "uri": "doi:10.1038/nphys1170",
+    "type": "ScholarlyArticle"
+  },
+  {
+    "kind": "isbn",
+    "uri": "isbn:9780140328721",
+    "type": "Book"
+  },
+  {
+    "kind": "media",
+    "uri": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    "type": "VideoObject"
+  },
+  {
+    "kind": "web",
+    "uri": "https://example.org/",
+    "type": "WebPage"
+  }
+]
