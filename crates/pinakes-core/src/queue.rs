@@ -122,6 +122,16 @@ pub async fn run_job(
     cfg: &QueueConfig,
     job: &Job,
 ) -> Result<()> {
+    // Heap-allocate the large persistence/reconciliation future before composing it
+    // with resolver futures, keeping default worker and test thread stacks bounded.
+    Box::pin(run_job_inner(pool, resolver, cfg, job)).await
+}
+async fn run_job_inner(
+    pool: &PgPool,
+    resolver: &dyn Resolver,
+    cfg: &QueueConfig,
+    job: &Job,
+) -> Result<()> {
     let result = std::panic::AssertUnwindSafe(tokio::time::timeout(
         RESOLVE_TIMEOUT,
         resolver.resolve(&job.uri),

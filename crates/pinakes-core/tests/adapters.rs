@@ -3410,6 +3410,9 @@ async fn review_cursor_privacy_is_confirmed_and_bad_requests_back_off(pool: PgPo
     ] {
         let id = store::ensure_resource(&pool, uri).await.unwrap();
         for (index, status) in [401, 403, 404, 451].into_iter().enumerate() {
+            if source == "google_calendar_api" && matches!(status, 401 | 403) {
+                continue;
+            }
             let mut accepted = cursor::container(uri, &cfg);
             accepted.fetched_at += index as i64 * 10000;
             store::save_document(&pool, &id, 0, &accepted)
@@ -3470,6 +3473,74 @@ async fn review_cursor_privacy_is_confirmed_and_bad_requests_back_off(pool: PgPo
                     .seconds,
                 3600
             );
+        }
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round2_google_credential_denials_keep_occurrences_and_count_drift(pool: PgPool) {
+    use pinakes_core::{queue, resolver::Resolver, telemetry};
+    let uri = "https://www.googleapis.com/calendar/v3/calendars/public/events";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut cfg = EventConfig {
+        geocoding: false,
+        ..Default::default()
+    };
+    cfg.adapters.platforms.insert(
+        "google_calendar_api".into(),
+        adapters::Options {
+            key: Some("fixture".into()),
+            ..Default::default()
+        },
+    );
+    for status in [401, 403, 404] {
+        let mut accepted = cursor::container(uri, &cfg);
+        cursor::append(&mut accepted,"google_calendar_api",&json!({"id":"keep","summary":"Retained event","start":{"dateTime":(Utc::now()+Duration::days(1)).to_rfc3339()}}),&cfg).unwrap();
+        accepted.fetched_at += i64::from(status) * 10000;
+        store::save_document(&pool, &id, 0, &accepted)
+            .await
+            .unwrap();
+        for n in 1..=2 {
+            let (egress, _) = mock_egress(vec![(status, Value::Null)]);
+            let r = platform(&pool, cfg.clone(), egress);
+            let metrics = telemetry::Metrics::new().unwrap();
+            if status == 404 {
+                let mut missing = r.resolve(uri).await.unwrap();
+                assert_eq!(missing.status, pinakes_core::model::Status::Missing);
+                missing.fetched_at = accepted.fetched_at + n * 3_600_000;
+                store::save_document(&pool, &id, 0, &missing).await.unwrap();
+            } else {
+                let (result, observations) = telemetry::observe(
+                    &metrics,
+                    &r.manifest(),
+                    queue::run_job(
+                        &pool,
+                        &r,
+                        &Default::default(),
+                        &queue::Job {
+                            id: id.clone(),
+                            uri: uri.into(),
+                            attempts: 0,
+                            generation: 0,
+                        },
+                    ),
+                )
+                .await;
+                result.unwrap();
+                assert!(observations.iter().any(|o| o.outcome == "drift"));
+                let state:(String,i32,String,i32,bool)=sqlx::query_as("SELECT status,missing_streak,last_error,attempts,dead_letter FROM resource WHERE id=$1").bind(&id).fetch_one(&pool).await.unwrap();
+                assert_eq!(state, ("ok".into(), 0, "upstream_denied".into(), 0, false));
+                let active:i64=sqlx::query_scalar("SELECT count(*) FROM occurrence WHERE resource_id=$1 AND coalesce(doc->>'event_status','scheduled')<>'cancelled'").bind(&id).fetch_one(&pool).await.unwrap();
+                assert_eq!(active, 1);
+            }
+        }
+        if status == 404 {
+            let status: String = sqlx::query_scalar("SELECT status FROM resource WHERE id=$1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(status, "missing");
         }
     }
 }

@@ -227,6 +227,15 @@ async fn json(
         egress.fetch_with(uri, &options).await?
     };
     super::service::upstream_status(&f)?;
+    let requires_key = sensitive || super::detect(uri).is_some_and(|d| d.requires_key);
+    if matches!(f.status, 401 | 403) && requires_key {
+        crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
+        return Err(crate::resolver::RetryLater {
+            class: "upstream_denied",
+            seconds: 3600,
+        }
+        .into());
+    }
     if gone(f.status) {
         return Ok((f.status, Value::Null));
     }
