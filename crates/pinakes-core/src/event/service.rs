@@ -75,9 +75,17 @@ impl EventService {
         // would leave the first disappearance observation pending forever.
         Ok(fetched)
     }
-    /// An established feed becoming HTML or missing is an empty snapshot, subject to the
-    /// same two-observation confirmation as missing keys. Transport/parse errors do not qualify.
-    pub async fn disappeared(&self, uri: &str, status: u16) -> Result<Option<ResourceMeta>> {
+    /// An established feed that is gone (404/410/451) or answers with an empty *feed* is an
+    /// empty snapshot, subject to the same two-observation confirmation as missing keys.
+    /// A 200 that is no longer a feed (HTML: a wall, a sign-in page or a move) never confirms
+    /// disappearance: the container is held as `blocked`, keeping its occurrences.
+    /// Transport/parse errors do not qualify.
+    pub async fn disappeared(
+        &self,
+        uri: &str,
+        status: u16,
+        feed_body: bool,
+    ) -> Result<Option<ResourceMeta>> {
         if !self.config.calendars || !matches!(status, 200 | 404 | 410 | 451) {
             return Ok(None);
         }
@@ -87,6 +95,10 @@ impl EventService {
         let Some((start, end)) = horizon else {
             return Ok(None);
         };
+        if status == 200 && !feed_body {
+            crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
+            return Err(crate::resolver::interstitial::Blocked.into());
+        }
         let mut doc = ResourceMeta::new(uri, "event", 86400);
         doc.status = crate::model::Status::Missing;
         doc.container = Some(Box::new(super::Container {
@@ -109,23 +121,8 @@ impl EventService {
             return Ok(None);
         }
         let bytes = &fetched.body;
-        let text = String::from_utf8_lossy(&bytes[..bytes.len().min(256)]);
-        let ics = text
-            .trim_start_matches(['\u{feff}', ' ', '\n', '\r'])
-            .starts_with("BEGIN:VCALENDAR");
-        let maybe_feed = ics
-            || matches!(
-                fetched.content_type.as_str(),
-                "text/calendar"
-                    | "application/ics"
-                    | "application/rss+xml"
-                    | "application/atom+xml"
-                    | "text/xml"
-                    | "application/xml"
-                    | "application/feed+json"
-                    | "application/json"
-            );
-        if !maybe_feed {
+        let ics = ics_body(bytes);
+        if !feed_like(fetched) {
             return Ok(None);
         }
         let uri = uri.to_owned();
@@ -666,4 +663,25 @@ pub(crate) fn own_calendar_link(base: &url::Url, link: &str) -> bool {
             .starts_with(&format!("{}/", base.path().trim_end_matches('/')))
             || link.path().contains(&format!("/{stem}."))
             || link.path().ends_with(&format!("/{stem}")))
+}
+
+fn ics_body(bytes: &[u8]) -> bool {
+    String::from_utf8_lossy(&bytes[..bytes.len().min(256)])
+        .trim_start_matches(['\u{feff}', ' ', '\n', '\r'])
+        .starts_with("BEGIN:VCALENDAR")
+}
+/// Calendar and feed bodies; everything else (notably HTML) is not a feed observation.
+pub fn feed_like(fetched: &Fetched) -> bool {
+    ics_body(&fetched.body)
+        || matches!(
+            fetched.content_type.as_str(),
+            "text/calendar"
+                | "application/ics"
+                | "application/rss+xml"
+                | "application/atom+xml"
+                | "text/xml"
+                | "application/xml"
+                | "application/feed+json"
+                | "application/json"
+        )
 }

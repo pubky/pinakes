@@ -2326,6 +2326,8 @@ async fn conditional_calendar_refreshes_horizon_with_advanced_clock(pool: PgPool
 #[sqlx::test(migrations = "../../migrations")]
 async fn vanished_feed_confirms_twice_and_recovers_through_queue(pool: PgPool) {
     use pinakes_core::{config::QueueConfig, queue};
+    // K41: a 200 that is no longer a feed (HTML) is a wall or a move: the container is held
+    // as blocked and keeps its occurrences. 404/410 still confirm after two observations.
     for (platform, status) in [false, true]
         .into_iter()
         .flat_map(|platform| [200, 404, 410].map(|status| (platform, status)))
@@ -2344,6 +2346,7 @@ async fn vanished_feed_confirms_twice_and_recovers_through_queue(pool: PgPool) {
             "text/html".into(),
             b"<html><title>Gone</title></html>".to_vec(),
         );
+        let confirms = status != 200;
         let t = Arc::new(ReviewSnapshots {
             responses: vec![calendar.clone(), missing.clone(), missing, calendar],
             calls: Mutex::default(),
@@ -2408,14 +2411,23 @@ async fn vanished_feed_confirms_twice_and_recovers_through_queue(pool: PgPool) {
             .unwrap();
             assert_eq!(
                 cancelled,
-                if round == 2 { 5 } else { 0 },
+                if round == 2 && confirms { 5 } else { 0 },
                 "HTTP {status}, round {round}"
             );
             assert_eq!(
                 visible,
-                if round == 2 { 0 } else { 5 },
+                if round == 2 && confirms { 0 } else { 5 },
                 "HTTP {status}, round {round}"
             );
+            let state: String = sqlx::query_scalar("SELECT status FROM resource WHERE id=$1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            if !confirms {
+                let held = matches!(round, 1 | 2);
+                assert_eq!(state == "blocked", held, "round {round}: {state}");
+            }
         }
         assert_eq!(
             *t.calls.lock().unwrap(),

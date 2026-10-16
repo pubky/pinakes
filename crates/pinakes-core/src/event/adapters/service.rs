@@ -196,7 +196,7 @@ impl PlatformResolver {
                 .events
                 .as_ref()
                 .unwrap()
-                .disappeared(uri, fetched.status)
+                .disappeared(uri, fetched.status, true)
                 .await?
             {
                 return Ok(doc);
@@ -215,7 +215,11 @@ impl PlatformResolver {
                     .events
                     .as_ref()
                     .unwrap()
-                    .disappeared(uri, fetched.status)
+                    .disappeared(
+                        uri,
+                        fetched.status,
+                        crate::event::service::feed_like(&fetched),
+                    )
                     .await?
                 {
                     return Ok(doc);
@@ -357,7 +361,7 @@ impl PlatformResolver {
             .events
             .as_ref()
             .unwrap()
-            .disappeared(uri, 451)
+            .disappeared(uri, 451, true)
             .await?
             .unwrap_or_else(|| ResourceMeta::new(uri, source, 3600));
         doc.source = source.into();

@@ -115,7 +115,8 @@ impl WebResolver {
                 if let Some(doc) = events.container(uri, &fetched, deadline).await? {
                     return Ok(doc);
                 }
-                if let Some(doc) = events.disappeared(uri, fetched.status).await? {
+                let feed = crate::event::service::feed_like(&fetched);
+                if let Some(doc) = events.disappeared(uri, fetched.status, feed).await? {
                     return Ok(doc);
                 }
             }

@@ -312,8 +312,10 @@ See the example config for caps and individual path switches.
 
 Each `(feed, UID, recurrence_id)` keeps its own version, cancellation state and change
 history. Two distinct successful observations confirm disappearance; an over-50% loss
-holds the snapshot until a matching fresh fetch. A former feed returning HTML 200 or HTTP 404/410 follows the same two-observation
-rule; confirmed missing parents hide their occurrence units from search while retaining
+holds the snapshot until a matching fresh fetch. A former feed returning HTTP 404/410/451 follows the same two-observation
+rule. A former feed answering 200 with HTML (a wall, sign-in page or move) never confirms
+disappearance: the container is held as `blocked` with its occurrences kept, a `drift`
+fetch outcome, and the blocked retry cadence; confirmed missing parents hide their occurrence units from search while retaining
 direct history. A fresh valid body can restore them. The first vanished-feed observation
 is a held empty snapshot: it increments `feed_held_total` and may trigger `FeedHeld`,
 just like a large key loss; the next matching observation resolves it. Older/replayed
