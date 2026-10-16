@@ -28,19 +28,14 @@ pub fn zone(name: &str) -> Option<Tz> {
     {
         return s.parse().ok();
     }
-    let rails = match name {
-        "Eastern Time (US & Canada)" => "America/New_York",
-        "Central Time (US & Canada)" => "America/Chicago",
-        "Mountain Time (US & Canada)" => "America/Denver",
-        "Pacific Time (US & Canada)" => "America/Los_Angeles",
-        "London" => "Europe/London",
-        "Bern" | "Zurich" => "Europe/Zurich",
-        "Berlin" => "Europe/Berlin",
-        "Paris" => "Europe/Paris",
-        "UTC" => "Etc/UTC",
-        _ => return None,
-    };
-    rails.parse().ok()
+    static RAILS: OnceLock<BTreeMap<String, String>> = OnceLock::new();
+    RAILS
+        .get_or_init(|| {
+            serde_json::from_str(include_str!("../../../../data/rails-zones.json"))
+                .expect("pinned Rails")
+        })
+        .get(name)
+        .and_then(|name| name.parse().ok())
 }
 pub fn coordinate_zone(point: &crate::model::Point) -> Option<String> {
     static FINDER: OnceLock<tzf_rs::DefaultFinder> = OnceLock::new();

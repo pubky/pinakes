@@ -22,8 +22,10 @@ async fn main() -> anyhow::Result<()> {
         let uri = entry["uri"].as_str().unwrap();
         let kind = entry["kind"].as_str().unwrap();
         let options = FetchOptions {
-            feed_cap: Some(32 * 1024 * 1024),
-            feed_hint: kind == "calendar",
+            user_agent: entry["user_agent"].as_str().map(str::to_owned),
+            feed_cap: (kind == "calendar" || entry["feed_hint"] == true)
+                .then_some(32 * 1024 * 1024),
+            feed_hint: kind == "calendar" || entry["feed_hint"] == true,
             accept: (kind == "ap").then(|| "application/activity+json".into()),
             ..Default::default()
         };
@@ -63,6 +65,16 @@ async fn main() -> anyhow::Result<()> {
                 if f.status == 200 {
                     let parsed = if kind == "calendar" {
                         calendar::parse(uri, &f.body, &EventConfig::default(), now)
+                    } else if let Some(adapter) = entry["adapter"].as_str() {
+                        if adapter == "wikidata" {
+                            pinakes_core::event::adapters::service::wiki_value(
+                                uri,
+                                &serde_json::from_slice(&f.body)?,
+                            )
+                        } else {
+                            pinakes_core::event::adapters::state::parse(adapter, uri, &f.body)
+                                .ok_or_else(|| anyhow::anyhow!("no platform event"))
+                        }
                     } else {
                         let mut d = ResourceMeta::new(uri, "web", 3600);
                         let text = String::from_utf8_lossy(&f.body);

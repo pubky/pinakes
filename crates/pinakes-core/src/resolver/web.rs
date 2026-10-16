@@ -31,11 +31,18 @@ impl Resolver for WebResolver {
         "web"
     }
     fn queue_sources(&self) -> Vec<&'static str> {
+        let mut sources = vec!["web"];
         if self.events.as_ref().is_none_or(|e| !e.config.calendars) {
-            vec!["web", "event"]
-        } else {
-            vec!["web"]
+            sources.push("event");
         }
+        if self
+            .events
+            .as_ref()
+            .is_none_or(|e| !e.config.adapters.enabled)
+        {
+            sources.push("event_platform");
+        }
+        sources
     }
     fn matches(&self, uri: &str) -> bool {
         super::classify(uri).is_some_and(|source| self.queue_sources().contains(&source))

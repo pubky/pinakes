@@ -1265,7 +1265,7 @@ pub fn structured_feed(
         );
         Ok(())
     };
-    let mut name = None;
+    let name;
     let mut items = 0usize;
     let mut dated = 0usize;
     let mut retained_bytes = 0usize;
@@ -1405,9 +1405,15 @@ pub fn structured_feed(
         if !matches!(xml.root_element().tag_name().name(), "rss" | "feed" | "RDF") {
             return Ok(None);
         }
+        name = xml
+            .root_element()
+            .children()
+            .find(|n| n.tag_name().name() == "title")
+            .and_then(|n| n.text())
+            .map(str::to_owned);
         for node in xml
             .descendants()
-            .filter(|n| n.has_tag_name("entry") || n.has_tag_name("item"))
+            .filter(|n| matches!(n.tag_name().name(), "entry" | "item"))
         {
             check_budget()?;
             items += 1;
@@ -1421,26 +1427,37 @@ pub fn structured_feed(
             let start = text(&["dtstart", "startdate", "startDate", "start", "dateStart"]);
             let start = start.or_else(|| {
                 node.descendants()
-                    .find(|n| n.tag_name().name() == "date")
-                    .and_then(|n| n.attribute("start").or_else(|| n.attribute("startdate")))
+                    .find(|n| matches!(n.tag_name().name(), "date" | "dates"))
+                    .and_then(|n| {
+                        n.attribute("start")
+                            .or_else(|| n.attribute("startdate"))
+                            .or_else(|| n.attribute("fromdate"))
+                    })
                     .map(str::to_owned)
             });
             if let Some(start) = start {
                 let url = node
                     .children()
-                    .find(|n| n.has_tag_name("link"))
+                    .find(|n| n.tag_name().name() == "link")
                     .and_then(|n| n.attribute("href").or_else(|| n.text()))
                     .map(str::to_owned);
                 let location = node
                     .descendants()
                     .find(|n| n.tag_name().name() == "location");
-                let place=location.map(|n|serde_json::json!({"name":n.descendants().find(|n|n.has_tag_name("name")).and_then(|n|n.text()),"latitude":n.descendants().find(|n|matches!(n.tag_name().name(),"latitude"|"lat")).and_then(|n|n.text()),"longitude":n.descendants().find(|n|matches!(n.tag_name().name(),"longitude"|"long"|"lon")).and_then(|n|n.text())}));
+                let place=location.map(|n|serde_json::json!({"name":n.attribute("name").or_else(|| n.descendants().find(|n|n.tag_name().name()=="name").and_then(|n|n.text())),"latitude":n.descendants().find(|n|matches!(n.tag_name().name(),"latitude"|"lat")).and_then(|n|n.text()),"longitude":n.descendants().find(|n|matches!(n.tag_name().name(),"longitude"|"long"|"lon")).and_then(|n|n.text())}));
                 append(
                     text(&["id", "guid"]),
                     text(&["title"]),
                     url,
                     Value::String(start),
-                    text(&["dtend", "enddate", "endDate", "end", "dateEnd"]).map(Value::String),
+                    text(&["dtend", "enddate", "endDate", "end", "dateEnd"])
+                        .or_else(|| {
+                            node.descendants()
+                                .find(|n| n.tag_name().name() == "dates")
+                                .and_then(|n| n.attribute("todate"))
+                                .map(str::to_owned)
+                        })
+                        .map(Value::String),
                     place,
                     text(&["description", "summary"]),
                 )?;

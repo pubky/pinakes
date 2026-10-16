@@ -17,7 +17,7 @@ same base.
 
 The Rust service, Postgres storage, Nexus ingestion, web/Pubky/geo/OSM resolvers and
 viewport API, change tracking, generic events/calendars and admin telemetry run locally.
-Platform-specific event adapters and media/groups follow on separate branches.
+Platform event adapters include cursor feeds, NIP-52, embedded page state, per-event ICS and optional keyed APIs. Media and groups follow on a separate branch.
 
 ## Running locally
 
@@ -343,3 +343,54 @@ local values when `tz` is absent. Data versions, attribution and regeneration ar
 
 The companion design inputs are `design-events.md` §3 and `research-event-sources.md`
 §A/F in the delivery mailbox. The repository keeps its overview in `docs/design.md`.
+
+
+## Platform event adapters
+
+`data/event-adapters.json` declares each source's mode, identity, cancellation,
+cadence floor, expected fields, UA, key requirement and canary. `/v1/info` reports the
+effective enabled state and reason when disabled, without exposing keys. All adapter
+options live under `[event.adapters.platforms.<id>]`; missing keys disable only that
+source. Resident Advisor is unofficial, fragile and off by default. Posh is marked
+fragile. Class C sources remain cards with a seven-day floor, including error retries.
+Disabling adapters sends their HTTP resources to the enabled web resolver; Nostr
+resources wait until their module is enabled. Migration 12 updates historical routing
+hints without changing resource IDs or reference rows.
+
+Luma, Meetup, Eventbrite, Partiful, Posh, RingCentral, Airmeet, Mobilizon, Gancio,
+Wikidata, Dice, Xceed, Ents24 and Ticketino supplement generic JSON-LD with bounded
+state parsing; JavaScript is never executed. ICS endpoints are selected from the
+current event identity or its own calendar link. Self-hosted Pretix/Eventyay/Gathio/
+Gancio/Mobilizon are detected from page signatures. RingCentral Rails zones use the
+pinned Rails 8.1.0 mapping and licence in `data/`. Browser/plain/non-Chrome profiles
+are fixed choices, configured per adapter. Every HTTP redirect, API endpoint and
+WebSocket hint uses the shared DNS/IP/host budget policy; authenticated APIs never
+redirect, and configuration credentials are removed from retained final URLs and errors.
+
+The portal and Google API cursors resync when expired. BTC Map requests all delta
+statuses and deletions without a server row limit, avoiding timestamp-tie truncation;
+an oversized response fails without advancing. Checkpoints live in `event_fetch`
+per resource and commit atomically with accepted occurrence batches. `source_state`
+keeps only finite adapter-level health and reset counters. Delta absence is not a
+deletion. Portal changes preserve deletion/recreation order; explicit portal OSM
+facts are stored in `osm_place` with versioned venue references. BTC Map `website`
+links enqueue their own page resources; the occurrence links to that resource.
+
+NIP-19 identifiers and supported client URLs use signed NIP-52 events. The newest
+matching revision wins (smallest event ID on a timestamp tie); nevent/note IDs pin a
+specific revision. Wine is limited to one request/second, Archives to two. Both must
+successfully miss before absence is accepted; outages preserve the last document.
+One relay hint can provide a bounded REQ/EOSE exchange (two seconds by default,
+one MB/256 frames). DNS is checked and pinned, and an unfinished subscription cannot
+confirm absence. Kind 31924 calendars queue their capped child references, then read
+accepted child documents; they never multiply inline network fetches. RSVP kind
+31925 is ignored. HTTP discovery and relay results share the bounded TTL cache.
+
+Run `cargo run -p pinakes-core --example adapter_probe -- MANIFEST.json REPLAYS.json OUTPUT_DIR` with `DATABASE_URL` for a read-only, keyless canary pass. Manifest entries
+are `{id,uri}`; a null URI records a skip. Replay entries contain `{uri,status,
+content_type,path}` (or `error`). Captures record exact request URLs, UA profiles,
+statuses, hashes and parser output; secrets are refused. Set `PINAKES_PROBE_OFFLINE=1`
+to replay without DNS/network fallback; uncaptured responses fail closed. Canaries that are unpublished,
+blocked, too large, or have no public sample are reported explicitly. A live probe
+never enables geocoding or writes calendar members. Recorded compressed responses for 45 keyless probes, synthesized keyed/API shapes,
+and mock cursor/relay tests run in `scripts/test` without public upstream access.

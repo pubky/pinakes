@@ -61,6 +61,7 @@ pub struct EventConfig {
     pub max_line_bytes: usize,
     pub max_date_values: usize,
     pub webcal_http_fallback: bool,
+    pub adapters: crate::event::adapters::AdapterConfig,
     pub enabled: bool,
     pub jsonld: bool,
     pub microformats: bool,
@@ -85,6 +86,7 @@ pub struct EventConfig {
 impl Default for EventConfig {
     fn default() -> Self {
         Self {
+            adapters: Default::default(),
             enabled: true,
             container: Default::default(),
             max_line_bytes: 65536,
@@ -326,6 +328,7 @@ impl Config {
         Ok(cfg)
     }
     pub fn validate(&self) -> Result<()> {
+        crate::event::adapters::validate(&self.event)?;
         let e = &self.event;
         let c = &e.container;
         if !(1..=1000).contains(&c.max_changes)

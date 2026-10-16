@@ -47,12 +47,25 @@ pub async fn run(
     generation: i64,
 ) -> Result<()> {
     let manifest = resolver.manifest();
+    run_manifest(pool, resolver, &manifest, config, metrics, generation).await
+}
+pub async fn run_manifest(
+    pool: &PgPool,
+    resolver: &dyn Resolver,
+    manifest: &Manifest,
+    config: &CanaryConfig,
+    metrics: &Metrics,
+    generation: i64,
+) -> Result<()> {
     let uri = manifest.canary.as_ref().expect("claimed canary");
-    let (result, observations) = crate::telemetry::observe(metrics, &manifest, async {
-        let result = tokio::time::timeout(Duration::from_secs(15), resolver.probe(uri.as_str()))
-            .await
-            .map_err(anyhow::Error::from)
-            .and_then(|r| r);
+    let (result, observations) = crate::telemetry::observe(metrics, manifest, async {
+        let result = tokio::time::timeout(
+            Duration::from_secs(15),
+            resolver.probe_manifest(uri.as_str(), manifest),
+        )
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|r| r);
         if result.is_err() {
             crate::telemetry::parser_error();
         }
@@ -79,7 +92,7 @@ pub async fn run(
         )
         .await?;
     }
-    record(pool, &manifest, generation, &result, config.interval_secs).await
+    record(pool, manifest, generation, &result, config.interval_secs).await
 }
 
 /// Policy-disabled probes do not leave a stale failing gauge behind after reconfiguration.

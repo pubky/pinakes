@@ -1,0 +1,422 @@
+[
+  {
+    "id": "einundzwanzig",
+    "uri": "https://portal.einundzwanzig.space/api/changes?since_sequence=0&limit=1",
+    "error": false,
+    "status": "ok",
+    "type": "Collection",
+    "missing_fields": [],
+    "tz": null
+  },
+  {
+    "id": "btcmap",
+    "uri": "https://api.btcmap.org/v4/events?updated_since=2026-10-15T00%3A00%3A00Z&include_deleted=true",
+    "error": false,
+    "status": "ok",
+    "type": "Collection",
+    "missing_fields": [],
+    "tz": null
+  },
+  {
+    "id": "nip52",
+    "uri": "https://api.nostr.wine/search?kind=31923&limit=1&sort=time&order=descending",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": "America/Los_Angeles"
+  },
+  {
+    "id": "google_ics",
+    "uri": "https://calendar.google.com/calendar/ical/en.usa%23holiday%40group.v.calendar.google.com/public/basic.ics",
+    "error": false,
+    "status": "ok",
+    "type": "DataFeed",
+    "missing_fields": [],
+    "tz": null
+  },
+  {
+    "id": "icloud",
+    "uri": "webcal://p29-caldav.icloud.com/published/2/MTcyMDQzMDA3OTcxNzIwNBo0YWxLi9E9wE87BujEc05s_wNSlxHYpVqZebpx8p79",
+    "error": false,
+    "status": "ok",
+    "type": "DataFeed",
+    "missing_fields": [],
+    "tz": null
+  },
+  {
+    "id": "outlook",
+    "uri": "https://outlook.office365.com/owa/calendar/e19b78d2fbc34df5a4176f3f03fdb1c2@virginia.edu/4a4f2fc2e41b4a91b5da9bcda73f5f7a12370440417110585045/calendar.ics",
+    "error": false,
+    "status": "ok",
+    "type": "DataFeed",
+    "missing_fields": [],
+    "tz": null
+  },
+  {
+    "id": "nextcloud",
+    "uri": "https://nch.nerdraum.de/remote.php/dav/public-calendars/kEgPjYnceaax6jct?export",
+    "error": false,
+    "status": "ok",
+    "type": "DataFeed",
+    "missing_fields": [],
+    "tz": null
+  },
+  {
+    "id": "ics",
+    "uri": "https://www.calendarlabs.com/ical-calendar/ics/76/US_Holidays.ics",
+    "error": false,
+    "status": "ok",
+    "type": "DataFeed",
+    "missing_fields": [],
+    "tz": null
+  },
+  {
+    "id": "luma",
+    "uri": "https://luma.com/376whqyw",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": "America/Chicago"
+  },
+  {
+    "id": "meetup",
+    "uri": "https://www.meetup.com/bitcoin-meetup-switzerland/events/316894744/",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": "Europe/Zurich"
+  },
+  {
+    "id": "eventbrite",
+    "uri": "https://www.eventbrite.com/e/se-bitcoin-sovereignty-economics-tickets-1978412197139",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": "Europe/London"
+  },
+  {
+    "id": "partiful",
+    "uri": "https://partiful.com/e/AK0FMV5lu2PmfSyxuXwY",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": "America/Los_Angeles"
+  },
+  {
+    "id": "posh",
+    "uri": "https://posh.vip/e/halloween-2026-eden",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": "America/New_York"
+  },
+  {
+    "id": "ringcentral",
+    "uri": "https://events.ringcentral.com/events/innovators-retreat-2026",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": "America/New_York"
+  },
+  {
+    "id": "airmeet",
+    "uri": "https://api.airmeet.com/api/v1/airmeet/0d7e16c0-7cd9-11f0-b52b-c993ee1463de/info",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": "America/Indiana/Petersburg"
+  },
+  {
+    "id": "mobilizon",
+    "uri": "https://mobilizon.fr/events/86a665ae-e495-4e4f-88d4-4cffd44a82f1",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": "Europe/Paris"
+  },
+  {
+    "id": "gancio",
+    "uri": "https://demo.gancio.org/api/events?max=1",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": null
+  },
+  {
+    "id": "gathio",
+    "uri": "https://events.sfconservancy.org/1ukbcQFkKAEr0OrZ7PDgq",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": "America/Vancouver"
+  },
+  {
+    "id": "wikidata",
+    "uri": "https://www.wikidata.org/wiki/Special:EntityData/Q125933843.json",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": "Europe/Vienna"
+  },
+  {
+    "id": "tito",
+    "uri": "https://ti.to/scipy/scipy2026.ics",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": null
+  },
+  {
+    "id": "petzi",
+    "uri": "https://www.petzi.ch/en/events/61387-fri-son-kim-wilde-uk/",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": "Europe/Zurich"
+  },
+  {
+    "id": "weezevent",
+    "uri": "https://api.weezevent.com/sites/view/live/E1114506.ics",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": null
+  },
+  {
+    "id": "pretix",
+    "uri": "https://pretix.eu/demo/democon/ical/",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": "Europe/Berlin"
+  },
+  {
+    "id": "eventyay",
+    "uri": "https://eventyay.com/ev/88882f3e/",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": "+07"
+  },
+  {
+    "id": "guidle",
+    "uri": "https://www.guidle.com/de/veranstaltungen/dies-das/ueberlingen/gregor-haegele-live-2027_A2rCGkH",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": null
+  },
+  {
+    "id": "eventfrog",
+    "uri": "https://eventfrog.ch/stream/de/event/7503702322012243890.ics",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": "Europe/Zurich"
+  },
+  {
+    "id": "allevents",
+    "uri": "https://allevents.in/zurich/200029487725505",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": "Europe/Zurich"
+  },
+  {
+    "id": "billetto",
+    "uri": "https://billetto.co.uk/e/farm-halloween-tickets-1977196",
+    "error": false,
+    "status": "unreachable",
+    "type": "WebPage",
+    "missing_fields": [
+      "name",
+      "start"
+    ],
+    "tz": null
+  },
+  {
+    "id": "fatsoma",
+    "uri": "https://www.fatsoma.com/e/npky3qjt/the-official-dublin-student-halloween-ball-2026",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": "Europe/Dublin"
+  },
+  {
+    "id": "designmynight",
+    "uri": "https://www.designmynight.com/london/whats-on/theatre/the-magic-hour-park-lane",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": "Europe/London"
+  },
+  {
+    "id": "rausgegangen",
+    "uri": "https://rausgegangen.de/en/events/geheimkonzert-dusseldorf-20-open-air-by-rausgegangen-0/",
+    "error": false,
+    "status": "unreachable",
+    "type": "WebPage",
+    "missing_fields": [
+      "name",
+      "start"
+    ],
+    "tz": null
+  },
+  {
+    "id": "fixr",
+    "uri": "https://fixr.co/event/halloween-2026-welcome-to-the-haunted-hotel-tickets-404456056",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": null
+  },
+  {
+    "id": "wegow",
+    "uri": "https://v4.wegow.com/es/conciertos/konzert-von-yasi-hofer-band-in-bonn-harmonie",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": null
+  },
+  {
+    "id": "stager",
+    "uri": "https://grounds.stager.co/shop/default/events/111608505",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": null
+  },
+  {
+    "id": "reservix",
+    "uri": "https://www.reservix.de/tickets-voodoo-juergens-und-die-ansa-panier-in-wiesbaden-schlachthof-wiesbaden-halle-am-21-5-2026/e2483153",
+    "error": false,
+    "status": "unreachable",
+    "type": "WebPage",
+    "missing_fields": [
+      "name",
+      "start"
+    ],
+    "tz": null
+  },
+  {
+    "id": "entradium",
+    "uri": "https://entradium.com/en/events/like-a-stone-vigo-supersonic",
+    "error": false,
+    "status": "ok",
+    "type": "WebPage",
+    "missing_fields": [
+      "name",
+      "start"
+    ],
+    "tz": null
+  },
+  {
+    "id": "starticket",
+    "uri": "https://s3-eu-west-1.amazonaws.com/starticket/wwwroot/ticketing/feeds/starticketfeed_D.xml",
+    "error": false,
+    "status": "ok",
+    "type": "DataFeed",
+    "missing_fields": [],
+    "tz": null
+  },
+  {
+    "id": "songkick",
+    "uri": "https://www.songkick.com/concerts/42408878-bausa-at-komplex-457",
+    "error": false,
+    "status": "ok",
+    "type": "MusicEvent",
+    "missing_fields": [],
+    "tz": "Europe/Zurich"
+  },
+  {
+    "id": "humanitix",
+    "uri": "https://events.humanitix.com/great-northern-contemporary-craft-fair",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": null
+  },
+  {
+    "id": "infomaniak",
+    "uri": "https://infomaniak.events/en-ch/conferences/seminaire-des-autorites-2026/92392f2a-6711-4917-b9e9-60c88e8c550a/events/396911",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": "Europe/Zurich"
+  },
+  {
+    "id": "xceed",
+    "uri": "https://xceed.me/en/roma/event/dissonanze-2026-day-1/220015",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": "Europe/Rome"
+  },
+  {
+    "id": "ents24",
+    "uri": "https://www.ents24.com/london-events/eventim-apollo/simon-brodkin/7474018",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": "Europe/London"
+  },
+  {
+    "id": "ticketino",
+    "uri": "https://www.ticketino.com/en/Event/TICKETINO-BBQ/192364",
+    "error": false,
+    "status": "ok",
+    "type": "Event",
+    "missing_fields": [],
+    "tz": "Europe/Zurich"
+  },
+  {
+    "id": "dice",
+    "uri": "https://dice.fm/event/6a06e51b6c518c00013a998c",
+    "error": false,
+    "status": "error",
+    "type": "WebPage",
+    "missing_fields": [
+      "name",
+      "start"
+    ],
+    "tz": null
+  },
+  {
+    "id": "fever",
+    "uri": "https://feverup.com/m/118911",
+    "error": true,
+    "status": null,
+    "type": null,
+    "missing_fields": [],
+    "tz": null
+  }
+]

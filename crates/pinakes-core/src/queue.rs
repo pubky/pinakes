@@ -116,6 +116,19 @@ async fn finish_job(
     job: &Job,
     result: Result<crate::model::ResourceMeta>,
 ) -> Result<()> {
+    let slow_cfg;
+    let manifest = resolver.manifest_for(&job.uri);
+    let cfg = if resolver.name() == "event_platform" && manifest.mode == crate::adapter::Mode::None
+    {
+        slow_cfg = QueueConfig {
+            backoff_secs: cfg.backoff_secs.max(manifest.cadence_floor),
+            max_backoff_secs: cfg.max_backoff_secs.max(manifest.cadence_floor),
+            ..cfg.clone()
+        };
+        &slow_cfg
+    } else {
+        cfg
+    };
     let result = match result {
         Err(error) if error.is::<crate::resolver::NotModified>() => {
             let value: Option<serde_json::Value> =
@@ -158,9 +171,12 @@ async fn finish_job(
             doc.start = doc.start.or(dates.0);
             doc.end = doc.end.or(dates.1);
         }
-        if matches!(resolver.name(), "web" | "event" | "pubky" | "geo" | "osm") {
+        if matches!(
+            resolver.name(),
+            "web" | "event" | "event_platform" | "pubky" | "geo" | "osm"
+        ) {
             let now = chrono::Utc::now();
-            let mut manifest = resolver.manifest();
+            let mut manifest = resolver.manifest_for(&job.uri);
             if resolver.name() == "osm" {
                 manifest.cadence_floor = doc.ttl_secs;
             }
@@ -183,7 +199,18 @@ async fn finish_job(
                         refresh,
                     )
                 } else {
-                    crate::scheduler::next(&manifest, &doc, now, refresh)
+                    if manifest.mode == crate::adapter::Mode::None
+                        && resolver.name() == "event_platform"
+                    {
+                        now.checked_add_signed(
+                            chrono::Duration::try_seconds(
+                                manifest.cadence_floor.min(i64::MAX as u64) as i64,
+                            )
+                            .unwrap_or(chrono::Duration::MAX),
+                        )
+                    } else {
+                        crate::scheduler::next(&manifest, &doc, now, refresh)
+                    }
                 };
                 doc.ttl_secs = next.map_or(0, |at| (at - now).num_seconds().max(0) as u64);
             } else if resolver.name() != "osm" {
@@ -191,7 +218,7 @@ async fn finish_job(
             }
         }
         let attrs = match resolver.name() {
-            "web" | "event" => crate::resolver::web::ATTRIBUTES,
+            "web" | "event" | "event_platform" => crate::resolver::web::ATTRIBUTES,
             "pubky" => crate::resolver::pubky::ATTRIBUTES,
             "geo" => crate::resolver::geo::ATTRIBUTES,
             "osm" => crate::resolver::osm::ATTRIBUTES,
@@ -286,7 +313,12 @@ async fn run_batch_config(
         _ => None,
     });
     if crate::telemetry::last_fetch().is_some() {
-        crate::source::outcome(pool, resolver.name(), error.as_deref()).await?;
+        crate::source::outcome(
+            pool,
+            &resolver.manifest_for(&jobs[0].uri).source,
+            error.as_deref(),
+        )
+        .await?;
     }
     for (job, result) in jobs.iter().zip(results) {
         guarded_finish_job(pool, resolver, cfg, refresh, job, result).await?;
@@ -358,6 +390,18 @@ pub fn spawn(
             config.web.clone(),
         ));
     }
+    if let Some(events) = events.clone().filter(|_| config.event.adapters.enabled) {
+        resolvers.push((
+            Arc::new(crate::event::adapters::service::PlatformResolver {
+                web: WebResolver {
+                    egress: egress.clone(),
+                    config: config.web.clone(),
+                    events: Some(events),
+                },
+            }),
+            config.web.clone(),
+        ));
+    }
     if let Some(events) = events.filter(|_| config.event.calendars) {
         resolvers.push((
             Arc::new(crate::event::service::CalendarResolver {
@@ -421,19 +465,21 @@ pub fn spawn(
                             { let mut next=rate.lock().await; tokio::time::sleep_until(*next).await; *next=Instant::now()+Duration::from_secs_f64(1.0/budget.requests_per_second); }
                             if Instant::now()>=canary_check {
                                 canary_check=Instant::now()+Duration::from_secs(60);
-                            if resolver.canary_allowed() {
-                            match crate::canary::claim(&pool,&resolver.manifest(),&canary).await {
-                                Ok(Some(generation))=>{if let Err(e)=crate::canary::run(&pool,resolver.as_ref(),&canary,&metrics,generation).await {tracing::warn!(error=%e,"canary bookkeeping failed");}return;},
+                            for manifest in resolver.manifests() {
+                            if resolver.canary_allowed_for(&manifest) {
+                            match crate::canary::claim(&pool,&manifest,&canary).await {
+                                Ok(Some(generation))=>{if let Err(e)=crate::canary::run_manifest(&pool,resolver.as_ref(),&manifest,&canary,&metrics,generation).await {tracing::warn!(error=%e,"canary bookkeeping failed");}return;},
                                 Err(e)=>tracing::warn!(error=%e,"canary claim failed"),
                                 _=>{}
                             }
-                            } else if let Err(e)=crate::canary::suspend(&pool,&resolver.manifest()).await {tracing::warn!(error=%e,"canary suspension failed");}
+                            } else if let Err(e)=crate::canary::suspend(&pool,&manifest).await {tracing::warn!(error=%e,"canary suspension failed");}
+                            }
                             }
                             match claim_sources(&pool,&resolver.queue_sources(),&cfg,resolver.batch_size()).await {
                                 Ok(jobs) if !jobs.is_empty()=>{
                                     let result=async {
                                         if resolver.name()=="geo" || authors.admit(&pool,&jobs[0],cfg.author_requests_per_second).await? {
-                                            let (result,_)=crate::telemetry::observe(&metrics,&resolver.manifest(),run_batch_config(&pool,resolver.as_ref(),&cfg,&refresh,&jobs)).await;
+                                            let (result,_)=crate::telemetry::observe(&metrics,&resolver.manifest_for(&jobs[0].uri),run_batch_config(&pool,resolver.as_ref(),&cfg,&refresh,&jobs)).await;
                                             result?;
                                         } else {
                                             for job in jobs.iter().skip(1) {

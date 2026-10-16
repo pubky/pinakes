@@ -15,6 +15,22 @@ pub trait Resolver: Send + Sync {
     fn manifest(&self) -> crate::adapter::Manifest {
         crate::adapter::manifest(self.name())
     }
+    fn manifest_for(&self, _uri: &str) -> crate::adapter::Manifest {
+        self.manifest()
+    }
+    fn manifests(&self) -> Vec<crate::adapter::Manifest> {
+        vec![self.manifest()]
+    }
+    fn canary_allowed_for(&self, manifest: &crate::adapter::Manifest) -> bool {
+        manifest.enabled && self.canary_allowed()
+    }
+    async fn probe_manifest(
+        &self,
+        uri: &str,
+        _manifest: &crate::adapter::Manifest,
+    ) -> Result<ResourceMeta> {
+        self.probe(uri).await
+    }
     async fn probe(&self, uri: &str) -> Result<ResourceMeta> {
         self.resolve(uri).await
     }
@@ -54,6 +70,12 @@ pub fn classify(uri: &str) -> Option<&'static str> {
             Some("pubky")
         }
         "http" | "https" if osm::parse_id(uri).is_some() => Some("osm"),
+        "nostr" => Some("event_platform"),
+        "http" | "https" | "webcal" | "webcals"
+            if crate::event::adapters::detect(uri).is_some_and(|d| d.id != "ics") =>
+        {
+            Some("event_platform")
+        }
         "webcal" | "webcals" => Some("event"),
         "http" | "https" if crate::event::service::is_feed(uri) => Some("event"),
         "http" | "https" => Some("web"),
@@ -66,6 +88,15 @@ pub fn classify(uri: &str) -> Option<&'static str> {
 pub fn classify_config(uri: &str, config: &crate::config::Config) -> Option<&'static str> {
     match classify(uri) {
         Some("event") if !config.event.enabled || !config.event.calendars => Some("web"),
+        Some("event_platform")
+            if crate::event::adapters::detect(uri)
+                .is_some_and(|d| !crate::event::adapters::manifest(d, &config.event).enabled)
+                && url::Url::parse(uri).is_ok_and(|u| {
+                    matches!(u.scheme(), "http" | "https" | "webcal" | "webcals")
+                }) =>
+        {
+            Some("web")
+        }
         other => other,
     }
 }

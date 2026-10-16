@@ -38,8 +38,12 @@ rrule = "=0.14.0"
 roxmltree = "=0.21.1"
 sha2 = "=0.10.9"
 tzf-rs = { version = "=1.1.4", default-features = false }
+nostr = "=0.45.5"
+tokio-tungstenite = { version = "=0.28.0", features = ["rustls-tls-webpki-roots"] }
 
 [dev-dependencies]
+flate2 = "=1.1.10"
+secp256k1 = "=0.30.0"
 serde_yaml_ng = "0.10"
 tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }

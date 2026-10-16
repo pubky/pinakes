@@ -1,0 +1,1337 @@
+[
+  {
+    "id": "einundzwanzig",
+    "domains": [
+      "portal.einundzwanzig.space"
+    ],
+    "paths": [],
+    "parser": "portal",
+    "mode": "cursor",
+    "cadence_floor": 3600,
+    "identity": "meetup_event_id/nostr_address",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [],
+    "canary": "https://portal.einundzwanzig.space/api/changes?since_sequence=0&limit=1",
+    "canary_note": null,
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "btcmap",
+    "domains": [
+      "api.btcmap.org"
+    ],
+    "paths": [
+      "/v4/events"
+    ],
+    "parser": "btcmap",
+    "mode": "cursor",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [],
+    "canary": "https://api.btcmap.org/v4/events?updated_since=2026-10-15T00%3A00%3A00Z&include_deleted=true",
+    "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "nip52",
+    "domains": [
+      "flockstr.com",
+      "njump.me",
+      "nostr.at",
+      "honey.hivetalk.org",
+      "letsmiti.app"
+    ],
+    "paths": [],
+    "parser": "nostr",
+    "mode": "cursor",
+    "cadence_floor": 3600,
+    "identity": "kind:pubkey:d_or_event_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://api.nostr.wine/search?kind=31923&limit=1&sort=time&order=descending",
+    "canary_note": null,
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "google_ics",
+    "domains": [
+      "calendar.google.com"
+    ],
+    "paths": [],
+    "parser": "calendar",
+    "mode": "container",
+    "cadence_floor": 3600,
+    "identity": "feed/uid/recurrence_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [],
+    "canary": "https://calendar.google.com/calendar/ical/en.usa%23holiday%40group.v.calendar.google.com/public/basic.ics",
+    "canary_note": null,
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "icloud",
+    "domains": [
+      "icloud.com"
+    ],
+    "paths": [],
+    "parser": "calendar",
+    "mode": "container",
+    "cadence_floor": 3600,
+    "identity": "feed/uid/recurrence_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [],
+    "canary": "webcal://p29-caldav.icloud.com/published/2/MTcyMDQzMDA3OTcxNzIwNBo0YWxLi9E9wE87BujEc05s_wNSlxHYpVqZebpx8p79",
+    "canary_note": "Alberta public diploma exam November schedule; source: 2026–27 bulletin p.73.",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "outlook",
+    "domains": [
+      "outlook.office365.com",
+      "outlook.live.com"
+    ],
+    "paths": [],
+    "parser": "calendar",
+    "mode": "container",
+    "cadence_floor": 3600,
+    "identity": "feed/uid/recurrence_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [],
+    "canary": "https://outlook.office365.com/owa/calendar/e19b78d2fbc34df5a4176f3f03fdb1c2@virginia.edu/4a4f2fc2e41b4a91b5da9bcda73f5f7a12370440417110585045/calendar.ics",
+    "canary_note": "University of Virginia public Academic Division Holiday Calendar, HR subscription instructions (2025-10-17).",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "nextcloud",
+    "domains": [
+      "nch.nerdraum.de"
+    ],
+    "paths": [],
+    "parser": "calendar",
+    "mode": "container",
+    "cadence_floor": 3600,
+    "identity": "feed/uid/recurrence_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [],
+    "canary": "https://nch.nerdraum.de/remote.php/dav/public-calendars/kEgPjYnceaax6jct?export",
+    "canary_note": null,
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "proton",
+    "domains": [
+      "calendar.proton.me"
+    ],
+    "paths": [],
+    "parser": "calendar",
+    "mode": "container",
+    "cadence_floor": 3600,
+    "identity": "feed/uid/recurrence_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [],
+    "canary": null,
+    "canary_note": "operator must configure a public sample",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "ics",
+    "domains": [],
+    "paths": [],
+    "parser": "calendar",
+    "mode": "container",
+    "cadence_floor": 3600,
+    "identity": "feed/uid/recurrence_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [],
+    "canary": "https://www.calendarlabs.com/ical-calendar/ics/76/US_Holidays.ics",
+    "canary_note": null,
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "luma",
+    "domains": [
+      "luma.com",
+      "lu.ma"
+    ],
+    "paths": [],
+    "parser": "luma",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://luma.com/376whqyw",
+    "canary_note": null,
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "meetup",
+    "domains": [
+      "meetup.com"
+    ],
+    "paths": [],
+    "parser": "meetup",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://www.meetup.com/bitcoin-meetup-switzerland/events/316894744/",
+    "canary_note": null,
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "eventbrite",
+    "domains": [
+      "eventbrite.com",
+      "eventbrite.co.uk",
+      "eventbrite.de",
+      "eventbrite.ch"
+    ],
+    "paths": [],
+    "parser": "eventbrite",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://www.eventbrite.com/e/se-bitcoin-sovereignty-economics-tickets-1978412197139",
+    "canary_note": null,
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "partiful",
+    "domains": [
+      "partiful.com"
+    ],
+    "paths": [],
+    "parser": "partiful",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://partiful.com/e/AK0FMV5lu2PmfSyxuXwY",
+    "canary_note": null,
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "posh",
+    "domains": [
+      "posh.vip"
+    ],
+    "paths": [],
+    "parser": "posh",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://posh.vip/e/halloween-2026-eden",
+    "canary_note": null,
+    "ua_profile": "plain",
+    "requires_key": false,
+    "fragile": true,
+    "enabled": true
+  },
+  {
+    "id": "ringcentral",
+    "domains": [
+      "events.ringcentral.com",
+      "app.events.ringcentral.com",
+      "app.hopin.com"
+    ],
+    "paths": [],
+    "parser": "ringcentral",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://events.ringcentral.com/events/innovators-retreat-2026",
+    "canary_note": null,
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "airmeet",
+    "domains": [
+      "airmeet.com",
+      "api.airmeet.com"
+    ],
+    "paths": [],
+    "parser": "airmeet",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://api.airmeet.com/api/v1/airmeet/0d7e16c0-7cd9-11f0-b52b-c993ee1463de/info",
+    "canary_note": null,
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "mobilizon",
+    "domains": [
+      "mobilizon.fr",
+      "keskonfai.fr"
+    ],
+    "paths": [],
+    "parser": "mobilizon",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://mobilizon.fr/events/86a665ae-e495-4e4f-88d4-4cffd44a82f1",
+    "canary_note": null,
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "gancio",
+    "domains": [
+      "demo.gancio.org"
+    ],
+    "paths": [],
+    "parser": "gancio",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://demo.gancio.org/api/events?max=1",
+    "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "gathio",
+    "domains": [
+      "events.sfconservancy.org",
+      "gath.io"
+    ],
+    "paths": [],
+    "parser": "ics_link",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://events.sfconservancy.org/1ukbcQFkKAEr0OrZ7PDgq",
+    "canary_note": null,
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "wikidata",
+    "domains": [
+      "wikidata.org",
+      "wikipedia.org"
+    ],
+    "paths": [],
+    "parser": "wikidata",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "wikidata_qid",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name"
+    ],
+    "canary": "https://www.wikidata.org/wiki/Special:EntityData/Q125933843.json",
+    "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "tito",
+    "domains": [
+      "ti.to"
+    ],
+    "paths": [],
+    "parser": "ics_link",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://ti.to/scipy/scipy2026.ics",
+    "canary_note": null,
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "petzi",
+    "domains": [
+      "petzi.ch"
+    ],
+    "paths": [],
+    "parser": "ics_link",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://www.petzi.ch/en/events/61387-fri-son-kim-wilde-uk/",
+    "canary_note": null,
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "weezevent",
+    "domains": [
+      "my.weezevent.com",
+      "api.weezevent.com"
+    ],
+    "paths": [],
+    "parser": "ics_link",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://api.weezevent.com/sites/view/live/E1114506.ics",
+    "canary_note": null,
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "pretix",
+    "domains": [
+      "pretix.eu"
+    ],
+    "paths": [],
+    "parser": "ics_link",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://pretix.eu/demo/democon/ical/",
+    "canary_note": null,
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "eventyay",
+    "domains": [
+      "eventyay.com",
+      "tickets.eventyay.com"
+    ],
+    "paths": [],
+    "parser": "ics_link",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://eventyay.com/ev/88882f3e/",
+    "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "guidle",
+    "domains": [
+      "guidle.com"
+    ],
+    "paths": [],
+    "parser": "ics_link",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://www.guidle.com/de/veranstaltungen/dies-das/ueberlingen/gregor-haegele-live-2027_A2rCGkH",
+    "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "eventfrog",
+    "domains": [
+      "eventfrog.ch",
+      "eventfrog.de"
+    ],
+    "paths": [],
+    "parser": "ics_link",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://eventfrog.ch/stream/de/event/7503702322012243890.ics",
+    "canary_note": null,
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "allevents",
+    "domains": [
+      "allevents.in"
+    ],
+    "paths": [],
+    "parser": "ics_link",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://allevents.in/zurich/200029487725505",
+    "canary_note": null,
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "billetto",
+    "domains": [
+      "billetto.co.uk",
+      "billetto.dk",
+      "billetto.se"
+    ],
+    "paths": [],
+    "parser": "page",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://billetto.co.uk/e/farm-halloween-tickets-1977196",
+    "canary_note": null,
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "fatsoma",
+    "domains": [
+      "fatsoma.com"
+    ],
+    "paths": [],
+    "parser": "page",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://www.fatsoma.com/e/npky3qjt/the-official-dublin-student-halloween-ball-2026",
+    "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "designmynight",
+    "domains": [
+      "designmynight.com"
+    ],
+    "paths": [],
+    "parser": "page",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://www.designmynight.com/london/whats-on/theatre/the-magic-hour-park-lane",
+    "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "rausgegangen",
+    "domains": [
+      "rausgegangen.de"
+    ],
+    "paths": [],
+    "parser": "page",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://rausgegangen.de/en/events/geheimkonzert-dusseldorf-20-open-air-by-rausgegangen-0/",
+    "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "fixr",
+    "domains": [
+      "fixr.co"
+    ],
+    "paths": [],
+    "parser": "page",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://fixr.co/event/halloween-2026-welcome-to-the-haunted-hotel-tickets-404456056",
+    "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "wegow",
+    "domains": [
+      "wegow.com"
+    ],
+    "paths": [],
+    "parser": "page",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://v4.wegow.com/es/conciertos/konzert-von-yasi-hofer-band-in-bonn-harmonie",
+    "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "stager",
+    "domains": [
+      "stager.co"
+    ],
+    "paths": [],
+    "parser": "page",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://grounds.stager.co/shop/default/events/111608505",
+    "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "reservix",
+    "domains": [
+      "reservix.de",
+      "adticket.de"
+    ],
+    "paths": [],
+    "parser": "page",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://www.reservix.de/tickets-voodoo-juergens-und-die-ansa-panier-in-wiesbaden-schlachthof-wiesbaden-halle-am-21-5-2026/e2483153",
+    "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "entradium",
+    "domains": [
+      "entradium.com"
+    ],
+    "paths": [],
+    "parser": "page",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://entradium.com/en/events/like-a-stone-vigo-supersonic",
+    "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "starticket",
+    "domains": [
+      "starticket.ch"
+    ],
+    "paths": [],
+    "parser": "page",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "type"
+    ],
+    "canary": "https://s3-eu-west-1.amazonaws.com/starticket/wwwroot/ticketing/feeds/starticketfeed_D.xml",
+    "canary_note": "Atom feed canary may contain only dates outside the horizon; validates dated feed shape, not current inventory.",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "songkick",
+    "domains": [
+      "songkick.com"
+    ],
+    "paths": [],
+    "parser": "page",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://www.songkick.com/concerts/42408878-bausa-at-komplex-457",
+    "canary_note": null,
+    "ua_profile": "firefox",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "humanitix",
+    "domains": [
+      "humanitix.com"
+    ],
+    "paths": [],
+    "parser": "page",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://events.humanitix.com/great-northern-contemporary-craft-fair",
+    "canary_note": null,
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "infomaniak",
+    "domains": [
+      "infomaniak.events"
+    ],
+    "paths": [],
+    "parser": "page",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://infomaniak.events/en-ch/conferences/seminaire-des-autorites-2026/92392f2a-6711-4917-b9e9-60c88e8c550a/events/396911",
+    "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "xceed",
+    "domains": [
+      "xceed.me"
+    ],
+    "paths": [],
+    "parser": "xceed",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://xceed.me/en/roma/event/dissonanze-2026-day-1/220015",
+    "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "ents24",
+    "domains": [
+      "ents24.com"
+    ],
+    "paths": [],
+    "parser": "ents24",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://www.ents24.com/london-events/eventim-apollo/simon-brodkin/7474018",
+    "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "ticketino",
+    "domains": [
+      "ticketino.com"
+    ],
+    "paths": [],
+    "parser": "ticketino",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://www.ticketino.com/en/Event/TICKETINO-BBQ/192364",
+    "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "dice",
+    "domains": [
+      "dice.fm"
+    ],
+    "paths": [],
+    "parser": "dice",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://dice.fm/event/6a06e51b6c518c00013a998c",
+    "canary_note": null,
+    "ua_profile": "browser",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "fever",
+    "domains": [
+      "feverup.com"
+    ],
+    "paths": [],
+    "parser": "page",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": "https://feverup.com/m/118911",
+    "canary_note": null,
+    "ua_profile": "browser",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "ticketmaster",
+    "domains": [
+      "ticketmaster.com",
+      "ticketmaster.co.uk",
+      "ticketmaster.de",
+      "ticketmaster.ch"
+    ],
+    "paths": [],
+    "parser": "ticketmaster",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": null,
+    "canary_note": "operator must configure a public sample",
+    "ua_profile": "pinakes",
+    "requires_key": true,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "skiddle",
+    "domains": [
+      "skiddle.com"
+    ],
+    "paths": [],
+    "parser": "skiddle",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": null,
+    "canary_note": "operator must configure a public sample",
+    "ua_profile": "pinakes",
+    "requires_key": true,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "billetto_api",
+    "domains": [],
+    "paths": [],
+    "parser": "billetto_api",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": null,
+    "canary_note": "operator must configure a public sample",
+    "ua_profile": "pinakes",
+    "requires_key": true,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "eventfrog_api",
+    "domains": [],
+    "paths": [],
+    "parser": "eventfrog_api",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": null,
+    "canary_note": "operator must configure a public sample",
+    "ua_profile": "pinakes",
+    "requires_key": true,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "google_calendar_api",
+    "domains": [],
+    "paths": [],
+    "parser": "google_calendar_api",
+    "mode": "cursor",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [],
+    "canary": null,
+    "canary_note": "operator must configure a public sample",
+    "ua_profile": "pinakes",
+    "requires_key": true,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "resident_advisor",
+    "domains": [
+      "ra.co"
+    ],
+    "paths": [],
+    "parser": "resident_advisor",
+    "mode": "resource",
+    "cadence_floor": 3600,
+    "identity": "platform_id",
+    "cancellation": "explicit_or_missing_twice",
+    "expected_fields": [
+      "name",
+      "start"
+    ],
+    "canary": null,
+    "canary_note": "operator must configure a public sample",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": true,
+    "enabled": false
+  },
+  {
+    "id": "facebook",
+    "domains": [
+      "facebook.com",
+      "fb.me"
+    ],
+    "paths": [],
+    "parser": "card",
+    "mode": "none",
+    "cadence_floor": 2592000,
+    "identity": "normalized_uri",
+    "cancellation": "unobservable",
+    "expected_fields": [],
+    "canary": null,
+    "canary_note": "operator must configure a public sample",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "eventim",
+    "domains": [
+      "eventim.de",
+      "eventim.ch",
+      "eventim.co.uk",
+      "ticketcorner.ch",
+      "ticketone.it",
+      "oeticket.com",
+      "seetickets.com",
+      "eventim-light.com",
+      "paylogic.com"
+    ],
+    "paths": [],
+    "parser": "card",
+    "mode": "none",
+    "cadence_floor": 2592000,
+    "identity": "normalized_uri",
+    "cancellation": "unobservable",
+    "expected_fields": [],
+    "canary": null,
+    "canary_note": "operator must configure a public sample",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "shotgun",
+    "domains": [
+      "shotgun.live"
+    ],
+    "paths": [],
+    "parser": "card",
+    "mode": "none",
+    "cadence_floor": 2592000,
+    "identity": "normalized_uri",
+    "cancellation": "unobservable",
+    "expected_fields": [],
+    "canary": null,
+    "canary_note": "operator must configure a public sample",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "bandsintown",
+    "domains": [
+      "bandsintown.com"
+    ],
+    "paths": [],
+    "parser": "card",
+    "mode": "none",
+    "cadence_floor": 2592000,
+    "identity": "normalized_uri",
+    "cancellation": "unobservable",
+    "expected_fields": [],
+    "canary": null,
+    "canary_note": "operator must configure a public sample",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "vivaticket",
+    "domains": [
+      "vivaticket.com"
+    ],
+    "paths": [],
+    "parser": "card",
+    "mode": "none",
+    "cadence_floor": 2592000,
+    "identity": "normalized_uri",
+    "cancellation": "unobservable",
+    "expected_fields": [],
+    "canary": null,
+    "canary_note": "operator must configure a public sample",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "fourvenues",
+    "domains": [
+      "fourvenues.com"
+    ],
+    "paths": [],
+    "parser": "card",
+    "mode": "none",
+    "cadence_floor": 2592000,
+    "identity": "normalized_uri",
+    "cancellation": "unobservable",
+    "expected_fields": [],
+    "canary": null,
+    "canary_note": "operator must configure a public sample",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "conference",
+    "domains": [
+      "zoom.us",
+      "zoom.com",
+      "meet.google.com",
+      "teams.microsoft.com",
+      "teams.live.com"
+    ],
+    "paths": [],
+    "parser": "card",
+    "mode": "none",
+    "cadence_floor": 2592000,
+    "identity": "normalized_uri",
+    "cancellation": "unobservable",
+    "expected_fields": [],
+    "canary": null,
+    "canary_note": "operator must configure a public sample",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "lemonade",
+    "domains": [
+      "lemonade.social"
+    ],
+    "paths": [],
+    "parser": "card",
+    "mode": "none",
+    "cadence_floor": 2592000,
+    "identity": "normalized_uri",
+    "cancellation": "unobservable",
+    "expected_fields": [],
+    "canary": null,
+    "canary_note": "operator must configure a public sample",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "ticket_shell",
+    "domains": [
+      "weeztix.com",
+      "ticketkantoor.nl"
+    ],
+    "paths": [],
+    "parser": "card",
+    "mode": "none",
+    "cadence_floor": 2592000,
+    "identity": "normalized_uri",
+    "cancellation": "unobservable",
+    "expected_fields": [],
+    "canary": null,
+    "canary_note": "operator must configure a public sample",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  },
+  {
+    "id": "hitobito",
+    "domains": [],
+    "paths": [],
+    "parser": "card",
+    "mode": "none",
+    "cadence_floor": 2592000,
+    "identity": "normalized_uri",
+    "cancellation": "unobservable",
+    "expected_fields": [],
+    "canary": null,
+    "canary_note": "operator must configure a public sample",
+    "ua_profile": "pinakes",
+    "requires_key": false,
+    "fragile": false,
+    "enabled": true
+  }
+]

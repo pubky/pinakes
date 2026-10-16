@@ -1,0 +1,1403 @@
+use chrono::{Duration, Utc};
+use pinakes_core::{
+    config::EventConfig,
+    event::{
+        adapters::{
+            self,
+            cursor::{self, Checkpoint},
+            state,
+        },
+        Occurrence,
+    },
+    model::{Point, ResourceMeta},
+    store,
+};
+use serde_json::{json, Value};
+use sqlx::PgPool;
+
+#[test]
+fn manifests_cover_research_and_keys_disable_without_exposing_credentials() {
+    let mut cfg = EventConfig::default();
+    let ids: std::collections::BTreeSet<_> =
+        adapters::definitions().iter().map(|d| &d.id).collect();
+    assert_eq!(ids.len(), adapters::definitions().len());
+    for id in [
+        "einundzwanzig",
+        "btcmap",
+        "nip52",
+        "google_calendar_api",
+        "luma",
+        "meetup",
+        "eventbrite",
+        "partiful",
+        "posh",
+        "ringcentral",
+        "airmeet",
+        "mobilizon",
+        "gancio",
+        "wikidata",
+        "dice",
+        "tito",
+        "petzi",
+        "weezevent",
+        "pretix",
+        "eventyay",
+        "gathio",
+        "guidle",
+        "eventfrog",
+        "allevents",
+        "ticketmaster",
+        "skiddle",
+        "billetto_api",
+        "eventfrog_api",
+        "resident_advisor",
+    ] {
+        assert!(adapters::definition(id).is_some(), "{id}");
+    }
+    for m in adapters::manifests(&cfg).iter().filter(|m| m.requires_key) {
+        assert!(!m.enabled);
+        assert_eq!(m.disabled_reason.as_deref(), Some("missing API key"));
+    }
+    assert!(!adapters::manifest(adapters::definition("resident_advisor").unwrap(), &cfg).enabled);
+    cfg.adapters.platforms.insert(
+        "ticketmaster".into(),
+        adapters::Options {
+            key: Some("secret-fixture-key".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        adapters::detect("https://billetto.dk/api/v3/public/events/123")
+            .unwrap()
+            .id,
+        "billetto_api"
+    );
+    let target = adapters::service::endpoint(
+        adapters::definition("ticketmaster").unwrap(),
+        "https://app.ticketmaster.com/discovery/v2/events/abc.json",
+        None,
+        &cfg,
+    )
+    .unwrap()
+    .unwrap()
+    .0;
+    assert!(target.contains("/abc.json?"));
+    assert!(!target.contains(".json.json"));
+    let m = adapters::manifest(adapters::definition("ticketmaster").unwrap(), &cfg);
+    assert!(m.enabled);
+    assert!(!serde_json::to_string(&m)
+        .unwrap()
+        .contains("secret-fixture-key"));
+    cfg.adapters.platforms.insert(
+        "facebook".into(),
+        adapters::Options {
+            cadence_floor: Some(3600),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        adapters::manifest(adapters::definition("facebook").unwrap(), &cfg).cadence_floor,
+        7 * 86400
+    );
+    cfg.adapters
+        .platforms
+        .get_mut("facebook")
+        .unwrap()
+        .cadence_floor = Some(u64::MAX);
+    assert!(adapters::validate(&cfg).is_err());
+    assert!(adapters::profile("browser").contains("Chrome/"));
+    assert!(adapters::profile("firefox").contains("Firefox/"));
+    assert_eq!(adapters::profile("plain"), "curl/8.10.1");
+    assert_eq!(
+        adapters::detect("https://pretix.example/test/ical/")
+            .unwrap()
+            .id,
+        "ics"
+    );
+    assert_eq!(
+        adapters::detected_html(
+            "https://tickets.example/org/test/",
+            "/static/pretixbase/ /ical/"
+        )
+        .unwrap()
+        .id,
+        "pretix"
+    );
+}
+
+#[test]
+fn embedded_platform_shapes_and_jsonld_precedence() {
+    let cases = [
+        (
+            "luma",
+            json!({"data":{"event":{"name":"Luma","start_at":"2026-10-20T17:00:00Z","end_at":"2026-10-20T18:00:00Z","timezone":"Europe/Zurich","coordinate":{"latitude":47,"longitude":8}}}}),
+        ),
+        (
+            "meetup",
+            json!({"props":{"pageProps":{"event":{"title":"Meetup","dateTime":"2026-10-20T17:00:00Z","group":{"timezone":"Europe/Zurich"},"venue":{"lat":47,"lon":8}}}}}),
+        ),
+        (
+            "eventbrite",
+            json!({"event":{"name":"Eventbrite","startDate":{"utc":"2026-10-20T17:00:00Z","timezone":"Europe/Zurich"},"venue":{"address":{"latitude":47,"longitude":8}},"status":"cancelled"}}),
+        ),
+        (
+            "partiful",
+            json!({"props":{"pageProps":{"event":{"title":"Partiful","startDate":"2026-10-20T17:00:00Z","timezone":"Europe/Zurich","guestAction":"APPLY"}}}}),
+        ),
+        (
+            "posh",
+            json!({"event":{"name":"Posh","startUtc":"2026-10-20T17:00:00Z","timezone":"Europe/Zurich","lat":47,"lng":8}}),
+        ),
+        (
+            "ringcentral",
+            json!({"props":{"pageProps":{"event":{"name":"RingCentral","time_start":"2026-10-20T17:00:00Z","timezone":"Eastern Time (US & Canada)","venue_type":"virtual"}}}}),
+        ),
+        (
+            "airmeet",
+            json!({"name":"Airmeet","start_time":1792515600000i64,"end_time":1792519200000i64,"timezone":"Europe/Zurich"}),
+        ),
+        (
+            "mobilizon",
+            json!({"data":{"event":{"title":"Mobilizon","beginsOn":"2026-10-20T17:00:00Z","timezone":"Europe/Zurich","isOnline":true}}}),
+        ),
+        (
+            "gancio",
+            json!({"title":"Gancio","start_datetime":1792515600i64,"place":{"lat":47,"lon":8}}),
+        ),
+        (
+            "ticketmaster",
+            json!({"name":"Ticketmaster","dates":{"start":{"dateTime":"2026-10-20T17:00:00Z"},"timezone":"Europe/Zurich","status":{"code":"postponed"}},"_embedded":{"venues":[{"name":"Hall","location":{"latitude":"47","longitude":"8"}}]}}),
+        ),
+        (
+            "skiddle",
+            json!({"results":{"eventname":"Skiddle","startdate":"2026-10-20T18:00:00+01:00","venue":{"latitude":47,"longitude":8}}}),
+        ),
+        (
+            "billetto_api",
+            json!({"event":{"name":"Billetto","start_at":"2026-10-20T17:00:00Z","state":"canceled"}}),
+        ),
+        (
+            "eventfrog_api",
+            json!({"events":[{"name":"Eventfrog","startDate":"2026-10-20T17:00:00Z","cancelled":true}]}),
+        ),
+        (
+            "resident_advisor",
+            json!({"data":{"event":{"title":"RA","startTime":"2026-10-20T19:00:00","venue":{"area":{"ianaTimeZone":"Europe/Zurich"},"location":{"latitude":47,"longitude":8}}}}}),
+        ),
+        (
+            "xceed",
+            json!({"event":{"name":"Xceed","startDate":"2026-10-20T17:00:00Z"}}),
+        ),
+    ];
+    for (id, v) in cases {
+        let html = if matches!(id, "posh" | "xceed") {
+            format!(
+                "<script>self.__next_f.push([1,{}]);</script>",
+                serde_json::to_string(&v.to_string()).unwrap()
+            )
+        } else {
+            format!("<script type='application/json'>{v}</script>")
+        };
+        let doc = state::parse(id, "https://example.org/event", html.as_bytes())
+            .unwrap_or_else(|| panic!("{id}"));
+        assert!(doc.start.is_some(), "{id}");
+        assert!(doc.name.is_some(), "{id}");
+        if id == "eventbrite" {
+            assert_eq!(
+                doc.event.event_status,
+                Some(pinakes_core::event::EventStatus::Cancelled)
+            );
+            assert!(doc.location.is_some());
+        }
+        if id == "ringcentral" {
+            assert_eq!(
+                doc.event.tz.as_deref(),
+                Some("America/New_York"),
+                "html={html}, direct={:?}",
+                state::object(
+                    id,
+                    "https://example.org/e",
+                    &v["props"]["pageProps"]["event"]
+                )
+                .unwrap()
+                .event
+                .tz
+            );
+        }
+    }
+    let nuxt = r#"<script id="__NUXT_DATA__">[{"event":1},{"name":2,"startDate":3},"Nuxt Concert","2026-10-20T17:00:00Z"]</script>"#;
+    let d = state::parse("ents24", "https://example.org/e", nuxt.as_bytes()).unwrap();
+    assert_eq!(d.name.as_deref(), Some("Nuxt Concert"));
+    assert_eq!(d.start.unwrap().timestamp(), 1792515600);
+    let atc = r#"<title>Ticketino</title><span class="atc_date_start">2026-10-20 19:00:00</span><span class="atc_date_end">2026-10-20 21:00:00</span><span class="atc_timezone">Europe/Zurich</span>"#;
+    assert_eq!(
+        state::parse("ticketino", "https://example.org/e", atc.as_bytes())
+            .unwrap()
+            .event
+            .tz
+            .as_deref(),
+        Some("Europe/Zurich")
+    );
+    assert!(state::parse(
+        "luma",
+        "https://example.org/e",
+        br#"{"recommendations":[{"name":"Unrelated","startDate":"2026-10-20T17:00:00Z"}]}"#
+    )
+    .is_none());
+}
+
+fn snapshot(uri: &str, n: usize, at: i64) -> ResourceMeta {
+    let mut doc = cursor::container(uri, &EventConfig::default());
+    doc.fetched_at = at;
+    for i in 0..n {
+        let mut d = ResourceMeta::new(uri, "btcmap", 3600);
+        d.set_type("Event");
+        d.start = Some(Utc::now() + Duration::days(1));
+        d.end = d.start;
+        d.name = Some(format!("Event {i}"));
+        d.location = Some(Point { lat: 47., lon: 8. });
+        doc.container
+            .as_mut()
+            .unwrap()
+            .occurrences
+            .push(Occurrence {
+                uid: i.to_string(),
+                recurrence_id: String::new(),
+                doc: d,
+                sequence: 0,
+                modified: None,
+                content_hash: i.to_string(),
+                volatile: false,
+            });
+    }
+    doc
+}
+fn checkpoint(doc: &mut ResourceMeta, id: &str, previous: Option<&str>, next: &str, reset: bool) {
+    doc.container.as_mut().unwrap().cursor = Some(Checkpoint {
+        source: id.into(),
+        adapter: "btcmap".into(),
+        previous: previous.map(str::to_owned),
+        next: next.into(),
+        reset,
+    });
+}
+async fn saved_cursor(pool: &PgPool, id: &str) -> Option<String> {
+    sqlx::query_scalar("SELECT adapter_cursor FROM event_fetch WHERE resource_id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn cursor_deltas_tombstones_rollback_hold_reset_and_compare_swap(pool: PgPool) {
+    let uri = "https://example.org/cursor.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let now = Utc::now().timestamp_millis();
+    let mut d = snapshot(uri, 3, now);
+    checkpoint(&mut d, &id, None, "1", false);
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let mut delta = snapshot(uri, 1, now + 1);
+    delta.container.as_mut().unwrap().delta = true;
+    delta.container.as_mut().unwrap().occurrences[0].doc.name = Some("Changed".into());
+    delta.container.as_mut().unwrap().deleted_uids = vec!["1".into()];
+    checkpoint(&mut delta, &id, Some("1"), "2", false);
+    store::save_document(&pool, &id, 0, &delta).await.unwrap();
+    let states: Vec<(String, String)> =
+        sqlx::query_as("SELECT uid,status FROM occurrence ORDER BY uid")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(states[1].1, "cancelled");
+    assert_eq!(states[2].1, "scheduled");
+    assert_eq!(saved_cursor(&pool, &id).await.as_deref(), Some("2"));
+    delta.fetched_at += 1;
+    checkpoint(&mut delta, &id, Some("1"), "stale", false);
+    store::save_document(&pool, &id, 0, &delta).await.unwrap();
+    assert_eq!(saved_cursor(&pool, &id).await.as_deref(), Some("2"));
+    sqlx::query("ALTER TABLE occurrence ADD CONSTRAINT fixture_reject CHECK(name<>'reject')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    delta.fetched_at += 1;
+    delta.container.as_mut().unwrap().occurrences[0].doc.name = Some("reject".into());
+    checkpoint(&mut delta, &id, Some("2"), "3", false);
+    assert!(store::save_document(&pool, &id, 0, &delta).await.is_err());
+    assert_eq!(saved_cursor(&pool, &id).await.as_deref(), Some("2"));
+    let mut empty = snapshot(uri, 0, now + 4);
+    checkpoint(&mut empty, &id, Some("2"), "4", true);
+    store::save_document(&pool, &id, 0, &empty).await.unwrap();
+    assert_eq!(saved_cursor(&pool, &id).await.as_deref(), Some("2"));
+    empty.fetched_at += 1;
+    store::save_document(&pool, &id, 0, &empty).await.unwrap();
+    assert_eq!(saved_cursor(&pool, &id).await.as_deref(), Some("4"));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT cursor_resets_total FROM source_state WHERE source='btcmap'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM source_state WHERE source LIKE '%:%'")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+fn signed(kind: u16, created: u64, tags: &[&[&str]]) -> nostr::event::Event {
+    use nostr::prelude::*;
+    // Deliberately public deterministic fixture key; never used for a real identity.
+    let keys = Keys::parse(&"01".repeat(32)).unwrap();
+    let unsigned = EventBuilder::new(Kind::from(kind), "Fixture description")
+        .tags(tags.iter().map(|t| Tag::parse(t.iter().copied()).unwrap()))
+        .custom_created_at(Timestamp::from_secs(created))
+        .finalize_unsigned(keys.public_key());
+    let sig = keys.sign_schnorr_with_aux_rand(
+        &secp256k1::Secp256k1::new(),
+        unsigned.compute_id().as_bytes(),
+        &[0; 32],
+    );
+    unsigned.add_signature(sig).unwrap()
+}
+#[test]
+fn nip19_vectors_client_forms_and_signed_nip52_revisions() {
+    use nostr::prelude::{Nip19Event, ToBech32};
+    use pinakes_core::event::adapters::nostr::{self as nip52, Target};
+    let public =
+        Target::decode("nostr:npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg")
+            .unwrap();
+    assert_eq!(
+        public.author.as_deref(),
+        Some("7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e")
+    );
+    let profile=Target::decode("nostr:nprofile1qqsrhuxx8l9ex335q7he0f09aej04zpazpl0ne2cgukyawd24mayt8gpp4mhxue69uhhytnc9e3k7mgpz4mhxue69uhkg6nzv9ejuumpv34kytnrdaksjlyr9p").unwrap();
+    assert_eq!(
+        profile.author.as_deref(),
+        Some("3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d")
+    );
+    assert_eq!(
+        profile.relays,
+        vec!["wss://r.x.com", "wss://djbas.sadkb.com"]
+    );
+    assert!(Target::decode(
+        "nostr:nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5"
+    )
+    .is_err());
+    let old = signed(
+        31923,
+        100,
+        &[
+            &["d", "fixture"],
+            &["title", "Old"],
+            &["start", "1792515600"],
+            &["start_tzid", "Europe/Zurich"],
+            &["g", "47", "8"],
+        ],
+    );
+    let new = signed(
+        31923,
+        101,
+        &[
+            &["d", "fixture"],
+            &["title", "New"],
+            &["start", "1792519200"],
+        ],
+    );
+    let coordinate = Target::coordinate(&format!("31923:{}:fixture", old.pubkey.to_hex())).unwrap();
+    let uri = coordinate.uri().unwrap();
+    assert_eq!(
+        Target::decode(&uri).unwrap().filter()["#d"],
+        json!(["fixture"])
+    );
+    for base in [
+        "https://flockstr.com/event/",
+        "https://njump.me/",
+        "https://nostr.at/",
+        "https://honey.hivetalk.org/dashboard/event/",
+        "https://letsmiti.app/calendar/",
+    ] {
+        assert!(
+            Target::decode(&format!("{base}{}", uri.trim_start_matches("nostr:")))
+                .unwrap()
+                .matches(&old)
+        );
+    }
+    let mut forged = json!(new);
+    forged["content"] = json!("tampered");
+    assert_eq!(
+        nip52::newest(&coordinate, &[json!(old), forged])
+            .unwrap()
+            .id,
+        old.id
+    );
+    assert_eq!(
+        nip52::newest(&coordinate, &[json!(new), json!(old)])
+            .unwrap()
+            .id,
+        new.id
+    );
+    let same_time = signed(
+        31923,
+        101,
+        &[
+            &["d", "fixture"],
+            &["title", "Tie"],
+            &["start", "1792519200"],
+        ],
+    );
+    assert_eq!(
+        nip52::newest(&coordinate, &[json!(new), json!(same_time)])
+            .unwrap()
+            .id,
+        new.id.min(same_time.id)
+    );
+    let pinned = Target::decode(&format!(
+        "nostr:{}",
+        Nip19Event::from(&old).to_bech32().unwrap()
+    ))
+    .unwrap();
+    assert_eq!(
+        nip52::newest(&pinned, &[json!(new), json!(old)])
+            .unwrap()
+            .id,
+        old.id
+    );
+    let parsed = nip52::parse(&uri, &old, &EventConfig::default()).unwrap();
+    assert_eq!(parsed.event.tz.as_deref(), Some("Europe/Zurich"));
+    assert_eq!(parsed.location.unwrap().lat, 47.);
+    assert!(parsed
+        .event
+        .warnings
+        .iter()
+        .any(|s| s == "nostr_legacy_missing_D"));
+    let all_day = signed(
+        31922,
+        102,
+        &[
+            &["d", "day"],
+            &["title", "Day"],
+            &["start", "2026-10-20"],
+            &["g", "u0qj"],
+        ],
+    );
+    let parsed = nip52::parse(&uri, &all_day, &EventConfig::default()).unwrap();
+    assert_eq!(
+        parsed.end.unwrap() - parsed.start.unwrap(),
+        Duration::days(1)
+    );
+    assert_eq!(parsed.event.all_day, Some(true));
+    assert_eq!(parsed.event.tz, None);
+    assert!(parsed.location.is_some());
+    assert!(nip52::parse(
+        &uri,
+        &signed(31925, 100, &[&["d", "rsvp"]]),
+        &EventConfig::default()
+    )
+    .is_err());
+}
+
+use pinakes_core::resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport};
+use std::{
+    collections::VecDeque,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
+struct AdapterDns;
+#[async_trait::async_trait]
+impl Dns for AdapterDns {
+    async fn lookup(&self, host: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
+        Ok(vec![SocketAddr::new(
+            if host == "private.example" {
+                "127.0.0.1"
+            } else {
+                "93.184.216.34"
+            }
+            .parse()?,
+            port,
+        )])
+    }
+}
+struct Replies {
+    replies: Mutex<VecDeque<(u16, Value)>>,
+    seen: Mutex<Vec<(String, FetchOptions)>>,
+}
+#[async_trait::async_trait]
+impl Transport for Replies {
+    async fn get(&self, url: &url::Url, addresses: &[SocketAddr]) -> anyhow::Result<Fetched> {
+        self.get_with(url, addresses, &Default::default()).await
+    }
+    async fn get_with(
+        &self,
+        url: &url::Url,
+        _: &[SocketAddr],
+        options: &FetchOptions,
+    ) -> anyhow::Result<Fetched> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((url.to_string(), options.clone()));
+        let (status, body) = self
+            .replies
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("unexpected HTTP request");
+        Ok(Fetched {
+            url: url.clone(),
+            validators: Default::default(),
+            content_type: "application/json".into(),
+            status,
+            retry_after_secs: 60,
+            location: (status == 302).then(|| "https://foreign.example/".into()),
+            body: serde_json::to_vec(&body)?,
+        })
+    }
+}
+fn mock_egress(replies: Vec<(u16, Value)>) -> (Egress, Arc<Replies>) {
+    let transport = Arc::new(Replies {
+        replies: Mutex::new(replies.into()),
+        seen: Mutex::default(),
+    });
+    (
+        Egress::with_backends(
+            pinakes_core::config::EgressConfig {
+                host_requests_per_second: 1000.,
+                ..Default::default()
+            },
+            Arc::new(AdapterDns),
+            transport.clone(),
+        ),
+        transport,
+    )
+}
+#[tokio::test]
+async fn nostr_indexer_outage_is_not_disappearance_and_private_relays_never_connect() {
+    use pinakes_core::event::adapters::nostr::{self as nip52, Target};
+    let event = signed(
+        31923,
+        100,
+        &[
+            &["d", "fixture"],
+            &["title", "Event"],
+            &["start", "1792515600"],
+        ],
+    );
+    let target = Target::coordinate(&format!("31923:{}:fixture", event.pubkey.to_hex())).unwrap();
+    let (egress, t) = mock_egress(vec![(200, json!([])), (503, Value::Null)]);
+    assert!(nip52::lookup(&target, &egress, &EventConfig::default())
+        .await
+        .is_err());
+    assert!(nip52::lookup(&target, &egress, &EventConfig::default())
+        .await
+        .is_err());
+    assert_eq!(
+        t.seen.lock().unwrap().len(),
+        2,
+        "failed indexer request is cached too"
+    );
+    let (egress, _) = mock_egress(vec![(200, json!([])), (200, json!([]))]);
+    assert!(nip52::lookup(&target, &egress, &EventConfig::default())
+        .await
+        .unwrap()
+        .is_none());
+    assert!(egress
+        .nostr_request("ws://private.example/", target.filter(), 100)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("non-public"));
+    let (egress, t) = mock_egress(vec![(200, json!([event]))]);
+    assert!(nip52::lookup(&target, &egress, &EventConfig::default())
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(t.seen.lock().unwrap().len(), 1);
+}
+#[tokio::test]
+async fn api_discovery_keys_include_body_and_credentials_never_redirect() {
+    let (egress, t) = mock_egress(vec![
+        (200, json!({"id":1})),
+        (200, json!({"id":2})),
+        (302, Value::Null),
+    ]);
+    let mut options = FetchOptions {
+        json_body: Some(json!({"id":1})),
+        ..Default::default()
+    };
+    let a = egress
+        .discover("https://example.org/api", &options, 3600)
+        .await
+        .unwrap();
+    assert_eq!(
+        egress
+            .discover("https://example.org/api#fragment", &options, 3600)
+            .await
+            .unwrap()
+            .body,
+        a.body
+    );
+    options.json_body = Some(json!({"id":2}));
+    assert_ne!(
+        egress
+            .discover("https://example.org/api", &options, 3600)
+            .await
+            .unwrap()
+            .body,
+        a.body
+    );
+    let error = egress
+        .fetch_with(
+            "https://example.org/private?key=fixture-secret",
+            &FetchOptions {
+                sensitive: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(!format!("{error:?}").contains("fixture-secret"));
+    assert_eq!(t.seen.lock().unwrap().len(), 3);
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn nostr_calendar_queues_members_and_reads_accepted_children(pool: PgPool) {
+    use pinakes_core::event::adapters::nostr::{self as nip52, Target};
+    let at = (Utc::now() + Duration::days(1)).timestamp().to_string();
+    let child = signed(
+        31923,
+        100,
+        &[&["d", "child"], &["title", "Member"], &["start", &at]],
+    );
+    let reference = format!("31923:{}:child", child.pubkey.to_hex());
+    let parent = signed(
+        31924,
+        101,
+        &[
+            &["d", "calendar"],
+            &["title", "Calendar"],
+            &["a", &reference],
+        ],
+    );
+    let parent_uri = Target::coordinate(&format!("31924:{}:calendar", parent.pubkey.to_hex()))
+        .unwrap()
+        .uri()
+        .unwrap();
+    let (egress, t) = mock_egress(vec![(200, json!([parent]))]);
+    let error = nip52::resolve(&parent_uri, &egress, &EventConfig::default(), &pool, false)
+        .await
+        .unwrap_err();
+    assert!(error.is::<pinakes_core::resolver::RetryLater>());
+    let child_uri = Target::coordinate(&reference).unwrap().uri().unwrap();
+    let id = pinakes_core::model::identity(&child_uri).unwrap().0;
+    let mut doc = nip52::parse(&child_uri, &child, &EventConfig::default()).unwrap();
+    doc.description = Some("x".repeat(2048));
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let limited = EventConfig {
+        max_event_document_bytes: 1024,
+        ..Default::default()
+    };
+    assert!(nip52::resolve(&parent_uri, &egress, &limited, &pool, false)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("document memory cap"));
+    let doc = nip52::resolve(&parent_uri, &egress, &EventConfig::default(), &pool, false)
+        .await
+        .unwrap();
+    assert_eq!(doc.container.unwrap().occurrences.len(), 1);
+    assert_eq!(
+        t.seen.lock().unwrap().len(),
+        1,
+        "child network work stays in its own queue"
+    );
+}
+
+async fn install_cursor(pool: &PgPool, uri: &str, value: &str) {
+    let id = store::ensure_resource(pool, uri).await.unwrap();
+    sqlx::query("INSERT INTO event_fetch(resource_id,adapter_cursor) VALUES($1,$2) ON CONFLICT(resource_id) DO UPDATE SET adapter_cursor=$2")
+        .bind(id).bind(value).execute(pool).await.unwrap();
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn cursor_http_resync_pagination_and_tombstones(pool: PgPool) {
+    let mut cfg = EventConfig {
+        coordinate_timezone: false,
+        ..Default::default()
+    };
+    let uri = "https://portal.einundzwanzig.space/api/meetup-events";
+    let definition = adapters::definition("einundzwanzig").unwrap();
+    let at = (Utc::now() + Duration::days(2)).to_rfc3339();
+    let event = json!({"id":7,"title":"Meetup","start":at,"link":"https://luma.com/fixture"});
+    let (egress, t) = mock_egress(vec![
+        (
+            200,
+            json!({"next_since":12,"has_more":true,"cursor_expired":false,"changes":[]}),
+        ),
+        (200, json!([event])),
+    ]);
+    let doc = cursor::resolve(&pool, uri, definition, &egress, &cfg, false)
+        .await
+        .unwrap();
+    let c = doc.container.unwrap();
+    assert!(!c.delta);
+    assert_eq!(c.occurrences.len(), 1);
+    assert_eq!(c.cursor.unwrap().next, "12");
+    assert!(t.seen.lock().unwrap().iter().all(|(_, o)| o.feed_hint));
+    install_cursor(&pool, uri, "12").await;
+    let (egress, _) = mock_egress(vec![
+        (
+            200,
+            json!({"next_since":30,"has_more":false,"cursor_expired":true,"changes":[]}),
+        ),
+        (200, json!([event])),
+    ]);
+    let c = cursor::resolve(&pool, uri, definition, &egress, &cfg, false)
+        .await
+        .unwrap()
+        .container
+        .unwrap();
+    assert!(c.cursor.unwrap().reset);
+    assert!(!c.delta);
+    let (egress, t) = mock_egress(vec![
+        (
+            200,
+            json!({"next_since":13,"has_more":true,"changes":[{"resource":"meetup-event","id":7,"action":"deleted"}]}),
+        ),
+        (
+            200,
+            json!({"next_since":14,"has_more":false,"changes":[{"resource":"meetup-event","action":"created","data":event}]}),
+        ),
+    ]);
+    let c = cursor::resolve(&pool, uri, definition, &egress, &cfg, false)
+        .await
+        .unwrap()
+        .container
+        .unwrap();
+    assert!(c.delta);
+    assert!(c.deleted_uids.is_empty(), "recreation wins across pages");
+    assert_eq!(c.occurrences.len(), 1);
+    assert!(t.seen.lock().unwrap()[1].0.contains("since_sequence=13"));
+    assert_eq!(
+        saved_cursor(&pool, &pinakes_core::model::identity(uri).unwrap().0)
+            .await
+            .as_deref(),
+        Some("12"),
+        "fetch alone never checkpoints"
+    );
+    let (egress, _) = mock_egress(vec![(
+        200,
+        json!({"next_since":12,"has_more":true,"changes":[]}),
+    )]);
+    assert!(
+        cursor::resolve(&pool, uri, definition, &egress, &cfg, false)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("non-advancing")
+    );
+    cfg.adapters.max_cursor_pages = 1;
+    let (egress, _) = mock_egress(vec![(
+        200,
+        json!({"next_since":13,"has_more":true,"changes":[]}),
+    )]);
+    assert!(
+        cursor::resolve(&pool, uri, definition, &egress, &cfg, false)
+            .await
+            .is_err()
+    );
+    cfg.adapters.max_cursor_pages = 10;
+    let btc_uri = "https://api.btcmap.org/v4/events";
+    let (egress, t) = mock_egress(vec![(
+        200,
+        json!([
+            {"id":1,"status":"live","starts_at":at,"name":"One","updated_at":"2026-10-15T13:00:00Z"},
+            {"id":2,"status":"live","starts_at":at,"name":"Two","updated_at":"2026-10-15T13:00:00Z"},
+            {"id":3,"status":"rejected","updated_at":"2026-10-15T13:00:00Z"},
+            {"id":4,"status":"live","deleted_at":"2026-10-15T13:00:00Z","updated_at":"2026-10-15T13:00:00Z"}
+        ]),
+    )]);
+    let c = cursor::resolve(
+        &pool,
+        btc_uri,
+        adapters::definition("btcmap").unwrap(),
+        &egress,
+        &cfg,
+        false,
+    )
+    .await
+    .unwrap()
+    .container
+    .unwrap();
+    assert!(c.delta);
+    assert_eq!(
+        c.occurrences.len(),
+        2,
+        "tied timestamps are consumed together"
+    );
+    assert_eq!(c.deleted_uids, ["3", "4"]);
+    assert_eq!(c.cursor.unwrap().next, "2026-10-15T13:00:00+00:00");
+    let seen = t.seen.lock().unwrap();
+    assert!(seen[0].0.contains("include_deleted=true&status=all"));
+    assert!(!seen[0].0.contains("limit="));
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn google_expiration_resets_then_commits_only_final_token(pool: PgPool) {
+    let uri = "https://www.googleapis.com/calendar/v3/calendars/public/events";
+    let mut cfg = EventConfig {
+        coordinate_timezone: false,
+        ..Default::default()
+    };
+    cfg.adapters.platforms.insert(
+        "google_calendar_api".into(),
+        adapters::Options {
+            key: Some("private-key".into()),
+            ..Default::default()
+        },
+    );
+    install_cursor(&pool, uri, "expired").await;
+    let event = json!({"id":"e1","summary":"Google","start":{"dateTime":(Utc::now()+Duration::days(1)).to_rfc3339()}});
+    let (egress, t) = mock_egress(vec![
+        (410, Value::Null),
+        (200, json!({"items":[event],"nextPageToken":"page-two"})),
+        (
+            200,
+            json!({"items":[{"id":"old","status":"cancelled"}],"nextSyncToken":"current"}),
+        ),
+    ]);
+    let doc = cursor::resolve(
+        &pool,
+        uri,
+        adapters::definition("google_calendar_api").unwrap(),
+        &egress,
+        &cfg,
+        false,
+    )
+    .await
+    .unwrap();
+    let c = doc.container.as_ref().unwrap();
+    assert!(!c.delta);
+    assert_eq!(c.deleted_uids, ["old"]);
+    let checkpoint = c.cursor.as_ref().unwrap();
+    assert!(checkpoint.reset);
+    assert_eq!(checkpoint.next, "current");
+    {
+        let seen = t.seen.lock().unwrap();
+        assert!(seen[0].0.contains("syncToken=expired"));
+        assert!(!seen[1].0.contains("syncToken"));
+        assert!(seen[2].0.contains("pageToken=page-two"));
+        assert!(seen.iter().all(|(_, o)| o.sensitive));
+    }
+    let id = pinakes_core::model::identity(uri).unwrap().0;
+    assert_eq!(saved_cursor(&pool, &id).await.as_deref(), Some("expired"));
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    assert_eq!(saved_cursor(&pool, &id).await.as_deref(), Some("current"));
+    let resets: i64 = sqlx::query_scalar(
+        "SELECT cursor_resets_total FROM source_state WHERE source='google_calendar_api'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(resets, 1);
+}
+
+#[test]
+fn own_calendar_links_and_deterministic_platform_endpoints() {
+    use adapters::service::{endpoint, ics_link};
+    let cfg = EventConfig::default();
+    let base = "https://tickets.example/org/current/".parse().unwrap();
+    assert_eq!(
+        ics_link("pretix", &base, "<a href='/org/other/ical/'>Other</a>"),
+        None
+    );
+    assert_eq!(
+        ics_link(
+            "pretix",
+            &base,
+            "<a href='/org/other/ical/'>Other</a><a href='/org/current/ical/'>Mine</a>"
+        )
+        .unwrap(),
+        "https://tickets.example/org/current/ical/"
+    );
+    for (id, uri, expected) in [
+        (
+            "nextcloud",
+            "https://cloud.example/apps/calendar/p/abc",
+            "https://cloud.example/remote.php/dav/public-calendars/abc?export",
+        ),
+        (
+            "petzi",
+            "https://www.petzi.ch/en/events/123-name/",
+            "https://www.petzi.ch/en/events/123-name.ics",
+        ),
+        (
+            "gathio",
+            "https://gath.io/abc",
+            "https://gath.io/export/event/abc",
+        ),
+    ] {
+        assert_eq!(
+            endpoint(adapters::definition(id).unwrap(), uri, None, &cfg)
+                .unwrap()
+                .unwrap()
+                .0,
+            expected
+        );
+    }
+    let f = Fetched {
+        url: base,
+        validators: Default::default(),
+        content_type: "text/html".into(),
+        status: 200,
+        retry_after_secs: 60,
+        location: None,
+        body: vec![],
+    };
+    for (id, uri, expected) in [
+        (
+            "partiful",
+            "https://partiful.com/e/abc",
+            "https://storage.googleapis.com/getpartiful.appspot.com/public/events/abc/event.ics",
+        ),
+        (
+            "meetup",
+            "https://www.meetup.com/group/events/123/",
+            "https://www.meetup.com/group/events/123/ical/123.ics",
+        ),
+        (
+            "luma",
+            "https://luma.com/event/evt-abc",
+            "https://api.lu.ma/event/get?event_api_id=evt-abc",
+        ),
+        (
+            "guidle",
+            "https://www.guidle.com/de/veranstaltungen/title_A123",
+            "https://www.guidle.com/iCalendar/?lang=de&id=A123",
+        ),
+    ] {
+        assert_eq!(
+            endpoint(adapters::definition(id).unwrap(), uri, Some(&f), &cfg)
+                .unwrap()
+                .unwrap()
+                .0,
+            expected
+        );
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn adapter_upgrade_reclassifies_legacy_routes_and_keeps_ids(pool: PgPool) {
+    let mut uris: Vec<String> = adapters::definitions()
+        .iter()
+        .filter_map(|d| d.canary.as_ref())
+        .map(ToString::to_string)
+        .collect();
+    uris.extend(
+        [
+            "https://cloud.example/apps/calendar/p/token",
+            "https://pretix.example.org/event/ical/",
+            "https://luma.com.attacker.example/event",
+            "https://www.openstreetmap.org/node/1",
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
+    for uri in &uris {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        if pinakes_core::resolver::classify(uri) != Some("osm") {
+            sqlx::query("UPDATE resource SET resolver='web' WHERE id=$1")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    }
+    sqlx::query("ALTER TABLE event_fetch DROP COLUMN adapter_cursor")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/202610160012_event_adapters.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    for uri in &uris {
+        let id = pinakes_core::model::identity(uri).unwrap().0;
+        let actual: String = sqlx::query_scalar("SELECT resolver FROM resource WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let expected = if pinakes_core::resolver::classify(uri) == Some("event_platform") {
+            "event_platform"
+        } else if pinakes_core::resolver::classify(uri) == Some("osm") {
+            "osm"
+        } else {
+            "web"
+        };
+        assert_eq!(actual, expected, "{uri}");
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn portal_explicit_osm_and_btc_website_are_separate_resources(pool: PgPool) {
+    use pinakes_core::{
+        event::service::EventService,
+        resolver::{osm::OsmResolver, web::WebResolver, Resolver},
+    };
+    let at = (Utc::now() + Duration::days(1)).to_rfc3339();
+    let row = json!({"id":7,"title":"Portal","start":at,"osm_type":"node","osm_id":42,"osm_name":"Explicit Hall","osm_lat":47.3,"osm_lon":8.5,"osm_address":{"city":"Zurich"}});
+    let (egress, _) = mock_egress(vec![(200, json!([row]))]);
+    let platform = adapters::service::PlatformResolver {
+        web: WebResolver {
+            egress,
+            config: Default::default(),
+            events: Some(Arc::new(EventService {
+                pool: pool.clone(),
+                config: EventConfig {
+                    geocoding: false,
+                    ..Default::default()
+                },
+                osm: Arc::new(OsmResolver::new(pool.clone(), Default::default()).unwrap()),
+            })),
+        },
+    };
+    let doc = platform
+        .resolve("https://portal.einundzwanzig.space/de/meetup/test/event/7")
+        .await
+        .unwrap();
+    assert!(doc.container.is_none());
+    assert!(doc.location.is_none());
+    let venue = doc.event.venue.as_ref().unwrap();
+    assert_eq!(venue.osm_id.as_deref(), Some("node/42"));
+    assert!(venue.osm_version.is_some());
+    assert!(venue.resource_id.is_some());
+    assert_eq!(doc.event.tz.as_deref(), Some("Europe/Zurich"));
+    let osm: Value = sqlx::query_scalar(
+        "SELECT versions->$1 FROM osm_place WHERE osm_type='node' AND osm_id=42",
+    )
+    .bind(&venue.osm_version)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(osm["name"], "Explicit Hall");
+    assert!(serde_json::to_value(&doc).unwrap().get("address").is_none());
+    let (egress, _) = mock_egress(vec![(
+        200,
+        json!({"id":1,"status":"live","starts_at":at,"name":"BTC","website":"https://luma.com/chained"}),
+    )]);
+    let platform = adapters::service::PlatformResolver {
+        web: WebResolver {
+            egress,
+            ..platform.web
+        },
+    };
+    let doc = platform
+        .resolve("https://api.btcmap.org/v4/events/1")
+        .await
+        .unwrap();
+    assert!(doc.aliases.iter().any(|s| s == "https://luma.com/chained"));
+    let resolver: String =
+        sqlx::query_scalar("SELECT resolver FROM resource WHERE uri='https://luma.com/chained'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(resolver, "event_platform");
+}
+
+#[test]
+fn all_page_and_calendar_adapters_parse_their_public_contracts() {
+    use pinakes_core::event::calendar;
+    let uri = "https://events.example/current";
+    let schema=br#"<script type="application/ld+json">{"@type":"MusicEvent","name":"Contract fixture","startDate":"2026-10-20T19:00:00+0200","endDate":"2026-10-20T21:00:00+0200","location":{"@type":"Place","name":"Hall","geo":{"latitude":47,"longitude":8}},"eventStatus":"EventCancelled"}</script>"#;
+    let cfg = EventConfig {
+        coordinate_timezone: false,
+        ..Default::default()
+    };
+    for d in adapters::definitions()
+        .iter()
+        .filter(|d| d.parser == "page")
+    {
+        let doc = state::parse(&d.id, uri, schema).unwrap_or_else(|| panic!("{}", d.id));
+        assert_eq!(doc.name.as_deref(), Some("Contract fixture"));
+        assert_eq!(
+            doc.event.event_status,
+            Some(pinakes_core::event::EventStatus::Cancelled)
+        );
+        assert!(doc.location.is_some());
+    }
+    for d in adapters::definitions()
+        .iter()
+        .filter(|d| d.parser == "ics_link" || d.parser == "calendar")
+    {
+        let bytes=b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:contract\r\nDTSTART;TZID=Europe/Zurich:20261020T190000\r\nDTEND;TZID=Europe/Zurich:20261020T210000\r\nSUMMARY:Contract fixture\r\nSTATUS:CANCELLED\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let f = Fetched {
+            url: uri.parse().unwrap(),
+            validators: Default::default(),
+            content_type: "text/calendar".into(),
+            status: 200,
+            retry_after_secs: 60,
+            location: None,
+            body: bytes.to_vec(),
+        };
+        let doc = adapters::service::calendar_document(uri, d, &f, &cfg)
+            .unwrap()
+            .unwrap();
+        let event = doc
+            .container
+            .as_ref()
+            .map(|c| &c.occurrences[0].doc)
+            .unwrap_or(&doc);
+        assert_eq!(event.name.as_deref(), Some("Contract fixture"), "{}", d.id);
+        assert_eq!(event.event.tz.as_deref(), Some("Europe/Zurich"));
+        assert_eq!(
+            event.event.event_status,
+            Some(pinakes_core::event::EventStatus::Cancelled)
+        );
+    }
+    let xml=br#"<feed xmlns="http://www.w3.org/2005/Atom" xmlns:mc="https://starticket.example/feeds"><title>Atom sample</title><entry><id>42</id><title>Concert</title><link href="https://starticket.example/42"/><mc:dates fromdate="2026-10-20T17:00:00Z" todate="2026-10-20T19:00:00Z"/><mc:locations><mc:location name="Hall"/></mc:locations></entry></feed>"#;
+    let doc = calendar::structured_feed(uri, xml, &cfg, "2026-10-16T00:00:00Z".parse().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(doc.name.as_deref(), Some("Atom sample"));
+    let c = doc.container.unwrap();
+    assert_eq!(c.occurrences.len(), 1);
+    assert_eq!(
+        c.occurrences[0].doc.event.venue.as_ref().unwrap().text,
+        "Hall"
+    );
+    assert_eq!(
+        c.occurrences[0].doc.end.unwrap() - c.occurrences[0].doc.start.unwrap(),
+        Duration::hours(2)
+    );
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn platform_ua_config_class_c_and_secret_projection(pool: PgPool) {
+    use pinakes_core::{
+        config::{Config, QueueConfig},
+        event::service::EventService,
+        queue,
+        resolver::{osm::OsmResolver, web::WebResolver, Resolver},
+    };
+    let mut cfg = EventConfig {
+        geocoding: false,
+        coordinate_timezone: false,
+        activitypub: false,
+        ..Default::default()
+    };
+    let schema = json!({"@type":"Event","name":"Fixture","startDate":"2026-10-20T17:00:00Z"});
+    let (egress, t) = mock_egress(vec![(200, schema.clone()); 4]);
+    let mut platform = adapters::service::PlatformResolver {
+        web: WebResolver {
+            egress,
+            config: Default::default(),
+            events: Some(Arc::new(EventService {
+                pool: pool.clone(),
+                config: cfg.clone(),
+                osm: Arc::new(OsmResolver::new(pool.clone(), Default::default()).unwrap()),
+            })),
+        },
+    };
+    for uri in [
+        "https://dice.fm/event/fixture",
+        "https://feverup.com/m/fixture",
+        "https://www.songkick.com/concerts/fixture",
+        "https://posh.vip/e/fixture",
+    ] {
+        platform.resolve(uri).await.unwrap();
+    }
+    let profiles: Vec<_> = t
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, o)| o.user_agent.clone().unwrap())
+        .collect();
+    assert!(profiles[0].contains("Chrome/"));
+    assert!(profiles[1].contains("Chrome/"));
+    assert!(profiles[2].contains("Firefox/"));
+    assert_eq!(profiles[3], "curl/8.10.1");
+    cfg.adapters.platforms.insert(
+        "ticketmaster".into(),
+        adapters::Options {
+            key: Some("test-secret".into()),
+            ..Default::default()
+        },
+    );
+    let (egress, t) = mock_egress(vec![(
+        200,
+        json!({"name":"Keyed","dates":{"start":{"dateTime":"2026-10-20T17:00:00Z"}}}),
+    )]);
+    platform.web.egress = egress;
+    Arc::get_mut(platform.web.events.as_mut().unwrap())
+        .unwrap()
+        .config = cfg;
+    let doc = platform
+        .resolve("https://www.ticketmaster.com/event/fixture")
+        .await
+        .unwrap();
+    assert!(t.seen.lock().unwrap()[0].0.contains("apikey=test-secret"));
+    assert!(!serde_json::to_string(&doc).unwrap().contains("test-secret"));
+    let (egress, _) = mock_egress(vec![(503, Value::Null)]);
+    platform.web.egress = egress;
+    let uri = "https://www.facebook.com/events/fixture";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let q = QueueConfig::default();
+    let job = queue::claim(&pool, "event_platform", &q)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.id, id);
+    queue::run_job(&pool, &platform, &q, &job).await.unwrap();
+    let seconds: f64 = sqlx::query_scalar(
+        "SELECT extract(epoch FROM next_attempt_at-now())::float8 FROM resource WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(seconds >= 7. * 86400. - 2., "class C retry: {seconds}");
+    let mut config = Config::default();
+    config.event.adapters.enabled = false;
+    assert_eq!(
+        pinakes_core::resolver::classify_config("https://dice.fm/event/fixture", &config),
+        Some("web")
+    );
+    config.event.adapters.enabled = true;
+    config.event.adapters.platforms.insert(
+        "dice".into(),
+        adapters::Options {
+            enabled: Some(false),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        pinakes_core::resolver::classify_config("https://dice.fm/event/fixture", &config),
+        Some("web")
+    );
+}
+
+struct RecordedResponses(std::collections::HashMap<String, Result<Fetched, String>>);
+#[async_trait::async_trait]
+impl Transport for RecordedResponses {
+    async fn get(&self, url: &url::Url, addresses: &[SocketAddr]) -> anyhow::Result<Fetched> {
+        self.get_with(url, addresses, &Default::default()).await
+    }
+    async fn get_with(
+        &self,
+        url: &url::Url,
+        _: &[SocketAddr],
+        options: &FetchOptions,
+    ) -> anyhow::Result<Fetched> {
+        let key = format!(
+            "{}:{}",
+            url,
+            options
+                .json_body
+                .as_ref()
+                .map(Value::to_string)
+                .unwrap_or_default()
+        );
+        self.0
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| Err(format!("uncaptured fixture request: {url}")))
+            .map_err(anyhow::Error::msg)
+    }
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn recorded_public_adapter_responses_replay_without_network(pool: PgPool) {
+    use pinakes_core::resolver::{osm::OsmResolver, web::WebResolver, Resolver};
+    use sha2::Digest;
+    use std::io::Read;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/adapters");
+    let records: Vec<Value> =
+        serde_json::from_slice(&std::fs::read(root.join("responses.json")).unwrap()).unwrap();
+    let mut responses = std::collections::HashMap::new();
+    for r in records {
+        let uri = r["uri"].as_str().unwrap();
+        let result = if let Some(error) = r["error"].as_str() {
+            Err(error.to_owned())
+        } else {
+            let mut body = vec![];
+            flate2::read::GzDecoder::new(
+                std::fs::File::open(root.join(r["path"].as_str().unwrap())).unwrap(),
+            )
+            .read_to_end(&mut body)
+            .unwrap();
+            assert_eq!(
+                format!("{:x}", sha2::Sha256::digest(&body)),
+                r["sha256"].as_str().unwrap()
+            );
+            Ok(Fetched {
+                url: uri.parse().unwrap(),
+                status: r["status"].as_u64().unwrap_or(200) as u16,
+                content_type: r["content_type"].as_str().unwrap_or("text/html").into(),
+                body,
+                validators: serde_json::from_value(r["validators"].clone()).unwrap_or_default(),
+                location: r["location"].as_str().map(str::to_owned),
+                retry_after_secs: 60,
+            })
+        };
+        let key = format!(
+            "{}:{}",
+            uri,
+            r["json_body"]
+                .as_object()
+                .map(|_| r["json_body"].to_string())
+                .unwrap_or_default()
+        );
+        responses.insert(key, result);
+    }
+    let mut cfg = EventConfig {
+        geocoding: false,
+        ..Default::default()
+    };
+    cfg.adapters.websocket = false;
+    let platform = adapters::service::PlatformResolver {
+        web: WebResolver {
+            egress: Egress::with_backends(
+                pinakes_core::config::EgressConfig {
+                    host_requests_per_second: 1000.0,
+                    ..Default::default()
+                },
+                Arc::new(AdapterDns),
+                Arc::new(RecordedResponses(responses)),
+            ),
+            config: Default::default(),
+            events: Some(Arc::new(pinakes_core::event::service::EventService {
+                pool: pool.clone(),
+                config: cfg.clone(),
+                osm: Arc::new(OsmResolver::new(pool.clone(), Default::default()).unwrap()),
+            })),
+        },
+    };
+    let cases: Vec<Value> =
+        serde_json::from_slice(&std::fs::read(root.join("cases.json")).unwrap()).unwrap();
+    for case in cases {
+        let id = case["id"].as_str().unwrap();
+        let manifest = adapters::manifest(adapters::definition(id).unwrap(), &cfg);
+        let result = platform
+            .probe_manifest(case["uri"].as_str().unwrap(), &manifest)
+            .await;
+        if case["error"] == true {
+            assert!(result.is_err(), "{id}");
+            continue;
+        }
+        let doc = result.unwrap_or_else(|e| panic!("{id}: {e}"));
+        assert_eq!(
+            doc.status.as_str(),
+            case["status"].as_str().unwrap(),
+            "{id}"
+        );
+        assert_eq!(doc.type_name, case["type"].as_str().unwrap(), "{id}");
+        assert_eq!(
+            json!(manifest.missing_fields(&doc)),
+            case["missing_fields"],
+            "{id}"
+        );
+        assert_eq!(json!(doc.event.tz), case["tz"], "{id}");
+    }
+}

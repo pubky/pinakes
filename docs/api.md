@@ -351,3 +351,20 @@ lifecycle strings are treated as absent and keep the otherwise valid reference.
 
 Identity mismatches and URI normalization failures are skipped with finite ingestion
 reasons `identity` and `uri`; valid siblings and the feed cursor still commit.
+
+### Platform manifests and cursor sources
+
+`/v1/info.manifests` includes the registered platform adapters. Each entry has
+`source`, `mode`, `cadence_floor`, `identity`, `cancellation`, `expected_fields`,
+`canary`, `canary_note`, `ua_profile`, `requires_key`, `enabled`, `disabled_reason`
+and `fragile`. A missing API key disables only its adapter; no key is returned.
+Canary status is per adapter, with fixed metric labels. Cursor values are internal
+per-resource state and are not exposed by this endpoint. Public source state reports
+aggregate resets and health; a cursor reset never changes resource identities.
+
+Portal, BTC Map, Google Calendar API and Nostr calendars produce the same occurrence
+and search units as ICS feeds. Explicit delta tombstones apply immediately; omission
+from a delta does not cancel a row. Expired cursors trigger full resync under the
+ordinary held-snapshot rules. BTC Map websites and Nostr calendar members are queued
+as independent resources. Portal OSM venue data uses the existing ODbL projection and
+licence boundary. All existing resource and occurrence routes and cursors are unchanged.

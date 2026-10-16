@@ -1,8 +1,8 @@
 use crate::model::ResourceMeta;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
     Cursor,
@@ -29,6 +29,12 @@ pub struct Manifest {
     pub cancellation: String,
     pub expected_fields: Vec<String>,
     pub canary: Option<Url>,
+    pub canary_note: Option<String>,
+    pub ua_profile: String,
+    pub requires_key: bool,
+    pub enabled: bool,
+    pub disabled_reason: Option<String>,
+    pub fragile: bool,
 }
 pub fn manifest(source: &str) -> Manifest {
     let (mode, floor, identity, cancellation, fields, canary) = match source {
@@ -89,6 +95,12 @@ pub fn manifest(source: &str) -> Manifest {
         cancellation: cancellation.into(),
         expected_fields: fields.into_iter().map(str::to_owned).collect(),
         canary: canary.map(|s| s.parse().expect("manifest URL")),
+        canary_note: None,
+        ua_profile: "pinakes".into(),
+        requires_key: false,
+        enabled: true,
+        disabled_reason: None,
+        fragile: false,
     }
 }
 pub fn manifests() -> Vec<Manifest> {
@@ -118,9 +130,18 @@ impl Manifest {
 pub fn configured(config: &crate::config::Config) -> Vec<Manifest> {
     let mut all = manifests();
     for m in &mut all {
+        m.enabled = match m.source.as_str() {
+            "web" => config.web.enabled,
+            "event" => config.event.enabled && config.event.calendars,
+            "pubky" => config.pubky.enabled,
+            "geo" => config.geo_enabled,
+            "osm" => config.osm.enabled,
+            _ => true,
+        };
         if m.source == "osm" {
             m.cadence_floor = config.osm.ttl_secs.max(3600);
         }
     }
+    all.extend(crate::event::adapters::manifests(&config.event));
     all
 }

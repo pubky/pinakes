@@ -869,7 +869,10 @@ pub async fn resolve(
     let (id, uri, _) = model::identity(&body.uri).map_err(|e| ApiError::bad(e.to_string()))?;
     let resolver = crate::resolver::classify_config(&uri, &state.config)
         .ok_or_else(|| ApiError::bad("no resolver available for this URI"))?;
-    if (resolver == "web" && !state.config.web.enabled)
+    if (resolver == "event_platform"
+        && crate::event::adapters::detect(&uri)
+            .is_none_or(|d| !crate::event::adapters::manifest(d, &state.config.event).enabled))
+        || (resolver == "web" && !state.config.web.enabled)
         || (resolver == "pubky" && !state.config.pubky.enabled)
         || (resolver == "geo" && !state.config.geo_enabled)
         || (resolver == "osm" && !state.config.osm.enabled)

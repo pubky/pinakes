@@ -24,6 +24,7 @@ pub struct Prepared {
     pub dead_letter: bool,
     pub applied: bool,
     retention_days: u32,
+    cursor: Option<super::adapters::cursor::Checkpoint>,
 }
 pub struct PendingChange {
     before: Option<Value>,
@@ -170,12 +171,21 @@ pub async fn prepare(
         })
         .map(|(k, _)| k.clone())
         .collect();
-    let incoming: BTreeSet<_> = container
+    let mut incoming: BTreeSet<_> = container
         .occurrences
         .iter()
         .filter(|o| mutable(&o.doc) || !old.contains_key(&o.key()))
         .map(|o| o.key())
         .collect();
+    let fetched_keys = incoming.clone();
+    let deleted: BTreeSet<_> = container.deleted_uids.iter().collect();
+    if container.delta {
+        incoming.extend(keys.iter().cloned());
+    }
+    incoming.retain(|key| {
+        !old.get(key)
+            .is_some_and(|(uid, _, _, _, _, _, _)| deleted.contains(uid))
+    });
     ensure!(
         container.occurrences.len() <= container.limits.max_rows,
         "incoming occurrence cap"
@@ -188,7 +198,7 @@ pub async fn prepare(
     let row_growth = incoming.iter().filter(|k| !old.contains_key(*k)).count();
     let excessive = old.len() + row_growth > container.limits.max_rows
         || (!repeated && !old.is_empty() && fresh.len() > container.limits.max_new_keys);
-    let hold = excessive || losses.len() * 2 > keys.len() && !repeated;
+    let hold = excessive || (!container.delta && losses.len() * 2 > keys.len() && !repeated);
     let holds = if hold { old_holds.saturating_add(1) } else { 0 };
     let floor = normal_ttl.max(container.limits.cadence_floor).max(3600);
     let retry = floor
@@ -205,6 +215,7 @@ pub async fn prepare(
             .map(serde_json::to_value)
             .transpose()?,
         retention_days: container.limits.retention_days,
+        cursor: container.cursor.clone(),
         last,
         fetched_at,
         horizon: container.horizon_start,
@@ -232,8 +243,14 @@ pub async fn prepare(
         return Ok(plan);
     }
     missing.retain(|k, _| keys.contains(k) && !incoming.contains(k));
-    let mut cancelled = BTreeSet::new();
-    for k in losses {
+    let mut cancelled: BTreeSet<_> = old
+        .iter()
+        .filter(|(key, (uid, _, doc, _, _, _, _))| {
+            deleted.contains(uid) && mutable(doc) && !fetched_keys.contains(*key)
+        })
+        .map(|(k, _)| k.clone())
+        .collect();
+    for k in losses.into_iter().filter(|_| !container.delta) {
         let count = missing.entry(k.clone()).or_default();
         *count += if repeated { 2 } else { 1 };
         if *count >= 2 {
@@ -353,7 +370,13 @@ pub async fn apply(
     if current != plan.last || current.is_some_and(|at| plan.fetched_at <= at) {
         return Ok(None);
     }
+    if let Some(cursor) = &plan.cursor {
+        if !cursor.check(tx, id).await? {
+            return Ok(None);
+        }
+    }
     sqlx::query("UPDATE event_fetch SET last_snapshot_at=$2,keys=$3,held_keys=$4,missing_keys=$5,hold_count=$6,horizon_start=$7,retention_days=$8,validators=coalesce($9,validators),horizon_end=$10 WHERE resource_id=$1").bind(id).bind(plan.fetched_at).bind(&plan.keys).bind(&plan.held).bind(json!(plan.missing)).bind(plan.holds as i32).bind(plan.horizon).bind(plan.retention_days as i32).bind(&plan.validators).bind(plan.horizon_end).execute(&mut **tx).await?;
+
     if !plan.applied {
         sqlx::query("INSERT INTO source_state(source,feed_held_total) VALUES('event',1) ON CONFLICT(source) DO UPDATE SET feed_held_total=source_state.feed_held_total+1").execute(&mut **tx).await?;
         return Ok(Some(false));
@@ -364,6 +387,9 @@ pub async fn apply(
     // Bound the encoded jsonb[] buffer independently of the retained plan.
     for chunk in plan.rows.chunks(256) {
         sqlx::query("INSERT INTO occurrence(resource_id,uid,recurrence_id,start_at,end_at,name,venue_id,status,url,event_resource_id,doc,point,sequence,modified,content_hash,volatile,supersedes) SELECT $1,j->>'uid',j->>'rid',(j->>'start')::timestamptz,(j->>'end')::timestamptz,j->>'name',j->>'venue_id',j->>'status',j->>'url',(SELECT id FROM resource WHERE id=j->>'link' AND id<>$1),j->'doc',CASE WHEN j->>'lat' IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint((j->>'lon')::float8,(j->>'lat')::float8),4326) END,(j->>'sequence')::bigint,(j->>'modified')::timestamptz,j->>'hash',(j->>'volatile')::boolean,j->>'supersedes' FROM unnest($2::jsonb[]) j ON CONFLICT(resource_id,uid,recurrence_id) DO UPDATE SET start_at=excluded.start_at,end_at=excluded.end_at,name=excluded.name,venue_id=excluded.venue_id,status=excluded.status,url=excluded.url,event_resource_id=excluded.event_resource_id,doc=excluded.doc,point=excluded.point,sequence=excluded.sequence,modified=excluded.modified,content_hash=excluded.content_hash,volatile=excluded.volatile,supersedes=coalesce(excluded.supersedes,occurrence.supersedes)").bind(id).bind(chunk).execute(&mut **tx).await?;
+    }
+    if let Some(cursor) = &plan.cursor {
+        cursor.commit(tx, id).await?;
     }
     Ok(Some(true))
 }

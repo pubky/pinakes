@@ -2285,8 +2285,16 @@ async fn conditional_calendar_refreshes_horizon_with_advanced_clock(pool: PgPool
 #[sqlx::test(migrations = "../../migrations")]
 async fn vanished_feed_confirms_twice_and_recovers_through_queue(pool: PgPool) {
     use pinakes_core::{config::QueueConfig, queue};
-    for status in [200, 404, 410] {
-        let uri = format!("https://example.org/vanished-{status}.ics");
+    for (platform, status) in [false, true]
+        .into_iter()
+        .flat_map(|platform| [200, 404, 410].map(|status| (platform, status)))
+    {
+        let host = if platform {
+            "calendar.google.com"
+        } else {
+            "example.org"
+        };
+        let uri = format!("https://{host}/vanished-{status}.ics");
         let id = store::ensure_resource(&pool, &uri).await.unwrap();
         let calendar = (200, "text/calendar".into(), future_calendar(5).into_bytes());
         let missing = (
@@ -2317,18 +2325,27 @@ async fn vanished_feed_confirms_twice_and_recovers_through_queue(pool: PgPool) {
                 osm: Arc::new(OsmResolver::new(pool.clone(), OsmConfig::default()).unwrap()),
             })),
         };
+        let resolver: Box<dyn Resolver> = if platform {
+            Box::new(pinakes_core::event::adapters::service::PlatformResolver { web: resolver })
+        } else {
+            Box::new(resolver)
+        };
         for round in 0..4 {
             sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
                 .bind(&id)
                 .execute(&pool)
                 .await
                 .unwrap();
-            let job = queue::claim(&pool, "event", &QueueConfig::default())
-                .await
-                .unwrap()
-                .unwrap();
+            let job = queue::claim(
+                &pool,
+                if platform { "event_platform" } else { "event" },
+                &QueueConfig::default(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
             assert_eq!(job.id, id);
-            queue::run_job(&pool, &resolver, &QueueConfig::default(), &job)
+            queue::run_job(&pool, resolver.as_ref(), &QueueConfig::default(), &job)
                 .await
                 .unwrap();
             let cancelled: i64 = sqlx::query_scalar(
@@ -2358,7 +2375,12 @@ async fn vanished_feed_confirms_twice_and_recovers_through_queue(pool: PgPool) {
         }
         assert_eq!(
             *t.calls.lock().unwrap(),
-            vec![(false, 200), (true, status), (false, status), (false, 200)]
+            vec![
+                (false, 200),
+                (!platform, status),
+                (false, status),
+                (false, 200)
+            ]
         );
     }
 }

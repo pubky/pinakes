@@ -142,39 +142,44 @@ impl EventService {
         if let Some(doc) = &mut result {
             if let Some(c) = &mut doc.container {
                 c.validators = Some(fetched.validators.clone());
-                // One request per distinct structured address, bounded by the total resolver deadline.
-                let mut venues: std::collections::BTreeMap<
-                    String,
-                    (super::Venue, super::EventFields),
-                > = std::collections::BTreeMap::new();
-                for row in &mut c.occurrences {
-                    let key = serde_json::to_string(&row.doc.event.venue)?;
-                    if let Some((v, fields)) = venues.get(&key) {
-                        row.doc.event.venue = Some(v.clone());
-                        if row.doc.event.tz.is_none() {
-                            row.doc.event.tz = fields.tz.clone();
-                            row.doc.event.timezone_attribution =
-                                fields.timezone_attribution.clone();
-                        }
-                    } else {
-                        let remaining = deadline
-                            .saturating_duration_since(tokio::time::Instant::now())
-                            .saturating_sub(Duration::from_millis(100));
-                        if !matches!(
-                            tokio::time::timeout(remaining, self.venue(&mut row.doc)).await,
-                            Ok(Ok(()))
-                        ) {
-                            row.doc.event.warnings.push("venue_unavailable".into());
-                        }
-                        if let Some(v) = &row.doc.event.venue {
-                            venues.insert(key, (v.clone(), row.doc.event.clone()));
-                        }
-                    }
-                    page::finalize(&mut row.doc, false);
-                }
+                self.enrich_container(c, deadline).await?;
             }
         }
         Ok(result)
+    }
+    pub async fn enrich_container(
+        &self,
+        c: &mut super::Container,
+        deadline: tokio::time::Instant,
+    ) -> Result<()> {
+        // One request per distinct structured address, bounded by the total resolver deadline.
+        let mut venues: std::collections::BTreeMap<String, (super::Venue, super::EventFields)> =
+            std::collections::BTreeMap::new();
+        for row in &mut c.occurrences {
+            let key = serde_json::to_string(&row.doc.event.venue)?;
+            if let Some((v, fields)) = venues.get(&key) {
+                row.doc.event.venue = Some(v.clone());
+                if row.doc.event.tz.is_none() {
+                    row.doc.event.tz = fields.tz.clone();
+                    row.doc.event.timezone_attribution = fields.timezone_attribution.clone();
+                }
+            } else {
+                let remaining = deadline
+                    .saturating_duration_since(tokio::time::Instant::now())
+                    .saturating_sub(Duration::from_millis(100));
+                if !matches!(
+                    tokio::time::timeout(remaining, self.venue(&mut row.doc)).await,
+                    Ok(Ok(()))
+                ) {
+                    row.doc.event.warnings.push("venue_unavailable".into());
+                }
+                if let Some(v) = &row.doc.event.venue {
+                    venues.insert(key, (v.clone(), row.doc.event.clone()));
+                }
+            }
+            page::finalize(&mut row.doc, false);
+        }
+        Ok(())
     }
     pub async fn page(
         &self,
@@ -195,7 +200,7 @@ impl EventService {
         let fetched = fetched.clone();
         let config = self.config.clone();
         let ttl = card.ttl_secs;
-        let (mut event, calendar_link, advertised, event_candidate) =
+        let (mut event, calendar_link, advertised, event_candidate, platform_extra) =
             tokio::task::spawn_blocking(move || {
                 let uri = input_uri.as_str();
                 let fetched = &fetched;
@@ -268,7 +273,34 @@ impl EventService {
                         page::microformats(&mut event, &html, &fetched.url);
                     }
                 }
-                (event, calendar_link, advertised, event_candidate)
+                let mut platform_extra = None;
+                if let Some(d) =
+                    super::adapters::detected_html(uri, &String::from_utf8_lossy(&fetched.body))
+                        .filter(|d| super::adapters::manifest(d, &config).enabled)
+                {
+                    // Self-hosted software cannot be classified from a shared vendor domain.
+                    if super::adapters::detect(uri).is_none() {
+                        platform_extra =
+                            super::adapters::service::endpoint(d, uri, Some(fetched), &config)
+                                .ok()
+                                .flatten()
+                                .map(|(target, opts)| (d.id.clone(), target, opts));
+                    }
+                    if let Some(extra) = super::adapters::state::parse(&d.id, uri, &fetched.body) {
+                        if !event.type_path.contains(&"Event".into()) {
+                            event.set_type("Event");
+                        }
+                        // Both inputs are bounded by the page cap; merge preserves JSON-LD precedence.
+                        let _ = page::merge_missing(&mut event, &extra);
+                    }
+                }
+                (
+                    event,
+                    calendar_link,
+                    advertised,
+                    event_candidate,
+                    platform_extra,
+                )
             })
             .await?;
         let is_event = event.type_path.contains(&"Event".into());
@@ -349,6 +381,33 @@ impl EventService {
                                 event.source = "ics".into();
                             }
                             super::page::merge_missing(&mut event, fallback)?;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((id, target, mut opts)) = platform_extra {
+            let d = super::adapters::definition(&id).expect("detected platform");
+            let manifest = super::adapters::manifest(d, &self.config);
+            opts.feed_hint = is_feed(&target) || d.parser == "ics_link";
+            opts.feed_cap = opts.feed_hint.then_some(self.config.feed_body_bytes);
+            opts.user_agent = Some(super::adapters::profile(&manifest.ua_profile).into());
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if let Ok(Ok(response)) = tokio::time::timeout(
+                remaining.min(Duration::from_secs(2)),
+                egress.discover(&target, &opts, manifest.cadence_floor),
+            )
+            .await
+            {
+                if response.status == 200 {
+                    let config = super::adapters::configured_event(&self.config, d);
+                    if let Some(extra) =
+                        super::adapters::service::enrichment_blocking(uri, d, &response, &config)
+                            .await?
+                    {
+                        if extra.type_path.contains(&"Event".into()) {
+                            event.set_type("Event");
+                            page::merge_missing(&mut event, &extra)?;
                         }
                     }
                 }
@@ -574,7 +633,7 @@ fn header_alternate(header: Option<&str>, base: &url::Url) -> Option<(String, St
         ))
     })
 }
-fn own_calendar_link(base: &url::Url, link: &str) -> bool {
+pub(crate) fn own_calendar_link(base: &url::Url, link: &str) -> bool {
     let Ok(link) = url::Url::parse(link) else {
         return false;
     };

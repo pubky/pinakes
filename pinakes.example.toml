@@ -66,6 +66,27 @@ max_holds = 5 # Consecutive loss/churn holds, then dead-letter.
 cadence_floor = 3600 # Exponential backoff never below the feed's normal cadence.
 link_hosts = [] # Extra exact hosts permitted for occurrence -> existing resource links.
 
+# Platform IDs and default canaries: data/event-adapters.json; effective policies: /v1/info.
+[event.adapters]
+enabled = true
+websocket = true # One relay hint only, after both HTTP indexers miss.
+websocket_deadline_ms = 2000
+max_cursor_pages = 10
+max_calendar_members = 50
+max_linked_resources = 100 # BTC website resources / explicit portal OSM venues per fetch.
+
+# Every platform accepts enabled, key, canary, ua_profile (pinakes/browser/firefox/plain),
+# cadence_floor (minimum 3600s), months_back, months_forward and max_occurrences.
+# Missing keys disable only the relevant adapter; secrets never appear in /v1/info.
+# [event.adapters.platforms.ticketmaster]
+# key = "" # Supply through protected config or PINAKES__EVENT__ADAPTERS__PLATFORMS__TICKETMASTER__KEY.
+# [event.adapters.platforms.resident_advisor]
+# enabled = true # Unofficial GraphQL, fragile and off by default.
+# [event.adapters.platforms.posh]
+# enabled = false
+# [event.adapters.platforms.proton]
+# canary = "https://calendar.proton.me/api/calendar/v1/url/.../calendar.ics?CacheKey=..."
+
 [egress]
 host_requests_per_second = 1.0
 # Exact names or *.example.org. An empty allow list permits all public hosts.

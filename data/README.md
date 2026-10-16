@@ -39,3 +39,10 @@ Builder and OpenStreetMap contributors. Source and regeneration instructions:
 Coordinate-derived `tz` values carry `timezone_attribution`; setting
 `event.coordinate_timezone=false` disables this inference. Never treat an offset
 alone as an IANA zone. Source upgrades are explicit lockfile/data changes.
+
+`rails-zones.json` derives ActiveSupport TimeZone::MAPPING from Rails **8.1.0**,
+for RingCentral/Hopin names. Source: <https://raw.githubusercontent.com/rails/rails/v8.1.0/activesupport/lib/active_support/values/time_zone.rb>.
+Source SHA-256: `c20a9fb54a413919aa8944649d7424e6dbc1e4b5c95cd02a1b169682bfbb0285`.
+The table preserves all 152 mappings; IANA rules still come from chrono-tz.
+Copyright Rails contributors, MIT; see [LICENSE.rails.txt](LICENSE.rails.txt).
+Regenerate with `scripts/rails-zones /path/to/time_zone.rb`.
