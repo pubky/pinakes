@@ -272,3 +272,22 @@ async fn blocked_jobs_clear_cards_keep_events_and_do_not_confirm_disappearance(p
         .unwrap();
     assert_eq!(status, "ok");
 }
+
+#[test]
+fn main_entity_canonical_is_identity_but_publisher_nodes_are_not() {
+    let uri = "https://example.org/article";
+    let f = page(
+        uri,
+        r#"<script type="application/ld+json">{"@type":"WebPage","url":"https://example.org/wrapper","mainEntity":{"@type":"Article","url":"https://example.org/canonical","name":"Main"}}</script>"#,
+        200,
+    );
+    let d = web::extract(uri, &f, 86400).doc;
+    assert!(d
+        .group_keys
+        .iter()
+        .any(|k| k.target.as_deref() == Some("https://example.org/canonical")));
+    assert!(!d
+        .group_keys
+        .iter()
+        .any(|k| k.target.as_deref() == Some("https://example.org/wrapper")));
+}

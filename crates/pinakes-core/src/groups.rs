@@ -145,15 +145,6 @@ fn evidence(
             d.group_keys.push(k);
         }
     }
-    for alias in row["aliases"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .take(4)
-        .filter_map(Value::as_str)
-    {
-        crate::group_keys::add(&mut d, "canonical", alias);
-    }
     if let Some(uid) = row["occurrence"]["uid"].as_str() {
         crate::group_keys::add(&mut d, "ics_uid", uid);
     }
@@ -242,7 +233,7 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
             }
         }
     }
-    let units: Vec<Unit> = rows
+    let mut units: Vec<Unit> = rows
         .iter()
         .map(|r| Unit {
             unit_id: r["unit_id"].as_str().unwrap().into(),
@@ -348,6 +339,15 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
             .entry(e.resource_id.clone())
             .or_insert(Some(e.revision));
     }
+    let claims: Vec<_> = units.iter().flat_map(|u| u.keys.iter().filter(|k| k.key.starts_with("url:")).map(|k| json!({"key":k.key,"origin":u.origin,"resource_id":id,"uri":rows.first().and_then(|r|r["uri"].as_str()).unwrap_or("")}))).collect();
+    let demoted: BTreeSet<(String, String)> = sqlx::query_as(r#"
+      WITH wanted AS (SELECT DISTINCT v->>'key' AS key,v->>'origin' AS origin FROM jsonb_array_elements($1) v),
+      claims AS (SELECT k.key,k.origin,k.resource_id,r.uri FROM wanted w JOIN resource_group k USING(key,origin) JOIN resource r ON r.id=k.resource_id WHERE k.resource_id<>$2
+        UNION SELECT v->>'key',v->>'origin',v->>'resource_id',v->>'uri' FROM jsonb_array_elements($1) v)
+      SELECT key,origin FROM claims GROUP BY key,origin
+       HAVING count(DISTINCT resource_id)>2 AND count(DISTINCT substring(uri from '^https?://[^/]+([^?#]*)'))>2
+      UNION SELECT d.key,d.origin FROM group_demoted_url d WHERE d.key=ANY($3)
+    "#).bind(json!(claims)).bind(id).bind(&keys).fetch_all(&mut **tx).await?.into_iter().collect();
     let mut incoming = Vec::new();
     let mut incoming_bytes = 0usize;
     for (unit, row) in units.iter().zip(&rows) {
@@ -390,8 +390,30 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
     }
     edges.retain(|e| e.resource_id != id);
     edges.extend(incoming);
+    edges.retain(|e| !demoted.contains(&(e.key.clone(), e.origin.clone())));
+    for u in &mut units {
+        u.keys
+            .retain(|k| !demoted.contains(&(k.key.clone(), u.origin.clone())));
+    }
     let plan = plan(tx, edges, &previous, cfg).await?;
     fence(tx, &revisions).await?;
+    for (key, origin) in &demoted {
+        sqlx::query(
+            "INSERT INTO group_demoted_url(key,origin) VALUES($1,$2) ON CONFLICT DO NOTHING",
+        )
+        .bind(key)
+        .bind(origin)
+        .execute(&mut **tx)
+        .await?;
+        // Invalidate every claimant, including members outside the admission window.
+        sqlx::query("INSERT INTO group_dirty(resource_id) SELECT DISTINCT resource_id FROM resource_group WHERE key=$1 AND origin=$2 ON CONFLICT DO NOTHING").bind(key).bind(origin).execute(&mut **tx).await?;
+        sqlx::query("DELETE FROM group_input WHERE resource_id IN(SELECT resource_id FROM resource_group WHERE key=$1 AND origin=$2)").bind(key).bind(origin).execute(&mut **tx).await?;
+        sqlx::query("DELETE FROM resource_group WHERE key=$1 AND origin=$2")
+            .bind(key)
+            .bind(origin)
+            .execute(&mut **tx)
+            .await?;
+    }
     sqlx::query("DELETE FROM group_unit WHERE resource_id=$1 AND NOT(unit_id=ANY($2))")
         .bind(id)
         .bind(&ids)

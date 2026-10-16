@@ -24,7 +24,11 @@ async fn save(
     d.set_type("MusicRecording");
     d.location = lat.map(|lat| Point { lat, lon: 8.0 });
     for key in keys {
-        group_keys::add(&mut d, "same_as", key);
+        if let Some(value) = key.strip_prefix("isrc:") {
+            group_keys::add(&mut d, "isrc", value);
+        } else {
+            group_keys::add(&mut d, "same_as", key);
+        }
     }
     store::save_document(pool, &id, 0, &d).await.unwrap();
     (id, d)
@@ -592,18 +596,18 @@ async fn round2_own_and_legacy_keys_survive_reserved_or_full_stored_evidence(poo
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn round2_pair_budget_parks_config_cap_without_losing_resource(pool: PgPool) {
-    let shared = pubky_resource_id::resource_id("https://budget.example/shared");
+    let shared = "USAAA2600003";
     sqlx::query("INSERT INTO resource(id,uri,scheme,host) SELECT md5('budget-'||i),'https://budget.example/'||i,'https','budget.example' FROM generate_series(1,999) i").execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO group_unit(unit_id,resource_id) SELECT id,id FROM resource")
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO resource_group(unit_id,resource_id,key,basis,confidence,origin,target) SELECT id,id,'url:'||$1,'same_as',0.8,'budget.example','budget.example' FROM resource").bind(&shared).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO resource_group(unit_id,resource_id,key,basis,confidence,origin,target) SELECT id,id,'isrc:'||$1,'isrc',1.0,'budget.example','budget.example' FROM resource").bind(&shared).execute(&pool).await.unwrap();
     let uri = "https://budget.example/new";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
     let mut d = ResourceMeta::new(uri, "web", 3600);
     d.name = Some("Saved despite pair budget".into());
-    group_keys::add(&mut d, "same_as", "https://budget.example/shared");
+    group_keys::add(&mut d, "isrc", shared);
     let cfg = pinakes_core::config::QueueConfig {
         groups: groups::GroupConfig {
             max_members: 1000,
@@ -689,9 +693,9 @@ async fn round2_curated_cards_keep_metadata_and_invalid_curation_is_400(pool: Pg
 }
 #[sqlx::test(migrations = "../../migrations")]
 async fn review_curating_an_automatic_id_pins_exactly_requested_members(pool: PgPool) {
-    let (a, _) = save(&pool, "ca", &["https://example.org/common"], None).await;
-    let (b, _) = save(&pool, "cb", &["https://example.org/common"], None).await;
-    let (c, _) = save(&pool, "cc", &["https://example.org/common"], None).await;
+    let (a, _) = save(&pool, "ca", &["isrc:USAAA2600001"], None).await;
+    let (b, _) = save(&pool, "cb", &["isrc:USAAA2600001"], None).await;
+    let (c, _) = save(&pool, "cc", &["isrc:USAAA2600001"], None).await;
     let old = gid(&pool, &a).await;
     let mut members = [a, b, c];
     members.sort();
@@ -783,8 +787,8 @@ async fn review_group_failure_keeps_document_and_drain_advances(pool: PgPool) {
 async fn review_claim_flood_preserves_existing_group_and_unchanged_keys_do_not_rewrite(
     pool: PgPool,
 ) {
-    let (a, _) = save(&pool, "stable-a", &["https://example.org/key"], None).await;
-    let (b, mut d) = save(&pool, "stable-b", &["https://example.org/key"], None).await;
+    let (a, _) = save(&pool, "stable-a", &["isrc:USAAA2600002"], None).await;
+    let (b, mut d) = save(&pool, "stable-b", &["isrc:USAAA2600002"], None).await;
     let group = gid(&pool, &a).await;
     let before: Vec<String> = sqlx::query_scalar(
         "SELECT xmin::text FROM resource_group WHERE resource_id=$1 ORDER BY key",
@@ -813,7 +817,7 @@ async fn review_claim_flood_preserves_existing_group_and_unchanged_keys_do_not_r
         let id = store::ensure_resource(&pool, &uri).await.unwrap();
         let mut d = ResourceMeta::new(&uri, "web", 3600);
         d.set_type("MusicRecording");
-        group_keys::add(&mut d, "same_as", "https://example.org/key");
+        group_keys::add(&mut d, "isrc", "USAAA2600002");
         let q = pinakes_core::config::QueueConfig {
             groups: cfg.clone(),
             ..Default::default()
@@ -875,6 +879,30 @@ async fn review_populated_collapse_uses_equality_facets_and_builds_only_page_car
     sqlx::query("INSERT INTO group_score(group_id,score,updated_at,newest_at,taggers,references_count) SELECT id,1,now(),now(),1,2 FROM \"group\"").execute(&pool).await.unwrap();
     sqlx::query("UPDATE resource SET point=ST_SetSRID(ST_MakePoint(8.0,47.0+((substring(uri from '[0-9]+$'))::integer)/100000.0),4326),doc=doc||jsonb_build_object('location',jsonb_build_object('lat',47.0+((substring(uri from '[0-9]+$'))::integer)/100000.0,'lon',8.0))").execute(&pool).await.unwrap();
     sqlx::query("ANALYZE").execute(&pool).await.unwrap();
+    if let Ok(path) = std::env::var("PINAKES_GROUP_FUNCTION_PLAN_FILE") {
+        let body: String =
+            sqlx::query_scalar("SELECT prosrc FROM pg_proc WHERE proname='group_card'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let group: String = sqlx::query_scalar("SELECT id FROM \"group\" ORDER BY id LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let plan: Value = sqlx::query_scalar(&format!(
+            "EXPLAIN(ANALYZE,BUFFERS,VERBOSE,FORMAT JSON) {}",
+            body.replace("g.id=gid", "g.id=$1")
+        ))
+        .bind(&group)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        std::fs::write(
+            path,
+            serde_json::to_vec_pretty(&json!({"body":body,"group":group,"plan":plan})).unwrap(),
+        )
+        .unwrap();
+    }
     let mut evidence = Vec::new();
     for request in [
         "/v1/search?collapse=group&bbox=7.9,47.0,8.1,47.006&limit=20",
@@ -968,4 +996,59 @@ async fn review_populated_collapse_uses_equality_facets_and_builds_only_page_car
         )
         .unwrap();
     }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round3_aliases_do_not_group_and_shared_canonicals_demote_every_claimant(pool: PgPool) {
+    let mut ids = Vec::new();
+    for suffix in ["one", "two"] {
+        let uri = format!("https://example.org/{suffix}");
+        let id = store::ensure_resource(&pool, &uri).await.unwrap();
+        let mut doc = ResourceMeta::new(&uri, "web", 86400);
+        doc.name = Some(suffix.into());
+        doc.aliases.push("https://example.org/landing".into());
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+        ids.push((id, doc));
+    }
+    assert_ne!(gid(&pool, &ids[0].0).await, gid(&pool, &ids[1].0).await);
+    for (id, doc) in &mut ids {
+        group_keys::add(doc, "canonical", "https://example.org/landing");
+        store::save_document(&pool, id, 0, doc).await.unwrap();
+    }
+    assert_eq!(gid(&pool, &ids[0].0).await, gid(&pool, &ids[1].0).await);
+    let (id, mut third) = save(&pool, "three", &["https://example.org/landing"], None).await;
+    third.aliases.push("https://example.org/landing".into());
+    ids.push((id, third));
+    for (id, doc) in &ids {
+        store::save_document(&pool, id, 0, doc).await.unwrap();
+    }
+    assert_ne!(gid(&pool, &ids[0].0).await, gid(&pool, &ids[1].0).await);
+    let key = format!(
+        "url:{}",
+        pinakes_core::model::identity("https://example.org/landing")
+            .unwrap()
+            .0
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM resource_group WHERE key=$1")
+        .bind(key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    for (id, _) in &ids {
+        let alias: bool = sqlx::query_scalar(
+            "SELECT (doc->'aliases') ? 'https://example.org/landing' FROM resource WHERE id=$1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(alias);
+    }
+    let metrics = pinakes_core::telemetry::Metrics::new().unwrap();
+    metrics.refresh(&pool).await.unwrap();
+    assert!(metrics
+        .encode()
+        .unwrap()
+        .contains("pinakes_group_url_demotions_total 1"));
 }

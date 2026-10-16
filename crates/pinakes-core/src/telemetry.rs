@@ -42,6 +42,7 @@ pub struct Metrics {
     pub overdue: IntGaugeVec,
     pub resources: IntGaugeVec,
     pub blocked: IntGaugeVec,
+    pub group_url_demotions: IntCounter,
     pub ingest_lag: IntGauge,
     pub ingest_success: IntGauge,
     pub ingest_resets: IntCounter,
@@ -77,7 +78,13 @@ impl Metrics {
             "Nexus projection resets",
         )?;
         registry.register(Box::new(ingest_resets.clone()))?;
+        let group_url_demotions = IntCounter::new(
+            "pinakes_group_url_demotions_total",
+            "Shared URL identity keys demoted by publisher",
+        )?;
+        registry.register(Box::new(group_url_demotions.clone()))?;
         let out = Self {
+            group_url_demotions,
             ingest_rejected: metric!(
                 IntCounterVec,
                 "pinakes_ingest_rejected_total",
@@ -210,6 +217,12 @@ impl Metrics {
         self.overdue.reset();
         self.resources.reset();
         self.blocked.reset();
+        sync_counter(
+            &self.group_url_demotions,
+            sqlx::query_scalar("SELECT count(*) FROM group_demoted_url")
+                .fetch_one(pool)
+                .await?,
+        );
         for (host, count) in sqlx::query_as::<_, (String, i64)>("SELECT coalesce(host,scheme),count(*) FROM resource WHERE status='blocked' GROUP BY coalesce(host,scheme)").fetch_all(pool).await? {
             self.blocked.with_label_values(&[&host]).set(count);
         }

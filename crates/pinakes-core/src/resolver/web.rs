@@ -508,9 +508,15 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url) {
     }
     if let Some(v) = v.get("mainEntity") {
         apply_jsonld(doc, v, base);
+        if doc.source != "web" {
+            return;
+        }
     }
     if let Some(v) = v.get("@graph") {
         apply_jsonld(doc, v, base);
+        if doc.source != "web" {
+            return;
+        }
     }
     let Some(kind) = schema_type(v) else {
         return;
@@ -518,6 +524,15 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url) {
     if doc.source == "web" {
         doc.set_type(kind);
         doc.source = "jsonld".into();
+        for field in ["url", "@id"] {
+            if let Some(url) = v
+                .get(field)
+                .and_then(Value::as_str)
+                .and_then(|s| origin_url(base, s))
+            {
+                add_alias(doc, url);
+            }
+        }
     }
     crate::group_keys::jsonld(doc, v, base);
     for (field, attribute) in [("duration", "duration"), ("isrcCode", "isrc")] {
