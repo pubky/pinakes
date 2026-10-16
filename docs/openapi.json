@@ -176,6 +176,85 @@
         }
       }
     },
+    "/v1/groups/{id}": {
+      "get": {
+        "tags": [],
+        "operationId": "group",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid ID or disabled module"
+          },
+          "404": {
+            "description": "Unknown group"
+          }
+        }
+      },
+      "put": {
+        "tags": [],
+        "description": "Admin listener only. Replaces the curated member set; never changes IDs or references.",
+        "operationId": "curate_group",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Curation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid curation"
+          }
+        },
+        "servers": [
+          {
+            "url": "http://127.0.0.1:9090"
+          }
+        ]
+      }
+    },
     "/v1/info": {
       "get": {
         "tags": [],
@@ -1044,6 +1123,33 @@
           }
         }
       },
+      "Curation": {
+        "type": "object",
+        "required": [
+          "members"
+        ],
+        "properties": {
+          "image": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Member"
+            }
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
       "EventFields": {
         "type": "object",
         "properties": {
@@ -1180,12 +1286,142 @@
           "document"
         ]
       },
+      "GroupConfig": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "max_distance_m": {
+            "type": "number",
+            "format": "double",
+            "default": 500.0
+          },
+          "max_graph_bytes": {
+            "type": "integer",
+            "default": 33554432,
+            "minimum": 0
+          },
+          "max_graph_units": {
+            "type": "integer",
+            "default": 20000,
+            "minimum": 0
+          },
+          "max_members": {
+            "type": "integer",
+            "default": 256,
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "GroupKey": {
+        "type": "object",
+        "required": [
+          "key",
+          "basis",
+          "confidence"
+        ],
+        "properties": {
+          "basis": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "number",
+            "format": "double"
+          },
+          "key": {
+            "type": "string"
+          }
+        }
+      },
+      "GroupMemberView": {
+        "type": "object",
+        "required": [
+          "resource_id",
+          "uri",
+          "site"
+        ],
+        "properties": {
+          "occurrence": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/OccurrenceRef"
+              }
+            ]
+          },
+          "resource_id": {
+            "type": "string"
+          },
+          "site": {
+            "type": "string"
+          },
+          "uri": {
+            "type": "string"
+          }
+        }
+      },
+      "GroupView": {
+        "type": "object",
+        "required": [
+          "id",
+          "curated",
+          "taggers",
+          "references",
+          "members"
+        ],
+        "properties": {
+          "curated": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "image": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GroupMemberView"
+            }
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "references": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "taggers": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "Info": {
         "type": "object",
         "required": [
           "version",
           "manifests",
           "counts",
+          "groups",
           "ingestion",
           "osm_licence",
           "resolvers"
@@ -1193,6 +1429,9 @@
         "properties": {
           "counts": {
             "$ref": "#/components/schemas/InfoCounts"
+          },
+          "groups": {
+            "$ref": "#/components/schemas/GroupConfig"
           },
           "ingestion": {
             "type": "array",
@@ -1337,6 +1576,28 @@
             "type": "string"
           }
         }
+      },
+      "Member": {
+        "type": "object",
+        "required": [
+          "resource_id"
+        ],
+        "properties": {
+          "occurrence": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/OccurrenceRef"
+              }
+            ]
+          },
+          "resource_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       },
       "Mode": {
         "type": "string",
@@ -1676,6 +1937,12 @@
                 "type": "integer",
                 "format": "int64"
               },
+              "group_keys": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/GroupKey"
+                }
+              },
               "image": {
                 "type": [
                   "string",
@@ -1802,6 +2069,16 @@
               },
               {
                 "$ref": "#/components/schemas/ReferenceEvent"
+              }
+            ]
+          },
+          "group": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GroupView"
               }
             ]
           },

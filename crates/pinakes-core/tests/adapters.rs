@@ -1880,6 +1880,7 @@ async fn portal_coordinates_are_page_facts_and_btc_website_has_lineage(pool: PgP
     let (egress, _) = mock_egress(vec![(200, json!([row]))]);
     let platform = adapters::service::PlatformResolver {
         web: WebResolver {
+            cards: None,
             egress,
             config: Default::default(),
             events: Some(Arc::new(EventService {
@@ -1921,6 +1922,7 @@ async fn portal_coordinates_are_page_facts_and_btc_website_has_lineage(pool: PgP
     )]);
     let platform = adapters::service::PlatformResolver {
         web: WebResolver {
+            cards: None,
             egress,
             ..platform.web
         },
@@ -2022,6 +2024,7 @@ async fn platform_ua_config_class_c_and_secret_projection(pool: PgPool) {
     let (egress, t) = mock_egress(vec![(200, schema.clone()); 4]);
     let mut platform = adapters::service::PlatformResolver {
         web: WebResolver {
+            cards: None,
             egress,
             config: Default::default(),
             events: Some(Arc::new(EventService {
@@ -2189,6 +2192,7 @@ async fn recorded_public_adapter_responses_replay_without_network(pool: PgPool) 
     cfg.adapters.websocket = false;
     let platform = adapters::service::PlatformResolver {
         web: WebResolver {
+            cards: None,
             egress: Egress::with_backends(
                 pinakes_core::config::EgressConfig {
                     host_requests_per_second: 1000.0,
@@ -2240,6 +2244,7 @@ fn platform(
 ) -> adapters::service::PlatformResolver {
     adapters::service::PlatformResolver {
         web: pinakes_core::resolver::web::WebResolver {
+            cards: None,
             egress,
             config: Default::default(),
             events: Some(Arc::new(pinakes_core::event::service::EventService {
@@ -2960,6 +2965,7 @@ async fn review_public_canary_redaction_unknown_size_and_disabled_nostr(pool: Pg
     let id = store::ensure_resource(&pool, uri).await.unwrap();
     let (egress, t) = mock_egress(vec![]);
     let web = WebResolver {
+        cards: None,
         egress,
         events: None,
         config: Default::default(),

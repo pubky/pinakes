@@ -46,3 +46,18 @@ Source SHA-256: `c20a9fb54a413919aa8944649d7424e6dbc1e4b5c95cd02a1b169682bfbb028
 The table preserves all 152 mappings; IANA rules still come from chrono-tz.
 Copyright Rails contributors, MIT; see [LICENSE.rails.txt](LICENSE.rails.txt).
 Regenerate with `scripts/rails-zones /path/to/time_zone.rb`.
+
+## oEmbed providers
+
+`oembed-providers.json` pins the 390-provider registry downloaded from
+<https://oembed.com/providers.json> on 2026-10-16. SHA-256:
+`274d3cadad4ebb51fec4303b422e84128bcac988d4275289448297c205dab19d`.
+The registry project is <https://github.com/iamcal/oembed>; its MIT license is
+preserved as [oembed-LICENSE](oembed-LICENSE). This is a separate upstream data
+license. Updates require an explicit replacement/digest review and resolver tests.
+
+The media resolver matches registry URL schemes locally, uses JSON-capable provider
+endpoints, and applies normal DNS/redirect/size/host budgets to every request. It
+retains typed metadata and origin image URLs only; it never serves embed HTML or
+rehosts media. Provider membership is not a promise that its public endpoint is
+available or permits a particular use.

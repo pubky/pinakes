@@ -17,7 +17,7 @@ same base.
 
 The Rust service, Postgres storage, Nexus ingestion, web/Pubky/geo/OSM resolvers and
 viewport API, change tracking, generic events/calendars and admin telemetry run locally.
-Platform event adapters include cursor feeds, NIP-52, embedded page state, per-event ICS and optional keyed APIs. Media and groups follow on a separate branch.
+Platform event adapters include cursor feeds, NIP-52, embedded page state, per-event ICS and optional keyed APIs. Media/identifier cards and optional group collapse share the same metadata pipeline.
 
 ## Running locally
 
@@ -200,7 +200,7 @@ and object paths must be nonempty and NUL-free, bounded in UTF-8 bytes by
 references; its cursor position still advances. `pinakes_ingest_rejected_total{reason}`
 counts the first rejected field after the batch commits, with fixed reasons `author`,
 `label`, `object_path`; rollback/retry does not inflate it. This counter resets on restart.
-Cursor/identity/timestamp errors still fail the transaction. Existing rows are preserved.
+Malformed identities and per-line timestamps are rejected and counted. Cursor-contract errors still fail the transaction; existing rows are preserved.
 Resources with no references expire seven days after becoming orphaned;
 preview-only entries follow the same policy. Search excludes unreferenced resources.
 
@@ -435,3 +435,36 @@ retries incomplete scans after five minutes, reusing cached pages. The captured 
 calendar request is now correctly replayed as an egress failure (its HTML card used to hide
 that failure). Wikipedia entity enrichment requires event/place JSON-LD or infobox cues;
 ordinary articles stay web cards without a speculative Wikidata fetch.
+
+
+## Media, identifiers, and groups
+
+Step 5 adds independent `cards.media`, `cards.isbn`, `cards.doi`, `cards.nostr` and
+`cards.activitypub` workers, manifests and budgets. Open Library/DOI endpoints,
+RSS scan limits and switches are in `pinakes.example.toml`; public requests retain
+the shared DNS, body, redirect and host policies. The pinned 390-provider oEmbed
+registry and its license are under `data/`. Metadata includes schema.org video,
+audio, music, podcast and image cards. Images keep their origin URLs; media and
+embed HTML are never re-hosted.
+
+Groups connect immutable resource or occurrence identities using extracted keys.
+`collapse=group` filters members then ranks and pages precomputed groups, with
+distinct taggers and best-member facets. Dated keys include start time, preserving
+recurrence dates even when they share a UID or page URL. Automatic merges refuse
+point disagreements over 500 m by default; a bounded admin curation route can
+explicitly join or split membership. `GET /v1/groups/{id}` and a resource's `group`
+provide the member list for Nexus hydration. See [the API contract](docs/api.md).
+
+Migration 0015 creates grouping tables/views and queues existing resources for a
+bounded background grouping pass. It preserves IDs, references, failed-job state
+and historical migrations. The `queue.groups` limits bound members and affected
+key metadata; `enabled=false` stops grouping and hides group APIs without deleting
+stored evidence. Names, coordinates and images remain in the original document
+views; OSM facts stay in `osm_place`.
+
+Run `scripts/e2e --mock` for the fixture flow or `scripts/e2e --isolated-live` for a
+scoped real SDK run. Both use an owned temporary database; the live driver resolves
+only its nine samples. [The harness guide](e2e/README.md) documents identity setup,
+configuration, CI commands, sample replacement and cleanup. It writes universal
+tags under `/pub/pinakes.e2e/tags/`, waits for Nexus and Pinakes, then deletes its
+own tags. The existing dev stack can also be tested by running `scripts/e2e`.

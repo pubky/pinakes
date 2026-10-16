@@ -138,6 +138,7 @@ pub async fn recompute_scores(tx: &mut Transaction<'_, Postgres>, ids: &[String]
     sqlx::query(r#"UPDATE resource r SET orphaned_at = CASE WHEN EXISTS
         (SELECT 1 FROM reference f WHERE f.resource_id=r.id) THEN NULL ELSE coalesce(orphaned_at, now()) END
         WHERE r.id = ANY($1)"#).bind(ids).execute(&mut **tx).await?;
+    crate::groups::scores(tx, ids).await?;
     Ok(())
 }
 pub async fn cleanup(pool: &PgPool, grace_days: u32) -> Result<u64> {
@@ -188,6 +189,16 @@ pub(crate) async fn write_document(
         .bind(doc.location.as_ref().map(|p| p.lat)).bind(doc.location.as_ref().map(|p| p.lon))
         .bind(doc.start).bind(doc.end).bind(serde_json::to_value(doc)?).bind(doc.status.as_str()).bind(doc.ttl_secs as f64).bind(doc.event.venue.as_ref().and_then(|v|v.resource_id.as_deref()))
         .execute(&mut **tx).await?;
+    if matches!(doc.source.as_str(), "media" | "activitypub")
+        && doc.status == crate::model::Status::Ok
+    {
+        sqlx::query("UPDATE resource SET resolver=$2 WHERE id=$1 AND generation=$3")
+            .bind(id)
+            .bind(&doc.source)
+            .bind(generation)
+            .execute(&mut **tx)
+            .await?;
+    }
     Ok(())
 }
 

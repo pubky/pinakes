@@ -174,6 +174,7 @@ pub fn router(state: AppState) -> Router {
             get(crate::change_api::resource),
         )
         .route("/v1/search", get(search))
+        .route("/v1/groups/{id}", get(group))
         .route("/v1/resources/lookup", post(lookup))
         .route("/v1/resources/{id}", get(resource))
         .route(
@@ -304,6 +305,9 @@ impl PageCursor {
 }
 #[derive(Serialize, ToSchema)]
 pub struct ResourceView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<crate::groups::GroupView>)]
+    pub group: Option<Value>,
     pub resource_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<crate::event::storage::OccurrenceRef>)]
@@ -395,6 +399,7 @@ fn view(row: &Value, fields: Fields, spatial: bool) -> Result<ResourceView, ApiE
     };
     let facets = !matches!(fields, Fields::Card);
     Ok(ResourceView {
+        group: row.get("group").filter(|v| !v.is_null()).cloned(),
         resource_id: row["id"].as_str().unwrap_or_default().into(),
         occurrence: row.get("occurrence").filter(|v| !v.is_null()).cloned(),
         event: row.get("event").filter(|v| !v.is_null()).cloned(),
@@ -440,8 +445,8 @@ fn validate_search(q: &SearchQuery) -> Result<Vec<String>, ApiError> {
     if q.venue.as_deref().is_some_and(|v| !model::valid_id(v)) {
         return Err(ApiError::bad("venue must be a resource ID"));
     }
-    if q.collapse.is_some() {
-        return Err(ApiError::bad("collapse is not available in this release"));
+    if q.collapse.as_deref().is_some_and(|v| v != "group") {
+        return Err(ApiError::bad("collapse must be group"));
     }
     if !(1..=500).contains(&q.limit.unwrap_or(50)) {
         return Err(ApiError::bad("limit must be 1–500"));
@@ -527,6 +532,9 @@ pub async fn search(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let tags = validate_search(&q)?;
+    if q.collapse.is_some() && !state.config.queue.groups.enabled {
+        return Err(ApiError::bad("groups are disabled"));
+    }
     let spatial = crate::spatial::Filters::parse(&q, &state.config.search)
         .map_err(|e| ApiError::bad(e.to_string()))?;
     let cursor = q
@@ -570,7 +578,11 @@ pub async fn search(
         }
     }
     let at = cursor.as_ref().map_or_else(Utc::now, |c| c.at);
-    let mut sql = QueryBuilder::<Postgres>::new("WITH filtered AS (SELECT r.*, ");
+    let mut sql = QueryBuilder::<Postgres>::new(if q.collapse.is_some() {
+        "WITH eligible AS (SELECT r.*, "
+    } else {
+        "WITH filtered AS (SELECT r.*, "
+    });
     if q.sort.as_deref() == Some("distance") {
         sql.push("-");
         spatial.distance(&mut sql);
@@ -657,6 +669,30 @@ pub async fn search(
             sql.push(")");
         }
     }
+    if q.collapse.is_some() {
+        sql.push("), filtered AS (SELECT DISTINCT ON(b.unit_id) b.*, ");
+        match q.sort.as_deref() {
+            Some("distance") => {
+                sql.push("coalesce(-");
+                let distance = crate::spatial::Filters::parse(&q, &state.config.search)
+                    .map_err(|e| ApiError::bad(e.to_string()))?; // Alias r below exposes the best member's indexed point.
+                distance.distance(&mut sql);
+                sql.push(",e.rank)");
+            }
+            Some("start") => {
+                sql.push("coalesce(-extract(epoch FROM b.start_at)::double precision,e.rank)");
+            }
+            Some("recent") => {
+                sql.push("coalesce(extract(epoch FROM s.newest_at),e.rank)::double precision");
+            }
+            _ => {
+                sql.push("coalesce(s.score*exp(-ln(2.0)*greatest(0,extract(epoch FROM (")
+                    .push_bind(at)
+                    .push("::timestamptz-s.updated_at)))/2592000.0),e.rank)::double precision");
+            }
+        }
+        sql.push(" AS rank FROM eligible e LEFT JOIN group_unit u ON u.unit_id=e.unit_id JOIN grouped_search_unit b ON b.unit_id=coalesce(u.group_id,e.unit_id) CROSS JOIN LATERAL (SELECT b.point) r LEFT JOIN group_score s ON s.group_id=u.group_id ORDER BY b.unit_id,e.rank DESC,e.unit_id");
+    }
     if let Some(resolution) = spatial.resolution {
         sql.push("), cells AS (SELECT *, h3_latlng_to_cell(point(ST_X(point),ST_Y(point)),")
             .push_bind(i32::from(u8::from(resolution)))
@@ -683,7 +719,14 @@ pub async fn search(
         sql.push(" ORDER BY rank DESC,unit_id DESC LIMIT ").push_bind((q.limit.unwrap_or(50)+1) as i64).push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p) ORDER BY rank DESC,unit_id DESC) FROM page p),'[]') AS items, ");
     }
     if q.facet.as_deref() == Some("tags") {
-        sql.push("coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY count DESC,label) FROM (SELECT f.label,count(DISTINCT r.unit_id) AS count FROM effective_reference f JOIN filtered r ON r.id=f.resource_id WHERE f.label IS NOT NULL");
+        sql.push("coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY count DESC,label) FROM (SELECT f.label,count(DISTINCT r.unit_id) AS count FROM effective_reference f JOIN filtered r ON ");
+        if q.collapse.is_some() {
+            sql.push("(r.id=f.resource_id OR EXISTS(SELECT 1 FROM group_unit u WHERE u.group_id=r.unit_id AND u.resource_id=f.resource_id))");
+        } else {
+            sql.push("r.id=f.resource_id");
+        }
+        sql.push(" WHERE f.label IS NOT NULL");
+
         scope(&mut sql, &q, &reach);
         sql.push(" GROUP BY f.label) t),'[]')");
     } else {
@@ -803,10 +846,16 @@ pub enum SearchResult {
     Cluster(ClusterResponse),
 }
 
-async fn read(pool: &PgPool, id: &str, fields: Fields) -> Result<Option<ResourceView>, ApiError> {
+async fn read(
+    pool: &PgPool,
+    id: &str,
+    fields: Fields,
+    groups: bool,
+) -> Result<Option<ResourceView>, ApiError> {
     let value: Option<Value> =
-        sqlx::query_scalar("SELECT to_jsonb(r) FROM resource_document r WHERE id=$1")
+        sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_card(u.group_id) END) FROM resource_document r LEFT JOIN group_unit u ON u.unit_id=r.id WHERE r.id=$1")
             .bind(id)
+            .bind(groups)
             .fetch_optional(pool)
             .await?;
     value.as_ref().map(|r| view(r, fields, false)).transpose()
@@ -820,10 +869,15 @@ pub async fn resource(
     if !model::valid_id(&id) {
         return Err(ApiError::bad("invalid resource ID"));
     }
-    read(&state.pool, &id, fields.fields.unwrap_or(Fields::Document))
-        .await?
-        .map(Json)
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "resource not found".into()))
+    read(
+        &state.pool,
+        &id,
+        fields.fields.unwrap_or(Fields::Document),
+        state.config.queue.groups.enabled,
+    )
+    .await?
+    .map(Json)
+    .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "resource not found".into()))
 }
 #[utoipa::path(post,path="/v1/resources/lookup",request_body=LookupRequest,params(FieldQuery),responses((status=200,body=Vec<ResourceView>),(status=400,description="Exactly one list of 1–500 IDs or URIs")))]
 pub async fn lookup(
@@ -853,7 +907,7 @@ pub async fn lookup(
     }
     store::expedite(&state.pool, &ids).await?;
     state.wake.notify_waiters();
-    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(r) FROM unnest($1::text[]) WITH ORDINALITY AS wanted(id,n) JOIN resource_document r ON r.id=wanted.id ORDER BY wanted.n").bind(ids).fetch_all(&state.pool).await?;
+    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_card(u.group_id) END) FROM unnest($1::text[]) WITH ORDINALITY AS wanted(id,n) JOIN resource_document r ON r.id=wanted.id LEFT JOIN group_unit u ON u.unit_id=r.id ORDER BY wanted.n").bind(ids).bind(state.config.queue.groups.enabled).fetch_all(&state.pool).await?;
     Ok(Json(
         rows.iter()
             .map(|r| view(r, fields.fields.unwrap_or(Fields::Facets), false))
@@ -886,9 +940,14 @@ pub async fn resolve(
     state.wake.notify_waiters();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     loop {
-        let resource = read(&state.pool, &id, Fields::Document)
-            .await?
-            .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "resource expired".into()))?;
+        let resource = read(
+            &state.pool,
+            &id,
+            Fields::Document,
+            state.config.queue.groups.enabled,
+        )
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "resource expired".into()))?;
         if resource.status != "pending" {
             return Ok((StatusCode::OK, Json(resource)).into_response());
         }
@@ -903,6 +962,7 @@ pub struct Info {
     pub version: String,
     pub manifests: Vec<crate::adapter::Manifest>,
     pub counts: InfoCounts,
+    pub groups: crate::groups::GroupConfig,
     pub ingestion: Vec<Value>,
     pub osm_licence: OsmLicence,
     pub resolvers: Value,
@@ -954,7 +1014,11 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
     let row=sqlx::query("SELECT (SELECT count(*) FROM resource) AS resources,(SELECT count(*) FROM reference) AS references,(SELECT count(*) FROM occurrence) AS occurrences").fetch_one(&state.pool).await?;
     let ingestion:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('nexus',nexus,'cursor',cursor,'feed_length',feed_length,'lag',greatest(feed_length-cursor,0),'epoch',epoch,'updated_at',updated_at) FROM feed_cursor ORDER BY nexus").fetch_all(&state.pool).await?;
     let statuses:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('resolver',resolver,'status',status,'count',count(*),'dead_letter',count(*) FILTER (WHERE dead_letter),'leased',count(*) FILTER (WHERE lease_until>now())) FROM resource GROUP BY resolver,status ORDER BY resolver,status").fetch_all(&state.pool).await?;
-    let body = json!({"version":env!("CARGO_PKG_VERSION"),"manifests":crate::adapter::configured(&state.config),"sources":sources,"metrics":state.metrics.summary(),"ingestion":ingestion,"counts":{"resources":row.try_get::<i64,_>("resources")?,"references":row.try_get::<i64,_>("references")?,"occurrences":row.try_get::<i64,_>("occurrences")?},"osm_licence":{"licence":"ODbL-1.0","attribution":crate::resolver::osm::ATTRIBUTION,"url":"https://opendatacommons.org/licenses/odbl/1-0/","dump":"/v1/dumps/osm_place.ndjson"},"resolvers":{"event":{"enabled":state.config.event.enabled,"calendar":state.config.event.calendars,"jsonld":state.config.event.jsonld,"microformats":state.config.event.microformats,"activitypub":state.config.event.activitypub,"geocoding":state.config.event.geocoding,"coordinate_timezone":state.config.event.coordinate_timezone,"months_back":state.config.event.months_back,"months_forward":state.config.event.months_forward},"geo":{"enabled":state.config.geo_enabled,"network":false},"osm":{"enabled":state.config.osm.enabled,"concurrency":1,"batch_size":50,"requests_per_second":state.config.osm.requests_per_second},"web":{"enabled":state.config.web.enabled,"concurrency":state.config.web.concurrency},"pubky":{"enabled":state.config.pubky.enabled,"concurrency":state.config.pubky.concurrency},"statuses":statuses}});
+    let mut body = json!({"groups":state.config.queue.groups,"version":env!("CARGO_PKG_VERSION"),"manifests":crate::adapter::configured(&state.config),"sources":sources,"metrics":state.metrics.summary(),"ingestion":ingestion,"counts":{"resources":row.try_get::<i64,_>("resources")?,"references":row.try_get::<i64,_>("references")?,"occurrences":row.try_get::<i64,_>("occurrences")?},"osm_licence":{"licence":"ODbL-1.0","attribution":crate::resolver::osm::ATTRIBUTION,"url":"https://opendatacommons.org/licenses/odbl/1-0/","dump":"/v1/dumps/osm_place.ndjson"},"resolvers":{"event":{"enabled":state.config.event.enabled,"calendar":state.config.event.calendars,"jsonld":state.config.event.jsonld,"microformats":state.config.event.microformats,"activitypub":state.config.event.activitypub,"geocoding":state.config.event.geocoding,"coordinate_timezone":state.config.event.coordinate_timezone,"months_back":state.config.event.months_back,"months_forward":state.config.event.months_forward},"geo":{"enabled":state.config.geo_enabled,"network":false},"osm":{"enabled":state.config.osm.enabled,"concurrency":1,"batch_size":50,"requests_per_second":state.config.osm.requests_per_second},"web":{"enabled":state.config.web.enabled,"concurrency":state.config.web.concurrency},"pubky":{"enabled":state.config.pubky.enabled,"concurrency":state.config.pubky.concurrency},"statuses":statuses}});
+    for kind in crate::resolver::cards::KINDS {
+        let c = state.config.cards.resolver(kind);
+        body["resolvers"][kind] = json!({"enabled":c.enabled,"concurrency":c.concurrency,"requests_per_second":c.requests_per_second});
+    }
     *cache = Some((Instant::now(), body.clone()));
     Ok(body)
 }
@@ -967,6 +1031,8 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         license(name = "MIT")
     ),
     paths(
+        group,
+        curate_group,
         crate::event::storage::list,
         search,
         resource,
@@ -1012,6 +1078,15 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         .paths
         .get_mut("/metrics")
         .expect("admin path")
+        .servers = Some(vec![utoipa::openapi::Server::new("http://127.0.0.1:9090")]);
+    document
+        .paths
+        .paths
+        .get_mut("/v1/groups/{id}")
+        .expect("groups path")
+        .put
+        .as_mut()
+        .expect("curation")
         .servers = Some(vec![utoipa::openapi::Server::new("http://127.0.0.1:9090")]);
     document
 }
@@ -1109,6 +1184,7 @@ async fn send_dump(
 
 pub fn admin_router(state: AppState) -> Router {
     Router::new()
+        .route("/v1/groups/{id}", axum::routing::put(curate_group))
         .route("/metrics", get(metrics))
         .route("/v1/info", get(admin_info))
         .with_state(state)
@@ -1124,4 +1200,35 @@ async fn metrics(State(state): State<AppState>) -> Result<Response, ApiError> {
         state.metrics.encode()?,
     )
         .into_response())
+}
+
+#[utoipa::path(get,path="/v1/groups/{id}",params(("id"=String,Path)),responses((status=200,body=crate::groups::GroupView),(status=400,description="Invalid ID or disabled module"),(status=404,description="Unknown group")))]
+pub async fn group(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    if !model::valid_id(&id) || !state.config.queue.groups.enabled {
+        return Err(ApiError::bad("invalid or disabled group"));
+    }
+    let value: Option<Value> = sqlx::query_scalar("SELECT group_card($1)")
+        .bind(id)
+        .fetch_one(&state.pool)
+        .await?;
+    value
+        .map(Json)
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "group not found".into()))
+}
+#[utoipa::path(put,path="/v1/groups/{id}",params(("id"=String,Path)),request_body=crate::groups::Curation,responses((status=200,body=crate::groups::GroupView),(status=400,description="Invalid curation")),description="Admin listener only. Replaces the curated member set; never changes IDs or references.")]
+pub async fn curate_group(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<crate::groups::Curation>,
+) -> Result<Json<Value>, ApiError> {
+    crate::groups::curate(&state.pool, &id, body, &state.config.queue.groups)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            tracing::warn!(error=%e,"group curation failed");
+            ApiError::bad("invalid group curation")
+        })
 }

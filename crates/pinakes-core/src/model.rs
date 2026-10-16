@@ -52,6 +52,8 @@ pub struct OsmId {
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
 pub struct ResourceMeta {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_keys: Vec<crate::group_keys::GroupKey>,
     #[serde(default, flatten)]
     pub event: crate::event::EventFields,
     /// A resolution result, never embedded in the bounded resource document.
@@ -157,6 +159,15 @@ impl ResourceMeta {
     }
     pub fn bounded(mut self, allowed_attributes: &[&str]) -> Result<Self> {
         self.event.bound();
+        self.group_keys.retain(|k| {
+            k.key.len() <= 2100
+                && k.basis.len() <= 32
+                && k.confidence.is_finite()
+                && (0.0..=1.0).contains(&k.confidence)
+        });
+        self.group_keys.sort_by(|a, b| a.key.cmp(&b.key));
+        self.group_keys.dedup_by(|a, b| a.key == b.key);
+        self.group_keys.truncate(16);
         self.attributes
             .retain(|k, _| allowed_attributes.contains(&k.as_str()));
         while self.attributes.len() > ATTRIBUTE_CAP {
@@ -182,7 +193,10 @@ impl ResourceMeta {
         }
         self.aliases.truncate(4);
         while self.validate(allowed_attributes).is_err() {
-            if self.attributes.pop_last().is_some() || self.aliases.pop().is_some() {
+            if self.attributes.pop_last().is_some()
+                || self.aliases.pop().is_some()
+                || self.group_keys.pop().is_some()
+            {
                 continue;
             }
             if self.description.take().is_some() || self.image.take().is_some() {

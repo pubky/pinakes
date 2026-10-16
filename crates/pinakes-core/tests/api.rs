@@ -131,7 +131,7 @@ async fn every_read_route_and_document_projection(pool: PgPool) {
     assert!(spec["components"]["schemas"]["ResourceView"]["properties"]
         .get("score")
         .is_none());
-    assert_eq!(spec["paths"].as_object().unwrap().len(), 12);
+    assert_eq!(spec["paths"].as_object().unwrap().len(), 13);
     for field in ["card", "facets", "document"] {
         let (code, item) = call(
             &app,
@@ -297,7 +297,7 @@ async fn search_filters_facets_true_keyset_and_invalid_options(pool: PgPool) {
         "to=2026-02-01",
         "cluster=3",
         "venue=x",
-        "collapse=group",
+        "collapse=invalid",
         "reach=wot_2",
         "reach=following",
         "reach=strangers",

@@ -37,7 +37,7 @@ Scale today (public graph, 2026-10-14): 921 users, 215 posts and 496 tags a week
 | Fetches the web | never | yes, with budgets |
 | Identity | `Resource.id = hex(blake3(normalize_uri(uri))[0..16])` | the same id, from the same crate |
 
-Inside Pinakes, three layers: a **base** for every URI (one resource row, its references, the resolver document, the generic endpoints); **kind modules** compiled in and switched on by config, each a resolver, the facets it promotes to indexed columns and the filters it adds, never an endpoint; and **client needs** a filter cannot express: in v0 clustering, served as a mode of search, later groups. Anything that needs a user, a follow, a post body or the social specs goes to Nexus.
+Inside Pinakes, three layers: a **base** for every URI (one resource row, its references, the resolver document, the generic endpoints); **kind modules** compiled in and switched on by config, each a resolver, the facets it promotes to indexed columns and the filters it adds, never an endpoint; and **client needs** a filter cannot express: clustering and group collapse, served as modes of search. Anything that needs a user, a follow, a post body or the social specs goes to Nexus.
 
 Place search as you type, reverse geocoding and a place's outline are not Pinakes either, because Pinakes only knows the places someone on Pubky referenced. The Maps client calls Photon and Nominatim directly, both ours, behind the ordinary edge; Pinakes calls the same Nominatim for lookups and venue geocoding. There is no proxy service in between: in front of upstreams we run, a proxy adds code with no data of its own.
 
@@ -123,7 +123,7 @@ Refresh follows the time to an event's start and stops after its end; a change i
 - A calendar feed is one resource and a container. Its events are occurrence rows keyed by `(feed, UID, RECURRENCE-ID)`, since nothing in a feed URL names one event. An event that has its own page is a resource of its own once referenced, and its occurrence rows link to it.
 - Caps: 32 attributes and 8 KB per document **(arbitrary)**.
 
-**Groups.** One thing often lives at several URIs: a recording on Spotify, Tidal, Deezer and Qobuz, a podcast episode at its host and in every directory, a film on IMDb and Letterboxd, an event on Luma and on the organiser's site, a place under two spellings of its OSM URL. Nexus sees as many resources as URIs, which is right: each is what someone referenced. Pinakes adds a group over them, from the keys resolution finds (ISRC, podcast GUID, Wikidata and IMDb ids, ICS UID, schema.org `sameAs`, a canonical URL) and from links an operator curates, which also covers intentional merges of ids or spellings. A group is a view, never an identity: ids and references stay per URI, so no key change needs a backfill. Search collapses to one row per group on request: the unit of a result is then the group, a filter matches when any member matches, counts are distinct authors across members, a cluster counts groups, and a group's score is precomputed like a resource's. A resource read lists its group. A later step, with media.
+**Groups.** One thing often lives at several URIs: a recording on Spotify, Tidal, Deezer and Qobuz, a podcast episode at its host and in every directory, a film on IMDb and Letterboxd, an event on Luma and on the organiser's site, a place under two spellings of its OSM URL. Nexus sees as many resources as URIs, which is right: each is what someone referenced. Pinakes adds a group over them, from the keys resolution finds (ISRC, podcast GUID, Wikidata and IMDb ids, ICS UID, schema.org `sameAs`, a canonical URL) and from links an operator curates, which also covers intentional merges of ids or spellings. A group is a view, never an identity: ids and references stay per URI, so no key change needs a backfill. Search collapses to one row per group on request: the unit of a result is then the group, a filter matches when any member matches, counts are distinct authors across members, a cluster counts groups, and a group's score is precomputed like a resource's. A resource read lists its group. Groups ship with the media module.
 
 [Details: the two example documents, the venue chain, time zones and cancellation, groups](details.html#document)
 
@@ -147,7 +147,7 @@ Postgres with PostGIS and full-text search **(arbitrary)**; any database with sp
 | `GET /v1/info`, admin routes | resolver status and ingestion lag; re-resolve, deny a host, read budgets |
 | `GET /v1/changes`, `POST /v1/changes/lookup` | what changed: Pinakes's own change feed, and the changes to a client's own resources since its last visit |
 | `GET /metrics` (admin listener) | Prometheus series per source: fetch outcomes, changes, canaries, queue, ingestion lag |
-| `collapse=group` on search, `GET /v1/groups/{id}` | later: one row per group of URIs that are one thing, with its members |
+| `collapse=group` on search, `GET /v1/groups/{id}` | one row per group of URIs that are one thing, with its members |
 
 `tags` at most five, `match=all` at most three **(arbitrary)**. Nothing in Pinakes returns a user, a follow, a post body or a viewer's own tag state.
 
@@ -225,3 +225,26 @@ venue geocoding and the three event search units are implemented. The companion
 with the task; this file remains the overview. Lifecycle is exposed as
 `event_status` to preserve the existing fetch-health `status` contract. Detailed
 implemented fields and limits are maintained in `docs/api.md` and the example config.
+
+
+### Media and group implementation (step 5)
+
+Five independently switched card resolvers share the established egress and queue
+policy. The pinned oEmbed registry is local data; ISBN uses Open Library, DOI uses
+CSL negotiation, generic Nostr reuses signed HTTP-indexer resolution, and advertised
+ActivityStreams objects use one negotiated fetch. RSS episode selection is by GUID
+or matching page link, never an arbitrary item from a multi-episode feed.
+
+`group_unit` identifies resource and occurrence members without changing their
+upstream IDs. `resource_group` holds bounded evidence; updates rebuild the affected
+components so removing a bridge can split a group. Typed music IDs and episode
+GUIDs precede Wikidata/IMDb/TMDB, ICS UID and URL evidence. Dated event evidence is
+scoped to the instance start. The default component cap is 256 and every pair of
+located members must agree within 500 m unless explicitly curated. Upgrade and
+reference dirty work is drained in bounded batches under the search-revision fence.
+
+A preselected best member supplies group facets; precomputed group scores count
+unique taggers across member references. Resource documents and OSM derivative
+facts remain in their existing tables. Search filters members before the grouping
+join, then uses group ranking for pagination and group units for clustering. The
+admin member set overrides automatic links; it never edits Nexus references.

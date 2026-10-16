@@ -99,7 +99,7 @@ pub async fn apply(
     let changed = matches!((&saved.epoch, &feed.epoch), (Some(a),Some(b)) if a != b);
     let epoch = feed.epoch.as_ref().or(saved.epoch.as_ref());
     if changed || requested.cursor > feed.length {
-        sqlx::query("TRUNCATE reference, resource_score")
+        sqlx::query("TRUNCATE reference, resource_score, group_score")
             .execute(&mut *tx)
             .await?;
         sqlx::query("UPDATE resource SET orphaned_at=coalesce(orphaned_at,now())")

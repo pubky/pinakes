@@ -14,6 +14,7 @@ Nexus in a separate call. All paths below are relative to the Pinakes origin.
 | `POST /v1/resources/lookup` | Exactly one of `{"ids":[...]}` or `{"uris":[...]}` | Array in request order, including duplicates, skipping unknowns; 1–500 entries |
 | `POST /v1/resolve` | `{"uri":"https://example.org/"}` | Resource immediately or after up to 3 seconds; 202 with `status=pending` while queued |
 | `GET /v1/resources/{id}/occurrences` | Optional RFC 3339 `from`, `to`, `limit` (1–500), signed `cursor` | `{items:[...],cursor}` in start/key order; default horizon/100 rows; unknown resource 404 |
+| `GET /v1/groups/{id}` | 32-character group ID | Group card, members and distinct taggers; 404 if unknown |
 | `GET /v1/info` | None | Public version, manifests, resolver status, counts, ingestion cursor/epoch/length/lag/time and licence |
 | `GET /v1/changes` | `cursor`, `class`, `type`, `source`, `limit` | Change page with ascending sequence cursor |
 | `POST /v1/changes/lookup` | `{resource_ids:[...], since, cursor?, limit?}` | Changes to 1–500 requested IDs since a timestamp |
@@ -49,9 +50,11 @@ not an HTTP 404 from the Pinakes resource route.
 | `from`, `to` | Inclusive start-time bounds, RFC 3339 or Unix milliseconds; `from` must not follow `to` |
 | `cluster` | Finite map zoom with `bbox`, floored and clamped into the resolution table; returns viewport clusters/points; incompatible with cursor |
 | `fields` | `card` (default), `facets`, or `document` |
+| `collapse` | `group`: filter members, deduplicate groups, then rank/page or cluster |
 
 `venue` accepts a 32-character resource ID for events at that place.
-`collapse` and `reach=wot_2` return 400. Unknown parameters, invalid
+`collapse=group` returns one best-member row per group after member filters.
+`reach=wot_2` and other collapse values return 400. Unknown parameters, invalid
 coordinates/dates, out-of-range radius, non-finite zoom and incompatible options also return 400.
 The `start` sort excludes resources without a start. Distance and start ranks are
 negative metres and negative Unix seconds respectively, so nearest/earliest comes
@@ -187,7 +190,7 @@ Handler errors use `{"error":"..."}`; Axum's query/JSON parsing errors may be te
 Malformed query parameters return 400, malformed JSON returns 400, JSON shape
 errors return 422, and request bodies over 2 MB return 413. Internal errors return
 500 without database diagnostics. There are no resource write, social-state,
-public admin, reverse-geocoding, place-search or group routes in this step.
+public admin, reverse-geocoding or place-search routes. Group curation is admin-only.
 
 ## Change feed and refresh
 
@@ -368,3 +371,56 @@ from a delta does not cancel a row. Expired cursors trigger full resync under th
 ordinary held-snapshot rules. BTC Map websites and Nostr calendar members are queued
 as independent resources. Portal OSM venue data uses the existing ODbL projection and
 licence boundary. All existing resource and occurrence routes and cursors are unchanged.
+
+
+## Groups and identifier cards
+
+Resources and lookup responses include `group` when membership has been computed.
+A group card has `id`, `kind`, `name`, `image`, `curated`, `taggers`, `references`
+and `members: [{resource_id, uri, site, occurrence?}]`. The optional occurrence
+contains `uid` and `recurrence_id`. Group IDs are views and can change when evidence
+joins or splits a group; member resource IDs and references never change. Ranking
+scores remain internal.
+
+`collapse=group` applies all filters to individual members first, then returns the
+group's preselected best member with its group card. Thus a group can match a tag,
+host or location on another member. Best-member facets and internal group scores
+are precomputed; taggers count distinct authors over all member references. Tag
+facets count groups once per label. Clusters count groups; their `top` entries are
+best-member resource IDs for the existing hydration contract. Fetch the group card
+to hydrate every member through Nexus `by_ids`. Unprocessed upgrade rows remain
+individual results until the bounded grouping pass reaches them.
+
+Automatic grouping uses typed identifiers, podcast GUIDs, ICS UID, `sameAs`,
+canonical URLs and accepted OSM URL identity. Dated event keys are scoped to start,
+so a recurring UID or reused page URL does not collapse different dates. Any pair
+of points over `queue.groups.max_distance_m` (default 500 m) prevents an automatic
+merge. Membership and evidence are bounded; over-popular keys are ignored.
+
+On the **admin listener only**:
+
+```http
+PUT /v1/groups/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+Content-Type: application/json
+
+{"name":"A curated recording","image":null,"members":[{"resource_id":"0123456789abcdef0123456789abcdef","occurrence":null}]}
+```
+
+This replaces the explicit member set and optional name/image. An occurrence member
+uses `{"uid":"calendar-uid","recurrence_id":"2026-10-20T17:00:00Z"}`. Members must
+already exist. Curation can deliberately override the automatic distance/evidence
+rules; removing a member allows its automatic evidence to be reconsidered. The
+route shares the existing loopback/admin network boundary and has no public auth
+flow. `queue.groups.enabled=false` disables grouping reads, writes and collapse;
+stored membership remains available if the module is re-enabled.
+
+Five independent manifests (`media`, `isbn`, `doi`, `nostr`, `activitypub`) appear in
+`/v1/info`, alongside card-worker status and the effective grouping limits; configure them under `[cards.<kind>]`. `isbn:` checks ISBN-10/13 checksums
+and calls Open Library. `doi:` and `https://doi.org/…` request CSL JSON. Generic Nostr
+profiles/notes use the signed-event indexer path; NIP-52 events retain their event
+schema. Advertised ActivityPub endpoints or ActivityStreams JSON yield Person,
+Article or SocialMediaPosting cards. Media uses the pinned oEmbed registry and RSS
+episode GUIDs; no embed HTML or media bytes are served. A direct podcast feed with
+multiple episodes is a PodcastSeries; `?guid=` or the episode page's matching RSS
+link selects an episode. Disabled non-HTTP identifier routes defer; enabled web can
+still render ordinary HTTP fallback cards.

@@ -3,6 +3,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::time::Duration;
 
+pub mod cards;
 pub mod egress;
 pub mod geo;
 pub mod osm;
@@ -58,6 +59,9 @@ pub trait Resolver: Send + Sync {
 /// Scheme modules and host adapters go before the generic web fallback.
 pub fn classify(uri: &str) -> Option<&'static str> {
     let url = url::Url::parse(uri).ok()?;
+    if let Some(kind) = cards::classify(uri) {
+        return Some(kind);
+    }
     match url.scheme() {
         "pubky"
             if url.path().starts_with("/pub/")
@@ -93,6 +97,13 @@ pub fn classify(uri: &str) -> Option<&'static str> {
 /// Persisted routing hints are configuration-independent; disabled calendars use web workers.
 pub fn classify_config(uri: &str, config: &crate::config::Config) -> Option<&'static str> {
     match classify(uri) {
+        Some(kind) if cards::KINDS.contains(&kind) && !config.cards.resolver(kind).enabled => {
+            if url::Url::parse(uri).is_ok_and(|u| matches!(u.scheme(), "http" | "https")) {
+                Some("web")
+            } else {
+                None
+            }
+        }
         Some("event") if !config.event.enabled || !config.event.calendars => Some("web"),
         Some("event_platform")
             if crate::event::adapters::detect(uri)

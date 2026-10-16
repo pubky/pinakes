@@ -254,6 +254,7 @@ pub async fn save(
         .transpose()?;
     let after = normalize(&doc);
     crate::store::write_document(&mut tx, id, generation, &doc).await?;
+    crate::groups::sync(&mut tx, id, &cfg.groups).await?;
     let diff = diff(before.as_ref(), Some(&after))
         .filter(|_| before.is_some() || doc.status != Status::Missing);
     if let Some(plan) = prepared

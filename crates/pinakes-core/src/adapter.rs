@@ -147,5 +147,6 @@ pub fn configured(config: &crate::config::Config) -> Vec<Manifest> {
         }
     }
     all.extend(crate::event::adapters::manifests(&config.event));
+    all.extend(crate::resolver::cards::manifests(&config.cards));
     all
 }

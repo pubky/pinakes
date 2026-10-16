@@ -34,6 +34,7 @@ pub const ALLOWED_TYPES: &[&str] = &[
     "application/json",
     "application/ld+json",
     "application/activity+json",
+    "application/vnd.citationstyles.csl+json",
     "image/jpeg",
     "image/png",
     "image/webp",
@@ -1067,6 +1068,7 @@ mod osm_policy_tests {
         }
         assert!(egress.allows("https://openstreetmap.org.example.net/"));
         let web = crate::resolver::web::WebResolver {
+            cards: None,
             events: None,
             egress: Egress::new(EgressConfig {
                 allow_hosts: vec!["only.example".into()],

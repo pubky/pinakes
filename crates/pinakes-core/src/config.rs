@@ -15,6 +15,7 @@ pub struct Config {
     pub ingest: IngestConfig,
     pub grace_days: u32,
     pub web: ResolverConfig,
+    pub cards: crate::resolver::cards::CardConfig,
     pub event: EventConfig,
     pub geo_enabled: bool,
     pub osm: OsmConfig,
@@ -43,6 +44,7 @@ impl Default for Config {
                 ..Default::default()
             },
             pubky: ResolverConfig::default(),
+            cards: Default::default(),
             event: EventConfig::default(),
             geo_enabled: true,
             osm: OsmConfig::default(),
@@ -167,6 +169,7 @@ impl Default for EgressConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct QueueConfig {
+    pub groups: crate::groups::GroupConfig,
     pub max_failures: u32,
     pub backoff_secs: u64,
     pub max_backoff_secs: u64,
@@ -177,6 +180,7 @@ pub struct QueueConfig {
 impl Default for QueueConfig {
     fn default() -> Self {
         Self {
+            groups: Default::default(),
             max_failures: 5,
             backoff_secs: 30,
             max_backoff_secs: 3600,
@@ -328,6 +332,15 @@ impl Config {
         Ok(cfg)
     }
     pub fn validate(&self) -> Result<()> {
+        self.cards.validate()?;
+        if !(10000..=100000).contains(&self.queue.groups.max_graph_units)
+            || !(1024 * 1024..=128 * 1024 * 1024).contains(&self.queue.groups.max_graph_bytes)
+            || !(2..=1000).contains(&self.queue.groups.max_members)
+            || !self.queue.groups.max_distance_m.is_finite()
+            || !(1.0..=10000.0).contains(&self.queue.groups.max_distance_m)
+        {
+            bail!("invalid grouping limits");
+        }
         crate::event::adapters::validate(&self.event)?;
         let e = &self.event;
         let c = &e.container;

@@ -381,6 +381,9 @@ impl EventService {
                                 event.source = "ics".into();
                             }
                             super::page::merge_missing(&mut event, fallback)?;
+                            if let Some(uid) = c.occurrences.first().map(|o| o.uid.as_str()) {
+                                crate::group_keys::add(&mut event, "ics_uid", uid);
+                            }
                         }
                     }
                 }
@@ -613,7 +616,7 @@ fn tls_unsupported(error: &anyhow::Error) -> bool {
             || s.contains("received corrupt message of type invalidcontenttype")
     })
 }
-fn header_alternate(header: Option<&str>, base: &url::Url) -> Option<(String, String)> {
+pub(crate) fn header_alternate(header: Option<&str>, base: &url::Url) -> Option<(String, String)> {
     header?.split(',').find_map(|part| {
         if !part.contains("rel=\"alternate\"") && !part.contains("rel=alternate") {
             return None;

@@ -150,6 +150,7 @@ async fn main() -> Result<()> {
     };
     let resolver = PlatformResolver {
         web: WebResolver {
+            cards: None,
             config: Default::default(),
             egress: Egress::with_backends(
                 EgressConfig::default(),

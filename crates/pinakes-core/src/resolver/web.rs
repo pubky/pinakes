@@ -19,8 +19,16 @@ pub const ATTRIBUTES: &[&str] = &[
     "author",
     "provider",
     "language",
+    "publisher",
+    "published",
+    "isbn",
+    "doi",
+    "podcast_guid",
+    "duration",
+    "isrc",
 ];
 pub struct WebResolver {
+    pub cards: Option<std::sync::Arc<super::cards::CardConfig>>,
     pub events: Option<std::sync::Arc<crate::event::service::EventService>>,
     pub egress: Egress,
     pub config: ResolverConfig,
@@ -41,6 +49,15 @@ impl Resolver for WebResolver {
             .is_none_or(|e| !e.config.adapters.enabled)
         {
             sources.push("event_platform");
+        }
+        for kind in super::cards::KINDS {
+            if self
+                .cards
+                .as_ref()
+                .is_none_or(|c| !c.resolver(kind).enabled)
+            {
+                sources.push(kind);
+            }
         }
         sources
     }
@@ -110,6 +127,7 @@ impl Resolver for WebResolver {
                 extracted.doc.end = None;
                 extracted.doc.event = Default::default();
             }
+
             if self
                 .events
                 .as_ref()
@@ -120,6 +138,11 @@ impl Resolver for WebResolver {
                 {
                     extracted.doc = doc;
                 }
+            }
+
+            if let Some(cards) = &self.cards {
+                extracted.doc =
+                    super::cards::enrich(uri, &fetched, extracted.doc, &self.egress, cards).await?;
             }
             if let Some(endpoint) = extracted.oembed.take() {
                 // Discovery is the only additional fetch; it follows the same policy as the page.
@@ -381,6 +404,8 @@ fn point(lat: f64, lon: f64) -> Option<Point> {
     .then_some(Point { lat, lon })
 }
 fn add_alias(doc: &mut ResourceMeta, alias: String) {
+    crate::group_keys::url_keys(doc, &alias);
+    crate::group_keys::add(doc, "canonical", &alias);
     if doc.aliases.len() < 4 && alias != doc.url && !doc.aliases.contains(&alias) {
         doc.aliases.push(alias);
     }
@@ -457,6 +482,16 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url) {
         doc.set_type(kind);
         doc.source = "jsonld".into();
     }
+    crate::group_keys::jsonld(doc, v, base);
+    for field in ["author", "creator"] {
+        if !doc.attributes.contains_key("author") {
+            if let Some(value) = v.get(field) {
+                if let Some(name) = value.as_str().or_else(|| value["name"].as_str()) {
+                    doc.attributes.insert("author".into(), name.into());
+                }
+            }
+        }
+    }
     fill(
         &mut doc.name,
         v.get("name").or_else(|| v.get("headline")).and_then(string),
@@ -516,7 +551,7 @@ fn mapped_type(vocab: &str, name: &str) -> Option<&'static str> {
     .get(name)?
     .as_str()
 }
-fn apply_oembed(doc: &mut ResourceMeta, v: &Value, base: &Url) {
+pub fn apply_oembed(doc: &mut ResourceMeta, v: &Value, base: &Url) {
     fill(&mut doc.name, v.get("title").and_then(string));
     fill(
         &mut doc.image,
@@ -622,6 +657,7 @@ mod tests {
             }
         }
         let resolver = WebResolver {
+            cards: None,
             events: None,
             egress: Egress::with_backends(Default::default(), Arc::new(TestDns), Arc::new(Pages)),
             config: Default::default(),

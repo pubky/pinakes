@@ -50,7 +50,6 @@ months_back = 1
 months_forward = 12
 # default_timezone = "Europe/Zurich" # Floating ICS times only; otherwise keep local time.
 geocode_score = 0.8
-# Retained for old configs; hold retry now uses max(normal cadence, container floor).
 # Additional hold retry floor (1 second–7 days); normal cadence / one hour still apply.
 held_retry_secs = 60 # Additional hold floor; normal cadence and 3600s minimum still apply.
 max_line_bytes = 65536
@@ -157,3 +156,43 @@ requests_per_minute = 120
 cache_capacity = 10000
 # Reach-enabled searches cost six budget units, even on a reach-cache hit.
 reach_cost = 6
+
+[cards]
+openlibrary_url = "https://openlibrary.org/api/books"
+doi_url = "https://doi.org/"
+podcast_items = 1000 # Bounded RSS item scan; no feed re-hosting.
+
+# Independent worker switches/budgets; HTTP fallbacks can still use enabled web.
+# Disable all five alongside web/event to run only geo/osm/pubky.
+[cards.media]
+enabled = true
+concurrency = 2
+requests_per_second = 2.0
+ttl_secs = 86400
+[cards.isbn]
+enabled = true
+concurrency = 2
+requests_per_second = 2.0
+ttl_secs = 86400
+[cards.doi]
+enabled = true
+concurrency = 2
+requests_per_second = 2.0
+ttl_secs = 86400
+[cards.nostr]
+enabled = true
+concurrency = 2
+requests_per_second = 2.0
+ttl_secs = 86400
+[cards.activitypub]
+enabled = true
+concurrency = 2
+requests_per_second = 2.0
+ttl_secs = 86400
+
+[queue.groups]
+enabled = true
+max_members = 256 # Per component; excessive-degree automatic keys are ignored.
+max_distance_m = 500.0 # Any two points farther apart prevent an automatic merge.
+max_graph_units = 20000 # Affected graph, including splits after evidence changes.
+max_graph_bytes = 33554432 # Bounded key metadata; resource documents stay in their tables.

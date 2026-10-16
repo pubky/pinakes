@@ -187,7 +187,17 @@ async fn finish_job(
         }
         if matches!(
             resolver.name(),
-            "web" | "event" | "event_platform" | "pubky" | "geo" | "osm"
+            "web"
+                | "event"
+                | "event_platform"
+                | "pubky"
+                | "geo"
+                | "osm"
+                | "media"
+                | "isbn"
+                | "doi"
+                | "nostr"
+                | "activitypub"
         ) {
             let now = chrono::Utc::now();
             let mut manifest = resolver.manifest_for(&job.uri);
@@ -236,7 +246,8 @@ async fn finish_job(
             }
         }
         let attrs = match resolver.name() {
-            "web" | "event" | "event_platform" => crate::resolver::web::ATTRIBUTES,
+            "web" | "event" | "event_platform" | "media" | "isbn" | "doi" | "nostr"
+            | "activitypub" => crate::resolver::web::ATTRIBUTES,
             "pubky" => crate::resolver::pubky::ATTRIBUTES,
             "geo" => crate::resolver::geo::ATTRIBUTES,
             "osm" => crate::resolver::osm::ATTRIBUTES,
@@ -391,10 +402,21 @@ pub fn spawn(
     shutdown: watch::Receiver<bool>,
     metrics: Arc<crate::telemetry::Metrics>,
 ) -> Result<JoinSet<()>> {
+    let egress = Egress::new(config.egress.clone());
+    spawn_with_egress(pool, config, wake, shutdown, metrics, egress)
+}
+/// Injectable upstream transport for deterministic integration stacks. Production uses `spawn`.
+pub fn spawn_with_egress(
+    pool: PgPool,
+    config: Config,
+    wake: Arc<Notify>,
+    shutdown: watch::Receiver<bool>,
+    metrics: Arc<crate::telemetry::Metrics>,
+    egress: Egress,
+) -> Result<JoinSet<()>> {
     let mut workers = JoinSet::new();
     let authors = Arc::new(AuthorBudget::default());
     let mut resolvers: Vec<(Arc<dyn Resolver>, crate::config::ResolverConfig)> = vec![];
-    let egress = Egress::new(config.egress.clone());
     let osm = Arc::new(OsmResolver::new(pool.clone(), config.osm.clone())?);
     let events = config.event.enabled.then(|| {
         Arc::new(crate::event::service::EventService {
@@ -406,6 +428,7 @@ pub fn spawn(
     if config.web.enabled {
         resolvers.push((
             Arc::new(WebResolver {
+                cards: Some(Arc::new(config.cards.clone())),
                 events: events.clone(),
                 egress: egress.clone(),
                 config: config.web.clone(),
@@ -417,6 +440,7 @@ pub fn spawn(
         resolvers.push((
             Arc::new(crate::event::adapters::service::PlatformResolver {
                 web: WebResolver {
+                    cards: Some(Arc::new(config.cards.clone())),
                     egress: egress.clone(),
                     config: config.web.clone(),
                     events: Some(events),
@@ -429,6 +453,7 @@ pub fn spawn(
         resolvers.push((
             Arc::new(crate::event::service::CalendarResolver {
                 web: WebResolver {
+                    cards: Some(Arc::new(config.cards.clone())),
                     egress: egress.clone(),
                     config: config.web.clone(),
                     events: Some(events),
@@ -436,6 +461,23 @@ pub fn spawn(
             }),
             config.web.clone(),
         ));
+    }
+    for kind in crate::resolver::cards::KINDS {
+        if config.cards.resolver(kind).enabled {
+            resolvers.push((
+                Arc::new(crate::resolver::cards::CardResolver {
+                    kind,
+                    config: Arc::new(config.clone()),
+                    web: WebResolver {
+                        cards: Some(Arc::new(config.cards.clone())),
+                        events: None,
+                        egress: egress.clone(),
+                        config: config.web.clone(),
+                    },
+                }),
+                config.cards.resolver(kind).clone(),
+            ));
+        }
     }
     if config.pubky.enabled {
         resolvers.push((

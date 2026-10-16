@@ -6,6 +6,8 @@ pub mod change_api;
 pub mod changes;
 pub mod config;
 pub mod event;
+pub mod group_keys;
+pub mod groups;
 pub mod ingest;
 pub mod maintenance;
 pub mod model;

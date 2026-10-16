@@ -87,6 +87,17 @@ async fn main() -> Result<()> {
             tokio::select! { _=ingest_shutdown.changed()=>break,_=tokio::time::sleep(Duration::from_secs(ingest_state.config.poll_secs))=>{} }
         }
     });
+    let group_pool = pool.clone();
+    let group_config = config.queue.groups.clone();
+    let mut group_shutdown = shutdown_rx.clone();
+    let group_task = tokio::spawn(async move {
+        loop {
+            if let Err(error) = pinakes_core::groups::drain(&group_pool, &group_config, 25).await {
+                tracing::warn!(%error,"group reconciliation will retry");
+            }
+            tokio::select! {_=group_shutdown.changed()=>break,_=tokio::time::sleep(Duration::from_secs(2))=>{}}
+        }
+    });
     let maintenance_task = tokio::spawn(pinakes_core::maintenance::run(
         pool.clone(),
         config.grace_days,
@@ -121,6 +132,7 @@ async fn main() -> Result<()> {
     admin_task.await??;
     ingest_task.await?;
     maintenance_task.await?;
+    group_task.await?;
     while let Some(result) = workers.join_next().await {
         result?;
     }
