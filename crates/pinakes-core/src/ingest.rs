@@ -9,7 +9,15 @@ use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgPool};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const REJECT_REASONS: &[&str] = &["author", "label", "object_path", "timestamp", "event"];
+pub const REJECT_REASONS: &[&str] = &[
+    "author",
+    "label",
+    "object_path",
+    "timestamp",
+    "event",
+    "identity",
+    "uri",
+];
 fn rejection_reason(line: &Change, limits: &IngestConfig) -> Option<&'static str> {
     if !crate::nexus::valid_author(&line.author) {
         Some("author")
@@ -120,8 +128,13 @@ pub async fn apply(
         if !crate::model::valid_id(&line.resource_id)
             || pubky_resource_id::resource_id(&line.uri) != line.resource_id
         {
-            bail!("Nexus resource ID disagrees with the identity crate");
+            *rejected.entry("identity").or_default() += 1;
+            continue;
         }
+        let Ok((_, scheme)) = pubky_resource_id::normalize_uri(&line.uri) else {
+            *rejected.entry("uri").or_default() += 1;
+            continue;
+        };
         let unit_key = if matches!(line.kind, crate::nexus::Kind::Event) {
             format!(
                 "{}:{}",
@@ -144,8 +157,6 @@ pub async fn apply(
         }
         match line.op {
             Op::Put => {
-                let (_, scheme) =
-                    pubky_resource_id::normalize_uri(&line.uri).map_err(anyhow::Error::msg)?;
                 store::insert_resource(&mut tx, &line.resource_id, &line.uri, &scheme).await?;
                 if old.as_deref() != Some(&line.resource_id) {
                     sqlx::query("UPDATE resource SET final=false,refresh_at=now(),next_attempt_at=now(),dead_letter=false,attempts=0 WHERE id=$1 AND final AND resolver<>'geo' AND $2>resolved_at").bind(&line.resource_id).bind(timestamp(Some(line.at))?).execute(&mut *tx).await?;

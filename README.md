@@ -254,8 +254,10 @@ Denied web canaries are skipped, and each worker checks due canaries at most onc
 `[web]`/`[pubky] ttl_secs` supplies the parser document's initial TTL; scheduling is
 controlled by `[refresh]`. Conditional responses preserve accepted facts, but validators
 are not persisted for ordinary web/Pubky pages. Calendar validators commit atomically with parsed snapshots. Conditional headers are
-suppressed until an initial snapshot is saved and while missing keys or a held snapshot
-need confirmation. Otherwise a 304 renews TTL without an additional GET.
+suppressed until an initial snapshot is saved, while missing keys or a held/missing feed
+need confirmation, and when the persisted `horizon_end` is no more than half the forward
+window ahead of the observation clock. That periodic unconditional GET re-expands a
+static recurring feed; otherwise a 304 renews TTL without an additional GET.
 
 Public queries use a separate pool with five-second PostgreSQL statement/acquisition
 limits, and all `/v1` routes have a configurable direct-peer IP budget. Search revisions
@@ -291,15 +293,20 @@ rows. Calendar GETs use the normal pinned-IP/redirect policy, decompression and 
 and parsed on a blocking worker. A malformed VEVENT is skipped with a warning; exceeded work or feed caps reject the snapshot. Conditional requests pause during disappearance/hold confirmation; after confirmation, 304 responses renew the accepted snapshot without a second GET. HTTPS downgrade is disabled by default; `event.webcal_http_fallback` permits it only for `webcal://` and an explicit TLS-protocol mismatch, never `webcals://`, policy errors, certificate errors or timeouts. The two permitted TLS-protocol error messages are
 matched narrowly; a reqwest/rustls wording change fails closed.
 The default horizon is one month back/twelve forward, with 50 instances per series
-and 10,000 per feed. Before expansion, at most 10,000 event revisions and 8 MiB of
-serialized bounded event documents are retained (`max_event_revisions`,
-`max_event_document_bytes`). RSS/Atom/JSON event items are converted directly into
-bounded occurrence rows, with item, document-memory and parse-deadline checks.
+and 10,000 per feed. At most 10,000 event revisions are retained (`max_event_revisions`).
+The revision map and expanded occurrence set each have an 8 MiB document budget
+(`max_event_document_bytes`); database upserts encode at most 256 rows per chunk. RSS/Atom/JSON event items are converted directly into
+bounded occurrence rows, with item, document-memory and parse-deadline checks. JSON
+decoding first materialises one DOM from the capped body on the blocking pool. Mixed
+feeds keep dated items and warn about skipped undated entries. A feed-provided refresh
+interval is clamped to one hour through 30 days.
 See the example config for caps and individual path switches.
 
 Each `(feed, UID, recurrence_id)` keeps its own version, cancellation state and change
 history. Two distinct successful observations confirm disappearance; an over-50% loss
-holds the snapshot until a matching fresh fetch. Older/replayed snapshots are fenced.
+holds the snapshot until a matching fresh fetch. A former feed returning HTML 200 or HTTP 404/410 follows the same two-observation
+rule; confirmed missing parents hide their occurrence units from search while retaining
+direct history. A fresh valid body can restore them. Older/replayed snapshots are fenced.
 Ended instances freeze after 24 hours; horizon roll-off does not cancel them. A URI in
 an occurrence links only to a different existing resource on the same host or an
 explicitly configured `event.container.link_hosts` host, without an unsolicited fetch.

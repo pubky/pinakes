@@ -2157,3 +2157,281 @@ fn structured_feed_work_is_bounded() {
             .contains("item cap")
     );
 }
+
+struct ReviewSnapshots {
+    responses: Vec<(u16, String, Vec<u8>)>,
+    calls: Mutex<Vec<(bool, u16)>>,
+}
+#[async_trait::async_trait]
+impl Transport for ReviewSnapshots {
+    async fn get(
+        &self,
+        url: &url::Url,
+        addresses: &[std::net::SocketAddr],
+    ) -> anyhow::Result<Fetched> {
+        self.get_with(url, addresses, &Default::default()).await
+    }
+    async fn get_with(
+        &self,
+        url: &url::Url,
+        _: &[std::net::SocketAddr],
+        options: &pinakes_core::resolver::egress::FetchOptions,
+    ) -> anyhow::Result<Fetched> {
+        let mut calls = self.calls.lock().unwrap();
+        let (status, content_type, body) =
+            &self.responses[calls.len().min(self.responses.len() - 1)];
+        let conditional = options.validators.etag.is_some();
+        let status = if conditional && *status == 200 && content_type == "text/calendar" {
+            304
+        } else {
+            *status
+        };
+        calls.push((conditional, status));
+        Ok(Fetched {
+            url: url.clone(),
+            status,
+            content_type: content_type.clone(),
+            body: if status == 304 { vec![] } else { body.clone() },
+            validators: pinakes_core::resolver::egress::Validators {
+                etag: Some("static".into()),
+                ..Default::default()
+            },
+            retry_after_secs: 60,
+            location: None,
+        })
+    }
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn conditional_calendar_refreshes_horizon_with_advanced_clock(pool: PgPool) {
+    let base = Utc::now();
+    let body = cal(&event(&format!(
+        "UID:weekly\nDTSTART:{}\nRRULE:FREQ=WEEKLY\nSUMMARY:Weekly",
+        base.format("%Y%m%dT%H%M%SZ")
+    )));
+    let t = Arc::new(ReviewSnapshots {
+        responses: vec![(200, "text/calendar".into(), body.into_bytes())],
+        calls: Mutex::default(),
+    });
+    let egress = Egress::with_backends(
+        EgressConfig {
+            host_requests_per_second: 1000.0,
+            ..Default::default()
+        },
+        Arc::new(PublicDns),
+        t.clone(),
+    );
+    let service = pinakes_core::event::service::EventService {
+        pool: pool.clone(),
+        config: EventConfig {
+            months_forward: 2,
+            geocoding: false,
+            ..Default::default()
+        },
+        osm: Arc::new(OsmResolver::new(pool.clone(), OsmConfig::default()).unwrap()),
+    };
+    let uri = "https://example.org/static.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let fetched = service.fetch_at(&egress, uri, base).await.unwrap();
+    let mut doc = calendar::parse(uri, &fetched.body, &service.config, base).unwrap();
+    doc.container.as_mut().unwrap().validators = Some(fetched.validators);
+    let first_end = doc.container.as_ref().unwrap().horizon_end;
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let persisted: DateTime<Utc> =
+        sqlx::query_scalar("SELECT horizon_end FROM event_fetch WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(persisted.timestamp_millis(), first_end.timestamp_millis());
+    assert_eq!(
+        service
+            .fetch_at(&egress, uri, base + Duration::days(1))
+            .await
+            .unwrap()
+            .status,
+        304
+    );
+    let advanced = base + Duration::days(40);
+    let fetched = service.fetch_at(&egress, uri, advanced).await.unwrap();
+    assert_eq!(fetched.status, 200);
+    let mut renewed = calendar::parse(uri, &fetched.body, &service.config, advanced).unwrap();
+    renewed.fetched_at = doc.fetched_at + 1;
+    renewed.container.as_mut().unwrap().validators = Some(fetched.validators);
+    store::save_document(&pool, &id, 0, &renewed).await.unwrap();
+    let new: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM occurrence WHERE resource_id=$1 AND start_at>$2")
+            .bind(&id)
+            .bind(first_end)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        new > 0,
+        "the stable ETag must not starve future recurrence expansion"
+    );
+    assert_eq!(
+        service
+            .fetch_at(&egress, uri, advanced + Duration::days(1))
+            .await
+            .unwrap()
+            .status,
+        304
+    );
+    assert_eq!(
+        *t.calls.lock().unwrap(),
+        vec![(false, 200), (true, 304), (false, 200), (true, 304)]
+    );
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn vanished_feed_confirms_twice_and_recovers_through_queue(pool: PgPool) {
+    use pinakes_core::{config::QueueConfig, queue};
+    for status in [200, 404, 410] {
+        let uri = format!("https://example.org/vanished-{status}.ics");
+        let id = store::ensure_resource(&pool, &uri).await.unwrap();
+        let calendar = (200, "text/calendar".into(), future_calendar(5).into_bytes());
+        let missing = (
+            status,
+            "text/html".into(),
+            b"<html><title>Gone</title></html>".to_vec(),
+        );
+        let t = Arc::new(ReviewSnapshots {
+            responses: vec![calendar.clone(), missing.clone(), missing, calendar],
+            calls: Mutex::default(),
+        });
+        let resolver = WebResolver {
+            egress: Egress::with_backends(
+                EgressConfig {
+                    host_requests_per_second: 1000.0,
+                    ..Default::default()
+                },
+                Arc::new(PublicDns),
+                t.clone(),
+            ),
+            config: Default::default(),
+            events: Some(Arc::new(pinakes_core::event::service::EventService {
+                pool: pool.clone(),
+                config: EventConfig {
+                    geocoding: false,
+                    ..Default::default()
+                },
+                osm: Arc::new(OsmResolver::new(pool.clone(), OsmConfig::default()).unwrap()),
+            })),
+        };
+        for round in 0..4 {
+            sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+                .bind(&id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let job = queue::claim(&pool, "event", &QueueConfig::default())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(job.id, id);
+            queue::run_job(&pool, &resolver, &QueueConfig::default(), &job)
+                .await
+                .unwrap();
+            let cancelled: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM occurrence WHERE resource_id=$1 AND status='cancelled'",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let visible: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM search_unit WHERE id=$1 AND occurrence IS NOT NULL",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                cancelled,
+                if round == 2 { 5 } else { 0 },
+                "HTTP {status}, round {round}"
+            );
+            assert_eq!(
+                visible,
+                if round == 2 { 0 } else { 5 },
+                "HTTP {status}, round {round}"
+            );
+        }
+        assert_eq!(
+            *t.calls.lock().unwrap(),
+            vec![(false, 200), (true, status), (false, status), (false, 200)]
+        );
+    }
+}
+#[test]
+fn expanded_documents_and_mixed_feeds_obey_budgets() {
+    let cfg = EventConfig {
+        max_event_document_bytes: 5000,
+        ..Default::default()
+    };
+    let body = cal(&event(&format!(
+        "UID:large-weekly\nDTSTART:20261020T120000Z\nRRULE:FREQ=WEEKLY\nDESCRIPTION:{}",
+        "x".repeat(2048)
+    )));
+    assert!(
+        calendar::parse("https://example.org/f.ics", body.as_bytes(), &cfg, now())
+            .unwrap_err()
+            .to_string()
+            .contains("expanded event document memory cap")
+    );
+    for body in [
+        json!({"items":vec![json!({"id":"dated","start":"2026-10-20T18:00:00Z","content_text":"x".repeat(2048)});4]}).to_string(),
+        format!("<feed>{}</feed>",format!("<entry><id>dated</id><start>2026-10-20T18:00:00Z</start><description>{}</description></entry>","x".repeat(2048)).repeat(4))
+    ] {
+        assert!(calendar::structured_feed("https://example.org/f.ics",body.as_bytes(),&cfg,now()).unwrap_err().to_string().contains("document memory cap"));
+    }
+    for body in [
+        json!({"items":[{"id":"dated","start":"2026-10-20T18:00:00Z"},{"id":"undated"},{"id":"null","start":null},{"id":"blank","start":" "}]}).to_string(),
+        "<feed><entry><id>dated</id><start>2026-10-20T18:00:00Z</start></entry><entry><id>undated</id></entry></feed>".into()
+    ] {
+        let d=calendar::structured_feed("https://example.org/f.ics",body.as_bytes(),&cfg,now()).unwrap().unwrap();
+        assert_eq!(d.container.unwrap().occurrences.len(),1);
+        assert!(d.event.warnings.contains(&"undated_feed_item".into()));
+    }
+    let c = parse(&cal(&format!(
+        "REFRESH-INTERVAL:P365D\n{}",
+        event("UID:ttl\nDTSTART:20261020T120000Z")
+    )))
+    .container
+    .unwrap();
+    assert_eq!(c.feed_ttl, Some(30 * 86400));
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn chunked_occurrence_upsert_remains_one_snapshot(pool: PgPool) {
+    let uri = "https://example.org/chunked.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let body = cal(&(0..600)
+        .map(|i| {
+            event(&format!(
+                "UID:chunk-{i}\nDTSTART:{}\nSUMMARY:Chunk {i}",
+                (Utc::now() + Duration::hours(i + 24)).format("%Y%m%dT%H%M%SZ")
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join("\n"));
+    let d = dynamic_parse(uri, &body);
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM occurrence WHERE resource_id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 600);
+    let mut second = fresh(&d);
+    for row in &mut second.container.as_mut().unwrap().occurrences {
+        row.doc.name = Some("Updated in chunks".into());
+    }
+    store::save_document(&pool, &id, 0, &second).await.unwrap();
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM occurrence WHERE resource_id=$1 AND name='Updated in chunks'",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 600);
+}

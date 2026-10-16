@@ -313,6 +313,16 @@ or a flagged UTC fallback. All-day ends are exclusive and stay local dates acros
 `timezone_attribution` accompanies coordinate-derived zones; preserve it in display
 along with any OSM `attribution`. See the separately licensed data in `data/README.md`.
 
+Calendar validators commit with the parsed snapshot and its `horizon_end`. They are
+sent only after a saved snapshot, with no pending missing/held keys or missing parent,
+and with more than half the configured forward window remaining. Otherwise an
+unconditional GET obtains a body for confirmation or recurrence expansion. Eligible
+304s renew TTL; they neither confirm disappearance nor advance the expansion horizon.
+A prior feed returning HTML 200 or HTTP 404/410 counts as an empty observation. Two
+observations cancel mutable rows and mark the parent missing, hiding its units from
+search; retained history remains available at the occurrence route. A valid body can
+restore the feed. Mixed dated/undated RSS/Atom/JSON feeds keep dated items and warn.
+
 Calendar rows use SEQUENCE/LAST-MODIFIED and normalized content hashes; DTSTAMP,
 unknown vendor props and fetch noise do not create changes. Explicit cancellations
 apply immediately. Disappearance needs two fresh complete snapshots. Losing over half
@@ -336,3 +346,6 @@ start are skipped and
 counted as `pinakes_ingest_rejected_total{reason="event"}` after commit. An invalid
 feed `at` timestamp uses reason `timestamp`, for every reference kind. Unknown
 lifecycle strings are treated as absent and keep the otherwise valid reference.
+
+Identity mismatches and URI normalization failures are skipped with finite ingestion
+reasons `identity` and `uri`; valid siblings and the feed cursor still commit.

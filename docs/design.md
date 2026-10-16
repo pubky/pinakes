@@ -204,7 +204,11 @@ Review decisions: OSM object alias URLs keep separate resource identities but sh
 OSM derivative row; other OSM-host pages are denied by web. OSM missing objects use the
 configured 30-day negative cache after confirmation, rather than the generic short missing
 TTL: a deleted object stays deleted. Web/Pubky cadence comes from `[refresh]`, not parser
-`ttl_secs`. Conditional validators are not stored/sent in this version.
+`ttl_secs`. Ordinary web/Pubky validators are not persisted. Calendar validators and
+`horizon_end` commit with parsed snapshots. Conditional headers are suppressed until a
+snapshot exists, during missing-key/held/missing-parent confirmation, or when the stored
+horizon has at most half the forward window remaining. An unconditional GET then renews
+recurrence expansion even when the feed's ETag is unchanged; eligible 304s renew TTL.
 
 
 Implementation note (step 4A): generic event documents, calendar occurrences,

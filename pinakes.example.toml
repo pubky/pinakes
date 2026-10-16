@@ -43,7 +43,7 @@ max_occurrences_per_series = 50
 max_occurrences_per_feed = 10000
 max_components = 100000
 max_event_revisions = 10000
-max_event_document_bytes = 8388608 # retained bounded documents before expansion
+max_event_document_bytes = 8388608 # separate byte cap for revision and expanded occurrence documents
 max_recurrence_steps = 100000
 parse_timeout_ms = 2000
 months_back = 1
@@ -54,6 +54,7 @@ geocode_score = 0.8
 held_retry_secs = 60
 max_line_bytes = 65536
 max_date_values = 4096
+# Enabling accepts plaintext integrity under an active network attacker for webcal:// hosts.
 webcal_http_fallback = false
 
 [event.container]

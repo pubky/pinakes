@@ -898,7 +898,7 @@ pub fn parse(
             .value("REFRESH-INTERVAL")
             .or_else(|| cal.value("X-PUBLISHED-TTL"))
             .and_then(time::duration)
-            .map(|d| d.num_seconds().clamp(3600, 31536000) as u64),
+            .map(|d| d.num_seconds().clamp(3600, 30 * 86400) as u64),
         ..Default::default()
     };
     type EventRevision<'a> = (
@@ -1029,6 +1029,7 @@ pub fn parse(
     }
     let mut hashes: BTreeMap<usize, String> = BTreeMap::new();
     let mut result: BTreeMap<(String, String), Occurrence> = BTreeMap::new();
+    let mut expanded_bytes = 0usize;
     for ((uid, rid), (c, doc, start, seq, modified, volatile)) in &events {
         if !rid.is_empty() {
             continue;
@@ -1148,7 +1149,12 @@ pub fn parse(
             })();
             match occurrence {
                 Ok(Some(row)) => {
-                    result.insert((uid.clone(), row.recurrence_id.clone()), row);
+                    retain_occurrence(
+                        &mut result,
+                        row,
+                        &mut expanded_bytes,
+                        cfg.max_event_document_bytes,
+                    )?;
                 }
                 Ok(None) => (),
                 Err(_) => container.warnings.push("invalid_vevent_occurrence".into()),
@@ -1164,9 +1170,8 @@ pub fn parse(
                     || result.contains_key(&(uid.clone(), rid.clone())),
                 "calendar occurrence cap"
             );
-            result
-                .entry((uid.clone(), rid.clone()))
-                .or_insert_with(|| Occurrence {
+            if !result.contains_key(&(uid.clone(), rid.clone())) {
+                let row = Occurrence {
                     uid: uid.clone(),
                     recurrence_id: rid.clone(),
                     doc: doc.clone(),
@@ -1177,7 +1182,14 @@ pub fn parse(
                         .or_insert_with(|| content_hash(c))
                         .clone(),
                     volatile: *volatile,
-                });
+                };
+                retain_occurrence(
+                    &mut result,
+                    row,
+                    &mut expanded_bytes,
+                    cfg.max_event_document_bytes,
+                )?;
+            }
         }
     }
     let mut counts = BTreeMap::new();
@@ -1194,7 +1206,13 @@ pub fn parse(
             container.occurrences.len() < cfg.max_occurrences_per_feed,
             "calendar occurrence cap"
         );
-        row.doc = row.doc.bounded(&[])?;
+        row.doc = match row.doc.bounded(&[]) {
+            Ok(doc) => doc,
+            Err(_) => {
+                container.warnings.push("invalid_vevent_occurrence".into());
+                continue;
+            }
+        };
         container.occurrences.push(row);
     }
     container.warnings.sort();
@@ -1206,6 +1224,28 @@ pub fn parse(
     doc.event.warnings = container.warnings.clone();
     doc.container = Some(Box::new(container));
     doc.bounded(&[])
+}
+
+// Account replacements as well as new keys; a small revision map can otherwise amplify
+// into tens of MB when every recurrence clones a long description.
+fn retain_occurrence(
+    rows: &mut BTreeMap<(String, String), Occurrence>,
+    row: Occurrence,
+    retained: &mut usize,
+    cap: usize,
+) -> Result<()> {
+    let key = (row.uid.clone(), row.recurrence_id.clone());
+    let old = rows
+        .get(&key)
+        .map(|o| serde_json::to_vec(&o.doc).map(|v| v.len()))
+        .transpose()?
+        .unwrap_or(0);
+    *retained = retained
+        .saturating_sub(old)
+        .saturating_add(serde_json::to_vec(&row.doc)?.len());
+    ensure!(*retained <= cap, "expanded event document memory cap");
+    rows.insert(key, row);
+    Ok(())
 }
 
 /// RSS/Atom event extensions and Gancio's JSON Feed are containers with the same lifecycle.
@@ -1318,6 +1358,9 @@ pub fn structured_feed(
         });
         Ok(())
     };
+    // JSON decoding materialises one DOM before deadline/item checks. Its input is
+    // bounded by feed_body_bytes (32 MB by default); retained occurrence docs have a
+    // separate byte cap above. Parsing runs on the blocking pool.
     if let Ok(v) = serde_json::from_slice::<Value>(bytes) {
         if !v["items"].is_array() {
             return Ok(None);
@@ -1331,7 +1374,8 @@ pub fn structured_feed(
             let start = event
                 .get("start_datetime")
                 .or_else(|| event.get("start"))
-                .or_else(|| event.get("startTime"));
+                .or_else(|| event.get("startTime"))
+                .filter(|v| !v.is_null() && v.as_str().is_none_or(|s| !s.trim().is_empty()));
             if let Some(start) = start {
                 append(
                     page::string(&v["id"]),
@@ -1406,16 +1450,16 @@ pub fn structured_feed(
     if dated == 0 && items > 0 {
         return Ok(None);
     }
-    ensure!(
-        dated == items,
-        "feed contains undated entries; refusing partial snapshot"
-    );
+    if dated < items {
+        container.warnings.push("undated_feed_item".into());
+    }
     if items == 0 && !super::service::is_feed(uri) {
         return Ok(None);
     }
     let mut d = ResourceMeta::new(uri, "event", 86400);
     d.set_type("DataFeed");
     d.name = name;
+    d.event.warnings = container.warnings.clone();
     d.container = Some(Box::new(container));
     Ok(Some(d.bounded(&[])?))
 }

@@ -62,6 +62,9 @@ impl Resolver for WebResolver {
                 if let Some(doc) = events.container(uri, &fetched, deadline).await? {
                     return Ok(doc);
                 }
+                if let Some(doc) = events.disappeared(uri, fetched.status).await? {
+                    return Ok(doc);
+                }
             }
             if fetched.status == 304 {
                 return Err(super::NotModified.into());

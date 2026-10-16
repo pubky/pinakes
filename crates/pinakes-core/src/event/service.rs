@@ -7,9 +7,14 @@ use crate::{
         osm::OsmResolver,
     },
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sqlx::PgPool;
 use std::{sync::Arc, time::Duration};
+
+type StoredHorizon = (
+    Option<chrono::DateTime<chrono::Utc>>,
+    Option<chrono::DateTime<chrono::Utc>>,
+);
 
 pub struct EventService {
     pub pool: PgPool,
@@ -18,13 +23,27 @@ pub struct EventService {
 }
 impl EventService {
     pub async fn fetch(&self, egress: &Egress, uri: &str) -> Result<Fetched> {
+        self.fetch_at(egress, uri, chrono::Utc::now()).await
+    }
+    /// Explicit observation clock also lets recurrence refreshes be exercised without sleeping.
+    pub async fn fetch_at(
+        &self,
+        egress: &Egress,
+        uri: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Fetched> {
         let mapped = calendar::canonical_feed(uri);
         let feed_hint = is_feed(uri) && self.config.calendars;
         let validators = if feed_hint {
+            let end = now
+                .checked_add_months(chrono::Months::new(self.config.months_forward))
+                .context("calendar horizon overflow")?;
+            let refresh_before = now + (end - now) / 2;
             sqlx::query_scalar::<_, serde_json::Value>(
-                "SELECT validators FROM event_fetch WHERE resource_id=$1 AND last_snapshot_at IS NOT NULL AND held_keys IS NULL AND missing_keys='{}'::jsonb",
+                "SELECT validators FROM event_fetch WHERE resource_id=$1 AND last_snapshot_at IS NOT NULL AND held_keys IS NULL AND missing_keys='{}'::jsonb AND horizon_end>$2 AND EXISTS(SELECT 1 FROM resource r WHERE r.id=event_fetch.resource_id AND r.status='ok' AND r.missing_streak=0)",
             )
             .bind(crate::model::identity(uri)?.0)
+            .bind(refresh_before)
             .fetch_optional(&self.pool)
             .await?
             .and_then(|v| serde_json::from_value(v).ok())
@@ -55,6 +74,30 @@ impl EventService {
         // confirmation is complete. Otherwise a new ETag followed by perpetual 304s
         // would leave the first disappearance observation pending forever.
         Ok(fetched)
+    }
+    /// An established feed becoming HTML or missing is an empty snapshot, subject to the
+    /// same two-observation confirmation as missing keys. Transport/parse errors do not qualify.
+    pub async fn disappeared(&self, uri: &str, status: u16) -> Result<Option<ResourceMeta>> {
+        if !self.config.calendars || !matches!(status, 200 | 404 | 410) {
+            return Ok(None);
+        }
+        let horizon: Option<StoredHorizon> =
+            sqlx::query_as("SELECT coalesce(horizon_start,(SELECT min(start_at) FROM occurrence WHERE resource_id=event_fetch.resource_id)),coalesce(horizon_end,(SELECT max(start_at) FROM occurrence WHERE resource_id=event_fetch.resource_id)) FROM event_fetch WHERE resource_id=$1 AND last_snapshot_at IS NOT NULL")
+                .bind(crate::model::identity(uri)?.0).fetch_optional(&self.pool).await?;
+        let Some((start, end)) = horizon else {
+            return Ok(None);
+        };
+        let mut doc = ResourceMeta::new(uri, "event", 86400);
+        doc.status = crate::model::Status::Missing;
+        doc.container = Some(Box::new(super::Container {
+            // Upgraded feeds without a persisted horizon use their retained row bounds.
+            horizon_start: start.unwrap_or_else(chrono::Utc::now),
+            horizon_end: end.unwrap_or_else(chrono::Utc::now),
+            limits: self.config.container.clone(),
+            held_retry_secs: self.config.held_retry_secs,
+            ..Default::default()
+        }));
+        Ok(Some(doc))
     }
     pub async fn container(
         &self,

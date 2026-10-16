@@ -149,29 +149,43 @@ async fn epoch_headers_length_reset_and_transaction_rollback(pool: PgPool) {
         Some("second")
     );
     let mut bad = a.clone();
-    bad.resource_id.clear(); // Identity disagreement is a transactional feed error.
+    bad.resource_id.clear(); // Identity disagreement is rejected without stalling the batch.
     let saved = ingest::cursor(&pool, "fixture").await.unwrap();
+    let mut bad_uri = a.clone();
+    bad_uri.uri = "no scheme".into();
+    bad_uri.resource_id = pubky_resource_id::resource_id(&bad_uri.uri);
     let invalid = FeedPage {
         page: Changes {
-            lines: vec![a.clone(), bad],
-            next_cursor: 2,
+            lines: vec![a.clone(), bad, bad_uri],
+            next_cursor: 3,
         },
         epoch: None,
-        length: 2,
+        length: 3,
     };
     assert!(
         ingest::apply(&pool, "fixture", &saved, &invalid, &limits, &metrics)
             .await
-            .is_err()
+            .unwrap()
     );
-    assert_eq!(refs(&pool).await, 0);
-    assert_eq!(ingest::cursor(&pool, "fixture").await.unwrap().cursor, 0);
-    batch(&pool, vec![a], None).await;
+    assert_eq!(refs(&pool).await, 1);
+    assert_eq!(ingest::cursor(&pool, "fixture").await.unwrap().cursor, 3);
+    for reason in ["identity", "uri"] {
+        assert_eq!(
+            metrics.ingest_rejected.with_label_values(&[reason]).get(),
+            1
+        );
+    }
     assert!(
         !ingest::apply(&pool, "fixture", &saved, &invalid, &limits, &metrics)
             .await
             .unwrap()
     );
+    for reason in ["identity", "uri"] {
+        assert_eq!(
+            metrics.ingest_rejected.with_label_values(&[reason]).get(),
+            1
+        );
+    }
 }
 #[sqlx::test(migrations = "../../migrations")]
 async fn concurrent_pollers_only_commit_a_batch_once(pool: PgPool) {
@@ -283,8 +297,11 @@ async fn rejected_counts_follow_commit_and_concurrent_cursor_fencing(pool: PgPoo
     let saved = ingest::cursor(&pool, "fixture").await.unwrap();
     let mut rejected = change("https://example.org/rejected", "a", "/pub/a");
     rejected.author = "invalid".into();
-    let mut invalid = change("https://example.org/rollback", "a", "/pub/b");
-    invalid.resource_id.clear(); // Rejected-field metrics must not survive a rollback.
+    let invalid = change("https://example.org/rollback", "a", "/pub/b");
+    // Force an actual storage failure after the rejected line; identity failures are
+    // now intentionally skipped and must no longer be used to simulate rollback.
+    sqlx::query("ALTER TABLE resource ADD CONSTRAINT rollback_fixture CHECK(uri<>'https://example.org/rollback')")
+        .execute(&pool).await.unwrap();
     let mut page = FeedPage {
         page: Changes {
             lines: vec![rejected, invalid],

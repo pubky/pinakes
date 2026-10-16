@@ -177,24 +177,37 @@ pub async fn save(
     let accepted: Option<Value> = row.try_get("accepted")?;
     // A never-observed object can be missing without having been created or cancelled.
     let before = accepted.filter(|v| v.get("type").is_some() && row.get::<bool, _>("ever_existed"));
-    let mut doc = doc.clone();
+    // The transient container is serde-skipped: copy only the small parent document,
+    // without cloning thousands of already-prepared occurrence documents.
+    let mut doc: ResourceMeta = serde_json::from_value(serde_json::to_value(doc)?)?;
     if doc.status == Status::Missing {
         let fetched = chrono::DateTime::from_timestamp_millis(doc.fetched_at)
             .context("invalid fetch time")?;
         let last: Option<chrono::DateTime<chrono::Utc>> = row.try_get("last_missing_at")?;
         let streak: i32 = row.try_get("missing_streak")?;
-        let streak = if last == Some(fetched) {
+        let streak = if last.is_some_and(|last| last >= fetched) {
             streak
         } else {
             streak + 1
         };
-        sqlx::query("UPDATE resource SET missing_streak=$2,last_missing_at=$3 WHERE id=$1")
+        sqlx::query("UPDATE resource SET missing_streak=$2,last_missing_at=greatest(last_missing_at,$3) WHERE id=$1")
             .bind(id)
             .bind(streak)
             .bind(fetched)
             .execute(&mut *tx)
             .await?;
         if streak < 2 {
+            // Record the empty snapshot on this first parent observation too, so the
+            // next observation confirms both the parent and its mutable occurrences.
+            if let Some(plan) = &prepared {
+                if crate::event::storage::apply(&mut tx, id, plan).await? == Some(true) {
+                    if plan.exceeds_limit(0) {
+                        plan.append_summary(&mut tx, id, None).await?;
+                    } else {
+                        plan.append_changes(&mut tx, id).await?;
+                    }
+                }
+            }
             let retry = cfg.missing_ttl_secs.max(3600) as f64;
             sqlx::query("UPDATE resource SET lease_until=NULL,priority_at=NULL,attempts=0,last_error=NULL,refresh_at=now()+$2*interval '1 second',next_attempt_at=now()+$2*interval '1 second' WHERE id=$1").bind(id).bind(retry).execute(&mut *tx).await?;
             if source == "osm" {

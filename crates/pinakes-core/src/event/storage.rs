@@ -10,6 +10,7 @@ pub struct Prepared {
     last: Option<i64>,
     fetched_at: i64,
     horizon: chrono::DateTime<chrono::Utc>,
+    horizon_end: chrono::DateTime<chrono::Utc>,
     keys: Vec<String>,
     held: Option<Vec<String>>,
     missing: BTreeMap<String, u32>,
@@ -207,6 +208,7 @@ pub async fn prepare(
         last,
         fetched_at,
         horizon: container.horizon_start,
+        horizon_end: container.horizon_end,
         keys: keys.iter().cloned().collect(),
         held: None,
         missing: BTreeMap::new(),
@@ -351,16 +353,17 @@ pub async fn apply(
     if current != plan.last || current.is_some_and(|at| plan.fetched_at <= at) {
         return Ok(None);
     }
-    sqlx::query("UPDATE event_fetch SET last_snapshot_at=$2,keys=$3,held_keys=$4,missing_keys=$5,hold_count=$6,horizon_start=$7,retention_days=$8,validators=coalesce($9,validators) WHERE resource_id=$1").bind(id).bind(plan.fetched_at).bind(&plan.keys).bind(&plan.held).bind(json!(plan.missing)).bind(plan.holds as i32).bind(plan.horizon).bind(plan.retention_days as i32).bind(&plan.validators).execute(&mut **tx).await?;
+    sqlx::query("UPDATE event_fetch SET last_snapshot_at=$2,keys=$3,held_keys=$4,missing_keys=$5,hold_count=$6,horizon_start=$7,retention_days=$8,validators=coalesce($9,validators),horizon_end=$10 WHERE resource_id=$1").bind(id).bind(plan.fetched_at).bind(&plan.keys).bind(&plan.held).bind(json!(plan.missing)).bind(plan.holds as i32).bind(plan.horizon).bind(plan.retention_days as i32).bind(&plan.validators).bind(plan.horizon_end).execute(&mut **tx).await?;
     if !plan.applied {
         sqlx::query("INSERT INTO source_state(source,feed_held_total) VALUES('event',1) ON CONFLICT(source) DO UPDATE SET feed_held_total=source_state.feed_held_total+1").execute(&mut **tx).await?;
         return Ok(Some(false));
     }
-    if !plan.purge.is_empty() {
-        sqlx::query("DELETE FROM occurrence WHERE resource_id=$1 AND (uid,recurrence_id) IN(SELECT j->>'uid',j->>'rid' FROM unnest($2::jsonb[]) j)").bind(id).bind(&plan.purge).execute(&mut **tx).await?;
+    for chunk in plan.purge.chunks(256) {
+        sqlx::query("DELETE FROM occurrence WHERE resource_id=$1 AND (uid,recurrence_id) IN(SELECT j->>'uid',j->>'rid' FROM unnest($2::jsonb[]) j)").bind(id).bind(chunk).execute(&mut **tx).await?;
     }
-    if !plan.rows.is_empty() {
-        sqlx::query("INSERT INTO occurrence(resource_id,uid,recurrence_id,start_at,end_at,name,venue_id,status,url,event_resource_id,doc,point,sequence,modified,content_hash,volatile,supersedes) SELECT $1,j->>'uid',j->>'rid',(j->>'start')::timestamptz,(j->>'end')::timestamptz,j->>'name',j->>'venue_id',j->>'status',j->>'url',(SELECT id FROM resource WHERE id=j->>'link' AND id<>$1),j->'doc',CASE WHEN j->>'lat' IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint((j->>'lon')::float8,(j->>'lat')::float8),4326) END,(j->>'sequence')::bigint,(j->>'modified')::timestamptz,j->>'hash',(j->>'volatile')::boolean,j->>'supersedes' FROM unnest($2::jsonb[]) j ON CONFLICT(resource_id,uid,recurrence_id) DO UPDATE SET start_at=excluded.start_at,end_at=excluded.end_at,name=excluded.name,venue_id=excluded.venue_id,status=excluded.status,url=excluded.url,event_resource_id=excluded.event_resource_id,doc=excluded.doc,point=excluded.point,sequence=excluded.sequence,modified=excluded.modified,content_hash=excluded.content_hash,volatile=excluded.volatile,supersedes=coalesce(excluded.supersedes,occurrence.supersedes)").bind(id).bind(&plan.rows).execute(&mut **tx).await?;
+    // Bound the encoded jsonb[] buffer independently of the retained plan.
+    for chunk in plan.rows.chunks(256) {
+        sqlx::query("INSERT INTO occurrence(resource_id,uid,recurrence_id,start_at,end_at,name,venue_id,status,url,event_resource_id,doc,point,sequence,modified,content_hash,volatile,supersedes) SELECT $1,j->>'uid',j->>'rid',(j->>'start')::timestamptz,(j->>'end')::timestamptz,j->>'name',j->>'venue_id',j->>'status',j->>'url',(SELECT id FROM resource WHERE id=j->>'link' AND id<>$1),j->'doc',CASE WHEN j->>'lat' IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint((j->>'lon')::float8,(j->>'lat')::float8),4326) END,(j->>'sequence')::bigint,(j->>'modified')::timestamptz,j->>'hash',(j->>'volatile')::boolean,j->>'supersedes' FROM unnest($2::jsonb[]) j ON CONFLICT(resource_id,uid,recurrence_id) DO UPDATE SET start_at=excluded.start_at,end_at=excluded.end_at,name=excluded.name,venue_id=excluded.venue_id,status=excluded.status,url=excluded.url,event_resource_id=excluded.event_resource_id,doc=excluded.doc,point=excluded.point,sequence=excluded.sequence,modified=excluded.modified,content_hash=excluded.content_hash,volatile=excluded.volatile,supersedes=coalesce(excluded.supersedes,occurrence.supersedes)").bind(id).bind(chunk).execute(&mut **tx).await?;
     }
     Ok(Some(true))
 }

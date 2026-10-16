@@ -347,19 +347,25 @@ impl OsmResolver {
         if let Some(s) = &mut display_name {
             crate::model::truncate(s, 2048);
         }
-        let version: Option<String> = sqlx::query_scalar(r#"INSERT INTO osm_place(osm_type,osm_id,point,bbox,name,category,address,tags,display_name,type,type_path,doc,fetched_at,refresh_at,status,fetch_doc,versions,fetch_display_name)
-          VALUES($1,$2,CASE WHEN $3::float8 IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint($4,$3),4326) END,$5,$6,$7,$8,$9,$10,$11,$12,$13,to_timestamp($14::float8/1000),to_timestamp($14::float8/1000)+$15*interval '1 second',$16,$13,jsonb_build_object(md5(($13::jsonb-ARRAY['fetched_at','ttl_secs']::text[])::text),$13::jsonb-ARRAY['fetched_at','ttl_secs']::text[]),$10)
-          ON CONFLICT(osm_type,osm_id) DO UPDATE SET fetch_doc=excluded.fetch_doc,fetch_display_name=excluded.fetch_display_name,versions=osm_place.versions || excluded.versions,fetched_at=excluded.fetched_at,refresh_at=excluded.refresh_at
-          WHERE osm_place.fetched_at<=excluded.fetched_at RETURNING md5((fetch_doc-ARRAY['fetched_at','ttl_secs']::text[])::text)"#)
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(r#"INSERT INTO osm_place(osm_type,osm_id,point,bbox,name,category,address,tags,display_name,type,type_path,doc,fetched_at,refresh_at,status,fetch_doc,fetch_display_name)
+          VALUES($1,$2,CASE WHEN $3::float8 IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint($4,$3),4326) END,$5,$6,$7,$8,$9,$10,$11,$12,$13,to_timestamp($14::float8/1000),to_timestamp($14::float8/1000)+$15*interval '1 second',$16,$13,$10)
+          ON CONFLICT(osm_type,osm_id) DO UPDATE SET fetch_doc=excluded.fetch_doc,fetch_display_name=excluded.fetch_display_name,fetched_at=excluded.fetched_at,refresh_at=excluded.refresh_at
+          WHERE osm_place.fetched_at<=excluded.fetched_at"#)
           .bind(&id.osm_type).bind(id.id).bind(doc.location.as_ref().map(|p|p.lat)).bind(doc.location.as_ref().map(|p|p.lon)).bind(doc.bbox.map(|b|b.to_vec()))
-          .bind(&doc.name).bind(&doc.category).bind(json!(doc.address)).bind(json!(doc.attributes)).bind(display_name).bind(&doc.type_name).bind(&doc.type_path).bind(json!(doc)).bind(doc.fetched_at as f64).bind(doc.ttl_secs as f64).bind(doc.status.as_str()).fetch_optional(&self.pool).await?;
-        // A late response cannot overwrite newer facts; return the actually stored version.
-        match version {
-            Some(version) => Ok(version),
-            None => Ok(sqlx::query_scalar("SELECT md5((fetch_doc-ARRAY['fetched_at','ttl_secs']::text[])::text) FROM osm_place WHERE osm_type=$1 AND osm_id=$2")
-                .bind(&id.osm_type).bind(id.id).fetch_one(&self.pool).await?),
-        }
+          .bind(&doc.name).bind(&doc.category).bind(json!(doc.address)).bind(json!(doc.attributes)).bind(display_name).bind(&doc.type_name).bind(&doc.type_path).bind(json!(doc)).bind(doc.fetched_at as f64).bind(doc.ttl_secs as f64).bind(doc.status.as_str()).execute(&mut *tx).await?;
+        // Normalize the actually retained fetch, including on a late response or an
+        // upgraded cache. Hold the row lock until its version is registered, so every
+        // returned key names facts stored in versions and uses the change writer's hash.
+        let retained: Value = sqlx::query_scalar("SELECT coalesce(fetch_doc,doc) FROM osm_place WHERE osm_type=$1 AND osm_id=$2 FOR UPDATE")
+            .bind(&id.osm_type).bind(id.id).fetch_one(&mut *tx).await?;
+        let normalized = crate::changes::normalize(&serde_json::from_value(retained)?);
+        let version: String = sqlx::query_scalar("UPDATE osm_place SET versions=versions || jsonb_build_object(md5($3::jsonb::text),$3::jsonb) WHERE osm_type=$1 AND osm_id=$2 RETURNING md5($3::jsonb::text)")
+            .bind(&id.osm_type).bind(id.id).bind(normalized).fetch_one(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(version)
     }
+
     async fn fallback(&self, id: &OsmId) -> Result<Option<Value>> {
         if id.osm_type != "node" {
             return Ok(None);
@@ -643,6 +649,12 @@ mod tests {
         let id = parse_id("https://www.openstreetmap.org/node/123").unwrap();
         let mut doc = ResourceMeta::new(&id.uri(), "osm", 3600);
         doc.set_type("Place");
+        doc.osm_id = Some(id.key());
+        doc.aliases = vec![
+            "https://example.org/z".into(),
+            "https://example.org/a".into(),
+            "https://example.org/z".into(),
+        ];
         doc.attributes.insert("content_length".into(), "42".into());
         doc.event.warnings.push("fixture_warning".into());
         let version = resolver.save(&id, &doc, None).await.unwrap();
@@ -652,8 +664,26 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(saved["warnings"], json!(["fixture_warning"]));
-        assert_eq!(saved["attributes"]["content_length"], "42");
+        assert_eq!(saved, crate::changes::normalize(&doc));
+        let expected: String = sqlx::query_scalar("SELECT md5($1::jsonb::text)")
+            .bind(crate::changes::normalize(&doc))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(version, expected);
+        let resource = crate::store::ensure_resource(&pool, &id.uri())
+            .await
+            .unwrap();
+        crate::store::save_document(&pool, &resource, 0, &doc)
+            .await
+            .unwrap();
+        let resource_version: String =
+            sqlx::query_scalar("SELECT osm_version FROM resource WHERE id=$1")
+                .bind(resource)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(resource_version, version);
         assert!(saved.get("fetched_at").is_none());
         doc.fetched_at -= 1000;
         doc.name = Some("Stale".into());
