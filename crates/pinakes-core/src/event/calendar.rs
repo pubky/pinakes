@@ -938,7 +938,13 @@ pub fn parse(
                         p.params.insert("TZID".into(), tz.clone());
                     }
                 }
-                let (dated, stamp) = document(&derived, &cal, &base, &zones)?;
+                let (dated, stamp) = match document(&derived, &cal, &base, &zones) {
+                    Ok(d) => d,
+                    Err(_) => {
+                        container.warnings.push("invalid_vevent_zone".into());
+                        continue;
+                    }
+                };
                 doc.start = dated.start;
                 doc.end = dated.end;
                 doc.event.start_local = None;

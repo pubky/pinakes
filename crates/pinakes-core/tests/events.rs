@@ -1401,6 +1401,14 @@ async fn review_container_caps_patches_rotation_backoff_retention_and_labels(poo
     .unwrap();
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0]["occurrence_changes"], 5);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource_change")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1,
+        "burst is one feed-level change including the parent creation"
+    );
     let mut renamed = fresh(&d);
     renamed.container.as_mut().unwrap().occurrences[0].doc.name = Some("Renamed".into());
     store::save_document(&pool, &id, 0, &renamed).await.unwrap();
@@ -1813,4 +1821,30 @@ async fn review_upgrade_moves_calendar_keys_without_rewriting_migrations(pool: P
         0
     );
     pinakes_core::migrate(&pool).await.unwrap();
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn review_change_cap_includes_parent_metadata_change(pool: PgPool) {
+    let uri = "https://example.org/combined.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut d = dynamic_parse(uri, &future_calendar(2));
+    d.container.as_mut().unwrap().limits.max_changes = 2;
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let seq: i64 = sqlx::query_scalar("SELECT max(seq) FROM resource_change")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    d = fresh(&d);
+    d.name = Some("Changed feed name".into());
+    for o in &mut d.container.as_mut().unwrap().occurrences {
+        o.doc.name = Some("New title".into());
+    }
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let rows: Vec<Value> = sqlx::query_scalar("SELECT after FROM resource_change WHERE seq>$1")
+        .bind(seq)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["occurrence_changes"], 2);
 }

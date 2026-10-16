@@ -17,6 +17,7 @@ pub struct Prepared {
     purge: Vec<Value>,
     changes: Vec<PendingChange>,
     change_count: usize,
+    change_limit: usize,
     pub retry_secs: u64,
     pub dead_letter: bool,
     pub applied: bool,
@@ -206,6 +207,7 @@ pub async fn prepare(
         purge,
         changes: vec![],
         change_count: 0,
+        change_limit: container.limits.max_changes,
         retry_secs: retry,
         dead_letter: holds >= container.limits.max_holds,
         applied: !hold && last.is_none_or(|at| fetched_at > at),
@@ -309,18 +311,6 @@ pub async fn prepare(
         let (url, link) = links(&doc, id, source_host.as_deref(), &container.limits);
         plan.rows.push(json!({"uid":uid,"rid":rid,"start":doc.start,"end":doc.end,"name":doc.name,"venue_id":doc.event.venue.as_ref().and_then(|v|v.resource_id.as_deref()),"status":status,"url":url,"link":link,"doc":doc,"lat":doc.location.as_ref().map(|p|p.lat),"lon":doc.location.as_ref().map(|p|p.lon),"sequence":seq,"modified":modified,"hash":hash,"volatile":false}));
     }
-    if plan.change_count > container.limits.max_changes {
-        let count = plan.change_count;
-        plan.changes = vec![PendingChange {
-            before: None,
-            after: Some(json!({"occurrence_changes":count,"type_path":["Thing","Event"]})),
-            diff: changes::Diff {
-                class: "details",
-                fields: vec!["occurrence_changes".into()],
-            },
-            key: None,
-        }];
-    }
     Ok(plan)
 }
 pub async fn apply(
@@ -355,6 +345,24 @@ pub async fn apply(
     Ok(Some(true))
 }
 impl Prepared {
+    pub fn exceeds_limit(&self, additional: usize) -> bool {
+        self.change_count.saturating_add(additional) > self.change_limit
+    }
+    pub async fn append_summary(&self, tx: &mut Transaction<'_, Postgres>, id: &str) -> Result<()> {
+        changes::append(
+            tx,
+            id,
+            "event",
+            None,
+            Some(json!({"occurrence_changes":self.change_count,"type_path":["Thing","Event"]})),
+            changes::Diff {
+                class: "details",
+                fields: vec!["occurrence_changes".into()],
+            },
+            None,
+        )
+        .await
+    }
     fn push_change(&mut self, change: PendingChange, cap: usize) {
         self.change_count += 1;
         if self.changes.len() < cap {

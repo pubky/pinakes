@@ -236,13 +236,20 @@ pub async fn save(
         .transpose()?;
     let after = normalize(&doc);
     crate::store::write_document(&mut tx, id, generation, &doc).await?;
-    if let Some(plan) = prepared {
-        plan.append_changes(&mut tx, id).await?;
-    }
-    if let Some(diff) = diff(before.as_ref(), Some(&after))
-        .filter(|_| before.is_some() || doc.status != Status::Missing)
+    let diff = diff(before.as_ref(), Some(&after))
+        .filter(|_| before.is_some() || doc.status != Status::Missing);
+    if let Some(plan) = prepared
+        .as_ref()
+        .filter(|p| p.exceeds_limit(usize::from(diff.is_some())))
     {
-        append(&mut tx, id, &source, before, Some(after), diff, None).await?;
+        plan.append_summary(&mut tx, id).await?;
+    } else {
+        if let Some(plan) = prepared {
+            plan.append_changes(&mut tx, id).await?;
+        }
+        if let Some(diff) = diff {
+            append(&mut tx, id, &source, before, Some(after), diff, None).await?;
+        }
     }
     tx.commit().await?;
     Ok(())
