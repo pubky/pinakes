@@ -1769,6 +1769,297 @@ async fn round5_upgrade_replans_url_claimants_under_the_variant_rule(pool: PgPoo
     .unwrap());
 }
 
+async fn event_page(
+    pool: &PgPool,
+    uri: &str,
+    name: &str,
+    start: chrono::DateTime<chrono::Utc>,
+    claims: &[(&str, &str)],
+) -> String {
+    let id = store::ensure_resource(pool, uri).await.unwrap();
+    let mut d = ResourceMeta::new(uri, "web", 86400);
+    d.set_type("Event");
+    d.name = Some(name.into());
+    d.location = Some(Point {
+        lat: 47.0,
+        lon: 8.0,
+    });
+    d.start = Some(start);
+    for (basis, value) in claims {
+        group_keys::add(&mut d, basis, value);
+    }
+    store::save_document(pool, &id, 0, &d).await.unwrap();
+    id
+}
+async fn best(pool: &PgPool, member: &str) -> String {
+    sqlx::query_scalar("SELECT g.best_resource_id FROM \"group\" g JOIN group_unit u ON u.group_id=g.id WHERE u.resource_id=$1 LIMIT 1")
+        .bind(member)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round6_corroborated_copier_with_same_as_does_not_take_the_card(pool: PgPool) {
+    let cfg = groups::GroupConfig {
+        cross_container_occurrences: groups::CrossContainerOccurrences::Corroborated,
+        ..Default::default()
+    };
+    let start = (chrono::Utc::now() + chrono::Duration::days(3))
+        .with_nanosecond(0)
+        .unwrap();
+    let victim_uri = "https://venue.example/events/concert";
+    let victim = event_page(
+        &pool,
+        victim_uri,
+        "Community concert",
+        start,
+        &[("ics_uid", "concert-uid")],
+    )
+    .await;
+    // Another origin replicates UID, start, location and name, and claims the victim's page.
+    let copier = event_page(
+        &pool,
+        "https://copier.example/concert",
+        "Community concert",
+        start,
+        &[("ics_uid", "concert-uid"), ("same_as", victim_uri)],
+    )
+    .await;
+    assert!(groups::reconcile(&pool, &copier, &cfg).await);
+    assert_eq!(gid(&pool, &copier).await, gid(&pool, &victim).await);
+    for author in ["a", "b", "c", "d"] {
+        tag(&pool, &copier, &author.repeat(52), "concert").await;
+    }
+    assert_eq!(best(&pool, &victim).await, victim);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round6_occurrence_naming_its_event_page_ranks_below_the_page(pool: PgPool) {
+    use pinakes_core::{config::EventConfig, event::calendar};
+    let cfg = groups::GroupConfig {
+        cross_container_occurrences: groups::CrossContainerOccurrences::Corroborated,
+        ..Default::default()
+    };
+    let date = (chrono::Utc::now() + chrono::Duration::days(2))
+        .with_nanosecond(0)
+        .unwrap();
+    let page = event_page(
+        &pool,
+        "https://organiser.example/events/meetup",
+        "Meetup",
+        date,
+        &[("ics_uid", "meetup-uid")],
+    )
+    .await;
+    let feed = "https://calendar.example/meetups.ics";
+    let id = store::ensure_resource(&pool, feed).await.unwrap();
+    let text = format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:meetup-uid\r\nDTSTART:{}\r\nSUMMARY:Meetup\r\nGEO:47;8\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n", date.format("%Y%m%dT%H%M%SZ"));
+    let d = calendar::parse(
+        feed,
+        text.as_bytes(),
+        &EventConfig::default(),
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    // The occurrence links its event page, which gives its unit a canonical claim on it.
+    sqlx::query("UPDATE occurrence SET event_resource_id=$1 WHERE resource_id=$2")
+        .bind(&page)
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(groups::reconcile(&pool, &id, &cfg).await);
+    groups::drain(&pool, &cfg, 100).await.unwrap();
+    let group: String = sqlx::query_scalar(
+        "SELECT group_id FROM group_unit WHERE resource_id=$1 AND occurrence_key<>''",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(gid(&pool, &page).await, group);
+    for author in ["a", "b", "c"] {
+        tag(&pool, &id, &author.repeat(52), "meetup").await;
+    }
+    assert_eq!(best(&pool, &page).await, page);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round6_registry_trust_needs_the_records_own_edition_and_a_real_landing_host(pool: PgPool) {
+    use pinakes_core::resolver::cards;
+    // An editor lists another edition (E2) in the victim record's identifiers.
+    let mut record: Value = serde_json::from_slice(include_bytes!(
+        "fixtures/registry/openlibrary-9780140328721.json"
+    ))
+    .unwrap();
+    record["ISBN:9780140328721"]["identifiers"]["openlibrary"] = json!(["OL7353617M", "OL999M"]);
+    let ol = recorded_json(
+        "https://openlibrary.org/api/books?bibkeys=ISBN:9780140328721&format=json&jscmd=data",
+        &serde_json::to_vec(&record).unwrap(),
+    );
+    let d = cards::parse_isbn("isbn:9780140328721", "9780140328721", &ol, 86400).unwrap();
+    let targets: Vec<_> = d
+        .group_keys
+        .iter()
+        .filter(|k| k.basis == "registry")
+        .filter_map(|k| k.target.clone())
+        .collect();
+    assert!(
+        targets.iter().all(|t| t.contains("/books/OL7353617M")),
+        "{targets:?}"
+    );
+    assert!(!targets.is_empty());
+    let isbn = store::ensure_resource(&pool, "isbn:9780140328721")
+        .await
+        .unwrap();
+    store::save_document(&pool, &isbn, 0, &d).await.unwrap();
+    let e2 = page(
+        &pool,
+        "https://openlibrary.org/books/OL999M",
+        "Other edition",
+        &[],
+    )
+    .await;
+    assert_ne!(gid(&pool, &e2).await, gid(&pool, &isbn).await);
+    let own = page(
+        &pool,
+        "https://openlibrary.org/books/OL7353617M",
+        "Edition",
+        &[],
+    )
+    .await;
+    assert_eq!(gid(&pool, &own).await, gid(&pool, &isbn).await);
+
+    // A registrant landing URL on any doi.org host is the proxy, not a landing page.
+    let csl = recorded_json(
+        "https://api.crossref.org/v1/works/x/transform",
+        &serde_json::to_vec(&json!({"type":"article-journal","title":"Proxy",
+            "resource":{"primary":{"URL":"https://www.doi.org/landing"}}}))
+        .unwrap(),
+    );
+    let d = cards::parse_doi("doi:10.5555/proxy", &csl, 86400).unwrap();
+    assert!(d.group_keys.iter().all(|k| k.basis != "registry"));
+    // A card stored before that check keeps the key in its document, but grouping drops it.
+    let card = store::ensure_resource(&pool, "doi:10.5555/proxy")
+        .await
+        .unwrap();
+    let mut legacy = ResourceMeta::new("doi:10.5555/proxy", "doi", 86400);
+    legacy.name = Some("Proxy".into());
+    group_keys::add(&mut legacy, "registry", "https://www.doi.org/landing");
+    store::save_document(&pool, &card, 0, &legacy)
+        .await
+        .unwrap();
+    let landing = page(&pool, "https://www.doi.org/landing", "Proxy page", &[]).await;
+    assert_ne!(gid(&pool, &landing).await, gid(&pool, &card).await);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource_group WHERE resource_id=$1 AND basis='registry'"
+        )
+        .bind(&card)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round6_encoded_separators_never_make_a_same_page_variant(pool: PgPool) {
+    let owner_uri = "https://shared.example/article";
+    let owner = page(&pool, owner_uri, "Owner", &[("canonical", owner_uri)]).await;
+    let key = format!("url:{owner}");
+    let squat = &[("canonical", owner_uri)];
+    for (path, variant) in [
+        ("article/print", true),
+        ("article/..%2Fevil", false),
+        ("article/%2e%2e/evil", false),
+        ("article/%2E%2E%2Fevil", false),
+        ("article/a%5Cb", false),
+        ("amp/article", true),
+    ] {
+        let id = page(
+            &pool,
+            &format!("https://shared.example/{path}"),
+            path,
+            squat,
+        )
+        .await;
+        let counted: bool = sqlx::query_scalar(
+            "SELECT counted FROM resource_group WHERE resource_id=$1 AND key=$2",
+        )
+        .bind(&id)
+        .bind(&key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(counted, !variant, "{path}");
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round6_upgrade_refetches_isbn_cards_and_replans_registry_and_encoded_claimants(
+    pool: PgPool,
+) {
+    let mut ids = Vec::new();
+    for (uri, source) in [
+        ("isbn:9780140328721", "isbn"),
+        ("doi:10.5555/legacy", "doi"),
+        ("https://example.org/plain", "web"),
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, source, 86400);
+        d.name = Some("Card".into());
+        if source != "web" {
+            group_keys::add(&mut d, "registry", "https://openlibrary.org/books/OL1M");
+        }
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.push(id);
+    }
+    let encoded = page(
+        &pool,
+        "https://shared.example/article/..%2Fevil",
+        "Encoded",
+        &[("canonical", "https://shared.example/article")],
+    )
+    .await;
+    sqlx::query("UPDATE resource SET lease_until=now()+interval '1 hour',next_attempt_at=now()+interval '30 days' WHERE id=ANY($1)").bind(&ids).execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM group_dirty")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before: Vec<i64> = sqlx::query_scalar(
+        "SELECT generation FROM resource WHERE id=ANY($1) ORDER BY array_position($1,id)",
+    )
+    .bind(&ids)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/202610160034_claimant_ranking_and_registry_pages.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let after: Vec<(i64, bool, f64)> = sqlx::query_as("SELECT generation,lease_until IS NULL,extract(epoch FROM(next_attempt_at-now()))::float8 FROM resource WHERE id=ANY($1) ORDER BY array_position($1,id)").bind(&ids).fetch_all(&pool).await.unwrap();
+    // Only the ISBN card refetches, within the hour.
+    assert_eq!(after[0].0, before[0] + 1);
+    assert!(after[0].1 && (-1.0..3600.0).contains(&after[0].2));
+    for (row, generation) in after.iter().zip(&before).skip(1) {
+        assert_eq!(row.0, *generation);
+        assert!(row.2 > 86400.0);
+    }
+    let mut dirty: Vec<String> = sqlx::query_scalar("SELECT resource_id FROM group_dirty")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    dirty.sort();
+    let mut expected = vec![ids[0].clone(), ids[1].clone(), encoded];
+    expected.sort();
+    assert_eq!(dirty, expected);
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn round4_upgrade_requeues_identifier_cards_without_registry_pages(pool: PgPool) {
     let mut ids = Vec::new();

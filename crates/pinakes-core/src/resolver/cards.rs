@@ -505,33 +505,34 @@ pub fn parse_isbn(uri: &str, number: &str, f: &Fetched, ttl: u64) -> Result<Reso
         }
     }
     // Open Library names the edition page; Goodreads/LibraryThing ids stay identifiers only.
-    let editions = v
-        .pointer("/identifiers/openlibrary")
-        .and_then(Value::as_array)
+    // Records are wiki-editable, so only the record's own edition key (and its slugged URL)
+    // names a landing page; other listed edition ids could be any book's.
+    let own = v["key"].as_str().filter(|k| {
+        k.strip_prefix("/books/OL")
+            .and_then(|id| id.strip_suffix('M'))
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    });
+    let slugged = v["url"].as_str().filter(|u| {
+        own.zip(Url::parse(u).ok())
+            .is_some_and(|(key, u)| u.path() == key || u.path().starts_with(&format!("{key}/")))
+    });
+    let pages = [own, slugged]
         .into_iter()
         .flatten()
-        .take(4)
-        .filter_map(Value::as_str)
-        .filter(|id| {
-            id.len() > 3
-                && id.starts_with("OL")
-                && id.ends_with('M')
-                && id[2..id.len() - 1].bytes().all(|b| b.is_ascii_digit())
-        })
-        .map(|id| format!("/books/{id}"));
-    let pages = [
-        v["url"].as_str(),
-        v["key"].as_str().filter(|k| k.starts_with("/books/")),
-    ]
-    .into_iter()
-    .flatten()
-    .map(str::to_owned)
-    .chain(editions)
-    .collect::<Vec<_>>();
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     for page in pages {
         registry_url(&mut d, &f.url, &page);
     }
     d.bounded(web::ATTRIBUTES)
+}
+/// URLs on the DOI proxy's registrable domain (doi.org, dx.doi.org, www.doi.org, ...).
+pub fn registry_proxy(url: &str) -> bool {
+    Url::parse(url).ok().is_some_and(|u| {
+        u.host_str()
+            .map(|h| h.trim_end_matches('.').to_ascii_lowercase())
+            .is_some_and(|h| psl::domain_str(&h) == Some("doi.org"))
+    })
 }
 /// A landing page named by the identifier registry is authoritative grouping evidence for
 /// that identifier. Legacy `http` registrations also claim the `https` form publishers serve.
@@ -539,11 +540,8 @@ fn registry_url(d: &mut ResourceMeta, base: &Url, s: &str) {
     let Some(url) = web::origin_url(base, s) else {
         return;
     };
-    // The DOI proxy is the identifier itself, not a publisher landing page.
-    if Url::parse(&url)
-        .ok()
-        .is_some_and(|u| matches!(u.host_str(), Some("doi.org" | "dx.doi.org")))
-    {
+    // The DOI proxy (any doi.org host) is the identifier itself, not a publisher landing page.
+    if registry_proxy(&url) {
         return;
     }
     crate::group_keys::add(d, "registry", &url);

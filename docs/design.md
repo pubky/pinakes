@@ -130,8 +130,10 @@ ICS UID matching is off by default (`groups.cross_container_occurrences = "off"`
 The opt-in `"corroborated"` mode requires two points within 500 m, starts within
 300 s, and pg_trgm similarity of normalized names ≥ 0.5. This restores the §5.3
 Luma/organiser event case at the price of being copyable by a determined publisher.
-The harm bound is the automatic best-member ordering: claimants below the member they
-name, then distinct taggers descending, references descending, admission time ascending,
+The harm bound is the automatic best-member ordering. A copier that joins with a sameAs or
+canonical naming the victim's page ranks below that page, whatever its origin; only a
+sameAs to an identifier-registry resource on another origin, or one the named page returns,
+is exempt. After that come distinct taggers descending, references descending, admission time ascending,
 then completeness. Curated best members remain pinned. Other typed IDs use publisher
 boundaries from `data/multi-tenant-hosts.json`, with an operator-configurable replacement
 path.
@@ -263,8 +265,9 @@ self-claims cannot nominate a new best member. A landing page named by the DOI o
 registry meets the publisher page's own URI or same-origin canonical, so "the paper on
 doi.org and on the journal's site" groups, but registrants choose their landing URL: a
 registry key naming a page on another site merges only when that page cites the identifier
-back (its own `doi:`/`isbn:` key from meta or JSON-LD). Open Library edition pages are the
-registry's own site and need no citation. The named page always outranks the identifier card. Only ICS UID is scoped to exact
+back (its own `doi:`/`isbn:` key from head meta or JSON-LD). Open Library edition pages are
+the registry's own site and need no citation, but only the record's own edition: other
+edition ids listed in a wiki-editable record are ignored. The named page always outranks the identifier card. Only ICS UID is scoped to exact
 start; occurrence joins additionally require starts within five minutes. Default
 component/per-origin caps are 256/16. New excess joiners are ignored while admitted
 members remain, and located members must agree within 500 m unless curated.

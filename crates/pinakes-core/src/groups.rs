@@ -143,8 +143,15 @@ fn same_page_variant(own: &str, target: &str) -> bool {
         a.path().trim_end_matches('/'),
         b.path().trim_end_matches('/'),
     );
+    // A segment that decodes to a separator or dot segment (`/article/..%2Fevil`) may be
+    // served as another path entirely, so such a claimant is never a variant.
+    let traverses = pa.split('/').any(|s| {
+        let decoded = percent_encoding::percent_decode_str(s).decode_utf8_lossy();
+        decoded.contains(['/', '\\']) || decoded == "." || decoded == ".."
+    });
     a.host_str() == b.host_str()
         && pb.len() > 1
+        && !traverses
         && (pa == pb
             || pa.starts_with(&format!("{pb}/"))
             || VARIANT_PREFIXES
@@ -199,8 +206,14 @@ fn evidence(
     let stored: Vec<crate::group_keys::GroupKey> =
         serde_json::from_value(row["keys"].clone()).unwrap_or_default();
     for k in stored.into_iter().filter(crate::group_keys::valid_stored) {
-        // Only identifier registries name landing pages; a page cannot claim that basis.
-        if k.basis == "registry" && !matches!(row["source"].as_str(), Some("isbn" | "doi")) {
+        // Only identifier registries name landing pages; a page cannot claim that basis, and
+        // the DOI proxy itself is never a landing page (cards stored before that check).
+        if k.basis == "registry"
+            && (!matches!(row["source"].as_str(), Some("isbn" | "doi"))
+                || k.target
+                    .as_deref()
+                    .is_some_and(crate::resolver::cards::registry_proxy))
+        {
             continue;
         }
         if let Some(url) = k.key.strip_prefix("url:").filter(|s| s.starts_with("http")) {
@@ -752,8 +765,11 @@ async fn plan(
                         .filter(|k| k.starts_with("doi:") || k.starts_with("isbn:"))
                         .any(|k| claims[b].contains(k))
                 };
+                // Only Open Library's own edition pages are exempt: it builds them from its key.
                 let vouched = |e: &Edge, a: usize, b: usize| {
-                    e.basis != "registry" || url_owned(e) || cites(a, b)
+                    e.basis != "registry"
+                        || (url_owned(e) && e.origin == "openlibrary.org")
+                        || cites(a, b)
                 };
                 let corroborated = cfg.cross_container_occurrences
                     == CrossContainerOccurrences::Corroborated

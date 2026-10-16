@@ -480,10 +480,11 @@ URL claims bridge only within a registrable domain or with a reciprocal backlink
 Cross-domain typed identifiers require verified evidence from both members or
 reciprocity; unverified self-claims do not merge. DOI and ISBN cards record the
 landing pages their registries name (Crossref `resource.primary.URL`, a non-proxy CSL
-`URL`, `text/html` links; the Open Library edition page) as trusted `registry` URL
+`URL`, `text/html` links; the Open Library record's own edition page) as trusted `registry` URL
 keys, so the publisher page groups with its identifier when the page's own URI or its
 same-origin canonical is that landing page and the page cites the identifier back
-(`citation_doi`, `prism.doi`, `dc.identifier`, `citation_isbn` meta, or a JSON-LD
+(`citation_doi`, `prism.doi`, `dc.identifier`, `citation_isbn` meta in the document head,
+or a JSON-LD
 identifier/sameAs; Open Library's own edition pages are exempt). Registrants choose their
 landing URL, so a registration naming someone else's page does not merge into it, and the
 named page always outranks the identifier card. A page naming a DOI it does not own never
