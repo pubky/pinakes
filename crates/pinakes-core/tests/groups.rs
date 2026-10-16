@@ -1673,6 +1673,103 @@ async fn round5_upgrade_splits_one_sided_registry_merges(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
+async fn round5_only_listed_leading_segments_make_same_page_variants(pool: PgPool) {
+    let owner_uri = "https://shared.example/article";
+    let owner = page(&pool, owner_uri, "Owner", &[("canonical", owner_uri)]).await;
+    let key = format!("url:{owner}");
+    let counted = |id: String| {
+        let (pool, key) = (pool.clone(), key.clone());
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT counted FROM resource_group WHERE resource_id=$1 AND key=$2",
+            )
+            .bind(id)
+            .bind(key)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let squat = &[("canonical", owner_uri)];
+    for (path, variant) in [
+        ("amp/article", true),
+        ("m/article", true),
+        ("mobile/article", true),
+        ("article/print", true),
+        ("article?output=amp", true),
+        ("~evil/article", false),
+        ("blog/article", false),
+        ("xarticle", false),
+    ] {
+        let id = page(
+            &pool,
+            &format!("https://shared.example/{path}"),
+            path,
+            squat,
+        )
+        .await;
+        assert_eq!(counted(id).await, !variant, "{path}");
+    }
+    // Counted squatters on distinct paths cross the threshold and are demoted.
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource_group WHERE key=$1 AND demoted"
+        )
+        .bind(&key)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        3
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round5_upgrade_replans_url_claimants_under_the_variant_rule(pool: PgPool) {
+    let owner_uri = "https://shared.example/article";
+    let owner = page(&pool, owner_uri, "Owner", &[("canonical", owner_uri)]).await;
+    let evil = page(
+        &pool,
+        "https://shared.example/~evil/article",
+        "Evil",
+        &[("canonical", owner_uri)],
+    )
+    .await;
+    // The 0031 backfill and the round-4 suffix rule left this claim mis-flagged.
+    sqlx::query("UPDATE resource_group SET counted=false WHERE resource_id=$1")
+        .bind(&evil)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM group_dirty")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/202610160033_variant_claims_replan.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let dirty: Vec<String> =
+        sqlx::query_scalar("SELECT resource_id FROM group_dirty ORDER BY resource_id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(dirty, std::slice::from_ref(&evil));
+    groups::drain(&pool, &Config::default().groups, 10)
+        .await
+        .unwrap();
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT counted FROM resource_group WHERE resource_id=$1 AND key=$2"
+    )
+    .bind(&evil)
+    .bind(format!("url:{owner}"))
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+}
+
+#[sqlx::test(migrations = "../../migrations")]
 async fn round4_upgrade_requeues_identifier_cards_without_registry_pages(pool: PgPool) {
     let mut ids = Vec::new();
     for (uri, source) in [

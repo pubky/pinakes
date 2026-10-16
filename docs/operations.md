@@ -26,7 +26,11 @@ validated sameAs evidence, or an entirely permanent HTTP redirect chain contribu
 A URL key claimed by more than two resources on distinct paths within one publisher is
 demoted, but only for non-authoritative claimants: a page's own URI and registry-named
 landing pages are never demoted, so squatting pages cannot take a page's identity. Same-page
-variants (AMP, print, query variants whose path contains the target path) are not counted.
+variants are not counted: the same path (query variants), a path extending the target
+(`/article/print`) or the target behind a listed leading segment (`/amp`, `/m`, `/mobile`).
+Any other path ending in the target (`/~user/article`) is a claimant. Migration 0033 re-plans
+every resource holding a non-authoritative URL claim once so stored flags follow this rule
+(it also settles 0031's backfill, which counted variants until each resource re-planned).
 Demotion is recomputed from live claims on every reconciliation; demoted claims stay stored
 (hidden from planning), and removing a claim (document change or orphan deletion) re-queues
 the remaining demoted claimants, so groups heal without operator action. There is no

@@ -130,8 +130,11 @@ struct Unit {
     occurrence: Option<Value>,
     event: Option<Value>,
 }
-/// The same page under another URL (AMP, print, a query variant) naming its canonical is
-/// not a competing claimant. A homepage canonical never qualifies.
+/// Leading segments that serve the same article on another path (`/amp/article`).
+const VARIANT_PREFIXES: [&str; 3] = ["/amp", "/m", "/mobile"];
+/// The same page under another URL (AMP, mobile, print, a query variant) naming its
+/// canonical is not a competing claimant. A homepage canonical never qualifies, and only
+/// listed leading segments count: `/~evil/article` is a claimant of `/article`.
 fn same_page_variant(own: &str, target: &str) -> bool {
     let (Ok(a), Ok(b)) = (url::Url::parse(own), url::Url::parse(target)) else {
         return false;
@@ -142,7 +145,11 @@ fn same_page_variant(own: &str, target: &str) -> bool {
     );
     a.host_str() == b.host_str()
         && pb.len() > 1
-        && (pa == pb || pa.starts_with(&format!("{pb}/")) || pa.ends_with(pb))
+        && (pa == pb
+            || pa.starts_with(&format!("{pb}/"))
+            || VARIANT_PREFIXES
+                .iter()
+                .any(|p| pa.strip_prefix(p) == Some(pb)))
 }
 /// Stored URL claims whose target is the same page as the claimant's own URI.
 fn variants(row: &Value) -> BTreeSet<String> {
