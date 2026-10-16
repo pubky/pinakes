@@ -42,7 +42,7 @@ async fn round2_paginated_nostr_and_inconclusive_queue_retry(pool: PgPool) {
         (200, json!([wanted.clone()])),
     ]);
     assert_eq!(
-        nip52::lookup(&target, &egress, &Default::default())
+        Box::pin(nip52::lookup(&target, &egress, &Default::default()))
             .await
             .unwrap()
             .unwrap()
@@ -55,15 +55,19 @@ async fn round2_paginated_nostr_and_inconclusive_queue_retry(pool: PgPool) {
         (200, json!(vec![other.clone(); 100])),
         (200, json!([wanted])),
     ]);
-    assert!(nip52::lookup(&target, &egress, &Default::default())
-        .await
-        .unwrap()
-        .is_some());
+    assert!(
+        Box::pin(nip52::lookup(&target, &egress, &Default::default()))
+            .await
+            .unwrap()
+            .is_some()
+    );
     assert!(t.seen.lock().unwrap()[2].0.contains("until=200"));
     let (egress, _) = mock_egress(vec![(404, Value::Null), (200, json!([]))]);
-    assert!(nip52::lookup(&target, &egress, &Default::default())
-        .await
-        .is_err());
+    assert!(
+        Box::pin(nip52::lookup(&target, &egress, &Default::default()))
+            .await
+            .is_err()
+    );
     let mut cfg = EventConfig::default();
     cfg.adapters.max_indexer_pages = 1;
     let (egress, transport) = mock_egress(vec![(200, json!(vec![other; 100])), (200, json!([]))]);
@@ -78,7 +82,7 @@ async fn round2_paginated_nostr_and_inconclusive_queue_retry(pool: PgPool) {
         .await
         .unwrap()
         .unwrap();
-    pinakes_core::queue::run_job(&pool, &r, &q, &job)
+    Box::pin(pinakes_core::queue::run_job(&pool, &r, &q, &job))
         .await
         .unwrap();
     let state: (i32, bool, String) =

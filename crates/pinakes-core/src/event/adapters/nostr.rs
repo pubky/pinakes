@@ -180,7 +180,8 @@ pub async fn lookup(target: &Target, egress: &Egress, cfg: &EventConfig) -> Resu
         }
         Ok(Vec::new())
     };
-    tokio::time::timeout(budget, lookup_inner(target, egress, cfg, relay))
+    // Keep the paginated indexer/relay state machine off callers' debug stacks.
+    tokio::time::timeout(budget, Box::pin(lookup_inner(target, egress, cfg, relay)))
         .await
         .map_err(|_| crate::resolver::RetryLater {
             class: "inconclusive",
