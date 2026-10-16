@@ -2156,12 +2156,13 @@ async fn round7_upgrade_refetches_resources_with_non_authoritative_canonicals(po
 async fn round8_upgrade_refetches_every_holder_of_a_foreign_canonical_or_same_as(pool: PgPool) {
     let mut ids = Vec::new();
     for (uri, claims) in [
-        // Body JSON-LD sameAs only (0035 skipped these).
+        // Body JSON-LD sameAs only: 0036's new coverage (0035 keyed on canonical).
         (
             "https://a.example/post",
             vec![("same_as", "https://elsewhere.example/x")],
         ),
-        // A same-origin body canonical: trusted, so 0035 skipped it too.
+        // A same-origin body canonical (not trusted: only own-URI and registry keys are; 0035
+        // already refetched it, and 0036 deliberately covers it again).
         (
             "https://b.example/post",
             vec![("canonical", "https://b.example/other")],

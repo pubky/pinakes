@@ -564,6 +564,11 @@ fn entity_priority(v: &Value) -> u8 {
         .or_else(|| v.get("@graph"))
         .map(entity_priority)
         .unwrap_or(0);
+    type_priority(v).max(nested)
+}
+/// A node's own priority, ignoring nested entities: 100 for content, 80 for WebPage, 20 for
+/// publisher and navigation helpers.
+fn type_priority(v: &Value) -> u8 {
     let path = schema_type(v)
         .map(crate::model::type_path)
         .unwrap_or_default();
@@ -588,7 +593,7 @@ fn entity_priority(v: &Value) -> u8 {
     } else {
         0
     };
-    own.max(nested)
+    own
 }
 /// The `url`/`@id` values of a JSON-LD node (or array of nodes), its main entity and its
 /// graph nodes.
@@ -603,27 +608,36 @@ fn entity_urls(v: &Value) -> impl Iterator<Item = &str> {
                 .chain(graph.into_iter().flatten().take(16))
         })
         .flat_map(|n| {
-            // Google's Article shape names its page through mainEntityOfPage (a URL or a
-            // WebPage node).
-            let page = n.get("mainEntityOfPage");
-            [
-                n.get("url"),
-                n.get("@id"),
-                page.filter(|p| p.is_string()),
-                page.and_then(|p| p.get("@id")),
-                page.and_then(|p| p.get("url")),
-            ]
-            .map(|v| v.and_then(Value::as_str))
+            // Google's Article shape names its page through mainEntityOfPage (a URL, a
+            // WebPage node, or an array of either).
+            let pages = n.get("mainEntityOfPage").map_or_else(Vec::new, |p| {
+                p.as_array()
+                    .map_or_else(|| vec![p], |a| a.iter().take(16).collect())
+            });
+            [n.get("url"), n.get("@id")]
+                .into_iter()
+                .chain(pages.into_iter().flat_map(|p| {
+                    [
+                        Some(p).filter(|p| p.is_string()),
+                        p.get("@id"),
+                        p.get("url"),
+                    ]
+                }))
+                .collect::<Vec<_>>()
         })
         .flatten()
+        .filter_map(Value::as_str)
 }
 fn entity_identity(url: &str) -> Option<String> {
     let mut u = Url::parse(url).ok()?;
     u.set_fragment(None);
     crate::model::identity(u.as_str()).ok().map(|v| v.0)
 }
-/// Identity claims (url/@id aliases, typed identifiers, sameAs) of the entity `apply_jsonld`
-/// would choose in `v`, without its card fields. Returns whether an entity was found.
+/// Identity claims (url/@id aliases, typed identifiers, sameAs) that a head script donates
+/// when a body entity is chosen for the card: those of the entity `apply_jsonld` would choose
+/// in `v`, without its card fields, and only from a WebPage-or-better node. A head
+/// Organization/WebSite/Person node would otherwise name the homepage and a site-wide
+/// Wikidata item for every page. Returns whether claims were donated.
 fn jsonld_claims(doc: &mut ResourceMeta, v: &Value, base: &Url) -> bool {
     if let Some(values) = v.as_array() {
         let best = values.iter().fold(None, |best, v| match best {
@@ -637,7 +651,7 @@ fn jsonld_claims(doc: &mut ResourceMeta, v: &Value, base: &Url) -> bool {
             return true;
         }
     }
-    if schema_type(v).is_none() {
+    if schema_type(v).is_none() || type_priority(v) < 80 {
         return false;
     }
     for field in ["url", "@id", "sameAs"] {
@@ -993,6 +1007,7 @@ mod tests {
             r#""https://news.example/story""#,
             r#"{"@type":"WebPage","@id":"https://news.example/story"}"#,
             r#"{"@type":"WebPage","url":"https://news.example/story#main"}"#,
+            r#"["https://news.example/other",{"@type":"WebPage","@id":"https://news.example/story"}]"#,
         ] {
             let (_, keys) = extract_keys(&format!(
                 r#"<head><title>Story</title></head><body><p>Text</p><script type="application/ld+json">{{"@type":"NewsArticle","mainEntityOfPage":{page},"sameAs":"https://doi.org/10.1234/abc"}}</script></body>"#
@@ -1014,6 +1029,23 @@ mod tests {
         assert_eq!(kind, "NewsArticle");
         assert!(keys.contains(&"doi:10.1234/head".to_owned()), "{keys:?}");
         assert!(!keys.contains(&"doi:10.5555/body".to_owned()), "{keys:?}");
+        // V41: a head Organization (below WebPage) donates nothing under a body Article: no
+        // homepage canonical and no site-wide Wikidata key.
+        let (kind, keys) = extract_keys(
+            r#"<head><title>Story</title><script type="application/ld+json">{"@type":"Organization","url":"https://news.example/","sameAs":"https://www.wikidata.org/wiki/Q42"}</script></head><body><p>Text</p><script type="application/ld+json">{"@type":"NewsArticle","headline":"Story"}</script></body>"#,
+        );
+        assert_eq!(kind, "NewsArticle");
+        let homepage = format!(
+            "url:{}",
+            crate::model::identity("https://news.example/").unwrap().0
+        );
+        assert!(!keys.contains(&homepage), "{keys:?}");
+        assert!(keys.iter().all(|k| !k.starts_with("wikidata:")), "{keys:?}");
+        // As the chosen entity (no body script), the same head node keeps its claims.
+        let (_, keys) = extract_keys(
+            r#"<head><title>Story</title><script type="application/ld+json">{"@type":"Organization","url":"https://news.example/","sameAs":"https://www.wikidata.org/wiki/Q42"}</script></head><body><p>Text</p></body>"#,
+        );
+        assert!(keys.contains(&"wikidata:Q42".to_owned()), "{keys:?}");
     }
     #[test]
     fn oembed_fills_only_missing_and_never_keeps_html() {
