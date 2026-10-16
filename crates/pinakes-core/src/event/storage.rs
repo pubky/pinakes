@@ -200,7 +200,10 @@ pub async fn prepare(
         || (!repeated && !old.is_empty() && fresh.len() > container.limits.max_new_keys);
     let hold = excessive || (!container.delta && losses.len() * 2 > keys.len() && !repeated);
     let holds = if hold { old_holds.saturating_add(1) } else { 0 };
-    let floor = normal_ttl.max(container.limits.cadence_floor).max(3600);
+    let floor = normal_ttl
+        .max(container.limits.cadence_floor)
+        .max(container.held_retry_secs)
+        .max(3600);
     let retry = floor
         .saturating_mul(
             1u64.checked_shl(holds.saturating_sub(1))

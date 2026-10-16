@@ -51,6 +51,7 @@ months_forward = 12
 # default_timezone = "Europe/Zurich" # Floating ICS times only; otherwise keep local time.
 geocode_score = 0.8
 # Retained for old configs; hold retry now uses max(normal cadence, container floor).
+# Additional hold retry floor (1 second–7 days); normal cadence / one hour still apply.
 held_retry_secs = 60
 max_line_bytes = 65536
 max_date_values = 4096

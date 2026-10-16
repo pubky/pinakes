@@ -42,6 +42,7 @@ async fn main() -> Result<()> {
         }
     }
     let config = Config::load(config.as_deref())?;
+    warn_webcal_fallback(config.event.webcal_http_fallback);
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(20)
         .connect(&config.database_url)
@@ -134,6 +135,12 @@ fn warn_admin_listener(address: std::net::SocketAddr) {
     }
 }
 
+fn warn_webcal_fallback(enabled: bool) {
+    if enabled {
+        tracing::warn!("webcal_http_fallback is enabled: webcal feeds may use plaintext HTTP and accept content modified by an active network attacker");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +181,22 @@ mod tests {
         assert_eq!(logs.matches("has no authentication").count(), 3);
         assert!(logs.contains("0.0.0.0:9090"));
         assert!(logs.contains("[::]:9090"));
+    }
+    #[test]
+    fn warns_only_when_plaintext_webcal_fallback_is_enabled() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = LogWriter(output.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            warn_webcal_fallback(false);
+            assert!(output.lock().unwrap().is_empty());
+            warn_webcal_fallback(true);
+        });
+        let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(logs.contains("plaintext HTTP") && logs.contains("active network attacker"));
     }
 }

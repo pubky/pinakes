@@ -268,7 +268,12 @@ pub async fn read_response_with(
     })
 }
 type HostBudget = Arc<Mutex<Instant>>;
-type DiscoveryCache = Arc<Mutex<HashMap<String, (Instant, Option<Fetched>)>>>;
+struct DiscoveryEntry {
+    expires: Instant,
+    accessed: Instant,
+    value: Option<Fetched>,
+}
+type DiscoveryCache = Arc<Mutex<HashMap<String, DiscoveryEntry>>>;
 #[derive(Clone)]
 pub struct Egress {
     cfg: EgressConfig,
@@ -416,8 +421,9 @@ impl Egress {
         }
     }
 
-    /// A discovered URL is fetched at most once per TTL, including failed/oversized results.
-    /// Concurrent references share the same flight; retained bodies total at most 32 MB.
+    /// Concurrent references share a flight. Successful responses use the requested TTL;
+    /// failures use five minutes. The LRU cache retains at most 10,000 entries / 32 MiB.
+    /// Capacity eviction can shorten a TTL; host budgets still apply to every fetch.
     pub async fn discover(&self, uri: &str, options: &FetchOptions, ttl: u64) -> Result<Fetched> {
         let mut url = Url::parse(uri)?;
         url.set_fragment(None);
@@ -442,45 +448,64 @@ impl Egress {
         let _guard = lock.lock().await;
         {
             let mut cache = self.discovered.lock().await;
-            cache.retain(|_, (expires, _)| *expires > Instant::now());
-            if let Some((_, value)) = cache.get(&key) {
-                return value.clone().ok_or_else(|| {
+            let now = Instant::now();
+            cache.retain(|_, entry| entry.expires > now);
+            if let Some(entry) = cache.get_mut(&key) {
+                entry.accessed = now;
+                return entry.value.clone().ok_or_else(|| {
                     super::RetryLater {
                         class: "discovery_cached",
-                        seconds: ttl.max(3600),
+                        seconds: entry
+                            .expires
+                            .saturating_duration_since(now)
+                            .as_secs()
+                            .max(1),
                     }
                     .into()
                 });
             }
-            if cache.len() >= 10000 {
-                bail!("discovery cache entry cap");
-            }
-            cache.insert(
-                key.clone(),
-                (
-                    Instant::now() + Duration::from_secs(ttl.clamp(3600, 31536000)),
-                    None,
-                ),
-            );
         }
         let result = fetch.await;
         let mut cache = self.discovered.lock().await;
-        let bytes: usize = cache
-            .values()
-            .filter_map(|(_, f)| f.as_ref())
-            .map(|f| f.body.len())
-            .sum();
+        let now = Instant::now();
+        cache.retain(|_, entry| entry.expires > now);
         let retained = result
             .as_ref()
             .ok()
-            .filter(|f| bytes.saturating_add(f.body.len()) <= 32 * 1024 * 1024)
-            .cloned();
+            .filter(|f| f.body.len() <= 32 * 1024 * 1024);
+        let needed = retained.map_or(0, |f| f.body.len());
+        let mut bytes: usize = cache
+            .values()
+            .filter_map(|entry| entry.value.as_ref())
+            .map(|f| f.body.len())
+            .sum();
+        if cache.len() >= 10000 || bytes.saturating_add(needed) > 32 * 1024 * 1024 {
+            let mut oldest: Vec<_> = cache
+                .iter()
+                .map(|(k, entry)| (entry.accessed, k.clone()))
+                .collect();
+            oldest.sort_unstable();
+            for (_, key) in oldest {
+                if cache.len() < 10000 && bytes.saturating_add(needed) <= 32 * 1024 * 1024 {
+                    break;
+                }
+                if let Some(entry) = cache.remove(&key) {
+                    bytes = bytes.saturating_sub(entry.value.as_ref().map_or(0, |f| f.body.len()));
+                }
+            }
+        }
+        let ttl = if retained.is_some_and(|f| (200..400).contains(&f.status)) {
+            ttl.clamp(3600, 31536000)
+        } else {
+            300
+        };
         cache.insert(
             key,
-            (
-                Instant::now() + Duration::from_secs(ttl.clamp(3600, 31536000)),
-                retained,
-            ),
+            DiscoveryEntry {
+                expires: now + Duration::from_secs(ttl),
+                accessed: now,
+                value: retained.cloned(),
+            },
         );
         result
     }
@@ -654,6 +679,113 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    #[tokio::test(start_paused = true)]
+    async fn discovery_capacity_evicts_lru_and_failures_expire_after_five_minutes() {
+        let egress = Egress::new(Default::default());
+        let now = Instant::now();
+        {
+            let mut cache = egress.discovered.lock().await;
+            for i in 0..10000 {
+                cache.insert(
+                    i.to_string(),
+                    DiscoveryEntry {
+                        expires: now + Duration::from_secs(86400),
+                        accessed: now - Duration::from_secs(10000 - i),
+                        value: None,
+                    },
+                );
+            }
+        }
+        assert!(egress
+            .cached("0".into(), 86400, async { panic!("cached") })
+            .await
+            .is_err());
+        let response = Fetched {
+            validators: Default::default(),
+            url: Url::parse("https://example.org/").unwrap(),
+            content_type: "text/html".into(),
+            status: 200,
+            retry_after_secs: 60,
+            location: None,
+            body: vec![1],
+        };
+        egress
+            .cached("fresh".into(), 86400, async { Ok(response.clone()) })
+            .await
+            .unwrap();
+        {
+            let cache = egress.discovered.lock().await;
+            assert_eq!(cache.len(), 10000);
+            assert!(cache.contains_key("0"));
+            assert!(!cache.contains_key("1"));
+        }
+        egress
+            .cached("failure".into(), 86400, async { bail!("transport") })
+            .await
+            .unwrap_err();
+        tokio::time::advance(Duration::from_secs(299)).await;
+        let error = egress
+            .cached("failure".into(), 86400, async { panic!("negative cache") })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<super::super::RetryLater>()
+                .unwrap()
+                .seconds,
+            1
+        );
+        tokio::time::advance(Duration::from_secs(2)).await;
+        egress
+            .cached("failure".into(), 86400, async { Ok(response.clone()) })
+            .await
+            .unwrap();
+        egress
+            .cached("fresh".into(), 86400, async {
+                panic!("positive TTL remains")
+            })
+            .await
+            .unwrap();
+        // HTTP errors also expire quickly, and a body replaces old bodies within the byte cap.
+        let mut failure = response.clone();
+        failure.status = 503;
+        egress
+            .cached("http-error".into(), 86400, async { Ok(failure) })
+            .await
+            .unwrap();
+        tokio::time::advance(Duration::from_secs(301)).await;
+        egress
+            .cached("http-error".into(), 86400, async { Ok(response) })
+            .await
+            .unwrap();
+        for key in ["large-a", "large-b"] {
+            egress
+                .cached(key.into(), 3600, async {
+                    Ok(Fetched {
+                        validators: Default::default(),
+                        url: Url::parse("https://example.org/").unwrap(),
+                        content_type: "text/calendar".into(),
+                        status: 200,
+                        retry_after_secs: 60,
+                        location: None,
+                        body: vec![0; 20 * 1024 * 1024],
+                    })
+                })
+                .await
+                .unwrap();
+            tokio::time::advance(Duration::from_secs(1)).await;
+        }
+        let cache = egress.discovered.lock().await;
+        assert!(!cache.contains_key("large-a"));
+        assert_eq!(
+            cache
+                .values()
+                .filter_map(|e| e.value.as_ref())
+                .map(|f| f.body.len())
+                .sum::<usize>(),
+            20 * 1024 * 1024
+        );
+    }
     #[test]
     fn rejects_every_special_range() {
         for ip in [

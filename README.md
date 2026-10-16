@@ -282,7 +282,7 @@ step 2 schema and the reviewed step 3 schema.
 
 `[event]` controls JSON-LD Event/subtypes, microformats h-event, ActivityPub Event
 negotiation and calendar containers. Missing fields are filled in that order;
-OpenGraph alone remains a WebPage. ActivityPub is negotiated for an advertised alternate, an event-looking page with no extracted Event, or an extracted Event lacking a zone. Each resolution permits one cached negotiation request. An Event page can follow a same-host link to its own ICS; discovered URLs share a one-hour-minimum TTL cache, including failures. Platform state adapters are the next branch. A calendar can run
+OpenGraph alone remains a WebPage. ActivityPub is negotiated for an advertised alternate, an event-looking page with no extracted Event, or an extracted Event lacking a zone. Each resolution permits one cached negotiation request. An Event page can follow a same-host link to its own ICS; discovered URLs share an LRU cache (10,000 entries / 32 MiB). Successful responses have a one-hour-minimum TTL; failures use five minutes. Eviction can shorten the TTL, with every new fetch still subject to host budgets. Platform adapters extend this path below. A calendar can run
 with web disabled; its workers share the web host budget and the OSM lookup mutex.
 With calendars disabled, feed URLs fall back to the enabled web module and its
 page-sized card extraction; stored routing hints remain valid when re-enabled.
@@ -394,3 +394,5 @@ to replay without DNS/network fallback; uncaptured responses fail closed. Canari
 blocked, too large, or have no public sample are reported explicitly. A live probe
 never enables geocoding or writes calendar members. Recorded compressed responses for 45 keyless probes, synthesized keyed/API shapes,
 and mock cursor/relay tests run in `scripts/test` without public upstream access.
+
+The calendar `held_retry_secs` option is an additional hold retry floor (up to seven days); normal cadence and the one-hour minimum still apply before exponential backoff. Embedded VTIMEZONE transitions share the parser deadline and enforce `max_date_values` per expansion. Enabling `webcal_http_fallback` emits a startup warning about plaintext integrity.

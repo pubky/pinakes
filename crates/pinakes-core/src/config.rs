@@ -354,7 +354,7 @@ impl Config {
             || !(1..=36).contains(&e.months_forward)
             || !e.geocode_score.is_finite()
             || !(0.0..=1.0).contains(&e.geocode_score)
-            || !(1..=3600).contains(&e.held_retry_secs)
+            || !(1..=604800).contains(&e.held_retry_secs)
             || e.default_timezone
                 .as_deref()
                 .is_some_and(|s| crate::event::time::zone(s).is_none())

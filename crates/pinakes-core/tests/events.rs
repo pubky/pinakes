@@ -20,6 +20,32 @@ fn parse(body: &str) -> ResourceMeta {
 fn cal(events: &str) -> String {
     format!("BEGIN:VCALENDAR\nVERSION:2.0\n{events}\nEND:VCALENDAR\n")
 }
+#[test]
+fn custom_timezone_date_budget_preserves_healthy_siblings() {
+    for expansion in [
+        "RRULE:FREQ=DAILY;COUNT=100000".to_owned(),
+        format!("RDATE:{}", vec!["20261020T020000"; 32].join(",")),
+    ] {
+        let zone = format!("BEGIN:VTIMEZONE\nTZID:CustomBudget\nBEGIN:STANDARD\nDTSTART:19700101T000000\nTZOFFSETFROM:+0100\nTZOFFSETTO:+0100\n{expansion}\nEND:STANDARD\nEND:VTIMEZONE");
+        let body = cal(&format!(
+            "{zone}\n{}\n{}",
+            event("UID:bad\nDTSTART;TZID=CustomBudget:20261020T120000\nSUMMARY:Bad zone"),
+            event("UID:good\nDTSTART:20261020T120000Z\nSUMMARY:Healthy")
+        ));
+        let cfg = EventConfig {
+            max_date_values: 16,
+            ..Default::default()
+        };
+        let container =
+            calendar::parse("https://example.org/feed.ics", body.as_bytes(), &cfg, now())
+                .unwrap()
+                .container
+                .unwrap();
+        assert_eq!(container.occurrences.len(), 1);
+        assert_eq!(container.occurrences[0].uid, "good");
+        assert!(!container.warnings.is_empty());
+    }
+}
 fn event(props: &str) -> String {
     format!("BEGIN:VEVENT\n{props}\nEND:VEVENT")
 }
@@ -1414,6 +1440,7 @@ async fn review_container_caps_patches_rotation_backoff_retention_and_labels(poo
     let id = store::ensure_resource(&pool, uri).await.unwrap();
     let mut d = dynamic_parse(uri, &future_calendar(5));
     d.ttl_secs = 7200;
+    d.container.as_mut().unwrap().held_retry_secs = 10800;
     let limits = &mut d.container.as_mut().unwrap().limits;
     limits.max_changes = 2;
     limits.max_rows = 6;
@@ -1459,7 +1486,7 @@ async fn review_container_caps_patches_rotation_backoff_retention_and_labels(poo
         let (count,dead,delay):(i32,bool,f64)=sqlx::query_as("SELECT e.hold_count,r.dead_letter,extract(epoch FROM r.next_attempt_at-now())::float8 FROM event_fetch e JOIN resource r ON r.id=e.resource_id WHERE r.id=$1").bind(&id).fetch_one(&pool).await.unwrap();
         assert_eq!(count, i);
         assert_eq!(dead, i == 3);
-        assert!(delay >= 7200.0 * 2f64.powi(i - 1) - 2.0, "{delay}");
+        assert!(delay >= 10800.0 * 2f64.powi(i - 1) - 2.0, "{delay}");
     }
     let n: i64 = sqlx::query_scalar("SELECT count(*) FROM occurrence")
         .fetch_one(&pool)

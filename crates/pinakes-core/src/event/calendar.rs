@@ -204,6 +204,8 @@ struct Stamp {
     unknown: bool,
 }
 struct Zones<'a> {
+    deadline: std::time::Instant,
+    max_date_values: usize,
     calendar: Option<&'a str>,
     default: Option<&'a str>,
     embedded: BTreeMap<String, &'a Component>,
@@ -225,6 +227,10 @@ impl Zones<'_> {
                     })
                     .flatten()
                 {
+                    ensure!(
+                        std::time::Instant::now() < self.deadline,
+                        "VTIMEZONE work budget"
+                    );
                     let wall = at.with_timezone(&offset).naive_local();
                     if self.at_wall(stamp, wall).is_ok_and(|v| v == at) {
                         return Ok(wall);
@@ -298,9 +304,24 @@ impl Zones<'_> {
     }
 }
 type Transition = (NaiveDateTime, chrono::FixedOffset, chrono::FixedOffset);
-fn transitions(c: &Component, wall: NaiveDateTime) -> Result<Vec<Transition>> {
+fn transitions(
+    c: &Component,
+    wall: NaiveDateTime,
+    deadline: std::time::Instant,
+    max_date_values: usize,
+) -> Result<Vec<Transition>> {
     let mut transitions = vec![];
+    let mut values = 0usize;
+    let mut budget = || -> Result<()> {
+        values += 1;
+        ensure!(
+            values <= max_date_values && std::time::Instant::now() < deadline,
+            "VTIMEZONE work budget"
+        );
+        Ok(())
+    };
     for o in &c.children {
+        budget()?;
         let start = time::naive(o.value("DTSTART").context("VTIMEZONE DTSTART")?)
             .context("VTIMEZONE date")?;
         let from = time::fixed(o.value("TZOFFSETFROM").context("VTIMEZONE FROM")?)
@@ -316,16 +337,21 @@ fn transitions(c: &Component, wall: NaiveDateTime) -> Result<Vec<Transition>> {
                 .context("VTIMEZONE horizon overflow")?
                 .and_utc()
                 .with_timezone(&rrule::Tz::UTC);
-            dates.extend(
-                set.before(end)
-                    .all(1000)
-                    .dates
-                    .into_iter()
-                    .map(|d| d.naive_utc()),
-            );
+            for date in set.limit().into_iter() {
+                budget()?;
+                if date > end {
+                    break;
+                }
+                dates.push(date.naive_utc());
+            }
         }
         for p in o.props.iter().filter(|p| p.name == "RDATE") {
-            dates.extend(p.value.split(',').filter_map(time::naive));
+            for value in p.value.split(',') {
+                budget()?;
+                if let Some(date) = time::naive(value) {
+                    dates.push(date);
+                }
+            }
         }
         for d in dates {
             transitions.push((d, from, to));
@@ -337,10 +363,17 @@ fn transitions(c: &Component, wall: NaiveDateTime) -> Result<Vec<Transition>> {
 impl Zones<'_> {
     fn custom_time(&self, c: &Component, wall: NaiveDateTime) -> Result<DateTime<Utc>> {
         use chrono::Datelike;
+        ensure!(
+            std::time::Instant::now() < self.deadline,
+            "VTIMEZONE work budget"
+        );
         let key = (c.value("TZID").unwrap_or("").to_owned(), wall.year());
         let mut cache = self.transitions.borrow_mut();
         if !cache.contains_key(&key) {
-            cache.insert(key.clone(), transitions(c, wall)?);
+            cache.insert(
+                key.clone(),
+                transitions(c, wall, self.deadline, self.max_date_values)?,
+            );
         }
         let transitions = &cache[&key];
         let mut chosen = transitions
@@ -348,6 +381,10 @@ impl Zones<'_> {
             .map(|t| t.1)
             .context("empty VTIMEZONE")?;
         for &(at, from, to) in transitions {
+            ensure!(
+                std::time::Instant::now() < self.deadline,
+                "VTIMEZONE work budget"
+            );
             let delta = to.local_minus_utc() - from.local_minus_utc();
             if delta > 0
                 && wall >= at
@@ -873,6 +910,8 @@ pub fn parse(
     let canonical = canonical_feed(uri);
     let base = Url::parse(&canonical)?;
     let zones = Zones {
+        deadline,
+        max_date_values: cfg.max_date_values,
         transitions: RefCell::default(),
         calendar: cal.value("X-WR-TIMEZONE"),
         default: cfg.default_timezone.as_deref(),
