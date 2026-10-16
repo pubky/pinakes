@@ -53,6 +53,67 @@ async fn classes(pool: &PgPool, id: &str) -> Vec<String> {
         .unwrap()
 }
 #[sqlx::test(migrations = "../../migrations")]
+async fn round4_dated_event_guard_counts_drift_and_allows_confirmed_missing(pool: PgPool) {
+    let (id, mut accepted) = seed(&pool, "https://example.org/dated").await;
+    accepted.start = Some(chrono::Utc::now() + chrono::Duration::days(1));
+    store::save_document(&pool, &id, 0, &accepted)
+        .await
+        .unwrap();
+    let before: Value = sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let history = classes(&pool, &id).await;
+    let metrics = Metrics::new().unwrap();
+    for kind in ["WebPage", "Article", "Event"] {
+        let mut doc = ResourceMeta::new(&accepted.url, "web", 3600);
+        doc.set_type(kind);
+        let (result, observations) =
+            telemetry::observe(&metrics, &adapter::manifest("web"), async {
+                let mut fetch = telemetry::FetchGuard::start();
+                fetch.status(200);
+                drop(fetch);
+                store::save_document(&pool, &id, 0, &doc).await
+            })
+            .await;
+        assert_eq!(
+            result
+                .unwrap_err()
+                .downcast_ref::<pinakes_core::resolver::RetryLater>()
+                .unwrap()
+                .class,
+            "drift"
+        );
+        assert_eq!(observations[0].outcome, "drift");
+        let after: Value = sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(before, after);
+        assert_eq!(classes(&pool, &id).await, history);
+    }
+    let mut missing = ResourceMeta::new(&accepted.url, "web", 3600);
+    missing.status = Status::Missing;
+    for status in ["ok", "missing"] {
+        missing.fetched_at += 1;
+        store::save_document(&pool, &id, 0, &missing).await.unwrap();
+        let (actual, start): (String, bool) =
+            sqlx::query_as("SELECT status,start_at IS NOT NULL FROM resource WHERE id=$1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(actual, status);
+        assert!(start);
+    }
+    store::save_document(&pool, &id, 0, &accepted)
+        .await
+        .unwrap();
+    assert_eq!(classes(&pool, &id).await.last().unwrap(), "uncancelled");
+}
+#[sqlx::test(migrations = "../../migrations")]
 async fn confirmations_failures_recovery_and_fencing(pool: PgPool) {
     let (id, mut doc) = seed(&pool, "https://example.org/event").await;
     doc.fetched_at += 100;

@@ -64,9 +64,31 @@ pub fn backoff(cfg: &QueueConfig, attempt: u32) -> u64 {
 pub async fn failed(pool: &PgPool, job: &Job, cfg: &QueueConfig, error: &str) -> Result<()> {
     let attempt = job.attempts as u32 + 1;
     let message = error;
-    sqlx::query(r#"UPDATE resource SET attempts=attempts+1, dead_letter=$3, status='error', lease_until=NULL,priority_at=NULL,
+    sqlx::query(r#"UPDATE resource SET attempts=attempts+1, timeout_streak=0, dead_letter=$3, status='error', lease_until=NULL,priority_at=NULL,
         next_attempt_at=now()+$4*interval '1 second', last_error=$5 WHERE id=$1 AND generation=$2"#)
         .bind(&job.id).bind(job.generation).bind(attempt>=cfg.max_failures).bind(backoff(cfg,attempt) as f64).bind(message).execute(pool).await?;
+    Ok(())
+}
+async fn timed_out(pool: &PgPool, job: &Job, cfg: &QueueConfig, seconds: u64) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    crate::store::lock_search_revision(&mut tx).await?;
+    let row: Option<(i32, i32)> = sqlx::query_as("SELECT CASE WHEN last_error='timeout' THEN timeout_streak ELSE 0 END,attempts FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE")
+        .bind(&job.id).bind(job.generation).fetch_optional(&mut *tx).await?;
+    if let Some((streak, attempts)) = row {
+        let streak = streak.saturating_add(1);
+        let charged = streak as u32 > cfg.timeout_grace;
+        let attempts = attempts.saturating_add(i32::from(charged));
+        let base = cfg.backoff_secs.max(seconds.clamp(1, 3600));
+        let delay = base
+            .saturating_mul(
+                1u64.checked_shl(streak.saturating_sub(1) as u32)
+                    .unwrap_or(u64::MAX),
+            )
+            .min(cfg.max_backoff_secs.max(base));
+        sqlx::query("UPDATE resource SET timeout_streak=$2,attempts=$3,dead_letter=$4,status=CASE WHEN $5 THEN 'error' ELSE status END,lease_until=NULL,priority_at=NULL,last_error='timeout',next_attempt_at=now()+$6*interval '1 second' WHERE id=$1")
+            .bind(&job.id).bind(streak).bind(attempts).bind(charged && attempts as u32>=cfg.max_failures).bind(charged).bind(delay as f64).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 pub async fn run_job(
@@ -260,8 +282,14 @@ async fn finish_job(
     if let Err(error) = result {
         tracing::warn!(resource_id=%job.id,resolver=resolver.name(),error=%error,"resolution failed");
         if let Some(retry) = error.downcast_ref::<crate::resolver::RetryLater>() {
-            sqlx::query("UPDATE resource SET lease_until=NULL,priority_at=NULL,next_attempt_at=now()+$3*interval '1 second',last_error=$4 WHERE id=$1 AND generation=$2")
-                .bind(&job.id).bind(job.generation).bind(retry.seconds.clamp(1,3600) as f64).bind(if retry.class=="rate_limited" {"http_4xx"} else {retry.class}).execute(pool).await?;
+            if retry.class == "timeout" {
+                timed_out(pool, job, cfg, retry.seconds).await?;
+            } else {
+                sqlx::query("UPDATE resource SET timeout_streak=0,lease_until=NULL,priority_at=NULL,next_attempt_at=now()+$3*interval '1 second',last_error=$4 WHERE id=$1 AND generation=$2")
+                    .bind(&job.id).bind(job.generation).bind(retry.seconds.clamp(1,3600) as f64).bind(if retry.class=="rate_limited" {"http_4xx"} else {retry.class}).execute(pool).await?;
+            }
+        } else if crate::resolver::error_class(&error) == "timeout" {
+            timed_out(pool, job, cfg, 60).await?;
         } else {
             let mut cfg = cfg.clone();
             if resolver.name() == "geo"

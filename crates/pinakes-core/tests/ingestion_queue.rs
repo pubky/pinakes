@@ -343,6 +343,120 @@ async fn rejected_counts_follow_commit_and_concurrent_cursor_fencing(pool: PgPoo
 struct FakeResolver {
     fail: bool,
 }
+struct DeferredResolver(&'static str);
+#[async_trait::async_trait]
+impl Resolver for DeferredResolver {
+    fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+        Duration::from_secs(60)
+    }
+    fn name(&self) -> &'static str {
+        "web"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, _: &str) -> anyhow::Result<ResourceMeta> {
+        Err(pinakes_core::resolver::RetryLater {
+            class: self.0,
+            seconds: 60,
+        }
+        .into())
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round4_timeout_escalation_is_durable_fenced_and_resets(pool: PgPool) {
+    let cfg = QueueConfig {
+        timeout_grace: 3,
+        max_failures: 2,
+        backoff_secs: 30,
+        max_backoff_secs: 240,
+        ..Default::default()
+    };
+    let uri = "https://example.org/tarpit";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let accepted = ResourceMeta::new(uri, "web", 3600);
+    store::save_document(&pool, &id, 0, &accepted)
+        .await
+        .unwrap();
+    let before: serde_json::Value = sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let mut old = None;
+    for (streak, attempts, delay) in [
+        (1, 0, 60),
+        (2, 0, 120),
+        (3, 0, 240),
+        (4, 1, 240),
+        (5, 2, 240),
+    ] {
+        sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+        queue::run_job(&pool, &DeferredResolver("timeout"), &cfg, &job)
+            .await
+            .unwrap();
+        if let Some(old) = old.as_ref() {
+            queue::run_job(&pool, &DeferredResolver("timeout"), &cfg, old)
+                .await
+                .unwrap();
+        }
+        old = Some(job);
+        let row: (i32,i32,bool,f64,serde_json::Value) = sqlx::query_as("SELECT timeout_streak,attempts,dead_letter,extract(epoch FROM next_attempt_at-now())::float8,doc FROM resource WHERE id=$1").bind(&id).fetch_one(&pool).await.unwrap();
+        assert_eq!((row.0, row.1, row.2), (streak, attempts, attempts == 2));
+        assert!(
+            row.3 <= delay as f64 && row.3 > delay as f64 - 2.0,
+            "{row:?}"
+        );
+        assert_eq!(row.4, before);
+    }
+    assert!(queue::claim(&pool, "web", &cfg).await.unwrap().is_none());
+    let uri = "https://example.org/recovery";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    for (kind, expected) in [
+        ("timeout", 1),
+        ("http_5xx", 0),
+        ("timeout", 1),
+        ("success", 0),
+        ("timeout", 1),
+        ("parse", 0),
+        ("timeout", 1),
+    ] {
+        sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+        if matches!(kind, "success" | "parse") {
+            queue::run_job(
+                &pool,
+                &FakeResolver {
+                    fail: kind == "parse",
+                },
+                &cfg,
+                &job,
+            )
+            .await
+            .unwrap();
+        } else {
+            queue::run_job(&pool, &DeferredResolver(kind), &cfg, &job)
+                .await
+                .unwrap();
+        }
+        let actual: i32 = sqlx::query_scalar("SELECT timeout_streak FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(actual, expected, "{kind}");
+    }
+}
 #[async_trait::async_trait]
 impl Resolver for FakeResolver {
     fn name(&self) -> &'static str {

@@ -251,6 +251,137 @@ struct WikiFailure {
     failure: u16,
     calls: std::sync::atomic::AtomicUsize,
 }
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round4_wikipedia_entity_miss_keeps_article_alive(pool: PgPool) {
+    use pinakes_core::resolver::Resolver;
+    for status in [404, 410] {
+        let uri = format!("https://en.wikipedia.org/wiki/Alive_{status}");
+        let id = store::ensure_resource(&pool, &uri).await.unwrap();
+        let r = platform(
+            &pool,
+            EventConfig {
+                activitypub: false,
+                geocoding: false,
+                ..Default::default()
+            },
+            Egress::with_backends(
+                Default::default(),
+                Arc::new(AdapterDns),
+                Arc::new(WikiFailure {
+                    failure: status,
+                    calls: Default::default(),
+                }),
+            ),
+        );
+        for _ in 0..2 {
+            let doc = r.web.resolve(&uri).await.unwrap();
+            assert_eq!(doc.status, pinakes_core::model::Status::Ok);
+            assert_eq!(doc.type_name, "Article");
+            store::save_document(&pool, &id, 0, &doc).await.unwrap();
+        }
+        let misses: i32 = sqlx::query_scalar("SELECT missing_streak FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(misses, 0);
+    }
+}
+
+struct SecondaryFailure(u16);
+#[async_trait::async_trait]
+impl Transport for SecondaryFailure {
+    async fn get(&self, u: &url::Url, _: &[SocketAddr]) -> anyhow::Result<Fetched> {
+        let secondary = u.path().starts_with("/api/") || u.host_str() == Some("api.lu.ma");
+        Ok(Fetched {
+            url: u.clone(),
+            status: if secondary { self.0 } else { 200 },
+            content_type: "text/html".into(),
+            body: if secondary {
+                b"unavailable".to_vec()
+            } else {
+                b"<title>Event page</title><meta name='generator' content='Gancio'>".to_vec()
+            },
+            validators: Default::default(),
+            location: None,
+            retry_after_secs: 60,
+        })
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round4_secondary_denial_or_miss_never_erases_event_start(pool: PgPool) {
+    use pinakes_core::{queue, resolver::Resolver};
+    for uri in [
+        "https://self.example/event/42",
+        "https://luma.com/event-metadata",
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut doc = ResourceMeta::new(uri, "web", 3600);
+        doc.set_type("MusicEvent");
+        doc.start = Some(Utc::now() + Duration::days(1));
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+        let before: Value = sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        for status in [401, 403, 451, 400, 404] {
+            let r = platform(
+                &pool,
+                EventConfig {
+                    activitypub: false,
+                    geocoding: false,
+                    ..Default::default()
+                },
+                Egress::with_backends(
+                    Default::default(),
+                    Arc::new(AdapterDns),
+                    Arc::new(SecondaryFailure(status)),
+                ),
+            );
+            if matches!(status, 401 | 403 | 451) {
+                assert!(r
+                    .resolve(uri)
+                    .await
+                    .unwrap_err()
+                    .is::<pinakes_core::resolver::RetryLater>());
+            }
+            queue::run_job(
+                &pool,
+                &r,
+                &Default::default(),
+                &queue::Job {
+                    id: id.clone(),
+                    uri: uri.into(),
+                    attempts: 0,
+                    generation: 0,
+                },
+            )
+            .await
+            .unwrap();
+            let (after, attempts, dead): (Value, i32, bool) =
+                sqlx::query_as("SELECT doc,attempts,dead_letter FROM resource WHERE id=$1")
+                    .bind(&id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(before, after, "{uri}: {status}");
+            assert_eq!((attempts, dead), (0, false));
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM resource_change WHERE resource_id=$1"
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            1
+        );
+    }
+}
 #[async_trait::async_trait]
 impl Transport for WikiFailure {
     async fn get(&self, u: &url::Url, _: &[SocketAddr]) -> anyhow::Result<Fetched> {
@@ -479,9 +610,10 @@ async fn round3_billetto_denied_venue_never_dead_letters(pool: PgPool) {
         assert_eq!((attempts, dead), (0, false));
     }
     server.abort();
-    assert!(
-        calls.load(Ordering::SeqCst) > 0,
-        "the denied geocode was requested"
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        6,
+        "one geocode attempt per resolution"
     );
 }
 
@@ -795,7 +927,7 @@ async fn round3_graphql_failure_preserves_accepted_event(pool: PgPool) {
 async fn round3_deleted_wikidata_confirms_missing_twice(pool: PgPool) {
     use pinakes_core::{model::Status, resolver::Resolver};
     for status in [404, 410] {
-        let uri = format!("https://en.wikipedia.org/wiki/Deleted_{status}");
+        let uri = format!("https://www.wikidata.org/wiki/Q678{status}");
         let id = store::ensure_resource(&pool, &uri).await.unwrap();
         let mut doc = ResourceMeta::new(&uri, "wikidata", 3600);
         doc.set_type("Event");
@@ -818,7 +950,7 @@ async fn round3_deleted_wikidata_confirms_missing_twice(pool: PgPool) {
                     }),
                 ),
             );
-            let d = r.web.resolve(&uri).await.unwrap();
+            let d = r.resolve(&uri).await.unwrap();
             assert_eq!(d.status, Status::Missing);
             store::save_document(&pool, &id, 0, &d).await.unwrap();
             let state: String = sqlx::query_scalar("SELECT status FROM resource WHERE id=$1")

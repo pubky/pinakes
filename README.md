@@ -136,7 +136,10 @@ refresh after seven days, OSM after its configured cache TTL. `geo:` is final.
 Two fresh successful missing observations confirm cancellation; a cached copy
 cannot count twice. The first missing result schedules a confirmation with a
 one-hour floor. Transient
-failures back off exponentially and enter dead letter after five failures. Last good
+failures back off exponentially and enter dead letter after five failures. Consecutive
+timeouts back off immediately; the first `queue.timeout_grace` (default three) do
+not consume failure attempts. Later timeouts charge failures until another outcome
+resets the persisted streak (migration 0016). Last good
 facets survive failed refreshes. A lookup or preview prioritizes an overdue resource inside its existing TTL,
 author budget and retry schedule. It cannot revive a dead letter. A new public
 reference can reopen a final non-geo resource.
@@ -429,9 +432,12 @@ BTC Map cursors never advance beyond the local fetch time, even when an upstream
 Only parser failures trigger the platform web-card fallback. Upstream failures, including
 cached discovery failures, retain the accepted document and retry. Optional venue geocoding
 records `venue_unavailable` and keeps the event; accepted venue data is preserved.
-Denied secondary requests and GraphQL failures defer, while Wikidata 404/410 follow
-two-observation disappearance. Nostr reserves relay time inside the queue budget and
-retries incomplete scans after five minutes, reusing cached pages. The captured Guidle
+Denied secondary requests and GraphQL failures defer. A refresh cannot replace an
+accepted dated Event with a start-less card: it retains the event, records drift and
+retries. Direct Wikidata 404/410 follow two-observation disappearance; a missing
+entity does not remove a live Wikipedia article. Nostr reserves relay time inside the queue budget and
+retries incomplete scans after five minutes. Capped indexer pages and GraphQL
+error bodies expire by that retry; complete pages retain their normal cache TTL. The captured Guidle
 calendar request is now correctly replayed as an egress failure (its HTML card used to hide
 that failure). Wikipedia entity enrichment requires event/place JSON-LD or infobox cues;
 ordinary articles stay web cards without a speculative Wikidata fetch.

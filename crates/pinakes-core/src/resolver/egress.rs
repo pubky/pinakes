@@ -434,6 +434,14 @@ impl Egress {
     /// failures use five minutes. The LRU cache retains at most 10,000 entries / 32 MiB.
     /// Capacity eviction can shorten a TTL; host budgets still apply to every fetch.
     pub async fn discover(&self, uri: &str, options: &FetchOptions, ttl: u64) -> Result<Fetched> {
+        self.cached(
+            Self::discovery_key(uri, options)?,
+            ttl,
+            self.fetch_with(uri, options),
+        )
+        .await
+    }
+    fn discovery_key(uri: &str, options: &FetchOptions) -> Result<String> {
         let mut url = Url::parse(uri)?;
         url.set_fragment(None);
         let mut key = url.to_string();
@@ -441,7 +449,23 @@ impl Egress {
             let identity = serde_json::to_vec(&(&options.json_body, &options.headers))?;
             key.push_str(&format!("|request:{}", blake3::hash(&identity).to_hex()));
         }
-        self.cached(key, ttl, self.fetch_with(uri, options)).await
+        Ok(key)
+    }
+    /// A successful HTTP response can still contain a transient application error.
+    /// Shorten only its existing cache entry, without extending older expiration times.
+    pub async fn shorten_discovery(
+        &self,
+        uri: &str,
+        options: &FetchOptions,
+        seconds: u64,
+    ) -> Result<()> {
+        let key = Self::discovery_key(uri, options)?;
+        if let Some(entry) = self.discovered.lock().await.get_mut(&key) {
+            entry.expires = entry
+                .expires
+                .min(Instant::now() + Duration::from_secs(seconds.clamp(1, 3600)));
+        }
+        Ok(())
     }
     async fn cached(
         &self,
@@ -688,6 +712,60 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    #[tokio::test(start_paused = true)]
+    async fn round4_graphql_error_expires_before_the_next_retry() {
+        struct Graphql(AtomicUsize);
+        #[async_trait]
+        impl Transport for Graphql {
+            async fn get(&self, url: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+                Ok(Fetched {
+                    url: url.clone(),
+                    status: 200,
+                    content_type: "application/json".into(),
+                    validators: Default::default(),
+                    location: None,
+                    retry_after_secs: 60,
+                    body: if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                        br#"{"errors":[{"message":"temporary"}]}"#.to_vec()
+                    } else {
+                        br#"{"data":{"event":null}}"#.to_vec()
+                    },
+                })
+            }
+        }
+        let transport = Arc::new(Graphql(AtomicUsize::new(0)));
+        let egress =
+            Egress::with_backends(Default::default(), Arc::new(FakeDns), transport.clone());
+        let options = FetchOptions {
+            json_body: Some(serde_json::json!({"query":"fixture"})),
+            ..Default::default()
+        };
+        let uri = "https://public.example/api";
+        let definition = crate::event::adapters::definition("mobilizon").unwrap();
+        for advance in [0, 299] {
+            tokio::time::advance(Duration::from_secs(advance)).await;
+            let error = crate::event::adapters::service::discover_enrichment(
+                &egress, uri, &options, 86400, definition,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error
+                    .downcast_ref::<super::super::RetryLater>()
+                    .unwrap()
+                    .class,
+                "graphql"
+            );
+        }
+        assert_eq!(transport.0.load(Ordering::SeqCst), 1);
+        tokio::time::advance(Duration::from_secs(2)).await;
+        crate::event::adapters::service::discover_enrichment(
+            &egress, uri, &options, 86400, definition,
+        )
+        .await
+        .unwrap();
+        assert_eq!(transport.0.load(Ordering::SeqCst), 2);
+    }
     #[tokio::test(start_paused = true)]
     async fn discovery_capacity_evicts_lru_and_failures_expire_after_five_minutes() {
         let egress = Egress::new(Default::default());

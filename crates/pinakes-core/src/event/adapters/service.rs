@@ -44,7 +44,7 @@ pub(super) fn upstream_status(f: &Fetched) -> Result<()> {
     Ok(())
 }
 
-fn enrichment_status(f: &Fetched) -> Result<()> {
+pub(crate) fn enrichment_status(f: &Fetched) -> Result<()> {
     upstream_status(f)?;
     if matches!(f.status, 401 | 403 | 451) {
         return Err(crate::resolver::RetryLater {
@@ -54,6 +54,36 @@ fn enrichment_status(f: &Fetched) -> Result<()> {
         .into());
     }
     Ok(())
+}
+
+pub(crate) async fn discover_enrichment(
+    egress: &Egress,
+    uri: &str,
+    options: &FetchOptions,
+    ttl: u64,
+    definition: &Definition,
+) -> Result<Fetched> {
+    let fetched = egress.discover(uri, options, ttl).await?;
+    enrichment_status(&fetched)?;
+    if definition.parser == "mobilizon" && fetched.status == 200 {
+        let body = fetched.body.clone();
+        let failed = tokio::task::spawn_blocking(move || {
+            serde_json::from_slice::<Value>(&body)
+                .ok()
+                .is_some_and(|v| v["errors"].as_array().is_some_and(|a| !a.is_empty()))
+        })
+        .await?;
+        if failed {
+            egress.shorten_discovery(uri, options, 300).await?;
+            crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
+            return Err(crate::resolver::RetryLater {
+                class: "graphql",
+                seconds: 300,
+            }
+            .into());
+        }
+    }
+    Ok(fetched)
 }
 
 pub struct PlatformResolver {
@@ -212,12 +242,14 @@ impl PlatformResolver {
                             opts.feed_cap = opts.feed_hint.then_some(local.feed_body_bytes);
                             opts.user_agent = Some(profile(&m.ua_profile).into());
                             {
-                                let f = self
-                                    .web
-                                    .egress
-                                    .discover(&target, &opts, m.cadence_floor)
-                                    .await?;
-                                enrichment_status(&f)?;
+                                let f = discover_enrichment(
+                                    &self.web.egress,
+                                    &target,
+                                    &opts,
+                                    m.cadence_floor,
+                                    d,
+                                )
+                                .await?;
                                 if f.status == 200 {
                                     if d.id == "luma" {
                                         if let Some(id) = serde_json::from_slice::<Value>(&f.body)
@@ -286,7 +318,7 @@ impl PlatformResolver {
             if doc.type_path.contains(&"Event".into()) {
                 // API zones must replace coordinate-derived enrichment, not the other way around.
                 page::finalize(&mut doc, local.coordinate_timezone);
-                if !probe {
+                if !probe && !doc.event.warnings.iter().any(|w| w == "venue_unavailable") {
                     let events = self.web.events.as_ref().unwrap();
                     if !matches!(
                         tokio::time::timeout(Duration::from_secs(2), events.venue(&mut doc)).await,
@@ -423,18 +455,6 @@ pub(crate) async fn enrichment_blocking(
         f.body.len() <= crate::resolver::egress::BODY_CAP,
         "non-feed enrichment exceeds cap"
     );
-    if d.parser == "mobilizon"
-        && serde_json::from_slice::<Value>(&f.body)
-            .ok()
-            .is_some_and(|v| v["errors"].as_array().is_some_and(|a| !a.is_empty()))
-    {
-        crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
-        return Err(crate::resolver::RetryLater {
-            class: "graphql",
-            seconds: 300,
-        }
-        .into());
-    }
     let (uri, id, body) = (uri.to_owned(), d.id.clone(), f.body.clone());
     Ok(tokio::task::spawn_blocking(move || state::parse(&id, &uri, &body)).await?)
 }
@@ -805,8 +825,8 @@ pub async fn wikipedia(uri: &str, f: &Fetched, egress: &Egress) -> Result<Option
         Err(e) if e.is::<ParseFailure>() => return Ok(None),
         Err(e) => return Err(e),
     };
-    Ok((doc.status == crate::model::Status::Missing
-        || doc.type_path.iter().any(|t| t == "Event" || t == "Place"))
+    Ok((doc.status != crate::model::Status::Missing
+        && doc.type_path.iter().any(|t| t == "Event" || t == "Place"))
     .then_some(doc))
 }
 pub fn wiki_value(uri: &str, v: &Value) -> Result<ResourceMeta> {

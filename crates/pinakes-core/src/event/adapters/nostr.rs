@@ -301,6 +301,11 @@ async fn lookup_inner(
                 exhausted = true;
                 break;
             }
+            // An HTTP success with a capped page is incomplete evidence. Its
+            // cache must expire by the next inconclusive retry, not an hour later.
+            egress
+                .shorten_discovery(url.as_str(), &Default::default(), 300)
+                .await?;
             let Some(oldest) = oldest.filter(|v| until.is_none_or(|previous| *v < previous)) else {
                 break;
             };
@@ -626,12 +631,13 @@ pub async fn resolve(
 mod deadline_tests {
     use super::*;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn empty_or_unrelated_relay_cannot_confirm_an_inconclusive_indexer_scan() {
         use crate::resolver::egress::{Dns, Fetched, Transport};
         use nostr::prelude::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::{net::SocketAddr, sync::Arc};
-        struct Fixture;
+        struct Fixture(AtomicUsize);
         #[async_trait::async_trait]
         impl Dns for Fixture {
             async fn lookup(&self, _: &str, port: u16) -> Result<Vec<SocketAddr>> {
@@ -641,6 +647,7 @@ mod deadline_tests {
         #[async_trait::async_trait]
         impl Transport for Fixture {
             async fn get(&self, url: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+                self.0.fetch_add(1, Ordering::SeqCst);
                 Ok(Fetched {
                     url: url.clone(),
                     status: 200,
@@ -672,8 +679,8 @@ mod deadline_tests {
         target.relays.push("wss://hint.example/".into());
         let mut cfg = EventConfig::default();
         cfg.adapters.max_indexer_pages = 1;
-        let egress =
-            Egress::with_backends(Default::default(), Arc::new(Fixture), Arc::new(Fixture));
+        let fixture = Arc::new(Fixture(AtomicUsize::new(0)));
+        let egress = Egress::with_backends(Default::default(), fixture.clone(), fixture.clone());
         for values in [vec![], vec![json!({"kind":31923,"content":"unsigned"})]] {
             let error = lookup_inner(&target, &egress, &cfg, std::future::ready(Ok(values)))
                 .await
@@ -698,6 +705,18 @@ mod deadline_tests {
             .unwrap()
             .id,
             event.id
+        );
+        assert_eq!(fixture.0.load(Ordering::SeqCst), 2);
+        tokio::time::advance(std::time::Duration::from_secs(301)).await;
+        assert!(
+            lookup_inner(&target, &egress, &cfg, std::future::ready(Ok(vec![])))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            fixture.0.load(Ordering::SeqCst),
+            3,
+            "the capped page refreshes while the complete empty indexer stays cached"
         );
     }
 

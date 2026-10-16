@@ -102,6 +102,7 @@ deny_hosts = []
 
 [queue]
 max_failures = 5
+timeout_grace = 3 # Consecutive timeouts back off immediately; later ones charge failures.
 backoff_secs = 30
 max_backoff_secs = 3600
 lease_secs = 60

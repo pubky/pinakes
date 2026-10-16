@@ -174,7 +174,7 @@ pub async fn save(
         Status::Unreachable | Status::Error | Status::Pending
     ) {
         let attempt = row.try_get::<i32, _>("attempts")? as u32 + 1;
-        sqlx::query("UPDATE resource SET status=$2,lease_until=NULL,priority_at=NULL,attempts=attempts+1,dead_letter=$4,last_error='http_4xx',next_attempt_at=now()+$3*interval '1 second' WHERE id=$1")
+        sqlx::query("UPDATE resource SET status=$2,lease_until=NULL,priority_at=NULL,attempts=attempts+1,timeout_streak=0,dead_letter=$4,last_error='http_4xx',next_attempt_at=now()+$3*interval '1 second' WHERE id=$1")
             .bind(id).bind(doc.status.as_str()).bind(crate::queue::backoff(cfg,attempt) as f64).bind(attempt>=cfg.max_failures).execute(&mut *tx).await?;
         tx.commit().await?;
         return Ok(());
@@ -182,6 +182,20 @@ pub async fn save(
     let accepted: Option<Value> = row.try_get("accepted")?;
     // A never-observed object can be missing without having been created or cancelled.
     let before = accepted.filter(|v| v.get("type").is_some() && row.get::<bool, _>("ever_existed"));
+    if doc.status == Status::Ok
+        && doc.start.is_none()
+        && before.as_ref().is_some_and(|old| old["start"].is_string())
+        && row
+            .try_get::<Option<Vec<String>>, _>("type_path")?
+            .is_some_and(|path| path.iter().any(|t| t == "Event"))
+    {
+        crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
+        return Err(crate::resolver::RetryLater {
+            class: "drift",
+            seconds: 3600,
+        }
+        .into());
+    }
     // The transient container is serde-skipped: copy only the small parent document,
     // without cloning thousands of already-prepared occurrence documents.
     let mut doc: ResourceMeta = serde_json::from_value(serde_json::to_value(doc)?)?;
@@ -214,7 +228,7 @@ pub async fn save(
                 }
             }
             let retry = cfg.missing_ttl_secs.max(3600) as f64;
-            sqlx::query("UPDATE resource SET lease_until=NULL,priority_at=NULL,attempts=0,last_error=NULL,refresh_at=now()+$2*interval '1 second',next_attempt_at=now()+$2*interval '1 second' WHERE id=$1").bind(id).bind(retry).execute(&mut *tx).await?;
+            sqlx::query("UPDATE resource SET lease_until=NULL,priority_at=NULL,attempts=0,timeout_streak=0,last_error=NULL,refresh_at=now()+$2*interval '1 second',next_attempt_at=now()+$2*interval '1 second' WHERE id=$1").bind(id).bind(retry).execute(&mut *tx).await?;
             if source == "osm" {
                 sqlx::query("UPDATE osm_place SET refresh_at=least(refresh_at,now()+$3*interval '1 second') WHERE osm_type=$1 AND osm_id=$2").bind(row.try_get::<Option<String>,_>("osm_type")?).bind(row.try_get::<Option<i64>,_>("osm_id")?).bind(retry).execute(&mut *tx).await?;
             }
@@ -229,7 +243,7 @@ pub async fn save(
             doc = serde_json::from_value(retained)?;
         }
     } else {
-        sqlx::query("UPDATE resource SET missing_streak=0,last_missing_at=NULL WHERE id=$1")
+        sqlx::query("UPDATE resource SET missing_streak=0,last_missing_at=NULL,timeout_streak=0 WHERE id=$1")
             .bind(id)
             .execute(&mut *tx)
             .await?;

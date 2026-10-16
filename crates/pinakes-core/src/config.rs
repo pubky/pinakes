@@ -171,6 +171,7 @@ impl Default for EgressConfig {
 pub struct QueueConfig {
     pub groups: crate::groups::GroupConfig,
     pub max_failures: u32,
+    pub timeout_grace: u32,
     pub backoff_secs: u64,
     pub max_backoff_secs: u64,
     pub lease_secs: u64,
@@ -182,6 +183,7 @@ impl Default for QueueConfig {
         Self {
             groups: Default::default(),
             max_failures: 5,
+            timeout_grace: 3,
             backoff_secs: 30,
             max_backoff_secs: 3600,
             lease_secs: 60,
@@ -455,6 +457,7 @@ impl Config {
             || !(1..=2048).contains(&self.ingest.max_object_path_bytes)
             || self.grace_days > 3650
             || !(1..=32).contains(&self.queue.max_failures)
+            || self.queue.timeout_grace > 32
             || !(30..=3600).contains(&self.queue.lease_secs)
             || self.queue.backoff_secs == 0
             || self.queue.max_backoff_secs > 86400

@@ -396,22 +396,30 @@ impl EventService {
             opts.feed_cap = opts.feed_hint.then_some(self.config.feed_body_bytes);
             opts.user_agent = Some(super::adapters::profile(&manifest.ua_profile).into());
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if let Ok(Ok(response)) = tokio::time::timeout(
+            let response = tokio::time::timeout(
                 remaining.min(Duration::from_secs(2)),
-                egress.discover(&target, &opts, manifest.cadence_floor),
+                super::adapters::service::discover_enrichment(
+                    egress,
+                    &target,
+                    &opts,
+                    manifest.cadence_floor,
+                    d,
+                ),
             )
             .await
-            {
-                if response.status == 200 {
-                    let config = super::adapters::configured_event(&self.config, d);
-                    if let Some(extra) =
-                        super::adapters::service::enrichment_blocking(uri, d, &response, &config)
-                            .await?
-                    {
-                        if extra.type_path.contains(&"Event".into()) {
-                            event.set_type("Event");
-                            page::merge_missing(&mut event, &extra)?;
-                        }
+            .map_err(|_| crate::resolver::RetryLater {
+                class: "timeout",
+                seconds: 60,
+            })??;
+            if response.status == 200 {
+                let config = super::adapters::configured_event(&self.config, d);
+                if let Some(extra) =
+                    super::adapters::service::enrichment_blocking(uri, d, &response, &config)
+                        .await?
+                {
+                    if extra.type_path.contains(&"Event".into()) {
+                        event.set_type("Event");
+                        page::merge_missing(&mut event, &extra)?;
                     }
                 }
             }
