@@ -50,6 +50,7 @@ impl Transport for TransportMock {
                 if u.path()=="/post" {("text/html",r#"<title>Blog</title><script type="application/ld+json">{"@type":"BlogPosting","name":"Original blog"}</script><link rel="alternate" type="application/rss+xml" href="/feed">"#.into())}
                 else {("application/rss+xml",r#"<rss><channel><title>Blog feed</title><item><guid>blog-guid</guid><title>Post</title><link>https://blog.example/post</link></item></channel></rss>"#.into())}
             },
+            "copier.example" => ("text/html","<title>Copied episode</title><link rel='alternate' type='application/rss+xml' href='https://podcast.example/feed'>".into()),
             "podcast.example" => {
                 if u.path()=="/episode" {("text/html","<title>Episode page</title><link rel='alternate' type='application/rss+xml' href='/feed'>".into())}
                 else {("application/rss+xml",RSS.into())}
@@ -1018,4 +1019,38 @@ fn round4_identifier_registries_name_landing_pages() {
     );
     let d = cards::parse_isbn("isbn:9780140328721", "9780140328721", &f, 3600).unwrap();
     assert!(d.group_keys.iter().all(|k| k.basis != "registry"));
+}
+
+#[tokio::test]
+async fn round4_discovered_feeds_from_other_origins_lend_no_guids() {
+    let mut cfg = Config::default();
+    cfg.web.discover_feeds = true;
+    let seen = Arc::new(TransportMock::default());
+    let r = resolver("media", cfg, seen.clone());
+    // The publisher's own page keeps its feed's episode and series GUIDs.
+    let own = r
+        .web
+        .resolve("https://podcast.example/episode")
+        .await
+        .unwrap();
+    assert_eq!(own.type_name, "PodcastEpisode");
+    assert!(own.group_keys.iter().any(|k| k.basis == "podcast_guid"));
+    // V17: another origin advertising that feed with ?guid= keeps a card, never the GUIDs
+    // (and so never the publisher's container scope).
+    let copy = r
+        .web
+        .resolve("https://copier.example/episode?guid=episode-1")
+        .await
+        .unwrap();
+    assert_eq!(copy.type_name, "PodcastEpisode");
+    assert!(copy
+        .group_keys
+        .iter()
+        .all(|k| !matches!(k.basis.as_str(), "podcast_guid" | "podcast_series_guid")));
+    assert!(seen
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(u, _)| u == "https://podcast.example/feed"));
 }

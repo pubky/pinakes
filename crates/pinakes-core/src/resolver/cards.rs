@@ -808,6 +808,10 @@ pub async fn enrich(
         let is_feed = f.content_type.contains("xml") || f.content_type.contains("rss");
         let direct = crate::model::identity(uri).ok().map(|v| v.0)
             == crate::model::identity(f.url.as_str()).ok().map(|v| v.0);
+        // A page may advertise any feed; only a same-publisher feed lends it episode GUIDs.
+        let borrowed = rss
+            .as_deref()
+            .is_some_and(|rss| !is_feed && !crate::group_keys::same_origin(uri, rss));
         let feed = if is_feed {
             Some(f.clone())
         } else if let Some(url) = rss {
@@ -843,9 +847,9 @@ pub async fn enrich(
             .await?
             {
                 // A multi-episode feed must not replace an episode page with the whole series.
-                if is_feed && !direct {
-                    // A redirecting URI is a different publisher, even if it serves a
-                    // byte-identical feed. Keep the card but withhold borrowed GUIDs.
+                if (is_feed && !direct) || borrowed {
+                    // A redirecting URI, or a page advertising another origin's feed, is a
+                    // different publisher. Keep the card but withhold borrowed GUIDs.
                     d.attributes.insert("podcast_feed".into(), referenced);
                     d.group_keys.retain(|k| {
                         !matches!(k.basis.as_str(), "podcast_guid" | "podcast_series_guid")
