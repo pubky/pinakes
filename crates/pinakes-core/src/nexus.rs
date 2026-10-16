@@ -45,6 +45,8 @@ pub struct Change {
     pub label: Option<String>,
     pub at: i64,
     pub recurrence_id: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
     pub start: Option<i64>,
     pub end: Option<i64>,
 }

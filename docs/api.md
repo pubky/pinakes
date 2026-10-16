@@ -13,6 +13,7 @@ Nexus in a separate call. All paths below are relative to the Pinakes origin.
 | `GET /v1/resources/{id}` | `fields=card\|facets\|document` | One resource; default `document`; 404 if absent |
 | `POST /v1/resources/lookup` | Exactly one of `{"ids":[...]}` or `{"uris":[...]}` | Array in request order, including duplicates, skipping unknowns; 1–500 entries |
 | `POST /v1/resolve` | `{"uri":"https://example.org/"}` | Resource immediately or after up to 3 seconds; 202 with `status=pending` while queued |
+| `GET /v1/resources/{id}/occurrences` | Optional RFC 3339 `from`, `to` inclusive start bounds | `{items:[...]}` in start/key order; unknown resource 404 |
 | `GET /v1/info` | None | Public version, manifests, resolver status, counts, ingestion cursor/epoch/length/lag/time and licence |
 | `GET /v1/changes` | `cursor`, `class`, `type`, `source`, `limit` | Change page with ascending sequence cursor |
 | `POST /v1/changes/lookup` | `{resource_ids:[...], since, cursor?, limit?}` | Changes to 1–500 requested IDs since a timestamp |
@@ -42,14 +43,15 @@ not an HTTP 404 from the Pinakes resource route.
 | `sort` | `activity` (default), `recent`, `distance` (requires `near`) or `start` |
 | `limit` | 1–500, default 50 |
 | `cursor` | Authenticated next-page token returned by this daemon; restart pagination after a daemon restart or an invalid-cursor 400 |
-| `facet` | `tags`: counts distinct resources per label over the entire filtered set |
+| `facet` | `tags`: counts distinct result units per label over the entire filtered set |
 | `bbox` | `minLon,minLat,maxLon,maxLat`, degrees; west > east crosses the antimeridian |
 | `near`, `radius` | `lat,lon` plus a positive metre radius, max 200,000 by default; mutually exclusive with `bbox` |
 | `from`, `to` | Inclusive start-time bounds, RFC 3339 or Unix milliseconds; `from` must not follow `to` |
 | `cluster` | Finite map zoom with `bbox`, floored and clamped into the resolution table; returns viewport clusters/points; incompatible with cursor |
 | `fields` | `card` (default), `facets`, or `document` |
 
-`venue`, `collapse` and `reach=wot_2` return 400. Unknown parameters, invalid
+`venue` accepts a 32-character resource ID for events at that place.
+`collapse` and `reach=wot_2` return 400. Unknown parameters, invalid
 coordinates/dates, out-of-range radius, non-finite zoom and incompatible options also return 400.
 The `start` sort excludes resources without a start. Distance and start ranks are
 negative metres and negative Unix seconds respectively, so nearest/earliest comes
@@ -113,7 +115,7 @@ return 400. A null cursor ends the result set.
 
 Cards include `resource_id`, `uri`, `type`, `name`, `description`, `image`, `site`,
 `status`. Missing card values are null. `facets` adds `type_path`, optional
-`category`, `point:{lat,lon}`, `start` and `end`. `document` adds the bounded
+`category` and `point:{lat,lon}`. Event `start`/`end` also appear on cards. `document` adds the bounded
 `ResourceMeta` with source, fetched time in Unix milliseconds, TTL seconds,
 attributes and aliases. `geo` omits `ttl_secs` because it is final. The document is at most 8 KB; its flat string attributes
 are resolver-allowlisted and capped at 32. An unresolved resource has no document.
@@ -185,7 +187,7 @@ Handler errors use `{"error":"..."}`; Axum's query/JSON parsing errors may be te
 Malformed query parameters return 400, malformed JSON returns 400, JSON shape
 errors return 422, and request bodies over 2 MB return 413. Internal errors return
 500 without database diagnostics. There are no resource write, social-state,
-public admin, occurrence, reverse-geocoding, place-search or group routes in this step.
+public admin, reverse-geocoding, place-search or group routes in this step.
 
 ## Change feed and refresh
 
@@ -263,3 +265,59 @@ report the effective `resolution`. If the actual group count still exceeds the c
 request returns 400. Search ETags include the reach-author-set hash and truncation flag,
 the feed cursor and a transactionally maintained write revision. Computing the revision
 does not scan resources, OSM places or references.
+
+## Event units and occurrences
+
+`type=Event&from=...&to=...&sort=start` covers external Event pages with a start,
+calendar occurrence rows and located Pubky event references. Every stage filters
+these units before paging/clustering; a calendar with three matching occurrences
+contributes three counts. `resource_id` is the page, owning feed or referenced venue.
+Use the composite occurrence/post handle as the client row key, not `resource_id`
+alone. Opaque cursor keys distinguish instances even when their ranks and owner IDs tie.
+
+A feed result adds `occurrence: {uid, recurrence_id, event_resource_id?}`. A null
+recurrence_id represents a non-recurring instance; recurring keys are UTC instants
+or all-day dates. An existing page matching the occurrence URL is linked by
+`event_resource_id`; it is never fetched just because a feed mentions it.
+A located Pubky result adds `event: {author, object_path, recurrence_id, start, end,
+status}` for Nexus post hydration. Its name is intentionally absent: Pinakes does
+not fetch the post body. Author/reach filters also constrain that post's author.
+`venue=<id>` matches promoted venue IDs and the referenced venue for Pubky units.
+Cancelled units retain their lifecycle status and remain addressable.
+
+`GET /v1/resources/{id}/occurrences?from=...&to=...` returns accepted occurrences
+ordered by start, UID and recurrence key, capped by `event.max_occurrences_per_feed`.
+Items include the full bounded `document`, their identity handle, start/end, name,
+status, URL, venue/page link, volatile flag and optional supersedes key. This route
+accepts RFC 3339 dates; search additionally accepts Unix milliseconds. A known
+non-calendar returns an empty array. Snapshot rows retained outside the rolling
+expansion horizon remain readable, so pass a window for a calendar view.
+
+Event documents add `tz?`, `all_day?`, `event_status`, `attendance`,
+`venue: {text,name?,address?,resource_id?,location?,location_source?,osm_id?,osm_version?}`,
+`organizer: {name,url?}`, and optional display-only `offers: {low_price,high_price,currency}`.
+Lifecycle is `scheduled|cancelled|postponed|rescheduled|moved_online`; attendance is
+`offline|online|mixed`. Top-level `status` still means fetch health. Calendar
+CATEGORIES become a bounded deduplicated `categories` array, independent of Pubky tags.
+
+An offset-only timestamp keeps its instant without inventing a zone. Floating
+calendar times use TZID/X-WR-TIMEZONE/configured default/coordinates where available.
+Without a zone, `start_local` and `end_local` preserve wall times; UTC values are a
+sorting proxy, not a known instant. Unknown TZIDs use an advertised/default zone
+or a flagged UTC fallback. All-day ends are exclusive and stay local dates across DST.
+`timezone_attribution` accompanies coordinate-derived zones; preserve it in display
+along with any OSM `attribution`. See the separately licensed data in `data/README.md`.
+
+Calendar rows use SEQUENCE/LAST-MODIFIED and normalized content hashes; DTSTAMP,
+unknown vendor props and fetch noise do not create changes. Explicit cancellations
+apply immediately. Disappearance needs two fresh complete snapshots. Losing over half
+the active keys holds all updates until the next identical successful snapshot.
+Each occurrence emits its own change with `occurrence` equal to the serialized
+`[uid,recurrence_id]` key. Snapshots older than or equal to the last observation are
+ignored; past end+24h and horizon roll-off never imply cancellation.
+
+Nexus `kind:event` puts/deletes accept `recurrence_id`, start/end Unix milliseconds
+and optional status. The reference key includes author, object_path, venue resource
+and recurrence so deleting one occurrence leaves other instances/venues intact.
+Bad recurrence keys (over 128 bytes or NUL) or lifecycle values are skipped and
+counted as `pinakes_ingest_rejected_total{reason="event"}` after commit.

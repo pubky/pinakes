@@ -124,7 +124,7 @@ async fn finish_job(
             doc.start = doc.start.or(dates.0);
             doc.end = doc.end.or(dates.1);
         }
-        if matches!(resolver.name(), "web" | "pubky" | "geo" | "osm") {
+        if matches!(resolver.name(), "web" | "event" | "pubky" | "geo" | "osm") {
             let now = chrono::Utc::now();
             let mut manifest = resolver.manifest();
             if resolver.name() == "osm" {
@@ -136,14 +136,29 @@ async fn finish_job(
                     .or(doc.start)
                     .is_some_and(|end| now >= end + chrono::Duration::hours(24))
             {
-                doc.ttl_secs = crate::scheduler::next(&manifest, &doc, now, refresh)
-                    .map_or(0, |at| (at - now).num_seconds().max(0) as u64);
+                let next = if let Some(container) = &doc.container {
+                    manifest.mode = crate::adapter::Mode::Container;
+                    crate::scheduler::container_next(
+                        &manifest,
+                        &container
+                            .occurrences
+                            .iter()
+                            .map(|o| o.doc.clone())
+                            .collect::<Vec<_>>(),
+                        container.feed_ttl,
+                        now,
+                        refresh,
+                    )
+                } else {
+                    crate::scheduler::next(&manifest, &doc, now, refresh)
+                };
+                doc.ttl_secs = next.map_or(0, |at| (at - now).num_seconds().max(0) as u64);
             } else if resolver.name() != "osm" {
                 doc.ttl_secs = doc.ttl_secs.max(3600);
             }
         }
         let attrs = match resolver.name() {
-            "web" => crate::resolver::web::ATTRIBUTES,
+            "web" | "event" => crate::resolver::web::ATTRIBUTES,
             "pubky" => crate::resolver::pubky::ATTRIBUTES,
             "geo" => crate::resolver::geo::ATTRIBUTES,
             "osm" => crate::resolver::osm::ATTRIBUTES,
@@ -291,11 +306,33 @@ pub fn spawn(
     let mut workers = JoinSet::new();
     let authors = Arc::new(AuthorBudget::default());
     let mut resolvers: Vec<(Arc<dyn Resolver>, crate::config::ResolverConfig)> = vec![];
+    let egress = Egress::new(config.egress.clone());
+    let osm = Arc::new(OsmResolver::new(pool.clone(), config.osm.clone())?);
+    let events = config.event.enabled.then(|| {
+        Arc::new(crate::event::service::EventService {
+            pool: pool.clone(),
+            config: config.event.clone(),
+            osm: osm.clone(),
+        })
+    });
     if config.web.enabled {
         resolvers.push((
             Arc::new(WebResolver {
-                egress: Egress::new(config.egress.clone()),
+                events: events.clone(),
+                egress: egress.clone(),
                 config: config.web.clone(),
+            }),
+            config.web.clone(),
+        ));
+    }
+    if let Some(events) = events.filter(|_| config.event.calendars) {
+        resolvers.push((
+            Arc::new(crate::event::service::CalendarResolver {
+                web: WebResolver {
+                    egress: egress.clone(),
+                    config: config.web.clone(),
+                    events: Some(events),
+                },
             }),
             config.web.clone(),
         ));
@@ -318,7 +355,7 @@ pub fn spawn(
     }
     if config.osm.enabled {
         resolvers.push((
-            Arc::new(OsmResolver::new(pool.clone(), config.osm.clone())?),
+            osm,
             crate::config::ResolverConfig {
                 concurrency: 1,
                 requests_per_second: config.osm.requests_per_second,

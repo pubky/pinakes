@@ -52,6 +52,12 @@ pub struct OsmId {
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
 pub struct ResourceMeta {
+    #[serde(default, flatten)]
+    pub event: crate::event::EventFields,
+    /// A resolution result, never embedded in the bounded resource document.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub container: Option<Box<crate::event::Container>>,
     #[serde(rename = "type")]
     pub type_name: String,
     pub type_path: Vec<String>,
@@ -150,6 +156,7 @@ impl ResourceMeta {
         Ok(())
     }
     pub fn bounded(mut self, allowed_attributes: &[&str]) -> Result<Self> {
+        self.event.bound();
         self.attributes
             .retain(|k, _| allowed_attributes.contains(&k.as_str()));
         while self.attributes.len() > ATTRIBUTE_CAP {

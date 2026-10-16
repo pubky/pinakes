@@ -257,7 +257,7 @@ impl OsmResolver {
             next: Mutex::new(Instant::now()),
         })
     }
-    async fn request(&self, url: reqwest::Url) -> Result<Option<Value>> {
+    pub(crate) async fn request(&self, url: reqwest::Url) -> Result<Option<Value>> {
         // One lock covers the request too: all batches and fallback calls share the host budget.
         let mut next = self.next.lock().await;
         tokio::time::sleep_until(*next).await;
@@ -337,7 +337,12 @@ impl OsmResolver {
             .transpose()
             .map_err(Into::into)
     }
-    async fn save(&self, id: &OsmId, doc: &ResourceMeta, display_name: Option<&str>) -> Result<()> {
+    pub(crate) async fn save(
+        &self,
+        id: &OsmId,
+        doc: &ResourceMeta,
+        display_name: Option<&str>,
+    ) -> Result<()> {
         let mut display_name = display_name.map(str::to_owned);
         if let Some(s) = &mut display_name {
             crate::model::truncate(s, 2048);

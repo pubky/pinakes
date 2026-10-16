@@ -205,3 +205,11 @@ OSM derivative row; other OSM-host pages are denied by web. OSM missing objects 
 configured 30-day negative cache after confirmation, rather than the generic short missing
 TTL: a deleted object stays deleted. Web/Pubky cadence comes from `[refresh]`, not parser
 `ttl_secs`. Conditional validators are not stored/sent in this version.
+
+
+Implementation note (step 4A): generic event documents, calendar occurrences,
+venue geocoding and the three event search units are implemented. The companion
+`design-events.md` §3 and `research-event-sources.md` §A/F are supplied separately
+with the task; this file remains the overview. Lifecycle is exposed as
+`event_status` to preserve the existing fetch-health `status` contract. Detailed
+implemented fields and limits are maintained in `docs/api.md` and the example config.

@@ -58,6 +58,7 @@ async fn seed(pool: &PgPool) -> Vec<String> {
                 label: Some(label.into()),
                 at: 1_790_000_000_000,
                 recurrence_id: None,
+                status: None,
                 start: None,
                 end: None,
             });
@@ -91,6 +92,9 @@ async fn seed(pool: &PgPool) -> Vec<String> {
         });
         doc.description = Some("A reference document".into());
         doc.set_type(if i == 0 { "MusicEvent" } else { "Article" });
+        if i == 0 {
+            doc.start = Some("2026-10-20T18:00:00Z".parse().unwrap());
+        }
         store::save_document(pool, id, 0, &doc).await.unwrap();
     }
     ids
@@ -127,7 +131,7 @@ async fn every_read_route_and_document_projection(pool: PgPool) {
     assert!(spec["components"]["schemas"]["ResourceView"]["properties"]
         .get("score")
         .is_none());
-    assert_eq!(spec["paths"].as_object().unwrap().len(), 11);
+    assert_eq!(spec["paths"].as_object().unwrap().len(), 12);
     for field in ["card", "facets", "document"] {
         let (code, item) = call(
             &app,
@@ -438,6 +442,7 @@ async fn polls_the_http_feed_and_replays_without_duplicates(pool: PgPool) {
         label: None,
         at: Utc::now().timestamp_millis(),
         recurrence_id: None,
+        status: None,
         start: None,
         end: None,
     };

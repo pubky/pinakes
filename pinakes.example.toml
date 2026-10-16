@@ -29,6 +29,27 @@ requests_per_second = 2.0
 # Parser TTL hint; [refresh] controls the actual schedule.
 ttl_secs = 86400
 
+[event]
+enabled = true
+jsonld = true
+microformats = true
+activitypub = true
+calendars = true
+geocoding = true
+coordinate_timezone = true
+# GET with decompression and streamed body accounting; pages still have the 1 MB cap.
+feed_body_bytes = 33554432
+max_occurrences_per_series = 50
+max_occurrences_per_feed = 10000
+max_components = 100000
+max_recurrence_steps = 100000
+parse_timeout_ms = 2000
+months_back = 1
+months_forward = 12
+# default_timezone = "Europe/Zurich" # Floating ICS times only; otherwise keep local time.
+geocode_score = 0.8
+held_retry_secs = 60
+
 [egress]
 host_requests_per_second = 1.0
 # Exact names or *.example.org. An empty allow list permits all public hosts.

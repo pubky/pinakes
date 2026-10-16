@@ -1,0 +1,446 @@
+use super::{calendar, page, Attendance};
+use crate::{
+    config::EventConfig,
+    model::ResourceMeta,
+    resolver::{
+        egress::{Egress, FetchOptions, Fetched, Validators},
+        osm::OsmResolver,
+    },
+};
+use anyhow::Result;
+use sqlx::PgPool;
+use std::{sync::Arc, time::Duration};
+
+pub struct EventService {
+    pub pool: PgPool,
+    pub config: EventConfig,
+    pub osm: Arc<OsmResolver>,
+}
+impl EventService {
+    pub async fn fetch(&self, egress: &Egress, uri: &str) -> Result<Fetched> {
+        let mapped = calendar::canonical_feed(uri);
+        let feed_hint = is_feed(uri) && self.config.calendars;
+        let validators = if feed_hint {
+            sqlx::query_scalar::<_, serde_json::Value>(
+                "SELECT validators FROM event_fetch WHERE resource_id=$1",
+            )
+            .bind(crate::model::identity(uri)?.0)
+            .fetch_optional(&self.pool)
+            .await?
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default()
+        } else {
+            Validators::default()
+        };
+        let mut options = FetchOptions {
+            feed_cap: self.config.calendars.then_some(self.config.feed_body_bytes),
+            feed_hint,
+            validators,
+            ..Default::default()
+        };
+        let fetched = egress.fetch_with(&mapped, &options).await;
+        let fetched = match fetched {
+            Err(_) if uri.starts_with("webcal:") || uri.starts_with("webcals:") => {
+                egress
+                    .fetch_with(&mapped.replacen("https:", "http:", 1), &options)
+                    .await?
+            }
+            other => other?,
+        };
+        // Validators are hints, never evidence of disappearance (nor a trusted snapshot).
+        let fetched = if fetched.status == 304 {
+            options.validators = Validators::default();
+            egress.fetch_with(fetched.url.as_str(), &options).await?
+        } else {
+            fetched
+        };
+        if feed_hint && fetched.status == 200 {
+            sqlx::query("INSERT INTO event_fetch(resource_id,validators) SELECT id,$2 FROM resource WHERE id=$1 ON CONFLICT(resource_id) DO UPDATE SET validators=$2").bind(crate::model::identity(uri)?.0).bind(serde_json::to_value(&fetched.validators)?).execute(&self.pool).await?;
+        }
+        Ok(fetched)
+    }
+    pub async fn container(
+        &self,
+        uri: &str,
+        fetched: &Fetched,
+        deadline: tokio::time::Instant,
+    ) -> Result<Option<ResourceMeta>> {
+        if !self.config.calendars || !(200..300).contains(&fetched.status) {
+            return Ok(None);
+        }
+        let bytes = &fetched.body;
+        let text = String::from_utf8_lossy(&bytes[..bytes.len().min(256)]);
+        let ics = text
+            .trim_start_matches(['\u{feff}', ' ', '\n', '\r'])
+            .starts_with("BEGIN:VCALENDAR");
+        let maybe_feed = ics
+            || matches!(
+                fetched.content_type.as_str(),
+                "text/calendar"
+                    | "application/ics"
+                    | "application/rss+xml"
+                    | "application/atom+xml"
+                    | "text/xml"
+                    | "application/xml"
+                    | "application/feed+json"
+                    | "application/json"
+            );
+        if !maybe_feed {
+            return Ok(None);
+        }
+        let uri = uri.to_owned();
+        let config = self.config.clone();
+        let body = bytes.clone();
+        let mut result = tokio::task::spawn_blocking(move || {
+            if ics {
+                calendar::parse(&uri, &body, &config, chrono::Utc::now()).map(Some)
+            } else {
+                calendar::structured_feed(&uri, &body, &config, chrono::Utc::now())
+            }
+        })
+        .await??;
+        if let Some(doc) = &mut result {
+            if let Some(c) = &mut doc.container {
+                // One request per distinct structured address, bounded by the total resolver deadline.
+                let mut venues: std::collections::BTreeMap<
+                    String,
+                    (super::Venue, super::EventFields),
+                > = std::collections::BTreeMap::new();
+                for row in &mut c.occurrences {
+                    let key = serde_json::to_string(&row.doc.event.venue)?;
+                    if let Some((v, fields)) = venues.get(&key) {
+                        row.doc.event.venue = Some(v.clone());
+                        if row.doc.event.tz.is_none() {
+                            row.doc.event.tz = fields.tz.clone();
+                            row.doc.event.timezone_attribution =
+                                fields.timezone_attribution.clone();
+                        }
+                    } else {
+                        let remaining = deadline
+                            .saturating_duration_since(tokio::time::Instant::now())
+                            .saturating_sub(Duration::from_millis(100));
+                        if !matches!(
+                            tokio::time::timeout(remaining, self.venue(&mut row.doc)).await,
+                            Ok(Ok(()))
+                        ) {
+                            row.doc.event.warnings.push("venue_unavailable".into());
+                        }
+                        if let Some(v) = &row.doc.event.venue {
+                            venues.insert(key, (v.clone(), row.doc.event.clone()));
+                        }
+                    }
+                    page::finalize(&mut row.doc, false);
+                }
+            }
+        }
+        Ok(result)
+    }
+    pub async fn page(
+        &self,
+        uri: &str,
+        fetched: &Fetched,
+        card: ResourceMeta,
+        egress: &Egress,
+        deadline: tokio::time::Instant,
+    ) -> Result<ResourceMeta> {
+        if !(200..300).contains(&fetched.status) {
+            return Ok(card);
+        }
+        let mut event = ResourceMeta::new(uri, "web", card.ttl_secs);
+        let mut calendar_link = None;
+        {
+            let text = String::from_utf8_lossy(&fetched.body);
+            if let Some(v) = page::lenient_json(&text) {
+                if self.config.jsonld {
+                    page::jsonld(&mut event, &v, &fetched.url);
+                }
+                if self.config.activitypub {
+                    page::activity(&mut event, &v, &fetched.url);
+                }
+            }
+            let html = scraper::Html::parse_document(&text);
+            if self.config.jsonld {
+                for node in html.select(
+                    &scraper::Selector::parse("script[type='application/ld+json']").unwrap(),
+                ) {
+                    if let Some(v) = page::lenient_json(&node.inner_html()) {
+                        page::jsonld(&mut event, &v, &fetched.url);
+                    }
+                }
+            }
+            if self.config.calendars {
+                calendar_link = html
+                    .select(
+                        &scraper::Selector::parse("link[type='text/calendar'][href],a[href]")
+                            .unwrap(),
+                    )
+                    .filter_map(|el| el.value().attr("href"))
+                    .filter(|href| {
+                        href.contains("/export/event/")
+                            || href.ends_with(".ics")
+                            || href.ends_with("/ical/")
+                    })
+                    .find_map(|href| crate::resolver::web::origin_url(&fetched.url, href));
+            }
+            if self.config.microformats {
+                page::microformats(&mut event, &html, &fetched.url);
+            }
+        }
+        if self.config.activitypub && (event.start.is_none() || event.event.tz.is_none()) {
+            for accept in [
+                "application/activity+json",
+                "application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\"",
+            ] {
+                let remaining = deadline
+                    .saturating_duration_since(tokio::time::Instant::now())
+                    .saturating_sub(Duration::from_millis(100));
+                if remaining < Duration::from_millis(100) {
+                    break;
+                }
+                let options = FetchOptions {
+                    accept: Some(accept.into()),
+                    ..Default::default()
+                };
+                if let Ok(Ok(response)) = tokio::time::timeout(
+                    remaining.min(Duration::from_secs(2)),
+                    egress.fetch_with(uri, &options),
+                )
+                .await
+                {
+                    if response.status == 200 {
+                        if let Ok(v) = serde_json::from_slice(&response.body) {
+                            if page::activity(&mut event, &v, &response.url) {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(link) = calendar_link.filter(|_| event.event.tz.is_none()) {
+            let remaining = deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .saturating_sub(Duration::from_millis(100));
+            if let Ok(Ok(response)) = tokio::time::timeout(
+                remaining.min(Duration::from_secs(2)),
+                egress.fetch_with(
+                    &link,
+                    &FetchOptions {
+                        feed_cap: Some(self.config.feed_body_bytes),
+                        feed_hint: true,
+                        ..Default::default()
+                    },
+                ),
+            )
+            .await
+            {
+                if response.status == 200 {
+                    if let Ok(mut calendar) =
+                        calendar::parse(&link, &response.body, &self.config, chrono::Utc::now())
+                    {
+                        if let Some(c) = calendar
+                            .container
+                            .take()
+                            .filter(|c| c.occurrences.len() == 1)
+                        {
+                            let fallback = &c.occurrences[0].doc;
+                            if !event.type_path.contains(&"Event".into()) {
+                                event.set_type("Event");
+                                event.source = "ics".into();
+                            }
+                            super::page::merge_missing(&mut event, fallback)?;
+                        }
+                    }
+                }
+            }
+        }
+        if !event.type_path.contains(&"Event".into()) {
+            let mut card = card;
+            if card.type_path.contains(&"Event".into()) {
+                card.set_type("WebPage");
+                card.start = None;
+                card.end = None;
+            }
+            return Ok(card);
+        }
+        if event.name.is_none() {
+            event.name = card.name;
+        }
+        if event.description.is_none() {
+            event.description = card.description;
+        }
+        if event.image.is_none() {
+            event.image = card.image;
+        }
+        event.aliases = card.aliases;
+        event.attributes = card.attributes;
+        event.site = card.site;
+        page::finalize(&mut event, self.config.coordinate_timezone);
+        // Geocoding is enrichment. A slow/unavailable service must not discard page facts.
+        let remaining = deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+            .saturating_sub(Duration::from_millis(25));
+        if !matches!(
+            tokio::time::timeout(remaining, self.venue(&mut event)).await,
+            Ok(Ok(()))
+        ) {
+            event.event.warnings.push("venue_unavailable".into());
+        }
+        page::finalize(&mut event, false);
+        event.bounded(crate::resolver::web::ATTRIBUTES)
+    }
+    pub async fn venue(&self, doc: &mut ResourceMeta) -> Result<()> {
+        if !self.config.geocoding
+            || doc.event.attendance == Some(Attendance::Online)
+            || doc.location.is_some()
+        {
+            return Ok(());
+        }
+        let Some(venue) = &mut doc.event.venue else {
+            return Ok(());
+        };
+        if venue.location.is_some()
+            || venue.osm_id.is_some()
+            || !venue.address.contains_key("street")
+            || !(venue.address.contains_key("city") || venue.address.contains_key("postalcode"))
+        {
+            return Ok(());
+        }
+        let mut url: url::Url = format!(
+            "{}/search",
+            self.osm.config.nominatim_url.trim_end_matches('/')
+        )
+        .parse()?;
+        url.query_pairs_mut()
+            .append_pair("format", "jsonv2")
+            .append_pair("addressdetails", "1")
+            .append_pair("namedetails", "1")
+            .append_pair("limit", "2");
+        for k in ["street", "city", "postalcode", "country"] {
+            if let Some(v) = venue.address.get(k) {
+                url.query_pairs_mut().append_pair(k, v);
+            }
+        }
+        let Some(value) = self.osm.request(url).await? else {
+            return Ok(());
+        };
+        let Some(hits) = value.as_array() else {
+            return Ok(());
+        };
+        if hits.len() != 1 {
+            return Ok(());
+        }
+        let hit = &hits[0];
+        let normalize = |s: &str| {
+            s.chars()
+                .filter(|c| c.is_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        };
+        let address = &hit["address"];
+        let mut matching = 0usize;
+        let mut total = 0usize;
+        for (k, keys) in [
+            ("city", &["city", "town", "village", "municipality"][..]),
+            ("postalcode", &["postcode"][..]),
+            ("country", &["country_code", "country"][..]),
+            ("street", &["road", "pedestrian", "footway"][..]),
+        ] {
+            if let Some(expected) = venue.address.get(k) {
+                total += 1;
+                let expected = normalize(expected);
+                let matched = keys
+                    .iter()
+                    .filter_map(|key| address[key].as_str())
+                    .any(|v| {
+                        let v = normalize(v);
+                        if k == "street" {
+                            let number = address["house_number"]
+                                .as_str()
+                                .map(normalize)
+                                .unwrap_or_default();
+                            expected == format!("{v}{number}") || expected == format!("{number}{v}")
+                        } else {
+                            expected == v
+                        }
+                    });
+                if matched {
+                    matching += 1;
+                }
+            }
+        }
+        let score = matching as f64 / total.max(1) as f64;
+        if score < self.config.geocode_score {
+            return Ok(());
+        }
+        let mut place = crate::resolver::osm::map_place(hit, self.osm.config.ttl_secs)?;
+        // Nominatim name can be separate from namedetails on search responses.
+        if place.name.is_none() {
+            place.name = hit["name"].as_str().map(str::to_owned);
+        }
+        let key = crate::resolver::osm::parse_id(&place.url).expect("mapped OSM id");
+        self.osm
+            .save(&key, &place, hit["display_name"].as_str())
+            .await?;
+        let version: String = sqlx::query_scalar("SELECT md5($1::jsonb::text)")
+            .bind(crate::changes::normalize(&place))
+            .fetch_one(&self.pool)
+            .await?;
+        venue.osm_id = Some(key.key());
+        venue.osm_version = Some(version);
+        venue.location = None;
+        venue.location_source = Some(crate::model::LocationSource::Geocoded);
+        if matching == total
+            && venue
+                .name
+                .as_deref()
+                .zip(place.name.as_deref())
+                .is_some_and(|(a, b)| !a.is_empty() && normalize(a) == normalize(b))
+        {
+            let id = crate::store::ensure_resource(&self.pool, &place.url).await?;
+            venue.resource_id = Some(id);
+            venue.location_source = Some(crate::model::LocationSource::Osm);
+        }
+        if self.config.coordinate_timezone && doc.event.tz.is_none() {
+            doc.event.tz = place
+                .location
+                .as_ref()
+                .and_then(super::time::coordinate_zone);
+            if doc.event.tz.is_some() {
+                doc.event.timezone_attribution = Some(super::time::ATTRIBUTION.into());
+            }
+        }
+        Ok(())
+    }
+}
+pub fn is_feed(uri: &str) -> bool {
+    uri.starts_with("webcal:")
+        || uri.starts_with("webcals:")
+        || url::Url::parse(uri).is_ok_and(|u| {
+            u.path().ends_with(".ics")
+                || u.path().ends_with("/ical/")
+                || u.path().ends_with("/feed/ics")
+                || u.path().ends_with("/feed/rss")
+                || u.path().ends_with("/feed/json")
+                || u.path().contains("/public-calendars/")
+        })
+}
+
+pub struct CalendarResolver {
+    pub web: crate::resolver::web::WebResolver,
+}
+#[async_trait::async_trait]
+impl crate::resolver::Resolver for CalendarResolver {
+    fn name(&self) -> &'static str {
+        "event"
+    }
+    fn matches(&self, uri: &str) -> bool {
+        crate::resolver::classify(uri) == Some("event")
+    }
+    async fn resolve(&self, uri: &str) -> Result<ResourceMeta> {
+        self.web.resolve(uri).await
+    }
+    fn refresh_after(&self, doc: &ResourceMeta) -> Duration {
+        Duration::from_secs(doc.ttl_secs)
+    }
+}

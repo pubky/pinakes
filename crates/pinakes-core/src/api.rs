@@ -172,6 +172,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/search", get(search))
         .route("/v1/resources/lookup", post(lookup))
         .route("/v1/resources/{id}", get(resource))
+        .route(
+            "/v1/resources/{id}/occurrences",
+            get(crate::event::storage::list),
+        )
         .route("/v1/resolve", post(resolve))
         .route("/v1/openapi.json", get(openapi))
         .route("/v1/dumps/osm_place.ndjson", get(osm_dump))
@@ -296,6 +300,10 @@ impl PageCursor {
 #[derive(Serialize, ToSchema)]
 pub struct ResourceView {
     pub resource_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub occurrence: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event: Option<Value>,
     pub uri: String,
     #[serde(rename = "type")]
     pub type_name: Option<String>,
@@ -381,6 +389,8 @@ fn view(row: &Value, fields: Fields, spatial: bool) -> Result<ResourceView, ApiE
     let facets = !matches!(fields, Fields::Card);
     Ok(ResourceView {
         resource_id: row["id"].as_str().unwrap_or_default().into(),
+        occurrence: row.get("occurrence").filter(|v| !v.is_null()).cloned(),
+        event: row.get("event").filter(|v| !v.is_null()).cloned(),
         uri: row["uri"].as_str().unwrap_or_default().into(),
         type_name: row["type"].as_str().map(str::to_owned),
         name: row["name"].as_str().map(str::to_owned),
@@ -405,12 +415,13 @@ fn view(row: &Value, fields: Fields, spatial: bool) -> Result<ResourceView, ApiE
             .map(|(kind, id)| format!("{kind}/{id}")),
         attribution: row["osm_id"]
             .as_i64()
-            .map(|_| crate::resolver::osm::ATTRIBUTION.into()),
+            .map(|_| crate::resolver::osm::ATTRIBUTION.into())
+            .or_else(|| doc.as_ref().and_then(|d| d.attribution.clone())),
         point: (facets || spatial)
             .then(|| doc.as_ref().and_then(|d| d.location.clone()))
             .flatten(),
-        start: facets.then(|| doc.as_ref().and_then(|d| d.start)).flatten(),
-        end: facets.then(|| doc.as_ref().and_then(|d| d.end)).flatten(),
+        start: doc.as_ref().and_then(|d| d.start),
+        end: doc.as_ref().and_then(|d| d.end),
         document: if matches!(fields, Fields::Document) {
             doc
         } else {
@@ -419,12 +430,11 @@ fn view(row: &Value, fields: Fields, spatial: bool) -> Result<ResourceView, ApiE
     })
 }
 fn validate_search(q: &SearchQuery) -> Result<Vec<String>, ApiError> {
-    for (name, value) in [("venue", &q.venue), ("collapse", &q.collapse)] {
-        if value.is_some() {
-            return Err(ApiError::bad(format!(
-                "{name} is not available in this release"
-            )));
-        }
+    if q.venue.as_deref().is_some_and(|v| !model::valid_id(v)) {
+        return Err(ApiError::bad("venue must be a resource ID"));
+    }
+    if q.collapse.is_some() {
+        return Err(ApiError::bad("collapse is not available in this release"));
     }
     if !(1..=500).contains(&q.limit.unwrap_or(50)) {
         return Err(ApiError::bad("limit must be 1–500"));
@@ -567,9 +577,22 @@ pub async fn search(
             .push("::timestamptz-s.updated_at)))/2592000.0),0)::double precision");
     }
     sql.push(
-        " AS rank FROM resource_document r LEFT JOIN resource_score s ON s.resource_id=r.id WHERE true",
+        " AS rank FROM search_unit r LEFT JOIN resource_score s ON s.resource_id=r.id WHERE true",
     );
     spatial.apply(&mut sql);
+    if let Some(venue) = &q.venue {
+        sql.push(" AND r.venue_id=").push_bind(venue.clone());
+    }
+    if let Some(author) = &q.author {
+        sql.push(" AND (r.event_author IS NULL OR r.event_author=")
+            .push_bind(author.clone())
+            .push(")");
+    }
+    if let Some(reach) = &reach {
+        sql.push(" AND (r.event_author IS NULL OR r.event_author=ANY(")
+            .push_bind(reach.authors.clone())
+            .push("))");
+    }
     if q.sort.as_deref() == Some("start") {
         sql.push(" AND r.start_at IS NOT NULL");
     }
@@ -630,30 +653,30 @@ pub async fn search(
     if let Some(resolution) = spatial.resolution {
         sql.push("), cells AS (SELECT *, h3_latlng_to_cell(point(ST_X(point),ST_Y(point)),")
             .push_bind(i32::from(u8::from(resolution)))
-            .push(")::text AS cell FROM filtered), groups AS (SELECT cell,count(*) AS count,avg(ST_Y(point)) AS lat,degrees(atan2(avg(sin(radians(ST_X(point)))),avg(cos(radians(ST_X(point)))))) AS lon,(array_agg(id ORDER BY rank DESC,id DESC))[1:3] AS top,max(rank) AS rank,CASE WHEN bool_or(osm_id IS NOT NULL) THEN ")
+            .push(")::text AS cell FROM filtered), groups AS (SELECT cell,count(*) AS count,avg(ST_Y(point)) AS lat,degrees(atan2(avg(sin(radians(ST_X(point)))),avg(cos(radians(ST_X(point)))))) AS lon,(array_agg(id ORDER BY rank DESC,id DESC))[1:3] AS top,max(rank) AS rank,CASE WHEN bool_or(osm_id IS NOT NULL OR doc->>'attribution' IS NOT NULL) THEN ")
             .push_bind(crate::resolver::osm::ATTRIBUTION)
             .push(" ELSE NULL END AS attribution FROM cells GROUP BY cell LIMIT ")
             .push_bind((state.config.search.max_cluster_cells+1) as i64)
-            .push("), entries AS (SELECT 'cluster' AS kind,cell AS id,rank,to_jsonb(g)-'rank' AS item FROM groups g WHERE count>1 AND (SELECT count(*) FROM filtered)>")
+            .push("), entries AS (SELECT 'cluster' AS kind,cell AS id,cell AS unit_id,rank,to_jsonb(g)-'rank' AS item FROM groups g WHERE count>1 AND (SELECT count(*) FROM filtered)>")
             .push_bind(q.limit.unwrap_or(50) as i64)
-            .push(" UNION ALL SELECT 'point',c.id,c.rank,to_jsonb(c) FROM cells c JOIN groups g USING(cell) WHERE g.count=1 OR (SELECT count(*) FROM filtered)<=")
+            .push(" UNION ALL SELECT 'point',c.id,c.unit_id,c.rank,to_jsonb(c) FROM cells c JOIN groups g USING(cell) WHERE g.count=1 OR (SELECT count(*) FROM filtered)<=")
             .push_bind(q.limit.unwrap_or(50) as i64)
             .push("), page AS (SELECT * FROM entries ORDER BY rank DESC,id DESC LIMIT ")
             .push_bind((q.limit.unwrap_or(50)+1) as i64)
-            .push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p) ORDER BY rank DESC,id DESC) FROM page p),'[]') AS items, (SELECT count(*) FROM filtered) AS total, (SELECT count(*) FROM groups) AS cell_count, ");
+            .push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p) ORDER BY rank DESC,unit_id DESC) FROM page p),'[]') AS items, (SELECT count(*) FROM filtered) AS total, (SELECT count(*) FROM groups) AS cell_count, ");
     } else {
         sql.push("), page AS (SELECT * FROM filtered");
         if let Some(c) = &cursor {
-            sql.push(" WHERE (rank,id)<(")
+            sql.push(" WHERE (rank,unit_id)<(")
                 .push_bind(c.score)
                 .push(",")
                 .push_bind(c.id.clone())
                 .push(")");
         }
-        sql.push(" ORDER BY rank DESC,id DESC LIMIT ").push_bind((q.limit.unwrap_or(50)+1) as i64).push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p) ORDER BY rank DESC,id DESC) FROM page p),'[]') AS items, ");
+        sql.push(" ORDER BY rank DESC,unit_id DESC LIMIT ").push_bind((q.limit.unwrap_or(50)+1) as i64).push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p) ORDER BY rank DESC,unit_id DESC) FROM page p),'[]') AS items, ");
     }
     if q.facet.as_deref() == Some("tags") {
-        sql.push("coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY count DESC,label) FROM (SELECT f.label,count(DISTINCT f.resource_id) AS count FROM reference f JOIN filtered r ON r.id=f.resource_id WHERE f.label IS NOT NULL");
+        sql.push("coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY count DESC,label) FROM (SELECT f.label,count(DISTINCT r.unit_id) AS count FROM reference f JOIN filtered r ON r.id=f.resource_id WHERE f.label IS NOT NULL");
         scope(&mut sql, &q, &reach);
         sql.push(" GROUP BY f.label) t),'[]')");
     } else {
@@ -677,7 +700,10 @@ pub async fn search(
             PageCursor {
                 version: 2,
                 score: last["rank"].as_f64().context("missing rank")?,
-                id: last["id"].as_str().context("missing resource ID")?.into(),
+                id: last["unit_id"]
+                    .as_str()
+                    .context("missing resource ID")?
+                    .into(),
                 at,
                 filter,
             }
@@ -840,6 +866,7 @@ pub async fn resolve(
         || (resolver == "pubky" && !state.config.pubky.enabled)
         || (resolver == "geo" && !state.config.geo_enabled)
         || (resolver == "osm" && !state.config.osm.enabled)
+        || (resolver == "event" && (!state.config.event.enabled || !state.config.event.calendars))
     {
         return Err(ApiError::bad("resolver is disabled"));
     }
@@ -890,7 +917,7 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
     let row=sqlx::query("SELECT (SELECT count(*) FROM resource) AS resources,(SELECT count(*) FROM reference) AS references,(SELECT count(*) FROM occurrence) AS occurrences").fetch_one(&state.pool).await?;
     let ingestion:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('nexus',nexus,'cursor',cursor,'feed_length',feed_length,'lag',greatest(feed_length-cursor,0),'epoch',epoch,'updated_at',updated_at) FROM feed_cursor ORDER BY nexus").fetch_all(&state.pool).await?;
     let statuses:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('resolver',resolver,'status',status,'count',count(*),'dead_letter',count(*) FILTER (WHERE dead_letter),'leased',count(*) FILTER (WHERE lease_until>now())) FROM resource GROUP BY resolver,status ORDER BY resolver,status").fetch_all(&state.pool).await?;
-    let body = json!({"version":env!("CARGO_PKG_VERSION"),"manifests":crate::adapter::configured(&state.config),"sources":sources,"metrics":state.metrics.summary(),"ingestion":ingestion,"counts":{"resources":row.try_get::<i64,_>("resources")?,"references":row.try_get::<i64,_>("references")?,"occurrences":row.try_get::<i64,_>("occurrences")?},"osm_licence":{"licence":"ODbL-1.0","attribution":crate::resolver::osm::ATTRIBUTION,"url":"https://opendatacommons.org/licenses/odbl/1-0/","dump":"/v1/dumps/osm_place.ndjson"},"resolvers":{"geo":{"enabled":state.config.geo_enabled,"network":false},"osm":{"enabled":state.config.osm.enabled,"concurrency":1,"batch_size":50,"requests_per_second":state.config.osm.requests_per_second},"web":{"enabled":state.config.web.enabled,"concurrency":state.config.web.concurrency},"pubky":{"enabled":state.config.pubky.enabled,"concurrency":state.config.pubky.concurrency},"statuses":statuses}});
+    let body = json!({"version":env!("CARGO_PKG_VERSION"),"manifests":crate::adapter::configured(&state.config),"sources":sources,"metrics":state.metrics.summary(),"ingestion":ingestion,"counts":{"resources":row.try_get::<i64,_>("resources")?,"references":row.try_get::<i64,_>("references")?,"occurrences":row.try_get::<i64,_>("occurrences")?},"osm_licence":{"licence":"ODbL-1.0","attribution":crate::resolver::osm::ATTRIBUTION,"url":"https://opendatacommons.org/licenses/odbl/1-0/","dump":"/v1/dumps/osm_place.ndjson"},"resolvers":{"event":{"enabled":state.config.event.enabled,"calendar":state.config.event.calendars,"jsonld":state.config.event.jsonld,"microformats":state.config.event.microformats,"activitypub":state.config.event.activitypub,"geocoding":state.config.event.geocoding,"coordinate_timezone":state.config.event.coordinate_timezone,"months_back":state.config.event.months_back,"months_forward":state.config.event.months_forward},"geo":{"enabled":state.config.geo_enabled,"network":false},"osm":{"enabled":state.config.osm.enabled,"concurrency":1,"batch_size":50,"requests_per_second":state.config.osm.requests_per_second},"web":{"enabled":state.config.web.enabled,"concurrency":state.config.web.concurrency},"pubky":{"enabled":state.config.pubky.enabled,"concurrency":state.config.pubky.concurrency},"statuses":statuses}});
     *cache = Some((Instant::now(), body.clone()));
     Ok(body)
 }
@@ -903,6 +930,7 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         license(name = "MIT")
     ),
     paths(
+        crate::event::storage::list,
         search,
         resource,
         lookup,

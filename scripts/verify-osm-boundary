@@ -25,6 +25,14 @@ IF to_regclass('resource_change') IS NOT NULL THEN
   THEN RAISE EXCEPTION 'OSM-host web facts leaked into historical changes'; END IF;
 END IF;
 END $$;
+DO $$ BEGIN
+IF to_regclass('event_fetch') IS NOT NULL THEN
+  IF EXISTS(SELECT 1 FROM resource WHERE doc#>>'{venue,osm_id}' IS NOT NULL AND (point IS NOT NULL OR doc ? 'location' OR (doc->'venue') ? 'location'))
+    OR EXISTS(SELECT 1 FROM occurrence WHERE doc#>>'{venue,osm_id}' IS NOT NULL AND (point IS NOT NULL OR doc ? 'location' OR (doc->'venue') ? 'location'))
+    OR EXISTS(SELECT 1 FROM resource_change WHERE (before#>>'{venue,osm_id}' IS NOT NULL AND (before ? 'location' OR (before->'venue') ? 'location')) OR (after#>>'{venue,osm_id}' IS NOT NULL AND (after ? 'location' OR (after->'venue') ? 'location')))
+  THEN RAISE EXCEPTION 'Geocoded coordinates leaked outside osm_place'; END IF;
+END IF;
+END $$;
 SELECT count(*) AS derivative_rows, count(*) FILTER(WHERE status='ok') AS resolved_places FROM osm_place;
 SELECT table_name,column_name FROM information_schema.columns
  WHERE table_schema='public' AND column_name IN ('osm_type','osm_id') ORDER BY 1,2;

@@ -51,6 +51,8 @@ pub fn classify(uri: &str) -> Option<&'static str> {
             Some("pubky")
         }
         "http" | "https" if osm::parse_id(uri).is_some() => Some("osm"),
+        "webcal" | "webcals" => Some("event"),
+        "http" | "https" if crate::event::service::is_feed(uri) => Some("event"),
         "http" | "https" => Some("web"),
         "geo" => Some("geo"),
         _ => None,

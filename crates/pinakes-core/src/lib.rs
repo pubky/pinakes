@@ -5,6 +5,7 @@ pub mod canary;
 pub mod change_api;
 pub mod changes;
 pub mod config;
+pub mod event;
 pub mod ingest;
 pub mod maintenance;
 pub mod model;

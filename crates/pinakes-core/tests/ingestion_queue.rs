@@ -35,6 +35,7 @@ fn change(uri: &str, author_seed: &str, path: &str) -> Change {
         label: Some("rust".into()),
         at: Utc::now().timestamp_millis(),
         recurrence_id: None,
+        status: None,
         start: None,
         end: None,
     }

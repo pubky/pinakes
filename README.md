@@ -16,8 +16,8 @@ same base.
 ## Status
 
 The Rust service, Postgres storage, Nexus ingestion, web/Pubky/geo/OSM resolvers and
-viewport API, change tracking and admin telemetry run locally. Event-specific
-parsers remain a later step.
+viewport API, change tracking, generic events/calendars and admin telemetry run locally.
+Platform-specific event adapters and media/groups follow on separate branches.
 
 ## Running locally
 
@@ -89,8 +89,10 @@ complete derivative database. OSM documents, cards and clusters carry attributio
 Search supports bounding boxes (including the antimeridian), distance in metres,
 time windows and H3 viewport clusters. PostgreSQL filters, ranks, aggregates tags
 and clusters before limiting the response. `h3o` validates the zoom table, with a
-PostgreSQL integration test comparing every supported cell resolution. Occurrences
-have a table but no producer or route yet.
+PostgreSQL integration test comparing every supported cell resolution. Event search
+includes external pages with starts, calendar occurrences and located Pubky event
+references. `venue=<resource_id>` selects events at a known place; cards carry times
+and occurrence/post handles for the client to hydrate.
 
 ```sh
 curl 'http://127.0.0.1:8090/v1/search?bbox=5.9,45.8,10.6,47.9&cluster=8&type=Place&facet=tags'
@@ -209,7 +211,7 @@ expected fields and optional canary. `/v1/info` exposes these declarations and
 the public summary. Full source state and metrics are on admin `/v1/info`. Both info
 and database-backed metrics are cached for 15 seconds. Near-start resources refresh more often (7 days, 2 days, 6 hours,
 1 hour); one successful fetch at/after end+24h makes the resource final. Container
-and cursor scheduling primitives are present for future adapters. The container
+cadence is driven by its earliest upcoming occurrence or feed TTL. The container
 key-set guard holds losses over half the set until an identical successful result
 confirms them, then applies changes per key.
 
@@ -251,7 +253,9 @@ Denied web canaries are skipped, and each worker checks due canaries at most onc
 
 `[web]`/`[pubky] ttl_secs` supplies the parser document's initial TTL; scheduling is
 controlled by `[refresh]`. Conditional responses preserve accepted facts, but validators
-are not yet persisted or sent: normal web/Pubky requests remain unconditional.
+are not persisted for ordinary web/Pubky pages. Calendar validators are persisted
+and sent as hints; a 304 triggers a full GET so snapshot confirmation always uses
+a new complete body.
 
 Public queries use a separate pool with five-second PostgreSQL statement/acquisition
 limits, and all `/v1` routes have a configurable direct-peer IP budget. Search revisions
@@ -271,3 +275,41 @@ canonical OSM rows before migration 0002 reclassifies them, preserving all histo
 SQLx migration checksums. Forward review migrations clear alias metadata/history and
 install the stricter Place-envelope constraint. This path is tested from both the
 step 2 schema and the reviewed step 3 schema.
+
+## Generic events and calendars
+
+`[event]` controls JSON-LD Event/subtypes, microformats h-event, ActivityPub Event
+negotiation and calendar containers. Missing fields are filled in that order;
+OpenGraph alone remains a WebPage. ActivityPub Person falls through to a discovered
+single-event ICS. Platform state adapters are the next branch. A calendar can run
+with web disabled; its workers share the web host budget and the OSM lookup mutex.
+
+ICS, event RSS/Atom and Gancio JSON feeds become DataFeed resources with occurrence
+rows. Calendar GETs use the normal pinned-IP/redirect policy, decompression and a
+32 MB cap; physical ICS lines are read incrementally from that bounded body, unfolded,
+and parsed on a blocking worker. Parsing/recurrence budgets reject a partial snapshot.
+The default horizon is one month back/twelve forward, with 50 instances per series
+and 10,000 per feed. See the example config for caps and individual path switches.
+
+Each `(feed, UID, recurrence_id)` keeps its own version, cancellation state and change
+history. Two distinct successful observations confirm disappearance; an over-50% loss
+holds the snapshot until a matching fresh fetch. Older/replayed snapshots are fenced.
+Ended instances freeze after 24 hours; horizon roll-off does not cancel them. A URI in
+an occurrence links to an existing resource without causing an unsolicited fetch.
+
+Page coordinates win. Online events skip geocoding. A structured Nominatim search is
+accepted only for a single sufficiently matching address; an OSM venue link additionally
+requires the name and full address to match. Geocoded facts remain in `osm_place`;
+resource/occurrence/change documents store versioned references and compose coordinates
+at read time. Both lookup and venue requests use one in-flight mutex and public-host
+rate clamp. Staging/production must configure their own Nominatim, as for OSM lookups.
+
+`status` remains fetch health; `event_status` carries scheduled/cancelled/postponed/
+rescheduled/moved_online. Offsets do not imply an IANA zone. Zones come from explicit
+AP/ICS metadata or the pinned coordinate table; unzoned floating times retain
+`start_local`/`end_local`, with UTC columns only a sorting proxy. Clients should use
+local values when `tz` is absent. Data versions, attribution and regeneration are in
+[data/README.md](data/README.md); the complete client contract is in [docs/api.md](docs/api.md).
+
+The companion design inputs are `design-events.md` §3 and `research-event-sources.md`
+§A/F in the delivery mailbox. The repository keeps its overview in `docs/design.md`.

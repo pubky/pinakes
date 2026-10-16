@@ -449,6 +449,59 @@
         }
       }
     },
+    "/v1/resources/{id}/occurrences": {
+      "get": {
+        "tags": [
+          "crate::event::storage"
+        ],
+        "description": "Calendar instances inside an inclusive start window. Stable UID/recurrence keys; bounded by the configured feed cap.",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/search": {
       "get": {
         "tags": [],
@@ -747,6 +800,14 @@
   },
   "components": {
     "schemas": {
+      "Attendance": {
+        "type": "string",
+        "enum": [
+          "offline",
+          "online",
+          "mixed"
+        ]
+      },
       "ChangeLine": {
         "type": "object",
         "required": [
@@ -946,6 +1007,120 @@
           }
         }
       },
+      "EventFields": {
+        "type": "object",
+        "properties": {
+          "all_day": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "attendance": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Attendance"
+              }
+            ]
+          },
+          "categories": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "end_local": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "event_status": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EventStatus"
+              }
+            ]
+          },
+          "join_mode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "offers": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Offers"
+              }
+            ]
+          },
+          "organizer": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Organizer"
+              }
+            ]
+          },
+          "start_local": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A local time without a resolvable zone is retained; UTC columns are only a sort proxy."
+          },
+          "timezone_attribution": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tz": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "venue": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Venue"
+              }
+            ]
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "EventStatus": {
+        "type": "string",
+        "enum": [
+          "scheduled",
+          "cancelled",
+          "postponed",
+          "rescheduled",
+          "moved_online"
+        ]
+      },
       "Facets": {
         "type": "object",
         "required": [
@@ -1001,6 +1176,48 @@
         },
         "additionalProperties": false
       },
+      "Offers": {
+        "type": "object",
+        "properties": {
+          "currency": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "high_price": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "low_price": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          }
+        }
+      },
+      "Organizer": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "Point": {
         "type": "object",
         "required": [
@@ -1031,152 +1248,159 @@
         "additionalProperties": false
       },
       "ResourceMeta": {
-        "type": "object",
-        "required": [
-          "type",
-          "type_path",
-          "url",
-          "site",
-          "attributes",
-          "source",
-          "status"
-        ],
-        "properties": {
-          "address": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EventFields"
+          },
+          {
             "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            },
-            "propertyNames": {
-              "type": "string"
-            }
-          },
-          "aliases": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "attributes": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            },
-            "propertyNames": {
-              "type": "string"
-            }
-          },
-          "attribution": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "bbox": {
-            "type": [
-              "array",
-              "null"
+            "required": [
+              "type",
+              "type_path",
+              "url",
+              "site",
+              "attributes",
+              "source",
+              "status"
             ],
-            "items": {
-              "type": "number",
-              "format": "double"
-            }
-          },
-          "category": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "description": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "end": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time"
-          },
-          "fetched_at": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "image": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "location": {
-            "oneOf": [
-              {
-                "type": "null"
+            "properties": {
+              "address": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "propertyNames": {
+                  "type": "string"
+                }
               },
-              {
-                "$ref": "#/components/schemas/Point"
-              }
-            ]
-          },
-          "location_source": {
-            "oneOf": [
-              {
-                "type": "null"
+              "aliases": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
               },
-              {
-                "$ref": "#/components/schemas/LocationSource"
+              "attributes": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "propertyNames": {
+                  "type": "string"
+                }
+              },
+              "attribution": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "bbox": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "number",
+                  "format": "double"
+                }
+              },
+              "category": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "description": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "end": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              },
+              "fetched_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "image": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "location": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/Point"
+                  }
+                ]
+              },
+              "location_source": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/LocationSource"
+                  }
+                ]
+              },
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "osm_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "site": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              },
+              "start": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              },
+              "status": {
+                "$ref": "#/components/schemas/Status"
+              },
+              "ttl_secs": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string"
+              },
+              "type_path": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "url": {
+                "type": "string"
               }
-            ]
-          },
-          "name": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "osm_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "site": {
-            "type": "string"
-          },
-          "source": {
-            "type": "string"
-          },
-          "start": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time"
-          },
-          "status": {
-            "$ref": "#/components/schemas/Status"
-          },
-          "ttl_secs": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
-          },
-          "type": {
-            "type": "string"
-          },
-          "type_path": {
-            "type": "array",
-            "items": {
-              "type": "string"
             }
-          },
-          "url": {
-            "type": "string"
           }
-        }
+        ]
       },
       "ResourceView": {
         "type": "object",
@@ -1222,6 +1446,7 @@
             ],
             "format": "date-time"
           },
+          "event": {},
           "image": {
             "type": [
               "string",
@@ -1234,6 +1459,7 @@
               "null"
             ]
           },
+          "occurrence": {},
           "osm_id": {
             "type": [
               "string",
@@ -1352,6 +1578,70 @@
             "format": "int64"
           },
           "label": {
+            "type": "string"
+          }
+        }
+      },
+      "Venue": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "address": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "location": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Point"
+              }
+            ]
+          },
+          "location_source": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LocationSource"
+              }
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "osm_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "osm_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "resource_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
             "type": "string"
           }
         }

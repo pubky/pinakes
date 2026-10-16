@@ -15,6 +15,7 @@ pub struct Config {
     pub ingest: IngestConfig,
     pub grace_days: u32,
     pub web: ResolverConfig,
+    pub event: EventConfig,
     pub geo_enabled: bool,
     pub osm: OsmConfig,
     pub search: SearchConfig,
@@ -42,6 +43,7 @@ impl Default for Config {
                 ..Default::default()
             },
             pubky: ResolverConfig::default(),
+            event: EventConfig::default(),
             geo_enabled: true,
             osm: OsmConfig::default(),
             search: SearchConfig::default(),
@@ -49,6 +51,52 @@ impl Default for Config {
             queue: QueueConfig::default(),
             preview: PreviewConfig::default(),
             api: ApiConfig::default(),
+        }
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EventConfig {
+    pub enabled: bool,
+    pub jsonld: bool,
+    pub microformats: bool,
+    pub activitypub: bool,
+    pub calendars: bool,
+    pub geocoding: bool,
+    pub coordinate_timezone: bool,
+    pub feed_body_bytes: usize,
+    pub max_occurrences_per_series: usize,
+    pub max_occurrences_per_feed: usize,
+    pub max_components: usize,
+    pub max_recurrence_steps: usize,
+    pub parse_timeout_ms: u64,
+    pub months_back: u32,
+    pub months_forward: u32,
+    pub default_timezone: Option<String>,
+    pub geocode_score: f64,
+    pub held_retry_secs: u64,
+}
+impl Default for EventConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            jsonld: true,
+            microformats: true,
+            activitypub: true,
+            calendars: true,
+            geocoding: true,
+            coordinate_timezone: true,
+            feed_body_bytes: 32 * 1024 * 1024,
+            max_occurrences_per_series: 50,
+            max_occurrences_per_feed: 10000,
+            max_components: 100000,
+            max_recurrence_steps: 100000,
+            parse_timeout_ms: 2000,
+            months_back: 1,
+            months_forward: 12,
+            default_timezone: None,
+            geocode_score: 0.8,
+            held_retry_secs: 60,
         }
     }
 }
@@ -255,7 +303,7 @@ impl Config {
             let target = node
                 .get_mut(parts[parts.len() - 1])
                 .context("unknown config key")?;
-            *target = if target.is_string() {
+            *target = if target.is_string() || (target.is_null() && val != "null") {
                 serde_json::Value::String(val)
             } else {
                 serde_json::from_str(&val).context("env override requires JSON value")?
@@ -266,6 +314,24 @@ impl Config {
         Ok(cfg)
     }
     pub fn validate(&self) -> Result<()> {
+        let e = &self.event;
+        if !(1024..=64 * 1024 * 1024).contains(&e.feed_body_bytes)
+            || !(1..=1000).contains(&e.max_occurrences_per_series)
+            || !(1..=10000).contains(&e.max_occurrences_per_feed)
+            || !(1..=100000).contains(&e.max_components)
+            || !(1..=1000000).contains(&e.max_recurrence_steps)
+            || !(1..=5000).contains(&e.parse_timeout_ms)
+            || e.months_back > 12
+            || !(1..=36).contains(&e.months_forward)
+            || !e.geocode_score.is_finite()
+            || !(0.0..=1.0).contains(&e.geocode_score)
+            || !(1..=3600).contains(&e.held_retry_secs)
+            || e.default_timezone
+                .as_deref()
+                .is_some_and(|s| crate::event::time::zone(s).is_none())
+        {
+            bail!("invalid event budget or timezone");
+        }
         self.listen.parse::<std::net::SocketAddr>()?;
         self.admin_listen.parse::<std::net::SocketAddr>()?;
         if self.admin_listen == self.listen

@@ -31,21 +31,31 @@ pub async fn container_keys(
     keys: &[String],
     retry_secs: u64,
 ) -> Result<KeyChanges> {
+    let mut tx = pool.begin().await?;
+    let result = container_keys_tx(&mut tx, source, keys, retry_secs).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+pub(crate) async fn container_keys_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    source: &str,
+    keys: &[String],
+    retry_secs: u64,
+) -> Result<KeyChanges> {
     ensure!(
         keys.len() <= 10000 && keys.iter().all(|k| k.len() <= 2048),
         "container key set exceeds cap"
     );
     let keys = keys.iter().cloned().collect::<BTreeSet<_>>();
-    let mut tx = pool.begin().await?;
     sqlx::query("INSERT INTO source_state(source) VALUES($1) ON CONFLICT DO NOTHING")
         .bind(source)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     let row = sqlx::query(
         "SELECT keys,held_keys,missing_keys FROM source_state WHERE source=$1 FOR UPDATE",
     )
     .bind(source)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
     let old = row
         .try_get::<Vec<String>, _>("keys")?
@@ -58,8 +68,7 @@ pub async fn container_keys(
     let repeated = held.as_ref() == Some(&keys);
     if losses.len() * 2 > old.len() && !repeated {
         sqlx::query("UPDATE source_state SET held_keys=$2,held_until=now()+$3*interval '1 second',feed_held_total=feed_held_total+1 WHERE source=$1")
-            .bind(source).bind(keys.iter().cloned().collect::<Vec<_>>()).bind(retry_secs as f64).execute(&mut *tx).await?;
-        tx.commit().await?;
+            .bind(source).bind(keys.iter().cloned().collect::<Vec<_>>()).bind(retry_secs as f64).execute(&mut **tx).await?;
         return Ok(KeyChanges {
             held: true,
             created: vec![],
@@ -86,8 +95,7 @@ pub async fn container_keys(
     }
     missing.retain(|key, _| !cancelled.contains(key));
     sqlx::query("UPDATE source_state SET keys=$2,missing_keys=$3,held_keys=NULL,held_until=NULL,last_success_at=now(),last_error=NULL,consecutive_failures=0 WHERE source=$1")
-        .bind(source).bind(applied.into_iter().collect::<Vec<_>>()).bind(json!(missing)).execute(&mut *tx).await?;
-    tx.commit().await?;
+        .bind(source).bind(applied.into_iter().collect::<Vec<_>>()).bind(json!(missing)).execute(&mut **tx).await?;
     Ok(KeyChanges {
         held: false,
         created,

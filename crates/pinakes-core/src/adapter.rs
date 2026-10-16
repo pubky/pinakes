@@ -48,6 +48,14 @@ pub fn manifest(source: &str) -> Manifest {
             vec!["name", "location"],
             Some("https://www.openstreetmap.org/node/240109189"),
         ),
+        "event" => (
+            Mode::Container,
+            3600,
+            "feed/uid/recurrence_id",
+            "explicit_or_missing_twice",
+            vec![],
+            None,
+        ),
         "web" => (
             Mode::Resource,
             3600,
@@ -84,7 +92,7 @@ pub fn manifest(source: &str) -> Manifest {
     }
 }
 pub fn manifests() -> Vec<Manifest> {
-    ["web", "pubky", "geo", "osm"]
+    ["web", "pubky", "geo", "osm", "event"]
         .into_iter()
         .map(manifest)
         .collect()

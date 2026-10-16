@@ -91,13 +91,13 @@ pub(crate) async fn write_document(
     }
     sqlx::query(r#"UPDATE resource SET type=$3, type_path=$4, name=$5, category=$6,
         point=CASE WHEN $7::double precision IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint($8,$7),4326) END,
-        start_at=$9, end_at=$10, doc=$11, status=$12, ever_existed=ever_existed OR $12='ok', resolved_at=now(),
+        start_at=$9, end_at=$10, venue_id=$14, doc=$11, status=$12, ever_existed=ever_existed OR $12='ok', resolved_at=now(),
         refresh_at=now()+NULLIF($13,0)*interval '1 second', next_attempt_at=coalesce(now()+NULLIF($13,0)*interval '1 second','infinity'::timestamptz), final=($13=0),
         attempts=0, dead_letter=false, last_error=NULL, lease_until=NULL, priority_at=NULL
         WHERE id=$1 AND generation=$2"#)
         .bind(id).bind(generation).bind(&doc.type_name).bind(&doc.type_path).bind(&doc.name).bind(&doc.category)
         .bind(doc.location.as_ref().map(|p| p.lat)).bind(doc.location.as_ref().map(|p| p.lon))
-        .bind(doc.start).bind(doc.end).bind(serde_json::to_value(doc)?).bind(doc.status.as_str()).bind(doc.ttl_secs as f64)
+        .bind(doc.start).bind(doc.end).bind(serde_json::to_value(doc)?).bind(doc.status.as_str()).bind(doc.ttl_secs as f64).bind(doc.event.venue.as_ref().and_then(|v|v.resource_id.as_deref()))
         .execute(&mut **tx).await?;
     Ok(())
 }

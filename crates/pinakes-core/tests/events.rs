@@ -1,0 +1,1115 @@
+use chrono::{DateTime, Duration, Utc};
+use pinakes_core::{
+    config::EventConfig,
+    event::{calendar, page, time, Attendance, EventStatus},
+    model::ResourceMeta,
+};
+use serde_json::{json, Value};
+fn now() -> DateTime<Utc> {
+    "2026-10-16T00:00:00Z".parse().unwrap()
+}
+fn parse(body: &str) -> ResourceMeta {
+    calendar::parse(
+        "https://example.org/feed.ics",
+        body.as_bytes(),
+        &EventConfig::default(),
+        now(),
+    )
+    .unwrap()
+}
+fn cal(events: &str) -> String {
+    format!("BEGIN:VCALENDAR\nVERSION:2.0\n{events}\nEND:VCALENDAR\n")
+}
+fn event(props: &str) -> String {
+    format!("BEGIN:VEVENT\n{props}\nEND:VEVENT")
+}
+#[test]
+fn vendor_calendar_folding_escaping_params_dates_location_conferences_images() {
+    let doc = parse(include_str!("fixtures/events/vendors.ics"));
+    let c = doc.container.unwrap();
+    assert_eq!(c.occurrences.len(), 6);
+    assert_eq!(c.feed_ttl, Some(14400));
+    let apple = &c.occurrences[0].doc;
+    assert_eq!(apple.name.as_deref(), Some("Folded very long event title"));
+    assert_eq!(
+        apple.description.as_deref(),
+        Some("Line one\nLine two; comma, slash\\")
+    );
+    assert_eq!(
+        apple.event.organizer.as_ref().unwrap().name,
+        "Alice\"s ^ group\nTeam"
+    );
+    assert_eq!(apple.location.as_ref().unwrap().lat, 46.0051);
+    assert_eq!(apple.event.tz.as_deref(), Some("Europe/Zurich"));
+    assert_eq!(
+        apple.end.unwrap() - apple.start.unwrap(),
+        Duration::hours(2)
+    );
+    assert!(apple.image.is_some());
+    let windows = &c.occurrences[1].doc;
+    assert_eq!(windows.event.tz.as_deref(), Some("Europe/Berlin"));
+    assert_eq!(windows.event.all_day, Some(false));
+    assert_eq!(windows.event.attendance, Some(Attendance::Online));
+    assert_eq!(
+        c.occurrences[2].doc.end.unwrap() - c.occurrences[2].doc.start.unwrap(),
+        Duration::days(1)
+    );
+    assert_eq!(c.occurrences[2].doc.event.all_day, Some(true));
+    assert_eq!(
+        c.occurrences[3].doc.event.tz.as_deref(),
+        Some("Europe/Zurich")
+    );
+    assert!(c.occurrences[3].doc.image.is_none());
+    assert_eq!(c.occurrences[3].doc.start, c.occurrences[3].doc.end);
+    assert_eq!(
+        c.occurrences[4].doc.event.attendance,
+        Some(Attendance::Online)
+    );
+    assert_eq!(c.occurrences[5].doc.location.as_ref().unwrap().lat, 47.0);
+}
+#[test]
+fn recurrence_dst_rdate_exdate_overrides_range_and_orphans() {
+    let body=cal(&["X-WR-TIMEZONE:Europe/Zurich".into(),event("UID:series\nDTSTART:20261018T163000Z\nDTEND:20261018T173000Z\nRRULE:FREQ=WEEKLY;COUNT=5\nSUMMARY:Weekly\nEXDATE;VALUE=DATE:20261025\nRDATE;VALUE=PERIOD:20261125T173000Z/PT3H"),event("UID:series\nRECURRENCE-ID;TZID=Europe/Zurich:20261101T183000\nDTSTART;TZID=Europe/Zurich:20261101T193000\nDURATION:PT2H\nSUMMARY:Moved\nSEQUENCE:2"),event("UID:series\nRECURRENCE-ID;TZID=Europe/Zurich;RANGE=THISANDFUTURE:20261108T183000\nDTSTART;TZID=Europe/Zurich:20261108T203000\nDURATION:PT2H\nSUMMARY:Future\nSEQUENCE:3"),event("UID:orphan\nRECURRENCE-ID:20261110T180000Z\nDTSTART:20261110T190000Z\nSUMMARY:Orphan")].join("\n"));
+    let c = parse(&body).container.unwrap();
+    assert_eq!(c.occurrences.len(), 6);
+    let rows: Vec<_> = c.occurrences.iter().filter(|o| o.uid == "series").collect();
+    assert_eq!(
+        rows[0].doc.start.unwrap().to_rfc3339(),
+        "2026-10-18T16:30:00+00:00"
+    );
+    assert_eq!(rows[1].recurrence_id, "2026-11-01T17:30:00Z");
+    assert_eq!(
+        rows[1].doc.start.unwrap().to_rfc3339(),
+        "2026-11-01T18:30:00+00:00"
+    );
+    assert_eq!(
+        rows[2].doc.start.unwrap().to_rfc3339(),
+        "2026-11-08T19:30:00+00:00"
+    );
+    assert_eq!(rows[3].doc.name.as_deref(), Some("Future"));
+}
+#[test]
+fn recurrence_limits_monthly_setpos_until_skip_invalid_and_dtstart() {
+    let cfg = EventConfig {
+        max_occurrences_per_series: 3,
+        ..Default::default()
+    };
+    let body = cal(&event(
+        "UID:daily\nDTSTART:20261016T120000Z\nRRULE:FREQ=DAILY\nSUMMARY:Daily",
+    ));
+    assert_eq!(
+        calendar::parse("https://example.org/a.ics", body.as_bytes(), &cfg, now())
+            .unwrap()
+            .container
+            .unwrap()
+            .occurrences
+            .len(),
+        3
+    );
+    let body=cal(&event("UID:monthly\nDTSTART:20261001T120000Z\nRRULE:FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=-1;UNTIL=20261231\nSUMMARY:Month end"));
+    let c = parse(&body).container.unwrap();
+    let dates: Vec<_> = c
+        .occurrences
+        .iter()
+        .map(|o| o.doc.start.unwrap().date_naive().to_string())
+        .collect();
+    assert_eq!(
+        dates,
+        vec!["2026-10-01", "2026-10-30", "2026-11-30", "2026-12-31"]
+    );
+    let body = cal(&event(
+        "UID:skip\nDTSTART:20261031T120000Z\nRRULE:FREQ=MONTHLY;COUNT=3\nSUMMARY:31",
+    ));
+    let dates: Vec<_> = parse(&body)
+        .container
+        .unwrap()
+        .occurrences
+        .into_iter()
+        .map(|o| o.doc.start.unwrap().date_naive().to_string())
+        .collect();
+    assert_eq!(dates, vec!["2026-10-31", "2026-12-31", "2027-01-31"]);
+}
+#[test]
+fn timezones_custom_windows_iana_precedence_unknown_float_and_gap() {
+    assert_eq!(
+        time::zone("/freeassociation.sourceforge.net/Tzfile/Europe/Zurich")
+            .unwrap()
+            .to_string(),
+        "Europe/Zurich"
+    );
+    assert_eq!(
+        time::parse("2026-03-29T02:30:00", Some("Europe/Zurich"))
+            .unwrap()
+            .to_rfc3339(),
+        "2026-03-29T01:30:00+00:00"
+    );
+    assert_eq!(
+        time::parse("2026-10-25T02:30:00", Some("Europe/Zurich"))
+            .unwrap()
+            .to_rfc3339(),
+        "2026-10-25T00:30:00+00:00"
+    );
+    let timezone="BEGIN:VTIMEZONE\nTZID:Custom\nBEGIN:STANDARD\nDTSTART:19701025T030000\nRRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU\nTZOFFSETFROM:+0200\nTZOFFSETTO:+0100\nEND:STANDARD\nBEGIN:DAYLIGHT\nDTSTART:19700329T020000\nRRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU\nTZOFFSETFROM:+0100\nTZOFFSETTO:+0200\nEND:DAYLIGHT\nEND:VTIMEZONE";
+    let body = cal(&format!(
+        "{timezone}\n{}",
+        event("UID:custom\nDTSTART;TZID=Custom:20261020T180000\nSUMMARY:Custom")
+    ));
+    let c = parse(&body).container.unwrap();
+    assert_eq!(
+        c.occurrences[0].doc.start.unwrap().to_rfc3339(),
+        "2026-10-20T16:00:00+00:00"
+    );
+    let body = cal(&event(
+        "UID:float\nDTSTART:20261020T180000\nSUMMARY:Floating",
+    ));
+    let c = parse(&body).container.unwrap();
+    assert!(c.occurrences[0].doc.event.tz.is_none());
+    assert!(c.occurrences[0].doc.event.start_local.is_some());
+    let body = cal(&event(
+        "UID:unknown\nDTSTART;TZID=Unknown/Zone:20261020T180000\nSUMMARY:Unknown",
+    ));
+    let c = parse(&body).container.unwrap();
+    assert!(c.occurrences[0]
+        .doc
+        .event
+        .warnings
+        .contains(&"unknown_tzid_utc_fallback".into()));
+}
+#[test]
+fn identities_duplicate_versions_cancel_and_export_noise() {
+    assert_eq!(
+        calendar::canonical_feed(
+            "webcal://calendar.google.com/calendar/ical/%41%2Eb%40example.com/public/basic.ics"
+        ),
+        calendar::canonical_feed(
+            "https://calendar.google.com/calendar/ical/A.b@example.com/public/basic.ics"
+        )
+    );
+    assert_eq!(
+        calendar::canonical_feed("https://cloud.example/index.php/apps/calendar/p/abc/"),
+        "https://cloud.example/apps/calendar/p/abc"
+    );
+    let base = event(
+        "UID:same\nDTSTART:20261020T180000Z\nSUMMARY:Old\nSEQUENCE:1\nDTSTAMP:20261015T000000Z",
+    );
+    let newer = base
+        .replace("Old", "New")
+        .replace("SEQUENCE:1", "SEQUENCE:2");
+    let c = parse(&cal(&format!("{newer}\n{base}"))).container.unwrap();
+    assert_eq!(c.occurrences.len(), 1);
+    assert_eq!(c.occurrences[0].doc.name.as_deref(), Some("New"));
+    assert!(c.warnings.contains(&"duplicate_uid".into()));
+    let d = parse(&cal(&newer.replace("20261015T000000Z", "20261016T000000Z")))
+        .container
+        .unwrap();
+    assert_eq!(c.occurrences[0].content_hash, d.occurrences[0].content_hash);
+    let missing = parse(&cal(&base.replace("UID:same\n", "")))
+        .container
+        .unwrap();
+    assert!(missing.occurrences[0].volatile);
+    let body=cal(&base.replace("UID:same","UID:20261015T000000Z-1234567891234567890@eventfrog.ch\nURL:https://eventfrog.ch/de/p/test-1234567891234567890.html"));
+    let c = calendar::parse(
+        "https://eventfrog.ch/stream/de/event/1234567891234567890.ics",
+        body.as_bytes(),
+        &EventConfig::default(),
+        now(),
+    )
+    .unwrap()
+    .container
+    .unwrap();
+    assert_eq!(c.occurrences[0].uid, "eventfrog:1234567891234567890");
+    let cancel = parse(&cal(&format!("METHOD:CANCEL\n{base}")))
+        .container
+        .unwrap();
+    assert_eq!(
+        cancel.occurrences[0].doc.event.event_status,
+        Some(EventStatus::Cancelled)
+    );
+    assert!(calendar::parse(
+        "https://example.org/f.ics",
+        cal(&base).trim_end_matches("END:VCALENDAR\n").as_bytes(),
+        &EventConfig::default(),
+        now()
+    )
+    .is_err());
+}
+#[test]
+fn generic_event_page_field_precedence_lenient_dates_offsets_and_online() {
+    let url = "https://example.org/e".parse().unwrap();
+    let mut d = ResourceMeta::new("https://example.org/e", "web", 1);
+    let v=page::lenient_json("{\"@graph\":[{\"@type\":\"Organization\",\"name\":\"Ignore\"},{\"@type\":\"MusicEvent\",\"name\":\"First\",\"description\":\"Raw\ncontrol\",\"startDate\":\"2026-10-20T18:00:00+0100\",\"endDate\":\"2026-10-21\",\"location\":{\"@type\":\"Place\",\"name\":\"Venue\",\"address\":{\"streetAddress\":\"Road 5\",\"addressLocality\":\"City\"}},\"eventStatus\":\"EventPostponed\",},]}").unwrap();
+    page::jsonld(&mut d, &v, &url);
+    let html = scraper::Html::parse_document(
+        "<div class='h-event'><b class='p-name'>Second</b><p class='p-summary'>Other</p></div>",
+    );
+    page::microformats(&mut d, &html, &url);
+    page::finalize(&mut d, false);
+    assert_eq!(d.name.as_deref(), Some("First"));
+    assert_eq!(d.start.unwrap().to_rfc3339(), "2026-10-20T17:00:00+00:00");
+    assert!(d.event.tz.is_none());
+    assert_eq!(d.event.event_status, Some(EventStatus::Postponed));
+    assert_eq!(d.type_name, "MusicEvent");
+    assert_eq!(d.event.venue.unwrap().address["street"], "Road 5");
+    let mut d = ResourceMeta::new("https://example.org/e", "web", 1);
+    page::jsonld(
+        &mut d,
+        &json!({"@type":"Event","name":"Online","startDate":"2026-10-20T19:00:00Z","location":{"@type":"VirtualLocation","url":"https://meet.google.com/abc-defg-hij"},"eventAttendanceMode":"https://schema.org/OnlineEventAttendanceMode","offers":{"lowPrice":"3","highPrice":8,"priceCurrency":"CHF"}}),
+        &url,
+    );
+    page::finalize(&mut d, true);
+    assert!(d.location.is_none());
+    assert_eq!(d.event.attendance, Some(Attendance::Online));
+    assert_eq!(d.event.offers.as_ref().unwrap().high_price, Some(8.0));
+    assert!(!page::activity(
+        &mut d,
+        &json!({"type":"Person","summary":"2026 event"}),
+        &url
+    ));
+}
+#[test]
+fn activitypub_mobilizon_and_feed_extensions() {
+    let url: url::Url = "https://mobilizon.example/events/1".parse().unwrap();
+    let mut d = ResourceMeta::new(url.as_str(), "web", 1);
+    assert!(page::activity(
+        &mut d,
+        &json!({"type":"Event","name":"AP","startTime":"2026-10-20T19:00:00+02:00","mz:timezone":"Europe/Paris","ical:status":"CANCELLED","joinMode":"free","location":{"type":"Place","latitude":45.7,"longitude":4.8,"name":"Lyon"},"attributedTo":"https://mobilizon.example/@group","attachment":[{"type":"Document","name":"Banner","url":"https://img.example/a.jpg"}]}),
+        &url
+    ));
+    page::finalize(&mut d, true);
+    assert_eq!(d.event.tz.as_deref(), Some("Europe/Paris"));
+    assert_eq!(d.event.event_status, Some(EventStatus::Cancelled));
+    assert!(d.image.is_some());
+    let xml=br#"<feed xmlns:mc="urn:starticket"><entry><id>ticket1</id><title>Concert</title><link href="https://example.org/e"/><mc:dates><mc:date><mc:startdate>2026-10-20T19:00:00+02:00</mc:startdate></mc:date></mc:dates><mc:locations><mc:location><mc:name>Hall</mc:name><mc:latitude>47</mc:latitude><mc:longitude>8</mc:longitude></mc:location></mc:locations></entry></feed>"#;
+    let c = calendar::structured_feed(
+        "https://example.org/rss",
+        xml,
+        &EventConfig::default(),
+        now(),
+    )
+    .unwrap()
+    .unwrap()
+    .container
+    .unwrap();
+    assert_eq!(c.occurrences.len(), 1);
+    assert_eq!(c.occurrences[0].uid, "ticket1");
+    let json = json!({"version":"https://jsonfeed.org/version/1","items":[{"id":"id1","title":"Gancio","url":"https://example.org/event/a","_gancio":{"start_datetime":1792522800,"place":{"name":"Hall","lat":47,"lon":8}}}]});
+    assert_eq!(
+        calendar::structured_feed(
+            "https://example.org/json",
+            json.to_string().as_bytes(),
+            &EventConfig::default(),
+            now()
+        )
+        .unwrap()
+        .unwrap()
+        .container
+        .unwrap()
+        .occurrences
+        .len(),
+        1
+    );
+}
+
+use axum::{
+    body::Body,
+    extract::{ConnectInfo, Query},
+    http::Request,
+    routing::get,
+    Router,
+};
+use http_body_util::BodyExt;
+use pinakes_core::{
+    api::{self, AppState},
+    config::{Config, IngestConfig, OsmConfig},
+    ingest,
+    model::{identity, Point},
+    nexus::{Change, Changes, FeedPage, Kind, Op},
+    resolver::{
+        egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+        osm::OsmResolver,
+        web::WebResolver,
+        Resolver,
+    },
+    store,
+    telemetry::Metrics,
+};
+use sqlx::PgPool;
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
+};
+use tower::ServiceExt;
+async fn call(app: &Router, path: &str) -> (u16, Value) {
+    let mut request = Request::builder().uri(path).body(Body::empty()).unwrap();
+    request
+        .extensions_mut()
+        .insert(ConnectInfo("127.0.0.1:1111".parse::<SocketAddr>().unwrap()));
+    let r = app.clone().oneshot(request).await.unwrap();
+    let status = r.status().as_u16();
+    let bytes = r.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(json!(String::from_utf8_lossy(&bytes))),
+    )
+}
+async fn reference(
+    pool: &PgPool,
+    uri: &str,
+    path: &str,
+    kind: Kind,
+    rid: Option<&str>,
+    start: Option<DateTime<Utc>>,
+    op: Op,
+) {
+    let (id, uri, _) = identity(uri).unwrap();
+    let cursor = ingest::cursor(pool, "events").await.unwrap();
+    let line = Change {
+        op,
+        resource_id: id,
+        uri,
+        kind,
+        author: "y".repeat(52),
+        object_path: path.into(),
+        label: Some("bitcoin".into()),
+        at: Utc::now().timestamp_millis(),
+        recurrence_id: rid.map(str::to_owned),
+        start: start.map(|s| s.timestamp_millis()),
+        end: start.map(|s| (s + Duration::hours(1)).timestamp_millis()),
+        status: None,
+    };
+    ingest::apply(
+        pool,
+        "events",
+        &cursor,
+        &FeedPage {
+            page: Changes {
+                lines: vec![line],
+                next_cursor: cursor.cursor + 1,
+            },
+            epoch: Some("1".into()),
+            length: cursor.cursor + 1,
+        },
+        &IngestConfig::default(),
+        &Metrics::new().unwrap(),
+    )
+    .await
+    .unwrap();
+}
+fn future_calendar(n: usize) -> String {
+    cal(&(0..n)
+        .map(|i| {
+            event(&format!(
+                "UID:id{i}\nDTSTART:{}Z\nDURATION:PT1H\nSUMMARY:Event {i}\nGEO:47;8",
+                (Utc::now() + Duration::days(i as i64 + 2)).format("%Y%m%dT%H%M%S")
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+fn dynamic_parse(uri: &str, text: &str) -> ResourceMeta {
+    calendar::parse(uri, text.as_bytes(), &EventConfig::default(), Utc::now()).unwrap()
+}
+fn fresh(doc: &ResourceMeta) -> ResourceMeta {
+    static FETCH: Mutex<i64> = Mutex::new(0);
+    let now = Utc::now().timestamp_millis() + 1000;
+    let mut at = FETCH.lock().unwrap();
+    *at = (*at + 1).max(now);
+    let mut doc = doc.clone();
+    doc.fetched_at = *at;
+    doc
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn calendar_snapshots_atomic_held_disappearance_freeze_and_changes(pool: PgPool) {
+    let uri = "https://example.org/test.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let full = future_calendar(4);
+    let original = dynamic_parse(uri, &full);
+    store::save_document(&pool, &id, 0, &original)
+        .await
+        .unwrap();
+    let count = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM occurrence WHERE status='cancelled'")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let fewer = dynamic_parse(uri, &future_calendar(1));
+    store::save_document(&pool, &id, 0, &fewer).await.unwrap();
+    assert_eq!(count().await, 0);
+    let held: bool =
+        sqlx::query_scalar("SELECT held_keys IS NOT NULL FROM source_state WHERE source=$1")
+            .bind(format!("calendar:{id}"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(held);
+    store::save_document(&pool, &id, 99, &fewer).await.unwrap();
+    assert_eq!(count().await, 0);
+    store::save_document(&pool, &id, 0, &fewer).await.unwrap();
+    assert_eq!(count().await, 0, "replayed snapshot cannot confirm loss");
+    store::save_document(&pool, &id, 0, &fresh(&fewer))
+        .await
+        .unwrap();
+    assert_eq!(count().await, 3);
+    store::save_document(&pool, &id, 0, &fresh(&original))
+        .await
+        .unwrap();
+    assert_eq!(count().await, 0);
+    let mut moved = original.clone();
+    let row = &mut moved.container.as_mut().unwrap().occurrences[0];
+    row.doc.start = row.doc.start.map(|s| s + Duration::hours(1));
+    row.doc.end = row.doc.end.map(|s| s + Duration::hours(1));
+    row.sequence += 1;
+    moved = fresh(&moved);
+    store::save_document(&pool, &id, 0, &moved).await.unwrap();
+    let classes:Vec<String>=sqlx::query_scalar("SELECT class FROM resource_change WHERE resource_id=$1 AND occurrence_key IS NOT NULL ORDER BY seq").bind(&id).fetch_all(&pool).await.unwrap();
+    assert_eq!(classes.iter().filter(|s| *s == "created").count(), 4);
+    assert_eq!(classes.iter().filter(|s| *s == "cancelled").count(), 3);
+    assert_eq!(classes.iter().filter(|s| *s == "uncancelled").count(), 3);
+    assert_eq!(classes.last().unwrap(), "rescheduled");
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM resource_change")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    store::save_document(&pool, &id, 0, &moved).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource_change")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        before
+    );
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn single_key_loss_requires_two_and_regenerated_uid_links_supersedes(pool: PgPool) {
+    let uri = "https://example.org/t.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let full = future_calendar(3);
+    let d = dynamic_parse(uri, &full);
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let mut smaller = fresh(&d);
+    smaller.container.as_mut().unwrap().occurrences.pop();
+    store::save_document(&pool, &id, 0, &smaller).await.unwrap();
+    smaller = fresh(&smaller);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM occurrence WHERE status='cancelled'")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    store::save_document(&pool, &id, 0, &smaller).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM occurrence WHERE status='cancelled'")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    let changed = fresh(&dynamic_parse(uri, &full.replace("UID:id0", "UID:new0")));
+    store::save_document(&pool, &id, 0, &changed).await.unwrap();
+    let (status, supersedes): (String, Option<String>) =
+        sqlx::query_as("SELECT status,supersedes FROM occurrence WHERE uid='new0'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "scheduled");
+    assert_eq!(supersedes.as_deref(), Some("[\"id0\",\"\"]"));
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn event_units_pagination_occurrence_route_pubky_recurrences_and_venue(pool: PgPool) {
+    let feed = "https://example.org/events.ics";
+    reference(
+        &pool,
+        feed,
+        "/pub/social/tags/calendar",
+        Kind::Tag,
+        None,
+        None,
+        Op::Put,
+    )
+    .await;
+    let id = identity(feed).unwrap().0;
+    store::save_document(&pool, &id, 0, &dynamic_parse(feed, &future_calendar(3)))
+        .await
+        .unwrap();
+    let venue = "geo:47,8";
+    let venue_id = store::ensure_resource(&pool, venue).await.unwrap();
+    let place = pinakes_core::resolver::geo::GeoResolver
+        .resolve(venue)
+        .await
+        .unwrap();
+    store::save_document(&pool, &venue_id, 0, &place)
+        .await
+        .unwrap();
+    for (i, rid) in ["2026-10-21", "2026-10-28"].into_iter().enumerate() {
+        reference(
+            &pool,
+            venue,
+            "/pub/social/v1/posts/event1",
+            Kind::Event,
+            Some(rid),
+            Some(Utc::now() + Duration::days(2 + i as i64)),
+            Op::Put,
+        )
+        .await;
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM reference WHERE kind='event'")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        2
+    );
+    let page_uri = "https://example.org/event";
+    reference(
+        &pool,
+        page_uri,
+        "/pub/social/tags/event",
+        Kind::Tag,
+        None,
+        None,
+        Op::Put,
+    )
+    .await;
+    let page_id = identity(page_uri).unwrap().0;
+    let mut page = ResourceMeta::new(page_uri, "jsonld", 3600);
+    page.set_type("MusicEvent");
+    page.name = Some("Page event".into());
+    page.start = Some(Utc::now() + Duration::days(2));
+    page.location = Some(Point {
+        lat: 47.0,
+        lon: 8.0,
+    });
+    page.event.venue = Some(pinakes_core::event::Venue {
+        resource_id: Some(venue_id.clone()),
+        ..Default::default()
+    });
+    store::save_document(&pool, &page_id, 0, &page)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (code, v) = call(
+        &app,
+        "/v1/search?type=Event&sort=start&bbox=7,46,9,48&limit=2",
+    )
+    .await;
+    assert_eq!(code, 200, "{v}");
+    assert_eq!(v["items"].as_array().unwrap().len(), 2);
+    let mut seen = vec![];
+    let mut v = v;
+    loop {
+        seen.extend(v["items"].as_array().unwrap().iter().cloned());
+        let Some(cursor) = v["cursor"].as_str() else {
+            break;
+        };
+        let result = call(
+            &app,
+            &format!("/v1/search?type=Event&sort=start&bbox=7,46,9,48&limit=2&cursor={cursor}"),
+        )
+        .await;
+        assert_eq!(result.0, 200, "{}", result.1);
+        v = result.1;
+    }
+    assert_eq!(seen.len(), 6);
+    assert_eq!(seen.iter().filter(|v| v.get("event").is_some()).count(), 2);
+    assert_eq!(
+        seen.iter()
+            .filter(|v| v.get("occurrence").is_some())
+            .count(),
+        3
+    );
+    assert!(seen.iter().all(|v| v.get("start").is_some()));
+    let (code, v) = call(&app, &format!("/v1/search?type=Event&venue={venue_id}")).await;
+    assert_eq!(code, 200, "{v}");
+    assert_eq!(v["items"].as_array().unwrap().len(), 3);
+    let (code, v) = call(&app, &format!("/v1/resources/{id}/occurrences")).await;
+    assert_eq!(code, 200, "{v}");
+    assert_eq!(v["items"].as_array().unwrap().len(), 3);
+    let (code, v) = call(
+        &app,
+        "/v1/search?type=Event&bbox=7,46,9,48&cluster=8&limit=1",
+    )
+    .await;
+    assert_eq!(code, 200, "{v}");
+    assert_eq!(v["total"], 6);
+    assert_eq!(v["clusters"][0]["count"], 6);
+    reference(
+        &pool,
+        venue,
+        "/pub/social/v1/posts/event1",
+        Kind::Event,
+        Some("2026-10-21"),
+        None,
+        Op::Del,
+    )
+    .await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM reference WHERE kind='event'")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn venue_geocoding_single_match_threshold_and_osm_storage_boundary(pool: PgPool) {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let seen = hits.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app=Router::new().route("/search",get(move|Query(q):Query<HashMap<String,String>>|{let seen=seen.clone();async move{seen.fetch_add(1,Ordering::SeqCst);assert_eq!(q["addressdetails"],"1");assert_eq!(q["street"],"Via Nassa 5");axum::Json(json!([{"osm_type":"node","osm_id":123,"lat":"46.0051","lon":"8.9528","category":"amenity","type":"cafe","name":"Plan B","namedetails":{"name":"Plan B"},"address":{"road":"Via Nassa","house_number":"5","city":"Lugano","postcode":"6900","country_code":"ch"}}]))}}));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let service = pinakes_core::event::service::EventService {
+        pool: pool.clone(),
+        config: EventConfig::default(),
+        osm: Arc::new(
+            OsmResolver::new(
+                pool.clone(),
+                OsmConfig {
+                    nominatim_url: format!("http://{addr}"),
+                    requests_per_second: 1000.0,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        ),
+    };
+    let uri = "https://example.org/event";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut doc = ResourceMeta::new(uri, "jsonld", 3600);
+    page::jsonld(
+        &mut doc,
+        &json!({"@type":"Event","name":"Meetup","startDate":"2026-12-20T18:00:00","location":{"@type":"Place","name":"Plan B","address":{"streetAddress":"Via Nassa 5","addressLocality":"Lugano","postalCode":"6900","addressCountry":"CH"}}}),
+        &uri.parse().unwrap(),
+    );
+    service.venue(&mut doc).await.unwrap();
+    assert!(doc.event.venue.as_ref().unwrap().resource_id.is_some());
+    assert!(doc.location.is_none());
+    assert_eq!(doc.event.tz.as_deref(), Some("Europe/Zurich"));
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let stored: Value = sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(stored.get("location").is_none());
+    assert!(stored["venue"].get("location").is_none());
+    let hydrated: Value = sqlx::query_scalar("SELECT doc FROM resource_document WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(hydrated["location"]["lat"], 46.0051);
+    assert!(hydrated["attribution"]
+        .as_str()
+        .unwrap()
+        .contains("OpenStreetMap"));
+    let mut online = doc.clone();
+    online.event.attendance = Some(Attendance::Online);
+    online.event.venue.as_mut().unwrap().osm_id = None;
+    service.venue(&mut online).await.unwrap();
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    server.abort();
+}
+struct PublicDns;
+#[async_trait::async_trait]
+impl Dns for PublicDns {
+    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
+        Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
+    }
+}
+struct ProtocolTransport {
+    seen: Mutex<Vec<(String, Option<String>, bool)>>,
+}
+#[async_trait::async_trait]
+impl Transport for ProtocolTransport {
+    async fn get(&self, url: &url::Url, addresses: &[SocketAddr]) -> anyhow::Result<Fetched> {
+        self.get_with(url, addresses, &FetchOptions::default())
+            .await
+    }
+    async fn get_with(
+        &self,
+        url: &url::Url,
+        _: &[SocketAddr],
+        o: &FetchOptions,
+    ) -> anyhow::Result<Fetched> {
+        self.seen.lock().unwrap().push((
+            url.path().into(),
+            o.accept.clone(),
+            o.validators.etag.is_some(),
+        ));
+        let mut f = Fetched {
+            validators: Default::default(),
+            url: url.clone(),
+            status: 200,
+            retry_after_secs: 60,
+            location: None,
+            content_type: "text/html".into(),
+            body: b"<title>Fallback</title>".to_vec(),
+        };
+        if url.path() == "/event" && o.accept.is_some() {
+            f.status = 301;
+            f.location = Some("/federation/m/1".into());
+        }
+        if url.path() == "/gathio" {
+            f.body = if o.accept.is_some() {
+                json!({"type":"Person","name":"Actor"})
+                    .to_string()
+                    .into_bytes()
+            } else {
+                b"<a href='/f.ics'>Calendar</a><title>Fallback</title>".to_vec()
+            };
+        }
+        if url.path() == "/ld"
+            && o.accept
+                .as_deref()
+                .is_some_and(|s| s.starts_with("application/ld+json"))
+        {
+            f.body=json!({"type":"Event","name":"LD negotiation","startTime":"2027-01-20T18:00:00Z","timezone":"Europe/Paris"}).to_string().into_bytes();
+        }
+        if url.path() == "/federation/m/1" {
+            f.content_type = "application/activity+json".into();
+            f.body=json!({"type":"Event","name":"Negotiated","startTime":"2027-01-20T18:00:00Z","timezone":"Europe/Paris","isOnline":true}).to_string().into_bytes();
+        }
+        if url.path() == "/f.ics" {
+            f.content_type = "text/plain".into();
+            f.validators.etag = Some("test".into());
+            f.body = future_calendar(1).into_bytes();
+            if o.validators.etag.is_some() {
+                f.status = 304;
+                f.body.clear();
+            }
+        }
+        Ok(f)
+    }
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn negotiated_event_redirect_and_calendar_validators_are_hints(pool: PgPool) {
+    let t = Arc::new(ProtocolTransport {
+        seen: Mutex::default(),
+    });
+    let egress = Egress::with_backends(
+        pinakes_core::config::EgressConfig {
+            host_requests_per_second: 1000.0,
+            ..Default::default()
+        },
+        Arc::new(PublicDns),
+        t.clone(),
+    );
+    let service = Arc::new(pinakes_core::event::service::EventService {
+        pool: pool.clone(),
+        config: EventConfig {
+            geocoding: false,
+            ..Default::default()
+        },
+        osm: Arc::new(OsmResolver::new(pool.clone(), OsmConfig::default()).unwrap()),
+    });
+    let resolver = WebResolver {
+        egress,
+        config: Default::default(),
+        events: Some(service),
+    };
+    let d = resolver.resolve("https://example.org/event").await.unwrap();
+    assert_eq!(d.name.as_deref(), Some("Negotiated"));
+    assert_eq!(d.event.tz.as_deref(), Some("Europe/Paris"));
+    let d = resolver
+        .resolve("https://example.org/gathio")
+        .await
+        .unwrap();
+    assert_eq!(d.type_name, "Event");
+    assert_eq!(d.name.as_deref(), Some("Event 0"));
+    let d = resolver.resolve("https://example.org/ld").await.unwrap();
+    assert_eq!(d.name.as_deref(), Some("LD negotiation"));
+    t.seen.lock().unwrap().clear();
+    store::ensure_resource(&pool, "webcal://example.org/f.ics")
+        .await
+        .unwrap();
+    let d = resolver
+        .resolve("webcal://example.org/f.ics")
+        .await
+        .unwrap();
+    assert_eq!(d.container.unwrap().occurrences.len(), 1);
+    let d = resolver
+        .resolve("webcal://example.org/f.ics")
+        .await
+        .unwrap();
+    assert_eq!(d.container.unwrap().occurrences.len(), 1);
+    let calls = t.seen.lock().unwrap();
+    let calls: Vec<_> = calls
+        .iter()
+        .filter(|(path, _, _)| path == "/f.ics")
+        .map(|(_, _, v)| *v)
+        .collect();
+    assert_eq!(calls, vec![false, true, false]);
+}
+
+#[tokio::test]
+async fn feed_transport_stream_cap_wrong_type_sniff_and_page_cap() {
+    use pinakes_core::resolver::egress::read_response_with;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route(
+            "/feed",
+            get(|| async {
+                (
+                    [("content-type", "application/octet-stream")],
+                    format!(
+                        "BEGIN:VCALENDAR\n{}\nEND:VCALENDAR",
+                        "X-COMMENT:long\n".repeat(100000)
+                    ),
+                )
+            }),
+        )
+        .route(
+            "/page",
+            get(|| async { ([("content-type", "text/html")], "x".repeat(1100000)) }),
+        );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = reqwest::Client::new();
+    let uri: url::Url = format!("http://{addr}/feed").parse().unwrap();
+    let options = FetchOptions {
+        feed_cap: Some(2 * 1024 * 1024),
+        ..Default::default()
+    };
+    let response = read_response_with(
+        uri.clone(),
+        client.get(uri.clone()).send().await.unwrap(),
+        &options,
+    )
+    .await
+    .unwrap();
+    assert!(response.body.len() > 1024 * 1024);
+    assert!(read_response_with(
+        uri.clone(),
+        client.get(uri).send().await.unwrap(),
+        &FetchOptions {
+            feed_cap: Some(1024),
+            ..Default::default()
+        }
+    )
+    .await
+    .is_err());
+    let uri: url::Url = format!("http://{addr}/page").parse().unwrap();
+    assert!(
+        read_response_with(uri.clone(), client.get(uri).send().await.unwrap(), &options)
+            .await
+            .is_err()
+    );
+    server.abort();
+}
+#[test]
+fn remaining_calendar_pitfalls_dates_lists_split_uids_alt_images_and_horizons() {
+    let body=cal(&format!("X-WR-TIMEZONE:Europe/Zurich\n{}\n{}\n{}",event("UID:base@google.com\nDTSTART;TZID=Europe/Zurich:20261020T180000\nRRULE:FREQ=WEEKLY;UNTIL=20261101T170000Z\nEXDATE;TZID=Europe/Zurich:20261027T180000,20261103T180000\nRDATE;VALUE=DATE:20261022\nSUMMARY:Before split\nX-ALT-DESC;FMTTYPE=text/HTML:<p>Poster<img src=\"https://example.org/img.png\"></p>"),event("UID:base_R20261101T180000@google.com\nDTSTART;TZID=Europe/Zurich:20261101T180000\nRRULE:FREQ=WEEKLY;COUNT=2\nSUMMARY:After split"),event("UID:date\nDTSTART;VALUE=DATE:20261025\nDTEND;VALUE=DATE:20261027\nSUMMARY:Two days\nSTATUS:CANCELLED")));
+    let c = parse(&body).container.unwrap();
+    assert!(c.occurrences.iter().any(|o| o.uid == "base@google.com"));
+    assert!(c
+        .occurrences
+        .iter()
+        .any(|o| o.uid == "base_R20261101T180000@google.com"));
+    assert!(c
+        .occurrences
+        .iter()
+        .find(|o| o.uid == "base@google.com")
+        .unwrap()
+        .doc
+        .image
+        .is_some());
+    let all_day = &c.occurrences.iter().find(|o| o.uid == "date").unwrap().doc;
+    assert_eq!(all_day.event.event_status, Some(EventStatus::Cancelled));
+    assert_eq!(
+        all_day.end.unwrap() - all_day.start.unwrap(),
+        Duration::hours(49)
+    );
+    let old = cal(&event("UID:old\nDTSTART:20000101T120000Z\nSUMMARY:Ancient"));
+    assert!(parse(&old).container.unwrap().occurrences.is_empty());
+    let bad = cal(&event(
+        "UID:bad\nDTSTART:20261020T120000Z\nRRULE:FREQ=WEEKLY;COUNT=10;UNTIL=20270101T120000Z",
+    ));
+    assert!(calendar::parse(
+        "https://example.org/f.ics",
+        bad.as_bytes(),
+        &EventConfig::default(),
+        now()
+    )
+    .is_err());
+}
+
+#[test]
+fn recurrence_local_days_coordinate_zones_exclusion_budget_and_categories() {
+    let c = parse(&cal(&format!("X-WR-TIMEZONE:Europe/Zurich\n{}", event("UID:days\nDTSTART;VALUE=DATE:20261024\nRRULE:FREQ=DAILY;COUNT=3\nCATEGORIES:Music,Talks\\, panels\nCATEGORIES:Music,Community")))).container.unwrap();
+    assert_eq!(
+        c.occurrences
+            .iter()
+            .map(|o| (o.doc.end.unwrap() - o.doc.start.unwrap()).num_hours())
+            .collect::<Vec<_>>(),
+        vec![24, 25, 24]
+    );
+    assert_eq!(
+        c.occurrences[0].doc.event.categories,
+        vec!["Community", "Music", "Talks, panels"]
+    );
+    let c = parse(&cal(&event("UID:floating\nDTSTART:20261024T180000\nDTEND:20261024T190000\nRRULE:FREQ=DAILY;COUNT=3\nGEO:47.37;8.54"))).container.unwrap();
+    assert_eq!(
+        c.occurrences[0].doc.event.tz.as_deref(),
+        Some("Europe/Zurich")
+    );
+    assert_eq!(
+        c.occurrences[0].doc.start.unwrap().to_rfc3339(),
+        "2026-10-24T16:00:00+00:00"
+    );
+    assert_eq!(
+        c.occurrences[1].doc.start.unwrap().to_rfc3339(),
+        "2026-10-25T17:00:00+00:00"
+    );
+    let exclusions = (16..=31)
+        .map(|n| format!("202610{n}T120000Z"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let c = parse(&cal(&event(&format!(
+        "UID:many\nDTSTART:20261016T120000Z\nRRULE:FREQ=DAILY\nEXDATE:{exclusions}"
+    ))))
+    .container
+    .unwrap();
+    assert_eq!(c.occurrences.len(), 50);
+    let cfg = EventConfig {
+        max_recurrence_steps: 10,
+        ..Default::default()
+    };
+    assert!(calendar::parse(
+        "https://example.org/f.ics",
+        cal(&event(
+            "UID:expensive\nDTSTART:19000101T000000Z\nRRULE:FREQ=SECONDLY"
+        ))
+        .as_bytes(),
+        &cfg,
+        now()
+    )
+    .is_err());
+    let body = cal(&event(
+        "UID:noise\nDTSTART:20261020T120000Z\nX-UNKNOWN-EXPORT:one",
+    ));
+    assert_eq!(
+        parse(&body).container.unwrap().occurrences[0].content_hash,
+        parse(&body.replace("one", "two"))
+            .container
+            .unwrap()
+            .occurrences[0]
+            .content_hash
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn ended_occurrences_freeze_and_horizon_rolloff_is_not_cancellation(pool: PgPool) {
+    let uri = "https://example.org/frozen.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let past = event(&format!(
+        "UID:past\nDTSTART:{}Z\nDURATION:PT1H\nSUMMARY:Original",
+        (Utc::now() - Duration::days(3)).format("%Y%m%dT%H%M%S")
+    ));
+    let d = fresh(&dynamic_parse(uri, &cal(&past)));
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let changed = fresh(&dynamic_parse(
+        uri,
+        &cal(&past.replace("Original", "Edited\nSTATUS:CANCELLED")),
+    ));
+    store::save_document(&pool, &id, 0, &changed).await.unwrap();
+    let row: (String, String) =
+        sqlx::query_as("SELECT name,status FROM occurrence WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(row, ("Original".into(), "scheduled".into()));
+    let mut empty = fresh(&dynamic_parse(uri, &cal("")));
+    empty.container.as_mut().unwrap().horizon_start = Utc::now();
+    store::save_document(&pool, &id, 0, &empty).await.unwrap();
+    store::save_document(&pool, &id, 0, &fresh(&empty))
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM occurrence WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "scheduled"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource_change WHERE occurrence_key IS NOT NULL"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
+    let bad = "geo:47,8";
+    reference(
+        &pool,
+        bad,
+        "/pub/social/v1/posts/invalid",
+        Kind::Event,
+        Some(&"x".repeat(129)),
+        Some(Utc::now()),
+        Op::Put,
+    )
+    .await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM reference")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn weekly_week_start_and_iana_over_embedded_timezone() {
+    let body = |week| {
+        cal(&event(&format!("UID:week\nDTSTART:20261020T120000Z\nRRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=TU,SU;COUNT=4;WKST={week}")))
+    };
+    let parse_dates = |body: &str| {
+        parse(body)
+            .container
+            .unwrap()
+            .occurrences
+            .iter()
+            .map(|o| o.doc.start.unwrap().date_naive().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        parse_dates(&body("MO")),
+        vec!["2026-10-20", "2026-10-25", "2026-11-03", "2026-11-08"]
+    );
+    assert_eq!(
+        parse_dates(&body("SU")),
+        vec!["2026-10-20", "2026-11-01", "2026-11-03", "2026-11-15"]
+    );
+    let tz="BEGIN:VTIMEZONE\nTZID:Europe/Zurich\nBEGIN:STANDARD\nDTSTART:19700101T000000\nTZOFFSETFROM:+0900\nTZOFFSETTO:+0900\nEND:STANDARD\nEND:VTIMEZONE";
+    let c = parse(&cal(&format!(
+        "{tz}\n{}",
+        event("UID:iana\nDTSTART;TZID=Europe/Zurich:20261020T180000")
+    )))
+    .container
+    .unwrap();
+    assert_eq!(
+        c.occurrences[0].doc.start.unwrap().to_rfc3339(),
+        "2026-10-20T16:00:00+00:00"
+    );
+    let c = parse(&cal(&format!(
+        "X-WR-TIMEZONE:Europe/Paris\n{}",
+        event("UID:fallback\nDTSTART;TZID=Absent:20261020T180000")
+    )))
+    .container
+    .unwrap();
+    assert_eq!(
+        c.occurrences[0].doc.event.tz.as_deref(),
+        Some("Europe/Paris")
+    );
+}

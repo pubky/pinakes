@@ -34,6 +34,9 @@ pub struct Diff {
     pub class: &'static str,
     pub fields: Vec<String>,
 }
+fn cancelled(v: &Value) -> bool {
+    v["status"] == "missing" || v["event_status"] == "cancelled"
+}
 pub fn diff(before: Option<&Value>, after: Option<&Value>) -> Option<Diff> {
     let keys = before
         .into_iter()
@@ -51,16 +54,8 @@ pub fn diff(before: Option<&Value>, after: Option<&Value>) -> Option<Diff> {
     let class = match (before, after) {
         (None, _) => "created",
         (_, None) => "deleted",
-        (Some(before), Some(after))
-            if before["status"] != "missing" && after["status"] == "missing" =>
-        {
-            "cancelled"
-        }
-        (Some(before), Some(after))
-            if before["status"] == "missing" && after["status"] != "missing" =>
-        {
-            "uncancelled"
-        }
+        (Some(before), Some(after)) if !cancelled(before) && cancelled(after) => "cancelled",
+        (Some(before), Some(after)) if cancelled(before) && !cancelled(after) => "uncancelled",
         _ if fields.iter().any(|k| matches!(k.as_str(), "start" | "end")) => "rescheduled",
         _ if fields
             .iter()
@@ -94,13 +89,14 @@ async fn snapshot(
         .bind(osm_type).bind(osm_id).bind(&version).bind(value).execute(&mut **tx).await?;
     Ok(json!({"osm_id":format!("{osm_type}/{osm_id}"),"version":version}))
 }
-async fn append(
+pub(crate) async fn append(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
     source: &str,
     before: Option<Value>,
     after: Option<Value>,
     diff: Diff,
+    occurrence: Option<&str>,
 ) -> Result<()> {
     let osm = before
         .as_ref()
@@ -137,8 +133,8 @@ async fn append(
     } else {
         (before, after)
     };
-    sqlx::query("INSERT INTO resource_change(resource_id,class,fields,before,after,source,type_path,osm_type,osm_id,at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,clock_timestamp())")
-        .bind(id).bind(diff.class).bind(diff.fields).bind(before).bind(after).bind(source).bind(type_path).bind(osm.as_ref().map(|o|&o.osm_type)).bind(osm.as_ref().map(|o|o.id)).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO resource_change(resource_id,class,fields,before,after,source,type_path,osm_type,osm_id,at,occurrence_key) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,clock_timestamp(),$10)")
+        .bind(id).bind(diff.class).bind(diff.fields).bind(before).bind(after).bind(source).bind(type_path).bind(osm.as_ref().map(|o|&o.osm_type)).bind(osm.as_ref().map(|o|o.id)).bind(occurrence).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO source_state(source,change_totals) VALUES($1,jsonb_build_object($2::text,1)) ON CONFLICT(source) DO UPDATE SET change_totals=source_state.change_totals || jsonb_build_object($2::text,coalesce((source_state.change_totals->>$2)::bigint,0)+1)")
         .bind(source).bind(diff.class).execute(&mut **tx).await?;
     Ok(())
@@ -211,6 +207,13 @@ pub async fn save(
             .execute(&mut *tx)
             .await?;
     }
+    if let Some(container) = doc.container.take() {
+        if !crate::event::storage::apply(&mut tx, id, &container, doc.fetched_at).await? {
+            sqlx::query("UPDATE resource SET lease_until=NULL,priority_at=NULL,next_attempt_at=now()+$2*interval '1 second' WHERE id=$1").bind(id).bind(container.held_retry_secs as f64).execute(&mut *tx).await?;
+            tx.commit().await?;
+            return Ok(());
+        }
+    }
     let before = before
         .map(|v| serde_json::from_value::<ResourceMeta>(v).map(|d| normalize(&d)))
         .transpose()?;
@@ -219,7 +222,7 @@ pub async fn save(
     if let Some(diff) = diff(before.as_ref(), Some(&after))
         .filter(|_| before.is_some() || doc.status != Status::Missing)
     {
-        append(&mut tx, id, &source, before, Some(after), diff).await?;
+        append(&mut tx, id, &source, before, Some(after), diff, None).await?;
     }
     tx.commit().await?;
     Ok(())
@@ -247,6 +250,7 @@ pub async fn delete_orphans(pool: &PgPool, grace_days: u32) -> Result<u64> {
                 Some(before),
                 None,
                 change,
+                None,
             )
             .await?;
         }
@@ -271,7 +275,7 @@ pub async fn retain(pool: &PgPool, days: u32) -> Result<()> {
     let mut tx = pool.begin().await?;
     let candidates: Vec<(String, i64)> = sqlx::query_as("SELECT osm_type,osm_id FROM osm_place WHERE (SELECT count(*) FROM jsonb_object_keys(versions))>1 FOR UPDATE SKIP LOCKED").fetch_all(&mut *tx).await?;
     for (kind, id) in candidates {
-        sqlx::query("WITH kept AS (SELECT coalesce(jsonb_object_agg(v.key,v.value),'{}'::jsonb) AS versions FROM osm_place o CROSS JOIN LATERAL jsonb_each(o.versions) v WHERE o.osm_type=$1 AND o.osm_id=$2 AND (v.key=md5((o.doc-ARRAY['fetched_at','ttl_secs']::text[])::text) OR v.key=md5((o.fetch_doc-ARRAY['fetched_at','ttl_secs']::text[])::text) OR EXISTS(SELECT 1 FROM resource r WHERE r.osm_type=o.osm_type AND r.osm_id=o.osm_id AND r.osm_version=v.key) OR EXISTS(SELECT 1 FROM resource_change c WHERE c.osm_type=o.osm_type AND c.osm_id=o.osm_id AND (c.before->>'version'=v.key OR c.after->>'version'=v.key)))) UPDATE osm_place o SET versions=k.versions FROM kept k WHERE o.osm_type=$1 AND o.osm_id=$2 AND o.versions IS DISTINCT FROM k.versions").bind(kind).bind(id).execute(&mut *tx).await?;
+        sqlx::query("WITH kept AS (SELECT coalesce(jsonb_object_agg(v.key,v.value),'{}'::jsonb) AS versions FROM osm_place o CROSS JOIN LATERAL jsonb_each(o.versions) v WHERE o.osm_type=$1 AND o.osm_id=$2 AND (v.key=md5((o.doc-ARRAY['fetched_at','ttl_secs']::text[])::text) OR v.key=md5((o.fetch_doc-ARRAY['fetched_at','ttl_secs']::text[])::text) OR EXISTS(SELECT 1 FROM resource r WHERE r.osm_type=o.osm_type AND r.osm_id=o.osm_id AND r.osm_version=v.key) OR EXISTS(SELECT 1 FROM resource r WHERE r.doc#>>'{venue,osm_id}'=o.osm_type||'/'||o.osm_id AND r.doc#>>'{venue,osm_version}'=v.key) OR EXISTS(SELECT 1 FROM occurrence x WHERE x.doc#>>'{venue,osm_id}'=o.osm_type||'/'||o.osm_id AND x.doc#>>'{venue,osm_version}'=v.key) OR EXISTS(SELECT 1 FROM resource_change c WHERE (c.before#>>'{venue,osm_id}'=o.osm_type||'/'||o.osm_id AND c.before#>>'{venue,osm_version}'=v.key) OR (c.after#>>'{venue,osm_id}'=o.osm_type||'/'||o.osm_id AND c.after#>>'{venue,osm_version}'=v.key)) OR EXISTS(SELECT 1 FROM resource_change c WHERE c.osm_type=o.osm_type AND c.osm_id=o.osm_id AND (c.before->>'version'=v.key OR c.after->>'version'=v.key)))) UPDATE osm_place o SET versions=k.versions FROM kept k WHERE o.osm_type=$1 AND o.osm_id=$2 AND o.versions IS DISTINCT FROM k.versions").bind(kind).bind(id).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     Ok(())

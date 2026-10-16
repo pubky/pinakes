@@ -21,6 +21,7 @@ pub const ATTRIBUTES: &[&str] = &[
     "language",
 ];
 pub struct WebResolver {
+    pub events: Option<std::sync::Arc<crate::event::service::EventService>>,
     pub egress: Egress,
     pub config: ResolverConfig,
 }
@@ -40,12 +41,31 @@ impl Resolver for WebResolver {
     async fn resolve(&self, uri: &str) -> Result<ResourceMeta> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         tokio::time::timeout_at(deadline, async {
-            let fetched = self.egress.fetch(uri).await?;
+            let fetched = if let Some(events) = &self.events {
+                events.fetch(&self.egress, uri).await?
+            } else {
+                self.egress.fetch(uri).await?
+            };
+            if let Some(events) = &self.events {
+                if let Some(doc) = events.container(uri, &fetched, deadline).await? {
+                    return Ok(doc);
+                }
+            }
             if fetched.status == 304 {
                 return Err(super::NotModified.into());
             }
             let observation = crate::telemetry::last_fetch();
             let mut extracted = extract(uri, &fetched, self.config.ttl_secs);
+            if let Some(events) = &self.events {
+                extracted.doc = events
+                    .page(uri, &fetched, extracted.doc, &self.egress, deadline)
+                    .await?;
+            } else if extracted.doc.type_path.contains(&"Event".into()) {
+                extracted.doc.set_type("WebPage");
+                extracted.doc.start = None;
+                extracted.doc.end = None;
+                extracted.doc.event = Default::default();
+            }
             if let Some(endpoint) = extracted.oembed.take() {
                 // Discovery is the only additional fetch; it follows the same policy as the page.
                 let remaining = deadline
@@ -135,7 +155,7 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
     let html = Html::parse_document(&text);
     let jsonld: Vec<Value> = html
         .select(&selector("script[type='application/ld+json']"))
-        .filter_map(|script| serde_json::from_str(&script.inner_html()).ok())
+        .filter_map(|script| crate::event::page::lenient_json(&script.inner_html()))
         .collect();
     apply_jsonld(&mut out.doc, &Value::Array(jsonld), &fetched.url);
     for (class, kind) in [
@@ -468,6 +488,7 @@ mod tests {
     fn extraction_precedence_and_promoted_facets() {
         let body = r#"<title>Title fallback</title><meta property="og:title" content="OG"><meta property="og:image" content="/pic.png"><link rel="alternate" type="application/json+oembed" href="/embed"><link rel="canonical" href="/canonical"><div class="h-event"><span class="p-name">MF</span><span class="p-summary">MF summary</span></div><script type="application/ld+json">{"@type":"MusicEvent","name":"JSON first","startDate":"2026-10-01T12:00:00Z","location":{"geo":{"latitude":46.0,"longitude":8.0}}}</script>"#;
         let fetched = Fetched {
+            validators: Default::default(),
             url: Url::parse("https://example.org/").unwrap(),
             status: 200,
             retry_after_secs: 60,
@@ -538,10 +559,11 @@ mod tests {
                 if url.path() != "/page" {
                     std::future::pending::<()>().await;
                 }
-                Ok(Fetched { url:url.clone(),status:200,retry_after_secs:60,location:None,content_type:"text/html".into(),body:br#"<title>Page survives</title><link rel="alternate" type="application/json+oembed" href="/embed">"#.to_vec() })
+                Ok(Fetched { validators:Default::default(),url:url.clone(),status:200,retry_after_secs:60,location:None,content_type:"text/html".into(),body:br#"<title>Page survives</title><link rel="alternate" type="application/json+oembed" href="/embed">"#.to_vec() })
             }
         }
         let resolver = WebResolver {
+            events: None,
             egress: Egress::with_backends(Default::default(), Arc::new(TestDns), Arc::new(Pages)),
             config: Default::default(),
         };

@@ -80,6 +80,7 @@ pub fn public_ip(ip: IpAddr) -> bool {
 }
 #[derive(Clone, Debug)]
 pub struct Fetched {
+    pub validators: Validators,
     pub url: Url,
     pub content_type: String,
     pub status: u16,
@@ -98,31 +99,88 @@ impl Dns for SystemDns {
         Ok(tokio::net::lookup_host((host, port)).await?.collect())
     }
 }
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct Validators {
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+}
+#[derive(Clone, Debug, Default)]
+pub struct FetchOptions {
+    pub accept: Option<String>,
+    pub user_agent: Option<String>,
+    pub feed_cap: Option<usize>,
+    pub feed_hint: bool,
+    pub validators: Validators,
+}
 #[async_trait]
 pub trait Transport: Send + Sync {
     async fn get(&self, url: &Url, addresses: &[SocketAddr]) -> Result<Fetched>;
+    async fn get_with(
+        &self,
+        url: &Url,
+        addresses: &[SocketAddr],
+        _options: &FetchOptions,
+    ) -> Result<Fetched> {
+        self.get(url, addresses).await
+    }
 }
 pub struct PinnedTransport;
 #[async_trait]
 impl Transport for PinnedTransport {
     async fn get(&self, url: &Url, addresses: &[SocketAddr]) -> Result<Fetched> {
+        self.get_with(url, addresses, &FetchOptions::default())
+            .await
+    }
+    async fn get_with(
+        &self,
+        url: &Url,
+        addresses: &[SocketAddr],
+        options: &FetchOptions,
+    ) -> Result<Fetched> {
         let client = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(10))
             .connect_timeout(Duration::from_secs(5))
-            .user_agent(USER_AGENT)
+            .user_agent(options.user_agent.as_deref().unwrap_or(USER_AGENT))
             .resolve_to_addrs(url.host_str().context("missing host")?, addresses)
             .build()?;
-        let response = client
-            .get(url.clone())
-            .header("accept", ALLOWED_TYPES.join(", "))
-            .send()
-            .await?;
-        read_response(url.clone(), response).await
+        let mut request = client.get(url.clone()).header(
+            "accept",
+            options
+                .accept
+                .clone()
+                .unwrap_or_else(|| ALLOWED_TYPES.join(", ")),
+        );
+        if let Some(v) = &options.validators.etag {
+            request = request.header("if-none-match", v);
+        }
+        if let Some(v) = &options.validators.last_modified {
+            request = request.header("if-modified-since", v);
+        }
+        read_response_with(url.clone(), request.send().await?, options).await
     }
 }
-pub async fn read_response(url: Url, mut response: reqwest::Response) -> Result<Fetched> {
+pub async fn read_response(url: Url, response: reqwest::Response) -> Result<Fetched> {
+    read_response_with(url, response, &FetchOptions::default()).await
+}
+pub async fn read_response_with(
+    url: Url,
+    mut response: reqwest::Response,
+    options: &FetchOptions,
+) -> Result<Fetched> {
+    let header = |key: &str| {
+        response
+            .headers()
+            .get(key)
+            .and_then(|v| v.to_str().ok())
+            .filter(|s| s.len() <= 2048)
+            .map(str::to_owned)
+    };
+    let validators = Validators {
+        etag: header("etag"),
+        last_modified: header("last-modified"),
+    };
     let status = response.status().as_u16();
     let retry_after_secs = super::osm::retry_after(response.headers());
     let location = response
@@ -142,23 +200,52 @@ pub async fn read_response(url: Url, mut response: reqwest::Response) -> Result<
         .to_ascii_lowercase();
     let mut body = vec![];
     if !(300..400).contains(&status) && (200..300).contains(&status) {
-        if !ALLOWED_TYPES.contains(&content_type.as_str()) {
-            bail!("content type is not allowed: {content_type}");
+        let feed_type = matches!(
+            content_type.as_str(),
+            "text/calendar"
+                | "application/ics"
+                | "text/xml"
+                | "application/xml"
+                | "application/rss+xml"
+                | "application/atom+xml"
+                | "application/feed+json"
+        );
+        let possible = options.feed_cap.is_some()
+            && (feed_type
+                || matches!(
+                    content_type.as_str(),
+                    "text/plain" | "application/octet-stream" | ""
+                ));
+        if !ALLOWED_TYPES.contains(&content_type.as_str()) && !possible {
+            bail!("content type is not allowed");
         }
-        if response
-            .content_length()
-            .is_some_and(|n| n > BODY_CAP as u64)
-        {
-            bail!("body exceeds 1 MB");
+        let max = options.feed_cap.unwrap_or(BODY_CAP);
+        if response.content_length().is_some_and(|n| n > max as u64) {
+            bail!("body exceeds cap (pages 1 MB)");
         }
         while let Some(chunk) = response.chunk().await? {
-            if body.len() + chunk.len() > BODY_CAP {
-                bail!("body exceeds 1 MB");
+            if body.len() + chunk.len() > max {
+                bail!("body exceeds cap (pages 1 MB)");
             }
             body.extend_from_slice(&chunk);
+            let sniff = String::from_utf8_lossy(&body[..body.len().min(256)])
+                .trim_start_matches(['\u{feff}', ' ', '\r', '\n'])
+                .starts_with("BEGIN:VCALENDAR");
+            if body.len() > BODY_CAP
+                && !(options.feed_cap.is_some() && (feed_type || options.feed_hint || sniff))
+            {
+                bail!("body exceeds 1 MB");
+            }
+        }
+        let sniff = String::from_utf8_lossy(&body[..body.len().min(256)])
+            .trim_start_matches(['\u{feff}', ' ', '\r', '\n'])
+            .starts_with("BEGIN:VCALENDAR");
+        if !ALLOWED_TYPES.contains(&content_type.as_str()) && !feed_type && !sniff {
+            bail!("content type is not allowed");
         }
     }
     Ok(Fetched {
+        validators,
         url,
         status,
         retry_after_secs,
@@ -209,7 +296,18 @@ impl Egress {
             .await
             .context("web resolution exceeded 10 seconds")?
     }
+    pub async fn fetch_with(&self, uri: &str, options: &FetchOptions) -> Result<Fetched> {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            self.fetch_options_inner(uri, options),
+        )
+        .await?
+    }
     async fn fetch_inner(&self, uri: &str) -> Result<Fetched> {
+        self.fetch_options_inner(uri, &FetchOptions::default())
+            .await
+    }
+    async fn fetch_options_inner(&self, uri: &str, options: &FetchOptions) -> Result<Fetched> {
         let mut url = Url::parse(uri)?;
         for redirects in 0..=3 {
             if !matches!(url.scheme(), "http" | "https")
@@ -244,7 +342,7 @@ impl Egress {
             // Pin checked addresses to the connection; a second DNS lookup could rebind to a private IP.
             let _permit = self.host_permit(&host).await;
             let mut observation = crate::telemetry::FetchGuard::start();
-            let response = self.transport.get(&url, &addresses).await?;
+            let response = self.transport.get_with(&url, &addresses, options).await?;
             observation.status(response.status);
             drop(observation);
             if response.status == 429 {
@@ -390,6 +488,7 @@ mod tests {
             assert!(addresses.iter().all(|s| public_ip(s.ip())));
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(Fetched {
+                validators: Validators::default(),
                 url: url.clone(),
                 status: 302,
                 retry_after_secs: 60,
@@ -582,6 +681,7 @@ mod osm_policy_tests {
         }
         assert!(egress.allows("https://openstreetmap.org.example.net/"));
         let web = crate::resolver::web::WebResolver {
+            events: None,
             egress: Egress::new(EgressConfig {
                 allow_hosts: vec!["only.example".into()],
                 ..Default::default()
