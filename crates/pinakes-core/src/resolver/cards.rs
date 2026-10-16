@@ -684,7 +684,8 @@ pub async fn enrich(
         if let Some(f) = feed {
             let (uri, cap, ttl) = (uri.to_owned(), cfg.podcast_items, cfg.media.ttl_secs);
             if let Ok(Some(d)) =
-                tokio::task::spawn_blocking(move || podcast(&uri, &f, ttl, cap)).await?
+                tokio::task::spawn_blocking(move || podcast_body(&uri, &f, ttl, cap, direct))
+                    .await?
             {
                 // A multi-episode feed must not replace an episode page with the whole series.
                 if direct || d.type_name == "PodcastEpisode" {
@@ -696,6 +697,17 @@ pub async fn enrich(
     doc.bounded(web::ATTRIBUTES)
 }
 pub fn podcast(uri: &str, f: &Fetched, ttl: u64, cap: usize) -> Result<Option<ResourceMeta>> {
+    let direct = crate::model::identity(uri).ok().map(|v| v.0)
+        == crate::model::identity(f.url.as_str()).ok().map(|v| v.0);
+    podcast_body(uri, f, ttl, cap, direct)
+}
+fn podcast_body(
+    uri: &str,
+    f: &Fetched,
+    ttl: u64,
+    cap: usize,
+    direct: bool,
+) -> Result<Option<ResourceMeta>> {
     let body = std::str::from_utf8(&f.body)?;
     let xml = roxmltree::Document::parse(body)?;
     let items: Vec<_> = xml
@@ -704,9 +716,25 @@ pub fn podcast(uri: &str, f: &Fetched, ttl: u64, cap: usize) -> Result<Option<Re
         .take(cap + 1)
         .collect();
     ensure!(items.len() <= cap, "podcast item cap");
-    if items.is_empty() {
+    let Some(channel) = xml.descendants().find(|n| n.has_tag_name("channel")) else {
         return Ok(None);
-    }
+    };
+    let podcast_namespace = channel.namespaces().any(|ns| {
+        matches!(
+            ns.uri().trim_end_matches('/'),
+            "http://www.itunes.com/dtds/podcast-1.0.dtd"
+                | "https://www.itunes.com/dtds/podcast-1.0.dtd"
+                | "https://podcastindex.org/namespace/1.0"
+                | "http://podcastindex.org/namespace/1.0"
+        )
+    });
+    let enclosure = |n: roxmltree::Node<'_, '_>| {
+        n.children().any(|c| {
+            c.has_tag_name("enclosure")
+                && c.attribute("type")
+                    .is_some_and(|ty| ty.starts_with("audio/") || ty.starts_with("video/"))
+        })
+    };
     let field = |n: roxmltree::Node<'_, '_>, name: &str| {
         n.children()
             .find(|c| c.is_element() && c.tag_name().name() == name)
@@ -727,16 +755,31 @@ pub fn podcast(uri: &str, f: &Fetched, ttl: u64, cap: usize) -> Result<Option<Re
                         == crate::model::identity(uri).ok().map(|v| v.0)
                 })
         })
-        .copied()
-        .or_else(|| (items.len() == 1 && guid.is_none()).then_some(items[0]));
+        .copied();
     let mut d = ResourceMeta::new(uri, "media", ttl);
-    if let Some(item) = chosen {
+    let is_podcast = podcast_namespace
+        || chosen
+            .map(enclosure)
+            .unwrap_or_else(|| items.iter().any(|n| enclosure(*n)));
+    if !is_podcast {
+        if !direct {
+            return Ok(None);
+        }
+        d.source = "web".into();
+        d.set_type("DataFeed");
+        d.name = field(channel, "title");
+        return Ok(Some(d.bounded(web::ATTRIBUTES)?));
+    }
+    if let Some(item) = chosen.filter(|_| !direct || guid.is_some()) {
         let Some(guid) = field(item, "guid") else {
             return Ok(None);
         };
         d.set_type("PodcastEpisode");
         d.name = field(item, "title");
         d.description = field(item, "description").map(|s| plain(&s));
+        if let Some(duration) = field(item, "duration") {
+            d.attributes.insert("duration".into(), duration);
+        }
         d.attributes.insert("podcast_guid".into(), guid.clone());
         crate::group_keys::add(&mut d, "podcast_guid", &guid);
         if let Some(link) = field(item, "link").and_then(|u| web::origin_url(&f.url, &u)) {

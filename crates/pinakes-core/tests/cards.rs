@@ -46,6 +46,10 @@ impl Transport for TransportMock {
                 if u.path()=="/page" {("text/html","<title>Fallback</title><link rel='alternate' type='application/activity+json' href='/actor'>".into())}
                 else {assert_eq!(options.accept.as_deref(),Some("application/activity+json"));("application/activity+json",json!({"type":"Person","preferredUsername":"alice","summary":"<p>About Alice</p>","icon":{"url":"/avatar.png"}}).to_string())}
             },
+            "blog.example" => {
+                if u.path()=="/post" {("text/html",r#"<title>Blog</title><script type="application/ld+json">{"@type":"BlogPosting","name":"Original blog"}</script><link rel="alternate" type="application/rss+xml" href="/feed">"#.into())}
+                else {("application/rss+xml",r#"<rss><channel><title>Blog feed</title><item><guid>blog-guid</guid><title>Post</title><link>https://blog.example/post</link></item></channel></rss>"#.into())}
+            },
             "podcast.example" => {
                 if u.path()=="/episode" {("text/html","<title>Episode page</title><link rel='alternate' type='application/rss+xml' href='/feed'>".into())}
                 else {("application/rss+xml",RSS.into())}
@@ -222,4 +226,42 @@ fn generic_nostr_signed_profile_note_and_nip52_routing() {
         Some("event_platform")
     );
     let _: ResourceMeta = ResourceMeta::new("nostr:x", "nostr", 3600);
+}
+
+#[tokio::test]
+async fn review_blog_rss_preserves_jsonld_and_single_episode_feed_is_series() {
+    let r = resolver(
+        "media",
+        Config::default(),
+        Arc::new(TransportMock::default()),
+    );
+    let d = r.web.resolve("https://blog.example/post").await.unwrap();
+    assert_eq!(d.type_name, "BlogPosting");
+    assert_eq!(d.name.as_deref(), Some("Original blog"));
+    assert!(!d.group_keys.iter().any(|k| k.basis == "podcast_guid"));
+    assert_eq!(
+        r.web
+            .resolve("https://blog.example/feed")
+            .await
+            .unwrap()
+            .type_name,
+        "DataFeed"
+    );
+    for enclosure in ["audio/mpeg", "video/mp4"] {
+        let f = Fetched {url:"https://podcast.example/feed".parse().unwrap(),status:200,body:format!("<rss><channel><title>Podcast</title><item><guid>one</guid><title>Episode</title><link>https://podcast.example/one</link><enclosure type='{enclosure}'/></item></channel></rss>").into_bytes(),content_type:"application/rss+xml".into(),location:None,retry_after_secs:60,validators:Default::default()};
+        assert_eq!(
+            cards::podcast(f.url.as_str(), &f, 3600, 10)
+                .unwrap()
+                .unwrap()
+                .type_name,
+            "PodcastSeries"
+        );
+        assert_eq!(
+            cards::podcast("https://podcast.example/one", &f, 3600, 10)
+                .unwrap()
+                .unwrap()
+                .type_name,
+            "PodcastEpisode"
+        );
+    }
 }
