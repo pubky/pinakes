@@ -46,11 +46,11 @@ not an HTTP 404 from the Pinakes resource route.
 | `bbox` | `minLon,minLat,maxLon,maxLat`, degrees; west > east crosses the antimeridian |
 | `near`, `radius` | `lat,lon` plus a positive metre radius, max 200,000 by default; mutually exclusive with `bbox` |
 | `from`, `to` | Inclusive start-time bounds, RFC 3339 or Unix milliseconds; `from` must not follow `to` |
-| `cluster` | Integer map zoom with `bbox`; returns viewport clusters/points; incompatible with cursor |
+| `cluster` | Finite map zoom with `bbox`, floored and clamped into the resolution table; returns viewport clusters/points; incompatible with cursor |
 | `fields` | `card` (default), `facets`, or `document` |
 
 `venue`, `collapse` and `reach=wot_2` return 400. Unknown parameters, invalid
-coordinates/dates, out-of-range radius/zoom and incompatible options also return 400.
+coordinates/dates, out-of-range radius, non-finite zoom and incompatible options also return 400.
 The `start` sort excludes resources without a start. Distance and start ranks are
 negative metres and negative Unix seconds respectively, so nearest/earliest comes
 first while preserving the descending keyset contract.
@@ -61,20 +61,22 @@ Spatial search includes `point` even with `fields=card`. OSM cards always includ
 includes cafés and other businesses. Spatial, time, text, type, tag and reach filters
 can be combined; tag facets count the complete filtered set before pagination.
 
-`cluster=<zoom>` returns `{clusters, points, truncated, total, reach_truncated,
+`cluster=<zoom>` returns `{clusters, points, truncated, total, reach_truncated, resolution,
 facets?}`. Each cluster is `{cell,count,lat,lon,top:[resource_ids],attribution?}`.
 `top` contains at most three IDs ordered by the selected rank. The centroid comes
 from member points (circular longitude mean handles the dateline). H3 resolution
-is `clamp(zoom-4,0,11)` by default for zooms 0..22, configurable via a table.
+is `clamp(floor(zoom)-4,0,11)` by default, configurable via a table. Large viewports
+may coarsen further to fit the cell budget; `resolution` reports the effective value.
 Singleton cells are points; if total filtered resources <= limit, all are points.
 The limit caps returned clusters plus singleton points, and `truncated` marks any
 omitted units. When not truncated, sum(cluster counts)+points.length equals total.
 There is no cursor in cluster mode; refine the viewport/zoom to retrieve omitted units.
 
 Search responses carry `Cache-Control: public, max-age=30` and an `ETag` hashing
-parameters, ingestion cursors/epochs, reference revision and latest resolution/cache
-revision. `If-None-Match` returns 304 when unchanged. The reference scope belongs in
-the URL, so reach/viewer searches have separate cache keys.
+parameters, ingestion cursors/epochs, a transactionally maintained write revision,
+the reach-author-set hash and its truncation flag. `If-None-Match` returns 304 when
+unchanged. The reference scope belongs in the URL, so reach/viewer searches have
+separate cache keys.
 
 One SQL statement performs type/facet and text filtering, reference/tag/reach
 filtering, ranking, tag aggregation and pagination. Facets are computed before the
@@ -209,9 +211,9 @@ The default retention is 90 days; pruning runs hourly.
 
 Refresh rows use time to start: >30 days/no start → 7 days, 7–30 days → 2 days,
 24 hours–7 days → 6 hours, <24 hours/running → 1 hour. Adapter floors may lengthen
-these intervals; OSM respects its configurable cache TTL. After an end, one fetch
-at end+24 hours makes the resource final. A final resource stays frozen until a
-new public reference reopens it; `geo:` stays final permanently. Missing
+these intervals; OSM respects its configurable cache TTL. An absent end uses the start.
+One fetch at end+24 hours makes the resource final. A final resource stays frozen until
+a public reference newer than its last resolution reopens it; `geo:` stays final permanently. Missing
 confirmation can require one additional fetch before finalization. `lookup` and
 `resolve` prioritize overdue jobs without advancing their earliest allowed retry.
 
