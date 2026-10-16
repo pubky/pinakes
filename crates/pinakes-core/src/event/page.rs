@@ -172,6 +172,24 @@ fn fields(doc: &mut ResourceMeta, v: &Value, base: &Url, ap: bool) {
             set_time(doc, s, end);
         }
     }
+    if doc.event.all_day == Some(false) && doc.event.tz.is_none() {
+        if let Some(end) = v[if ap { "endTime" } else { "endDate" }]
+            .as_str()
+            .filter(|s| s.len() == 10 || s.len() == 8)
+        {
+            if let Some(start) = v[if ap { "startTime" } else { "startDate" }]
+                .as_str()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            {
+                use chrono::TimeZone;
+                doc.end = time::naive(end)
+                    .and_then(|d| d.checked_add_signed(chrono::Duration::days(1)))
+                    .and_then(|d| start.offset().from_local_datetime(&d).single())
+                    .map(|d| d.to_utc());
+                doc.event.end_local = None;
+            }
+        }
+    }
     fill(
         &mut doc.event.event_status,
         v["eventStatus"]
@@ -305,6 +323,16 @@ pub fn set_time(doc: &mut ResourceMeta, s: &str, end: bool) {
     let Some(value) = time::parse(s, doc.event.tz.as_deref()) else {
         return;
     };
+    if end && (s.len() == 10 || s.len() == 8) && doc.event.all_day == Some(false) {
+        if let Some(next) =
+            time::naive(s).and_then(|d| d.checked_add_signed(chrono::Duration::days(1)))
+        {
+            let local = next.to_string();
+            doc.end = time::parse(&local, doc.event.tz.as_deref());
+            doc.event.end_local = Some(local);
+        }
+        return;
+    }
     if end {
         doc.end = Some(value);
         if time::offset(s).is_none() {

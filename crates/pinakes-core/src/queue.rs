@@ -7,6 +7,7 @@ use crate::{
     },
 };
 use anyhow::{bail, Result};
+use futures_util::FutureExt;
 use sqlx::{FromRow, PgPool};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{
@@ -131,10 +132,10 @@ async fn finish_job(
                 manifest.cadence_floor = doc.ttl_secs;
             }
             if doc.status != Status::Missing
-                || doc
-                    .end
-                    .or(doc.start)
-                    .is_some_and(|end| now >= end + chrono::Duration::hours(24))
+                || doc.end.or(doc.start).is_some_and(|end| {
+                    end.checked_add_signed(chrono::Duration::hours(24))
+                        .is_some_and(|at| now >= at)
+                })
             {
                 let next = if let Some(container) = &doc.container {
                     manifest.mode = crate::adapter::Mode::Container;
@@ -212,11 +213,11 @@ async fn run_batch_config(
     let uris = jobs.iter().map(|j| j.uri.clone()).collect::<Vec<_>>();
     let results = tokio::time::timeout(
         Duration::from_secs(15 * jobs.len() as u64),
-        resolver.resolve_batch(&uris),
+        std::panic::AssertUnwindSafe(resolver.resolve_batch(&uris)).catch_unwind(),
     )
     .await;
     let results = match results {
-        Ok(results) if results.len() == jobs.len() => results,
+        Ok(Ok(results)) if results.len() == jobs.len() => results,
         Err(_) if resolver.name() == "osm" => jobs
             .iter()
             .map(|_| {

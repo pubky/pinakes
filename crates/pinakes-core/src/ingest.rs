@@ -27,9 +27,17 @@ fn rejection_reason(line: &Change, limits: &IngestConfig) -> Option<&'static str
         .as_ref()
         .is_some_and(|s| s.len() > 128 || s.contains('\0'))
         || line
-            .status
-            .as_ref()
-            .is_some_and(|s| crate::event::EventStatus::parse(s).is_none())
+            .start
+            .into_iter()
+            .chain(line.end)
+            .chain([line.at])
+            .any(|ms| {
+                DateTime::<Utc>::from_timestamp_millis(ms).is_none_or(|t| {
+                    use chrono::Datelike;
+                    !(1..=9999).contains(&t.year())
+                })
+            })
+        || line.start.zip(line.end).is_some_and(|(a, b)| b < a)
     {
         Some("event")
     } else {

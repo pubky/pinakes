@@ -15,7 +15,10 @@ pub fn next(
         return None;
     }
     let end = doc.end.or(doc.start);
-    let final_at = end.map(|end| end + Duration::hours(24));
+    let final_at = end.map(|end| {
+        end.checked_add_signed(Duration::hours(24))
+            .unwrap_or(DateTime::<Utc>::MAX_UTC)
+    });
     if final_at.is_some_and(|at| now >= at) {
         return None;
     }
@@ -42,7 +45,9 @@ pub fn next(
     } else {
         3600
     });
-    let at = now + Duration::seconds(seconds as i64);
+    let at = now
+        .checked_add_signed(Duration::try_seconds(seconds.min(i64::MAX as u64) as i64)?)
+        .unwrap_or(DateTime::<Utc>::MAX_UTC);
     Some(final_at.map_or(at, |end| end.min(at)))
 }
 /// Container TTL is meaningful only in the far/medium rows; near starts tighten it.

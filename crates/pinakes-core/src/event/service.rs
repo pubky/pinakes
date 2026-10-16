@@ -32,28 +32,26 @@ impl EventService {
         } else {
             Validators::default()
         };
-        let mut options = FetchOptions {
-            feed_cap: self.config.calendars.then_some(self.config.feed_body_bytes),
+        let options = FetchOptions {
+            feed_cap: feed_hint.then_some(self.config.feed_body_bytes),
             feed_hint,
             validators,
             ..Default::default()
         };
         let fetched = egress.fetch_with(&mapped, &options).await;
         let fetched = match fetched {
-            Err(_) if uri.starts_with("webcal:") || uri.starts_with("webcals:") => {
+            Err(e)
+                if self.config.webcal_http_fallback
+                    && uri.starts_with("webcal:")
+                    && tls_unsupported(&e) =>
+            {
                 egress
                     .fetch_with(&mapped.replacen("https:", "http:", 1), &options)
                     .await?
             }
             other => other?,
         };
-        // Validators are hints, never evidence of disappearance (nor a trusted snapshot).
-        let fetched = if fetched.status == 304 {
-            options.validators = Validators::default();
-            egress.fetch_with(fetched.url.as_str(), &options).await?
-        } else {
-            fetched
-        };
+        // A 304 renews the accepted snapshot's TTL; it is not a disappearance observation.
         if feed_hint && fetched.status == 200 {
             sqlx::query("INSERT INTO event_fetch(resource_id,validators) SELECT id,$2 FROM resource WHERE id=$1 ON CONFLICT(resource_id) DO UPDATE SET validators=$2").bind(crate::model::identity(uri)?.0).bind(serde_json::to_value(&fetched.validators)?).execute(&self.pool).await?;
         }
@@ -146,51 +144,95 @@ impl EventService {
         if !(200..300).contains(&fetched.status) {
             return Ok(card);
         }
-        let mut event = ResourceMeta::new(uri, "web", card.ttl_secs);
-        let mut calendar_link = None;
-        {
-            let text = String::from_utf8_lossy(&fetched.body);
-            if let Some(v) = page::lenient_json(&text) {
-                if self.config.jsonld {
-                    page::jsonld(&mut event, &v, &fetched.url);
-                }
-                if self.config.activitypub {
-                    page::activity(&mut event, &v, &fetched.url);
-                }
-            }
-            let html = scraper::Html::parse_document(&text);
-            if self.config.jsonld {
-                for node in html.select(
-                    &scraper::Selector::parse("script[type='application/ld+json']").unwrap(),
-                ) {
-                    if let Some(v) = page::lenient_json(&node.inner_html()) {
-                        page::jsonld(&mut event, &v, &fetched.url);
+        anyhow::ensure!(
+            fetched.body.len() <= crate::resolver::egress::BODY_CAP,
+            "non-calendar page exceeds 1 MB"
+        );
+        let input_uri = uri.to_owned();
+        let fetched = fetched.clone();
+        let config = self.config.clone();
+        let ttl = card.ttl_secs;
+        let (mut event, calendar_link, advertised, event_candidate) =
+            tokio::task::spawn_blocking(move || {
+                let uri = input_uri.as_str();
+                let fetched = &fetched;
+                let mut event = ResourceMeta::new(uri, "web", ttl);
+                let mut calendar_link = None;
+                let mut advertised =
+                    header_alternate(fetched.validators.link.as_deref(), &fetched.url);
+                let event_candidate;
+                {
+                    let text = String::from_utf8_lossy(&fetched.body);
+                    if let Some(v) = page::lenient_json(&text) {
+                        if config.jsonld {
+                            page::jsonld(&mut event, &v, &fetched.url);
+                        }
+                        if config.activitypub {
+                            page::activity(&mut event, &v, &fetched.url);
+                        }
+                    }
+                    let html = scraper::Html::parse_document(&text);
+                    event_candidate = text.contains("startDate")
+                        || text.contains("dtstart")
+                        || text.contains("dt-start");
+                    if advertised.is_none() {
+                        advertised = html
+                            .select(
+                                &scraper::Selector::parse("link[rel~=alternate][href]").unwrap(),
+                            )
+                            .find_map(|e| {
+                                let mime = e.value().attr("type")?;
+                                if !matches!(
+                                    mime,
+                                    "application/activity+json" | "application/ld+json"
+                                ) {
+                                    return None;
+                                }
+                                Some((
+                                    fetched.url.join(e.value().attr("href")?).ok()?.to_string(),
+                                    mime.to_owned(),
+                                ))
+                            });
+                    }
+                    if config.jsonld {
+                        for node in html.select(
+                            &scraper::Selector::parse("script[type='application/ld+json']")
+                                .unwrap(),
+                        ) {
+                            if let Some(v) = page::lenient_json(&node.inner_html()) {
+                                page::jsonld(&mut event, &v, &fetched.url);
+                            }
+                        }
+                    }
+                    if config.calendars {
+                        calendar_link = html
+                            .select(
+                                &scraper::Selector::parse(
+                                    "link[type='text/calendar'][href],a[href]",
+                                )
+                                .unwrap(),
+                            )
+                            .filter_map(|el| el.value().attr("href"))
+                            .filter(|href| {
+                                href.contains("/export/event/")
+                                    || href.ends_with(".ics")
+                                    || href.ends_with("/ical/")
+                            })
+                            .filter_map(|href| crate::resolver::web::origin_url(&fetched.url, href))
+                            .find(|link| own_calendar_link(&fetched.url, link));
+                    }
+                    if config.microformats {
+                        page::microformats(&mut event, &html, &fetched.url);
                     }
                 }
-            }
-            if self.config.calendars {
-                calendar_link = html
-                    .select(
-                        &scraper::Selector::parse("link[type='text/calendar'][href],a[href]")
-                            .unwrap(),
-                    )
-                    .filter_map(|el| el.value().attr("href"))
-                    .filter(|href| {
-                        href.contains("/export/event/")
-                            || href.ends_with(".ics")
-                            || href.ends_with("/ical/")
-                    })
-                    .find_map(|href| crate::resolver::web::origin_url(&fetched.url, href));
-            }
-            if self.config.microformats {
-                page::microformats(&mut event, &html, &fetched.url);
-            }
-        }
-        if self.config.activitypub && (event.start.is_none() || event.event.tz.is_none()) {
-            for accept in [
-                "application/activity+json",
-                "application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\"",
-            ] {
+                (event, calendar_link, advertised, event_candidate)
+            })
+            .await?;
+        let is_event = event.type_path.contains(&"Event".into());
+        if self.config.activitypub && (advertised.is_some() || (!is_event && event_candidate)) {
+            let (alternate, accept) =
+                advertised.unwrap_or_else(|| (uri.to_owned(), "application/activity+json".into()));
+            for _ in 0..1 {
                 let remaining = deadline
                     .saturating_duration_since(tokio::time::Instant::now())
                     .saturating_sub(Duration::from_millis(100));
@@ -198,12 +240,12 @@ impl EventService {
                     break;
                 }
                 let options = FetchOptions {
-                    accept: Some(accept.into()),
+                    accept: Some(accept.clone()),
                     ..Default::default()
                 };
                 if let Ok(Ok(response)) = tokio::time::timeout(
                     remaining.min(Duration::from_secs(2)),
-                    egress.fetch_with(uri, &options),
+                    egress.discover(&alternate, &options, card.ttl_secs),
                 )
                 .await
                 {
@@ -217,26 +259,32 @@ impl EventService {
                 }
             }
         }
-        if let Some(link) = calendar_link.filter(|_| event.event.tz.is_none()) {
+        if let Some(link) = calendar_link
+            .filter(|_| event.type_path.contains(&"Event".into()) && event.event.tz.is_none())
+        {
             let remaining = deadline
                 .saturating_duration_since(tokio::time::Instant::now())
                 .saturating_sub(Duration::from_millis(100));
             if let Ok(Ok(response)) = tokio::time::timeout(
                 remaining.min(Duration::from_secs(2)),
-                egress.fetch_with(
+                egress.discover(
                     &link,
                     &FetchOptions {
                         feed_cap: Some(self.config.feed_body_bytes),
                         feed_hint: true,
                         ..Default::default()
                     },
+                    card.ttl_secs,
                 ),
             )
             .await
             {
                 if response.status == 200 {
-                    if let Ok(mut calendar) =
-                        calendar::parse(&link, &response.body, &self.config, chrono::Utc::now())
+                    let config = self.config.clone();
+                    if let Ok(Ok(mut calendar)) = tokio::task::spawn_blocking(move || {
+                        calendar::parse(&link, &response.body, &config, chrono::Utc::now())
+                    })
+                    .await
                     {
                         if let Some(c) = calendar
                             .container
@@ -296,6 +344,7 @@ impl EventService {
         {
             return Ok(());
         }
+        doc.event.bound();
         let Some(venue) = &mut doc.event.venue else {
             return Ok(());
         };
@@ -315,7 +364,8 @@ impl EventService {
             .append_pair("format", "jsonv2")
             .append_pair("addressdetails", "1")
             .append_pair("namedetails", "1")
-            .append_pair("limit", "2");
+            .append_pair("limit", "2")
+            .append_pair("accept-language", "en");
         for k in ["street", "city", "postalcode", "country"] {
             if let Some(v) = venue.address.get(k) {
                 url.query_pairs_mut().append_pair(k, v);
@@ -443,4 +493,53 @@ impl crate::resolver::Resolver for CalendarResolver {
     fn refresh_after(&self, doc: &ResourceMeta) -> Duration {
         Duration::from_secs(doc.ttl_secs)
     }
+}
+
+fn tls_unsupported(error: &anyhow::Error) -> bool {
+    // Certificate, DNS, policy, timeout and HTTP errors never justify plaintext.
+    error.chain().any(|e| {
+        let s = e.to_string().to_ascii_lowercase();
+        s.contains("wrong version number")
+            || s.contains("received corrupt message of type invalidcontenttype")
+    })
+}
+fn header_alternate(header: Option<&str>, base: &url::Url) -> Option<(String, String)> {
+    header?.split(',').find_map(|part| {
+        if !part.contains("rel=\"alternate\"") && !part.contains("rel=alternate") {
+            return None;
+        }
+        let mime = if part.contains("application/activity+json") {
+            "application/activity+json"
+        } else if part.contains("application/ld+json") {
+            "application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\""
+        } else {
+            return None;
+        };
+        Some((
+            base.join(part.split('<').nth(1)?.split('>').next()?)
+                .ok()?
+                .to_string(),
+            mime.into(),
+        ))
+    })
+}
+fn own_calendar_link(base: &url::Url, link: &str) -> bool {
+    let Ok(link) = url::Url::parse(link) else {
+        return false;
+    };
+    if base.host_str() != link.host_str() {
+        return false;
+    }
+    let stem = base
+        .path()
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
+    !stem.is_empty()
+        && (link
+            .path()
+            .starts_with(&format!("{}/", base.path().trim_end_matches('/')))
+            || link.path().contains(&format!("/{stem}."))
+            || link.path().ends_with(&format!("/{stem}")))
 }

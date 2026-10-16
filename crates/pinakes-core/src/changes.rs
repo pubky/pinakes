@@ -20,6 +20,7 @@ pub fn normalize(doc: &ResourceMeta) -> Value {
     let object = value.as_object_mut().unwrap();
     object.remove("fetched_at");
     object.remove("ttl_secs");
+    object.remove("warnings");
     if let Some(attrs) = object.get_mut("attributes").and_then(Value::as_object_mut) {
         attrs.remove("content_length");
     }

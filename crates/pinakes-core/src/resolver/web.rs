@@ -55,7 +55,15 @@ impl Resolver for WebResolver {
                 return Err(super::NotModified.into());
             }
             let observation = crate::telemetry::last_fetch();
-            let mut extracted = extract(uri, &fetched, self.config.ttl_secs);
+            anyhow::ensure!(
+                fetched.body.len() <= super::egress::BODY_CAP,
+                "non-feed page exceeds 1 MB"
+            );
+            let input_uri = uri.to_owned();
+            let input = fetched.clone();
+            let ttl = self.config.ttl_secs;
+            let mut extracted =
+                tokio::task::spawn_blocking(move || extract(&input_uri, &input, ttl)).await?;
             if let Some(events) = &self.events {
                 extracted.doc = events
                     .page(uri, &fetched, extracted.doc, &self.egress, deadline)
@@ -73,7 +81,11 @@ impl Resolver for WebResolver {
                     .saturating_sub(Duration::from_millis(25));
                 if let Ok(Ok(response)) = tokio::time::timeout(
                     remaining.min(Duration::from_secs(2)),
-                    self.egress.fetch(endpoint.as_str()),
+                    self.egress.discover(
+                        endpoint.as_str(),
+                        &Default::default(),
+                        self.config.ttl_secs,
+                    ),
                 )
                 .await
                 {

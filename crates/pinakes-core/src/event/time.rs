@@ -56,7 +56,7 @@ pub fn local(tz: Tz, value: NaiveDateTime) -> Option<DateTime<Utc>> {
         LocalResult::Ambiguous(a, b) => Some(a.min(b).to_utc()),
         LocalResult::None => (1..=48)
             .find_map(|h| {
-                tz.from_local_datetime(&(value - Duration::hours(h)))
+                tz.from_local_datetime(&value.checked_sub_signed(Duration::hours(h))?)
                     .earliest()
             })
             .and_then(|prior| prior.offset().fix().from_local_datetime(&value).single())
@@ -85,7 +85,7 @@ pub fn offset(value: &str) -> Option<DateTime<Utc>> {
     if let Ok(t) = DateTime::parse_from_rfc3339(value) {
         return Some(t.to_utc());
     }
-    for f in ["%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d %H:%M:%S %z"] {
+    for f in ["%Y-%m-%dT%H:%M:%S%.f%z", "%Y-%m-%d %H:%M:%S %z"] {
         if let Ok(d) = DateTime::parse_from_str(value, f) {
             return Some(d.to_utc());
         }

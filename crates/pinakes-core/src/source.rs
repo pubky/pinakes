@@ -77,7 +77,7 @@ pub(crate) async fn container_keys_tx(
     }
     let mut missing: BTreeMap<String, u32> =
         serde_json::from_value(row.try_get::<Value, _>("missing_keys")?)?;
-    missing.retain(|key, _| !keys.contains(key));
+    missing.retain(|key, _| old.contains(key) && !keys.contains(key));
     let mut cancelled = Vec::new();
     for key in losses {
         let count = missing.entry(key.clone()).or_default();

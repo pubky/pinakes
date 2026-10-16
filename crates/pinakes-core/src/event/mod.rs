@@ -116,6 +116,12 @@ pub struct Offers {
 impl EventFields {
     pub fn bound(&mut self) {
         use crate::model::truncate;
+        for value in [&mut self.tz, &mut self.start_local, &mut self.end_local]
+            .into_iter()
+            .flatten()
+        {
+            truncate(value, 128);
+        }
         if let Some(v) = &mut self.venue {
             truncate(&mut v.text, 1024);
             if let Some(n) = &mut v.name {

@@ -9,7 +9,10 @@ use anyhow::{bail, ensure, Context, Result};
 use chrono::{DateTime, Duration, Months, NaiveDateTime, TimeZone, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, io::BufRead};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+};
 use url::Url;
 
 #[derive(Clone, Debug, Default)]
@@ -20,6 +23,7 @@ struct Property {
 }
 #[derive(Clone, Debug, Default)]
 struct Component {
+    invalid: bool,
     name: String,
     props: Vec<Property>,
     children: Vec<Component>,
@@ -111,7 +115,7 @@ fn unescape(s: &str) -> String {
     }
     out
 }
-fn components(bytes: &[u8], cap: usize) -> Result<Component> {
+fn components(bytes: &[u8], cfg: &EventConfig, deadline: std::time::Instant) -> Result<Component> {
     let mut stack: Vec<Component> = vec![];
     let mut root = None;
     let mut pending = String::new();
@@ -120,11 +124,20 @@ fn components(bytes: &[u8], cap: usize) -> Result<Component> {
         if line.trim().is_empty() {
             return Ok(());
         }
-        let p = property(line)?;
+        let p = match property(line) {
+            Ok(p) => p,
+            Err(e) => {
+                if let Some(event) = stack.iter_mut().find(|c| c.name == "VEVENT") {
+                    event.invalid = true;
+                    return Ok(());
+                }
+                return Err(e);
+            }
+        };
         if p.name == "BEGIN" {
             ensure!(stack.len() < 8, "calendar nesting cap");
             count += 1;
-            ensure!(count <= cap, "calendar component cap");
+            ensure!(count <= cfg.max_components, "calendar component cap");
             stack.push(Component {
                 name: p.value.to_ascii_uppercase(),
                 ..Default::default()
@@ -147,12 +160,25 @@ fn components(bytes: &[u8], cap: usize) -> Result<Component> {
         }
         Ok(())
     };
-    // BufRead processes physical lines; unfold before parameter parsing and TEXT unescaping.
-    for line in std::io::Cursor::new(bytes).lines() {
-        let line = line?;
-        let line = line.trim_end_matches('\r');
+    // Borrow physical byte slices before decoding: a hostile line cannot allocate past its cap.
+    for line in bytes.split(|b| *b == b'\n') {
+        ensure!(
+            std::time::Instant::now() < deadline,
+            "calendar parse budget"
+        );
+        ensure!(
+            line.len() <= cfg.max_line_bytes,
+            "calendar physical line cap"
+        );
+        let line = std::str::from_utf8(line)
+            .unwrap_or("INVALID_CONTENT_LINE")
+            .trim_end_matches('\r');
         if line.starts_with([' ', '\t']) {
             ensure!(!pending.is_empty(), "orphan folded line");
+            ensure!(
+                pending.len() + line.len() <= cfg.max_line_bytes,
+                "calendar unfolded line cap"
+            );
             pending.push_str(&line[1..]);
         } else {
             if !pending.is_empty() {
@@ -181,6 +207,7 @@ struct Zones<'a> {
     calendar: Option<&'a str>,
     default: Option<&'a str>,
     embedded: BTreeMap<String, &'a Component>,
+    transitions: RefCell<BTreeMap<(String, i32), Vec<Transition>>>,
 }
 impl Zones<'_> {
     fn wall_at(&self, stamp: &Stamp, at: DateTime<Utc>) -> Result<NaiveDateTime> {
@@ -234,7 +261,7 @@ impl Zones<'_> {
         } else if let Some(z) = zone {
             time::local(z, wall).context("local date outside zone")?
         } else if let Some(z) = custom {
-            custom_time(z, wall)?
+            self.custom_time(z, wall)?
         } else {
             wall.and_utc()
         };
@@ -254,13 +281,14 @@ impl Zones<'_> {
                 return time::local(zone, wall).context("invalid wall time");
             }
             if let Some(c) = self.embedded.get(zone) {
-                return custom_time(c, wall);
+                return self.custom_time(c, wall);
             }
         }
         Ok(wall.and_utc())
     }
 }
-fn custom_time(c: &Component, wall: NaiveDateTime) -> Result<DateTime<Utc>> {
+type Transition = (NaiveDateTime, chrono::FixedOffset, chrono::FixedOffset);
+fn transitions(c: &Component, wall: NaiveDateTime) -> Result<Vec<Transition>> {
     let mut transitions = vec![];
     for o in &c.children {
         let start = time::naive(o.value("DTSTART").context("VTIMEZONE DTSTART")?)
@@ -273,7 +301,9 @@ fn custom_time(c: &Component, wall: NaiveDateTime) -> Result<DateTime<Utc>> {
         if let Some(rule) = o.value("RRULE") {
             let set: rrule::RRuleSet =
                 format!("DTSTART:{}Z\nRRULE:{}", start.format("%Y%m%dT%H%M%S"), rule).parse()?;
-            let end = (wall + Duration::days(370))
+            let end = wall
+                .checked_add_signed(Duration::days(370))
+                .context("VTIMEZONE horizon overflow")?
                 .and_utc()
                 .with_timezone(&rrule::Tz::UTC);
             dates.extend(
@@ -292,31 +322,54 @@ fn custom_time(c: &Component, wall: NaiveDateTime) -> Result<DateTime<Utc>> {
         }
     }
     transitions.sort_by_key(|t| t.0);
-    let mut chosen = transitions
-        .first()
-        .map(|t| t.1)
-        .context("empty VTIMEZONE")?;
-    for (at, from, to) in transitions {
-        let delta = to.local_minus_utc() - from.local_minus_utc();
-        if delta > 0 && wall >= at && wall < at + Duration::seconds(delta as i64) {
-            chosen = from;
-            break;
+    Ok(transitions)
+}
+impl Zones<'_> {
+    fn custom_time(&self, c: &Component, wall: NaiveDateTime) -> Result<DateTime<Utc>> {
+        use chrono::Datelike;
+        let key = (c.value("TZID").unwrap_or("").to_owned(), wall.year());
+        let mut cache = self.transitions.borrow_mut();
+        if !cache.contains_key(&key) {
+            cache.insert(key.clone(), transitions(c, wall)?);
         }
-        if delta < 0 && wall >= at + Duration::seconds(delta as i64) && wall < at {
-            chosen = from;
-            break;
+        let transitions = &cache[&key];
+        let mut chosen = transitions
+            .first()
+            .map(|t| t.1)
+            .context("empty VTIMEZONE")?;
+        for &(at, from, to) in transitions {
+            let delta = to.local_minus_utc() - from.local_minus_utc();
+            if delta > 0
+                && wall >= at
+                && wall
+                    < at.checked_add_signed(Duration::seconds(delta as i64))
+                        .context("VTIMEZONE transition overflow")?
+            {
+                chosen = from;
+                break;
+            }
+            if delta < 0
+                && wall
+                    >= at
+                        .checked_add_signed(Duration::seconds(delta as i64))
+                        .context("VTIMEZONE transition overflow")?
+                && wall < at
+            {
+                chosen = from;
+                break;
+            }
+            if wall >= at {
+                chosen = to;
+            } else {
+                break;
+            }
         }
-        if wall >= at {
-            chosen = to;
-        } else {
-            break;
-        }
+        chosen
+            .from_local_datetime(&wall)
+            .single()
+            .map(|d| d.to_utc())
+            .context("VTIMEZONE conversion")
     }
-    chosen
-        .from_local_datetime(&wall)
-        .single()
-        .map(|d| d.to_utc())
-        .context("VTIMEZONE conversion")
 }
 fn recurrence_key(s: &Stamp) -> String {
     if s.date {
@@ -408,7 +461,13 @@ fn content_hash(c: &Component) -> String {
     hash(props.join("\n").as_bytes())
 }
 fn conference(s: &str) -> bool {
+    let html = scraper::Html::parse_fragment(s);
+    let hrefs: Vec<_> = html
+        .select(&scraper::Selector::parse("a[href]").unwrap())
+        .filter_map(|n| n.value().attr("href").map(str::to_owned))
+        .collect();
     s.split_whitespace()
+        .chain(hrefs.iter().map(String::as_str))
         .filter_map(|s| Url::parse(s.trim_matches(['<', '>', '(', ')', ','])).ok())
         .filter_map(|u| u.host_str().map(str::to_owned))
         .any(|h| {
@@ -420,6 +479,38 @@ fn conference(s: &str) -> bool {
                 || h == "zoom.com"
                 || h.ends_with(".zoom.com")
         })
+}
+fn structured_address(text: &str) -> BTreeMap<String, String> {
+    let parts: Vec<_> = text
+        .split([',', '\n'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut out = BTreeMap::new();
+    for (i, part) in parts.iter().enumerate().skip(1) {
+        let mut words = part.split_whitespace();
+        let Some(postcode) = words.next() else {
+            continue;
+        };
+        let city = words.collect::<Vec<_>>().join(" ");
+        if (4..=10).contains(&postcode.len())
+            && postcode.chars().any(|c| c.is_ascii_digit())
+            && !city.is_empty()
+            && parts[i - 1].chars().any(|c| c.is_ascii_digit())
+        {
+            out.insert("street".into(), parts[i - 1].to_string());
+            out.insert("postalcode".into(), postcode.into());
+            out.insert("city".into(), city);
+            if let Some(country) = parts.get(i + 1) {
+                out.insert("country".into(), country.to_string());
+            }
+            break;
+        }
+    }
+    for value in out.values_mut() {
+        crate::model::truncate(value, 256);
+    }
+    out
 }
 fn document(
     c: &Component,
@@ -434,7 +525,14 @@ fn document(
     let mut doc = ResourceMeta::new(base.as_str(), "ics", 86400);
     doc.set_type("Event");
     doc.name = c.text("SUMMARY");
-    doc.description = c.text("DESCRIPTION").or_else(|| c.text("X-ALT-DESC"));
+    doc.description = c.text("DESCRIPTION").or_else(|| {
+        c.text("X-ALT-DESC").map(|s| {
+            scraper::Html::parse_fragment(&s)
+                .root_element()
+                .text()
+                .collect()
+        })
+    });
     for p in c.props.iter().filter(|p| p.name == "CATEGORIES") {
         let mut escaped = false;
         let mut start = 0;
@@ -466,7 +564,15 @@ fn document(
                 .context("duration overflow")?,
         )
     } else if start.date {
-        Some(zones.at_wall(&start, start.wall + Duration::days(1))?)
+        Some(
+            zones.at_wall(
+                &start,
+                start
+                    .wall
+                    .checked_add_signed(Duration::days(1))
+                    .context("all-day end overflow")?,
+            )?,
+        )
     } else {
         Some(start.at)
     };
@@ -488,7 +594,7 @@ fn document(
             .cloned()
             .or_else(|| (!p.value.starts_with("mailto:")).then(|| p.value.clone()))
             .or_else(|| cal.text("X-WR-CALNAME").or_else(|| cal.text("NAME")));
-        doc.event.organizer = name.map(|name| Organizer {
+        doc.event.organizer = name.filter(|s| !s.contains('@')).map(|name| Organizer {
             name,
             url: origin_url(base, &p.value),
         });
@@ -520,17 +626,32 @@ fn document(
     .iter()
     .any(|k| c.value(k).is_some_and(|s| !s.is_empty()))
         || location.as_deref().is_some_and(conference)
-        || doc.description.as_deref().is_some_and(conference);
-    doc.event.attendance = Some(if online && coord.is_some() {
-        Attendance::Mixed
-    } else if online {
-        Attendance::Online
-    } else {
-        Attendance::Offline
-    });
+        || doc.description.as_deref().is_some_and(conference)
+        || c.value("X-ALT-DESC").is_some_and(conference);
+    doc.event.attendance = Some(
+        if online
+            && (coord.is_some()
+                || location
+                    .as_deref()
+                    .is_some_and(|s| !s.trim().is_empty() && !conference(s)))
+        {
+            Attendance::Mixed
+        } else if online {
+            Attendance::Online
+        } else {
+            Attendance::Offline
+        },
+    );
     if doc.event.attendance != Some(Attendance::Online) {
         if location.is_some() || coord.is_some() {
             doc.event.venue = Some(Venue {
+                address: structured_address(
+                    apple
+                        .and_then(|p| p.params.get("X-ADDRESS"))
+                        .map(String::as_str)
+                        .or(location.as_deref())
+                        .unwrap_or(""),
+                ),
                 text: location.unwrap_or_default(),
                 name: apple.and_then(|p| p.params.get("X-TITLE").cloned()),
                 location: coord.clone(),
@@ -570,6 +691,7 @@ fn document(
     {
         doc.url = url;
     }
+    doc = doc.bounded(&[])?;
     Ok((doc, start))
 }
 fn expand(
@@ -623,7 +745,10 @@ fn expand(
                 };
                 let mut until = zones.stamp(&prop, v)?;
                 if v.len() == 8 {
-                    until.wall += Duration::days(1) - Duration::seconds(1);
+                    until.wall = until
+                        .wall
+                        .checked_add_signed(Duration::days(1) - Duration::seconds(1))
+                        .context("UNTIL overflow")?;
                 }
                 let wall = if v.ends_with('Z') {
                     if let Some(z) = start.zone.as_deref().and_then(time::zone) {
@@ -646,15 +771,9 @@ fn expand(
         )
         .parse()?;
         // Generate floating wall values with the bounded RRULE iterator, then apply RFC gap rules.
-        let excluded = c
-            .props
-            .iter()
-            .filter(|p| p.name == "EXDATE")
-            .map(|p| p.value.split(',').count())
-            .sum::<usize>();
         let take = cfg
             .max_occurrences_per_series
-            .saturating_add(excluded)
+            .saturating_mul(2)
             .saturating_add(10);
         let mut included = 0;
         for (steps, d) in set.limit().into_iter().enumerate() {
@@ -675,8 +794,14 @@ fn expand(
             }
         }
     }
+    let mut values = 0usize;
     for p in c.props.iter().filter(|p| p.name == "RDATE") {
         for v in p.value.split(',') {
+            values += 1;
+            ensure!(
+                values <= cfg.max_date_values && std::time::Instant::now() < deadline,
+                "RDATE work budget"
+            );
             let (s, end) = v.split_once('/').map_or((v, None), |(s, e)| (s, Some(e)));
             let at = zones.stamp(p, s)?.at;
             let duration = end
@@ -688,23 +813,40 @@ fn expand(
                     }
                 })
                 .transpose()?;
-            out.insert(at, duration);
-        }
-    }
-    for p in c.props.iter().filter(|p| p.name == "EXDATE") {
-        for v in p.value.split(',') {
-            let s = zones.stamp(p, v)?;
-            if s.date {
-                out.retain(|at, _| {
-                    zones
-                        .wall_at(start, *at)
-                        .is_ok_and(|wall| wall.date() != s.wall.date())
-                });
-            } else {
-                out.remove(&s.at);
+            ensure!(
+                duration
+                    .is_none_or(|d| d >= Duration::zero() && at.checked_add_signed(d).is_some()),
+                "RDATE end overflow"
+            );
+            if at >= lo && at <= hi {
+                out.insert(at, duration);
             }
         }
     }
+    let mut dates = BTreeSet::new();
+    let mut instants = BTreeSet::new();
+    for p in c.props.iter().filter(|p| p.name == "EXDATE") {
+        for v in p.value.split(',') {
+            values += 1;
+            ensure!(
+                values <= cfg.max_date_values && std::time::Instant::now() < deadline,
+                "EXDATE work budget"
+            );
+            let s = zones.stamp(p, v)?;
+            if s.date {
+                dates.insert(s.wall.date());
+            } else {
+                instants.insert(s.at);
+            }
+        }
+    }
+    out.retain(|at, _| {
+        !instants.contains(at)
+            && (dates.is_empty()
+                || zones
+                    .wall_at(start, *at)
+                    .is_ok_and(|w| !dates.contains(&w.date())))
+    });
     out.retain(|at, _| *at >= lo && *at <= hi);
     Ok(out)
 }
@@ -717,10 +859,11 @@ pub fn parse(
     ensure!(bytes.len() <= cfg.feed_body_bytes, "calendar body cap");
     let deadline =
         std::time::Instant::now() + std::time::Duration::from_millis(cfg.parse_timeout_ms);
-    let cal = components(bytes, cfg.max_components)?;
+    let cal = components(bytes, cfg, deadline)?;
     let canonical = canonical_feed(uri);
     let base = Url::parse(&canonical)?;
     let zones = Zones {
+        transitions: RefCell::default(),
         calendar: cal.value("X-WR-TIMEZONE"),
         default: cfg.default_timezone.as_deref(),
         embedded: cal
@@ -761,7 +904,17 @@ pub fn parse(
             std::time::Instant::now() < deadline,
             "calendar parse budget"
         );
-        let (mut doc, mut start) = document(c, &cal, &base, &zones)?;
+        if c.invalid {
+            container.warnings.push("invalid_vevent_line".into());
+            continue;
+        }
+        let (mut doc, mut start) = match document(c, &cal, &base, &zones) {
+            Ok(d) => d,
+            Err(_) => {
+                container.warnings.push("invalid_vevent_document".into());
+                continue;
+            }
+        };
         if cfg.coordinate_timezone && doc.event.tz.is_none() {
             doc.event.tz = doc.location.as_ref().and_then(time::coordinate_zone);
             if let Some(tz) = &doc.event.tz {
@@ -804,12 +957,21 @@ pub fn parse(
                 )
             )
         });
-        ensure!(uid.len() <= 1024, "UID exceeds cap");
+        if uid.len() > 1024 {
+            container.warnings.push("invalid_vevent_uid".into());
+            continue;
+        }
         let rid = c
             .get("RECURRENCE-ID")
             .map(|p| zones.stamp(p, &p.value).map(|s| recurrence_key(&s)))
-            .transpose()?
-            .unwrap_or_default();
+            .transpose();
+        let rid = match rid {
+            Ok(r) => r.unwrap_or_default(),
+            Err(_) => {
+                container.warnings.push("invalid_recurrence_id".into());
+                continue;
+            }
+        };
         let sequence = c
             .value("SEQUENCE")
             .and_then(|s| s.parse().ok())
@@ -826,6 +988,7 @@ pub fn parse(
         }
         events.insert(key, (c, doc, start, sequence, modified, volatile));
     }
+    let mut hashes: BTreeMap<usize, String> = BTreeMap::new();
     let mut result: BTreeMap<(String, String), Occurrence> = BTreeMap::new();
     for ((uid, rid), (c, doc, start, seq, modified, volatile)) in &events {
         if !rid.is_empty() {
@@ -836,8 +999,27 @@ pub fn parse(
             std::time::Instant::now() < deadline,
             "calendar parse budget"
         );
-        let expanded = expand(c, start, &zones, lo, hi, cfg, deadline)?;
-        for (at, duration) in expanded {
+        let expanded = match expand(c, start, &zones, lo, hi, cfg, deadline) {
+            Ok(v) => v,
+            Err(e) if e.to_string().contains("budget") => return Err(e),
+            Err(_) => {
+                container.warnings.push("invalid_vevent_recurrence".into());
+                continue;
+            }
+        };
+        for (series_count, (at, duration)) in expanded.into_iter().enumerate() {
+            ensure!(
+                std::time::Instant::now() < deadline,
+                "occurrence work budget"
+            );
+            if series_count >= cfg.max_occurrences_per_series {
+                container.warnings.push("series_cap".into());
+                break;
+            }
+            ensure!(
+                result.len() < cfg.max_occurrences_per_feed,
+                "calendar occurrence cap"
+            );
             let key = if recurring {
                 if start.date {
                     zones.wall_at(start, at)?.date().to_string()
@@ -850,7 +1032,13 @@ pub fn parse(
             let mut d = doc.clone();
             d.container = None;
             d.start = Some(at);
-            d.end = Some(at + duration.unwrap_or_else(|| doc.end.unwrap_or(start.at) - start.at));
+            d.end = at.checked_add_signed(
+                duration.unwrap_or_else(|| doc.end.unwrap_or(start.at) - start.at),
+            );
+            if d.end.is_none() {
+                container.warnings.push("occurrence_end_overflow".into());
+                continue;
+            }
             if start.date && duration.is_none() {
                 let days = if let Some(end) = c.get("DTEND") {
                     zones.stamp(end, &end.value)?.wall - start.wall
@@ -860,7 +1048,13 @@ pub fn parse(
                         .unwrap_or(Duration::days(1))
                 };
                 let wall = zones.wall_at(start, at)?;
-                d.end = Some(zones.at_wall(start, wall + days)?);
+                d.end = Some(
+                    zones.at_wall(
+                        start,
+                        wall.checked_add_signed(days)
+                            .context("all-day occurrence overflow")?,
+                    )?,
+                );
             }
             let mut source = *c;
             let mut sequence = *seq;
@@ -879,11 +1073,18 @@ pub fn parse(
                 let original = c.get("RECURRENCE-ID").context("override key")?;
                 let original = zones.stamp(original, &original.value)?;
                 d = override_doc.clone();
-                d.start = Some(at + (override_start.at - original.at));
-                d.end = Some(
-                    d.start.unwrap()
-                        + (override_doc.end.unwrap_or(override_start.at) - override_start.at),
+                d.start = at.checked_add_signed(override_start.at - original.at);
+                if d.start.is_none() {
+                    container.warnings.push("override_start_overflow".into());
+                    continue;
+                }
+                d.end = d.start.unwrap().checked_add_signed(
+                    override_doc.end.unwrap_or(override_start.at) - override_start.at,
                 );
+                if d.end.is_none() {
+                    container.warnings.push("override_end_overflow".into());
+                    continue;
+                }
                 source = c;
                 sequence = *s;
                 changed = *m;
@@ -900,7 +1101,10 @@ pub fn parse(
                     doc: d,
                     sequence,
                     modified: changed,
-                    content_hash: content_hash(source),
+                    content_hash: hashes
+                        .entry(source as *const Component as usize)
+                        .or_insert_with(|| content_hash(source))
+                        .clone(),
                     volatile: *volatile,
                 },
             );
@@ -909,6 +1113,12 @@ pub fn parse(
     // Orphans and moved overrides whose original instance is outside the window remain addressable.
     for ((uid, rid), (c, doc, _, seq, modified, volatile)) in &events {
         if !rid.is_empty() && doc.start.is_some_and(|s| s >= lo && s <= hi) {
+            ensure!(std::time::Instant::now() < deadline, "override work budget");
+            ensure!(
+                result.len() < cfg.max_occurrences_per_feed
+                    || result.contains_key(&(uid.clone(), rid.clone())),
+                "calendar occurrence cap"
+            );
             result
                 .entry((uid.clone(), rid.clone()))
                 .or_insert_with(|| Occurrence {
@@ -917,7 +1127,10 @@ pub fn parse(
                     doc: doc.clone(),
                     sequence: *seq,
                     modified: *modified,
-                    content_hash: content_hash(c),
+                    content_hash: hashes
+                        .entry(*c as *const Component as usize)
+                        .or_insert_with(|| content_hash(c))
+                        .clone(),
                     volatile: *volatile,
                 });
         }
@@ -941,7 +1154,7 @@ pub fn parse(
     }
     container.warnings.sort();
     container.warnings.dedup();
-    let mut doc = ResourceMeta::new(uri, "calendar", 86400);
+    let mut doc = ResourceMeta::new(uri, "event", 86400);
     doc.set_type("DataFeed");
     doc.name = cal.text("NAME").or_else(|| cal.text("X-WR-CALNAME"));
     doc.description = cal.text("DESCRIPTION").or_else(|| cal.text("X-WR-CALDESC"));
@@ -1119,7 +1332,7 @@ pub fn structured_feed(
             volatile,
         });
     }
-    let mut d = ResourceMeta::new(uri, "calendar", 86400);
+    let mut d = ResourceMeta::new(uri, "event", 86400);
     d.set_type("DataFeed");
     d.name = name;
     d.container = Some(Box::new(container));

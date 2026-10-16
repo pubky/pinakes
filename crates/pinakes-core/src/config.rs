@@ -57,6 +57,9 @@ impl Default for Config {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EventConfig {
+    pub max_line_bytes: usize,
+    pub max_date_values: usize,
+    pub webcal_http_fallback: bool,
     pub enabled: bool,
     pub jsonld: bool,
     pub microformats: bool,
@@ -80,6 +83,9 @@ impl Default for EventConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            max_line_bytes: 65536,
+            max_date_values: 4096,
+            webcal_http_fallback: false,
             jsonld: true,
             microformats: true,
             activitypub: true,
@@ -315,7 +321,9 @@ impl Config {
     }
     pub fn validate(&self) -> Result<()> {
         let e = &self.event;
-        if !(1024..=64 * 1024 * 1024).contains(&e.feed_body_bytes)
+        if !(1024..=262144).contains(&e.max_line_bytes)
+            || !(1..=10000).contains(&e.max_date_values)
+            || !(1024..=64 * 1024 * 1024).contains(&e.feed_body_bytes)
             || !(1..=1000).contains(&e.max_occurrences_per_series)
             || !(1..=10000).contains(&e.max_occurrences_per_feed)
             || !(1..=100000).contains(&e.max_components)

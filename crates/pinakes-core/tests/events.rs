@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
 use pinakes_core::{
-    config::EventConfig,
+    config::{EgressConfig, EventConfig},
     event::{calendar, page, time, Attendance, EventStatus},
     model::ResourceMeta,
 };
@@ -752,6 +752,13 @@ impl Transport for ProtocolTransport {
             content_type: "text/html".into(),
             body: b"<title>Fallback</title>".to_vec(),
         };
+        if url.path() == "/event" && o.accept.is_none() {
+            f.validators.link =
+                Some("</event>; rel=alternate; type=application/activity+json".into());
+        }
+        if url.path() == "/ld" && o.accept.is_none() {
+            f.body = b"<link rel='alternate' type='application/ld+json' href='/ld'>".to_vec();
+        }
         if url.path() == "/event" && o.accept.is_some() {
             f.status = 301;
             f.location = Some("/federation/m/1".into());
@@ -762,7 +769,7 @@ impl Transport for ProtocolTransport {
                     .to_string()
                     .into_bytes()
             } else {
-                b"<a href='/f.ics'>Calendar</a><title>Fallback</title>".to_vec()
+                b"<div class='h-event'><time class='dt-start' datetime='2027-01-20T18:00:00Z'></time></div><a href='/export/event/gathio'>Calendar</a><title>Fallback</title>".to_vec()
             };
         }
         if url.path() == "/ld"
@@ -776,7 +783,7 @@ impl Transport for ProtocolTransport {
             f.content_type = "application/activity+json".into();
             f.body=json!({"type":"Event","name":"Negotiated","startTime":"2027-01-20T18:00:00Z","timezone":"Europe/Paris","isOnline":true}).to_string().into_bytes();
         }
-        if url.path() == "/f.ics" {
+        if url.path() == "/f.ics" || url.path() == "/export/event/gathio" {
             f.content_type = "text/plain".into();
             f.validators.etag = Some("test".into());
             f.body = future_calendar(1).into_bytes();
@@ -789,7 +796,7 @@ impl Transport for ProtocolTransport {
     }
 }
 #[sqlx::test(migrations = "../../migrations")]
-async fn negotiated_event_redirect_and_calendar_validators_are_hints(pool: PgPool) {
+async fn advertised_event_negotiation_and_calendar_not_modified(pool: PgPool) {
     let t = Arc::new(ProtocolTransport {
         seen: Mutex::default(),
     });
@@ -834,18 +841,18 @@ async fn negotiated_event_redirect_and_calendar_validators_are_hints(pool: PgPoo
         .await
         .unwrap();
     assert_eq!(d.container.unwrap().occurrences.len(), 1);
-    let d = resolver
+    assert!(resolver
         .resolve("webcal://example.org/f.ics")
         .await
-        .unwrap();
-    assert_eq!(d.container.unwrap().occurrences.len(), 1);
+        .unwrap_err()
+        .is::<pinakes_core::resolver::NotModified>());
     let calls = t.seen.lock().unwrap();
     let calls: Vec<_> = calls
         .iter()
         .filter(|(path, _, _)| path == "/f.ics")
         .map(|(_, _, v)| *v)
         .collect();
-    assert_eq!(calls, vec![false, true, false]);
+    assert_eq!(calls, vec![false, true]);
 }
 
 #[tokio::test]
@@ -937,7 +944,11 @@ fn remaining_calendar_pitfalls_dates_lists_split_uids_alt_images_and_horizons() 
         &EventConfig::default(),
         now()
     )
-    .is_err());
+    .unwrap()
+    .container
+    .unwrap()
+    .occurrences
+    .is_empty());
 }
 
 #[test]
@@ -1112,4 +1123,250 @@ fn weekly_week_start_and_iana_over_embedded_timezone() {
         c.occurrences[0].doc.event.tz.as_deref(),
         Some("Europe/Paris")
     );
+}
+
+#[test]
+fn review_malformed_events_are_isolated_and_hostile_work_is_bounded() {
+    let good = event("UID:good\nDTSTART:20261020T120000Z\nSUMMARY:Good");
+    for bad in [
+        "UID:bad\nDTSTART:20260230T120000Z",
+        "UID:bad\nSUMMARY:Missing start",
+        "UID:bad\nDTSTART:20261020T120000Z\nDTEND:20261019T120000Z",
+        "UID:bad\nDTSTART:20261020T120000Z\nRRULE:FREQ=WEEKLY;BYDAY=1MO",
+        "UID:bad\nDTSTART:20261020T120000Z\nRRULE:FREQ=INVALID",
+        "UID:bad\nDTSTART;VALUE=DATE:+262142-12-31",
+        "UID:bad\nDTSTART:20261020T120000Z\nRDATE;VALUE=PERIOD:20261021T120000Z/P999999999D",
+        "UID:bad\nDTSTART:20261020T120000Z\nNO COLON",
+    ] {
+        let body = cal(&format!("{}\n{good}", event(bad)));
+        let result =
+            std::panic::catch_unwind(|| parse(&body)).expect("untrusted date must not panic");
+        let c = result.container.unwrap();
+        assert_eq!(c.occurrences.len(), 1, "{bad}");
+        assert!(!c.warnings.is_empty(), "{bad}");
+    }
+    let mut body = cal(&format!(
+        "{}\n{good}",
+        event("UID:bad\nDTSTART:20261020T120000Z\nSUMMARY:invalid")
+    ))
+    .into_bytes();
+    let i = body.windows(7).position(|b| b == b"invalid").unwrap();
+    body[i] = 0xff;
+    assert_eq!(
+        calendar::parse(
+            "https://example.org/f.ics",
+            &body,
+            &EventConfig::default(),
+            now()
+        )
+        .unwrap()
+        .container
+        .unwrap()
+        .occurrences
+        .len(),
+        1
+    );
+    let large = cal(&event(&format!(
+        "UID:bounded\nDTSTART:20261020T120000Z\nRRULE:FREQ=DAILY\nSUMMARY:{}\nDESCRIPTION:{}",
+        "x".repeat(32000),
+        "y".repeat(32000)
+    )));
+    let c = parse(&large).container.unwrap();
+    assert_eq!(c.occurrences.len(), 50);
+    assert!(c
+        .occurrences
+        .iter()
+        .all(|o| o.doc.name.as_ref().unwrap().len() <= 512
+            && o.doc.description.as_ref().unwrap().len() <= 2048));
+    let cfg = EventConfig {
+        max_date_values: 2,
+        ..Default::default()
+    };
+    let rdates = cal(&event(
+        "UID:r\nDTSTART:20261020T120000Z\nRDATE:20261021T120000Z,20261022T120000Z,20261023T120000Z",
+    ));
+    assert!(calendar::parse("https://example.org/f.ics", rdates.as_bytes(), &cfg, now()).is_err());
+    let long = cal(&event(&format!(
+        "UID:long\nDTSTART:20261020T120000Z\nSUMMARY:{}",
+        "a".repeat(65537)
+    )));
+    assert!(calendar::parse(
+        "https://example.org/f.ics",
+        long.as_bytes(),
+        &EventConfig::default(),
+        now()
+    )
+    .is_err());
+}
+
+#[test]
+fn review_ics_address_mixed_privacy_and_date_end() {
+    let body=cal(&format!("X-PUBLISHED-TTL:PT6H\n{}",event("UID:hybrid\nDTSTART:20261020T180000Z\nLOCATION:Room A\\nMain Street 10\\, 8000 Zurich\\, Switzerland\nX-ALT-DESC;FMTTYPE=text/html:<p>Join <a href=\"https://meet.google.com/abc-defg-hij\">online</a></p>\nORGANIZER;CN=alice@example.org:mailto:alice@example.org\nSTATUS:TENTATIVE"))).replace('\n',"\r\n");
+    let c = parse(&body).container.unwrap();
+    assert_eq!(c.feed_ttl, Some(21600));
+    let d = &c.occurrences[0].doc;
+    assert_eq!(d.event.attendance, Some(Attendance::Mixed));
+    assert_eq!(d.event.event_status, Some(EventStatus::Scheduled));
+    assert_eq!(d.event.venue.as_ref().unwrap().address["city"], "Zurich");
+    assert!(d.event.organizer.is_none());
+    assert!(!d.description.as_ref().unwrap().contains('<'));
+    let mut d = ResourceMeta::new("https://example.org/e", "web", 3600);
+    page::jsonld(
+        &mut d,
+        &json!({"@type":"Event","startDate":"2026-10-20T19:00:00+02:00","endDate":"2026-10-20"}),
+        &"https://example.org/e".parse().unwrap(),
+    );
+    page::finalize(&mut d, false);
+    assert_eq!(d.end.unwrap().to_rfc3339(), "2026-10-20T22:00:00+00:00");
+    assert!(time::offset("2026-10-20T19:00:00.000+0100").is_some());
+    let mut after = d.clone();
+    after.event.warnings.push("venue_unavailable".into());
+    assert_eq!(
+        pinakes_core::changes::normalize(&d),
+        pinakes_core::changes::normalize(&after)
+    );
+    d.end = Some(DateTime::<Utc>::MAX_UTC);
+    assert!(std::panic::catch_unwind(|| pinakes_core::scheduler::next(
+        &pinakes_core::adapter::manifest("web"),
+        &d,
+        now(),
+        &Default::default()
+    ))
+    .is_ok());
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn review_plain_pages_have_no_discovery_and_advertised_urls_share_ttl(pool: PgPool) {
+    let transport = Arc::new(ProtocolTransport {
+        seen: Mutex::new(vec![]),
+    });
+    let egress = Egress::with_backends(
+        EgressConfig {
+            host_requests_per_second: 1000.0,
+            ..Default::default()
+        },
+        Arc::new(PublicDns),
+        transport.clone(),
+    );
+    let service = Arc::new(pinakes_core::event::service::EventService {
+        pool: pool.clone(),
+        config: EventConfig {
+            geocoding: false,
+            ..Default::default()
+        },
+        osm: Arc::new(OsmResolver::new(pool, OsmConfig::default()).unwrap()),
+    });
+    let resolver = WebResolver {
+        egress,
+        config: Default::default(),
+        events: Some(service),
+    };
+    resolver.resolve("https://example.org/plain").await.unwrap();
+    assert_eq!(transport.seen.lock().unwrap().len(), 1);
+    for _ in 0..2 {
+        resolver.resolve("https://example.org/event").await.unwrap();
+    }
+    let seen = transport.seen.lock().unwrap();
+    assert_eq!(
+        seen.iter()
+            .filter(|(p, _, _)| p == "/federation/m/1")
+            .count(),
+        1
+    );
+    assert_eq!(
+        seen.iter()
+            .filter(|(p, a, _)| p == "/event" && a.is_some())
+            .count(),
+        1
+    );
+}
+
+struct FailedTls(Mutex<Vec<String>>);
+#[async_trait::async_trait]
+impl Transport for FailedTls {
+    async fn get(&self, url: &url::Url, _: &[SocketAddr]) -> anyhow::Result<Fetched> {
+        self.0.lock().unwrap().push(url.scheme().into());
+        anyhow::bail!("wrong version number")
+    }
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn talos_webcals_never_downgrades_even_when_webcal_fallback_is_enabled(pool: PgPool) {
+    let transport = Arc::new(FailedTls(Mutex::new(vec![])));
+    let egress = Egress::with_backends(
+        EgressConfig::default(),
+        Arc::new(PublicDns),
+        transport.clone(),
+    );
+    let service = pinakes_core::event::service::EventService {
+        pool: pool.clone(),
+        config: EventConfig {
+            webcal_http_fallback: true,
+            ..Default::default()
+        },
+        osm: Arc::new(OsmResolver::new(pool, OsmConfig::default()).unwrap()),
+    };
+    assert!(service
+        .fetch(&egress, "webcals://example.org/f.ics")
+        .await
+        .is_err());
+    assert_eq!(*transport.0.lock().unwrap(), vec!["https"]);
+}
+struct XmlTransport(reqwest::Client, String);
+#[async_trait::async_trait]
+impl Transport for XmlTransport {
+    async fn get(&self, url: &url::Url, addresses: &[SocketAddr]) -> anyhow::Result<Fetched> {
+        self.get_with(url, addresses, &Default::default()).await
+    }
+    async fn get_with(
+        &self,
+        url: &url::Url,
+        _: &[SocketAddr],
+        options: &FetchOptions,
+    ) -> anyhow::Result<Fetched> {
+        assert!(
+            options.feed_cap.is_none(),
+            "non-feed URL must retain the page cap"
+        );
+        pinakes_core::resolver::egress::read_response_with(
+            url.clone(),
+            self.0.get(&self.1).send().await?,
+            options,
+        )
+        .await
+    }
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn talos_non_feed_xml_is_refused_at_the_page_cap(pool: PgPool) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = Router::new().route(
+        "/",
+        get(|| async {
+            (
+                [("content-type", "application/xml")],
+                format!("<root>{}</root>", "x".repeat(2 * 1024 * 1024)),
+            )
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let egress = Egress::with_backends(
+        Default::default(),
+        Arc::new(PublicDns),
+        Arc::new(XmlTransport(
+            reqwest::Client::new(),
+            format!("http://{addr}/"),
+        )),
+    );
+    let service = pinakes_core::event::service::EventService {
+        pool: pool.clone(),
+        config: Default::default(),
+        osm: Arc::new(OsmResolver::new(pool, OsmConfig::default()).unwrap()),
+    };
+    assert!(service
+        .fetch(&egress, "https://example.org/page")
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("cap"));
+    server.abort();
 }

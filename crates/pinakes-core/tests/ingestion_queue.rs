@@ -149,7 +149,7 @@ async fn epoch_headers_length_reset_and_transaction_rollback(pool: PgPool) {
         Some("second")
     );
     let mut bad = a.clone();
-    bad.at = i64::MAX;
+    bad.resource_id.clear(); // Identity disagreement is a transactional feed error.
     let saved = ingest::cursor(&pool, "fixture").await.unwrap();
     let invalid = FeedPage {
         page: Changes {
@@ -284,7 +284,7 @@ async fn rejected_counts_follow_commit_and_concurrent_cursor_fencing(pool: PgPoo
     let mut rejected = change("https://example.org/rejected", "a", "/pub/a");
     rejected.author = "invalid".into();
     let mut invalid = change("https://example.org/rollback", "a", "/pub/b");
-    invalid.at = i64::MAX;
+    invalid.resource_id.clear(); // Rejected-field metrics must not survive a rollback.
     let mut page = FeedPage {
         page: Changes {
             lines: vec![rejected, invalid],
@@ -581,4 +581,85 @@ async fn epoch_replay_does_not_reopen_final_resource(pool: PgPool) {
         .fetch_one(&pool)
         .await
         .unwrap());
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn invalid_event_dates_do_not_stall_feed_and_unknown_status_is_accepted(pool: PgPool) {
+    let mut good = change("geo:47,8", "event-author", "/pub/events/1");
+    good.kind = Kind::Event;
+    good.start = Some(Utc::now().timestamp_millis());
+    good.end = good.start;
+    good.status = Some("upstream-new-status".into());
+    let mut huge = good.clone();
+    huge.object_path = "/pub/events/2".into();
+    huge.start = Some(i64::MAX);
+    let mut reversed = good.clone();
+    reversed.object_path = "/pub/events/3".into();
+    reversed.end = Some(good.start.unwrap() - 1);
+    assert!(batch(&pool, vec![huge, reversed, good], Some("events")).await);
+    assert_eq!(refs(&pool).await, 1);
+    assert_eq!(ingest::cursor(&pool, "fixture").await.unwrap().cursor, 3);
+    assert!(
+        sqlx::query_scalar::<_, Option<String>>("SELECT event_status FROM reference")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+struct PanicOnce(std::sync::atomic::AtomicBool);
+#[async_trait::async_trait]
+impl Resolver for PanicOnce {
+    fn name(&self) -> &'static str {
+        "fixture"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, uri: &str) -> anyhow::Result<ResourceMeta> {
+        assert!(
+            !self.0.swap(false, std::sync::atomic::Ordering::SeqCst),
+            "hostile parser panic"
+        );
+        Ok(ResourceMeta::new(uri, "fixture", 3600))
+    }
+    fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+        Duration::from_secs(3600)
+    }
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn resolver_panic_is_a_failed_job_and_next_batch_can_run(pool: PgPool) {
+    let id = store::ensure_resource(&pool, "https://example.org/poison")
+        .await
+        .unwrap();
+    let resolver = PanicOnce(std::sync::atomic::AtomicBool::new(true));
+    let job = queue::Job {
+        id: id.clone(),
+        uri: "https://example.org/poison".into(),
+        generation: 0,
+        attempts: 0,
+    };
+    queue::run_batch(&pool, &resolver, &QueueConfig::default(), &[job])
+        .await
+        .unwrap();
+    let id = store::ensure_resource(&pool, "https://example.org/healthy")
+        .await
+        .unwrap();
+    let job = queue::Job {
+        id: id.clone(),
+        uri: "https://example.org/healthy".into(),
+        generation: 0,
+        attempts: 0,
+    };
+    queue::run_batch(&pool, &resolver, &QueueConfig::default(), &[job])
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM resource WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "ok"
+    );
 }

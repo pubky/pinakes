@@ -175,7 +175,7 @@ handshake probes. These findings supersede the earlier RPK-only deployment note.
 The SDK exposes no connection/address-validation hook; its HTTP clients remain private.
 The preflight is not connection pinning: a PKARR record republished between validation
 and the SDK's resolution, changed DNS answers, cached transport choices, redirects and
-ambient SDK proxy behavior can escape it. The firewall must enforce the boundary
+ambient SDK proxy behavior can escape it. The pinned SDK exposes no connection DNS override: changing `/etc/hosts` would be a process-global side effect and cannot pin PKARR endpoints or all redirect targets. Pinakes therefore does not mutate it. ICANN DNS is resolved again by the SDK after the check; the checked addresses are not its connection addresses. The firewall must enforce the boundary
 independently of the SDK. Public info exposes no transport diagnostics.
 
 Preview limits use the socket peer IP; forwarded headers are deliberately ignored.
@@ -280,14 +280,13 @@ step 2 schema and the reviewed step 3 schema.
 
 `[event]` controls JSON-LD Event/subtypes, microformats h-event, ActivityPub Event
 negotiation and calendar containers. Missing fields are filled in that order;
-OpenGraph alone remains a WebPage. ActivityPub Person falls through to a discovered
-single-event ICS. Platform state adapters are the next branch. A calendar can run
+OpenGraph alone remains a WebPage. ActivityPub is negotiated only for an advertised alternate, or an event-looking page with no extracted Event. An Event page can follow a same-host link to its own ICS; discovered URLs share a one-hour-minimum TTL cache, including failures. Platform state adapters are the next branch. A calendar can run
 with web disabled; its workers share the web host budget and the OSM lookup mutex.
 
 ICS, event RSS/Atom and Gancio JSON feeds become DataFeed resources with occurrence
 rows. Calendar GETs use the normal pinned-IP/redirect policy, decompression and a
 32 MB cap; physical ICS lines are read incrementally from that bounded body, unfolded,
-and parsed on a blocking worker. Parsing/recurrence budgets reject a partial snapshot.
+and parsed on a blocking worker. A malformed VEVENT is skipped with a warning; exceeded work or feed caps reject the snapshot. Calendar 304 responses renew the accepted snapshot without a second GET or a disappearance observation. HTTPS downgrade is disabled by default; `event.webcal_http_fallback` permits it only for `webcal://` and an explicit TLS-protocol mismatch, never `webcals://`, policy errors, certificate errors or timeouts.
 The default horizon is one month back/twelve forward, with 50 instances per series
 and 10,000 per feed. See the example config for caps and individual path switches.
 

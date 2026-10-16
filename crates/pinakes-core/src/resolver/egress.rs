@@ -101,6 +101,8 @@ impl Dns for SystemDns {
 }
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Validators {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
     pub etag: Option<String>,
     pub last_modified: Option<String>,
 }
@@ -178,6 +180,7 @@ pub async fn read_response_with(
             .map(str::to_owned)
     };
     let validators = Validators {
+        link: header("link"),
         etag: header("etag"),
         last_modified: header("last-modified"),
     };
@@ -210,12 +213,11 @@ pub async fn read_response_with(
                 | "application/atom+xml"
                 | "application/feed+json"
         );
-        let possible = options.feed_cap.is_some()
-            && (feed_type
-                || matches!(
-                    content_type.as_str(),
-                    "text/plain" | "application/octet-stream" | ""
-                ));
+        let possible = feed_type
+            || matches!(
+                content_type.as_str(),
+                "text/plain" | "application/octet-stream" | ""
+            );
         if !ALLOWED_TYPES.contains(&content_type.as_str()) && !possible {
             bail!("content type is not allowed");
         }
@@ -255,12 +257,15 @@ pub async fn read_response_with(
     })
 }
 type HostBudget = Arc<Mutex<Instant>>;
+type DiscoveryCache = Arc<Mutex<HashMap<String, (Instant, Option<Fetched>)>>>;
 #[derive(Clone)]
 pub struct Egress {
     cfg: EgressConfig,
     dns: Arc<dyn Dns>,
     transport: Arc<dyn Transport>,
     hosts: Arc<Mutex<HashMap<String, HostBudget>>>,
+    discovered: DiscoveryCache,
+    discoveries: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 impl Egress {
     pub fn allows(&self, uri: &str) -> bool {
@@ -289,6 +294,8 @@ impl Egress {
             dns,
             transport,
             hosts: Arc::default(),
+            discovered: Arc::default(),
+            discoveries: Arc::default(),
         }
     }
     pub async fn fetch(&self, uri: &str) -> Result<Fetched> {
@@ -302,6 +309,60 @@ impl Egress {
             self.fetch_options_inner(uri, options),
         )
         .await?
+    }
+    /// A discovered URL is fetched at most once per TTL, including failed/oversized results.
+    /// Concurrent references share the same flight; retained bodies total at most 32 MB.
+    pub async fn discover(&self, uri: &str, options: &FetchOptions, ttl: u64) -> Result<Fetched> {
+        let key = Url::parse(uri)?.to_string();
+        let lock = {
+            let mut flights = self.discoveries.lock().await;
+            flights.retain(|_, lock| Arc::strong_count(lock) > 1);
+            flights.entry(key.clone()).or_default().clone()
+        };
+        let _guard = lock.lock().await;
+        {
+            let mut cache = self.discovered.lock().await;
+            cache.retain(|_, (expires, _)| *expires > Instant::now());
+            if let Some((_, value)) = cache.get(&key) {
+                return value.clone().ok_or_else(|| {
+                    super::RetryLater {
+                        class: "discovery_cached",
+                        seconds: ttl.max(3600),
+                    }
+                    .into()
+                });
+            }
+            if cache.len() >= 10000 {
+                bail!("discovery cache entry cap");
+            }
+            cache.insert(
+                key.clone(),
+                (
+                    Instant::now() + Duration::from_secs(ttl.clamp(3600, 31536000)),
+                    None,
+                ),
+            );
+        }
+        let result = self.fetch_with(uri, options).await;
+        let mut cache = self.discovered.lock().await;
+        let bytes: usize = cache
+            .values()
+            .filter_map(|(_, f)| f.as_ref())
+            .map(|f| f.body.len())
+            .sum();
+        let retained = result
+            .as_ref()
+            .ok()
+            .filter(|f| bytes.saturating_add(f.body.len()) <= 32 * 1024 * 1024)
+            .cloned();
+        cache.insert(
+            key,
+            (
+                Instant::now() + Duration::from_secs(ttl.clamp(3600, 31536000)),
+                retained,
+            ),
+        );
+        result
     }
     async fn fetch_inner(&self, uri: &str) -> Result<Fetched> {
         self.fetch_options_inner(uri, &FetchOptions::default())
