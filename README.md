@@ -282,6 +282,8 @@ step 2 schema and the reviewed step 3 schema.
 negotiation and calendar containers. Missing fields are filled in that order;
 OpenGraph alone remains a WebPage. ActivityPub is negotiated only for an advertised alternate, or an event-looking page with no extracted Event. An Event page can follow a same-host link to its own ICS; discovered URLs share a one-hour-minimum TTL cache, including failures. Platform state adapters are the next branch. A calendar can run
 with web disabled; its workers share the web host budget and the OSM lookup mutex.
+With calendars disabled, feed URLs fall back to the enabled web module and its
+page-sized card extraction; stored routing hints remain valid when re-enabled.
 
 ICS, event RSS/Atom and Gancio JSON feeds become DataFeed resources with occurrence
 rows. Calendar GETs use the normal pinned-IP/redirect policy, decompression and a

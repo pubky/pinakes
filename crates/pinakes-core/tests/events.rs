@@ -638,6 +638,16 @@ async fn event_units_pagination_occurrence_route_pubky_recurrences_and_venue(poo
     assert_eq!(code, 200, "{v}");
     assert_eq!(v["total"], 6);
     assert_eq!(v["clusters"][0]["count"], 6);
+    let top = v["clusters"][0]["top"].as_array().unwrap();
+    assert_eq!(top.len(), 3);
+    assert_eq!(
+        top.iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3
+    );
+
     reference(
         &pool,
         venue,
@@ -1693,4 +1703,114 @@ async fn review_occurrences_signed_paging_windows_and_indexed_views(pool: PgPool
         let plan:Vec<String>=sqlx::query_scalar(query).fetch_all(&mut *tx).await.unwrap();
         assert!(plan.join("\n").contains(index),"{index}: {plan:?}");
     }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn review_disabled_calendars_use_web_queue_and_preview(pool: PgPool) {
+    let cfg = Config {
+        event: EventConfig {
+            calendars: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let uri = "https://example.org/disabled.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let service = Arc::new(pinakes_core::event::service::EventService {
+        pool: pool.clone(),
+        config: cfg.event.clone(),
+        osm: Arc::new(OsmResolver::new(pool.clone(), Default::default()).unwrap()),
+    });
+    let web = pinakes_core::resolver::web::WebResolver {
+        events: Some(service),
+        egress: Egress::new(cfg.egress.clone()),
+        config: cfg.web.clone(),
+    };
+    assert_eq!(
+        pinakes_core::resolver::classify_config(uri, &cfg),
+        Some("web")
+    );
+    assert!(web.matches(uri));
+    let jobs = pinakes_core::queue::claim_sources(&pool, &web.queue_sources(), &cfg.queue, 1)
+        .await
+        .unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].id, id);
+    store::save_document(
+        &pool,
+        &id,
+        jobs[0].generation,
+        &ResourceMeta::new(uri, "web", 86400),
+    )
+    .await
+    .unwrap();
+    let on = Config::default();
+    assert_eq!(
+        pinakes_core::resolver::classify_config(uri, &on),
+        Some("event")
+    );
+    let app = api::router(api::AppState::new(pool, cfg).unwrap());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .extension(ConnectInfo("127.0.0.1:1111".parse::<SocketAddr>().unwrap()))
+                .uri("/v1/resolve")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"uri":uri}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+}
+
+#[sqlx::test(migrations = false)]
+async fn review_upgrade_moves_calendar_keys_without_rewriting_migrations(pool: PgPool) {
+    let before = sqlx::migrate::Migrator {
+        migrations: std::borrow::Cow::Owned(
+            pinakes_core::MIGRATOR.iter().take(9).cloned().collect(),
+        ),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    before.run(&pool).await.unwrap();
+    let id = store::ensure_resource(&pool, "https://example.org/upgrade.ics")
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO event_fetch(resource_id,last_snapshot_at) VALUES($1,42)")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO source_state(source,keys,held_keys,missing_keys,feed_held_total) VALUES($1,ARRAY['key'],ARRAY['held'],'{\"key\":1}',3)").bind(format!("calendar:{id}")).execute(&pool).await.unwrap();
+    pinakes_core::migrate(&pool).await.unwrap();
+    let row: Value =
+        sqlx::query_scalar("SELECT to_jsonb(e) FROM event_fetch e WHERE resource_id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(row["last_snapshot_at"], 42);
+    assert_eq!(row["keys"], json!(["key"]));
+    assert_eq!(row["held_keys"], json!(["held"]));
+    assert_eq!(row["missing_keys"], json!({"key":1}));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT feed_held_total FROM source_state WHERE source='event'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        3
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM source_state WHERE source LIKE 'calendar:%'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+    pinakes_core::migrate(&pool).await.unwrap();
 }

@@ -19,6 +19,9 @@ pub trait Resolver: Send + Sync {
         self.resolve(uri).await
     }
     fn name(&self) -> &'static str;
+    fn queue_sources(&self) -> Vec<&'static str> {
+        vec![self.name()]
+    }
     fn matches(&self, uri: &str) -> bool;
     fn canary_allowed(&self) -> bool {
         true
@@ -56,6 +59,14 @@ pub fn classify(uri: &str) -> Option<&'static str> {
         "http" | "https" => Some("web"),
         "geo" => Some("geo"),
         _ => None,
+    }
+}
+
+/// Persisted routing hints are configuration-independent; disabled calendars use web workers.
+pub fn classify_config(uri: &str, config: &crate::config::Config) -> Option<&'static str> {
+    match classify(uri) {
+        Some("event") if !config.event.enabled || !config.event.calendars => Some("web"),
+        other => other,
     }
 }
 

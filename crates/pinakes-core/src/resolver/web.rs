@@ -30,8 +30,15 @@ impl Resolver for WebResolver {
     fn name(&self) -> &'static str {
         "web"
     }
+    fn queue_sources(&self) -> Vec<&'static str> {
+        if self.events.as_ref().is_none_or(|e| !e.config.calendars) {
+            vec!["web", "event"]
+        } else {
+            vec!["web"]
+        }
+    }
     fn matches(&self, uri: &str) -> bool {
-        super::classify(uri) == Some("web")
+        super::classify(uri).is_some_and(|source| self.queue_sources().contains(&source))
     }
     fn canary_allowed(&self) -> bool {
         self.manifest()
@@ -44,7 +51,12 @@ impl Resolver for WebResolver {
             let fetched = if let Some(events) = &self.events {
                 events.fetch(&self.egress, uri).await?
             } else {
-                self.egress.fetch(uri).await?
+                let uri = if uri.starts_with("webcal:") || uri.starts_with("webcals:") {
+                    crate::event::calendar::canonical_feed(uri)
+                } else {
+                    uri.to_owned()
+                };
+                self.egress.fetch(&uri).await?
             };
             if let Some(events) = &self.events {
                 if let Some(doc) = events.container(uri, &fetched, deadline).await? {

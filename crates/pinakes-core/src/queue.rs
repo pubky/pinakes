@@ -32,11 +32,19 @@ pub async fn claim_batch(
     cfg: &QueueConfig,
     size: usize,
 ) -> Result<Vec<Job>> {
+    claim_sources(pool, &[resolver], cfg, size).await
+}
+pub async fn claim_sources(
+    pool: &PgPool,
+    sources: &[&str],
+    cfg: &QueueConfig,
+    size: usize,
+) -> Result<Vec<Job>> {
     let size = size.clamp(1, 50);
     Ok(sqlx::query_as(r#"UPDATE resource SET lease_until=now()+$2*interval '1 second', generation=generation+1
-        WHERE id IN (SELECT id FROM resource WHERE resolver=$1 AND NOT dead_letter AND NOT final AND next_attempt_at<=now() AND NOT EXISTS(SELECT 1 FROM source_state WHERE source=$1 AND held_until>now())
+        WHERE id IN (SELECT id FROM resource WHERE resolver=ANY($1) AND NOT dead_letter AND NOT final AND next_attempt_at<=now() AND NOT EXISTS(SELECT 1 FROM source_state WHERE source=ANY($1) AND held_until>now())
           AND (lease_until IS NULL OR lease_until<now()) ORDER BY priority_at DESC NULLS LAST,next_attempt_at,id FOR UPDATE SKIP LOCKED LIMIT $3)
-        RETURNING id,uri,attempts,generation"#).bind(resolver).bind(cfg.lease_secs.max(15 * size as u64 + 10) as f64).bind(size as i64).fetch_all(pool).await?)
+        RETURNING id,uri,attempts,generation"#).bind(sources).bind(cfg.lease_secs.max(15 * size as u64 + 10) as f64).bind(size as i64).fetch_all(pool).await?)
 }
 
 pub fn backoff(cfg: &QueueConfig, attempt: u32) -> u64 {
@@ -397,7 +405,7 @@ pub fn spawn(
                             }
                             } else if let Err(e)=crate::canary::suspend(&pool,&resolver.manifest()).await {tracing::warn!(error=%e,"canary suspension failed");}
                             }
-                            match claim_batch(&pool,resolver.name(),&cfg,resolver.batch_size()).await {
+                            match claim_sources(&pool,&resolver.queue_sources(),&cfg,resolver.batch_size()).await {
                                 Ok(jobs) if !jobs.is_empty()=>{
                                     let result=async {
                                         if resolver.name()=="geo" || authors.admit(&pool,&jobs[0],cfg.author_requests_per_second).await? {

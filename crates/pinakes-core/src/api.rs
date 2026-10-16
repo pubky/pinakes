@@ -863,7 +863,7 @@ pub async fn resolve(
     Json(body): Json<ResolveRequest>,
 ) -> Result<Response, ApiError> {
     let (id, uri, _) = model::identity(&body.uri).map_err(|e| ApiError::bad(e.to_string()))?;
-    let resolver = crate::resolver::classify(&uri)
+    let resolver = crate::resolver::classify_config(&uri, &state.config)
         .ok_or_else(|| ApiError::bad("no resolver available for this URI"))?;
     if (resolver == "web" && !state.config.web.enabled)
         || (resolver == "pubky" && !state.config.pubky.enabled)
