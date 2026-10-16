@@ -487,6 +487,7 @@ pub fn parse_isbn(uri: &str, number: &str, f: &Fetched, ttl: u64) -> Result<Reso
         return Ok(missing(uri, "isbn", ttl));
     };
     let mut d = ResourceMeta::new(uri, "isbn", ttl);
+    crate::group_keys::add(&mut d, "isbn", number);
     d.set_type("Book");
     d.name = text(v.get("title"));
     d.image = v
@@ -540,6 +541,7 @@ pub fn parse_doi(uri: &str, f: &Fetched, ttl: u64) -> Result<ResourceMeta> {
         }
     }
     if let Some(number) = doi(uri) {
+        crate::group_keys::add(&mut d, "doi", &number);
         d.aliases.push(format!("https://doi.org/{number}"));
     }
     d.bounded(web::ATTRIBUTES)

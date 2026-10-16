@@ -61,6 +61,50 @@ async fn tag(pool: &PgPool, id: &str, author: &str, label: &str) {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
+async fn round3_identifier_twins_group_without_redirect_aliases(pool: PgPool) {
+    let mut ids = Vec::new();
+    // Model legacy cards too: own typed identity must be recovered even without stored keys.
+    for uri in [
+        "isbn:0140328726",
+        "isbn:9780140328721",
+        "isbn:9780201616224",
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "isbn", 86400);
+        d.set_type("Book");
+        d.name = Some("Book".into());
+        d.aliases
+            .push("https://openlibrary.org/shared-redirect".into());
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.push(id);
+    }
+    assert_eq!(gid(&pool, &ids[0]).await, gid(&pool, &ids[1]).await);
+    assert_ne!(gid(&pool, &ids[0]).await, gid(&pool, &ids[2]).await);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource_group WHERE key='isbn:9780140328721' AND trusted"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        2
+    );
+    let mut doi_ids = Vec::new();
+    for uri in ["doi:10.1000/EXAMPLE", "https://doi.org/10.1000/example"] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "doi", 86400);
+        d.set_type("ScholarlyArticle");
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        doi_ids.push(id);
+    }
+    assert_eq!(gid(&pool, &doi_ids[0]).await, gid(&pool, &doi_ids[1]).await);
+    let mut invalid = ResourceMeta::new("https://example.org/book", "web", 0);
+    group_keys::add(&mut invalid, "isbn", "9780140328722");
+    group_keys::add(&mut invalid, "doi", "invalid");
+    assert!(invalid.group_keys.is_empty());
+}
+
+#[sqlx::test(migrations = "../../migrations")]
 async fn round2_group_fence_ignores_unrelated_saves_and_retries_changed_inputs(pool: PgPool) {
     let (a, _) = save(&pool, "fence-a", &["https://example.org/shared"], None).await;
     let (b, _) = save(&pool, "fence-b", &["https://example.org/shared"], None).await;
@@ -634,7 +678,7 @@ async fn round3_scaled_pair_budget_handles_config_cap_without_parking(pool: PgPo
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO resource_group(unit_id,resource_id,key,basis,confidence,origin,target) SELECT id,id,'isrc:'||$1,'isrc',1.0,'budget.example','budget.example' FROM resource").bind(&shared).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO resource_group(unit_id,resource_id,key,basis,confidence,origin,target) SELECT id,id,'isrc:'||$1,'isrc',1.0,'budget.example','budget.example' FROM resource").bind(shared).execute(&pool).await.unwrap();
     let uri = "https://budget.example/new";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
     let mut d = ResourceMeta::new(uri, "web", 3600);

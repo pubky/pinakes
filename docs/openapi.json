@@ -1304,6 +1304,70 @@
           "document"
         ]
       },
+      "GroupCard": {
+        "type": "object",
+        "required": [
+          "id",
+          "curated",
+          "taggers",
+          "references",
+          "member_count"
+        ],
+        "properties": {
+          "attribution": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "curated": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "image": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "location": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Point"
+              }
+            ]
+          },
+          "member_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "references": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "taggers": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "GroupConfig": {
         "type": "object",
         "properties": {
@@ -1417,6 +1481,7 @@
           "curated",
           "taggers",
           "references",
+          "member_count",
           "members"
         ],
         "properties": {
@@ -1453,6 +1518,10 @@
                 "$ref": "#/components/schemas/Point"
               }
             ]
+          },
+          "member_count": {
+            "type": "integer",
+            "format": "int64"
           },
           "members": {
             "type": "array",
@@ -2139,7 +2208,7 @@
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/GroupView"
+                "$ref": "#/components/schemas/GroupCard"
               }
             ]
           },
@@ -2268,6 +2337,7 @@
           "pending",
           "missing",
           "unreachable",
+          "blocked",
           "error"
         ]
       },

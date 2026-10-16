@@ -408,7 +408,7 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
         osm: osm.clone(),
     });
     let web = || WebResolver {
-        oembed_policy: Default::default(),
+        oembed_policy: cfg.media.oembed,
         cards: Some(Arc::new(cfg.cards.clone())),
         events: Some(events.clone()),
         egress: egress.clone(),

@@ -382,8 +382,8 @@ A group card has `id`, `kind`, `name`, `image`, `attribution`, `curated`, `tagge
 and `member_count`. The detail route adds `members: [{resource_id, uri, site, occurrence?}]`. The optional occurrence
 contains `uid` and `recurrence_id`. Group IDs are views and can change when evidence
 joins or splits a group; member resource IDs and references never change. Ranking
-scores remain internal. Resource reads keep their own name/image in the attached
-group summary; group lookup and collapsed search use the best member. OSM best
+scores remain internal. Resource reads keep their own name/image in automatic group summaries; curated summaries
+preserve operator metadata. Group lookup and collapsed search use the best member. OSM best
 members carry attribution.
 
 `collapse=group` applies all filters to individual members first, then returns the
@@ -400,9 +400,9 @@ canonical URLs and accepted OSM URL identity. URL claims require the same
 registrable domain or reciprocity. Cross-domain typed keys require verified evidence
 on both members or reciprocal links. ICS UID candidates use the configured container policy and a five-minute start guard;
 occurrence joins also reject starts more than five minutes apart. Any pair of points
-over `queue.groups.max_distance_m` (default 500 m) prevents an automatic merge.
-FIFO and per-origin admission caps reject new excess joiners without dropping
-established groups. Singletons stay individual; grouping failures back off separately
+over `groups.max_distance_m` (default 500 m) prevents an automatic merge.
+FIFO and per-origin admission caps reject excess joiners. URL keys shared by more than
+two distinct paths in one publisher are demoted for all claimants. Singletons stay individual; grouping failures back off separately
 and cannot prevent a resource save.
 
 On the **admin listener only**:

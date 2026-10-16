@@ -68,6 +68,8 @@ pub fn add(doc: &mut ResourceMeta, basis: &str, value: &str) {
         "imdb" => ("imdb", 0.95),
         "tmdb" => ("tmdb", 0.95),
         "ics_uid" => ("ics_uid", 0.9),
+        "isbn" => ("isbn", 1.0),
+        "doi" => ("doi", 1.0),
         "same_as" | "canonical" => ("url", 0.8),
         _ => return,
     };
@@ -80,6 +82,28 @@ pub fn add(doc: &mut ResourceMeta, basis: &str, value: &str) {
             return;
         }
         id
+    } else if kind == "isbn" {
+        let Some(number) = crate::resolver::cards::isbn(&format!("isbn:{value}")) else {
+            return;
+        };
+        if number.len() == 10 {
+            // ISBN-10 and its ISBN-13 edition identify the same book independently of
+            // any provider URL. Keep this evidence separate from redirect aliases.
+            let body = format!("978{}", &number[..9]);
+            let sum: u32 = body
+                .bytes()
+                .enumerate()
+                .map(|(i, n)| u32::from(n - b'0') * if i % 2 == 0 { 1 } else { 3 })
+                .sum();
+            format!("{body}{}", (10 - sum % 10) % 10)
+        } else {
+            number
+        }
+    } else if kind == "doi" {
+        let Some(number) = crate::resolver::cards::doi(&format!("doi:{value}")) else {
+            return;
+        };
+        number
     } else if matches!(kind, "isrc" | "iswc") {
         value
             .chars()
@@ -151,6 +175,13 @@ pub fn add(doc: &mut ResourceMeta, basis: &str, value: &str) {
     }
 }
 pub fn url_keys(doc: &mut ResourceMeta, url: &str) {
+    if let Some(number) = url.strip_prefix("isbn:") {
+        add(doc, "isbn", number);
+        return;
+    }
+    if let Some(number) = crate::resolver::cards::doi(url) {
+        add(doc, "doi", &number);
+    }
     if let Ok(u) = url::Url::parse(url) {
         let last = u
             .path()

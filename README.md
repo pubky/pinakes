@@ -492,8 +492,8 @@ bounded backfill; curated groups survive. Group reconciliation runs after docume
 commit, parks failures with its own backoff and continues the dirty queue. Evidence
 fingerprints avoid rewriting unchanged keys; graph work precedes the short revision
 fence. FIFO admission and `max_members_per_origin` preserve existing members under
-key floods. The `groups` limits bound graph size and key metadata. Group cards
-are built only for returned page rows; facets use equality joins.
+key floods. The `groups` limits bound graph size and key metadata. Compact group cards are cached when membership or references change; member arrays
+are returned only by the group detail route. Facets use equality joins.
 
 Migration 0018 revives failed identifier/common-media routes introduced by 0015,
 staggering retries within an hour. Future resolver changes clear failures from the
