@@ -1331,3 +1331,14 @@ async fn round21_out_of_range_request_timestamps_answer_400(pool: PgPool) {
     .await;
     assert_eq!(code, 200, "{body}");
 }
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn startup_accepts_the_installed_h3_extension(pool: PgPool) {
+    let installed: String =
+        sqlx::query_scalar("SELECT extversion FROM pg_extension WHERE extname='h3'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(pinakes_core::h3_supported(&installed), "{installed}");
+    pinakes_core::check_extensions(&pool).await.unwrap();
+}

@@ -59,6 +59,8 @@ async fn main() -> Result<()> {
     if migrate_only {
         return Ok(());
     }
+    // After migrations, before serving: clustering needs h3 >= 4.2.3.
+    pinakes_core::check_extensions(&pool).await?;
     // Host, author and IP budgets are process-local; one daemon owns this database.
     let mut instance_lock = pool.acquire().await?;
     let owns_database: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(73822917)")

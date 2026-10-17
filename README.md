@@ -22,7 +22,8 @@ Platform event adapters include cursor feeds, NIP-52, embedded page state, per-e
 ## Running locally
 
 Requires Rust (2021 edition; the current Pubky SDK requires Rust 1.89 or newer),
-PostgreSQL **16**, PostGIS, `pg_trgm` and `h3`. Docker is not required. On Ubuntu, install
+PostgreSQL **16–18**, PostGIS **3.4+**, `pg_trgm` and `h3` **4.2.3+** (h3-pg added
+`h3_latlng_to_cell(point, integer)` in 4.2.3; `pinakesd` refuses to serve on an older h3). Docker is not required. On Ubuntu, install
 `postgresql-16 postgresql-16-postgis-3 postgresql-contrib-16 postgresql-16-h3`; if version 16 is not
 in the distribution, use the [official PGDG repository](https://www.postgresql.org/download/linux/ubuntu/).
 
@@ -310,6 +311,12 @@ re-fetches documents an older extractor produced (`queue.reextract_on_upgrade`, 
 `queue.reextract_window_secs`); see [docs/operations.md](docs/operations.md). A change to what
 a resolver extracts must bump its entry in `resolver::EXTRACTOR_VERSIONS` in the same commit;
 rows record the worker kind that extracted them, and a 304 does not count as a re-extraction.
+
+Upgrading the h3 package does not upgrade the extension in an existing database: migrations
+run `CREATE EXTENSION IF NOT EXISTS h3`, which keeps the installed version. After installing
+h3 4.2.3 or newer, run `ALTER EXTENSION h3 UPDATE;` (and `ALTER EXTENSION h3_postgis UPDATE;`
+if installed) in each Pinakes database; otherwise `pinakesd` stops at startup naming the
+version it found.
 
 Use `pinakesd --config <path> --migrate` for upgrades. It prepares any legacy web-fetched
 canonical OSM rows before migration 0002 reclassifies them, preserving all historical
