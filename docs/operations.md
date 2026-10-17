@@ -197,4 +197,4 @@ is sent with `X-Content-Type-Options: nosniff` and a CSP of `default-src 'self'`
 inline script. The bundle injects one fixed `<style>` element, allowed by its SHA-256 hash,
 and its CSS embeds a `data:` image. A bundle upgrade must re-check that hash in a browser.
 The admin listener serves its own document at `/v1/openapi.json` behind the bearer token and
-has no Swagger UI.
+has no Swagger UI. `scripts/demo-lookup` checks resolvers read-only through `/v1/resolve`.

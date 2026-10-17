@@ -75,6 +75,14 @@ checked-in snapshots with `scripts/openapi`. Search filters complete reference d
 sorting or paging; clients pass its ordered IDs to Nexus `/v0/stream/resources/by_ids` for
 social hydration, in batches of 100. Pinakes does not hydrate or fetch through Nexus.
 
+`scripts/demo-lookup [--base URL] [--file e2e/samples.lookup.json]` is a read-only demo and
+resolver regression check against any running daemon. It previews a curated list of public
+URIs through `POST /v1/resolve` (one or more per resolver kind), polls each resource, prints a
+table of kind, URI, type, source, status and group, and exits non-zero when a resource
+fails, stays pending or misses its expected type (an ancestor matches) or status. Requests are
+paced under the default `[preview]` budget. It never writes to Pubky or Nexus; the daemon
+needs the relevant resolvers enabled.
+
 `pinakes-core` contains the schema, feed client, resolver contract, queue and API.
 `pinakesd` runs migrations, the HTTP server, feed polling and resolver workers.
 The shared identity crate is copied **unchanged** from the supplied Nexus extraction;
