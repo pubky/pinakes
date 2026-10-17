@@ -1016,12 +1016,17 @@ async fn swagger_ui_and_each_listener_documents_only_its_own_operations(pool: Pg
     // The CSP's style hashes are exactly those of the <style> elements the served bundle renders,
     // so a utoipa-swagger-ui bump that changes them fails here, not silently in browsers.
     let mut rendered = std::collections::BTreeSet::new();
+    let (mut elements, mut literals) = (0, 0);
     for asset in ["swagger-ui-bundle.js", "swagger-ui-standalone-preset.js"] {
         let (code, _, body) = raw(&public, "GET", &format!("/swagger-ui/{asset}"), None).await;
         assert_eq!(code, 200, "{asset}");
         let js = String::from_utf8(body).unwrap();
         let needle = "createElement(\"style\",null,\"";
+        // Every <style> element must be a plain literal the pattern sees; any other form (a
+        // variable, props, a template) would escape the hash check.
+        elements += js.matches("createElement(\"style\"").count();
         for (at, _) in js.match_indices(needle) {
+            literals += 1;
             let css = &js[at + needle.len()..];
             let css = &css[..css.find('"').unwrap()];
             use base64::Engine;
@@ -1041,6 +1046,10 @@ async fn swagger_ui_and_each_listener_documents_only_its_own_operations(pool: Pg
         .map(str::to_owned)
         .collect();
     assert!(!rendered.is_empty());
+    assert_eq!(
+        elements, literals,
+        "a <style> element is not a plain string literal"
+    );
     assert_eq!(rendered, allowed);
 
     // Both documents match their snapshots and every $ref resolves.
@@ -1334,11 +1343,26 @@ async fn round21_out_of_range_request_timestamps_answer_400(pool: PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn startup_accepts_the_installed_h3_extension(pool: PgPool) {
+    pinakes_core::check_extensions(&pool).await.unwrap();
+    // The function decides, whatever the version string says.
     let installed: String =
         sqlx::query_scalar("SELECT extversion FROM pg_extension WHERE extname='h3'")
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert!(pinakes_core::h3_supported(&installed), "{installed}");
-    pinakes_core::check_extensions(&pool).await.unwrap();
+    sqlx::query(
+        "ALTER FUNCTION h3_latlng_to_cell(point,integer) RENAME TO h3_latlng_to_cell_hidden",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let error = pinakes_core::check_extensions(&pool)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(&format!("h3 extension {installed} is installed")),
+        "{error}"
+    );
+    assert!(error.contains("ALTER EXTENSION h3 UPDATE"), "{error}");
 }

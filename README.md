@@ -23,7 +23,8 @@ Platform event adapters include cursor feeds, NIP-52, embedded page state, per-e
 
 Requires Rust (2021 edition; the current Pubky SDK requires Rust 1.89 or newer),
 PostgreSQL **16–18**, PostGIS **3.4+**, `pg_trgm` and `h3` **4.2.3+** (h3-pg added
-`h3_latlng_to_cell(point, integer)` in 4.2.3; `pinakesd` refuses to serve on an older h3). Docker is not required. On Ubuntu, install
+`h3_latlng_to_cell(point, integer)` in 4.2.3; `pinakesd` refuses to serve when the installed
+h3 lacks that function). Docker is not required. On Ubuntu, install
 `postgresql-16 postgresql-16-postgis-3 postgresql-contrib-16 postgresql-16-h3`; if version 16 is not
 in the distribution, use the [official PGDG repository](https://www.postgresql.org/download/linux/ubuntu/).
 
@@ -316,7 +317,8 @@ Upgrading the h3 package does not upgrade the extension in an existing database:
 run `CREATE EXTENSION IF NOT EXISTS h3`, which keeps the installed version. After installing
 h3 4.2.3 or newer, run `ALTER EXTENSION h3 UPDATE;` (and `ALTER EXTENSION h3_postgis UPDATE;`
 if installed) in each Pinakes database; otherwise `pinakesd` stops at startup naming the
-version it found.
+version it found. The check tests for the function itself, so development and suffixed builds
+that have it are accepted.
 
 Use `pinakesd --config <path> --migrate` for upgrades. It prepares any legacy web-fetched
 canonical OSM rows before migration 0002 reclassifies them, preserving all historical

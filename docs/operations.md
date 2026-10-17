@@ -206,7 +206,9 @@ has no Swagger UI. `scripts/demo-lookup` checks resolvers read-only through `/v1
 
 Supported database matrix: PostgreSQL 16–18, PostGIS 3.4+, `pg_trgm`, and h3 4.2.3 or newer
 (h3-pg added `h3_latlng_to_cell(point, integer)` in 4.2.3; with 4.2.2 every `cluster=` search
-fails). After migrations and before serving, `pinakesd` reads h3's `extversion` and refuses to
-start below 4.2.3, naming the version it found. Upgrading the package is not enough: run
+fails). After migrations and before serving, `pinakesd` checks
+`to_regprocedure('h3_latlng_to_cell(point,integer)')` and refuses to start without it, naming
+the h3 `extversion` it found; development, release-candidate and source builds that have the
+function start normally. Upgrading the package is not enough: run
 `ALTER EXTENSION h3 UPDATE;` (and `ALTER EXTENSION h3_postgis UPDATE;` if installed) in the
 database, because `CREATE EXTENSION IF NOT EXISTS h3` never upgrades an installed extension.
