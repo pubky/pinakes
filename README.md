@@ -282,6 +282,11 @@ with no network I/O under the shared cache lock. Reach-enabled searches cost
 HMAC-BLAKE3 with a random key generated at daemon startup; restart pagination after a
 restart or an invalid-cursor response. The key is neither configured nor persisted.
 
+At startup `pinakesd` also brings stored routing hints up to the current classification and
+re-fetches documents an older extractor produced (`queue.reextract_on_upgrade`, spread over
+`queue.reextract_window_secs`); see [docs/operations.md](docs/operations.md). A change to what
+a resolver extracts must bump its entry in `resolver::EXTRACTOR_VERSIONS` in the same commit.
+
 Use `pinakesd --config <path> --migrate` for upgrades. It prepares any legacy web-fetched
 canonical OSM rows before migration 0002 reclassifies them, preserving all historical
 SQLx migration checksums. Forward review migrations clear alias metadata/history and

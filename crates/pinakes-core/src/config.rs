@@ -198,6 +198,11 @@ pub struct QueueConfig {
     pub missing_ttl_secs: u64,
     pub blocked_ttl_secs: u64,
     pub author_requests_per_second: f64,
+    /// Re-fetch, at startup, `ok` documents produced by an older extractor version of their
+    /// resolver (`resolver::EXTRACTOR_VERSIONS`), so parser changes reach stored documents.
+    pub reextract_on_upgrade: bool,
+    /// Spread for those re-fetches (3600–604800 seconds), never later than the scheduled refresh.
+    pub reextract_window_secs: u64,
 }
 impl Default for QueueConfig {
     fn default() -> Self {
@@ -211,6 +216,8 @@ impl Default for QueueConfig {
             missing_ttl_secs: 3600,
             blocked_ttl_secs: 86400,
             author_requests_per_second: 1.0,
+            reextract_on_upgrade: true,
+            reextract_window_secs: 21600,
         }
     }
 }
@@ -548,6 +555,7 @@ impl Config {
             || self.queue.max_backoff_secs < self.queue.backoff_secs
             || !(1..=86400).contains(&self.queue.missing_ttl_secs)
             || !(3600..=2592000).contains(&self.queue.blocked_ttl_secs)
+            || !(3600..=604800).contains(&self.queue.reextract_window_secs)
             || self.preview.requests_per_minute == 0
             || self.preview.uri_requests_per_minute == 0
             || !(1..=100000).contains(&self.preview.cache_capacity)
@@ -642,6 +650,19 @@ mod tests {
         }
         assert_eq!(config.queue.blocked_ttl_secs, 86400);
         assert_eq!(config.api.blocked_metric_hosts, 20);
+        for key in ["reextract_on_upgrade", "reextract_window_secs"] {
+            assert!(
+                text.lines().any(|l| l.starts_with(&format!("{key} = "))),
+                "{key}"
+            );
+        }
+        assert!(config.queue.reextract_on_upgrade);
+        assert_eq!(config.queue.reextract_window_secs, 21600);
+        for (window, valid) in [(3599, false), (3600, true), (604800, true), (604801, false)] {
+            let mut c = Config::default();
+            c.queue.reextract_window_secs = window;
+            assert_eq!(c.validate().is_ok(), valid, "{window}");
+        }
     }
     #[test]
     fn reach_and_ingest_limits_have_safe_defaults_and_config_bounds() {

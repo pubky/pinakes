@@ -79,6 +79,18 @@ by the reroute trigger, `ok` rows re-resolve through the re-queue, and a row ent
 the OSM route gets or drops its identity envelope. Pages promoted to `media`/`activitypub` by
 their own card keep that route. Migration 0038 also turns earlier OSM-host refusals from dead
 letters into final `unsupported` rows, so they no longer count toward the dead-letter alert.
+Parser changes reach stored documents the same way. Each resolver kind has an extractor version
+(`resolver::EXTRACTOR_VERSIONS`), bumped in the same commit as any change to what it extracts
+or how it builds group evidence, and every save records it (`resource.extracted_with`). After
+the re-queue above, with `queue.reextract_on_upgrade` (default true), the daemon re-fetches `ok`
+rows whose version is below their resolver's current one. These re-fetches are spread over
+`queue.reextract_window_secs` (default 21600, 3600–604800) and are never later than the
+scheduled refresh. They run in batches of 1000, with leases fenced and fetch validators
+cleared; OSM rows also expire their `osm_place` cache entry so the object is looked up again.
+Rows already due within the window are skipped, so restarts are idempotent. A re-plan cannot
+replace this, because it reuses the stored document. Migration 0040 marks every resolved row
+as version 0, so the first start after it re-extracts everything once, throttled by the normal
+per-host and OSM limits.
 A save records the route that produced the document (`resource.resolved_by`). At startup the
 daemon re-queues `ok` rows whose `resolved_by` differs from `resolver` (batches of 1000,
 staggered over one hour, never later than the scheduled refresh, generation bump, event-fetch

@@ -122,6 +122,10 @@ missing_ttl_secs = 3600
 # Retry interval for pages behind an interstitial wall (3600–2592000 seconds).
 blocked_ttl_secs = 86400
 author_requests_per_second = 1.0
+# At startup, re-fetch ok documents an older extractor version produced (one integer per
+# resolver, bumped with every extraction change), spread over the window (3600–604800 s).
+reextract_on_upgrade = true
+reextract_window_secs = 21600
 
 [preview]
 requests_per_minute = 30

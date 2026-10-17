@@ -72,6 +72,20 @@ async fn main() -> Result<()> {
     if requeued > 0 {
         tracing::info!(requeued, "re-queued documents saved under another resolver");
     }
+    if config.queue.reextract_on_upgrade {
+        let reextract = queue::reextract_outdated(
+            &pool,
+            config.queue.reextract_window_secs,
+            &pinakes_core::resolver::extractor_versions(),
+        )
+        .await?;
+        if reextract > 0 {
+            tracing::info!(
+                reextract,
+                "re-queued documents from an older extractor version"
+            );
+        }
+    }
     pinakes_core::groups::configure(&pool, &config.groups).await?;
     let api_pool = api::pool_options().connect(&config.database_url).await?;
     let state = AppState::new(api_pool, config.clone())?;

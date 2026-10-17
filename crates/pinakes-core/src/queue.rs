@@ -136,6 +136,47 @@ pub async fn requeue_rerouted(pool: &PgPool) -> Result<u64> {
     }
 }
 
+/// Re-fetch `ok` rows whose document an older extractor version produced
+/// (`extracted_with` below `versions[resolver]`): parser changes otherwise reach stored
+/// documents only at their natural refresh. Runs at startup after `requeue_rerouted`, under the
+/// instance lock, in batches of 1000, staggered over `window_secs` and never later than the
+/// scheduled refresh, with leases fenced, validators cleared and OSM cache entries expired.
+/// Rows already due within the window are skipped, so restarts are idempotent; a re-saved
+/// document records the version.
+pub async fn reextract_outdated(
+    pool: &PgPool,
+    window_secs: u64,
+    versions: &serde_json::Value,
+) -> Result<u64> {
+    let (mut last, mut total) = (String::new(), 0u64);
+    loop {
+        let ids: Vec<String> = sqlx::query_scalar(r#"WITH picked AS (
+            SELECT id FROM resource WHERE id>$1 AND status='ok' AND resolver IS NOT NULL
+              AND coalesce(extracted_with,0)<coalesce(($2::jsonb->>resolver)::int,0)
+              AND (final OR dead_letter OR lease_until>now() OR next_attempt_at>now()+$3*interval '1 second')
+            ORDER BY id LIMIT 1000),
+          fresh AS (UPDATE event_fetch SET validators='{}' WHERE resource_id IN (SELECT id FROM picked)),
+          -- An OSM job is served from the osm_place cache while it is fresh; expire it so the
+          -- object is looked up and mapped again (batched, under the OSM rate limit).
+          uncached AS (UPDATE osm_place o SET refresh_at=least(o.refresh_at,now()) FROM resource s
+            WHERE s.id IN (SELECT id FROM picked) AND s.resolver='osm' AND o.osm_type=s.osm_type AND o.osm_id=s.osm_id)
+          UPDATE resource r SET attempts=0,timeout_streak=0,dead_letter=false,final=false,
+            last_error=NULL,last_error_resolver=NULL,lease_until=NULL,priority_at=NULL,generation=generation+1,
+            next_attempt_at=least(next_attempt_at,now()+((('x'||substr(r.id,1,8))::bit(32)::bigint % $3::bigint)*interval '1 second'))
+          FROM picked p WHERE r.id=p.id RETURNING r.id"#)
+            .bind(&last)
+            .bind(versions)
+            .bind(window_secs as i64)
+            .fetch_all(pool)
+            .await?;
+        total += ids.len() as u64;
+        match ids.into_iter().max() {
+            Some(id) => last = id,
+            None => return Ok(total),
+        }
+    }
+}
+
 pub fn backoff(cfg: &QueueConfig, attempt: u32) -> u64 {
     cfg.backoff_secs
         .saturating_mul(

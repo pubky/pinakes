@@ -2540,3 +2540,61 @@ async fn round11_book_card_represents_its_open_library_edition_page(pool: PgPool
     assert_eq!(rows[0]["type"], "Book");
     assert_eq!(rows[0]["resource_id"], isbn.as_str());
 }
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round12_reextraction_lets_a_pre_citation_publisher_page_meet_its_doi(pool: PgPool) {
+    // Stable's case: the Nature page was saved by an extractor that read no citation keys, so its
+    // document names no DOI and the registry key from the DOI card finds no reciprocity.
+    let landing = "https://www.nature.com/articles/nature12373";
+    let page = store::ensure_resource(&pool, landing).await.unwrap();
+    let mut old = ResourceMeta::new(landing, "web", 7 * 86400);
+    old.name = Some("Nanometre-scale thermometry in a living cell | Nature".into());
+    old.set_type("WebPage");
+    store::save_document(&pool, &page, 0, &old).await.unwrap();
+    sqlx::query(
+        "UPDATE resource SET extracted_with=0,next_attempt_at=now()+interval '6 days' WHERE id=$1",
+    )
+    .bind(&page)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let csl: Value = serde_json::from_slice(include_bytes!(
+        "fixtures/registry/crossref-nature12373.csl.json"
+    ))
+    .unwrap();
+    let card = doi_card(&pool, "doi:10.1038/nature12373", &csl).await;
+    assert_ne!(gid(&pool, &card).await, gid(&pool, &page).await);
+    let versions = pinakes_core::resolver::extractor_versions();
+    assert_eq!(
+        pinakes_core::queue::reextract_outdated(&pool, 21600, &versions)
+            .await
+            .unwrap(),
+        1
+    );
+    // The window elapses and the web worker re-extracts the recorded page head.
+    sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+        .bind(&page)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let job = pinakes_core::queue::claim(&pool, "web", &Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.id, page);
+    let html = recorded_html(
+        landing,
+        include_bytes!("fixtures/registry/nature12373-head.html"),
+    );
+    let fresh = pinakes_core::resolver::web::extract(landing, &html, 86400).doc;
+    store::save_document(&pool, &page, job.generation, &fresh)
+        .await
+        .unwrap();
+    assert_eq!(gid(&pool, &card).await, gid(&pool, &page).await);
+    assert_eq!(
+        pinakes_core::queue::reextract_outdated(&pool, 21600, &versions)
+            .await
+            .unwrap(),
+        0
+    );
+}

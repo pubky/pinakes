@@ -97,6 +97,32 @@ pub fn classify(uri: &str) -> Option<&'static str> {
     }
 }
 
+/// The extractor version of each resolver kind. Bump a resolver's number in the same commit as
+/// any change to what it extracts or how it builds group evidence: at startup, `ok` documents
+/// saved by an older version are re-fetched (`queue::reextract_outdated`), because a re-plan
+/// reuses the stored document and only a re-fetch re-runs the parser.
+pub const EXTRACTOR_VERSIONS: &[(&str, i32)] = &[
+    ("web", 1),
+    ("pubky", 1),
+    ("geo", 1),
+    ("osm", 1),
+    ("event", 1),
+    ("event_platform", 1),
+    ("media", 1),
+    ("isbn", 1),
+    ("doi", 1),
+    ("nostr", 1),
+    ("activitypub", 1),
+];
+/// `EXTRACTOR_VERSIONS` as a JSON object for SQL (`versions->>resolver`).
+pub fn extractor_versions() -> serde_json::Value {
+    EXTRACTOR_VERSIONS
+        .iter()
+        .map(|(name, v)| ((*name).to_owned(), serde_json::json!(v)))
+        .collect::<serde_json::Map<_, _>>()
+        .into()
+}
+
 /// Persisted routing hints are configuration-independent; disabled calendars use web workers.
 pub fn classify_config(uri: &str, config: &crate::config::Config) -> Option<&'static str> {
     match classify(uri) {

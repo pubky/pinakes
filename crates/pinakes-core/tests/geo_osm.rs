@@ -1200,14 +1200,15 @@ async fn round11_upgrade_reroutes_legacy_osm_aliases_and_location_links_once(poo
         .execute(&pool)
         .await
         .unwrap();
-    // A page whose own card promoted it to the media route keeps that route.
+    pinakes_core::migrate(&pool).await.unwrap();
+    // A page whose own card promoted it to the media route keeps that route (saved through
+    // today's save path, so after the schema has caught up).
     let mut card = ResourceMeta::new(promoted, "media", 86400);
     card.set_type("VideoObject");
     card.name = Some("Talk".into());
     store::save_document(&pool, &ids[promoted], 0, &card)
         .await
         .unwrap();
-    pinakes_core::migrate(&pool).await.unwrap();
     // 0038 turns the local refusals into one final, non-dead-letter outcome.
     let state = |id: String| {
         let pool = pool.clone();
@@ -1340,4 +1341,52 @@ async fn round11_location_links_switch_off_waits_like_a_disabled_route(pool: PgP
         let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status().as_u16() / 100, expected / 100, "{uri}");
     }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round12_osm_reextraction_bypasses_the_fresh_cache(pool: PgPool) {
+    let (mock, resolver, server) = mock(&pool).await;
+    let id = store::ensure_resource(&pool, "https://www.openstreetmap.org/node/240109189")
+        .await
+        .unwrap();
+    let jobs = queue::claim_batch(&pool, "osm", &QueueConfig::default(), 50)
+        .await
+        .unwrap();
+    queue::run_batch(&pool, &resolver, &QueueConfig::default(), &jobs)
+        .await
+        .unwrap();
+    assert_eq!(mock.calls.lock().await.len(), 1);
+    sqlx::query("UPDATE resource SET extracted_with=0 WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        queue::reextract_outdated(&pool, 21600, &pinakes_core::resolver::extractor_versions())
+            .await
+            .unwrap(),
+        1
+    );
+    sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let jobs = queue::claim_batch(&pool, "osm", &QueueConfig::default(), 50)
+        .await
+        .unwrap();
+    queue::run_batch(&pool, &resolver, &QueueConfig::default(), &jobs)
+        .await
+        .unwrap();
+    // The object was looked up and mapped again, not served from the cache.
+    assert_eq!(mock.calls.lock().await.len(), 2);
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<i32>>("SELECT extracted_with FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    server.abort();
 }

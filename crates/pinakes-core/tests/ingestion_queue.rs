@@ -1116,3 +1116,117 @@ async fn round4_new_references_reprobe_blocked_pages_within_a_host_budget(pool: 
     .unwrap();
     assert_eq!(due(pool.clone(), vec![ids[0].clone()]).await, vec![false]);
 }
+
+async fn extraction(pool: &PgPool, id: &str) -> (Option<i32>, bool, i64) {
+    sqlx::query_as("SELECT extracted_with,next_attempt_at<=now()+interval '6 hours',generation FROM resource WHERE id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round12_older_extractor_versions_reextract_once_and_only_their_resolver(pool: PgPool) {
+    let versions = pinakes_core::resolver::extractor_versions();
+    let window = 21600;
+    let page = "https://example.org/old-parser";
+    let id = store::ensure_resource(&pool, page).await.unwrap();
+    let mut doc = ResourceMeta::new(page, "web", 7 * 86400);
+    doc.name = Some("Old parser".into());
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let place = store::ensure_resource(&pool, "geo:47,8").await.unwrap();
+    let job = queue::claim(&pool, "geo", &QueueConfig::default())
+        .await
+        .unwrap()
+        .unwrap();
+    queue::run_job(
+        &pool,
+        &pinakes_core::resolver::geo::GeoResolver::default(),
+        &QueueConfig::default(),
+        &job,
+    )
+    .await
+    .unwrap();
+    let due = store::ensure_resource(&pool, "https://example.org/due-soon")
+        .await
+        .unwrap();
+    let mut d = ResourceMeta::new("https://example.org/due-soon", "web", 60);
+    d.name = Some("Due soon".into());
+    store::save_document(&pool, &due, 0, &d).await.unwrap();
+    // Every save records its resolver's current version.
+    for row in [&id, &place, &due] {
+        assert_eq!(extraction(&pool, row).await.0, Some(1));
+    }
+    // An older document (as the migration marks every resolved row): re-queued within the window,
+    // once; a row already due inside the window is left to its own schedule.
+    sqlx::query(
+        "UPDATE resource SET extracted_with=0,next_attempt_at=now()+interval '6 days' WHERE id=$1",
+    )
+    .bind(&id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE resource SET extracted_with=0 WHERE id=$1")
+        .bind(&due)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before = extraction(&pool, &id).await;
+    assert!(!before.1);
+    assert_eq!(
+        queue::reextract_outdated(&pool, window, &versions)
+            .await
+            .unwrap(),
+        1
+    );
+    let after = extraction(&pool, &id).await;
+    assert!(after.1 && after.2 == before.2 + 1);
+    assert_eq!(
+        queue::reextract_outdated(&pool, window, &versions)
+            .await
+            .unwrap(),
+        0
+    );
+    // Re-saved by the current extractor, it leaves the set.
+    sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let job = queue::claim(&pool, "web", &QueueConfig::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.id, id);
+    store::save_document(&pool, &id, job.generation, &doc)
+        .await
+        .unwrap();
+    assert_eq!(extraction(&pool, &id).await.0, Some(1));
+    sqlx::query("UPDATE resource SET next_attempt_at=now()+interval '6 days' WHERE id=ANY($1)")
+        .bind([&id, &due])
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET extracted_with=1 WHERE id=$1")
+        .bind(&due)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        queue::reextract_outdated(&pool, window, &versions)
+            .await
+            .unwrap(),
+        0
+    );
+    // Bumping one resolver's constant re-queues only that resolver's documents.
+    let place_before = extraction(&pool, &place).await;
+    let mut bumped = versions.clone();
+    bumped["web"] = 2.into();
+    assert_eq!(
+        queue::reextract_outdated(&pool, window, &bumped)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(extraction(&pool, &place).await, place_before);
+}
