@@ -9,30 +9,6 @@
     "version": "0.1.0"
   },
   "paths": {
-    "/metrics": {
-      "servers": [
-        {
-          "url": "http://127.0.0.1:9090"
-        }
-      ],
-      "get": {
-        "tags": [],
-        "description": "Separate admin listener only; URL is controlled by admin_listen.",
-        "operationId": "metrics",
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "text/plain; version=0.0.4": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/v1/changes": {
       "get": {
         "tags": [
@@ -216,51 +192,6 @@
             "description": "Unknown group"
           }
         }
-      },
-      "put": {
-        "tags": [],
-        "description": "Admin listener only. Replaces the curated member set; never changes IDs or references.",
-        "operationId": "curate_group",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/Curation"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GroupView"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid curation"
-          }
-        },
-        "servers": [
-          {
-            "url": "http://127.0.0.1:9090"
-          }
-        ]
       }
     },
     "/v1/info": {
@@ -1149,33 +1080,6 @@
           "corroborated"
         ]
       },
-      "Curation": {
-        "type": "object",
-        "required": [
-          "members"
-        ],
-        "properties": {
-          "image": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "members": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Member"
-            }
-          },
-          "name": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "additionalProperties": false
-      },
       "EventFields": {
         "type": "object",
         "properties": {
@@ -1714,28 +1618,6 @@
             "type": "string"
           }
         }
-      },
-      "Member": {
-        "type": "object",
-        "required": [
-          "resource_id"
-        ],
-        "properties": {
-          "occurrence": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/OccurrenceRef"
-              }
-            ]
-          },
-          "resource_id": {
-            "type": "string"
-          }
-        },
-        "additionalProperties": false
       },
       "Mode": {
         "type": "string",

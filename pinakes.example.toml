@@ -188,6 +188,9 @@ blocked_metric_hosts = 20
 # wildcard patterns like "https://*.pubky.app"); [] sends no CORS headers. The admin listener
 # never sends CORS headers.
 cors_allow_origins = ["*"]
+# Swagger UI for the public OpenAPI document at /swagger-ui (vendored bundle, same per-IP
+# budget as /v1). false removes the route; /v1/openapi.json stays.
+swagger_ui = true
 
 [cards]
 openlibrary_url = "https://openlibrary.org/api/books"

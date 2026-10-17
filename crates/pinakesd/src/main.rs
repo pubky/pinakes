@@ -34,8 +34,15 @@ async fn main() -> Result<()> {
                 );
                 return Ok(());
             }
+            "--openapi-admin" => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&api::admin_openapi_document())?
+                );
+                return Ok(());
+            }
             "--help" => {
-                println!("pinakesd [--config PATH] [--migrate | --openapi]");
+                println!("pinakesd [--config PATH] [--migrate | --openapi | --openapi-admin]");
                 return Ok(());
             }
             _ => bail!("unknown argument {arg}"),

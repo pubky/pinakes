@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-cargo run -q -p pinakesd -- --openapi > docs/openapi.json
+# Public listener document (also served at /v1/openapi.json and by /swagger-ui) and the
+# admin listener document (served at admin_listen /v1/openapi.json behind the bearer check).
+cargo build -q -p pinakesd
+target/debug/pinakesd --openapi > docs/openapi.json
+target/debug/pinakesd --openapi-admin > docs/openapi.admin.json

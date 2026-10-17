@@ -245,6 +245,33 @@ async fn cors_preflight(
         .into_response()
 }
 
+/// Swagger UI for the public document, from the vendored bundle; no second spec route.
+fn swagger_ui(config: &crate::config::ApiConfig) -> Router<AppState> {
+    if !config.swagger_ui {
+        return Router::new();
+    }
+    Router::from(
+        utoipa_swagger_ui::SwaggerUi::new("/swagger-ui")
+            .config(utoipa_swagger_ui::Config::new(["/v1/openapi.json"])),
+    )
+    .layer(axum::middleware::map_response(swagger_headers))
+}
+/// The vendored bundle (Swagger UI 5.17.14) runs no inline script. It injects one fixed
+/// `<style>` element, allowed by its hash, and its CSS embeds a data: image. Re-check the hash
+/// when the vendored bundle changes (a browser reports the new one as a CSP violation).
+const SWAGGER_UI_CSP: &str = "default-src 'self'; style-src 'self' 'sha256-RL3ie0nH+Lzz2YNqQN83mnU0J1ot4QL7b99vMdIX99w='; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
+async fn swagger_headers(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        header::HeaderValue::from_static(SWAGGER_UI_CSP),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
+    response
+}
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/info", get(info))
@@ -265,6 +292,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/resolve", post(resolve))
         .route("/v1/openapi.json", get(openapi))
         .route("/v1/dumps/osm_place.ndjson", get(osm_dump))
+        .merge(swagger_ui(&state.config.api))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             cors_preflight,
@@ -1107,6 +1135,7 @@ pub async fn info(State(state): State<AppState>) -> Result<Json<Value>, ApiError
     }
     Ok(Json(body))
 }
+#[utoipa::path(get,path="/v1/info",responses((status=200,body=Value)),description="Admin listener: the public summary plus source diagnostics, ingestion, queue statuses and metrics. Cached for 15 seconds.")]
 async fn admin_info(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(full_info(&state).await?))
 }
@@ -1144,7 +1173,6 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
     ),
     paths(
         group,
-        curate_group,
         crate::event::storage::list,
         search,
         resource,
@@ -1155,8 +1183,7 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         osm_dump,
         crate::change_api::feed,
         crate::change_api::lookup,
-        crate::change_api::resource,
-        metrics
+        crate::change_api::resource
     ),
     components(schemas(
         ResourceMeta,
@@ -1187,28 +1214,48 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
     ))
 )]
 pub struct ApiDoc;
+/// Operations served by `admin_listen`, every one behind the bearer check.
+#[derive(OpenApi)]
+#[openapi(
+    info(
+        title = "Pinakes admin",
+        version = "0.1.0",
+        description = "Operator API on admin_listen. Every operation requires the admin bearer token when one is configured.",
+        license(name = "MIT")
+    ),
+    paths(curate_group, admin_info, admin_openapi, metrics),
+    modifiers(&AdminBearer),
+    security(("admin_bearer" = []))
+)]
+pub struct AdminApiDoc;
+struct AdminBearer;
+impl utoipa::Modify for AdminBearer {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+        openapi
+            .components
+            .get_or_insert_with(Default::default)
+            .add_security_scheme(
+                "admin_bearer",
+                SecurityScheme::Http(HttpBuilder::new().scheme(HttpAuthScheme::Bearer).build()),
+            );
+    }
+}
+/// The public listener's document: exactly the operations `router` serves.
 pub fn openapi_document() -> utoipa::openapi::OpenApi {
-    let mut document = ApiDoc::openapi();
-    document
-        .paths
-        .paths
-        .get_mut("/metrics")
-        .expect("admin path")
-        .servers = Some(vec![utoipa::openapi::Server::new("http://127.0.0.1:9090")]);
-    document
-        .paths
-        .paths
-        .get_mut("/v1/groups/{id}")
-        .expect("groups path")
-        .put
-        .as_mut()
-        .expect("curation")
-        .servers = Some(vec![utoipa::openapi::Server::new("http://127.0.0.1:9090")]);
-    document
+    ApiDoc::openapi()
+}
+/// The admin listener's document, served there behind the bearer check.
+pub fn admin_openapi_document() -> utoipa::openapi::OpenApi {
+    AdminApiDoc::openapi()
 }
 #[utoipa::path(get,path="/v1/openapi.json",responses((status=200,body=Value)))]
 async fn openapi() -> Json<Value> {
     Json(serde_json::to_value(openapi_document()).expect("OpenAPI serialization"))
+}
+#[utoipa::path(get,path="/v1/openapi.json",responses((status=200,body=Value)),description="Admin listener only: this document.")]
+async fn admin_openapi() -> Json<Value> {
+    Json(serde_json::to_value(admin_openapi_document()).expect("OpenAPI serialization"))
 }
 
 /// First line of the OSM dump: the ODbL notice.
@@ -1373,6 +1420,7 @@ pub fn admin_router(state: AppState) -> Router {
         .route("/v1/groups/{id}", axum::routing::put(curate_group))
         .route("/metrics", get(metrics))
         .route("/v1/info", get(admin_info))
+        .route("/v1/openapi.json", get(admin_openapi))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin_auth,
@@ -1411,7 +1459,7 @@ async fn admin_auth(
     }
     next.run(request).await
 }
-#[utoipa::path(get,path="/metrics",responses((status=200,content_type="text/plain; version=0.0.4",body=String)),description="Separate admin listener only; URL is controlled by admin_listen.")]
+#[utoipa::path(get,path="/metrics",responses((status=200,content_type="text/plain; version=0.0.4",body=String)),description="Prometheus metrics.")]
 async fn metrics(State(state): State<AppState>) -> Result<Response, ApiError> {
     state.metrics.refresh(&state.pool).await?;
     Ok((

@@ -1,0 +1,312 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Pinakes admin",
+    "description": "Operator API on admin_listen. Every operation requires the admin bearer token when one is configured.",
+    "license": {
+      "name": "MIT"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/metrics": {
+      "get": {
+        "tags": [],
+        "description": "Prometheus metrics.",
+        "operationId": "metrics",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "text/plain; version=0.0.4": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/groups/{id}": {
+      "put": {
+        "tags": [],
+        "description": "Admin listener only. Replaces the curated member set; never changes IDs or references.",
+        "operationId": "curate_group",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Curation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid curation"
+          }
+        }
+      }
+    },
+    "/v1/info": {
+      "get": {
+        "tags": [],
+        "description": "Admin listener: the public summary plus source diagnostics, ingestion, queue statuses and metrics. Cached for 15 seconds.",
+        "operationId": "admin_info",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/openapi.json": {
+      "get": {
+        "tags": [],
+        "description": "Admin listener only: this document.",
+        "operationId": "admin_openapi",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Curation": {
+        "type": "object",
+        "required": [
+          "members"
+        ],
+        "properties": {
+          "image": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Member"
+            }
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "GroupMemberView": {
+        "type": "object",
+        "required": [
+          "resource_id",
+          "uri",
+          "site"
+        ],
+        "properties": {
+          "occurrence": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/OccurrenceRef"
+              }
+            ]
+          },
+          "resource_id": {
+            "type": "string"
+          },
+          "site": {
+            "type": "string"
+          },
+          "uri": {
+            "type": "string"
+          }
+        }
+      },
+      "GroupView": {
+        "type": "object",
+        "required": [
+          "id",
+          "curated",
+          "taggers",
+          "references",
+          "member_count",
+          "members"
+        ],
+        "properties": {
+          "attribution": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "curated": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "image": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "location": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Point"
+              }
+            ]
+          },
+          "member_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GroupMemberView"
+            }
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "references": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "taggers": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "Member": {
+        "type": "object",
+        "required": [
+          "resource_id"
+        ],
+        "properties": {
+          "occurrence": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/OccurrenceRef"
+              }
+            ]
+          },
+          "resource_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "OccurrenceRef": {
+        "type": "object",
+        "required": [
+          "uid"
+        ],
+        "properties": {
+          "event_resource_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recurrence_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "uid": {
+            "type": "string"
+          }
+        }
+      },
+      "Point": {
+        "type": "object",
+        "required": [
+          "lat",
+          "lon"
+        ],
+        "properties": {
+          "lat": {
+            "type": "number",
+            "format": "double"
+          },
+          "lon": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "admin_bearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "security": [
+    {
+      "admin_bearer": []
+    }
+  ]
+}

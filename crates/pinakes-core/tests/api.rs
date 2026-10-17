@@ -131,7 +131,7 @@ async fn every_read_route_and_document_projection(pool: PgPool) {
     assert!(spec["components"]["schemas"]["ResourceView"]["properties"]
         .get("score")
         .is_none());
-    assert_eq!(spec["paths"].as_object().unwrap().len(), 13);
+    assert_eq!(spec["paths"].as_object().unwrap().len(), 12);
     for field in ["card", "facets", "document"] {
         let (code, item) = call(
             &app,
@@ -915,6 +915,157 @@ async fn review_admin_bearer_and_network_bind_policy(pool: sqlx::PgPool) {
             }
         }
     }
+}
+
+async fn raw(
+    app: &Router,
+    method: &str,
+    path: &str,
+    bearer: Option<&str>,
+) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json");
+    if let Some(token) = bearer {
+        request = request.header("authorization", format!("Bearer {token}"));
+    }
+    let body = if method == "GET" {
+        Body::empty()
+    } else {
+        Body::from("{}")
+    };
+    let mut request = request.body(body).unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.9:1234".parse::<SocketAddr>().unwrap(),
+    ));
+    let response = app.clone().oneshot(request).await.unwrap();
+    let (parts, body) = response.into_parts();
+    let bytes = body.collect().await.unwrap().to_bytes().to_vec();
+    (parts.status, parts.headers, bytes)
+}
+
+fn refs(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::String(r)) = map.get("$ref") {
+                out.push(r.clone());
+            }
+            map.values().for_each(|v| refs(v, out));
+        }
+        Value::Array(items) => items.iter().for_each(|v| refs(v, out)),
+        _ => {}
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn swagger_ui_and_each_listener_documents_only_its_own_operations(pool: PgPool) {
+    let token = "swagger-test-operator-token";
+    let config = Config {
+        admin_token: Some(token.into()),
+        ..Default::default()
+    };
+    let state = AppState::new(pool.clone(), config.clone()).unwrap();
+    let public = api::router(state.clone());
+    let admin = api::admin_router(state);
+
+    // Swagger UI is on by default, from the vendored bundle, under restrictive headers.
+    let (code, headers, _) = raw(&public, "GET", "/swagger-ui", None).await;
+    assert!(code.is_redirection());
+    assert_eq!(headers["location"], "/swagger-ui/");
+    let (code, headers, body) = raw(&public, "GET", "/swagger-ui/", None).await;
+    assert_eq!(code, 200);
+    assert!(headers["content-type"]
+        .to_str()
+        .unwrap()
+        .starts_with("text/html"));
+    assert!(String::from_utf8(body).unwrap().contains("<html"));
+    let csp = headers["content-security-policy"].to_str().unwrap();
+    assert!(csp.starts_with("default-src 'self';") && !csp.contains("unsafe"));
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    let (code, _, body) = raw(&public, "GET", "/swagger-ui/swagger-initializer.js", None).await;
+    assert_eq!(code, 200);
+    let initializer = String::from_utf8(body).unwrap();
+    assert!(initializer.contains("\"/v1/openapi.json\"") && !initializer.contains("petstore"));
+
+    // Both documents match their snapshots and every $ref resolves.
+    let docs = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/");
+    let public_doc = serde_json::to_value(api::openapi_document()).unwrap();
+    let admin_doc = serde_json::to_value(api::admin_openapi_document()).unwrap();
+    for (doc, file) in [
+        (&public_doc, "openapi.json"),
+        (&admin_doc, "openapi.admin.json"),
+    ] {
+        let snapshot: Value =
+            serde_json::from_str(&std::fs::read_to_string(format!("{docs}{file}")).unwrap())
+                .unwrap();
+        assert_eq!(doc, &snapshot, "{file} is stale; run scripts/openapi");
+        let mut found = vec![];
+        refs(doc, &mut found);
+        for r in found {
+            let pointer = r.strip_prefix('#').expect("local $ref");
+            assert!(doc.pointer(pointer).is_some(), "{file}: unresolved {r}");
+        }
+    }
+    assert_eq!(
+        call(&public, "GET", "/v1/openapi.json", None).await.1,
+        public_doc
+    );
+    assert_eq!(raw(&admin, "GET", "/v1/openapi.json", None).await.0, 401);
+    let (code, _, body) = raw(&admin, "GET", "/v1/openapi.json", Some(token)).await;
+    assert_eq!(code, 200);
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), admin_doc);
+    assert!(admin_doc["components"]["securitySchemes"]["admin_bearer"].is_object());
+
+    // "Try it out" can only target operations the listener serves: the router's own fallback
+    // (404, empty body) and 405 never answer a documented operation.
+    let id = "00000000000000000000000000000000";
+    for (app, doc, bearer) in [
+        (&public, &public_doc, None),
+        (&admin, &admin_doc, Some(token)),
+    ] {
+        for (path, item) in doc["paths"].as_object().unwrap() {
+            for method in item.as_object().unwrap().keys() {
+                let uri = path.replace("{id}", id);
+                let method = method.to_uppercase();
+                let (code, _, body) = raw(app, &method, &uri, bearer).await;
+                assert!(
+                    code != 405 && !(code == 404 && body.is_empty()),
+                    "{method} {path} is documented but not served ({code})"
+                );
+            }
+        }
+    }
+    assert!(public_doc["paths"].get("/metrics").is_none());
+    assert!(public_doc["paths"]["/v1/groups/{id}"].get("put").is_none());
+    assert_eq!(raw(&public, "GET", "/metrics", None).await.0, 404);
+    assert_eq!(
+        raw(&public, "PUT", &format!("/v1/groups/{id}"), None)
+            .await
+            .0,
+        405
+    );
+
+    // Switched off, the route is gone.
+    let mut off = config;
+    off.api.swagger_ui = false;
+    let public = api::router(AppState::new(pool.clone(), off).unwrap());
+    for path in [
+        "/swagger-ui",
+        "/swagger-ui/",
+        "/swagger-ui/swagger-initializer.js",
+    ] {
+        assert_eq!(raw(&public, "GET", path, None).await.0, 404, "{path}");
+    }
+    assert_eq!(call(&public, "GET", "/v1/openapi.json", None).await.0, 200);
+
+    // Swagger UI shares the per-IP budget of the /v1 routes.
+    let mut tight = Config::default();
+    tight.api.requests_per_minute = 2;
+    let public = api::router(AppState::new(pool, tight).unwrap());
+    assert_eq!(raw(&public, "GET", "/swagger-ui/", None).await.0, 200);
+    assert_eq!(raw(&public, "GET", "/v1/openapi.json", None).await.0, 200);
+    assert_eq!(raw(&public, "GET", "/swagger-ui/", None).await.0, 429);
 }
 
 async fn cors_call(

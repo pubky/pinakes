@@ -67,10 +67,13 @@ curl -H 'Content-Type: application/json' -d '{"uri":"https://example.org/"}' \
 ## API and architecture
 
 [API reference](docs/api.md) describes the implemented `/v1` subset. Utoipa derives
-the OpenAPI served at `/v1/openapi.json`; regenerate the checked-in snapshot with
-`scripts/openapi`. Search filters complete reference data before sorting or paging;
-clients pass its ordered IDs to Nexus `/v0/stream/resources/by_ids` for social
-hydration, in batches of 100. Pinakes does not hydrate or fetch through Nexus.
+the OpenAPI served at `/v1/openapi.json`: the public listener's document lists only public
+operations, and the admin listener serves its own behind the bearer token. Swagger UI for the
+public document is at `/swagger-ui` (`api.swagger_ui = true` by default, like pubky-nexus),
+from the vendored `utoipa-swagger-ui` bundle: builds never download it. Regenerate both
+checked-in snapshots with `scripts/openapi`. Search filters complete reference data before
+sorting or paging; clients pass its ordered IDs to Nexus `/v0/stream/resources/by_ids` for
+social hydration, in batches of 100. Pinakes does not hydrate or fetch through Nexus.
 
 `pinakes-core` contains the schema, feed client, resolver contract, queue and API.
 `pinakesd` runs migrations, the HTTP server, feed polling and resolver workers.

@@ -189,3 +189,12 @@ The capability-URL guard scans every tracked source file and every nonignored ne
 including root configuration, Rust and scripts. Git-ignored runtime credentials/artifacts and
 `.git`, `target`, `node_modules` are excluded. Exact synthetic fixture URLs are allowed only
 in named test files; failures print paths without URL values.
+
+Swagger UI is served at `/swagger-ui` on the public listener when `api.swagger_ui` is true
+(the default; `false` returns 404). It renders the public `/v1/openapi.json` from the
+`utoipa-swagger-ui` vendored bundle (Swagger UI 5.17.14), shares the `/v1` per-IP budget and
+is sent with `X-Content-Type-Options: nosniff` and a CSP of `default-src 'self'` with no
+inline script. The bundle injects one fixed `<style>` element, allowed by its SHA-256 hash,
+and its CSS embeds a `data:` image. A bundle upgrade must re-check that hash in a browser.
+The admin listener serves its own document at `/v1/openapi.json` behind the bearer token and
+has no Swagger UI.

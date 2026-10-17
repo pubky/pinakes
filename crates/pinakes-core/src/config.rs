@@ -311,6 +311,8 @@ pub struct ApiConfig {
     /// public API takes no cookies or tokens), a list of `scheme://host[:port]` origins, or `[]`
     /// to send no CORS headers. Never applied to the admin listener.
     pub cors_allow_origins: Vec<String>,
+    /// Serve Swagger UI for the public document at `/swagger-ui` (as pubky-nexus does).
+    pub swagger_ui: bool,
 }
 impl Default for ApiConfig {
     fn default() -> Self {
@@ -320,6 +322,7 @@ impl Default for ApiConfig {
             reach_cost: 6,
             blocked_metric_hosts: 20,
             cors_allow_origins: vec!["*".into()],
+            swagger_ui: true,
         }
     }
 }
