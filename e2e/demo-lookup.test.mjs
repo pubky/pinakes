@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { formatTable, lookupAll, parseArgs, validateEntries, verdict } from './demo-lookup.mjs';
+import { exitCode, formatTable, lookupAll, main, parseArgs, validateEntries, verdict } from './demo-lookup.mjs';
 
 test('arguments default to the dev daemon and the curated list, and are validated', () => {
   assert.deepEqual(parseArgs([]), { base: 'http://127.0.0.1:8090', file: 'e2e/samples.lookup.json', timeoutSecs: 90 });
@@ -81,4 +81,37 @@ test('the curated list is valid and covers every resolver kind', async () => {
     assert.ok(kinds.has(kind), kind);
   }
   assert.equal(new Set(entries.map(e => e.uri)).size, entries.length);
+});
+
+test('a 429 on /v1/resolve is retried with backoff, honouring Retry-After, and is bounded', async () => {
+  let clock = 0;
+  const waits = [];
+  const statuses = [429, 429, 200];
+  const fetch = async (url, init = {}) => {
+    if (init.method === 'POST') {
+      const status = statuses.shift() ?? 429;
+      return { status, headers: { get: name => (name === 'retry-after' && status === 429 && statuses.length === 1 ? '7' : null) }, json: async () => (status === 200 ? { resource_id: 'a', status: 'ok', type: 'WebPage' } : { error: 'busy' }) };
+    }
+    throw new Error(`unexpected ${url}`);
+  };
+  const sleep = async ms => { waits.push(ms); clock += ms; };
+  const [row] = await lookupAll([{ kind: 'web', uri: 'https://x.example/' }], { base: 'http://h:1', timeoutSecs: 3, fetch, sleep, now: () => clock });
+  assert.equal(row.problem, null);
+  assert.deepEqual(waits, [2100, 7000]);
+  statuses.length = 0;
+  const [busy] = await lookupAll([{ kind: 'web', uri: 'https://x.example/' }], { base: 'http://h:1', timeoutSecs: 3, fetch, sleep, now: () => clock, resolveRetries: 2 });
+  assert.equal(busy.problem, 'resolve HTTP 429: busy');
+});
+
+test('exit codes: 0 when all rows pass, 1 on any failure, 2 on usage or file errors', async () => {
+  assert.equal(exitCode([{ problem: null }, { problem: null }]), 0);
+  assert.equal(exitCode([{ problem: null }, { problem: 'still pending' }]), 1);
+  const quiet = { out: () => {}, err: () => {} };
+  const lookup = async entries => entries.map(e => ({ kind: e.kind, uri: e.uri, status: 'ok', problem: e.kind === 'bad' ? 'type x' : null }));
+  const read = async () => JSON.stringify([{ kind: 'ok', uri: 'https://a.example/' }, { kind: 'bad', uri: 'https://b.example/' }]);
+  assert.equal(await main([], { ...quiet, lookup, read }), 1);
+  assert.equal(await main([], { ...quiet, lookup, read: async () => '[{"kind":"ok","uri":"https://a.example/"}]' }), 0);
+  assert.equal(await main(['--write'], quiet), 2);
+  assert.equal(await main([], { ...quiet, read: async () => 'not json' }), 2);
+  assert.equal(await main(['--help'], quiet), 0);
 });

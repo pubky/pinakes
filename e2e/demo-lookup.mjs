@@ -74,7 +74,7 @@ export function formatTable(rows) {
 
 // Pace /v1/resolve under the default [preview] budget (30 per minute per IP and per URI) and
 // polling under the public API budget (120 per minute per IP).
-export async function lookupAll(entries, { base, timeoutSecs, fetch = globalThis.fetch, sleep = ms => new Promise(r => setTimeout(r, ms)), now = Date.now, resolveGapMs = 2100, pollMs = 1000, log = () => {} }) {
+export async function lookupAll(entries, { base, timeoutSecs, fetch = globalThis.fetch, sleep = ms => new Promise(r => setTimeout(r, ms)), now = Date.now, resolveGapMs = 2100, resolveRetries = 4, pollMs = 1000, log = () => {} }) {
   const rows = [];
   let lastResolve = -Infinity;
   for (const entry of entries) {
@@ -83,7 +83,15 @@ export async function lookupAll(entries, { base, timeoutSecs, fetch = globalThis
     lastResolve = now();
     let row;
     try {
-      const response = await fetch(`${base}/v1/resolve`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ uri: entry.uri }) });
+      // A preview budget shared behind one proxy IP can answer 429: back off and retry, bounded.
+      let response;
+      for (let attempt = 0; ; attempt++) {
+        response = await fetch(`${base}/v1/resolve`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ uri: entry.uri }) });
+        if (response.status !== 429 || attempt >= resolveRetries) break;
+        const retryAfter = Number(response.headers?.get?.('retry-after'));
+        await sleep(Math.min(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : resolveGapMs * 2 ** attempt, 60000));
+        lastResolve = now();
+      }
       const body = await response.json().catch(() => ({}));
       if (response.status !== 200 && response.status !== 202) throw new Error(`resolve HTTP ${response.status}${body.error ? `: ${body.error}` : ''}`);
       let view = body;
@@ -106,17 +114,26 @@ export async function lookupAll(entries, { base, timeoutSecs, fetch = globalThis
   return rows;
 }
 
-async function main() {
-  const options = parseArgs(process.argv.slice(2));
-  if (options.help) return console.log(USAGE);
-  const entries = validateEntries(JSON.parse(await readFile(options.file, 'utf8')));
-  const rows = await lookupAll(entries, { ...options, log: line => process.stderr.write(`${line}\n`) });
-  console.log(formatTable(rows));
-  const failed = rows.filter(r => r.problem).length;
-  console.log(`\n${rows.length - failed}/${rows.length} ok against ${options.base}`);
-  process.exitCode = failed ? 1 : 0;
+// 0: every entry ok; 1: at least one failed, stayed pending or missed its expectation.
+// Usage and file errors exit 2 (see main).
+export const exitCode = rows => (rows.some(r => r.problem) ? 1 : 0);
+
+export async function main(argv, { out = console.log, err = console.error, lookup = lookupAll, read = path => readFile(path, 'utf8') } = {}) {
+  try {
+    const options = parseArgs(argv);
+    if (options.help) { out(USAGE); return 0; }
+    const entries = validateEntries(JSON.parse(await read(options.file)));
+    const rows = await lookup(entries, { ...options, log: line => process.stderr.write(`${line}\n`) });
+    out(formatTable(rows));
+    const failed = rows.filter(r => r.problem).length;
+    out(`\n${rows.length - failed}/${rows.length} ok against ${options.base}`);
+    return exitCode(rows);
+  } catch (error) {
+    err(error.message);
+    return 2;
+  }
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
-  main().catch(error => { console.error(error.message); process.exitCode = 2; });
+  process.exitCode = await main(process.argv.slice(2));
 }
