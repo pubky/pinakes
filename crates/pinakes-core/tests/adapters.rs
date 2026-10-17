@@ -2882,6 +2882,162 @@ async fn review_upgrade_preserves_dead_letters_and_staggers_due_rows(pool: PgPoo
     assert!(sqlx::query_scalar::<_,bool>("SELECT next_attempt_at>=now() AND next_attempt_at<=now()+interval '1 hour' FROM resource WHERE id=$1").bind(live).fetch_one(&pool).await.unwrap());
 }
 
+/// A media worker storing the page card, as the media resolver does when negotiation fails.
+struct PageFallbackMedia;
+#[async_trait::async_trait]
+impl pinakes_core::resolver::Resolver for PageFallbackMedia {
+    fn name(&self) -> &'static str {
+        "media"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    fn refresh_after(&self, doc: &ResourceMeta) -> std::time::Duration {
+        std::time::Duration::from_secs(doc.ttl_secs)
+    }
+    async fn resolve(&self, uri: &str) -> anyhow::Result<ResourceMeta> {
+        let mut doc = ResourceMeta::new(uri, "web", 86400);
+        doc.set_type("WebPage");
+        doc.name = Some("Fallback page".into());
+        Ok(doc)
+    }
+}
+
+async fn route(pool: &PgPool, id: &str) -> (String, Option<String>, bool, i64) {
+    sqlx::query_as("SELECT resolver,resolved_by,next_attempt_at<=now()+interval '1 hour',generation FROM resource WHERE id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrations = false)]
+async fn round10_upgrade_from_0011_reresolves_rerouted_cards_once(pool: PgPool) {
+    use pinakes_core::queue;
+    let before = sqlx::migrate::Migrator {
+        migrations: std::borrow::Cow::Owned(
+            pinakes_core::MIGRATOR.iter().take(11).cloned().collect(),
+        ),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    before.run(&pool).await.unwrap();
+    let btc = "https://api.btcmap.org/v4/events/1";
+    let video = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+    let page = "https://example.org/article";
+    let mut ids = Vec::new();
+    for (uri, source) in [(btc, "web"), (video, "opengraph"), (page, "opengraph")] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut doc = ResourceMeta::new(uri, source, 7 * 86400);
+        doc.set_type("WebPage");
+        // The 4A web worker's card, refreshed a day ago with a week-long TTL.
+        sqlx::query("UPDATE resource SET resolver='web',status='ok',ever_existed=true,type='WebPage',doc=$2,resolved_at=now()-interval '1 day',refresh_at=now()+interval '6 days',next_attempt_at=now()+interval '6 days' WHERE id=$1")
+            .bind(&id)
+            .bind(serde_json::to_value(&doc).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        ids.push(id);
+    }
+    let (btc_id, video_id, page_id) = (&ids[0], &ids[1], &ids[2]);
+    pinakes_core::migrate(&pool).await.unwrap();
+    // 0013 restores the pre-0012 refresh date and 0015 keeps it: both cards wait six days.
+    let (resolver, by, due, btc_generation) = route(&pool, btc_id).await;
+    assert_eq!(
+        (resolver.as_str(), by, due),
+        ("event_platform", None, false)
+    );
+    let (resolver, by, due, video_generation) = route(&pool, video_id).await;
+    assert_eq!((resolver.as_str(), by, due), ("media", None, false));
+    let page_before = route(&pool, page_id).await;
+    assert_eq!(
+        (
+            page_before.0.as_str(),
+            page_before.1.as_deref(),
+            page_before.2
+        ),
+        ("web", Some("web"), false)
+    );
+
+    // Validators from the old fetch would let a 304 re-save the old card.
+    sqlx::query(
+        r#"INSERT INTO event_fetch(resource_id,validators) VALUES($1,'{"etag":"\"old\""}')"#,
+    )
+    .bind(btc_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // The startup check re-queues exactly the re-routed rows within the hour, once.
+    assert_eq!(queue::requeue_rerouted(&pool).await.unwrap(), 2);
+    assert_eq!(
+        sqlx::query_scalar::<_, Value>("SELECT validators FROM event_fetch WHERE resource_id=$1")
+            .bind(btc_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        json!({})
+    );
+    let (_, _, due, generation) = route(&pool, btc_id).await;
+    assert!(due && generation == btc_generation + 1);
+    let (_, _, due, generation) = route(&pool, video_id).await;
+    assert!(due && generation == video_generation + 1);
+    assert_eq!(route(&pool, page_id).await, page_before);
+    assert_eq!(queue::requeue_rerouted(&pool).await.unwrap(), 0);
+
+    // The stagger elapses; the new resolvers replace the cards.
+    sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=ANY($1)")
+        .bind([btc_id, video_id])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let q = pinakes_core::config::QueueConfig::default();
+    let (egress, _) = mock_egress(vec![(
+        200,
+        json!({"id":1,"status":"live","name":"BTC Map meetup",
+            "starts_at":(Utc::now()+Duration::days(3)).to_rfc3339()}),
+    )]);
+    let cfg = EventConfig {
+        geocoding: false,
+        ..Default::default()
+    };
+    let job = queue::claim(&pool, "event_platform", &q)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&job.id, btc_id);
+    queue::run_job(&pool, &platform(&pool, cfg, egress), &q, &job)
+        .await
+        .unwrap();
+    let job = queue::claim(&pool, "media", &q).await.unwrap().unwrap();
+    assert_eq!(&job.id, video_id);
+    queue::run_job(&pool, &PageFallbackMedia, &q, &job)
+        .await
+        .unwrap();
+    let saved: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT id,doc->>'source',resolved_by FROM resource WHERE id=ANY($1) ORDER BY id",
+    )
+    .bind([btc_id, video_id])
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let source = |id: &str| saved.iter().find(|s| s.0 == id).cloned().unwrap();
+    assert_eq!(
+        source(btc_id),
+        (
+            btc_id.clone(),
+            "btcmap".into(),
+            Some("event_platform".into())
+        )
+    );
+    // The fallback page card is the media route's own result: it is not re-queued again.
+    assert_eq!(
+        source(video_id),
+        (video_id.clone(), "web".into(), Some("media".into()))
+    );
+    let settled = route(&pool, video_id).await;
+    assert_eq!(queue::requeue_rerouted(&pool).await.unwrap(), 0);
+    assert_eq!(route(&pool, video_id).await, settled);
+}
+
 fn recorded_egress(rows: Vec<(&str, &str, Value)>) -> Egress {
     let map = rows
         .into_iter()

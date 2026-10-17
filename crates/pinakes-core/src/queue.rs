@@ -53,6 +53,36 @@ pub async fn claim_sources(
         RETURNING id,uri,attempts,generation"#).bind(sources).bind(cfg.lease_secs.max(15 * size as u64 + 10) as f64).bind(size as i64).fetch_all(pool).await?)
 }
 
+/// Re-queue `ok` rows whose stored document was saved under another route, e.g. after a
+/// migration re-routed them (0013 and 0015 kept the old refresh date). Runs at startup under
+/// the instance lock: batches of 1000, staggered over one hour, never later than the scheduled
+/// refresh, with leases fenced by the generation bump. Cleared validators keep a 304 from
+/// re-saving the old card. Rows already due within the hour are left alone, so restarts are
+/// idempotent; a saved document records its route and leaves the set.
+pub async fn requeue_rerouted(pool: &PgPool) -> Result<u64> {
+    let (mut last, mut total) = (String::new(), 0u64);
+    loop {
+        let ids: Vec<String> = sqlx::query_scalar(r#"WITH picked AS (
+            SELECT id FROM resource WHERE id>$1 AND status='ok' AND resolver IS NOT NULL
+              AND resolved_by IS DISTINCT FROM resolver
+              AND (final OR dead_letter OR lease_until>now() OR next_attempt_at>now()+interval '1 hour')
+            ORDER BY id LIMIT 1000),
+          fresh AS (UPDATE event_fetch SET validators='{}' WHERE resource_id IN (SELECT id FROM picked))
+          UPDATE resource r SET attempts=0,timeout_streak=0,dead_letter=false,final=false,
+            last_error=NULL,last_error_resolver=NULL,lease_until=NULL,priority_at=NULL,generation=generation+1,
+            next_attempt_at=least(next_attempt_at,now()+((('x'||substr(r.id,1,8))::bit(32)::bigint % 3600)*interval '1 second'))
+          FROM picked p WHERE r.id=p.id RETURNING r.id"#)
+            .bind(&last)
+            .fetch_all(pool)
+            .await?;
+        total += ids.len() as u64;
+        match ids.into_iter().max() {
+            Some(id) => last = id,
+            None => return Ok(total),
+        }
+    }
+}
+
 pub fn backoff(cfg: &QueueConfig, attempt: u32) -> u64 {
     cfg.backoff_secs
         .saturating_mul(

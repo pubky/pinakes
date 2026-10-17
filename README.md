@@ -286,6 +286,15 @@ SQLx migration checksums. Forward review migrations clear alias metadata/history
 install the stricter Place-envelope constraint. This path is tested from both the
 step 2 schema and the reviewed step 3 schema.
 
+Each saved document records the route that produced it (`resolved_by`). At startup, after
+taking the instance lock, `pinakesd` re-queues every `ok` resource whose route has changed
+since its document was saved, for example by a migration that re-routes a host to a new
+resolver. They are staggered over one hour and never later than the scheduled refresh,
+in batches of 1000. Migration 0037 marks cards that earlier route changes left behind (the
+generic page card on an identifier, media or platform route). A route whose own resolver
+falls back to the page card records itself, so it is refetched once and not again. The
+upgrade from the 0011 schema is tested.
+
 ## Generic events and calendars
 
 `[event]` controls JSON-LD Event/subtypes, microformats h-event, ActivityPub Event

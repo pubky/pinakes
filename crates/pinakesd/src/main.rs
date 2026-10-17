@@ -60,6 +60,11 @@ async fn main() -> Result<()> {
     if !owns_database {
         bail!("another pinakesd already owns this database");
     }
+    // Only the lock owner may fence leases; a routing change takes effect within the hour.
+    let requeued = queue::requeue_rerouted(&pool).await?;
+    if requeued > 0 {
+        tracing::info!(requeued, "re-queued documents saved under another resolver");
+    }
     pinakes_core::groups::configure(&pool, &config.groups).await?;
     let api_pool = api::pool_options().connect(&config.database_url).await?;
     let state = AppState::new(api_pool, config.clone())?;

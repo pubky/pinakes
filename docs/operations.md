@@ -70,6 +70,15 @@ double-encoded or path-parameter segments that hold only sameAs). Same-origin ca
 never trusted (only own-URI and registry keys are), so 0035 already covered them. A deployment
 that ran 0035 refetches those resources a second time, which is harmless; the 0036 header
 calls them trusted, but it is published and stays byte-identical.
+A save records the route that produced the document (`resource.resolved_by`). At startup the
+daemon re-queues `ok` rows whose `resolved_by` differs from `resolver` (batches of 1000,
+staggered over one hour, never later than the scheduled refresh, generation bump, event-fetch
+validators cleared so a 304 cannot re-save the old card). Rows already due within the hour are
+skipped, so restarts are idempotent. Migration 0037 leaves `resolved_by` empty for `ok` cards
+from the generic web extractor on the `event_platform`, `media`, `nostr`, `isbn`, `doi` and
+`activitypub` routes, which 0012/0013/0015 re-routed without refetching (0013 restores the
+pre-0012 `next_attempt_at`, and its and 0015's `greatest(...)` keep it). A config-disabled
+card kind served by the web worker records its own route, so toggling it is not re-queued.
 Aliases remain available as navigation metadata. Lock contention between group writers
 retries after 1–3 seconds without advancing the conflict backoff; inputs recorded under a
 partial (pair-budget) plan are recomputed on the next reconciliation instead of cached.
