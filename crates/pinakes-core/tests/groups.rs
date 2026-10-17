@@ -2501,3 +2501,42 @@ fn round4_tenant_shapes_cover_user_prefixes_show_pages_and_podbean_sites() {
         std::fs::remove_file(path).unwrap();
     }
 }
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round11_book_card_represents_its_open_library_edition_page(pool: PgPool) {
+    use pinakes_core::resolver::cards;
+    // The worst case for the card: its edition page is admitted first, as complete (name and
+    // cover) and with as many taggers.
+    let uri = "https://openlibrary.org/books/OL7353617M";
+    let edition = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut d = ResourceMeta::new(uri, "web", 86400);
+    d.name = Some("Fantastic Mr. Fox by Roald Dahl | Open Library".into());
+    d.image = Some("https://covers.openlibrary.org/b/id/6498519-L.jpg".into());
+    d.set_type("WebPage");
+    store::save_document(&pool, &edition, 0, &d).await.unwrap();
+    tag(&pool, &edition, &"e".repeat(52), "books").await;
+    let ol = recorded_json(
+        "https://openlibrary.org/api/books?bibkeys=ISBN:9780140328721&format=json&jscmd=data",
+        include_bytes!("fixtures/registry/openlibrary-9780140328721.json"),
+    );
+    let card = cards::parse_isbn("isbn:9780140328721", "9780140328721", &ol, 86400).unwrap();
+    let isbn = store::ensure_resource(&pool, "isbn:9780140328721")
+        .await
+        .unwrap();
+    store::save_document(&pool, &isbn, 0, &card).await.unwrap();
+    tag(&pool, &isbn, &"i".repeat(52), "books").await;
+    let group = gid(&pool, &isbn).await;
+    assert_eq!(gid(&pool, &edition).await, group);
+    assert_eq!(best(&pool, &edition).await, isbn);
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let view = get(&app, &format!("/v1/groups/{group}")).await;
+    assert_eq!(
+        (view["kind"].as_str(), view["name"].as_str()),
+        (Some("Book"), card.name.as_deref()),
+        "{view}"
+    );
+    let rows = get(&app, "/v1/search?collapse=group&tags=books").await["items"].clone();
+    assert_eq!(rows.as_array().unwrap().len(), 1, "{rows}");
+    assert_eq!(rows[0]["type"], "Book");
+    assert_eq!(rows[0]["resource_id"], isbn.as_str());
+}

@@ -498,7 +498,9 @@ same-origin canonical is that landing page and the page cites the identifier bac
 or a JSON-LD
 identifier/sameAs; Open Library's own edition pages are exempt). Registrants choose their
 landing URL, so a registration naming someone else's page does not merge into it, and the
-named page always outranks the identifier card. A page naming a DOI it does not own never
+named page outranks the identifier card. The exception is the registry's own page: an Open
+Library edition page ranks below its ISBN card, which represents the book group (migration
+0038 re-ranks existing groups). A page naming a DOI it does not own never
 merges, and only the DOI/ISBN resolvers can supply registry evidence. Migration 0028
 refetches older DOI/ISBN cards once, staggered over an hour. The PSL and hosted-blog tenant
 boundaries separate independent publishers. `collapse=group` filters members, then

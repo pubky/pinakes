@@ -285,7 +285,8 @@ doi.org and on the journal's site" groups, but registrants choose their landing 
 registry key naming a page on another site merges only when that page cites the identifier
 back (its own `doi:`/`isbn:` key from head meta or JSON-LD). Open Library edition pages are
 the registry's own site and need no citation, but only the record's own edition: other
-edition ids listed in a wiki-editable record are ignored. The named page always outranks the identifier card. Only ICS UID is scoped to exact
+edition ids listed in a wiki-editable record are ignored. The named page outranks the identifier card, except the registry's own
+page: an Open Library edition page ranks below its ISBN card, so the typed Book card represents the group. Only ICS UID is scoped to exact
 start; occurrence joins additionally require starts within five minutes. Default
 component/per-origin caps are 256/16. New excess joiners are ignored while admitted
 members remain, and located members must agree within 500 m unless curated.

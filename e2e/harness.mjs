@@ -152,11 +152,18 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
           const ids = [docs.get(kind).resource_id, docs.get(other).resource_id];
           if (!details.some(detail => ids.every(id => detail.members.some(member => member.resource_id === id)))) return false;
         }
+        // A book group is represented by its Book card, not by the registry's edition page.
+        if (docs.has('isbn') && docs.has('isbn_page')) {
+          const book = collapsed.items.find(row => row.group && details.some(detail => detail.id === row.group.id
+            && [docs.get('isbn'), docs.get('isbn_page')].every(d => detail.members.some(member => member.resource_id === d.resource_id))));
+          if (book?.type !== 'Book') return false;
+        }
         if (pairs.length) assert(collapsed.items.length < results.items.length, 'grouped samples must collapse');
         for (const row of collapsed.items) if (row.group) { assert(row.group.member_count > 0); assert(!("members" in row.group)); }
         return true;
       }, timeout, signal);
       report.assertions.push(`group collapse and membership (${samples.filter(s => s.group_with).map(s => `${s.kind}~${s.group_with}`).join(', ') || 'no pairs'})`);
+      if (docs.has('isbn') && docs.has('isbn_page')) report.assertions.push('book group represented by its Book card');
     }, report, journal);
     assert(report.cleanup.every(c => c.deleted), 'Tag cleanup failed; retry using journal');
     await waitFor('Nexus deletions', async () => { await poll(); return tags.every(tag => feed.get(tag.path)?.op === 'del'); }, timeout, signal);

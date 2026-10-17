@@ -41,7 +41,9 @@ Demotion is recomputed from live claims on every reconciliation; demoted claims 
 the remaining demoted claimants, so groups heal without operator action. There is no
 permanent tombstone. `pinakes_group_url_demotions_total` counts demotion events. In an
 automatic group, claimants rank below the member they name for the card, before taggers: a
-DOI/ISBN card below the landing page its registry names, a member whose canonical names
+DOI/ISBN card below the landing page its registry names (unless that page is on the card's own
+registry origin: an Open Library edition page is the registry's own record and ranks below its
+ISBN card, so a book group shows the Book card), a member whose canonical names
 another member (an ICS occurrence naming its event page included), and a member whose sameAs
 names another member. Two sameAs exemptions apply: a sameAs to an identifier-registry resource
 on another origin (doi.org, openlibrary.org, wikidata.org), so a publisher keeps the card, and
