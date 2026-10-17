@@ -57,8 +57,9 @@ pub async fn claim_sources(
 /// aliases or location links, say). Runs at startup under the instance lock, before
 /// `requeue_rerouted`, in batches of 1000. Failed rows are revived by the reroute trigger and
 /// `ok` rows re-resolve through `requeue_rerouted`; a row entering or leaving the OSM route gets
-/// or drops its OSM identity envelope. A page promoted to `media`/`activitypub` by its own card
-/// keeps that route, and a URI `classify` does not route keeps its hint.
+/// or drops its OSM identity envelope, and an OSM-host URL moving to web drops its facts; both
+/// become pending, fenced and staggered. A page or feed promoted to `media`/`activitypub` by its
+/// own card keeps that route, and a URI `classify` does not route keeps its hint.
 pub async fn reclassify_routes(pool: &PgPool) -> Result<u64> {
     let (mut last, mut total) = (String::new(), 0u64);
     loop {
@@ -76,8 +77,10 @@ pub async fn reclassify_routes(pool: &PgPool) -> Result<u64> {
             let Some(route) = crate::resolver::classify(&uri) else {
                 continue;
             };
+            // The web and event routes both run web extraction, whose card may promote the row.
             if stored.as_deref() == Some(route)
-                || (route == "web" && matches!(stored.as_deref(), Some("media" | "activitypub")))
+                || (matches!(route, "web" | "event")
+                    && matches!(stored.as_deref(), Some("media" | "activitypub")))
             {
                 continue;
             }
@@ -90,16 +93,38 @@ pub async fn reclassify_routes(pool: &PgPool) -> Result<u64> {
             osm_ids.push(osm.map(|o| o.id));
         }
         if !ids.is_empty() {
-            total += sqlx::query(r#"UPDATE resource r SET resolver=v.route,osm_type=v.osm_type,osm_id=v.osm_id,
+            // `reset`: the row's facts belong to no route it may keep. Entering or leaving the OSM
+            // route swaps the identity envelope; an OSM-host URL moving to web may hold no facts
+            // (`resource_web_osm_boundary`) and is refused there before any fetch. Such a row
+            // becomes pending and is re-queued like a reroute: fenced, revived, and staggered
+            // over an hour, never later than its scheduled refresh.
+            total += sqlx::query(r#"WITH v AS (
+                  SELECT v.*,
+                    (v.osm_id IS NOT NULL)<>(r.osm_id IS NOT NULL)
+                      OR (v.route='web' AND lower(rtrim(r.host,'.')) ~ '(^|[.])(openstreetmap[.]org|osm[.]org)$') AS reset
+                  FROM unnest($1::text[],$2::text[],$3::text[],$4::bigint[]) v(id,route,osm_type,osm_id) JOIN resource r ON r.id=v.id)
+                UPDATE resource r SET resolver=v.route,osm_type=v.osm_type,osm_id=v.osm_id,
                 doc=CASE WHEN v.osm_id IS NOT NULL THEN jsonb_build_object('type','Place','url',r.uri,'osm_id',v.osm_type||'/'||v.osm_id,'source','osm','status','pending')
-                  WHEN r.osm_id IS NOT NULL THEN '{}'::jsonb ELSE r.doc END,
-                type_path=CASE WHEN v.osm_id IS NOT NULL THEN NULL WHEN r.osm_id IS NOT NULL THEN '{}' ELSE r.type_path END,
-                name=CASE WHEN v.osm_id IS NOT NULL THEN NULL ELSE r.name END,
-                point=CASE WHEN v.osm_id IS NOT NULL THEN NULL ELSE r.point END,
-                category=CASE WHEN v.osm_id IS NOT NULL THEN NULL ELSE r.category END,
-                type=CASE WHEN v.osm_id IS NOT NULL THEN NULL ELSE r.type END,
-                status=CASE WHEN (v.osm_id IS NULL)<>(r.osm_id IS NULL) THEN 'pending' ELSE r.status END
-                FROM unnest($1::text[],$2::text[],$3::text[],$4::bigint[]) v(id,route,osm_type,osm_id) WHERE r.id=v.id"#)
+                  WHEN v.reset THEN '{}'::jsonb ELSE r.doc END,
+                type_path=CASE WHEN v.osm_id IS NOT NULL THEN NULL WHEN v.reset THEN '{}' ELSE r.type_path END,
+                name=CASE WHEN v.reset THEN NULL ELSE r.name END,
+                point=CASE WHEN v.reset THEN NULL ELSE r.point END,
+                category=CASE WHEN v.reset THEN NULL ELSE r.category END,
+                type=CASE WHEN v.reset THEN NULL ELSE r.type END,
+                start_at=CASE WHEN v.reset THEN NULL ELSE r.start_at END,
+                end_at=CASE WHEN v.reset THEN NULL ELSE r.end_at END,
+                venue_id=CASE WHEN v.reset THEN NULL ELSE r.venue_id END,
+                status=CASE WHEN v.reset THEN 'pending' ELSE r.status END,
+                attempts=CASE WHEN v.reset THEN 0 ELSE r.attempts END,
+                timeout_streak=CASE WHEN v.reset THEN 0 ELSE r.timeout_streak END,
+                dead_letter=CASE WHEN v.reset THEN false ELSE r.dead_letter END,
+                final=CASE WHEN v.reset THEN false ELSE r.final END,
+                lease_until=CASE WHEN v.reset THEN NULL ELSE r.lease_until END,
+                priority_at=CASE WHEN v.reset THEN NULL ELSE r.priority_at END,
+                generation=CASE WHEN v.reset THEN r.generation+1 ELSE r.generation END,
+                next_attempt_at=CASE WHEN v.reset THEN least(r.next_attempt_at,now()+((('x'||substr(r.id,1,8))::bit(32)::bigint % 3600)*interval '1 second'))
+                  ELSE r.next_attempt_at END
+                FROM v WHERE r.id=v.id"#)
                 .bind(&ids).bind(&routes).bind(&types).bind(&osm_ids).execute(pool).await?.rows_affected();
         }
         last = end;
@@ -136,12 +161,14 @@ pub async fn requeue_rerouted(pool: &PgPool) -> Result<u64> {
     }
 }
 
-/// Re-fetch `ok` rows whose document an older extractor version produced
-/// (`extracted_with` below `versions[resolver]`): parser changes otherwise reach stored
-/// documents only at their natural refresh. Runs at startup after `requeue_rerouted`, under the
-/// instance lock, in batches of 1000, staggered over `window_secs` and never later than the
-/// scheduled refresh, with leases fenced, validators cleared and OSM cache entries expired.
-/// Rows already due within the window are skipped, so restarts are idempotent; a re-saved
+/// Re-fetch `ok` rows whose document an older extractor version produced (`extracted_with`
+/// below the version of `extracted_by`, the worker kind that ran, or of the route for rows saved
+/// before that was recorded): parser changes otherwise reach stored documents only at their
+/// natural refresh. Runs at startup after `requeue_rerouted`, under the instance lock, in batches
+/// of 1000. Every outdated row loses its HTTP validators and OSM cache entry, so its next fetch,
+/// whenever it comes, re-extracts instead of re-saving the old document on a 304 or a cache hit.
+/// Rows not already due within `window_secs` are re-queued: staggered over the window and never
+/// later than the scheduled refresh, with leases fenced. Restarts are idempotent; a re-extracted
 /// document records the version.
 pub async fn reextract_outdated(
     pool: &PgPool,
@@ -150,27 +177,29 @@ pub async fn reextract_outdated(
 ) -> Result<u64> {
     let (mut last, mut total) = (String::new(), 0u64);
     loop {
-        let ids: Vec<String> = sqlx::query_scalar(r#"WITH picked AS (
-            SELECT id FROM resource WHERE id>$1 AND status='ok' AND resolver IS NOT NULL
-              AND coalesce(extracted_with,0)<coalesce(($2::jsonb->>resolver)::int,0)
-              AND (final OR dead_letter OR lease_until>now() OR next_attempt_at>now()+$3*interval '1 second')
+        let (end, requeued): (Option<String>, i64) = sqlx::query_as(r#"WITH outdated AS (
+            SELECT id,osm_type,osm_id,resolver,
+              (final OR dead_letter OR lease_until>now() OR next_attempt_at>now()+$3*interval '1 second') AS requeue
+            FROM resource WHERE id>$1 AND status='ok' AND resolver IS NOT NULL
+              AND coalesce(extracted_with,0)<coalesce(($2::jsonb->>coalesce(extracted_by,resolver))::int,0)
             ORDER BY id LIMIT 1000),
-          fresh AS (UPDATE event_fetch SET validators='{}' WHERE resource_id IN (SELECT id FROM picked)),
+          fresh AS (UPDATE event_fetch SET validators='{}' WHERE resource_id IN (SELECT id FROM outdated) AND validators<>'{}'),
           -- An OSM job is served from the osm_place cache while it is fresh; expire it so the
           -- object is looked up and mapped again (batched, under the OSM rate limit).
-          uncached AS (UPDATE osm_place o SET refresh_at=least(o.refresh_at,now()) FROM resource s
-            WHERE s.id IN (SELECT id FROM picked) AND s.resolver='osm' AND o.osm_type=s.osm_type AND o.osm_id=s.osm_id)
-          UPDATE resource r SET attempts=0,timeout_streak=0,dead_letter=false,final=false,
+          uncached AS (UPDATE osm_place o SET refresh_at=least(o.refresh_at,now()) FROM outdated s
+            WHERE s.resolver='osm' AND o.osm_type=s.osm_type AND o.osm_id=s.osm_id),
+          requeued AS (UPDATE resource r SET attempts=0,timeout_streak=0,dead_letter=false,final=false,
             last_error=NULL,last_error_resolver=NULL,lease_until=NULL,priority_at=NULL,generation=generation+1,
             next_attempt_at=least(next_attempt_at,now()+((('x'||substr(r.id,1,8))::bit(32)::bigint % $3::bigint)*interval '1 second'))
-          FROM picked p WHERE r.id=p.id RETURNING r.id"#)
+            FROM outdated p WHERE r.id=p.id AND p.requeue RETURNING r.id)
+          SELECT (SELECT max(id) FROM outdated),(SELECT count(*) FROM requeued)"#)
             .bind(&last)
             .bind(versions)
             .bind(window_secs as i64)
-            .fetch_all(pool)
+            .fetch_one(pool)
             .await?;
-        total += ids.len() as u64;
-        match ids.into_iter().max() {
+        total += requeued as u64;
+        match end {
             Some(id) => last = id,
             None => return Ok(total),
         }
@@ -324,6 +353,8 @@ async fn finish_job(
     } else {
         cfg
     };
+    // A 304 re-saves the stored document; it does not re-extract it.
+    let not_modified = matches!(&result, Err(e) if e.is::<crate::resolver::NotModified>());
     let result = match result {
         Err(error) if error.is::<crate::resolver::interstitial::Blocked>() => {
             let mut doc =
@@ -452,7 +483,12 @@ async fn finish_job(
             doc.ttl_secs = cfg.blocked_ttl_secs;
         }
         doc.validate(attrs)?;
-        crate::changes::save(pool, &job.id, job.generation, &doc, cfg).await
+        let extraction = if not_modified {
+            crate::store::Extraction::Unchanged
+        } else {
+            crate::store::Extraction::By(resolver.name())
+        };
+        crate::changes::save_extracted(pool, &job.id, job.generation, &doc, cfg, extraction).await
     }
     .await;
     if let Err(error) = result {

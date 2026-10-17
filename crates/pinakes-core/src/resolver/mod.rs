@@ -99,8 +99,11 @@ pub fn classify(uri: &str) -> Option<&'static str> {
 
 /// The extractor version of each resolver kind. Bump a resolver's number in the same commit as
 /// any change to what it extracts or how it builds group evidence: at startup, `ok` documents
-/// saved by an older version are re-fetched (`queue::reextract_outdated`), because a re-plan
-/// reuses the stored document and only a re-fetch re-runs the parser.
+/// saved by an older version of the worker kind that extracted them (`extracted_by`; web also
+/// runs the event, event_platform and disabled card routes) are re-fetched
+/// (`queue::reextract_outdated`), because a re-plan reuses the stored document and only a
+/// re-fetch re-runs the parser. Every `classify` route and card kind needs an entry: a missing
+/// one compares 0 < 0 and never re-extracts.
 pub const EXTRACTOR_VERSIONS: &[(&str, i32)] = &[
     ("web", 1),
     ("pubky", 1),
@@ -207,4 +210,42 @@ pub fn error_class(error: &anyhow::Error) -> &'static str {
         }
     }
     "parse"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_route_and_card_kind_has_an_extractor_version() {
+        let versions = extractor_versions();
+        let routes = [
+            "https://example.org/page",
+            "https://www.openstreetmap.org/node/1",
+            "https://osm.org/go/0EEQjE--",
+            "geo:46.0,8.9",
+            "webcal://example.org/calendar.ics",
+            "nostr:naddr1qqxnzd3cxqmrzv3exgmr2wfeqgsxu35yyt0mwjjh8pcz4zprhxegz69t4wr9t74vk6zne58wzh0waycrqsqqqa28pccpzu",
+            "pubky://o1gg96ewuojmopcjbz8895478wdtxtzzber7aezq6ror5a91j7dy/pub/example.app/x",
+        ];
+        let kinds = routes.iter().map(|uri| classify(uri).expect(uri));
+        for kind in kinds.chain(cards::KINDS) {
+            assert!(
+                versions[kind].as_i64().is_some_and(|v| v > 0),
+                "{kind} has no extractor version"
+            );
+        }
+        let routed: std::collections::BTreeSet<_> =
+            routes.iter().filter_map(|uri| classify(uri)).collect();
+        assert_eq!(
+            routed,
+            ["event", "event_platform", "geo", "osm", "pubky", "web"].into(),
+            "a new route needs a sample here"
+        );
+        assert_eq!(
+            EXTRACTOR_VERSIONS.len(),
+            routed.len() + cards::KINDS.len(),
+            "versions name only routes and card kinds"
+        );
+    }
 }

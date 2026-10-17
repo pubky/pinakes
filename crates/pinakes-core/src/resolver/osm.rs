@@ -72,9 +72,11 @@ pub fn public_upstream(url: &url::Url) -> bool {
     }
 }
 /// An OSM object named by its canonical URL or an alias of it: `/{type}/{id}` with an optional
-/// trailing slash or query, `/{type}/{id}/history[/{version}]`, `/edit?{type}={id}`, the editing
-/// API `api.openstreetmap.org/api/0.6/{type}/{id}[/full][.json|.xml]` (`full` for ways and
-/// relations) and Nominatim `details`/`ui/details.html?osmtype=N|W|R&osmid=`. Every alias
+/// trailing slash or query, `/{type}/{id}/history[/{version}]`, `/edit?{type}={id}`, object
+/// shortlinks `/go/<code>?{type}={id}`, the editing API
+/// `api.openstreetmap.org/api/0.6/{type}/{id}[/full][.json|.xml]` (`full` for ways and
+/// relations) and Nominatim `details`/`ui/details.html?osmtype=N|W|R&osmid=` (each exactly once,
+/// without `place_id` or `postcode`). `/edit` and shortlinks name exactly one object. Every alias
 /// resolves through the shared `osm_place` row and carries the same `osm:` group key.
 pub fn parse_id(uri: &str) -> Option<OsmId> {
     let url = url::Url::parse(uri).ok()?;
@@ -89,7 +91,12 @@ pub fn parse_id(uri: &str) -> Option<OsmId> {
     let path = url.path().strip_prefix('/')?;
     let (osm_type, digits) = match host.as_str() {
         "www.openstreetmap.org" | "openstreetmap.org" | "osm.org" | "www.osm.org" => {
-            if path == "edit" {
+            // osm.org's Share → Short link on an object page is `/go/<code>?way=N`, whose
+            // permalink redirects to `/way/N`; the code is only the map centre.
+            let shortlink = path
+                .strip_prefix("go/")
+                .is_some_and(|code| crate::resolver::geo::shortlink(code).is_some());
+            if path == "edit" || shortlink {
                 let mut found = url
                     .query_pairs()
                     .filter(|(k, _)| matches!(k.as_ref(), "node" | "way" | "relation"));
@@ -125,18 +132,26 @@ pub fn parse_id(uri: &str) -> Option<OsmId> {
             (osm_type.to_owned(), digits.to_owned())
         }
         "nominatim.openstreetmap.org" if matches!(path, "details" | "ui/details.html") => {
-            let pair = |name: &str| {
-                url.query_pairs()
-                    .find(|(k, _)| k == name)
-                    .map(|(_, v)| v.into_owned())
+            // Nominatim's details endpoint reads `place_id`, then `postcode`, before `osmtype`,
+            // and accepts only N, W and R; anything ambiguous is not an alias.
+            let only = |name: &str| {
+                let mut values = url.query_pairs().filter(|(k, _)| k == name);
+                let (_, value) = values.next()?;
+                values.next().is_none().then(|| value.into_owned())
             };
-            let osm_type = match pair("osmtype")?.to_ascii_uppercase().as_str() {
+            if url
+                .query_pairs()
+                .any(|(k, _)| matches!(k.as_ref(), "place_id" | "postcode"))
+            {
+                return None;
+            }
+            let osm_type = match only("osmtype")?.as_str() {
                 "N" => "node",
                 "W" => "way",
                 "R" => "relation",
                 _ => return None,
             };
-            (osm_type.to_owned(), pair("osmid")?)
+            (osm_type.to_owned(), only("osmid")?)
         }
         _ => return None,
     };
@@ -677,7 +692,11 @@ mod tests {
             ("https://api.openstreetmap.org/api/0.6/way/50637691/full", "way/50637691"),
             ("https://api.openstreetmap.org/api/0.6/relation/7/full.xml", "relation/7"),
             ("https://nominatim.openstreetmap.org/ui/details.html?osmtype=N&osmid=240109189", "node/240109189"),
-            ("https://nominatim.openstreetmap.org/details?osmtype=w&osmid=50637691&class=tourism", "way/50637691"),
+            ("https://nominatim.openstreetmap.org/details?osmtype=W&osmid=50637691&class=tourism", "way/50637691"),
+            // Round 13: osm.org's Share → Short link on an object page.
+            ("https://osm.org/go/0EEQjE--?way=50637691", "way/50637691"),
+            ("https://www.openstreetmap.org/go/0GAjIv8h?node=240109189&m", "node/240109189"),
+            ("https://openstreetmap.org/go/D~hV--?relation=7", "relation/7"),
         ] {
             assert_eq!(parse_id(uri).map(|id| id.key()).as_deref(), Some(key), "{uri}");
             assert_eq!(super::super::classify(uri), Some("osm"), "{uri}");
@@ -697,6 +716,17 @@ mod tests {
             "https://nominatim.openstreetmap.org/ui/details.html?osmtype=X&osmid=1",
             "https://nominatim.openstreetmap.org/ui/details.html?osmtype=N&osmid=0",
             "https://nominatim.openstreetmap.org/search?osmtype=N&osmid=1",
+            // Upstream accepts N, W and R only, and place_id/postcode take precedence.
+            "https://nominatim.openstreetmap.org/details?osmtype=w&osmid=50637691",
+            "https://nominatim.openstreetmap.org/details?osmtype=N&osmid=1&osmid=2",
+            "https://nominatim.openstreetmap.org/details?osmtype=N&osmtype=W&osmid=1",
+            "https://nominatim.openstreetmap.org/details?place_id=9&osmtype=N&osmid=1",
+            "https://nominatim.openstreetmap.org/details?postcode=6900&osmtype=N&osmid=1",
+            "https://osm.org/go/0EEQjE--",
+            "https://osm.org/go/0EEQjE--?way=1&node=2",
+            "https://osm.org/go/0EEQjE--?changeset=1",
+            "https://osm.org/go/!!?way=1",
+            "https://osm.org/go/0EEQjE--/x?way=1",
             "https://user@www.openstreetmap.org/node/1/history",
             "https://www.openstreetmap.org:8443/edit?node=1",
             "https://api.openstreetmap.org:443x/api/0.6/node/1",

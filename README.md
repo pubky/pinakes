@@ -81,12 +81,12 @@ are documented in [data/README.md](data/README.md).
 
 `geo:` URIs resolve locally to final places, and so do map links that name a point (OSM
 marker links and shortlinks, OsmAnd, Organic Maps; `[geo] location_links`, default on). Canonical
-OSM object URLs and their aliases (history, edit, editing-API and Nominatim details URLs; see
+OSM object URLs and their aliases (history, edit, object shortlink, editing-API and Nominatim details URLs; see
 [docs/api.md](docs/api.md)) use batched Nominatim lookup (up to 50 IDs/request, 30-day cache). OSM-derived fields live only
 in `osm_place`, under ODbL; a non-materialized SQL view joins them for reads and
 search. Pubky references keep their independent IDs and data. The public
-`/v1/dumps/osm_place.ndjson` stream and `pg_dump --table osm_place` export the
-complete derivative database. OSM documents, cards and clusters carry attribution.
+`/v1/dumps/osm_place.ndjson` download (an explicit, documented line format that includes every
+publicly served version) and `pg_dump --table osm_place` export the derivative database. OSM documents, cards and clusters carry attribution.
 
 Search supports bounding boxes (including the antimeridian), distance in metres,
 time windows and H3 viewport clusters. PostgreSQL filters, ranks, aggregates tags
@@ -285,7 +285,8 @@ restart or an invalid-cursor response. The key is neither configured nor persist
 At startup `pinakesd` also brings stored routing hints up to the current classification and
 re-fetches documents an older extractor produced (`queue.reextract_on_upgrade`, spread over
 `queue.reextract_window_secs`); see [docs/operations.md](docs/operations.md). A change to what
-a resolver extracts must bump its entry in `resolver::EXTRACTOR_VERSIONS` in the same commit.
+a resolver extracts must bump its entry in `resolver::EXTRACTOR_VERSIONS` in the same commit;
+rows record the worker kind that extracted them, and a 304 does not count as a re-extraction.
 
 Use `pinakesd --config <path> --migrate` for upgrades. It prepares any legacy web-fetched
 canonical OSM rows before migration 0002 reclassifies them, preserving all historical
@@ -505,7 +506,7 @@ identifier/sameAs; Open Library's own edition pages are exempt). Registrants cho
 landing URL, so a registration naming someone else's page does not merge into it, and the
 named page outranks the identifier card. The exception is the registry's own page: an Open
 Library edition page ranks below its ISBN card, which represents the book group (migration
-0038 re-ranks existing groups). A page naming a DOI it does not own never
+0039 re-ranks existing groups). A page naming a DOI it does not own never
 merges, and only the DOI/ISBN resolvers can supply registry evidence. Migration 0028
 refetches older DOI/ISBN cards once, staggered over an hour. The PSL and hosted-blog tenant
 boundaries separate independent publishers. `collapse=group` filters members, then

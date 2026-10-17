@@ -194,8 +194,10 @@ fn evidence(
 ) -> Vec<crate::group_keys::GroupKey> {
     let uri = row["uri"].as_str().unwrap_or("");
     let mut d = crate::model::ResourceMeta::new(uri, "groups", 0);
-    // Own identity always occupies the bounded slots before publisher-supplied claims.
-    if row["occurrence"].is_null() && row["event"].is_null() {
+    // Own identity always occupies the bounded slots before publisher-supplied claims. A point
+    // (`geo:` or a map link) is never an identity, so it claims no own URL key: a page whose
+    // sameAs or canonical names the exact link URL does not join it.
+    if row["occurrence"].is_null() && row["event"].is_null() && row["source"] != "geo" {
         crate::group_keys::url_keys(&mut d, uri);
         crate::group_keys::add(&mut d, "canonical", uri);
         if let Some(osm) = crate::resolver::osm::parse_id(uri) {

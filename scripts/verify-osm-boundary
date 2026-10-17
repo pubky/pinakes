@@ -26,7 +26,8 @@ IF to_regclass('resource_change') IS NOT NULL THEN
   IF EXISTS(SELECT 1 FROM resource_change WHERE source='osm' AND
     (type_path IS NOT NULL OR before-ARRAY['osm_id','version']::text[]<>'{}'::jsonb OR after-ARRAY['osm_id','version']::text[]<>'{}'::jsonb))
   THEN RAISE EXCEPTION 'OSM-derived values leaked into resource_change'; END IF;
-  IF EXISTS(SELECT 1 FROM resource_change WHERE source<>'osm' AND (coalesce(before->>'url','') ~ '^https?://([a-z0-9-]+[.])*(openstreetmap[.]org|osm[.]org)[.]?(:[0-9]+)?([/?#]|$)' OR coalesce(after->>'url','') ~ '^https?://([a-z0-9-]+[.])*(openstreetmap[.]org|osm[.]org)[.]?(:[0-9]+)?([/?#]|$)'))
+  -- Location links on OSM hosts resolve as geo points named by the URL itself (migration 0038).
+  IF EXISTS(SELECT 1 FROM resource_change WHERE source NOT IN ('osm','geo') AND (coalesce(before->>'url','') ~ '^https?://([a-z0-9-]+[.])*(openstreetmap[.]org|osm[.]org)[.]?(:[0-9]+)?([/?#]|$)' OR coalesce(after->>'url','') ~ '^https?://([a-z0-9-]+[.])*(openstreetmap[.]org|osm[.]org)[.]?(:[0-9]+)?([/?#]|$)'))
   THEN RAISE EXCEPTION 'OSM-host web facts leaked into historical changes'; END IF;
 END IF;
 END $$;

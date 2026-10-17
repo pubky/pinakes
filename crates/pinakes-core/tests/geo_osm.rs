@@ -222,8 +222,14 @@ async fn fifty_one_jobs_two_calls_cache_refresh_and_separation(pool: PgPool) {
     assert_eq!(view["attribution"], osm::ATTRIBUTION);
     assert_eq!(view["document"]["location_source"], "osm");
     assert_eq!(view["osm_id"], "node/240109189");
-    let (status, _, dump) = call(&app, "/v1/dumps/osm_place.ndjson", None).await;
+    let (status, headers, dump) = call(&app, "/v1/dumps/osm_place.ndjson", None).await;
     assert_eq!(status, 200);
+    // D1: a file download, so Swagger UI and browsers do not parse it as one JSON value.
+    assert_eq!(headers["content-type"], "application/x-ndjson");
+    assert_eq!(
+        headers["content-disposition"],
+        "attachment; filename=\"osm_place.ndjson\""
+    );
     let rows = dump
         .as_str()
         .unwrap()
@@ -233,6 +239,77 @@ async fn fifty_one_jobs_two_calls_cache_refresh_and_separation(pool: PgPool) {
     assert_eq!(rows.len(), 52);
     assert_eq!(rows[0]["licence"], "ODbL-1.0");
     assert!(rows.iter().any(|r| r["name"] == "Berlin"));
+    // D2: every line has exactly the documented fields; no internal column leaks.
+    let spec = serde_json::to_value(api::openapi_document()).unwrap();
+    let fields = |schema: &str| {
+        spec["components"]["schemas"][schema]["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let keys = |row: &Value| {
+        row.as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    assert_eq!(keys(&rows[0]), fields("OsmDumpNotice"));
+    let place = fields("OsmDumpPlace");
+    assert_eq!(
+        place.iter().map(String::as_str).collect::<Vec<_>>(),
+        [
+            "address",
+            "bbox",
+            "category",
+            "display_name",
+            "fetched_at",
+            "name",
+            "osm_id",
+            "osm_type",
+            "point",
+            "status",
+            "tags",
+            "type",
+            "type_path",
+            "versions"
+        ],
+        "the public dump line format changed"
+    );
+    let required = spec["components"]["schemas"]["OsmDumpPlace"]["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k.as_str().unwrap().to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(required, place, "every field is on every line");
+    for row in &rows[1..] {
+        assert_eq!(keys(row), place, "{row}");
+    }
+    let berlin = rows.iter().find(|r| r["name"] == "Berlin").unwrap();
+    assert_eq!(berlin["osm_type"], "node");
+    assert_eq!(berlin["osm_id"], 240109189);
+    assert!(berlin["point"]["lat"].is_f64() && berlin["point"]["lon"].is_f64());
+    assert_eq!(berlin["status"], "ok");
+    // The version a resource pins (and /v1/changes serves) is in the line.
+    let pinned: String = sqlx::query_scalar(
+        "SELECT osm_version FROM resource WHERE osm_type='node' AND osm_id=240109189 LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(berlin["versions"][&pinned]["name"], "Berlin");
+    for column in [
+        "fetch_doc",
+        "fetch_display_name",
+        "search_text",
+        "refresh_at",
+        "doc",
+    ] {
+        assert!(rows.iter().all(|r| r.get(column).is_none()), "{column}");
+    }
     assert_eq!(call(&app, "/v1/dumps/osm_place.ndjson", None).await.0, 200);
     assert_eq!(call(&app, "/v1/dumps/osm_place.ndjson", None).await.0, 429);
     assert!(
@@ -1389,4 +1466,231 @@ async fn round12_osm_reextraction_bypasses_the_fresh_cache(pool: PgPool) {
         Some(1)
     );
     server.abort();
+}
+
+/// Round 13 W1/W4: osm.org object shortlinks stored as points by round 11 become aliases of their
+/// object, and changeset/note shortlinks drop their point facts on the way to one final refusal.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round13_object_shortlinks_join_their_object_and_route_moves_are_complete(pool: PgPool) {
+    let (_, resolver, server) = mock(&pool).await;
+    let canonical = "https://www.openstreetmap.org/node/240109189";
+    let short = "https://osm.org/go/0GAjIv8h?node=240109189";
+    let changeset = "https://osm.org/go/0EEQjE--?changeset=1";
+    let note = "https://www.openstreetmap.org/go/0EEQjE--?note=5";
+    let mut ids = HashMap::new();
+    for uri in [canonical, short, changeset, note] {
+        ids.insert(uri, store::ensure_resource(&pool, uri).await.unwrap());
+    }
+    // What round 11 stored: final `ok` geo points at the shortlink's map centre.
+    for uri in [short, changeset, note] {
+        sqlx::query("UPDATE resource SET resolver='geo',osm_type=NULL,osm_id=NULL,doc='{}',type_path='{}',status='pending' WHERE id=$1")
+            .bind(&ids[uri])
+            .execute(&pool)
+            .await
+            .unwrap();
+        let code = uri.split("/go/").nth(1).unwrap().split('?').next().unwrap();
+        let mut doc = geo::parse_link(&format!("https://osm.org/go/{code}")).unwrap();
+        doc.url = uri.into();
+        store::save_document(&pool, &ids[uri], 0, &doc)
+            .await
+            .unwrap();
+    }
+    let state = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (Option<String>, String, bool, bool, i64, bool, bool, Value)>(
+                "SELECT resolver,status,final,dead_letter,generation,next_attempt_at<=now()+interval '1 hour',point IS NULL AND name IS NULL AND type IS NULL,doc FROM resource WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let before = state(ids[short].clone()).await;
+    assert_eq!(
+        (before.1.as_str(), before.2, before.5, before.6),
+        ("ok", true, false, false)
+    );
+    assert_eq!(queue::reclassify_routes(&pool).await.unwrap(), 3);
+    // Entering the OSM route: the envelope, pending, revived, fenced and due within the hour.
+    let (route, status, final_, dead, generation, due, cleared, doc) =
+        state(ids[short].clone()).await;
+    assert_eq!(
+        (
+            route.as_deref(),
+            status.as_str(),
+            final_,
+            dead,
+            due,
+            cleared
+        ),
+        (Some("osm"), "pending", false, false, true, true)
+    );
+    assert_eq!(generation, before.4 + 1);
+    assert_eq!(doc["osm_id"], "node/240109189");
+    // An OSM-host URL moving to web keeps no facts (resource_web_osm_boundary).
+    for uri in [changeset, note] {
+        let (route, status, final_, dead, _, due, cleared, doc) = state(ids[uri].clone()).await;
+        assert_eq!(
+            (
+                route.as_deref(),
+                status.as_str(),
+                final_,
+                dead,
+                due,
+                cleared,
+                doc
+            ),
+            (Some("web"), "pending", false, false, true, true, json!({})),
+            "{uri}"
+        );
+    }
+    assert_eq!(queue::reclassify_routes(&pool).await.unwrap(), 0);
+    assert_eq!(queue::requeue_rerouted(&pool).await.unwrap(), 0);
+
+    sqlx::query("UPDATE resource SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let jobs = queue::claim_batch(&pool, "osm", &QueueConfig::default(), 50)
+        .await
+        .unwrap();
+    assert_eq!(jobs.len(), 2);
+    queue::run_batch(&pool, &resolver, &QueueConfig::default(), &jobs)
+        .await
+        .unwrap();
+    let group = group_of(&pool, &ids[canonical])
+        .await
+        .expect("object group");
+    assert_eq!(group_of(&pool, &ids[short]).await, Some(group));
+    let web = pinakes_core::resolver::web::WebResolver {
+        oembed_policy: Default::default(),
+        cards: None,
+        events: None,
+        egress: pinakes_core::resolver::egress::Egress::new(Default::default()),
+        config: Default::default(),
+    };
+    while let Some(job) = queue::claim(&pool, "web", &QueueConfig::default())
+        .await
+        .unwrap()
+    {
+        queue::run_job(&pool, &web, &QueueConfig::default(), &job)
+            .await
+            .unwrap();
+    }
+    for uri in [changeset, note] {
+        let refused: (String, bool, Option<String>) =
+            sqlx::query_as("SELECT status,final,last_error FROM resource WHERE id=$1")
+                .bind(&ids[uri])
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            refused,
+            ("error".into(), true, Some("unsupported".into())),
+            "{uri}"
+        );
+        assert_eq!(group_of(&pool, &ids[uri]).await, None, "{uri}");
+    }
+    server.abort();
+}
+
+/// Round 13 W5: a point claims no URL key of its own, so a page naming the exact link URL as its
+/// canonical does not group with it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round13_a_page_naming_a_map_link_does_not_group_with_the_point(pool: PgPool) {
+    let link = "https://osmand.net/map?pin=52.5186925,13.3996024";
+    let page = "https://osmand.net/map?pin=52.5186925,13.3996024&utm_source=share";
+    let point = store::ensure_resource(&pool, link).await.unwrap();
+    let job = queue::claim(&pool, "geo", &QueueConfig::default())
+        .await
+        .unwrap()
+        .unwrap();
+    queue::run_job(
+        &pool,
+        &geo::GeoResolver::default(),
+        &QueueConfig::default(),
+        &job,
+    )
+    .await
+    .unwrap();
+    let other = store::ensure_resource(&pool, "https://osmand.net/blog/berlin")
+        .await
+        .unwrap();
+    let mut doc = ResourceMeta::new("https://osmand.net/blog/berlin", "web", 86400);
+    doc.set_type("WebPage");
+    doc.name = Some("Berlin on OsmAnd".into());
+    pinakes_core::group_keys::add(&mut doc, "canonical", link);
+    pinakes_core::group_keys::add(&mut doc, "same_as", page);
+    store::save_document(&pool, &other, 0, &doc).await.unwrap();
+    assert!(!sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM resource_group WHERE resource_id=$1 AND key LIKE 'url:%')"
+    )
+    .bind(&point)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+    assert_eq!(group_of(&pool, &point).await, None);
+}
+
+/// Round 13 K58: `scripts/verify-osm-boundary` accepts the geo change lines of OSM-host location
+/// links (as migration 0038 does) and still refuses web facts on OSM hosts.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round13_boundary_script_accepts_location_link_history(pool: PgPool) {
+    let marker = "https://www.openstreetmap.org/?mlat=52.5186925&mlon=13.3996024";
+    let id = store::ensure_resource(&pool, marker).await.unwrap();
+    let job = queue::claim(&pool, "geo", &QueueConfig::default())
+        .await
+        .unwrap()
+        .unwrap();
+    queue::run_job(
+        &pool,
+        &geo::GeoResolver::default(),
+        &QueueConfig::default(),
+        &job,
+    )
+    .await
+    .unwrap();
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM resource_change WHERE resource_id=$1 AND source='geo')"
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+    let database: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let mut url = url::Url::parse(&std::env::var("DATABASE_URL").unwrap()).unwrap();
+    url.set_path(&format!("/{database}"));
+    let script = || {
+        std::process::Command::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/verify-osm-boundary"
+        ))
+        .env("DATABASE_URL", url.as_str())
+        .output()
+        .unwrap()
+    };
+    let ok = script();
+    assert!(
+        ok.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    // A web change line on an OSM host (only possible without the table constraint) still fails.
+    sqlx::query("ALTER TABLE resource_change DROP CONSTRAINT change_web_osm_boundary")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource_change SET source='web' WHERE resource_id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let leaked = script();
+    assert!(!leaked.status.success());
+    assert!(String::from_utf8_lossy(&leaked.stderr).contains("leaked into historical changes"));
 }

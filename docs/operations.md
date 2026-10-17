@@ -76,18 +76,24 @@ At startup, before the re-queue below, the daemon brings every stored routing hi
 current classification (batches of 1000): a release that adds a route (OSM object aliases and
 location links in round 11) re-routes existing rows without a migration. Failed rows are revived
 by the reroute trigger, `ok` rows re-resolve through the re-queue, and a row entering or leaving
-the OSM route gets or drops its identity envelope. Pages promoted to `media`/`activitypub` by
-their own card keep that route. Migration 0038 also turns earlier OSM-host refusals from dead
+the OSM route gets or drops its identity envelope; an OSM-host URL moving to web drops its facts
+(round 13's object shortlinks enter the OSM route, changeset/note/query shortlinks leave geo for
+the web refusal). Such rows become pending with a generation bump, revived and staggered over
+an hour, never later than their scheduled refresh. Pages and feeds promoted to
+`media`/`activitypub` by their own card (through the web or event route) keep that route. Migration 0038 also turns earlier OSM-host refusals from dead
 letters into final `unsupported` rows, so they no longer count toward the dead-letter alert.
 Parser changes reach stored documents the same way. Each resolver kind has an extractor version
 (`resolver::EXTRACTOR_VERSIONS`), bumped in the same commit as any change to what it extracts
-or how it builds group evidence, and every save records it (`resource.extracted_with`). After
-the re-queue above, with `queue.reextract_on_upgrade` (default true), the daemon re-fetches `ok`
-rows whose version is below their resolver's current one. These re-fetches are spread over
-`queue.reextract_window_secs` (default 21600, 3600–604800) and are never later than the
-scheduled refresh. They run in batches of 1000, with leases fenced and fetch validators
-cleared; OSM rows also expire their `osm_place` cache entry so the object is looked up again.
-Rows already due within the window are skipped, so restarts are idempotent. A re-plan cannot
+or how it builds group evidence. Every save records the worker kind that extracted the document
+and its version (`resource.extracted_by`, `resource.extracted_with`); web workers also run the
+event, event_platform and disabled card routes, so those rows record `web`. A 304 re-save keeps
+both, because it does not re-extract. After the re-queue above, with
+`queue.reextract_on_upgrade` (default true), the daemon finds `ok` rows whose version is below
+the current one of their `extracted_by` kind (their route for rows saved before migration 0041).
+Every such row loses its fetch validators and, on the OSM route, its `osm_place` cache entry, so
+its next fetch re-extracts. Rows not already due within `queue.reextract_window_secs` (default
+21600, 3600–604800) are re-queued, spread over the window and never later than the scheduled
+refresh, in batches of 1000 with leases fenced. Restarts are idempotent. A re-plan cannot
 replace this, because it reuses the stored document. Migration 0040 marks every resolved row
 as version 0, so the first start after it re-extracts everything once, throttled by the normal
 per-host and OSM limits.

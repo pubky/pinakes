@@ -1230,3 +1230,249 @@ async fn round12_older_extractor_versions_reextract_once_and_only_their_resolver
     );
     assert_eq!(extraction(&pool, &place).await, place_before);
 }
+
+/// A worker of a given kind that re-extracts a fixed document or answers 304.
+struct Fixed {
+    name: &'static str,
+    source: &'static str,
+    not_modified: bool,
+}
+#[async_trait::async_trait]
+impl Resolver for Fixed {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    fn refresh_after(&self, doc: &ResourceMeta) -> Duration {
+        Duration::from_secs(doc.ttl_secs)
+    }
+    async fn resolve(&self, uri: &str) -> anyhow::Result<ResourceMeta> {
+        if self.not_modified {
+            return Err(pinakes_core::resolver::NotModified.into());
+        }
+        let mut doc = ResourceMeta::new(uri, self.source, 7 * 86400);
+        doc.set_type(if self.source == "media" {
+            "PodcastSeries"
+        } else {
+            "WebPage"
+        });
+        doc.name = Some("Re-extracted".into());
+        Ok(doc)
+    }
+}
+
+async fn extractor(pool: &PgPool, id: &str) -> (Option<String>, Option<i32>) {
+    sqlx::query_as("SELECT extracted_by,extracted_with FROM resource WHERE id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn validators(pool: &PgPool, id: &str) -> serde_json::Value {
+    sqlx::query_scalar("SELECT validators FROM event_fetch WHERE resource_id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Round 13 X1: every outdated row loses its validators, re-queued or not, and a 304 re-save
+/// keeps the extractor recorded with the stored document.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round13_a_304_never_stamps_an_old_document_current(pool: PgPool) {
+    let versions = pinakes_core::resolver::extractor_versions();
+    let mut ids = Vec::new();
+    for uri in [
+        "https://example.org/soon.ics",
+        "https://example.org/later.ics",
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut doc = ResourceMeta::new(uri, "event", 6 * 3600);
+        doc.name = Some("Calendar".into());
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+        sqlx::query(
+            r#"INSERT INTO event_fetch(resource_id,validators) VALUES($1,'{"etag":"\"v1\""}')"#,
+        )
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+    assert_eq!(
+        extractor(&pool, &ids[0]).await,
+        (Some("event".into()), Some(1))
+    );
+    // An `event` bump: the feed refreshing within the window is skipped by the re-queue, yet
+    // loses its validators too, so its next refresh cannot be a 304.
+    sqlx::query("UPDATE resource SET extracted_with=0,next_attempt_at=now()+CASE WHEN id=$1 THEN interval '1 minute' ELSE interval '6 days' END WHERE id=ANY($2)")
+        .bind(&ids[0])
+        .bind(&ids)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        queue::reextract_outdated(&pool, 21600, &versions)
+            .await
+            .unwrap(),
+        1
+    );
+    for id in &ids {
+        assert_eq!(validators(&pool, id).await, serde_json::json!({}), "{id}");
+    }
+    // A 304 anyway (an upstream ignoring the missing validator): the stored document is re-saved
+    // with its old extractor, so the next start still finds it outdated.
+    sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+        .bind(&ids[0])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let job = queue::claim(&pool, "event", &QueueConfig::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.id, ids[0]);
+    let unchanged = Fixed {
+        name: "event",
+        source: "event",
+        not_modified: true,
+    };
+    queue::run_job(&pool, &unchanged, &QueueConfig::default(), &job)
+        .await
+        .unwrap();
+    let (status, resolved): (String, bool) = sqlx::query_as(
+        "SELECT status,resolved_at>now()-interval '1 minute' FROM resource WHERE id=$1",
+    )
+    .bind(&ids[0])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((status.as_str(), resolved), ("ok", true));
+    assert_eq!(
+        extractor(&pool, &ids[0]).await,
+        (Some("event".into()), Some(0))
+    );
+    sqlx::query("UPDATE resource SET next_attempt_at=now()+interval '6 days' WHERE id=$1")
+        .bind(&ids[0])
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        queue::reextract_outdated(&pool, 21600, &versions)
+            .await
+            .unwrap(),
+        1
+    );
+    // A full fetch re-extracts and records the version.
+    sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+        .bind(&ids[0])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let job = queue::claim(&pool, "event", &QueueConfig::default())
+        .await
+        .unwrap()
+        .unwrap();
+    let fresh = Fixed {
+        name: "event",
+        source: "event",
+        not_modified: false,
+    };
+    queue::run_job(&pool, &fresh, &QueueConfig::default(), &job)
+        .await
+        .unwrap();
+    assert_eq!(
+        extractor(&pool, &ids[0]).await,
+        (Some("event".into()), Some(1))
+    );
+}
+
+/// Round 13 X2: the worker kind that ran is recorded and compared, so a `web` bump reaches card
+/// rows a web worker extracted while their card kind was off.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round13_reextraction_follows_the_worker_that_extracted(pool: PgPool) {
+    let video = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+    let id = store::ensure_resource(&pool, video).await.unwrap();
+    let route: String = sqlx::query_scalar("SELECT resolver FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(route, "media");
+    // cards.media off: the web worker claims the media route and extracts a web page.
+    let jobs = queue::claim_sources(&pool, &["web", "media"], &QueueConfig::default(), 1)
+        .await
+        .unwrap();
+    let web = Fixed {
+        name: "web",
+        source: "web",
+        not_modified: false,
+    };
+    queue::run_job(&pool, &web, &QueueConfig::default(), &jobs[0])
+        .await
+        .unwrap();
+    assert_eq!(extractor(&pool, &id).await, (Some("web".into()), Some(1)));
+    sqlx::query("UPDATE resource SET next_attempt_at=now()+interval '6 days' WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut media = pinakes_core::resolver::extractor_versions();
+    media["media"] = 2.into();
+    assert_eq!(
+        queue::reextract_outdated(&pool, 21600, &media)
+            .await
+            .unwrap(),
+        0
+    );
+    let mut web_bump = pinakes_core::resolver::extractor_versions();
+    web_bump["web"] = 2.into();
+    assert_eq!(
+        queue::reextract_outdated(&pool, 21600, &web_bump)
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+/// Round 13 W2: a feed on the `event` route promoted to `media` by its own card keeps that route
+/// across restarts instead of flipping back and being fetched again.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round13_promoted_event_route_rows_survive_restarts(pool: PgPool) {
+    let feed = "https://example.org/podcast/feed/rss";
+    let id = store::ensure_resource(&pool, feed).await.unwrap();
+    let job = queue::claim(&pool, "event", &QueueConfig::default())
+        .await
+        .unwrap()
+        .unwrap();
+    let card = Fixed {
+        name: "event",
+        source: "media",
+        not_modified: false,
+    };
+    queue::run_job(&pool, &card, &QueueConfig::default(), &job)
+        .await
+        .unwrap();
+    let state = || async {
+        sqlx::query_as::<_, (String, Option<String>, i64, chrono::DateTime<Utc>)>(
+            "SELECT resolver,resolved_by,generation,next_attempt_at FROM resource WHERE id=$1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let promoted = state().await;
+    assert_eq!(
+        (promoted.0.as_str(), promoted.1.as_deref()),
+        ("media", Some("media"))
+    );
+    for _ in 0..2 {
+        assert_eq!(queue::reclassify_routes(&pool).await.unwrap(), 0);
+        assert_eq!(queue::requeue_rerouted(&pool).await.unwrap(), 0);
+        assert_eq!(state().await, promoted);
+    }
+}

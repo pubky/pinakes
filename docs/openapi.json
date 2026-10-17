@@ -161,11 +161,19 @@
         "operationId": "osm_dump",
         "responses": {
           "200": {
-            "description": "Streaming ODbL derivative database; first line is the licence notice",
+            "description": "Streaming ODbL derivative database, sent as a file download: one JSON object per line, the licence notice first, then one cached OSM object per line",
+            "headers": {
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "`attachment; filename=\"osm_place.ndjson\"`"
+              }
+            },
             "content": {
               "application/x-ndjson": {
                 "schema": {
-                  "type": "string"
+                  "$ref": "#/components/schemas/OsmDumpLine"
                 }
               }
             }
@@ -1897,6 +1905,148 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "OsmDumpLine": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/OsmDumpNotice"
+          },
+          {
+            "$ref": "#/components/schemas/OsmDumpPlace"
+          }
+        ],
+        "description": "A dump line: the notice first, then one place per line."
+      },
+      "OsmDumpNotice": {
+        "type": "object",
+        "description": "First line of the OSM dump: the ODbL notice.",
+        "required": [
+          "notice",
+          "licence",
+          "licence_url",
+          "attribution_url",
+          "table"
+        ],
+        "properties": {
+          "attribution_url": {
+            "type": "string"
+          },
+          "licence": {
+            "type": "string",
+            "example": "ODbL-1.0"
+          },
+          "licence_url": {
+            "type": "string"
+          },
+          "notice": {
+            "type": "string"
+          },
+          "table": {
+            "type": "string",
+            "example": "osm_place"
+          }
+        }
+      },
+      "OsmDumpPlace": {
+        "type": "object",
+        "description": "One cached OSM object per line after the notice; every field is present, null where unknown.\nThe projection is explicit (`OSM_DUMP_LINE`): internal columns never reach the dump.",
+        "required": [
+          "osm_type",
+          "osm_id",
+          "name",
+          "type",
+          "type_path",
+          "category",
+          "point",
+          "bbox",
+          "address",
+          "tags",
+          "display_name",
+          "status",
+          "fetched_at",
+          "versions"
+        ],
+        "properties": {
+          "address": {
+            "type": "object"
+          },
+          "bbox": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "number",
+              "format": "double"
+            },
+            "description": "`[min_lon, min_lat, max_lon, max_lat]`."
+          },
+          "category": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OSM `key/value` category, e.g. `place/city`."
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fetched_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "osm_id": {
+            "type": "integer",
+            "format": "int64",
+            "example": 240109189
+          },
+          "osm_type": {
+            "type": "string",
+            "example": "node"
+          },
+          "point": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Point",
+                "description": "Null for cached missing objects."
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "description": "`ok` or `missing`."
+          },
+          "tags": {
+            "type": "object",
+            "description": "Allowlisted OSM tags."
+          },
+          "type": {
+            "type": "string",
+            "description": "Schema.org type, e.g. `City`."
+          },
+          "type_path": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "versions": {
+            "type": "object",
+            "description": "Every derived document served publicly, keyed by the version hash that\n`/v1/changes` and pinned resource documents name."
           }
         }
       },

@@ -1094,7 +1094,10 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         LookupRequest,
         ResolveRequest,
         TagFacet,
-        Facets
+        Facets,
+        OsmDumpLine,
+        OsmDumpNotice,
+        OsmDumpPlace
     ))
 )]
 pub struct ApiDoc;
@@ -1122,7 +1125,72 @@ async fn openapi() -> Json<Value> {
     Json(serde_json::to_value(openapi_document()).expect("OpenAPI serialization"))
 }
 
-#[utoipa::path(get,path="/v1/dumps/osm_place.ndjson",responses((status=200,description="Streaming ODbL derivative database; first line is the licence notice",content_type="application/x-ndjson",body=String),(status=429,description="Dump request budget exhausted")))]
+/// First line of the OSM dump: the ODbL notice.
+#[derive(ToSchema)]
+#[allow(dead_code)]
+pub struct OsmDumpNotice {
+    notice: String,
+    #[schema(example = "ODbL-1.0")]
+    licence: String,
+    licence_url: String,
+    attribution_url: String,
+    #[schema(example = "osm_place")]
+    table: String,
+}
+/// One cached OSM object per line after the notice; every field is present, null where unknown.
+/// The projection is explicit (`OSM_DUMP_LINE`): internal columns never reach the dump.
+#[derive(ToSchema)]
+#[allow(dead_code)]
+pub struct OsmDumpPlace {
+    #[schema(example = "node")]
+    osm_type: String,
+    #[schema(example = 240109189)]
+    osm_id: i64,
+    #[schema(required = true)]
+    name: Option<String>,
+    /// Schema.org type, e.g. `City`.
+    r#type: String,
+    type_path: Vec<String>,
+    /// OSM `key/value` category, e.g. `place/city`.
+    #[schema(required = true)]
+    category: Option<String>,
+    /// Null for cached missing objects.
+    #[schema(required = true)]
+    point: Option<model::Point>,
+    /// `[min_lon, min_lat, max_lon, max_lat]`.
+    #[schema(required = true)]
+    bbox: Option<Vec<f64>>,
+    #[schema(value_type = Object)]
+    address: Value,
+    /// Allowlisted OSM tags.
+    #[schema(value_type = Object)]
+    tags: Value,
+    #[schema(required = true)]
+    display_name: Option<String>,
+    /// `ok` or `missing`.
+    status: String,
+    fetched_at: chrono::DateTime<chrono::Utc>,
+    /// Every derived document served publicly, keyed by the version hash that
+    /// `/v1/changes` and pinned resource documents name.
+    #[schema(value_type = Object)]
+    versions: Value,
+}
+/// A dump line: the notice first, then one place per line.
+#[derive(ToSchema)]
+#[allow(dead_code, clippy::large_enum_variant)]
+#[serde(untagged)]
+pub enum OsmDumpLine {
+    Notice(OsmDumpNotice),
+    Place(OsmDumpPlace),
+}
+/// The public dump line format (see `OsmDumpPlace`); a new `osm_place` column is not exported
+/// until it is added here, to the schema and to docs/api.md.
+pub const OSM_DUMP_LINE: &str = "SELECT jsonb_build_object('osm_type',osm_type,'osm_id',osm_id,'name',name,'type',type,'type_path',type_path,'category',category,\
+    'point',CASE WHEN point IS NULL THEN NULL ELSE jsonb_build_object('lat',ST_Y(point),'lon',ST_X(point)) END,\
+    'bbox',bbox,'address',address,'tags',tags,'display_name',display_name,'status',status,'fetched_at',fetched_at,'versions',versions) \
+    FROM osm_place ORDER BY osm_type,osm_id";
+
+#[utoipa::path(get,path="/v1/dumps/osm_place.ndjson",responses((status=200,description="Streaming ODbL derivative database, sent as a file download: one JSON object per line, the licence notice first, then one cached OSM object per line",content_type="application/x-ndjson",body=OsmDumpLine,headers(("Content-Disposition"=String,description="`attachment; filename=\"osm_place.ndjson\"`"))),(status=429,description="Dump request budget exhausted")))]
 async fn osm_dump(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -1168,7 +1236,7 @@ async fn osm_dump(
                 .await
                 .map_err(std::io::Error::other)?;
             send_dump(&sender,format!("{}\n",json!({"notice":crate::resolver::osm::ATTRIBUTION,"licence":"ODbL-1.0","licence_url":"https://opendatacommons.org/licenses/odbl/1-0/","attribution_url":"https://www.openstreetmap.org/copyright","table":"osm_place"})),chunk).await?;
-            let mut rows=sqlx::query_scalar::<_,Value>("SELECT to_jsonb(o)-'point' || jsonb_build_object('point',CASE WHEN point IS NULL THEN NULL ELSE jsonb_build_object('lat',ST_Y(point),'lon',ST_X(point)) END) FROM osm_place o ORDER BY osm_type,osm_id").fetch(&mut *tx);
+            let mut rows = sqlx::query_scalar::<_, Value>(OSM_DUMP_LINE).fetch(&mut *tx);
             while let Some(row) = tokio::time::timeout(chunk, rows.try_next())
                 .await
                 .map_err(std::io::Error::other)?
@@ -1192,6 +1260,11 @@ async fn osm_dump(
         [
             (header::CONTENT_TYPE, "application/x-ndjson"),
             (header::CACHE_CONTROL, "no-store"),
+            // A file: browsers and Swagger UI download it instead of parsing it as one JSON value.
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"osm_place.ndjson\"",
+            ),
         ],
         axum::body::Body::from_stream(stream),
     )

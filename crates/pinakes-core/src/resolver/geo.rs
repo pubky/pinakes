@@ -196,7 +196,8 @@ fn text_point(lat: &str, lon: &str, zoom: Option<String>) -> Option<LocationLink
         text: zoom.is_none().then(|| (lat.to_owned(), lon.to_owned())),
     })
 }
-/// OSM marker links (`/?mlat=&mlon=`) and shortlinks (`/go/<code>`, `?m` marks a marker), OsmAnd
+/// OSM marker links (`/?mlat=&mlon=`) and shortlinks (`/go/<code>`, `?m` marks a marker; not
+/// with `node`, `way`, `relation`, `changeset`, `note` or `query`), OsmAnd
 /// `map?pin=lat,lon` and `go?lat=&lon=&z=`, and Organic Maps `omaps.app/<ge0 code>[/<name>]`.
 /// Fragments are ignored: the identity rule drops them before a link is stored.
 pub fn location_link(uri: &str) -> Option<LocationLink> {
@@ -216,6 +217,16 @@ pub fn location_link(uri: &str) -> Option<LocationLink> {
     };
     match host.as_str() {
         "www.openstreetmap.org" | "openstreetmap.org" | "osm.org" | "www.osm.org" => {
+            // A link that names an object, changeset, note or query is about that, not about
+            // its map centre: objects are OSM aliases, the rest stay refused.
+            if url.query_pairs().any(|(k, _)| {
+                matches!(
+                    k.as_ref(),
+                    "node" | "way" | "relation" | "changeset" | "note" | "query"
+                )
+            }) {
+                return None;
+            }
             match url.path() {
                 "/" => text_point(&query("mlat")?, &query("mlon")?, query("zoom")),
                 path => shortlink(path.strip_prefix("/go/")?),
@@ -447,8 +458,26 @@ mod tests {
             "https://omaps.app/Byqqqqqqq",
             "https://example.org/go/0EEQjE--",
             "https://u@osm.org/go/0EEQjE--",
+            // Round 13: object, changeset, note and query links are not map points.
+            "https://osm.org/go/0EEQjE--?way=50637691",
+            "https://osm.org/go/0EEQjE--?node=1&m",
+            "https://osm.org/go/0EEQjE--?relation=7",
+            "https://osm.org/go/0EEQjE--?way=1&way=2",
+            "https://osm.org/go/0EEQjE--?changeset=1",
+            "https://osm.org/go/0EEQjE--?note=1",
+            "https://osm.org/go/0EEQjE--?query=52.5,13.4",
+            "https://www.openstreetmap.org/?mlat=52.5&mlon=13.4&note=1",
         ] {
             assert!(location_link(uri).is_none(), "{uri}");
+        }
+        for (uri, route) in [
+            ("https://osm.org/go/0EEQjE--?way=50637691", Some("osm")),
+            ("https://osm.org/go/0EEQjE--?way=1&way=2", Some("web")),
+            ("https://osm.org/go/0EEQjE--?changeset=1", Some("web")),
+            ("https://osm.org/go/0EEQjE--?note=1", Some("web")),
+            ("https://osm.org/go/0EEQjE--?query=52.5,13.4", Some("web")),
+        ] {
+            assert_eq!(super::super::classify(uri), route, "{uri}");
         }
         assert_eq!(
             super::super::classify("https://www.openstreetmap.org/#map=12/52.5/13.4"),

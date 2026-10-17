@@ -166,18 +166,40 @@ pub async fn save_document(
     )
     .await
 }
+/// Which extractor produced a saved document, recorded as `extracted_by`/`extracted_with` for
+/// `queue::reextract_outdated`.
+#[derive(Clone, Copy, Debug)]
+pub enum Extraction<'a> {
+    /// The worker of the row's own route (direct saves).
+    Route,
+    /// This worker kind ran, e.g. `web` for a disabled card kind or an `event` row.
+    By(&'a str),
+    /// A 304 re-saved the stored document: the extractor recorded with it stands.
+    Unchanged,
+}
+impl Extraction<'_> {
+    fn binds(self) -> (bool, Option<String>) {
+        match self {
+            Self::Route => (false, None),
+            Self::By(kind) => (false, Some(kind.to_owned())),
+            Self::Unchanged => (true, None),
+        }
+    }
+}
 pub(crate) async fn write_document(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
     generation: i64,
     doc: &ResourceMeta,
+    extraction: Extraction<'_>,
 ) -> Result<()> {
+    let (unchanged, kind) = extraction.binds();
     if doc.source == "osm" {
         let osm = crate::resolver::osm::parse_id(&doc.url)
             .ok_or_else(|| anyhow::anyhow!("invalid OSM document identity"))?;
         let minimal = serde_json::json!({"type":"Place","url":doc.url,"osm_id":osm.key(),"source":"osm","status":doc.status});
-        sqlx::query("UPDATE resource SET osm_type=$3,osm_id=$4,type=NULL,type_path=NULL,name=NULL,category=NULL,point=NULL,doc=$5,status=$6,ever_existed=ever_existed OR $6='ok',resolved_at=now(),resolved_by=resolver,extracted_with=coalesce(($10::jsonb->>resolver)::int,0),refresh_at=to_timestamp($7::float8/1000)+$8*interval '1 second',next_attempt_at=to_timestamp($7::float8/1000)+$8*interval '1 second',attempts=0,timeout_streak=0,dead_letter=false,last_error=NULL,lease_until=NULL,priority_at=NULL,osm_version=md5($9::jsonb::text) WHERE id=$1 AND generation=$2")
-            .bind(id).bind(generation).bind(&osm.osm_type).bind(osm.id).bind(minimal).bind(doc.status.as_str()).bind(doc.fetched_at as f64).bind(doc.ttl_secs as f64).bind(crate::changes::normalize(doc)).bind(crate::resolver::extractor_versions()).execute(&mut **tx).await?;
+        sqlx::query("UPDATE resource SET osm_type=$3,osm_id=$4,type=NULL,type_path=NULL,name=NULL,category=NULL,point=NULL,doc=$5,status=$6,ever_existed=ever_existed OR $6='ok',resolved_at=now(),resolved_by=resolver,extracted_by=CASE WHEN $11 THEN extracted_by ELSE coalesce($12,resolver) END,extracted_with=CASE WHEN $11 THEN extracted_with ELSE coalesce(($10::jsonb->>coalesce($12,resolver))::int,0) END,refresh_at=to_timestamp($7::float8/1000)+$8*interval '1 second',next_attempt_at=to_timestamp($7::float8/1000)+$8*interval '1 second',attempts=0,timeout_streak=0,dead_letter=false,last_error=NULL,lease_until=NULL,priority_at=NULL,osm_version=md5($9::jsonb::text) WHERE id=$1 AND generation=$2")
+            .bind(id).bind(generation).bind(&osm.osm_type).bind(osm.id).bind(minimal).bind(doc.status.as_str()).bind(doc.fetched_at as f64).bind(doc.ttl_secs as f64).bind(crate::changes::normalize(doc)).bind(crate::resolver::extractor_versions()).bind(unchanged).bind(&kind).execute(&mut **tx).await?;
         sqlx::query("UPDATE osm_place SET point=CASE WHEN $3::float8 IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint($4,$3),4326) END,bbox=$5,name=$6,category=$7,address=$8,tags=$9,type=$10,type_path=$11,doc=$12,status=$13,display_name=CASE WHEN $13='ok' THEN fetch_display_name ELSE display_name END,versions=versions || jsonb_build_object(md5($14::jsonb::text),$14::jsonb) WHERE osm_type=$1 AND osm_id=$2")
             .bind(&osm.osm_type).bind(osm.id).bind(doc.location.as_ref().map(|p|p.lat)).bind(doc.location.as_ref().map(|p|p.lon)).bind(doc.bbox.map(|b|b.to_vec())).bind(&doc.name).bind(&doc.category).bind(serde_json::json!(doc.address)).bind(serde_json::json!(doc.attributes)).bind(&doc.type_name).bind(&doc.type_path).bind(serde_json::json!(doc)).bind(doc.status.as_str()).bind(crate::changes::normalize(doc)).execute(&mut **tx).await?;
         return Ok(());
@@ -185,24 +207,25 @@ pub(crate) async fn write_document(
     sqlx::query(r#"UPDATE resource SET type=$3, type_path=$4, name=$5, category=$6,
         point=CASE WHEN $7::double precision IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint($8,$7),4326) END,
         start_at=$9, end_at=$10, venue_id=$14, doc=$11, status=$12, ever_existed=ever_existed OR $12='ok', resolved_at=now(), resolved_by=resolver,
-        extracted_with=coalesce(($15::jsonb->>resolver)::int,0),
+        extracted_by=CASE WHEN $16 THEN extracted_by ELSE coalesce($17,resolver) END,
+        extracted_with=CASE WHEN $16 THEN extracted_with ELSE coalesce(($15::jsonb->>coalesce($17,resolver))::int,0) END,
         refresh_at=now()+NULLIF($13,0)*interval '1 second', next_attempt_at=coalesce(now()+NULLIF($13,0)*interval '1 second','infinity'::timestamptz), final=($13=0),
         attempts=0, timeout_streak=0, dead_letter=false, last_error=NULL, lease_until=NULL, priority_at=NULL
         WHERE id=$1 AND generation=$2"#)
         .bind(id).bind(generation).bind(&doc.type_name).bind(&doc.type_path).bind(&doc.name).bind(&doc.category)
         .bind(doc.location.as_ref().map(|p| p.lat)).bind(doc.location.as_ref().map(|p| p.lon))
         .bind(doc.start).bind(doc.end).bind(serde_json::to_value(doc)?).bind(doc.status.as_str()).bind(doc.ttl_secs as f64).bind(doc.event.venue.as_ref().and_then(|v|v.resource_id.as_deref()))
-        .bind(crate::resolver::extractor_versions())
+        .bind(crate::resolver::extractor_versions()).bind(unchanged).bind(&kind)
         .execute(&mut **tx).await?;
     if matches!(doc.source.as_str(), "media" | "activitypub")
         && doc.status == crate::model::Status::Ok
     {
-        // A promoted card is already that route's card, so it is not re-queued at startup.
-        sqlx::query("UPDATE resource SET resolver=$2,resolved_by=$2,extracted_with=coalesce(($4::jsonb->>$2)::int,0) WHERE id=$1 AND generation=$3")
+        // A promoted card is already that route's card, so it is not re-queued at startup; the
+        // extractor that produced it stays recorded.
+        sqlx::query("UPDATE resource SET resolver=$2,resolved_by=$2 WHERE id=$1 AND generation=$3")
             .bind(id)
             .bind(&doc.source)
             .bind(generation)
-            .bind(crate::resolver::extractor_versions())
             .execute(&mut **tx)
             .await?;
     }

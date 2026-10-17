@@ -159,6 +159,25 @@ pub async fn save(
     doc: &ResourceMeta,
     cfg: &crate::config::QueueConfig,
 ) -> Result<()> {
+    save_extracted(
+        pool,
+        id,
+        generation,
+        doc,
+        cfg,
+        crate::store::Extraction::Route,
+    )
+    .await
+}
+/// `save`, recording which extractor produced `doc` (see `store::Extraction`).
+pub async fn save_extracted(
+    pool: &PgPool,
+    id: &str,
+    generation: i64,
+    doc: &ResourceMeta,
+    cfg: &crate::config::QueueConfig,
+    extraction: crate::store::Extraction<'_>,
+) -> Result<()> {
     let mut prepared = if let Some(container) = &doc.container {
         Some(
             crate::event::storage::prepare(pool, id, container, doc.fetched_at, doc.ttl_secs)
@@ -316,7 +335,7 @@ pub async fn save(
         .map(|v| serde_json::from_value::<ResourceMeta>(v).map(|d| normalize(&d)))
         .transpose()?;
     let after = normalize(&doc);
-    crate::store::write_document(&mut tx, id, generation, &doc).await?;
+    crate::store::write_document(&mut tx, id, generation, &doc, extraction).await?;
     let diff = diff(before.as_ref(), Some(&after))
         .filter(|_| !social_missing && (before.is_some() || doc.status != Status::Missing));
     if let Some(plan) = prepared

@@ -19,7 +19,7 @@ Nexus in a separate call. All paths below are relative to the Pinakes origin.
 | `GET /v1/changes` | `cursor`, `class`, `type`, `source`, `limit` | Change page with ascending sequence cursor |
 | `POST /v1/changes/lookup` | `{resource_ids:[...], since, cursor?, limit?}` | Changes to 1–500 requested IDs since a timestamp |
 | `GET /v1/resources/{id}/changes` | Same filters as changes | Resource history, including after expiry |
-| `GET /v1/dumps/osm_place.ndjson` | None | Streaming ODbL notice followed by every `osm_place` row; 2 requests/minute per socket IP by default |
+| `GET /v1/dumps/osm_place.ndjson` | None | ODbL derivative database as a file download: the licence notice, then one line per cached OSM object (format below); 2 requests/minute per socket IP by default |
 | `GET /v1/openapi.json` | None | Generated OpenAPI 3.1 |
 
 `lookup` also accepts the Nexus-compatible alias `resource_ids` for `ids`.
@@ -143,29 +143,53 @@ OSM documents include `osm_id`, `location_source:osm`, `bbox` in API bbox order,
 `address` (street, house_number, postcode, city, country_code when present), category,
 allowlisted attributes and attribution. OSM metadata is composed from `osm_place`
 at read time. The resource table contains only OSM IDs and a minimal envelope.
-`/v1/info` declares ODbL and the dump URL; the dump's first NDJSON line declares its
-licence, followed by a repeatable-read snapshot of the table. It includes cached
-missing records, with null geometry. No Pubky references or scores are exported.
+`/v1/info` declares ODbL and the dump URL. The dump is sent as a file
+(`Content-Disposition: attachment; filename="osm_place.ndjson"`, `application/x-ndjson`), so
+browsers and Swagger UI download it. Its first line is the licence notice
+(`notice`, `licence`, `licence_url`, `attribution_url`, `table`), followed by a repeatable-read
+snapshot of the table, one object per line with exactly these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `osm_type`, `osm_id` | The OSM object (`node`/`way`/`relation`, positive id) |
+| `name`, `type`, `type_path`, `category` | Current name, schema.org type and its path, OSM `key/value` category |
+| `point`, `bbox` | `{lat, lon}` and `[min_lon, min_lat, max_lon, max_lat]`; null for missing objects |
+| `address`, `tags`, `display_name` | Address parts, allowlisted OSM tags, Nominatim display name |
+| `status` | `ok`, or `missing` for cached missing records |
+| `fetched_at` | When Nominatim last returned the object |
+| `versions` | Every derived document served publicly, keyed by the version hash that pinned resource documents and `/v1/changes` name, so earlier values the change feed shows are in the dump |
+
+Internal columns (the raw fetch, the search vector, the refresh schedule) are not exported, and a
+new column is not exported until it is added to this list, the OpenAPI schema `OsmDumpPlace`
+and the dump query. No Pubky references or scores are exported.
 
 OSM object URLs on `www.openstreetmap.org`, `openstreetmap.org`, `osm.org` and
 `www.osm.org` use the OSM resolver over HTTP(S), including a trailing slash or query. So do
-object aliases: `/{type}/{id}/history[/{version}]`, `/edit?{type}={id}`, the editing API
-`api.openstreetmap.org/api/0.6/{type}/{id}[/full][.json|.xml]` (`full` for ways and
-relations) and Nominatim `details`/`ui/details.html?osmtype=N|W|R&osmid=`. Each spelling keeps
+object aliases: `/{type}/{id}/history[/{version}]`, `/edit?{type}={id}`, object shortlinks
+from Share → Short link on an object page (`/go/<code>?{type}={id}`, which osm.org redirects to
+`/{type}/{id}`), the editing API `api.openstreetmap.org/api/0.6/{type}/{id}[/full][.json|.xml]`
+(`full` for ways and relations) and Nominatim `details`/`ui/details.html?osmtype=N|W|R&osmid=`.
+`/edit` and shortlinks name exactly one `node`, `way` or `relation`. Nominatim aliases need
+exactly one `osmtype` (uppercase `N`, `W` or `R`, as Nominatim itself requires) and one `osmid`,
+and no `place_id` or `postcode`, which Nominatim would read first. Each spelling keeps
 its own resource ID; matching object IDs share only the derivative `osm_place` row (no extra
 Nominatim request) and group through the shared `osm:` key. The unchanged identity crate strips
 fragments before classification.
 
 Location links resolve offline as `geo` Place points (`[geo] location_links`, default on):
-OSM marker links (`/?mlat=&mlon=`, optional `zoom`), OSM shortlinks (`osm.org/go/<code>` and
-`openstreetmap.org/go/<code>`, `?m` marks a marker; openstreetmap-website's encoding), OsmAnd
+OSM marker links (`/?mlat=&mlon=`, optional `zoom`), OSM shortlinks (`/go/<code>` on
+`osm.org`, `www.osm.org`, `openstreetmap.org` and `www.openstreetmap.org`, `?m` marks a marker;
+openstreetmap-website's encoding), OsmAnd
 `osmand.net/map?pin=lat,lon` and `osmand.net/go?lat=&lon=&z=`, and Organic Maps
 `omaps.app/<ge0 code>[/<name>]` (Organic Maps' ge0 encoding). `attributes.precision` comes
 from the link's zoom where present, else from the coordinates' decimals. Points are not
-identity and never group. Switched off, these links wait like a disabled route and `/v1/resolve`
-returns 400.
+identity and never group: they claim no group key, not even their own URL, so a page naming the
+link as its canonical or sameAs stays apart. An OSM link with a `node`, `way`, `relation`,
+`changeset`, `note` or `query` parameter is not a location link. Switched off, these links wait
+like a disabled route and `/v1/resolve` returns 400.
 
-Every other URL on OSM hosts (including subdomains, user pages, map views and changesets)
+Every other URL on OSM hosts (including subdomains, user pages, map views, changesets and
+changeset, note or query shortlinks)
 is refused by web before any fetch: status `error`, link-only card, no metadata. A map view
 (`/#map=z/lat/lon`) is the homepage, because the identity rule drops fragments. The refusal is
 stored once as final (`last_error='unsupported'`), not retried and not dead-lettered; a refusal
