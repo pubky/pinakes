@@ -987,6 +987,61 @@ async fn swagger_ui_and_each_listener_documents_only_its_own_operations(pool: Pg
     assert_eq!(code, 200);
     let initializer = String::from_utf8(body).unwrap();
     assert!(initializer.contains("\"/v1/openapi.json\"") && !initializer.contains("petstore"));
+    // No validator badge (an image from validator.swagger.io off localhost).
+    assert!(
+        initializer.contains("\"validatorUrl\": \"none\""),
+        "{initializer}"
+    );
+    // Redirect, assets and asset 404s carry the headers; other public paths, 404s included, do not.
+    for (path, expected) in [
+        ("/swagger-ui", 303),
+        ("/swagger-ui/swagger-ui.css", 200),
+        ("/swagger-ui/swagger-initializer.js", 200),
+        ("/swagger-ui/missing.js", 404),
+    ] {
+        let (code, headers, _) = raw(&public, "GET", path, None).await;
+        assert_eq!(code.as_u16(), expected, "{path}");
+        assert_eq!(
+            headers["content-security-policy"],
+            api::SWAGGER_UI_CSP,
+            "{path}"
+        );
+        assert_eq!(headers["x-content-type-options"], "nosniff", "{path}");
+    }
+    for path in ["/", "/metrics", "/favicon.ico", "/swagger-uix", "/v1/info"] {
+        let (_, headers, _) = raw(&public, "GET", path, None).await;
+        assert!(headers.get("content-security-policy").is_none(), "{path}");
+        assert!(headers.get("x-content-type-options").is_none(), "{path}");
+    }
+    // The CSP's style hashes are exactly those of the <style> elements the served bundle renders,
+    // so a utoipa-swagger-ui bump that changes them fails here, not silently in browsers.
+    let mut rendered = std::collections::BTreeSet::new();
+    for asset in ["swagger-ui-bundle.js", "swagger-ui-standalone-preset.js"] {
+        let (code, _, body) = raw(&public, "GET", &format!("/swagger-ui/{asset}"), None).await;
+        assert_eq!(code, 200, "{asset}");
+        let js = String::from_utf8(body).unwrap();
+        let needle = "createElement(\"style\",null,\"";
+        for (at, _) in js.match_indices(needle) {
+            let css = &js[at + needle.len()..];
+            let css = &css[..css.find('"').unwrap()];
+            use base64::Engine;
+            use sha2::Digest;
+            rendered.insert(format!(
+                "'sha256-{}'",
+                base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(css))
+            ));
+        }
+    }
+    let allowed: std::collections::BTreeSet<String> = api::SWAGGER_UI_CSP
+        .split(';')
+        .find_map(|d| d.trim().strip_prefix("style-src "))
+        .unwrap()
+        .split(' ')
+        .filter(|s| s.starts_with("'sha256-"))
+        .map(str::to_owned)
+        .collect();
+    assert!(!rendered.is_empty());
+    assert_eq!(rendered, allowed);
 
     // Both documents match their snapshots and every $ref resolves.
     let docs = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/");
@@ -1055,7 +1110,9 @@ async fn swagger_ui_and_each_listener_documents_only_its_own_operations(pool: Pg
         "/swagger-ui/",
         "/swagger-ui/swagger-initializer.js",
     ] {
-        assert_eq!(raw(&public, "GET", path, None).await.0, 404, "{path}");
+        let (code, headers, _) = raw(&public, "GET", path, None).await;
+        assert_eq!(code, 404, "{path}");
+        assert!(headers.get("content-security-policy").is_none(), "{path}");
     }
     assert_eq!(call(&public, "GET", "/v1/openapi.json", None).await.0, 200);
 
@@ -1065,7 +1122,10 @@ async fn swagger_ui_and_each_listener_documents_only_its_own_operations(pool: Pg
     let public = api::router(AppState::new(pool, tight).unwrap());
     assert_eq!(raw(&public, "GET", "/swagger-ui/", None).await.0, 200);
     assert_eq!(raw(&public, "GET", "/v1/openapi.json", None).await.0, 200);
-    assert_eq!(raw(&public, "GET", "/swagger-ui/", None).await.0, 429);
+    let (code, headers, _) = raw(&public, "GET", "/swagger-ui/", None).await;
+    assert_eq!(code, 429);
+    assert_eq!(headers["content-security-policy"], api::SWAGGER_UI_CSP);
+    assert_eq!(headers["x-content-type-options"], "nosniff");
 }
 
 async fn cors_call(

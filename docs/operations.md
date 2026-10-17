@@ -192,9 +192,14 @@ in named test files; failures print paths without URL values.
 
 Swagger UI is served at `/swagger-ui` on the public listener when `api.swagger_ui` is true
 (the default; `false` returns 404). It renders the public `/v1/openapi.json` from the
-`utoipa-swagger-ui` vendored bundle (Swagger UI 5.17.14), shares the `/v1` per-IP budget and
-is sent with `X-Content-Type-Options: nosniff` and a CSP of `default-src 'self'` with no
-inline script. The bundle injects one fixed `<style>` element, allowed by its SHA-256 hash,
-and its CSS embeds a `data:` image. A bundle upgrade must re-check that hash in a browser.
+`utoipa-swagger-ui` vendored bundle (Swagger UI 5.17.14) and shares the `/v1` per-IP budget.
+Every `/swagger-ui` response (page, assets, redirect, asset 404s and budget 429s), and no
+other path, carries `X-Content-Type-Options: nosniff` and a CSP of `default-src 'self'` with
+no inline script. The bundle's logo SVG renders one fixed `<style>` element, allowed by its
+SHA-256 hash, and its CSS embeds eight `data:` images. A test recomputes the hash from the
+served bundle, so a `utoipa-swagger-ui` upgrade that changes it fails the suite. The spec
+validator badge is off (`validatorUrl: none`); off localhost it would load an image from
+validator.swagger.io. Builds use the vendored bundle; a build environment must not set
+`SWAGGER_UI_DOWNLOAD_URL`, which makes the crate's build script download the bundle instead.
 The admin listener serves its own document at `/v1/openapi.json` behind the bearer token and
 has no Swagger UI. `scripts/demo-lookup` checks resolvers read-only through `/v1/resolve`.

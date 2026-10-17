@@ -250,30 +250,41 @@ fn swagger_ui(config: &crate::config::ApiConfig) -> Router<AppState> {
     if !config.swagger_ui {
         return Router::new();
     }
+    // No validator badge: off localhost Swagger UI would load validator.swagger.io as an image.
     Router::from(
         utoipa_swagger_ui::SwaggerUi::new("/swagger-ui")
-            .config(utoipa_swagger_ui::Config::new(["/v1/openapi.json"])),
+            .config(utoipa_swagger_ui::Config::new(["/v1/openapi.json"]).validator_url("none")),
     )
-    .layer(axum::middleware::map_response(swagger_headers))
 }
-/// The vendored bundle (Swagger UI 5.17.14) runs no inline script. It injects one fixed
-/// `<style>` element, allowed by its hash, and its CSS embeds a data: image. Re-check the hash
-/// when the vendored bundle changes (a browser reports the new one as a CSP violation).
-const SWAGGER_UI_CSP: &str = "default-src 'self'; style-src 'self' 'sha256-RL3ie0nH+Lzz2YNqQN83mnU0J1ot4QL7b99vMdIX99w='; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
-async fn swagger_headers(mut response: Response) -> Response {
-    let headers = response.headers_mut();
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        header::HeaderValue::from_static(SWAGGER_UI_CSP),
-    );
-    headers.insert(
-        header::X_CONTENT_TYPE_OPTIONS,
-        header::HeaderValue::from_static("nosniff"),
-    );
+/// The vendored bundle (Swagger UI 5.17.14) runs no inline script. Its standalone preset renders
+/// the logo SVG with one fixed `<style>` element, allowed by its hash (a test recomputes it from
+/// the served bundle), and its CSS embeds eight data: images.
+pub const SWAGGER_UI_CSP: &str = "default-src 'self'; style-src 'self' 'sha256-RL3ie0nH+Lzz2YNqQN83mnU0J1ot4QL7b99vMdIX99w='; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
+/// Outermost, so `/swagger-ui` redirects, assets, asset 404s and budget 429s all carry the
+/// headers, and no other path does (a layer on the merged router would also wrap its fallback,
+/// i.e. every unmatched public path).
+async fn swagger_headers(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = request.uri().path();
+    let swagger = path == "/swagger-ui" || path.starts_with("/swagger-ui/");
+    let mut response = next.run(request).await;
+    if swagger {
+        let headers = response.headers_mut();
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            header::HeaderValue::from_static(SWAGGER_UI_CSP),
+        );
+        headers.insert(
+            header::X_CONTENT_TYPE_OPTIONS,
+            header::HeaderValue::from_static("nosniff"),
+        );
+    }
     response
 }
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route("/v1/info", get(info))
         .route("/v1/changes", get(crate::change_api::feed))
         .route("/v1/changes/lookup", post(crate::change_api::lookup))
@@ -305,8 +316,11 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             cors_headers,
         ))
-        .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
-        .with_state(state)
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024));
+    if state.config.api.swagger_ui {
+        router = router.layer(axum::middleware::from_fn(swagger_headers));
+    }
+    router.with_state(state)
 }
 #[derive(Debug)]
 pub struct ApiError(pub(crate) StatusCode, pub(crate) String);

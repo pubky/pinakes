@@ -3,6 +3,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # Public listener document (also served at /v1/openapi.json and by /swagger-ui) and the
 # admin listener document (served at admin_listen /v1/openapi.json behind the bearer check).
-cargo build -q -p pinakesd
-target/debug/pinakesd --openapi > docs/openapi.json
-target/debug/pinakesd --openapi-admin > docs/openapi.admin.json
+# Each is generated into a temporary file first, so a failed build never empties a snapshot.
+for doc in "openapi.json:--openapi" "openapi.admin.json:--openapi-admin"; do
+  tmp=$(mktemp "docs/.${doc%%:*}.XXXXXX")
+  trap 'rm -f "$tmp"' EXIT
+  cargo run -q -p pinakesd -- "${doc#*:}" > "$tmp"
+  mv "$tmp" "docs/${doc%%:*}"
+  trap - EXIT
+done
