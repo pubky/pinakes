@@ -61,6 +61,13 @@ async fn main() -> Result<()> {
         bail!("another pinakesd already owns this database");
     }
     // Only the lock owner may fence leases; a routing change takes effect within the hour.
+    let rerouted = queue::reclassify_routes(&pool).await?;
+    if rerouted > 0 {
+        tracing::info!(
+            rerouted,
+            "updated routing hints to the current classification"
+        );
+    }
     let requeued = queue::requeue_rerouted(&pool).await?;
     if requeued > 0 {
         tracing::info!(requeued, "re-queued documents saved under another resolver");

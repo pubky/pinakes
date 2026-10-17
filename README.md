@@ -79,8 +79,10 @@ it will become a git dependency on pubky-nexus after that PR merges. No social
 specs are parsed here. The pinned schema.org vocabulary and its separate license
 are documented in [data/README.md](data/README.md).
 
-`geo:` URIs resolve locally to final places. Canonical OSM object URLs use batched
-Nominatim lookup (up to 50 IDs/request, 30-day cache). OSM-derived fields live only
+`geo:` URIs resolve locally to final places, and so do map links that name a point (OSM
+marker links and shortlinks, OsmAnd, Organic Maps; `[geo] location_links`, default on). Canonical
+OSM object URLs and their aliases (history, edit, editing-API and Nominatim details URLs; see
+[docs/api.md](docs/api.md)) use batched Nominatim lookup (up to 50 IDs/request, 30-day cache). OSM-derived fields live only
 in `osm_place`, under ODbL; a non-materialized SQL view joins them for reads and
 search. Pubky references keep their independent IDs and data. The public
 `/v1/dumps/osm_place.ndjson` stream and `pg_dump --table osm_place` export the

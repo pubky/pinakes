@@ -148,11 +148,28 @@ licence, followed by a repeatable-read snapshot of the table. It includes cached
 missing records, with null geometry. No Pubky references or scores are exported.
 
 OSM object URLs on `www.openstreetmap.org`, `openstreetmap.org`, `osm.org` and
-`www.osm.org` use the OSM resolver over HTTP(S), including a trailing slash or query.
-Each spelling keeps its shared resource ID; matching object IDs share only the derivative
-`osm_place` row. The unchanged identity crate strips fragments before classification.
+`www.osm.org` use the OSM resolver over HTTP(S), including a trailing slash or query. So do
+object aliases: `/{type}/{id}/history[/{version}]`, `/edit?{type}={id}`, the editing API
+`api.openstreetmap.org/api/0.6/{type}/{id}[/full][.json|.xml]` (`full` for ways and
+relations) and Nominatim `details`/`ui/details.html?osmtype=N|W|R&osmid=`. Each spelling keeps
+its own resource ID; matching object IDs share only the derivative `osm_place` row (no extra
+Nominatim request) and group through the shared `osm:` key. The unchanged identity crate strips
+fragments before classification.
+
+Location links resolve offline as `geo` Place points (`[geo] location_links`, default on):
+OSM marker links (`/?mlat=&mlon=`, optional `zoom`), OSM shortlinks (`osm.org/go/<code>` and
+`openstreetmap.org/go/<code>`, `?m` marks a marker; openstreetmap-website's encoding), OsmAnd
+`osmand.net/map?pin=lat,lon` and `osmand.net/go?lat=&lon=&z=`, and Organic Maps
+`omaps.app/<ge0 code>[/<name>]` (Organic Maps' ge0 encoding). `attributes.precision` comes
+from the link's zoom where present, else from the coordinates' decimals. Points are not
+identity and never group. Switched off, these links wait like a disabled route and `/v1/resolve`
+returns 400.
+
 Every other URL on OSM hosts (including subdomains, user pages, map views and changesets)
-is refused by web, also after redirects: status `error`, link-only card, no metadata.
+is refused by web before any fetch: status `error`, link-only card, no metadata. A map view
+(`/#map=z/lat/lon`) is the homepage, because the identity rule drops fragments. The refusal is
+stored once as final (`last_error='unsupported'`), not retried and not dead-lettered; a refusal
+after a redirect still dead-letters after its first attempt.
 Malformed rows fail only their own object. Batch 429/5xx/timeout/body-cap outcomes defer
 jobs without charging attempts, with Retry-After bounded to one hour. Optional editing-API
 fallback is node-only.

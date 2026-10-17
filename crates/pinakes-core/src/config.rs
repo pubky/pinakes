@@ -20,6 +20,7 @@ pub struct Config {
     pub media: crate::resolver::cards::MediaConfig,
     pub event: EventConfig,
     pub geo_enabled: bool,
+    pub geo: GeoConfig,
     pub osm: OsmConfig,
     pub search: SearchConfig,
     pub pubky: ResolverConfig,
@@ -52,6 +53,7 @@ impl Default for Config {
             media: Default::default(),
             event: EventConfig::default(),
             geo_enabled: true,
+            geo: GeoConfig::default(),
             osm: OsmConfig::default(),
             search: SearchConfig::default(),
             egress: EgressConfig::default(),
@@ -290,6 +292,20 @@ impl Default for ApiConfig {
             cache_capacity: 10000,
             reach_cost: 6,
             blocked_metric_hosts: 20,
+        }
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GeoConfig {
+    /// Resolve map links that name a point (OSM marker links and shortlinks, OsmAnd, Organic
+    /// Maps) as `geo` Place points, offline. Off, they wait as a disabled route.
+    pub location_links: bool,
+}
+impl Default for GeoConfig {
+    fn default() -> Self {
+        Self {
+            location_links: true,
         }
     }
 }

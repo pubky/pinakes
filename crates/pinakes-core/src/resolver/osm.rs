@@ -71,38 +71,89 @@ pub fn public_upstream(url: &url::Url) -> bool {
         None => false,
     }
 }
+/// An OSM object named by its canonical URL or an alias of it: `/{type}/{id}` with an optional
+/// trailing slash or query, `/{type}/{id}/history[/{version}]`, `/edit?{type}={id}`, the editing
+/// API `api.openstreetmap.org/api/0.6/{type}/{id}[/full][.json|.xml]` (`full` for ways and
+/// relations) and Nominatim `details`/`ui/details.html?osmtype=N|W|R&osmid=`. Every alias
+/// resolves through the shared `osm_place` row and carries the same `osm:` group key.
 pub fn parse_id(uri: &str) -> Option<OsmId> {
     let url = url::Url::parse(uri).ok()?;
     let host = url.host_str()?.trim_end_matches('.').to_ascii_lowercase();
     if !matches!(url.scheme(), "http" | "https")
-        || !matches!(
-            host.as_str(),
-            "www.openstreetmap.org" | "openstreetmap.org" | "osm.org" | "www.osm.org"
-        )
         || !url.username().is_empty()
         || url.password().is_some()
         || url.port().is_some()
     {
         return None;
     }
-    let path = url
-        .path()
-        .strip_prefix('/')?
-        .strip_suffix('/')
-        .unwrap_or(url.path().strip_prefix('/')?);
-    let (osm_type, digits) = path.split_once('/')?;
-    if !matches!(osm_type, "node" | "way" | "relation")
-        || digits.is_empty()
-        || digits.starts_with('0')
-        || !digits.bytes().all(|c| c.is_ascii_digit())
-    {
+    let path = url.path().strip_prefix('/')?;
+    let (osm_type, digits) = match host.as_str() {
+        "www.openstreetmap.org" | "openstreetmap.org" | "osm.org" | "www.osm.org" => {
+            if path == "edit" {
+                let mut found = url
+                    .query_pairs()
+                    .filter(|(k, _)| matches!(k.as_ref(), "node" | "way" | "relation"));
+                let (k, v) = found.next()?;
+                if found.next().is_some() {
+                    return None;
+                }
+                (k.into_owned(), v.into_owned())
+            } else {
+                let path = path.strip_suffix('/').unwrap_or(path);
+                let mut parts = path.split('/');
+                let (osm_type, digits) = (parts.next()?, parts.next()?);
+                match (parts.next(), parts.next(), parts.next()) {
+                    (None, _, _) | (Some("history"), None, _) => {}
+                    (Some("history"), Some(version), None) if positive(version).is_some() => {}
+                    _ => return None,
+                }
+                (osm_type.to_owned(), digits.to_owned())
+            }
+        }
+        "api.openstreetmap.org" => {
+            let rest = path.strip_prefix("api/0.6/")?;
+            let rest = [".json", ".xml"]
+                .iter()
+                .find_map(|ext| rest.strip_suffix(ext))
+                .unwrap_or(rest);
+            let (osm_type, rest) = rest.split_once('/')?;
+            let digits = match rest.split_once('/') {
+                Some((digits, "full")) if osm_type != "node" => digits,
+                Some(_) => return None,
+                None => rest,
+            };
+            (osm_type.to_owned(), digits.to_owned())
+        }
+        "nominatim.openstreetmap.org" if matches!(path, "details" | "ui/details.html") => {
+            let pair = |name: &str| {
+                url.query_pairs()
+                    .find(|(k, _)| k == name)
+                    .map(|(_, v)| v.into_owned())
+            };
+            let osm_type = match pair("osmtype")?.to_ascii_uppercase().as_str() {
+                "N" => "node",
+                "W" => "way",
+                "R" => "relation",
+                _ => return None,
+            };
+            (osm_type.to_owned(), pair("osmid")?)
+        }
+        _ => return None,
+    };
+    if !matches!(osm_type.as_str(), "node" | "way" | "relation") {
         return None;
     }
-    let id = digits.parse::<i64>().ok().filter(|id| *id > 0)?;
     Some(OsmId {
-        osm_type: osm_type.into(),
-        id,
+        osm_type,
+        id: positive(&digits)?,
     })
+}
+/// A positive decimal id without sign or leading zero that fits in i64.
+fn positive(digits: &str) -> Option<i64> {
+    if digits.is_empty() || digits.starts_with('0') || !digits.bytes().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<i64>().ok().filter(|id| *id > 0)
 }
 fn copy_error(error: &anyhow::Error) -> anyhow::Error {
     if let Some(retry) = error.downcast_ref::<super::RetryLater>() {
@@ -611,6 +662,44 @@ mod tests {
             "https://wiki.openstreetmap.org/node/1",
             "https://evilopenstreetmap.org/node/1",
             "https://www.openstreetmap.org/node/1//",
+        ] {
+            assert!(parse_id(uri).is_none(), "{uri}");
+        }
+        // Round 11 aliases name the same object and route to the OSM resolver.
+        for (uri, key) in [
+            ("https://www.openstreetmap.org/node/240109189/history", "node/240109189"),
+            ("https://osm.org/way/50637691/history/12", "way/50637691"),
+            ("https://www.openstreetmap.org/relation/7/history/", "relation/7"),
+            ("https://www.openstreetmap.org/edit?node=240109189", "node/240109189"),
+            ("https://openstreetmap.org/edit?editor=id&way=50637691", "way/50637691"),
+            ("https://api.openstreetmap.org/api/0.6/node/240109189", "node/240109189"),
+            ("https://api.openstreetmap.org/api/0.6/node/240109189.json", "node/240109189"),
+            ("https://api.openstreetmap.org/api/0.6/way/50637691/full", "way/50637691"),
+            ("https://api.openstreetmap.org/api/0.6/relation/7/full.xml", "relation/7"),
+            ("https://nominatim.openstreetmap.org/ui/details.html?osmtype=N&osmid=240109189", "node/240109189"),
+            ("https://nominatim.openstreetmap.org/details?osmtype=w&osmid=50637691&class=tourism", "way/50637691"),
+        ] {
+            assert_eq!(parse_id(uri).map(|id| id.key()).as_deref(), Some(key), "{uri}");
+            assert_eq!(super::super::classify(uri), Some("osm"), "{uri}");
+        }
+        for uri in [
+            "https://www.openstreetmap.org/node/1/history/0",
+            "https://www.openstreetmap.org/node/1/history/2/x",
+            "https://www.openstreetmap.org/node/1/changesets",
+            "https://www.openstreetmap.org/edit",
+            "https://www.openstreetmap.org/edit?node=1&way=2",
+            "https://www.openstreetmap.org/edit?node=01",
+            "https://www.openstreetmap.org/history",
+            "https://api.openstreetmap.org/api/0.6/node/1/full",
+            "https://api.openstreetmap.org/api/0.6/node/1/ways",
+            "https://api.openstreetmap.org/api/0.6/changeset/1",
+            "https://api.openstreetmap.org/api/0.5/node/1",
+            "https://nominatim.openstreetmap.org/ui/details.html?osmtype=X&osmid=1",
+            "https://nominatim.openstreetmap.org/ui/details.html?osmtype=N&osmid=0",
+            "https://nominatim.openstreetmap.org/search?osmtype=N&osmid=1",
+            "https://user@www.openstreetmap.org/node/1/history",
+            "https://www.openstreetmap.org:8443/edit?node=1",
+            "https://api.openstreetmap.org:443x/api/0.6/node/1",
         ] {
             assert!(parse_id(uri).is_none(), "{uri}");
         }

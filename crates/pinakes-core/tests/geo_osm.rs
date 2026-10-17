@@ -316,9 +316,14 @@ async fn geo_is_final_and_sql_h3_agrees_with_h3o(pool: PgPool) {
         .await
         .unwrap()
         .unwrap();
-    queue::run_job(&pool, &geo::GeoResolver, &QueueConfig::default(), &job)
-        .await
-        .unwrap();
+    queue::run_job(
+        &pool,
+        &geo::GeoResolver::default(),
+        &QueueConfig::default(),
+        &job,
+    )
+    .await
+    .unwrap();
     let (final_state, no_refresh, no_ttl): (bool, bool, bool) = sqlx::query_as(
         "SELECT final,refresh_at IS NULL,NOT(doc?'ttl_secs') FROM resource WHERE id=$1",
     )
@@ -980,4 +985,359 @@ async fn review_group_osm_best_member_keeps_attribution_and_resource_own_name(po
     assert_eq!(doc["name"], "Own page");
     assert_eq!(doc["group"]["name"], "Berlin"); // Curated metadata survives member reads (C2).
     server.abort();
+}
+
+async fn group_of(pool: &PgPool, id: &str) -> Option<String> {
+    sqlx::query_scalar("SELECT group_id FROM group_unit WHERE resource_id=$1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+        .flatten()
+}
+
+/// Every URL style of the round-11 live probe (Berlin, node 240109189).
+#[sqlx::test(migrations = "../../migrations")]
+async fn round11_osm_url_styles_resolve_as_the_object_a_point_or_one_final_refusal(pool: PgPool) {
+    let (mock, resolver, server) = mock(&pool).await;
+    let canonical = "https://www.openstreetmap.org/node/240109189";
+    let objects = [
+        canonical,
+        "https://openstreetmap.org/node/240109189",
+        "https://osm.org/node/240109189",
+        "http://www.openstreetmap.org/node/240109189",
+        "https://www.openstreetmap.org/node/240109189/history",
+        "https://www.openstreetmap.org/node/240109189/history/3",
+        "https://www.openstreetmap.org/edit?node=240109189",
+        "https://api.openstreetmap.org/api/0.6/node/240109189",
+        "https://api.openstreetmap.org/api/0.6/node/240109189.json",
+        "https://nominatim.openstreetmap.org/ui/details.html?osmtype=N&osmid=240109189",
+        "https://nominatim.openstreetmap.org/details?osmtype=N&osmid=240109189",
+    ];
+    // The id rule drops fragments, so a #map suffix is the same resource.
+    assert_eq!(
+        pinakes_core::model::identity(&format!("{canonical}#map=12/52.5/13.4"))
+            .unwrap()
+            .0,
+        pinakes_core::model::identity(canonical).unwrap().0
+    );
+    let mut ids = Vec::new();
+    for uri in objects {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let (resolver_name, key): (String, String) =
+            sqlx::query_as("SELECT resolver,osm_type||'/'||osm_id FROM resource WHERE id=$1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            (resolver_name.as_str(), key.as_str()),
+            ("osm", "node/240109189"),
+            "{uri}"
+        );
+        ids.push(id);
+    }
+    let jobs = queue::claim_batch(&pool, "osm", &QueueConfig::default(), 50)
+        .await
+        .unwrap();
+    assert_eq!(jobs.len(), objects.len());
+    queue::run_batch(&pool, &resolver, &QueueConfig::default(), &jobs)
+        .await
+        .unwrap();
+    // One Nominatim object and one derivative row serve every alias.
+    assert_eq!(
+        *mock.calls.lock().await,
+        vec![vec!["N240109189".to_owned()]]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM osm_place")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    let group = group_of(&pool, &ids[0]).await.expect("aliases group");
+    for (uri, id) in objects.iter().zip(&ids) {
+        assert_eq!(
+            group_of(&pool, id).await.as_deref(),
+            Some(group.as_str()),
+            "{uri}"
+        );
+        assert!(sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM resource_group WHERE resource_id=$1 AND key='osm:node/240109189')"
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap());
+    }
+
+    // Location links are offline points that never group, not even with each other.
+    let points = [
+        "https://www.openstreetmap.org/?mlat=52.5186925&mlon=13.3996024",
+        "https://osm.org/go/0GAjIv8h?m",
+        "https://osmand.net/map?pin=52.5186925,13.3996024",
+        "https://osmand.net/go?lat=52.5186925&lon=13.3996024&z=17",
+        "https://omaps.app/B4srhdHVVt/Berlin",
+    ];
+    let mut point_ids = Vec::new();
+    for uri in points {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        point_ids.push(id);
+    }
+    let geo = geo::GeoResolver::default();
+    while let Some(job) = queue::claim(&pool, "geo", &QueueConfig::default())
+        .await
+        .unwrap()
+    {
+        queue::run_job(&pool, &geo, &QueueConfig::default(), &job)
+            .await
+            .unwrap();
+    }
+    for (uri, id) in points.iter().zip(&point_ids) {
+        let (status, kind, source, has_point): (String, String, String, bool) = sqlx::query_as(
+            "SELECT status,type,doc->>'source',point IS NOT NULL FROM resource WHERE id=$1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (status.as_str(), kind.as_str(), source.as_str(), has_point),
+            ("ok", "Place", "geo", true),
+            "{uri}"
+        );
+        assert_eq!(group_of(&pool, id).await, None, "{uri}");
+    }
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM resource_change WHERE resource_id=$1 AND source='geo')"
+    )
+    .bind(&point_ids[0])
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+
+    // A map view is the homepage; it, like any other OSM page, is refused once and stays final.
+    let web = pinakes_core::resolver::web::WebResolver {
+        oembed_policy: Default::default(),
+        cards: None,
+        events: None,
+        egress: pinakes_core::resolver::egress::Egress::new(Default::default()),
+        config: Default::default(),
+    };
+    let mut refused = Vec::new();
+    for uri in [
+        "https://www.openstreetmap.org/#map=12/52.5/13.4",
+        "https://www.openstreetmap.org/user/someone",
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let job = queue::claim(&pool, "web", &QueueConfig::default())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.id, id);
+        queue::run_job(&pool, &web, &QueueConfig::default(), &job)
+            .await
+            .unwrap();
+        refused.push(id);
+    }
+    for id in &refused {
+        let state: (String, i32, bool, bool, Option<String>, bool) = sqlx::query_as("SELECT status,attempts,dead_letter,final,last_error,next_attempt_at='infinity' FROM resource WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            state,
+            (
+                "error".into(),
+                1,
+                false,
+                true,
+                Some("unsupported".into()),
+                true
+            )
+        );
+    }
+    sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=ANY($1)")
+        .bind(&refused)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(queue::claim(&pool, "web", &QueueConfig::default())
+        .await
+        .unwrap()
+        .is_none());
+    server.abort();
+}
+
+#[sqlx::test(migrations = false)]
+async fn round11_upgrade_reroutes_legacy_osm_aliases_and_location_links_once(pool: PgPool) {
+    let before = sqlx::migrate::Migrator {
+        migrations: std::borrow::Cow::Owned(
+            pinakes_core::MIGRATOR.iter().take(37).cloned().collect(),
+        ),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    before.run(&pool).await.unwrap();
+    let alias = "https://www.openstreetmap.org/node/240109189/history";
+    let pending_alias = "https://www.openstreetmap.org/edit?node=240109189";
+    let marker = "https://www.openstreetmap.org/?mlat=52.5186925&mlon=13.3996024";
+    let view = "https://www.openstreetmap.org/";
+    let promoted = "https://example.org/talk";
+    let mut ids = HashMap::new();
+    for uri in [alias, pending_alias, marker, view, promoted] {
+        ids.insert(uri, store::ensure_resource(&pool, uri).await.unwrap());
+    }
+    // What the previous release stored: web routes, refused once into dead letter.
+    sqlx::query("UPDATE resource SET resolver='web',osm_type=NULL,osm_id=NULL,doc='{}',type_path='{}',status='error',attempts=1,dead_letter=true,last_error='policy',next_attempt_at=now()+interval '30 seconds' WHERE id=ANY($1)")
+        .bind([&ids[alias], &ids[marker], &ids[view]])
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET resolver='web',osm_type=NULL,osm_id=NULL,doc='{}',type_path='{}' WHERE id=$1")
+        .bind(&ids[pending_alias])
+        .execute(&pool)
+        .await
+        .unwrap();
+    // A page whose own card promoted it to the media route keeps that route.
+    let mut card = ResourceMeta::new(promoted, "media", 86400);
+    card.set_type("VideoObject");
+    card.name = Some("Talk".into());
+    store::save_document(&pool, &ids[promoted], 0, &card)
+        .await
+        .unwrap();
+    pinakes_core::migrate(&pool).await.unwrap();
+    // 0038 turns the local refusals into one final, non-dead-letter outcome.
+    let state = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (Option<String>, String, bool, bool, i32, Option<String>, bool)>(
+                "SELECT resolver,status,dead_letter,final,attempts,last_error,next_attempt_at<=now()+interval '1 hour' FROM resource WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(
+        state(ids[view].clone()).await,
+        (
+            Some("web".into()),
+            "error".into(),
+            false,
+            true,
+            1,
+            Some("unsupported".into()),
+            false
+        )
+    );
+    assert_eq!(queue::reclassify_routes(&pool).await.unwrap(), 3);
+    for uri in [alias, pending_alias] {
+        let (resolver, status, dead, final_, attempts, error, due) = state(ids[uri].clone()).await;
+        assert_eq!(
+            (
+                resolver.as_deref(),
+                status.as_str(),
+                dead,
+                final_,
+                attempts,
+                error,
+                due
+            ),
+            (Some("osm"), "pending", false, false, 0, None, true),
+            "{uri}"
+        );
+        let envelope: Value = sqlx::query_scalar(
+            "SELECT doc FROM resource WHERE id=$1 AND osm_type='node' AND osm_id=240109189",
+        )
+        .bind(&ids[uri])
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(envelope["osm_id"], "node/240109189");
+    }
+    let (resolver, _, dead, final_, attempts, error, due) = state(ids[marker].clone()).await;
+    assert_eq!(
+        (resolver.as_deref(), dead, final_, attempts, error, due),
+        (Some("geo"), false, false, 0, None, true)
+    );
+    assert_eq!(state(ids[view].clone()).await.0.as_deref(), Some("web"));
+    assert_eq!(
+        state(ids[promoted].clone()).await.0.as_deref(),
+        Some("media")
+    );
+    // Idempotent, and nothing for the round-10 check to re-queue.
+    assert_eq!(queue::reclassify_routes(&pool).await.unwrap(), 0);
+    assert_eq!(queue::requeue_rerouted(&pool).await.unwrap(), 0);
+
+    let (_, resolver, server) = mock(&pool).await;
+    sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=ANY($1)")
+        .bind([&ids[alias], &ids[pending_alias], &ids[marker]])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let jobs = queue::claim_batch(&pool, "osm", &QueueConfig::default(), 50)
+        .await
+        .unwrap();
+    queue::run_batch(&pool, &resolver, &QueueConfig::default(), &jobs)
+        .await
+        .unwrap();
+    let job = queue::claim(&pool, "geo", &QueueConfig::default())
+        .await
+        .unwrap()
+        .unwrap();
+    queue::run_job(
+        &pool,
+        &geo::GeoResolver::default(),
+        &QueueConfig::default(),
+        &job,
+    )
+    .await
+    .unwrap();
+    for uri in [alias, pending_alias, marker] {
+        assert_eq!(state(ids[uri].clone()).await.1, "ok", "{uri}");
+    }
+    assert_eq!(
+        group_of(&pool, &ids[alias]).await,
+        group_of(&pool, &ids[pending_alias]).await
+    );
+    server.abort();
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn round11_location_links_switch_off_waits_like_a_disabled_route(pool: PgPool) {
+    let marker = "https://www.openstreetmap.org/?mlat=52.5&mlon=13.4";
+    let off = geo::GeoResolver {
+        location_links: false,
+    };
+    let error = off.resolve(marker).await.unwrap_err();
+    assert_eq!(
+        error
+            .downcast_ref::<pinakes_core::resolver::RetryLater>()
+            .unwrap()
+            .class,
+        "disabled"
+    );
+    assert_eq!(
+        off.resolve("geo:52.5,13.4").await.unwrap().status,
+        Status::Ok
+    );
+    let mut config = Config::default();
+    config.geo.location_links = false;
+    let app = api::router(AppState::new(pool, config).unwrap());
+    for (uri, expected) in [(marker, 400), ("geo:52.5,13.4", 200)] {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/v1/resolve")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "uri": uri }).to_string()))
+            .unwrap();
+        request.extensions_mut().insert(ConnectInfo(
+            "127.0.0.2:1".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status().as_u16() / 100, expected / 100, "{uri}");
+    }
 }

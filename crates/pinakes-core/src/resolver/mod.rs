@@ -81,6 +81,8 @@ pub fn classify(uri: &str) -> Option<&'static str> {
             None
         }
         "http" | "https" if osm::parse_id(uri).is_some() => Some("osm"),
+        // Map links that name a point; never identity, so they never group.
+        "http" | "https" if geo::location_link(uri).is_some() => Some("geo"),
         "nostr" => Some("event_platform"),
         "http" | "https" | "webcal" | "webcals"
             if crate::event::adapters::detect(uri).is_some_and(|d| d.id != "ics") =>

@@ -952,7 +952,9 @@ pub async fn resolve(
             .is_none_or(|d| !crate::event::adapters::manifest(d, &state.config.event).enabled))
         || (resolver == "web" && !state.config.web.enabled)
         || (resolver == "pubky" && !state.config.pubky.enabled)
-        || (resolver == "geo" && !state.config.geo_enabled)
+        || (resolver == "geo"
+            && (!state.config.geo_enabled
+                || (!uri.starts_with("geo:") && !state.config.geo.location_links)))
         || (resolver == "osm" && !state.config.osm.enabled)
         || (resolver == "event" && (!state.config.event.enabled || !state.config.event.calendars))
     {

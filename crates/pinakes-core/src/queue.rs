@@ -53,6 +53,59 @@ pub async fn claim_sources(
         RETURNING id,uri,attempts,generation"#).bind(sources).bind(cfg.lease_secs.max(15 * size as u64 + 10) as f64).bind(size as i64).fetch_all(pool).await?)
 }
 
+/// Bring stored routing hints up to `classify` after a release changes a route (new OSM object
+/// aliases or location links, say). Runs at startup under the instance lock, before
+/// `requeue_rerouted`, in batches of 1000. Failed rows are revived by the reroute trigger and
+/// `ok` rows re-resolve through `requeue_rerouted`; a row entering or leaving the OSM route gets
+/// or drops its OSM identity envelope. A page promoted to `media`/`activitypub` by its own card
+/// keeps that route, and a URI `classify` does not route keeps its hint.
+pub async fn reclassify_routes(pool: &PgPool) -> Result<u64> {
+    let (mut last, mut total) = (String::new(), 0u64);
+    loop {
+        let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT id,uri,resolver FROM resource WHERE id>$1 ORDER BY id LIMIT 1000",
+        )
+        .bind(&last)
+        .fetch_all(pool)
+        .await?;
+        let Some(end) = rows.last().map(|r| r.0.clone()) else {
+            return Ok(total);
+        };
+        let (mut ids, mut routes, mut types, mut osm_ids) = (vec![], vec![], vec![], vec![]);
+        for (id, uri, stored) in rows {
+            let Some(route) = crate::resolver::classify(&uri) else {
+                continue;
+            };
+            if stored.as_deref() == Some(route)
+                || (route == "web" && matches!(stored.as_deref(), Some("media" | "activitypub")))
+            {
+                continue;
+            }
+            let osm = (route == "osm")
+                .then(|| crate::resolver::osm::parse_id(&uri))
+                .flatten();
+            ids.push(id);
+            routes.push(route);
+            types.push(osm.as_ref().map(|o| o.osm_type.clone()));
+            osm_ids.push(osm.map(|o| o.id));
+        }
+        if !ids.is_empty() {
+            total += sqlx::query(r#"UPDATE resource r SET resolver=v.route,osm_type=v.osm_type,osm_id=v.osm_id,
+                doc=CASE WHEN v.osm_id IS NOT NULL THEN jsonb_build_object('type','Place','url',r.uri,'osm_id',v.osm_type||'/'||v.osm_id,'source','osm','status','pending')
+                  WHEN r.osm_id IS NOT NULL THEN '{}'::jsonb ELSE r.doc END,
+                type_path=CASE WHEN v.osm_id IS NOT NULL THEN NULL WHEN r.osm_id IS NOT NULL THEN '{}' ELSE r.type_path END,
+                name=CASE WHEN v.osm_id IS NOT NULL THEN NULL ELSE r.name END,
+                point=CASE WHEN v.osm_id IS NOT NULL THEN NULL ELSE r.point END,
+                category=CASE WHEN v.osm_id IS NOT NULL THEN NULL ELSE r.category END,
+                type=CASE WHEN v.osm_id IS NOT NULL THEN NULL ELSE r.type END,
+                status=CASE WHEN (v.osm_id IS NULL)<>(r.osm_id IS NULL) THEN 'pending' ELSE r.status END
+                FROM unnest($1::text[],$2::text[],$3::text[],$4::bigint[]) v(id,route,osm_type,osm_id) WHERE r.id=v.id"#)
+                .bind(&ids).bind(&routes).bind(&types).bind(&osm_ids).execute(pool).await?.rows_affected();
+        }
+        last = end;
+    }
+}
+
 /// Re-queue `ok` rows whose stored document was saved under another route, e.g. after a
 /// migration re-routed them (0013 and 0015 kept the old refresh date). Runs at startup under
 /// the instance lock: batches of 1000, staggered over one hour, never later than the scheduled
@@ -374,6 +427,17 @@ async fn finish_job(
             }
         } else if crate::resolver::error_class(&error) == "timeout" {
             timed_out(pool, job, cfg, 60).await?;
+        } else if crate::resolver::error_class(&error) == "policy"
+            && url::Url::parse(&job.uri)
+                .ok()
+                .and_then(|u| u.host_str().map(crate::resolver::osm::osm_host))
+                .unwrap_or(false)
+        {
+            // Web refuses every OSM-host page that is not an object or a location link before any
+            // fetch. The refusal is local and permanent: store it once as final, not toward
+            // dead-letter; a later routing change revives it through the reroute trigger.
+            sqlx::query("UPDATE resource SET status='error',attempts=attempts+1,timeout_streak=0,dead_letter=false,final=true,lease_until=NULL,priority_at=NULL,last_error='unsupported',next_attempt_at='infinity' WHERE id=$1 AND generation=$2")
+                .bind(&job.id).bind(job.generation).execute(pool).await?;
         } else {
             let mut cfg = cfg.clone();
             if resolver.name() == "geo"
@@ -604,7 +668,9 @@ pub fn spawn_with_egress(
     }
     if config.geo_enabled {
         resolvers.push((
-            Arc::new(GeoResolver),
+            Arc::new(GeoResolver {
+                location_links: config.geo.location_links,
+            }),
             crate::config::ResolverConfig {
                 concurrency: 1,
                 requests_per_second: 100.0,

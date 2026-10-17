@@ -73,6 +73,8 @@ impl Fixture {
         let samples = json!([
             {"kind":"osm","uri":"https://www.openstreetmap.org/node/501","type":"Place"},
             {"kind":"geo","uri":"geo:47,8","type":"Place"},
+            {"kind":"osm_alias","uri":"https://www.openstreetmap.org/node/501/history","type":"Place","group_with":"osm"},
+            {"kind":"marker","uri":"https://www.openstreetmap.org/?mlat=47.0&mlon=8.0","type":"Place"},
             {"kind":"event","uri":"https://events.example/e2e","type":"Event"},
             {"kind":"ics","uri":"https://calendar.example/e2e.ics","type":"DataFeed","expectedOccurrences":2},
             {"kind":"naddr","uri":naddr,"type":"Event"},
@@ -423,7 +425,7 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
     };
     let mut resolvers: Vec<Arc<dyn Resolver>> = vec![
         osm,
-        Arc::new(GeoResolver),
+        Arc::new(GeoResolver::default()),
         Arc::new(PlatformResolver { web: web() }),
         Arc::new(CalendarResolver { web: web() }),
         Arc::new(web()),

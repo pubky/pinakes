@@ -565,7 +565,7 @@ async fn event_units_pagination_occurrence_route_pubky_recurrences_and_venue(poo
         .unwrap();
     let venue = "geo:47,8";
     let venue_id = store::ensure_resource(&pool, venue).await.unwrap();
-    let place = pinakes_core::resolver::geo::GeoResolver
+    let place = pinakes_core::resolver::geo::GeoResolver::default()
         .resolve(venue)
         .await
         .unwrap();

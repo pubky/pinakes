@@ -70,6 +70,13 @@ double-encoded or path-parameter segments that hold only sameAs). Same-origin ca
 never trusted (only own-URI and registry keys are), so 0035 already covered them. A deployment
 that ran 0035 refetches those resources a second time, which is harmless; the 0036 header
 calls them trusted, but it is published and stays byte-identical.
+At startup, before the re-queue below, the daemon brings every stored routing hint up to the
+current classification (batches of 1000): a release that adds a route (OSM object aliases and
+location links in round 11) re-routes existing rows without a migration. Failed rows are revived
+by the reroute trigger, `ok` rows re-resolve through the re-queue, and a row entering or leaving
+the OSM route gets or drops its identity envelope. Pages promoted to `media`/`activitypub` by
+their own card keep that route. Migration 0038 also turns earlier OSM-host refusals from dead
+letters into final `unsupported` rows, so they no longer count toward the dead-letter alert.
 A save records the route that produced the document (`resource.resolved_by`). At startup the
 daemon re-queues `ok` rows whose `resolved_by` differs from `resolver` (batches of 1000,
 staggered over one hour, never later than the scheduled refresh, generation bump, event-fetch
