@@ -3,19 +3,21 @@ Calendar recurrence: `event.utc_series_wall_clock` (default `"x_wr_timezone"`; a
 `"coordinates"`, `"never"`) chooses which zone sources make a series with a UTC DTSTART expand on
 local wall-clock time instead of in UTC (RFC 5545). The default keeps Google's exports correct
 (UTC DTSTART plus `X-WR-TIMEZONE`) and leaves feeds whose zone comes only from coordinates in
-UTC, so their dates keep the published UTC time across DST changes. Two settings re-key unchanged
-feeds: `event.utc_series_wall_clock` and `event.default_timezone`. The applied values of both are
-stored in the database (`instance_setting`). When a start finds either changed, every `ok` event
+UTC, so their dates keep the published UTC time across DST changes. Three settings re-key
+unchanged feeds: `event.utc_series_wall_clock`, `event.default_timezone` and
+`event.coordinate_timezone`. Their applied values are stored in the database
+(`instance_setting`). When a start finds any of them changed, every `ok` event
 and event_platform document is marked outdated and every calendar fetch loses its HTTP
 validators, so each calendar re-parses once even if its feed is unchanged: within
 `queue.reextract_window_secs` with `queue.reextract_on_upgrade`, otherwise at its next fetch.
 Instances that this re-parse moves by up to an hour across a DST change are recorded as moves
 (`rescheduled`), not cancellations, because the snapshot's recorded expansion changed: the
-calendar extractor version, the mode, and `default_timezone` when set. Changes the feed itself
-makes are never paired, with one exception: once per feed, the first snapshot after upgrading
-to 0043 (whose stored expansion is NULL) pairs hour shifts whatever caused them, because one
-parse cannot tell the feed's changes from the parser's. From then on only a change of extractor
-version, mode or `default_timezone` pairs.
+calendar extractor version, the mode, and `default_timezone` and `coordinate_timezone` when they
+differ from their defaults. Changes the feed itself makes are never paired, with one exception:
+once per feed, the first applied snapshot after upgrading to 0043 (whose stored expansion is
+NULL; a held snapshot keeps it NULL) pairs hour shifts whatever caused them, because one parse
+cannot tell the feed's changes from the parser's. From then on only a change of extractor
+version or of one of the three settings pairs.
 
 CORS: the public listener serves browser clients on other origins according to
 `api.cors_allow_origins` (default `["*"]`, safe because the public API is read-only apart from

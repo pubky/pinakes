@@ -393,8 +393,9 @@ Calendar rows use SEQUENCE/LAST-MODIFIED and normalized content hashes; DTSTAMP,
 unknown vendor props and fetch noise do not create changes. Explicit cancellations
 apply immediately. Disappearance needs two fresh complete snapshots. Losing over half
 the active keys holds all updates until the next identical successful snapshot. When Pinakes
-itself re-expands a feed, under a new calendar extractor version, `utc_series_wall_clock` mode or
-`default_timezone` (recorded per snapshot as `event_fetch.expansion`), an instance whose start
+itself re-expands a feed, under a new calendar extractor version, `utc_series_wall_clock` mode,
+`default_timezone` or `coordinate_timezone` (recorded per snapshot as `event_fetch.expansion`),
+an instance whose start
 shifted by at most
 an hour across a DST change is a move, not a loss. A lost key pairs one-to-one, nearest first,
 with a new key of the same UID and content hash before the hold test. The old row becomes
@@ -402,11 +403,14 @@ with a new key of the same UID and content hash before the hold test. The old ro
 move; a move back onto a superseded or cancelled key does the same. Feed-driven changes never
 pair: an organiser's edit changes the content hash, and a flipped `X-WR-TIMEZONE` or VTIMEZONE
 leaves the expansion unchanged, so both go through the hold and two-observation rules above.
-One exception: once per feed, the first snapshot after upgrading to 0043 (whose stored
-expansion is NULL) pairs hour shifts whatever caused them, because one parse cannot tell the
-feed's changes from the parser's; from then on only a change of extractor version,
-`utc_series_wall_clock` or `default_timezone` pairs. A superseded row keeps no `supersedes`
-pointer of its own, so following `supersedes` from any row ends; change lines keep the history.
+One exception: once per feed, the first applied snapshot after upgrading to 0043 (whose stored
+expansion is NULL; a held snapshot keeps it NULL, so the next one pairs) pairs hour shifts
+whatever caused them, because one parse cannot tell the feed's changes from the parser's; from
+then on only a change of extractor version, `utc_series_wall_clock`, `default_timezone` or
+`coordinate_timezone` pairs. Superseded rows carry no `supersedes` pointer (the apply that
+supersedes a row clears it); active and cancelled rows keep theirs, so following `supersedes`
+from any row ends; change lines keep the history. Calendar dates need four-digit years (RFC 5545
+`date-fullyear`); a signed or longer year is an invalid value of its event.
 A series whose embedded VTIMEZONE cannot convert its DTSTART expands in UTC (its published
 instants) and records the warning `series_zone_unconvertible`.
 Occurrence changes are field patches with `occurrence` equal to the serialized

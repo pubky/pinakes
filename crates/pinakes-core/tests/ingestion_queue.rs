@@ -1231,6 +1231,14 @@ async fn round12_older_extractor_versions_reextract_once_and_only_their_resolver
     assert_eq!(extraction(&pool, &place).await, place_before);
 }
 
+/// Event settings with `default_timezone` and the rest at their defaults.
+fn zone(tz: Option<&str>) -> pinakes_core::config::EventConfig {
+    pinakes_core::config::EventConfig {
+        default_timezone: tz.map(str::to_owned),
+        ..Default::default()
+    }
+}
+
 /// A worker of a given kind that re-extracts a fixed document or answers 304.
 struct Fixed {
     name: &'static str,
@@ -1685,20 +1693,19 @@ async fn round17_first_start_with_a_non_default_mode_marks_stored_calendars(pool
 /// stored calendars once.
 #[sqlx::test(migrations = "../../migrations")]
 async fn round18_a_default_timezone_change_reparses_calendars_once(pool: PgPool) {
-    use pinakes_core::config::UtcSeriesWallClock::XWrTimezone;
     let feed = "https://example.org/tz.ics";
     let id = store::ensure_resource(&pool, feed).await.unwrap();
     let mut doc = ResourceMeta::new(feed, "event", 6 * 3600);
     doc.name = Some("Calendar".into());
     store::save_document(&pool, &id, 0, &doc).await.unwrap();
     assert_eq!(
-        queue::apply_calendar_settings(&pool, XWrTimezone, None)
+        queue::apply_calendar_settings(&pool, &zone(None))
             .await
             .unwrap(),
         0
     );
     assert_eq!(
-        queue::apply_calendar_settings(&pool, XWrTimezone, Some("Europe/Zurich"))
+        queue::apply_calendar_settings(&pool, &zone(Some("Europe/Zurich")))
             .await
             .unwrap(),
         1
@@ -1711,9 +1718,83 @@ async fn round18_a_default_timezone_change_reparses_calendars_once(pool: PgPool)
             .unwrap();
     assert_eq!(stored, "Europe/Zurich");
     assert_eq!(
-        queue::apply_calendar_settings(&pool, XWrTimezone, Some("Europe/Zurich"))
+        queue::apply_calendar_settings(&pool, &zone(Some("Europe/Zurich")))
             .await
             .unwrap(),
+        0
+    );
+}
+
+/// Round 19 M5/M6: the settings matrix. Set to unset re-parses; a first start with a zone set and
+/// calendars stored re-parses; an interrupted start (marks done, settings not recorded) is treated
+/// as a change again at the next start, which marks what is left and records; a
+/// `coordinate_timezone` change re-parses too.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round19_the_calendar_settings_matrix(pool: PgPool) {
+    let mut ids = vec![];
+    for n in 0..2 {
+        let feed = format!("https://example.org/matrix-{n}.ics");
+        let id = store::ensure_resource(&pool, &feed).await.unwrap();
+        let mut doc = ResourceMeta::new(&feed, "event", 6 * 3600);
+        doc.name = Some("Calendar".into());
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+        ids.push(id);
+    }
+    let current = |pool: PgPool| async move {
+        sqlx::query(
+            "UPDATE resource SET extracted_with=5 WHERE coalesce(extracted_by,resolver)='event'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+    };
+    // First start with a zone set and calendars stored: re-parse once.
+    assert_eq!(
+        queue::apply_calendar_settings(&pool, &zone(Some("Europe/Zurich")))
+            .await
+            .unwrap(),
+        2
+    );
+    current(pool.clone()).await;
+    // Set to unset: re-parse once.
+    assert_eq!(
+        queue::apply_calendar_settings(&pool, &zone(None))
+            .await
+            .unwrap(),
+        2
+    );
+    current(pool.clone()).await;
+    // An interrupted start: the change to a zone marked one calendar, then the process stopped
+    // before recording the settings.
+    sqlx::query("UPDATE resource SET extracted_with=0 WHERE id=$1")
+        .bind(&ids[0])
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        queue::apply_calendar_settings(&pool, &zone(Some("Asia/Tokyo")))
+            .await
+            .unwrap(),
+        1,
+        "the next start marks what is left"
+    );
+    let recorded: String =
+        sqlx::query_scalar("SELECT value FROM instance_setting WHERE key='event.default_timezone'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(recorded, "Asia/Tokyo");
+    current(pool.clone()).await;
+    // coordinate_timezone off: re-parse once, then nothing.
+    let mut off = zone(Some("Asia/Tokyo"));
+    off.coordinate_timezone = false;
+    assert_eq!(
+        queue::apply_calendar_settings(&pool, &off).await.unwrap(),
+        2
+    );
+    current(pool.clone()).await;
+    assert_eq!(
+        queue::apply_calendar_settings(&pool, &off).await.unwrap(),
         0
     );
 }

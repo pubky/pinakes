@@ -131,8 +131,9 @@ pub const EXTRACTOR_VERSIONS: &[(&str, i32)] = &[
     // 3: UNTIL as an instant, TZID on UTC values, floating RECURRENCE-ID per series (round 16).
     // 4: floating values in UTC series, embedded zones in the repeated hour (round 17).
     // 5: an unconvertible embedded zone expands its series in UTC (round 18).
-    ("event", 5),
-    ("event_platform", 5),
+    // 6: four-digit years only (round 19).
+    ("event", 6),
+    ("event_platform", 6),
     ("media", 1),
     ("isbn", 1),
     ("doi", 1),

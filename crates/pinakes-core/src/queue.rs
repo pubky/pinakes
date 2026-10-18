@@ -215,15 +215,22 @@ pub async fn reextract_outdated(
     }
 }
 
-/// `apply_calendar_settings` with no `default_timezone`.
+/// `apply_calendar_settings` with `mode` and the other settings at their defaults.
 pub async fn apply_calendar_mode(
     pool: &PgPool,
     mode: crate::config::UtcSeriesWallClock,
 ) -> Result<u64> {
-    apply_calendar_settings(pool, mode, None).await
+    apply_calendar_settings(
+        pool,
+        &crate::config::EventConfig {
+            utc_series_wall_clock: mode,
+            ..Default::default()
+        },
+    )
+    .await
 }
-/// Re-parse calendars once after `event.utc_series_wall_clock` or `event.default_timezone`
-/// changes, since an unchanged feed would otherwise keep answering 304 with documents expanded
+/// Re-parse calendars once after `event.utc_series_wall_clock`, `event.default_timezone` or
+/// `event.coordinate_timezone` changes, since an unchanged feed would otherwise keep answering 304 with documents expanded
 /// under the old settings. Runs at startup under the instance lock, before
 /// `reextract_outdated`. The applied settings are stored in `instance_setting`; on a change, `ok`
 /// event and event_platform documents are marked outdated (`extracted_with=0`, re-queued by
@@ -235,10 +242,9 @@ pub async fn apply_calendar_mode(
 /// documents marked.
 pub async fn apply_calendar_settings(
     pool: &PgPool,
-    mode: crate::config::UtcSeriesWallClock,
-    default_timezone: Option<&str>,
+    cfg: &crate::config::EventConfig,
 ) -> Result<u64> {
-    let mode = serde_json::to_value(mode)?
+    let mode = serde_json::to_value(cfg.utc_series_wall_clock)?
         .as_str()
         .unwrap_or_default()
         .to_owned();
@@ -251,8 +257,15 @@ pub async fn apply_calendar_settings(
         ("event.utc_series_wall_clock", mode, default_mode),
         (
             "event.default_timezone",
-            default_timezone.unwrap_or_default().to_owned(),
+            cfg.default_timezone.clone().unwrap_or_default(),
             String::new(),
+        ),
+        (
+            "event.coordinate_timezone",
+            cfg.coordinate_timezone.to_string(),
+            crate::config::EventConfig::default()
+                .coordinate_timezone
+                .to_string(),
         ),
     ];
     let mut remark = false;

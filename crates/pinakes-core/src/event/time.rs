@@ -58,7 +58,21 @@ pub fn local(tz: Tz, value: NaiveDateTime) -> Option<DateTime<Utc>> {
             .map(|t| t.to_utc()),
     }
 }
+/// Whether a date value starts with exactly four ASCII year digits, as RFC 5545
+/// (`date-fullyear = 4DIGIT`) and the ISO 8601 forms Pinakes reads require: `YYYY-…` or the
+/// compact `YYYYMMDD[T…]`. chrono's `%Y` would also take signed years of any width, which put
+/// later arithmetic at the edge of its range.
+fn four_digit_year(value: &str) -> bool {
+    let b = value.as_bytes();
+    b.len() >= 8
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && (b[4] == b'-'
+            || (b[4..8].iter().all(u8::is_ascii_digit) && b.get(8).is_none_or(|&c| c == b'T')))
+}
 pub fn naive(value: &str) -> Option<NaiveDateTime> {
+    if !four_digit_year(value) {
+        return None;
+    }
     for f in [
         "%Y-%m-%dT%H:%M:%S%.f",
         "%Y-%m-%dT%H:%M",
@@ -77,6 +91,9 @@ pub fn naive(value: &str) -> Option<NaiveDateTime> {
     None
 }
 pub fn offset(value: &str) -> Option<DateTime<Utc>> {
+    if !four_digit_year(value) {
+        return None;
+    }
     if let Ok(t) = DateTime::parse_from_rfc3339(value) {
         return Some(t.to_utc());
     }

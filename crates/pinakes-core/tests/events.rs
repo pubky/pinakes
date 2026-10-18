@@ -2117,7 +2117,10 @@ async fn repeated_key_growth_confirms_but_total_row_limit_stays_hard(pool: PgPoo
 }
 
 #[test]
-fn bad_custom_zone_occurrence_does_not_discard_good_siblings() {
+/// Round 19 M7: renamed from `bad_custom_zone_occurrence_does_not_discard_good_siblings`. Since
+/// round 18 (N3) the broken zone no longer fails per occurrence: its UTC series expand at their
+/// published instants with a warning, and the good sibling stays.
+fn unconvertible_custom_zone_series_expand_in_utc_beside_good_siblings() {
     let zone = "BEGIN:VTIMEZONE\nTZID:Broken\nEND:VTIMEZONE";
     let body = cal(&[zone.into(),event("UID:broken-recurring\nDTSTART;VALUE=DATE;TZID=Broken:20261020T000000Z\nDURATION:P1D\nRDATE:20261021T000000Z\nSUMMARY:Bad reverse zone"), event("UID:broken-single\nDTSTART;VALUE=DATE;TZID=Broken:20261020T000000Z\nDURATION:P1D"),event("UID:good\nDTSTART:20261022T180000Z\nSUMMARY:Good sibling")].join("\n"));
     let c = parse(&body).container.unwrap();
@@ -3414,4 +3417,214 @@ async fn round18_the_null_expansion_pairs_once_then_never(pool: PgPool) {
     let (holds, held, _, _, cancelled, rescheduled) = feed_outcome(&pool, &id).await;
     assert_eq!((holds, held, cancelled, rescheduled), (1, true, 0, 7));
     assert_eq!(stored(pool.clone(), id.clone()).await, Some(current));
+}
+
+/// Round 19 M1: years are exactly four digits (RFC 5545 `date-fullyear`). Signed or five-digit
+/// years in a VTIMEZONE DTSTART, a VEVENT DTSTART, an RDATE or a UNTIL are invalid values scoped to
+/// their event: no panic, the event's warning, siblings kept.
+#[test]
+fn round19_years_have_four_digits() {
+    // chrono's `%Y` accepts the dashed forms (signed, or more than four digits); the compact
+    // signed forms are refused by chrono itself.
+    for bad in [
+        "-262143-01-01T00:00:00",
+        "-262143-01-01",
+        "+12026-10-20",
+        "-0001-01-01",
+        "-2621430101T000000",
+        "02026-10-20",
+    ] {
+        assert!(time::naive(bad).is_none(), "{bad}");
+        assert!(time::offset(&format!("{bad}Z")).is_none(), "{bad}");
+    }
+    assert!(time::naive("20261020T100000").is_some());
+    assert!(time::naive("2026-10-20").is_some());
+    assert!(time::offset("2026-10-20T10:00:00+02:00").is_some());
+    let good =
+        "BEGIN:VEVENT\r\nUID:good\r\nSUMMARY:Good\r\nDTSTART:20261022T180000Z\r\nEND:VEVENT\r\n";
+    let edge_zone = "BEGIN:VTIMEZONE\r\nTZID:Edge\r\nBEGIN:STANDARD\r\nDTSTART:-262143-01-01T00:00:00\r\nTZOFFSETFROM:+0200\r\nTZOFFSETTO:+0100\r\nRRULE:FREQ=YEARLY;BYDAY=-1SU;BYMONTH=10\r\nEND:STANDARD\r\nEND:VTIMEZONE\r\n";
+    for (case, header, event) in [
+        (
+            "VTIMEZONE DTSTART",
+            edge_zone,
+            "UID:edge\r\nSUMMARY:Edge\r\nDTSTART;TZID=Edge:20261024T100000\r\nRRULE:FREQ=DAILY;COUNT=2\r\n",
+        ),
+        (
+            "VEVENT DTSTART",
+            "",
+            "UID:edge\r\nSUMMARY:Edge\r\nDTSTART:+12026-10-24T10:00:00Z\r\n",
+        ),
+        (
+            "RDATE",
+            "",
+            "UID:edge\r\nSUMMARY:Edge\r\nDTSTART:20261024T100000Z\r\nRDATE:-0001-01-01T00:00:00Z\r\n",
+        ),
+        (
+            "UNTIL",
+            "",
+            "UID:edge\r\nSUMMARY:Edge\r\nDTSTART:20261024T100000Z\r\nRRULE:FREQ=DAILY;UNTIL=-262143-01-01T00:00:00Z\r\n",
+        ),
+    ] {
+        let body = format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n{header}BEGIN:VEVENT\r\n{event}END:VEVENT\r\n{good}END:VCALENDAR\r\n");
+        let doc = calendar::parse(
+            "https://example.org/edge.ics",
+            body.as_bytes(),
+            &EventConfig::default(),
+            "2026-10-18T00:00:00Z".parse().unwrap(),
+        )
+        .unwrap();
+        let c = doc.container.unwrap();
+        assert!(
+            c.occurrences.iter().any(|o| o.uid == "good"),
+            "{case}: the sibling is kept"
+        );
+        assert!(
+            c.occurrences.iter().all(|o| o.uid == "good"),
+            "{case}: the broken event yields nothing: {:?}",
+            c.occurrences.iter().map(|o| (&o.uid, o.doc.start)).collect::<Vec<_>>()
+        );
+        assert!(!c.warnings.is_empty(), "{case}: the event's warning");
+    }
+}
+
+/// Round 19 M2: a snapshot held while the stored expansion is still NULL (the feed lost most of
+/// its keys in the upgrade fetch) keeps it NULL, so the next snapshot is still the first applied
+/// one and pairs its hour shifts.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round19_a_held_snapshot_keeps_the_null_expansion(pool: PgPool) {
+    use pinakes_core::config::UtcSeriesWallClock::Coordinates;
+    let uri = "https://example.org/held-upgrade.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let stored = || async {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT expansion FROM event_fetch WHERE resource_id=$1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let coordinates = EventConfig {
+        utc_series_wall_clock: Coordinates,
+        ..Default::default()
+    };
+    snapshot(
+        &pool,
+        &id,
+        uri,
+        &daily("", "20361024T004800Z"),
+        &coordinates,
+    )
+    .await;
+    sqlx::query("UPDATE event_fetch SET expansion=NULL WHERE resource_id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The upgrade fetch finds the feed briefly broken: one unrelated event left. Held.
+    let cfg = EventConfig::default();
+    let broken = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:other\r\nSUMMARY:Other\r\nDTSTART:20361030T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    snapshot(&pool, &id, uri, broken, &cfg).await;
+    assert_eq!(feed_outcome(&pool, &id).await.0, 1, "held");
+    assert_eq!(stored().await, None, "a held snapshot records no expansion");
+    // The next fetch is the real re-expansion: it pairs and records.
+    snapshot(&pool, &id, uri, &daily("", "20361024T004800Z"), &cfg).await;
+    assert_eq!(feed_outcome(&pool, &id).await, (0, false, 10, 7, 0, 7));
+    assert_eq!(stored().await, Some(calendar::expansion(&cfg)));
+}
+
+/// Round 19 M3: an apply clears `supersedes` on rows it supersedes inside its upsert, so an
+/// unchanged re-apply runs no extra statement on `occurrence` (each one bumps the search revision
+/// and its lock): one INSERT … ON CONFLICT, nothing else.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round19_an_unchanged_reapply_runs_one_occurrence_statement(pool: PgPool) {
+    use pinakes_core::config::UtcSeriesWallClock::Coordinates;
+    let uri = "https://example.org/statements.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let body = daily("", "20361024T004800Z");
+    let coordinates = EventConfig {
+        utc_series_wall_clock: Coordinates,
+        ..Default::default()
+    };
+    snapshot(&pool, &id, uri, &body, &coordinates).await;
+    snapshot(&pool, &id, uri, &body, &EventConfig::default()).await;
+    // A test-only statement counter on occurrence.
+    for sql in [
+        "CREATE TABLE statement_count(op text)",
+        "CREATE FUNCTION count_statement() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO statement_count VALUES(TG_OP); RETURN NULL; END $$",
+        "CREATE TRIGGER count_occurrence_statements AFTER INSERT OR UPDATE OR DELETE ON occurrence FOR EACH STATEMENT EXECUTE FUNCTION count_statement()",
+    ] {
+        sqlx::query(sql).execute(&pool).await.unwrap();
+    }
+    snapshot(&pool, &id, uri, &body, &EventConfig::default()).await;
+    let ops: Vec<String> = sqlx::query_scalar("SELECT op FROM statement_count ORDER BY op")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    // INSERT … ON CONFLICT DO UPDATE fires one INSERT and one UPDATE statement trigger.
+    assert_eq!(ops, ["INSERT", "UPDATE"]);
+    let pointers: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM occurrence WHERE resource_id=$1 AND status='superseded' AND supersedes IS NOT NULL",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pointers, 0, "superseded rows carry no pointer");
+}
+
+/// Round 19 M3: migration 0044 clears the pointers superseded rows kept from earlier releases and
+/// leaves active rows' pointers.
+#[sqlx::test(migrations = false)]
+async fn round19_migration_0044_clears_superseded_pointers(pool: PgPool) {
+    let before = sqlx::migrate::Migrator {
+        migrations: std::borrow::Cow::Owned(
+            pinakes_core::MIGRATOR.iter().take(43).cloned().collect(),
+        ),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    before.run(&pool).await.unwrap();
+    let uri = "https://example.org/pointers.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let body = daily("", "20361024T004800Z");
+    snapshot(&pool, &id, uri, &body, &EventConfig::default()).await;
+    // As round 17 left it: a superseded row and an active row pointing at each other.
+    let keys: Vec<(String, String)> = sqlx::query_as(
+        "SELECT uid,recurrence_id FROM occurrence WHERE resource_id=$1 ORDER BY recurrence_id LIMIT 2",
+    )
+    .bind(&id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let key = |k: &(String, String)| serde_json::to_string(&(&k.0, &k.1)).unwrap();
+    sqlx::query("UPDATE occurrence SET status='superseded',supersedes=$3 WHERE resource_id=$1 AND recurrence_id=$2")
+        .bind(&id)
+        .bind(&keys[0].1)
+        .bind(key(&keys[1]))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE occurrence SET supersedes=$3 WHERE resource_id=$1 AND recurrence_id=$2")
+        .bind(&id)
+        .bind(&keys[1].1)
+        .bind(key(&keys[0]))
+        .execute(&pool)
+        .await
+        .unwrap();
+    pinakes_core::migrate(&pool).await.unwrap();
+    let pointers: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT status,supersedes FROM occurrence WHERE resource_id=$1 AND recurrence_id=ANY($2) ORDER BY recurrence_id",
+    )
+    .bind(&id)
+    .bind(vec![keys[0].1.clone(), keys[1].1.clone()])
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        pointers,
+        [
+            ("superseded".into(), None),
+            ("scheduled".into(), Some(key(&keys[0])))
+        ]
+    );
 }

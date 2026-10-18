@@ -812,10 +812,6 @@ fn document(
     doc = doc.bounded(&[])?;
     Ok((doc, start))
 }
-/// The stamp a series expands and resolves its floating RECURRENCE-ID, RDATE and EXDATE values
-/// with. A UTC DTSTART expands in UTC (RFC 5545) unless its zone source is configured for
-/// wall-clock expansion (Google exports a UTC DTSTART with a local rule and X-WR-TIMEZONE); then
-/// its wall time is DTSTART in that zone, IANA or embedded VTIMEZONE alike.
 /// A stamp that expands in UTC: its published instant, no zone.
 fn utc_series(start: &Stamp) -> Stamp {
     Stamp {
@@ -825,6 +821,10 @@ fn utc_series(start: &Stamp) -> Stamp {
         ..start.clone()
     }
 }
+/// The stamp a series expands and resolves its floating RECURRENCE-ID, RDATE and EXDATE values
+/// with. A UTC DTSTART expands in UTC (RFC 5545) unless its zone source is configured for
+/// wall-clock expansion (Google exports a UTC DTSTART with a local rule and X-WR-TIMEZONE); then
+/// its wall time is DTSTART in that zone, IANA or embedded VTIMEZONE alike.
 fn series_start(
     c: &Component,
     start: &Stamp,
@@ -848,14 +848,10 @@ fn series_start(
             ..start.clone()
         })
     } else {
-        Ok(Stamp {
-            zone: None,
-            source: ZoneSource::None,
-            wall: start.at.naive_utc(),
-            ..start.clone()
-        })
+        Ok(utc_series(start))
     }
 }
+/// Expand a series from its series stamp (`series_start`, applied by `parse`).
 fn expand(
     c: &Component,
     start: &Stamp,
@@ -865,8 +861,7 @@ fn expand(
     cfg: &EventConfig,
     deadline: std::time::Instant,
 ) -> Result<BTreeMap<DateTime<Utc>, Option<Duration>>> {
-    let series = series_start(c, start, zones, cfg).unwrap_or_else(|_| utc_series(start));
-    let start = &series;
+    // `start` is already the series stamp (`series_start`, converted once in `parse`).
     let wall_start = start.wall;
     // A UNTIL instant is compared as an instant: its wall time may fall in a repeated or skipped
     // hour, so the rule runs an hour past it and instances after it are dropped.
@@ -1019,9 +1014,9 @@ fn expand(
     Ok(out)
 }
 /// The calendar expansion signature: the calendar extractor version, the configured
-/// `utc_series_wall_clock` mode and, when set, `default_timezone`: the settings that re-key
-/// unchanged feeds. The default zone is appended only when set, so instances without it keep
-/// their stored signatures.
+/// `utc_series_wall_clock` mode and, when they differ from their defaults, `default_timezone`
+/// and `coordinate_timezone`: the settings that re-key unchanged feeds. Non-default parts only,
+/// so instances on the defaults keep their stored signatures.
 pub fn expansion(cfg: &EventConfig) -> String {
     let version = crate::resolver::extractor_versions()["event"]
         .as_i64()
@@ -1030,10 +1025,14 @@ pub fn expansion(cfg: &EventConfig) -> String {
         .ok()
         .and_then(|v| v.as_str().map(str::to_owned))
         .unwrap_or_default();
-    match cfg.default_timezone.as_deref() {
-        Some(tz) => format!("v{version}:{mode}:tz={tz}"),
-        None => format!("v{version}:{mode}"),
+    let mut signature = format!("v{version}:{mode}");
+    if let Some(tz) = cfg.default_timezone.as_deref() {
+        signature.push_str(&format!(":tz={tz}"));
     }
+    if !cfg.coordinate_timezone {
+        signature.push_str(":coords=off");
+    }
+    signature
 }
 pub fn parse(
     uri: &str,
@@ -1700,6 +1699,11 @@ mod tests {
         assert_eq!(
             expansion(&cfg),
             format!("v{version}:x_wr_timezone:tz=Europe/Zurich")
+        );
+        cfg.coordinate_timezone = false;
+        assert_eq!(
+            expansion(&cfg),
+            format!("v{version}:x_wr_timezone:tz=Europe/Zurich:coords=off")
         );
     }
 }

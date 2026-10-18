@@ -493,17 +493,13 @@ pub async fn apply(
     for chunk in plan.purge.chunks(256) {
         sqlx::query("DELETE FROM occurrence WHERE resource_id=$1 AND (uid,recurrence_id) IN(SELECT j->>'uid',j->>'rid' FROM unnest($2::jsonb[]) j)").bind(id).bind(chunk).execute(&mut **tx).await?;
     }
-    // Bound the encoded jsonb[] buffer independently of the retained plan.
+    // Bound the encoded jsonb[] buffer independently of the retained plan. A row this apply marks
+    // superseded drops its own `supersedes` pointer in the same upsert, so a flip-back (K
+    // superseded by L, then L by K) never leaves a cycle; active and cancelled rows keep theirs,
+    // and change lines keep the history.
     for chunk in plan.rows.chunks(256) {
-        sqlx::query("INSERT INTO occurrence(resource_id,uid,recurrence_id,start_at,end_at,name,venue_id,status,url,event_resource_id,doc,point,sequence,modified,content_hash,volatile,supersedes) SELECT $1,j->>'uid',j->>'rid',(j->>'start')::timestamptz,(j->>'end')::timestamptz,j->>'name',j->>'venue_id',j->>'status',j->>'url',(SELECT id FROM resource WHERE id=j->>'link' AND id<>$1),j->'doc',CASE WHEN j->>'lat' IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint((j->>'lon')::float8,(j->>'lat')::float8),4326) END,(j->>'sequence')::bigint,(j->>'modified')::timestamptz,j->>'hash',(j->>'volatile')::boolean,j->>'supersedes' FROM unnest($2::jsonb[]) j ON CONFLICT(resource_id,uid,recurrence_id) DO UPDATE SET start_at=excluded.start_at,end_at=excluded.end_at,name=excluded.name,venue_id=excluded.venue_id,status=excluded.status,url=excluded.url,event_resource_id=excluded.event_resource_id,doc=excluded.doc,point=excluded.point,sequence=excluded.sequence,modified=excluded.modified,content_hash=excluded.content_hash,volatile=excluded.volatile,supersedes=coalesce(excluded.supersedes,occurrence.supersedes)").bind(id).bind(chunk).execute(&mut **tx).await?;
+        sqlx::query("INSERT INTO occurrence(resource_id,uid,recurrence_id,start_at,end_at,name,venue_id,status,url,event_resource_id,doc,point,sequence,modified,content_hash,volatile,supersedes) SELECT $1,j->>'uid',j->>'rid',(j->>'start')::timestamptz,(j->>'end')::timestamptz,j->>'name',j->>'venue_id',j->>'status',j->>'url',(SELECT id FROM resource WHERE id=j->>'link' AND id<>$1),j->'doc',CASE WHEN j->>'lat' IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint((j->>'lon')::float8,(j->>'lat')::float8),4326) END,(j->>'sequence')::bigint,(j->>'modified')::timestamptz,j->>'hash',(j->>'volatile')::boolean,j->>'supersedes' FROM unnest($2::jsonb[]) j ON CONFLICT(resource_id,uid,recurrence_id) DO UPDATE SET start_at=excluded.start_at,end_at=excluded.end_at,name=excluded.name,venue_id=excluded.venue_id,status=excluded.status,url=excluded.url,event_resource_id=excluded.event_resource_id,doc=excluded.doc,point=excluded.point,sequence=excluded.sequence,modified=excluded.modified,content_hash=excluded.content_hash,volatile=excluded.volatile,supersedes=CASE WHEN excluded.status='superseded' THEN NULL ELSE coalesce(excluded.supersedes,occurrence.supersedes) END").bind(id).bind(chunk).execute(&mut **tx).await?;
     }
-    // Only an active row names the row it replaced: a superseded row drops its own pointer, so a
-    // flip-back (K superseded by L, then L by K) never leaves a `supersedes` cycle. Change lines
-    // keep the history.
-    sqlx::query("UPDATE occurrence SET supersedes=NULL WHERE resource_id=$1 AND status='superseded' AND supersedes IS NOT NULL")
-        .bind(id)
-        .execute(&mut **tx)
-        .await?;
     if let Some(cursor) = &plan.cursor {
         cursor.commit(tx, id).await?;
     }
