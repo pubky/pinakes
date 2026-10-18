@@ -916,3 +916,137 @@ async fn review_admin_bearer_and_network_bind_policy(pool: sqlx::PgPool) {
         }
     }
 }
+
+async fn cors_call(
+    app: &Router,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> (StatusCode, HeaderMap) {
+    let mut request = Request::builder().method(method).uri(path);
+    for (k, v) in headers {
+        request = request.header(*k, *v);
+    }
+    let mut request = request.body(Body::empty()).unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.9:1234".parse::<SocketAddr>().unwrap(),
+    ));
+    let response = app.clone().oneshot(request).await.unwrap();
+    (response.status(), response.headers().clone())
+}
+
+/// Round 14 C1: CORS on the public listener only, for any origin by default, for listed origins,
+/// or not at all; preflights spend the per-IP budget and 429s stay readable cross-origin.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round14_cors_for_browser_clients_on_the_public_listener_only(pool: PgPool) {
+    let app_with = |origins: Vec<&str>, per_minute: usize| {
+        let mut config = Config::default();
+        config.api.cors_allow_origins = origins.into_iter().map(str::to_owned).collect();
+        config.api.requests_per_minute = per_minute;
+        config.validate().unwrap();
+        api::router(AppState::new(pool.clone(), config).unwrap())
+    };
+    let preflight = [
+        ("origin", "https://pubky.app"),
+        ("access-control-request-method", "POST"),
+        ("access-control-request-headers", "content-type"),
+    ];
+    // Default: any origin, no credentials, Retry-After and ETag exposed.
+    assert_eq!(Config::default().api.cors_allow_origins, ["*"]);
+    let any = app_with(vec!["*"], 120);
+    let (code, h) = cors_call(&any, "GET", "/v1/info", &[("origin", "https://pubky.app")]).await;
+    assert_eq!(code, 200);
+    assert_eq!(h["access-control-allow-origin"], "*");
+    assert_eq!(h["access-control-expose-headers"], "retry-after, etag");
+    assert!(h.get("access-control-allow-credentials").is_none());
+    assert!(h.get_all("vary").iter().all(|v| v != "origin"));
+    let (_, h) = cors_call(&any, "GET", "/v1/info", &[]).await;
+    assert!(
+        h.get("access-control-allow-origin").is_none(),
+        "no Origin, no CORS"
+    );
+    let (code, h) = cors_call(&any, "OPTIONS", "/v1/resolve", &preflight).await;
+    assert_eq!(code, 204);
+    assert_eq!(h["access-control-allow-origin"], "*");
+    assert_eq!(h["access-control-allow-methods"], "GET, POST");
+    assert_eq!(h["access-control-allow-headers"], "content-type");
+    assert_eq!(h["access-control-max-age"], "600");
+    // A list: the allowed origin is echoed with Vary: Origin; another origin gets nothing.
+    let listed = app_with(vec!["https://pubky.app"], 120);
+    let (_, h) = cors_call(
+        &listed,
+        "GET",
+        "/v1/info",
+        &[("origin", "https://pubky.app")],
+    )
+    .await;
+    assert_eq!(h["access-control-allow-origin"], "https://pubky.app");
+    assert!(h.get_all("vary").iter().any(|v| v == "origin"));
+    let (_, h) = cors_call(
+        &listed,
+        "GET",
+        "/v1/info",
+        &[("origin", "https://evil.example")],
+    )
+    .await;
+    assert!(h.get("access-control-allow-origin").is_none());
+    assert!(h.get_all("vary").iter().any(|v| v == "origin"));
+    let refused = [
+        ("origin", "https://evil.example"),
+        ("access-control-request-method", "POST"),
+    ];
+    let (code, h) = cors_call(&listed, "OPTIONS", "/v1/resolve", &refused).await;
+    assert_eq!(code, 204);
+    assert!(h.get("access-control-allow-origin").is_none());
+    assert!(h.get("access-control-allow-methods").is_none());
+    // Preflights share the per-IP budget, and the 429 is readable cross-origin.
+    let tight = app_with(vec!["*"], 2);
+    for _ in 0..2 {
+        assert_eq!(
+            cors_call(&tight, "OPTIONS", "/v1/resolve", &preflight)
+                .await
+                .0,
+            204
+        );
+    }
+    let (code, h) = cors_call(
+        &tight,
+        "GET",
+        "/v1/info",
+        &[("origin", "https://pubky.app")],
+    )
+    .await;
+    assert_eq!(code, 429);
+    assert!(h.contains_key("retry-after"));
+    assert_eq!(h["access-control-allow-origin"], "*");
+    assert_eq!(h["access-control-expose-headers"], "retry-after, etag");
+    // Disabled: no CORS headers, and OPTIONS is not answered as a preflight.
+    let off = app_with(vec![], 120);
+    let (_, h) = cors_call(&off, "GET", "/v1/info", &[("origin", "https://pubky.app")]).await;
+    assert!(h.get("access-control-allow-origin").is_none());
+    let (code, h) = cors_call(&off, "OPTIONS", "/v1/resolve", &preflight).await;
+    assert_ne!(code, 204);
+    assert!(h.get("access-control-allow-methods").is_none());
+    // The admin listener never sends CORS headers.
+    let admin = api::admin_router(AppState::new(pool.clone(), Config::default()).unwrap());
+    for (method, headers) in [
+        ("GET", &[("origin", "https://pubky.app")][..]),
+        ("OPTIONS", &preflight[..]),
+    ] {
+        let (_, h) = cors_call(&admin, method, "/v1/info", headers).await;
+        assert!(h.get("access-control-allow-origin").is_none(), "{method}");
+        assert!(h.get("access-control-allow-methods").is_none(), "{method}");
+    }
+    // Only "*" alone or exact origins are accepted.
+    for bad in [
+        vec!["*", "https://pubky.app"],
+        vec!["https://pubky.app/"],
+        vec!["https://pubky.app/path"],
+        vec!["ftp://pubky.app"],
+        vec!["pubky.app"],
+    ] {
+        let mut config = Config::default();
+        config.api.cors_allow_origins = bad.iter().map(|s| s.to_string()).collect();
+        assert!(config.validate().is_err(), "{bad:?}");
+    }
+}

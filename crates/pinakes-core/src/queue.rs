@@ -58,7 +58,8 @@ pub async fn claim_sources(
 /// `requeue_rerouted`, in batches of 1000. Failed rows are revived by the reroute trigger and
 /// `ok` rows re-resolve through `requeue_rerouted`; a row entering or leaving the OSM route gets
 /// or drops its OSM identity envelope, and an OSM-host URL moving to web drops its facts; both
-/// become pending, fenced and staggered. A page or feed promoted to `media`/`activitypub` by its
+/// become pending and unresolved (no `resolved_at`, `refresh_at`, `resolved_by` or
+/// `osm_version`), fenced and staggered. A page or feed promoted to `media`/`activitypub` by its
 /// own card keeps that route, and a URI `classify` does not route keeps its hint.
 pub async fn reclassify_routes(pool: &PgPool) -> Result<u64> {
     let (mut last, mut total) = (String::new(), 0u64);
@@ -77,9 +78,11 @@ pub async fn reclassify_routes(pool: &PgPool) -> Result<u64> {
             let Some(route) = crate::resolver::classify(&uri) else {
                 continue;
             };
-            // The web and event routes both run web extraction, whose card may promote the row.
+            // The web, event and event_platform routes all run web extraction (the event and
+            // adapter workers fall back to it, and web workers serve those routes when they are
+            // off), whose card may promote the row.
             if stored.as_deref() == Some(route)
-                || (matches!(route, "web" | "event")
+                || (matches!(route, "web" | "event" | "event_platform")
                     && matches!(stored.as_deref(), Some("media" | "activitypub")))
             {
                 continue;
@@ -115,6 +118,10 @@ pub async fn reclassify_routes(pool: &PgPool) -> Result<u64> {
                 end_at=CASE WHEN v.reset THEN NULL ELSE r.end_at END,
                 venue_id=CASE WHEN v.reset THEN NULL ELSE r.venue_id END,
                 status=CASE WHEN v.reset THEN 'pending' ELSE r.status END,
+                resolved_at=CASE WHEN v.reset THEN NULL ELSE r.resolved_at END,
+                refresh_at=CASE WHEN v.reset THEN NULL ELSE r.refresh_at END,
+                resolved_by=CASE WHEN v.reset THEN NULL ELSE r.resolved_by END,
+                osm_version=CASE WHEN v.reset THEN NULL ELSE r.osm_version END,
                 attempts=CASE WHEN v.reset THEN 0 ELSE r.attempts END,
                 timeout_streak=CASE WHEN v.reset THEN 0 ELSE r.timeout_streak END,
                 dead_letter=CASE WHEN v.reset THEN false ELSE r.dead_letter END,
@@ -133,28 +140,30 @@ pub async fn reclassify_routes(pool: &PgPool) -> Result<u64> {
 
 /// Re-queue `ok` rows whose stored document was saved under another route, e.g. after a
 /// migration re-routed them (0013 and 0015 kept the old refresh date). Runs at startup under
-/// the instance lock: batches of 1000, staggered over one hour, never later than the scheduled
-/// refresh, with leases fenced by the generation bump. Cleared validators keep a 304 from
-/// re-saving the old card. Rows already due within the hour are left alone, so restarts are
-/// idempotent; a saved document records its route and leaves the set.
+/// the instance lock in batches of 1000. Every such row loses its fetch validators, so its next
+/// fetch, whenever it comes, cannot be a 304 that keeps the old route's card. Rows not already due
+/// within the hour are re-queued: staggered over the hour, never later than the scheduled refresh,
+/// with leases fenced by the generation bump. Restarts are idempotent; a re-resolved document
+/// records its route and leaves the set (a 304 re-save keeps the recorded route).
 pub async fn requeue_rerouted(pool: &PgPool) -> Result<u64> {
     let (mut last, mut total) = (String::new(), 0u64);
     loop {
-        let ids: Vec<String> = sqlx::query_scalar(r#"WITH picked AS (
-            SELECT id FROM resource WHERE id>$1 AND status='ok' AND resolver IS NOT NULL
+        let (end, requeued): (Option<String>, i64) = sqlx::query_as(r#"WITH rerouted AS (
+            SELECT id,(final OR dead_letter OR lease_until>now() OR next_attempt_at>now()+interval '1 hour') AS requeue
+            FROM resource WHERE id>$1 AND status='ok' AND resolver IS NOT NULL
               AND resolved_by IS DISTINCT FROM resolver
-              AND (final OR dead_letter OR lease_until>now() OR next_attempt_at>now()+interval '1 hour')
             ORDER BY id LIMIT 1000),
-          fresh AS (UPDATE event_fetch SET validators='{}' WHERE resource_id IN (SELECT id FROM picked))
-          UPDATE resource r SET attempts=0,timeout_streak=0,dead_letter=false,final=false,
+          fresh AS (UPDATE event_fetch SET validators='{}' WHERE resource_id IN (SELECT id FROM rerouted) AND validators<>'{}'),
+          requeued AS (UPDATE resource r SET attempts=0,timeout_streak=0,dead_letter=false,final=false,
             last_error=NULL,last_error_resolver=NULL,lease_until=NULL,priority_at=NULL,generation=generation+1,
             next_attempt_at=least(next_attempt_at,now()+((('x'||substr(r.id,1,8))::bit(32)::bigint % 3600)*interval '1 second'))
-          FROM picked p WHERE r.id=p.id RETURNING r.id"#)
+            FROM rerouted p WHERE r.id=p.id AND p.requeue RETURNING r.id)
+          SELECT (SELECT max(id) FROM rerouted),(SELECT count(*) FROM requeued)"#)
             .bind(&last)
-            .fetch_all(pool)
+            .fetch_one(pool)
             .await?;
-        total += ids.len() as u64;
-        match ids.into_iter().max() {
+        total += requeued as u64;
+        match end {
             Some(id) => last = id,
             None => return Ok(total),
         }

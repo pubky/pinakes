@@ -1,4 +1,15 @@
 
+CORS: the public listener serves browser clients on other origins according to
+`api.cors_allow_origins` (default `["*"]`, safe because the public API is read-only apart from
+budgeted previews and takes no cookies or tokens; list exact origins to restrict; `[]` disables
+CORS). Preflights (`OPTIONS` with `Access-Control-Request-Method`) are answered with 204,
+`Access-Control-Allow-Methods: GET, POST`, `Access-Control-Allow-Headers: content-type` and
+`Access-Control-Max-Age: 600`, and spend the per-IP budget like any request. Responses,
+429s included, carry `Access-Control-Allow-Origin` and expose `Retry-After` and `ETag`; with an
+origin list they add `Vary: Origin`. No `Access-Control-Allow-Credentials` is sent. A refused
+origin gets no CORS headers. The admin listener never sends CORS headers. Entries other than
+`"*"` alone or exact origins stop startup.
+
 Web access interstitials are stored as `blocked` with no display fields or grouping evidence.
 `queue.blocked_ttl_secs` controls probes (default 86400; 3600–2592000 seconds); these probes
 never charge failures or dead-letter the resource. Access failure is not evidence of deletion:
@@ -85,9 +96,12 @@ letters into final `unsupported` rows, so they no longer count toward the dead-l
 Parser changes reach stored documents the same way. Each resolver kind has an extractor version
 (`resolver::EXTRACTOR_VERSIONS`), bumped in the same commit as any change to what it extracts
 or how it builds group evidence. Every save records the worker kind that extracted the document
-and its version (`resource.extracted_by`, `resource.extracted_with`); web workers also run the
-event, event_platform and disabled card routes, so those rows record `web`. A 304 re-save keeps
-both, because it does not re-extract. After the re-queue above, with
+and its version (`resource.extracted_by`, `resource.extracted_with`). Web workers also serve
+the event route when calendars are off, the event_platform route when adapters are off, and
+every disabled card kind; only those rows record `web`, while event and event_platform rows
+served by their own workers record `event`/`event_platform`. (Migration 0041's comment says
+those routes always record `web`; it is published and stays byte-identical.) A 304 re-save
+keeps the recorded route and extractor, because it does not re-extract. After the re-queue above, with
 `queue.reextract_on_upgrade` (default true), the daemon finds `ok` rows whose version is below
 the current one of their `extracted_by` kind (their route for rows saved before migration 0041).
 Every such row loses its fetch validators and, on the OSM route, its `osm_place` cache entry, so

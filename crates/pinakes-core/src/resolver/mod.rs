@@ -57,8 +57,23 @@ pub trait Resolver: Send + Sync {
     }
     fn refresh_after(&self, doc: &ResourceMeta) -> Duration;
 }
+/// Every route `classify` returns besides the card kinds (`cards::KINDS`). `classify` returns
+/// only these constants, so a new route is added here and `EXTRACTOR_VERSIONS` must cover it.
+pub const ROUTES: [&str; 6] = ["web", "pubky", "geo", "osm", "event", "event_platform"];
+const WEB: &str = ROUTES[0];
+const PUBKY: &str = ROUTES[1];
+const GEO: &str = ROUTES[2];
+const OSM: &str = ROUTES[3];
+const EVENT: &str = ROUTES[4];
+const EVENT_PLATFORM: &str = ROUTES[5];
+
 /// Scheme modules and host adapters go before the generic web fallback.
 pub fn classify(uri: &str) -> Option<&'static str> {
+    let route = classify_route(uri);
+    debug_assert!(route.is_none_or(|r| ROUTES.contains(&r) || cards::KINDS.contains(&r)));
+    route
+}
+fn classify_route(uri: &str) -> Option<&'static str> {
     let url = url::Url::parse(uri).ok()?;
     if let Some(kind) = cards::classify(uri) {
         return Some(kind);
@@ -72,7 +87,7 @@ pub fn classify(uri: &str) -> Option<&'static str> {
                     .nth(2)
                     .is_some_and(|app| !app.is_empty() && app != "pubky.app") =>
         {
-            Some("pubky")
+            Some(PUBKY)
         }
         "http" | "https"
             if url.host_str() == Some("api.nostr.wine")
@@ -80,27 +95,28 @@ pub fn classify(uri: &str) -> Option<&'static str> {
         {
             None
         }
-        "http" | "https" if osm::parse_id(uri).is_some() => Some("osm"),
+        "http" | "https" if osm::parse_id(uri).is_some() => Some(OSM),
         // Map links that name a point; never identity, so they never group.
-        "http" | "https" if geo::location_link(uri).is_some() => Some("geo"),
-        "nostr" => Some("event_platform"),
+        "http" | "https" if geo::location_link(uri).is_some() => Some(GEO),
+        "nostr" => Some(EVENT_PLATFORM),
         "http" | "https" | "webcal" | "webcals"
             if crate::event::adapters::detect(uri).is_some_and(|d| d.id != "ics") =>
         {
-            Some("event_platform")
+            Some(EVENT_PLATFORM)
         }
-        "webcal" | "webcals" => Some("event"),
-        "http" | "https" if crate::event::service::is_feed(uri) => Some("event"),
-        "http" | "https" => Some("web"),
-        "geo" => Some("geo"),
+        "webcal" | "webcals" => Some(EVENT),
+        "http" | "https" if crate::event::service::is_feed(uri) => Some(EVENT),
+        "http" | "https" => Some(WEB),
+        "geo" => Some(GEO),
         _ => None,
     }
 }
 
 /// The extractor version of each resolver kind. Bump a resolver's number in the same commit as
 /// any change to what it extracts or how it builds group evidence: at startup, `ok` documents
-/// saved by an older version of the worker kind that extracted them (`extracted_by`; web also
-/// runs the event, event_platform and disabled card routes) are re-fetched
+/// saved by an older version of the worker kind that extracted them (`extracted_by`; web workers
+/// also serve the event route with calendars off, the event_platform route with adapters off,
+/// and disabled card kinds) are re-fetched
 /// (`queue::reextract_outdated`), because a re-plan reuses the stored document and only a
 /// re-fetch re-runs the parser. Every `classify` route and card kind needs an entry: a missing
 /// one compares 0 < 0 and never re-extracts.
@@ -219,7 +235,19 @@ mod tests {
     #[test]
     fn every_route_and_card_kind_has_an_extractor_version() {
         let versions = extractor_versions();
-        let routes = [
+        for kind in ROUTES.iter().chain(cards::KINDS.iter()) {
+            assert!(
+                versions[kind].as_i64().is_some_and(|v| v > 0),
+                "{kind} has no extractor version"
+            );
+        }
+        assert_eq!(
+            EXTRACTOR_VERSIONS.len(),
+            ROUTES.len() + cards::KINDS.len(),
+            "versions name only routes and card kinds"
+        );
+        // Every route is reachable, so ROUTES lists nothing classify cannot return.
+        let samples = [
             "https://example.org/page",
             "https://www.openstreetmap.org/node/1",
             "https://osm.org/go/0EEQjE--",
@@ -228,24 +256,8 @@ mod tests {
             "nostr:naddr1qqxnzd3cxqmrzv3exgmr2wfeqgsxu35yyt0mwjjh8pcz4zprhxegz69t4wr9t74vk6zne58wzh0waycrqsqqqa28pccpzu",
             "pubky://o1gg96ewuojmopcjbz8895478wdtxtzzber7aezq6ror5a91j7dy/pub/example.app/x",
         ];
-        let kinds = routes.iter().map(|uri| classify(uri).expect(uri));
-        for kind in kinds.chain(cards::KINDS) {
-            assert!(
-                versions[kind].as_i64().is_some_and(|v| v > 0),
-                "{kind} has no extractor version"
-            );
-        }
         let routed: std::collections::BTreeSet<_> =
-            routes.iter().filter_map(|uri| classify(uri)).collect();
-        assert_eq!(
-            routed,
-            ["event", "event_platform", "geo", "osm", "pubky", "web"].into(),
-            "a new route needs a sample here"
-        );
-        assert_eq!(
-            EXTRACTOR_VERSIONS.len(),
-            routed.len() + cards::KINDS.len(),
-            "versions name only routes and card kinds"
-        );
+            samples.iter().filter_map(|uri| classify(uri)).collect();
+        assert_eq!(routed, ROUTES.into_iter().collect());
     }
 }

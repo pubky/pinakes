@@ -1438,41 +1438,154 @@ async fn round13_reextraction_follows_the_worker_that_extracted(pool: PgPool) {
     );
 }
 
-/// Round 13 W2: a feed on the `event` route promoted to `media` by its own card keeps that route
-/// across restarts instead of flipping back and being fetched again.
+/// Round 13 W2 and round 14 Y1: a feed on the `event` route, or an event page on the
+/// `event_platform` route served by a web worker, promoted to `media`/`activitypub` by its own
+/// card keeps that route across restarts instead of flipping back and being fetched again.
 #[sqlx::test(migrations = "../../migrations")]
 async fn round13_promoted_event_route_rows_survive_restarts(pool: PgPool) {
-    let feed = "https://example.org/podcast/feed/rss";
-    let id = store::ensure_resource(&pool, feed).await.unwrap();
+    let mut promoted = vec![];
+    for (uri, route, worker, card) in [
+        (
+            "https://example.org/podcast/feed/rss",
+            "event",
+            "event",
+            "media",
+        ),
+        (
+            "https://luma.com/abc123",
+            "event_platform",
+            "web",
+            "activitypub",
+        ),
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let job = queue::claim(&pool, route, &QueueConfig::default())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.id, id, "{uri} is on the {route} route");
+        let worker = Fixed {
+            name: worker,
+            source: card,
+            not_modified: false,
+        };
+        queue::run_job(&pool, &worker, &QueueConfig::default(), &job)
+            .await
+            .unwrap();
+        promoted.push((id, card));
+    }
+    let state = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (String, Option<String>, i64, chrono::DateTime<Utc>)>(
+                "SELECT resolver,resolved_by,generation,next_attempt_at FROM resource WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let mut before = vec![];
+    for (id, card) in &promoted {
+        let s = state(id.clone()).await;
+        assert_eq!((s.0.as_str(), s.1.as_deref()), (*card, Some(*card)));
+        before.push(s);
+    }
+    for _ in 0..2 {
+        assert_eq!(queue::reclassify_routes(&pool).await.unwrap(), 0);
+        assert_eq!(queue::requeue_rerouted(&pool).await.unwrap(), 0);
+        for ((id, _), b) in promoted.iter().zip(&before) {
+            assert_eq!(&state(id.clone()).await, b);
+        }
+    }
+}
+
+/// Round 14 Y2: every re-routed `ok` row loses its validators, re-queued or not, and a 304 re-save
+/// keeps the route recorded with the stored document, so the row stays in the re-routed set.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round14_a_304_never_marks_a_rerouted_document_current(pool: PgPool) {
+    let mut ids = Vec::new();
+    for uri in [
+        "https://example.org/soon.ics",
+        "https://example.org/later.ics",
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut doc = ResourceMeta::new(uri, "event", 6 * 3600);
+        doc.name = Some("Calendar".into());
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+        sqlx::query(
+            r#"INSERT INTO event_fetch(resource_id,validators) VALUES($1,'{"etag":"\"v1\""}')"#,
+        )
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+    // Saved under the web route by an earlier release; one is due within the hour.
+    sqlx::query("UPDATE resource SET resolved_by='web',next_attempt_at=now()+CASE WHEN id=$1 THEN interval '1 minute' ELSE interval '6 days' END WHERE id=ANY($2)")
+        .bind(&ids[0])
+        .bind(&ids)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(queue::requeue_rerouted(&pool).await.unwrap(), 1);
+    for id in &ids {
+        assert_eq!(validators(&pool, id).await, serde_json::json!({}), "{id}");
+    }
+    sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+        .bind(&ids[0])
+        .execute(&pool)
+        .await
+        .unwrap();
     let job = queue::claim(&pool, "event", &QueueConfig::default())
         .await
         .unwrap()
         .unwrap();
-    let card = Fixed {
+    assert_eq!(job.id, ids[0]);
+    let unchanged = Fixed {
         name: "event",
-        source: "media",
-        not_modified: false,
+        source: "event",
+        not_modified: true,
     };
-    queue::run_job(&pool, &card, &QueueConfig::default(), &job)
+    queue::run_job(&pool, &unchanged, &QueueConfig::default(), &job)
         .await
         .unwrap();
-    let state = || async {
-        sqlx::query_as::<_, (String, Option<String>, i64, chrono::DateTime<Utc>)>(
-            "SELECT resolver,resolved_by,generation,next_attempt_at FROM resource WHERE id=$1",
-        )
-        .bind(&id)
-        .fetch_one(&pool)
+    let route = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<String>>("SELECT resolved_by FROM resource WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(route(ids[0].clone()).await.as_deref(), Some("web"));
+    sqlx::query("UPDATE resource SET next_attempt_at=now()+interval '6 days' WHERE id=$1")
+        .bind(&ids[0])
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(queue::requeue_rerouted(&pool).await.unwrap(), 1);
+    // A full fetch records the route.
+    sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+        .bind(&ids[0])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let job = queue::claim(&pool, "event", &QueueConfig::default())
         .await
         .unwrap()
+        .unwrap();
+    let fresh = Fixed {
+        name: "event",
+        source: "event",
+        not_modified: false,
     };
-    let promoted = state().await;
-    assert_eq!(
-        (promoted.0.as_str(), promoted.1.as_deref()),
-        ("media", Some("media"))
-    );
-    for _ in 0..2 {
-        assert_eq!(queue::reclassify_routes(&pool).await.unwrap(), 0);
-        assert_eq!(queue::requeue_rerouted(&pool).await.unwrap(), 0);
-        assert_eq!(state().await, promoted);
-    }
+    queue::run_job(&pool, &fresh, &QueueConfig::default(), &job)
+        .await
+        .unwrap();
+    assert_eq!(route(ids[0].clone()).await.as_deref(), Some("event"));
 }

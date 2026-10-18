@@ -291,6 +291,10 @@ pub struct ApiConfig {
     pub reach_cost: usize,
     /// `pinakes_blocked_resources` keeps this many registrable domains plus `other`.
     pub blocked_metric_hosts: usize,
+    /// Browser origins allowed to call the public listener (CORS): `["*"]` (any origin; the
+    /// public API takes no cookies or tokens), a list of `scheme://host[:port]` origins, or `[]`
+    /// to send no CORS headers. Never applied to the admin listener.
+    pub cors_allow_origins: Vec<String>,
 }
 impl Default for ApiConfig {
     fn default() -> Self {
@@ -299,6 +303,7 @@ impl Default for ApiConfig {
             cache_capacity: 10000,
             reach_cost: 6,
             blocked_metric_hosts: 20,
+            cors_allow_origins: vec!["*".into()],
         }
     }
 }
@@ -403,6 +408,20 @@ impl Config {
         self.walls().context("invalid web wall settings")?;
         if !(1..=500).contains(&self.api.blocked_metric_hosts) {
             bail!("api.blocked_metric_hosts must be 1–500");
+        }
+        let origins = &self.api.cors_allow_origins;
+        if origins.iter().any(|o| o == "*") && origins.len() > 1 {
+            bail!("api.cors_allow_origins: \"*\" must be the only entry");
+        }
+        for origin in origins.iter().filter(|o| *o != "*") {
+            let valid = url::Url::parse(origin).is_ok_and(|u| {
+                matches!(u.scheme(), "http" | "https")
+                    && u.host_str().is_some()
+                    && u.origin().ascii_serialization() == *origin
+            });
+            if !valid {
+                bail!("api.cors_allow_origins: {origin:?} is not an origin (scheme://host[:port], no path or trailing slash)");
+            }
         }
         for other in std::iter::once(&self.pubky).chain(
             crate::resolver::cards::KINDS
@@ -658,6 +677,8 @@ mod tests {
         }
         assert!(config.queue.reextract_on_upgrade);
         assert_eq!(config.queue.reextract_window_secs, 21600);
+        assert!(text.lines().any(|l| l == r#"cors_allow_origins = ["*"]"#));
+        assert_eq!(config.api.cors_allow_origins, ["*"]);
         for (window, valid) in [(3599, false), (3600, true), (604800, true), (604801, false)] {
             let mut c = Config::default();
             c.queue.reextract_window_secs = window;

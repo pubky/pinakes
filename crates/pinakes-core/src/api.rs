@@ -142,7 +142,8 @@ async fn public_budget(
         )
         .into_response();
     };
-    let cost = if request.uri().path() == "/v1/search"
+    let cost = if request.method() != axum::http::Method::OPTIONS
+        && request.uri().path() == "/v1/search"
         && url::form_urlencoded::parse(request.uri().query().unwrap_or_default().as_bytes())
             .any(|(key, _)| key == "reach")
     {
@@ -167,6 +168,80 @@ async fn public_budget(
     next.run(request).await
 }
 
+/// Whether `origin` may call the public listener (`api.cors_allow_origins`).
+fn cors_allowed(state: &AppState, origin: Option<&header::HeaderValue>) -> bool {
+    let origins = &state.config.api.cors_allow_origins;
+    origin.is_some_and(|origin| {
+        origins.iter().any(|o| o == "*")
+            || origin
+                .to_str()
+                .is_ok_and(|origin| origins.iter().any(|o| o == origin))
+    })
+}
+/// CORS headers for browser clients on the public listener, outermost so that budget refusals
+/// (429 with `Retry-After`) are readable cross-origin too. No credentials: the public API takes
+/// no cookies or tokens. `Vary: Origin` whenever the answer depends on the origin.
+async fn cors_headers(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let origin = request.headers().get(header::ORIGIN).cloned();
+    let mut response = next.run(request).await;
+    let origins = &state.config.api.cors_allow_origins;
+    if origins.is_empty() {
+        return response;
+    }
+    let any = origins.iter().any(|o| o == "*");
+    let allowed = cors_allowed(&state, origin.as_ref());
+    let headers = response.headers_mut();
+    if !any {
+        headers.append(header::VARY, header::HeaderValue::from_static("origin"));
+    }
+    if allowed {
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            if any {
+                header::HeaderValue::from_static("*")
+            } else {
+                origin.expect("allowed origin")
+            },
+        );
+        headers.insert(
+            header::ACCESS_CONTROL_EXPOSE_HEADERS,
+            header::HeaderValue::from_static("retry-after, etag"),
+        );
+    }
+    response
+}
+/// Answer CORS preflights inside the budget layer, so they share the per-IP budget. A refused
+/// origin gets no CORS headers, which the browser treats as a refusal.
+async fn cors_preflight(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let preflight = request.method() == axum::http::Method::OPTIONS
+        && request
+            .headers()
+            .contains_key(header::ACCESS_CONTROL_REQUEST_METHOD);
+    if !preflight || state.config.api.cors_allow_origins.is_empty() {
+        return next.run(request).await;
+    }
+    if !cors_allowed(&state, request.headers().get(header::ORIGIN)) {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    (
+        StatusCode::NO_CONTENT,
+        [
+            (header::ACCESS_CONTROL_ALLOW_METHODS, "GET, POST"),
+            (header::ACCESS_CONTROL_ALLOW_HEADERS, "content-type"),
+            (header::ACCESS_CONTROL_MAX_AGE, "600"),
+        ],
+    )
+        .into_response()
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/info", get(info))
@@ -189,7 +264,15 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/dumps/osm_place.ndjson", get(osm_dump))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
+            cors_preflight,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
             public_budget,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            cors_headers,
         ))
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .with_state(state)

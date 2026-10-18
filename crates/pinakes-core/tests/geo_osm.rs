@@ -1529,6 +1529,24 @@ async fn round13_object_shortlinks_join_their_object_and_route_moves_are_complet
     );
     assert_eq!(generation, before.4 + 1);
     assert_eq!(doc["osm_id"], "node/240109189");
+    // Round 14 K60: unresolved until the OSM worker maps it, so the boundary proof holds meanwhile.
+    for uri in [short, changeset, note] {
+        let resolved: (bool, bool, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT resolved_at IS NOT NULL,refresh_at IS NOT NULL,resolved_by,osm_version FROM resource WHERE id=$1",
+        )
+        .bind(&ids[uri])
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(resolved, (false, false, None, None), "{uri}");
+    }
+    if let Some(proof) = boundary_script(&pool).await {
+        assert!(
+            proof.status.success(),
+            "{}",
+            String::from_utf8_lossy(&proof.stderr)
+        );
+    }
     // An OSM-host URL moving to web keeps no facts (resource_web_osm_boundary).
     for uri in [changeset, note] {
         let (route, status, final_, dead, _, due, cleared, doc) = state(ids[uri].clone()).await;
@@ -1634,6 +1652,39 @@ async fn round13_a_page_naming_a_map_link_does_not_group_with_the_point(pool: Pg
     assert_eq!(group_of(&pool, &point).await, None);
 }
 
+/// `scripts/verify-osm-boundary` against this test database, or None, with a message saying so,
+/// where the PostgreSQL client tools it runs (`psql`, `pg_dump`) are not installed.
+async fn boundary_script(pool: &PgPool) -> Option<std::process::Output> {
+    for tool in ["psql", "pg_dump"] {
+        if std::process::Command::new(tool)
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!(
+                "SKIPPED: scripts/verify-osm-boundary needs `{tool}` (PostgreSQL client tools), \
+                 which is not installed"
+            );
+            return None;
+        }
+    }
+    let database: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let mut url = url::Url::parse(&std::env::var("DATABASE_URL").unwrap()).unwrap();
+    url.set_path(&format!("/{database}"));
+    Some(
+        std::process::Command::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/verify-osm-boundary"
+        ))
+        .env("DATABASE_URL", url.as_str())
+        .output()
+        .unwrap(),
+    )
+}
+
 /// Round 13 K58: `scripts/verify-osm-boundary` accepts the geo change lines of OSM-host location
 /// links (as migration 0038 does) and still refuses web facts on OSM hosts.
 #[sqlx::test(migrations = "../../migrations")]
@@ -1659,22 +1710,9 @@ async fn round13_boundary_script_accepts_location_link_history(pool: PgPool) {
     .fetch_one(&pool)
     .await
     .unwrap());
-    let database: String = sqlx::query_scalar("SELECT current_database()")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    let mut url = url::Url::parse(&std::env::var("DATABASE_URL").unwrap()).unwrap();
-    url.set_path(&format!("/{database}"));
-    let script = || {
-        std::process::Command::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../scripts/verify-osm-boundary"
-        ))
-        .env("DATABASE_URL", url.as_str())
-        .output()
-        .unwrap()
+    let Some(ok) = boundary_script(&pool).await else {
+        return;
     };
-    let ok = script();
     assert!(
         ok.status.success(),
         "{}",
@@ -1690,7 +1728,7 @@ async fn round13_boundary_script_accepts_location_link_history(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let leaked = script();
+    let leaked = boundary_script(&pool).await.unwrap();
     assert!(!leaked.status.success());
     assert!(String::from_utf8_lossy(&leaked.stderr).contains("leaked into historical changes"));
 }
