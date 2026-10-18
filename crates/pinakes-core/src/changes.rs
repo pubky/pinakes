@@ -216,6 +216,11 @@ pub async fn save_extracted(
     let before = accepted.filter(|v| v.get("type").is_some() && row.get::<bool, _>("ever_existed"));
     // Only a storable old start is protected: one stored before the bound (year 0000 or past
     // 9999) is dropped at re-parse and must be replaced, not kept forever.
+    // Both drift guards read the stored row's type path, so a page cannot shed `Event` in the
+    // same refresh to slip past either one.
+    let stored_event = row
+        .try_get::<Option<Vec<String>>, _>("type_path")?
+        .is_some_and(|path| path.iter().any(|t| t == "Event"));
     if doc.status == Status::Ok
         && doc.start.is_none()
         && before.as_ref().is_some_and(|old| {
@@ -225,9 +230,7 @@ pub async fn save_extracted(
                 .and_then(crate::event::time::bounded)
                 .is_some()
         })
-        && row
-            .try_get::<Option<Vec<String>>, _>("type_path")?
-            .is_some_and(|path| path.iter().any(|t| t == "Event"))
+        && stored_event
     {
         crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
         return Err(crate::resolver::RetryLater {
@@ -354,7 +357,7 @@ pub async fn save_extracted(
         if had_start
             && doc.start.is_none()
             && old.start.and_then(crate::event::time::bounded).is_some()
-            && doc.type_path.iter().any(|t| t == "Event")
+            && stored_event
         {
             crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
             return Err(crate::resolver::RetryLater {

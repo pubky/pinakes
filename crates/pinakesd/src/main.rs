@@ -83,6 +83,17 @@ async fn main() -> Result<()> {
     if capped > 0 {
         tracing::info!(capped, "capped derived-link expiries at the event horizon");
     }
+    let extended = pinakes_core::store::extend_derivations(
+        &pool,
+        pinakes_core::store::derivation_horizon(&config.event),
+    )
+    .await?;
+    if extended > 0 {
+        tracing::info!(
+            extended,
+            "extended derived links whose event entered the horizon"
+        );
+    }
     if config.queue.reextract_on_upgrade {
         let reextract = queue::reextract_outdated(
             &pool,

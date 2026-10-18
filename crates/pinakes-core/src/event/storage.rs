@@ -30,6 +30,7 @@ pub struct Prepared {
     expansion: Option<String>,
     /// Feed warnings found while building rows, added to the stored document.
     pub(crate) warnings: Vec<String>,
+    delta: bool,
 }
 pub struct PendingChange {
     before: Option<Value>,
@@ -299,6 +300,7 @@ pub async fn prepare(
         cursor: container.cursor.clone(),
         expansion: container.expansion.clone(),
         warnings: vec![],
+        delta: container.delta,
         last,
         fetched_at,
         horizon: container.horizon_start,
@@ -526,6 +528,14 @@ pub async fn apply(
     }
     if let Some(cursor) = &plan.cursor {
         cursor.commit(tx, id).await?;
+    }
+    if plan.delta {
+        // A delta feed may never resend a far event, so its links follow the horizon here.
+        sqlx::query(crate::store::EXTEND_PARENT_DERIVATIONS)
+            .bind(id)
+            .bind(plan.horizon_end)
+            .execute(&mut **tx)
+            .await?;
     }
     Ok(Some(true))
 }

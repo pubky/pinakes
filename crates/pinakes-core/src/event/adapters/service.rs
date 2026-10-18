@@ -386,8 +386,6 @@ impl PlatformResolver {
                 .and_then(crate::event::time::bounded)
                 .or(o.doc.start.and_then(crate::event::time::bounded))
                 .filter(|at| *at > chrono::Utc::now())
-                // Delta rows skip the horizon: a distant event never holds a slot past it.
-                .map(|at| at.min(crate::store::derivation_horizon(cfg)))
             else {
                 continue;
             };
@@ -407,7 +405,10 @@ impl PlatformResolver {
         }
         if cfg.adapters.derive_resources {
             for (link, until) in links.into_iter().take(cfg.adapters.max_linked_resources) {
-                if crate::store::derive_resource_until(
+                // Delta rows skip the horizon: a distant event never holds a slot past it, and
+                // the expiry follows the horizon until the event is inside it
+                // (`store::extend_derivations`).
+                if crate::store::derive_resource_within(
                     &events.pool,
                     &doc.url,
                     &link,
@@ -415,6 +416,7 @@ impl PlatformResolver {
                     cfg.adapters.max_linked_resources,
                     cfg.adapters.max_derived_resources,
                     Some(until),
+                    Some(crate::store::derivation_horizon(cfg)),
                 )
                 .await?
                 .is_some()

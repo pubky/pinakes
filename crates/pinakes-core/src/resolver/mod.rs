@@ -136,8 +136,10 @@ pub const EXTRACTOR_VERSIONS: &[(&str, i32)] = &[
     // 8: trimmed JSON-LD date-only ends, skipped failed NIP-52 calendar members (round 21).
     // 9: storable NIP-52 all-day dates, start-less calendar members skipped (round 22).
     // 10: NIP-52 calendars stop waiting for a member pending past the configured wait (round 23).
-    ("event", 10),
-    ("event_platform", 10),
+    // 11: the NIP-52 member wait per calendar and member, bounded per calendar; leap seconds
+    // normalised before the year check (round 24).
+    ("event", 11),
+    ("event_platform", 11),
     ("media", 1),
     ("isbn", 1),
     ("doi", 1),

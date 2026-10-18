@@ -90,10 +90,12 @@ pub fn container(uri: &str, cfg: &EventConfig) -> ResourceMeta {
         limits: cfg.container.clone(),
         horizon_start: now
             .checked_sub_months(chrono::Months::new(cfg.months_back))
-            .unwrap_or(chrono::DateTime::<Utc>::MIN_UTC),
+            .unwrap_or_else(crate::event::time::earliest)
+            .max(crate::event::time::earliest()),
         horizon_end: now
             .checked_add_months(chrono::Months::new(cfg.months_forward))
-            .unwrap_or(chrono::DateTime::<Utc>::MAX_UTC),
+            .unwrap_or_else(crate::event::time::latest)
+            .min(crate::event::time::latest()),
         held_retry_secs: cfg.held_retry_secs,
         ..Default::default()
     }));
@@ -619,8 +621,9 @@ fn missing(uri: &str, source: &str) -> ResourceMeta {
 fn single(uri: &str, adapter: &str, row: &Value, cfg: &EventConfig) -> Result<ResourceMeta> {
     let mut doc = container(uri, cfg);
     let c = doc.container.as_mut().unwrap();
-    c.horizon_start = DateTime::<Utc>::MIN_UTC;
-    c.horizon_end = DateTime::<Utc>::MAX_UTC;
+    // Unbounded for a single event, but storable: no path may bind chrono's sentinels.
+    c.horizon_start = crate::event::time::earliest();
+    c.horizon_end = crate::event::time::latest();
     append(&mut doc, adapter, row, cfg)?;
     if doc.container.as_ref().unwrap().occurrences.is_empty() {
         if adapter == "btcmap" && doc.container.as_ref().unwrap().deleted_uids.is_empty() {

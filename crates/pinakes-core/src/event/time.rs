@@ -1,6 +1,6 @@
 use chrono::{
     DateTime, Datelike, Duration, FixedOffset, LocalResult, NaiveDate, NaiveDateTime, Offset,
-    SubsecRound, TimeZone, Utc,
+    SubsecRound, TimeZone, Timelike, Utc,
 };
 use chrono_tz::Tz;
 use std::{collections::BTreeMap, sync::OnceLock};
@@ -82,9 +82,27 @@ fn four_digit_year(value: &str) -> bool {
 /// Postgres keeps microseconds and rounds anything finer, so 9999-12-31T23:59:59.9999995Z would
 /// be stored as year 10000: the instant is truncated to microseconds first, and callers store the
 /// returned value.
+///
+/// chrono keeps a leap second as nanoseconds ≥ 1e9 within the 59th second, so
+/// 9999-12-31T23:59:60Z reads as year 9999 while Postgres rolls it into year 10000: a leap second
+/// is first normalised into the next second.
 pub fn bounded(t: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let t = if t.nanosecond() >= 1_000_000_000 {
+        t.with_nanosecond(t.nanosecond() - 1_000_000_000)?
+            .checked_add_signed(Duration::seconds(1))?
+    } else {
+        t
+    };
     let t = t.trunc_subsecs(6);
     (1..=9999).contains(&t.year()).then_some(t)
+}
+/// The earliest storable instant (`bounded`), for horizons that would otherwise be unbounded.
+pub fn earliest() -> DateTime<Utc> {
+    DateTime::from_timestamp(-62135596800, 0).expect("0001-01-01T00:00:00Z")
+}
+/// The latest storable instant (`bounded`).
+pub fn latest() -> DateTime<Utc> {
+    DateTime::from_timestamp(253402300799, 999_999_000).expect("9999-12-31T23:59:59.999999Z")
 }
 /// A Unix timestamp in seconds, bounded like every stored instant.
 pub fn from_timestamp(secs: i64) -> Option<DateTime<Utc>> {

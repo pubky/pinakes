@@ -556,6 +556,20 @@ pub async fn resolve(
     }
     let mut pending = false;
     let mut retained_bytes = 0usize;
+    // The wait for unresolved members is bounded twice: per member, from when this calendar
+    // first listed it (not from when anyone first referenced it), and for the calendar as a
+    // whole, from its last stored snapshot (else from when it was first seen), so members added
+    // one after another cannot keep it from applying its other members' changes for good.
+    let calendar_id = crate::model::identity(uri)?.0;
+    let wait = cfg.adapters.calendar_member_wait_hours as f64;
+    let calendar_overdue: bool = sqlx::query_scalar(
+        "SELECT coalesce(to_timestamp(e.last_snapshot_at/1000.0),r.created_at)<now()-$2*interval '1 hour' FROM resource r LEFT JOIN event_fetch e ON e.resource_id=r.id WHERE r.id=$1",
+    )
+    .bind(&calendar_id)
+    .bind(wait)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(false);
     for target in refs {
         let resource = target.uri()?;
         let Some(id) = crate::store::derive_resource_until(
@@ -575,13 +589,15 @@ pub async fn resolve(
             }
             .into());
         };
-        let (value, failed, overdue): (Value, bool, bool) = sqlx::query_as(
-            "SELECT d.doc,(r.status IN ('error','unreachable') OR r.dead_letter OR r.final) AND r.status<>'ok',r.created_at<now()-$2*interval '1 hour' FROM resource_document d JOIN resource r ON r.id=d.id WHERE d.id=$1",
+        let (value, failed, member_overdue): (Value, bool, bool) = sqlx::query_as(
+            "SELECT d.doc,(r.status IN ('error','unreachable') OR r.dead_letter OR r.final) AND r.status<>'ok',coalesce((SELECT l.first_seen_at FROM resource_derivation l WHERE l.parent_id=$3 AND l.child_id=d.id),now())<now()-$2*interval '1 hour' FROM resource_document d JOIN resource r ON r.id=d.id WHERE d.id=$1",
         )
         .bind(&id)
-        .bind(cfg.adapters.calendar_member_wait_hours as f64)
+        .bind(wait)
+        .bind(&calendar_id)
         .fetch_one(pool)
         .await?;
+        let overdue = member_overdue || calendar_overdue;
         // A member whose own resolution failed (refused, unreachable, dead-lettered) is skipped
         // like a missing one, or the calendar would wait for it forever: pending answers never
         // count toward dead-letter.

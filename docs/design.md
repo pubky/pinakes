@@ -104,9 +104,11 @@ Adapter derivation is an explicit, configurable exception to direct-reference-on
 NIP-52 calendars may resolve their listed event members, and BTC Map may resolve the event's
 own website. `event.adapters.derive_resources` defaults on. Per-parent and per-adapter limits
 and parent-author budgets (or a synthetic per-adapter sponsor when no author exists) cover
-this work. BTC Map sponsorships expire with the event (its end, else its start, never past the
-event horizon, `event.months_forward`; startup caps stored expiries the same way), freeing slots
-for new future events;
+this work. BTC Map sponsorships expire with the event (its end, else its start), capped at the
+event horizon (`event.months_forward`; startup caps stored expiries the same way). The uncapped
+instant is kept, and once the event enters the horizon (checked at startup and on every apply of
+the delta feed) the expiry is extended to it, so a far event keeps its link until it happens while
+a year-9999 event never holds a slot past the horizon. This frees slots for new future events;
 calendar membership remains bounded across polls. Portal coordinates remain page-sourced venue facts,
 with no writes to the OSM cache and no implicit OSM fetch.
 

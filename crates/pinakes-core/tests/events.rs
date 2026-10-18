@@ -4363,3 +4363,20 @@ async fn round23_stored_year_10000_values_read_and_migration_0046_clears_them(po
             .unwrap();
     assert_eq!((start_at, doc_start), (None, false));
 }
+
+/// Round 24 E5: chrono reads 9999-12-31T23:59:60Z as year 9999 while Postgres rolls it into
+/// 10000; a leap second is normalised into the next second before the year check.
+#[test]
+fn round24_a_leap_second_is_normalised_before_the_bound() {
+    let leap = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+    assert_eq!(time::bounded(leap("9999-12-31T23:59:60Z")), None);
+    assert_eq!(
+        time::bounded(leap("2016-12-31T23:59:60.5Z")),
+        Some(leap("2017-01-01T00:00:00.5Z"))
+    );
+    assert_eq!(
+        time::bounded(leap("9999-12-31T23:59:59.999999Z")),
+        Some(time::latest())
+    );
+    assert_eq!(time::bounded(time::earliest()), Some(time::earliest()));
+}

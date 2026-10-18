@@ -4339,15 +4339,235 @@ async fn round23_a_member_that_never_resolves_stops_blocking_its_calendar(pool: 
         .await
         .unwrap();
     assert!(pending(resolve(cfg.clone()).await), "within the wait");
-    sqlx::query("UPDATE resource SET created_at=now()-interval '49 hours' WHERE id=$1")
-        .bind(member_id(&stuck).0)
-        .execute(&pool)
-        .await
-        .unwrap();
+    // Round 24 E2: the wait runs from when this calendar first listed the member.
+    sqlx::query(
+        "UPDATE resource_derivation SET first_seen_at=now()-interval '49 hours' WHERE child_id=$1",
+    )
+    .bind(member_id(&stuck).0)
+    .execute(&pool)
+    .await
+    .unwrap();
     let doc = resolve(cfg.clone()).await.unwrap();
     assert_eq!(doc.event.warnings, ["calendar_member_unavailable"]);
     assert_eq!(doc.container.unwrap().occurrences.len(), 1);
     let mut patient = cfg.clone();
     patient.adapters.calendar_member_wait_hours = 72;
     assert!(pending(resolve(patient).await), "a longer wait still waits");
+}
+
+/// Round 24 E2: the member wait is the calendar's own. (a) A member referenced long before this
+/// calendar listed it (anyone can reference a `nostr:` URI early) does not shorten the wait.
+/// (b) A calendar whose last stored snapshot, or first sighting, is older than the wait stops
+/// waiting for unresolved members, however recently they were listed.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round24_the_member_wait_is_per_calendar_and_bounded(pool: PgPool) {
+    use pinakes_core::event::adapters::nostr as nip52;
+    let cfg = EventConfig::default();
+    let at = (Utc::now() + Duration::days(1)).timestamp().to_string();
+    let timed = |d: &str| {
+        signed(
+            31923,
+            100,
+            &[&["d", d], &["title", "Member"], &["start", &at]],
+        )
+    };
+    let (good, stuck) = (timed("good"), timed("stuck"));
+    // Referenced 100 hours before any calendar listed it.
+    let (stuck_id, stuck_uri) = member_id(&stuck);
+    store::ensure_resource(&pool, &stuck_uri).await.unwrap();
+    sqlx::query("UPDATE resource SET created_at=now()-interval '100 hours' WHERE id=$1")
+        .bind(&stuck_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (uri, parent) = nip52_calendar(&pool, &[&good, &stuck]).await;
+    let calendar = pinakes_core::model::identity(&uri).unwrap().0;
+    let (egress, _) = mock_egress(vec![(200, json!([parent]))]);
+    let resolve = || nip52::resolve(&uri, &egress, &cfg, &pool, false);
+    let pending = |r: anyhow::Result<pinakes_core::model::ResourceMeta>| {
+        r.unwrap_err()
+            .downcast_ref::<pinakes_core::resolver::RetryLater>()
+            .is_some_and(|r| r.class == "calendar_members_pending")
+    };
+    let _ = resolve().await;
+    let (good_id, good_uri) = member_id(&good);
+    let doc = nip52::parse(&good_uri, &good, &cfg).unwrap();
+    store::save_document(&pool, &good_id, 0, &doc)
+        .await
+        .unwrap();
+    assert!(
+        pending(resolve().await),
+        "(a) an early reference does not shorten this calendar's wait"
+    );
+    // (b) The calendar itself was first seen 49 hours ago and never stored a snapshot.
+    sqlx::query("UPDATE resource SET created_at=now()-interval '49 hours' WHERE id=$1")
+        .bind(&calendar)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let doc = resolve().await.unwrap();
+    assert_eq!(doc.event.warnings, ["calendar_member_unavailable"]);
+    assert_eq!(doc.container.unwrap().occurrences.len(), 1);
+    // A recent stored snapshot restores the wait.
+    sqlx::query("INSERT INTO event_fetch(resource_id,last_snapshot_at) VALUES($1,$2)")
+        .bind(&calendar)
+        .bind(Utc::now().timestamp_millis())
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        pending(resolve().await),
+        "(b) a recent snapshot: still waiting"
+    );
+    sqlx::query("UPDATE event_fetch SET last_snapshot_at=$2 WHERE resource_id=$1")
+        .bind(&calendar)
+        .bind((Utc::now() - Duration::hours(49)).timestamp_millis())
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(resolve().await.is_ok(), "(b) an old snapshot: applies");
+}
+
+/// Round 24 E1: a far BTC Map event's link is capped at the horizon when derived, keeps its
+/// event's own instant, and is extended to it once the event enters the horizon, by the next
+/// delta apply or at startup; a year-9999 event never qualifies and keeps the cap.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round24_a_far_event_keeps_its_link_as_the_horizon_moves(pool: PgPool) {
+    use pinakes_core::resolver::Resolver;
+    let cfg = EventConfig {
+        geocoding: false,
+        ..Default::default()
+    };
+    let uri = "https://api.btcmap.org/v4/events";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let start =
+        chrono::DateTime::from_timestamp((Utc::now() + chrono::Months::new(18)).timestamp(), 0)
+            .unwrap();
+    let row = json!({"id":1,"status":"live","starts_at":start.to_rfc3339(),"name":"Far","website":"https://example.org/far18","updated_at":"2026-10-15T13:00:00Z"});
+    let (egress, _) = mock_egress(vec![(200, json!([row]))]);
+    let doc = platform(&pool, cfg.clone(), egress)
+        .resolve(uri)
+        .await
+        .unwrap();
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let link = || {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>)>(
+                "SELECT d.expires_at,d.until FROM resource_derivation d JOIN resource r ON r.id=d.child_id WHERE r.uri='https://example.org/far18'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let (expires, until) = link().await;
+    assert_eq!(until, Some(start), "the event's own instant is kept");
+    assert!(
+        (expires - store::derivation_horizon(&cfg))
+            .num_seconds()
+            .abs()
+            < 60,
+        "capped at the horizon"
+    );
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM occurrence WHERE resource_id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 0, "a delta feed stores no row beyond the horizon");
+    // Seven months later (shifted back instead of waiting): the event is 11 months out, the
+    // link expires in 5, and BTC Map never resends the unedited event.
+    let shift = || {
+        let pool = pool.clone();
+        async move {
+            sqlx::query("UPDATE resource_derivation SET expires_at=expires_at-interval '7 months',until=until-interval '7 months'")
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    shift().await;
+    let (egress, _) = mock_egress(vec![(200, json!([]))]);
+    let mut doc = platform(&pool, cfg.clone(), egress)
+        .resolve(uri)
+        .await
+        .unwrap();
+    doc.fetched_at += 1000;
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let (expires, until) = link().await;
+    assert_eq!(
+        Some(expires),
+        until,
+        "the delta apply extended it to the event"
+    );
+    // The startup pass does the same for a link that no apply reached.
+    shift().await;
+    sqlx::query("UPDATE resource_derivation SET expires_at=now()+interval '1 month'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        store::extend_derivations(&pool, store::derivation_horizon(&cfg))
+            .await
+            .unwrap(),
+        1
+    );
+    let (expires, until) = link().await;
+    assert_eq!(Some(expires), until);
+    // A year-9999 event never enters the horizon.
+    store::derive_resource_within(
+        &pool,
+        uri,
+        "https://example.org/never",
+        "btcmap",
+        100,
+        100,
+        chrono::DateTime::from_timestamp(253385000000, 0),
+        Some(store::derivation_horizon(&cfg)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        store::extend_derivations(&pool, store::derivation_horizon(&cfg))
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+/// Round 24 E3: a single BTC Map event document carries storable horizons, not chrono's
+/// sentinels, and saves through the full save path with its container.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round24_a_single_event_document_saves_with_storable_horizons(pool: PgPool) {
+    let cfg = EventConfig::default();
+    let uri = "https://api.btcmap.org/v4/events/7";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let at = (Utc::now() + Duration::days(2)).to_rfc3339();
+    let (egress, _) = mock_egress(vec![(
+        200,
+        json!({"id":7,"status":"live","starts_at":at,"name":"Seven","updated_at":"2026-10-15T13:00:00Z"}),
+    )]);
+    let doc = cursor::resolve(
+        &pool,
+        uri,
+        adapters::definition("btcmap").unwrap(),
+        &egress,
+        &cfg,
+        false,
+    )
+    .await
+    .unwrap();
+    let c = doc.container.as_ref().unwrap();
+    assert_eq!(c.horizon_start, pinakes_core::event::time::earliest());
+    assert_eq!(c.horizon_end, pinakes_core::event::time::latest());
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let (start, end): (chrono::DateTime<Utc>, chrono::DateTime<Utc>) =
+        sqlx::query_as("SELECT horizon_start,horizon_end FROM event_fetch WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((start, end), (c.horizon_start, c.horizon_end));
 }

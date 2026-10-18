@@ -47,6 +47,31 @@ pub async fn cap_derivation_expiry(pool: &PgPool, cfg: &crate::config::EventConf
         }
     }
 }
+/// Extend derived links whose event has entered the horizon to the event's own instant
+/// (`until`), so a link capped at the horizon when it was derived does not expire before its
+/// event while the horizon moves on. A year-9999 event never enters it, so it keeps the cap.
+/// Startup runs this over every link in batches of 1000; each delta-feed apply runs it for its
+/// own links (`storage::apply`).
+pub async fn extend_derivations(
+    pool: &PgPool,
+    horizon: chrono::DateTime<chrono::Utc>,
+) -> Result<u64> {
+    let mut total = 0u64;
+    loop {
+        let extended = sqlx::query(EXTEND_DERIVATIONS_BATCH)
+            .bind(horizon)
+            .execute(pool)
+            .await?
+            .rows_affected();
+        total += extended;
+        if extended == 0 {
+            return Ok(total);
+        }
+    }
+}
+const EXTEND_DERIVATIONS_BATCH: &str = "UPDATE resource_derivation SET expires_at=until WHERE (parent_id,child_id) IN (SELECT parent_id,child_id FROM resource_derivation WHERE until IS NOT NULL AND until<=$1 AND expires_at>now() AND expires_at<until LIMIT 1000)";
+/// `extend_derivations` for one parent's links, inside its apply.
+pub(crate) const EXTEND_PARENT_DERIVATIONS: &str = "UPDATE resource_derivation SET expires_at=until WHERE parent_id=$1 AND until IS NOT NULL AND until<=$2 AND expires_at>now() AND expires_at<until";
 /// Time-scoped sponsorship frees expired event slots without fetching every historical link.
 pub async fn derive_resource_until(
     pool: &PgPool,
@@ -57,12 +82,28 @@ pub async fn derive_resource_until(
     global_cap: usize,
     expires: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<Option<String>> {
-    if expires.is_some_and(|at| at <= chrono::Utc::now()) {
+    derive_resource_within(pool, parent, uri, adapter, cap, global_cap, expires, None).await
+}
+/// `derive_resource_until` for a link whose event asks for `until` but whose expiry is capped
+/// at `horizon`; the uncapped instant is kept so `extend_derivations` can follow the horizon.
+#[allow(clippy::too_many_arguments)]
+pub async fn derive_resource_within(
+    pool: &PgPool,
+    parent: &str,
+    uri: &str,
+    adapter: &str,
+    cap: usize,
+    global_cap: usize,
+    until: Option<chrono::DateTime<chrono::Utc>>,
+    horizon: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<Option<String>> {
+    if until.is_some_and(|at| at <= chrono::Utc::now()) {
         return Ok(None);
     }
     // Never past the last storable instant (`time::bounded`), whatever the caller derived.
     let latest = chrono::DateTime::from_timestamp(253402300799, 0).expect("9999-12-31T23:59:59Z");
-    let expires = expires.map(|at| at.min(latest));
+    let until = until.map(|at| at.min(latest));
+    let expires = until.map(|at| horizon.map_or(at, |h| at.min(h)));
     let (parent_id, _, _) = identity(parent)?;
     let (id, uri, scheme) = identity(uri)?;
     if parent_id == id {
@@ -107,21 +148,23 @@ pub async fn derive_resource_until(
             return Ok(None);
         }
         insert_resource(&mut tx, &id, &uri, &scheme).await?;
-        sqlx::query("INSERT INTO resource_derivation(parent_id,child_id,adapter,expires_at) VALUES($1,$2,$3,$4) ON CONFLICT(parent_id,child_id) DO UPDATE SET expires_at=excluded.expires_at")
+        sqlx::query("INSERT INTO resource_derivation(parent_id,child_id,adapter,expires_at,until) VALUES($1,$2,$3,$4,$5) ON CONFLICT(parent_id,child_id) DO UPDATE SET expires_at=excluded.expires_at,until=excluded.until")
             .bind(&parent_id)
             .bind(&id)
             .bind(adapter)
             .bind(expires)
+            .bind(until)
             .execute(&mut *tx)
             .await?;
     }
     if known {
         sqlx::query(
-            "UPDATE resource_derivation SET expires_at=$3 WHERE parent_id=$1 AND child_id=$2",
+            "UPDATE resource_derivation SET expires_at=$3,until=$4 WHERE parent_id=$1 AND child_id=$2",
         )
         .bind(&parent_id)
         .bind(&id)
         .bind(expires)
+        .bind(until)
         .execute(&mut *tx)
         .await?;
     }
