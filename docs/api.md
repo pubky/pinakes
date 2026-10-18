@@ -425,7 +425,9 @@ instants are limited to UTC years 0001–9999, the range Postgres reads back (a 
 9999-12-31 can land in year 10000): an occurrence starting outside it is dropped with the feed's
 `occurrence_start_out_of_range`, and an end or modification time outside it is dropped with the
 item's `end_out_of_range` or `modified_out_of_range`, so one bad item never fails the feed. A
-document's own start or end is treated the same way.
+document's own start or end is treated the same way. The bound is applied again where each
+occurrence row is written, after times re-derived from a stored venue's zone: an occurrence
+whose start falls out of range there keeps its stored row.
 A series whose embedded VTIMEZONE cannot convert its DTSTART expands in UTC (its published
 instants) and records the warning `series_zone_unconvertible`.
 Occurrence changes are field patches with `occurrence` equal to the serialized
@@ -525,7 +527,12 @@ and calls Open Library. Valid `doi:`, `https://doi.org/…` and `https://dx.doi.
 request CSL JSON, including publication date and container. Invalid bare identifiers
 are final Missing; informational DOI URLs fall back to web. Generic Nostr
 profiles/notes use the signed-event indexer path; NIP-52 events retain their event
-schema. Advertised ActivityPub endpoints or ActivityStreams JSON yield Person,
+schema. A NIP-52 calendar waits (`calendar_members_pending`) only for members not resolved
+yet. A member whose resolution failed (refused, unreachable, dead-lettered), including one
+whose newest version is refused, or an accepted member without a start, is skipped like a
+missing one with `calendar_member_unavailable`: the calendar applies its other members, and
+the skipped member's rows are cancelled after two snapshots; its last accepted version is not
+kept. Advertised ActivityPub endpoints or ActivityStreams JSON yield Person,
 Article or SocialMediaPosting cards only when the fetched URL and object ID share
 the page’s registrable domain. Social note excerpts are capped at 200 characters,
 refresh at most hourly and lose history on disappearance. Unlisted AP content is

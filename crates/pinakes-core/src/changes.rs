@@ -214,9 +214,17 @@ pub async fn save_extracted(
     let accepted: Option<Value> = row.try_get("accepted")?;
     // A never-observed object can be missing without having been created or cancelled.
     let before = accepted.filter(|v| v.get("type").is_some() && row.get::<bool, _>("ever_existed"));
+    // Only a storable old start is protected: one stored before the bound (year 0000 or past
+    // 9999) is dropped at re-parse and must be replaced, not kept forever.
     if doc.status == Status::Ok
         && doc.start.is_none()
-        && before.as_ref().is_some_and(|old| old["start"].is_string())
+        && before.as_ref().is_some_and(|old| {
+            old["start"]
+                .as_str()
+                .and_then(|s| s.parse::<chrono::DateTime<chrono::Utc>>().ok())
+                .and_then(crate::event::time::bounded)
+                .is_some()
+        })
         && row
             .try_get::<Option<Vec<String>>, _>("type_path")?
             .is_some_and(|path| path.iter().any(|t| t == "Event"))
@@ -332,6 +340,8 @@ pub async fn save_extracted(
         .and_then(|v| serde_json::from_value::<ResourceMeta>(v.clone()).ok())
     {
         crate::event::storage::preserve_venue(&mut doc, &old);
+        // It may re-derive the times under the stored zone, after `bound_instants`.
+        crate::event::clear_instants(&mut doc);
     }
     let before = before
         .map(|v| serde_json::from_value::<ResourceMeta>(v).map(|d| normalize(&d)))

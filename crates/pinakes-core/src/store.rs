@@ -36,6 +36,9 @@ pub async fn derive_resource_until(
     if expires.is_some_and(|at| at <= chrono::Utc::now()) {
         return Ok(None);
     }
+    // Never past the last storable instant (`time::bounded`), whatever the caller derived.
+    let latest = chrono::DateTime::from_timestamp(253402300799, 0).expect("9999-12-31T23:59:59Z");
+    let expires = expires.map(|at| at.min(latest));
     let (parent_id, _, _) = identity(parent)?;
     let (id, uri, scheme) = identity(uri)?;
     if parent_id == id {

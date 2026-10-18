@@ -201,7 +201,9 @@ impl Default for ContainerLimits {
 /// `occurrence_start_out_of_range`; an out-of-range occurrence end or modified time is dropped
 /// with the item's `end_out_of_range`/`modified_out_of_range`, as is a document's own start or
 /// end. One bad item therefore never fails the feed's apply. `None` when nothing was out of
-/// range, so the common case does not copy the document.
+/// range, so the common case does not copy the document. This is the early pass:
+/// `storage::prepare` bounds each upsert row again (`bound_item`), after anything that may
+/// re-derive times, and `changes::save_extracted` the document after `preserve_venue`.
 pub fn bound_instants(doc: &ResourceMeta) -> Option<ResourceMeta> {
     let out = |t: &Option<DateTime<Utc>>| t.is_some_and(|t| time::bounded(t).is_none());
     let item = |d: &ResourceMeta| out(&d.start) || out(&d.end);
@@ -215,21 +217,7 @@ pub fn bound_instants(doc: &ResourceMeta) -> Option<ResourceMeta> {
         return None;
     }
     let mut doc = doc.clone();
-    fn clear(d: &mut ResourceMeta) {
-        for (value, warning) in [
-            (&mut d.start, "start_out_of_range"),
-            (&mut d.end, "end_out_of_range"),
-        ] {
-            if value.is_some_and(|t| time::bounded(t).is_none()) {
-                *value = None;
-                d.event.warnings.push(warning.into());
-            }
-        }
-        d.event.warnings.sort();
-        d.event.warnings.dedup();
-        d.event.warnings.truncate(16);
-    }
-    clear(&mut doc);
+    clear_instants(&mut doc);
     if let Some(c) = &mut doc.container {
         let before = c.occurrences.len();
         c.occurrences
@@ -244,14 +232,43 @@ pub fn bound_instants(doc: &ResourceMeta) -> Option<ResourceMeta> {
             doc.event.warnings.truncate(16);
         }
         for o in &mut c.occurrences {
-            if o.modified.is_some_and(|t| time::bounded(t).is_none()) {
-                o.modified = None;
-                o.doc.event.warnings.push("modified_out_of_range".into());
-            }
-            clear(&mut o.doc);
+            bound_item(&mut o.doc, &mut o.modified);
         }
     }
     Some(doc)
+}
+/// Drop a document's out-of-range start or end with its `start_out_of_range`/`end_out_of_range`
+/// warning (`time::bounded`).
+pub fn clear_instants(d: &mut ResourceMeta) {
+    let mut changed = false;
+    for (value, warning) in [
+        (&mut d.start, "start_out_of_range"),
+        (&mut d.end, "end_out_of_range"),
+    ] {
+        if value.is_some_and(|t| time::bounded(t).is_none()) {
+            *value = None;
+            d.event.warnings.push(warning.into());
+            changed = true;
+        }
+    }
+    if changed {
+        d.event.warnings.sort();
+        d.event.warnings.dedup();
+        d.event.warnings.truncate(16);
+    }
+}
+/// One occurrence's instants: `false` when its start is out of range (the row must be dropped);
+/// otherwise an out-of-range end or modified time is dropped with the item's warning.
+pub fn bound_item(d: &mut ResourceMeta, modified: &mut Option<DateTime<Utc>>) -> bool {
+    if d.start.is_some_and(|t| time::bounded(t).is_none()) {
+        return false;
+    }
+    if modified.is_some_and(|t| time::bounded(t).is_none()) {
+        *modified = None;
+        d.event.warnings.push("modified_out_of_range".into());
+    }
+    clear_instants(d);
+    true
 }
 #[derive(Clone, Debug, Default)]
 pub struct Container {

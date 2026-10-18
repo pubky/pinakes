@@ -3981,3 +3981,253 @@ async fn round21_a_failed_calendar_member_never_wedges_its_calendar(pool: PgPool
         assert_eq!(uids, std::slice::from_ref(&good_ref), "{failure}");
     }
 }
+
+/// A NIP-52 calendar over `members` (kind 31923 events), saved as a resource.
+async fn nip52_calendar(
+    pool: &PgPool,
+    members: &[&nostr::event::Event],
+) -> (String, nostr::event::Event) {
+    use pinakes_core::event::adapters::nostr::Target;
+    let refs: Vec<String> = members
+        .iter()
+        .map(|m| {
+            format!(
+                "31923:{}:{}",
+                m.pubkey.to_hex(),
+                m.tags
+                    .iter()
+                    .find(|t| t.as_slice()[0] == "d")
+                    .unwrap()
+                    .as_slice()[1]
+            )
+        })
+        .collect();
+    let mut tags: Vec<Vec<&str>> = vec![vec!["d", "calendar"], vec!["title", "Calendar"]];
+    for r in &refs {
+        tags.push(vec!["a", r]);
+    }
+    let tags: Vec<&[&str]> = tags.iter().map(Vec::as_slice).collect();
+    let parent = signed(31924, 101, &tags);
+    let uri = Target::coordinate(&format!("31924:{}:calendar", parent.pubkey.to_hex()))
+        .unwrap()
+        .uri()
+        .unwrap();
+    store::ensure_resource(pool, &uri).await.unwrap();
+    (uri, parent)
+}
+fn member_id(e: &nostr::event::Event) -> (String, String) {
+    use pinakes_core::event::adapters::nostr::Target;
+    let d = e
+        .tags
+        .iter()
+        .find(|t| t.as_slice()[0] == "d")
+        .unwrap()
+        .as_slice()[1]
+        .clone();
+    let uri = Target::coordinate(&format!("{}:{}:{d}", e.kind.as_u16(), e.pubkey.to_hex()))
+        .unwrap()
+        .uri()
+        .unwrap();
+    (pinakes_core::model::identity(&uri).unwrap().0, uri)
+}
+
+/// Round 22 G1: NIP-52 all-day dates whose midnight is not storable (0000-01-01, or 9999-12-31
+/// with its default next-day end) are refused at parse; and an accepted member without a start
+/// is skipped as unavailable instead of keeping its calendar pending.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round22_year_0000_nip52_dates_never_wedge_a_calendar(pool: PgPool) {
+    use pinakes_core::event::adapters::nostr as nip52;
+    let cfg = EventConfig::default();
+    let day = |d: &str, start: &str, end: Option<&str>| {
+        let mut tags: Vec<&[&str]> = vec![&["title", "Day"]];
+        let d = ["d", d];
+        let start = ["start", start];
+        tags.push(&d);
+        tags.push(&start);
+        let end = end.map(|e| ["end", e]);
+        if let Some(end) = &end {
+            tags.push(end);
+        }
+        signed(31922, 100, &tags)
+    };
+    for (start, end) in [
+        ("0000-01-01", None),
+        ("0000-12-31", Some("0001-01-02")),
+        ("9999-12-31", None),
+        ("2026-10-20", Some("0000-01-01")),
+    ] {
+        let e = day("edge", start, end);
+        let error = nip52::parse(&member_id(&e).1, &e, &cfg)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("invalid all-day"),
+            "{start} {end:?}: {error}"
+        );
+    }
+    for (start, end, last) in [
+        ("0001-01-01", None, "0001-01-02T00:00:00Z"),
+        ("9999-12-30", None, "9999-12-31T00:00:00Z"),
+    ] {
+        let e = day("edge", start, end);
+        let doc = nip52::parse(&member_id(&e).1, &e, &cfg).unwrap();
+        assert_eq!(doc.end, Some(last.parse().unwrap()), "{start}");
+    }
+    // The backstop: an `ok` member whose start was dropped at the store.
+    let at = (Utc::now() + Duration::days(1)).timestamp().to_string();
+    let timed = |d: &str| {
+        signed(
+            31923,
+            100,
+            &[&["d", d], &["title", "Member"], &["start", &at]],
+        )
+    };
+    let (good, startless) = (timed("good"), timed("startless"));
+    let (uri, parent) = nip52_calendar(&pool, &[&good, &startless]).await;
+    let (egress, _) = mock_egress(vec![(200, json!([parent]))]);
+    let _ = nip52::resolve(&uri, &egress, &cfg, &pool, false).await;
+    for (member, start) in [(&good, true), (&startless, false)] {
+        let (id, member_uri) = member_id(member);
+        let mut doc = nip52::parse(&member_uri, member, &cfg).unwrap();
+        if !start {
+            doc.start = None;
+            doc.end = None;
+        }
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    }
+    let doc = nip52::resolve(&uri, &egress, &cfg, &pool, false)
+        .await
+        .unwrap();
+    assert_eq!(doc.event.warnings, ["calendar_member_unavailable"]);
+    assert_eq!(doc.container.unwrap().occurrences.len(), 1);
+}
+
+/// Round 22 G5: a member whose newest version is refused (its resource is `error`, its stored
+/// document the last accepted version) is skipped like a missing member: its row is cancelled
+/// after two snapshots; the last accepted version is not kept.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round22_a_refused_newest_member_version_cancels_after_two_snapshots(pool: PgPool) {
+    use pinakes_core::event::adapters::nostr as nip52;
+    let cfg = EventConfig::default();
+    let at = (Utc::now() + Duration::days(1)).timestamp().to_string();
+    let timed = |d: &str| {
+        signed(
+            31923,
+            100,
+            &[&["d", d], &["title", "Member"], &["start", &at]],
+        )
+    };
+    let (kept, refused) = (timed("kept"), timed("refused"));
+    let (uri, parent) = nip52_calendar(&pool, &[&kept, &refused]).await;
+    let (egress, _) = mock_egress(vec![(200, json!([parent]))]);
+    let _ = nip52::resolve(&uri, &egress, &cfg, &pool, false).await;
+    for member in [&kept, &refused] {
+        let (id, member_uri) = member_id(member);
+        let doc = nip52::parse(&member_uri, member, &cfg).unwrap();
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    }
+    let calendar = pinakes_core::model::identity(&uri).unwrap().0;
+    let base = Utc::now().timestamp_millis();
+    let mut snapshot = 0;
+    let mut save = || {
+        snapshot += 1;
+        let (pool, egress, cfg, uri, calendar) =
+            (&pool, &egress, &cfg, uri.clone(), calendar.clone());
+        let n = snapshot;
+        async move {
+            let mut doc = nip52::resolve(&uri, egress, cfg, pool, false)
+                .await
+                .unwrap();
+            doc.fetched_at = base + n * 1000;
+            store::save_document(pool, &calendar, 0, &doc)
+                .await
+                .unwrap();
+            sqlx::query_as::<_, (String, String)>(
+                "SELECT uid,status FROM occurrence WHERE resource_id=$1 ORDER BY uid",
+            )
+            .bind(&calendar)
+            .fetch_all(pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(uid, status)| (uid.rsplit(':').next().unwrap().to_owned(), status))
+            .collect::<Vec<_>>()
+        }
+    };
+    let rows = |a: &str, b: &str| {
+        vec![
+            ("kept".to_owned(), a.to_owned()),
+            ("refused".to_owned(), b.to_owned()),
+        ]
+    };
+    assert_eq!(save().await, rows("scheduled", "scheduled"));
+    // The newest version of `refused` fails its parse: the resource is `error`, its stored
+    // document stays the accepted one.
+    sqlx::query(
+        "UPDATE resource SET status='error',attempts=1,last_error='invalid start' WHERE id=$1",
+    )
+    .bind(member_id(&refused).0)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(save().await, rows("scheduled", "scheduled"), "missing once");
+    assert_eq!(
+        save().await,
+        rows("scheduled", "cancelled"),
+        "cancelled after two"
+    );
+}
+
+/// Round 22 G4: a BTC Map end late on 9999-12-31 (year 10000 UTC) never becomes a derived
+/// link's expiry: the start is used instead, and `derive_resource_until` clamps any expiry to
+/// 9999-12-31T23:59:59Z.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round22_derived_link_expiry_is_bounded(pool: PgPool) {
+    use pinakes_core::resolver::Resolver;
+    let uri = "https://api.btcmap.org/v4/events";
+    store::ensure_resource(&pool, uri).await.unwrap();
+    let at =
+        chrono::DateTime::from_timestamp((Utc::now() + Duration::days(2)).timestamp(), 0).unwrap();
+    let (egress, _) = mock_egress(vec![(
+        200,
+        json!([{"id":1,"status":"live","starts_at":at.to_rfc3339(),"ends_at":"9999-12-31T23:59:59-05:00","name":"One","website":"https://example.org/one","updated_at":"2026-10-15T13:00:00Z"}]),
+    )]);
+    let r = platform(
+        &pool,
+        EventConfig {
+            geocoding: false,
+            ..Default::default()
+        },
+        egress,
+    );
+    r.resolve(uri).await.unwrap();
+    let expiry = |child: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<chrono::DateTime<Utc>>>(
+                "SELECT d.expires_at FROM resource_derivation d JOIN resource r ON r.id=d.child_id WHERE r.uri=$1",
+            )
+            .bind(child)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(expiry("https://example.org/one").await, Some(at));
+    store::derive_resource_until(
+        &pool,
+        uri,
+        "https://example.org/two",
+        "btcmap",
+        10,
+        10,
+        chrono::DateTime::from_timestamp(253402318799, 0),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        expiry("https://example.org/two").await,
+        chrono::DateTime::from_timestamp(253402300799, 0)
+    );
+}

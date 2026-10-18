@@ -3964,3 +3964,197 @@ fn round21_a_padded_date_only_end_is_reanchored() {
         );
     }
 }
+
+/// Round 22 G2: an Event document stored before the bound with a start in year 0000 or past 9999
+/// (the binary bind accepted it) is replaced on re-parse, not kept forever by the drift guard;
+/// a storable old start is still protected.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round22_a_stored_out_of_range_start_is_replaced(pool: PgPool) {
+    let event = |uri: &str, start: Option<DateTime<Utc>>| {
+        let mut doc = ResourceMeta::new(uri, "web", 3600);
+        doc.set_type("Event");
+        doc.name = Some("Old".into());
+        doc.start = start;
+        fresh(&doc)
+    };
+    let soon = Utc::now() + Duration::days(1);
+    for (n, stored) in ["+10000-01-01T00:00:00Z", "0000-06-01T00:00:00Z"]
+        .into_iter()
+        .enumerate()
+    {
+        let uri = format!("https://example.org/old-{n}");
+        let id = store::ensure_resource(&pool, &uri).await.unwrap();
+        store::save_document(&pool, &id, 0, &event(&uri, Some(soon)))
+            .await
+            .unwrap();
+        let at: DateTime<Utc> = stored.parse().unwrap();
+        // As a release before the bound stored it.
+        sqlx::query(
+            "UPDATE resource SET doc=jsonb_set(doc,'{start}',to_jsonb($2::text)),start_at=$3 WHERE id=$1",
+        )
+        .bind(&id)
+        .bind(stored)
+        .bind(at)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // The re-parse finds the same start, which the save drops as out of range.
+        store::save_document(&pool, &id, 0, &event(&uri, Some(at)))
+            .await
+            .unwrap();
+        let (start_at, warnings): (Option<DateTime<Utc>>, Value) =
+            sqlx::query_as("SELECT start_at,doc->'warnings' FROM resource WHERE id=$1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(start_at, None, "{stored}");
+        assert_eq!(warnings, json!(["start_out_of_range"]), "{stored}");
+    }
+    let uri = "https://example.org/kept";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    store::save_document(&pool, &id, 0, &event(uri, Some(soon)))
+        .await
+        .unwrap();
+    let error = store::save_document(&pool, &id, 0, &event(uri, None))
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .downcast_ref::<pinakes_core::resolver::RetryLater>()
+            .is_some_and(|r| r.class == "drift"),
+        "{error}"
+    );
+}
+
+/// Round 22 G3: times re-derived after `bound_instants` (`preserve_venue` re-applies the stored
+/// venue's zone when this refresh's geocode failed) are bounded where the upsert rows are built:
+/// a floating 9999-12-31T20:00 at a New York venue (10000-01-01T01:00Z) keeps the stored row and
+/// the feed applies.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round22_times_rederived_after_the_bound_never_reach_the_cast(pool: PgPool) {
+    use pinakes_core::event::{Container, Occurrence, Venue};
+    let uri = "https://example.org/venue.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let now = Utc::now();
+    // A second, unchanged occurrence keeps the snapshot from being held (one key of two lost),
+    // so its rows reach the upsert.
+    let feed = |talk: &ResourceMeta, other: &ResourceMeta, hash: &str| {
+        let item = |uid: &str, doc: &ResourceMeta, hash: &str| Occurrence {
+            uid: uid.into(),
+            recurrence_id: String::new(),
+            doc: doc.clone(),
+            sequence: 0,
+            modified: None,
+            content_hash: hash.into(),
+            volatile: false,
+        };
+        let mut doc = ResourceMeta::new(uri, "event", 3600);
+        doc.set_type("Collection");
+        doc.container = Some(Box::new(Container {
+            horizon_start: now - Duration::days(30),
+            horizon_end: now + Duration::days(365),
+            occurrences: vec![item("talk", talk, hash), item("other", other, "other")],
+            ..Default::default()
+        }));
+        fresh(&doc)
+    };
+    let local = (now + Duration::days(10))
+        .format("%Y-%m-%dT%H:%M:%S")
+        .to_string();
+    let mut first = ResourceMeta::new("https://example.org/talk", "event", 3600);
+    first.set_type("Event");
+    first.name = Some("Talk".into());
+    first.event.start_local = Some(local.clone());
+    first.event.tz = Some("America/New_York".into());
+    first.start = time::parse(&local, Some("America/New_York"));
+    first.event.venue = Some(Venue {
+        text: "Hall".into(),
+        osm_version: Some("v1".into()),
+        location: Some(pinakes_core::model::Point {
+            lat: 40.7,
+            lon: -74.0,
+        }),
+        ..Default::default()
+    });
+    let mut other = first.clone();
+    other.name = Some("Other".into());
+    store::save_document(&pool, &id, 0, &feed(&first, &other, "a"))
+        .await
+        .unwrap();
+    // The next refresh: DTSTART moved to the last evening of 9999, and the geocode failed.
+    let mut second = first.clone();
+    second.event.start_local = Some("9999-12-31T20:00:00".into());
+    second.event.tz = None;
+    second.start = Some("9999-12-31T20:00:00Z".parse().unwrap());
+    second.event.venue = Some(Venue {
+        text: "Hall".into(),
+        ..Default::default()
+    });
+    second.event.warnings = vec!["venue_unavailable".into()];
+    store::save_document(&pool, &id, 0, &feed(&second, &other, "b"))
+        .await
+        .unwrap();
+    let start: DateTime<Utc> =
+        sqlx::query_scalar("SELECT start_at FROM occurrence WHERE resource_id=$1 AND uid='talk'")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(Some(start), first.start, "the stored row stays");
+}
+
+/// Round 22 G3: the same re-derivation on an event document itself (not a feed row) is bounded
+/// after `preserve_venue`: the start is dropped with `start_out_of_range` instead of storing
+/// year 10000.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round22_a_document_start_rederived_after_the_bound_is_dropped(pool: PgPool) {
+    use pinakes_core::event::Venue;
+    let uri = "https://example.org/talk-page";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let local = (Utc::now() + Duration::days(10))
+        .format("%Y-%m-%dT%H:%M:%S")
+        .to_string();
+    let mut first = ResourceMeta::new(uri, "web", 3600);
+    first.set_type("Event");
+    first.name = Some("Talk".into());
+    first.event.start_local = Some(local.clone());
+    first.event.tz = Some("America/New_York".into());
+    first.start = time::parse(&local, Some("America/New_York"));
+    first.event.venue = Some(Venue {
+        text: "Hall".into(),
+        osm_version: Some("v1".into()),
+        location: Some(pinakes_core::model::Point {
+            lat: 40.7,
+            lon: -74.0,
+        }),
+        ..Default::default()
+    });
+    store::save_document(&pool, &id, 0, &fresh(&first))
+        .await
+        .unwrap();
+    let mut second = first.clone();
+    second.event.start_local = Some("9999-12-31T20:00:00".into());
+    second.event.tz = None;
+    second.start = Some("9999-12-31T20:00:00Z".parse().unwrap());
+    second.event.venue = Some(Venue {
+        text: "Hall".into(),
+        ..Default::default()
+    });
+    store::save_document(&pool, &id, 0, &fresh(&second))
+        .await
+        .unwrap();
+    let (start_at, warnings, tz): (Option<DateTime<Utc>>, Value, Option<String>) =
+        sqlx::query_as("SELECT start_at,doc->'warnings',doc->>'tz' FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        tz.as_deref(),
+        Some("America/New_York"),
+        "the stored zone was re-applied"
+    );
+    assert_eq!(start_at, None);
+    assert_eq!(warnings, json!(["start_out_of_range"]));
+}

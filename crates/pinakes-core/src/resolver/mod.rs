@@ -134,13 +134,15 @@ pub const EXTRACTOR_VERSIONS: &[(&str, i32)] = &[
     // 6: four-digit years only (round 19).
     // 7: bounded NIP-52 dates and integer timestamps, leading whitespace, `YYYYMMDDZ` (round 20).
     // 8: trimmed JSON-LD date-only ends, skipped failed NIP-52 calendar members (round 21).
-    ("event", 8),
-    ("event_platform", 8),
+    // 9: storable NIP-52 all-day dates, start-less calendar members skipped (round 22).
+    ("event", 9),
+    ("event_platform", 9),
     ("media", 1),
     ("isbn", 1),
     ("doi", 1),
     // 2: NIP-52 events parse their dates like the event_platform route (round 20).
-    ("nostr", 2),
+    // 3: NIP-52 all-day dates must be storable instants (round 22).
+    ("nostr", 3),
     ("activitypub", 1),
 ];
 /// The extractor kind recorded for `doc` when the `worker` kind produced it. The web worker

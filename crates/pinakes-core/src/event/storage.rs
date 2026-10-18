@@ -379,8 +379,15 @@ pub async fn prepare(
             continue;
         }
         let mut doc = item.doc.clone();
+        let mut modified = item.modified;
         if let Some((_, _, old, _, _, _, _)) = previous {
             preserve_venue(&mut doc, old);
+        }
+        // The last step before `apply` casts these instants from text: `preserve_venue` may have
+        // re-derived the times under the stored zone, so bound them again whatever ran before
+        // (`bound_instants` is the early pass). An out-of-range start keeps the stored row.
+        if !super::bound_item(&mut doc, &mut modified) {
+            continue;
         }
         let mut after = changes::normalize(&doc);
         // A move lands on a new key, or back on one whose row was superseded or cancelled (a mode
@@ -423,7 +430,7 @@ pub async fn prepare(
             source_host.as_deref(),
             &container.limits,
         );
-        plan.rows.push(json!({"uid":item.uid,"rid":item.recurrence_id,"start":doc.start,"end":doc.end,"name":doc.name,"venue_id":doc.event.venue.as_ref().and_then(|v|v.resource_id.as_deref()),"status":doc.event.event_status.as_ref().unwrap_or(&EventStatus::Scheduled).as_str(),"url":url,"link":link,"doc":doc,"lat":doc.location.as_ref().map(|p|p.lat),"lon":doc.location.as_ref().map(|p|p.lon),"sequence":item.sequence,"modified":item.modified,"hash":item.content_hash,"volatile":item.volatile,"supersedes":supersedes}));
+        plan.rows.push(json!({"uid":item.uid,"rid":item.recurrence_id,"start":doc.start,"end":doc.end,"name":doc.name,"venue_id":doc.event.venue.as_ref().and_then(|v|v.resource_id.as_deref()),"status":doc.event.event_status.as_ref().unwrap_or(&EventStatus::Scheduled).as_str(),"url":url,"link":link,"doc":doc,"lat":doc.location.as_ref().map(|p|p.lat),"lon":doc.location.as_ref().map(|p|p.lon),"sequence":item.sequence,"modified":modified,"hash":item.content_hash,"volatile":item.volatile,"supersedes":supersedes}));
     }
     for key in cancelled.iter().chain(superseded.iter()) {
         let Some((uid, rid, old, _, hash, seq, modified)) = old.get(key) else {

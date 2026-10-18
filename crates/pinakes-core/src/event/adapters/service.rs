@@ -383,7 +383,8 @@ impl PlatformResolver {
             let Some(until) = o
                 .doc
                 .end
-                .or(o.doc.start)
+                .and_then(crate::event::time::bounded)
+                .or(o.doc.start.and_then(crate::event::time::bounded))
                 .filter(|at| *at > chrono::Utc::now())
             else {
                 continue;

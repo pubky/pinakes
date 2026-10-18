@@ -369,12 +369,20 @@ pub fn parse(uri: &str, event: &Event, cfg: &EventConfig) -> Result<ResourceMeta
             doc.event.warnings.push("nostr_legacy_missing_D".into());
         }
     } else {
-        let date = |s: &str| time::naive(s).map(|t| t.date());
+        // Dates whose midnight is a storable instant (`time::bounded`), so 0000-01-01 is refused
+        // here rather than saved and dropped at the store, and 9999-12-31's default end (the
+        // next day) is refused too.
+        let storable =
+            |d: chrono::NaiveDate| time::bounded(d.and_hms_opt(0, 0, 0)?.and_utc()).map(|_| d);
+        let date = |s: &str| time::naive(s).and_then(|t| storable(t.date()));
         let start = date(start).context("invalid all-day start")?;
-        let end = tag(event, "end")
-            .map(|s| date(s).context("invalid all-day end"))
-            .transpose()?
-            .unwrap_or(start.succ_opt().context("date overflow")?);
+        let end = match tag(event, "end") {
+            Some(s) => date(s).context("invalid all-day end")?,
+            None => start
+                .succ_opt()
+                .and_then(storable)
+                .context("invalid all-day end")?,
+        };
         ensure!(end > start, "invalid all-day end");
         doc.start = Some(start.and_hms_opt(0, 0, 0).unwrap().and_utc());
         doc.end = Some(end.and_hms_opt(0, 0, 0).unwrap().and_utc());
@@ -576,7 +584,7 @@ pub async fn resolve(
         // A member whose own resolution failed (refused, unreachable, dead-lettered) is skipped
         // like a missing one, or the calendar would wait for it forever: pending answers never
         // count toward dead-letter.
-        if failed {
+        let unavailable = |doc: &mut ResourceMeta| {
             if !doc
                 .event
                 .warnings
@@ -589,6 +597,9 @@ pub async fn resolve(
                 let c = doc.container.as_mut().unwrap();
                 c.warnings.push("calendar_member_unavailable".into());
             }
+        };
+        if failed {
+            unavailable(&mut doc);
             continue;
         }
         if value.get("type").is_none() {
@@ -599,8 +610,14 @@ pub async fn resolve(
         if event_doc.status == Status::Missing {
             continue;
         }
-        if event_doc.status != Status::Ok || event_doc.start.is_none() {
+        if event_doc.status != Status::Ok {
             pending = true;
+            continue;
+        }
+        // An accepted member without a start (its start was out of range and dropped at the
+        // store) will not gain one by waiting.
+        if event_doc.start.is_none() {
+            unavailable(&mut doc);
             continue;
         }
         event_doc.url = resource;
