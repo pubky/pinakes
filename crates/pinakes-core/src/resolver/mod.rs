@@ -125,8 +125,9 @@ pub const EXTRACTOR_VERSIONS: &[(&str, i32)] = &[
     ("pubky", 1),
     ("geo", 1),
     ("osm", 1),
-    ("event", 1),
-    ("event_platform", 1),
+    // 2: RFC 5545 expansion of UTC-DTSTART series and DST-ambiguous first instances (round 15).
+    ("event", 2),
+    ("event_platform", 2),
     ("media", 1),
     ("isbn", 1),
     ("doi", 1),

@@ -2681,3 +2681,147 @@ fn malformed_structured_feed_dates_keep_healthy_siblings() {
     .unwrap()
     .is_none());
 }
+
+/// Occurrence starts of a one-event feed parsed at a fixed `now` (round 15 Z6–Z8: no test may
+/// depend on the clock landing near a DST change).
+fn starts_at(header: &str, event: &str, now: &str, cfg: &EventConfig) -> Vec<String> {
+    let body = format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n{header}BEGIN:VEVENT\r\nUID:dst-series\r\nSUMMARY:Series\r\n{event}END:VEVENT\r\nEND:VCALENDAR\r\n"
+    );
+    let doc = calendar::parse(
+        "https://example.org/dst.ics",
+        body.as_bytes(),
+        cfg,
+        now.parse().unwrap(),
+    )
+    .unwrap();
+    doc.container
+        .unwrap()
+        .occurrences
+        .iter()
+        .map(|o| o.doc.start.unwrap().format("%Y-%m-%dT%H:%MZ").to_string())
+        .collect()
+}
+
+/// Round 15 Z6: Europe/Zurich leaves summer time on 2026-10-25 at 01:00 UTC (local 02:00–03:00
+/// happens twice) and enters it on 2027-03-28 at 01:00 UTC (local 02:00–03:00 does not exist).
+#[test]
+fn round15_dst_transitions_give_each_series_its_exact_count() {
+    let cfg = EventConfig::default();
+    let autumn = "2026-10-18T01:18:00Z";
+    let x_wr = "X-WR-TIMEZONE:Europe/Zurich\r\n";
+    // The mock e2e case: a UTC DTSTART in the repeated hour, wall-clock expanded (X-WR-TIMEZONE),
+    // gave three dates for COUNT=2. DTSTART is the first instance itself.
+    assert_eq!(
+        starts_at(
+            x_wr,
+            "DTSTART:20261025T011800Z\r\nRRULE:FREQ=DAILY;COUNT=2\r\n",
+            autumn,
+            &cfg
+        ),
+        ["2026-10-25T01:18Z", "2026-10-26T01:18Z"]
+    );
+    // The same with only GEO: UTC expansion, still two.
+    assert_eq!(
+        starts_at(
+            "",
+            "DTSTART:20261025T011800Z\r\nRRULE:FREQ=DAILY;COUNT=2\r\nGEO:47;8\r\n",
+            autumn,
+            &cfg
+        ),
+        ["2026-10-25T01:18Z", "2026-10-26T01:18Z"]
+    );
+    // A local series crossing the repeated hour: the ambiguous 02:18 is its first occurrence
+    // (summer time, 00:18Z), once.
+    let local = "DTSTART;TZID=Europe/Zurich:20261024T021800\r\n";
+    assert_eq!(
+        starts_at(
+            "",
+            &format!("{local}RRULE:FREQ=DAILY;COUNT=3\r\n"),
+            autumn,
+            &cfg
+        ),
+        [
+            "2026-10-24T00:18Z",
+            "2026-10-25T00:18Z",
+            "2026-10-26T01:18Z"
+        ]
+    );
+    assert_eq!(
+        starts_at(
+            "",
+            &format!("{local}RRULE:FREQ=DAILY;UNTIL=20261026T011800Z\r\n"),
+            autumn,
+            &cfg
+        ),
+        [
+            "2026-10-24T00:18Z",
+            "2026-10-25T00:18Z",
+            "2026-10-26T01:18Z"
+        ]
+    );
+    // An EXDATE on the DTSTART instance in the repeated hour removes exactly that date.
+    assert_eq!(
+        starts_at(
+            x_wr,
+            "DTSTART:20261025T011800Z\r\nRRULE:FREQ=DAILY;COUNT=2\r\nEXDATE:20261025T011800Z\r\n",
+            autumn,
+            &cfg
+        ),
+        ["2026-10-26T01:18Z"]
+    );
+    // Spring: a nonexistent 02:30 moves forward by the gap (RFC 5545: the offset before it),
+    // 03:30 summer time = 01:30Z, still one date per day.
+    assert_eq!(
+        starts_at(
+            "",
+            "DTSTART;TZID=Europe/Zurich:20270327T023000\r\nRRULE:FREQ=DAILY;COUNT=3\r\n",
+            "2027-03-20T00:00:00Z",
+            &cfg
+        ),
+        [
+            "2027-03-27T01:30Z",
+            "2027-03-28T01:30Z",
+            "2027-03-29T00:30Z"
+        ]
+    );
+}
+
+/// Round 15 Z7: a UTC series expands in UTC unless its zone source is configured for wall-clock
+/// expansion (`event.utc_series_wall_clock`).
+#[test]
+fn round15_utc_series_wall_clock_modes() {
+    use pinakes_core::config::UtcSeriesWallClock::{Coordinates, Never, XWrTimezone};
+    let autumn = "2026-10-18T00:00:00Z";
+    let series = "DTSTART:20261025T004800Z\r\nRRULE:FREQ=DAILY;COUNT=2\r\n";
+    let geo = format!("{series}GEO:47;8\r\n");
+    let x_wr = "X-WR-TIMEZONE:Europe/Zurich\r\n";
+    let utc = ["2026-10-25T00:48Z", "2026-10-26T00:48Z"];
+    // 02:48 summer time, then 02:48 winter time.
+    let wall = ["2026-10-25T00:48Z", "2026-10-26T01:48Z"];
+    for (mode, geo_only, with_x_wr) in [
+        (XWrTimezone, utc, wall),
+        (Coordinates, wall, wall),
+        (Never, utc, utc),
+    ] {
+        let cfg = EventConfig {
+            utc_series_wall_clock: mode,
+            ..Default::default()
+        };
+        assert_eq!(
+            starts_at("", &geo, autumn, &cfg),
+            geo_only,
+            "{mode:?} GEO only"
+        );
+        assert_eq!(
+            starts_at(x_wr, series, autumn, &cfg),
+            with_x_wr,
+            "{mode:?} X-WR-TIMEZONE"
+        );
+    }
+    assert_eq!(
+        EventConfig::default().utc_series_wall_clock,
+        XWrTimezone,
+        "RFC 5545 unless X-WR-TIMEZONE or TZID says otherwise"
+    );
+}

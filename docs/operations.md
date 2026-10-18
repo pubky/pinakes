@@ -1,4 +1,11 @@
 
+Calendar recurrence: `event.utc_series_wall_clock` (default `"x_wr_timezone"`; also
+`"coordinates"`, `"never"`) chooses which zone sources make a series with a UTC DTSTART expand on
+local wall-clock time instead of in UTC (RFC 5545). The default keeps Google's exports correct
+(UTC DTSTART plus `X-WR-TIMEZONE`) and leaves feeds whose zone comes only from coordinates in
+UTC, so their dates keep the published UTC time across DST changes. Changing the mode changes the
+expanded dates of affected feeds at their next fetch, as a calendar edit would.
+
 CORS: the public listener serves browser clients on other origins according to
 `api.cors_allow_origins` (default `["*"]`, safe because the public API is read-only apart from
 budgeted previews and takes no cookies or tokens; list exact origins to restrict, with no

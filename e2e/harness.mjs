@@ -123,7 +123,15 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
       const occurrences = await json(`${pinakes}/v1/resources/${docs.get('ics').resource_id}/occurrences`);
       assert(occurrences.items.length > 0, 'ICS should expand occurrences');
       const expectedOccurrences = samples.find(s => s.kind === 'ics').expectedOccurrences;
-      if (expectedOccurrences !== undefined) assert.equal(occurrences.items.length, expectedOccurrences);
+      if (expectedOccurrences !== undefined) {
+        // The mock fixture's series starts seven days after the run. A miscount there once came
+        // from a DST transition (2026-10-25, the repeated hour); the fixed-now regressions in
+        // tests/events.rs (round15_*) cover that case.
+        const starts = occurrences.items.map(o => o.start).join(', ');
+        assert.equal(occurrences.items.length, expectedOccurrences,
+          `ICS occurrences: expected ${expectedOccurrences}, got ${occurrences.items.length} (${starts}). ` +
+          'If the series start falls near a DST change, compare with the round15 DST tests in crates/pinakes-core/tests/events.rs.');
+      }
       report.assertions.push('ICS occurrences');
       positiveVenue ||= !!event.document?.venue?.resource_id;
       const venue = event.document?.venue?.resource_id ?? docs.get('osm').resource_id;

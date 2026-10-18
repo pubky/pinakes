@@ -361,6 +361,15 @@ calendar times use TZID/X-WR-TIMEZONE/configured default/coordinates where avail
 Without a zone, `start_local` and `end_local` preserve wall times; UTC values are a
 sorting proxy, not a known instant. Unknown TZIDs use an advertised/default zone
 or a flagged UTC fallback. All-day ends are exclusive and stay local dates across DST.
+
+Recurrence follows RFC 5545 across DST changes. A local series' first date is its DTSTART; an
+ambiguous wall time (the repeated autumn hour) is its first occurrence, once; a nonexistent spring
+wall time moves forward by the gap. A series whose DTSTART is UTC (`…Z`) expands in UTC, so it
+keeps its UTC time across a change, unless `event.utc_series_wall_clock` selects its zone source
+for wall-clock expansion. The default, `x_wr_timezone`, selects an explicit `X-WR-TIMEZONE`
+(Google exports UTC DTSTARTs with a local rule) or a `TZID`. `coordinates` adds the configured
+default and coordinate-derived zones, and `never` keeps every UTC series in UTC. Coordinate zones
+otherwise only place floating times and label display.
 `timezone_attribution` accompanies coordinate-derived zones; preserve it in display
 along with any OSM `attribution`. See the separately licensed data in `data/README.md`.
 

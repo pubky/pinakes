@@ -1284,6 +1284,7 @@ async fn validators(pool: &PgPool, id: &str) -> serde_json::Value {
 #[sqlx::test(migrations = "../../migrations")]
 async fn round13_a_304_never_stamps_an_old_document_current(pool: PgPool) {
     let versions = pinakes_core::resolver::extractor_versions();
+    let event_version = versions["event"].as_i64().unwrap() as i32;
     let mut ids = Vec::new();
     for uri in [
         "https://example.org/soon.ics",
@@ -1304,7 +1305,7 @@ async fn round13_a_304_never_stamps_an_old_document_current(pool: PgPool) {
     }
     assert_eq!(
         extractor(&pool, &ids[0]).await,
-        (Some("event".into()), Some(1))
+        (Some("event".into()), Some(event_version))
     );
     // An `event` bump: the feed refreshing within the window is skipped by the re-queue, yet
     // loses its validators too, so its next refresh cannot be a 304.
@@ -1386,7 +1387,7 @@ async fn round13_a_304_never_stamps_an_old_document_current(pool: PgPool) {
         .unwrap();
     assert_eq!(
         extractor(&pool, &ids[0]).await,
-        (Some("event".into()), Some(1))
+        (Some("event".into()), Some(event_version))
     );
 }
 

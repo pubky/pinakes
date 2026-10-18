@@ -64,6 +64,19 @@ impl Default for Config {
         }
     }
 }
+/// Which zone sources make a recurring series with a UTC (`Z`) DTSTART expand on local wall-clock
+/// time instead of in UTC (RFC 5545).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UtcSeriesWallClock {
+    /// An explicit `X-WR-TIMEZONE` (Google's exports) or a `TZID` on DTSTART.
+    #[default]
+    XWrTimezone,
+    /// Any zone the series has, including `default_timezone` and coordinate-derived zones.
+    Coordinates,
+    /// Never: UTC series always expand in UTC.
+    Never,
+}
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EventConfig {
@@ -79,6 +92,8 @@ pub struct EventConfig {
     pub calendars: bool,
     pub geocoding: bool,
     pub coordinate_timezone: bool,
+    /// Wall-clock expansion of UTC-DTSTART series (see `UtcSeriesWallClock`).
+    pub utc_series_wall_clock: UtcSeriesWallClock,
     pub feed_body_bytes: usize,
     pub max_occurrences_per_series: usize,
     pub max_occurrences_per_feed: usize,
@@ -108,6 +123,7 @@ impl Default for EventConfig {
             calendars: true,
             geocoding: true,
             coordinate_timezone: true,
+            utc_series_wall_clock: UtcSeriesWallClock::XWrTimezone,
             feed_body_bytes: 32 * 1024 * 1024,
             max_occurrences_per_series: 50,
             max_occurrences_per_feed: 10000,
@@ -680,6 +696,14 @@ mod tests {
         assert!(config.queue.reextract_on_upgrade);
         assert_eq!(config.queue.reextract_window_secs, 21600);
         assert!(text.lines().any(|l| l == r#"cors_allow_origins = ["*"]"#));
+        assert!(text
+            .lines()
+            .any(|l| l == r#"utc_series_wall_clock = "x_wr_timezone""#));
+        assert_eq!(
+            config.event.utc_series_wall_clock,
+            UtcSeriesWallClock::XWrTimezone
+        );
+        assert!(toml::from_str::<Config>("[event]\nutc_series_wall_clock = \"always\"\n").is_err());
         assert_eq!(config.api.cors_allow_origins, ["*"]);
         for (window, valid) in [(3599, false), (3600, true), (604800, true), (604801, false)] {
             let mut c = Config::default();

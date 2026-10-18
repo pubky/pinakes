@@ -201,7 +201,17 @@ struct Stamp {
     wall: NaiveDateTime,
     date: bool,
     zone: Option<String>,
+    /// Where `zone` came from; decides wall-clock expansion of UTC series.
+    source: ZoneSource,
     unknown: bool,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ZoneSource {
+    None,
+    Tzid,
+    Calendar,
+    Default,
+    Coordinates,
 }
 struct Zones<'a> {
     deadline: std::time::Instant,
@@ -262,6 +272,16 @@ impl Zones<'_> {
             }
         });
         let custom = name.and_then(|n| self.embedded.get(n)).copied();
+        let tzid = p.params.get("TZID").map(String::as_str);
+        let source = if zone.is_none() && custom.is_none() {
+            ZoneSource::None
+        } else if tzid.is_some_and(|n| time::zone(n).is_some() || self.embedded.contains_key(n)) {
+            ZoneSource::Tzid
+        } else if self.calendar.and_then(time::zone).is_some() {
+            ZoneSource::Calendar
+        } else {
+            ZoneSource::Default
+        };
         let at = if zulu {
             wall.and_utc()
         } else if let Some(z) = zone {
@@ -278,6 +298,7 @@ impl Zones<'_> {
             zone: zone
                 .map(|z| z.to_string())
                 .or_else(|| custom.and(name).map(str::to_owned)),
+            source,
             unknown: !zulu && name.is_some() && zone.is_none() && custom.is_none(),
         })
     }
@@ -750,9 +771,32 @@ fn expand(
     cfg: &EventConfig,
     deadline: std::time::Instant,
 ) -> Result<BTreeMap<DateTime<Utc>, Option<Duration>>> {
+    // A UTC DTSTART expands in UTC (RFC 5545) unless its zone source is configured for wall-clock
+    // expansion: Google exports a UTC DTSTART with a local recurring rule and X-WR-TIMEZONE.
+    let utc = c.value("DTSTART").is_some_and(|s| s.ends_with('Z'));
+    let wall_clock = utc
+        && start.zone.is_some()
+        && match cfg.utc_series_wall_clock {
+            crate::config::UtcSeriesWallClock::Never => false,
+            crate::config::UtcSeriesWallClock::XWrTimezone => {
+                matches!(start.source, ZoneSource::Tzid | ZoneSource::Calendar)
+            }
+            crate::config::UtcSeriesWallClock::Coordinates => true,
+        };
+    let series;
+    let start = if utc && !wall_clock {
+        series = Stamp {
+            zone: None,
+            source: ZoneSource::None,
+            wall: start.at.naive_utc(),
+            ..start.clone()
+        };
+        &series
+    } else {
+        start
+    };
     let mut wall_start = start.wall;
-    // Google uses UTC DTSTART with a local recurring rule and X-WR-TIMEZONE.
-    if c.value("DTSTART").is_some_and(|s| s.ends_with('Z')) {
+    if wall_clock {
         if let Some(z) = start.zone.as_deref().and_then(time::zone) {
             wall_start = start.at.with_timezone(&z).naive_local();
         }
@@ -828,7 +872,13 @@ fn expand(
                 steps < cfg.max_recurrence_steps && std::time::Instant::now() < deadline,
                 "recurrence work budget"
             );
-            let at = zones.at_wall(start, d.naive_utc())?;
+            // The first instance is DTSTART itself: its wall time may be ambiguous (the repeated
+            // autumn hour), and mapping it back could name the other instant as a second date.
+            let at = if d.naive_utc() == wall_start {
+                start.at
+            } else {
+                zones.at_wall(start, d.naive_utc())?
+            };
             if at > hi {
                 break;
             }
@@ -990,6 +1040,7 @@ pub fn parse(
                 doc.event.start_local = None;
                 start = stamp;
                 start.zone = Some(tz.clone());
+                start.source = ZoneSource::Coordinates;
             }
         }
         let uid = c.text("UID").filter(|s| !s.is_empty());

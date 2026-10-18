@@ -49,6 +49,11 @@ activitypub = true
 calendars = true
 geocoding = true
 coordinate_timezone = true
+# A recurring series whose DTSTART is UTC (...Z) expands in UTC, as RFC 5545 says, unless its zone
+# comes from a source chosen here: "x_wr_timezone" (default: an explicit X-WR-TIMEZONE, Google's
+# exports, or a TZID), "coordinates" (also default_timezone and coordinate-derived zones) or
+# "never". Coordinate zones otherwise only place floating times and display.
+utc_series_wall_clock = "x_wr_timezone"
 # GET with decompression and streamed body accounting; pages still have the 1 MB cap.
 feed_body_bytes = 33554432
 max_occurrences_per_series = 50
