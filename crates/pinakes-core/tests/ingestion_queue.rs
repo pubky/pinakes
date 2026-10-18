@@ -1680,3 +1680,40 @@ async fn round17_first_start_with_a_non_default_mode_marks_stored_calendars(pool
         0
     );
 }
+
+/// Round 18 N5: `event.default_timezone` is tracked beside the mode: changing it re-parses
+/// stored calendars once.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round18_a_default_timezone_change_reparses_calendars_once(pool: PgPool) {
+    use pinakes_core::config::UtcSeriesWallClock::XWrTimezone;
+    let feed = "https://example.org/tz.ics";
+    let id = store::ensure_resource(&pool, feed).await.unwrap();
+    let mut doc = ResourceMeta::new(feed, "event", 6 * 3600);
+    doc.name = Some("Calendar".into());
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    assert_eq!(
+        queue::apply_calendar_settings(&pool, XWrTimezone, None)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        queue::apply_calendar_settings(&pool, XWrTimezone, Some("Europe/Zurich"))
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(extractor(&pool, &id).await, (Some("event".into()), Some(0)));
+    let stored: String =
+        sqlx::query_scalar("SELECT value FROM instance_setting WHERE key='event.default_timezone'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, "Europe/Zurich");
+    assert_eq!(
+        queue::apply_calendar_settings(&pool, XWrTimezone, Some("Europe/Zurich"))
+            .await
+            .unwrap(),
+        0
+    );
+}

@@ -72,11 +72,16 @@ async fn main() -> Result<()> {
     if requeued > 0 {
         tracing::info!(requeued, "re-queued documents saved under another resolver");
     }
-    let remodelled = queue::apply_calendar_mode(&pool, config.event.utc_series_wall_clock).await?;
+    let remodelled = queue::apply_calendar_settings(
+        &pool,
+        config.event.utc_series_wall_clock,
+        config.event.default_timezone.as_deref(),
+    )
+    .await?;
     if remodelled > 0 {
         tracing::info!(
             remodelled,
-            "event.utc_series_wall_clock changed: calendars re-parse once"
+            "event.utc_series_wall_clock or event.default_timezone changed: calendars re-parse once"
         );
     }
     if config.queue.reextract_on_upgrade {

@@ -120,6 +120,8 @@ fn classify_route(uri: &str) -> Option<&'static str> {
 /// (`queue::reextract_outdated`), because a re-plan reuses the stored document and only a
 /// re-fetch re-runs the parser. Every `classify` route and card kind needs an entry: a missing
 /// one compares 0 < 0 and never re-extracts.
+/// `event` and `event_platform` run the same ICS expander, so they share one number (the
+/// calendar expansion signature reads `event`); split out an expander version if they diverge.
 pub const EXTRACTOR_VERSIONS: &[(&str, i32)] = &[
     ("web", 1),
     ("pubky", 1),
@@ -128,8 +130,9 @@ pub const EXTRACTOR_VERSIONS: &[(&str, i32)] = &[
     // 2: RFC 5545 expansion of UTC-DTSTART series and DST-ambiguous first instances (round 15).
     // 3: UNTIL as an instant, TZID on UTC values, floating RECURRENCE-ID per series (round 16).
     // 4: floating values in UTC series, embedded zones in the repeated hour (round 17).
-    ("event", 4),
-    ("event_platform", 4),
+    // 5: an unconvertible embedded zone expands its series in UTC (round 18).
+    ("event", 5),
+    ("event_platform", 5),
     ("media", 1),
     ("isbn", 1),
     ("doi", 1),
@@ -262,5 +265,14 @@ mod tests {
         let routed: std::collections::BTreeSet<_> =
             samples.iter().filter_map(|uri| classify(uri)).collect();
         assert_eq!(routed, ROUTES.into_iter().collect());
+    }
+    #[test]
+    fn calendar_routes_share_the_expander_version() {
+        let versions = extractor_versions();
+        assert_eq!(
+            versions["event"], versions["event_platform"],
+            "event and event_platform run the same ICS expander and the expansion signature reads \
+             `event`: if they must diverge, split out an expander version for calendar::expansion"
+        );
     }
 }

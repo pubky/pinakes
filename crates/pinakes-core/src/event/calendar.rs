@@ -340,6 +340,15 @@ impl Zones<'_> {
     }
 }
 type Transition = (NaiveDateTime, chrono::FixedOffset, chrono::FixedOffset);
+/// The repeated wall-time window `[start + delta, start)` of a backward transition (`delta < 0`
+/// seconds), with checked arithmetic: a transition at the edge of chrono's range is an error
+/// scoped to the event, never a panic.
+fn repeated_window(start: NaiveDateTime, delta: i32) -> Result<(NaiveDateTime, NaiveDateTime)> {
+    let from = start
+        .checked_add_signed(Duration::seconds(i64::from(delta)))
+        .context("VTIMEZONE transition overflow")?;
+    Ok((from, start))
+}
 fn transitions(
     c: &Component,
     wall: NaiveDateTime,
@@ -416,7 +425,8 @@ impl Zones<'_> {
                 continue;
             }
             let wall = at.with_timezone(&to).naive_local();
-            if wall >= start + Duration::seconds(delta as i64) && wall < start {
+            let (from_wall, until_wall) = repeated_window(start, delta)?;
+            if wall >= from_wall && wall < until_wall {
                 return Ok(Some(wall));
             }
         }
@@ -806,6 +816,15 @@ fn document(
 /// with. A UTC DTSTART expands in UTC (RFC 5545) unless its zone source is configured for
 /// wall-clock expansion (Google exports a UTC DTSTART with a local rule and X-WR-TIMEZONE); then
 /// its wall time is DTSTART in that zone, IANA or embedded VTIMEZONE alike.
+/// A stamp that expands in UTC: its published instant, no zone.
+fn utc_series(start: &Stamp) -> Stamp {
+    Stamp {
+        zone: None,
+        source: ZoneSource::None,
+        wall: start.at.naive_utc(),
+        ..start.clone()
+    }
+}
 fn series_start(
     c: &Component,
     start: &Stamp,
@@ -846,7 +865,7 @@ fn expand(
     cfg: &EventConfig,
     deadline: std::time::Instant,
 ) -> Result<BTreeMap<DateTime<Utc>, Option<Duration>>> {
-    let series = series_start(c, start, zones, cfg).unwrap_or_else(|_| start.clone());
+    let series = series_start(c, start, zones, cfg).unwrap_or_else(|_| utc_series(start));
     let start = &series;
     let wall_start = start.wall;
     // A UNTIL instant is compared as an instant: its wall time may fall in a repeated or skipped
@@ -999,8 +1018,10 @@ fn expand(
     out.retain(|at, _| *at >= lo && *at <= hi);
     Ok(out)
 }
-/// The calendar expansion signature: the calendar extractor version and the configured
-/// `utc_series_wall_clock` mode, the two things that re-key unchanged feeds.
+/// The calendar expansion signature: the calendar extractor version, the configured
+/// `utc_series_wall_clock` mode and, when set, `default_timezone`: the settings that re-key
+/// unchanged feeds. The default zone is appended only when set, so instances without it keep
+/// their stored signatures.
 pub fn expansion(cfg: &EventConfig) -> String {
     let version = crate::resolver::extractor_versions()["event"]
         .as_i64()
@@ -1009,7 +1030,10 @@ pub fn expansion(cfg: &EventConfig) -> String {
         .ok()
         .and_then(|v| v.as_str().map(str::to_owned))
         .unwrap_or_default();
-    format!("v{version}:{mode}")
+    match cfg.default_timezone.as_deref() {
+        Some(tz) => format!("v{version}:{mode}:tz={tz}"),
+        None => format!("v{version}:{mode}"),
+    }
 }
 pub fn parse(
     uri: &str,
@@ -1109,8 +1133,15 @@ pub fn parse(
             }
         }
         // From here on the series stamp: RECURRENCE-ID keys, expansion and overrides agree.
-        // A zone that cannot convert keeps the plain stamp; its occurrences fail one by one below.
-        let start = series_start(c, &start, &zones, cfg).unwrap_or(start);
+        // A zone that cannot convert DTSTART (an embedded VTIMEZONE with inconsistent offsets)
+        // expands the series in UTC, the published instant, with a warning; never the raw stamp.
+        let start = match series_start(c, &start, &zones, cfg) {
+            Ok(s) => s,
+            Err(_) => {
+                container.warnings.push("series_zone_unconvertible".into());
+                utc_series(&start)
+            }
+        };
         let uid = c.text("UID").filter(|s| !s.is_empty());
         let volatile = uid.is_none() && platform_id(&doc.url).is_none();
         let uid = if base.host_str().is_some_and(|s| s.starts_with("eventfrog."))
@@ -1640,4 +1671,35 @@ pub fn structured_feed(
     d.event.warnings = container.warnings.clone();
     d.container = Some(Box::new(container));
     Ok(Some(d.bounded(&[])?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repeated_window_reports_overflow_instead_of_panicking() {
+        let start =
+            NaiveDateTime::parse_from_str("2026-10-25T03:00:00", "%Y-%m-%dT%H:%M:%S").unwrap();
+        let (from, until) = repeated_window(start, -3600).unwrap();
+        assert_eq!(
+            (from.to_string(), until),
+            ("2026-10-25 02:00:00".into(), start)
+        );
+        assert!(repeated_window(NaiveDateTime::MIN, -3600).is_err());
+    }
+
+    #[test]
+    fn the_expansion_signature_names_the_default_zone_only_when_set() {
+        let mut cfg = EventConfig::default();
+        let version = crate::resolver::extractor_versions()["event"]
+            .as_i64()
+            .unwrap();
+        assert_eq!(expansion(&cfg), format!("v{version}:x_wr_timezone"));
+        cfg.default_timezone = Some("Europe/Zurich".into());
+        assert_eq!(
+            expansion(&cfg),
+            format!("v{version}:x_wr_timezone:tz=Europe/Zurich")
+        );
+    }
 }

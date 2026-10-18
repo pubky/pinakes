@@ -215,44 +215,78 @@ pub async fn reextract_outdated(
     }
 }
 
-/// Re-parse calendars once after `event.utc_series_wall_clock` changes, since an unchanged feed
-/// would otherwise keep answering 304 with documents expanded under the old mode. Runs at startup
-/// under the instance lock, before `reextract_outdated`. The applied mode is stored in
-/// `instance_setting`; on a change, `ok` event and event_platform documents are marked outdated
-/// (`extracted_with=0`, re-queued by `reextract_outdated`) and every calendar fetch loses its
-/// validators, so even without the re-extraction wave the next fetch re-parses. Both passes run
-/// in batches of 1000 and the mode is recorded last, so an interrupted start repeats them. The
-/// first start (no stored mode) records the mode; if calendars are already stored it says their
-/// expansion predates mode tracking and, when the configured mode is not the default, marks them
-/// too. Returns the number of documents marked.
+/// `apply_calendar_settings` with no `default_timezone`.
 pub async fn apply_calendar_mode(
     pool: &PgPool,
     mode: crate::config::UtcSeriesWallClock,
 ) -> Result<u64> {
-    let value = serde_json::to_value(mode)?
+    apply_calendar_settings(pool, mode, None).await
+}
+/// Re-parse calendars once after `event.utc_series_wall_clock` or `event.default_timezone`
+/// changes, since an unchanged feed would otherwise keep answering 304 with documents expanded
+/// under the old settings. Runs at startup under the instance lock, before
+/// `reextract_outdated`. The applied settings are stored in `instance_setting`; on a change, `ok`
+/// event and event_platform documents are marked outdated (`extracted_with=0`, re-queued by
+/// `reextract_outdated`) and every calendar fetch loses its validators, so even without the
+/// re-extraction wave the next fetch re-parses. Both passes run in batches of 1000 and the
+/// settings are recorded last, so an interrupted start repeats them. A setting seen for the first
+/// time is recorded; if calendars are already stored it says their expansion predates tracking
+/// and, when the configured value is not the default, marks them too. Returns the number of
+/// documents marked.
+pub async fn apply_calendar_settings(
+    pool: &PgPool,
+    mode: crate::config::UtcSeriesWallClock,
+    default_timezone: Option<&str>,
+) -> Result<u64> {
+    let mode = serde_json::to_value(mode)?
         .as_str()
         .unwrap_or_default()
         .to_owned();
-    let stored: Option<String> = sqlx::query_scalar(
-        "SELECT value FROM instance_setting WHERE key='event.utc_series_wall_clock'",
-    )
-    .fetch_optional(pool)
-    .await?;
-    let remark = match stored.as_deref() {
-        Some(previous) => previous != value,
-        None => {
-            let stored_calendars: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource WHERE status='ok' AND coalesce(extracted_by,resolver) IN ('event','event_platform'))")
-                .fetch_one(pool)
+    let default_mode = serde_json::to_value(crate::config::UtcSeriesWallClock::default())?
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    // (key, configured value, value when unset)
+    let settings = [
+        ("event.utc_series_wall_clock", mode, default_mode),
+        (
+            "event.default_timezone",
+            default_timezone.unwrap_or_default().to_owned(),
+            String::new(),
+        ),
+    ];
+    let mut remark = false;
+    let mut stored_calendars: Option<bool> = None;
+    for (key, value, unset) in &settings {
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT value FROM instance_setting WHERE key=$1")
+                .bind(key)
+                .fetch_optional(pool)
                 .await?;
-            if stored_calendars {
-                tracing::info!(
-                    mode = %value,
-                    "stored calendar expansions predate mode tracking; the extractor-version wave re-parses them"
-                );
+        match stored {
+            Some(previous) => remark |= &previous != value,
+            None => {
+                let calendars = match stored_calendars {
+                    Some(c) => c,
+                    None => {
+                        let c: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource WHERE status='ok' AND coalesce(extracted_by,resolver) IN ('event','event_platform'))")
+                            .fetch_one(pool)
+                            .await?;
+                        stored_calendars = Some(c);
+                        c
+                    }
+                };
+                if calendars {
+                    tracing::info!(
+                        setting = key,
+                        value = %value,
+                        "stored calendar expansions predate tracking of this setting"
+                    );
+                }
+                remark |= calendars && value != unset;
             }
-            stored_calendars && mode != crate::config::UtcSeriesWallClock::default()
         }
-    };
+    }
     let mut marked = 0;
     if remark {
         loop {
@@ -272,10 +306,13 @@ pub async fn apply_calendar_mode(
             > 0
         {}
     }
-    sqlx::query("INSERT INTO instance_setting(key,value) VALUES('event.utc_series_wall_clock',$1) ON CONFLICT(key) DO UPDATE SET value=excluded.value,applied_at=CASE WHEN instance_setting.value=excluded.value THEN instance_setting.applied_at ELSE now() END")
-        .bind(&value)
-        .execute(pool)
-        .await?;
+    for (key, value, _) in &settings {
+        sqlx::query("INSERT INTO instance_setting(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=excluded.value,applied_at=CASE WHEN instance_setting.value=excluded.value THEN instance_setting.applied_at ELSE now() END")
+            .bind(key)
+            .bind(value)
+            .execute(pool)
+            .await?;
+    }
     Ok(marked)
 }
 

@@ -2121,9 +2121,30 @@ fn bad_custom_zone_occurrence_does_not_discard_good_siblings() {
     let zone = "BEGIN:VTIMEZONE\nTZID:Broken\nEND:VTIMEZONE";
     let body = cal(&[zone.into(),event("UID:broken-recurring\nDTSTART;VALUE=DATE;TZID=Broken:20261020T000000Z\nDURATION:P1D\nRDATE:20261021T000000Z\nSUMMARY:Bad reverse zone"), event("UID:broken-single\nDTSTART;VALUE=DATE;TZID=Broken:20261020T000000Z\nDURATION:P1D"),event("UID:good\nDTSTART:20261022T180000Z\nSUMMARY:Good sibling")].join("\n"));
     let c = parse(&body).container.unwrap();
-    assert_eq!(c.occurrences.len(), 1);
-    assert_eq!(c.occurrences[0].uid, "good");
-    assert!(c.warnings.iter().any(|w| w == "invalid_vevent_occurrence"));
+    // Round 18 N3: a zone that cannot convert DTSTART expands its series in UTC (the published
+    // instants) with a warning, instead of dropping it or reading UTC wall times as local.
+    let mut rows: Vec<(String, String)> = c
+        .occurrences
+        .iter()
+        .map(|o| (o.uid.clone(), o.doc.start.unwrap().to_rfc3339()))
+        .collect();
+    rows.sort();
+    assert_eq!(
+        rows,
+        [
+            (
+                "broken-recurring".into(),
+                "2026-10-20T00:00:00+00:00".into()
+            ),
+            (
+                "broken-recurring".into(),
+                "2026-10-21T00:00:00+00:00".into()
+            ),
+            ("broken-single".into(), "2026-10-20T00:00:00+00:00".into()),
+            ("good".into(), "2026-10-22T18:00:00+00:00".into()),
+        ]
+    );
+    assert!(c.warnings.iter().any(|w| w == "series_zone_unconvertible"));
 }
 #[test]
 fn retained_revision_memory_is_bounded() {
@@ -3133,6 +3154,26 @@ async fn round17_a_mode_flip_and_back_moves_each_way_once(pool: PgPool) {
         snapshot(&pool, &id, uri, &body, &coordinates).await;
     }
     assert_eq!(feed_outcome(&pool, &id).await, (0, false, 10, 7, 0, 14));
+    // Round 18 N4: walking `supersedes` from any row ends (no cycle after the flip-back).
+    let rows: Vec<(String, String, Option<String>)> =
+        sqlx::query_as("SELECT uid,recurrence_id,supersedes FROM occurrence WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let next: std::collections::HashMap<String, Option<String>> = rows
+        .into_iter()
+        .map(|(uid, rid, sup)| (serde_json::to_string(&(uid, rid)).unwrap(), sup))
+        .collect();
+    for start in next.keys() {
+        let mut key = Some(start.clone());
+        let mut steps = 0;
+        while let Some(k) = key {
+            steps += 1;
+            assert!(steps <= next.len(), "supersedes cycle from {start}");
+            key = next.get(&k).cloned().flatten();
+        }
+    }
 }
 
 /// Round 17 P1/P5: only Pinakes's own re-expansion pairs. A feed flipping its X-WR-TIMEZONE
@@ -3284,4 +3325,93 @@ fn round17_embedded_zone_repeated_hour() {
         ),
         ["2026-10-25T01:30Z", "2026-10-26T01:30Z"]
     );
+}
+
+/// Round 18 N3: an embedded VTIMEZONE that cannot convert (a STANDARD block without
+/// TZOFFSETTO) leaves a UTC series at its published instants, with a warning.
+#[test]
+fn round18_an_unconvertible_zone_keeps_the_utc_instants() {
+    let odd = "BEGIN:VTIMEZONE\r\nTZID:Odd Zone\r\nBEGIN:STANDARD\r\nDTSTART:16010101T030000\r\nTZOFFSETFROM:+0200\r\nRRULE:FREQ=YEARLY;BYDAY=-1SU;BYMONTH=10\r\nEND:STANDARD\r\nEND:VTIMEZONE\r\n";
+    let body = format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n{odd}BEGIN:VEVENT\r\nUID:odd\r\nSUMMARY:Odd\r\nDTSTART;TZID=Odd Zone:20261020T100000Z\r\nRRULE:FREQ=DAILY;COUNT=3\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n");
+    let doc = calendar::parse(
+        "https://example.org/odd.ics",
+        body.as_bytes(),
+        &EventConfig::default(),
+        "2026-10-18T00:00:00Z".parse().unwrap(),
+    )
+    .unwrap();
+    let c = doc.container.unwrap();
+    let starts: Vec<String> = c
+        .occurrences
+        .iter()
+        .map(|o| o.doc.start.unwrap().format("%Y-%m-%dT%H:%MZ").to_string())
+        .collect();
+    assert_eq!(
+        starts,
+        [
+            "2026-10-20T10:00Z",
+            "2026-10-21T10:00Z",
+            "2026-10-22T10:00Z"
+        ]
+    );
+    assert!(c.warnings.iter().any(|w| w == "series_zone_unconvertible"));
+}
+
+/// Round 18 N1/K62: the real upgrade path. A snapshot stored before 0043 has no expansion: the
+/// first re-expansion pairs its hour shifts once and records the current expansion; from then on
+/// a one-hour shift under the same expansion (the feed flipping X-WR-TIMEZONE) never pairs, is
+/// held, and leaves the stored expansion unchanged.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round18_the_null_expansion_pairs_once_then_never(pool: PgPool) {
+    use pinakes_core::config::UtcSeriesWallClock::Coordinates;
+    let uri = "https://example.org/upgrade.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let stored = |pool: PgPool, id: String| async move {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT expansion FROM event_fetch WHERE resource_id=$1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    // Stored by a release before 0043: expanded on the coordinate zone's wall clock, no record.
+    let coordinates = EventConfig {
+        utc_series_wall_clock: Coordinates,
+        ..Default::default()
+    };
+    snapshot(
+        &pool,
+        &id,
+        uri,
+        &daily("", "20361024T004800Z"),
+        &coordinates,
+    )
+    .await;
+    sqlx::query("UPDATE event_fetch SET expansion=NULL WHERE resource_id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The upgrade's re-parse under the default: seven hour shifts pair once.
+    let cfg = EventConfig::default();
+    snapshot(&pool, &id, uri, &daily("", "20361024T004800Z"), &cfg).await;
+    assert_eq!(feed_outcome(&pool, &id).await, (0, false, 10, 7, 0, 7));
+    let current = calendar::expansion(&cfg);
+    assert_eq!(
+        stored(pool.clone(), id.clone()).await,
+        Some(current.clone())
+    );
+    // Same expansion, the feed flips X-WR-TIMEZONE: held, nothing paired, record unchanged.
+    snapshot(
+        &pool,
+        &id,
+        uri,
+        &daily("X-WR-TIMEZONE:Europe/Zurich\r\n", "20361024T004800Z"),
+        &cfg,
+    )
+    .await;
+    let (holds, held, _, _, cancelled, rescheduled) = feed_outcome(&pool, &id).await;
+    assert_eq!((holds, held, cancelled, rescheduled), (1, true, 0, 7));
+    assert_eq!(stored(pool.clone(), id.clone()).await, Some(current));
 }
