@@ -3753,3 +3753,90 @@ async fn review_cursor_quarantines_bad_rows_without_inventing_deletions(pool: Pg
     assert!(c.warnings.iter().any(|w| w == "invalid_cursor_row"));
     assert_eq!(c.cursor.unwrap().next, "12");
 }
+
+/// Round 20 J1: NIP-52 dates, NIP-52 timestamps and BTC Map's `updated_at` take the same years
+/// as the calendar parsers (0000–9999). A Nostr event is its own resource, so a bad date refuses
+/// that event's parse, like any other malformed NIP-52 event; a BTC Map row is dropped with the
+/// feed's row warning while its siblings are kept.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round20_adapter_dates_have_four_digit_years(pool: PgPool) {
+    use pinakes_core::event::adapters::nostr::{self as nip52, Target};
+    let cfg = EventConfig::default();
+    let event = |kind: u16, start: &str, end: Option<&str>| {
+        let mut tags: Vec<&[&str]> = vec![&["d", "edge"], &["title", "Edge"]];
+        let start = ["start", start];
+        tags.push(&start);
+        let end = end.map(|e| ["end", e]);
+        if let Some(end) = &end {
+            tags.push(end);
+        }
+        signed(kind, 100, &tags)
+    };
+    let uri = |e: &nostr::event::Event| {
+        Target::coordinate(&format!("{}:{}:edge", e.kind.as_u16(), e.pubkey.to_hex()))
+            .unwrap()
+            .uri()
+            .unwrap()
+    };
+    for (kind, start, end) in [
+        (31922, "+12026-10-20", None),
+        (31922, "-262143-01-01", None),
+        (31922, "2026-10-20", Some("+12026-10-21")),
+        (31922, "2026-10-20", Some("-262143-01-01")),
+        (31923, "253402300800", None),
+        (31923, "-62167219201", None),
+        (31923, "1792519200", Some("253402300800")),
+    ] {
+        let e = event(kind, start, end);
+        let error = nip52::parse(&uri(&e), &e, &cfg).unwrap_err().to_string();
+        assert!(
+            error.starts_with("invalid"),
+            "{kind} {start} {end:?}: {error}"
+        );
+    }
+    for (kind, start, end, first) in [
+        (
+            31922,
+            "2026-10-20",
+            Some("2026-10-22"),
+            "2026-10-20T00:00:00Z",
+        ),
+        (31922, "20261020", None, "2026-10-20T00:00:00Z"),
+        (31923, "253402300799", None, "9999-12-31T23:59:59Z"),
+        (31923, "-62167219200", None, "0000-01-01T00:00:00Z"),
+    ] {
+        let e = event(kind, start, end);
+        let doc = nip52::parse(&uri(&e), &e, &cfg).unwrap();
+        assert_eq!(doc.start, Some(first.parse().unwrap()), "{kind} {start}");
+    }
+    let at = (Utc::now() + Duration::days(2)).to_rfc3339();
+    let (egress, _) = mock_egress(vec![(
+        200,
+        json!([
+            {"id":1,"status":"live","starts_at":at,"name":"One","updated_at":"2026-10-15T13:00:00Z"},
+            {"id":2,"status":"live","starts_at":at,"name":"Two","updated_at":"+12026-10-15T13:00:00Z"},
+            {"id":3,"status":"live","starts_at":at,"name":"Three","updated_at":"-262143-01-01T00:00:00Z"}
+        ]),
+    )]);
+    let c = cursor::resolve(
+        &pool,
+        "https://api.btcmap.org/v4/events",
+        adapters::definition("btcmap").unwrap(),
+        &egress,
+        &cfg,
+        false,
+    )
+    .await
+    .unwrap()
+    .container
+    .unwrap();
+    assert_eq!(
+        c.occurrences
+            .iter()
+            .map(|o| o.uid.as_str())
+            .collect::<Vec<_>>(),
+        ["1"]
+    );
+    assert_eq!(c.warnings, ["invalid_cursor_row"]);
+    assert_eq!(c.cursor.unwrap().next, "2026-10-15T13:00:00+00:00");
+}

@@ -1482,12 +1482,10 @@ pub fn structured_feed(
         check_budget()?;
         dated += 1;
         let parse = |v: &Value| {
-            v.as_i64()
-                .and_then(|n| DateTime::from_timestamp(n, 0))
-                .or_else(|| {
-                    v.as_str()
-                        .and_then(|s| time::parse(s, cfg.default_timezone.as_deref()))
-                })
+            v.as_i64().and_then(time::from_timestamp).or_else(|| {
+                v.as_str()
+                    .and_then(|s| time::parse(s, cfg.default_timezone.as_deref()))
+            })
         };
         let Some(start) = parse(&start) else {
             dated -= 1;

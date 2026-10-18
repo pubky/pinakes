@@ -1,5 +1,6 @@
 use chrono::{
-    DateTime, Duration, FixedOffset, LocalResult, NaiveDate, NaiveDateTime, Offset, TimeZone, Utc,
+    DateTime, Datelike, Duration, FixedOffset, LocalResult, NaiveDate, NaiveDateTime, Offset,
+    TimeZone, Utc,
 };
 use chrono_tz::Tz;
 use std::{collections::BTreeMap, sync::OnceLock};
@@ -61,15 +62,27 @@ pub fn local(tz: Tz, value: NaiveDateTime) -> Option<DateTime<Utc>> {
 /// Whether a date value starts with exactly four ASCII year digits, as RFC 5545
 /// (`date-fullyear = 4DIGIT`) and the ISO 8601 forms Pinakes reads require: `YYYY-…` or the
 /// compact `YYYYMMDD[T…]`. chrono's `%Y` would also take signed years of any width, which put
-/// later arithmetic at the edge of its range.
+/// later arithmetic at the edge of its range. A compact date may carry `Z` directly
+/// (`YYYYMMDDZ`), which `offset` strips. Callers trim leading whitespace first, which chrono's
+/// `%Y` used to skip.
 fn four_digit_year(value: &str) -> bool {
     let b = value.as_bytes();
     b.len() >= 8
         && b[..4].iter().all(u8::is_ascii_digit)
         && (b[4] == b'-'
-            || (b[4..8].iter().all(u8::is_ascii_digit) && b.get(8).is_none_or(|&c| c == b'T')))
+            || (b[4..8].iter().all(u8::is_ascii_digit)
+                && b.get(8).is_none_or(|&c| c == b'T' || c == b'Z')))
+}
+/// The instant if its year is 0000–9999, the range the string parsers accept.
+pub fn bounded(t: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    (0..=9999).contains(&t.year()).then_some(t)
+}
+/// A Unix timestamp in seconds, bounded like the string forms.
+pub fn from_timestamp(secs: i64) -> Option<DateTime<Utc>> {
+    DateTime::from_timestamp(secs, 0).and_then(bounded)
 }
 pub fn naive(value: &str) -> Option<NaiveDateTime> {
+    let value = value.trim_start();
     if !four_digit_year(value) {
         return None;
     }
@@ -91,6 +104,7 @@ pub fn naive(value: &str) -> Option<NaiveDateTime> {
     None
 }
 pub fn offset(value: &str) -> Option<DateTime<Utc>> {
+    let value = value.trim_start();
     if !four_digit_year(value) {
         return None;
     }

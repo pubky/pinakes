@@ -77,7 +77,10 @@ fn uid(v: &Value) -> Option<String> {
         .or_else(|| v["id"].as_i64().map(|x| x.to_string()))
 }
 fn timestamp(v: &Value) -> Option<DateTime<Utc>> {
-    v.as_str()?.parse().ok()
+    v.as_str()?
+        .parse()
+        .ok()
+        .and_then(crate::event::time::bounded)
 }
 pub fn container(uri: &str, cfg: &EventConfig) -> ResourceMeta {
     let mut doc = ResourceMeta::new(uri, "event", 3600);

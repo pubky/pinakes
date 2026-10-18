@@ -132,12 +132,14 @@ pub const EXTRACTOR_VERSIONS: &[(&str, i32)] = &[
     // 4: floating values in UTC series, embedded zones in the repeated hour (round 17).
     // 5: an unconvertible embedded zone expands its series in UTC (round 18).
     // 6: four-digit years only (round 19).
-    ("event", 6),
-    ("event_platform", 6),
+    // 7: bounded NIP-52 dates and integer timestamps, leading whitespace, `YYYYMMDDZ` (round 20).
+    ("event", 7),
+    ("event_platform", 7),
     ("media", 1),
     ("isbn", 1),
     ("doi", 1),
-    ("nostr", 1),
+    // 2: NIP-52 events parse their dates like the event_platform route (round 20).
+    ("nostr", 2),
     ("activitypub", 1),
 ];
 /// `EXTRACTOR_VERSIONS` as a JSON object for SQL (`versions->>resolver`).

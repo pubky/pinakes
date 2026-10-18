@@ -360,19 +360,19 @@ pub fn parse(uri: &str, event: &Event, cfg: &EventConfig) -> Result<ResourceMeta
         .and_then(time::zone)
         .map(|z| z.to_string());
     if kind == 31923 {
-        doc.start = chrono::DateTime::from_timestamp(start.parse()?, 0);
+        doc.start = Some(time::from_timestamp(start.parse()?).context("invalid start")?);
         doc.end = tag(event, "end")
-            .map(str::parse::<i64>)
+            .map(|t| time::from_timestamp(t.parse()?).context("invalid end"))
             .transpose()?
-            .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
             .or(doc.start);
         if tag(event, "D").is_none() {
             doc.event.warnings.push("nostr_legacy_missing_D".into());
         }
     } else {
-        let start = chrono::NaiveDate::parse_from_str(start, "%Y-%m-%d")?;
+        let date = |s: &str| time::naive(s).map(|t| t.date());
+        let start = date(start).context("invalid all-day start")?;
         let end = tag(event, "end")
-            .map(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d"))
+            .map(|s| date(s).context("invalid all-day end"))
             .transpose()?
             .unwrap_or(start.succ_opt().context("date overflow")?);
         ensure!(end > start, "invalid all-day end");

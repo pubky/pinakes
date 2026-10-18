@@ -317,6 +317,7 @@ fn fields(doc: &mut ResourceMeta, v: &Value, base: &Url, ap: bool) {
     }
 }
 pub fn set_time(doc: &mut ResourceMeta, s: &str, end: bool) {
+    let s = s.trim();
     if (end && doc.end.is_some()) || (!end && doc.start.is_some()) {
         return;
     }

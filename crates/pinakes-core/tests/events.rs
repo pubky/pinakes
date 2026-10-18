@@ -3443,24 +3443,28 @@ fn round19_years_have_four_digits() {
     let good =
         "BEGIN:VEVENT\r\nUID:good\r\nSUMMARY:Good\r\nDTSTART:20261022T180000Z\r\nEND:VEVENT\r\n";
     let edge_zone = "BEGIN:VTIMEZONE\r\nTZID:Edge\r\nBEGIN:STANDARD\r\nDTSTART:-262143-01-01T00:00:00\r\nTZOFFSETFROM:+0200\r\nTZOFFSETTO:+0100\r\nRRULE:FREQ=YEARLY;BYDAY=-1SU;BYMONTH=10\r\nEND:STANDARD\r\nEND:VTIMEZONE\r\n";
-    for (case, header, event) in [
+    for (case, warning, header, event) in [
         (
             "VTIMEZONE DTSTART",
+            "invalid_vevent_document",
             edge_zone,
             "UID:edge\r\nSUMMARY:Edge\r\nDTSTART;TZID=Edge:20261024T100000\r\nRRULE:FREQ=DAILY;COUNT=2\r\n",
         ),
         (
             "VEVENT DTSTART",
+            "invalid_vevent_document",
             "",
             "UID:edge\r\nSUMMARY:Edge\r\nDTSTART:+12026-10-24T10:00:00Z\r\n",
         ),
         (
             "RDATE",
+            "invalid_vevent_recurrence",
             "",
             "UID:edge\r\nSUMMARY:Edge\r\nDTSTART:20261024T100000Z\r\nRDATE:-0001-01-01T00:00:00Z\r\n",
         ),
         (
             "UNTIL",
+            "invalid_vevent_recurrence",
             "",
             "UID:edge\r\nSUMMARY:Edge\r\nDTSTART:20261024T100000Z\r\nRRULE:FREQ=DAILY;UNTIL=-262143-01-01T00:00:00Z\r\n",
         ),
@@ -3483,8 +3487,91 @@ fn round19_years_have_four_digits() {
             "{case}: the broken event yields nothing: {:?}",
             c.occurrences.iter().map(|o| (&o.uid, o.doc.start)).collect::<Vec<_>>()
         );
-        assert!(!c.warnings.is_empty(), "{case}: the event's warning");
+        assert_eq!(c.warnings, [warning], "{case}: the event's warning");
     }
+}
+
+/// Round 20 J2: leading whitespace, which chrono's `%Y` skipped before round 19, and a compact
+/// date with `Z` parse again, in JSON-LD and in a JSON feed. J1: a feed's integer timestamps take
+/// the same years as its strings.
+#[test]
+fn round20_whitespace_compact_z_and_bounded_feed_timestamps() {
+    use chrono::Datelike;
+    let utc = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+    assert_eq!(
+        time::offset(" 2026-10-20T19:00:00+02:00"),
+        Some(utc("2026-10-20T17:00:00Z"))
+    );
+    assert_eq!(
+        time::parse("\t2026-10-20T19:00:00", Some("Europe/Zurich")),
+        Some(utc("2026-10-20T17:00:00Z"))
+    );
+    assert_eq!(
+        time::parse("20261020Z", None),
+        Some(utc("2026-10-20T00:00:00Z"))
+    );
+    assert!(time::naive(" +12026-10-20").is_none());
+    assert!(time::offset("2026102Z").is_none());
+    assert_eq!(
+        time::from_timestamp(253402300799),
+        Some(utc("9999-12-31T23:59:59Z"))
+    );
+    assert_eq!(time::from_timestamp(253402300800), None);
+    assert_eq!(time::from_timestamp(-62167219201), None);
+    let url = "https://example.org/e".parse().unwrap();
+    let mut d = ResourceMeta::new("https://example.org/e", "web", 1);
+    page::jsonld(
+        &mut d,
+        &json!({"@type":"Event","name":"Padded","startDate":" 2026-10-20T19:00:00+02:00"}),
+        &url,
+    );
+    assert_eq!(d.start, Some(utc("2026-10-20T17:00:00Z")));
+    let mut d = ResourceMeta::new("https://example.org/e", "web", 1);
+    page::jsonld(
+        &mut d,
+        &json!({"@type":"Event","name":"Padded day","startDate":" 2026-10-20"}),
+        &url,
+    );
+    assert_eq!(d.event.all_day, Some(true), "the trimmed value is a date");
+    let feed = json!({"version":"https://jsonfeed.org/version/1","items":[
+        {"id":"padded","title":"Padded","event":{"start":" 2026-10-20T19:00:00+02:00"}},
+        {"id":"compact","title":"Compact","event":{"start":"20261020Z"}},
+        {"id":"far","title":"Far","event":{"start":253402300800_i64}},
+        {"id":"far-end","title":"Far end","event":{"start":1792522800,"end":253402300800_i64}}
+    ]});
+    let c = calendar::structured_feed(
+        "https://example.org/json",
+        feed.to_string().as_bytes(),
+        &EventConfig::default(),
+        now(),
+    )
+    .unwrap()
+    .unwrap()
+    .container
+    .unwrap();
+    let start = |uid: &str| {
+        c.occurrences
+            .iter()
+            .find(|o| o.uid == uid)
+            .map(|o| (o.doc.start, o.doc.end))
+    };
+    assert_eq!(
+        start("padded").unwrap().0,
+        Some(utc("2026-10-20T17:00:00Z"))
+    );
+    assert_eq!(
+        start("compact").unwrap().0,
+        Some(utc("2026-10-20T00:00:00Z"))
+    );
+    assert_eq!(start("far"), None, "a start beyond 9999 is refused");
+    // Like an unparsable string start: the item's warning, and the feed-level count of items
+    // without a usable date.
+    assert_eq!(c.warnings, ["invalid_feed_item_date", "undated_feed_item"]);
+    let (_, end) = start("far-end").unwrap();
+    assert!(
+        end.is_none_or(|e| e.year() <= 9999),
+        "an end beyond 9999 is refused: {end:?}"
+    );
 }
 
 /// Round 19 M2: a snapshot held while the stored expansion is still NULL (the feed lost most of

@@ -19,7 +19,7 @@ fn val(v: &Value, keys: &[&str]) -> Option<String> {
 }
 fn date(v: &Value) -> Option<String> {
     if let Some(n) = v.as_i64() {
-        return chrono::DateTime::from_timestamp(if n > 100000000000 { n / 1000 } else { n }, 0)
+        return time::from_timestamp(if n > 100000000000 { n / 1000 } else { n })
             .map(|t| t.to_rfc3339());
     }
     v.as_str()
