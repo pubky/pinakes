@@ -1,14 +1,16 @@
 
 CORS: the public listener serves browser clients on other origins according to
 `api.cors_allow_origins` (default `["*"]`, safe because the public API is read-only apart from
-budgeted previews and takes no cookies or tokens; list exact origins to restrict; `[]` disables
-CORS). Preflights (`OPTIONS` with `Access-Control-Request-Method`) are answered with 204,
-`Access-Control-Allow-Methods: GET, POST`, `Access-Control-Allow-Headers: content-type` and
-`Access-Control-Max-Age: 600`, and spend the per-IP budget like any request. Responses,
-429s included, carry `Access-Control-Allow-Origin` and expose `Retry-After` and `ETag`; with an
-origin list they add `Vary: Origin`. No `Access-Control-Allow-Credentials` is sent. A refused
-origin gets no CORS headers. The admin listener never sends CORS headers. Entries other than
-`"*"` alone or exact origins stop startup.
+budgeted previews and takes no cookies or tokens; list exact origins to restrict, with no
+wildcard patterns such as `https://*.pubky.app`; `[]` disables CORS). Preflights (`OPTIONS` with
+`Access-Control-Request-Method`) are answered with 204, `Access-Control-Allow-Methods: GET,
+POST`, `Access-Control-Allow-Headers: content-type` and `Access-Control-Max-Age: 600`, and spend
+the per-IP budget like any request. In `*` mode every response, 429s and requests without an
+`Origin` included, carries `Access-Control-Allow-Origin: *` and exposes `Retry-After` and
+`ETag`, so a shared cache filled by a non-browser client still serves browsers. With an origin
+list only allowed origins get those headers (echoed), and every response adds `Vary: Origin`; a
+refused origin gets none. No `Access-Control-Allow-Credentials` is sent. The admin listener never
+sends CORS headers. Entries other than `"*"` alone or exact origins stop startup.
 
 Web access interstitials are stored as `blocked` with no display fields or grouping evidence.
 `queue.blocked_ttl_secs` controls probes (default 86400; 3600–2592000 seconds); these probes
@@ -91,7 +93,8 @@ the OSM route gets or drops its identity envelope; an OSM-host URL moving to web
 (round 13's object shortlinks enter the OSM route, changeset/note/query shortlinks leave geo for
 the web refusal). Such rows become pending with a generation bump, revived and staggered over
 an hour, never later than their scheduled refresh. Pages and feeds promoted to
-`media`/`activitypub` by their own card (through the web or event route) keep that route. Migration 0038 also turns earlier OSM-host refusals from dead
+`media`/`activitypub` by their own card (through the web, event or event_platform route) keep
+that route. Migration 0038 also turns earlier OSM-host refusals from dead
 letters into final `unsupported` rows, so they no longer count toward the dead-letter alert.
 Parser changes reach stored documents the same way. Each resolver kind has an extractor version
 (`resolver::EXTRACTOR_VERSIONS`), bumped in the same commit as any change to what it extracts

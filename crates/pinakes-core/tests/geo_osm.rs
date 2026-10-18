@@ -1653,17 +1653,16 @@ async fn round13_a_page_naming_a_map_link_does_not_group_with_the_point(pool: Pg
 }
 
 /// `scripts/verify-osm-boundary` against this test database, or None, with a message saying so,
-/// where the PostgreSQL client tools it runs (`psql`, `pg_dump`) are not installed.
+/// where the tools it runs (`psql`, `pg_dump`, `rg`) are not installed.
 async fn boundary_script(pool: &PgPool) -> Option<std::process::Output> {
-    for tool in ["psql", "pg_dump"] {
+    for tool in ["psql", "pg_dump", "rg"] {
         if std::process::Command::new(tool)
             .arg("--version")
             .output()
             .is_err()
         {
             eprintln!(
-                "SKIPPED: scripts/verify-osm-boundary needs `{tool}` (PostgreSQL client tools), \
-                 which is not installed"
+                "SKIPPED: scripts/verify-osm-boundary needs `{tool}`, which is not installed"
             );
             return None;
         }
@@ -1731,4 +1730,55 @@ async fn round13_boundary_script_accepts_location_link_history(pool: PgPool) {
     let leaked = boundary_script(&pool).await.unwrap();
     assert!(!leaked.status.success());
     assert!(String::from_utf8_lossy(&leaked.stderr).contains("leaked into historical changes"));
+}
+
+/// Round 15 Z4: a resolved OSM-route row (a round-11 Nominatim alias with a lowercase osmtype,
+/// refused since round 13) moving to web loses every resolution mark, not only its facts.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round15_a_resolved_osm_row_moving_to_web_is_unresolved(pool: PgPool) {
+    let alias = "https://nominatim.openstreetmap.org/details?osmtype=n&osmid=240109189";
+    let id = store::ensure_resource(&pool, alias).await.unwrap();
+    // What round 11 stored: an OSM alias resolved through the shared osm_place row.
+    sqlx::query("UPDATE resource SET resolver='osm',resolved_by='osm',osm_type='node',osm_id=240109189,type_path=NULL,doc=jsonb_build_object('type','Place','url',uri,'osm_id','node/240109189','source','osm','status','ok'),status='ok',resolved_at=now(),refresh_at=now()+interval '30 days',next_attempt_at=now()+interval '30 days',osm_version='0123456789abcdef0123456789abcdef' WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let marks = || async {
+        sqlx::query_as::<_, (bool, bool, Option<String>, Option<String>)>(
+            "SELECT resolved_at IS NOT NULL,refresh_at IS NOT NULL,resolved_by,osm_version FROM resource WHERE id=$1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(
+        marks().await,
+        (
+            true,
+            true,
+            Some("osm".into()),
+            Some("0123456789abcdef0123456789abcdef".into())
+        )
+    );
+    assert_eq!(queue::reclassify_routes(&pool).await.unwrap(), 1);
+    let (route, status, doc): (String, String, Value) =
+        sqlx::query_as("SELECT resolver,status,doc FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        (route.as_str(), status.as_str(), doc),
+        ("web", "pending", json!({}))
+    );
+    assert_eq!(marks().await, (false, false, None, None));
+    if let Some(proof) = boundary_script(&pool).await {
+        assert!(
+            proof.status.success(),
+            "{}",
+            String::from_utf8_lossy(&proof.stderr)
+        );
+    }
 }

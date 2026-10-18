@@ -414,11 +414,13 @@ impl Config {
             bail!("api.cors_allow_origins: \"*\" must be the only entry");
         }
         for origin in origins.iter().filter(|o| *o != "*") {
-            let valid = url::Url::parse(origin).is_ok_and(|u| {
-                matches!(u.scheme(), "http" | "https")
-                    && u.host_str().is_some()
-                    && u.origin().ascii_serialization() == *origin
-            });
+            // Origins are exact: the url crate accepts `*` in a host, which would never match.
+            let valid = !origin.contains('*')
+                && url::Url::parse(origin).is_ok_and(|u| {
+                    matches!(u.scheme(), "http" | "https")
+                        && u.host_str().is_some()
+                        && u.origin().ascii_serialization() == *origin
+                });
             if !valid {
                 bail!("api.cors_allow_origins: {origin:?} is not an origin (scheme://host[:port], no path or trailing slash)");
             }

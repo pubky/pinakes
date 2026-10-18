@@ -2,7 +2,20 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export DATABASE_URL="${DATABASE_URL:-postgresql:///postgres?host=/var/run/postgresql}"
+# The tests that run scripts/verify-osm-boundary skip it without these tools; libtest captures
+# their SKIPPED line on a passing run, so say it here, before and after the suite.
+missing=""
+for tool in psql pg_dump rg; do
+  command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+done
+warn() {
+  if [ -n "$missing" ]; then
+    echo "WARNING: not installed:$missing; the scripts/verify-osm-boundary checks in the test suite are SKIPPED" >&2
+  fi
+}
+warn
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test --workspace
 scripts/check-ops
+warn

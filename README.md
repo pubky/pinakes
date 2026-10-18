@@ -127,8 +127,9 @@ DATABASE_URL='postgresql:///pinakes?host=/var/run/postgresql' scripts/verify-osm
 creates separate disposable databases for integration tests; no test uses or resets
 the development database. Tests require a real PostgreSQL server and fail explicitly
 if it is unavailable. The tests that run `scripts/verify-osm-boundary` also need the PostgreSQL
-client tools (`psql`, `pg_dump`); where either is missing they print `SKIPPED: …` and skip
-the script check instead of failing. Egress tests use local servers and injected transport/DNS
+client tools (`psql`, `pg_dump`) and `rg`; where one is missing they skip the script check
+instead of failing, and `scripts/test` prints a `WARNING` naming the missing tools before and
+after the suite. The script itself refuses to run without them. Egress tests use local servers and injected transport/DNS
 backends; the production IP policy has no localhost bypass.
 
 ## Operations
@@ -187,8 +188,8 @@ ambient SDK proxy behavior can escape it. The pinned SDK exposes no connection D
 independently of the SDK. Public info exposes no transport diagnostics.
 
 Browser apps on other origins (pubky.app, a demo app) can call the public listener directly:
-`api.cors_allow_origins` (default `["*"]`; a list of exact `scheme://host[:port]` origins
-restricts it, `[]` turns CORS off) answers preflights for GET and POST with
+`api.cors_allow_origins` (default `["*"]`; a list of exact `scheme://host[:port]` origins, no
+wildcard patterns, restricts it; `[]` turns CORS off) answers preflights for GET and POST with
 `content-type`, caches them for 600 seconds, exposes `Retry-After` and `ETag`, sends no
 credentials header (the public API takes no cookies or tokens) and adds `Vary: Origin` when the
 answer depends on the origin. Preflights spend the per-IP budget, and 429s carry the CORS

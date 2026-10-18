@@ -180,7 +180,8 @@ fn cors_allowed(state: &AppState, origin: Option<&header::HeaderValue>) -> bool 
 }
 /// CORS headers for browser clients on the public listener, outermost so that budget refusals
 /// (429 with `Retry-After`) are readable cross-origin too. No credentials: the public API takes
-/// no cookies or tokens. `Vary: Origin` whenever the answer depends on the origin.
+/// no cookies or tokens. In `*` mode every response carries them; with an origin list only
+/// allowed origins get them, and every response carries `Vary: Origin`.
 async fn cors_headers(
     State(state): State<AppState>,
     request: axum::extract::Request,
@@ -193,7 +194,9 @@ async fn cors_headers(
         return response;
     }
     let any = origins.iter().any(|o| o == "*");
-    let allowed = cors_allowed(&state, origin.as_ref());
+    // In `*` mode the headers do not depend on the request, so they go on every response: a
+    // shared cache filled by a request without Origin (curl, a server) still serves browsers.
+    let allowed = any || cors_allowed(&state, origin.as_ref());
     let headers = response.headers_mut();
     if !any {
         headers.append(header::VARY, header::HeaderValue::from_static("origin"));

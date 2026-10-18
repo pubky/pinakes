@@ -960,11 +960,12 @@ async fn round14_cors_for_browser_clients_on_the_public_listener_only(pool: PgPo
     assert_eq!(h["access-control-expose-headers"], "retry-after, etag");
     assert!(h.get("access-control-allow-credentials").is_none());
     assert!(h.get_all("vary").iter().all(|v| v != "origin"));
-    let (_, h) = cors_call(&any, "GET", "/v1/info", &[]).await;
-    assert!(
-        h.get("access-control-allow-origin").is_none(),
-        "no Origin, no CORS"
-    );
+    // Round 15 Z1: in `*` mode a request without Origin gets the headers too, so a shared cache
+    // filled by curl or a server still serves browsers.
+    let (_, h) = cors_call(&any, "GET", "/v1/search?q=x", &[]).await;
+    assert_eq!(h["access-control-allow-origin"], "*");
+    assert_eq!(h["access-control-expose-headers"], "retry-after, etag");
+    assert!(h.get_all("vary").iter().all(|v| v != "origin"));
     let (code, h) = cors_call(&any, "OPTIONS", "/v1/resolve", &preflight).await;
     assert_eq!(code, 204);
     assert_eq!(h["access-control-allow-origin"], "*");
@@ -1044,6 +1045,8 @@ async fn round14_cors_for_browser_clients_on_the_public_listener_only(pool: PgPo
         vec!["https://pubky.app/path"],
         vec!["ftp://pubky.app"],
         vec!["pubky.app"],
+        vec!["https://*.pubky.app"],
+        vec!["https://pubky.*"],
     ] {
         let mut config = Config::default();
         config.api.cors_allow_origins = bad.iter().map(|s| s.to_string()).collect();

@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+for tool in rg psql pg_dump; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "verify-osm-boundary: $tool is required but not installed" >&2
+    exit 1
+  fi
+done
 # Adapters may reference accepted OSM facts, but never write the derivative cache.
 if rg -n 'osm[.]save\(|(?:INSERT INTO|UPDATE|DELETE FROM) osm_place' crates/pinakes-core/src/event/adapters; then
   echo 'Adapter writes to osm_place are forbidden' >&2
