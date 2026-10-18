@@ -122,7 +122,9 @@ or how it builds group evidence. Every save records the worker kind that extract
 and its version (`resource.extracted_by`, `resource.extracted_with`). Web workers also serve
 the event route when calendars are off, the event_platform route when adapters are off, and
 every disabled card kind; only those rows record `web`, while event and event_platform rows
-served by their own workers record `event`/`event_platform`. (Migration 0041's comment says
+served by their own workers record `event`/`event_platform`. A calendar or event page that a
+web worker builds with the event service records `event`, so event extractor bumps reach it;
+migration 0045 relabels those saved earlier as `event` version 0. (Migration 0041's comment says
 those routes always record `web`; it is published and stays byte-identical.) A 304 re-save
 keeps the recorded route and extractor, because it does not re-extract. After the re-queue above, with
 `queue.reextract_on_upgrade` (default true), the daemon finds `ok` rows whose version is below

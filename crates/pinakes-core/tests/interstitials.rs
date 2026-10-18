@@ -767,3 +767,26 @@ fn round5_multi_byte_refresh_content_and_sign_in_flows_are_content() {
         );
     }
 }
+
+/// Round 21 H1: the web route's own JSON-LD and microformat dates take the stored-instant range
+/// (UTC years 0001–9999) like the event parsers.
+#[test]
+fn round21_web_route_dates_are_bounded() {
+    let uri = "https://example.org/talk";
+    for (start, kept) in [
+        ("2026-10-20T19:00:00Z", true),
+        ("0000-01-01T00:00:00Z", false),
+        ("9999-12-31T23:59:59-05:00", false),
+    ] {
+        let jsonld = format!(
+            r#"<script type="application/ld+json">{{"@type":"Article","name":"Talk","startDate":"{start}"}}</script>"#
+        );
+        let microformat = format!(
+            r#"<div class="h-event"><b class="p-name">Talk</b><time class="dt-start" datetime="{start}"></time></div>"#
+        );
+        for body in [jsonld, microformat] {
+            let d = web::extract(uri, &page(uri, &body, 200), 86400).doc;
+            assert_eq!(d.start.is_some(), kept, "{body}");
+        }
+    }
+}

@@ -609,7 +609,7 @@ async fn finish_job(
         let extraction = if not_modified {
             crate::store::Extraction::Unchanged
         } else {
-            crate::store::Extraction::By(resolver.name())
+            crate::store::Extraction::By(crate::resolver::extracted_by(resolver.name(), &doc))
         };
         crate::changes::save_extracted(pool, &job.id, job.generation, &doc, cfg, extraction).await
     }

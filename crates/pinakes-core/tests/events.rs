@@ -3715,3 +3715,252 @@ async fn round19_migration_0044_clears_superseded_pointers(pool: PgPool) {
         ]
     );
 }
+
+/// Round 21 H1: an occurrence end or modification time Postgres cannot store (UTC year 0000 or
+/// 10000) is dropped with the item's warning instead of failing the whole feed's apply; the good
+/// items are stored. ICS: a zoned DTEND late on 9999-12-31, a huge DURATION, a year-0000
+/// LAST-MODIFIED. JSON feed: an offset end late on 9999-12-31.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round21_out_of_range_instants_never_fail_a_feed(pool: PgPool) {
+    let uri = "https://example.org/far.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let event = |uid: &str, extra: &str| {
+        format!("BEGIN:VEVENT\r\nUID:{uid}\r\nSUMMARY:{uid}\r\nDTSTART:20361022T180000Z\r\n{extra}END:VEVENT\r\n")
+    };
+    let body = format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n{}{}{}{}END:VCALENDAR\r\n",
+        event("good", "DTEND:20361022T200000Z\r\n"),
+        event(
+            "zoned-end",
+            "DTEND;TZID=America/New_York:99991231T235959\r\n"
+        ),
+        event("duration", "DURATION:P3000000D\r\n"),
+        event("modified", "LAST-MODIFIED:00000101T000000Z\r\n"),
+    );
+    snapshot(&pool, &id, uri, &body, &EventConfig::default()).await;
+    let rows = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (String, Option<DateTime<Utc>>, Option<DateTime<Utc>>, Value)>(
+                "SELECT uid,end_at,modified,coalesce(doc->'warnings','null') FROM occurrence WHERE resource_id=$1 ORDER BY uid",
+            )
+            .bind(id)
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let stored = rows(id.clone()).await;
+    let summary: Vec<_> = stored
+        .iter()
+        .map(|(uid, end, modified, warnings)| {
+            (
+                uid.as_str(),
+                end.is_some(),
+                modified.is_some(),
+                warnings.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("duration", false, false, json!(["end_out_of_range"])),
+            ("good", true, false, Value::Null),
+            ("modified", true, false, json!(["modified_out_of_range"])),
+            ("zoned-end", false, false, json!(["end_out_of_range"])),
+        ],
+        "{stored:?}"
+    );
+    let uri = "https://example.org/far.json";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let feed = json!({"version":"https://jsonfeed.org/version/1","items":[
+        {"id":"good","title":"Good","event":{"start":"2026-10-20T19:00:00Z","end":"2026-10-20T21:00:00Z"}},
+        {"id":"far-end","title":"Far end","event":{"start":"2026-10-20T19:00:00Z","end":"9999-12-31T23:59:59-05:00"}}
+    ]});
+    let doc = calendar::structured_feed(
+        uri,
+        feed.to_string().as_bytes(),
+        &EventConfig::default(),
+        now(),
+    )
+    .unwrap()
+    .unwrap();
+    store::save_document(&pool, &id, 0, &fresh(&doc))
+        .await
+        .unwrap();
+    let summary: Vec<_> = rows(id)
+        .await
+        .into_iter()
+        .map(|(uid, end, _, warnings)| (uid, end.is_some(), warnings))
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("far-end".to_owned(), false, json!(["end_out_of_range"])),
+            ("good".to_owned(), true, Value::Null),
+        ]
+    );
+}
+
+/// A calendar the web worker builds with the event service, saved as `worker` recorded it.
+async fn web_route_calendar(pool: &PgPool, uri: &str, worker: &str) -> String {
+    let id = store::ensure_resource(pool, uri).await.unwrap();
+    let body = daily("", "20361024T004800Z");
+    let now: DateTime<Utc> = "2036-10-20T00:00:00Z".parse().unwrap();
+    let doc = fresh(&calendar::parse(uri, body.as_bytes(), &EventConfig::default(), now).unwrap());
+    pinakes_core::changes::save_extracted(
+        pool,
+        &id,
+        0,
+        &doc,
+        &Default::default(),
+        store::Extraction::By(worker),
+    )
+    .await
+    .unwrap();
+    id
+}
+async fn extraction(pool: &PgPool, id: &str) -> (String, i32) {
+    sqlx::query_as("SELECT extracted_by,extracted_with FROM resource WHERE id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Round 21 H3: a calendar or event page the web worker builds with the event service records the
+/// `event` extractor, so an event version bump re-queues it; a plain page stays `web`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round21_web_route_calendars_follow_the_event_version(pool: PgPool) {
+    use pinakes_core::resolver::{extracted_by, extractor_versions};
+    let uri = "https://example.org/agenda";
+    let resolver: String = {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        sqlx::query_scalar("SELECT resolver FROM resource WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    assert_eq!(
+        resolver, "web",
+        "a feed URL that fails is_feed is on the web route"
+    );
+    let now: DateTime<Utc> = "2036-10-20T00:00:00Z".parse().unwrap();
+    let calendar = calendar::parse(
+        uri,
+        daily("", "20361024T004800Z").as_bytes(),
+        &EventConfig::default(),
+        now,
+    )
+    .unwrap();
+    assert_eq!(extracted_by("web", &calendar), "event");
+    let mut page = ResourceMeta::new(uri, "web", 1);
+    page.set_type("MusicEvent");
+    assert_eq!(extracted_by("web", &page), "event");
+    page.set_type("WebPage");
+    assert_eq!(extracted_by("web", &page), "web");
+    assert_eq!(extracted_by("event", &calendar), "event");
+    let id = web_route_calendar(&pool, uri, extracted_by("web", &calendar)).await;
+    let current = extractor_versions();
+    assert_eq!(
+        extraction(&pool, &id).await,
+        ("event".into(), current["event"].as_i64().unwrap() as i32)
+    );
+    assert_eq!(
+        pinakes_core::queue::reextract_outdated(&pool, 3600, &current)
+            .await
+            .unwrap(),
+        0
+    );
+    let mut web_bump = current.clone();
+    web_bump["web"] = json!(current["web"].as_i64().unwrap() + 1);
+    assert_eq!(
+        pinakes_core::queue::reextract_outdated(&pool, 3600, &web_bump)
+            .await
+            .unwrap(),
+        0
+    );
+    let mut event_bump = current.clone();
+    event_bump["event"] = json!(current["event"].as_i64().unwrap() + 1);
+    sqlx::query("UPDATE resource SET next_attempt_at=now()+interval '6 days' WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        pinakes_core::queue::reextract_outdated(&pool, 3600, &event_bump)
+            .await
+            .unwrap(),
+        1,
+        "an event version bump re-queues the web-route calendar"
+    );
+}
+
+/// Round 21 H3: migration 0045 relabels calendars and event pages saved by the web worker as
+/// `web` as the event extractor's output at version 0, so the startup pass re-queues them; a
+/// plain web page keeps its label.
+#[sqlx::test(migrations = false)]
+async fn round21_migration_0045_relabels_web_route_event_documents(pool: PgPool) {
+    let before = sqlx::migrate::Migrator {
+        migrations: std::borrow::Cow::Owned(
+            pinakes_core::MIGRATOR.iter().take(44).cloned().collect(),
+        ),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    before.run(&pool).await.unwrap();
+    let calendar = web_route_calendar(&pool, "https://example.org/agenda", "web").await;
+    let save = |uri: &'static str, kind: &'static str| {
+        let pool = pool.clone();
+        async move {
+            let id = store::ensure_resource(&pool, uri).await.unwrap();
+            let mut doc = ResourceMeta::new(uri, "web", 3600);
+            doc.set_type(kind);
+            doc.name = Some(kind.into());
+            pinakes_core::changes::save_extracted(
+                &pool,
+                &id,
+                0,
+                &fresh(&doc),
+                &Default::default(),
+                store::Extraction::By("web"),
+            )
+            .await
+            .unwrap();
+            id
+        }
+    };
+    let event_page = save("https://example.org/concert", "MusicEvent").await;
+    let plain = save("https://example.org/about", "WebPage").await;
+    let web = pinakes_core::resolver::extractor_versions()["web"]
+        .as_i64()
+        .unwrap() as i32;
+    for id in [&calendar, &event_page, &plain] {
+        assert_eq!(extraction(&pool, id).await, ("web".into(), web));
+    }
+    pinakes_core::migrate(&pool).await.unwrap();
+    assert_eq!(extraction(&pool, &calendar).await, ("event".into(), 0));
+    assert_eq!(extraction(&pool, &event_page).await, ("event".into(), 0));
+    assert_eq!(extraction(&pool, &plain).await, ("web".into(), web));
+}
+
+/// Round 21 H6: a padded date-only JSON-LD end is re-anchored to the start's offset like an
+/// unpadded one.
+#[test]
+fn round21_a_padded_date_only_end_is_reanchored() {
+    let url = "https://example.org/e".parse().unwrap();
+    for end in ["2026-10-22", " 2026-10-22 "] {
+        let mut d = ResourceMeta::new("https://example.org/e", "web", 1);
+        page::jsonld(
+            &mut d,
+            &json!({"@type":"Event","name":"Days","startDate":" 2026-10-20T19:00:00+02:00 ","endDate":end}),
+            &url,
+        );
+        assert_eq!(
+            d.end,
+            Some("2026-10-22T22:00:00Z".parse().unwrap()),
+            "{end:?}"
+        );
+    }
+}

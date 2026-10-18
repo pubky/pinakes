@@ -657,6 +657,13 @@ pub async fn list(
     if !crate::model::valid_id(&id) || !(1..=500).contains(&limit) {
         return Err(ApiError::bad("invalid occurrence id or limit"));
     }
+    if [q.from, q.to]
+        .iter()
+        .flatten()
+        .any(|t| super::time::bounded(*t).is_none())
+    {
+        return Err(ApiError::bad("timestamp out of range"));
+    }
     let cursor = q
         .cursor
         .as_deref()

@@ -567,10 +567,30 @@ pub async fn resolve(
             }
             .into());
         };
-        let value: Value = sqlx::query_scalar("SELECT doc FROM resource_document WHERE id=$1")
-            .bind(&id)
-            .fetch_one(pool)
-            .await?;
+        let (value, failed): (Value, bool) = sqlx::query_as(
+            "SELECT d.doc,(r.status IN ('error','unreachable') OR r.dead_letter OR r.final) AND r.status<>'ok' FROM resource_document d JOIN resource r ON r.id=d.id WHERE d.id=$1",
+        )
+        .bind(&id)
+        .fetch_one(pool)
+        .await?;
+        // A member whose own resolution failed (refused, unreachable, dead-lettered) is skipped
+        // like a missing one, or the calendar would wait for it forever: pending answers never
+        // count toward dead-letter.
+        if failed {
+            if !doc
+                .event
+                .warnings
+                .iter()
+                .any(|w| w == "calendar_member_unavailable")
+            {
+                doc.event
+                    .warnings
+                    .push("calendar_member_unavailable".into());
+                let c = doc.container.as_mut().unwrap();
+                c.warnings.push("calendar_member_unavailable".into());
+            }
+            continue;
+        }
         if value.get("type").is_none() {
             pending = true;
             continue;

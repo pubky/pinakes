@@ -3785,6 +3785,8 @@ async fn round20_adapter_dates_have_four_digit_years(pool: PgPool) {
         (31922, "2026-10-20", Some("-262143-01-01")),
         (31923, "253402300800", None),
         (31923, "-62167219201", None),
+        // Round 21: year 0000 is refused too (Postgres cannot read it back).
+        (31923, "-62167219200", None),
         (31923, "1792519200", Some("253402300800")),
     ] {
         let e = event(kind, start, end);
@@ -3803,7 +3805,7 @@ async fn round20_adapter_dates_have_four_digit_years(pool: PgPool) {
         ),
         (31922, "20261020", None, "2026-10-20T00:00:00Z"),
         (31923, "253402300799", None, "9999-12-31T23:59:59Z"),
-        (31923, "-62167219200", None, "0000-01-01T00:00:00Z"),
+        (31923, "-62135596800", None, "0001-01-01T00:00:00Z"),
     ] {
         let e = event(kind, start, end);
         let doc = nip52::parse(&uri(&e), &e, &cfg).unwrap();
@@ -3839,4 +3841,143 @@ async fn round20_adapter_dates_have_four_digit_years(pool: PgPool) {
     );
     assert_eq!(c.warnings, ["invalid_cursor_row"]);
     assert_eq!(c.cursor.unwrap().next, "2026-10-15T13:00:00+00:00");
+}
+
+/// Round 21 H1: one BTC Map row with a year-0000 `updated_at`, and one whose start lands in year
+/// 10000 UTC, neither stall the source: the delta applies, keeps the good rows, and commits its
+/// cursor at the last good row.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round21_a_bad_btcmap_row_never_stalls_the_cursor(pool: PgPool) {
+    let cfg = EventConfig::default();
+    let uri = "https://api.btcmap.org/v4/events";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let at = (Utc::now() + Duration::days(2)).to_rfc3339();
+    let (egress, _) = mock_egress(vec![(
+        200,
+        json!([
+            {"id":1,"status":"live","starts_at":at,"name":"One","updated_at":"2026-10-15T13:00:00Z"},
+            {"id":2,"status":"live","starts_at":at,"name":"Zero","updated_at":"0000-01-01T00:00:00Z"},
+            {"id":3,"status":"live","starts_at":"9999-12-31T23:59:59-05:00","name":"Far","updated_at":"2026-10-15T12:00:00Z"}
+        ]),
+    )]);
+    let doc = cursor::resolve(
+        &pool,
+        uri,
+        adapters::definition("btcmap").unwrap(),
+        &egress,
+        &cfg,
+        false,
+    )
+    .await
+    .unwrap();
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let uids: Vec<String> =
+        sqlx::query_scalar("SELECT uid FROM occurrence WHERE resource_id=$1 ORDER BY uid")
+            .bind(&id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(uids, ["1"]);
+    let warnings: Value = sqlx::query_scalar("SELECT doc->'warnings' FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(warnings, json!(["occurrence_start_out_of_range"]));
+    assert_eq!(
+        saved_cursor(&pool, &id).await.as_deref(),
+        Some("2026-10-15T13:00:00+00:00")
+    );
+}
+
+/// Round 21 H2: a NIP-52 calendar member whose own resolution failed (refused parse, unreachable
+/// or dead-lettered) is skipped with `calendar_member_unavailable` like a missing one, so the
+/// calendar applies its other members; a member not yet resolved still makes it wait.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round21_a_failed_calendar_member_never_wedges_its_calendar(pool: PgPool) {
+    use pinakes_core::event::adapters::nostr::{self as nip52, Target};
+    let at = (Utc::now() + Duration::days(1)).timestamp().to_string();
+    let member = |d: &str, start: &str| {
+        signed(
+            31923,
+            100,
+            &[&["d", d], &["title", "Member"], &["start", start]],
+        )
+    };
+    let good = member("good", &at);
+    let bad = member("bad", "253402300800");
+    let reference = |e: &nostr::event::Event, d: &str| format!("31923:{}:{d}", e.pubkey.to_hex());
+    let (good_ref, bad_ref) = (reference(&good, "good"), reference(&bad, "bad"));
+    let parent = signed(
+        31924,
+        101,
+        &[
+            &["d", "calendar"],
+            &["title", "Calendar"],
+            &["a", &good_ref],
+            &["a", &bad_ref],
+        ],
+    );
+    let parent_uri = Target::coordinate(&format!("31924:{}:calendar", parent.pubkey.to_hex()))
+        .unwrap()
+        .uri()
+        .unwrap();
+    store::ensure_resource(&pool, &parent_uri).await.unwrap();
+    let (egress, _) = mock_egress(vec![(200, json!([parent]))]);
+    let cfg = EventConfig::default();
+    let resolve = || nip52::resolve(&parent_uri, &egress, &cfg, &pool, false);
+    let pending = |r: anyhow::Result<pinakes_core::model::ResourceMeta>| {
+        r.unwrap_err()
+            .downcast_ref::<pinakes_core::resolver::RetryLater>()
+            .is_some_and(|r| r.class == "calendar_members_pending")
+    };
+    assert!(pending(resolve().await), "both members unresolved");
+    let id = |r: &str| {
+        pinakes_core::model::identity(&Target::coordinate(r).unwrap().uri().unwrap())
+            .unwrap()
+            .0
+    };
+    let good_uri = Target::coordinate(&good_ref).unwrap().uri().unwrap();
+    let doc = nip52::parse(&good_uri, &good, &cfg).unwrap();
+    store::save_document(&pool, &id(&good_ref), 0, &doc)
+        .await
+        .unwrap();
+    let bad_uri = Target::coordinate(&bad_ref).unwrap().uri().unwrap();
+    assert!(
+        nip52::parse(&bad_uri, &bad, &cfg).is_err(),
+        "the bad member's parse is refused"
+    );
+    assert!(pending(resolve().await), "the bad member is still pending");
+    for failure in [
+        "status='error',attempts=1,last_error='invalid start'",
+        "status='unreachable'",
+        "status='pending',dead_letter=true",
+    ] {
+        sqlx::query(
+            "UPDATE resource SET status='pending',dead_letter=false,final=false WHERE id=$1",
+        )
+        .bind(id(&bad_ref))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(&format!("UPDATE resource SET {failure} WHERE id=$1"))
+            .bind(id(&bad_ref))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let doc = resolve().await.unwrap();
+        assert_eq!(
+            doc.event.warnings,
+            ["calendar_member_unavailable"],
+            "{failure}"
+        );
+        let uids: Vec<_> = doc
+            .container
+            .unwrap()
+            .occurrences
+            .into_iter()
+            .map(|o| o.uid)
+            .collect();
+        assert_eq!(uids, std::slice::from_ref(&good_ref), "{failure}");
+    }
 }

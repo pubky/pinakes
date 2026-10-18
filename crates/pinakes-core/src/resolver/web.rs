@@ -525,7 +525,7 @@ pub fn origin_url(base: &Url, s: &str) -> Option<String> {
 fn parse_time(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::parse_from_rfc3339(s)
         .ok()
-        .map(|d| d.to_utc())
+        .and_then(|d| crate::event::time::bounded(d.to_utc()))
 }
 fn number(v: &Value) -> Option<f64> {
     v.as_f64()

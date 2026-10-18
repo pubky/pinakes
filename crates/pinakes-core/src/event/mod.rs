@@ -196,6 +196,63 @@ impl Default for ContainerLimits {
         }
     }
 }
+/// Instants Postgres can store (`time::bounded`), applied to every document before it is saved:
+/// an occurrence whose start is out of range is dropped with the feed's
+/// `occurrence_start_out_of_range`; an out-of-range occurrence end or modified time is dropped
+/// with the item's `end_out_of_range`/`modified_out_of_range`, as is a document's own start or
+/// end. One bad item therefore never fails the feed's apply. `None` when nothing was out of
+/// range, so the common case does not copy the document.
+pub fn bound_instants(doc: &ResourceMeta) -> Option<ResourceMeta> {
+    let out = |t: &Option<DateTime<Utc>>| t.is_some_and(|t| time::bounded(t).is_none());
+    let item = |d: &ResourceMeta| out(&d.start) || out(&d.end);
+    if !item(doc)
+        && !doc.container.as_ref().is_some_and(|c| {
+            c.occurrences
+                .iter()
+                .any(|o| item(&o.doc) || out(&o.modified))
+        })
+    {
+        return None;
+    }
+    let mut doc = doc.clone();
+    fn clear(d: &mut ResourceMeta) {
+        for (value, warning) in [
+            (&mut d.start, "start_out_of_range"),
+            (&mut d.end, "end_out_of_range"),
+        ] {
+            if value.is_some_and(|t| time::bounded(t).is_none()) {
+                *value = None;
+                d.event.warnings.push(warning.into());
+            }
+        }
+        d.event.warnings.sort();
+        d.event.warnings.dedup();
+        d.event.warnings.truncate(16);
+    }
+    clear(&mut doc);
+    if let Some(c) = &mut doc.container {
+        let before = c.occurrences.len();
+        c.occurrences
+            .retain(|o| o.doc.start.is_none_or(|t| time::bounded(t).is_some()));
+        if c.occurrences.len() < before {
+            c.warnings.push("occurrence_start_out_of_range".into());
+            doc.event
+                .warnings
+                .push("occurrence_start_out_of_range".into());
+            doc.event.warnings.sort();
+            doc.event.warnings.dedup();
+            doc.event.warnings.truncate(16);
+        }
+        for o in &mut c.occurrences {
+            if o.modified.is_some_and(|t| time::bounded(t).is_none()) {
+                o.modified = None;
+                o.doc.event.warnings.push("modified_out_of_range".into());
+            }
+            clear(&mut o.doc);
+        }
+    }
+    Some(doc)
+}
 #[derive(Clone, Debug, Default)]
 pub struct Container {
     /// Committed with the snapshot, never before parsing or a generation fence.

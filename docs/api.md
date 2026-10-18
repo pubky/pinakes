@@ -47,7 +47,7 @@ not an HTTP 404 from the Pinakes resource route.
 | `facet` | `tags`: counts distinct result units per label over the entire filtered set |
 | `bbox` | `minLon,minLat,maxLon,maxLat`, degrees; west > east crosses the antimeridian |
 | `near`, `radius` | `lat,lon` plus a positive metre radius, max 200,000 by default; mutually exclusive with `bbox` |
-| `from`, `to` | Inclusive start-time bounds, RFC 3339 or Unix milliseconds; `from` must not follow `to` |
+| `from`, `to` | Inclusive start-time bounds, RFC 3339 or Unix milliseconds, within UTC years 0001–9999 (otherwise 400 `timestamp out of range`); `from` must not follow `to` |
 | `cluster` | Finite map zoom with `bbox`, floored and clamped into the resolution table; returns viewport clusters/points; incompatible with cursor |
 | `fields` | `card` (default), `facets`, or `document` |
 | `collapse` | `group`: filter members, deduplicate groups, then rank/page or cluster |
@@ -249,7 +249,8 @@ no lines. Cursor 0 starts at the oldest retained line. A nonzero cursor older
 than retained history returns **410**; restart at 0 and refresh your saved resources.
 
 `POST /v1/changes/lookup` accepts 1–500 `resource_ids` and `since` as RFC3339 text
-or Unix milliseconds (integer or decimal text). The timestamp is inclusive.
+or Unix milliseconds (integer or decimal text), within UTC years 0001–9999 (otherwise 400
+`timestamp out of range`). The timestamp is inclusive.
 Optional `cursor` and `limit` page large histories. IDs may be known or unknown;
 only matching retained changes are returned. Resource history remains accessible
 after orphan expiry because change records do not cascade with resource deletion.
@@ -345,7 +346,8 @@ time window, and expires on daemon restart. A tampered or mismatched cursor is 4
 Items include the full bounded `document`, their identity handle, start/end, name,
 status, URL, venue/page link, volatile flag and optional supersedes key. This route
 accepts RFC 3339 dates; search additionally accepts Unix milliseconds. A known
-non-calendar returns an empty array. `from` defaults to the last accepted horizon
+non-calendar returns an empty array. `from` and `to` outside UTC years 0001–9999 answer 400
+`timestamp out of range`. `from` defaults to the last accepted horizon
 start (otherwise the configured horizon); an explicit earlier bound can read
 retained older rows. Superseded rows are excluded.
 
@@ -392,10 +394,12 @@ starts add `invalid_feed_item_date` without failing healthy siblings.
 Calendar rows use SEQUENCE/LAST-MODIFIED and normalized content hashes; DTSTAMP,
 unknown vendor props and fetch noise do not create changes. Explicit cancellations
 apply immediately. Disappearance needs two fresh complete snapshots. Losing over half
-the active keys, adding more than `event.container.max_new_keys` (1000 default) new keys to a
-feed that already has rows, or growing past `event.container.max_rows` (10000 default) holds all
-updates until the next identical successful snapshot; paired moves (below) count as neither lost
-nor new. When Pinakes
+the active keys, or adding more than `event.container.max_new_keys` (1000 default) new keys to a
+feed that already has rows, holds all updates until the next identical successful snapshot;
+paired moves (below) count as neither lost nor new. Growing past `event.container.max_rows`
+(10000 default; stored rows plus the snapshot's new keys, paired moves included) holds every
+snapshot, identical or not, until the feed shrinks below it or `event.container.max_holds` (5)
+consecutive holds dead-letter the feed. When Pinakes
 itself re-expands a feed, under a new calendar extractor version, `utc_series_wall_clock` mode,
 `default_timezone` or `coordinate_timezone` (recorded per snapshot as `event_fetch.expansion`),
 an instance whose start
@@ -413,10 +417,15 @@ then on only a change of extractor version, `utc_series_wall_clock`, `default_ti
 `coordinate_timezone` pairs. Superseded rows carry no `supersedes` pointer (the apply that
 supersedes a row clears it); active and cancelled rows keep theirs, so following `supersedes`
 from any row ends; change lines keep the history. Event dates need four-digit years (RFC 5545
-`date-fullyear`, years 0000–9999): calendar and page strings, NIP-52 dates and integer
-timestamps alike. A signed or longer year, or a timestamp outside those years, is an invalid
-value of its event (a Nostr event is its own resource, so its parse is refused). Leading
-whitespace before a date is ignored, and a compact date may end in `Z` (`20261020Z`).
+`date-fullyear`): calendar and page strings and NIP-52 dates alike. A signed or longer year, or
+an integer timestamp outside UTC years 0001–9999, is an invalid value of its event (a Nostr event
+is its own resource, so its parse is refused). Leading
+whitespace before a date is ignored, and a compact date may end in `Z` (`20261020Z`). Stored
+instants are limited to UTC years 0001–9999, the range Postgres reads back (a local time late on
+9999-12-31 can land in year 10000): an occurrence starting outside it is dropped with the feed's
+`occurrence_start_out_of_range`, and an end or modification time outside it is dropped with the
+item's `end_out_of_range` or `modified_out_of_range`, so one bad item never fails the feed. A
+document's own start or end is treated the same way.
 A series whose embedded VTIMEZONE cannot convert its DTSTART expands in UTC (its published
 instants) and records the warning `series_zone_unconvertible`.
 Occurrence changes are field patches with `occurrence` equal to the serialized

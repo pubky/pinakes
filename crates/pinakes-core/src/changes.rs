@@ -178,6 +178,8 @@ pub async fn save_extracted(
     cfg: &crate::config::QueueConfig,
     extraction: crate::store::Extraction<'_>,
 ) -> Result<()> {
+    let bounded = crate::event::bound_instants(doc);
+    let doc = bounded.as_ref().unwrap_or(doc);
     let mut prepared = if let Some(container) = &doc.container {
         Some(
             crate::event::storage::prepare(pool, id, container, doc.fetched_at, doc.ttl_secs)

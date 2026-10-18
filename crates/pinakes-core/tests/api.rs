@@ -1053,3 +1053,70 @@ async fn round14_cors_for_browser_clients_on_the_public_listener_only(pool: PgPo
         assert!(config.validate().is_err(), "{bad:?}");
     }
 }
+
+/// Round 21 H4: request instants Postgres cannot bind (outside UTC years 0001–9999) answer 400
+/// `timestamp out of range` instead of 500, as integers and as RFC 3339.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round21_out_of_range_request_timestamps_answer_400(pool: PgPool) {
+    let ids = seed(&pool).await;
+    let app = api::router(AppState::new(pool, Config::default()).unwrap());
+    let refused = |code: StatusCode, body: &Value, what: &str| {
+        assert_eq!(code, 400, "{what}: {body}");
+        assert!(
+            body.to_string().contains("timestamp out of range"),
+            "{what}: {body}"
+        );
+    };
+    for value in [
+        "-8000000000000000",
+        "8000000000000000",
+        "-62135596800001",
+        "0000-01-01T00:00:00Z",
+        "9999-12-31T23:59:59-05:00",
+    ] {
+        for key in ["from", "to"] {
+            let (code, body) = call(&app, "GET", &format!("/v1/search?{key}={value}"), None).await;
+            refused(code, &body, &format!("search {key}={value}"));
+        }
+        let since = value
+            .parse::<i64>()
+            .map_or_else(|_| json!(value), |n| json!(n));
+        let (code, body) = call(
+            &app,
+            "POST",
+            "/v1/changes/lookup",
+            Some(json!({"resource_ids":[ids[0]],"since":since})),
+        )
+        .await;
+        refused(code, &body, &format!("lookup since={since}"));
+    }
+    for value in ["0000-01-01T00:00:00Z", "9999-12-31T23:59:59-05:00"] {
+        for key in ["from", "to"] {
+            let (code, body) = call(
+                &app,
+                "GET",
+                &format!("/v1/resources/{}/occurrences?{key}={value}", ids[0]),
+                None,
+            )
+            .await;
+            refused(code, &body, &format!("occurrences {key}={value}"));
+        }
+    }
+    // The edges themselves are accepted.
+    for value in [
+        "0001-01-01T00:00:00Z",
+        "9999-12-31T23:59:59Z",
+        "-62135596800000",
+    ] {
+        let (code, body) = call(&app, "GET", &format!("/v1/search?from={value}"), None).await;
+        assert_eq!(code, 200, "search from={value}: {body}");
+    }
+    let (code, body) = call(
+        &app,
+        "POST",
+        "/v1/changes/lookup",
+        Some(json!({"resource_ids":[ids[0]],"since":"0001-01-01T00:00:00Z"})),
+    )
+    .await;
+    assert_eq!(code, 200, "{body}");
+}

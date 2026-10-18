@@ -39,12 +39,14 @@ fn coordinates(raw: &str, count: usize) -> Result<Vec<f64>> {
     );
     Ok(values)
 }
+/// Unix milliseconds or RFC 3339, within the years Postgres can bind (`time::bounded`).
 pub fn timestamp(raw: &str) -> Result<DateTime<Utc>> {
-    if let Ok(ms) = raw.parse::<i64>() {
-        DateTime::from_timestamp_millis(ms).context("timestamp out of range")
+    let at = if let Ok(ms) = raw.parse::<i64>() {
+        DateTime::from_timestamp_millis(ms).context("timestamp out of range")?
     } else {
-        Ok(DateTime::parse_from_rfc3339(raw)?.with_timezone(&Utc))
-    }
+        DateTime::parse_from_rfc3339(raw)?.with_timezone(&Utc)
+    };
+    crate::event::time::bounded(at).context("timestamp out of range")
 }
 pub fn resolution(zoom: f64, config: &SearchConfig) -> Result<h3o::Resolution> {
     ensure!(zoom.is_finite(), "zoom must be finite");

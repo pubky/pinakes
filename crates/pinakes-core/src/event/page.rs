@@ -175,11 +175,12 @@ fn fields(doc: &mut ResourceMeta, v: &Value, base: &Url, ap: bool) {
     if doc.event.all_day == Some(false) && doc.event.tz.is_none() {
         if let Some(end) = v[if ap { "endTime" } else { "endDate" }]
             .as_str()
+            .map(str::trim)
             .filter(|s| s.len() == 10 || s.len() == 8)
         {
             if let Some(start) = v[if ap { "startTime" } else { "startDate" }]
                 .as_str()
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s.trim()).ok())
             {
                 use chrono::TimeZone;
                 doc.end = time::naive(end)
@@ -316,6 +317,8 @@ fn fields(doc: &mut ResourceMeta, v: &Value, base: &Url, ap: bool) {
         );
     }
 }
+/// Set the start or end from a page value, trimmed at both ends first (a padded date-only value
+/// is still recognised as a date by its length).
 pub fn set_time(doc: &mut ResourceMeta, s: &str, end: bool) {
     let s = s.trim();
     if (end && doc.end.is_some()) || (!end && doc.start.is_some()) {

@@ -62,9 +62,10 @@ pub fn local(tz: Tz, value: NaiveDateTime) -> Option<DateTime<Utc>> {
 /// Whether a date value starts with exactly four ASCII year digits, as RFC 5545
 /// (`date-fullyear = 4DIGIT`) and the ISO 8601 forms Pinakes reads require: `YYYY-…` or the
 /// compact `YYYYMMDD[T…]`. chrono's `%Y` would also take signed years of any width, which put
-/// later arithmetic at the edge of its range. A compact date may carry `Z` directly
-/// (`YYYYMMDDZ`), which `offset` strips. Callers trim leading whitespace first, which chrono's
-/// `%Y` used to skip.
+/// later arithmetic at the edge of its range. The ninth byte of a compact value may also be `Z`,
+/// so that `offset` can strip it from `YYYYMMDDZ` and read the date as UTC; `naive` has no
+/// format for the `Z` and refuses it. `naive` and `offset` trim leading whitespace before
+/// calling this, as chrono's `%Y` skipped it.
 fn four_digit_year(value: &str) -> bool {
     let b = value.as_bytes();
     b.len() >= 8
@@ -73,11 +74,14 @@ fn four_digit_year(value: &str) -> bool {
             || (b[4..8].iter().all(u8::is_ascii_digit)
                 && b.get(8).is_none_or(|&c| c == b'T' || c == b'Z')))
 }
-/// The instant if its year is 0000–9999, the range the string parsers accept.
+/// The instant if its UTC year is 0001–9999: what Postgres reads back from the text form
+/// (`to_rfc3339` writes year 0 as `0000`, which Postgres refuses, and years past 9999 with a
+/// `+`). The string parsers accept year 0000 and local times that land in year 10000, so every
+/// stored or bound instant passes through this (`event::bound_instants`).
 pub fn bounded(t: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    (0..=9999).contains(&t.year()).then_some(t)
+    (1..=9999).contains(&t.year()).then_some(t)
 }
-/// A Unix timestamp in seconds, bounded like the string forms.
+/// A Unix timestamp in seconds, bounded like every stored instant.
 pub fn from_timestamp(secs: i64) -> Option<DateTime<Utc>> {
     DateTime::from_timestamp(secs, 0).and_then(bounded)
 }

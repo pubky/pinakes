@@ -133,8 +133,9 @@ pub const EXTRACTOR_VERSIONS: &[(&str, i32)] = &[
     // 5: an unconvertible embedded zone expands its series in UTC (round 18).
     // 6: four-digit years only (round 19).
     // 7: bounded NIP-52 dates and integer timestamps, leading whitespace, `YYYYMMDDZ` (round 20).
-    ("event", 7),
-    ("event_platform", 7),
+    // 8: trimmed JSON-LD date-only ends, skipped failed NIP-52 calendar members (round 21).
+    ("event", 8),
+    ("event_platform", 8),
     ("media", 1),
     ("isbn", 1),
     ("doi", 1),
@@ -142,6 +143,16 @@ pub const EXTRACTOR_VERSIONS: &[(&str, i32)] = &[
     ("nostr", 2),
     ("activitypub", 1),
 ];
+/// The extractor kind recorded for `doc` when the `worker` kind produced it. The web worker
+/// builds calendars and event pages with the event service, so those are the `event`
+/// extractor's output and follow its version; everything else is the worker's own.
+pub fn extracted_by<'a>(worker: &'a str, doc: &crate::model::ResourceMeta) -> &'a str {
+    if worker == "web" && (doc.container.is_some() || doc.type_path.iter().any(|t| t == "Event")) {
+        "event"
+    } else {
+        worker
+    }
+}
 /// `EXTRACTOR_VERSIONS` as a JSON object for SQL (`versions->>resolver`).
 pub fn extractor_versions() -> serde_json::Value {
     EXTRACTOR_VERSIONS
