@@ -1515,6 +1515,12 @@ pub fn admin_router(state: AppState) -> Router {
         .route("/metrics", get(metrics))
         .route("/v1/info", get(admin_info))
         .route("/v1/openapi.json", get(admin_openapi));
+    with_admin_layers(routes, state)
+}
+/// The admin listener's layer stack around `routes`: the panic backstop innermost, then the
+/// bearer check, so an unauthenticated request never reaches a handler. No CORS. Public so a test
+/// can mount a route under exactly this stack.
+pub fn with_admin_layers(routes: Router<AppState>, state: AppState) -> Router {
     panic_backstop(routes, &state, "admin")
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

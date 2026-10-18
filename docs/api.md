@@ -383,7 +383,8 @@ than retained history returns **410**; restart at 0 and refresh your saved resou
 Unix milliseconds (integer or decimal text) or a relative time (`now-30d`), within UTC years
 0001–9999 (otherwise 400 `timestamp out of range`). The timestamp is inclusive. A relative
 `since` describes the first page: later pages (with `cursor`) keep that window, capped at the
-cursor line's time, so lines from the minutes between page fetches are not skipped.
+cursor line's time less one second (absorbing commit-order jitter between `seq` and `at`), so
+lines from the minutes between page fetches are not skipped.
 Optional `cursor` and `limit` page large histories. IDs may be known or unknown;
 only matching retained changes are returned. Resource history remains accessible
 after orphan expiry because change records do not cascade with resource deletion.
@@ -423,8 +424,10 @@ request path (never the payload), counted in `pinakes_api_panics_total` and aler
 not slice client input at byte indexes. A test sends multibyte, emoji, U+FFFD, `x:`/`geo:` and
 coordinate-shaped values in every public query parameter, path parameter and body field (with
 the companions each needs to reach its parser), plus raw invalid UTF-8 (`%FF`, decoded to
-U+FFFD) in every query parameter, and expects 2xx or 4xx answers, with the relative-time
-message where one applies.
+U+FFFD) in every query parameter, and expects 2xx or 4xx answers (502 only for `reach`, whose
+Nexus upstream is absent in the test), with the relative-time message where one applies. A test
+mounts a panicking route under each listener's layer stack (`api::with_public_layers`,
+`api::with_admin_layers`, the latter behind the bearer check).
 
 Public `/v1/info` exposes manifests and status but no Nexus URL, source errors or metric
 samples. Admin `GET /v1/info` includes full ingestion/source/canary state and numerical

@@ -1497,8 +1497,11 @@ async fn round5_multibyte_input_never_panics_any_public_route(pool: PgPool) {
     };
     let mut sent = 0;
     let check = |status: StatusCode, body: &Value, what: &str, name: &str, value: &str| {
+        // 2xx or 4xx; 502 only where the request reaches the Nexus upstream (`reach=`).
         assert!(
-            status.is_success() || status.is_client_error() || status == StatusCode::BAD_GATEWAY,
+            status.is_success()
+                || status.is_client_error()
+                || (status == StatusCode::BAD_GATEWAY && what.contains("reach=")),
             "{what}: {status} {body}"
         );
         if relative_field(what, name) && value.starts_with("now") {
@@ -1769,4 +1772,73 @@ async fn round6_the_panic_backstop_answers_500_with_cors_and_counts(pool: PgPool
         json!({"error":"internal server error"})
     );
     assert_eq!(panics.get(), 1);
+}
+
+/// Step 6 round 7 S21: the admin listener's backstop, behind the bearer check: without the
+/// token a 401 and the handler never runs; with it a 500 with the fixed body, no CORS header,
+/// and the panic counter incremented.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round7_the_admin_backstop_sits_behind_the_bearer_check(pool: PgPool) {
+    let config = Config {
+        admin_token: Some("admin-test-token".into()),
+        ..Default::default()
+    };
+    let state = AppState::new(pool, config).unwrap();
+    let panics = state.metrics.api_panics.clone();
+    static RAN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    async fn boom() -> &'static str {
+        RAN.fetch_add(1, Ordering::SeqCst);
+        panic!("test panic")
+    }
+    let app = api::with_admin_layers(Router::new().route("/boom", get(boom)), state);
+    let send = |token: Option<&'static str>| {
+        let app = app.clone();
+        async move {
+            let mut request = Request::builder()
+                .uri("/boom")
+                .header("origin", "https://pubky.app");
+            if let Some(t) = token {
+                request = request.header("authorization", format!("Bearer {t}"));
+            }
+            let mut request = request.body(Body::empty()).unwrap();
+            request.extensions_mut().insert(axum::extract::ConnectInfo(
+                "127.0.0.13:1234".parse::<SocketAddr>().unwrap(),
+            ));
+            app.oneshot(request).await.unwrap()
+        }
+    };
+    let refused = send(None).await;
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(RAN.load(Ordering::SeqCst), 0, "the handler never ran");
+    assert_eq!(panics.get(), 0);
+    let response = send(Some("admin-test-token")).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(response
+        .headers()
+        .get("access-control-allow-origin")
+        .is_none());
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap(),
+        json!({"error":"internal server error"})
+    );
+    assert_eq!(RAN.load(Ordering::SeqCst), 1);
+    assert_eq!(panics.get(), 1);
+}
+
+/// Step 6 round 7 S23: the cursor cap sits one second below the cursor line, so `at`/`seq`
+/// inversions from concurrent inserts are absorbed.
+#[test]
+fn round7_the_lookup_cursor_cap_absorbs_inversions() {
+    let at = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+    let cursor = at("2036-06-01T10:00:10.500Z");
+    assert_eq!(
+        pinakes_core::change_api::capped_since(at("2036-06-01T10:01:00Z"), cursor),
+        at("2036-06-01T10:00:09.500Z")
+    );
+    // A window already older than the cursor stays as it is.
+    assert_eq!(
+        pinakes_core::change_api::capped_since(at("2036-06-01T09:00:00Z"), cursor),
+        at("2036-06-01T09:00:00Z")
+    );
 }
