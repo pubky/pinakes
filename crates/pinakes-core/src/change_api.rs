@@ -50,6 +50,8 @@ pub struct ChangePage {
 #[serde(deny_unknown_fields)]
 pub struct ChangeLookup {
     pub resource_ids: Vec<String>,
+    /// RFC3339, Unix milliseconds, or relative to the request (`now-30d`).
+    #[schema(value_type = String)]
     pub since: Value,
     pub cursor: Option<i64>,
     #[schema(minimum = 1, maximum = 500)]
@@ -146,7 +148,9 @@ pub async fn lookup(
         .as_str()
         .map(str::to_owned)
         .or_else(|| body.since.as_i64().map(|n| n.to_string()))
-        .ok_or_else(|| ApiError::bad("since must be RFC3339 or Unix milliseconds"))?;
+        .ok_or_else(|| {
+            ApiError::bad("since must be RFC3339, Unix milliseconds or relative (now-30d)")
+        })?;
     let since = crate::spatial::timestamp(&since).map_err(|e| ApiError::bad(e.to_string()))?;
     query(
         &state,

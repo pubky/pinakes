@@ -103,11 +103,16 @@ impl Recipe {
     }
 }
 
+/// The empty first example of a parameter that not every recipe of its operation uses.
+pub const NONE: &str = "(none)";
+
 /// Add every recipe to the public document as named examples. Body recipes become request body
-/// examples. Parameter recipes become examples on each parameter of their operation, under the
-/// same name: Swagger UI fills every parameter from the first recipe, and picking another
-/// recipe's name in each dropdown switches to it; a parameter that recipe does not use gets an
-/// empty value, which Swagger UI leaves out of the request.
+/// examples. Parameter recipes become examples on the parameters they use, under the recipe's
+/// name. Swagger UI lists examples by key, alphabetically, and fills each parameter from the
+/// first one; a parameter that not every recipe of its operation uses therefore starts with an
+/// empty `(none)` example, which Swagger UI leaves out of the request, so picking a recipe in the
+/// dropdowns of the parameters it uses sends exactly that recipe. Panics on a recipe for an
+/// unknown operation or with a key that names none of its parameters.
 pub fn apply(doc: &mut Value) {
     let mut by_operation = BTreeMap::<(String, String), Vec<Recipe>>::new();
     for recipe in recipes() {
@@ -129,21 +134,39 @@ pub fn apply(doc: &mut Value) {
                 "value": recipe.body,
             });
         }
-        let used: Vec<&str> = recipes
-            .iter()
-            .flat_map(|r| r.params.keys().chain(r.query.keys()))
-            .map(String::as_str)
-            .collect();
         // `get_mut`, not indexing: indexing would insert `"parameters": null`.
-        let Some(parameters) = operation
+        let mut empty = Vec::new();
+        let parameters = operation
             .get_mut("parameters")
             .and_then(Value::as_array_mut)
-        else {
-            continue;
-        };
-        for parameter in parameters {
+            .unwrap_or(&mut empty);
+        let names: Vec<String> = parameters
+            .iter()
+            .filter_map(|p| p["name"].as_str().map(str::to_owned))
+            .collect();
+        for recipe in &recipes {
+            for key in recipe.params.keys().chain(recipe.query.keys()) {
+                assert!(
+                    names.contains(key),
+                    "recipe {}: `{key}` is not a parameter of {method} {path}",
+                    recipe.name
+                );
+            }
+        }
+        let parameter_recipes: Vec<&Recipe> = recipes
+            .iter()
+            .filter(|r| !r.params.is_empty() || !r.query.is_empty())
+            .collect();
+        let mut optional = false;
+        for parameter in parameters.iter_mut() {
             let name = parameter["name"].as_str().unwrap_or_default().to_owned();
-            if !used.contains(&name.as_str()) {
+            let value = |r: &Recipe| r.params.get(&name).or_else(|| r.query.get(&name)).cloned();
+            let using: Vec<&Recipe> = parameter_recipes
+                .iter()
+                .copied()
+                .filter(|r| value(r).is_some())
+                .collect();
+            if using.is_empty() {
                 continue;
             }
             let integer = parameter["schema"]["type"] == "integer"
@@ -151,26 +174,30 @@ pub fn apply(doc: &mut Value) {
                     .as_array()
                     .is_some_and(|t| t.iter().any(|t| t == "integer"));
             let mut examples = serde_json::Map::new();
-            for recipe in recipes
-                .iter()
-                .filter(|r| r.body.is_none() || !r.query.is_empty())
-            {
-                let value = recipe.params.get(&name).or_else(|| recipe.query.get(&name));
-                let value = match value {
-                    Some(v) if integer => v.parse::<i64>().map(Value::from).expect("integer"),
-                    Some(v) => Value::from(v.as_str()),
-                    None => Value::from(""),
+            if using.len() < parameter_recipes.len() {
+                optional = true;
+                examples.insert(
+                    NONE.to_owned(),
+                    json!({"summary": "(none): not used by the example", "value": ""}),
+                );
+            }
+            for recipe in using {
+                let v = value(recipe).expect("used");
+                let v = if integer {
+                    Value::from(v.parse::<i64>().expect("integer recipe value"))
+                } else {
+                    Value::from(v)
                 };
                 examples.insert(
                     recipe.name.clone(),
-                    json!({"summary": recipe.summary, "value": value}),
+                    json!({"summary": recipe.summary, "value": v}),
                 );
             }
             parameter["examples"] = Value::Object(examples);
         }
-        if recipes.iter().filter(|r| r.body.is_none()).count() > 1 {
-            let note = "Examples: pick the same example in each parameter's dropdown; \
-                        parameters the example does not use stay empty.";
+        if optional {
+            let note = "Examples: pick the example in the dropdown of each parameter it uses; \
+                        the other parameters stay (none) and are not sent.";
             let description = operation["description"].as_str().unwrap_or_default();
             operation["description"] = Value::from(if description.is_empty() {
                 note.to_owned()
@@ -178,5 +205,42 @@ pub fn apply(doc: &mut Value) {
                 format!("{description}\n\n{note}")
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recipe_keys_name_parameters_of_their_operation() {
+        let mut doc = serde_json::to_value(<crate::api::ApiDoc as utoipa::OpenApi>::openapi())
+            .expect("document");
+        apply(&mut doc);
+        let search = &doc["paths"]["/v1/search"]["get"]["parameters"];
+        let q = search
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "q")
+            .unwrap();
+        let keys: Vec<&String> = q["examples"].as_object().unwrap().keys().collect();
+        assert_eq!(keys, [NONE, "search-box"], "(none) first, then the users");
+        let mut broken = serde_json::to_value(<crate::api::ApiDoc as utoipa::OpenApi>::openapi())
+            .expect("document");
+        broken["paths"]["/v1/search"]["get"]["parameters"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|p| p["name"] != "q");
+        let refused = std::panic::catch_unwind(move || apply(&mut broken))
+            .expect_err("a recipe key without a parameter must fail");
+        let message = refused
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            message.contains("`q` is not a parameter of get /v1/search"),
+            "{message}"
+        );
     }
 }

@@ -83,7 +83,10 @@
             },
             "type": "array"
           },
-          "since": {}
+          "since": {
+            "description": "RFC3339, Unix milliseconds, or relative to the request (`now-30d`).",
+            "type": "string"
+          }
         },
         "required": [
           "resource_ids",
@@ -1597,7 +1600,7 @@
     }
   },
   "info": {
-    "description": "Pinakes ranks, Nexus hydrates. External resource metadata and search. Each operation has named examples for pubky.app features (link previews, feed cards, map, events, tag pages, freshness); pick one and use Try it out.",
+    "description": "Pinakes ranks, Nexus hydrates. External resource metadata and search. Operations behind pubky.app features (link previews, feed cards, map, events, tag pages, freshness) carry named examples; pick one and use Try it out.",
     "license": {
       "name": "MIT"
     },
@@ -1714,7 +1717,7 @@
                       "deb643fb39aa8b975957e1a5ced9c427",
                       "0f3820de1c3532e8805674cc996978f9"
                     ],
-                    "since": "2026-01-01T00:00:00Z"
+                    "since": "now-30d"
                   }
                 }
               },
@@ -1992,7 +1995,6 @@
     },
     "/v1/resources/{id}": {
       "get": {
-        "description": "Examples: pick the same example in each parameter's dropdown; parameters the example does not use stay empty.",
         "operationId": "resource",
         "parameters": [
           {
@@ -2259,34 +2261,18 @@
     },
     "/v1/search": {
       "get": {
-        "description": "Examples: pick the same example in each parameter's dropdown; parameters the example does not use stay empty.",
+        "description": "Examples: pick the example in the dropdown of each parameter it uses; the other parameters stay (none) and are not sent.",
         "operationId": "search",
         "parameters": [
           {
             "examples": {
-              "map-viewport": {
-                "summary": "Map viewport, clustered (Lugano)",
-                "value": ""
-              },
-              "nearby-places": {
-                "summary": "Nearby places (5 km around Lugano)",
+              "(none)": {
+                "summary": "(none): not used by the example",
                 "value": ""
               },
               "search-box": {
                 "summary": "Search box: 'lugano'",
                 "value": "lugano"
-              },
-              "social-reach": {
-                "summary": "What the people I follow tagged (replace viewer with an existing user)",
-                "value": ""
-              },
-              "tag-page": {
-                "summary": "Tag page: everything tagged bitcoin, with related tags",
-                "value": ""
-              },
-              "upcoming-events": {
-                "summary": "Upcoming events, soonest first",
-                "value": ""
               }
             },
             "in": "query",
@@ -2301,25 +2287,13 @@
           },
           {
             "examples": {
-              "map-viewport": {
-                "summary": "Map viewport, clustered (Lugano)",
+              "(none)": {
+                "summary": "(none): not used by the example",
                 "value": ""
               },
               "nearby-places": {
                 "summary": "Nearby places (5 km around Lugano)",
                 "value": "Place"
-              },
-              "search-box": {
-                "summary": "Search box: 'lugano'",
-                "value": ""
-              },
-              "social-reach": {
-                "summary": "What the people I follow tagged (replace viewer with an existing user)",
-                "value": ""
-              },
-              "tag-page": {
-                "summary": "Tag page: everything tagged bitcoin, with related tags",
-                "value": ""
               },
               "upcoming-events": {
                 "summary": "Upcoming events, soonest first",
@@ -2371,29 +2345,13 @@
           },
           {
             "examples": {
-              "map-viewport": {
-                "summary": "Map viewport, clustered (Lugano)",
-                "value": ""
-              },
-              "nearby-places": {
-                "summary": "Nearby places (5 km around Lugano)",
-                "value": ""
-              },
-              "search-box": {
-                "summary": "Search box: 'lugano'",
-                "value": ""
-              },
-              "social-reach": {
-                "summary": "What the people I follow tagged (replace viewer with an existing user)",
+              "(none)": {
+                "summary": "(none): not used by the example",
                 "value": ""
               },
               "tag-page": {
                 "summary": "Tag page: everything tagged bitcoin, with related tags",
                 "value": "bitcoin"
-              },
-              "upcoming-events": {
-                "summary": "Upcoming events, soonest first",
-                "value": ""
               }
             },
             "in": "query",
@@ -2430,29 +2388,13 @@
           },
           {
             "examples": {
-              "map-viewport": {
-                "summary": "Map viewport, clustered (Lugano)",
-                "value": ""
-              },
-              "nearby-places": {
-                "summary": "Nearby places (5 km around Lugano)",
-                "value": ""
-              },
-              "search-box": {
-                "summary": "Search box: 'lugano'",
+              "(none)": {
+                "summary": "(none): not used by the example",
                 "value": ""
               },
               "social-reach": {
                 "summary": "What the people I follow tagged (replace viewer with an existing user)",
                 "value": "following"
-              },
-              "tag-page": {
-                "summary": "Tag page: everything tagged bitcoin, with related tags",
-                "value": ""
-              },
-              "upcoming-events": {
-                "summary": "Upcoming events, soonest first",
-                "value": ""
               }
             },
             "in": "query",
@@ -2467,29 +2409,13 @@
           },
           {
             "examples": {
-              "map-viewport": {
-                "summary": "Map viewport, clustered (Lugano)",
-                "value": ""
-              },
-              "nearby-places": {
-                "summary": "Nearby places (5 km around Lugano)",
-                "value": ""
-              },
-              "search-box": {
-                "summary": "Search box: 'lugano'",
+              "(none)": {
+                "summary": "(none): not used by the example",
                 "value": ""
               },
               "social-reach": {
                 "summary": "What the people I follow tagged (replace viewer with an existing user)",
                 "value": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
-              },
-              "tag-page": {
-                "summary": "Tag page: everything tagged bitcoin, with related tags",
-                "value": ""
-              },
-              "upcoming-events": {
-                "summary": "Upcoming events, soonest first",
-                "value": ""
               }
             },
             "in": "query",
@@ -2504,24 +2430,8 @@
           },
           {
             "examples": {
-              "map-viewport": {
-                "summary": "Map viewport, clustered (Lugano)",
-                "value": ""
-              },
-              "nearby-places": {
-                "summary": "Nearby places (5 km around Lugano)",
-                "value": ""
-              },
-              "search-box": {
-                "summary": "Search box: 'lugano'",
-                "value": ""
-              },
-              "social-reach": {
-                "summary": "What the people I follow tagged (replace viewer with an existing user)",
-                "value": ""
-              },
-              "tag-page": {
-                "summary": "Tag page: everything tagged bitcoin, with related tags",
+              "(none)": {
+                "summary": "(none): not used by the example",
                 "value": ""
               },
               "upcoming-events": {
@@ -2566,16 +2476,8 @@
           },
           {
             "examples": {
-              "map-viewport": {
-                "summary": "Map viewport, clustered (Lugano)",
-                "value": ""
-              },
-              "nearby-places": {
-                "summary": "Nearby places (5 km around Lugano)",
-                "value": ""
-              },
-              "search-box": {
-                "summary": "Search box: 'lugano'",
+              "(none)": {
+                "summary": "(none): not used by the example",
                 "value": ""
               },
               "social-reach": {
@@ -2585,10 +2487,6 @@
               "tag-page": {
                 "summary": "Tag page: everything tagged bitcoin, with related tags",
                 "value": "tags"
-              },
-              "upcoming-events": {
-                "summary": "Upcoming events, soonest first",
-                "value": ""
               }
             },
             "in": "query",
@@ -2619,29 +2517,13 @@
           {
             "description": "West,south,east,north in degrees; west > east crosses the antimeridian.",
             "examples": {
+              "(none)": {
+                "summary": "(none): not used by the example",
+                "value": ""
+              },
               "map-viewport": {
                 "summary": "Map viewport, clustered (Lugano)",
                 "value": "8.90,45.98,9.00,46.03"
-              },
-              "nearby-places": {
-                "summary": "Nearby places (5 km around Lugano)",
-                "value": ""
-              },
-              "search-box": {
-                "summary": "Search box: 'lugano'",
-                "value": ""
-              },
-              "social-reach": {
-                "summary": "What the people I follow tagged (replace viewer with an existing user)",
-                "value": ""
-              },
-              "tag-page": {
-                "summary": "Tag page: everything tagged bitcoin, with related tags",
-                "value": ""
-              },
-              "upcoming-events": {
-                "summary": "Upcoming events, soonest first",
-                "value": ""
               }
             },
             "in": "query",
@@ -2657,29 +2539,13 @@
           {
             "description": "Latitude,longitude in degrees; requires radius and excludes bbox.",
             "examples": {
-              "map-viewport": {
-                "summary": "Map viewport, clustered (Lugano)",
+              "(none)": {
+                "summary": "(none): not used by the example",
                 "value": ""
               },
               "nearby-places": {
                 "summary": "Nearby places (5 km around Lugano)",
                 "value": "46.0037,8.9511"
-              },
-              "search-box": {
-                "summary": "Search box: 'lugano'",
-                "value": ""
-              },
-              "social-reach": {
-                "summary": "What the people I follow tagged (replace viewer with an existing user)",
-                "value": ""
-              },
-              "tag-page": {
-                "summary": "Tag page: everything tagged bitcoin, with related tags",
-                "value": ""
-              },
-              "upcoming-events": {
-                "summary": "Upcoming events, soonest first",
-                "value": ""
               }
             },
             "in": "query",
@@ -2695,29 +2561,13 @@
           {
             "description": "Positive metres, at most the configured maximum (200000 by default).",
             "examples": {
-              "map-viewport": {
-                "summary": "Map viewport, clustered (Lugano)",
+              "(none)": {
+                "summary": "(none): not used by the example",
                 "value": ""
               },
               "nearby-places": {
                 "summary": "Nearby places (5 km around Lugano)",
                 "value": "5000"
-              },
-              "search-box": {
-                "summary": "Search box: 'lugano'",
-                "value": ""
-              },
-              "social-reach": {
-                "summary": "What the people I follow tagged (replace viewer with an existing user)",
-                "value": ""
-              },
-              "tag-page": {
-                "summary": "Tag page: everything tagged bitcoin, with related tags",
-                "value": ""
-              },
-              "upcoming-events": {
-                "summary": "Upcoming events, soonest first",
-                "value": ""
               }
             },
             "in": "query",
@@ -2731,31 +2581,15 @@
             }
           },
           {
-            "description": "Inclusive start time lower bound: RFC3339 or Unix milliseconds.",
+            "description": "Inclusive start time lower bound: RFC3339, Unix milliseconds, or relative to the request\n(`now`, `now+7d`, `now-12h`; the current minute).",
             "examples": {
-              "map-viewport": {
-                "summary": "Map viewport, clustered (Lugano)",
-                "value": ""
-              },
-              "nearby-places": {
-                "summary": "Nearby places (5 km around Lugano)",
-                "value": ""
-              },
-              "search-box": {
-                "summary": "Search box: 'lugano'",
-                "value": ""
-              },
-              "social-reach": {
-                "summary": "What the people I follow tagged (replace viewer with an existing user)",
-                "value": ""
-              },
-              "tag-page": {
-                "summary": "Tag page: everything tagged bitcoin, with related tags",
+              "(none)": {
+                "summary": "(none): not used by the example",
                 "value": ""
               },
               "upcoming-events": {
                 "summary": "Upcoming events, soonest first",
-                "value": "2026-01-01T00:00:00Z"
+                "value": "now"
               }
             },
             "in": "query",
@@ -2769,31 +2603,15 @@
             }
           },
           {
-            "description": "Inclusive start time upper bound: RFC3339 or Unix milliseconds.",
+            "description": "Inclusive start time upper bound: RFC3339, Unix milliseconds, or relative (`now+30d`).",
             "examples": {
-              "map-viewport": {
-                "summary": "Map viewport, clustered (Lugano)",
-                "value": ""
-              },
-              "nearby-places": {
-                "summary": "Nearby places (5 km around Lugano)",
-                "value": ""
-              },
-              "search-box": {
-                "summary": "Search box: 'lugano'",
-                "value": ""
-              },
-              "social-reach": {
-                "summary": "What the people I follow tagged (replace viewer with an existing user)",
-                "value": ""
-              },
-              "tag-page": {
-                "summary": "Tag page: everything tagged bitcoin, with related tags",
+              "(none)": {
+                "summary": "(none): not used by the example",
                 "value": ""
               },
               "upcoming-events": {
                 "summary": "Upcoming events, soonest first",
-                "value": "2028-12-31T23:59:59Z"
+                "value": "now+365d"
               }
             },
             "in": "query",
@@ -2809,29 +2627,13 @@
           {
             "description": "Finite map zoom; fractional zooms are floored and clamped to the table. Requires bbox; large views coarsen to the configured cell budget.",
             "examples": {
+              "(none)": {
+                "summary": "(none): not used by the example",
+                "value": ""
+              },
               "map-viewport": {
                 "summary": "Map viewport, clustered (Lugano)",
                 "value": "12"
-              },
-              "nearby-places": {
-                "summary": "Nearby places (5 km around Lugano)",
-                "value": ""
-              },
-              "search-box": {
-                "summary": "Search box: 'lugano'",
-                "value": ""
-              },
-              "social-reach": {
-                "summary": "What the people I follow tagged (replace viewer with an existing user)",
-                "value": ""
-              },
-              "tag-page": {
-                "summary": "Tag page: everything tagged bitcoin, with related tags",
-                "value": ""
-              },
-              "upcoming-events": {
-                "summary": "Upcoming events, soonest first",
-                "value": ""
               }
             },
             "in": "query",
@@ -2859,29 +2661,13 @@
           {
             "description": "Return one row per verified or curated group; standalone resources remain separate.",
             "examples": {
+              "(none)": {
+                "summary": "(none): not used by the example",
+                "value": ""
+              },
               "map-viewport": {
                 "summary": "Map viewport, clustered (Lugano)",
                 "value": "group"
-              },
-              "nearby-places": {
-                "summary": "Nearby places (5 km around Lugano)",
-                "value": ""
-              },
-              "search-box": {
-                "summary": "Search box: 'lugano'",
-                "value": ""
-              },
-              "social-reach": {
-                "summary": "What the people I follow tagged (replace viewer with an existing user)",
-                "value": ""
-              },
-              "tag-page": {
-                "summary": "Tag page: everything tagged bitcoin, with related tags",
-                "value": ""
-              },
-              "upcoming-events": {
-                "summary": "Upcoming events, soonest first",
-                "value": ""
               }
             },
             "in": "query",

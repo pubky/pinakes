@@ -147,7 +147,8 @@ async fn fixture(pool: &PgPool) {
             .await
             .unwrap();
     assert_eq!(state.0, "ok", "{state:?}");
-    // The Swiss holiday feed with two dates ahead.
+    // The Swiss holiday feed: one date past (round 4 R1: upcoming events must not list it) and
+    // two ahead.
     let feed = "https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics";
     let day = |d: i64| {
         (now + chrono::Duration::days(d))
@@ -155,9 +156,10 @@ async fn fixture(pool: &PgPool) {
             .to_string()
     };
     let ics = format!(
-        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:holiday-a\r\nDTSTART;VALUE=DATE:{}\r\nSUMMARY:Holiday A\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:holiday-b\r\nDTSTART;VALUE=DATE:{}\r\nSUMMARY:Holiday B\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:holiday-a\r\nDTSTART;VALUE=DATE:{}\r\nSUMMARY:Holiday A\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:holiday-b\r\nDTSTART;VALUE=DATE:{}\r\nSUMMARY:Holiday B\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:holiday-past\r\nDTSTART;VALUE=DATE:{}\r\nSUMMARY:Past holiday\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
         day(20),
-        day(60)
+        day(60),
+        day(-20)
     );
     let calendar =
         pinakes_core::event::calendar::parse(feed, ics.as_bytes(), &Default::default(), now)
@@ -305,7 +307,8 @@ fn examples(doc: &Value) -> BTreeMap<String, (String, String, Option<Value>)> {
                         .as_object()
                         .into_iter()
                         .flatten()
-                        .map(|(k, _)| k.clone()),
+                        .map(|(k, _)| k.clone())
+                        .filter(|k| k != pinakes_core::recipes::NONE),
                 );
             }
             for name in names {
@@ -392,6 +395,16 @@ async fn every_named_example_returns_data(pool: PgPool) {
             "{} {method} {target} returned no data: {response}",
             recipe.name
         );
+        if recipe.name == "upcoming-events" {
+            let floor = chrono::Utc::now() - chrono::Duration::minutes(2);
+            for item in response["items"].as_array().unwrap() {
+                let start = item["start"]
+                    .as_str()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .unwrap_or_else(|| panic!("an event without a start: {item}"));
+                assert!(start >= floor, "upcoming events lists a past date: {item}");
+            }
+        }
     }
     nexus.abort();
 }
@@ -414,7 +427,7 @@ fn the_api_docs_list_every_recipe() {
                 .chain(recipe.params.values())
                 .all(|v| v
                     .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b".,:_-".contains(&b))),
+                    .all(|b| b.is_ascii_alphanumeric() || b".,:_-+".contains(&b))),
             "{}: a query value needs URL encoding",
             recipe.name
         );

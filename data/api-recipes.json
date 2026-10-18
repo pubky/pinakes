@@ -57,13 +57,13 @@
     {
       "name": "upcoming-events",
       "summary": "Upcoming events, soonest first",
-      "feature": "An events tab: events and calendar dates in a time window, sorted by start.",
+      "feature": "An events tab: events and calendar dates of the next year, sorted by start; now is resolved per request.",
       "method": "GET",
       "path": "/v1/search",
       "query": {
         "type": "Event",
-        "from": "2026-01-01T00:00:00Z",
-        "to": "2028-12-31T23:59:59Z",
+        "from": "now",
+        "to": "now+365d",
         "sort": "start"
       },
       "expect": "items"
@@ -163,7 +163,7 @@
           "id(https://www.nature.com/articles/nature12373)",
           "id(https://www.youtube.com/watch?v=dQw4w9WgXcQ)"
         ],
-        "since": "2026-01-01T00:00:00Z"
+        "since": "now-30d"
       },
       "expect": "lines"
     }

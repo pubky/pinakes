@@ -284,6 +284,7 @@ async fn swagger_headers(
     response
 }
 pub fn router(state: AppState) -> Router {
+    std::sync::LazyLock::force(&PUBLIC_DOCUMENT);
     let mut router = Router::new()
         .route("/v1/info", get(info))
         .route("/v1/changes", get(crate::change_api::feed))
@@ -393,9 +394,10 @@ pub struct SearchQuery {
     pub near: Option<String>,
     /// Positive metres, at most the configured maximum (200000 by default).
     pub radius: Option<String>,
-    /// Inclusive start time lower bound: RFC3339 or Unix milliseconds.
+    /// Inclusive start time lower bound: RFC3339, Unix milliseconds, or relative to the request
+    /// (`now`, `now+7d`, `now-12h`; the current minute).
     pub from: Option<String>,
-    /// Inclusive start time upper bound: RFC3339 or Unix milliseconds.
+    /// Inclusive start time upper bound: RFC3339, Unix milliseconds, or relative (`now+30d`).
     pub to: Option<String>,
     /// Finite map zoom; fractional zooms are floored and clamped to the table. Requires bbox; large views coarsen to the configured cell budget.
     pub cluster: Option<String>,
@@ -931,7 +933,15 @@ pub async fn search(
     let revision: Value = row.try_get("revision")?;
     let etag = format!(
         "\"{}\"",
-        blake3::hash(&serde_json::to_vec(&(q.clone(), revision, reach_revision))?).to_hex()
+        // Relative times (`from=now`) resolve per request: hash the resolved window too.
+        blake3::hash(&serde_json::to_vec(&(
+            q.clone(),
+            revision,
+            reach_revision,
+            spatial.from,
+            spatial.to
+        ))?)
+        .to_hex()
     );
     let mut response = if headers
         .get(header::IF_NONE_MATCH)
@@ -1182,7 +1192,7 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
     info(
         title = "Pinakes",
         version = "0.1.0",
-        description = "Pinakes ranks, Nexus hydrates. External resource metadata and search. Each operation has named examples for pubky.app features (link previews, feed cards, map, events, tag pages, freshness); pick one and use Try it out.",
+        description = "Pinakes ranks, Nexus hydrates. External resource metadata and search. Operations behind pubky.app features (link previews, feed cards, map, events, tag pages, freshness) carry named examples; pick one and use Try it out.",
         license(name = "MIT")
     ),
     tags(
@@ -1265,18 +1275,23 @@ impl utoipa::Modify for AdminBearer {
     }
 }
 /// The public listener's document: exactly the operations `router` serves.
-pub fn openapi_document() -> Value {
+/// Built once: a malformed recipe file fails when the router is built (at startup), not on
+/// every `/v1/openapi.json` request.
+static PUBLIC_DOCUMENT: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
     let mut doc = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI serialization");
     crate::recipes::apply(&mut doc);
     doc
+});
+pub fn openapi_document() -> Value {
+    PUBLIC_DOCUMENT.clone()
 }
 /// The admin listener's document, served there behind the bearer check.
 pub fn admin_openapi_document() -> utoipa::openapi::OpenApi {
     AdminApiDoc::openapi()
 }
 #[utoipa::path(get,tag="Service",path="/v1/openapi.json",responses((status=200,body=Value)))]
-async fn openapi() -> Json<Value> {
-    Json(openapi_document())
+async fn openapi() -> Json<&'static Value> {
+    Json(&PUBLIC_DOCUMENT)
 }
 #[utoipa::path(get,tag="Admin",path="/v1/openapi.json",responses((status=200,body=Value)),description="Admin listener only: this document.")]
 async fn admin_openapi() -> Json<Value> {

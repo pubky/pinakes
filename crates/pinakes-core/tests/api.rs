@@ -1344,6 +1344,30 @@ async fn round21_out_of_range_request_timestamps_answer_400(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn startup_accepts_the_installed_h3_extension(pool: PgPool) {
     pinakes_core::check_extensions(&pool).await.unwrap();
+    // Installed but off this connection's search_path: reported as such, not as too old.
+    let schema: String = sqlx::query_scalar(
+        "SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='h3'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let narrow = PgPool::connect_with(
+        (*pool.connect_options())
+            .clone()
+            .options([("search_path", "pg_catalog")]),
+    )
+    .await
+    .unwrap();
+    let error = pinakes_core::check_extensions(&narrow)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(&format!("in schema {schema}")) && error.contains("search_path"),
+        "{error}"
+    );
+    assert!(!error.contains("Upgrade"), "{error}");
+    narrow.close().await;
     // The function decides, whatever the version string says.
     let installed: String =
         sqlx::query_scalar("SELECT extversion FROM pg_extension WHERE extname='h3'")

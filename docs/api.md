@@ -42,18 +42,26 @@ not an HTTP 404 from the Pinakes resource route.
 ## Recipes for pubky.app
 
 One request per pubky.app feature, built from the staging seed list. Each is also a named example
-in Swagger UI (`/swagger-ui`): pick it in the example dropdown and use **Try it out**. For
-`GET /v1/search`, which has several recipes, pick the same example in each parameter's dropdown;
-parameters that example does not use stay empty and are not sent. The paths are relative to the
-instance's base URL, for example `curl "$BASE/v1/search?q=lugano"`; POST bodies are JSON
+in Swagger UI (`/swagger-ui`): pick it in the example dropdown and use **Try it out**. On
+`GET /v1/search`, which serves several recipes, every parameter starts at `(none)` and lists only
+the examples that use it: pick the example in the dropdown of each parameter it uses (the map
+viewport, for instance, in `bbox`, `cluster` and `collapse`); parameters left at `(none)` are not
+sent. The paths are relative to the instance's base URL, for example
+`curl "$BASE/v1/search?q=lugano"`; POST bodies are JSON
 (`curl -H 'Content-Type: application/json' -d '{"uri":"…"}' "$BASE/v1/resolve"`). Resource IDs
 are the deterministic hashes of the seed URIs, so the requests return data on any instance that
-indexed them. Four caveats:
+indexed them.
+
+Times may be relative to the request: search's `from` and `to` and the change lookup's `since`
+accept `now`, `now+30d` or
+`now-12h` (days or hours, from the current minute), so the events and freshness recipes never go
+stale. In a raw query string `+` decodes to a space, and `now 30d` is accepted as `now+30d`.
+
+Three caveats:
 
 - Search (`GET /v1/search`) lists only links someone referenced on Pubky, so the search recipes
   need the seed tags (present on staging); previews, cards, groups, dates and changes do not.
 - The reach viewer is a placeholder; use a user that exists in the Nexus the instance reads.
-- The events window is fixed (2026–2028); move it when it lapses.
 - The group ID is the one a group of those two members gets when it first forms; an instance
   where the group formed differently has another ID (take `group.id` from either member's
   resource view).
@@ -91,10 +99,10 @@ of the same URIs and checks that this list matches.
   GET /v1/search?near=46.0037,8.9511&radius=5000&type=Place
   ```
 
-- **Upcoming events, soonest first.** An events tab: events and calendar dates in a time window, sorted by start.
+- **Upcoming events, soonest first.** An events tab: events and calendar dates of the next year, sorted by start; now is resolved per request.
 
   ```text
-  GET /v1/search?from=2026-01-01T00:00:00Z&sort=start&to=2028-12-31T23:59:59Z&type=Event
+  GET /v1/search?from=now&sort=start&to=now+365d&type=Event
   ```
 
 - **Tag page: everything tagged bitcoin, with related tags.** A tag page lists tagged links and shows the tags that co-occur with it.
@@ -145,10 +153,10 @@ of the same URIs and checks that this list matches.
   GET /v1/changes?limit=20
   ```
 
-- **Freshness: did the links I posted change?.** Notify a user when an event they shared moved or a card changed.
+- **Freshness: did the links I posted change?** Notify a user when an event they shared moved or a card changed.
 
   ```text
-  POST /v1/changes/lookup {"resource_ids":["7f8f0e5f5b301b55a06d51df5d54281c","deb643fb39aa8b975957e1a5ced9c427","0f3820de1c3532e8805674cc996978f9"],"since":"2026-01-01T00:00:00Z"}
+  POST /v1/changes/lookup {"resource_ids":["7f8f0e5f5b301b55a06d51df5d54281c","deb643fb39aa8b975957e1a5ced9c427","0f3820de1c3532e8805674cc996978f9"],"since":"now-30d"}
   ```
 
 ## Search
@@ -169,7 +177,7 @@ of the same URIs and checks that this list matches.
 | `facet` | `tags`: counts distinct result units per label over the entire filtered set |
 | `bbox` | `minLon,minLat,maxLon,maxLat`, degrees; west > east crosses the antimeridian |
 | `near`, `radius` | `lat,lon` plus a positive metre radius, max 200,000 by default; mutually exclusive with `bbox` |
-| `from`, `to` | Inclusive start-time bounds, RFC 3339 or Unix milliseconds, within UTC years 0001–9999 (otherwise 400 `timestamp out of range`); `from` must not follow `to` |
+| `from`, `to` | Inclusive start-time bounds, RFC 3339, Unix milliseconds or relative to the request (`now`, `now+30d`, `now-12h`; the current minute), within UTC years 0001–9999 (otherwise 400 `timestamp out of range`); `from` must not follow `to` |
 | `cluster` | Finite map zoom with `bbox`, floored and clamped into the resolution table; returns viewport clusters/points; incompatible with cursor |
 | `fields` | `card` (default), `facets`, or `document` |
 | `collapse` | `group`: filter members, deduplicate groups, then rank/page or cluster |
@@ -370,9 +378,9 @@ unchanged; when caught up, it advances to the current head even if filters match
 no lines. Cursor 0 starts at the oldest retained line. A nonzero cursor older
 than retained history returns **410**; restart at 0 and refresh your saved resources.
 
-`POST /v1/changes/lookup` accepts 1–500 `resource_ids` and `since` as RFC3339 text
-or Unix milliseconds (integer or decimal text), within UTC years 0001–9999 (otherwise 400
-`timestamp out of range`). The timestamp is inclusive.
+`POST /v1/changes/lookup` accepts 1–500 `resource_ids` and `since` as RFC3339 text,
+Unix milliseconds (integer or decimal text) or a relative time (`now-30d`), within UTC years
+0001–9999 (otherwise 400 `timestamp out of range`). The timestamp is inclusive.
 Optional `cursor` and `limit` page large histories. IDs may be known or unknown;
 only matching retained changes are returned. Resource history remains accessible
 after orphan expiry because change records do not cascade with resource deletion.
@@ -467,7 +475,7 @@ ordered by start, UID and recurrence key. `limit` defaults to 100 and cannot exc
 time window, and expires on daemon restart. A tampered or mismatched cursor is 400.
 Items include the full bounded `document`, their identity handle, start/end, name,
 status, URL, venue/page link, volatile flag and optional supersedes key. This route
-accepts RFC 3339 dates; search additionally accepts Unix milliseconds. A known
+accepts RFC 3339 dates; search additionally accepts Unix milliseconds and relative times. A known
 non-calendar returns an empty array. `from` and `to` outside UTC years 0001–9999 answer 400
 `timestamp out of range`. `from` defaults to the last accepted horizon
 start (otherwise the configured horizon); an explicit earlier bound can read
