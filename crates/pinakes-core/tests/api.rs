@@ -1841,4 +1841,12 @@ fn round7_the_lookup_cursor_cap_absorbs_inversions() {
         pinakes_core::change_api::capped_since(at("2036-06-01T09:00:00Z"), cursor),
         at("2036-06-01T09:00:00Z")
     );
+    // S24: no second to subtract at the earliest instant; the cap is the cursor's time.
+    assert_eq!(
+        pinakes_core::change_api::capped_since(
+            at("2036-06-01T10:01:00Z"),
+            DateTime::<Utc>::MIN_UTC
+        ),
+        DateTime::<Utc>::MIN_UTC
+    );
 }

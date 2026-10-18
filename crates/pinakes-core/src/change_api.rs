@@ -160,12 +160,17 @@ pub async fn feed(
 /// A relative `since` on a later lookup page: the first page's window, capped at the cursor
 /// line's time less one second. Concurrent inserts can commit `seq` and `clock_timestamp()`
 /// microseconds out of order, so a line just after the cursor may be slightly older than it;
-/// the second only widens the window, and the `seq` filter still prevents duplicates.
+/// the second only widens the window, and the `seq` filter still prevents duplicates. At the
+/// earliest representable instant the cap is the cursor's time itself, so it cannot panic.
 pub fn capped_since(
     since: chrono::DateTime<chrono::Utc>,
     cursor_at: chrono::DateTime<chrono::Utc>,
 ) -> chrono::DateTime<chrono::Utc> {
-    since.min(cursor_at - chrono::Duration::seconds(1))
+    since.min(
+        cursor_at
+            .checked_sub_signed(chrono::Duration::seconds(1))
+            .unwrap_or(cursor_at),
+    )
 }
 #[utoipa::path(post,tag="Changes",path="/v1/changes/lookup",request_body=ChangeLookup,responses((status=200,body=ChangePage),(status=400,description="Invalid IDs or since"),(status=410,description="Cursor expired")))]
 pub async fn lookup(
