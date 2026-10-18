@@ -666,7 +666,7 @@ fn scope(
             .push(")");
     }
 }
-#[utoipa::path(get,path="/v1/search",params(SearchQuery),responses((status=200,body=SearchResult),(status=304,description="ETag unchanged"),(status=400,description="Invalid or unavailable filter"),(status=502,description="Nexus reach unavailable")))]
+#[utoipa::path(get,tag="Search",path="/v1/search",params(SearchQuery),responses((status=200,body=SearchResult),(status=304,description="ETag unchanged"),(status=400,description="Invalid or unavailable filter"),(status=502,description="Nexus reach unavailable")))]
 pub async fn search(
     State(state): State<AppState>,
     Query(q): Query<SearchQuery>,
@@ -1012,7 +1012,7 @@ async fn read(
             .await?;
     value.as_ref().map(|r| view(r, fields, false)).transpose()
 }
-#[utoipa::path(get,path="/v1/resources/{id}",params(("id"=String,Path,description="32 lowercase hex resource ID"),FieldQuery),responses((status=200,body=ResourceView),(status=400,description="Invalid ID"),(status=404,description="Unknown resource")))]
+#[utoipa::path(get,tag="Previews",path="/v1/resources/{id}",params(("id"=String,Path,description="32 lowercase hex resource ID"),FieldQuery),responses((status=200,body=ResourceView),(status=400,description="Invalid ID"),(status=404,description="Unknown resource")))]
 pub async fn resource(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1031,7 +1031,7 @@ pub async fn resource(
     .map(Json)
     .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "resource not found".into()))
 }
-#[utoipa::path(post,path="/v1/resources/lookup",request_body=LookupRequest,params(FieldQuery),responses((status=200,body=Vec<ResourceView>),(status=400,description="Exactly one list of 1–500 IDs or URIs")))]
+#[utoipa::path(post,tag="Previews",path="/v1/resources/lookup",request_body=LookupRequest,params(FieldQuery),responses((status=200,body=Vec<ResourceView>),(status=400,description="Exactly one list of 1–500 IDs or URIs")))]
 pub async fn lookup(
     State(state): State<AppState>,
     Query(fields): Query<FieldQuery>,
@@ -1066,7 +1066,7 @@ pub async fn lookup(
             .collect::<Result<_, _>>()?,
     ))
 }
-#[utoipa::path(post,path="/v1/resolve",request_body=ResolveRequest,responses((status=200,body=ResourceView),(status=202,body=ResourceView,description="Queued; poll resource by ID"),(status=400,description="Unsupported URI or disabled resolver"),(status=429,description="Preview rate limit")))]
+#[utoipa::path(post,tag="Previews",path="/v1/resolve",request_body=ResolveRequest,responses((status=200,body=ResourceView),(status=202,body=ResourceView,description="Queued; poll resource by ID"),(status=400,description="Unsupported URI or disabled resolver"),(status=429,description="Preview rate limit")))]
 pub async fn resolve(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -1134,7 +1134,7 @@ pub struct OsmLicence {
     pub url: String,
     pub dump: String,
 }
-#[utoipa::path(get,path="/v1/info",responses((status=200,body=Info)),description="Public summary only; the same path on admin_listen includes source diagnostics and metrics. Cached for 15 seconds.")]
+#[utoipa::path(get,tag="Service",path="/v1/info",responses((status=200,body=Info)),description="Public summary only; the same path on admin_listen includes source diagnostics and metrics. Cached for 15 seconds.")]
 pub async fn info(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let mut body = full_info(&state).await?;
     body.as_object_mut().unwrap().remove("sources");
@@ -1149,7 +1149,7 @@ pub async fn info(State(state): State<AppState>) -> Result<Json<Value>, ApiError
     }
     Ok(Json(body))
 }
-#[utoipa::path(get,path="/v1/info",responses((status=200,body=Value)),description="Admin listener: the public summary plus source diagnostics, ingestion, queue statuses and metrics. Cached for 15 seconds.")]
+#[utoipa::path(get,tag="Admin",path="/v1/info",responses((status=200,body=Value)),description="Admin listener: the public summary plus source diagnostics, ingestion, queue statuses and metrics. Cached for 15 seconds.")]
 async fn admin_info(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(full_info(&state).await?))
 }
@@ -1182,8 +1182,17 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
     info(
         title = "Pinakes",
         version = "0.1.0",
-        description = "Pinakes ranks, Nexus hydrates. External resource metadata and search.",
+        description = "Pinakes ranks, Nexus hydrates. External resource metadata and search. Each operation has named examples for pubky.app features (link previews, feed cards, map, events, tag pages, freshness); pick one and use Try it out.",
         license(name = "MIT")
+    ),
+    tags(
+        (name = "Previews", description = "Link previews and cards: resolve a pasted link, look up the cards of a page of posts, open one card."),
+        (name = "Search", description = "Map viewports, nearby places, events, tag pages, the search box and social reach."),
+        (name = "Events", description = "The dates of calendar feeds."),
+        (name = "Groups", description = "Links to the same thing, collapsed into one group with one best card."),
+        (name = "Changes", description = "Freshness: the change feed and per-link history."),
+        (name = "Service", description = "Version, resolvers, licence and this document."),
+        (name = "Licensing", description = "The ODbL share-alike download of the OpenStreetMap-derived data.")
     ),
     paths(
         group,
@@ -1256,18 +1265,20 @@ impl utoipa::Modify for AdminBearer {
     }
 }
 /// The public listener's document: exactly the operations `router` serves.
-pub fn openapi_document() -> utoipa::openapi::OpenApi {
-    ApiDoc::openapi()
+pub fn openapi_document() -> Value {
+    let mut doc = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI serialization");
+    crate::recipes::apply(&mut doc);
+    doc
 }
 /// The admin listener's document, served there behind the bearer check.
 pub fn admin_openapi_document() -> utoipa::openapi::OpenApi {
     AdminApiDoc::openapi()
 }
-#[utoipa::path(get,path="/v1/openapi.json",responses((status=200,body=Value)))]
+#[utoipa::path(get,tag="Service",path="/v1/openapi.json",responses((status=200,body=Value)))]
 async fn openapi() -> Json<Value> {
-    Json(serde_json::to_value(openapi_document()).expect("OpenAPI serialization"))
+    Json(openapi_document())
 }
-#[utoipa::path(get,path="/v1/openapi.json",responses((status=200,body=Value)),description="Admin listener only: this document.")]
+#[utoipa::path(get,tag="Admin",path="/v1/openapi.json",responses((status=200,body=Value)),description="Admin listener only: this document.")]
 async fn admin_openapi() -> Json<Value> {
     Json(serde_json::to_value(admin_openapi_document()).expect("OpenAPI serialization"))
 }
@@ -1337,7 +1348,7 @@ pub const OSM_DUMP_LINE: &str = "SELECT jsonb_build_object('osm_type',osm_type,'
     'bbox',bbox,'address',address,'tags',tags,'display_name',display_name,'status',status,'fetched_at',fetched_at,'versions',versions) \
     FROM osm_place ORDER BY osm_type,osm_id";
 
-#[utoipa::path(get,path="/v1/dumps/osm_place.ndjson",responses((status=200,description="Streaming ODbL derivative database, sent as a file download: one JSON object per line, the licence notice first, then one cached OSM object per line",content_type="application/x-ndjson",body=OsmDumpLine,headers(("Content-Disposition"=String,description="`attachment; filename=\"osm_place.ndjson\"`"))),(status=429,description="Dump request budget exhausted")))]
+#[utoipa::path(get,tag="Licensing",path="/v1/dumps/osm_place.ndjson",responses((status=200,description="Streaming ODbL derivative database, sent as a file download: one JSON object per line, the licence notice first, then one cached OSM object per line",content_type="application/x-ndjson",body=OsmDumpLine,headers(("Content-Disposition"=String,description="`attachment; filename=\"osm_place.ndjson\"`"))),(status=429,description="Dump request budget exhausted")))]
 async fn osm_dump(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -1473,7 +1484,7 @@ async fn admin_auth(
     }
     next.run(request).await
 }
-#[utoipa::path(get,path="/metrics",responses((status=200,content_type="text/plain; version=0.0.4",body=String)),description="Prometheus metrics.")]
+#[utoipa::path(get,tag="Admin",path="/metrics",responses((status=200,content_type="text/plain; version=0.0.4",body=String)),description="Prometheus metrics.")]
 async fn metrics(State(state): State<AppState>) -> Result<Response, ApiError> {
     state.metrics.refresh(&state.pool).await?;
     Ok((
@@ -1486,7 +1497,7 @@ async fn metrics(State(state): State<AppState>) -> Result<Response, ApiError> {
         .into_response())
 }
 
-#[utoipa::path(get,path="/v1/groups/{id}",params(("id"=String,Path)),responses((status=200,body=crate::groups::GroupView),(status=400,description="Invalid ID or disabled module"),(status=404,description="Unknown group")))]
+#[utoipa::path(get,tag="Groups",path="/v1/groups/{id}",params(("id"=String,Path)),responses((status=200,body=crate::groups::GroupView),(status=400,description="Invalid ID or disabled module"),(status=404,description="Unknown group")))]
 pub async fn group(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1502,7 +1513,7 @@ pub async fn group(
         .map(Json)
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "group not found".into()))
 }
-#[utoipa::path(put,path="/v1/groups/{id}",params(("id"=String,Path)),request_body=crate::groups::Curation,responses((status=200,body=crate::groups::GroupView),(status=400,description="Invalid curation")),description="Admin listener only. Replaces the curated member set; never changes IDs or references.")]
+#[utoipa::path(put,tag="Admin",path="/v1/groups/{id}",params(("id"=String,Path)),request_body=crate::groups::Curation,responses((status=200,body=crate::groups::GroupView),(status=400,description="Invalid curation")),description="Admin listener only. Replaces the curated member set; never changes IDs or references.")]
 pub async fn curate_group(
     State(state): State<AppState>,
     Path(id): Path<String>,

@@ -72,8 +72,10 @@ curl -H 'Content-Type: application/json' -d '{"uri":"https://example.org/"}' \
 the OpenAPI served at `/v1/openapi.json`: the public listener's document lists only public
 operations, and the admin listener serves its own behind the bearer token. Swagger UI for the
 public document is at `/swagger-ui` (`api.swagger_ui = true` by default, like pubky-nexus),
-from the vendored `utoipa-swagger-ui` bundle: builds never download it. Regenerate both
-checked-in snapshots with `scripts/openapi`. Search filters complete reference data before
+from the vendored `utoipa-swagger-ui` bundle: builds never download it. Its operations carry
+named examples for pubky.app features (link previews, feed cards, map, events, tag pages,
+freshness) from `data/api-recipes.json`, listed in docs/api.md under "Recipes for pubky.app" and
+run by `tests/recipes.rs`. Regenerate both checked-in snapshots with `scripts/openapi`. Search filters complete reference data before
 sorting or paging; clients pass its ordered IDs to Nexus `/v0/stream/resources/by_ids` for
 social hydration, in batches of 100. Pinakes does not hydrate or fetch through Nexus.
 

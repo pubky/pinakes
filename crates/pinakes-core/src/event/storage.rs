@@ -680,7 +680,7 @@ impl OccurrenceCursor {
         serde_json::from_slice(payload).map_err(|_| invalid())
     }
 }
-#[utoipa::path(get,path="/v1/resources/{id}/occurrences",operation_id="list_occurrences",tag="events",params(("id"=String,Path),OccurrenceQuery),responses((status=200,body=OccurrencePage),(status=400,description="Invalid window, limit or cursor"),(status=404,description="Resource not found")),description="Calendar instances ordered by start, UID and recurrence ID. Inclusive window, default limit 100, maximum 500. Superseded keys are omitted.")]
+#[utoipa::path(get,path="/v1/resources/{id}/occurrences",operation_id="list_occurrences",tag="Events",params(("id"=String,Path),OccurrenceQuery),responses((status=200,body=OccurrencePage),(status=400,description="Invalid window, limit or cursor"),(status=404,description="Resource not found")),description="Calendar instances ordered by start, UID and recurrence ID. Inclusive window, default limit 100, maximum 500. Superseded keys are omitted.")]
 pub async fn list(
     axum::extract::State(state): axum::extract::State<crate::api::AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,

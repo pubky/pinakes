@@ -1,888 +1,20 @@
 {
-  "openapi": "3.1.0",
-  "info": {
-    "title": "Pinakes",
-    "description": "Pinakes ranks, Nexus hydrates. External resource metadata and search.",
-    "license": {
-      "name": "MIT"
-    },
-    "version": "0.1.0"
-  },
-  "paths": {
-    "/v1/changes": {
-      "get": {
-        "tags": [
-          "crate::change_api"
-        ],
-        "operationId": "feed",
-        "parameters": [
-          {
-            "name": "cursor",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
-              "format": "int64"
-            }
-          },
-          {
-            "name": "class",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "type",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "source",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
-              "maximum": 500,
-              "minimum": 1
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ChangePage"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid filter"
-          },
-          "410": {
-            "description": "Cursor no longer retained"
-          }
-        }
-      }
-    },
-    "/v1/changes/lookup": {
-      "post": {
-        "tags": [
-          "crate::change_api"
-        ],
-        "operationId": "lookup",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ChangeLookup"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ChangePage"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid IDs or since"
-          },
-          "410": {
-            "description": "Cursor expired"
-          }
-        }
-      }
-    },
-    "/v1/dumps/osm_place.ndjson": {
-      "get": {
-        "tags": [],
-        "operationId": "osm_dump",
-        "responses": {
-          "200": {
-            "description": "Streaming ODbL derivative database, sent as a file download: one JSON object per line, the licence notice first, then one cached OSM object per line",
-            "headers": {
-              "Content-Disposition": {
-                "schema": {
-                  "type": "string"
-                },
-                "description": "`attachment; filename=\"osm_place.ndjson\"`"
-              }
-            },
-            "content": {
-              "application/x-ndjson": {
-                "schema": {
-                  "$ref": "#/components/schemas/OsmDumpLine"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Dump request budget exhausted"
-          }
-        }
-      }
-    },
-    "/v1/groups/{id}": {
-      "get": {
-        "tags": [],
-        "operationId": "group",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GroupView"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid ID or disabled module"
-          },
-          "404": {
-            "description": "Unknown group"
-          }
-        }
-      }
-    },
-    "/v1/info": {
-      "get": {
-        "tags": [],
-        "description": "Public summary only; the same path on admin_listen includes source diagnostics and metrics. Cached for 15 seconds.",
-        "operationId": "info",
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Info"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/openapi.json": {
-      "get": {
-        "tags": [],
-        "operationId": "openapi",
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/resolve": {
-      "post": {
-        "tags": [],
-        "operationId": "resolve",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ResolveRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ResourceView"
-                }
-              }
-            }
-          },
-          "202": {
-            "description": "Queued; poll resource by ID",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ResourceView"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Unsupported URI or disabled resolver"
-          },
-          "429": {
-            "description": "Preview rate limit"
-          }
-        }
-      }
-    },
-    "/v1/resources/lookup": {
-      "post": {
-        "tags": [],
-        "operationId": "lookup",
-        "parameters": [
-          {
-            "name": "fields",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "oneOf": [
-                {
-                  "type": "null"
-                },
-                {
-                  "$ref": "#/components/schemas/Fields"
-                }
-              ]
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/LookupRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/ResourceView"
-                  }
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Exactly one list of 1–500 IDs or URIs"
-          }
-        }
-      }
-    },
-    "/v1/resources/{id}": {
-      "get": {
-        "tags": [],
-        "operationId": "resource",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "32 lowercase hex resource ID",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "fields",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "oneOf": [
-                {
-                  "type": "null"
-                },
-                {
-                  "$ref": "#/components/schemas/Fields"
-                }
-              ]
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ResourceView"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid ID"
-          },
-          "404": {
-            "description": "Unknown resource"
-          }
-        }
-      }
-    },
-    "/v1/resources/{id}/changes": {
-      "get": {
-        "tags": [
-          "crate::change_api"
-        ],
-        "operationId": "resource",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Resource ID",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "cursor",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
-              "format": "int64"
-            }
-          },
-          {
-            "name": "class",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "type",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "source",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
-              "maximum": 500,
-              "minimum": 1
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ChangePage"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid resource ID"
-          },
-          "410": {
-            "description": "Cursor expired"
-          }
-        }
-      }
-    },
-    "/v1/resources/{id}/occurrences": {
-      "get": {
-        "tags": [
-          "events"
-        ],
-        "description": "Calendar instances ordered by start, UID and recurrence ID. Inclusive window, default limit 100, maximum 500. Superseded keys are omitted.",
-        "operationId": "list_occurrences",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "from",
-            "in": "query",
-            "description": "Inclusive start time; defaults to this feed's last accepted horizon start.",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "format": "date-time"
-            }
-          },
-          {
-            "name": "to",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "format": "date-time"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
-              "maximum": 500,
-              "minimum": 1
-            }
-          },
-          {
-            "name": "cursor",
-            "in": "query",
-            "description": "Signed keyset cursor, scoped to this resource and window; invalid after restart.",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OccurrencePage"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid window, limit or cursor"
-          },
-          "404": {
-            "description": "Resource not found"
-          }
-        }
-      }
-    },
-    "/v1/search": {
-      "get": {
-        "tags": [],
-        "operationId": "search",
-        "parameters": [
-          {
-            "name": "q",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "type",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "category",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "scheme",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "host",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "tags",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "match",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "author",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "reach",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "viewer",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "sort",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
-              "maximum": 500,
-              "minimum": 1
-            }
-          },
-          {
-            "name": "cursor",
-            "in": "query",
-            "description": "Authenticated opaque keyset cursor from this daemon; invalid after restart. Restart pagination on HTTP 400.",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "facet",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "fields",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "oneOf": [
-                {
-                  "type": "null"
-                },
-                {
-                  "$ref": "#/components/schemas/Fields"
-                }
-              ]
-            }
-          },
-          {
-            "name": "bbox",
-            "in": "query",
-            "description": "West,south,east,north in degrees; west > east crosses the antimeridian.",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "near",
-            "in": "query",
-            "description": "Latitude,longitude in degrees; requires radius and excludes bbox.",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "radius",
-            "in": "query",
-            "description": "Positive metres, at most the configured maximum (200000 by default).",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "from",
-            "in": "query",
-            "description": "Inclusive start time lower bound: RFC3339 or Unix milliseconds.",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "to",
-            "in": "query",
-            "description": "Inclusive start time upper bound: RFC3339 or Unix milliseconds.",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "cluster",
-            "in": "query",
-            "description": "Finite map zoom; fractional zooms are floored and clamped to the table. Requires bbox; large views coarsen to the configured cell budget.",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "venue",
-            "in": "query",
-            "description": "Resource ID of the accepted event venue; filters event units.",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "collapse",
-            "in": "query",
-            "description": "Return one row per verified or curated group; standalone resources remain separate.",
-            "required": false,
-            "schema": {
-              "oneOf": [
-                {
-                  "type": "null"
-                },
-                {
-                  "$ref": "#/components/schemas/CollapseMode"
-                }
-              ]
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SearchResult"
-                }
-              }
-            }
-          },
-          "304": {
-            "description": "ETag unchanged"
-          },
-          "400": {
-            "description": "Invalid or unavailable filter"
-          },
-          "502": {
-            "description": "Nexus reach unavailable"
-          }
-        }
-      }
-    }
-  },
   "components": {
     "schemas": {
       "Attendance": {
-        "type": "string",
         "enum": [
           "offline",
           "online",
           "mixed"
-        ]
+        ],
+        "type": "string"
       },
       "ChangeLine": {
-        "type": "object",
-        "required": [
-          "seq",
-          "resource_id",
-          "at",
-          "class",
-          "fields",
-          "source"
-        ],
         "properties": {
           "after": {},
           "at": {
-            "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "type": "integer"
           },
           "attribution": {
             "type": [
@@ -895,10 +27,10 @@
             "type": "string"
           },
           "fields": {
-            "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "type": "array"
           },
           "occurrence": {
             "type": [
@@ -910,83 +42,84 @@
             "type": "string"
           },
           "seq": {
-            "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "type": "integer"
           },
           "source": {
             "type": "string"
           }
-        }
+        },
+        "required": [
+          "seq",
+          "resource_id",
+          "at",
+          "class",
+          "fields",
+          "source"
+        ],
+        "type": "object"
       },
       "ChangeLookup": {
-        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "resource_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "since": {}
+        },
         "required": [
           "resource_ids",
           "since"
         ],
-        "properties": {
-          "cursor": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64"
-          },
-          "limit": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "maximum": 500,
-            "minimum": 1
-          },
-          "resource_ids": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "since": {}
-        },
-        "additionalProperties": false
+        "type": "object"
       },
       "ChangePage": {
-        "type": "object",
+        "properties": {
+          "has_more": {
+            "type": "boolean"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/ChangeLine"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "oldest_cursor": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
         "required": [
           "lines",
           "next_cursor",
           "has_more",
           "oldest_cursor"
         ],
-        "properties": {
-          "has_more": {
-            "type": "boolean"
-          },
-          "lines": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ChangeLine"
-            }
-          },
-          "next_cursor": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "oldest_cursor": {
-            "type": "integer",
-            "format": "int64"
-          }
-        }
+        "type": "object"
       },
       "Cluster": {
-        "type": "object",
-        "required": [
-          "cell",
-          "count",
-          "lat",
-          "lon",
-          "top"
-        ],
         "properties": {
           "attribution": {
             "type": [
@@ -998,41 +131,40 @@
             "type": "string"
           },
           "count": {
-            "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "type": "integer"
           },
           "lat": {
-            "type": "number",
-            "format": "double"
+            "format": "double",
+            "type": "number"
           },
           "lon": {
-            "type": "number",
-            "format": "double"
+            "format": "double",
+            "type": "number"
           },
           "top": {
-            "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "type": "array"
           }
-        }
+        },
+        "required": [
+          "cell",
+          "count",
+          "lat",
+          "lon",
+          "top"
+        ],
+        "type": "object"
       },
       "ClusterResponse": {
-        "type": "object",
-        "required": [
-          "resolution",
-          "clusters",
-          "points",
-          "truncated",
-          "total",
-          "reach_truncated"
-        ],
         "properties": {
           "clusters": {
-            "type": "array",
             "items": {
               "$ref": "#/components/schemas/Cluster"
-            }
+            },
+            "type": "array"
           },
           "facets": {
             "oneOf": [
@@ -1045,43 +177,51 @@
             ]
           },
           "points": {
-            "type": "array",
             "items": {
               "$ref": "#/components/schemas/ResourceView"
-            }
+            },
+            "type": "array"
           },
           "reach_truncated": {
             "type": "boolean"
           },
           "resolution": {
-            "type": "integer",
             "format": "int32",
-            "minimum": 0
+            "minimum": 0,
+            "type": "integer"
           },
           "total": {
-            "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "type": "integer"
           },
           "truncated": {
             "type": "boolean"
           }
-        }
+        },
+        "required": [
+          "resolution",
+          "clusters",
+          "points",
+          "truncated",
+          "total",
+          "reach_truncated"
+        ],
+        "type": "object"
       },
       "CollapseMode": {
-        "type": "string",
         "enum": [
           "group"
-        ]
+        ],
+        "type": "string"
       },
       "CrossContainerOccurrences": {
-        "type": "string",
         "enum": [
           "off",
           "corroborated"
-        ]
+        ],
+        "type": "string"
       },
       "EventFields": {
-        "type": "object",
         "properties": {
           "all_day": {
             "type": [
@@ -1100,10 +240,10 @@
             ]
           },
           "categories": {
-            "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "type": "array"
           },
           "end_local": {
             "type": [
@@ -1148,11 +288,11 @@
             ]
           },
           "start_local": {
+            "description": "A local time without a resolvable zone is retained; UTC columns are only a sort proxy.",
             "type": [
               "string",
               "null"
-            ],
-            "description": "A local time without a resolvable zone is retained; UTC columns are only a sort proxy."
+            ]
           },
           "timezone_attribution": {
             "type": [
@@ -1177,54 +317,47 @@
             ]
           },
           "warnings": {
-            "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "type": "array"
           }
-        }
+        },
+        "type": "object"
       },
       "EventStatus": {
-        "type": "string",
         "enum": [
           "scheduled",
           "cancelled",
           "postponed",
           "rescheduled",
           "moved_online"
-        ]
+        ],
+        "type": "string"
       },
       "Facets": {
-        "type": "object",
+        "properties": {
+          "tags": {
+            "items": {
+              "$ref": "#/components/schemas/TagFacet"
+            },
+            "type": "array"
+          }
+        },
         "required": [
           "tags"
         ],
-        "properties": {
-          "tags": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/TagFacet"
-            }
-          }
-        }
+        "type": "object"
       },
       "Fields": {
-        "type": "string",
         "enum": [
           "card",
           "facets",
           "document"
-        ]
+        ],
+        "type": "string"
       },
       "GroupCard": {
-        "type": "object",
-        "required": [
-          "id",
-          "curated",
-          "taggers",
-          "references",
-          "member_count"
-        ],
         "properties": {
           "attribution": {
             "type": [
@@ -1261,8 +394,8 @@
             ]
           },
           "member_count": {
-            "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "type": "integer"
           },
           "name": {
             "type": [
@@ -1271,99 +404,101 @@
             ]
           },
           "references": {
-            "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "type": "integer"
           },
           "taggers": {
-            "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "type": "integer"
           }
-        }
+        },
+        "required": [
+          "id",
+          "curated",
+          "taggers",
+          "references",
+          "member_count"
+        ],
+        "type": "object"
       },
       "GroupConfig": {
-        "type": "object",
+        "additionalProperties": false,
         "properties": {
           "cross_container_occurrences": {
+            "default": "off",
             "oneOf": [
               {
                 "$ref": "#/components/schemas/CrossContainerOccurrences"
               }
-            ],
-            "default": "off"
+            ]
           },
           "enabled": {
-            "type": "boolean",
-            "default": true
+            "default": true,
+            "type": "boolean"
           },
           "max_distance_m": {
-            "type": "number",
+            "default": 500.0,
             "format": "double",
-            "default": 500.0
+            "type": "number"
           },
           "max_graph_bytes": {
-            "type": "integer",
             "default": 33554432,
-            "minimum": 0
+            "minimum": 0,
+            "type": "integer"
           },
           "max_graph_units": {
-            "type": "integer",
             "default": 20000,
-            "minimum": 0
+            "minimum": 0,
+            "type": "integer"
           },
           "max_members": {
-            "type": "integer",
             "default": 256,
-            "minimum": 0
+            "minimum": 0,
+            "type": "integer"
           },
           "max_members_per_origin": {
-            "type": "integer",
             "default": 16,
-            "minimum": 0
+            "minimum": 0,
+            "type": "integer"
           },
           "multi_tenant_hosts_path": {
+            "default": null,
             "type": [
               "string",
               "null"
-            ],
-            "default": null
+            ]
           }
         },
-        "additionalProperties": false
+        "type": "object"
       },
       "GroupKey": {
-        "type": "object",
-        "required": [
-          "key",
-          "basis",
-          "confidence"
-        ],
         "properties": {
           "basis": {
             "type": "string"
           },
           "confidence": {
-            "type": "number",
-            "format": "double"
+            "format": "double",
+            "type": "number"
           },
           "key": {
             "type": "string"
           },
           "target": {
+            "description": "Destination URL (older documents contain a publisher origin). Never a fetch instruction.",
             "type": [
               "string",
               "null"
-            ],
-            "description": "Destination URL (older documents contain a publisher origin). Never a fetch instruction."
+            ]
           }
-        }
+        },
+        "required": [
+          "key",
+          "basis",
+          "confidence"
+        ],
+        "type": "object"
       },
       "GroupMemberView": {
-        "type": "object",
-        "required": [
-          "resource_id",
-          "uri",
-          "site"
-        ],
         "properties": {
           "occurrence": {
             "oneOf": [
@@ -1384,18 +519,15 @@
           "uri": {
             "type": "string"
           }
-        }
+        },
+        "required": [
+          "resource_id",
+          "uri",
+          "site"
+        ],
+        "type": "object"
       },
       "GroupView": {
-        "type": "object",
-        "required": [
-          "id",
-          "curated",
-          "taggers",
-          "references",
-          "member_count",
-          "members"
-        ],
         "properties": {
           "attribution": {
             "type": [
@@ -1432,14 +564,14 @@
             ]
           },
           "member_count": {
-            "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "type": "integer"
           },
           "members": {
-            "type": "array",
             "items": {
               "$ref": "#/components/schemas/GroupMemberView"
-            }
+            },
+            "type": "array"
           },
           "name": {
             "type": [
@@ -1448,17 +580,50 @@
             ]
           },
           "references": {
-            "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "type": "integer"
           },
           "taggers": {
-            "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "type": "integer"
           }
-        }
+        },
+        "required": [
+          "id",
+          "curated",
+          "taggers",
+          "references",
+          "member_count",
+          "members"
+        ],
+        "type": "object"
       },
       "Info": {
-        "type": "object",
+        "properties": {
+          "counts": {
+            "$ref": "#/components/schemas/InfoCounts"
+          },
+          "groups": {
+            "$ref": "#/components/schemas/GroupConfig"
+          },
+          "ingestion": {
+            "items": {},
+            "type": "array"
+          },
+          "manifests": {
+            "items": {
+              "$ref": "#/components/schemas/Manifest"
+            },
+            "type": "array"
+          },
+          "osm_licence": {
+            "$ref": "#/components/schemas/OsmLicence"
+          },
+          "resolvers": {},
+          "version": {
+            "type": "string"
+          }
+        },
         "required": [
           "version",
           "manifests",
@@ -1468,106 +633,69 @@
           "osm_licence",
           "resolvers"
         ],
-        "properties": {
-          "counts": {
-            "$ref": "#/components/schemas/InfoCounts"
-          },
-          "groups": {
-            "$ref": "#/components/schemas/GroupConfig"
-          },
-          "ingestion": {
-            "type": "array",
-            "items": {}
-          },
-          "manifests": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Manifest"
-            }
-          },
-          "osm_licence": {
-            "$ref": "#/components/schemas/OsmLicence"
-          },
-          "resolvers": {},
-          "version": {
-            "type": "string"
-          }
-        }
+        "type": "object"
       },
       "InfoCounts": {
-        "type": "object",
+        "properties": {
+          "occurrences": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "references": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "resources": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
         "required": [
           "resources",
           "references",
           "occurrences"
         ],
-        "properties": {
-          "occurrences": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "references": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "resources": {
-            "type": "integer",
-            "format": "int64"
-          }
-        }
+        "type": "object"
       },
       "LocationSource": {
-        "type": "string",
         "enum": [
           "uri",
           "osm",
           "page",
           "geocoded"
-        ]
+        ],
+        "type": "string"
       },
       "LookupRequest": {
-        "type": "object",
+        "additionalProperties": false,
         "properties": {
           "ids": {
+            "items": {
+              "type": "string"
+            },
             "type": [
               "array",
               "null"
-            ],
-            "items": {
-              "type": "string"
-            }
+            ]
           },
           "uris": {
+            "items": {
+              "type": "string"
+            },
             "type": [
               "array",
               "null"
-            ],
-            "items": {
-              "type": "string"
-            }
+            ]
           }
         },
-        "additionalProperties": false
+        "type": "object"
       },
       "Manifest": {
-        "type": "object",
-        "required": [
-          "source",
-          "mode",
-          "cadence_floor",
-          "identity",
-          "cancellation",
-          "expected_fields",
-          "ua_profile",
-          "requires_key",
-          "enabled",
-          "fragile"
-        ],
         "properties": {
           "cadence_floor": {
-            "type": "integer",
             "format": "int64",
-            "minimum": 0
+            "minimum": 0,
+            "type": "integer"
           },
           "canary": {
             "type": [
@@ -1594,10 +722,10 @@
             "type": "boolean"
           },
           "expected_fields": {
-            "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "type": "array"
           },
           "fragile": {
             "type": "boolean"
@@ -1617,22 +745,31 @@
           "ua_profile": {
             "type": "string"
           }
-        }
+        },
+        "required": [
+          "source",
+          "mode",
+          "cadence_floor",
+          "identity",
+          "cancellation",
+          "expected_fields",
+          "ua_profile",
+          "requires_key",
+          "enabled",
+          "fragile"
+        ],
+        "type": "object"
       },
       "Mode": {
-        "type": "string",
         "enum": [
           "cursor",
           "container",
           "resource",
           "none"
-        ]
+        ],
+        "type": "string"
       },
       "OccurrencePage": {
-        "type": "object",
-        "required": [
-          "items"
-        ],
         "properties": {
           "cursor": {
             "type": [
@@ -1641,35 +778,28 @@
             ]
           },
           "items": {
-            "type": "array",
             "items": {
               "$ref": "#/components/schemas/OccurrenceRecord"
-            }
+            },
+            "type": "array"
           }
-        }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
       },
       "OccurrenceRecord": {
-        "type": "object",
-        "required": [
-          "resource_id",
-          "uid",
-          "recurrence_id",
-          "start_at",
-          "status",
-          "document",
-          "occurrence",
-          "volatile"
-        ],
         "properties": {
           "document": {
             "$ref": "#/components/schemas/ResourceMeta"
           },
           "end_at": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
-            ],
-            "format": "date-time"
+            ]
           },
           "event_resource_id": {
             "type": [
@@ -1693,8 +823,8 @@
             "type": "string"
           },
           "start_at": {
-            "type": "string",
-            "format": "date-time"
+            "format": "date-time",
+            "type": "string"
           },
           "status": {
             "type": "string"
@@ -1723,13 +853,20 @@
           "volatile": {
             "type": "boolean"
           }
-        }
+        },
+        "required": [
+          "resource_id",
+          "uid",
+          "recurrence_id",
+          "start_at",
+          "status",
+          "document",
+          "occurrence",
+          "volatile"
+        ],
+        "type": "object"
       },
       "OccurrenceRef": {
-        "type": "object",
-        "required": [
-          "uid"
-        ],
         "properties": {
           "event_resource_id": {
             "type": [
@@ -1746,10 +883,13 @@
           "uid": {
             "type": "string"
           }
-        }
+        },
+        "required": [
+          "uid"
+        ],
+        "type": "object"
       },
       "Offers": {
-        "type": "object",
         "properties": {
           "currency": {
             "type": [
@@ -1758,26 +898,23 @@
             ]
           },
           "high_price": {
+            "format": "double",
             "type": [
               "number",
               "null"
-            ],
-            "format": "double"
+            ]
           },
           "low_price": {
+            "format": "double",
             "type": [
               "number",
               "null"
-            ],
-            "format": "double"
+            ]
           }
-        }
+        },
+        "type": "object"
       },
       "Organizer": {
-        "type": "object",
-        "required": [
-          "name"
-        ],
         "properties": {
           "name": {
             "type": "string"
@@ -1788,9 +925,14 @@
               "null"
             ]
           }
-        }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
       },
       "OsmDumpLine": {
+        "description": "A dump line: the notice first, then one place per line.",
         "oneOf": [
           {
             "$ref": "#/components/schemas/OsmDumpNotice"
@@ -1798,26 +940,17 @@
           {
             "$ref": "#/components/schemas/OsmDumpPlace"
           }
-        ],
-        "description": "A dump line: the notice first, then one place per line."
+        ]
       },
       "OsmDumpNotice": {
-        "type": "object",
         "description": "First line of the OSM dump: the ODbL notice.",
-        "required": [
-          "notice",
-          "licence",
-          "licence_url",
-          "attribution_url",
-          "table"
-        ],
         "properties": {
           "attribution_url": {
             "type": "string"
           },
           "licence": {
-            "type": "string",
-            "example": "ODbL-1.0"
+            "example": "ODbL-1.0",
+            "type": "string"
           },
           "licence_url": {
             "type": "string"
@@ -1826,14 +959,102 @@
             "type": "string"
           },
           "table": {
-            "type": "string",
-            "example": "osm_place"
+            "example": "osm_place",
+            "type": "string"
           }
-        }
+        },
+        "required": [
+          "notice",
+          "licence",
+          "licence_url",
+          "attribution_url",
+          "table"
+        ],
+        "type": "object"
       },
       "OsmDumpPlace": {
-        "type": "object",
         "description": "One cached OSM object per line after the notice; every field is present, null where unknown.\nThe projection is explicit (`OSM_DUMP_LINE`): internal columns never reach the dump.",
+        "properties": {
+          "address": {
+            "type": "object"
+          },
+          "bbox": {
+            "description": "`[min_lon, min_lat, max_lon, max_lat]`.",
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "category": {
+            "description": "OSM `key/value` category, e.g. `place/city`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fetched_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "osm_id": {
+            "example": 240109189,
+            "format": "int64",
+            "type": "integer"
+          },
+          "osm_type": {
+            "example": "node",
+            "type": "string"
+          },
+          "point": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Point",
+                "description": "Null for cached missing objects."
+              }
+            ]
+          },
+          "status": {
+            "description": "`ok` or `missing`.",
+            "type": "string"
+          },
+          "tags": {
+            "description": "Allowlisted OSM tags.",
+            "type": "object"
+          },
+          "type": {
+            "description": "Schema.org type, e.g. `City`.",
+            "type": "string"
+          },
+          "type_path": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "versions": {
+            "description": "Every derived document served publicly, keyed by the version hash that\n`/v1/changes` and pinned resource documents name.",
+            "type": "object"
+          }
+        },
         "required": [
           "osm_type",
           "osm_id",
@@ -1850,96 +1071,9 @@
           "fetched_at",
           "versions"
         ],
-        "properties": {
-          "address": {
-            "type": "object"
-          },
-          "bbox": {
-            "type": [
-              "array",
-              "null"
-            ],
-            "items": {
-              "type": "number",
-              "format": "double"
-            },
-            "description": "`[min_lon, min_lat, max_lon, max_lat]`."
-          },
-          "category": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "OSM `key/value` category, e.g. `place/city`."
-          },
-          "display_name": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "fetched_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "name": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "osm_id": {
-            "type": "integer",
-            "format": "int64",
-            "example": 240109189
-          },
-          "osm_type": {
-            "type": "string",
-            "example": "node"
-          },
-          "point": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Point",
-                "description": "Null for cached missing objects."
-              }
-            ]
-          },
-          "status": {
-            "type": "string",
-            "description": "`ok` or `missing`."
-          },
-          "tags": {
-            "type": "object",
-            "description": "Allowlisted OSM tags."
-          },
-          "type": {
-            "type": "string",
-            "description": "Schema.org type, e.g. `City`."
-          },
-          "type_path": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "versions": {
-            "type": "object",
-            "description": "Every derived document served publicly, keyed by the version hash that\n`/v1/changes` and pinned resource documents name."
-          }
-        }
+        "type": "object"
       },
       "OsmLicence": {
-        "type": "object",
-        "required": [
-          "licence",
-          "attribution",
-          "url",
-          "dump"
-        ],
         "properties": {
           "attribution": {
             "type": "string"
@@ -1953,44 +1087,43 @@
           "url": {
             "type": "string"
           }
-        }
+        },
+        "required": [
+          "licence",
+          "attribution",
+          "url",
+          "dump"
+        ],
+        "type": "object"
       },
       "Point": {
-        "type": "object",
+        "properties": {
+          "lat": {
+            "format": "double",
+            "type": "number"
+          },
+          "lon": {
+            "format": "double",
+            "type": "number"
+          }
+        },
         "required": [
           "lat",
           "lon"
         ],
-        "properties": {
-          "lat": {
-            "type": "number",
-            "format": "double"
-          },
-          "lon": {
-            "type": "number",
-            "format": "double"
-          }
-        }
+        "type": "object"
       },
       "ReferenceEvent": {
-        "type": "object",
-        "required": [
-          "author",
-          "object_path",
-          "recurrence_id",
-          "start",
-          "status"
-        ],
         "properties": {
           "author": {
             "type": "string"
           },
           "end": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
-            ],
-            "format": "date-time"
+            ]
           },
           "object_path": {
             "type": "string"
@@ -1999,25 +1132,33 @@
             "type": "string"
           },
           "start": {
-            "type": "string",
-            "format": "date-time"
+            "format": "date-time",
+            "type": "string"
           },
           "status": {
             "type": "string"
           }
-        }
+        },
+        "required": [
+          "author",
+          "object_path",
+          "recurrence_id",
+          "start",
+          "status"
+        ],
+        "type": "object"
       },
       "ResolveRequest": {
-        "type": "object",
-        "required": [
-          "uri"
-        ],
+        "additionalProperties": false,
         "properties": {
           "uri": {
             "type": "string"
           }
         },
-        "additionalProperties": false
+        "required": [
+          "uri"
+        ],
+        "type": "object"
       },
       "ResourceMeta": {
         "allOf": [
@@ -2025,40 +1166,30 @@
             "$ref": "#/components/schemas/EventFields"
           },
           {
-            "type": "object",
-            "required": [
-              "type",
-              "type_path",
-              "url",
-              "site",
-              "attributes",
-              "source",
-              "status"
-            ],
             "properties": {
               "address": {
-                "type": "object",
                 "additionalProperties": {
                   "type": "string"
                 },
                 "propertyNames": {
                   "type": "string"
-                }
+                },
+                "type": "object"
               },
               "aliases": {
-                "type": "array",
                 "items": {
                   "type": "string"
-                }
+                },
+                "type": "array"
               },
               "attributes": {
-                "type": "object",
                 "additionalProperties": {
                   "type": "string"
                 },
                 "propertyNames": {
                   "type": "string"
-                }
+                },
+                "type": "object"
               },
               "attribution": {
                 "type": [
@@ -2067,14 +1198,14 @@
                 ]
               },
               "bbox": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
                 "type": [
                   "array",
                   "null"
-                ],
-                "items": {
-                  "type": "number",
-                  "format": "double"
-                }
+                ]
               },
               "category": {
                 "type": [
@@ -2089,21 +1220,21 @@
                 ]
               },
               "end": {
+                "format": "date-time",
                 "type": [
                   "string",
                   "null"
-                ],
-                "format": "date-time"
+                ]
               },
               "fetched_at": {
-                "type": "integer",
-                "format": "int64"
+                "format": "int64",
+                "type": "integer"
               },
               "group_keys": {
-                "type": "array",
                 "items": {
                   "$ref": "#/components/schemas/GroupKey"
-                }
+                },
+                "type": "array"
               },
               "image": {
                 "type": [
@@ -2150,44 +1281,47 @@
                 "type": "string"
               },
               "start": {
+                "format": "date-time",
                 "type": [
                   "string",
                   "null"
-                ],
-                "format": "date-time"
+                ]
               },
               "status": {
                 "$ref": "#/components/schemas/Status"
               },
               "ttl_secs": {
-                "type": "integer",
                 "format": "int64",
-                "minimum": 0
+                "minimum": 0,
+                "type": "integer"
               },
               "type": {
                 "type": "string"
               },
               "type_path": {
-                "type": "array",
                 "items": {
                   "type": "string"
-                }
+                },
+                "type": "array"
               },
               "url": {
                 "type": "string"
               }
-            }
+            },
+            "required": [
+              "type",
+              "type_path",
+              "url",
+              "site",
+              "attributes",
+              "source",
+              "status"
+            ],
+            "type": "object"
           }
         ]
       },
       "ResourceView": {
-        "type": "object",
-        "required": [
-          "resource_id",
-          "uri",
-          "site",
-          "status"
-        ],
         "properties": {
           "attribution": {
             "type": [
@@ -2218,11 +1352,11 @@
             ]
           },
           "end": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
-            ],
-            "format": "date-time"
+            ]
           },
           "event": {
             "oneOf": [
@@ -2289,11 +1423,11 @@
             "type": "string"
           },
           "start": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
-            ],
-            "format": "date-time"
+            ]
           },
           "status": {
             "type": "string"
@@ -2305,25 +1439,27 @@
             ]
           },
           "type_path": {
+            "items": {
+              "type": "string"
+            },
             "type": [
               "array",
               "null"
-            ],
-            "items": {
-              "type": "string"
-            }
+            ]
           },
           "uri": {
             "type": "string"
           }
-        }
+        },
+        "required": [
+          "resource_id",
+          "uri",
+          "site",
+          "status"
+        ],
+        "type": "object"
       },
       "SearchResponse": {
-        "type": "object",
-        "required": [
-          "items",
-          "reach_truncated"
-        ],
         "properties": {
           "cursor": {
             "type": [
@@ -2342,15 +1478,20 @@
             ]
           },
           "items": {
-            "type": "array",
             "items": {
               "$ref": "#/components/schemas/ResourceView"
-            }
+            },
+            "type": "array"
           },
           "reach_truncated": {
             "type": "boolean"
           }
-        }
+        },
+        "required": [
+          "items",
+          "reach_truncated"
+        ],
+        "type": "object"
       },
       "SearchResult": {
         "oneOf": [
@@ -2363,7 +1504,6 @@
         ]
       },
       "Status": {
-        "type": "string",
         "enum": [
           "ok",
           "pending",
@@ -2371,38 +1511,35 @@
           "unreachable",
           "blocked",
           "error"
-        ]
+        ],
+        "type": "string"
       },
       "TagFacet": {
-        "type": "object",
-        "required": [
-          "label",
-          "count"
-        ],
         "properties": {
           "count": {
-            "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "type": "integer"
           },
           "label": {
             "type": "string"
           }
-        }
+        },
+        "required": [
+          "label",
+          "count"
+        ],
+        "type": "object"
       },
       "Venue": {
-        "type": "object",
-        "required": [
-          "text"
-        ],
         "properties": {
           "address": {
-            "type": "object",
             "additionalProperties": {
               "type": "string"
             },
             "propertyNames": {
               "type": "string"
-            }
+            },
+            "type": "object"
           },
           "location": {
             "oneOf": [
@@ -2451,8 +1588,1372 @@
           "text": {
             "type": "string"
           }
-        }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
       }
     }
-  }
+  },
+  "info": {
+    "description": "Pinakes ranks, Nexus hydrates. External resource metadata and search. Each operation has named examples for pubky.app features (link previews, feed cards, map, events, tag pages, freshness); pick one and use Try it out.",
+    "license": {
+      "name": "MIT"
+    },
+    "title": "Pinakes",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/changes": {
+      "get": {
+        "operationId": "feed",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "class",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "type",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "examples": {
+              "recent-changes": {
+                "summary": "Freshness: what changed recently",
+                "value": 20
+              }
+            },
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "maximum": 500,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangePage"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "description": "Invalid filter"
+          },
+          "410": {
+            "description": "Cursor no longer retained"
+          }
+        },
+        "tags": [
+          "Changes"
+        ]
+      }
+    },
+    "/v1/changes/lookup": {
+      "post": {
+        "operationId": "lookup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "examples": {
+                "my-links-changed": {
+                  "description": "Notify a user when an event they shared moved or a card changed.",
+                  "summary": "Freshness: did the links I posted change?",
+                  "value": {
+                    "resource_ids": [
+                      "7f8f0e5f5b301b55a06d51df5d54281c",
+                      "deb643fb39aa8b975957e1a5ced9c427",
+                      "0f3820de1c3532e8805674cc996978f9"
+                    ],
+                    "since": "2026-01-01T00:00:00Z"
+                  }
+                }
+              },
+              "schema": {
+                "$ref": "#/components/schemas/ChangeLookup"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangePage"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "description": "Invalid IDs or since"
+          },
+          "410": {
+            "description": "Cursor expired"
+          }
+        },
+        "tags": [
+          "Changes"
+        ]
+      }
+    },
+    "/v1/dumps/osm_place.ndjson": {
+      "get": {
+        "operationId": "osm_dump",
+        "responses": {
+          "200": {
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/OsmDumpLine"
+                }
+              }
+            },
+            "description": "Streaming ODbL derivative database, sent as a file download: one JSON object per line, the licence notice first, then one cached OSM object per line",
+            "headers": {
+              "Content-Disposition": {
+                "description": "`attachment; filename=\"osm_place.ndjson\"`",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Dump request budget exhausted"
+          }
+        },
+        "tags": [
+          "Licensing"
+        ]
+      }
+    },
+    "/v1/groups/{id}": {
+      "get": {
+        "operationId": "group",
+        "parameters": [
+          {
+            "examples": {
+              "article-group": {
+                "summary": "One article, two links: the Nature page and its DOI",
+                "value": "d1b4a3fefc115a5b7ea5bed6fb231011"
+              }
+            },
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupView"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "description": "Invalid ID or disabled module"
+          },
+          "404": {
+            "description": "Unknown group"
+          }
+        },
+        "tags": [
+          "Groups"
+        ]
+      }
+    },
+    "/v1/info": {
+      "get": {
+        "description": "Public summary only; the same path on admin_listen includes source diagnostics and metrics. Cached for 15 seconds.",
+        "operationId": "info",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Info"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "Service"
+        ]
+      }
+    },
+    "/v1/openapi.json": {
+      "get": {
+        "operationId": "openapi",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "Service"
+        ]
+      }
+    },
+    "/v1/resolve": {
+      "post": {
+        "operationId": "resolve",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "examples": {
+                "link-preview-event": {
+                  "description": "An event link becomes an event card with its date and venue.",
+                  "summary": "Link preview while composing: a Luma event",
+                  "value": {
+                    "uri": "https://luma.com/376whqyw"
+                  }
+                },
+                "link-preview-video": {
+                  "description": "The composer shows a card (title, image, type) for a link the user pastes.",
+                  "summary": "Link preview while composing: a YouTube video",
+                  "value": {
+                    "uri": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+                  }
+                }
+              },
+              "schema": {
+                "$ref": "#/components/schemas/ResolveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceView"
+                }
+              }
+            },
+            "description": ""
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceView"
+                }
+              }
+            },
+            "description": "Queued; poll resource by ID"
+          },
+          "400": {
+            "description": "Unsupported URI or disabled resolver"
+          },
+          "429": {
+            "description": "Preview rate limit"
+          }
+        },
+        "tags": [
+          "Previews"
+        ]
+      }
+    },
+    "/v1/resources/lookup": {
+      "post": {
+        "operationId": "lookup",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "fields",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/Fields"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "examples": {
+                "feed-cards": {
+                  "description": "The feed renders the cards for every link in the visible posts with one request.",
+                  "summary": "Feed link cards for a page of posts",
+                  "value": {
+                    "uris": [
+                      "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                      "https://luma.com/376whqyw",
+                      "https://www.nature.com/articles/nature12373",
+                      "isbn:9781119473862",
+                      "geo:46.0037,8.9511"
+                    ]
+                  }
+                }
+              },
+              "schema": {
+                "$ref": "#/components/schemas/LookupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ResourceView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "description": "Exactly one list of 1–500 IDs or URIs"
+          }
+        },
+        "tags": [
+          "Previews"
+        ]
+      }
+    },
+    "/v1/resources/{id}": {
+      "get": {
+        "description": "Examples: pick the same example in each parameter's dropdown; parameters the example does not use stay empty.",
+        "operationId": "resource",
+        "parameters": [
+          {
+            "description": "32 lowercase hex resource ID",
+            "examples": {
+              "book-detail": {
+                "summary": "Book detail card (ISBN)",
+                "value": "5bccc93f427b6fd44115fdd02618392f"
+              },
+              "place-detail": {
+                "summary": "Place detail card (Berlin)",
+                "value": "81cefcae5a6a468cfc27ff1c1b420fce"
+              }
+            },
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "examples": {
+              "book-detail": {
+                "summary": "Book detail card (ISBN)",
+                "value": "card"
+              },
+              "place-detail": {
+                "summary": "Place detail card (Berlin)",
+                "value": "card"
+              }
+            },
+            "in": "query",
+            "name": "fields",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/Fields"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceView"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "description": "Invalid ID"
+          },
+          "404": {
+            "description": "Unknown resource"
+          }
+        },
+        "tags": [
+          "Previews"
+        ]
+      }
+    },
+    "/v1/resources/{id}/changes": {
+      "get": {
+        "operationId": "resource",
+        "parameters": [
+          {
+            "description": "Resource ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "class",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "type",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "maximum": 500,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangePage"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "description": "Invalid resource ID"
+          },
+          "410": {
+            "description": "Cursor expired"
+          }
+        },
+        "tags": [
+          "Changes"
+        ]
+      }
+    },
+    "/v1/resources/{id}/occurrences": {
+      "get": {
+        "description": "Calendar instances ordered by start, UID and recurrence ID. Inclusive window, default limit 100, maximum 500. Superseded keys are omitted.",
+        "operationId": "list_occurrences",
+        "parameters": [
+          {
+            "examples": {
+              "calendar-dates": {
+                "summary": "Calendar dates of a feed (Swiss holidays)",
+                "value": "2dea92aa8c3cf8ae1cffad92cf3ca718"
+              }
+            },
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Inclusive start time; defaults to this feed's last accepted horizon start.",
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "examples": {
+              "calendar-dates": {
+                "summary": "Calendar dates of a feed (Swiss holidays)",
+                "value": 20
+              }
+            },
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "maximum": 500,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Signed keyset cursor, scoped to this resource and window; invalid after restart.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OccurrencePage"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "description": "Invalid window, limit or cursor"
+          },
+          "404": {
+            "description": "Resource not found"
+          }
+        },
+        "tags": [
+          "Events"
+        ]
+      }
+    },
+    "/v1/search": {
+      "get": {
+        "description": "Examples: pick the same example in each parameter's dropdown; parameters the example does not use stay empty.",
+        "operationId": "search",
+        "parameters": [
+          {
+            "examples": {
+              "map-viewport": {
+                "summary": "Map viewport, clustered (Lugano)",
+                "value": ""
+              },
+              "nearby-places": {
+                "summary": "Nearby places (5 km around Lugano)",
+                "value": ""
+              },
+              "search-box": {
+                "summary": "Search box: 'lugano'",
+                "value": "lugano"
+              },
+              "social-reach": {
+                "summary": "What the people I follow tagged (replace viewer with an existing user)",
+                "value": ""
+              },
+              "tag-page": {
+                "summary": "Tag page: everything tagged bitcoin, with related tags",
+                "value": ""
+              },
+              "upcoming-events": {
+                "summary": "Upcoming events, soonest first",
+                "value": ""
+              }
+            },
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "examples": {
+              "map-viewport": {
+                "summary": "Map viewport, clustered (Lugano)",
+                "value": ""
+              },
+              "nearby-places": {
+                "summary": "Nearby places (5 km around Lugano)",
+                "value": "Place"
+              },
+              "search-box": {
+                "summary": "Search box: 'lugano'",
+                "value": ""
+              },
+              "social-reach": {
+                "summary": "What the people I follow tagged (replace viewer with an existing user)",
+                "value": ""
+              },
+              "tag-page": {
+                "summary": "Tag page: everything tagged bitcoin, with related tags",
+                "value": ""
+              },
+              "upcoming-events": {
+                "summary": "Upcoming events, soonest first",
+                "value": "Event"
+              }
+            },
+            "in": "query",
+            "name": "type",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "category",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "scheme",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "host",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "examples": {
+              "map-viewport": {
+                "summary": "Map viewport, clustered (Lugano)",
+                "value": ""
+              },
+              "nearby-places": {
+                "summary": "Nearby places (5 km around Lugano)",
+                "value": ""
+              },
+              "search-box": {
+                "summary": "Search box: 'lugano'",
+                "value": ""
+              },
+              "social-reach": {
+                "summary": "What the people I follow tagged (replace viewer with an existing user)",
+                "value": ""
+              },
+              "tag-page": {
+                "summary": "Tag page: everything tagged bitcoin, with related tags",
+                "value": "bitcoin"
+              },
+              "upcoming-events": {
+                "summary": "Upcoming events, soonest first",
+                "value": ""
+              }
+            },
+            "in": "query",
+            "name": "tags",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "match",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "author",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "examples": {
+              "map-viewport": {
+                "summary": "Map viewport, clustered (Lugano)",
+                "value": ""
+              },
+              "nearby-places": {
+                "summary": "Nearby places (5 km around Lugano)",
+                "value": ""
+              },
+              "search-box": {
+                "summary": "Search box: 'lugano'",
+                "value": ""
+              },
+              "social-reach": {
+                "summary": "What the people I follow tagged (replace viewer with an existing user)",
+                "value": "following"
+              },
+              "tag-page": {
+                "summary": "Tag page: everything tagged bitcoin, with related tags",
+                "value": ""
+              },
+              "upcoming-events": {
+                "summary": "Upcoming events, soonest first",
+                "value": ""
+              }
+            },
+            "in": "query",
+            "name": "reach",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "examples": {
+              "map-viewport": {
+                "summary": "Map viewport, clustered (Lugano)",
+                "value": ""
+              },
+              "nearby-places": {
+                "summary": "Nearby places (5 km around Lugano)",
+                "value": ""
+              },
+              "search-box": {
+                "summary": "Search box: 'lugano'",
+                "value": ""
+              },
+              "social-reach": {
+                "summary": "What the people I follow tagged (replace viewer with an existing user)",
+                "value": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+              },
+              "tag-page": {
+                "summary": "Tag page: everything tagged bitcoin, with related tags",
+                "value": ""
+              },
+              "upcoming-events": {
+                "summary": "Upcoming events, soonest first",
+                "value": ""
+              }
+            },
+            "in": "query",
+            "name": "viewer",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "examples": {
+              "map-viewport": {
+                "summary": "Map viewport, clustered (Lugano)",
+                "value": ""
+              },
+              "nearby-places": {
+                "summary": "Nearby places (5 km around Lugano)",
+                "value": ""
+              },
+              "search-box": {
+                "summary": "Search box: 'lugano'",
+                "value": ""
+              },
+              "social-reach": {
+                "summary": "What the people I follow tagged (replace viewer with an existing user)",
+                "value": ""
+              },
+              "tag-page": {
+                "summary": "Tag page: everything tagged bitcoin, with related tags",
+                "value": ""
+              },
+              "upcoming-events": {
+                "summary": "Upcoming events, soonest first",
+                "value": "start"
+              }
+            },
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "maximum": 500,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Authenticated opaque keyset cursor from this daemon; invalid after restart. Restart pagination on HTTP 400.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "examples": {
+              "map-viewport": {
+                "summary": "Map viewport, clustered (Lugano)",
+                "value": ""
+              },
+              "nearby-places": {
+                "summary": "Nearby places (5 km around Lugano)",
+                "value": ""
+              },
+              "search-box": {
+                "summary": "Search box: 'lugano'",
+                "value": ""
+              },
+              "social-reach": {
+                "summary": "What the people I follow tagged (replace viewer with an existing user)",
+                "value": "tags"
+              },
+              "tag-page": {
+                "summary": "Tag page: everything tagged bitcoin, with related tags",
+                "value": "tags"
+              },
+              "upcoming-events": {
+                "summary": "Upcoming events, soonest first",
+                "value": ""
+              }
+            },
+            "in": "query",
+            "name": "facet",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "fields",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/Fields"
+                }
+              ]
+            }
+          },
+          {
+            "description": "West,south,east,north in degrees; west > east crosses the antimeridian.",
+            "examples": {
+              "map-viewport": {
+                "summary": "Map viewport, clustered (Lugano)",
+                "value": "8.90,45.98,9.00,46.03"
+              },
+              "nearby-places": {
+                "summary": "Nearby places (5 km around Lugano)",
+                "value": ""
+              },
+              "search-box": {
+                "summary": "Search box: 'lugano'",
+                "value": ""
+              },
+              "social-reach": {
+                "summary": "What the people I follow tagged (replace viewer with an existing user)",
+                "value": ""
+              },
+              "tag-page": {
+                "summary": "Tag page: everything tagged bitcoin, with related tags",
+                "value": ""
+              },
+              "upcoming-events": {
+                "summary": "Upcoming events, soonest first",
+                "value": ""
+              }
+            },
+            "in": "query",
+            "name": "bbox",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Latitude,longitude in degrees; requires radius and excludes bbox.",
+            "examples": {
+              "map-viewport": {
+                "summary": "Map viewport, clustered (Lugano)",
+                "value": ""
+              },
+              "nearby-places": {
+                "summary": "Nearby places (5 km around Lugano)",
+                "value": "46.0037,8.9511"
+              },
+              "search-box": {
+                "summary": "Search box: 'lugano'",
+                "value": ""
+              },
+              "social-reach": {
+                "summary": "What the people I follow tagged (replace viewer with an existing user)",
+                "value": ""
+              },
+              "tag-page": {
+                "summary": "Tag page: everything tagged bitcoin, with related tags",
+                "value": ""
+              },
+              "upcoming-events": {
+                "summary": "Upcoming events, soonest first",
+                "value": ""
+              }
+            },
+            "in": "query",
+            "name": "near",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Positive metres, at most the configured maximum (200000 by default).",
+            "examples": {
+              "map-viewport": {
+                "summary": "Map viewport, clustered (Lugano)",
+                "value": ""
+              },
+              "nearby-places": {
+                "summary": "Nearby places (5 km around Lugano)",
+                "value": "5000"
+              },
+              "search-box": {
+                "summary": "Search box: 'lugano'",
+                "value": ""
+              },
+              "social-reach": {
+                "summary": "What the people I follow tagged (replace viewer with an existing user)",
+                "value": ""
+              },
+              "tag-page": {
+                "summary": "Tag page: everything tagged bitcoin, with related tags",
+                "value": ""
+              },
+              "upcoming-events": {
+                "summary": "Upcoming events, soonest first",
+                "value": ""
+              }
+            },
+            "in": "query",
+            "name": "radius",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Inclusive start time lower bound: RFC3339 or Unix milliseconds.",
+            "examples": {
+              "map-viewport": {
+                "summary": "Map viewport, clustered (Lugano)",
+                "value": ""
+              },
+              "nearby-places": {
+                "summary": "Nearby places (5 km around Lugano)",
+                "value": ""
+              },
+              "search-box": {
+                "summary": "Search box: 'lugano'",
+                "value": ""
+              },
+              "social-reach": {
+                "summary": "What the people I follow tagged (replace viewer with an existing user)",
+                "value": ""
+              },
+              "tag-page": {
+                "summary": "Tag page: everything tagged bitcoin, with related tags",
+                "value": ""
+              },
+              "upcoming-events": {
+                "summary": "Upcoming events, soonest first",
+                "value": "2026-01-01T00:00:00Z"
+              }
+            },
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Inclusive start time upper bound: RFC3339 or Unix milliseconds.",
+            "examples": {
+              "map-viewport": {
+                "summary": "Map viewport, clustered (Lugano)",
+                "value": ""
+              },
+              "nearby-places": {
+                "summary": "Nearby places (5 km around Lugano)",
+                "value": ""
+              },
+              "search-box": {
+                "summary": "Search box: 'lugano'",
+                "value": ""
+              },
+              "social-reach": {
+                "summary": "What the people I follow tagged (replace viewer with an existing user)",
+                "value": ""
+              },
+              "tag-page": {
+                "summary": "Tag page: everything tagged bitcoin, with related tags",
+                "value": ""
+              },
+              "upcoming-events": {
+                "summary": "Upcoming events, soonest first",
+                "value": "2028-12-31T23:59:59Z"
+              }
+            },
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Finite map zoom; fractional zooms are floored and clamped to the table. Requires bbox; large views coarsen to the configured cell budget.",
+            "examples": {
+              "map-viewport": {
+                "summary": "Map viewport, clustered (Lugano)",
+                "value": "12"
+              },
+              "nearby-places": {
+                "summary": "Nearby places (5 km around Lugano)",
+                "value": ""
+              },
+              "search-box": {
+                "summary": "Search box: 'lugano'",
+                "value": ""
+              },
+              "social-reach": {
+                "summary": "What the people I follow tagged (replace viewer with an existing user)",
+                "value": ""
+              },
+              "tag-page": {
+                "summary": "Tag page: everything tagged bitcoin, with related tags",
+                "value": ""
+              },
+              "upcoming-events": {
+                "summary": "Upcoming events, soonest first",
+                "value": ""
+              }
+            },
+            "in": "query",
+            "name": "cluster",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Resource ID of the accepted event venue; filters event units.",
+            "in": "query",
+            "name": "venue",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Return one row per verified or curated group; standalone resources remain separate.",
+            "examples": {
+              "map-viewport": {
+                "summary": "Map viewport, clustered (Lugano)",
+                "value": "group"
+              },
+              "nearby-places": {
+                "summary": "Nearby places (5 km around Lugano)",
+                "value": ""
+              },
+              "search-box": {
+                "summary": "Search box: 'lugano'",
+                "value": ""
+              },
+              "social-reach": {
+                "summary": "What the people I follow tagged (replace viewer with an existing user)",
+                "value": ""
+              },
+              "tag-page": {
+                "summary": "Tag page: everything tagged bitcoin, with related tags",
+                "value": ""
+              },
+              "upcoming-events": {
+                "summary": "Upcoming events, soonest first",
+                "value": ""
+              }
+            },
+            "in": "query",
+            "name": "collapse",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/CollapseMode"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResult"
+                }
+              }
+            },
+            "description": ""
+          },
+          "304": {
+            "description": "ETag unchanged"
+          },
+          "400": {
+            "description": "Invalid or unavailable filter"
+          },
+          "502": {
+            "description": "Nexus reach unavailable"
+          }
+        },
+        "tags": [
+          "Search"
+        ]
+      }
+    }
+  },
+  "tags": [
+    {
+      "description": "Link previews and cards: resolve a pasted link, look up the cards of a page of posts, open one card.",
+      "name": "Previews"
+    },
+    {
+      "description": "Map viewports, nearby places, events, tag pages, the search box and social reach.",
+      "name": "Search"
+    },
+    {
+      "description": "The dates of calendar feeds.",
+      "name": "Events"
+    },
+    {
+      "description": "Links to the same thing, collapsed into one group with one best card.",
+      "name": "Groups"
+    },
+    {
+      "description": "Freshness: the change feed and per-link history.",
+      "name": "Changes"
+    },
+    {
+      "description": "Version, resolvers, licence and this document.",
+      "name": "Service"
+    },
+    {
+      "description": "The ODbL share-alike download of the OpenStreetMap-derived data.",
+      "name": "Licensing"
+    }
+  ]
 }

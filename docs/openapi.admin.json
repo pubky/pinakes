@@ -11,7 +11,9 @@
   "paths": {
     "/metrics": {
       "get": {
-        "tags": [],
+        "tags": [
+          "Admin"
+        ],
         "description": "Prometheus metrics.",
         "operationId": "metrics",
         "responses": {
@@ -30,7 +32,9 @@
     },
     "/v1/groups/{id}": {
       "put": {
-        "tags": [],
+        "tags": [
+          "Admin"
+        ],
         "description": "Admin listener only. Replaces the curated member set; never changes IDs or references.",
         "operationId": "curate_group",
         "parameters": [
@@ -72,7 +76,9 @@
     },
     "/v1/info": {
       "get": {
-        "tags": [],
+        "tags": [
+          "Admin"
+        ],
         "description": "Admin listener: the public summary plus source diagnostics, ingestion, queue statuses and metrics. Cached for 15 seconds.",
         "operationId": "admin_info",
         "responses": {
@@ -89,7 +95,9 @@
     },
     "/v1/openapi.json": {
       "get": {
-        "tags": [],
+        "tags": [
+          "Admin"
+        ],
         "description": "Admin listener only: this document.",
         "operationId": "admin_openapi",
         "responses": {

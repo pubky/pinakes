@@ -1,0 +1,171 @@
+{
+  "about": "Named OpenAPI examples for pubky.app features, built from the staging seed list. pinakesd adds them to its public OpenAPI document (Swagger UI dropdowns), tests/recipes.rs runs every one against a fixture of the same URIs, and docs/api.md lists them under 'Recipes for pubky.app'. In strings, id(URI) becomes that URI's resource ID and group(URI,URI,...) the ID a group of those members gets when it forms.",
+  "recipes": [
+    {
+      "name": "link-preview-video",
+      "summary": "Link preview while composing: a YouTube video",
+      "feature": "The composer shows a card (title, image, type) for a link the user pastes.",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": { "uri": "https://www.youtube.com/watch?v=dQw4w9WgXcQ" },
+      "expect": "card"
+    },
+    {
+      "name": "link-preview-event",
+      "summary": "Link preview while composing: a Luma event",
+      "feature": "An event link becomes an event card with its date and venue.",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": { "uri": "https://luma.com/376whqyw" },
+      "expect": "card"
+    },
+    {
+      "name": "feed-cards",
+      "summary": "Feed link cards for a page of posts",
+      "feature": "The feed renders the cards for every link in the visible posts with one request.",
+      "method": "POST",
+      "path": "/v1/resources/lookup",
+      "body": {
+        "uris": [
+          "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+          "https://luma.com/376whqyw",
+          "https://www.nature.com/articles/nature12373",
+          "isbn:9781119473862",
+          "geo:46.0037,8.9511"
+        ]
+      },
+      "expect": "items"
+    },
+    {
+      "name": "map-viewport",
+      "summary": "Map viewport, clustered (Lugano)",
+      "feature": "The map draws clusters and single pins for the visible area, one pin per group.",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": { "bbox": "8.90,45.98,9.00,46.03", "cluster": "12", "collapse": "group" },
+      "expect": "map"
+    },
+    {
+      "name": "nearby-places",
+      "summary": "Nearby places (5 km around Lugano)",
+      "feature": "A 'near me' list: places within 5 km of a point.",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": { "near": "46.0037,8.9511", "radius": "5000", "type": "Place" },
+      "expect": "items"
+    },
+    {
+      "name": "upcoming-events",
+      "summary": "Upcoming events, soonest first",
+      "feature": "An events tab: events and calendar dates in a time window, sorted by start.",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "type": "Event",
+        "from": "2026-01-01T00:00:00Z",
+        "to": "2028-12-31T23:59:59Z",
+        "sort": "start"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "tag-page",
+      "summary": "Tag page: everything tagged bitcoin, with related tags",
+      "feature": "A tag page lists tagged links and shows the tags that co-occur with it.",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": { "tags": "bitcoin", "facet": "tags" },
+      "expect": "items"
+    },
+    {
+      "name": "search-box",
+      "summary": "Search box: 'lugano'",
+      "feature": "Free-text search over card names.",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": { "q": "lugano" },
+      "expect": "items"
+    },
+    {
+      "name": "social-reach",
+      "summary": "What the people I follow tagged (replace viewer with an existing user)",
+      "feature": "A personal feed: links tagged by users the viewer follows. The viewer must exist in the Nexus this instance reads; this placeholder does not.",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "reach": "following",
+        "viewer": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+        "facet": "tags"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "calendar-dates",
+      "summary": "Calendar dates of a feed (Swiss holidays)",
+      "feature": "A subscribed calendar shows its upcoming dates.",
+      "method": "GET",
+      "path": "/v1/resources/{id}/occurrences",
+      "params": {
+        "id": "id(https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics)"
+      },
+      "query": { "limit": "20" },
+      "expect": "items"
+    },
+    {
+      "name": "place-detail",
+      "summary": "Place detail card (Berlin)",
+      "feature": "Tapping a place opens its card with location, address and attribution.",
+      "method": "GET",
+      "path": "/v1/resources/{id}",
+      "params": { "id": "id(https://www.openstreetmap.org/node/240109189)" },
+      "query": { "fields": "card" },
+      "expect": "card"
+    },
+    {
+      "name": "book-detail",
+      "summary": "Book detail card (ISBN)",
+      "feature": "A book link opens its card with title and authors.",
+      "method": "GET",
+      "path": "/v1/resources/{id}",
+      "params": { "id": "id(isbn:9780140328721)" },
+      "query": { "fields": "card" },
+      "expect": "card"
+    },
+    {
+      "name": "article-group",
+      "summary": "One article, two links: the Nature page and its DOI",
+      "feature": "Links to the same thing collapse into one group with one best card.",
+      "method": "GET",
+      "path": "/v1/groups/{id}",
+      "params": {
+        "id": "group(doi:10.1038/nature12373,https://www.nature.com/articles/nature12373)"
+      },
+      "expect": "group"
+    },
+    {
+      "name": "recent-changes",
+      "summary": "Freshness: what changed recently",
+      "feature": "A sync job follows the change feed to refresh cached cards.",
+      "method": "GET",
+      "path": "/v1/changes",
+      "query": { "limit": "20" },
+      "expect": "lines"
+    },
+    {
+      "name": "my-links-changed",
+      "summary": "Freshness: did the links I posted change?",
+      "feature": "Notify a user when an event they shared moved or a card changed.",
+      "method": "POST",
+      "path": "/v1/changes/lookup",
+      "body": {
+        "resource_ids": [
+          "id(https://luma.com/376whqyw)",
+          "id(https://www.nature.com/articles/nature12373)",
+          "id(https://www.youtube.com/watch?v=dQw4w9WgXcQ)"
+        ],
+        "since": "2026-01-01T00:00:00Z"
+      },
+      "expect": "lines"
+    }
+  ]
+}

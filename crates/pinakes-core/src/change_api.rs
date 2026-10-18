@@ -122,14 +122,14 @@ async fn query(
         oldest_cursor: oldest,
     }))
 }
-#[utoipa::path(get,path="/v1/changes",params(ChangeQuery),responses((status=200,body=ChangePage),(status=400,description="Invalid filter"),(status=410,description="Cursor no longer retained")))]
+#[utoipa::path(get,tag="Changes",path="/v1/changes",params(ChangeQuery),responses((status=200,body=ChangePage),(status=400,description="Invalid filter"),(status=410,description="Cursor no longer retained")))]
 pub async fn feed(
     State(state): State<AppState>,
     Query(q): Query<ChangeQuery>,
 ) -> Result<Json<ChangePage>, ApiError> {
     query(&state, q, None, None).await
 }
-#[utoipa::path(post,path="/v1/changes/lookup",request_body=ChangeLookup,responses((status=200,body=ChangePage),(status=400,description="Invalid IDs or since"),(status=410,description="Cursor expired")))]
+#[utoipa::path(post,tag="Changes",path="/v1/changes/lookup",request_body=ChangeLookup,responses((status=200,body=ChangePage),(status=400,description="Invalid IDs or since"),(status=410,description="Cursor expired")))]
 pub async fn lookup(
     State(state): State<AppState>,
     Json(body): Json<ChangeLookup>,
@@ -160,7 +160,7 @@ pub async fn lookup(
     )
     .await
 }
-#[utoipa::path(get,path="/v1/resources/{id}/changes",params(("id"=String,Path,description="Resource ID"),ChangeQuery),responses((status=200,body=ChangePage),(status=400,description="Invalid resource ID"),(status=410,description="Cursor expired")))]
+#[utoipa::path(get,tag="Changes",path="/v1/resources/{id}/changes",params(("id"=String,Path,description="Resource ID"),ChangeQuery),responses((status=200,body=ChangePage),(status=400,description="Invalid resource ID"),(status=410,description="Cursor expired")))]
 pub async fn resource(
     State(state): State<AppState>,
     Path(id): Path<String>,

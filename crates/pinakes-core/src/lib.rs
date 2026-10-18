@@ -13,6 +13,7 @@ pub mod maintenance;
 pub mod model;
 pub mod nexus;
 pub mod queue;
+pub mod recipes;
 pub mod resolver;
 pub mod scheduler;
 pub mod source;

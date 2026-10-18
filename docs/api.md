@@ -28,7 +28,7 @@ Nexus in a separate call. All paths below are relative to the Pinakes origin.
 | `GET /v1/changes` | `cursor`, `class`, `type`, `source`, `limit` | Change page with ascending sequence cursor |
 | `POST /v1/changes/lookup` | `{resource_ids:[...], since, cursor?, limit?}` | Changes to 1–500 requested IDs since a timestamp |
 | `GET /v1/resources/{id}/changes` | Same filters as changes | Resource history, including after expiry |
-| `GET /v1/dumps/osm_place.ndjson` | None | ODbL derivative database as a file download: the licence notice, then one line per cached OSM object (format below); 2 requests/minute per socket IP by default |
+| `GET /v1/dumps/osm_place.ndjson` | None | ODbL derivative database as a file download: the licence notice, then one line per cached OSM object (format below); 2 requests/minute per socket IP by default; listed last in Swagger UI, under Licensing |
 | `GET /v1/openapi.json` | None | Generated OpenAPI 3.1 |
 | `GET /swagger-ui` | None | Swagger UI for the public document (when `api.swagger_ui`) |
 
@@ -38,6 +38,118 @@ of the refresh queue without bypassing TTL, backoff, leases or final state. URIs
 by `pubky-resource-id`. Each URI is at most 2048 bytes; IDs are 32 lowercase hex
 characters. A missing upstream object is a known resource with `status=missing`,
 not an HTTP 404 from the Pinakes resource route.
+
+## Recipes for pubky.app
+
+One request per pubky.app feature, built from the staging seed list. Each is also a named example
+in Swagger UI (`/swagger-ui`): pick it in the example dropdown and use **Try it out**. For
+`GET /v1/search`, which has several recipes, pick the same example in each parameter's dropdown;
+parameters that example does not use stay empty and are not sent. The paths are relative to the
+instance's base URL, for example `curl "$BASE/v1/search?q=lugano"`; POST bodies are JSON
+(`curl -H 'Content-Type: application/json' -d '{"uri":"…"}' "$BASE/v1/resolve"`). Resource IDs
+are the deterministic hashes of the seed URIs, so the requests return data on any instance that
+indexed them. Four caveats:
+
+- Search (`GET /v1/search`) lists only links someone referenced on Pubky, so the search recipes
+  need the seed tags (present on staging); previews, cards, groups, dates and changes do not.
+- The reach viewer is a placeholder; use a user that exists in the Nexus the instance reads.
+- The events window is fixed (2026–2028); move it when it lapses.
+- The group ID is the one a group of those two members gets when it first forms; an instance
+  where the group formed differently has another ID (take `group.id` from either member's
+  resource view).
+
+The recipes live in `data/api-recipes.json`; `tests/recipes.rs` runs every one against a fixture
+of the same URIs and checks that this list matches.
+
+- **Link preview while composing: a YouTube video.** The composer shows a card (title, image, type) for a link the user pastes.
+
+  ```text
+  POST /v1/resolve {"uri":"https://www.youtube.com/watch?v=dQw4w9WgXcQ"}
+  ```
+
+- **Link preview while composing: a Luma event.** An event link becomes an event card with its date and venue.
+
+  ```text
+  POST /v1/resolve {"uri":"https://luma.com/376whqyw"}
+  ```
+
+- **Feed link cards for a page of posts.** The feed renders the cards for every link in the visible posts with one request.
+
+  ```text
+  POST /v1/resources/lookup {"uris":["https://www.youtube.com/watch?v=dQw4w9WgXcQ","https://luma.com/376whqyw","https://www.nature.com/articles/nature12373","isbn:9781119473862","geo:46.0037,8.9511"]}
+  ```
+
+- **Map viewport, clustered (Lugano).** The map draws clusters and single pins for the visible area, one pin per group.
+
+  ```text
+  GET /v1/search?bbox=8.90,45.98,9.00,46.03&cluster=12&collapse=group
+  ```
+
+- **Nearby places (5 km around Lugano).** A 'near me' list: places within 5 km of a point.
+
+  ```text
+  GET /v1/search?near=46.0037,8.9511&radius=5000&type=Place
+  ```
+
+- **Upcoming events, soonest first.** An events tab: events and calendar dates in a time window, sorted by start.
+
+  ```text
+  GET /v1/search?from=2026-01-01T00:00:00Z&sort=start&to=2028-12-31T23:59:59Z&type=Event
+  ```
+
+- **Tag page: everything tagged bitcoin, with related tags.** A tag page lists tagged links and shows the tags that co-occur with it.
+
+  ```text
+  GET /v1/search?facet=tags&tags=bitcoin
+  ```
+
+- **Search box: 'lugano'.** Free-text search over card names.
+
+  ```text
+  GET /v1/search?q=lugano
+  ```
+
+- **What the people I follow tagged (replace viewer with an existing user).** A personal feed: links tagged by users the viewer follows. The viewer must exist in the Nexus this instance reads; this placeholder does not.
+
+  ```text
+  GET /v1/search?facet=tags&reach=following&viewer=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+  ```
+
+- **Calendar dates of a feed (Swiss holidays).** A subscribed calendar shows its upcoming dates.
+
+  ```text
+  GET /v1/resources/2dea92aa8c3cf8ae1cffad92cf3ca718/occurrences?limit=20
+  ```
+
+- **Place detail card (Berlin).** Tapping a place opens its card with location, address and attribution.
+
+  ```text
+  GET /v1/resources/81cefcae5a6a468cfc27ff1c1b420fce?fields=card
+  ```
+
+- **Book detail card (ISBN).** A book link opens its card with title and authors.
+
+  ```text
+  GET /v1/resources/5bccc93f427b6fd44115fdd02618392f?fields=card
+  ```
+
+- **One article, two links: the Nature page and its DOI.** Links to the same thing collapse into one group with one best card.
+
+  ```text
+  GET /v1/groups/d1b4a3fefc115a5b7ea5bed6fb231011
+  ```
+
+- **Freshness: what changed recently.** A sync job follows the change feed to refresh cached cards.
+
+  ```text
+  GET /v1/changes?limit=20
+  ```
+
+- **Freshness: did the links I posted change?.** Notify a user when an event they shared moved or a card changed.
+
+  ```text
+  POST /v1/changes/lookup {"resource_ids":["7f8f0e5f5b301b55a06d51df5d54281c","deb643fb39aa8b975957e1a5ced9c427","0f3820de1c3532e8805674cc996978f9"],"since":"2026-01-01T00:00:00Z"}
+  ```
 
 ## Search
 
