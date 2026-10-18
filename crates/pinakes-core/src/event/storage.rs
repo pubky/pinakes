@@ -199,6 +199,63 @@ pub async fn prepare(
     );
     let fresh: Vec<_> = incoming.difference(&keys).cloned().collect();
     let losses: Vec<_> = keys.difference(&incoming).cloned().collect();
+    // Moves: an instance whose start shifted by up to an hour (a DST re-expansion, or a series
+    // moved by an hour without other edits) gets a new key (uid + instant). Pair each lost key
+    // with a fresh key of the same uid and content hash, nearest first and one-to-one, before the
+    // hold test: the pair is one rescheduled occurrence, neither a loss nor a new key.
+    let mut moved: BTreeMap<String, String> = BTreeMap::new();
+    if !container.delta {
+        // Arrivals per (uid, content hash): their keys and starts.
+        type Arrivals<'a> =
+            BTreeMap<(&'a str, &'a str), Vec<(&'a String, chrono::DateTime<chrono::Utc>)>>;
+        let mut by_series: Arrivals = BTreeMap::new();
+        let arriving: BTreeMap<String, &super::Occurrence> =
+            container.occurrences.iter().map(|o| (o.key(), o)).collect();
+        for key in &fresh {
+            if let Some(o) = arriving.get(key) {
+                if let Some(at) = o.doc.start {
+                    by_series
+                        .entry((o.uid.as_str(), o.content_hash.as_str()))
+                        .or_default()
+                        .push((key, at));
+                }
+            }
+        }
+        let mut candidates = vec![];
+        for lost in &losses {
+            let Some((uid, _, d, _, hash, _, _)) = old.get(lost) else {
+                continue;
+            };
+            let (Some(at), Some(arrivals)) =
+                (d.start, by_series.get(&(uid.as_str(), hash.as_str())))
+            else {
+                continue;
+            };
+            for (key, new_at) in arrivals {
+                let gap = (*new_at - at).num_seconds().abs();
+                if gap <= 3600 {
+                    candidates.push((gap, lost.clone(), (*key).clone()));
+                }
+            }
+        }
+        candidates.sort();
+        let mut taken = BTreeSet::new();
+        for (_, lost, key) in candidates {
+            if !taken.contains(&lost) && !moved.contains_key(&key) {
+                taken.insert(lost.clone());
+                moved.insert(key, lost);
+            }
+        }
+    }
+    let moved_from: BTreeSet<String> = moved.values().cloned().collect();
+    let fresh: Vec<_> = fresh
+        .into_iter()
+        .filter(|k| !moved.contains_key(k))
+        .collect();
+    let losses: Vec<_> = losses
+        .into_iter()
+        .filter(|k| !moved_from.contains(k))
+        .collect();
     let repeated = held
         .as_ref()
         .is_some_and(|h| h.iter().cloned().collect::<BTreeSet<_>>() == incoming);
@@ -256,7 +313,7 @@ pub async fn prepare(
         plan.missing = missing;
         return Ok(plan);
     }
-    missing.retain(|k, _| keys.contains(k) && !incoming.contains(k));
+    missing.retain(|k, _| keys.contains(k) && !incoming.contains(k) && !moved_from.contains(k));
     let mut cancelled: BTreeSet<_> = old
         .iter()
         .filter(|(key, (uid, _, doc, _, _, _, _))| {
@@ -282,7 +339,11 @@ pub async fn prepare(
     plan.missing = missing;
     let mut hashes: BTreeMap<_, Vec<String>> = BTreeMap::new();
     for (key, (_, _, d, status, hash, _, _)) in &old {
-        if !incoming.contains(key) && status != "superseded" && mutable(d) {
+        if !incoming.contains(key)
+            && !moved_from.contains(key)
+            && status != "superseded"
+            && mutable(d)
+        {
             hashes
                 .entry((hash.clone(), d.start, d.name.clone()))
                 .or_default()
@@ -312,12 +373,18 @@ pub async fn prepare(
         if let Some((_, _, old, _, _, _, _)) = previous {
             preserve_venue(&mut doc, old);
         }
-        let before = previous.map(|(_, _, d, _, _, _, _)| changes::normalize(d));
         let mut after = changes::normalize(&doc);
+        let moved_from_key = moved.get(&key).filter(|_| previous.is_none()).cloned();
+        // A moved occurrence diffs against the row it replaces: one `rescheduled` line.
+        let before = previous
+            .or_else(|| moved_from_key.as_ref().and_then(|k| old.get(k)))
+            .map(|(_, _, d, _, _, _, _)| changes::normalize(d));
         let supersedes = if previous.is_none() {
-            hashes
-                .get_mut(&(item.content_hash.clone(), doc.start, doc.name.clone()))
-                .and_then(Vec::pop)
+            moved_from_key.or_else(|| {
+                hashes
+                    .get_mut(&(item.content_hash.clone(), doc.start, doc.name.clone()))
+                    .and_then(Vec::pop)
+            })
         } else {
             None
         };

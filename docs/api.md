@@ -369,7 +369,11 @@ keeps its UTC time across a change, unless `event.utc_series_wall_clock` selects
 for wall-clock expansion. The default, `x_wr_timezone`, selects an explicit `X-WR-TIMEZONE`
 (Google exports UTC DTSTARTs with a local rule) or a `TZID`. `coordinates` adds the configured
 default and coordinate-derived zones, and `never` keeps every UTC series in UTC. Coordinate zones
-otherwise only place floating times and label display.
+otherwise only place floating times and label display. A UTC value that carries a `TZID`
+(not RFC 5545, but seen in feeds) follows that zone like an `X-WR-TIMEZONE`, through an embedded
+VTIMEZONE too. A UNTIL is compared as an instant, so a UNTIL inside the repeated hour keeps every
+instance before it. Floating RECURRENCE-ID, RDATE and EXDATE values resolve in the series' own
+zone, so in a UTC series they name UTC instances.
 `timezone_attribution` accompanies coordinate-derived zones; preserve it in display
 along with any OSM `attribution`. See the separately licensed data in `data/README.md`.
 
@@ -388,7 +392,11 @@ starts add `invalid_feed_item_date` without failing healthy siblings.
 Calendar rows use SEQUENCE/LAST-MODIFIED and normalized content hashes; DTSTAMP,
 unknown vendor props and fetch noise do not create changes. Explicit cancellations
 apply immediately. Disappearance needs two fresh complete snapshots. Losing over half
-the active keys holds all updates until the next identical successful snapshot.
+the active keys holds all updates until the next identical successful snapshot. An instance
+whose start moved by at most an hour without other edits (a DST re-expansion, or a series
+shifted by an hour) is a move, not a loss: a lost key pairs one-to-one, nearest first, with a new
+key of the same UID and content hash, before the hold test. The old row becomes `superseded`,
+the new row names it in `supersedes`, and one `rescheduled` change is emitted per move.
 Occurrence changes are field patches with `occurrence` equal to the serialized
 `[uid,recurrence_id]` key. Above `event.container.max_changes` (100 default), a
 single feed-level `details` change has `after.occurrence_changes` with the count;

@@ -762,6 +762,41 @@ fn document(
     doc = doc.bounded(&[])?;
     Ok((doc, start))
 }
+/// The stamp a series expands and resolves its floating RECURRENCE-ID, RDATE and EXDATE values
+/// with. A UTC DTSTART expands in UTC (RFC 5545) unless its zone source is configured for
+/// wall-clock expansion (Google exports a UTC DTSTART with a local rule and X-WR-TIMEZONE); then
+/// its wall time is DTSTART in that zone, IANA or embedded VTIMEZONE alike.
+fn series_start(
+    c: &Component,
+    start: &Stamp,
+    zones: &Zones<'_>,
+    cfg: &EventConfig,
+) -> Result<Stamp> {
+    let utc = c.value("DTSTART").is_some_and(|s| s.ends_with('Z'));
+    if !utc || start.zone.is_none() {
+        return Ok(start.clone());
+    }
+    let wall_clock = match cfg.utc_series_wall_clock {
+        crate::config::UtcSeriesWallClock::Never => false,
+        crate::config::UtcSeriesWallClock::XWrTimezone => {
+            matches!(start.source, ZoneSource::Tzid | ZoneSource::Calendar)
+        }
+        crate::config::UtcSeriesWallClock::Coordinates => true,
+    };
+    if wall_clock {
+        Ok(Stamp {
+            wall: zones.wall_at(start, start.at)?,
+            ..start.clone()
+        })
+    } else {
+        Ok(Stamp {
+            zone: None,
+            source: ZoneSource::None,
+            wall: start.at.naive_utc(),
+            ..start.clone()
+        })
+    }
+}
 fn expand(
     c: &Component,
     start: &Stamp,
@@ -771,36 +806,12 @@ fn expand(
     cfg: &EventConfig,
     deadline: std::time::Instant,
 ) -> Result<BTreeMap<DateTime<Utc>, Option<Duration>>> {
-    // A UTC DTSTART expands in UTC (RFC 5545) unless its zone source is configured for wall-clock
-    // expansion: Google exports a UTC DTSTART with a local recurring rule and X-WR-TIMEZONE.
-    let utc = c.value("DTSTART").is_some_and(|s| s.ends_with('Z'));
-    let wall_clock = utc
-        && start.zone.is_some()
-        && match cfg.utc_series_wall_clock {
-            crate::config::UtcSeriesWallClock::Never => false,
-            crate::config::UtcSeriesWallClock::XWrTimezone => {
-                matches!(start.source, ZoneSource::Tzid | ZoneSource::Calendar)
-            }
-            crate::config::UtcSeriesWallClock::Coordinates => true,
-        };
-    let series;
-    let start = if utc && !wall_clock {
-        series = Stamp {
-            zone: None,
-            source: ZoneSource::None,
-            wall: start.at.naive_utc(),
-            ..start.clone()
-        };
-        &series
-    } else {
-        start
-    };
-    let mut wall_start = start.wall;
-    if wall_clock {
-        if let Some(z) = start.zone.as_deref().and_then(time::zone) {
-            wall_start = start.at.with_timezone(&z).naive_local();
-        }
-    }
+    let series = series_start(c, start, zones, cfg).unwrap_or_else(|_| start.clone());
+    let start = &series;
+    let wall_start = start.wall;
+    // A UNTIL instant is compared as an instant: its wall time may fall in a repeated or skipped
+    // hour, so the rule runs an hour past it and instances after it are dropped.
+    let mut until_at = None;
     let mut out = BTreeMap::new();
     out.insert(start.at, None);
     if let Some(rule) = c.value("RRULE") {
@@ -834,21 +845,19 @@ fn expand(
                         .unwrap_or_default(),
                     value: v.into(),
                 };
-                let mut until = zones.stamp(&prop, v)?;
-                if v.len() == 8 {
+                let mut until = zones.series_stamp(&prop, v, start)?;
+                let wall = if v.len() == 8 {
                     until.wall = until
                         .wall
                         .checked_add_signed(Duration::days(1) - Duration::seconds(1))
                         .context("UNTIL overflow")?;
-                }
-                let wall = if v.ends_with('Z') {
-                    if let Some(z) = start.zone.as_deref().and_then(time::zone) {
-                        until.at.with_timezone(&z).naive_local()
-                    } else {
-                        until.wall
-                    }
-                } else {
                     until.wall
+                } else {
+                    until_at = Some(until.at);
+                    zones
+                        .wall_at(start, until.at)?
+                        .checked_add_signed(Duration::hours(1))
+                        .context("UNTIL overflow")?
                 };
                 parts.push(format!("UNTIL={}Z", wall.format("%Y%m%dT%H%M%S")));
             } else {
@@ -879,6 +888,9 @@ fn expand(
             } else {
                 zones.at_wall(start, d.naive_utc())?
             };
+            if until_at.is_some_and(|until| at > until) {
+                continue;
+            }
             if at > hi {
                 break;
             }
@@ -1043,6 +1055,9 @@ pub fn parse(
                 start.source = ZoneSource::Coordinates;
             }
         }
+        // From here on the series stamp: RECURRENCE-ID keys, expansion and overrides agree.
+        // A zone that cannot convert keeps the plain stamp; its occurrences fail one by one below.
+        let start = series_start(c, &start, &zones, cfg).unwrap_or(start);
         let uid = c.text("UID").filter(|s| !s.is_empty());
         let volatile = uid.is_none() && platform_id(&doc.url).is_none();
         let uid = if base.host_str().is_some_and(|s| s.starts_with("eventfrog."))
@@ -1202,7 +1217,7 @@ pub fn parse(
                 });
                 if let Some(((_, r), (c, override_doc, override_start, s, m, _))) = override_ {
                     let original = c.get("RECURRENCE-ID").context("override key")?;
-                    let original = zones.stamp(original, &original.value)?;
+                    let original = zones.series_stamp(original, &original.value, start)?;
                     d = override_doc.clone();
                     d.start = at.checked_add_signed(override_start.at - original.at);
                     if d.start.is_none() {

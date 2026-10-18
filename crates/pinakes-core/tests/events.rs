@@ -2825,3 +2825,244 @@ fn round15_utc_series_wall_clock_modes() {
         "RFC 5545 unless X-WR-TIMEZONE or TZID says otherwise"
     );
 }
+
+/// An Outlook-style embedded VTIMEZONE with Central European rules under a name no IANA lookup
+/// knows, so it resolves only through the embedded definition.
+const CUSTOM_EUROPE: &str = "BEGIN:VTIMEZONE\r\nTZID:Custom Europe\r\nBEGIN:STANDARD\r\nDTSTART:16010101T030000\r\nTZOFFSETFROM:+0200\r\nTZOFFSETTO:+0100\r\nRRULE:FREQ=YEARLY;BYDAY=-1SU;BYMONTH=10\r\nEND:STANDARD\r\nBEGIN:DAYLIGHT\r\nDTSTART:16010101T020000\r\nTZOFFSETFROM:+0100\r\nTZOFFSETTO:+0200\r\nRRULE:FREQ=YEARLY;BYDAY=-1SU;BYMONTH=3\r\nEND:DAYLIGHT\r\nEND:VTIMEZONE\r\n";
+
+/// Round 16 Q3 (K61): a UTC DTSTART carrying a TZID that names an embedded VTIMEZONE (not RFC
+/// 5545, seen in the wild) expands on that zone's wall clock consistently: DTSTART 08:00Z is
+/// 10:00 summer time, so the series stays at 10:00 local, 09:00Z after the change.
+#[test]
+fn round16_utc_value_with_an_embedded_zone_tzid_expands_consistently() {
+    assert_eq!(
+        starts_at(
+            CUSTOM_EUROPE,
+            "DTSTART;TZID=Custom Europe:20261024T080000Z\r\nRRULE:FREQ=DAILY;COUNT=3\r\n",
+            "2026-10-18T00:00:00Z",
+            &EventConfig::default()
+        ),
+        [
+            "2026-10-24T08:00Z",
+            "2026-10-25T09:00Z",
+            "2026-10-26T09:00Z"
+        ]
+    );
+}
+
+/// Round 16 Q4: UNTIL is an instant. UNTIL=…011000Z is 02:10 in the second pass of the repeated
+/// hour; the 02:15 instance that day is its first pass (00:15Z), before UNTIL, so it stays.
+#[test]
+fn round16_until_in_the_repeated_hour_compares_instants() {
+    assert_eq!(
+        starts_at(
+            "X-WR-TIMEZONE:Europe/Zurich\r\n",
+            "DTSTART:20261023T001500Z\r\nRRULE:FREQ=DAILY;UNTIL=20261025T011000Z\r\n",
+            "2026-10-18T00:00:00Z",
+            &EventConfig::default()
+        ),
+        [
+            "2026-10-23T00:15Z",
+            "2026-10-24T00:15Z",
+            "2026-10-25T00:15Z"
+        ]
+    );
+}
+
+/// Round 16 Q5: a floating RECURRENCE-ID resolves with the series stamp, like floating RDATE and
+/// EXDATE: in a GEO-only UTC series it names the UTC instance, not a Zurich wall time.
+#[test]
+fn round16_floating_recurrence_id_overrides_the_utc_instance() {
+    let body = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:override-series\r\nSUMMARY:Daily\r\nGEO:47;8\r\nDTSTART:20261020T100000Z\r\nRRULE:FREQ=DAILY;COUNT=3\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:override-series\r\nSUMMARY:Moved\r\nGEO:47;8\r\nRECURRENCE-ID:20261021T100000\r\nDTSTART:20261021T120000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    let doc = calendar::parse(
+        "https://example.org/override.ics",
+        body.as_bytes(),
+        &EventConfig::default(),
+        "2026-10-18T00:00:00Z".parse().unwrap(),
+    )
+    .unwrap();
+    let rows: Vec<(String, String)> = doc
+        .container
+        .unwrap()
+        .occurrences
+        .iter()
+        .map(|o| {
+            (
+                o.doc.start.unwrap().format("%Y-%m-%dT%H:%MZ").to_string(),
+                o.doc.name.clone().unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("2026-10-20T10:00Z".into(), "Daily".into()),
+            ("2026-10-21T12:00Z".into(), "Moved".into()),
+            ("2026-10-22T10:00Z".into(), "Daily".into())
+        ]
+    );
+}
+
+/// Round 16 Q6: the configured `default_timezone` is a derived zone like coordinates, and UNTIL,
+/// RDATE and EXDATE follow the series under every `utc_series_wall_clock` mode.
+#[test]
+fn round16_default_zone_and_series_parts_per_mode() {
+    use pinakes_core::config::UtcSeriesWallClock::{Coordinates, Never, XWrTimezone};
+    let now = "2026-10-18T00:00:00Z";
+    let series = "DTSTART:20261025T004800Z\r\nRRULE:FREQ=DAILY;COUNT=2\r\n";
+    for (mode, expected) in [
+        (XWrTimezone, ["2026-10-25T00:48Z", "2026-10-26T00:48Z"]),
+        (Coordinates, ["2026-10-25T00:48Z", "2026-10-26T01:48Z"]),
+        (Never, ["2026-10-25T00:48Z", "2026-10-26T00:48Z"]),
+    ] {
+        let cfg = EventConfig {
+            utc_series_wall_clock: mode,
+            default_timezone: Some("Europe/Zurich".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            starts_at("", series, now, &cfg),
+            expected,
+            "{mode:?} default zone"
+        );
+    }
+    // X-WR-TIMEZONE feed: UNTIL (UTC), an RDATE and an EXDATE on the series.
+    let parts = "DTSTART:20261024T004800Z\r\nRRULE:FREQ=DAILY;UNTIL=20261026T004800Z\r\nRDATE:20261027T004800Z\r\nEXDATE:20261025T004800Z\r\n";
+    let x_wr = "X-WR-TIMEZONE:Europe/Zurich\r\n";
+    for (mode, expected) in [
+        // Wall clock: 26 Oct 02:48 winter time is 01:48Z, after UNTIL.
+        (XWrTimezone, vec!["2026-10-24T00:48Z", "2026-10-27T00:48Z"]),
+        (Coordinates, vec!["2026-10-24T00:48Z", "2026-10-27T00:48Z"]),
+        (
+            Never,
+            vec![
+                "2026-10-24T00:48Z",
+                "2026-10-26T00:48Z",
+                "2026-10-27T00:48Z",
+            ],
+        ),
+    ] {
+        let cfg = EventConfig {
+            utc_series_wall_clock: mode,
+            ..Default::default()
+        };
+        assert_eq!(
+            starts_at(x_wr, parts, now, &cfg),
+            expected,
+            "{mode:?} parts"
+        );
+    }
+}
+
+/// Round 16 Q1: re-expanding a GEO-only UTC series under the round-15 default moves the instances
+/// after a DST change by an hour (new keys). Paired as moves, they neither hold the feed nor emit
+/// cancellations: one `rescheduled` line per shifted instance. The 2036-10-26 change keeps the
+/// test independent of the clock; an unrelated loss of most keys still holds.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round16_dst_reexpansion_moves_instances_without_hold_or_cancellations(pool: PgPool) {
+    use pinakes_core::config::UtcSeriesWallClock::Coordinates;
+    let uri = "https://example.org/geo-series.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let body = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:geo-daily\r\nSUMMARY:Daily meetup\r\nGEO:47;8\r\nDTSTART:20361024T004800Z\r\nDTEND:20361024T014800Z\r\nRRULE:FREQ=DAILY;COUNT=10\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    let now: DateTime<Utc> = "2036-10-20T00:00:00Z".parse().unwrap();
+    let parse_with = |cfg: &EventConfig| calendar::parse(uri, body.as_bytes(), cfg, now).unwrap();
+    // As stored before round 15: wall-clock expansion in the coordinate zone.
+    let before = fresh(&parse_with(&EventConfig {
+        utc_series_wall_clock: Coordinates,
+        ..Default::default()
+    }));
+    store::save_document(&pool, &id, 0, &before).await.unwrap();
+    let starts = |doc: &ResourceMeta| {
+        doc.container
+            .as_ref()
+            .unwrap()
+            .occurrences
+            .iter()
+            .map(|o| o.doc.start.unwrap())
+            .collect::<Vec<_>>()
+    };
+    let after = fresh(&parse_with(&EventConfig::default()));
+    let shifted = starts(&before)
+        .iter()
+        .filter(|at| !starts(&after).contains(at))
+        .count();
+    // 26 October 00:48Z is 02:48 summer time (the first pass of the repeated hour), so the seven
+    // instances from 27 October move.
+    assert_eq!(
+        shifted, 7,
+        "the seven instances after the change move by an hour"
+    );
+    store::save_document(&pool, &id, 0, &after).await.unwrap();
+    let (hold_count, held): (i32, bool) = sqlx::query_as(
+        "SELECT hold_count,held_keys IS NOT NULL FROM event_fetch WHERE resource_id=$1",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((hold_count, held), (0, false), "no hold");
+    let statuses: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT status,count(*) FROM occurrence WHERE resource_id=$1 GROUP BY 1 ORDER BY 1",
+    )
+    .bind(&id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        statuses,
+        [("scheduled".into(), 10), ("superseded".into(), 7)]
+    );
+    let active: Vec<DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT start_at FROM occurrence WHERE resource_id=$1 AND status='scheduled' ORDER BY 1",
+    )
+    .bind(&id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(active, starts(&after));
+    let classes: Vec<String> = sqlx::query_scalar(
+        "SELECT class FROM resource_change WHERE resource_id=$1 AND occurrence_key IS NOT NULL ORDER BY seq",
+    )
+    .bind(&id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(classes.iter().filter(|c| *c == "cancelled").count(), 0);
+    assert_eq!(classes.iter().filter(|c| *c == "rescheduled").count(), 7);
+    // The next refresh changes nothing.
+    store::save_document(&pool, &id, 0, &fresh(&after))
+        .await
+        .unwrap();
+    let again: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM resource_change WHERE resource_id=$1 AND occurrence_key IS NOT NULL",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(again as usize, classes.len());
+    // An unrelated feed losing most of its keys is still held.
+    let other = "https://example.org/other.ics";
+    let other_id = store::ensure_resource(&pool, other).await.unwrap();
+    let events = |n: usize| {
+        let mut body = String::from("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n");
+        for i in 0..n {
+            body.push_str(&format!("BEGIN:VEVENT\r\nUID:single-{i}\r\nSUMMARY:Single {i}\r\nDTSTART:2036102{i}T100000Z\r\nEND:VEVENT\r\n"));
+        }
+        body.push_str("END:VCALENDAR\r\n");
+        fresh(&calendar::parse(other, body.as_bytes(), &EventConfig::default(), now).unwrap())
+    };
+    store::save_document(&pool, &other_id, 0, &events(4))
+        .await
+        .unwrap();
+    store::save_document(&pool, &other_id, 0, &events(1))
+        .await
+        .unwrap();
+    let held: bool =
+        sqlx::query_scalar("SELECT held_keys IS NOT NULL FROM event_fetch WHERE resource_id=$1")
+            .bind(&other_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(held);
+}

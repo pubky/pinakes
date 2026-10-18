@@ -215,6 +215,45 @@ pub async fn reextract_outdated(
     }
 }
 
+/// Re-parse calendars once after `event.utc_series_wall_clock` changes, since an unchanged feed
+/// would otherwise keep answering 304 with documents expanded under the old mode. Runs at startup
+/// under the instance lock, before `reextract_outdated`. The applied mode is stored in
+/// `instance_setting`; on a change, `ok` event and event_platform documents are marked outdated
+/// (`extracted_with=0`, re-queued by `reextract_outdated`) and every calendar fetch loses its
+/// validators, so even without the re-extraction wave the next fetch re-parses. The first start
+/// only records the mode. Returns the number of documents marked.
+pub async fn apply_calendar_mode(
+    pool: &PgPool,
+    mode: crate::config::UtcSeriesWallClock,
+) -> Result<u64> {
+    let value = serde_json::to_value(mode)?
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let mut tx = pool.begin().await?;
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM instance_setting WHERE key='event.utc_series_wall_clock' FOR UPDATE",
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    let mut marked = 0;
+    if stored.as_deref().is_some_and(|s| s != value) {
+        marked = sqlx::query("UPDATE resource SET extracted_with=0 WHERE status='ok' AND coalesce(extracted_by,resolver) IN ('event','event_platform') AND coalesce(extracted_with,0)<>0")
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        sqlx::query("UPDATE event_fetch SET validators='{}' WHERE validators<>'{}'")
+            .execute(&mut *tx)
+            .await?;
+    }
+    sqlx::query("INSERT INTO instance_setting(key,value) VALUES('event.utc_series_wall_clock',$1) ON CONFLICT(key) DO UPDATE SET value=excluded.value,applied_at=CASE WHEN instance_setting.value=excluded.value THEN instance_setting.applied_at ELSE now() END")
+        .bind(&value)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(marked)
+}
+
 pub fn backoff(cfg: &QueueConfig, attempt: u32) -> u64 {
     cfg.backoff_secs
         .saturating_mul(

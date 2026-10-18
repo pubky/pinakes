@@ -1590,3 +1590,60 @@ async fn round14_a_304_never_marks_a_rerouted_document_current(pool: PgPool) {
         .unwrap();
     assert_eq!(route(ids[0].clone()).await.as_deref(), Some("event"));
 }
+
+/// Round 16 Q2: a change of `event.utc_series_wall_clock` re-parses calendars once, even unchanged
+/// feeds that would answer 304; the first start only records the mode.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round16_a_calendar_mode_change_reparses_unchanged_feeds_once(pool: PgPool) {
+    use pinakes_core::config::UtcSeriesWallClock::{Never, XWrTimezone};
+    let feed = "https://example.org/mode.ics";
+    let id = store::ensure_resource(&pool, feed).await.unwrap();
+    let mut doc = ResourceMeta::new(feed, "event", 6 * 3600);
+    doc.name = Some("Calendar".into());
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    sqlx::query(
+        r#"INSERT INTO event_fetch(resource_id,validators) VALUES($1,'{"etag":"\"v1\""}')"#,
+    )
+    .bind(&id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE resource SET next_attempt_at=now()+interval '6 days' WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let versions = pinakes_core::resolver::extractor_versions();
+    let current = extractor(&pool, &id).await;
+    assert_eq!(
+        queue::apply_calendar_mode(&pool, XWrTimezone)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        queue::apply_calendar_mode(&pool, XWrTimezone)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(extractor(&pool, &id).await, current);
+    assert_ne!(validators(&pool, &id).await, serde_json::json!({}));
+    assert_eq!(
+        queue::reextract_outdated(&pool, 21600, &versions)
+            .await
+            .unwrap(),
+        0
+    );
+    // The operator switches the mode: marked once, validators gone, re-queued by the wave.
+    assert_eq!(queue::apply_calendar_mode(&pool, Never).await.unwrap(), 1);
+    assert_eq!(extractor(&pool, &id).await, (Some("event".into()), Some(0)));
+    assert_eq!(validators(&pool, &id).await, serde_json::json!({}));
+    assert_eq!(
+        queue::reextract_outdated(&pool, 21600, &versions)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(queue::apply_calendar_mode(&pool, Never).await.unwrap(), 0);
+}

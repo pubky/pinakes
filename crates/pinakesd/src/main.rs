@@ -72,6 +72,13 @@ async fn main() -> Result<()> {
     if requeued > 0 {
         tracing::info!(requeued, "re-queued documents saved under another resolver");
     }
+    let remodelled = queue::apply_calendar_mode(&pool, config.event.utc_series_wall_clock).await?;
+    if remodelled > 0 {
+        tracing::info!(
+            remodelled,
+            "event.utc_series_wall_clock changed: calendars re-parse once"
+        );
+    }
     if config.queue.reextract_on_upgrade {
         let reextract = queue::reextract_outdated(
             &pool,

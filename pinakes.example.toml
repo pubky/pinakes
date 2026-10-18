@@ -183,8 +183,9 @@ reach_cost = 6
 # pinakes_blocked_resources keeps this many registrable domains plus "other" (1–500).
 blocked_metric_hosts = 20
 # Browser origins allowed to call the public listener (CORS). ["*"] allows any origin (the public
-# API takes no cookies or tokens); list origins such as "https://pubky.app" to restrict; [] sends
-# no CORS headers. The admin listener never sends CORS headers.
+# API takes no cookies or tokens); list exact origins such as "https://pubky.app" to restrict (no
+# wildcard patterns like "https://*.pubky.app"); [] sends no CORS headers. The admin listener
+# never sends CORS headers.
 cors_allow_origins = ["*"]
 
 [cards]
