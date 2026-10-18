@@ -54,17 +54,20 @@ pub fn timestamp_at(raw: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>> {
         if offset.is_empty() {
             return Ok(minute);
         }
-        // A raw `now+30d` in a query string arrives as `now 30d` (form decoding).
-        let (sign, amount) = match offset.split_at(1) {
-            ("+" | " ", rest) => (1, rest),
-            ("-", rest) => (-1, rest),
+        // A raw `now+30d` in a query string arrives as `now 30d` (form decoding). Client input:
+        // match ASCII bytes and slice only after one, never at an arbitrary byte index.
+        let sign = match offset.as_bytes()[0] {
+            b'+' | b' ' => 1,
+            b'-' => -1,
             _ => anyhow::bail!("relative time is now, now+N(d|h) or now-N(d|h)"),
         };
-        let (digits, hours) = match amount.split_at(amount.len().saturating_sub(1)) {
-            (digits, "d") => (digits, 24),
-            (digits, "h") => (digits, 1),
+        let amount = &offset[1..];
+        let hours = match amount.as_bytes().last() {
+            Some(b'd') => 24,
+            Some(b'h') => 1,
             _ => anyhow::bail!("relative time unit is d or h"),
         };
+        let digits = &amount[..amount.len() - 1];
         ensure!(
             !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) && digits.len() <= 6,
             "relative time amount is a whole number"
@@ -102,6 +105,11 @@ pub struct Filters {
 }
 impl Filters {
     pub fn parse(q: &SearchQuery, config: &SearchConfig) -> Result<Self> {
+        Self::parse_at(q, config, Utc::now())
+    }
+    /// `parse` with relative times (`now`, `now+7d`) resolved against `now`: a search cursor pins
+    /// it, so every page of one query uses the same window.
+    pub fn parse_at(q: &SearchQuery, config: &SearchConfig, now: DateTime<Utc>) -> Result<Self> {
         ensure!(
             q.bbox.is_none() || q.near.is_none(),
             "bbox and near are mutually exclusive"
@@ -124,8 +132,16 @@ impl Filters {
         );
         let mut out = Self {
             bbox: q.bbox.as_deref().map(Bbox::parse).transpose()?,
-            from: q.from.as_deref().map(timestamp).transpose()?,
-            to: q.to.as_deref().map(timestamp).transpose()?,
+            from: q
+                .from
+                .as_deref()
+                .map(|raw| timestamp_at(raw, now))
+                .transpose()?,
+            to: q
+                .to
+                .as_deref()
+                .map(|raw| timestamp_at(raw, now))
+                .transpose()?,
             ..Default::default()
         };
         if let Some(raw) = &q.near {
@@ -281,6 +297,13 @@ mod tests {
             );
         }
         for bad in [
+            "nowé",
+            "now+é",
+            "now+1é",
+            "now-é",
+            "now+1😀",
+            "now😀",
+            "now\u{FFFD}",
             "now+",
             "now+d",
             "now+3",

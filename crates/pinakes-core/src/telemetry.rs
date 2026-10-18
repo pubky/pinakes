@@ -45,6 +45,8 @@ pub struct Metrics {
     blocked_hosts: usize,
     pub group_url_demotions: IntCounter,
     pub group_pair_budget: IntCounter,
+    /// Public API handler panics answered 500 by the backstop layer.
+    pub api_panics: IntCounter,
     pub ingest_lag: IntGauge,
     pub ingest_success: IntGauge,
     pub ingest_resets: IntCounter,
@@ -90,7 +92,13 @@ impl Metrics {
             "Grouping plans committed with bounded partial evidence",
         )?;
         registry.register(Box::new(group_pair_budget.clone()))?;
+        let api_panics = IntCounter::new(
+            "pinakes_api_panics_total",
+            "Public API requests whose handler panicked (answered 500)",
+        )?;
+        registry.register(Box::new(api_panics.clone()))?;
         let out = Self {
+            api_panics,
             group_pair_budget,
             group_url_demotions,
             ingest_rejected: metric!(

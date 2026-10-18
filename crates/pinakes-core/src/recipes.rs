@@ -108,11 +108,13 @@ pub const NONE: &str = "(none)";
 
 /// Add every recipe to the public document as named examples. Body recipes become request body
 /// examples. Parameter recipes become examples on the parameters they use, under the recipe's
-/// name. Swagger UI lists examples by key, alphabetically, and fills each parameter from the
-/// first one; a parameter that not every recipe of its operation uses therefore starts with an
-/// empty `(none)` example, which Swagger UI leaves out of the request, so picking a recipe in the
-/// dropdowns of the parameters it uses sends exactly that recipe. Panics on a recipe for an
-/// unknown operation or with a key that names none of its parameters.
+/// name. The document's example maps are serde_json maps, whose keys serialize sorted, and Swagger
+/// UI fills each parameter from the first example it lists; a parameter that not every recipe of
+/// its operation uses therefore starts with an empty `(none)` example (`(` sorts before letters),
+/// which Swagger UI leaves out of the request, so picking a recipe in the dropdowns of the
+/// parameters it uses sends exactly that recipe. Panics on a recipe for an unknown operation, or
+/// with a key that names no parameter of its operation in the right place (`params` are path
+/// parameters, `query` keys query parameters).
 pub fn apply(doc: &mut Value) {
     let mut by_operation = BTreeMap::<(String, String), Vec<Recipe>>::new();
     for recipe in recipes() {
@@ -140,15 +142,20 @@ pub fn apply(doc: &mut Value) {
             .get_mut("parameters")
             .and_then(Value::as_array_mut)
             .unwrap_or(&mut empty);
-        let names: Vec<String> = parameters
+        let names: Vec<(String, String)> = parameters
             .iter()
-            .filter_map(|p| p["name"].as_str().map(str::to_owned))
+            .filter_map(|p| Some((p["name"].as_str()?.to_owned(), p["in"].as_str()?.to_owned())))
             .collect();
         for recipe in &recipes {
-            for key in recipe.params.keys().chain(recipe.query.keys()) {
+            let keys = recipe
+                .params
+                .keys()
+                .map(|k| (k, "path"))
+                .chain(recipe.query.keys().map(|k| (k, "query")));
+            for (key, place) in keys {
                 assert!(
-                    names.contains(key),
-                    "recipe {}: `{key}` is not a parameter of {method} {path}",
+                    names.iter().any(|(n, i)| n == key && i == place),
+                    "recipe {}: `{key}` is not a {place} parameter of {method} {path}",
                     recipe.name
                 );
             }
@@ -239,7 +246,29 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert!(
-            message.contains("`q` is not a parameter of get /v1/search"),
+            message.contains("`q` is not a query parameter of get /v1/search"),
+            "{message}"
+        );
+        // A path key placed under `query` is refused too (round 5 S15).
+        let mut misplaced =
+            serde_json::to_value(<crate::api::ApiDoc as utoipa::OpenApi>::openapi())
+                .expect("document");
+        for p in misplaced["paths"]["/v1/resources/{id}"]["get"]["parameters"]
+            .as_array_mut()
+            .unwrap()
+        {
+            if p["name"] == "id" {
+                p["in"] = "query".into();
+            }
+        }
+        let refused = std::panic::catch_unwind(move || apply(&mut misplaced))
+            .expect_err("a path key under query must fail");
+        let message = refused
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            message.contains("`id` is not a path parameter"),
             "{message}"
         );
     }

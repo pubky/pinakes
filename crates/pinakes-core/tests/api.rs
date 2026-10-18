@@ -1390,3 +1390,208 @@ async fn startup_accepts_the_installed_h3_extension(pool: PgPool) {
     );
     assert!(error.contains("ALTER EXTENSION h3 UPDATE"), "{error}");
 }
+
+async fn send_raw(app: &Router, method: &str, target: &str, body: Option<Value>) -> StatusCode {
+    let mut request = Request::builder().method(method).uri(target);
+    if body.is_some() {
+        request = request.header("content-type", "application/json");
+    }
+    let mut request = request
+        .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.11:1234".parse::<SocketAddr>().unwrap(),
+    ));
+    app.clone().oneshot(request).await.unwrap().status()
+}
+
+/// Step 6 round 5 S10: multibyte input after `now` was sliced at a byte index and panicked.
+/// S11: every public query parameter, path parameter and body field, taken from the served
+/// document, gets multibyte, emoji and invalid-UTF-8 values; no request may panic or answer 500.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round5_multibyte_input_never_panics_any_public_route(pool: PgPool) {
+    let mut config = Config::default();
+    config.api.requests_per_minute = 1_000_000;
+    let state = AppState::new(pool, config).unwrap();
+    let panics = state.metrics.api_panics.clone();
+    let app = api::router(state);
+    for (method, target, body) in [
+        ("GET", "/v1/search?from=now%C3%A9", None),
+        ("GET", "/v1/search?to=now%2B%C3%A9", None),
+        ("GET", "/v1/search?from=now%2B1%F0%9F%98%80", None),
+        ("GET", "/v1/search?from=now%FF", None),
+        (
+            "POST",
+            "/v1/changes/lookup",
+            Some(json!({"resource_ids":["0123456789abcdef0123456789abcdef"],"since":"nowé"})),
+        ),
+        (
+            "POST",
+            "/v1/changes/lookup",
+            Some(json!({"resource_ids":["0123456789abcdef0123456789abcdef"],"since":"now-é"})),
+        ),
+    ] {
+        assert_eq!(
+            send_raw(&app, method, target, body.clone()).await,
+            StatusCode::BAD_REQUEST,
+            "{method} {target} {body:?}"
+        );
+    }
+    let values = [
+        "é",
+        "😀",
+        "nowé",
+        "now+é",
+        "now+1é",
+        "now-😀",
+        "a\u{FFFD}b",
+        "日本語",
+        "now 😀d",
+    ];
+    let doc = api::openapi_document();
+    let id = "0123456789abcdef0123456789abcdef";
+    let encode = |v: &str| url::form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>();
+    let mut sent = 0;
+    for (path, item) in doc["paths"].as_object().unwrap() {
+        for (method, operation) in item.as_object().unwrap() {
+            let method = method.to_ascii_uppercase();
+            let parameters = operation["parameters"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let fill = |except: Option<&str>, value: &str| {
+                let mut target = path.clone();
+                for p in &parameters {
+                    if p["in"] == "path" {
+                        let name = p["name"].as_str().unwrap();
+                        let v = if Some(name) == except {
+                            encode(value)
+                        } else {
+                            id.into()
+                        };
+                        target = target.replace(&format!("{{{name}}}"), &v);
+                    }
+                }
+                target
+            };
+            let body_schema = {
+                let schema = &operation["requestBody"]["content"]["application/json"]["schema"];
+                match schema["$ref"].as_str() {
+                    Some(r) => doc["components"]["schemas"][r.rsplit('/').next().unwrap()].clone(),
+                    None => schema.clone(),
+                }
+            };
+            for value in values {
+                for p in &parameters {
+                    let name = p["name"].as_str().unwrap();
+                    let target = if p["in"] == "path" {
+                        fill(Some(name), value)
+                    } else {
+                        format!("{}?{name}={}", fill(None, value), encode(value))
+                    };
+                    let body = body_schema.is_object().then(|| json!({}));
+                    let status = send_raw(&app, &method, &target, body).await;
+                    assert_ne!(
+                        status,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "{method} {target}"
+                    );
+                    sent += 1;
+                }
+                if let Some(properties) = body_schema["properties"].as_object() {
+                    for (field, schema) in properties {
+                        let v = if schema["type"] == "array" {
+                            json!([value])
+                        } else {
+                            json!(value)
+                        };
+                        let mut body = serde_json::Map::new();
+                        // Valid companions, so the field under test is what gets parsed.
+                        for (other, s) in properties {
+                            if other != field && s["type"] == "array" {
+                                body.insert(other.clone(), json!([id]));
+                            }
+                        }
+                        body.insert(field.clone(), v);
+                        let target = fill(None, value);
+                        let status =
+                            send_raw(&app, &method, &target, Some(Value::Object(body))).await;
+                        assert_ne!(
+                            status,
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "{method} {target} {field}={value}"
+                        );
+                        sent += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        sent > 300,
+        "only {sent} requests: the sweep lost its routes"
+    );
+    assert_eq!(panics.get(), 0, "no handler panicked");
+}
+
+/// Step 6 round 5 S12: page two of a relative-window search resolves `now` at the cursor's
+/// pinned instant, so an event that started between the two page fetches is not skipped.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round5_relative_windows_are_pinned_by_the_search_cursor(pool: PgPool) {
+    use chrono::Timelike;
+    // Leave room before the next minute boundary for page one and the events it lists.
+    if Utc::now().second() >= 50 {
+        tokio::time::sleep(std::time::Duration::from_secs(
+            61 - u64::from(Utc::now().second()),
+        ))
+        .await;
+    }
+    let base = Utc::now() + chrono::Duration::seconds(3);
+    let mut ids = vec![];
+    for (i, offset) in [0i64, 2].into_iter().enumerate() {
+        let uri = format!("https://events.example/soon-{i}");
+        let id = store::ensure_resource(&pool, &uri).await.unwrap();
+        let mut doc = ResourceMeta::new(&uri, "web", 86400);
+        doc.set_type("Event");
+        doc.name = Some(format!("Soon {i}"));
+        doc.start = Some(base + chrono::Duration::seconds(offset));
+        doc.end = doc.start.map(|s| s + chrono::Duration::hours(1));
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+        sqlx::query("INSERT INTO reference(resource_id,kind,author,label,object_path,created_at) VALUES($1,'tag',$2,'soon',$1,now())")
+            .bind(&id)
+            .bind("y".repeat(52))
+            .execute(&pool)
+            .await
+            .unwrap();
+        ids.push(id);
+    }
+    let app = api::router(AppState::new(pool, Config::default()).unwrap());
+    let (code, page) = call(
+        &app,
+        "GET",
+        "/v1/search?type=Event&from=now&sort=start&limit=1",
+        None,
+    )
+    .await;
+    assert_eq!(code, 200, "{page}");
+    assert_eq!(page["items"][0]["resource_id"], ids[0]);
+    let cursor = page["cursor"].as_str().unwrap().to_owned();
+    // Cross the minute boundary: `now` alone would now resolve after both starts.
+    tokio::time::sleep(std::time::Duration::from_secs(
+        61 - u64::from(Utc::now().second()),
+    ))
+    .await;
+    assert!(Utc::now() > base + chrono::Duration::seconds(2));
+    let (code, next) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?type=Event&from=now&sort=start&limit=1&cursor={cursor}"),
+        None,
+    )
+    .await;
+    assert_eq!(code, 200, "{next}");
+    assert_eq!(
+        next["items"][0]["resource_id"], ids[1],
+        "page two keeps page one's window"
+    );
+}

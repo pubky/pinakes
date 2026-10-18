@@ -47,3 +47,7 @@ groups:
         for: 30m
         labels: {severity: warning}
         annotations: {summary: "More than a thousand Pinakes refreshes overdue for thirty minutes"}
+      - alert: ApiPanics
+        expr: increase(pinakes_api_panics_total[15m]) > 0
+        labels: {severity: warning}
+        annotations: {summary: "A Pinakes public API handler panicked; the request was answered 500"}

@@ -53,9 +53,10 @@ are the deterministic hashes of the seed URIs, so the requests return data on an
 indexed them.
 
 Times may be relative to the request: search's `from` and `to` and the change lookup's `since`
-accept `now`, `now+30d` or
+(a string, or an integer of Unix milliseconds) accept `now`, `now+30d` or
 `now-12h` (days or hours, from the current minute), so the events and freshness recipes never go
-stale. In a raw query string `+` decodes to a space, and `now 30d` is accepted as `now+30d`.
+stale. Later pages of one search resolve them at the instant its cursor pins, so the window
+does not move between pages. In a raw query string `+` decodes to a space, and `now 30d` is accepted as `now+30d`.
 
 Three caveats:
 
@@ -412,6 +413,12 @@ by default `127.0.0.1:9090`; the public route returns 404. It uses Prometheus te
 format. The admin listener has no resource routes. `admin_token` (env
 `PINAKES__ADMIN_TOKEN`) requires a constant-time Bearer check on all admin routes.
 Non-loopback binds without a token are refused; use TLS at the reverse proxy.
+
+A public handler that panics is answered `500 internal server error` by a backstop layer
+(tower-http `CatchPanicLayer`) instead of a dropped connection, counted in
+`pinakes_api_panics_total` and alerted as `ApiPanics`. Request parsing does not slice client
+input at byte indexes; a test sends multibyte, emoji and invalid-UTF-8 values in every public
+query parameter, path parameter and body field, and expects no panic.
 
 Public `/v1/info` exposes manifests and status but no Nexus URL, source errors or metric
 samples. Admin `GET /v1/info` includes full ingestion/source/canary state and numerical

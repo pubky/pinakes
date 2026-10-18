@@ -84,8 +84,17 @@
             "type": "array"
           },
           "since": {
-            "description": "RFC3339, Unix milliseconds, or relative to the request (`now-30d`).",
-            "type": "string"
+            "oneOf": [
+              {
+                "description": "RFC 3339, Unix milliseconds as text, or now-Nd|h",
+                "type": "string"
+              },
+              {
+                "description": "Unix milliseconds",
+                "format": "int64",
+                "type": "integer"
+              }
+            ]
           }
         },
         "required": [

@@ -46,12 +46,33 @@ pub struct ChangePage {
     pub has_more: bool,
     pub oldest_cursor: i64,
 }
+/// `since`: a string (RFC 3339, Unix milliseconds as text, or `now-30d`) or an integer (Unix ms).
+fn since_schema() -> utoipa::openapi::schema::Schema {
+    use utoipa::openapi::schema::{
+        KnownFormat, ObjectBuilder, OneOfBuilder, Schema, SchemaFormat, Type,
+    };
+    Schema::OneOf(
+        OneOfBuilder::new()
+            .item(
+                ObjectBuilder::new()
+                    .schema_type(Type::String)
+                    .description(Some("RFC 3339, Unix milliseconds as text, or now-Nd|h")),
+            )
+            .item(
+                ObjectBuilder::new()
+                    .schema_type(Type::Integer)
+                    .format(Some(SchemaFormat::KnownFormat(KnownFormat::Int64)))
+                    .description(Some("Unix milliseconds")),
+            )
+            .build(),
+    )
+}
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ChangeLookup {
     pub resource_ids: Vec<String>,
-    /// RFC3339, Unix milliseconds, or relative to the request (`now-30d`).
-    #[schema(value_type = String)]
+    /// RFC3339, Unix milliseconds (number or text), or relative to the request (`now-30d`).
+    #[schema(schema_with = since_schema)]
     pub since: Value,
     pub cursor: Option<i64>,
     #[schema(minimum = 1, maximum = 500)]

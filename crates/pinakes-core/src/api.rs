@@ -285,6 +285,7 @@ async fn swagger_headers(
 }
 pub fn router(state: AppState) -> Router {
     std::sync::LazyLock::force(&PUBLIC_DOCUMENT);
+    let panics = state.metrics.api_panics.clone();
     let mut router = Router::new()
         .route("/v1/info", get(info))
         .route("/v1/changes", get(crate::change_api::feed))
@@ -305,6 +306,19 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/openapi.json", get(openapi))
         .route("/v1/dumps/osm_place.ndjson", get(osm_dump))
         .merge(swagger_ui(&state.config.api))
+        // Backstop: a handler panic answers 500 (counted) instead of dropping the connection;
+        // innermost, so CORS and the other layers still shape the response.
+        .layer(tower_http::catch_panic::CatchPanicLayer::custom(
+            move |_: Box<dyn std::any::Any + Send>| {
+                panics.inc();
+                tracing::error!("public API handler panicked");
+                ApiError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error".into(),
+                )
+                .into_response()
+            },
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             cors_preflight,
@@ -678,13 +692,15 @@ pub async fn search(
     if q.collapse.is_some() && !state.config.groups.enabled {
         return Err(ApiError::bad("groups are disabled"));
     }
-    let spatial = crate::spatial::Filters::parse(&q, &state.config.search)
-        .map_err(|e| ApiError::bad(e.to_string()))?;
     let cursor = q
         .cursor
         .as_deref()
         .map(|s| PageCursor::decode(s, &state.cursor_mac))
         .transpose()?;
+    // A later page resolves relative times at the cursor's pinned instant, as page one did.
+    let at = cursor.as_ref().map_or_else(Utc::now, |c| c.at);
+    let spatial = crate::spatial::Filters::parse_at(&q, &state.config.search, at)
+        .map_err(|e| ApiError::bad(e.to_string()))?;
     let reach = if let (Some(viewer), Some(reach)) = (&q.viewer, &q.reach) {
         Some(state.nexus.reach(viewer, reach).await.map_err(|e| {
             tracing::warn!(error=%e,"reach unavailable");
@@ -720,7 +736,6 @@ pub async fn search(
             return Err(ApiError::bad("cursor does not match this search"));
         }
     }
-    let at = cursor.as_ref().map_or_else(Utc::now, |c| c.at);
     let mut sql = QueryBuilder::<Postgres>::new(if q.collapse.is_some() {
         "WITH eligible AS (SELECT r.*, "
     } else {
@@ -818,7 +833,7 @@ pub async fn search(
         match q.sort.as_deref() {
             Some("distance") => {
                 sql.push("coalesce(-");
-                let distance = crate::spatial::Filters::parse(&q, &state.config.search)
+                let distance = crate::spatial::Filters::parse_at(&q, &state.config.search, at)
                     .map_err(|e| ApiError::bad(e.to_string()))?; // Alias r below exposes the best member's indexed point.
                 distance.distance(&mut sql);
                 sql.push(",e.rank)");

@@ -2698,6 +2698,7 @@ dependencies = [
  "tokio-tungstenite",
  "toml",
  "tower",
+ "tower-http",
  "tracing",
  "tzf-rs",
  "url",
@@ -4595,6 +4596,7 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
  "url",
 ]
 
