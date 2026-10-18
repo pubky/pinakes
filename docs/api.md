@@ -392,11 +392,15 @@ starts add `invalid_feed_item_date` without failing healthy siblings.
 Calendar rows use SEQUENCE/LAST-MODIFIED and normalized content hashes; DTSTAMP,
 unknown vendor props and fetch noise do not create changes. Explicit cancellations
 apply immediately. Disappearance needs two fresh complete snapshots. Losing over half
-the active keys holds all updates until the next identical successful snapshot. An instance
-whose start moved by at most an hour without other edits (a DST re-expansion, or a series
-shifted by an hour) is a move, not a loss: a lost key pairs one-to-one, nearest first, with a new
-key of the same UID and content hash, before the hold test. The old row becomes `superseded`,
-the new row names it in `supersedes`, and one `rescheduled` change is emitted per move.
+the active keys holds all updates until the next identical successful snapshot. When Pinakes
+itself re-expands a feed, under a new calendar extractor version or `utc_series_wall_clock` mode
+(recorded per snapshot as `event_fetch.expansion`), an instance whose start shifted by at most
+an hour across a DST change is a move, not a loss. A lost key pairs one-to-one, nearest first,
+with a new key of the same UID and content hash before the hold test. The old row becomes
+`superseded`, the new row names it in `supersedes`, and one `rescheduled` change is emitted per
+move; a move back onto a superseded or cancelled key does the same. Feed-driven changes never
+pair: an organiser's edit changes the content hash, and a flipped `X-WR-TIMEZONE` or VTIMEZONE
+leaves the expansion unchanged, so both go through the hold and two-observation rules above.
 Occurrence changes are field patches with `occurrence` equal to the serialized
 `[uid,recurrence_id]` key. Above `event.container.max_changes` (100 default), a
 single feed-level `details` change has `after.occurrence_changes` with the count;

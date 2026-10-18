@@ -246,6 +246,12 @@ impl Zones<'_> {
                         return Ok(wall);
                     }
                 }
+                // The second pass of a repeated hour: its wall time maps forward to the first
+                // pass, so accept the wall that lies in a transition's repeated window under
+                // that transition's later offset.
+                if let Some(wall) = self.second_pass(zone, at)? {
+                    return Ok(wall);
+                }
                 bail!("custom zone reverse conversion");
             }
         }
@@ -302,13 +308,22 @@ impl Zones<'_> {
             unknown: !zulu && name.is_some() && zone.is_none() && custom.is_none(),
         })
     }
+    /// A series value (RDATE, EXDATE, RECURRENCE-ID, UNTIL): floating values take the series zone,
+    /// and in a series without one (a UTC series) they are UTC, never the calendar's
+    /// X-WR-TIMEZONE or the configured default.
     fn series_stamp(&self, p: &Property, value: &str, start: &Stamp) -> Result<Stamp> {
         if !value.ends_with('Z') && !p.params.contains_key("TZID") {
-            if let Some(zone) = &start.zone {
-                let mut p = p.clone();
-                p.params.insert("TZID".into(), zone.clone());
-                return self.stamp(&p, value);
+            let mut p = p.clone();
+            p.params.insert(
+                "TZID".into(),
+                start.zone.clone().unwrap_or_else(|| "UTC".into()),
+            );
+            let mut stamp = self.stamp(&p, value)?;
+            if start.zone.is_none() {
+                stamp.zone = None;
+                stamp.source = ZoneSource::None;
             }
+            return Ok(stamp);
         }
         self.stamp(p, value)
     }
@@ -382,6 +397,31 @@ fn transitions(
     Ok(transitions)
 }
 impl Zones<'_> {
+    /// The wall time of `at` when it is the second pass of an embedded zone's repeated hour.
+    fn second_pass(&self, c: &Component, at: DateTime<Utc>) -> Result<Option<NaiveDateTime>> {
+        use chrono::Datelike;
+        // Load the year's transitions as `custom_time` does.
+        let year_wall = at.naive_utc();
+        let key = (c.value("TZID").unwrap_or("").to_owned(), year_wall.year());
+        let mut cache = self.transitions.borrow_mut();
+        if !cache.contains_key(&key) {
+            cache.insert(
+                key.clone(),
+                transitions(c, year_wall, self.deadline, self.max_date_values)?,
+            );
+        }
+        for &(start, from, to) in &cache[&key] {
+            let delta = to.local_minus_utc() - from.local_minus_utc();
+            if delta >= 0 {
+                continue;
+            }
+            let wall = at.with_timezone(&to).naive_local();
+            if wall >= start + Duration::seconds(delta as i64) && wall < start {
+                return Ok(Some(wall));
+            }
+        }
+        Ok(None)
+    }
     fn custom_time(&self, c: &Component, wall: NaiveDateTime) -> Result<DateTime<Utc>> {
         use chrono::Datelike;
         ensure!(
@@ -959,6 +999,18 @@ fn expand(
     out.retain(|at, _| *at >= lo && *at <= hi);
     Ok(out)
 }
+/// The calendar expansion signature: the calendar extractor version and the configured
+/// `utc_series_wall_clock` mode, the two things that re-key unchanged feeds.
+pub fn expansion(cfg: &EventConfig) -> String {
+    let version = crate::resolver::extractor_versions()["event"]
+        .as_i64()
+        .unwrap_or(0);
+    let mode = serde_json::to_value(cfg.utc_series_wall_clock)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    format!("v{version}:{mode}")
+}
 pub fn parse(
     uri: &str,
     bytes: &[u8],
@@ -995,6 +1047,7 @@ pub fn parse(
         horizon_start: lo,
         horizon_end: hi,
         held_retry_secs: cfg.held_retry_secs,
+        expansion: Some(expansion(cfg)),
         feed_ttl: cal
             .value("REFRESH-INTERVAL")
             .or_else(|| cal.value("X-PUBLISHED-TTL"))

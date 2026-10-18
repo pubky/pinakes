@@ -220,8 +220,11 @@ pub async fn reextract_outdated(
 /// under the instance lock, before `reextract_outdated`. The applied mode is stored in
 /// `instance_setting`; on a change, `ok` event and event_platform documents are marked outdated
 /// (`extracted_with=0`, re-queued by `reextract_outdated`) and every calendar fetch loses its
-/// validators, so even without the re-extraction wave the next fetch re-parses. The first start
-/// only records the mode. Returns the number of documents marked.
+/// validators, so even without the re-extraction wave the next fetch re-parses. Both passes run
+/// in batches of 1000 and the mode is recorded last, so an interrupted start repeats them. The
+/// first start (no stored mode) records the mode; if calendars are already stored it says their
+/// expansion predates mode tracking and, when the configured mode is not the default, marks them
+/// too. Returns the number of documents marked.
 pub async fn apply_calendar_mode(
     pool: &PgPool,
     mode: crate::config::UtcSeriesWallClock,
@@ -230,27 +233,49 @@ pub async fn apply_calendar_mode(
         .as_str()
         .unwrap_or_default()
         .to_owned();
-    let mut tx = pool.begin().await?;
     let stored: Option<String> = sqlx::query_scalar(
-        "SELECT value FROM instance_setting WHERE key='event.utc_series_wall_clock' FOR UPDATE",
+        "SELECT value FROM instance_setting WHERE key='event.utc_series_wall_clock'",
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(pool)
     .await?;
+    let remark = match stored.as_deref() {
+        Some(previous) => previous != value,
+        None => {
+            let stored_calendars: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource WHERE status='ok' AND coalesce(extracted_by,resolver) IN ('event','event_platform'))")
+                .fetch_one(pool)
+                .await?;
+            if stored_calendars {
+                tracing::info!(
+                    mode = %value,
+                    "stored calendar expansions predate mode tracking; the extractor-version wave re-parses them"
+                );
+            }
+            stored_calendars && mode != crate::config::UtcSeriesWallClock::default()
+        }
+    };
     let mut marked = 0;
-    if stored.as_deref().is_some_and(|s| s != value) {
-        marked = sqlx::query("UPDATE resource SET extracted_with=0 WHERE status='ok' AND coalesce(extracted_by,resolver) IN ('event','event_platform') AND coalesce(extracted_with,0)<>0")
-            .execute(&mut *tx)
+    if remark {
+        loop {
+            let n = sqlx::query("UPDATE resource SET extracted_with=0 WHERE id IN (SELECT id FROM resource WHERE status='ok' AND coalesce(extracted_by,resolver) IN ('event','event_platform') AND coalesce(extracted_with,0)<>0 LIMIT 1000)")
+                .execute(pool)
+                .await?
+                .rows_affected();
+            marked += n;
+            if n == 0 {
+                break;
+            }
+        }
+        while sqlx::query("UPDATE event_fetch SET validators='{}' WHERE resource_id IN (SELECT resource_id FROM event_fetch WHERE validators<>'{}' LIMIT 1000)")
+            .execute(pool)
             .await?
-            .rows_affected();
-        sqlx::query("UPDATE event_fetch SET validators='{}' WHERE validators<>'{}'")
-            .execute(&mut *tx)
-            .await?;
+            .rows_affected()
+            > 0
+        {}
     }
     sqlx::query("INSERT INTO instance_setting(key,value) VALUES('event.utc_series_wall_clock',$1) ON CONFLICT(key) DO UPDATE SET value=excluded.value,applied_at=CASE WHEN instance_setting.value=excluded.value THEN instance_setting.applied_at ELSE now() END")
         .bind(&value)
-        .execute(&mut *tx)
+        .execute(pool)
         .await?;
-    tx.commit().await?;
     Ok(marked)
 }
 

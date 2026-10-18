@@ -8,7 +8,9 @@ the database (`instance_setting`). When a start finds it changed, every `ok` eve
 event_platform document is marked outdated and every calendar fetch loses its HTTP validators,
 so each calendar re-parses once even if its feed is unchanged: within
 `queue.reextract_window_secs` with `queue.reextract_on_upgrade`, otherwise at its next fetch.
-Instances that move by an hour are recorded as moves (`rescheduled`), not cancellations.
+Instances that this re-parse moves by up to an hour across a DST change are recorded as moves
+(`rescheduled`), not cancellations, because the snapshot's recorded expansion (version and mode)
+changed. Changes the feed itself makes are never paired.
 
 CORS: the public listener serves browser clients on other origins according to
 `api.cors_allow_origins` (default `["*"]`, safe because the public API is read-only apart from

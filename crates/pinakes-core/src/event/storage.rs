@@ -26,6 +26,8 @@ pub struct Prepared {
     pub applied: bool,
     retention_days: u32,
     cursor: Option<super::adapters::cursor::Checkpoint>,
+    /// The container's expansion signature, stored when the snapshot applies.
+    expansion: Option<String>,
 }
 pub struct PendingChange {
     before: Option<Value>,
@@ -102,7 +104,11 @@ pub async fn prepare(
     fetched_at: i64,
     normal_ttl: u64,
 ) -> Result<Prepared> {
-    let state=sqlx::query("SELECT last_snapshot_at,held_keys,missing_keys,hold_count FROM event_fetch WHERE resource_id=$1").bind(id).fetch_optional(pool).await?;
+    let state=sqlx::query("SELECT last_snapshot_at,held_keys,missing_keys,hold_count,expansion FROM event_fetch WHERE resource_id=$1").bind(id).fetch_optional(pool).await?;
+    // Pinakes re-expanded this feed (a new calendar extractor version or wall-clock mode) when
+    // the stored snapshot's expansion differs; only then do hour-shifted keys pair as moves.
+    let stored_expansion: Option<String> = state.as_ref().and_then(|r| r.get("expansion"));
+    let reexpanded = container.expansion.is_some() && stored_expansion != container.expansion;
     let last = state
         .as_ref()
         .and_then(|r| r.get::<Option<i64>, _>("last_snapshot_at"));
@@ -199,12 +205,14 @@ pub async fn prepare(
     );
     let fresh: Vec<_> = incoming.difference(&keys).cloned().collect();
     let losses: Vec<_> = keys.difference(&incoming).cloned().collect();
-    // Moves: an instance whose start shifted by up to an hour (a DST re-expansion, or a series
-    // moved by an hour without other edits) gets a new key (uid + instant). Pair each lost key
-    // with a fresh key of the same uid and content hash, nearest first and one-to-one, before the
-    // hold test: the pair is one rescheduled occurrence, neither a loss nor a new key.
+    // Moves: when Pinakes re-expands a feed (new calendar extractor version or wall-clock mode),
+    // an instance whose start shifts by up to an hour (DST) gets a new key (uid + instant). Pair
+    // each lost key with a fresh key of the same uid and content hash, nearest first and
+    // one-to-one, before the hold test: the pair is one rescheduled occurrence, neither a loss nor
+    // a new key. Feed-driven changes (an organiser's edit, a flipped X-WR-TIMEZONE) never pair and
+    // go through the normal hold and two-observation rules.
     let mut moved: BTreeMap<String, String> = BTreeMap::new();
-    if !container.delta {
+    if reexpanded && !container.delta {
         // Arrivals per (uid, content hash): their keys and starts.
         type Arrivals<'a> =
             BTreeMap<(&'a str, &'a str), Vec<(&'a String, chrono::DateTime<chrono::Utc>)>>;
@@ -287,6 +295,7 @@ pub async fn prepare(
             .transpose()?,
         retention_days: container.limits.retention_days,
         cursor: container.cursor.clone(),
+        expansion: container.expansion.clone(),
         last,
         fetched_at,
         horizon: container.horizon_start,
@@ -374,17 +383,28 @@ pub async fn prepare(
             preserve_venue(&mut doc, old);
         }
         let mut after = changes::normalize(&doc);
-        let moved_from_key = moved.get(&key).filter(|_| previous.is_none()).cloned();
-        // A moved occurrence diffs against the row it replaces: one `rescheduled` line.
-        let before = previous
-            .or_else(|| moved_from_key.as_ref().and_then(|k| old.get(k)))
-            .map(|(_, _, d, _, _, _, _)| changes::normalize(d));
-        let supersedes = if previous.is_none() {
-            moved_from_key.or_else(|| {
-                hashes
-                    .get_mut(&(item.content_hash.clone(), doc.start, doc.name.clone()))
-                    .and_then(Vec::pop)
+        // A move lands on a new key, or back on one whose row was superseded or cancelled (a mode
+        // flipped back): either way it diffs against the row it replaces, which it supersedes,
+        // with one `rescheduled` line.
+        let moved_from_key = moved
+            .get(&key)
+            .filter(|_| {
+                previous.is_none_or(|(_, _, _, status, _, _, _)| {
+                    matches!(status.as_str(), "superseded" | "cancelled")
+                })
             })
+            .cloned();
+        let before = moved_from_key
+            .as_ref()
+            .and_then(|k| old.get(k))
+            .or(previous)
+            .map(|(_, _, d, _, _, _, _)| changes::normalize(d));
+        let supersedes = if moved_from_key.is_some() {
+            moved_from_key
+        } else if previous.is_none() {
+            hashes
+                .get_mut(&(item.content_hash.clone(), doc.start, doc.name.clone()))
+                .and_then(Vec::pop)
         } else {
             None
         };
@@ -464,7 +484,7 @@ pub async fn apply(
             return Ok(None);
         }
     }
-    sqlx::query("UPDATE event_fetch SET last_snapshot_at=$2,keys=$3,held_keys=$4,missing_keys=$5,hold_count=$6,horizon_start=$7,retention_days=$8,validators=coalesce($9,validators),horizon_end=$10 WHERE resource_id=$1").bind(id).bind(plan.fetched_at).bind(&plan.keys).bind(&plan.held).bind(json!(plan.missing)).bind(plan.holds as i32).bind(plan.horizon).bind(plan.retention_days as i32).bind(&plan.validators).bind(plan.horizon_end).execute(&mut **tx).await?;
+    sqlx::query("UPDATE event_fetch SET last_snapshot_at=$2,keys=$3,held_keys=$4,missing_keys=$5,hold_count=$6,horizon_start=$7,retention_days=$8,validators=coalesce($9,validators),horizon_end=$10,expansion=CASE WHEN $11 THEN coalesce($12,expansion) ELSE expansion END WHERE resource_id=$1").bind(id).bind(plan.fetched_at).bind(&plan.keys).bind(&plan.held).bind(json!(plan.missing)).bind(plan.holds as i32).bind(plan.horizon).bind(plan.retention_days as i32).bind(&plan.validators).bind(plan.horizon_end).bind(plan.applied).bind(&plan.expansion).execute(&mut **tx).await?;
 
     if !plan.applied {
         sqlx::query("INSERT INTO source_state(source,feed_held_total) VALUES($1,1) ON CONFLICT(source) DO UPDATE SET feed_held_total=source_state.feed_held_total+1").bind(&plan.source).execute(&mut **tx).await?;

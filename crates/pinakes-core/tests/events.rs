@@ -3066,3 +3066,222 @@ async fn round16_dst_reexpansion_moves_instances_without_hold_or_cancellations(p
             .unwrap();
     assert!(held);
 }
+
+/// Save one parse of `body` under `cfg` as a fresh snapshot.
+async fn snapshot(pool: &PgPool, id: &str, uri: &str, body: &str, cfg: &EventConfig) {
+    let now: DateTime<Utc> = "2036-10-20T00:00:00Z".parse().unwrap();
+    let doc = fresh(&calendar::parse(uri, body.as_bytes(), cfg, now).unwrap());
+    store::save_document(pool, id, 0, &doc).await.unwrap();
+}
+/// (hold count, held, active rows, superseded rows, cancelled lines, rescheduled lines)
+async fn feed_outcome(pool: &PgPool, id: &str) -> (i32, bool, i64, i64, usize, usize) {
+    let (holds, held): (i32, bool) = sqlx::query_as(
+        "SELECT hold_count,held_keys IS NOT NULL FROM event_fetch WHERE resource_id=$1",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let (active, superseded): (i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER(WHERE status='scheduled'),count(*) FILTER(WHERE status='superseded') FROM occurrence WHERE resource_id=$1",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let classes: Vec<String> = sqlx::query_scalar(
+        "SELECT class FROM resource_change WHERE resource_id=$1 AND occurrence_key IS NOT NULL",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let count = |c: &str| classes.iter().filter(|x| *x == c).count();
+    (
+        holds,
+        held,
+        active,
+        superseded,
+        count("cancelled"),
+        count("rescheduled"),
+    )
+}
+fn daily(header: &str, dtstart: &str) -> String {
+    format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n{header}BEGIN:VEVENT\r\nUID:series\r\nSUMMARY:Daily\r\nGEO:47;8\r\nDTSTART:{dtstart}\r\nDURATION:PT1H\r\nRRULE:FREQ=DAILY;COUNT=10\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+}
+
+/// Round 17 P2: after the upgrade pairing, flipping the mode back moves every instance back onto
+/// its old (superseded) key: no duplicates, no cancellations, one `rescheduled` line each way.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round17_a_mode_flip_and_back_moves_each_way_once(pool: PgPool) {
+    use pinakes_core::config::UtcSeriesWallClock::Coordinates;
+    let uri = "https://example.org/flip.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let body = daily("", "20361024T004800Z");
+    let coordinates = EventConfig {
+        utc_series_wall_clock: Coordinates,
+        ..Default::default()
+    };
+    snapshot(&pool, &id, uri, &body, &coordinates).await;
+    snapshot(&pool, &id, uri, &body, &EventConfig::default()).await;
+    assert_eq!(feed_outcome(&pool, &id).await, (0, false, 10, 7, 0, 7));
+    // The operator switches back (Q2 re-parses): the seven move back onto their old keys.
+    snapshot(&pool, &id, uri, &body, &coordinates).await;
+    assert_eq!(feed_outcome(&pool, &id).await, (0, false, 10, 7, 0, 14));
+    // Further refreshes neither duplicate nor cancel.
+    for _ in 0..2 {
+        snapshot(&pool, &id, uri, &body, &coordinates).await;
+    }
+    assert_eq!(feed_outcome(&pool, &id).await, (0, false, 10, 7, 0, 14));
+}
+
+/// Round 17 P1/P5: only Pinakes's own re-expansion pairs. A feed flipping its X-WR-TIMEZONE
+/// (same expansion) is held; a shift over an hour (Antarctica/Troll moves by two) or an edited
+/// series (new content hash) under a re-expansion is held too.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round17_feed_driven_shifts_never_pair(pool: PgPool) {
+    use pinakes_core::config::UtcSeriesWallClock::Coordinates;
+    let held = |pool: PgPool, id: String| async move { feed_outcome(&pool, &id).await };
+    // X-WR-TIMEZONE flips between refreshes under one expansion: seven keys move by an hour.
+    let uri = "https://example.org/xwr-flip.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let cfg = EventConfig::default();
+    snapshot(
+        &pool,
+        &id,
+        uri,
+        &daily("X-WR-TIMEZONE:Europe/Zurich\r\n", "20361024T004800Z"),
+        &cfg,
+    )
+    .await;
+    snapshot(&pool, &id, uri, &daily("", "20361024T004800Z"), &cfg).await;
+    let (holds, is_held, active, superseded, cancelled, rescheduled) =
+        held(pool.clone(), id.clone()).await;
+    assert_eq!(
+        (holds, is_held),
+        (1, true),
+        "a feed-driven zone flip is held"
+    );
+    assert_eq!((active, superseded, cancelled, rescheduled), (10, 0, 0, 0));
+    // A re-expansion (mode change) that shifts by two hours: Troll's DST, via default_timezone.
+    let uri = "https://example.org/troll.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let body = daily("", "20361024T004800Z").replace("GEO:47;8\r\n", "");
+    let troll = |mode| EventConfig {
+        utc_series_wall_clock: mode,
+        default_timezone: Some("Antarctica/Troll".into()),
+        ..Default::default()
+    };
+    snapshot(&pool, &id, uri, &body, &troll(Coordinates)).await;
+    snapshot(
+        &pool,
+        &id,
+        uri,
+        &body,
+        &troll(pinakes_core::config::UtcSeriesWallClock::XWrTimezone),
+    )
+    .await;
+    assert_eq!(
+        held(pool.clone(), id.clone()).await.0,
+        1,
+        "a two-hour shift does not pair"
+    );
+    // A re-expansion together with an edited DTSTART (new content hash): no pairing.
+    let uri = "https://example.org/edited.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    snapshot(&pool, &id, uri, &daily("", "20361024T004800Z"), &cfg).await;
+    sqlx::query("UPDATE event_fetch SET expansion='v0:legacy' WHERE resource_id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    snapshot(&pool, &id, uri, &daily("", "20361024T014800Z"), &cfg).await;
+    assert_eq!(
+        held(pool.clone(), id.clone()).await.0,
+        1,
+        "an edited series does not pair"
+    );
+    // Distinct UIDs never pair either (the round-16 control).
+    let uri = "https://example.org/distinct.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    // (A single event's key is its UID, so a shifted start is an update; new UIDs are losses.)
+    let singles = |prefix: &str, hour: u8| {
+        let mut body = String::from("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n");
+        for i in 0..4 {
+            body.push_str(&format!("BEGIN:VEVENT\r\nUID:{prefix}-{i}\r\nSUMMARY:Single\r\nDTSTART:2036102{i}T{hour:02}0000Z\r\nEND:VEVENT\r\n"));
+        }
+        body.push_str("END:VCALENDAR\r\n");
+        body
+    };
+    snapshot(&pool, &id, uri, &singles("single", 10), &cfg).await;
+    sqlx::query("UPDATE event_fetch SET expansion='v0:legacy' WHERE resource_id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    snapshot(&pool, &id, uri, &singles("renamed", 11), &cfg).await;
+    assert_eq!(
+        held(pool.clone(), id.clone()).await.0,
+        1,
+        "distinct UIDs do not pair"
+    );
+}
+
+/// Round 17 P3: in a UTC series a floating EXDATE is UTC, not the calendar's X-WR-TIMEZONE or the
+/// configured default zone.
+#[test]
+fn round17_floating_values_in_a_utc_series_are_utc() {
+    use pinakes_core::config::UtcSeriesWallClock::{Never, XWrTimezone};
+    let now = "2026-10-18T00:00:00Z";
+    let series =
+        "DTSTART:20261020T100000Z\r\nRRULE:FREQ=DAILY;COUNT=3\r\nEXDATE:20261021T100000\r\n";
+    let expected = ["2026-10-20T10:00Z", "2026-10-22T10:00Z"];
+    // Default mode with default_timezone: the series stays UTC, so does the EXDATE.
+    let cfg = EventConfig {
+        default_timezone: Some("Europe/Zurich".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        starts_at("", series, now, &cfg),
+        expected,
+        "{XWrTimezone:?}"
+    );
+    // `never` with an X-WR-TIMEZONE feed.
+    let cfg = EventConfig {
+        utc_series_wall_clock: Never,
+        ..Default::default()
+    };
+    assert_eq!(
+        starts_at("X-WR-TIMEZONE:Europe/Zurich\r\n", series, now, &cfg),
+        expected,
+        "{Never:?}"
+    );
+}
+
+/// Round 17 P4: embedded zones convert instants in the second pass of the repeated hour, so a UTC
+/// UNTIL there no longer aborts the series and a DTSTART there expands on the zone's wall clock.
+#[test]
+fn round17_embedded_zone_repeated_hour() {
+    let now = "2026-10-18T00:00:00Z";
+    let cfg = EventConfig::default();
+    // UNTIL 01:10Z is 02:10 in the second pass; the 02:15 first-pass instance (00:15Z) stays.
+    assert_eq!(
+        starts_at(
+            CUSTOM_EUROPE,
+            "DTSTART;TZID=Custom Europe:20261023T001500Z\r\nRRULE:FREQ=DAILY;UNTIL=20261025T011000Z\r\n",
+            now,
+            &cfg
+        ),
+        ["2026-10-23T00:15Z", "2026-10-24T00:15Z", "2026-10-25T00:15Z"]
+    );
+    // DTSTART 01:30Z is 02:30 in the second pass: the next day is 02:30 winter time, 01:30Z.
+    assert_eq!(
+        starts_at(
+            CUSTOM_EUROPE,
+            "DTSTART;TZID=Custom Europe:20261025T013000Z\r\nRRULE:FREQ=DAILY;COUNT=2\r\n",
+            now,
+            &cfg
+        ),
+        ["2026-10-25T01:30Z", "2026-10-26T01:30Z"]
+    );
+}

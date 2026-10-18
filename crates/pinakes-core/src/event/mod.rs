@@ -210,4 +210,7 @@ pub struct Container {
     pub horizon_start: DateTime<Utc>,
     pub horizon_end: DateTime<Utc>,
     pub held_retry_secs: u64,
+    /// The calendar expansion that produced these keys (`calendar::expansion`). Hour-shifted keys
+    /// pair as moves only when it differs from the stored snapshot's: Pinakes's own re-expansion.
+    pub expansion: Option<String>,
 }

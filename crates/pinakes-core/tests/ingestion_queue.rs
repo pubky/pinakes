@@ -1647,3 +1647,36 @@ async fn round16_a_calendar_mode_change_reparses_unchanged_feeds_once(pool: PgPo
     );
     assert_eq!(queue::apply_calendar_mode(&pool, Never).await.unwrap(), 0);
 }
+
+/// Round 17 P7: the first start after mode tracking, with calendars already stored and a
+/// non-default mode configured, re-parses them once (their expansion predates tracking).
+#[sqlx::test(migrations = "../../migrations")]
+async fn round17_first_start_with_a_non_default_mode_marks_stored_calendars(pool: PgPool) {
+    use pinakes_core::config::UtcSeriesWallClock::Coordinates;
+    let feed = "https://example.org/first.ics";
+    let id = store::ensure_resource(&pool, feed).await.unwrap();
+    let mut doc = ResourceMeta::new(feed, "event", 6 * 3600);
+    doc.name = Some("Calendar".into());
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    sqlx::query(
+        r#"INSERT INTO event_fetch(resource_id,validators) VALUES($1,'{"etag":"\"v1\""}')"#,
+    )
+    .bind(&id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        queue::apply_calendar_mode(&pool, Coordinates)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(extractor(&pool, &id).await, (Some("event".into()), Some(0)));
+    assert_eq!(validators(&pool, &id).await, serde_json::json!({}));
+    assert_eq!(
+        queue::apply_calendar_mode(&pool, Coordinates)
+            .await
+            .unwrap(),
+        0
+    );
+}
