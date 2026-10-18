@@ -381,7 +381,9 @@ than retained history returns **410**; restart at 0 and refresh your saved resou
 
 `POST /v1/changes/lookup` accepts 1–500 `resource_ids` and `since` as RFC3339 text,
 Unix milliseconds (integer or decimal text) or a relative time (`now-30d`), within UTC years
-0001–9999 (otherwise 400 `timestamp out of range`). The timestamp is inclusive.
+0001–9999 (otherwise 400 `timestamp out of range`). The timestamp is inclusive. A relative
+`since` describes the first page: later pages (with `cursor`) keep that window, capped at the
+cursor line's time, so lines from the minutes between page fetches are not skipped.
 Optional `cursor` and `limit` page large histories. IDs may be known or unknown;
 only matching retained changes are returned. Resource history remains accessible
 after orphan expiry because change records do not cascade with resource deletion.
@@ -414,11 +416,15 @@ format. The admin listener has no resource routes. `admin_token` (env
 `PINAKES__ADMIN_TOKEN`) requires a constant-time Bearer check on all admin routes.
 Non-loopback binds without a token are refused; use TLS at the reverse proxy.
 
-A public handler that panics is answered `500 internal server error` by a backstop layer
-(tower-http `CatchPanicLayer`) instead of a dropped connection, counted in
-`pinakes_api_panics_total` and alerted as `ApiPanics`. Request parsing does not slice client
-input at byte indexes; a test sends multibyte, emoji and invalid-UTF-8 values in every public
-query parameter, path parameter and body field, and expects no panic.
+A handler that panics, on either listener, is answered `500 internal server error` by a backstop
+layer (tower-http `CatchPanicLayer`) instead of a dropped connection. It is logged with its
+request path (never the payload), counted in `pinakes_api_panics_total` and alerted as
+`ApiPanics`; on the public listener the 500 still carries the CORS headers. Request parsing does
+not slice client input at byte indexes. A test sends multibyte, emoji, U+FFFD, `x:`/`geo:` and
+coordinate-shaped values in every public query parameter, path parameter and body field (with
+the companions each needs to reach its parser), plus raw invalid UTF-8 (`%FF`, decoded to
+U+FFFD) in every query parameter, and expects 2xx or 4xx answers, with the relative-time
+message where one applies.
 
 Public `/v1/info` exposes manifests and status but no Nexus URL, source errors or metric
 samples. Admin `GET /v1/info` includes full ingestion/source/canary state and numerical

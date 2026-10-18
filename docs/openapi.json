@@ -84,9 +84,10 @@
             "type": "array"
           },
           "since": {
+            "description": "Inclusive lower bound on the change time, as a string or as Unix milliseconds",
             "oneOf": [
               {
-                "description": "RFC 3339, Unix milliseconds as text, or now-Nd|h",
+                "description": "RFC 3339, Unix milliseconds as text, or relative to the request: now, now-Nd, now-Nh, now+Nd or now+Nh (the current minute); a later page keeps the first page's window",
                 "type": "string"
               },
               {

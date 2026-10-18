@@ -53,10 +53,15 @@ fn since_schema() -> utoipa::openapi::schema::Schema {
     };
     Schema::OneOf(
         OneOfBuilder::new()
+            .description(Some(
+                "Inclusive lower bound on the change time, as a string or as Unix milliseconds",
+            ))
             .item(
                 ObjectBuilder::new()
                     .schema_type(Type::String)
-                    .description(Some("RFC 3339, Unix milliseconds as text, or now-Nd|h")),
+                    .description(Some(
+                        "RFC 3339, Unix milliseconds as text, or relative to the request: now, now-Nd, now-Nh, now+Nd or now+Nh (the current minute); a later page keeps the first page's window",
+                    )),
             )
             .item(
                 ObjectBuilder::new()
@@ -172,7 +177,22 @@ pub async fn lookup(
         .ok_or_else(|| {
             ApiError::bad("since must be RFC3339, Unix milliseconds or relative (now-30d)")
         })?;
-    let since = crate::spatial::timestamp(&since).map_err(|e| ApiError::bad(e.to_string()))?;
+    let relative = since.starts_with("now");
+    let mut since = crate::spatial::timestamp_at(&since, state.now())
+        .map_err(|e| ApiError::bad(e.to_string()))?;
+    // A relative `since` is the window start of the first page. A later page continues after
+    // its cursor, a line at or past that start, so cap the window at the cursor line's time:
+    // re-resolving `now` would otherwise skip lines from the minutes between the pages.
+    if relative && body.cursor.is_some_and(|c| c > 0) {
+        let cursor_at: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT at FROM resource_change WHERE seq=$1")
+                .bind(body.cursor)
+                .fetch_optional(&state.pool)
+                .await?;
+        if let Some(at) = cursor_at {
+            since = since.min(at);
+        }
+    }
     query(
         &state,
         ChangeQuery {

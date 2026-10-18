@@ -27,6 +27,8 @@ use std::{
 use tokio::sync::{Mutex, Notify};
 use utoipa::{IntoParams, OpenApi, ToSchema};
 
+/// A request clock (`AppState::clock`).
+pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
@@ -38,6 +40,9 @@ pub struct AppState {
     dumps: Arc<tokio::sync::Semaphore>,
     info_cache: Arc<Mutex<Option<(Instant, Value)>>>,
     pub(crate) cursor_mac: SimpleHmac<blake3::Hasher>,
+    /// The request clock for relative times and search cursors; tests set it, the daemon never
+    /// does (wall clock).
+    pub clock: Option<Clock>,
 }
 impl AppState {
     pub fn new(pool: PgPool, config: Config) -> anyhow::Result<Self> {
@@ -60,7 +65,12 @@ impl AppState {
             info_cache: Arc::default(),
             cursor_mac: SimpleHmac::<blake3::Hasher>::new_from_slice(&cursor_key)
                 .context("initialize cursor MAC")?,
+            clock: None,
         })
+    }
+    /// Now, for relative times and search cursors.
+    pub fn now(&self) -> DateTime<Utc> {
+        self.clock.as_ref().map_or_else(Utc::now, |clock| clock())
     }
     async fn budget(
         &self,
@@ -285,8 +295,7 @@ async fn swagger_headers(
 }
 pub fn router(state: AppState) -> Router {
     std::sync::LazyLock::force(&PUBLIC_DOCUMENT);
-    let panics = state.metrics.api_panics.clone();
-    let mut router = Router::new()
+    let routes = Router::new()
         .route("/v1/info", get(info))
         .route("/v1/changes", get(crate::change_api::feed))
         .route("/v1/changes/lookup", post(crate::change_api::lookup))
@@ -305,20 +314,14 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/resolve", post(resolve))
         .route("/v1/openapi.json", get(openapi))
         .route("/v1/dumps/osm_place.ndjson", get(osm_dump))
-        .merge(swagger_ui(&state.config.api))
-        // Backstop: a handler panic answers 500 (counted) instead of dropping the connection;
-        // innermost, so CORS and the other layers still shape the response.
-        .layer(tower_http::catch_panic::CatchPanicLayer::custom(
-            move |_: Box<dyn std::any::Any + Send>| {
-                panics.inc();
-                tracing::error!("public API handler panicked");
-                ApiError(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal server error".into(),
-                )
-                .into_response()
-            },
-        ))
+        .merge(swagger_ui(&state.config.api));
+    with_public_layers(routes, state)
+}
+/// The public listener's layer stack around `routes`: the panic backstop innermost, then CORS
+/// preflights, the per-IP budget, CORS headers, the body limit and, outermost, the path-scoped
+/// Swagger headers. Public so a test can mount a route under exactly this stack.
+pub fn with_public_layers(routes: Router<AppState>, state: AppState) -> Router {
+    let mut router = panic_backstop(routes, &state, "public")
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             cors_preflight,
@@ -336,6 +339,42 @@ pub fn router(state: AppState) -> Router {
         router = router.layer(axum::middleware::from_fn(swagger_headers));
     }
     router.with_state(state)
+}
+/// Marks a response the panic backstop produced, so the layer around it can log the path.
+#[derive(Clone, Copy)]
+struct CaughtPanic;
+/// Backstop: a handler panic answers 500 (counted in `pinakes_api_panics_total`) instead of
+/// dropping the connection, and the request path is logged (never the payload). Innermost, so
+/// the listener's other layers (CORS, Swagger headers) still shape the response.
+fn panic_backstop(
+    routes: Router<AppState>,
+    state: &AppState,
+    listener: &'static str,
+) -> Router<AppState> {
+    let panics = state.metrics.api_panics.clone();
+    routes
+        .layer(tower_http::catch_panic::CatchPanicLayer::custom(
+            move |_: Box<dyn std::any::Any + Send>| {
+                panics.inc();
+                let mut response = ApiError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error".into(),
+                )
+                .into_response();
+                response.extensions_mut().insert(CaughtPanic);
+                response
+            },
+        ))
+        .layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| async move {
+                let path = request.uri().path().to_owned();
+                let response = next.run(request).await;
+                if response.extensions().get::<CaughtPanic>().is_some() {
+                    tracing::error!(listener, path = %path, "API handler panicked; answered 500");
+                }
+                response
+            },
+        ))
 }
 #[derive(Debug)]
 pub struct ApiError(pub(crate) StatusCode, pub(crate) String);
@@ -698,7 +737,7 @@ pub async fn search(
         .map(|s| PageCursor::decode(s, &state.cursor_mac))
         .transpose()?;
     // A later page resolves relative times at the cursor's pinned instant, as page one did.
-    let at = cursor.as_ref().map_or_else(Utc::now, |c| c.at);
+    let at = cursor.as_ref().map_or_else(|| state.now(), |c| c.at);
     let spatial = crate::spatial::Filters::parse_at(&q, &state.config.search, at)
         .map_err(|e| ApiError::bad(e.to_string()))?;
     let reach = if let (Some(viewer), Some(reach)) = (&q.viewer, &q.reach) {
@@ -731,7 +770,7 @@ pub async fn search(
             || c.filter != filter
             || !c.score.is_finite()
             || !model::valid_id(&c.id)
-            || c.at > Utc::now() + chrono::Duration::seconds(5)
+            || c.at > state.now() + chrono::Duration::seconds(5)
         {
             return Err(ApiError::bad("cursor does not match this search"));
         }
@@ -1471,11 +1510,12 @@ async fn send_dump(
 }
 
 pub fn admin_router(state: AppState) -> Router {
-    Router::new()
+    let routes = Router::new()
         .route("/v1/groups/{id}", axum::routing::put(curate_group))
         .route("/metrics", get(metrics))
         .route("/v1/info", get(admin_info))
-        .route("/v1/openapi.json", get(admin_openapi))
+        .route("/v1/openapi.json", get(admin_openapi));
+    panic_backstop(routes, &state, "admin")
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin_auth,

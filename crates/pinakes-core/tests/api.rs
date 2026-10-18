@@ -5,7 +5,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use http_body_util::BodyExt;
 use pinakes_core::{
     api::{self, AppState},
@@ -1391,7 +1391,12 @@ async fn startup_accepts_the_installed_h3_extension(pool: PgPool) {
     assert!(error.contains("ALTER EXTENSION h3 UPDATE"), "{error}");
 }
 
-async fn send_raw(app: &Router, method: &str, target: &str, body: Option<Value>) -> StatusCode {
+async fn send_raw(
+    app: &Router,
+    method: &str,
+    target: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
     let mut request = Request::builder().method(method).uri(target);
     if body.is_some() {
         request = request.header("content-type", "application/json");
@@ -1402,19 +1407,37 @@ async fn send_raw(app: &Router, method: &str, target: &str, body: Option<Value>)
     request.extensions_mut().insert(axum::extract::ConnectInfo(
         "127.0.0.11:1234".parse::<SocketAddr>().unwrap(),
     ));
-    app.clone().oneshot(request).await.unwrap().status()
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or_else(|_| json!(String::from_utf8_lossy(&bytes))),
+    )
 }
 
-/// Step 6 round 5 S10: multibyte input after `now` was sliced at a byte index and panicked.
-/// S11: every public query parameter, path parameter and body field, taken from the served
-/// document, gets multibyte, emoji and invalid-UTF-8 values; no request may panic or answer 500.
+/// A test clock for relative times and search cursors (round 6 S20).
+fn test_clock(at: DateTime<Utc>) -> (Arc<std::sync::Mutex<DateTime<Utc>>>, api::Clock) {
+    let now = Arc::new(std::sync::Mutex::new(at));
+    let read = now.clone();
+    (now, Arc::new(move || *read.lock().unwrap()))
+}
+
+/// Step 6 rounds 5–6 (S10, S11, S16, S18): every query parameter, path parameter and body field of
+/// every public operation, taken from the served document, gets multibyte, emoji, U+FFFD and
+/// invalid-UTF-8 values, including `x:`/`geo:` and coordinate-shaped ones, with the companions
+/// each parameter requires so the value reaches its parser. Every answer is 2xx or 4xx, never a
+/// panic; relative times answer 400 with the relative-time message.
 #[sqlx::test(migrations = "../../migrations")]
 async fn round5_multibyte_input_never_panics_any_public_route(pool: PgPool) {
     let mut config = Config::default();
     config.api.requests_per_minute = 1_000_000;
+    config.preview.requests_per_minute = 1_000_000;
+    config.preview.uri_requests_per_minute = 1_000_000;
     let state = AppState::new(pool, config).unwrap();
     let panics = state.metrics.api_panics.clone();
     let app = api::router(state);
+    let id = "0123456789abcdef0123456789abcdef";
     for (method, target, body) in [
         ("GET", "/v1/search?from=now%C3%A9", None),
         ("GET", "/v1/search?to=now%2B%C3%A9", None),
@@ -1423,18 +1446,19 @@ async fn round5_multibyte_input_never_panics_any_public_route(pool: PgPool) {
         (
             "POST",
             "/v1/changes/lookup",
-            Some(json!({"resource_ids":["0123456789abcdef0123456789abcdef"],"since":"nowé"})),
+            Some(json!({"resource_ids":[id],"since":"nowé"})),
         ),
         (
             "POST",
             "/v1/changes/lookup",
-            Some(json!({"resource_ids":["0123456789abcdef0123456789abcdef"],"since":"now-é"})),
+            Some(json!({"resource_ids":[id],"since":"now-é"})),
         ),
     ] {
-        assert_eq!(
-            send_raw(&app, method, target, body.clone()).await,
-            StatusCode::BAD_REQUEST,
-            "{method} {target} {body:?}"
+        let (status, body) = send_raw(&app, method, target, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {target}");
+        assert!(
+            body["error"].as_str().unwrap().contains("relative time"),
+            "{method} {target}: {body}"
         );
     }
     let values = [
@@ -1447,11 +1471,47 @@ async fn round5_multibyte_input_never_panics_any_public_route(pool: PgPool) {
         "a\u{FFFD}b",
         "日本語",
         "now 😀d",
+        "x:é",
+        "geo:😀,1",
+        "46.0,é",
+        "é,1,2,3",
     ];
+    // Raw invalid UTF-8 in query strings (decoded to U+FFFD by the extractor).
+    let raw_values = ["%FF", "now%FF", "now%2B1%FF", "%FF,1"];
     let doc = api::openapi_document();
-    let id = "0123456789abcdef0123456789abcdef";
     let encode = |v: &str| url::form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>();
+    // Query parameters that only reach their parser with a companion.
+    let companions = |name: &str| match name {
+        "radius" => "&near=46.0,8.9",
+        "near" => "&radius=1000",
+        "cluster" => "&bbox=8.9,45.9,9.1,46.1",
+        "reach" => "&viewer=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+        "viewer" => "&reach=following",
+        _ => "",
+    };
+    // Relative times exist on search (`from`, `to`) and the change lookup (`since`); the
+    // occurrence window takes plain RFC 3339 and answers with the query extractor's message.
+    let relative_field = |what: &str, name: &str| {
+        (what.contains("/v1/search") && matches!(name, "from" | "to"))
+            || (what.contains("/v1/changes/lookup") && name == "since")
+    };
     let mut sent = 0;
+    let check = |status: StatusCode, body: &Value, what: &str, name: &str, value: &str| {
+        assert!(
+            status.is_success() || status.is_client_error() || status == StatusCode::BAD_GATEWAY,
+            "{what}: {status} {body}"
+        );
+        if relative_field(what, name) && value.starts_with("now") {
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{what}");
+            assert!(
+                body["error"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("relative time"),
+                "{what}: {body}"
+            );
+        }
+    };
     for (path, item) in doc["paths"].as_object().unwrap() {
         for (method, operation) in item.as_object().unwrap() {
             let method = method.to_ascii_uppercase();
@@ -1481,46 +1541,102 @@ async fn round5_multibyte_input_never_panics_any_public_route(pool: PgPool) {
                     None => schema.clone(),
                 }
             };
-            for value in values {
-                for p in &parameters {
-                    let name = p["name"].as_str().unwrap();
-                    let target = if p["in"] == "path" {
-                        fill(Some(name), value)
+            let is_array = |schema: &Value| {
+                schema["type"] == "array"
+                    || schema["type"]
+                        .as_array()
+                        .is_some_and(|t| t.iter().any(|t| t == "array"))
+            };
+            // A minimal valid body for the operation, so query and path checks reach handlers.
+            let base_body = body_schema["properties"].as_object().map(|properties| {
+                let mut body = serde_json::Map::new();
+                for name in body_schema["required"].as_array().into_iter().flatten() {
+                    let name = name.as_str().unwrap();
+                    let value = if is_array(&properties[name]) {
+                        json!([id])
+                    } else if name == "since" {
+                        json!("now")
                     } else {
-                        format!("{}?{name}={}", fill(None, value), encode(value))
+                        json!("https://example.org/")
                     };
-                    let body = body_schema.is_object().then(|| json!({}));
-                    let status = send_raw(&app, &method, &target, body).await;
-                    assert_ne!(
+                    body.insert(name.to_owned(), value);
+                }
+                if body.is_empty() {
+                    // Exactly one of the optional lists (resources/lookup).
+                    if let Some((name, _)) = properties.iter().find(|(_, s)| is_array(s)) {
+                        body.insert(name.clone(), json!([id]));
+                    }
+                }
+                body
+            });
+            for p in &parameters {
+                let name = p["name"].as_str().unwrap();
+                let targets = values.iter().map(|v| (v.to_string(), encode(v))).chain(
+                    raw_values.iter().filter(|_| p["in"] == "query").map(|v| {
+                        (
+                            v.replace("%2B", "+").replace("%FF", "\u{FFFD}"),
+                            v.to_string(),
+                        )
+                    }),
+                );
+                for (value, encoded) in targets {
+                    let target = if p["in"] == "path" {
+                        fill(Some(name), &value)
+                    } else {
+                        format!("{}?{name}={encoded}{}", fill(None, ""), companions(name))
+                    };
+                    let body = base_body.clone().map(Value::Object);
+                    let (status, response) = send_raw(&app, &method, &target, body).await;
+                    check(
                         status,
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "{method} {target}"
+                        &response,
+                        &format!("{method} {target}"),
+                        name,
+                        &value,
                     );
                     sent += 1;
                 }
-                if let Some(properties) = body_schema["properties"].as_object() {
-                    for (field, schema) in properties {
-                        let v = if schema["type"] == "array" {
-                            json!([value])
-                        } else {
-                            json!(value)
-                        };
-                        let mut body = serde_json::Map::new();
-                        // Valid companions, so the field under test is what gets parsed.
-                        for (other, s) in properties {
-                            if other != field && s["type"] == "array" {
-                                body.insert(other.clone(), json!([id]));
-                            }
+            }
+            if let (Some(properties), Some(base)) =
+                (body_schema["properties"].as_object(), &base_body)
+            {
+                for (field, schema) in properties {
+                    for value in values {
+                        let mut body = base.clone();
+                        if !base.contains_key(field) && is_array(schema) {
+                            // The other list goes, so exactly one list is sent.
+                            body.retain(|k, _| !is_array(&properties[k.as_str()]));
                         }
-                        body.insert(field.clone(), v);
-                        let target = fill(None, value);
-                        let status =
-                            send_raw(&app, &method, &target, Some(Value::Object(body))).await;
-                        assert_ne!(
-                            status,
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "{method} {target} {field}={value}"
+                        body.insert(
+                            field.clone(),
+                            if is_array(schema) {
+                                json!([value])
+                            } else {
+                                json!(value)
+                            },
                         );
+                        let target = fill(None, "");
+                        let what = format!("{method} {target} {field}={value}");
+                        let (status, response) =
+                            send_raw(&app, &method, &target, Some(Value::Object(body))).await;
+                        check(status, &response, &what, field, value);
+                        // Text fields (strings, string lists, string-or-integer) must reach the
+                        // handler; integer fields rightly refuse a string at the JSON shape.
+                        let textual = is_array(schema)
+                            || schema["oneOf"].is_array()
+                            || schema["type"] == "string"
+                            || schema["type"]
+                                .as_array()
+                                .is_some_and(|t| t.iter().any(|t| t == "string"));
+                        if textual {
+                            assert_ne!(
+                                status,
+                                StatusCode::UNPROCESSABLE_ENTITY,
+                                "{what}: the value must reach the handler, not stop at JSON shape"
+                            );
+                        } else {
+                            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{what}");
+                        }
                         sent += 1;
                     }
                 }
@@ -1528,33 +1644,26 @@ async fn round5_multibyte_input_never_panics_any_public_route(pool: PgPool) {
         }
     }
     assert!(
-        sent > 300,
+        sent > 400,
         "only {sent} requests: the sweep lost its routes"
     );
     assert_eq!(panics.get(), 0, "no handler panicked");
 }
 
-/// Step 6 round 5 S12: page two of a relative-window search resolves `now` at the cursor's
-/// pinned instant, so an event that started between the two page fetches is not skipped.
+/// Step 6 rounds 5–6 (S12, S20): page two of a relative-window search resolves `now` at the
+/// cursor's pinned instant, so an event that started between the two page fetches is not skipped.
 #[sqlx::test(migrations = "../../migrations")]
 async fn round5_relative_windows_are_pinned_by_the_search_cursor(pool: PgPool) {
-    use chrono::Timelike;
-    // Leave room before the next minute boundary for page one and the events it lists.
-    if Utc::now().second() >= 50 {
-        tokio::time::sleep(std::time::Duration::from_secs(
-            61 - u64::from(Utc::now().second()),
-        ))
-        .await;
-    }
-    let base = Utc::now() + chrono::Duration::seconds(3);
+    let start: DateTime<Utc> = "2036-06-01T10:00:20Z".parse().unwrap();
+    let (now, clock) = test_clock(start);
     let mut ids = vec![];
-    for (i, offset) in [0i64, 2].into_iter().enumerate() {
+    for (i, offset) in [10i64, 20].into_iter().enumerate() {
         let uri = format!("https://events.example/soon-{i}");
         let id = store::ensure_resource(&pool, &uri).await.unwrap();
         let mut doc = ResourceMeta::new(&uri, "web", 86400);
         doc.set_type("Event");
         doc.name = Some(format!("Soon {i}"));
-        doc.start = Some(base + chrono::Duration::seconds(offset));
+        doc.start = Some(start + chrono::Duration::seconds(offset));
         doc.end = doc.start.map(|s| s + chrono::Duration::hours(1));
         store::save_document(&pool, &id, 0, &doc).await.unwrap();
         sqlx::query("INSERT INTO reference(resource_id,kind,author,label,object_path,created_at) VALUES($1,'tag',$2,'soon',$1,now())")
@@ -1565,33 +1674,99 @@ async fn round5_relative_windows_are_pinned_by_the_search_cursor(pool: PgPool) {
             .unwrap();
         ids.push(id);
     }
-    let app = api::router(AppState::new(pool, Config::default()).unwrap());
-    let (code, page) = call(
-        &app,
-        "GET",
-        "/v1/search?type=Event&from=now&sort=start&limit=1",
-        None,
-    )
-    .await;
+    let mut state = AppState::new(pool, Config::default()).unwrap();
+    state.clock = Some(clock);
+    let app = api::router(state);
+    let path = "/v1/search?type=Event&from=now&sort=start&limit=1";
+    let (code, page) = call(&app, "GET", path, None).await;
     assert_eq!(code, 200, "{page}");
     assert_eq!(page["items"][0]["resource_id"], ids[0]);
     let cursor = page["cursor"].as_str().unwrap().to_owned();
-    // Cross the minute boundary: `now` alone would now resolve after both starts.
-    tokio::time::sleep(std::time::Duration::from_secs(
-        61 - u64::from(Utc::now().second()),
-    ))
-    .await;
-    assert!(Utc::now() > base + chrono::Duration::seconds(2));
-    let (code, next) = call(
-        &app,
-        "GET",
-        &format!("/v1/search?type=Event&from=now&sort=start&limit=1&cursor={cursor}"),
-        None,
-    )
-    .await;
+    // A minute later `now` alone would resolve after both starts.
+    *now.lock().unwrap() = start + chrono::Duration::minutes(1);
+    let (code, next) = call(&app, "GET", &format!("{path}&cursor={cursor}"), None).await;
     assert_eq!(code, 200, "{next}");
     assert_eq!(
         next["items"][0]["resource_id"], ids[1],
         "page two keeps page one's window"
     );
+    let (_, fresh) = call(&app, "GET", path, None).await;
+    assert_eq!(fresh["items"], json!([]), "a new query uses the new minute");
+}
+
+/// Step 6 round 6 S19: a relative `since` in /v1/changes/lookup keeps the first page's window on
+/// later cursor pages instead of re-resolving `now`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round6_change_lookup_pins_a_relative_since_per_cursor(pool: PgPool) {
+    let minute: DateTime<Utc> = "2036-06-01T10:00:00Z".parse().unwrap();
+    let uri = "https://example.org/changing";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    for second in [10, 20, 30] {
+        sqlx::query("INSERT INTO resource_change(resource_id,class,fields,after,source,at) VALUES($1,'details',ARRAY['name'],$2,'web',$3)")
+            .bind(&id)
+            .bind(json!({"name": format!("v{second}")}))
+            .bind(minute + chrono::Duration::seconds(second))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let (now, clock) = test_clock(minute + chrono::Duration::seconds(40));
+    let mut state = AppState::new(pool, Config::default()).unwrap();
+    state.clock = Some(clock);
+    let app = api::router(state);
+    let page = |cursor: Option<i64>| {
+        let mut body = json!({"resource_ids":[id],"since":"now","limit":1});
+        if let Some(c) = cursor {
+            body["cursor"] = json!(c);
+        }
+        body
+    };
+    let (status, first) = send_raw(&app, "POST", "/v1/changes/lookup", Some(page(None))).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["lines"].as_array().unwrap().len(), 1);
+    let cursor = first["next_cursor"].as_i64().unwrap();
+    // The next minute: `now` alone would start after every line.
+    *now.lock().unwrap() = minute + chrono::Duration::seconds(70);
+    let (status, second) =
+        send_raw(&app, "POST", "/v1/changes/lookup", Some(page(Some(cursor)))).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(
+        second["lines"][0]["after"]["name"], "v20",
+        "page two keeps the first page's window: {second}"
+    );
+    let (_, fresh) = send_raw(&app, "POST", "/v1/changes/lookup", Some(page(None))).await;
+    assert_eq!(
+        fresh["lines"],
+        json!([]),
+        "a new lookup uses the new minute"
+    );
+}
+
+/// Step 6 round 6 S17: a panicking handler under the public layer stack answers the fixed 500
+/// body with the CORS header and increments `pinakes_api_panics_total`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round6_the_panic_backstop_answers_500_with_cors_and_counts(pool: PgPool) {
+    let state = AppState::new(pool, Config::default()).unwrap();
+    let panics = state.metrics.api_panics.clone();
+    async fn boom() -> &'static str {
+        panic!("test panic")
+    }
+    let app = api::with_public_layers(Router::new().route("/boom", get(boom)), state);
+    let mut request = Request::builder()
+        .uri("/boom")
+        .header("origin", "https://pubky.app")
+        .body(Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.12:1234".parse::<SocketAddr>().unwrap(),
+    ));
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.headers()["access-control-allow-origin"], "*");
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap(),
+        json!({"error":"internal server error"})
+    );
+    assert_eq!(panics.get(), 1);
 }
