@@ -138,8 +138,9 @@ pub const EXTRACTOR_VERSIONS: &[(&str, i32)] = &[
     // 10: NIP-52 calendars stop waiting for a member pending past the configured wait (round 23).
     // 11: the NIP-52 member wait per calendar and member, bounded per calendar; leap seconds
     // normalised before the year check (round 24).
-    ("event", 11),
-    ("event_platform", 11),
+    // 12: event documents keep the page card's identity claims (round 25).
+    ("event", 12),
+    ("event_platform", 12),
     ("media", 1),
     ("isbn", 1),
     ("doi", 1),

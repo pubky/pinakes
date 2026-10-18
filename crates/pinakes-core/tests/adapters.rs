@@ -4571,3 +4571,169 @@ async fn round24_a_single_event_document_saves_with_storable_horizons(pool: PgPo
             .unwrap();
     assert_eq!((start, end), (c.horizon_start, c.horizon_end));
 }
+
+/// HTML pages by host and path (any query), 404 otherwise.
+struct HtmlPages(std::collections::BTreeMap<String, String>);
+#[async_trait::async_trait]
+impl Transport for HtmlPages {
+    async fn get(&self, url: &url::Url, addresses: &[SocketAddr]) -> anyhow::Result<Fetched> {
+        self.get_with(url, addresses, &Default::default()).await
+    }
+    async fn get_with(
+        &self,
+        url: &url::Url,
+        _: &[SocketAddr],
+        _: &FetchOptions,
+    ) -> anyhow::Result<Fetched> {
+        let page = self
+            .0
+            .get(&format!("{}{}", url.host_str().unwrap_or(""), url.path()));
+        Ok(Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            url: url.clone(),
+            validators: Default::default(),
+            content_type: "text/html; charset=utf-8".into(),
+            status: if page.is_some() { 200 } else { 404 },
+            retry_after_secs: 60,
+            location: None,
+            body: page.cloned().unwrap_or_default().into_bytes(),
+        })
+    }
+}
+fn html_platform(pool: &PgPool, pages: &[(&str, String)]) -> adapters::service::PlatformResolver {
+    platform(
+        pool,
+        EventConfig {
+            geocoding: false,
+            ..Default::default()
+        },
+        Egress::with_backends(
+            Default::default(),
+            Arc::new(AdapterDns),
+            Arc::new(HtmlPages(
+                pages
+                    .iter()
+                    .map(|(k, v)| ((*k).to_owned(), v.clone()))
+                    .collect(),
+            )),
+        ),
+    )
+}
+/// An event page as Meetup and Luma publish them: a head canonical and og:url naming the clean
+/// URL, and a JSON-LD Event whose `url` is the same.
+fn event_page(canonical: &str, name: &str, same_as: Option<&str>) -> String {
+    let start = (Utc::now() + Duration::days(20)).to_rfc3339();
+    let same_as = same_as.map_or(String::new(), |s| format!(r#","sameAs":"{s}""#));
+    format!(
+        r#"<html><head><title>{name}</title><link rel="canonical" href="{canonical}"><meta property="og:url" content="{canonical}"><script type="application/ld+json">{{"@context":"https://schema.org","@type":"Event","name":"{name}","startDate":"{start}","eventAttendanceMode":"https://schema.org/OfflineEventAttendanceMode","location":{{"@type":"Place","name":"Hall","address":"Zurich","geo":{{"latitude":47.37,"longitude":8.54}}}},"url":"{canonical}"{same_as}}}</script></head><body><h1>{name}</h1></body></html>"#
+    )
+}
+async fn group_of(pool: &PgPool, id: &str) -> String {
+    sqlx::query_scalar("SELECT coalesce(group_id,unit_id) FROM group_unit WHERE resource_id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Round 25 D1: event documents keep the card's identity claims. Through the real Meetup and
+/// Luma adapter routes, two URLs of the same event that differ only in tracking parameters
+/// join one group through the same-origin canonical their pages declare; nothing joins across
+/// platforms.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round25_event_pages_keep_their_canonical_claims(pool: PgPool) {
+    use pinakes_core::resolver::Resolver;
+    let meetup = "https://www.meetup.com/zurich-bitcoin/events/316480149/";
+    let luma = "https://lu.ma/abc123";
+    let r = html_platform(
+        &pool,
+        &[
+            (
+                "www.meetup.com/zurich-bitcoin/events/316480149/",
+                event_page(meetup, "Bitcoin Meetup", None),
+            ),
+            ("lu.ma/abc123", event_page(luma, "Bitcoin Meetup", None)),
+        ],
+    );
+    let mut ids = vec![];
+    for (uri, canonical) in [
+        (format!("{meetup}?recId=a1&searchId=s1"), meetup),
+        (format!("{meetup}?recId=b2&searchId=s2"), meetup),
+        (format!("{luma}?tk=one"), luma),
+        (format!("{luma}?tk=two"), luma),
+    ] {
+        let id = store::ensure_resource(&pool, &uri).await.unwrap();
+        let doc = r.resolve(&uri).await.unwrap();
+        assert!(
+            doc.type_path.contains(&"Event".into()),
+            "{uri}: {:?}",
+            doc.type_path
+        );
+        let claim = format!(
+            "url:{}",
+            pinakes_core::model::identity(canonical).unwrap().0
+        );
+        assert!(
+            doc.group_keys.iter().any(|k| k.key == claim),
+            "{uri} claims its canonical: {:?}",
+            doc.group_keys
+        );
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+        ids.push(id);
+    }
+    assert_ne!(
+        ids[0], ids[1],
+        "tracking parameters are part of the identity"
+    );
+    assert_eq!(
+        group_of(&pool, &ids[0]).await,
+        group_of(&pool, &ids[1]).await
+    );
+    assert_eq!(
+        group_of(&pool, &ids[2]).await,
+        group_of(&pool, &ids[3]).await
+    );
+    assert_ne!(
+        group_of(&pool, &ids[0]).await,
+        group_of(&pool, &ids[2]).await,
+        "the same event on another platform does not join"
+    );
+}
+
+/// Round 25 D1: through the web route, a cross-origin sameAs between two event pages still
+/// needs reciprocity: one-sided it joins nothing, reciprocated it groups them.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round25_cross_origin_event_same_as_needs_reciprocity(pool: PgPool) {
+    use pinakes_core::resolver::Resolver;
+    let (a, b) = (
+        "https://events.a.example/talk",
+        "https://tickets.b.example/talk",
+    );
+    let one_sided = html_platform(
+        &pool,
+        &[
+            ("events.a.example/talk", event_page(a, "Talk", Some(b))),
+            ("tickets.b.example/talk", event_page(b, "Talk", None)),
+        ],
+    );
+    let (ia, ib) = (
+        store::ensure_resource(&pool, a).await.unwrap(),
+        store::ensure_resource(&pool, b).await.unwrap(),
+    );
+    for (uri, id) in [(a, &ia), (b, &ib)] {
+        let doc = one_sided.web.resolve(uri).await.unwrap();
+        assert!(doc.type_path.contains(&"Event".into()));
+        store::save_document(&pool, id, 0, &doc).await.unwrap();
+    }
+    assert_ne!(group_of(&pool, &ia).await, group_of(&pool, &ib).await);
+    let reciprocal = html_platform(
+        &pool,
+        &[("tickets.b.example/talk", event_page(b, "Talk", Some(a)))],
+    );
+    let mut doc = reciprocal.web.resolve(b).await.unwrap();
+    assert!(doc.group_keys.iter().any(|k| k.key == format!("url:{ia}")));
+    doc.fetched_at += 1000;
+    store::save_document(&pool, &ib, 0, &doc).await.unwrap();
+    assert_eq!(group_of(&pool, &ia).await, group_of(&pool, &ib).await);
+}

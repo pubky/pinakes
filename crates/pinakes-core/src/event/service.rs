@@ -446,6 +446,18 @@ impl EventService {
         event.aliases = card.aliases;
         event.attributes = card.attributes;
         event.site = card.site;
+        // The card's identity claims (its same-origin canonical and og:url, typed identifiers,
+        // sameAs) describe this page too, so they stay with the event. Redirect aliases are not
+        // among them (round 3 keeps them out of group keys), and the grouping rules decide what
+        // each claim may join.
+        for key in card.group_keys {
+            if event.group_keys.len() >= 16 {
+                break;
+            }
+            if !event.group_keys.iter().any(|k| k.key == key.key) {
+                event.group_keys.push(key);
+            }
+        }
         page::finalize(&mut event, self.config.coordinate_timezone);
         // Geocoding is enrichment. A slow/unavailable service must not discard page facts.
         let remaining = deadline

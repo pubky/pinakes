@@ -168,6 +168,10 @@ node contributes only when it is itself the chosen entity. JSON-LD itself stays
 document-wide because plugins put it in the body. A `<script>`
 injected into the body by user content is cross-site scripting on that site and outside this
 threat model. Rendered user `<meta>`/`<link>` elements, which some sites allow, are not.
+An event page keeps these claims: the event document built from a page (generic JSON-LD and
+microformats, and the Meetup and Luma adapters, which read the same page) carries the page
+card's identity claims, so two tracking-parameter variants of one event join through the
+same-origin canonical they declare, under the same rules as any other page.
 
 [Details: the two example documents, the venue chain, time zones and cancellation, groups](details.html#document)
 
