@@ -427,7 +427,10 @@ instants are limited to UTC years 0001–9999, the range Postgres reads back (a 
 item's `end_out_of_range` or `modified_out_of_range`, so one bad item never fails the feed. A
 document's own start or end is treated the same way. The bound is applied again where each
 occurrence row is written, after times re-derived from a stored venue's zone: an occurrence
-whose start falls out of range there keeps its stored row.
+whose start falls out of range there keeps its stored row (in a non-delta feed that row is then
+cancelled after two snapshots, since the item is outside the horizon) and the feed records
+`occurrence_start_out_of_range`. Instants are truncated to microseconds first, as Postgres
+stores them, so a value just below year 10000 is not rounded into it.
 A series whose embedded VTIMEZONE cannot convert its DTSTART expands in UTC (its published
 instants) and records the warning `series_zone_unconvertible`.
 Occurrence changes are field patches with `occurrence` equal to the serialized
@@ -528,7 +531,9 @@ request CSL JSON, including publication date and container. Invalid bare identif
 are final Missing; informational DOI URLs fall back to web. Generic Nostr
 profiles/notes use the signed-event indexer path; NIP-52 events retain their event
 schema. A NIP-52 calendar waits (`calendar_members_pending`) only for members not resolved
-yet. A member whose resolution failed (refused, unreachable, dead-lettered), including one
+yet, and for at most `event.adapters.calendar_member_wait_hours` (48 default) after a member was
+first seen; a member still unresolved after that counts as unavailable. A member whose
+resolution failed (refused, unreachable, dead-lettered), including one
 whose newest version is refused, or an accepted member without a start, is skipped like a
 missing one with `calendar_member_unavailable`: the calendar applies its other members, and
 the skipped member's rows are cancelled after two snapshots; its last accepted version is not

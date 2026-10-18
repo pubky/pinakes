@@ -4102,19 +4102,28 @@ async fn round22_times_rederived_after_the_bound_never_reach_the_cast(pool: PgPo
             .await
             .unwrap();
     assert_eq!(Some(start), first.start, "the stored row stays");
+    // Round 23 F5: the late skip is recorded on the feed, as the early pass does.
+    let warnings: Value = sqlx::query_scalar("SELECT doc->'warnings' FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(warnings, json!(["occurrence_start_out_of_range"]));
 }
 
-/// Round 22 G3: the same re-derivation on an event document itself (not a feed row) is bounded
-/// after `preserve_venue`: the start is dropped with `start_out_of_range` instead of storing
-/// year 10000.
+/// Round 22 G3, as round 23 F2 settles it: the same re-derivation on an event document itself
+/// (not a feed row) is bounded after `preserve_venue`, and when that drops the start while the
+/// stored start is valid, the save answers `drift` and keeps the stored document, like the early
+/// guard and like the occurrence path, which keeps its stored row.
 #[sqlx::test(migrations = "../../migrations")]
-async fn round22_a_document_start_rederived_after_the_bound_is_dropped(pool: PgPool) {
+async fn round22_a_document_start_rederived_after_the_bound_is_drift(pool: PgPool) {
     use pinakes_core::event::Venue;
     let uri = "https://example.org/talk-page";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
     let local = (Utc::now() + Duration::days(10))
         .format("%Y-%m-%dT%H:%M:%S")
         .to_string();
+    let local_first = local.clone();
     let mut first = ResourceMeta::new(uri, "web", 3600);
     first.set_type("Event");
     first.name = Some("Talk".into());
@@ -4141,20 +4150,216 @@ async fn round22_a_document_start_rederived_after_the_bound_is_dropped(pool: PgP
         text: "Hall".into(),
         ..Default::default()
     });
-    store::save_document(&pool, &id, 0, &fresh(&second))
+    let error = store::save_document(&pool, &id, 0, &fresh(&second))
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .downcast_ref::<pinakes_core::resolver::RetryLater>()
+            .is_some_and(|r| r.class == "drift"),
+        "{error}"
+    );
+    let (start_at, warnings, local): (Option<DateTime<Utc>>, Value, Option<String>) =
+        sqlx::query_as(
+            "SELECT start_at,coalesce(doc->'warnings','null'),doc->>'start_local' FROM resource WHERE id=$1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
         .await
         .unwrap();
-    let (start_at, warnings, tz): (Option<DateTime<Utc>>, Value, Option<String>) =
-        sqlx::query_as("SELECT start_at,doc->'warnings',doc->>'tz' FROM resource WHERE id=$1")
+    assert_eq!(start_at, first.start, "the stored start stays");
+    assert_eq!(local, Some(local_first), "the stored document stays");
+    assert_eq!(warnings, Value::Null);
+    let lines: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM resource_change WHERE resource_id=$1")
             .bind(&id)
             .fetch_one(&pool)
             .await
             .unwrap();
+    assert_eq!(lines, 1, "only the creation line, no rescheduled line");
+}
+
+/// Round 23 F1: Postgres keeps microseconds and rounds finer values, so 9999-12-31T23:59:59.9999995Z
+/// would land in year 10000: instants are truncated before the range check. A JSON-feed end like
+/// that is stored in year 9999 and its page reads; a modification time an older build stored in
+/// year 10000 never fails the cancellation that writes the row back.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round23_sub_microsecond_instants_never_round_past_9999(pool: PgPool) {
+    let edge: DateTime<Utc> = "9999-12-31T23:59:59.9999995Z".parse().unwrap();
+    let kept: DateTime<Utc> = "9999-12-31T23:59:59.999999Z".parse().unwrap();
+    assert_eq!(time::bounded(edge), Some(kept));
+    let uri = "https://example.org/edge.json";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let feed = json!({"version":"https://jsonfeed.org/version/1","items":[
+        {"id":"edge","title":"Edge","event":{"start":"2026-10-20T19:00:00Z","end":"9999-12-31T23:59:59.9999995Z"}}
+    ]});
+    let doc = calendar::structured_feed(
+        uri,
+        feed.to_string().as_bytes(),
+        &EventConfig::default(),
+        now(),
+    )
+    .unwrap()
+    .unwrap();
+    store::save_document(&pool, &id, 0, &fresh(&doc))
+        .await
+        .unwrap();
+    let end: Option<DateTime<Utc>> =
+        sqlx::query_scalar("SELECT end_at FROM occurrence WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(end, Some(kept));
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (code, page) = call(
+        &app,
+        &format!("/v1/resources/{id}/occurrences?from=2026-01-01T00:00:00Z"),
+    )
+    .await;
+    assert_eq!(code, 200, "{page}");
     assert_eq!(
-        tz.as_deref(),
-        Some("America/New_York"),
-        "the stored zone was re-applied"
+        page["items"][0]["end_at"],
+        json!("9999-12-31T23:59:59.999999Z")
     );
-    assert_eq!(start_at, None);
-    assert_eq!(warnings, json!(["start_out_of_range"]));
+
+    let uri = "https://example.org/modified.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let event = |uid: &str| {
+        format!("BEGIN:VEVENT\r\nUID:{uid}\r\nSUMMARY:{uid}\r\nDTSTART:20361022T180000Z\r\nEND:VEVENT\r\n")
+    };
+    let body = |events: &[&str]| {
+        format!(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n{}END:VCALENDAR\r\n",
+            events.iter().map(|e| event(e)).collect::<String>()
+        )
+    };
+    let cfg = EventConfig::default();
+    snapshot(&pool, &id, uri, &body(&["a", "b", "c"]), &cfg).await;
+    // As an older build stored it: the text cast rounded a sub-microsecond value into 10000.
+    sqlx::query("UPDATE occurrence SET modified=make_timestamptz(10000,1,1,0,0,0,'UTC') WHERE resource_id=$1 AND uid='a'")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    snapshot(&pool, &id, uri, &body(&["b", "c"]), &cfg).await;
+    snapshot(&pool, &id, uri, &body(&["b", "c"]), &cfg).await;
+    let (status, modified): (String, Option<DateTime<Utc>>) =
+        sqlx::query_as("SELECT status,modified FROM occurrence WHERE resource_id=$1 AND uid='a'")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((status.as_str(), modified), ("cancelled", None));
+}
+
+/// Round 23 F1: rows older builds stored in year 10000 read through the API without failing the
+/// page, and migration 0046 clears them once.
+#[sqlx::test(migrations = false)]
+async fn round23_stored_year_10000_values_read_and_migration_0046_clears_them(pool: PgPool) {
+    sqlx::migrate::Migrator {
+        migrations: std::borrow::Cow::Owned(
+            pinakes_core::MIGRATOR.iter().take(45).cloned().collect(),
+        ),
+        ..sqlx::migrate::Migrator::DEFAULT
+    }
+    .run(&pool)
+    .await
+    .unwrap();
+    let uri = "https://example.org/old.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let event = |uid: &str| {
+        format!("BEGIN:VEVENT\r\nUID:{uid}\r\nSUMMARY:{uid}\r\nDTSTART:20361022T180000Z\r\nDTEND:20361022T200000Z\r\nEND:VEVENT\r\n")
+    };
+    let body = format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n{}{}{}END:VCALENDAR\r\n",
+        event("end"),
+        event("start"),
+        event("modified")
+    );
+    snapshot(&pool, &id, uri, &body, &EventConfig::default()).await;
+    let far = "make_timestamptz(10000,1,1,0,0,0,'UTC')";
+    for (uid, set) in [
+        (
+            "end",
+            format!("end_at={far},doc=jsonb_set(doc,'{{end}}','\"+10000-01-01T00:00:00Z\"')"),
+        ),
+        (
+            "start",
+            format!("start_at={far},doc=jsonb_set(doc,'{{start}}','\"+10000-01-01T00:00:00Z\"')"),
+        ),
+        ("modified", format!("modified={far}")),
+    ] {
+        sqlx::query(&format!(
+            "UPDATE occurrence SET {set} WHERE resource_id=$1 AND uid='{uid}'"
+        ))
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let page_uri = "https://example.org/far-event";
+    let page_id = store::ensure_resource(&pool, page_uri).await.unwrap();
+    let mut page = ResourceMeta::new(page_uri, "web", 3600);
+    page.set_type("Event");
+    page.name = Some("Far".into());
+    page.start = Some(Utc::now() + Duration::days(1));
+    store::save_document(&pool, &page_id, 0, &fresh(&page))
+        .await
+        .unwrap();
+    sqlx::query(&format!("UPDATE resource SET start_at={far},doc=jsonb_set(doc,'{{start}}','\"+10000-01-01T00:00:00Z\"') WHERE id=$1"))
+        .bind(&page_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (code, v) = call(
+        &app,
+        &format!("/v1/resources/{id}/occurrences?from=2026-01-01T00:00:00Z"),
+    )
+    .await;
+    assert_eq!(code, 200, "{v}");
+    let items: Vec<_> = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| (i["uid"].as_str().unwrap().to_owned(), i["end_at"].is_null()))
+        .collect();
+    assert_eq!(
+        items,
+        [("end".to_owned(), true), ("modified".to_owned(), false)],
+        "a year-10000 end reads as null and a year-10000 start is skipped"
+    );
+    let (code, v) = call(&app, &format!("/v1/resources/{page_id}")).await;
+    assert_eq!(code, 200, "{v}");
+    pinakes_core::migrate(&pool).await.unwrap();
+    type Row = (String, Option<DateTime<Utc>>, Option<DateTime<Utc>>, bool);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT uid,end_at,modified,doc ? 'end' FROM occurrence WHERE resource_id=$1 ORDER BY uid",
+    )
+    .bind(&id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let summary: Vec<_> = rows
+        .iter()
+        .map(|(uid, end, modified, doc_end)| {
+            (uid.as_str(), end.is_some(), modified.is_some(), *doc_end)
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("end", false, false, false),
+            ("modified", true, false, true)
+        ],
+        "the start row is dropped, the end and the modification time cleared"
+    );
+    let (start_at, doc_start): (Option<DateTime<Utc>>, bool) =
+        sqlx::query_as("SELECT start_at,doc ? 'start' FROM resource WHERE id=$1")
+            .bind(&page_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((start_at, doc_start), (None, false));
 }

@@ -23,6 +23,9 @@ pub struct AdapterConfig {
     pub max_indexer_pages: usize,
     pub max_derived_resources: usize,
     pub max_calendar_members: usize,
+    /// Hours a NIP-52 calendar waits for a member that has never resolved before applying
+    /// without it (`calendar_member_unavailable`).
+    pub calendar_member_wait_hours: u64,
     pub max_linked_resources: usize,
     pub platforms: BTreeMap<String, Options>,
 }
@@ -37,6 +40,7 @@ impl Default for AdapterConfig {
             max_indexer_pages: 10,
             max_derived_resources: 10000,
             max_calendar_members: 50,
+            calendar_member_wait_hours: 48,
             max_linked_resources: 100,
             platforms: BTreeMap::new(),
         }
@@ -302,6 +306,7 @@ pub fn validate(cfg: &EventConfig) -> anyhow::Result<()> {
             && (1..=20).contains(&cfg.adapters.max_indexer_pages)
             && (1..=100000).contains(&cfg.adapters.max_derived_resources)
             && (1..=500).contains(&cfg.adapters.max_calendar_members)
+            && (1..=720).contains(&cfg.adapters.calendar_member_wait_hours)
             && (1..=1000).contains(&cfg.adapters.max_linked_resources)
             && (100..=5000).contains(&cfg.adapters.websocket_deadline_ms),
         "invalid adapter limits"

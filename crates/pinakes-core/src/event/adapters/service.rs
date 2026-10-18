@@ -386,6 +386,8 @@ impl PlatformResolver {
                 .and_then(crate::event::time::bounded)
                 .or(o.doc.start.and_then(crate::event::time::bounded))
                 .filter(|at| *at > chrono::Utc::now())
+                // Delta rows skip the horizon: a distant event never holds a slot past it.
+                .map(|at| at.min(crate::store::derivation_horizon(cfg)))
             else {
                 continue;
             };

@@ -93,6 +93,7 @@ max_cursor_pages = 10
 max_indexer_pages = 10 # Inclusive until windows; shared 10s deadline, incomplete -> retry.
 max_derived_resources = 10000 # Active sponsorship rows per adapter, across all parents.
 max_calendar_members = 50
+calendar_member_wait_hours = 48 # 1-720: a NIP-52 calendar then applies without a never-resolved member.
 max_linked_resources = 100 # Active future-event website resources per BTC Map root.
 
 # Every platform accepts enabled, key, canary, ua_profile (pinakes/browser/firefox/plain),

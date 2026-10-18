@@ -237,35 +237,45 @@ pub fn bound_instants(doc: &ResourceMeta) -> Option<ResourceMeta> {
     }
     Some(doc)
 }
-/// Drop a document's out-of-range start or end with its `start_out_of_range`/`end_out_of_range`
-/// warning (`time::bounded`).
+/// Bound a document's start and end (`time::bounded`, which also truncates to the microseconds
+/// Postgres keeps): an out-of-range value is dropped with its `start_out_of_range` or
+/// `end_out_of_range` warning.
 pub fn clear_instants(d: &mut ResourceMeta) {
     let mut changed = false;
     for (value, warning) in [
         (&mut d.start, "start_out_of_range"),
         (&mut d.end, "end_out_of_range"),
     ] {
-        if value.is_some_and(|t| time::bounded(t).is_none()) {
-            *value = None;
-            d.event.warnings.push(warning.into());
-            changed = true;
+        if let Some(t) = *value {
+            *value = time::bounded(t);
+            if value.is_none() {
+                d.event.warnings.push(warning.into());
+                changed = true;
+            }
         }
     }
     if changed {
-        d.event.warnings.sort();
-        d.event.warnings.dedup();
-        d.event.warnings.truncate(16);
+        tidy_warnings(d);
     }
 }
+fn tidy_warnings(d: &mut ResourceMeta) {
+    d.event.warnings.sort();
+    d.event.warnings.dedup();
+    d.event.warnings.truncate(16);
+}
 /// One occurrence's instants: `false` when its start is out of range (the row must be dropped);
-/// otherwise an out-of-range end or modified time is dropped with the item's warning.
+/// otherwise each instant is truncated to microseconds and an out-of-range end or modified time
+/// is dropped with the item's warning.
 pub fn bound_item(d: &mut ResourceMeta, modified: &mut Option<DateTime<Utc>>) -> bool {
     if d.start.is_some_and(|t| time::bounded(t).is_none()) {
         return false;
     }
-    if modified.is_some_and(|t| time::bounded(t).is_none()) {
-        *modified = None;
-        d.event.warnings.push("modified_out_of_range".into());
+    if let Some(t) = *modified {
+        *modified = time::bounded(t);
+        if modified.is_none() {
+            d.event.warnings.push("modified_out_of_range".into());
+            tidy_warnings(d);
+        }
     }
     clear_instants(d);
     true

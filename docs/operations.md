@@ -136,6 +136,9 @@ refresh, in batches of 1000 with leases fenced. Restarts are idempotent. A re-pl
 replace this, because it reuses the stored document. Migration 0040 marks every resolved row
 as version 0, so the first start after it re-extracts everything once, throttled by the normal
 per-host and OSM limits.
+Every start also caps derived-link expiries (`resource_derivation.expires_at`) at the event
+horizon (now plus `event.months_forward`), in batches of 1000, logging `capped derived-link
+expiries at the event horizon` when it changes any.
 A save records the route that produced the document (`resource.resolved_by`). At startup the
 daemon re-queues `ok` rows whose `resolved_by` differs from `resolver` (batches of 1000,
 staggered over one hour, never later than the scheduled refresh, generation bump, event-fetch

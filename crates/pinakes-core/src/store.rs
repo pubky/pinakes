@@ -23,6 +23,30 @@ pub async fn derive_resource(
 ) -> Result<Option<String>> {
     derive_resource_until(pool, parent, uri, adapter, cap, 10000, None).await
 }
+/// The latest expiry a derived link may carry: the event horizon (`event.months_forward`).
+pub fn derivation_horizon(cfg: &crate::config::EventConfig) -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now()
+        .checked_add_months(chrono::Months::new(cfg.months_forward))
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC)
+}
+/// Cap stored derived-link expiries at the event horizon, so a link sponsored by a distant event
+/// (stored before the cap, or under a longer horizon) frees its slot in time. Runs at startup in
+/// batches of 1000; idempotent.
+pub async fn cap_derivation_expiry(pool: &PgPool, cfg: &crate::config::EventConfig) -> Result<u64> {
+    let horizon = derivation_horizon(cfg);
+    let mut total = 0u64;
+    loop {
+        let capped = sqlx::query("UPDATE resource_derivation SET expires_at=$1 WHERE (parent_id,child_id) IN (SELECT parent_id,child_id FROM resource_derivation WHERE expires_at>$1 LIMIT 1000)")
+            .bind(horizon)
+            .execute(pool)
+            .await?
+            .rows_affected();
+        total += capped;
+        if capped == 0 {
+            return Ok(total);
+        }
+    }
+}
 /// Time-scoped sponsorship frees expired event slots without fetching every historical link.
 pub async fn derive_resource_until(
     pool: &PgPool,

@@ -575,10 +575,11 @@ pub async fn resolve(
             }
             .into());
         };
-        let (value, failed): (Value, bool) = sqlx::query_as(
-            "SELECT d.doc,(r.status IN ('error','unreachable') OR r.dead_letter OR r.final) AND r.status<>'ok' FROM resource_document d JOIN resource r ON r.id=d.id WHERE d.id=$1",
+        let (value, failed, overdue): (Value, bool, bool) = sqlx::query_as(
+            "SELECT d.doc,(r.status IN ('error','unreachable') OR r.dead_letter OR r.final) AND r.status<>'ok',r.created_at<now()-$2*interval '1 hour' FROM resource_document d JOIN resource r ON r.id=d.id WHERE d.id=$1",
         )
         .bind(&id)
+        .bind(cfg.adapters.calendar_member_wait_hours as f64)
         .fetch_one(pool)
         .await?;
         // A member whose own resolution failed (refused, unreachable, dead-lettered) is skipped
@@ -602,16 +603,31 @@ pub async fn resolve(
             unavailable(&mut doc);
             continue;
         }
-        if value.get("type").is_none() {
-            pending = true;
+        // A member that keeps answering "try later" (an indexer gone, an author past the
+        // indexer's page limit) never reaches `error`: past the configured wait it is
+        // unavailable too.
+        let parsed = value
+            .get("type")
+            .is_some()
+            .then(|| serde_json::from_value::<ResourceMeta>(value))
+            .transpose()?;
+        let Some(mut event_doc) = parsed.filter(|d| d.status != Status::Pending) else {
+            if overdue {
+                unavailable(&mut doc);
+            } else {
+                pending = true;
+            }
             continue;
-        }
-        let mut event_doc: ResourceMeta = serde_json::from_value(value)?;
+        };
         if event_doc.status == Status::Missing {
             continue;
         }
         if event_doc.status != Status::Ok {
-            pending = true;
+            if overdue {
+                unavailable(&mut doc);
+            } else {
+                pending = true;
+            }
             continue;
         }
         // An accepted member without a start (its start was out of range and dropped at the

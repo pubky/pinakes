@@ -28,6 +28,8 @@ pub struct Prepared {
     cursor: Option<super::adapters::cursor::Checkpoint>,
     /// The container's expansion signature, stored when the snapshot applies.
     expansion: Option<String>,
+    /// Feed warnings found while building rows, added to the stored document.
+    pub(crate) warnings: Vec<String>,
 }
 pub struct PendingChange {
     before: Option<Value>,
@@ -296,6 +298,7 @@ pub async fn prepare(
         retention_days: container.limits.retention_days,
         cursor: container.cursor.clone(),
         expansion: container.expansion.clone(),
+        warnings: vec![],
         last,
         fetched_at,
         horizon: container.horizon_start,
@@ -385,8 +388,16 @@ pub async fn prepare(
         }
         // The last step before `apply` casts these instants from text: `preserve_venue` may have
         // re-derived the times under the stored zone, so bound them again whatever ran before
-        // (`bound_instants` is the early pass). An out-of-range start keeps the stored row.
+        // (`bound_instants` is the early pass). An out-of-range start keeps the stored row (in a
+        // non-delta feed it is then cancelled after two snapshots), with the feed's warning.
         if !super::bound_item(&mut doc, &mut modified) {
+            if !plan
+                .warnings
+                .iter()
+                .any(|w| w == "occurrence_start_out_of_range")
+            {
+                plan.warnings.push("occurrence_start_out_of_range".into());
+            }
             continue;
         }
         let mut after = changes::normalize(&doc);
@@ -440,6 +451,12 @@ pub async fn prepare(
             continue;
         }
         let mut doc = old.clone();
+        // Stored by an older build (a binary bind or a sub-microsecond value), these may not
+        // survive the text cast: bound them like every other row.
+        let mut modified = *modified;
+        if !super::bound_item(&mut doc, &mut modified) {
+            continue;
+        }
         let status = if superseded.contains(key) {
             "superseded"
         } else {
@@ -712,7 +729,10 @@ pub async fn list(
     if to.is_some_and(|to| from > to) {
         return Err(ApiError::bad("invalid occurrence window"));
     }
-    let values:Vec<Value>=sqlx::query_scalar("SELECT (to_jsonb(o)-ARRAY['point','effective_point','doc','document','content_hash','modified','sequence','search_text']::text[])||jsonb_build_object('document',document,'occurrence',jsonb_build_object('uid',uid,'recurrence_id',nullif(recurrence_id,''),'event_resource_id',event_resource_id)) FROM event_occurrence o WHERE resource_id=$1 AND start_at>=$2 AND ($3::timestamptz IS NULL OR start_at<=$3) AND ($4::timestamptz IS NULL OR (start_at,uid,recurrence_id)>($4,$5,$6)) ORDER BY start_at,uid,recurrence_id LIMIT $7").bind(&root).bind(from).bind(to).bind(cursor.as_ref().map(|c|c.at)).bind(cursor.as_ref().map(|c|&c.uid)).bind(cursor.as_ref().map(|c|&c.rid)).bind((limit+1) as i64).fetch_all(&state.pool).await?;
+    // Rows written by older builds through binary binds may hold year 10000 (to_jsonb writes it
+    // without the `+` chrono needs): an out-of-range end reads as null and such a start is
+    // skipped, instead of failing the page. `from` is bounded, so year 0 starts never match.
+    let values:Vec<Value>=sqlx::query_scalar("SELECT (to_jsonb(o)-ARRAY['point','effective_point','doc','document','content_hash','modified','sequence','search_text']::text[])||jsonb_build_object('document',document,'occurrence',jsonb_build_object('uid',uid,'recurrence_id',nullif(recurrence_id,''),'event_resource_id',event_resource_id),'end_at',CASE WHEN end_at>=make_timestamptz(1,1,1,0,0,0,'UTC') AND end_at<make_timestamptz(10000,1,1,0,0,0,'UTC') THEN end_at END) FROM event_occurrence o WHERE resource_id=$1 AND start_at>=$2 AND start_at<make_timestamptz(10000,1,1,0,0,0,'UTC') AND ($3::timestamptz IS NULL OR start_at<=$3) AND ($4::timestamptz IS NULL OR (start_at,uid,recurrence_id)>($4,$5,$6)) ORDER BY start_at,uid,recurrence_id LIMIT $7").bind(&root).bind(from).bind(to).bind(cursor.as_ref().map(|c|c.at)).bind(cursor.as_ref().map(|c|&c.uid)).bind(cursor.as_ref().map(|c|&c.rid)).bind((limit+1) as i64).fetch_all(&state.pool).await?;
     let more = values.len() > limit;
     let items: Vec<OccurrenceRecord> = values
         .into_iter()

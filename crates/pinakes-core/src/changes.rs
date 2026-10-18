@@ -239,6 +239,12 @@ pub async fn save_extracted(
     // The transient container is serde-skipped: copy only the small parent document,
     // without cloning thousands of already-prepared occurrence documents.
     let mut doc: ResourceMeta = serde_json::from_value(serde_json::to_value(doc)?)?;
+    if let Some(plan) = prepared.as_ref().filter(|p| !p.warnings.is_empty()) {
+        doc.event.warnings.extend(plan.warnings.iter().cloned());
+        doc.event.warnings.sort();
+        doc.event.warnings.dedup();
+        doc.event.warnings.truncate(16);
+    }
     if doc.status == Status::Blocked {
         // Access walls cannot prove absence. Keep accepted event/feed facts and never
         // fabricate an empty container observation or advance missing confirmation.
@@ -339,9 +345,24 @@ pub async fn save_extracted(
         .as_ref()
         .and_then(|v| serde_json::from_value::<ResourceMeta>(v.clone()).ok())
     {
+        let had_start = doc.start.is_some();
         crate::event::storage::preserve_venue(&mut doc, &old);
         // It may re-derive the times under the stored zone, after `bound_instants`.
         crate::event::clear_instants(&mut doc);
+        // Agree with the drift guard above, and with the occurrence path, which keeps its stored
+        // row: a start this late pass drops never replaces a storable stored start.
+        if had_start
+            && doc.start.is_none()
+            && old.start.and_then(crate::event::time::bounded).is_some()
+            && doc.type_path.iter().any(|t| t == "Event")
+        {
+            crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
+            return Err(crate::resolver::RetryLater {
+                class: "drift",
+                seconds: 3600,
+            }
+            .into());
+        }
     }
     let before = before
         .map(|v| serde_json::from_value::<ResourceMeta>(v).map(|d| normalize(&d)))

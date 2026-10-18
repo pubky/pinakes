@@ -79,6 +79,10 @@ async fn main() -> Result<()> {
             "a calendar expansion setting changed: calendars re-parse once"
         );
     }
+    let capped = pinakes_core::store::cap_derivation_expiry(&pool, &config.event).await?;
+    if capped > 0 {
+        tracing::info!(capped, "capped derived-link expiries at the event horizon");
+    }
     if config.queue.reextract_on_upgrade {
         let reextract = queue::reextract_outdated(
             &pool,

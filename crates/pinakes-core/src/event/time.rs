@@ -1,6 +1,6 @@
 use chrono::{
     DateTime, Datelike, Duration, FixedOffset, LocalResult, NaiveDate, NaiveDateTime, Offset,
-    TimeZone, Utc,
+    SubsecRound, TimeZone, Utc,
 };
 use chrono_tz::Tz;
 use std::{collections::BTreeMap, sync::OnceLock};
@@ -78,7 +78,12 @@ fn four_digit_year(value: &str) -> bool {
 /// (`to_rfc3339` writes year 0 as `0000`, which Postgres refuses, and years past 9999 with a
 /// `+`). The string parsers accept year 0000 and local times that land in year 10000, so every
 /// stored or bound instant passes through this (`event::bound_instants`).
+///
+/// Postgres keeps microseconds and rounds anything finer, so 9999-12-31T23:59:59.9999995Z would
+/// be stored as year 10000: the instant is truncated to microseconds first, and callers store the
+/// returned value.
 pub fn bounded(t: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let t = t.trunc_subsecs(6);
     (1..=9999).contains(&t.year()).then_some(t)
 }
 /// A Unix timestamp in seconds, bounded like every stored instant.

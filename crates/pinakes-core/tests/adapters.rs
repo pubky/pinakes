@@ -4231,3 +4231,123 @@ async fn round22_derived_link_expiry_is_bounded(pool: PgPool) {
         chrono::DateTime::from_timestamp(253402300799, 0)
     );
 }
+
+/// Round 23 F3: a distant but storable BTC Map event never holds a derived link's slot past the
+/// event horizon, and the startup pass caps stored expiries the same way. F1: a sub-microsecond
+/// `updated_at` just below year 10000 is stored in year 9999.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round23_derived_links_expire_within_the_horizon(pool: PgPool) {
+    use pinakes_core::resolver::Resolver;
+    let cfg = EventConfig {
+        geocoding: false,
+        ..Default::default()
+    };
+    let uri = "https://api.btcmap.org/v4/events";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let (egress, _) = mock_egress(vec![(
+        200,
+        json!([
+            {"id":1,"status":"live","starts_at":"9999-06-01T00:00:00Z","name":"Far","website":"https://example.org/far","updated_at":"2026-10-15T13:00:00Z"},
+            {"id":2,"status":"live","starts_at":(Utc::now() + Duration::days(2)).to_rfc3339(),"name":"Near","updated_at":"9999-12-31T23:59:59.9999995Z"}
+        ]),
+    )]);
+    let doc = platform(&pool, cfg.clone(), egress)
+        .resolve(uri)
+        .await
+        .unwrap();
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let modified: Option<chrono::DateTime<Utc>> =
+        sqlx::query_scalar("SELECT modified FROM occurrence WHERE resource_id=$1 AND uid='2'")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        modified,
+        Some("9999-12-31T23:59:59.999999Z".parse().unwrap())
+    );
+    let horizon = store::derivation_horizon(&cfg);
+    let expiry = |child: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<chrono::DateTime<Utc>>>(
+                "SELECT d.expires_at FROM resource_derivation d JOIN resource r ON r.id=d.child_id WHERE r.uri=$1",
+            )
+            .bind(child)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .unwrap()
+        }
+    };
+    let near = |a: chrono::DateTime<Utc>| (a - horizon).num_seconds().abs() < 60;
+    assert!(near(expiry("https://example.org/far").await));
+    // As an earlier build stored it, uncapped.
+    store::derive_resource_until(
+        &pool,
+        uri,
+        "https://example.org/later",
+        "btcmap",
+        10,
+        10,
+        Some(Utc::now() + Duration::days(3650)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!near(expiry("https://example.org/later").await));
+    assert_eq!(store::cap_derivation_expiry(&pool, &cfg).await.unwrap(), 1);
+    assert!(near(expiry("https://example.org/later").await));
+    assert_eq!(store::cap_derivation_expiry(&pool, &cfg).await.unwrap(), 0);
+}
+
+/// Round 23 F4: a member that never resolves (its lookup keeps answering "try later") stops
+/// blocking its calendar after `event.adapters.calendar_member_wait_hours`: the calendar applies
+/// its other members with `calendar_member_unavailable`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn round23_a_member_that_never_resolves_stops_blocking_its_calendar(pool: PgPool) {
+    use pinakes_core::event::adapters::nostr as nip52;
+    let cfg = EventConfig::default();
+    assert_eq!(cfg.adapters.calendar_member_wait_hours, 48);
+    let mut invalid = cfg.clone();
+    invalid.adapters.calendar_member_wait_hours = 0;
+    assert!(adapters::validate(&invalid).is_err());
+    let at = (Utc::now() + Duration::days(1)).timestamp().to_string();
+    let timed = |d: &str| {
+        signed(
+            31923,
+            100,
+            &[&["d", d], &["title", "Member"], &["start", &at]],
+        )
+    };
+    let (good, stuck) = (timed("good"), timed("stuck"));
+    let (uri, parent) = nip52_calendar(&pool, &[&good, &stuck]).await;
+    let (egress, _) = mock_egress(vec![(200, json!([parent]))]);
+    let resolve = |cfg: EventConfig| {
+        let (uri, egress, pool) = (uri.clone(), &egress, &pool);
+        async move { nip52::resolve(&uri, egress, &cfg, pool, false).await }
+    };
+    let pending = |r: anyhow::Result<pinakes_core::model::ResourceMeta>| {
+        r.unwrap_err()
+            .downcast_ref::<pinakes_core::resolver::RetryLater>()
+            .is_some_and(|r| r.class == "calendar_members_pending")
+    };
+    assert!(pending(resolve(cfg.clone()).await));
+    let (good_id, good_uri) = member_id(&good);
+    let doc = nip52::parse(&good_uri, &good, &cfg).unwrap();
+    store::save_document(&pool, &good_id, 0, &doc)
+        .await
+        .unwrap();
+    assert!(pending(resolve(cfg.clone()).await), "within the wait");
+    sqlx::query("UPDATE resource SET created_at=now()-interval '49 hours' WHERE id=$1")
+        .bind(member_id(&stuck).0)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let doc = resolve(cfg.clone()).await.unwrap();
+    assert_eq!(doc.event.warnings, ["calendar_member_unavailable"]);
+    assert_eq!(doc.container.unwrap().occurrences.len(), 1);
+    let mut patient = cfg.clone();
+    patient.adapters.calendar_member_wait_hours = 72;
+    assert!(pending(resolve(patient).await), "a longer wait still waits");
+}
