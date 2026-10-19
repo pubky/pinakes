@@ -402,13 +402,7 @@ impl Resolver for CardResolver {
     }
     async fn resolve(&self, uri: &str) -> Result<ResourceMeta> {
         let ttl = self.config.cards.resolver(self.kind).ttl_secs;
-        // Nostr and the official APIs leave their own fetch timeouts room to answer first.
-        let budget = if matches!(self.kind, "nostr" | "official") {
-            crate::queue::RESOLVE_TIMEOUT - Duration::from_secs(1)
-        } else {
-            Duration::from_secs(10)
-        };
-        let result = tokio::time::timeout(budget, async {
+        let result = tokio::time::timeout(budget(self.kind), async {
             match self.kind {
                 "isbn" => {
                     let Some(number) = isbn(uri) else { return Ok(missing(uri,"isbn",0)); };
@@ -1186,5 +1180,30 @@ fn media_type(d: &mut ResourceMeta, uri: &str) {
     if let Some(kind) = kind {
         d.set_type(kind);
         d.source = "media".into();
+    }
+}
+
+/// How long a resolver of this kind may take. Nostr and the official APIs leave their own fetch
+/// timeouts (10 seconds, slot wait included) room to answer first.
+fn budget(kind: &str) -> Duration {
+    if matches!(kind, "nostr" | "official") {
+        crate::queue::RESOLVE_TIMEOUT - Duration::from_secs(1)
+    } else {
+        Duration::from_secs(10)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn official_apis_outlast_their_fetch_timeout() {
+        // A fetch gives up after 10 seconds; the route waits at least a second longer, so a
+        // source's own answer to a slow fetch (e.g. USGS's retry) always comes first.
+        for kind in ["official", "nostr"] {
+            assert!(budget(kind) >= Duration::from_secs(11), "{kind}");
+            assert!(budget(kind) < crate::queue::RESOLVE_TIMEOUT, "{kind}");
+        }
     }
 }
