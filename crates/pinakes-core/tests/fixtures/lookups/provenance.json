@@ -65,6 +65,42 @@
     "status": 200,
     "url": "https://api.deps.dev/v3/systems/npm/packages/semver/versions/7.8.5"
   },
+  "gog-gamesdb-steam-1": {
+    "bytes": 91,
+    "content_type": "application/json",
+    "file": "gog-gamesdb-steam-1.json",
+    "recorded_at": "2026-10-19T15:18:25+00:00",
+    "sha256": "c821ac1e580f124cba5356268922c08f26f3c6a60ad9bd044694b7bd801f64d8",
+    "status": 404,
+    "url": "https://gamesdb.gog.com/platforms/steam/external_releases/1"
+  },
+  "gog-gamesdb-steam-292030": {
+    "bytes": 27237,
+    "content_type": "application/json",
+    "file": "gog-gamesdb-steam-292030.json",
+    "recorded_at": "2026-10-19T15:18:24+00:00",
+    "sha256": "637825acc446164cf3f9b18cba70fa54b2ae991900ead397cb634188df31deeb",
+    "status": 200,
+    "url": "https://gamesdb.gog.com/platforms/steam/external_releases/292030"
+  },
+  "gog-gamesdb-steam-413150": {
+    "bytes": 14950,
+    "content_type": "application/json",
+    "file": "gog-gamesdb-steam-413150.json",
+    "recorded_at": "2026-10-19T15:18:23+00:00",
+    "sha256": "c989023daa1fb715e3ed696cf183ca643d489d225b5aafa2b72b56334baad1be",
+    "status": 200,
+    "url": "https://gamesdb.gog.com/platforms/steam/external_releases/413150"
+  },
+  "gog-product-1453375253": {
+    "bytes": 2250,
+    "content_type": "application/json",
+    "file": "gog-product-1453375253.json",
+    "recorded_at": "2026-10-19T15:18:26+00:00",
+    "sha256": "cdf5679ff7f9a520e3a3040a788d67a522fd212e5d5a2f7fc17121d864d2db21",
+    "status": 200,
+    "url": "https://api.gog.com/products/1453375253"
+  },
   "hf-papers-1304.1068": {
     "bytes": 302,
     "content_type": "application/json; charset=utf-8",
@@ -128,6 +164,46 @@
     "sha256": "595600ec8060055e4582121441e8227bc6ab12ff63b42030686e18ec46226ff2",
     "status": 200,
     "url": "https://registry.npmjs.org/semver/latest"
+  },
+  "pcgamingwiki-1": {
+    "bytes": 18249,
+    "content_type": "text/html; charset=UTF-8",
+    "file": null,
+    "note": "Status only: an unknown appid answers 200 with the wiki search page and no redirect.",
+    "recorded_at": "2026-10-19T15:18:22+00:00",
+    "sha256": "2975ce5bbcdd97d9c08b80927192901d00ba0cf72e12d98f55daf11425e1cd2e",
+    "status": 200,
+    "url": "https://www.pcgamingwiki.com/api/appid.php?appid=1"
+  },
+  "pcgamingwiki-620": {
+    "bytes": 0,
+    "content_type": "text/html; charset=UTF-8",
+    "file": null,
+    "location": "https://www.pcgamingwiki.com/wiki/Portal_2",
+    "note": "Status and Location only.",
+    "recorded_at": "2026-10-19T15:18:21+00:00",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "status": 302,
+    "url": "https://www.pcgamingwiki.com/api/appid.php?appid=620"
+  },
+  "protondb-1": {
+    "bytes": 3449,
+    "content_type": "text/html; charset=utf-8",
+    "file": "protondb-1.html",
+    "recorded_at": "2026-10-19T15:18:20+00:00",
+    "sha256": "8514f0009a58c6e0acb5468f88037732b59b70af5e524f452e3bef8fb33effc5",
+    "status": 404,
+    "url": "https://www.protondb.com/api/v1/reports/summaries/1.json"
+  },
+  "protondb-620": {
+    "bytes": 147,
+    "content_type": "application/json",
+    "file": "protondb-620.json",
+    "note": "ProtonDB summary, ODbL.",
+    "recorded_at": "2026-10-19T15:18:18+00:00",
+    "sha256": "cad52f595fcb46f45cd9fc9cad78175c6959986bb97013511d7a3c7a9dbb0416",
+    "status": 200,
+    "url": "https://www.protondb.com/api/v1/reports/summaries/620.json"
   },
   "pypi-six-provenance": {
     "accept": "application/vnd.pypi.integrity.v1+json",
