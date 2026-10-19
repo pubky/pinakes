@@ -2060,6 +2060,12 @@
                   "value": {
                     "uri": "https://xceed.me/en/roma/event/dissonanze-2026-day-1/220015"
                   }
+                },
+                "resolve-zefix-1": {
+                  "summary": "https://register.ld.admin.ch/zefix/company/126286",
+                  "value": {
+                    "uri": "https://register.ld.admin.ch/zefix/company/126286"
+                  }
                 }
               },
               "schema": {

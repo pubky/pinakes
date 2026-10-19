@@ -102,6 +102,11 @@
     "type": "Legislation"
   },
   {
+    "kind": "zefix",
+    "uri": "https://register.ld.admin.ch/zefix/company/126286",
+    "type": "Organization"
+  },
+  {
     "kind": "web",
     "uri": "https://example.org/",
     "type": "WebPage"

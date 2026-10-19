@@ -30,6 +30,7 @@ pub mod legislation_gov_uk;
 pub mod sec;
 pub mod swiss_parliament;
 pub mod uk_parliament_bills;
+pub mod zefix;
 
 /// Every source, one line each, in alphabetical order of name.
 #[rustfmt::skip]
@@ -44,6 +45,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &sec::Sec,
     &swiss_parliament::SwissParliament,
     &uk_parliament_bills::UkParliamentBills,
+    &zefix::Zefix,
 ];
 
 /// One official API.

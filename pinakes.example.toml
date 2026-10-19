@@ -73,6 +73,8 @@ enabled = true
 enabled = true
 [sources.uk_parliament_bills]
 enabled = true
+[sources.zefix]
+enabled = true
 
 [media]
 oembed = "when_needed" # "always" restores eager registry discovery.

@@ -48,3 +48,4 @@ or got plain web cards before are read again.
 - [`sec`](sec.md): SEC EDGAR filings, their documents and companies.
 - [`swiss_parliament`](swiss_parliament.md): Swiss Parliament business items (Curia Vista) by affair id.
 - [`uk_parliament_bills`](uk_parliament_bills.md): UK Parliament bills and Acts by bill id.
+- [`zefix`](zefix.md): Swiss companies in the commercial register, by register id.

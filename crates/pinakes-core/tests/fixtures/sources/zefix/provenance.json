@@ -1,0 +1,24 @@
+{
+  "sparql_company_126286_spo": {
+    "accept": "application/sparql-results+json",
+    "bytes": 13999,
+    "content_type": "application/sparql-results+json;charset=UTF-8",
+    "file": "sparql_company_126286_spo.json",
+    "note": "GET ?query=, s/p/o rows for company + address + identifiers + legal form names + municipality name",
+    "recorded_at": "2026-10-19T16:18:20+00:00",
+    "sha256": "3f8c041f6554a9fee93ca20fd63bba0257eb211ee3c3a5ab40c91896e7fd7b63",
+    "status": 200,
+    "url": "https://ld.admin.ch/query?query=PREFIX%20schema%3A%20%3Chttp%3A%2F%2Fschema.org%2F%3E%20SELECT%20%3Fs%20%3Fp%20%3Fo%20WHERE%20%7B%20VALUES%20%3Fc%20%7B%20%3Chttps%3A%2F%2Fregister.ld.admin.ch%2Fzefix%2Fcompany%2F126286%3E%20%7D%20%7B%20%3Fc%20%3Fp%20%3Fo%20BIND%28%3Fc%20AS%20%3Fs%29%20%7D%20UNION%20%7B%20%3Fc%20schema%3Aaddress%20%3Fs%20.%20%3Fs%20%3Fp%20%3Fo%20%7D%20UNION%20%7B%20%3Fc%20schema%3Aidentifier%20%3Fs%20.%20%3Fs%20%3Fp%20%3Fo%20%7D%20UNION%20%7B%20%3Fc%20schema%3AadditionalType%20%3Fs%20.%20%3Fs%20schema%3Aname%20%3Fo%20BIND%28schema%3Aname%20AS%20%3Fp%29%20%7D%20UNION%20%7B%20%3Fc%20%3Chttps%3A%2F%2Fschema.ld.admin.ch%2Fmunicipality%3E%20%3Fs%20.%20%3Fs%20schema%3Aname%20%3Fo%20BIND%28schema%3Aname%20AS%20%3Fp%29%20%7D%20%7D"
+  },
+  "sparql_company_999999999_spo_missing": {
+    "accept": "application/sparql-results+json",
+    "bytes": 115,
+    "content_type": "application/sparql-results+json;charset=UTF-8",
+    "file": "sparql_company_999999999_spo_missing.json",
+    "note": "same query, unknown ehraid -> empty bindings",
+    "recorded_at": "2026-10-19T16:18:21+00:00",
+    "sha256": "34fb511bb0ebd21720200564a7e4d1b3021019b601005edf3dcca93fe8d5782f",
+    "status": 200,
+    "url": "https://ld.admin.ch/query?query=PREFIX%20schema%3A%20%3Chttp%3A%2F%2Fschema.org%2F%3E%20SELECT%20%3Fs%20%3Fp%20%3Fo%20WHERE%20%7B%20VALUES%20%3Fc%20%7B%20%3Chttps%3A%2F%2Fregister.ld.admin.ch%2Fzefix%2Fcompany%2F999999999%3E%20%7D%20%7B%20%3Fc%20%3Fp%20%3Fo%20BIND%28%3Fc%20AS%20%3Fs%29%20%7D%20UNION%20%7B%20%3Fc%20schema%3Aaddress%20%3Fs%20.%20%3Fs%20%3Fp%20%3Fo%20%7D%20UNION%20%7B%20%3Fc%20schema%3Aidentifier%20%3Fs%20.%20%3Fs%20%3Fp%20%3Fo%20%7D%20UNION%20%7B%20%3Fc%20schema%3AadditionalType%20%3Fs%20.%20%3Fs%20schema%3Aname%20%3Fo%20BIND%28schema%3Aname%20AS%20%3Fp%29%20%7D%20UNION%20%7B%20%3Fc%20%3Chttps%3A%2F%2Fschema.ld.admin.ch%2Fmunicipality%3E%20%3Fs%20.%20%3Fs%20schema%3Aname%20%3Fo%20BIND%28schema%3Aname%20AS%20%3Fp%29%20%7D%20%7D"
+  }
+}
