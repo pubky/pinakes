@@ -285,7 +285,11 @@ async fn run_job_inner(
             .into()
         })
     })
-    .and_then(|r| r);
+    .and_then(|r| r)
+    .map(|mut doc| {
+        crate::music::type_card(&job.uri, &mut doc);
+        doc
+    });
     guarded_finish_job(
         pool,
         resolver,

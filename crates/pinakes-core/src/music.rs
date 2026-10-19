@@ -280,6 +280,19 @@ pub fn parse(uri: &str) -> Option<Link> {
     }
 }
 
+/// Type a resolved card by what its link is, whatever the service's page or oEmbed calls it:
+/// a track is a `MusicRecording`, an album a `MusicAlbum`, an artist a `MusicGroup`, a playlist a
+/// `MusicPlaylist`. A video stays as resolved; a card that did not resolve is left alone.
+pub fn type_card(uri: &str, doc: &mut crate::model::ResourceMeta) {
+    if doc.status != crate::model::Status::Ok {
+        return;
+    }
+    match parse(uri) {
+        Some(link) if link.level != Level::Video => doc.set_type(link.level.type_name()),
+        _ => {}
+    }
+}
+
 /// SoundCloud pages that are not tracks.
 const SOUNDCLOUD_PAGES: &[&str] = &[
     "tracks",
@@ -542,6 +555,67 @@ mod tests {
                 "{expected}"
             );
         }
+    }
+
+    #[test]
+    fn cards_are_typed_by_their_level() {
+        use crate::model::{ResourceMeta, Status};
+        let card = |uri: &str, kind: &str, status: Status| {
+            let mut d = ResourceMeta::new(uri, "web", 3600);
+            d.set_type(kind);
+            d.status = status;
+            type_card(uri, &mut d);
+            d.type_name
+        };
+        // Apple Music's JSON-LD calls a song a MusicComposition; Spotify's oEmbed a video.
+        assert_eq!(
+            card(
+                "https://music.apple.com/us/song/1097861770",
+                "MusicComposition",
+                Status::Ok
+            ),
+            "MusicRecording"
+        );
+        assert_eq!(
+            card(
+                "https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE",
+                "VideoObject",
+                Status::Ok
+            ),
+            "MusicAlbum"
+        );
+        assert_eq!(
+            card("https://www.deezer.com/artist/399", "WebPage", Status::Ok),
+            "MusicGroup"
+        );
+        assert_eq!(
+            card(
+                "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M",
+                "WebPage",
+                Status::Ok
+            ),
+            "MusicPlaylist"
+        );
+        assert_eq!(
+            card(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                "VideoObject",
+                Status::Ok
+            ),
+            "VideoObject"
+        );
+        assert_eq!(
+            card(
+                "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq",
+                "WebPage",
+                Status::Missing
+            ),
+            "WebPage"
+        );
+        assert_eq!(
+            card("https://example.org/", "WebPage", Status::Ok),
+            "WebPage"
+        );
     }
 
     #[test]

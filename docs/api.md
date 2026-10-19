@@ -44,6 +44,11 @@ Absent values are `null`, never `""`. Text fields (`name`, `description`, `site`
 text in `details`) are plain text, decoded from the source's HTML entities once: escape them
 before rendering them as HTML.
 
+A music link is typed by what it is, whatever the service's page or player calls it: a track is a
+`MusicRecording`, an album a `MusicAlbum`, an artist a `MusicGroup` and a playlist a
+`MusicPlaylist`, on every service ([music service links](#aliases)). A video stays a
+`VideoObject`.
+
 ### Card
 
 | Field | Meaning |
