@@ -9,6 +9,24 @@
     "status": 200,
     "url": "https://api.btcmap.org/v4/places?fields=id,osm_id,osm_url,name,updated_at,deleted_at&updated_since=2026-10-10T00:12:50Z&limit=40&include_deleted=true"
   },
+  "crates-rand": {
+    "bytes": 2490,
+    "content_type": "application/json",
+    "file": "crates-rand.json",
+    "recorded_at": "2026-10-19T15:18:06+00:00",
+    "sha256": "e2bff456d5fe7cb7264f51d614e36478c830da1a48c5d61e3a31f59817e6c697",
+    "status": 200,
+    "url": "https://crates.io/api/v1/crates/rand?include=default_version"
+  },
+  "crates-serde": {
+    "bytes": 2679,
+    "content_type": "application/json",
+    "file": "crates-serde.json",
+    "recorded_at": "2026-10-19T15:18:08+00:00",
+    "sha256": "c4a5f5024c135866b60866b033fb6a65704f474090bdd5efd51a73ff594457dd",
+    "status": 200,
+    "url": "https://crates.io/api/v1/crates/serde?include=default_version"
+  },
   "datacite-arxiv-1304.1068": {
     "bytes": 10564,
     "content_type": "application/json; charset=utf-8",
@@ -28,6 +46,24 @@
     "sha256": "4642ed74b9c2e82da482e7b2caed14e98a54cfa080e8233c79db6117db873fc1",
     "status": 200,
     "url": "https://api.datacite.org/dois?query=relatedIdentifiers.relatedIdentifier:%2210.1038/nature12373%22%20AND%20relatedIdentifiers.relationType:IsVersionOf&client-id=arxiv.content&page%5Bsize%5D=25"
+  },
+  "depsdev-cargo-rand": {
+    "bytes": 630,
+    "content_type": "application/json; charset=utf-8",
+    "file": "depsdev-cargo-rand.json",
+    "recorded_at": "2026-10-19T15:18:13+00:00",
+    "sha256": "1fa1aff361ad6db60f8b93d5ae2d1bb795d9d1284fc1190206391c3ceccbc0f5",
+    "status": 200,
+    "url": "https://api.deps.dev/v3/systems/cargo/packages/rand/versions/0.10.3"
+  },
+  "depsdev-npm-semver": {
+    "bytes": 1494,
+    "content_type": "application/json; charset=utf-8",
+    "file": "depsdev-npm-semver.json",
+    "recorded_at": "2026-10-19T15:18:12+00:00",
+    "sha256": "97e607b405785224f6d9ad0143ded0687af131f9ae77fe5ceea7e7ba3186866c",
+    "status": 200,
+    "url": "https://api.deps.dev/v3/systems/npm/packages/semver/versions/7.8.5"
   },
   "hf-papers-1304.1068": {
     "bytes": 302,
@@ -65,6 +101,80 @@
     "sha256": "cd46a69a5d42af09d1716e9dd3cf97492f40fc30751897159378f471dab3ed1f",
     "status": 200,
     "url": "https://nominatim.openstreetmap.org/lookup?osm_ids=R2888417,N9984134345,W70417858&format=jsonv2&extratags=1"
+  },
+  "npm-left-pad-latest": {
+    "bytes": 1571,
+    "content_type": "application/json",
+    "file": "npm-left-pad-latest.json",
+    "recorded_at": "2026-10-19T15:18:10+00:00",
+    "sha256": "dbc2770a1039acd66cd5f87ebafcd212b367a0baecbcfe1ee7d43960b7aafc25",
+    "status": 200,
+    "url": "https://registry.npmjs.org/left-pad/latest"
+  },
+  "npm-semver-attestations": {
+    "bytes": 14760,
+    "content_type": "application/json",
+    "file": "npm-semver-attestations.json",
+    "recorded_at": "2026-10-19T15:18:09+00:00",
+    "sha256": "37f48d5103c9f5d9a4f704976133fc0473bddb259e8a79a6150477bd6fb89be0",
+    "status": 200,
+    "url": "https://registry.npmjs.org/-/npm/v1/attestations/semver@7.8.5"
+  },
+  "npm-semver-latest": {
+    "bytes": 2569,
+    "content_type": "application/json",
+    "file": "npm-semver-latest.json",
+    "recorded_at": "2026-10-19T15:18:09+00:00",
+    "sha256": "595600ec8060055e4582121441e8227bc6ab12ff63b42030686e18ec46226ff2",
+    "status": 200,
+    "url": "https://registry.npmjs.org/semver/latest"
+  },
+  "pypi-six-provenance": {
+    "accept": "application/vnd.pypi.integrity.v1+json",
+    "bytes": 73,
+    "content_type": "application/json",
+    "file": "pypi-six-provenance.json",
+    "recorded_at": "2026-10-19T15:19:02+00:00",
+    "sha256": "be56fdc66641359434036b2d3a2a1779201ed1ba7ec5b9343f120f792fa42800",
+    "status": 404,
+    "url": "https://pypi.org/integrity/six/1.17.0/six-1.17.0-py2.py3-none-any.whl/provenance"
+  },
+  "pypi-urllib3": {
+    "bytes": 160832,
+    "content_type": "application/json",
+    "file": "pypi-urllib3.json.gz",
+    "recorded_at": "2026-10-19T15:18:10+00:00",
+    "sha256": "fe033abdf4e116777f2062304b5442660092498d27f55f0ff6968f86d064bb5c",
+    "status": 200,
+    "url": "https://pypi.org/pypi/urllib3/json"
+  },
+  "pypi-urllib3-provenance": {
+    "accept": "application/vnd.pypi.integrity.v1+json",
+    "bytes": 9533,
+    "content_type": "application/vnd.pypi.integrity.v1+json",
+    "file": "pypi-urllib3-provenance.json",
+    "recorded_at": "2026-10-19T15:18:11+00:00",
+    "sha256": "68c2b794eb6c28e944cbbb052d33318f2e1b787ac1724a00f00a0aa525362537",
+    "status": 200,
+    "url": "https://pypi.org/integrity/urllib3/2.8.0/urllib3-2.8.0-py3-none-any.whl/provenance"
+  },
+  "swh-origin-missing": {
+    "bytes": 111,
+    "content_type": "application/json",
+    "file": "swh-origin-missing.json",
+    "recorded_at": "2026-10-19T15:18:15+00:00",
+    "sha256": "f6247169b608f0c0124e64582dfff11828b125fd8af8e0a8c654e9ca9edec984",
+    "status": 404,
+    "url": "https://archive.softwareheritage.org/api/1/origin/https://github.com/pubky/pinakes-no-such-repo/get/"
+  },
+  "swh-origin-rand": {
+    "bytes": 348,
+    "content_type": "application/json",
+    "file": "swh-origin-rand.json",
+    "recorded_at": "2026-10-19T15:18:13+00:00",
+    "sha256": "94276ac6763af6661cb914b018a1bfc7e19c570a8aa15655945ad1690ea3b689",
+    "status": 200,
+    "url": "https://archive.softwareheritage.org/api/1/origin/https://github.com/rust-random/rand/get/"
   },
   "unpaywall-missing": {
     "bytes": 207,
