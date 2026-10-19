@@ -55,13 +55,14 @@ CARGO_PROFILE_DEV_DEBUG=0 scripts/e2e --isolated-live
 ```
 
 `--isolated-live` uses the real SDK, homeserver, Nexus and public upstreams. Its
-private Pinakes driver reads the Nexus feed but resolves only the selected
-sample IDs (thirteen by default, at most sixteen), using the production queue completion/leases
-and resolver policy, and runs the also-on sources for them: the Spotify track sample must show
-Deezer as a derived link, found through MusicBrainz, and the Wikidata item for Paris its French
-and English Wikipedia editions. Canaries and unrelated backlog fetching are
-off. Use this mode for a scoped live
-smoke test. Run `scripts/e2e` without a mode to use an already configured dev stack
+private Pinakes driver reads the Nexus feed but resolves only the selected sample IDs
+(seventeen by default, at most twenty), through the production queue path (batched completion,
+leases and resolver policy), and runs the also-on sources for them. Music samples must be typed
+and named by what they are (Spotify, Apple Music, TIDAL, Bandcamp, SoundCloud); the Spotify
+track sample must show Deezer as a derived link, found through MusicBrainz, and the Wikidata
+item for Paris its French and English Wikipedia editions. Canaries and unrelated backlog
+fetching are off. Use this mode for a scoped live smoke test. Run `scripts/e2e` without a mode
+to use an already configured dev stack
 at `PINAKES_E2E_PINAKES` (default `http://127.0.0.1:8090`).
 
 The harness creates a minimal `/pub/pubky.app/profile.json` only when missing,

@@ -96,6 +96,9 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
         }, timeout, signal);
         docs.set(tag.kind, d);
         report.samples.push({ kind: tag.kind, uri: tag.uri, resource_id: d.id, type: d.type, status: d.status, site: d.site });
+        // A music link is typed and named by what it is, whatever its page says.
+        if (tag.site) assert.equal(d.site, tag.site, `Pinakes ${tag.kind} site`);
+        if (tag.site) assert.equal(d.type, tag.type, `Pinakes ${tag.kind} type`);
       }
       // The type filter matches ancestors, so a MusicEvent sample is found under type=Event.
       for (const type of new Set(tags.map(tag => tag.type))) {

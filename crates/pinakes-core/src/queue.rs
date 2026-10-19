@@ -286,19 +286,6 @@ async fn run_job_inner(
         })
     })
     .and_then(|r| r);
-    // What the also-on sources said about the artist (a person or a group), if anything.
-    let artist_type: Option<String> = if result.is_ok() {
-        sqlx::query_scalar("SELECT value FROM resource_fact WHERE resource_id=$1 AND name='artist_type' AND expires_at>now() ORDER BY value LIMIT 1")
-            .bind(&job.id)
-            .fetch_optional(pool)
-            .await?
-    } else {
-        None
-    };
-    let result = result.map(|mut doc| {
-        crate::music::type_card(&job.uri, artist_type.as_deref(), &mut doc);
-        doc
-    });
     guarded_finish_job(
         pool,
         resolver,
@@ -317,6 +304,20 @@ async fn guarded_finish_job(
     job: &Job,
     result: Result<crate::model::ResourceMeta>,
 ) -> Result<()> {
+    // Every finished job, single or batched: a music link's card is typed and named by what it
+    // is, whatever its page said.
+    let result = match result {
+        Ok(mut doc) if crate::music::parse(&job.uri).is_some() => {
+            // What the also-on sources said about the artist (a person or a group), if anything.
+            let artist_type: Option<String> = sqlx::query_scalar("SELECT value FROM resource_fact WHERE resource_id=$1 AND name='artist_type' AND expires_at>now() ORDER BY value LIMIT 1")
+                .bind(&job.id)
+                .fetch_optional(pool)
+                .await?;
+            crate::music::type_card(&job.uri, artist_type.as_deref(), &mut doc);
+            Ok(doc)
+        }
+        other => other,
+    };
     match std::panic::AssertUnwindSafe(finish_job(pool, resolver, cfg, refresh, job, result))
         .catch_unwind()
         .await

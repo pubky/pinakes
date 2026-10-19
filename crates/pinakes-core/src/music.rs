@@ -287,20 +287,24 @@ pub fn parse(uri: &str) -> Option<Link> {
     }
 }
 
-/// Type a resolved card by what its link is, whatever the service's page or oEmbed calls it:
-/// a track is a `MusicRecording`, an album a `MusicAlbum`, an artist a `MusicGroup` (a `Person`
-/// when MusicBrainz says the artist is one: `artist_type`), a playlist a `MusicPlaylist`. A
-/// video stays as resolved; a card that did not resolve is left alone.
+/// Type and name a resolved card by what its link is, whatever the service's page or oEmbed
+/// says: a track is a `MusicRecording`, an album a `MusicAlbum`, an artist a `MusicGroup` (a
+/// `Person` when MusicBrainz says the artist is one: `artist_type`), a playlist a
+/// `MusicPlaylist`; a video stays as resolved. The card's site is the service's name ("Apple
+/// Music", "TIDAL", "YouTube"), as derived links show it. A card that did not resolve is left
+/// alone.
 pub fn type_card(uri: &str, artist_type: Option<&str>, doc: &mut crate::model::ResourceMeta) {
     if doc.status != crate::model::Status::Ok {
         return;
     }
-    match parse(uri) {
-        Some(link) if link.level == Level::Artist && artist_type == Some("Person") => {
-            doc.set_type("Person")
-        }
-        Some(link) if link.level != Level::Video => doc.set_type(link.level.type_name()),
-        _ => {}
+    let Some(link) = parse(uri) else {
+        return;
+    };
+    doc.site = link.service.name().into();
+    match link.level {
+        Level::Video => {}
+        Level::Artist if artist_type == Some("Person") => doc.set_type("Person"),
+        level => doc.set_type(level.type_name()),
     }
 }
 
@@ -639,6 +643,15 @@ mod tests {
         assert_eq!(
             card("https://example.org/", "WebPage", Status::Ok),
             "WebPage"
+        );
+        // The service's name is the card's site, a video's too.
+        let mut d = ResourceMeta::new("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "media", 3600);
+        d.site = "www.youtube.com".into();
+        d.set_type("VideoObject");
+        type_card("https://www.youtube.com/watch?v=dQw4w9WgXcQ", None, &mut d);
+        assert_eq!(
+            (d.type_name.as_str(), d.site.as_str()),
+            ("VideoObject", "YouTube")
         );
         // A solo artist, as MusicBrainz says.
         let mut d = ResourceMeta::new("https://www.deezer.com/artist/1", "web", 3600);

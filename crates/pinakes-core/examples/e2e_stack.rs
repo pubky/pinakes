@@ -613,8 +613,8 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
     }
     // The scope stays small and explicit: only listed samples are ever fetched.
     ensure!(
-        (1..=16).contains(&selected.len()),
-        "live driver requires one to sixteen sample resources"
+        (1..=20).contains(&selected.len()),
+        "live driver requires one to twenty sample resources"
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);
@@ -639,8 +639,14 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
                 let job=sqlx::query_as::<_,queue::Job>("UPDATE resource SET lease_until=now()+interval '60 seconds',generation=generation+1 WHERE id=$1 AND NOT dead_letter AND NOT final AND next_attempt_at<=now() AND (lease_until IS NULL OR lease_until<now()) RETURNING id,uri,attempts,generation").bind(id).fetch_optional(&pool).await;
                 match job {
                     Ok(Some(job)) => {
-                        if let Err(e) =
-                            queue::run_job(&pool, resolver.as_ref(), &cfg.queue, &job).await
+                        // The production path: the workers finish every job through a batch.
+                        if let Err(e) = queue::run_batch(
+                            &pool,
+                            resolver.as_ref(),
+                            &cfg.queue,
+                            std::slice::from_ref(&job),
+                        )
+                        .await
                         {
                             eprintln!("live sample completion: {e}");
                         }

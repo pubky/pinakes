@@ -933,3 +933,116 @@ async fn an_artist_is_a_person_when_musicbrainz_says_so(pool: PgPool) {
     .unwrap();
     assert_eq!(resolve().await, "Person");
 }
+
+/// The production queue (batched claims, `run_batch`) types and names every music link by what
+/// it is, whatever its page says: the links the candidate showed as VideoObject,
+/// MusicComposition, WebApplication, WebPage, AudioObject or an album.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_production_queue_types_and_names_music_links(pool: PgPool) {
+    use pinakes_core::{config::QueueConfig, queue, resolver::Resolver};
+    /// Each page as the live service describes itself.
+    struct Pages;
+    #[async_trait]
+    impl Resolver for Pages {
+        fn name(&self) -> &'static str {
+            "web"
+        }
+        fn matches(&self, _: &str) -> bool {
+            true
+        }
+        async fn resolve(&self, uri: &str) -> anyhow::Result<ResourceMeta> {
+            let (kind, site) = match uri {
+                u if u.contains("spotify") => ("VideoObject", "Spotify"),
+                u if u.contains("apple") => ("MusicComposition", "Apple Music - Web Player"),
+                u if u.contains("tidal") => ("WebApplication", "Music on TIDAL"),
+                u if u.contains("bandcamp") => ("MusicAlbum", "Radiohead"),
+                u if u.contains("soundcloud") => ("AudioObject", "SoundCloud"),
+                u if u.contains("youtube") => ("VideoObject", "www.youtube.com"),
+                _ => ("WebPage", ""),
+            };
+            let mut d = ResourceMeta::new(uri, "web", 3600);
+            d.set_type(kind);
+            d.site = site.into();
+            d.name = Some("Radiohead".into());
+            Ok(d)
+        }
+        fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+            Duration::from_secs(3600)
+        }
+    }
+    let expected = [
+        (
+            "https://open.spotify.com/track/003vvx7Niy0yvhvHt4a68B",
+            "MusicRecording",
+            "Spotify",
+        ),
+        (
+            "https://music.apple.com/gb/song/1440717826",
+            "MusicRecording",
+            "Apple Music",
+        ),
+        (
+            "https://open.qobuz.com/track/443937120",
+            "MusicRecording",
+            "Qobuz",
+        ),
+        (
+            "https://music.amazon.com/tracks/B0H9CSQQ1L",
+            "MusicRecording",
+            "Amazon Music",
+        ),
+        (
+            "https://open.qobuz.com/album/0634904078164",
+            "MusicAlbum",
+            "Qobuz",
+        ),
+        ("https://tidal.com/artist/64518", "MusicGroup", "TIDAL"),
+        ("https://radiohead.bandcamp.com/", "MusicGroup", "Bandcamp"),
+        (
+            "https://soundcloud.com/radiohead",
+            "MusicGroup",
+            "SoundCloud",
+        ),
+        (
+            "https://music.amazon.co.uk/artists/B000QJXOGC",
+            "MusicGroup",
+            "Amazon Music",
+        ),
+        (
+            "https://www.youtube.com/watch?v=m2zUrruKjDQ",
+            "VideoObject",
+            "YouTube",
+        ),
+        (
+            "https://www.youtube.com/channel/UCr_iyUANcn9OX_yy9piYoLw",
+            "MusicGroup",
+            "YouTube",
+        ),
+    ];
+    let mut ids = vec![];
+    for (uri, ..) in expected {
+        ids.push(store::ensure_resource(&pool, uri).await.unwrap());
+    }
+    sqlx::query("UPDATE resource SET resolver='web' WHERE id=ANY($1)")
+        .bind(&ids)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let cfg = QueueConfig::default();
+    loop {
+        let jobs = queue::claim_batch(&pool, "web", &cfg, 4).await.unwrap();
+        if jobs.is_empty() {
+            break;
+        }
+        queue::run_batch(&pool, &Pages, &cfg, &jobs).await.unwrap();
+    }
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    for ((uri, kind, site), id) in expected.iter().zip(&ids) {
+        let card = get(&app, &format!("/v1/resources/{id}")).await;
+        assert_eq!(
+            (card["type"].as_str(), card["site"].as_str()),
+            (Some(*kind), Some(*site)),
+            "{uri}"
+        );
+    }
+}

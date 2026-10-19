@@ -277,7 +277,8 @@
     "type": "MusicRecording",
     "derived": [
       "Deezer"
-    ]
+    ],
+    "site": "Spotify"
   },
   {
     "kind": "wikidata",
@@ -287,5 +288,29 @@
       "Wikipedia (fr)",
       "Wikipedia (en)"
     ]
+  },
+  {
+    "kind": "apple_song",
+    "uri": "https://music.apple.com/gb/song/1440717826",
+    "type": "MusicRecording",
+    "site": "Apple Music"
+  },
+  {
+    "kind": "tidal_artist",
+    "uri": "https://tidal.com/artist/64518",
+    "type": "MusicGroup",
+    "site": "TIDAL"
+  },
+  {
+    "kind": "bandcamp_artist",
+    "uri": "https://radiohead.bandcamp.com/",
+    "type": "MusicGroup",
+    "site": "Bandcamp"
+  },
+  {
+    "kind": "soundcloud_artist",
+    "uri": "https://soundcloud.com/radiohead",
+    "type": "MusicGroup",
+    "site": "SoundCloud"
   }
 ]
