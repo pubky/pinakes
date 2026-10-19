@@ -134,8 +134,14 @@ pub fn manifests(c: &CardConfig) -> Vec<Manifest> {
 }
 #[derive(Deserialize)]
 struct Provider {
+    #[serde(default)]
+    provider_name: String,
     endpoints: Vec<Endpoint>,
 }
+/// Registry providers whose public endpoint does not serve a server: SoundCloud (a bot challenge
+/// for server addresses), TikTok (its answers carry no metadata), Facebook and Instagram (an app
+/// token). Their links get ordinary web cards.
+pub const SKIPPED_PROVIDERS: &[&str] = &["Facebook", "Instagram", "SoundCloud", "TikTok"];
 #[derive(Deserialize)]
 struct Endpoint {
     url: String,
@@ -146,8 +152,11 @@ struct Endpoint {
 fn providers() -> &'static Vec<Provider> {
     static P: OnceLock<Vec<Provider>> = OnceLock::new();
     P.get_or_init(|| {
-        serde_json::from_str(include_str!("../../../../data/oembed-providers.json"))
-            .expect("pinned providers")
+        let mut all: Vec<Provider> =
+            serde_json::from_str(include_str!("../../../../data/oembed-providers.json"))
+                .expect("pinned providers");
+        all.retain(|p| !SKIPPED_PROVIDERS.contains(&p.provider_name.as_str()));
+        all
     })
 }
 fn wildcard(pattern: &str, value: &str) -> bool {

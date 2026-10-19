@@ -581,6 +581,49 @@ fn identifier_dates_domains_media_attributes_and_social_excerpt() {
             .scheme()
             == "https"
     );
+    // The keyless providers that answer (Twitter's and MixCloud's endpoints redirect to their
+    // current ones).
+    for (uri, endpoint) in [
+        ("https://x.com/jack/status/20", "publish.x.com"),
+        ("https://twitter.com/jack/status/20", "publish.twitter.com"),
+        ("https://vimeo.com/22439234", "vimeo.com"),
+        (
+            "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC",
+            "open.spotify.com",
+        ),
+        (
+            "https://www.flickr.com/photos/bees/2341623661/",
+            "www.flickr.com",
+        ),
+        (
+            "https://www.mixcloud.com/spartacus/party-time/",
+            "www.mixcloud.com",
+        ),
+        (
+            "https://www.dailymotion.com/video/x7tgad0",
+            "www.dailymotion.com",
+        ),
+        (
+            "https://www.ted.com/talks/ken_robinson_do_schools_kill_creativity",
+            "www.ted.com",
+        ),
+        (
+            "https://www.reddit.com/r/Bitcoin/comments/7v8yqb/the_bitcoin_whitepaper/",
+            "www.reddit.com",
+        ),
+    ] {
+        let found = cards::provider_endpoint(uri).unwrap_or_else(|| panic!("{uri}"));
+        assert_eq!(found.host_str(), Some(endpoint), "{uri}");
+    }
+    // Skipped: a bot challenge, empty answers, or an app token.
+    for uri in [
+        "https://soundcloud.com/forss/flickermood",
+        "https://www.tiktok.com/@someone/video/123",
+        "https://www.facebook.com/someone/posts/123",
+        "https://www.instagram.com/p/abc/",
+    ] {
+        assert!(cards::provider_endpoint(uri).is_none(), "{uri}");
+    }
     let f=Fetched{permanent_redirect: false,truncated:false,url:"https://doi.org/10.1234/work".parse().unwrap(),body:serde_json::to_vec(&json!({"type":"article-journal","title":"Dated","issued":{"date-parts":[[2024,5,12]]},"container-title":"Journal"})).unwrap(),content_type:"application/json".into(),status:200,location:None,retry_after_secs:60,validators:Default::default()};
     let d = cards::parse_doi("doi:10.1234/work", &f, 3600).unwrap();
     assert_eq!(d.attributes["published"], "2024-05-12");

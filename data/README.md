@@ -59,7 +59,13 @@ Regenerate with `scripts/rails-zones /path/to/time_zone.rb`.
 `274d3cadad4ebb51fec4303b422e84128bcac988d4275289448297c205dab19d`.
 The registry project is <https://github.com/iamcal/oembed>; its MIT license is
 preserved as [oembed-LICENSE](oembed-LICENSE). This is a separate upstream data
-license. Updates require an explicit replacement/digest review and resolver tests.
+license. Updates require an explicit replacement/digest review and resolver tests:
+`scripts/oembed-providers [FILE]` downloads (or reads) a newer registry, checks its shape, lists
+the providers added and removed, and rewrites the file and this paragraph's date, count and digest.
+
+Four registry providers are skipped in code
+(`cards::SKIPPED_PROVIDERS`), so an update cannot bring them back: SoundCloud (a bot challenge for
+server addresses), TikTok (answers without metadata), Facebook and Instagram (an app token).
 
 The media resolver matches registry URL schemes locally, uses JSON-capable provider
 endpoints, and applies normal DNS/redirect/size/host budgets to every request. It

@@ -296,7 +296,8 @@ only for calendars, where they commit with the parsed snapshot.
 Generic web resolution reads JSON-LD, microformats, OpenGraph, oEmbed and the title, then the
 page hooks of switched-on sources (WordPress and Ghost records a page names on its own origin;
 see [docs/sources](sources/README.md)). Canonical, alternate and oEmbed links come from the
-document head only. Media pages use the pinned 390-provider oEmbed registry (`data/`):
+document head only. Media pages use the pinned 390-provider oEmbed registry (`data/`, with
+SoundCloud, TikTok, Facebook and Instagram skipped; `scripts/oembed-providers` updates it):
 `media.oembed = "when_needed"` (default) asks path-specific providers first and broad patterns
 only for an incomplete, failed or truncated page; `"always"` also fetches every matching
 provider and trusted page-advertised endpoints, which must share the page's origin or its
