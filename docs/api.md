@@ -358,7 +358,8 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 | `author` | Resources referenced by this 52-character z-base-32 public key |
 | `reach`, `viewer` | `following` or `friends` of the Nexus user `viewer`: only their references and tags count |
 | `venue` | Events at this venue resource ID |
-| `sort` | `activity` (default), `recent`, `distance` (requires `near`) or `start` |
+| `sort` | `activity` (default), `recent`, `distance` (requires `near`), `start` or `trending` (by the references made inside `window`; only links referenced in it; with `collapse=group` one song across services is one row) |
+| `window` | With `sort=trending`: `{n}h` or `{n}d`, from `1h` to `90d`, default `7d`, counted back from the first page's instant |
 | `limit` | 1–500, default 50 |
 | `cursor` | The signed next-page token of the previous page |
 | `facet` | `tags`, `type` or both (`type,tags`): counts over the whole filtered set, in `facets.tags` (`{label, count}` per label) and `facets.type` (`{type, count}` per card type), most frequent first |

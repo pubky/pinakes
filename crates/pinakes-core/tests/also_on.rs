@@ -753,3 +753,122 @@ async fn search_by_key_finds_the_same_object_on_every_service(pool: PgPool) {
         assert!(plan.join("\n").contains(index), "{index}: {plan:?}");
     }
 }
+
+/// `sort=trending` ranks by the references made inside the window (7 days by default), shows
+/// only links referenced in it, combines with tags and `collapse=group` (one song across
+/// services is one row), and refuses windows outside 1h–90d.
+#[sqlx::test(migrations = "../../migrations")]
+async fn trending_counts_references_inside_the_window(pool: PgPool) {
+    let (spotify, deezer, old) = (
+        "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq",
+        "https://www.deezer.com/track/138539973",
+        "https://tidal.com/track/1",
+    );
+    let ids = [
+        page(&pool, spotify, "Song").await,
+        page(&pool, deezer, "Song").await,
+        page(&pool, old, "Old song").await,
+    ];
+    // Spotify: three this week. Deezer: five three weeks ago and one today. Old: two in spring.
+    for (id, days_ago, count, label) in [
+        (&ids[0], 1, 3, "rock"),
+        (&ids[1], 21, 5, "rock"),
+        (&ids[1], 0, 1, "rock"),
+        (&ids[2], 60, 2, "jazz"),
+    ] {
+        sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) SELECT $1,repeat(chr(97+n%20),52),'tag','/pub/test/tags/'||$1||'/'||$2||'/'||n,$4,now()-$2*interval '1 day' FROM generate_series(1,$3) n")
+            .bind(id)
+            .bind(days_ago)
+            .bind(count)
+            .bind(label)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let rows = |path: &'static str| {
+        let app = app.clone();
+        async move {
+            get(&app, path).await["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["id"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(
+        rows("/v1/search?sort=trending").await,
+        [ids[0].clone(), ids[1].clone()]
+    );
+    assert_eq!(
+        rows("/v1/search?sort=trending&window=30d").await,
+        [ids[1].clone(), ids[0].clone()]
+    );
+    assert_eq!(
+        rows("/v1/search?sort=trending&window=90d&tags=jazz").await,
+        [ids[2].clone()]
+    );
+    // Within the last hour: only today's Deezer reference (made at the start of the test).
+    assert_eq!(
+        rows("/v1/search?sort=trending&window=1h").await,
+        [ids[1].clone()]
+    );
+    // The two services' links are one recording: collapsed, one row.
+    let hub = Fake::new("music");
+    for uri in [spotify, deezer] {
+        hub.answer(
+            uri,
+            Ok(Found {
+                keys: vec![key("mb:recording:9f9cf187-d6f9-437f-9d98-d59cdbd52757")],
+                ..Default::default()
+            }),
+        );
+    }
+    let sources: Vec<Arc<dyn Source>> = vec![hub];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows("/v1/search?sort=trending&collapse=group").await.len(),
+        1
+    );
+    for bad in [
+        "sort=trending&window=0h",
+        "sort=trending&window=91d",
+        "sort=trending&window=7w",
+        "sort=trending&window=d",
+        "sort=activity&window=7d",
+        "window=7d",
+    ] {
+        let mut request = Request::builder()
+            .uri(format!("/v1/search?{bad}"))
+            .body(Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        assert_eq!(
+            app.clone().oneshot(request).await.unwrap().status(),
+            400,
+            "{bad}"
+        );
+    }
+    // The window's references are found by their time index.
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL enable_seqscan=off")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let plan: Vec<String> = sqlx::query_scalar(
+        "EXPLAIN SELECT resource_id,count(*) FROM effective_reference WHERE created_at>=now()-interval '7 days' GROUP BY resource_id",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap();
+    assert!(
+        plan.join("\n").contains("reference_created_idx"),
+        "{plan:?}"
+    );
+}

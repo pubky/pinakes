@@ -137,3 +137,6 @@ $$;
 -- A music service's URL forms are spellings of one object (`music::parse`).
 ALTER TABLE resource_alias DROP CONSTRAINT resource_alias_basis;
 ALTER TABLE resource_alias ADD CONSTRAINT resource_alias_basis CHECK ((basis = ANY (ARRAY['cursor'::text, 'osm'::text, 'identifier'::text, 'service'::text, 'tracking'::text, 'canonical'::text])));
+
+-- `sort=trending` counts the references made inside a window.
+CREATE INDEX reference_created_idx ON reference USING btree (created_at);

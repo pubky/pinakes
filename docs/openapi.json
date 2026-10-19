@@ -3141,6 +3141,18 @@
             }
           },
           {
+            "description": "With `sort=trending`: how far back references count, `1h`–`90d` (`{n}h` or `{n}d`),\ndefault `7d`.",
+            "in": "query",
+            "name": "window",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
             "in": "query",
             "name": "limit",
             "required": false,

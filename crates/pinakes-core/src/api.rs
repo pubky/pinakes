@@ -446,6 +446,9 @@ pub struct SearchQuery {
     pub reach: Option<String>,
     pub viewer: Option<String>,
     pub sort: Option<String>,
+    /// With `sort=trending`: how far back references count, `1h`–`90d` (`{n}h` or `{n}d`),
+    /// default `7d`.
+    pub window: Option<String>,
     #[param(minimum = 1, maximum = 500)]
     pub limit: Option<usize>,
     /// Authenticated opaque keyset cursor from this daemon; invalid after restart. Restart pagination on HTTP 400.
@@ -1000,12 +1003,16 @@ fn validate_search(q: &SearchQuery) -> Result<Vec<String>, ApiError> {
     }
     if !matches!(
         q.sort.as_deref(),
-        None | Some("activity" | "recent" | "distance" | "start")
+        None | Some("activity" | "recent" | "distance" | "start" | "trending")
     ) {
         return Err(ApiError::bad(
-            "sort must be activity, recent, distance or start",
+            "sort must be activity, recent, distance, start or trending",
         ));
     }
+    if q.window.is_some() && q.sort.as_deref() != Some("trending") {
+        return Err(ApiError::bad("window applies to sort=trending only"));
+    }
+    trend_window(q.window.as_deref())?;
     if !matches!(q.match_mode.as_deref(), None | Some("any" | "all")) {
         return Err(ApiError::bad("match must be any or all"));
     }
@@ -1052,6 +1059,27 @@ fn validate_search(q: &SearchQuery) -> Result<Vec<String>, ApiError> {
         ));
     }
     Ok(tags)
+}
+/// The trending window: `{n}h` or `{n}d` between one hour and 90 days, default seven days.
+pub(crate) fn trend_window(window: Option<&str>) -> Result<chrono::Duration, ApiError> {
+    let Some(window) = window else {
+        return Ok(chrono::Duration::days(7));
+    };
+    let bad = || ApiError::bad("window is {n}h or {n}d, from 1h to 90d");
+    let (number, unit) = window.split_at(window.len().saturating_sub(1));
+    if number.is_empty() || number.len() > 4 || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(bad());
+    }
+    let n: i64 = number.parse().map_err(|_| bad())?;
+    let span = match unit {
+        "h" => chrono::Duration::hours(n),
+        "d" => chrono::Duration::days(n),
+        _ => return Err(bad()),
+    };
+    if span < chrono::Duration::hours(1) || span > chrono::Duration::days(90) {
+        return Err(bad());
+    }
+    Ok(span)
 }
 /// What `key` matches: join keys, or one fact.
 #[derive(Debug, PartialEq)]
@@ -1165,12 +1193,27 @@ pub async fn search(
             return Err(ApiError::bad("cursor does not match this search"));
         }
     }
-    let mut sql = QueryBuilder::<Postgres>::new(if q.collapse.is_some() {
-        "WITH eligible AS (SELECT r.*, "
+    let trending = q.sort.as_deref() == Some("trending");
+    let mut sql = QueryBuilder::<Postgres>::new("WITH ");
+    if trending {
+        // References made inside the window, counted once for all rows (in the same reach),
+        // relative to the instant the first page pinned.
+        let since = at - trend_window(q.window.as_deref())?;
+        sql.push("trend AS (SELECT f.resource_id,count(*) AS n FROM effective_reference f WHERE f.created_at>=")
+            .push_bind(since)
+            .push(" AND f.created_at<=")
+            .push_bind(at);
+        scope(&mut sql, &q, &reach);
+        sql.push(" GROUP BY f.resource_id), ");
+    }
+    sql.push(if q.collapse.is_some() {
+        "eligible AS (SELECT r.*, "
     } else {
-        "WITH filtered AS (SELECT r.*, "
+        "filtered AS (SELECT r.*, "
     });
-    if q.sort.as_deref() == Some("distance") {
+    if trending {
+        sql.push("t.n::double precision");
+    } else if q.sort.as_deref() == Some("distance") {
         sql.push("-");
         spatial.distance(&mut sql);
     } else if q.sort.as_deref() == Some("start") {
@@ -1182,9 +1225,11 @@ pub async fn search(
             .push_bind(at)
             .push("::timestamptz-s.updated_at)))/2592000.0),0)::double precision");
     }
-    sql.push(
-        " AS rank FROM search_unit r LEFT JOIN resource_score s ON s.resource_id=r.id WHERE true",
-    );
+    sql.push(" AS rank FROM search_unit r LEFT JOIN resource_score s ON s.resource_id=r.id");
+    if trending {
+        sql.push(" JOIN trend t ON t.resource_id=r.id");
+    }
+    sql.push(" WHERE true");
     spatial.apply(&mut sql);
     if let Some(venue) = &q.venue {
         sql.push(" AND r.venue_id=").push_bind(venue.clone());
