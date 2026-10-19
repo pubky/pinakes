@@ -45,6 +45,16 @@
     "status": 200,
     "url": "https://rest.uniprot.org/uniprotkb/P69905.json?fields=accession,id,protein_name,gene_primary,organism_name,organism_id,length,cc_function,xref_alphafolddb,xref_pdb,date_created,date_modified,sequence_version"
   },
+  "entry-q15086-followed": {
+    "bytes": 874741,
+    "content_type": "application/json",
+    "file": "entry-q15086-followed.json.gz",
+    "note": "the merged accession with the redirect followed: final URL https://rest.uniprot.org/uniprotkb/P04637?from=Q15086, the full P04637 record (the fields list is dropped)",
+    "recorded_at": "2026-10-19T16:43:09+00:00",
+    "sha256": "6bdb471fae5b0d4c92a1e2fd63f35b49e3826188e82ff54fcddec70c4e63e114",
+    "status": 200,
+    "url": "https://rest.uniprot.org/uniprotkb/Q15086.json?fields=accession,id,protein_name,gene_primary,organism_name,organism_id,length,cc_function,xref_alphafolddb,xref_pdb,date_created,date_modified,sequence_version"
+  },
   "entry-q15086-merged": {
     "bytes": 200,
     "content_type": "application/json",

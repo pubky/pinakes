@@ -76,11 +76,14 @@ or got plain web cards before are read by their source.
 - [`mempool`](mempool.md): Bitcoin blocks, transactions and addresses, and Lightning nodes and
   channels, from mempool.space (Esplora as fallback).
 - [`met`](met.md): The Metropolitan Museum of Art's works by object id.
+- [`pdb`](pdb.md): Protein Data Bank structures by PDB id.
+- [`pubchem`](pubchem.md): PubChem compounds by compound id.
 - [`public_inbox`](public_inbox.md): mailing-list messages in public-inbox archives (gnusha.org, lore.kernel.org, others), and old bitcoin-dev pipermail addresses
 - [`sec`](sec.md): SEC EDGAR filings, their documents and companies.
 - [`stacker_news`](stacker_news.md): Stacker News posts and comments by item id.
 - [`swiss_parliament`](swiss_parliament.md): Swiss Parliament business items (Curia Vista) by affair id.
 - [`uk_parliament_bills`](uk_parliament_bills.md): UK Parliament bills and Acts by bill id.
+- [`uniprot`](uniprot.md): UniProtKB proteins by accession.
 - [`wordpress`](wordpress.md): page hook: a WordPress post's editorial title, excerpt, dates and featured image from its REST record
 - [`zefix`](zefix.md): Swiss companies in the commercial register, by register id.
 - [`zenodo`](zenodo.md): Zenodo records (datasets, software, papers) by record id.

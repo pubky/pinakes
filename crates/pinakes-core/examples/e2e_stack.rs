@@ -121,7 +121,10 @@ impl Fixture {
             {"kind":"cleveland","uri":"https://www.clevelandart.org/art/1958.39","type":"VisualArtwork"},
             {"kind":"met","uri":"https://www.metmuseum.org/art/collection/search/436535","type":"VisualArtwork"},
             {"kind":"commons","uri":"https://commons.wikimedia.org/wiki/File:Golden_Gate_Bridge_as_seen_from_Battery_East.jpg","type":"ImageObject"},
-            {"kind":"internet_archive","uri":"https://archive.org/details/bitcoin-whitepaper","type":"Book"}
+            {"kind":"internet_archive","uri":"https://archive.org/details/bitcoin-whitepaper","type":"Book"},
+            {"kind":"pdb","uri":"https://www.rcsb.org/structure/4HHB","type":"Dataset"},
+            {"kind":"pubchem","uri":"https://pubchem.ncbi.nlm.nih.gov/compound/2244","type":"MolecularEntity"},
+            {"kind":"uniprot","uri":"https://www.uniprot.org/uniprotkb/P69905/entry","type":"Protein"}
         ]);
         Ok(Self {
             boundary: Arc::default(),
@@ -182,6 +185,9 @@ impl Dns for FixtureDns {
                 | "api.artic.edu"
                 | "commons.wikimedia.org"
                 | "archive.org"
+                | "rest.uniprot.org"
+                | "pubchem.ncbi.nlm.nih.gov"
+                | "data.rcsb.org"
         ) {
             "93.184.216.34"
         } else {
@@ -243,6 +249,9 @@ impl Transport for Fixture {
             "collectionapi.metmuseum.org" if u.path()=="/public/collection/v1/objects/436535"=>("application/json",include_str!("../tests/fixtures/sources/met/object-436535.json").into()),
             "archive.org" if u.path()=="/metadata/bitcoin-whitepaper/metadata"=>("application/json",include_str!("../tests/fixtures/sources/internet_archive/bitcoin-whitepaper.json").into()),
             "commons.wikimedia.org" if u.path()=="/w/api.php" && u.query_pairs().any(|(k,v)| k=="titles" && v=="File:Golden Gate Bridge as seen from Battery East.jpg")=>("application/json",include_str!("../tests/fixtures/sources/commons/golden-gate.json").into()),
+            "data.rcsb.org" if u.path()=="/rest/v1/core/entry/4HHB"=>("application/json",include_str!("../tests/fixtures/sources/pdb/entry-4hhb.json").into()),
+            "pubchem.ncbi.nlm.nih.gov" if u.path().starts_with("/rest/pug/compound/cid/2244/property/")=>("application/json",include_str!("../tests/fixtures/sources/pubchem/compound-2244.json").into()),
+            "rest.uniprot.org" if u.path()=="/uniprotkb/P69905.json"=>("application/json",include_str!("../tests/fixtures/sources/uniprot/entry-p69905.json").into()),
             _=>bail!("no fixture for upstream host {}",u.host_str().unwrap_or("")),
         };
         Ok(Fetched {

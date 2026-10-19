@@ -5,14 +5,20 @@
 //! id in upper case. An extended id (`pdb_00004hhb`) names the same entry while it starts with
 //! `pdb_0000`. Coordinate files (`files.rcsb.org`) are files of an entry, not the entry.
 //!
-//! An obsolete entry is gone from the Data API (404); `status_request` says which entry replaced
-//! it. The data is CC0.
-use super::kit::{
-    float, host_and_segments, int, json, text, texts, time, web_url, Card, Key, Link, Request,
+//! An obsolete entry is gone from the Data API (404) and is missing; `status_request` says which
+//! entry replaced it. The data is CC0.
+use super::{
+    kit::{
+        fetch, float, host_and_segments, int, json, text, time, web_url, Card, Key, Link, Request,
+    },
+    Example, Source,
 };
-use anyhow::{ensure, Result};
-use serde_json::{json, Value};
+use crate::model::ResourceMeta;
+use anyhow::{ensure, Context, Result};
+use async_trait::async_trait;
+use serde_json::Value;
 
+pub const SITE: &str = "RCSB PDB";
 const VIA: &str = "pdb";
 pub const ATTRIBUTION: &str = "RCSB PDB (CC0 1.0)";
 
@@ -136,29 +142,17 @@ pub fn parse(status: u16, raw: &[u8], id: &str) -> Result<Option<Card>> {
     }
     card.detail("keywords", words);
     let c = &v["rcsb_primary_citation"];
-    let citation: serde_json::Map<String, Value> = [
-        ("title", text(&c["title"]).map(Value::from)),
-        (
-            "journal",
-            text(&c["rcsb_journal_abbrev"])
-                .or_else(|| text(&c["journal_abbrev"]))
-                .map(Value::from),
-        ),
-        ("year", int(&c["year"]).map(Value::from)),
-        (
-            "doi",
-            text(&c["pdbx_database_id_DOI"]).map(|d| d.to_ascii_lowercase().into()),
-        ),
-        (
-            "pubmed_id",
-            int(&c["pdbx_database_id_PubMed"]).map(Value::from),
-        ),
-        ("authors", Some(json!(texts(&c["rcsb_authors"])))),
-    ]
-    .into_iter()
-    .filter_map(|(k, v)| v.filter(|v| v != &json!([])).map(|v| (k.to_owned(), v)))
-    .collect();
-    card.detail("citation", Value::Object(citation));
+    card.detail("citation_title", text(&c["title"]));
+    card.detail(
+        "citation_journal",
+        text(&c["rcsb_journal_abbrev"]).or_else(|| text(&c["journal_abbrev"])),
+    );
+    card.detail("citation_year", int(&c["year"]));
+    card.detail(
+        "citation_doi",
+        text(&c["pdbx_database_id_DOI"]).map(|d| d.to_ascii_lowercase()),
+    );
+    card.detail("citation_pubmed_id", int(&c["pdbx_database_id_PubMed"]));
     // The entry's own DOI, as the entry states it.
     for db in v["database_2"].as_array().into_iter().flatten() {
         let ours = db["database_id"].as_str() == Some("PDB")
@@ -181,10 +175,86 @@ pub fn parse(status: u16, raw: &[u8], id: &str) -> Result<Option<Card>> {
     Ok(Some(card))
 }
 
+/// The entry of a root, `pdb:{ID}` (the four-character id in upper case).
+pub fn from_root(uri: &str) -> Option<String> {
+    let id = uri.strip_prefix("pdb:")?;
+    pdb_id(id).filter(|i| i == id)
+}
+
+/// The entry of a root or an RCSB link.
+pub fn target(uri: &str) -> Option<String> {
+    from_root(uri).or_else(|| from_uri(uri))
+}
+
+/// The source: PDB entries from the RCSB PDB Data API.
+pub struct Pdb;
+
+#[async_trait]
+impl Source for Pdb {
+    fn name(&self) -> &'static str {
+        "pdb"
+    }
+    fn reads(&self, uri: &str) -> bool {
+        target(uri).is_some()
+    }
+    fn alias_root(&self, uri: &str) -> Option<String> {
+        let root = identifier(&target(uri)?);
+        (root != uri).then_some(root)
+    }
+    fn invalid(&self, uri: &str) -> bool {
+        uri.starts_with("pdb:") && from_root(uri).is_none()
+    }
+    fn facts(&self) -> &'static [&'static str] {
+        &[
+            "page_url",
+            "doi",
+            "deposit_date",
+            "revision_date",
+            "methods",
+            "resolution",
+            "polymer_entity_count",
+            "molecular_weight_kda",
+            "classification",
+            "keywords",
+            "citation_title",
+            "citation_journal",
+            "citation_year",
+            "citation_doi",
+            "citation_pubmed_id",
+        ]
+    }
+    fn budgets(&self) -> &'static [super::Budget] {
+        &[("data.rcsb.org", 1.0, None)]
+    }
+    fn examples(&self) -> &'static [Example] {
+        &[
+            Example {
+                uri: "https://www.rcsb.org/structure/4HHB",
+                card_type: "Dataset",
+            },
+            Example {
+                uri: "https://www.rcsb.org/structure/6VXX",
+                card_type: "Dataset",
+            },
+        ]
+    }
+    async fn resolve(&self, cx: &super::Context<'_>, uri: &str) -> Result<ResourceMeta> {
+        let Some(id) = target(uri) else {
+            return Ok(cx.missing(uri, self));
+        };
+        let f = fetch(cx, &request(&id).context("no reader")?).await?;
+        Ok(match parse(f.status, &f.body, &id)? {
+            Some(card) => card.into_doc(cx.card(uri, self), SITE),
+            None => cx.missing(uri, self),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sources::kit::fixture;
+    use serde_json::json;
 
     fn read(name: &str) -> Vec<u8> {
         fixture::read("pdb", name)
@@ -274,10 +344,10 @@ mod tests {
         assert_eq!(d["molecular_weight_kda"], 64.74);
         assert_eq!(d["classification"], "OXYGEN TRANSPORT");
         assert_eq!(d["keywords"], json!(["OXYGEN TRANSPORT"]));
-        assert_eq!(d["citation"]["journal"], "J Mol Biol");
-        assert_eq!(d["citation"]["year"], 1984);
-        assert_eq!(d["citation"]["doi"], "10.1016/0022-2836(84)90472-8");
-        assert_eq!(d["citation"]["pubmed_id"], 6726807);
+        assert_eq!(d["citation_journal"], "J Mol Biol");
+        assert_eq!(d["citation_year"], 1984);
+        assert_eq!(d["citation_doi"], "10.1016/0022-2836(84)90472-8");
+        assert_eq!(d["citation_pubmed_id"], 6726807);
         assert_eq!(card.keys, [Key::new("doi", "10.2210/pdb4hhb/pdb")]);
         let links: Vec<_> = card.also_on.iter().map(|l| l.uri.as_str()).collect();
         assert_eq!(
@@ -308,7 +378,7 @@ mod tests {
         assert_eq!(d["resolution"], 2.8);
         assert_eq!(d["keywords"][0], "Coronavirus");
         assert_eq!(d["keywords"].as_array().unwrap().len(), 9);
-        assert_eq!(d["citation"]["doi"], "10.1016/j.cell.2020.02.058");
+        assert_eq!(d["citation_doi"], "10.1016/j.cell.2020.02.058");
         assert_eq!(card.keys, [Key::new("doi", "10.2210/pdb6vxx/pdb")]);
     }
 
@@ -332,5 +402,52 @@ mod tests {
         assert!(parse(429, b"", "4HHB").is_err());
         assert!(parse(503, b"", "4HHB").is_err());
         assert!(parse(200, b"<html>", "4HHB").is_err());
+    }
+
+    #[test]
+    fn roots_and_aliases() {
+        let p = Pdb;
+        assert!(p.reads("pdb:4HHB"));
+        assert_eq!(p.alias_root("pdb:4HHB"), None);
+        assert!(!p.invalid("pdb:4HHB"));
+        for uri in [
+            "https://www.rcsb.org/structure/4hhb",
+            "https://www.rcsb.org/structure/pdb_00004hhb",
+            "https://data.rcsb.org/rest/v1/core/entry/4HHB",
+        ] {
+            assert_eq!(p.alias_root(uri).as_deref(), Some("pdb:4HHB"), "{uri}");
+        }
+        for uri in [
+            "pdb:4hhb",
+            "pdb:0HHB",
+            "pdb:pdb_00004hhb",
+            "pdb:",
+            "pdb:4HHB/x",
+        ] {
+            assert!(p.invalid(uri), "{uri}");
+            assert!(!p.reads(uri), "{uri}");
+        }
+        assert!(!p.invalid("https://example.org/pdb:4HHB"));
+        for example in p.examples() {
+            assert!(p.reads(example.uri), "{}", example.uri);
+        }
+    }
+
+    #[test]
+    fn documents() {
+        for (file, id) in [("entry-4hhb.json", "4HHB"), ("entry-6vxx.json", "6VXX")] {
+            let card = parse(200, &read(file), id).unwrap().unwrap();
+            let doc = crate::sources::kit::checked(&Pdb, &card);
+            assert_eq!(doc.source_root.as_deref(), Some(card.id.as_str()));
+            assert_eq!(doc.attributes["page_url"], card.url);
+            assert!(doc.attributes["doi"].starts_with("10.2210/pdb"));
+        }
+        let card = parse(200, &read("entry-4hhb.json"), "4HHB")
+            .unwrap()
+            .unwrap();
+        let doc = card.into_doc(ResourceMeta::new("pdb:4HHB", "pdb", 60), SITE);
+        assert_eq!(doc.site, "RCSB PDB");
+        assert_eq!(doc.attributes["citation_year"], "1984");
+        assert_eq!(doc.attributes["methods"], "X-RAY DIFFRACTION");
     }
 }

@@ -2019,6 +2019,18 @@
                     "uri": "https://partiful.com/e/AK0FMV5lu2PmfSyxuXwY"
                   }
                 },
+                "resolve-pdb-1": {
+                  "summary": "https://www.rcsb.org/structure/4HHB",
+                  "value": {
+                    "uri": "https://www.rcsb.org/structure/4HHB"
+                  }
+                },
+                "resolve-pdb-2": {
+                  "summary": "https://www.rcsb.org/structure/6VXX",
+                  "value": {
+                    "uri": "https://www.rcsb.org/structure/6VXX"
+                  }
+                },
                 "resolve-posh-vip-e-halloween-2026-eden": {
                   "summary": "https://posh.vip/e/halloween-2026-eden",
                   "value": {
@@ -2029,6 +2041,18 @@
                   "summary": "https://pretix.eu/demo/democon/ical/",
                   "value": {
                     "uri": "https://pretix.eu/demo/democon/ical/"
+                  }
+                },
+                "resolve-pubchem-1": {
+                  "summary": "https://pubchem.ncbi.nlm.nih.gov/compound/2244",
+                  "value": {
+                    "uri": "https://pubchem.ncbi.nlm.nih.gov/compound/2244"
+                  }
+                },
+                "resolve-pubchem-2": {
+                  "summary": "https://pubchem.ncbi.nlm.nih.gov/compound/2519",
+                  "value": {
+                    "uri": "https://pubchem.ncbi.nlm.nih.gov/compound/2519"
                   }
                 },
                 "resolve-pubky-org": {
@@ -2113,6 +2137,18 @@
                   "summary": "https://bills.parliament.uk/bills/3737",
                   "value": {
                     "uri": "https://bills.parliament.uk/bills/3737"
+                  }
+                },
+                "resolve-uniprot-1": {
+                  "summary": "https://www.uniprot.org/uniprotkb/P69905/entry",
+                  "value": {
+                    "uri": "https://www.uniprot.org/uniprotkb/P69905/entry"
+                  }
+                },
+                "resolve-uniprot-2": {
+                  "summary": "https://www.uniprot.org/uniprotkb/P04637/entry",
+                  "value": {
+                    "uri": "https://www.uniprot.org/uniprotkb/P04637/entry"
                   }
                 },
                 "resolve-v4-wegow-com-es-conciertos-konzert-von-yasi-hofer-band-in-bo": {

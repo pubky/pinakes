@@ -7,12 +7,18 @@
 //!
 //! The service asks for at most 5 requests a second and reports its load in the
 //! `X-Throttling-Control` header. Structure depictions are public domain.
-use super::kit::{
-    encode, float, host_and_segments, json, plain, text, web_url, Card, Key, Request,
+use super::{
+    kit::{
+        encode, fetch, float, host_and_segments, json, plain, text, web_url, Card, Key, Request,
+    },
+    Example, Source,
 };
+use crate::model::ResourceMeta;
 use anyhow::{bail, ensure, Context, Result};
+use async_trait::async_trait;
 use percent_encoding::percent_decode_str;
 
+pub const SITE: &str = "PubChem";
 pub const ATTRIBUTION: &str = "PubChem (NCBI)";
 /// The properties the card reads. `SMILES` is the full (isomeric) SMILES; PubChem maps the old
 /// names `IsomericSMILES` and `CanonicalSMILES` to `SMILES` and `ConnectivitySMILES`.
@@ -158,6 +164,82 @@ pub fn parse(status: u16, raw: &[u8], cid: u64) -> Result<Option<Card>> {
     Ok(Some(card))
 }
 
+/// The compound of a root, `pubchem:cid/{cid}`.
+pub fn from_root(uri: &str) -> Option<Target> {
+    let id = uri.strip_prefix("pubchem:cid/")?;
+    cid(id).map(Target::Cid)
+}
+
+/// The compound of a root or a PubChem link.
+pub fn target(uri: &str) -> Option<Target> {
+    from_root(uri).or_else(|| from_uri(uri))
+}
+
+/// The source: PubChem compounds from PUG REST.
+pub struct Pubchem;
+
+#[async_trait]
+impl Source for Pubchem {
+    fn name(&self) -> &'static str {
+        "pubchem"
+    }
+    fn reads(&self, uri: &str) -> bool {
+        target(uri).is_some()
+    }
+    fn alias_root(&self, uri: &str) -> Option<String> {
+        let root = identifier(&target(uri)?)?;
+        (root != uri).then_some(root)
+    }
+    fn invalid(&self, uri: &str) -> bool {
+        uri.starts_with("pubchem:") && from_root(uri).is_none()
+    }
+    fn facts(&self) -> &'static [&'static str] {
+        &[
+            "page_url",
+            "inchikey",
+            "iupac_name",
+            "formula",
+            "molecular_weight",
+            "exact_mass",
+            "smiles",
+            "xlogp",
+        ]
+    }
+    fn budgets(&self) -> &'static [super::Budget] {
+        &[("pubchem.ncbi.nlm.nih.gov", 4.0, None)]
+    }
+    fn examples(&self) -> &'static [Example] {
+        &[
+            Example {
+                uri: "https://pubchem.ncbi.nlm.nih.gov/compound/2244",
+                card_type: "MolecularEntity",
+            },
+            Example {
+                uri: "https://pubchem.ncbi.nlm.nih.gov/compound/2519",
+                card_type: "MolecularEntity",
+            },
+        ]
+    }
+    async fn resolve(&self, cx: &super::Context<'_>, uri: &str) -> Result<ResourceMeta> {
+        let cid = match target(uri) {
+            Some(Target::Cid(cid)) => cid,
+            Some(Target::Name(name)) => {
+                let f = fetch(cx, &name_request(&name).context("no lookup")?).await?;
+                match parse_name(f.status, &f.body)? {
+                    Some(cid) => cid,
+                    None => return Ok(cx.missing(uri, self)),
+                }
+            }
+            None => return Ok(cx.missing(uri, self)),
+        };
+        let f = fetch(cx, &request(cid).context("no reader")?).await?;
+        Ok(match parse(f.status, &f.body, cid)? {
+            Some(card) => card.into_doc(cx.card(uri, self), SITE),
+            None => cx.missing(uri, self),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,5 +382,58 @@ mod tests {
         assert!(parse(429, b"", 2244).is_err());
         assert!(parse(400, b"{}", 2244).is_err());
         assert_eq!(inchikey("BSYNRYMUTXBXSQ-UHFFFAOYSA-n"), None);
+    }
+
+    #[test]
+    fn roots_and_aliases() {
+        let p = Pubchem;
+        assert!(p.reads("pubchem:cid/2244"));
+        assert_eq!(p.alias_root("pubchem:cid/2244"), None);
+        assert!(!p.invalid("pubchem:cid/2244"));
+        for uri in [
+            "https://pubchem.ncbi.nlm.nih.gov/compound/2244",
+            "https://pubchem.ncbi.nlm.nih.gov/summary/summary.cgi?cid=2244",
+            "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/2244/JSON",
+        ] {
+            assert_eq!(
+                p.alias_root(uri).as_deref(),
+                Some("pubchem:cid/2244"),
+                "{uri}"
+            );
+        }
+        // A name names a compound only after the lookup.
+        let name = "https://pubchem.ncbi.nlm.nih.gov/compound/aspirin";
+        assert!(p.reads(name));
+        assert_eq!(p.alias_root(name), None);
+        for uri in [
+            "pubchem:cid/02244",
+            "pubchem:cid/0",
+            "pubchem:cid/aspirin",
+            "pubchem:sid/1",
+            "pubchem:",
+        ] {
+            assert!(p.invalid(uri), "{uri}");
+            assert!(!p.reads(uri), "{uri}");
+        }
+        for example in p.examples() {
+            assert!(p.reads(example.uri), "{}", example.uri);
+        }
+    }
+
+    #[test]
+    fn documents() {
+        for (file, cid) in [("compound-2244.json", 2244), ("compound-2519.json", 2519)] {
+            let card = parse(200, &read(file), cid).unwrap().unwrap();
+            let doc = crate::sources::kit::checked(&Pubchem, &card);
+            assert_eq!(doc.source_root.as_deref(), Some(card.id.as_str()));
+            assert_eq!(doc.attributes["page_url"], card.url);
+        }
+        let card = parse(200, &read("compound-2244.json"), 2244)
+            .unwrap()
+            .unwrap();
+        let doc = card.into_doc(ResourceMeta::new("pubchem:cid/2244", "pubchem", 60), SITE);
+        assert_eq!(doc.site, "PubChem");
+        assert_eq!(doc.attributes["inchikey"], "BSYNRYMUTXBXSQ-UHFFFAOYSA-N");
+        assert_eq!(doc.attributes["molecular_weight"], "180.16");
     }
 }

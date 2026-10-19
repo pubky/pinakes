@@ -217,6 +217,21 @@
     "type": "Book"
   },
   {
+    "kind": "pdb",
+    "uri": "https://www.rcsb.org/structure/4HHB",
+    "type": "Dataset"
+  },
+  {
+    "kind": "pubchem",
+    "uri": "https://pubchem.ncbi.nlm.nih.gov/compound/2244",
+    "type": "MolecularEntity"
+  },
+  {
+    "kind": "uniprot",
+    "uri": "https://www.uniprot.org/uniprotkb/P69905/entry",
+    "type": "Protein"
+  },
+  {
     "kind": "web",
     "uri": "https://example.org/",
     "type": "WebPage"

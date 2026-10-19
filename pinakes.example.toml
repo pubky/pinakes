@@ -103,6 +103,10 @@ enabled = true
 enabled = true
 [sources.met]
 enabled = true
+[sources.pdb]
+enabled = true
+[sources.pubchem]
+enabled = true
 [sources.public_inbox]
 enabled = true
 [sources.sec]
@@ -112,6 +116,8 @@ enabled = true
 [sources.swiss_parliament]
 enabled = true
 [sources.uk_parliament_bills]
+enabled = true
+[sources.uniprot]
 enabled = true
 [sources.wordpress]
 enabled = true
