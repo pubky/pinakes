@@ -24,6 +24,7 @@ pub mod courtlistener;
 pub mod ecfr;
 pub mod federal_register;
 pub mod gleif;
+pub mod legislation_gov_uk;
 pub mod sec;
 pub mod swiss_parliament;
 pub mod uk_parliament_bills;
@@ -35,6 +36,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &ecfr::Ecfr,
     &federal_register::FederalRegister,
     &gleif::Gleif,
+    &legislation_gov_uk::LegislationGovUk,
     &sec::Sec,
     &swiss_parliament::SwissParliament,
     &uk_parliament_bills::UkParliamentBills,

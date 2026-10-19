@@ -1,0 +1,42 @@
+{
+  "eur_2016_679_introduction": {
+    "accept": "application/xml",
+    "bytes": 255627,
+    "content_type": "application/xml;charset=utf-8",
+    "file": "eur_2016_679_introduction.xml.gz",
+    "recorded_at": "2026-10-19T16:23:25+00:00",
+    "sha256": "82bd6477492c8750bfdbce42ab92ad36a590f104dd6859f413b05edcffa352d5",
+    "status": 200,
+    "url": "https://www.legislation.gov.uk/eur/2016/679/introduction/data.xml"
+  },
+  "missing_ukpga_2018_9999_introduction": {
+    "accept": "application/xml",
+    "bytes": 15725,
+    "content_type": "text/html; charset=UTF-8",
+    "file": "missing_ukpga_2018_9999_introduction.html",
+    "recorded_at": "2026-10-19T16:23:27+00:00",
+    "sha256": "3bd9392f85459de0def0f0b9a3bbc7e2fd734fd024fd9fea5622cddeed34eb8b",
+    "status": 400,
+    "url": "https://www.legislation.gov.uk/ukpga/2018/9999/introduction/data.xml"
+  },
+  "ukpga_2018_12_introduction": {
+    "accept": "application/xml",
+    "bytes": 33430,
+    "content_type": "application/xml;charset=utf-8",
+    "file": "ukpga_2018_12_introduction.xml",
+    "recorded_at": "2026-10-19T16:23:23+00:00",
+    "sha256": "994f706e5fa85c2924a2594e3be078ad2d85ca803aa5b32195d2448a122c27ca",
+    "status": 200,
+    "url": "https://www.legislation.gov.uk/ukpga/2018/12/introduction/data.xml"
+  },
+  "uksi_2019_419_introduction_made": {
+    "accept": "application/xml",
+    "bytes": 17085,
+    "content_type": "application/xml;charset=utf-8",
+    "file": "uksi_2019_419_introduction_made.xml",
+    "recorded_at": "2026-10-19T16:23:32+00:00",
+    "sha256": "a7d40ea9855545a9173c9143a4b014f219d7b14e8589110807d257957b1ca6bd",
+    "status": 200,
+    "url": "https://www.legislation.gov.uk/uksi/2019/419/introduction/made/data.xml"
+  }
+}

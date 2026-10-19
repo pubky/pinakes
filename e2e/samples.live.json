@@ -87,6 +87,11 @@
     "type": "CreativeWork"
   },
   {
+    "kind": "legislation_gov_uk",
+    "uri": "https://www.legislation.gov.uk/ukpga/2018/12/contents",
+    "type": "Legislation"
+  },
+  {
     "kind": "web",
     "uri": "https://example.org/",
     "type": "WebPage"

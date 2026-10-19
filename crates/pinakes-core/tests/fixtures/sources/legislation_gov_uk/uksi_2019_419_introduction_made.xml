@@ -1,0 +1,91 @@
+<Legislation xmlns="http://www.legislation.gov.uk/namespaces/legislation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" DocumentURI="http://www.legislation.gov.uk/uksi/2019/419/made" IdURI="http://www.legislation.gov.uk/id/uksi/2019/419" NumberOfProvisions="351" xsi:schemaLocation="http://www.legislation.gov.uk/namespaces/legislation http://www.legislation.gov.uk/schema/legislation.xsd" SchemaVersion="1.0"><ukm:Metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dct="http://purl.org/dc/terms/" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:ukm="http://www.legislation.gov.uk/namespaces/metadata">
+					<dc:identifier>http://www.legislation.gov.uk/uksi/2019/419/introduction/made</dc:identifier><dc:title>The Data Protection, Privacy and Electronic Communications (Amendments etc) (EU Exit) Regulations 2019</dc:title><dc:language>en</dc:language><dc:publisher>King's Printer of Acts of Parliament</dc:publisher><dc:modified>2022-02-24</dc:modified><dc:subject scheme="SIheading">EXITING THE EUROPEAN UNION</dc:subject><dc:subject scheme="SIheading">DATA PROTECTION</dc:subject><dc:subject scheme="SIheading">ELECTRONIC COMMUNICATIONS</dc:subject>
+					<dc:description>These Regulations make amendments to legislation in relation to the regulation of the processing of personal data.</dc:description>
+					<atom:link rel="self" href="http://www.legislation.gov.uk/uksi/2019/419/introduction/made/data.xml" type="application/xml"/><atom:link rel="http://www.legislation.gov.uk/def/navigation/resources" href="http://www.legislation.gov.uk/uksi/2019/419/resources" title="More Resources"/>
+					
+					<atom:link rel="http://www.legislation.gov.uk/def/navigation/memorandum" href="http://www.legislation.gov.uk/uksi/2019/419/memorandum" title="Explanatory Memorandum"/><atom:link rel="http://www.legislation.gov.uk/def/navigation/memorandum/toc" href="http://www.legislation.gov.uk/uksi/2019/419/memorandum/contents" title="Explanatory Memorandum Table of Contents"/>
+					
+					<atom:link rel="http://www.legislation.gov.uk/def/navigation/act" href="http://www.legislation.gov.uk/uksi/2019/419/made" title="whole act"/><atom:link rel="http://www.legislation.gov.uk/def/navigation/introduction" href="http://www.legislation.gov.uk/uksi/2019/419/introduction/made" title="introduction"/><atom:link rel="http://www.legislation.gov.uk/def/navigation/signature" href="http://www.legislation.gov.uk/uksi/2019/419/signature/made" title="signature"/><atom:link rel="http://www.legislation.gov.uk/def/navigation/note" href="http://www.legislation.gov.uk/uksi/2019/419/note/made" title="note"/>
+					<atom:link rel="http://www.legislation.gov.uk/def/navigation/body" href="http://www.legislation.gov.uk/uksi/2019/419/body/made" title="body"/>
+					<atom:link rel="http://www.legislation.gov.uk/def/navigation/schedules" href="http://www.legislation.gov.uk/uksi/2019/419/schedules/made" title="schedules"/>
+					
+										
+					
+					
+					
+					<atom:link rel="alternate" type="application/rdf+xml" href="http://www.legislation.gov.uk/uksi/2019/419/introduction/made/data.rdf" title="RDF/XML"/><atom:link rel="alternate" type="application/akn+xml" href="http://www.legislation.gov.uk/uksi/2019/419/introduction/made/data.akn" title="AKN"/><atom:link rel="alternate" type="application/xhtml+xml" href="http://www.legislation.gov.uk/uksi/2019/419/introduction/made/data.xht" title="HTML snippet"/><atom:link rel="alternate" type="text/html" href="http://www.legislation.gov.uk/uksi/2019/419/introduction/made/data.htm" title="Website (XHTML) Default View"/><atom:link rel="alternate" type="text/csv" href="http://www.legislation.gov.uk/uksi/2019/419/introduction/made/data.csv" title="CSV"/><atom:link rel="alternate" type="application/pdf" href="http://www.legislation.gov.uk/uksi/2019/419/introduction/made/data.pdf" title="PDF"/>
+					<atom:link rel="alternate" type="application/akn+xhtml" href="http://www.legislation.gov.uk/uksi/2019/419/introduction/made/data.html" title="HTML5 snippet"/>
+
+					
+					<atom:link rel="http://purl.org/dc/terms/tableOfContents" hreflang="en" href="http://www.legislation.gov.uk/uksi/2019/419/contents/made" title="Table of Contents"/>
+					
+					<atom:link rel="http://purl.org/dc/terms/hasVersion" href="http://www.legislation.gov.uk/uksi/2019/419/introduction/2019-03-29" title="2019-03-29"/><atom:link rel="http://purl.org/dc/terms/hasVersion" href="http://www.legislation.gov.uk/uksi/2019/419/introduction" title="current"/>
+					<atom:link rel="http://www.legislation.gov.uk/def/navigation/supersedes" href="http://www.legislation.gov.uk/id/ukdsi/2019/9780111178300" title="The Data Protection, Privacy and Electronic Communications (Amendments etc) (EU Exit) Regulations 2019"/>
+					<atom:link rel="up" href="http://www.legislation.gov.uk/uksi/2019/419/made" title="Entire legislation"/><atom:link rel="next" href="http://www.legislation.gov.uk/uksi/2019/419/regulation/1/made" title="Provision; Regulation 1"/><atom:link rel="nextInForce" href="http://www.legislation.gov.uk/uksi/2019/419/regulation/1/made" title="Provision; Regulation 1"/>
+					<ukm:SecondaryMetadata><ukm:DocumentClassification>
+<ukm:DocumentCategory Value="secondary"/>
+<ukm:DocumentMainType Value="UnitedKingdomStatutoryInstrument"/>
+<ukm:DocumentStatus Value="final"/>
+<ukm:DocumentMinorType Value="regulation"/>
+</ukm:DocumentClassification><ukm:Year Value="2019"/><ukm:Number Value="419"/><ukm:Made Date="2019-02-28"/><ukm:ISBN Value="9780111182680"/><ukm:UnappliedEffects><ukm:UnappliedEffect AffectedClass="UnitedKingdomStatutoryInstrument" Comments="IP completion day - Amendment should not be applied - Regulations revoked (18.12.2020) by The Data Protection, Privacy and Electronic Communications (Amendments etc) (EU Exit) Regulations 2020 (S.I. 2020/1586), regs. 1(3), 7" AffectingYear="2019" AffectedNumber="419" Notes="This amendment not applied to legislation.gov.uk. S.I. 2019/485 revoked (18.12.2020) by The Data Protection, Privacy and Electronic Communications (Amendments etc) (EU Exit) Regulations 2020 (S.I. 2020/1586), regs. 1(3), 7" AffectedProvisions="Sch. 2 para. 102" AffectedYear="2019" AffectingURI="http://www.legislation.gov.uk/id/uksi/2019/485" Row="207" AffectedURI="http://www.legislation.gov.uk/id/uksi/2019/419" AffectingProvisions="reg. 2(2)" AffectingClass="UnitedKingdomStatutoryInstrument" Modified="2021-06-17T11:32:22Z" AppendedCommentary="2020 c. 1, Sch. 5 para. 1(1)" EffectId="key-ce773afa6d0ffb3b05298316e7238aa3" URI="http://www.legislation.gov.uk/id/effect/key-e133fd60a00502a55d9f97840bc796b0" RequiresApplied="false" Type="words inserted" AffectingNumber="485" AffectingEffectsExtent="E+W+S+N.I."><ukm:AffectedTitle>The Data Protection, Privacy and Electronic Communications (Amendments etc) (EU Exit) Regulations 2019</ukm:AffectedTitle><ukm:AffectedProvisions><ukm:Section Ref="schedule-2" URI="http://www.legislation.gov.uk/id/uksi/2019/419/schedule/2">Sch. 2 </ukm:Section><ukm:Section Ref="schedule-2-paragraph-102" URI="http://www.legislation.gov.uk/id/uksi/2019/419/schedule/2/paragraph/102">para. 102</ukm:Section></ukm:AffectedProvisions><ukm:AffectingTitle>The Data Protection, Privacy and Electronic Communications (Amendments etc) (EU Exit) (No. 2) Regulations 2019</ukm:AffectingTitle><ukm:AffectingProvisions><ukm:Section Ref="regulation-2-2" URI="http://www.legislation.gov.uk/id/uksi/2019/485/regulation/2/2">reg. 2(2)</ukm:Section></ukm:AffectingProvisions><ukm:CommencementAuthority><ukm:Section Ref="regulation-1" URI="http://www.legislation.gov.uk/id/uksi/2019/485/regulation/1">reg. 1</ukm:Section></ukm:CommencementAuthority><ukm:InForceDates><ukm:InForce Date="2020-12-31" Qualification="Other" OtherQualification="immediately before IP completion day"/></ukm:InForceDates></ukm:UnappliedEffect><ukm:UnappliedEffect AffectedURI="http://www.legislation.gov.uk/id/uksi/2019/419" Modified="2021-06-17T11:32:22Z" AffectingURI="http://www.legislation.gov.uk/id/uksi/2019/485" URI="http://www.legislation.gov.uk/id/effect/key-0691d9c12cbec99d8806891e48e3ab88" AppendedCommentary="2020 c. 1, Sch. 5 para. 1(1)" AffectedNumber="419" AffectedProvisions="Sch. 2 para. 102" AffectedYear="2019" AffectingClass="UnitedKingdomStatutoryInstrument" Comments="IP completion day - Amendment should not be applied - Regulations revoked (18.12.2020) by The Data Protection, Privacy and Electronic Communications (Amendments etc) (EU Exit) Regulations 2020 (S.I. 2020/1586), regs. 1(3), 7" AffectingYear="2019" RequiresApplied="false" Notes="This amendment not applied to legislation.gov.uk. S.I. 2019/485 revoked (18.12.2020) by The Data Protection, Privacy and Electronic Communications (Amendments etc) (EU Exit) Regulations 2020 (S.I. 2020/1586), regs. 1(3), 7" Type="words substituted" EffectId="key-3e6c27b496afacb344e8a9922aa090e4" AffectingNumber="485" AffectingProvisions="reg. 2(3)" AffectedClass="UnitedKingdomStatutoryInstrument" Row="208" AffectingEffectsExtent="E+W+S+N.I."><ukm:AffectedTitle>The Data Protection, Privacy and Electronic Communications (Amendments etc) (EU Exit) Regulations 2019</ukm:AffectedTitle><ukm:AffectedProvisions><ukm:Section Ref="schedule-2" URI="http://www.legislation.gov.uk/id/uksi/2019/419/schedule/2">Sch. 2 </ukm:Section><ukm:Section Ref="schedule-2-paragraph-102" URI="http://www.legislation.gov.uk/id/uksi/2019/419/schedule/2/paragraph/102">para. 102</ukm:Section></ukm:AffectedProvisions><ukm:AffectingTitle>The Data Protection, Privacy and Electronic Communications (Amendments etc) (EU Exit) (No. 2) Regulations 2019</ukm:AffectingTitle><ukm:AffectingProvisions><ukm:Section Ref="regulation-2-3" URI="http://www.legislation.gov.uk/id/uksi/2019/485/regulation/2/3">reg. 2(3)</ukm:Section></ukm:AffectingProvisions><ukm:CommencementAuthority><ukm:Section Ref="regulation-1" URI="http://www.legislation.gov.uk/id/uksi/2019/485/regulation/1">reg. 1</ukm:Section></ukm:CommencementAuthority><ukm:InForceDates><ukm:InForce Date="2020-12-31" Qualification="Other" OtherQualification="immediately before IP completion day"/></ukm:InForceDates></ukm:UnappliedEffect><ukm:UnappliedEffect Type="words substituted" AffectedURI="http://www.legislation.gov.uk/id/uksi/2019/419" AffectingYear="2019" AffectingProvisions="reg. 2(4)" AffectingEffectsExtent="E+W+S+N.I." RequiresApplied="false" URI="http://www.legislation.gov.uk/id/effect/key-2cdc9159b02a6df45934f8508f375ab3" Comments="IP completion day - Amendment should not be applied - Regulations revoked (18.12.2020) by The Data Protection, Privacy and Electronic Communications (Amendments etc) (EU Exit) Regulations 2020 (S.I. 2020/1586), regs. 1(3), 7" AffectedClass="UnitedKingdomStatutoryInstrument" AffectingNumber="485" AffectedYear="2019" EffectId="key-2dbb00f2c588ee6f692cc635a1c991a0" AffectedNumber="419" Row="209" AppendedCommentary="2020 c. 1, Sch. 5 para. 1(1)" Notes="This amendment not applied to legislation.gov.uk. S.I. 2019/485 revoked (18.12.2020) by The Data Protection, Privacy and Electronic Communications (Amendments etc) (EU Exit) Regulations 2020 (S.I. 2020/1586), regs. 1(3), 7" AffectedProvisions="Sch. 2 para. 102" AffectingClass="UnitedKingdomStatutoryInstrument" Modified="2021-06-17T11:32:22Z" AffectingURI="http://www.legislation.gov.uk/id/uksi/2019/485"><ukm:AffectedTitle>The Data Protection, Privacy and Electronic Communications (Amendments etc) (EU Exit) Regulations 2019</ukm:AffectedTitle><ukm:AffectedProvisions><ukm:Section Ref="schedule-2" URI="http://www.legislation.gov.uk/id/uksi/2019/419/schedule/2">Sch. 2 </ukm:Section><ukm:Section Ref="schedule-2-paragraph-102" URI="http://www.legislation.gov.uk/id/uksi/2019/419/schedule/2/paragraph/102">para. 102</ukm:Section></ukm:AffectedProvisions><ukm:AffectingTitle>The Data Protection, Privacy and Electronic Communications (Amendments etc) (EU Exit) (No. 2) Regulations 2019</ukm:AffectingTitle><ukm:AffectingProvisions><ukm:Section Ref="regulation-2-4" URI="http://www.legislation.gov.uk/id/uksi/2019/485/regulation/2/4">reg. 2(4)</ukm:Section></ukm:AffectingProvisions><ukm:CommencementAuthority><ukm:Section Ref="regulation-1" URI="http://www.legislation.gov.uk/id/uksi/2019/485/regulation/1">reg. 1</ukm:Section></ukm:CommencementAuthority><ukm:InForceDates><ukm:InForce Date="2020-12-31" Qualification="Other" OtherQualification="immediately before IP completion day"/></ukm:InForceDates></ukm:UnappliedEffect></ukm:UnappliedEffects></ukm:SecondaryMetadata>
+					<ukm:Supersedes URI="http://www.legislation.gov.uk/id/ukdsi/2019/9780111178300"><dc:title>The Data Protection, Privacy and Electronic Communications (Amendments etc) (EU Exit) Regulations 2019</dc:title><ukm:DocumentMainType Value="UnitedKingdomDraftStatutoryInstrument"/><ukm:Year Value="2019"/><ukm:ISBN Value="9780111178300"/></ukm:Supersedes>
+
+                    
+									<ukm:Notes><ukm:Note IdURI="http://www.legislation.gov.uk/id/uksi/2019/419/notes"/><ukm:Alternatives><ukm:Alternative URI="http://www.legislation.gov.uk/uksi/2019/419/pdfs/uksiem_20190419_en.pdf" Date="2019-03-06" Title="UK Explanatory Memorandum" Size="113817"/></ukm:Alternatives>       
+								</ukm:Notes> 
+					<ukm:CorrectionSlips><ukm:CorrectionSlip URI="http://www.legislation.gov.uk/uksi/2019/419/pdfs/uksics_20190419_en_001.pdf" Date="2022-02-24" Title="Correction Slip 1" Size="106835"/></ukm:CorrectionSlips><ukm:Alternatives><ukm:Alternative URI="http://www.legislation.gov.uk/uksi/2019/419/pdfs/uksi_20190419_en.pdf" Date="2019-03-06" Size="302808"/></ukm:Alternatives>
+					
+					<ukm:Statistics>
+									<ukm:TotalParagraphs Value="353"/>
+									<ukm:BodyParagraphs Value="8"/>
+									<ukm:ScheduleParagraphs Value="345"/>
+									<ukm:AttachmentParagraphs Value="0"/>
+									<ukm:TotalImages Value="0"/>
+								</ukm:Statistics>
+				</ukm:Metadata><Secondary><SecondaryPrelims DocumentURI="http://www.legislation.gov.uk/uksi/2019/419/introduction/made" IdURI="http://www.legislation.gov.uk/id/uksi/2019/419/introduction">
+<Number>2019 No. 419</Number>
+<SubjectInformation>
+<Subject>
+<Title>Exiting The European Union</Title>
+</Subject>
+<Subject>
+<Title>Data Protection</Title>
+</Subject>
+<Subject>
+<Title>Electronic Communications</Title>
+</Subject>
+</SubjectInformation>
+<Title>The Data Protection, Privacy and Electronic Communications (Amendments etc) (EU Exit) Regulations 2019</Title>
+<MadeDate>
+<Text>Made</Text>
+<DateText>28th February 2019</DateText>
+</MadeDate>
+<ComingIntoForce>
+<Text>Coming into force in accordance with regulation 1(2) and (3)</Text></ComingIntoForce>
+<SecondaryPreamble>
+<IntroductoryText>
+<P>
+<Text>The Secretary of State makes these Regulations in exercise of the powers conferred by sections 8(1) and 23(1) of, paragraph 1(1) of Schedule 4 to and paragraph 21 of Schedule 7 to the European Union (Withdrawal) Act 2018<FootnoteRef Ref="f00001"/>, section 211(2) of the Data Protection Act 2018<FootnoteRef Ref="f00002"/> and section 2(2) of the European Communities Act 1972<FootnoteRef Ref="f00003"/>.</Text></P>
+<P>
+<Text>In accordance with paragraph 3(1) of Schedule 4 to the European Union (Withdrawal) Act 2018, these Regulations are made with the consent of the Treasury.</Text></P>
+<P>
+<Text>The Secretary of State is a Minister designated for purposes of section 2(2) of the European Communities Act 1972 in respect of matters relating to electronic communications.</Text></P>
+</IntroductoryText>
+<EnactingText>
+<Para>
+<Text>In accordance with paragraphs 1(1) and 12(1) of Schedule 7 to the European Union (Withdrawal) Act 2018, section 211(5) of the Data Protection Act 2018 and paragraph 2(2) of Schedule 2 to the European Communities Act 1972 a draft of this instrument has been laid before, and approved by a resolution of, each House of Parliament.</Text></Para>
+</EnactingText>
+</SecondaryPreamble>
+</SecondaryPrelims></Secondary><Footnotes><Footnote id="f00001">
+<FootnoteText>
+<Para><Text><Citation URI="http://www.legislation.gov.uk/id/ukpga/2018/16" id="c00081" Class="UnitedKingdomPublicGeneralAct" Year="2018" Number="0016">2018 c. 16</Citation>.</Text></Para>
+</FootnoteText>
+</Footnote><Footnote id="f00002">
+<FootnoteText>
+<Para><Text><Citation URI="http://www.legislation.gov.uk/id/ukpga/2018/12" id="c00082" Class="UnitedKingdomPublicGeneralAct" Year="2018" Number="0012">2018 c. 12</Citation>.</Text></Para>
+</FootnoteText>
+</Footnote><Footnote id="f00003">
+<FootnoteText>
+<Para><Text><Citation URI="http://www.legislation.gov.uk/id/ukpga/1972/68" id="c00083" Class="UnitedKingdomPublicGeneralAct" Year="1972" Number="0068">1972. c. 68</Citation>. Section 2 was amended by section 27(1)(a) of the Legislative and Regulatory Reform Act <Citation URI="http://www.legislation.gov.uk/id/ukpga/2006/51" id="c00084" Class="UnitedKingdomPublicGeneralAct" Year="2006" Number="0051">2006 (c.51)</Citation> and Part 1 of the Schedule to the European Union (Amendment) Act <Citation URI="http://www.legislation.gov.uk/id/ukpga/2008/7" id="c00085" Class="UnitedKingdomPublicGeneralAct" Year="2008" Number="0007">2008 (c. 7)</Citation>.</Text></Para>
+</FootnoteText>
+</Footnote></Footnotes></Legislation>

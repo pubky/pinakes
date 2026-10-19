@@ -1719,6 +1719,18 @@
                     "uri": "https://infomaniak.events/en-ch/conferences/seminaire-des-autorites-2026/92392f2a-6711-4917-b9e9-60c88e8c550a/events/396911"
                   }
                 },
+                "resolve-legislation-gov-uk-1": {
+                  "summary": "https://www.legislation.gov.uk/ukpga/2018/12/contents",
+                  "value": {
+                    "uri": "https://www.legislation.gov.uk/ukpga/2018/12/contents"
+                  }
+                },
+                "resolve-legislation-gov-uk-2": {
+                  "summary": "https://www.legislation.gov.uk/uksi/2019/419/made",
+                  "value": {
+                    "uri": "https://www.legislation.gov.uk/uksi/2019/419/made"
+                  }
+                },
                 "resolve-luma-com-376whqyw": {
                   "summary": "https://luma.com/376whqyw",
                   "value": {
