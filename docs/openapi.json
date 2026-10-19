@@ -1791,6 +1791,30 @@
                     "uri": "https://s3-eu-west-1.amazonaws.com/starticket/wwwroot/ticketing/feeds/starticketfeed_D.xml"
                   }
                 },
+                "resolve-sec-1": {
+                  "summary": "https://www.sec.gov/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959-index.htm",
+                  "value": {
+                    "uri": "https://www.sec.gov/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959-index.htm"
+                  }
+                },
+                "resolve-sec-2": {
+                  "summary": "https://www.sec.gov/Archives/edgar/data/2070457/000121390026079805/ea029862901ex99-1.htm",
+                  "value": {
+                    "uri": "https://www.sec.gov/Archives/edgar/data/2070457/000121390026079805/ea029862901ex99-1.htm"
+                  }
+                },
+                "resolve-sec-3": {
+                  "summary": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0002070457",
+                  "value": {
+                    "uri": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0002070457"
+                  }
+                },
+                "resolve-sec-4": {
+                  "summary": "https://www.sec.gov/files/rules/sro/nasdaqtx/2026/34-106268.pdf",
+                  "value": {
+                    "uri": "https://www.sec.gov/files/rules/sro/nasdaqtx/2026/34-106268.pdf"
+                  }
+                },
                 "resolve-thebiz-pro-episodes-1-making-cypherpunk-products-and-busines": {
                   "summary": "https://thebiz.pro/episodes/1/making-cypherpunk-products-and-businesses",
                   "value": {

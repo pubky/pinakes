@@ -55,6 +55,8 @@ enabled = true
 # Official-API sources, in alphabetical order (docs/sources/README.md).
 [sources.federal_register]
 enabled = true
+[sources.sec]
+enabled = true
 
 [media]
 oembed = "when_needed" # "always" restores eager registry discovery.

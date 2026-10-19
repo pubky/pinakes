@@ -21,9 +21,14 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::OnceLock};
 
 pub mod federal_register;
+pub mod sec;
 
 /// Every source, one line each, in alphabetical order of name.
-pub static REGISTRY: &[&dyn Source] = &[&federal_register::FederalRegister];
+#[rustfmt::skip]
+pub static REGISTRY: &[&dyn Source] = &[
+    &federal_register::FederalRegister,
+    &sec::Sec,
+];
 
 /// One official API.
 #[async_trait]

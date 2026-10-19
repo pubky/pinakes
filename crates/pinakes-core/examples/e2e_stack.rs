@@ -87,7 +87,8 @@ impl Fixture {
             {"kind":"media","uri":"https://www.youtube.com/watch?v=fixture","type":"VideoObject"},
             {"kind":"web","uri":"https://web.example/e2e","type":"WebPage"},
             {"kind":"federal_register","uri":"fr:2026-18291","type":"Legislation"},
-            {"kind":"federal_register_page","uri":"https://www.federalregister.gov/d/2026-18291","type":"Legislation","group_with":"federal_register"}
+            {"kind":"federal_register_page","uri":"https://www.federalregister.gov/d/2026-18291","type":"Legislation","group_with":"federal_register"},
+            {"kind":"sec","uri":"https://www.sec.gov/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959-index.htm","type":"Report"}
         ]);
         Ok(Self {
             boundary: Arc::default(),
@@ -116,6 +117,7 @@ impl Dns for FixtureDns {
                 | "www.youtube.com"
                 | "web.example"
                 | "www.federalregister.gov"
+                | "www.sec.gov"
         ) {
             "93.184.216.34"
         } else {
@@ -141,6 +143,7 @@ impl Transport for Fixture {
             "openlibrary.org"=>("application/json",json!({"ISBN:9780140328721":{"title":"Matilda","authors":[{"name":"Roald Dahl"}],"url":"https://openlibrary.org/books/OL7353617M/Matilda","key":"/books/OL7353617M"},"ISBN:0140328726":{"title":"Matilda","authors":[{"name":"Roald Dahl"}],"url":"https://openlibrary.org/books/OL7353617M/Matilda","key":"/books/OL7353617M"}}).to_string()),
             "www.youtube.com"=>("application/json",json!({"type":"video","title":"Fixture video","thumbnail_url":"https://image.example/a.jpg"}).to_string()),
             "web.example"=>("text/html","<title>Fixture page</title>".into()),
+            "www.sec.gov" if u.path()=="/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959.hdr.sgml"=>("text/sgml",include_str!("../tests/fixtures/sources/sec/sec-hdr-ms-s1.sgml").into()),
             "www.federalregister.gov" if u.path()=="/api/v1/documents/2026-18291.json"=>("application/json",include_str!("../tests/fixtures/sources/federal_register/fr-2026-18291.json").into()),
             _=>bail!("no fixture for upstream host {}",u.host_str().unwrap_or("")),
         };
