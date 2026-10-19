@@ -112,6 +112,13 @@ pub fn parse(uri: &str) -> Option<Link> {
             }
         }
         "music.apple.com" => apple(&segments, query("i")),
+        // The iTunes Store's URLs for the same catalogue (`…/album/{slug}/id{N}`).
+        "itunes.apple.com" => {
+            let mut s = segments.clone();
+            let last = s.pop()?.strip_prefix("id")?;
+            s.push(last);
+            apple(&s, query("i"))
+        }
         "youtube.com" | "m.youtube.com" | "music.youtube.com" => match segments.as_slice() {
             ["watch"] => youtube_video(&query("v")?),
             ["shorts" | "embed" | "live", id] => youtube_video(id),
@@ -157,12 +164,23 @@ pub fn parse(uri: &str) -> Option<Link> {
                 ["browse", rest @ ..] => rest,
                 rest => rest,
             };
+            // The share form ends in `/u`.
+            let s = match s {
+                [rest @ .., "u"] => rest,
+                rest => rest,
+            };
             match s {
                 [kind @ ("track" | "album" | "artist"), id] if digits(id) => link(
                     Service::Tidal,
                     level(kind)?,
                     id,
                     format!("https://tidal.com/{kind}/{id}"),
+                ),
+                ["video", id] if digits(id) => link(
+                    Service::Tidal,
+                    Level::Video,
+                    id,
+                    format!("https://tidal.com/video/{id}"),
                 ),
                 ["playlist", id] if uuid(id) => link(
                     Service::Tidal,
@@ -519,6 +537,31 @@ mod tests {
                 "https://tidal.com/browse/album/58990511?u",
                 "https://tidal.com/album/58990511",
                 Level::Album,
+            ),
+            (
+                "https://tidal.com/track/534050211/u",
+                "https://tidal.com/track/534050211",
+                Level::Track,
+            ),
+            (
+                "https://tidal.com/browse/artist/64518/u",
+                "https://tidal.com/artist/64518",
+                Level::Artist,
+            ),
+            (
+                "https://tidal.com/video/155006578/u",
+                "https://tidal.com/video/155006578",
+                Level::Video,
+            ),
+            (
+                "https://itunes.apple.com/gb/album/id1237917085",
+                "https://music.apple.com/gb/album/1237917085",
+                Level::Album,
+            ),
+            (
+                "https://itunes.apple.com/us/album/cut-to-the-feeling/id1237917085?i=1237917090&uo=4",
+                "https://music.apple.com/us/song/1237917090",
+                Level::Track,
             ),
             (
                 "https://www.qobuz.com/gb-en/album/ok-computer-radiohead/0634904078164",

@@ -490,10 +490,11 @@ root, and a read, lookup, change query or occurrence read of the alias answers w
   is an alias of its canonical URL: Spotify (`intl-xx` paths, `spotify:{kind}:{id}`, the old
   `user/…/playlist/…` form) → `https://open.spotify.com/{kind}/{id}`; Apple Music →
   `https://music.apple.com/{country}/{kind}/{id}` without the name slug, an album URL with
-  `?i={id}` naming that track (`/song/{id}`); YouTube and YouTube Music (`youtu.be`,
+  `?i={id}` naming that track (`/song/{id}`), the iTunes Store's `itunes.apple.com/…/id{N}` too; YouTube and YouTube Music (`youtu.be`,
   `m.`/`music.youtube.com`, `/shorts/`, `/embed/`) → `https://www.youtube.com/watch?v={id}` and
   `…/playlist?list={id}`; Deezer without the language path → `https://www.deezer.com/{kind}/{id}`;
-  TIDAL (`/browse/`, `listen.tidal.com`) → `https://tidal.com/{kind}/{id}`; Qobuz store album
+  TIDAL (`/browse/`, `listen.tidal.com`, the `/u` share suffix; tracks, albums, artists, videos) →
+  `https://tidal.com/{kind}/{id}`; Qobuz store album
   pages → `https://open.qobuz.com/{kind}/{id}`; SoundCloud (`m.`, any letter case, parameters) →
   `https://soundcloud.com/{user}/{track}`; Amazon Music (`albums/{id}?trackAsin=` naming that
   track) → `https://music.amazon.{tld}/{kind}/{id}`; Bandcamp without parameters. Short links
