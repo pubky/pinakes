@@ -443,6 +443,113 @@ pub fn time(v: &Value) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Link and root forms beyond the sources' examples, one or more per id shape.
+    const FORMS: &[&str] = &[
+        "btc:tx/a1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d",
+        "btc-testnet4:block/00000000b747d47c3b38161693ad05e26924b3775a8be669751f969da836311e",
+        "btc:address/bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+        "ln:node/03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f",
+        "ln:channel/892785849701564416",
+        "bitcoin:1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa?amount=0.001",
+        "https://mempool.space/de/signet/lightning/channel/811984x2037x0",
+        "https://mempool.space/api/v1/block/0000000000000000001c8018d9cb3b742ef25114f27563e3fc4a1902167f9893",
+        "usgs:official20110311054624120_30",
+        "https://earthquake.usgs.gov/fdsnws/event/1/query?eventid=ci38457511&format=geojson",
+        "https://earthquake.usgs.gov/earthquakes/feed/v1.0/detail/ci38457511.geojson",
+        "docker:library/nginx",
+        "https://hub.docker.com/v2/namespaces/lncm/repositories/bitcoind",
+        "ror:03yrm5c26",
+        "https://api.ror.org/v2/organizations/03yrm5c26",
+        "hf:model/meta-llama/llama-2-7b-hf",
+        "https://hf.co/meta-llama/Llama-2-7b-hf/blob/main/config.json",
+        "zenodo:1234567",
+        "https://zenodo.org/api/records/1234567",
+        "figshare:1018700",
+        "https://api.figshare.com/v2/articles/1018700/versions/1",
+        "met:436535",
+        "https://collectionapi.metmuseum.org/public/collection/v1/objects/436535",
+        "cleveland:1958.39",
+        "https://openaccess-api.clevelandart.org/api/artworks/135382",
+        "artic:27992",
+        "https://api.artic.edu/api/v1/artworks/27992/a-sunday-on-la-grande-jatte",
+        "ia:bitcoin-whitepaper",
+        "https://archive.org/metadata/bitcoin-whitepaper/metadata",
+        "commons:File:%C3%89t%C3%A9_%C3%A0_Paris.jpg",
+        "https://commons.wikimedia.org/w/index.php?title=File:Bitcoin.svg&action=history",
+        "https://commons.wikimedia.org/w/index.php?curid=1234",
+        "pdb:4HHB",
+        "https://www.rcsb.org/pdb/explore.do?structureId=pdb_00004hhb",
+        "uniprot:P69905",
+        "https://rest.uniprot.org/uniprotkb/HBA_HUMAN.json",
+        "pubchem:cid/2244",
+        "https://pubchem.ncbi.nlm.nih.gov/summary/summary.cgi?cid=2244",
+        "gbif:occurrence/5938027305",
+        "https://www.gbif.org/zh-tw/species/1341976/metrics",
+        "inat:observation/333069440",
+        "https://www.inaturalist.org/taxa/47219-Apis-mellifera",
+        "nct:NCT04368728",
+        "https://classic.clinicaltrials.gov/ct2/show/record/NCT04368728?term=x",
+    ];
+
+    /// Every spelling of `link` with one multibyte character in it: inserted at each position
+    /// (raw and percent-encoded), and in place of as many ASCII bytes as it is long, so length
+    /// checks in bytes pass and only a byte-based slice is safe.
+    fn multibyte_spellings(link: &str) -> Vec<String> {
+        let mut out = vec![];
+        for (at, _) in link.char_indices().chain([(link.len(), ' ')]) {
+            for insert in ["é", "😀", "e\u{301}", "%C3%A9", "%F0%9F%98%80"] {
+                out.push(format!("{}{insert}{}", &link[..at], &link[at..]));
+            }
+            for replace in ["é", "€", "😀"] {
+                let end = at + replace.len();
+                if link.get(at..end).is_some_and(|s| s.is_ascii()) {
+                    out.push(format!("{}{replace}{}", &link[..at], &link[end..]));
+                }
+            }
+        }
+        out
+    }
+
+    /// Every example, its root and every form above, spelled with a multibyte character, never
+    /// panics in what the ingest path asks of a link: which source reads it, its static root,
+    /// whether it is invalid, its route.
+    #[test]
+    fn multibyte_links_never_panic() {
+        let mut links: Vec<String> = FORMS.iter().map(|s| (*s).to_owned()).collect();
+        for source in super::super::REGISTRY {
+            for example in source.examples() {
+                links.push(example.uri.into());
+                links.extend(source.alias_root(example.uri));
+            }
+        }
+        let mut checked = 0;
+        for link in &links {
+            for uri in multibyte_spellings(link) {
+                let outcome = std::panic::catch_unwind(|| {
+                    for source in super::super::REGISTRY {
+                        source.reads(&uri);
+                        source.alias_root(&uri);
+                        source.invalid(&uri);
+                    }
+                    super::super::alias_root(&uri);
+                    crate::alias::root(&uri);
+                    crate::resolver::classify(&uri);
+                });
+                assert!(outcome.is_ok(), "panics on {uri:?}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 10_000, "{checked}");
+    }
+
+    #[test]
+    fn ror_ids_with_multibyte_characters() {
+        // Nine bytes whose seventh byte is inside `é`.
+        assert_eq!(crate::sources::ror::ror_id("0abcdeé1"), None);
+        use crate::sources::Source;
+        assert!(!crate::sources::ror::Ror.reads("https://ror.org/0abcdeé1"));
+    }
     use serde_json::json;
 
     #[test]

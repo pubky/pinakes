@@ -23,7 +23,7 @@ const BASE32: &str = "0123456789abcdefghjkmnpqrstvwxyz";
 /// A ROR id with a valid check, in lower case, e.g. `03yrm5c26`.
 pub fn ror_id(value: &str) -> Option<String> {
     let value = value.to_ascii_lowercase();
-    if value.len() != 9 || !value.starts_with('0') {
+    if value.len() != 9 || !value.is_ascii() || !value.starts_with('0') {
         return None;
     }
     let (body, check) = value.split_at(7);
