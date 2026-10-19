@@ -69,6 +69,8 @@ enabled = true
 enabled = true
 [sources.forgejo]
 enabled = true
+[sources.gitlab]
+enabled = true
 [sources.gleif]
 enabled = true
 [sources.govinfo]

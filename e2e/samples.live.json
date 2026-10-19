@@ -147,6 +147,11 @@
     "type": "SoftwareSourceCode"
   },
   {
+    "kind": "gitlab",
+    "uri": "https://gitlab.com/inkscape/inkscape/-/blob/master/README.md",
+    "type": "SoftwareSourceCode"
+  },
+  {
     "kind": "web",
     "uri": "https://example.org/",
     "type": "WebPage"

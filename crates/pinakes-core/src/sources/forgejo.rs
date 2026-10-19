@@ -379,14 +379,9 @@ pub fn release_card(
     doc.set_type("SoftwareSourceCode");
     let title = text(&v["name"]).unwrap_or_else(|| tag_name.clone());
     doc.name = Some(format!("{}/{} {title}", target.owner, target.repo));
-    doc.description = text(&v["body"]).map(|b| {
-        let b = b.split_whitespace().collect::<Vec<_>>().join(" ");
-        let mut cut: String = b.chars().take(200).collect();
-        if cut.len() < b.len() {
-            cut.push('…');
-        }
-        cut
-    });
+    doc.description = text(&v["body"])
+        .map(|b| super::markdown_excerpt(&b))
+        .filter(|b| !b.is_empty());
     let root = format!("{}/releases/tag/{tag}", target.page());
     insert(
         &mut doc,

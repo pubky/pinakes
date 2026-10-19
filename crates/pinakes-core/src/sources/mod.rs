@@ -28,6 +28,7 @@ pub mod eur_lex;
 pub mod federal_register;
 pub mod fedlex;
 pub mod forgejo;
+pub mod gitlab;
 pub mod gleif;
 pub mod govinfo;
 pub mod hacker_news;
@@ -51,6 +52,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &federal_register::FederalRegister,
     &fedlex::Fedlex,
     &forgejo::Forgejo,
+    &gitlab::Gitlab,
     &gleif::Gleif,
     &govinfo::Govinfo,
     &hacker_news::HackerNews,
@@ -349,6 +351,43 @@ pub(crate) fn retry(f: &Fetched) -> Result<()> {
         .into());
     }
     Ok(())
+}
+
+/// Markdown as plain text for a 200-character excerpt: images, heading and quote marks, emphasis
+/// and code marks dropped, links kept as their text.
+pub fn markdown_excerpt(markdown: &str) -> String {
+    let mut out = String::new();
+    for line in markdown.lines() {
+        let line = line.trim().trim_start_matches(['#', '>']).trim();
+        if line.is_empty() || line.starts_with("![") {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&markdown_inline(line));
+        if out.len() > 400 {
+            break;
+        }
+    }
+    let mut cut = out.chars().take(200).collect::<String>();
+    if cut.len() < out.len() {
+        cut.push('…');
+    }
+    cut
+}
+
+/// `[text](url)` as `text`, without `**`, `__` and backticks.
+fn markdown_inline(line: &str) -> String {
+    let mut line = line.replace("**", "").replace("__", "").replace('`', "");
+    while let Some(mid) = line.find("](") {
+        let (Some(open), Some(close)) = (line[..mid].rfind('['), line[mid..].find(')')) else {
+            break;
+        };
+        let text = line[open + 1..mid].to_owned();
+        line.replace_range(open..mid + close + 1, &text);
+    }
+    line
 }
 
 /// A trimmed, non-empty JSON string.
@@ -671,6 +710,11 @@ mod tests {
         assert!(sparql_rows(b"{}").is_err());
         assert_eq!(sparql_literal("a\"b\\"), "a\\\"b\\\\");
         assert_eq!(sparql_literal("a\nb\rc"), "a\\nb\\rc");
+        assert_eq!(
+            markdown_excerpt("## Release highlights\n\n- **Filter Gallery**: see [the docs](https://x.example/a) and `code`\n![img](i.png)"),
+            "Release highlights - Filter Gallery: see the docs and code"
+        );
+        assert_eq!(markdown_excerpt("a ](b) [c"), "a ](b) [c");
     }
 
     #[test]

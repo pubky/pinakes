@@ -1,0 +1,115 @@
+{
+  "branch-17-7": {
+    "bytes": 34,
+    "content_type": "application/json",
+    "file": "branch-17-7.json",
+    "note": "The first segment of a branch name with a slash is no branch.",
+    "recorded_at": "2026-10-19T18:58:31+00:00",
+    "sha256": "657f3016a454dec65e221ae87b4b4b80c7b4b91ea689c126185ef4cf41ca4da8",
+    "status": 404,
+    "url": "https://gitlab.com/api/v4/projects/gitlab-org%2Fgitlab/repository/branches/17-7"
+  },
+  "branch-17-7-slash": {
+    "bytes": 1373,
+    "content_type": "application/json",
+    "file": "branch-17-7-slash.json",
+    "recorded_at": "2026-10-19T18:58:34+00:00",
+    "sha256": "6f05ec6959cc2f46db8ecff193b48e8eda5e854576e61eacaaf671900dad4eb8",
+    "status": 200,
+    "url": "https://gitlab.com/api/v4/projects/gitlab-org%2Fgitlab/repository/branches/17-7%2Fcreated-at-for-pipeline-configuration-full-path"
+  },
+  "branch-master": {
+    "bytes": 1166,
+    "content_type": "application/json",
+    "file": "branch-master.json",
+    "recorded_at": "2026-10-19T18:58:23+00:00",
+    "sha256": "e97d07ecb9b133a7c51374028c5d8126d5d99bed378f929e306f799633fd8028",
+    "status": 200,
+    "url": "https://gitlab.com/api/v4/projects/inkscape%2Finkscape/repository/branches/master"
+  },
+  "branch-missing": {
+    "bytes": 34,
+    "content_type": "application/json",
+    "file": "branch-missing.json",
+    "recorded_at": "2026-10-19T18:58:25+00:00",
+    "sha256": "657f3016a454dec65e221ae87b4b4b80c7b4b91ea689c126185ef4cf41ca4da8",
+    "status": 404,
+    "url": "https://gitlab.com/api/v4/projects/inkscape%2Finkscape/repository/branches/NOPE"
+  },
+  "commits-none": {
+    "bytes": 2,
+    "content_type": "application/json",
+    "file": "commits-none.json",
+    "recorded_at": "2026-10-19T18:58:30+00:00",
+    "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "status": 200,
+    "url": "https://gitlab.com/api/v4/projects/inkscape%2Finkscape/repository/commits?ref_name=master&path=NOPE.md&per_page=1"
+  },
+  "commits-readme": {
+    "bytes": 649,
+    "content_type": "application/json",
+    "file": "commits-readme.json",
+    "recorded_at": "2026-10-19T18:58:28+00:00",
+    "sha256": "3581be13014dc0e30bc19b457ac3ac4a5953a9b97e8014e08ee57a2508d6c502",
+    "status": 200,
+    "url": "https://gitlab.com/api/v4/projects/inkscape%2Finkscape/repository/commits?ref_name=master&path=README.md&per_page=1"
+  },
+  "not-gitlab": {
+    "accept": "application/json",
+    "bytes": 577,
+    "content_type": "text/html; charset=utf-8",
+    "file": "not-gitlab.html",
+    "note": "A host that is not GitLab.",
+    "recorded_at": "2026-10-19T18:58:22+00:00",
+    "sha256": "25ddf2c883e0d1958ea971d279a7e4f0fd446724ee3db7db19dadabd4a62e484",
+    "status": 404,
+    "url": "https://example.com/api/v4/projects/a%2Fb"
+  },
+  "project-inkscape": {
+    "bytes": 1083,
+    "content_type": "application/json",
+    "file": "project-inkscape.json",
+    "note": "gitlab.com API; project metadata.",
+    "recorded_at": "2026-10-19T18:58:20+00:00",
+    "sha256": "c591b3dfe4cca199d84969a9c68a8f86ad79ee6d1807313509aac68939fe77ee",
+    "status": 200,
+    "url": "https://gitlab.com/api/v4/projects/inkscape%2Finkscape"
+  },
+  "project-missing": {
+    "bytes": 35,
+    "content_type": "application/json",
+    "file": "project-missing.json",
+    "note": "GitLab's own error shape.",
+    "recorded_at": "2026-10-19T18:58:21+00:00",
+    "sha256": "cab94e3c65da6f4f2b8d644eaf58967469d25a4761d17370c38feec6d56ccfdc",
+    "status": 404,
+    "url": "https://gitlab.com/api/v4/projects/nosuch%2Fnosuch"
+  },
+  "release-inkscape-1-4": {
+    "bytes": 4761,
+    "content_type": "application/json",
+    "file": "release-inkscape-1-4.json",
+    "recorded_at": "2026-10-19T18:58:27+00:00",
+    "sha256": "e2458550e26024912b98aa566d1572bb66bc63e3a369cfde270529be81fa4e66",
+    "status": 200,
+    "url": "https://gitlab.com/api/v4/projects/inkscape%2Finkscape/releases/INKSCAPE_1_4"
+  },
+  "tag-17-7": {
+    "bytes": 31,
+    "content_type": "application/json",
+    "file": "tag-17-7.json",
+    "recorded_at": "2026-10-19T18:58:33+00:00",
+    "sha256": "ff037a1cfaab47d449fa4d691206f26e0ca3b822d28134da877c4218cb944140",
+    "status": 404,
+    "url": "https://gitlab.com/api/v4/projects/gitlab-org%2Fgitlab/repository/tags/17-7"
+  },
+  "tag-inkscape-1-4": {
+    "bytes": 2281,
+    "content_type": "application/json",
+    "file": "tag-inkscape-1-4.json",
+    "recorded_at": "2026-10-19T18:58:26+00:00",
+    "sha256": "dd492340c1f65d38651094ba1c164189606f31b960a361e42f745508ac241c13",
+    "status": 200,
+    "url": "https://gitlab.com/api/v4/projects/inkscape%2Finkscape/repository/tags/INKSCAPE_1_4"
+  }
+}

@@ -46,29 +46,6 @@ pub fn query(id: u64) -> Value {
     })
 }
 
-/// Markdown as plain text for an excerpt: images and heading marks dropped, links kept as text.
-fn excerpt(markdown: &str) -> String {
-    let mut out = String::new();
-    for line in markdown.lines() {
-        let line = line.trim().trim_start_matches(['#', '>']).trim();
-        if line.is_empty() || line.starts_with("![") {
-            continue;
-        }
-        if !out.is_empty() {
-            out.push(' ');
-        }
-        out.push_str(line);
-        if out.len() > 400 {
-            break;
-        }
-    }
-    let mut cut = out.chars().take(200).collect::<String>();
-    if cut.len() < out.len() {
-        cut.push('…');
-    }
-    cut
-}
-
 /// The card of an item, or `None` when there is no such item or it was deleted.
 pub fn card(
     mut doc: ResourceMeta,
@@ -102,7 +79,7 @@ pub fn card(
         }
     }
     doc.description = text(&node["text"])
-        .map(|t| excerpt(&t))
+        .map(|t| super::markdown_excerpt(&t))
         .filter(|t| !t.is_empty());
     doc.image = Some(format!("https://capture.stacker.news/items/{id}"));
     for (key, value) in [

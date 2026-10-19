@@ -1761,6 +1761,24 @@
                     "uri": "https://github.com/pubky/pubky-core/releases.atom"
                   }
                 },
+                "resolve-gitlab-1": {
+                  "summary": "https://gitlab.com/inkscape/inkscape",
+                  "value": {
+                    "uri": "https://gitlab.com/inkscape/inkscape"
+                  }
+                },
+                "resolve-gitlab-2": {
+                  "summary": "https://gitlab.com/inkscape/inkscape/-/blob/master/README.md",
+                  "value": {
+                    "uri": "https://gitlab.com/inkscape/inkscape/-/blob/master/README.md"
+                  }
+                },
+                "resolve-gitlab-3": {
+                  "summary": "https://gitlab.com/inkscape/inkscape/-/releases/INKSCAPE_1_4",
+                  "value": {
+                    "uri": "https://gitlab.com/inkscape/inkscape/-/releases/INKSCAPE_1_4"
+                  }
+                },
                 "resolve-gleif-1": {
                   "summary": "lei:KY37LUS27QQX7BB93L28",
                   "value": {
