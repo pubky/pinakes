@@ -1,0 +1,39 @@
+{
+  "artwork-111628": {
+    "bytes": 2382,
+    "content_type": "application/json",
+    "file": "artwork-111628.json",
+    "note": "not public domain, has an image_id",
+    "recorded_at": "2026-10-19T16:24:09+00:00",
+    "sha256": "5460d9caafce6160a23638b2b8d7cdf857ae5091266cdccdfaa2e0db5d68f660",
+    "status": 200,
+    "url": "https://api.artic.edu/api/v1/artworks/111628?fields=id,title,artist_display,date_display,date_start,date_end,medium_display,dimensions,credit_line,place_of_origin,department_title,artwork_type_title,is_public_domain,image_id,description,short_description,main_reference_number,copyright_notice"
+  },
+  "artwork-27992": {
+    "bytes": 2928,
+    "content_type": "application/json",
+    "file": "artwork-27992.json",
+    "recorded_at": "2026-10-19T16:22:05+00:00",
+    "sha256": "4c269a634b5cb30c17762ebed67f054edd425d55c968a070a7ecc1cf3e229895",
+    "status": 200,
+    "url": "https://api.artic.edu/api/v1/artworks/27992?fields=id,title,artist_display,date_display,date_start,date_end,medium_display,dimensions,credit_line,place_of_origin,department_title,artwork_type_title,is_public_domain,image_id,description,short_description,main_reference_number,copyright_notice"
+  },
+  "artwork-28560": {
+    "bytes": 2720,
+    "content_type": "application/json",
+    "file": "artwork-28560.json",
+    "recorded_at": "2026-10-19T16:22:08+00:00",
+    "sha256": "f6246634ccc091e6f5ab6411ff48a4a1637fb7f40ce8f28a24155376984e4380",
+    "status": 200,
+    "url": "https://api.artic.edu/api/v1/artworks/28560?fields=id,title,artist_display,date_display,date_start,date_end,medium_display,dimensions,credit_line,place_of_origin,department_title,artwork_type_title,is_public_domain,image_id,description,short_description,main_reference_number,copyright_notice"
+  },
+  "artwork-missing": {
+    "bytes": 86,
+    "content_type": "application/json",
+    "file": "artwork-missing.json",
+    "recorded_at": "2026-10-19T16:22:10+00:00",
+    "sha256": "6f1bbdd9063f964eea7c95def1ddb68bf0349672eb63357fc43616e590fde9f3",
+    "status": 404,
+    "url": "https://api.artic.edu/api/v1/artworks/999999999?fields=id,title,artist_display,date_display,date_start,date_end,medium_display,dimensions,credit_line,place_of_origin,department_title,artwork_type_title,is_public_domain,image_id,description,short_description,main_reference_number,copyright_notice"
+  }
+}

@@ -20,7 +20,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::OnceLock};
 
+pub mod artic;
 pub mod bluesky;
+pub mod cleveland;
 pub mod courtlistener;
 pub mod discourse;
 pub mod docker_hub;
@@ -43,6 +45,7 @@ pub mod legislation_gov_uk;
 pub mod lobsters;
 pub mod mastodon;
 pub mod mempool;
+pub mod met;
 pub mod public_inbox;
 pub mod ror;
 pub mod sec;

@@ -1,0 +1,39 @@
+{
+  "object-436532": {
+    "bytes": 2361,
+    "content_type": "application/json",
+    "file": "object-436532.json",
+    "recorded_at": "2026-10-19T16:19:08+00:00",
+    "sha256": "de4ef448a392190d655e195f633b2ecef1c1eeb3e0dbc5e01a72993bd5ec96a5",
+    "status": 200,
+    "url": "https://collectionapi.metmuseum.org/public/collection/v1/objects/436532"
+  },
+  "object-436535": {
+    "bytes": 2794,
+    "content_type": "application/json",
+    "file": "object-436535.json",
+    "recorded_at": "2026-10-19T16:19:07+00:00",
+    "sha256": "4ba5ef3338794fc8550373ca657ae00a31fbb915194753a816620f2063ee5911",
+    "status": 200,
+    "url": "https://collectionapi.metmuseum.org/public/collection/v1/objects/436535"
+  },
+  "object-488221": {
+    "bytes": 2253,
+    "content_type": "application/json",
+    "file": "object-488221.json",
+    "note": "not public domain",
+    "recorded_at": "2026-10-19T16:24:06+00:00",
+    "sha256": "4c751279f926bca317e98412477fa28b6a671bc4debda60d90411eafd87154fb",
+    "status": 200,
+    "url": "https://collectionapi.metmuseum.org/public/collection/v1/objects/488221"
+  },
+  "object-missing": {
+    "bytes": 33,
+    "content_type": "application/json",
+    "file": "object-missing.json",
+    "recorded_at": "2026-10-19T16:19:09+00:00",
+    "sha256": "df70047f484934e3665acbace510e10ed2a9703cafa9185b1d7a8af4f46cd2b8",
+    "status": 404,
+    "url": "https://collectionapi.metmuseum.org/public/collection/v1/objects/999999999"
+  }
+}

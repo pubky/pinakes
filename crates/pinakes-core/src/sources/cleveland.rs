@@ -1,0 +1,380 @@
+//! Artworks of the Cleveland Museum of Art, read from its Open Access API by the accession number
+//! or the numeric id in the link.
+//!
+//! The identifier is `cleveland:{accession number}` (in lower case, e.g. `cleveland:1958.39`):
+//! the museum's own pages are named by it, so it comes from most links alone. clevelandart.org
+//! and the API also accept the numeric id (`/art/135382`); such a link is identified by the
+//! accession number in the API's answer, and the card names it as an alias.
+//!
+//! The API's data is CC0; images are shown only for works the API marks CC0.
+use super::kit::html_text;
+use super::kit::{
+    host_and_segments, int, json, plain, text, texts, web_url, Card, Key, Link, Request,
+};
+use super::met::wikidata_id;
+use anyhow::{ensure, Context, Result};
+
+const API: &str = "https://openaccess-api.clevelandart.org/api/artworks";
+const CREDIT: &str = "Cleveland Museum of Art";
+const VIA: &str = "cleveland";
+
+/// What a link names: an artwork by accession number or by numeric id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Artwork {
+    /// Digits and lower-case letters in dot-separated parts, e.g. `1958.39` or `1916.1511.a`.
+    Accession(String),
+    Id(u64),
+}
+
+/// An accession number in lower case (the API answers 404 for upper-case letters).
+pub fn accession(value: &str) -> Option<String> {
+    let value = value.to_ascii_lowercase();
+    let parts: Vec<&str> = value.split('.').collect();
+    (parts.len() >= 2
+        && parts
+            .iter()
+            .all(|p| plain(p, 12, |c| c.is_ascii_digit() || c.is_ascii_lowercase()))
+        && parts[0].bytes().all(|b| b.is_ascii_digit())
+        && value.len() <= 32)
+        .then_some(value)
+}
+
+fn artwork(value: &str) -> Option<Artwork> {
+    if plain(value, 10, |c| c.is_ascii_digit()) {
+        return value.parse().ok().filter(|id| *id > 0).map(Artwork::Id);
+    }
+    accession(value).map(Artwork::Accession)
+}
+
+/// The artwork a clevelandart.org page or an API URL names.
+pub fn from_uri(uri: &str) -> Option<Artwork> {
+    let (host, segments) = host_and_segments(uri)?;
+    let s: Vec<&str> = segments.iter().map(String::as_str).collect();
+    match (host.as_str(), s.as_slice()) {
+        ("clevelandart.org", ["art", id]) => artwork(id),
+        ("openaccess-api.clevelandart.org", ["api", "artworks", id]) => artwork(id),
+        _ => None,
+    }
+}
+
+/// The identifier, or `None` for a numeric id (its accession number comes from the answer).
+pub fn identifier(artwork: &Artwork) -> Option<String> {
+    match artwork {
+        Artwork::Accession(a) => Some(format!("cleveland:{a}")),
+        Artwork::Id(_) => None,
+    }
+}
+
+pub fn page(artwork: &Artwork) -> String {
+    match artwork {
+        Artwork::Accession(a) => format!("https://www.clevelandart.org/art/{a}"),
+        Artwork::Id(id) => format!("https://www.clevelandart.org/art/{id}"),
+    }
+}
+
+/// The API record; the API takes either form.
+pub fn request(artwork: &Artwork) -> Option<Request> {
+    Request::get(&match artwork {
+        Artwork::Accession(a) => format!("{API}/{a}"),
+        Artwork::Id(id) => format!("{API}/{id}"),
+    })
+}
+
+/// An artwork, or `None` when the API does not know it (404 "Artwork not found").
+pub fn parse(status: u16, raw: &[u8], artwork: &Artwork) -> Result<Option<Card>> {
+    let Some(v) = json(status, raw, &[404])? else {
+        return Ok(None);
+    };
+    let d = &v["data"];
+    let acc = d["accession_number"]
+        .as_str()
+        .and_then(accession)
+        .context("no accession number")?;
+    let id = int(&d["id"]).filter(|id| *id > 0).context("no id")?;
+    ensure!(
+        match artwork {
+            Artwork::Accession(a) => *a == acc,
+            Artwork::Id(n) => *n as i64 == id,
+        },
+        "the API answered for another artwork"
+    );
+    let named = Artwork::Accession(acc.clone());
+    let mut card = Card::new(
+        "VisualArtwork",
+        identifier(&named).expect("an accession number"),
+        page(&named),
+    );
+    card.alias(page(&Artwork::Id(id as u64)));
+    if let Some(url) = text(&d["url"]).filter(|u| from_uri(u).as_ref() == Some(&named)) {
+        card.alias(url);
+    }
+    card.name = text(&d["title"]);
+    card.description = text(&d["description"])
+        .or_else(|| text(&d["wall_description"]))
+        .and_then(|s| html_text(&s));
+    let license = text(&d["share_license_status"]);
+    if license.as_deref() == Some("CC0") {
+        card.image = text(&d["images"]["web"]["url"]).filter(|u| web_url(u).is_some());
+        card.attribution = Some(format!("{CREDIT}, CC0"));
+    } else {
+        card.attribution = Some(CREDIT.into());
+    }
+    let creators: Vec<String> = d["creators"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| text(&c["description"]))
+        .collect();
+    card.detail("creators", creators);
+    for (name, field) in [
+        ("creation_date", "creation_date"),
+        ("original_title", "title_in_original_language"),
+        ("technique", "technique"),
+        ("measurements", "measurements"),
+        ("department", "department"),
+        ("type", "type"),
+        ("collection", "collection"),
+        ("current_location", "current_location"),
+        ("credit_line", "creditline"),
+        ("copyright", "copyright"),
+    ] {
+        card.detail(name, text(&d[field]));
+    }
+    card.detail("culture", texts(&d["culture"]));
+    card.detail("accession_number", acc.as_str());
+    card.detail(
+        "former_accession_numbers",
+        texts(&d["former_accession_numbers"]),
+    );
+    card.detail("object_id", id);
+    card.detail("begin_year", int(&d["creation_date_earliest"]));
+    card.detail("end_year", int(&d["creation_date_latest"]));
+    card.detail("share_license_status", license);
+    let external = &d["external_resources"];
+    if let [q] = external["wikidata"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+    {
+        if let Some(q) = wikidata_id(q) {
+            card.key(Key::new("wikidata", &q));
+        }
+    }
+    for uri in texts(&external["internet_archive"]) {
+        if archive_item(&uri) {
+            card.link(Link::new("Internet Archive", uri, VIA));
+        }
+    }
+    Ok(Some(card))
+}
+
+/// An Internet Archive item page, `https://archive.org/details/{identifier}`.
+fn archive_item(uri: &str) -> bool {
+    let Some((host, segments)) = host_and_segments(uri) else {
+        return false;
+    };
+    host == "archive.org"
+        && matches!(segments.as_slice(), [d, id] if d == "details"
+            && plain(id, 100, |c| c.is_ascii_alphanumeric() || "._-".contains(c)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sources::kit::fixture;
+    use serde_json::{json, Value};
+
+    fn read(name: &str) -> Vec<u8> {
+        fixture::read("cleveland", name)
+    }
+    fn acc(a: &str) -> Artwork {
+        Artwork::Accession(a.into())
+    }
+
+    #[test]
+    fn every_link_form_of_one_artwork() {
+        for uri in [
+            "https://www.clevelandart.org/art/1958.39",
+            "https://clevelandart.org/art/1958.39",
+            "https://www.clevelandart.org/art/1958.39/?utm_source=x",
+            "https://openaccess-api.clevelandart.org/api/artworks/1958.39",
+            "https://openaccess-api.clevelandart.org/api/artworks/1958.39?indent=1",
+        ] {
+            let a = from_uri(uri);
+            assert_eq!(a, Some(acc("1958.39")), "{uri}");
+            assert_eq!(
+                identifier(&a.unwrap()).as_deref(),
+                Some("cleveland:1958.39")
+            );
+        }
+        assert_eq!(
+            from_uri("https://www.clevelandart.org/art/1916.1511.A"),
+            Some(acc("1916.1511.a"))
+        );
+        for uri in [
+            "https://www.clevelandart.org/art/135382",
+            "https://openaccess-api.clevelandart.org/api/artworks/135382",
+        ] {
+            assert_eq!(from_uri(uri), Some(Artwork::Id(135382)), "{uri}");
+        }
+        assert_eq!(identifier(&Artwork::Id(135382)), None);
+        assert_eq!(
+            page(&acc("1958.39")),
+            "https://www.clevelandart.org/art/1958.39"
+        );
+        assert_eq!(
+            request(&acc("1958.39")).unwrap().url.as_str(),
+            "https://openaccess-api.clevelandart.org/api/artworks/1958.39"
+        );
+        assert_eq!(
+            request(&Artwork::Id(135382)).unwrap().url.as_str(),
+            "https://openaccess-api.clevelandart.org/api/artworks/135382"
+        );
+    }
+
+    #[test]
+    fn invalid_links() {
+        for uri in [
+            "https://www.clevelandart.org/art/1958.39.",
+            "https://www.clevelandart.org/art/0",
+            "https://www.clevelandart.org/art/1958.39-the-red-kerchief",
+            "https://www.clevelandart.org/art/1958..39",
+            "https://www.clevelandart.org/art/.39",
+            "https://www.clevelandart.org/art/a.39",
+            "https://www.clevelandart.org/art/1958.39/extra",
+            "https://www.clevelandart.org/art/collection/search",
+            "https://openaccess-api.clevelandart.org/api/artworks/",
+            "https://openaccess-api.clevelandart.org/api/creators/1844",
+            "https://example.org/art/1958.39",
+        ] {
+            assert_eq!(from_uri(uri), None, "{uri}");
+        }
+    }
+
+    #[test]
+    fn cc0_painting() {
+        let card = parse(200, &read("artwork-1958.39.json"), &acc("1958.39"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.type_name, "VisualArtwork");
+        assert_eq!(card.id, "cleveland:1958.39");
+        assert_eq!(card.url, "https://www.clevelandart.org/art/1958.39");
+        assert_eq!(card.name.as_deref(), Some("The Red Kerchief"));
+        assert!(card
+            .description
+            .as_deref()
+            .unwrap()
+            .starts_with("This painting depicts Monet's first wife, Camille"));
+        assert_eq!(
+            card.image.as_deref(),
+            Some("https://openaccess-cdn.clevelandart.org/1958.39/1958.39_web.jpg")
+        );
+        assert_eq!(card.start, None);
+        assert_eq!(
+            card.attribution.as_deref(),
+            Some("Cleveland Museum of Art, CC0")
+        );
+        assert_eq!(card.keys, [Key::new("wikidata", "Q50772913")]);
+        assert_eq!(
+            card.aliases,
+            [
+                "https://www.clevelandart.org/art/135382",
+                "https://clevelandart.org/art/1958.39"
+            ]
+        );
+        assert_eq!(
+            card.also_on,
+            [Link::new(
+                "Internet Archive",
+                "https://archive.org/details/clevelandart-1958.39-the-red-kerchief",
+                "cleveland"
+            )]
+        );
+        let d = &card.details;
+        assert_eq!(d["creators"][0], "Claude Monet (French, 1840–1926)");
+        assert_eq!(d["creation_date"], "c. 1868–73");
+        assert_eq!(d["begin_year"], 1868);
+        assert_eq!(d["end_year"], 1873);
+        assert_eq!(d["original_title"], "Femme à la capeline rouge");
+        assert_eq!(d["culture"][0], "France, 19th century");
+        assert_eq!(d["technique"], "oil on fabric");
+        assert_eq!(d["type"], "Painting");
+        assert_eq!(d["accession_number"], "1958.39");
+        assert_eq!(d["object_id"], 135382);
+        assert_eq!(d["credit_line"], "Bequest of Leonard C. Hanna Jr.");
+        assert_eq!(d["share_license_status"], "CC0");
+    }
+
+    #[test]
+    fn numeric_id_gives_the_same_card() {
+        let by_id = parse(200, &read("artwork-135382.json"), &Artwork::Id(135382))
+            .unwrap()
+            .unwrap();
+        let by_acc = parse(200, &read("artwork-1958.39.json"), &acc("1958.39"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_id, by_acc);
+
+        let card = parse(200, &read("artwork-1958.31.json"), &acc("1958.31"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.name.as_deref(), Some("Adeline Ravoux"));
+        assert_eq!(card.details["former_accession_numbers"][0], "1642.43");
+        assert_eq!(card.keys, [Key::new("wikidata", "Q26221230")]);
+    }
+
+    #[test]
+    fn no_image_unless_cc0() {
+        let card = parse(200, &read("artwork-1997.246.json"), &acc("1997.246"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.name.as_deref(), Some("Marilyn x 100"));
+        assert_eq!(card.image, None);
+        assert_eq!(card.attribution.as_deref(), Some("Cleveland Museum of Art"));
+        assert_eq!(card.details["share_license_status"], "Copyrighted");
+        assert!(card.details["copyright"]
+            .as_str()
+            .unwrap()
+            .starts_with("© The Andy Warhol Foundation"));
+        let text = card.description.unwrap();
+        assert!(text.starts_with("The image of Marilyn Monroe in Marilyn x 100, the largest"));
+        assert!(!text.contains('<'));
+
+        let mut v: Value = serde_json::from_slice(&read("artwork-1997.246.json")).unwrap();
+        v["data"]["images"] =
+            json!({"web": {"url": "https://openaccess-cdn.clevelandart.org/x.jpg"}});
+        let raw = serde_json::to_vec(&v).unwrap();
+        assert_eq!(
+            parse(200, &raw, &acc("1997.246")).unwrap().unwrap().image,
+            None
+        );
+    }
+
+    #[test]
+    fn missing_and_failures() {
+        assert_eq!(
+            parse(404, &read("artwork-missing.json"), &acc("1800.99999")).unwrap(),
+            None
+        );
+        assert!(parse(200, &read("artwork-1958.39.json"), &acc("1958.31")).is_err());
+        assert!(parse(200, &read("artwork-1958.39.json"), &Artwork::Id(135299)).is_err());
+        assert!(parse(429, b"", &acc("1958.39")).is_err());
+        assert!(parse(502, b"", &acc("1958.39")).is_err());
+        assert!(parse(200, b"{\"data\": {}}", &acc("1958.39")).is_err());
+    }
+
+    #[test]
+    fn ambiguous_wikidata_adds_no_key() {
+        let mut v: Value = serde_json::from_slice(&read("artwork-1958.39.json")).unwrap();
+        v["data"]["external_resources"]["wikidata"] = json!([
+            "https://www.wikidata.org/wiki/Q1",
+            "https://www.wikidata.org/wiki/Q2"
+        ]);
+        let raw = serde_json::to_vec(&v).unwrap();
+        assert!(parse(200, &raw, &acc("1958.39"))
+            .unwrap()
+            .unwrap()
+            .keys
+            .is_empty());
+    }
+}
