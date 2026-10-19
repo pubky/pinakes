@@ -1,0 +1,107 @@
+{
+  "btcmap-places": {
+    "bytes": 6873,
+    "content_type": "application/json",
+    "file": "btcmap-places.json",
+    "note": "BTC Map places sync page.",
+    "recorded_at": "2026-10-19T15:23:29+00:00",
+    "sha256": "48111260561ecce69e5a001487f5aef073ee9604a8e813d6cd3b57d069b92265",
+    "status": 200,
+    "url": "https://api.btcmap.org/v4/places?fields=id,osm_id,osm_url,name,updated_at,deleted_at&updated_since=2026-10-10T00:12:50Z&limit=40&include_deleted=true"
+  },
+  "datacite-arxiv-1304.1068": {
+    "bytes": 10564,
+    "content_type": "application/json; charset=utf-8",
+    "file": "datacite-arxiv-1304.1068.json",
+    "note": "DataCite metadata, CC0.",
+    "recorded_at": "2026-10-19T15:18:01+00:00",
+    "sha256": "991c9714f0bcc8f02b1a6edd79497a75eb94482315c05d62449cf8b2573175d1",
+    "status": 200,
+    "url": "https://api.datacite.org/dois/10.48550/arXiv.1304.1068"
+  },
+  "datacite-versions-nature12373": {
+    "bytes": 4620,
+    "content_type": "application/json; charset=utf-8",
+    "file": "datacite-versions-nature12373.json",
+    "note": "DataCite metadata, CC0.",
+    "recorded_at": "2026-10-19T15:18:02+00:00",
+    "sha256": "4642ed74b9c2e82da482e7b2caed14e98a54cfa080e8233c79db6117db873fc1",
+    "status": 200,
+    "url": "https://api.datacite.org/dois?query=relatedIdentifiers.relatedIdentifier:%2210.1038/nature12373%22%20AND%20relatedIdentifiers.relationType:IsVersionOf&client-id=arxiv.content&page%5Bsize%5D=25"
+  },
+  "hf-papers-1304.1068": {
+    "bytes": 302,
+    "content_type": "application/json; charset=utf-8",
+    "file": "hf-papers-1304.1068.json",
+    "recorded_at": "2026-10-19T15:18:05+00:00",
+    "sha256": "d8e9d7934eab6b8d99e1539b65cab9f58f8c5e2c8c6af22edfa126a1e537bdf5",
+    "status": 404,
+    "url": "https://huggingface.co/api/papers/1304.1068"
+  },
+  "hf-papers-1706.03762": {
+    "bytes": 8233,
+    "content_type": "application/json; charset=utf-8",
+    "file": "hf-papers-1706.03762.json",
+    "recorded_at": "2026-10-19T15:18:04+00:00",
+    "sha256": "6dcacf476c046fdde77213a08e6386f6aa0c439707f3c3951850941541a34048",
+    "status": 200,
+    "url": "https://huggingface.co/api/papers/1706.03762"
+  },
+  "ncbi-idconv": {
+    "bytes": 768,
+    "content_type": "application/json",
+    "file": "ncbi-idconv.json",
+    "recorded_at": "2026-10-19T15:17:59+00:00",
+    "sha256": "6361ad624354390b44ea9796b63ba7a0fe101afc0de758390dedb852ab406f51",
+    "status": 200,
+    "url": "https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles/?ids=10.1038/nature12373,10.1093/nar/gks1195,10.9999/pinakes-no-such-doi&format=json&tool=pinakes&email=info%40synonym.to"
+  },
+  "nominatim-places": {
+    "bytes": 3616,
+    "content_type": "application/json; charset=utf-8",
+    "file": "nominatim-places.json",
+    "note": "© OpenStreetMap contributors, ODbL 1.0.",
+    "recorded_at": "2026-10-19T15:17:53+00:00",
+    "sha256": "cd46a69a5d42af09d1716e9dd3cf97492f40fc30751897159378f471dab3ed1f",
+    "status": 200,
+    "url": "https://nominatim.openstreetmap.org/lookup?osm_ids=R2888417,N9984134345,W70417858&format=jsonv2&extratags=1"
+  },
+  "unpaywall-missing": {
+    "bytes": 207,
+    "content_type": "text/html; charset=utf-8",
+    "file": "unpaywall-missing.html",
+    "recorded_at": "2026-10-19T15:17:58+00:00",
+    "sha256": "e9639e3c4681ce85f852fbac48e2eeee5ba51296dbfec57c200d59b76237ab80",
+    "status": 404,
+    "url": "https://api.unpaywall.org/v2/10.9999/pinakes-no-such-doi?email=info%40synonym.to"
+  },
+  "unpaywall-nature12373": {
+    "bytes": 5405,
+    "content_type": "application/json",
+    "file": "unpaywall-nature12373.json",
+    "recorded_at": "2026-10-19T15:17:56+00:00",
+    "sha256": "d335c2cb2af11aeb86edc2b670d9ca4007c67ffbd7691215f3e1f91b80d720c5",
+    "status": 200,
+    "url": "https://api.unpaywall.org/v2/10.1038/nature12373?email=info%40synonym.to"
+  },
+  "wikidata-games-apps": {
+    "bytes": 1103277,
+    "content_type": "application/json; charset=utf-8",
+    "file": "wikidata-games-apps.json.gz",
+    "note": "Wikidata entities (claims and sitelink URLs), CC0.",
+    "recorded_at": "2026-10-19T15:18:17+00:00",
+    "sha256": "770d225ec65872ce3d32f5b42e87781d5f2d0c890e36b746a623129df750d058",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&format=json&props=claims%7Csitelinks%2Furls&ids=Q23013817%7CQ171477"
+  },
+  "wikidata-places": {
+    "bytes": 377557,
+    "content_type": "application/json; charset=utf-8",
+    "file": "wikidata-places.json.gz",
+    "note": "Wikidata entities (claims and sitelink URLs), CC0.",
+    "recorded_at": "2026-10-19T15:17:52+00:00",
+    "sha256": "a4dd4d13036294a8ae2d6bf3e87c1ea7882d981bd2515f2bf4d2f9141b620648",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&format=json&props=claims%7Csitelinks%2Furls&ids=Q7024%7CQ153306%7CQ38945047"
+  }
+}
