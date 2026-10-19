@@ -56,7 +56,12 @@ impl Transport for Recorded {
             wikidata.then_some(pinakes_core::hubs::WIKIDATA_CAP),
             "{url}"
         );
-        let target = format!("{}?{}", url.path(), url.query().unwrap_or(""));
+        let target = format!(
+            "{}{}?{}",
+            url.host_str().unwrap_or(""),
+            url.path(),
+            url.query().unwrap_or("")
+        );
         self.seen.lock().unwrap().push(target.clone());
         let query = |k: &str| {
             url.query_pairs()
@@ -73,6 +78,10 @@ impl Transport for Recorded {
                 "https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE" => {
                     (200, fixture("mb-url-spotify-album.json"))
                 }
+                // Dracula: two releases ("Dracula", "Dracula (remix)") of one release group.
+                "https://tidal.com/album/495402659" => {
+                    (200, fixture("mb-url-tidal-495402659.json"))
+                }
                 _ => (404, fixture("mb-url-unknown.json")),
             },
             "/ws/2/recording/9f9cf187-d6f9-437f-9d98-d59cdbd52757" => {
@@ -81,7 +90,14 @@ impl Transport for Recorded {
             "/ws/2/release/30702389-5c67-4438-9ea0-2351c8de0f1d" => {
                 (200, fixture("mb-release.json"))
             }
+            "/ws/2/release/19fc791d-01d1-460d-960a-edb19cad0ee8" => {
+                (200, fixture("mb-release-19fc791d.json"))
+            }
+            "/ws/2/release/132919b9-60a8-4835-884f-3a943ba587bf" => {
+                (200, fixture("mb-release-132919b9.json"))
+            }
             "/lookup" if query("upc") == "634904078164" => (200, fixture("itunes-upc.json")),
+            "/lookup" => (200, fixture("itunes-upc-many.json")),
             // A Wikipedia's own API: the article's Wikidata item.
             "/w/api.php" if url.host_str() != Some("www.wikidata.org") => {
                 match (url.host_str().unwrap_or(""), query("titles").as_str()) {
@@ -132,10 +148,14 @@ async fn musicbrainz_answers_known_unknown_and_busy() {
         seen: Mutex::default(),
     });
     let e = egress(t.clone());
-    let track = musicbrainz::url(&e, "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq")
-        .await
-        .unwrap()
-        .unwrap();
+    let track = musicbrainz::url(
+        &e,
+        musicbrainz::BASE,
+        "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq",
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(
         track.targets,
         [(
@@ -143,30 +163,39 @@ async fn musicbrainz_answers_known_unknown_and_busy() {
             "9f9cf187-d6f9-437f-9d98-d59cdbd52757".into()
         )]
     );
-    let recording = musicbrainz::entity(&e, MbKind::Recording, &track.targets[0].1)
-        .await
-        .unwrap()
-        .unwrap();
+    let recording = musicbrainz::entity(
+        &e,
+        musicbrainz::BASE,
+        MbKind::Recording,
+        &track.targets[0].1,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(recording.title.as_deref(), Some("Paranoid Android"));
     // A URL MusicBrainz does not know: nothing, not an error.
-    assert!(
-        musicbrainz::url(&e, "https://open.spotify.com/track/unknown")
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(musicbrainz::url(
+        &e,
+        musicbrainz::BASE,
+        "https://open.spotify.com/track/unknown"
+    )
+    .await
+    .unwrap()
+    .is_none());
     // A busy hub: retry later, with the hub's own wait.
-    let busy = musicbrainz::url(&e, "https://busy.example/x")
+    let busy = musicbrainz::url(&e, musicbrainz::BASE, "https://busy.example/x")
         .await
         .unwrap_err();
     let retry = busy.downcast_ref::<RetryLater>().expect("retry later");
     assert_eq!((retry.class, retry.seconds), ("musicbrainz_busy", 120));
     // A malformed MBID asks nothing.
     let before = t.seen.lock().unwrap().len();
-    assert!(musicbrainz::entity(&e, MbKind::Release, "not-an-mbid")
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        musicbrainz::entity(&e, musicbrainz::BASE, MbKind::Release, "not-an-mbid")
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(t.seen.lock().unwrap().len(), before);
 }
 
@@ -503,4 +532,74 @@ async fn a_wikidata_item_lists_its_editions_and_encyclopedias(pool: sqlx::PgPool
         .await
         .unwrap();
     assert_eq!(keys, ["wikidata:Q9312"]);
+}
+
+/// An album link MusicBrainz relates to several releases of one release group (Dracula: TIDAL,
+/// Apple and Deezer each point to "Dracula" and "Dracula (remix)") takes the release group's key
+/// alone, and the links every release has. A configured mirror is asked instead of musicbrainz.org.
+#[sqlx::test(migrations = "../../migrations")]
+async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
+    let uri = "https://tidal.com/album/495402659";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut d = ResourceMeta::new(uri, "media", 86400);
+    d.set_type("MusicAlbum");
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let mut config = Config::default();
+    config.also_on.sources.insert(
+        "musicbrainz".into(),
+        also_on::SourceOptions {
+            base_url: Some("https://mb-mirror.example/ws/2".into()),
+            ..Default::default()
+        },
+    );
+    config.validate().unwrap();
+    let cx = also_on::Context {
+        egress: egress(t.clone()),
+        config: Arc::new(config),
+    };
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    let rows = |sql: &'static str| {
+        let (pool, id) = (pool.clone(), id.clone());
+        async move {
+            sqlx::query_scalar::<_, String>(sql)
+                .bind(id)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(
+        rows("SELECT key FROM resource_key WHERE resource_id=$1 ORDER BY key").await,
+        ["mb:release-group:86b6aeeb-f305-45f6-a9c0-76bd6235227e"]
+    );
+    assert_eq!(
+        rows("SELECT site||' '||uri FROM derived_link WHERE resource_id=$1 AND source='musicbrainz' ORDER BY site").await,
+        [
+            "Apple Music https://music.apple.com/au/album/1874125260",
+            "Deezer https://www.deezer.com/album/910510411",
+            "Qobuz https://open.qobuz.com/album/l048fnzy555c8",
+            "Spotify https://open.spotify.com/album/6KFq3hJB6JnNvDbEHRvPoK",
+        ]
+    );
+    // Facts both releases share: the barcode, not either MBID or the differing credits.
+    assert_eq!(
+        rows("SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name").await,
+        ["upc 196874054246"]
+    );
+    let seen = t.seen.lock().unwrap().clone();
+    let mb: Vec<_> = seen.iter().filter(|s| s.contains("/ws/2/")).collect();
+    assert_eq!(mb.len(), 3, "{seen:?}");
+    assert!(
+        mb.iter().all(|s| s.starts_with("mb-mirror.example/ws/2/")),
+        "{seen:?}"
+    );
 }

@@ -684,6 +684,23 @@ impl Config {
         {
             bail!("unknown also_on source {unknown}");
         }
+        for (id, options) in &self.also_on.sources {
+            let Some(base) = &options.base_url else {
+                continue;
+            };
+            let parsed = url::Url::parse(base).ok().filter(|u| {
+                matches!(u.scheme(), "http" | "https")
+                    && u.host_str().is_some()
+                    && u.username().is_empty()
+                    && u.password().is_none()
+                    && u.query().is_none()
+                    && u.fragment().is_none()
+                    && !base.ends_with('/')
+            });
+            if id != "musicbrainz" || parsed.is_none() {
+                bail!("also_on.sources.{id}.base_url must be an http(s) URL without a trailing slash, and only musicbrainz takes one");
+            }
+        }
         let a = &self.also_on;
         if !(1..=256).contains(&a.links_per_source)
             || !(1..=64).contains(&a.keys_per_source)

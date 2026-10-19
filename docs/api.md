@@ -726,8 +726,10 @@ refresh keeps them, and they go when the source stops returning them. A source's
 is looked up exactly, never by title or name:
 - `musicbrainz`: what MusicBrainz relates the link to (one recording, release or release group,
   or artist; several are ambiguous and give nothing), that entity's current links on music
-  services, and its MBIDs as keys (`mb:recording:…`, `mb:release:…`, `mb:release-group:…`,
-  `mb:artist:…`). Its facts: `mbid`, the recording's `isrc`s, the release's barcode as `upc`,
+  services, and its MBIDs as keys. An album link related to up to four releases of one release
+  group (editions MusicBrainz keeps apart) takes the release group's key alone, and the links
+  and facts every one of those releases has. The keys are `mb:recording:…`, `mb:release:…`, `mb:release-group:…`
+  and `mb:artist:…`. Its facts: `mbid`, the recording's `isrc`s, the release's barcode as `upc`,
   the `artist` credit, the recording's `duration` and an artist's `artist_type` (`Person`,
 `Group`, …). A release with a barcode also gets its
   Apple Music album from iTunes (`via: "itunes"`) when exactly one album answers.

@@ -65,11 +65,20 @@ impl AlsoOnConfig {
     pub fn source_enabled(&self, id: &str) -> bool {
         self.enabled && self.sources.get(id).and_then(|s| s.enabled).unwrap_or(true)
     }
+    /// The MusicBrainz web service: `[also_on.sources.musicbrainz] base_url`, or the public one.
+    pub fn musicbrainz_base(&self) -> &str {
+        self.sources
+            .get("musicbrainz")
+            .and_then(|s| s.base_url.as_deref())
+            .unwrap_or(crate::hubs::musicbrainz::BASE)
+    }
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SourceOptions {
     pub enabled: Option<bool>,
+    /// The web service a hub source asks (`musicbrainz` only: a mirror's `…/ws/2`).
+    pub base_url: Option<String>,
 }
 
 /// One resource as a source sees it.

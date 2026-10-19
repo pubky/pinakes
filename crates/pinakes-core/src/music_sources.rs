@@ -3,8 +3,10 @@
 //!
 //! - [`MusicBrainzSource`]: what MusicBrainz relates the tagged link to (one recording, release
 //!   or artist), that entity's current links on music services at the same level, and its
-//!   MBIDs as keys. A release with a barcode also gets its Apple Music album from iTunes'
-//!   `lookup?upc=` when exactly one album answers.
+//!   MBIDs as keys. An album link related to several releases of one release group (editions
+//!   MusicBrainz keeps apart) takes that release group: its key, and the links and facts every
+//!   one of those releases has. A release with a barcode also gets its Apple Music album from
+//!   iTunes' `lookup?upc=` when exactly one album answers.
 //! - [`WikidataSource`]: the one item carrying the link's service ID, that item's other music
 //!   service IDs at the same level as links, and its Q-id and MusicBrainz IDs as keys.
 //!
@@ -35,6 +37,9 @@ fn derived(url: &str, level: Level, via: &str) -> Option<Link> {
     (join_level(&found)? == level).then(|| Link::new(found.canonical, found.service.name(), via))
 }
 
+/// At most this many releases of one link are read to find the release group they share.
+const MAX_EDITIONS: usize = 4;
+
 /// MusicBrainz relations of an exact link.
 pub struct MusicBrainzSource;
 #[async_trait]
@@ -52,7 +57,8 @@ impl Source for MusicBrainzSource {
         let Some(level) = join_level(&link) else {
             return Ok(Found::default());
         };
-        let Some(targets) = musicbrainz::url(&cx.egress, &link.canonical).await? else {
+        let base = cx.config.also_on.musicbrainz_base();
+        let Some(targets) = musicbrainz::url(&cx.egress, base, &link.canonical).await? else {
             return Ok(Found::default());
         };
         let at = |kind: MbKind| -> Vec<&String> {
@@ -63,8 +69,9 @@ impl Source for MusicBrainzSource {
                 .map(|(_, id)| id)
                 .collect()
         };
-        // Exactly one entity at the link's level; several are ambiguous and join nothing.
-        let (kind, id) = match level {
+        // Exactly one entity at the link's level; several are ambiguous and join nothing,
+        // except releases of one release group.
+        let (kind, ids) = match level {
             Level::Track => (MbKind::Recording, at(MbKind::Recording)),
             Level::Artist => (MbKind::Artist, at(MbKind::Artist)),
             _ => match at(MbKind::Release).as_slice() {
@@ -72,12 +79,17 @@ impl Source for MusicBrainzSource {
                 releases => (MbKind::Release, releases.to_vec()),
             },
         };
-        let [id] = id.as_slice() else {
+        if ids.is_empty() || ids.len() > 1 && (kind != MbKind::Release || ids.len() > MAX_EDITIONS)
+        {
             return Ok(Found::default());
-        };
-        let Some(entity) = musicbrainz::entity(&cx.egress, kind, id).await? else {
-            return Ok(Found::default());
-        };
+        }
+        let mut entities = vec![];
+        for id in ids {
+            let Some(entity) = musicbrainz::entity(&cx.egress, base, kind, id).await? else {
+                return Ok(Found::default());
+            };
+            entities.push(entity);
+        }
         let mut found = Found::default();
         let mut key = |kind: MbKind, id: &str| {
             if let Some(key) = hubs::key::mb(kind, id) {
@@ -87,17 +99,44 @@ impl Source for MusicBrainzSource {
                 });
             }
         };
-        key(kind, &entity.mbid);
-        if let Some(group) = &entity.release_group {
-            key(MbKind::ReleaseGroup, group);
+        let entity = &entities[0];
+        // Several releases: the release group's key alone, so editions stay apart.
+        if entities.len() == 1 {
+            key(kind, &entity.mbid);
         }
-        found.facts = facts(&entity);
-        found.links = entity
-            .urls
-            .iter()
-            .filter_map(|u| derived(&u.url, level, "musicbrainz"))
-            .collect();
-        if let Some(barcode) = &entity.barcode {
+        match &entity.release_group {
+            Some(group)
+                if entities
+                    .iter()
+                    .all(|e| e.release_group.as_ref() == Some(group)) =>
+            {
+                key(MbKind::ReleaseGroup, group)
+            }
+            _ if entities.len() > 1 => return Ok(Found::default()),
+            _ => {}
+        }
+        // What every entity has (one entity: all of it).
+        found.facts = facts(entity);
+        found
+            .facts
+            .retain(|f| entities[1..].iter().all(|e| facts(e).contains(f)));
+        let links = |e: &musicbrainz::Entity| -> Vec<Link> {
+            e.urls
+                .iter()
+                .filter_map(|u| derived(&u.url, level, "musicbrainz"))
+                .collect()
+        };
+        found.links = links(entity);
+        found.links.retain(|l| {
+            entities[1..]
+                .iter()
+                .all(|e| links(e).iter().any(|o| o.uri == l.uri))
+        });
+        let barcode = entity
+            .barcode
+            .as_ref()
+            .filter(|b| entities.iter().all(|e| e.barcode.as_ref() == Some(*b)));
+        if let Some(barcode) = barcode {
             // iTunes is a second service: its failure never costs MusicBrainz's answer.
             match itunes_album(cx, barcode).await {
                 Ok(Some(apple)) => found.links.push(apple),

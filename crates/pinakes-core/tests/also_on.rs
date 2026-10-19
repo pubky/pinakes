@@ -378,6 +378,7 @@ async fn runs_replace_their_rows_failures_keep_them_and_rows_expire(pool: PgPool
         "wiki".into(),
         also_on::SourceOptions {
             enabled: Some(false),
+            ..Default::default()
         },
     );
     let before = wiki.calls.lock().unwrap().len();
@@ -544,6 +545,30 @@ async fn saves_make_sources_due_and_unknown_sources_are_refused(pool: PgPool) {
     let unknown =
         toml::from_str::<Config>("[also_on.sources.nope]\nenabled = false\n").map(|c| c.validate());
     assert!(matches!(unknown, Ok(Err(_))), "{unknown:?}");
+    // A MusicBrainz mirror: an http(s) web service root; no other source takes a base URL.
+    let base = |id: &str, url: &str| {
+        toml::from_str::<Config>(&format!("[also_on.sources.{id}]\nbase_url = \"{url}\"\n"))
+            .unwrap()
+    };
+    let mirror = base("musicbrainz", "http://mb.example:5000/ws/2");
+    mirror.validate().unwrap();
+    assert_eq!(
+        mirror.also_on.musicbrainz_base(),
+        "http://mb.example:5000/ws/2"
+    );
+    assert_eq!(
+        Config::default().also_on.musicbrainz_base(),
+        "https://musicbrainz.org/ws/2"
+    );
+    for (id, url) in [
+        ("musicbrainz", "http://mb.example/ws/2/"),
+        ("musicbrainz", "ftp://mb.example/ws/2"),
+        ("musicbrainz", "https://user:pw@mb.example/ws/2"),
+        ("musicbrainz", "https://mb.example/ws/2?x=1"),
+        ("wikidata", "https://wd.example/w/api.php"),
+    ] {
+        assert!(base(id, url).validate().is_err(), "{id} {url}");
+    }
 }
 
 /// Every spelling of one music object is an alias of its canonical URL (`service`), so the

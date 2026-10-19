@@ -117,6 +117,7 @@ pub mod musicbrainz {
     //! barcode.
     use super::*;
 
+    /// The public web service; `[also_on.sources.musicbrainz] base_url` names a mirror instead.
     pub const BASE: &str = "https://musicbrainz.org/ws/2";
 
     /// One URL relation of an entity: the relation type (`free streaming`, `streaming`,
@@ -244,10 +245,10 @@ pub mod musicbrainz {
             MbKind::ReleaseGroup | MbKind::Artist => "url-rels",
         }
     }
-    /// The URL lookup for `link` (exact; MusicBrainz stores URLs as given, so the link is sent
-    /// as the card has it).
-    pub fn url_lookup(link: &str) -> String {
-        let mut url = url::Url::parse(&format!("{BASE}/url")).expect("constant URL");
+    /// The URL lookup for `link` at the web service `base` (exact; MusicBrainz stores URLs as
+    /// given, so the link is sent as the card has it).
+    pub fn url_lookup(base: &str, link: &str) -> String {
+        let mut url = url::Url::parse(&format!("{base}/url")).expect("a checked base URL");
         url.query_pairs_mut()
             .append_pair("resource", link)
             .append_pair(
@@ -257,21 +258,27 @@ pub mod musicbrainz {
             .append_pair("fmt", "json");
         url.into()
     }
-    pub fn entity_lookup(kind: MbKind, mbid: &str) -> String {
-        format!("{BASE}/{}/{mbid}?inc={}&fmt=json", kind.as_str(), inc(kind))
+    pub fn entity_lookup(base: &str, kind: MbKind, mbid: &str) -> String {
+        format!("{base}/{}/{mbid}?inc={}&fmt=json", kind.as_str(), inc(kind))
     }
-    /// What `link` is linked to; `None` when MusicBrainz does not know the URL.
-    pub async fn url(egress: &Egress, link: &str) -> Result<Option<UrlTargets>> {
-        Ok(get(egress, &url_lookup(link), "musicbrainz")
+    /// What `link` is linked to; `None` when MusicBrainz does not know the URL. `base` is the
+    /// web service ([`BASE`] or a mirror).
+    pub async fn url(egress: &Egress, base: &str, link: &str) -> Result<Option<UrlTargets>> {
+        Ok(get(egress, &url_lookup(base, link), "musicbrainz")
             .await?
             .map(|v| parse_url(&v)))
     }
     /// One entity with its URL relations; `None` when the MBID is unknown.
-    pub async fn entity(egress: &Egress, kind: MbKind, id: &str) -> Result<Option<Entity>> {
+    pub async fn entity(
+        egress: &Egress,
+        base: &str,
+        kind: MbKind,
+        id: &str,
+    ) -> Result<Option<Entity>> {
         let Some(id) = mbid(id) else {
             return Ok(None);
         };
-        Ok(get(egress, &entity_lookup(kind, &id), "musicbrainz")
+        Ok(get(egress, &entity_lookup(base, kind, &id), "musicbrainz")
             .await?
             .and_then(|v| parse_entity(kind, &v)))
     }
@@ -543,10 +550,11 @@ mod tests {
             musicbrainz::parse_entity(MbKind::ReleaseGroup, &fixture("mb-release-group.json"))
                 .unwrap();
         assert!(group.urls.iter().all(|u| !u.url.is_empty()));
-        assert!(
-            musicbrainz::url_lookup("https://open.spotify.com/track/x?si=1&a=b")
-                .contains("resource=https%3A%2F%2Fopen.spotify.com%2Ftrack%2Fx%3Fsi%3D1%26a%3Db")
-        );
+        assert!(musicbrainz::url_lookup(
+            musicbrainz::BASE,
+            "https://open.spotify.com/track/x?si=1&a=b"
+        )
+        .contains("resource=https%3A%2F%2Fopen.spotify.com%2Ftrack%2Fx%3Fsi%3D1%26a%3Db"));
     }
 
     #[test]
