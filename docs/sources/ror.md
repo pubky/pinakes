@@ -38,7 +38,7 @@ card has it; otherwise it is `Organization`.
 | `status` | `active`, `inactive` or `withdrawn` |
 | `city`, `country`, `country_code` | Its one location (GeoNames) |
 | `website` | Its website |
-| `acronyms`, `aliases`, `labels` | Other names: acronyms, aliases, names in other languages |
+| `acronyms`, `other_names`, `labels` | Other names: acronyms, other names ROR lists (its aliases), names in other languages |
 | `domains` | Its web domains |
 | `wikidata`, `isni`, `fundref`, `grid` | Its id in each registry, when ROR names one preferred id or only one (ISNI without spaces) |
 | `page_url` | `https://ror.org/{id}` |

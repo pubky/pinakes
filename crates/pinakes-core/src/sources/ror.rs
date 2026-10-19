@@ -189,7 +189,7 @@ pub fn parse(status: u16, raw: &[u8], id: &str) -> Result<Option<Card>> {
     card.detail("status", text(&v["status"]));
     card.detail("website", links(&v, "website").into_iter().next());
     card.detail("acronyms", names(&v, "acronym"));
-    card.detail("aliases", names(&v, "alias"));
+    card.detail("other_names", names(&v, "alias"));
     card.detail(
         "labels",
         names(&v, "label")
@@ -238,7 +238,7 @@ impl Source for Ror {
             "status",
             "website",
             "acronyms",
-            "aliases",
+            "other_names",
             "labels",
             "domains",
             // Keys, by namespace
@@ -342,6 +342,22 @@ mod tests {
             "https://api.ror.org/v2/organizations/042nb2s44"
         );
         assert_eq!(request("042nb2s45"), None);
+    }
+
+    #[test]
+    fn other_names_are_not_link_aliases() {
+        // ROR's "alias" names are other names of the organisation, published as `other_names`
+        // (the card's `aliases` are other links to it).
+        let mut v: Value = serde_json::from_slice(&read("org-042nb2s44.json")).unwrap();
+        v["names"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"value": "Mass Tech", "types": ["alias"], "lang": null}));
+        let raw = serde_json::to_vec(&v).unwrap();
+        let card = parse(200, &raw, "042nb2s44").unwrap().unwrap();
+        assert_eq!(card.details["other_names"], json!(["Mass Tech"]));
+        assert!(!card.details.contains_key("aliases"));
+        assert!(card.aliases.iter().all(|a| a.starts_with("https://")));
     }
 
     #[test]
