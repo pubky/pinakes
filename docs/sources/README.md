@@ -67,6 +67,8 @@ or got plain web cards before are read by their source.
 - [`legislation_gov_uk`](legislation_gov_uk.md): UK Acts, statutory instruments and retained EU law.
 - [`lobsters`](lobsters.md): Lobsters stories by short id.
 - [`mastodon`](mastodon.md): Mastodon posts on any server.
+- [`mempool`](mempool.md): Bitcoin blocks, transactions and addresses, and Lightning nodes and
+  channels, from mempool.space (Esplora as fallback).
 - [`public_inbox`](public_inbox.md): mailing-list messages in public-inbox archives (gnusha.org, lore.kernel.org, others), and old bitcoin-dev pipermail addresses
 - [`sec`](sec.md): SEC EDGAR filings, their documents and companies.
 - [`stacker_news`](stacker_news.md): Stacker News posts and comments by item id.

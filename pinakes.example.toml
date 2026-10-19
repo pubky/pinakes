@@ -87,6 +87,8 @@ enabled = true
 enabled = true
 [sources.mastodon]
 enabled = true
+[sources.mempool]
+enabled = true
 [sources.public_inbox]
 enabled = true
 [sources.sec]

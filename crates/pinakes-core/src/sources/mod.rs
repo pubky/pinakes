@@ -85,6 +85,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &legislation_gov_uk::LegislationGovUk,
     &lobsters::Lobsters,
     &mastodon::Mastodon,
+    &mempool::Mempool,
     &public_inbox::PublicInbox,
     &sec::Sec,
     &stacker_news::StackerNews,

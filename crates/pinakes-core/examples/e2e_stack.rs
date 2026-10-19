@@ -1,6 +1,8 @@
 //! Isolated e2e stack with real migrations, ingestion, resolver parsers, storage and API.
 //! Default mode mocks external boundaries with no public network; --live scopes real fetches
 //! to the (at most twelve) sample IDs.
+// The mock's sample list is one `json!` literal, deeper than the default macro recursion limit.
+#![recursion_limit = "256"]
 use anyhow::{bail, ensure, Result};
 use async_trait::async_trait;
 use axum::{
@@ -110,7 +112,8 @@ impl Fixture {
             {"kind":"wordpress","uri":"https://bitcoinmagazine.com/markets/no-uptober-yet-as-bitcoin-slips","type":"Article"},
             {"kind":"ghost","uri":"https://www.privacyguides.org/news/2026/10/19/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/","type":"Article"},
             {"kind":"public_inbox","uri":"https://gnusha.org/pi/bitcoindev/atCSAVprBE-tAnN3@erisian.com.au/","type":"EmailMessage"},
-            {"kind":"feed","uri":"https://www.theblock.co/news/business/2026-10-19-mesh-visa-partner-spend-crypto-stablecoins-421058","type":"Article"}
+            {"kind":"feed","uri":"https://www.theblock.co/news/business/2026-10-19-mesh-visa-partner-spend-crypto-stablecoins-421058","type":"Article"},
+            {"kind":"mempool","uri":"https://mempool.space/lightning/node/03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f","type":"LightningNode"}
         ]);
         Ok(Self {
             boundary: Arc::default(),
@@ -162,6 +165,7 @@ impl Dns for FixtureDns {
                 | "www.federalregister.gov"
                 | "www.sec.gov"
                 | "www.ecfr.gov"
+                | "mempool.space"
         ) {
             "93.184.216.34"
         } else {
@@ -214,6 +218,7 @@ impl Transport for Fixture {
             "www.ecfr.gov" if u.path()=="/api/versioner/v1/ancestry/current/title-17.json"=>("application/json",include_str!("../tests/fixtures/sources/ecfr/ancestry_current_title-17_section-240.10b-5.json").into()),
             "www.sec.gov" if u.path()=="/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959.hdr.sgml"=>("text/sgml",include_str!("../tests/fixtures/sources/sec/sec-hdr-ms-s1.sgml").into()),
             "www.federalregister.gov" if u.path()=="/api/v1/documents/2026-18291.json"=>("application/json",include_str!("../tests/fixtures/sources/federal_register/fr-2026-18291.json").into()),
+            "mempool.space" if u.path()=="/api/v1/lightning/nodes/03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f"=>("application/json",include_str!("../tests/fixtures/sources/mempool/node-acinq.json").into()),
             _=>bail!("no fixture for upstream host {}",u.host_str().unwrap_or("")),
         };
         Ok(Fetched {

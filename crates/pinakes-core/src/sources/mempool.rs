@@ -1307,15 +1307,9 @@ mod tests {
         ];
         for card in cards {
             let card = card.unwrap().unwrap();
-            let doc = card
-                .clone()
-                .into_doc(ResourceMeta::new(&card.id, m.name(), 60), SITE);
-            for name in doc.attributes.keys() {
-                assert!(m.facts().contains(&name.as_str()), "{name}");
-            }
+            let doc = crate::sources::kit::checked(&m, &card);
             assert_eq!(doc.attributes["page_url"], card.url);
             assert_eq!(doc.source_root.as_deref(), Some(card.id.as_str()));
-            assert_eq!(doc.site, "mempool.space");
         }
     }
 
