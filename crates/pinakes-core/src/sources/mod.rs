@@ -27,6 +27,7 @@ pub mod ecfr;
 pub mod eur_lex;
 pub mod federal_register;
 pub mod fedlex;
+pub mod forgejo;
 pub mod gleif;
 pub mod govinfo;
 pub mod hacker_news;
@@ -49,6 +50,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &eur_lex::EurLex,
     &federal_register::FederalRegister,
     &fedlex::Fedlex,
+    &forgejo::Forgejo,
     &gleif::Gleif,
     &govinfo::Govinfo,
     &hacker_news::HackerNews,
@@ -439,6 +441,73 @@ pub(crate) mod fixture {
             out
         } else {
             raw
+        }
+    }
+
+    /// An egress that answers recorded responses by exact URL (anything else is a 404) and
+    /// remembers the URLs asked, in order. Pair it with `#[tokio::test(start_paused = true)]`:
+    /// the per-host spacing then costs no time.
+    pub fn egress(
+        routes: Vec<(&str, u16, &'static str, Vec<u8>)>,
+    ) -> (crate::resolver::egress::Egress, std::sync::Arc<Recorded>) {
+        let recorded = std::sync::Arc::new(Recorded {
+            routes: routes
+                .into_iter()
+                .map(|(url, status, kind, body)| (url.to_owned(), (status, kind, body)))
+                .collect(),
+            asked: Default::default(),
+        });
+        let egress = crate::resolver::egress::Egress::with_backends(
+            Default::default(),
+            std::sync::Arc::new(PublicDns),
+            recorded.clone(),
+        );
+        (egress, recorded)
+    }
+
+    pub struct Recorded {
+        routes: std::collections::BTreeMap<String, (u16, &'static str, Vec<u8>)>,
+        pub asked: std::sync::Mutex<Vec<String>>,
+    }
+    impl Recorded {
+        pub fn asked(&self) -> Vec<String> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+    #[async_trait::async_trait]
+    impl crate::resolver::egress::Transport for Recorded {
+        async fn get(
+            &self,
+            url: &url::Url,
+            _: &[std::net::SocketAddr],
+        ) -> anyhow::Result<crate::resolver::egress::Fetched> {
+            self.asked.lock().unwrap().push(url.to_string());
+            let (status, kind, body) = self.routes.get(url.as_str()).cloned().unwrap_or((
+                404,
+                "text/html",
+                b"<html>not found</html>".to_vec(),
+            ));
+            Ok(crate::resolver::egress::Fetched {
+                permanent_redirect: false,
+                truncated: false,
+                validators: Default::default(),
+                url: url.clone(),
+                content_type: kind.into(),
+                status,
+                retry_after_secs: 60,
+                location: None,
+                body,
+            })
+        }
+    }
+    struct PublicDns;
+    #[async_trait::async_trait]
+    impl crate::resolver::egress::Dns for PublicDns {
+        async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<std::net::SocketAddr>> {
+            Ok(vec![std::net::SocketAddr::new(
+                [93, 184, 216, 34].into(),
+                port,
+            )])
         }
     }
 }

@@ -1,0 +1,1 @@
+{"message":"GetUserByName","url":"https://codeberg.org/api/swagger","errors":["user redirect does not exist [name: nosuch]"]}

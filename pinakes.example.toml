@@ -67,6 +67,8 @@ enabled = true
 enabled = true
 [sources.fedlex]
 enabled = true
+[sources.forgejo]
+enabled = true
 [sources.gleif]
 enabled = true
 [sources.govinfo]

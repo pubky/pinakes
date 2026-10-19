@@ -1,0 +1,116 @@
+{
+  "branch-forgejo": {
+    "bytes": 1027,
+    "content_type": "application/json;charset=utf-8",
+    "file": "branch-forgejo.json",
+    "recorded_at": "2026-10-19T18:50:48+00:00",
+    "sha256": "081f343f8e7b441d89d0c019a9423f8d87165fae8153fbab6ea7ca12d374d3a4",
+    "status": 200,
+    "url": "https://codeberg.org/api/v1/repos/forgejo/forgejo/branches/forgejo"
+  },
+  "branch-v11.0": {
+    "bytes": 134,
+    "content_type": "application/json;charset=utf-8",
+    "file": "branch-v11.0.json",
+    "note": "The first segment of v11.0/forgejo is no branch.",
+    "recorded_at": "2026-10-19T18:50:50+00:00",
+    "sha256": "3e9e08cfd408a7962e65ea393b6c1c33565e0073ee4c10ddd21fa2c68b2d51c2",
+    "status": 404,
+    "url": "https://codeberg.org/api/v1/repos/forgejo/forgejo/branches/v11.0"
+  },
+  "branch-v11.0-forgejo": {
+    "bytes": 2022,
+    "content_type": "application/json;charset=utf-8",
+    "file": "branch-v11.0-forgejo.json",
+    "recorded_at": "2026-10-19T18:50:51+00:00",
+    "sha256": "4339f7bca89b7267fc82c3d305aaccc783b5eb51eddc589ba8ad51c8445de960",
+    "status": 200,
+    "url": "https://codeberg.org/api/v1/repos/forgejo/forgejo/branches/v11.0/forgejo"
+  },
+  "codeberg-version": {
+    "bytes": 51,
+    "content_type": "application/json;charset=utf-8",
+    "file": "codeberg-version.json",
+    "note": "Codeberg (Forgejo) API. Forgejo versions carry +gitea-.",
+    "recorded_at": "2026-10-19T18:50:42+00:00",
+    "sha256": "5a1b79057d339cd54293ee10ef980c78aefb6f27bb6be107c21f36bb94b25f6a",
+    "status": 200,
+    "url": "https://codeberg.org/api/v1/version"
+  },
+  "commits-missing": {
+    "bytes": 84,
+    "content_type": "application/json;charset=utf-8",
+    "file": "commits-missing.json",
+    "recorded_at": "2026-10-19T18:50:57+00:00",
+    "sha256": "8effe547838fbd80e5b7ed5f5855e7880bf0db842c6f86d6c89ea47edf4922ba",
+    "status": 404,
+    "url": "https://codeberg.org/api/v1/repos/forgejo/forgejo/commits?sha=forgejo&path=NOPE.md&limit=1&stat=false&files=false&verification=false"
+  },
+  "commits-v11-readme": {
+    "bytes": 2338,
+    "content_type": "application/json;charset=utf-8",
+    "file": "commits-v11-readme.json",
+    "recorded_at": "2026-10-19T18:50:56+00:00",
+    "sha256": "fb046ca173e795228a61c1f44f4db84eba32ce8c2cb2a8c20544cff57b35b885",
+    "status": 200,
+    "url": "https://codeberg.org/api/v1/repos/forgejo/forgejo/commits?sha=v11.0%2Fforgejo&path=README.md&limit=1&stat=false&files=false&verification=false"
+  },
+  "gitea-version": {
+    "bytes": 40,
+    "content_type": "application/json;charset=utf-8",
+    "file": "gitea-version.json",
+    "note": "gitea.com API.",
+    "recorded_at": "2026-10-19T18:50:44+00:00",
+    "sha256": "ada21ba98bc4341130eb8585534c91589bffc01eb3cf05bec56a4236a6b30ce4",
+    "status": 200,
+    "url": "https://gitea.com/api/v1/version"
+  },
+  "not-forgejo-version": {
+    "accept": "application/json",
+    "bytes": 136,
+    "content_type": "text/html",
+    "file": "not-forgejo-version.html",
+    "note": "A host that is not Forgejo or Gitea.",
+    "recorded_at": "2026-10-19T18:50:45+00:00",
+    "sha256": "3f2463c10cd391e448cc9e320a6671f050405f13207c746f9ad77385b6d32ee6",
+    "status": 410,
+    "url": "https://github.com/api/v1/version"
+  },
+  "release-v11.0.1": {
+    "bytes": 8120,
+    "content_type": "application/json;charset=utf-8",
+    "file": "release-v11.0.1.json",
+    "recorded_at": "2026-10-19T18:50:53+00:00",
+    "sha256": "8e2fdea601150ce1e51b57988f5b49b0d885684f90298a22ac956697c8e6bb93",
+    "status": 200,
+    "url": "https://codeberg.org/api/v1/repos/forgejo/forgejo/releases/tags/v11.0.1"
+  },
+  "repo-forgejo": {
+    "bytes": 2664,
+    "content_type": "application/json;charset=utf-8",
+    "file": "repo-forgejo.json",
+    "note": "Codeberg API; repository metadata.",
+    "recorded_at": "2026-10-19T18:50:46+00:00",
+    "sha256": "d21b129392e0c761e368f0feac6e810147f87701da163022599e7a192492c06d",
+    "status": 200,
+    "url": "https://codeberg.org/api/v1/repos/forgejo/forgejo"
+  },
+  "repo-missing": {
+    "bytes": 126,
+    "content_type": "application/json;charset=utf-8",
+    "file": "repo-missing.json",
+    "recorded_at": "2026-10-19T18:50:47+00:00",
+    "sha256": "b06d411913c18da3b7d73e2e9543a35a4429893add1f1ca0c7c8eed08087528d",
+    "status": 404,
+    "url": "https://codeberg.org/api/v1/repos/nosuch/nosuchrepo"
+  },
+  "tag-v11.0.1": {
+    "bytes": 679,
+    "content_type": "application/json;charset=utf-8",
+    "file": "tag-v11.0.1.json",
+    "recorded_at": "2026-10-19T18:50:52+00:00",
+    "sha256": "df516ee9f5c9945dba81e53658b018f0e6e4eaa2f1c47233e109215affe60015",
+    "status": 200,
+    "url": "https://codeberg.org/api/v1/repos/forgejo/forgejo/tags/v11.0.1"
+  }
+}

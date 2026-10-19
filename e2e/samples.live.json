@@ -142,6 +142,11 @@
     "type": "DiscussionForumPosting"
   },
   {
+    "kind": "forgejo",
+    "uri": "https://codeberg.org/forgejo/forgejo/src/branch/forgejo/README.md",
+    "type": "SoftwareSourceCode"
+  },
+  {
     "kind": "web",
     "uri": "https://example.org/",
     "type": "WebPage"

@@ -47,6 +47,7 @@ or got plain web cards before are read by their source.
 - [`eur_lex`](eur_lex.md): EU law by CELEX number, ELI or Official Journal id.
 - [`federal_register`](federal_register.md): Federal Register documents by document number.
 - [`fedlex`](fedlex.md): Swiss federal law in the classified compilation, by ELI.
+- [`forgejo`](forgejo.md): repositories, branches, tags, releases and files on Forgejo and Gitea instances (Codeberg, gitea.com, others)
 - [`gleif`](gleif.md): Legal Entity Identifier records.
 - [`govinfo`](govinfo.md): US public laws, bills, US Code sections and the Statutes at Large.
 - [`hacker_news`](hacker_news.md): Hacker News items by id (and hnsignals.com pages).

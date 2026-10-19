@@ -1737,6 +1737,24 @@
                     "uri": "https://fixr.co/event/halloween-2026-welcome-to-the-haunted-hotel-tickets-404456056"
                   }
                 },
+                "resolve-forgejo-1": {
+                  "summary": "https://codeberg.org/forgejo/forgejo",
+                  "value": {
+                    "uri": "https://codeberg.org/forgejo/forgejo"
+                  }
+                },
+                "resolve-forgejo-2": {
+                  "summary": "https://codeberg.org/forgejo/forgejo/src/branch/forgejo/README.md",
+                  "value": {
+                    "uri": "https://codeberg.org/forgejo/forgejo/src/branch/forgejo/README.md"
+                  }
+                },
+                "resolve-forgejo-3": {
+                  "summary": "https://codeberg.org/forgejo/forgejo/releases/tag/v11.0.1",
+                  "value": {
+                    "uri": "https://codeberg.org/forgejo/forgejo/releases/tag/v11.0.1"
+                  }
+                },
                 "resolve-github-com-pubky-pubky-core-releases-atom": {
                   "summary": "https://github.com/pubky/pubky-core/releases.atom",
                   "value": {
