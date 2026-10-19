@@ -439,6 +439,105 @@ async fn fixture(pool: &PgPool) {
             .await
             .unwrap();
     }
+    // What the books, podcasts and films sources would record: an edition's work, ISBN and
+    // pages, a show's Apple ID and GUID, a film's IMDb ID and Wikidata item (the show and the
+    // film are synthetic cards).
+    {
+        use pinakes_core::also_on::{self, AlsoOnConfig, Fact, Found, Key, Link};
+        let apple = "https://podcasts.apple.com/us/podcast/the-daily/id1200361736";
+        let imdb = "https://www.imdb.com/title/tt0111161/";
+        save(pool, &card(apple, "web", "PodcastSeries", "The Daily")).await;
+        save(
+            pool,
+            &card(imdb, "web", "Movie", "The Shawshank Redemption (1994)"),
+        )
+        .await;
+        let key = |k: &str, via: &str| Key {
+            key: k.into(),
+            via: via.into(),
+        };
+        for (uri, source, found) in [
+            (
+                "isbn:9780140328721",
+                "books",
+                Found {
+                    keys: vec![
+                        key("openlibrary:edition:OL7353617M", "openlibrary"),
+                        key("openlibrary:work:OL45804W", "openlibrary"),
+                    ],
+                    links: vec![
+                        Link::new(
+                            "https://openlibrary.org/books/OL7353617M",
+                            "Open Library",
+                            "openlibrary",
+                        ),
+                        Link::new("https://www.amazon.com/dp/0140328726", "Amazon", "isbn"),
+                    ],
+                    facts: vec![Fact::new("isbn", "9780140328721")],
+                },
+            ),
+            (
+                apple,
+                "podcasts",
+                Found {
+                    keys: vec![
+                        key("podcast:apple:1200361736", "itunes"),
+                        key(
+                            "podcast:guid:304b84f0-07b0-5265-b6b7-da5cf5aeb56e",
+                            "podcastindex",
+                        ),
+                    ],
+                    links: vec![
+                        Link::new("https://pca.st/itunes/1200361736", "Pocket Casts", "itunes"),
+                        Link::new(
+                            "https://open.spotify.com/show/3IM0lmZxpFAY7CwMuv9H4g",
+                            "Spotify",
+                            "wikidata",
+                        ),
+                    ],
+                    facts: vec![Fact::new(
+                        "podcast_guid",
+                        "304b84f0-07b0-5265-b6b7-da5cf5aeb56e",
+                    )],
+                },
+            ),
+            (
+                imdb,
+                "films",
+                Found {
+                    keys: vec![
+                        key("imdb:tt0111161", "imdb"),
+                        key("wikidata:Q172241", "wikidata"),
+                    ],
+                    links: vec![
+                        Link::new("https://www.themoviedb.org/movie/278", "TMDB", "wikidata"),
+                        Link::new(
+                            "https://letterboxd.com/film/the-shawshank-redemption/",
+                            "Letterboxd",
+                            "wikidata",
+                        ),
+                    ],
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let id = identity(uri).unwrap().0;
+            also_on::record(
+                pool,
+                &id,
+                source,
+                found,
+                std::time::Duration::from_secs(30 * 86400),
+                &AlsoOnConfig::default(),
+            )
+            .await
+            .unwrap();
+            pinakes_core::groups::reconcile(pool, &id, &Default::default()).await;
+        }
+        pinakes_core::groups::drain(pool, &Default::default(), 100)
+            .await
+            .unwrap();
+    }
     // Seed labels, by the seed identity.
     for (uri, labels) in [
         (
@@ -470,6 +569,11 @@ async fn fixture(pool: &PgPool) {
             &["pubky", "mapky"],
         ),
         ("https://example.org/", &["web"]),
+        (
+            "https://podcasts.apple.com/us/podcast/the-daily/id1200361736",
+            &["podcast", "news"],
+        ),
+        ("https://www.imdb.com/title/tt0111161/", &["film"]),
     ] {
         let id = identity(uri).unwrap().0;
         for label in labels {

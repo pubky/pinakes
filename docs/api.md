@@ -308,6 +308,9 @@ GET /v1/search?key=mbid:9f9cf187-d6f9-437f-9d98-d59cdbd52757
 GET /v1/search?key=isrc:GBAYE9701376
 GET /v1/search?key=upc:634904078164
 GET /v1/search?key=wikidata:Q9312
+GET /v1/search?key=isbn:9780140328721
+GET /v1/search?key=imdb:tt0111161
+GET /v1/search?key=podcast:304b84f0-07b0-5265-b6b7-da5cf5aeb56e
 GET /v1/search?collapse=group&type=Book
 GET /v1/search?collapse=group&type=ScholarlyArticle
 GET /v1/search?bbox=8.90,45.98,9.00,46.03&cluster=12
@@ -327,6 +330,8 @@ GET /v1/resources/5bccc93f427b6fd44115fdd02618392f
 GET /v1/resources/0f3820de1c3532e8805674cc996978f9
 GET /v1/resources/fe358c60c13f6a97b50899c4240f27bf
 GET /v1/resources/586d741bd42f9a0dde1c946b58db20ae
+GET /v1/resources/448cc746b24c989629ff12bff641f5ac
+GET /v1/resources/4de689cf91b85eee5e7a5b6a16d719cb
 ```
 
 ### GET /v1/resources/by-uri

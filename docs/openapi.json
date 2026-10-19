@@ -2805,6 +2805,14 @@
                 "summary": "https://luma.com/376whqyw",
                 "value": "7f8f0e5f5b301b55a06d51df5d54281c"
               },
+              "read-podcasts-apple-com-us-podcast-the-daily-id1200361736": {
+                "summary": "https://podcasts.apple.com/us/podcast/the-daily/id1200361736",
+                "value": "448cc746b24c989629ff12bff641f5ac"
+              },
+              "read-www-imdb-com-title-tt0111161": {
+                "summary": "https://www.imdb.com/title/tt0111161/",
+                "value": "4de689cf91b85eee5e7a5b6a16d719cb"
+              },
               "read-www-openstreetmap-org-node-240109189": {
                 "summary": "https://www.openstreetmap.org/node/240109189",
                 "value": "81cefcae5a6a468cfc27ff1c1b420fce"
@@ -3095,9 +3103,17 @@
                 "summary": "(none)",
                 "value": ""
               },
+              "key-304b84f0-07b0-5265-b6b7-da5cf5aeb56e": {
+                "summary": "podcast:304b84f0-07b0-5265-b6b7-da5cf5aeb56e",
+                "value": "podcast:304b84f0-07b0-5265-b6b7-da5cf5aeb56e"
+              },
               "key-634904078164": {
                 "summary": "upc:634904078164",
                 "value": "upc:634904078164"
+              },
+              "key-9780140328721": {
+                "summary": "isbn:9780140328721",
+                "value": "isbn:9780140328721"
               },
               "key-9f9cf187-d6f9-437f-9d98-d59cdbd52757": {
                 "summary": "mbid:9f9cf187-d6f9-437f-9d98-d59cdbd52757",
@@ -3110,6 +3126,10 @@
               "key-q9312": {
                 "summary": "wikidata:Q9312",
                 "value": "wikidata:Q9312"
+              },
+              "key-tt0111161": {
+                "summary": "imdb:tt0111161",
+                "value": "imdb:tt0111161"
               }
             },
             "in": "query",

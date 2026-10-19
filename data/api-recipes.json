@@ -1502,6 +1502,36 @@
       "expect": "items"
     },
     {
+      "name": "key-9780140328721",
+      "summary": "key=isbn:9780140328721",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "key": "isbn:9780140328721"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "key-tt0111161",
+      "summary": "key=imdb:tt0111161",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "key": "imdb:tt0111161"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "key-304b84f0-07b0-5265-b6b7-da5cf5aeb56e",
+      "summary": "key=podcast:304b84f0-07b0-5265-b6b7-da5cf5aeb56e",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "key": "podcast:304b84f0-07b0-5265-b6b7-da5cf5aeb56e"
+      },
+      "expect": "items"
+    },
+    {
       "name": "collapse-book",
       "summary": "type=Book&collapse=group",
       "method": "GET",
@@ -1654,6 +1684,32 @@
       },
       "labels": {
         "id": "isbn:9780140328721"
+      },
+      "expect": "card"
+    },
+    {
+      "name": "read-podcasts-apple-com-us-podcast-the-daily-id1200361736",
+      "summary": "https://podcasts.apple.com/us/podcast/the-daily/id1200361736",
+      "method": "GET",
+      "path": "/v1/resources/{id}",
+      "params": {
+        "id": "id(https://podcasts.apple.com/us/podcast/the-daily/id1200361736)"
+      },
+      "labels": {
+        "id": "https://podcasts.apple.com/us/podcast/the-daily/id1200361736"
+      },
+      "expect": "card"
+    },
+    {
+      "name": "read-www-imdb-com-title-tt0111161",
+      "summary": "https://www.imdb.com/title/tt0111161/",
+      "method": "GET",
+      "path": "/v1/resources/{id}",
+      "params": {
+        "id": "id(https://www.imdb.com/title/tt0111161/)"
+      },
+      "labels": {
+        "id": "https://www.imdb.com/title/tt0111161/"
       },
       "expect": "card"
     },
