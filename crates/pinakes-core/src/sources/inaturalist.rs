@@ -3,23 +3,23 @@
 //! Every site of the iNaturalist Network shares one database, so a link on any of them, and the
 //! API URL, is an alias of one identifier: `inat:observation/{id}` or `inat:taxon/{id}`.
 //!
-//! The API asks for at most 60 requests a minute and under 10,000 a day: `REQUEST_INTERVAL`
-//! apart. Licences are per observation and per photo; a photo without a licence is never shown.
+//! The API asks for at most 60 requests a minute and under 10,000 a day, so the budget is one
+//! request every 9 seconds. Licences are per observation and per photo; a photo without a licence is never shown.
 //! An observation whose location is obscured or private has public coordinates that are
 //! randomised, so its card has no point.
 use super::kit::html_text;
 use super::kit::{
     float, host_and_segments, int, json, plain, text, time, Card, Key, Link, Point, Request,
 };
+use super::{Example, Source};
+use crate::model::ResourceMeta;
 use anyhow::{ensure, Context, Result};
+use async_trait::async_trait;
 use serde_json::Value;
-use std::time::Duration;
 
 pub const SITE: &str = "iNaturalist";
 const VIA: &str = "inaturalist";
 const API: &str = "https://api.inaturalist.org/v1";
-/// The least time between two API requests.
-pub const REQUEST_INTERVAL: Duration = Duration::from_secs(2);
 
 /// The sites of the iNaturalist Network (`/v1/sites`), without `www.`, plus naturalista.mx,
 /// which redirects to the Mexican site.
@@ -108,6 +108,22 @@ pub fn request(object: Object) -> Option<Request> {
         Object::Observation(id) => format!("{API}/observations/{id}"),
         Object::Taxon(id) => format!("{API}/taxa/{id}"),
     })
+}
+
+/// The object of a root (`inat:observation/{id}`, `inat:taxon/{id}`).
+pub fn from_root(uri: &str) -> Option<Object> {
+    let (kind, id) = uri.strip_prefix("inat:")?.split_once('/')?;
+    let object = match kind {
+        "observation" => Object::Observation(number(id)?),
+        "taxon" => Object::Taxon(number(id)?),
+        _ => return None,
+    };
+    (identifier(object) == uri).then_some(object)
+}
+
+/// The object of a root or an iNaturalist Network link.
+pub fn target(uri: &str) -> Option<Object> {
+    from_root(uri).or_else(|| from_uri(uri))
 }
 
 /// The observation or taxon card, or `None` when iNaturalist has no such record.
@@ -263,6 +279,85 @@ pub fn parse_taxon(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
         None => "iNaturalist".into(),
     });
     Ok(Some(card))
+}
+
+/// The source: iNaturalist observations and taxa, one request per card.
+pub struct Inaturalist;
+
+#[async_trait]
+impl Source for Inaturalist {
+    fn name(&self) -> &'static str {
+        "inaturalist"
+    }
+    fn reads(&self, uri: &str) -> bool {
+        target(uri).is_some()
+    }
+    fn alias_root(&self, uri: &str) -> Option<String> {
+        let root = identifier(target(uri)?);
+        (root != uri).then_some(root)
+    }
+    fn invalid(&self, uri: &str) -> bool {
+        uri.starts_with("inat:") && from_root(uri).is_none()
+    }
+    fn facts(&self) -> &'static [&'static str] {
+        &[
+            "page_url",
+            // Observations
+            "place_guess",
+            "positional_accuracy_m",
+            "observed_on",
+            "quality_grade",
+            "taxon_id",
+            "taxon_name",
+            "taxon_rank",
+            "common_name",
+            "user_login",
+            "obscured",
+            "geoprivacy",
+            "taxon_geoprivacy",
+            "uuid",
+            "license_code",
+            "photos",
+            "image_attribution",
+            // Taxa
+            "rank",
+            "preferred_common_name",
+            "iconic_taxon_name",
+            "observations_count",
+            "is_active",
+            "extinct",
+            "wikipedia_url",
+            "ancestry",
+            "parent_id",
+            // Keys
+            "gbif",
+        ]
+    }
+    fn budgets(&self) -> &'static [super::Budget] {
+        &[("api.inaturalist.org", 0.11, None)]
+    }
+    fn examples(&self) -> &'static [Example] {
+        &[
+            Example {
+                uri: "https://www.inaturalist.org/observations/333069440",
+                card_type: "Observation",
+            },
+            Example {
+                uri: "https://www.inaturalist.org/taxa/47219-Apis-mellifera",
+                card_type: "Taxon",
+            },
+        ]
+    }
+    async fn resolve(&self, cx: &super::Context<'_>, uri: &str) -> Result<ResourceMeta> {
+        let Some(object) = target(uri) else {
+            return Ok(cx.missing(uri, self));
+        };
+        let f = super::kit::fetch(cx, &request(object).context("no request")?).await?;
+        Ok(match parse(f.status, &f.body, object)? {
+            Some(card) => card.into_doc(cx.card(uri, self), SITE),
+            None => cx.missing(uri, self),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -496,5 +591,67 @@ mod tests {
         });
         assert_eq!(photo(&reserved, "medium"), None);
         assert_eq!(licence("cc0"), "CC0");
+    }
+
+    #[test]
+    fn roots_and_aliases() {
+        let i = Inaturalist;
+        for uri in ["inat:observation/333069440", "inat:taxon/47219"] {
+            assert!(i.reads(uri), "{uri}");
+            assert_eq!(i.alias_root(uri), None, "{uri}");
+            assert!(!i.invalid(uri), "{uri}");
+            assert_eq!(target(uri).map(identifier).as_deref(), Some(uri));
+        }
+        assert_eq!(
+            i.alias_root("https://www.argentinat.org/observations/333069440")
+                .as_deref(),
+            Some("inat:observation/333069440")
+        );
+        assert_eq!(
+            i.alias_root("https://www.inaturalist.org/taxa/47219-Apis-mellifera")
+                .as_deref(),
+            Some("inat:taxon/47219")
+        );
+        for uri in [
+            "inat:observation/0333069440",
+            "inat:observation/7536b3e3-e1f0-4e5f-b77a-7c3522ae3d54",
+            "inat:taxon/47219-Apis-mellifera",
+            "inat:user/1",
+            "inat:47219",
+        ] {
+            assert!(i.invalid(uri), "{uri}");
+            assert!(!i.reads(uri), "{uri}");
+        }
+        for example in i.examples() {
+            assert!(i.reads(example.uri), "{}", example.uri);
+        }
+    }
+
+    #[test]
+    fn documents() {
+        let cards = [
+            parse_observation(200, &read("observation-333069440.json.gz"), 333069440),
+            parse_observation(
+                200,
+                &read("observation-195404405-obscured.json.gz"),
+                195404405,
+            ),
+            parse_taxon(200, &read("taxon-47219.json.gz"), 47219),
+        ];
+        for card in cards {
+            let card = card.unwrap().unwrap();
+            let doc = crate::sources::kit::checked(&Inaturalist, &card);
+            assert_eq!(doc.attributes["page_url"], card.url);
+            assert_eq!(doc.source_root.as_deref(), Some(card.id.as_str()));
+        }
+        let card = parse_observation(200, &read("observation-333069440.json.gz"), 333069440)
+            .unwrap()
+            .unwrap();
+        let doc = card.into_doc(
+            ResourceMeta::new("inat:observation/333069440", "inaturalist", 60),
+            SITE,
+        );
+        assert_eq!(doc.attributes["gbif"], "occurrence/5938027305");
+        assert_eq!(doc.site, "iNaturalist");
     }
 }

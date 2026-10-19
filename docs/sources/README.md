@@ -53,6 +53,7 @@ or got plain web cards before are read by their source.
 - [`artic`](artic.md): Art Institute of Chicago artworks by id.
 - [`bluesky`](bluesky.md): Bluesky posts and profiles.
 - [`cleveland`](cleveland.md): Cleveland Museum of Art artworks by accession number.
+- [`clinicaltrials`](clinicaltrials.md): ClinicalTrials.gov clinical studies by NCT number.
 - [`commons`](commons.md): Wikimedia Commons files (images, video, audio) by file name.
 - [`courtlistener`](courtlistener.md): US court opinions by cluster id.
 - [`discourse`](discourse.md): Topics and posts on any Discourse forum.
@@ -63,12 +64,14 @@ or got plain web cards before are read by their source.
 - [`feed`](feed.md): wall hook: a walled page's card from the exact item in its site's RSS/Atom feed or news sitemap
 - [`figshare`](figshare.md): Figshare articles (datasets, figures, papers) by article id.
 - [`forgejo`](forgejo.md): repositories, branches, tags, releases and files on Forgejo and Gitea instances (Codeberg, gitea.com, others)
+- [`gbif`](gbif.md): GBIF species and occurrence records by key.
 - [`ghost`](ghost.md): page hook: a Ghost post's title, excerpt, image, dates, authors and tags from the Content API
 - [`gitlab`](gitlab.md): projects, branches, tags, releases and files on gitlab.com and other GitLab instances
 - [`gleif`](gleif.md): Legal Entity Identifier records.
 - [`govinfo`](govinfo.md): US public laws, bills, US Code sections and the Statutes at Large.
 - [`hacker_news`](hacker_news.md): Hacker News items by id (and hnsignals.com pages).
 - [`huggingface`](huggingface.md): Hugging Face models, datasets and Spaces by repo id.
+- [`inaturalist`](inaturalist.md): iNaturalist observations and taxa by id.
 - [`internet_archive`](internet_archive.md): Internet Archive items (books, films, audio, software…) by identifier.
 - [`legislation_gov_uk`](legislation_gov_uk.md): UK Acts, statutory instruments and retained EU law.
 - [`lobsters`](lobsters.md): Lobsters stories by short id.

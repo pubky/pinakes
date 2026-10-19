@@ -232,6 +232,21 @@
     "type": "Protein"
   },
   {
+    "kind": "clinicaltrials",
+    "uri": "https://clinicaltrials.gov/study/NCT04368728",
+    "type": "MedicalTrial"
+  },
+  {
+    "kind": "gbif",
+    "uri": "https://www.gbif.org/species/1341976",
+    "type": "Taxon"
+  },
+  {
+    "kind": "inaturalist",
+    "uri": "https://www.inaturalist.org/observations/333069440",
+    "type": "Observation"
+  },
+  {
     "kind": "web",
     "uri": "https://example.org/",
     "type": "WebPage"

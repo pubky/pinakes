@@ -1611,6 +1611,12 @@
                     "uri": "https://www.clevelandart.org/art/1958.39"
                   }
                 },
+                "resolve-clinicaltrials-1": {
+                  "summary": "https://clinicaltrials.gov/study/NCT04368728",
+                  "value": {
+                    "uri": "https://clinicaltrials.gov/study/NCT04368728"
+                  }
+                },
                 "resolve-commons-1": {
                   "summary": "https://commons.wikimedia.org/wiki/File:Golden_Gate_Bridge_as_seen_from_Battery_East.jpg",
                   "value": {
@@ -1797,6 +1803,18 @@
                     "uri": "https://codeberg.org/forgejo/forgejo/releases/tag/v11.0.1"
                   }
                 },
+                "resolve-gbif-1": {
+                  "summary": "https://www.gbif.org/species/1341976",
+                  "value": {
+                    "uri": "https://www.gbif.org/species/1341976"
+                  }
+                },
+                "resolve-gbif-2": {
+                  "summary": "https://www.gbif.org/occurrence/5938027305",
+                  "value": {
+                    "uri": "https://www.gbif.org/occurrence/5938027305"
+                  }
+                },
                 "resolve-ghost-1": {
                   "summary": "https://www.privacyguides.org/news/2026/10/19/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/",
                   "value": {
@@ -1885,6 +1903,18 @@
                   "summary": "https://huggingface.co/spaces/huggingface-projects/llama-2-7b-chat",
                   "value": {
                     "uri": "https://huggingface.co/spaces/huggingface-projects/llama-2-7b-chat"
+                  }
+                },
+                "resolve-inaturalist-1": {
+                  "summary": "https://www.inaturalist.org/observations/333069440",
+                  "value": {
+                    "uri": "https://www.inaturalist.org/observations/333069440"
+                  }
+                },
+                "resolve-inaturalist-2": {
+                  "summary": "https://www.inaturalist.org/taxa/47219-Apis-mellifera",
+                  "value": {
+                    "uri": "https://www.inaturalist.org/taxa/47219-Apis-mellifera"
                   }
                 },
                 "resolve-infomaniak-events-en-ch-conferences-seminaire-des-autorites": {

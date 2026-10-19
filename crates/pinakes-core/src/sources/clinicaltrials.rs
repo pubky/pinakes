@@ -4,7 +4,10 @@
 //! site), and its API URL are aliases of one identifier: `nct:{NCT number}`. The registry asks
 //! to be credited with the date of its data, which is the record's last update.
 use super::kit::{host_and_segments, int, json, text, texts, time, Card, Link, Request};
+use super::{Example, Source};
+use crate::model::ResourceMeta;
 use anyhow::{ensure, Context, Result};
+use async_trait::async_trait;
 use serde_json::Value;
 
 pub const SITE: &str = "ClinicalTrials.gov";
@@ -61,6 +64,17 @@ pub fn request(nct: &str) -> Option<Request> {
         "https://clinicaltrials.gov/api/v2/studies/{}?fields={FIELDS}",
         self::nct(nct)?
     ))
+}
+
+/// The NCT number of a root (`nct:NCT04368728`, in upper case).
+pub fn from_root(uri: &str) -> Option<String> {
+    let id = uri.strip_prefix("nct:")?;
+    nct(id).filter(|n| n == id)
+}
+
+/// The NCT number of a root or a ClinicalTrials.gov link.
+pub fn target(uri: &str) -> Option<String> {
+    from_root(uri).or_else(|| from_uri(uri))
 }
 
 /// A date given as `YYYY-MM-DD` (a month-only date gives nothing).
@@ -137,6 +151,65 @@ pub fn parse(status: u16, raw: &[u8], nct: &str) -> Result<Option<Card>> {
         VIA,
     ));
     Ok(Some(card))
+}
+
+/// The source: ClinicalTrials.gov studies, one request per card.
+pub struct ClinicalTrials;
+
+#[async_trait]
+impl Source for ClinicalTrials {
+    fn name(&self) -> &'static str {
+        "clinicaltrials"
+    }
+    fn reads(&self, uri: &str) -> bool {
+        target(uri).is_some()
+    }
+    fn alias_root(&self, uri: &str) -> Option<String> {
+        let root = identifier(&target(uri)?);
+        (root != uri).then_some(root)
+    }
+    fn invalid(&self, uri: &str) -> bool {
+        uri.starts_with("nct:") && from_root(uri).is_none()
+    }
+    fn facts(&self) -> &'static [&'static str] {
+        &[
+            "page_url",
+            "official_title",
+            "overall_status",
+            "start_date",
+            "start_date_type",
+            "completion_date",
+            "completion_date_type",
+            "last_update_posted",
+            "study_type",
+            "phases",
+            "enrollment",
+            "conditions",
+            "interventions",
+            "sponsor",
+            "has_results",
+            "pmids",
+        ]
+    }
+    fn budgets(&self) -> &'static [super::Budget] {
+        &[("clinicaltrials.gov", 1.0, None)]
+    }
+    fn examples(&self) -> &'static [Example] {
+        &[Example {
+            uri: "https://clinicaltrials.gov/study/NCT04368728",
+            card_type: "MedicalTrial",
+        }]
+    }
+    async fn resolve(&self, cx: &super::Context<'_>, uri: &str) -> Result<ResourceMeta> {
+        let Some(nct) = target(uri) else {
+            return Ok(cx.missing(uri, self));
+        };
+        let f = super::kit::fetch(cx, &request(&nct).context("no request")?).await?;
+        Ok(match parse(f.status, &f.body, &nct)? {
+            Some(card) => card.into_doc(cx.card(uri, self), SITE),
+            None => cx.missing(uri, self),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -286,5 +359,39 @@ mod tests {
         assert!(parse(429, b"", PFIZER).is_err());
         assert!(parse(503, b"", PFIZER).is_err());
         assert!(parse(200, b"not json", PFIZER).is_err());
+    }
+
+    #[test]
+    fn roots_and_aliases() {
+        let c = ClinicalTrials;
+        assert!(c.reads("nct:NCT04368728"));
+        assert_eq!(c.alias_root("nct:NCT04368728"), None);
+        assert!(!c.invalid("nct:NCT04368728"));
+        assert_eq!(
+            c.alias_root("https://classic.clinicaltrials.gov/ct2/show/NCT04368728?term=x")
+                .as_deref(),
+            Some("nct:NCT04368728")
+        );
+        for uri in ["nct:nct04368728", "nct:NCT0436872", "nct:04368728", "nct:"] {
+            assert!(c.invalid(uri), "{uri}");
+            assert!(!c.reads(uri), "{uri}");
+        }
+        for example in c.examples() {
+            assert!(c.reads(example.uri), "{}", example.uri);
+        }
+    }
+
+    #[test]
+    fn documents() {
+        for (file, nct) in [
+            ("NCT04368728.json.gz", PFIZER),
+            ("NCT04470427.json.gz", "NCT04470427"),
+            ("NCT01278719.json", "NCT01278719"),
+        ] {
+            let card = parse(200, &read(file), nct).unwrap().unwrap();
+            let doc = crate::sources::kit::checked(&ClinicalTrials, &card);
+            assert_eq!(doc.attributes["page_url"], card.url);
+            assert_eq!(doc.source_root.as_deref(), Some(card.id.as_str()));
+        }
     }
 }

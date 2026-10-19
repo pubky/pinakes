@@ -124,7 +124,10 @@ impl Fixture {
             {"kind":"internet_archive","uri":"https://archive.org/details/bitcoin-whitepaper","type":"Book"},
             {"kind":"pdb","uri":"https://www.rcsb.org/structure/4HHB","type":"Dataset"},
             {"kind":"pubchem","uri":"https://pubchem.ncbi.nlm.nih.gov/compound/2244","type":"MolecularEntity"},
-            {"kind":"uniprot","uri":"https://www.uniprot.org/uniprotkb/P69905/entry","type":"Protein"}
+            {"kind":"uniprot","uri":"https://www.uniprot.org/uniprotkb/P69905/entry","type":"Protein"},
+            {"kind":"clinicaltrials","uri":"https://clinicaltrials.gov/study/NCT04368728","type":"MedicalTrial"},
+            {"kind":"gbif","uri":"https://www.gbif.org/species/1341976","type":"Taxon"},
+            {"kind":"inaturalist","uri":"https://www.inaturalist.org/observations/333069440","type":"Observation"}
         ]);
         Ok(Self {
             boundary: Arc::default(),
@@ -188,6 +191,9 @@ impl Dns for FixtureDns {
                 | "rest.uniprot.org"
                 | "pubchem.ncbi.nlm.nih.gov"
                 | "data.rcsb.org"
+                | "clinicaltrials.gov"
+                | "api.inaturalist.org"
+                | "api.gbif.org"
         ) {
             "93.184.216.34"
         } else {
@@ -252,6 +258,9 @@ impl Transport for Fixture {
             "data.rcsb.org" if u.path()=="/rest/v1/core/entry/4HHB"=>("application/json",include_str!("../tests/fixtures/sources/pdb/entry-4hhb.json").into()),
             "pubchem.ncbi.nlm.nih.gov" if u.path().starts_with("/rest/pug/compound/cid/2244/property/")=>("application/json",include_str!("../tests/fixtures/sources/pubchem/compound-2244.json").into()),
             "rest.uniprot.org" if u.path()=="/uniprotkb/P69905.json"=>("application/json",include_str!("../tests/fixtures/sources/uniprot/entry-p69905.json").into()),
+            "api.gbif.org" if u.path()=="/v1/species/1341976"=>("application/json",include_str!("../tests/fixtures/sources/gbif/species-1341976.json").into()),
+            "api.inaturalist.org" if u.path()=="/v1/observations/333069440"=>("application/json",gunzip(include_bytes!("../tests/fixtures/sources/inaturalist/observation-333069440.json.gz"))),
+            "clinicaltrials.gov" if u.path()=="/api/v2/studies/NCT04368728"=>("application/json",gunzip(include_bytes!("../tests/fixtures/sources/clinicaltrials/NCT04368728.json.gz"))),
             _=>bail!("no fixture for upstream host {}",u.host_str().unwrap_or("")),
         };
         Ok(Fetched {

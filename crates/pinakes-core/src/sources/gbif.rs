@@ -11,7 +11,10 @@ use super::kit::{
     encode, float, host_and_segments, int, json, plain, text, texts, time, Card, Key, Link, Point,
     Request,
 };
+use super::{Example, Source};
+use crate::model::ResourceMeta;
 use anyhow::{ensure, Context, Result};
+use async_trait::async_trait;
 use serde_json::Value;
 
 pub const SITE: &str = "GBIF";
@@ -100,6 +103,21 @@ pub fn request(object: Object) -> Option<Request> {
         Object::Species(k) => format!("{API}/species/{k}"),
         Object::Occurrence(k) => format!("{API}/occurrence/{k}"),
     })
+}
+
+/// The object of a root (`gbif:species/{key}`, `gbif:occurrence/{key}`).
+pub fn from_root(uri: &str) -> Option<Object> {
+    let (kind, id) = uri.strip_prefix("gbif:")?.split_once('/')?;
+    let object = match kind {
+        "species" | "occurrence" => object(kind, id)?,
+        _ => return None,
+    };
+    (identifier(object) == uri).then_some(object)
+}
+
+/// The object of a root or a gbif.org link.
+pub fn target(uri: &str) -> Option<Object> {
+    from_root(uri).or_else(|| from_uri(uri))
 }
 
 /// The species or occurrence card, or `None` when GBIF has no such record.
@@ -308,6 +326,90 @@ pub fn parse_inat_search(status: u16, raw: &[u8], observation: u64) -> Result<Op
         (Some(1), [key]) => Some(*key),
         _ => None,
     })
+}
+
+/// The source: GBIF species and occurrences, one request per card.
+pub struct Gbif;
+
+#[async_trait]
+impl Source for Gbif {
+    fn name(&self) -> &'static str {
+        "gbif"
+    }
+    fn reads(&self, uri: &str) -> bool {
+        target(uri).is_some()
+    }
+    fn alias_root(&self, uri: &str) -> Option<String> {
+        let root = identifier(target(uri)?);
+        (root != uri).then_some(root)
+    }
+    fn invalid(&self, uri: &str) -> bool {
+        uri.starts_with("gbif:") && from_root(uri).is_none()
+    }
+    fn facts(&self) -> &'static [&'static str] {
+        &[
+            "page_url",
+            // Species
+            "canonical_name",
+            "authorship",
+            "rank",
+            "taxonomic_status",
+            "kingdom",
+            "phylum",
+            "class",
+            "order",
+            "family",
+            "genus",
+            "vernacular_name",
+            "accepted_key",
+            "accepted_name",
+            "parent_key",
+            "published_in",
+            "dataset_key",
+            // Occurrences
+            "event_date",
+            "basis_of_record",
+            "occurrence_status",
+            "dataset_name",
+            "publisher",
+            "recorded_by",
+            "country_code",
+            "taxon_key",
+            "taxon_rank",
+            "uncertainty_m",
+            "information_withheld",
+            "data_generalizations",
+            "license",
+            "occurrence_id",
+            // Keys
+            "inat",
+        ]
+    }
+    fn budgets(&self) -> &'static [super::Budget] {
+        &[("api.gbif.org", 1.0, None)]
+    }
+    fn examples(&self) -> &'static [Example] {
+        &[
+            Example {
+                uri: "https://www.gbif.org/species/1341976",
+                card_type: "Taxon",
+            },
+            Example {
+                uri: "https://www.gbif.org/occurrence/5938027305",
+                card_type: "Observation",
+            },
+        ]
+    }
+    async fn resolve(&self, cx: &super::Context<'_>, uri: &str) -> Result<ResourceMeta> {
+        let Some(object) = target(uri) else {
+            return Ok(cx.missing(uri, self));
+        };
+        let f = super::kit::fetch(cx, &request(object).context("no request")?).await?;
+        Ok(match parse(f.status, &f.body, object)? {
+            Some(card) => card.into_doc(cx.card(uri, self), SITE),
+            None => cx.missing(uri, self),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -563,5 +665,70 @@ mod tests {
         assert_eq!(parse_inat_search(200, two, 5).unwrap(), None);
         assert!(parse_inat_search(429, b"", 5).is_err());
         assert!(parse_inat_search(200, b"{}", 5).is_err());
+    }
+
+    #[test]
+    fn roots_and_aliases() {
+        let g = Gbif;
+        for uri in ["gbif:species/1341976", "gbif:occurrence/5938027305"] {
+            assert!(g.reads(uri), "{uri}");
+            assert_eq!(g.alias_root(uri), None, "{uri}");
+            assert!(!g.invalid(uri), "{uri}");
+            assert_eq!(target(uri).map(identifier).as_deref(), Some(uri));
+        }
+        assert_eq!(
+            g.alias_root("https://www.gbif.org/es/species/1341976/metrics")
+                .as_deref(),
+            Some("gbif:species/1341976")
+        );
+        assert_eq!(
+            g.alias_root("https://api.gbif.org/v1/occurrence/5938027305")
+                .as_deref(),
+            Some("gbif:occurrence/5938027305")
+        );
+        for uri in [
+            "gbif:species/01341976",
+            "gbif:species/0",
+            "gbif:species/abc",
+            "gbif:dataset/1",
+            "gbif:1341976",
+            "gbif:occurrence/",
+        ] {
+            assert!(g.invalid(uri), "{uri}");
+            assert!(!g.reads(uri), "{uri}");
+        }
+        assert!(!g.invalid("https://example.org/gbif:species/x"));
+        for example in g.examples() {
+            assert!(g.reads(example.uri), "{}", example.uri);
+        }
+    }
+
+    #[test]
+    fn documents() {
+        let cards = [
+            parse_species(200, &read("species-1341976.json"), 1341976),
+            parse_species(200, &read("species-10951632-synonym.json"), 10951632),
+            parse_occurrence(200, &read("occurrence-5938027305.json"), 5938027305),
+            parse_occurrence(
+                200,
+                &read("occurrence-4993788366-obscured.json"),
+                4993788366,
+            ),
+        ];
+        for card in cards {
+            let card = card.unwrap().unwrap();
+            let doc = crate::sources::kit::checked(&Gbif, &card);
+            assert_eq!(doc.attributes["page_url"], card.url);
+            assert_eq!(doc.source_root.as_deref(), Some(card.id.as_str()));
+        }
+        let card = parse_occurrence(200, &read("occurrence-5938027305.json"), 5938027305)
+            .unwrap()
+            .unwrap();
+        let doc = card.into_doc(
+            ResourceMeta::new("gbif:occurrence/5938027305", "gbif", 60),
+            SITE,
+        );
+        assert_eq!(doc.attributes["inat"], "observation/333069440");
+        assert_eq!(doc.site, "GBIF");
     }
 }

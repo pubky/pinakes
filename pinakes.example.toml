@@ -59,6 +59,8 @@ enabled = true
 enabled = true
 [sources.cleveland]
 enabled = true
+[sources.clinicaltrials]
+enabled = true
 [sources.commons]
 enabled = true
 [sources.courtlistener]
@@ -79,6 +81,8 @@ enabled = true
 enabled = true
 [sources.forgejo]
 enabled = true
+[sources.gbif]
+enabled = true
 [sources.ghost]
 enabled = true
 [sources.gitlab]
@@ -90,6 +94,8 @@ enabled = true
 [sources.hacker_news]
 enabled = true
 [sources.huggingface]
+enabled = true
+[sources.inaturalist]
 enabled = true
 [sources.internet_archive]
 enabled = true
