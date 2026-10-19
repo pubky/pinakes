@@ -18,6 +18,8 @@ use serde_json::Value;
 
 pub const ATTRIBUTION: &str = "U.S. Geological Survey";
 pub const SITE: &str = "USGS";
+/// How long a link waits after USGS took longer than a request may take.
+pub const SLOW_RETRY_SECS: u64 = 600;
 
 /// An event id: a network code and the network's own code, in lower case, e.g. `ci38457511`.
 pub fn event_id(value: &str) -> Option<String> {
@@ -127,6 +129,23 @@ pub fn parse(status: u16, raw: &[u8], id: &str) -> Result<Option<Card>> {
 }
 
 /// The source: the USGS FDSN event service.
+/// A fetch that timed out becomes a plain retry (`upstream`), which never counts toward dead
+/// letter. USGS can take 10 to 25 seconds for an event it hasn't served recently, longer than a
+/// request may take, and keeps only an answer it delivered (for under a minute), so a retry is
+/// not sure to be faster; the link waits `SLOW_RETRY_SECS` and tries again. Any other error is
+/// returned as it is.
+pub fn slow_answer(error: anyhow::Error) -> anyhow::Error {
+    if crate::resolver::error_class(&error) == "timeout" {
+        crate::resolver::RetryLater {
+            class: "upstream",
+            seconds: SLOW_RETRY_SECS,
+        }
+        .into()
+    } else {
+        error
+    }
+}
+
 pub struct Usgs;
 
 #[async_trait]
@@ -182,7 +201,9 @@ impl Source for Usgs {
         let Some(id) = target(uri) else {
             return Ok(cx.missing(uri, self));
         };
-        let f = fetch(cx, &request(&id).context("no request")?).await?;
+        let f = fetch(cx, &request(&id).context("no request")?)
+            .await
+            .map_err(slow_answer)?;
         Ok(match parse(f.status, &f.body, &id)? {
             Some(card) => card.into_doc(cx.card(uri, self), SITE),
             None => cx.missing(uri, self),
@@ -374,5 +395,24 @@ mod tests {
         assert!(parse(429, b"", TOHOKU).is_err());
         assert!(parse(503, b"", TOHOKU).is_err());
         assert!(parse(200, b"<html>", TOHOKU).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_slow_answer_waits_without_counting_as_a_failure() {
+        let elapsed = tokio::time::timeout(std::time::Duration::ZERO, std::future::pending::<()>())
+            .await
+            .unwrap_err();
+        let error = slow_answer(anyhow::Error::new(elapsed).context("fetch"));
+        let retry = error
+            .downcast_ref::<crate::resolver::RetryLater>()
+            .expect("a retry");
+        assert_eq!((retry.class, retry.seconds), ("upstream", SLOW_RETRY_SECS));
+        assert_eq!(crate::resolver::error_class(&error), "upstream");
+        // Anything else is not a slow answer.
+        let other = slow_answer(anyhow::anyhow!("malformed"));
+        assert!(other
+            .downcast_ref::<crate::resolver::RetryLater>()
+            .is_none());
+        assert_eq!(other.to_string(), "malformed");
     }
 }
