@@ -53,7 +53,11 @@ enabled = true
 enabled = true
 
 # Official-API sources, in alphabetical order (docs/sources/README.md).
+[sources.artic]
+enabled = true
 [sources.bluesky]
+enabled = true
+[sources.cleveland]
 enabled = true
 [sources.courtlistener]
 enabled = true
@@ -92,6 +96,8 @@ enabled = true
 [sources.mastodon]
 enabled = true
 [sources.mempool]
+enabled = true
+[sources.met]
 enabled = true
 [sources.public_inbox]
 enabled = true

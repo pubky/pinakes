@@ -1545,6 +1545,12 @@
                     "uri": "https://api.weezevent.com/sites/view/live/E1114506.ics"
                   }
                 },
+                "resolve-artic-1": {
+                  "summary": "https://www.artic.edu/artworks/27992",
+                  "value": {
+                    "uri": "https://www.artic.edu/artworks/27992"
+                  }
+                },
                 "resolve-bitcoinops-org-feed-xml": {
                   "summary": "https://bitcoinops.org/feed.xml",
                   "value": {
@@ -1597,6 +1603,12 @@
                   "summary": "https://casa.io/",
                   "value": {
                     "uri": "https://casa.io/"
+                  }
+                },
+                "resolve-cleveland-1": {
+                  "summary": "https://www.clevelandart.org/art/1958.39",
+                  "value": {
+                    "uri": "https://www.clevelandart.org/art/1958.39"
                   }
                 },
                 "resolve-courtlistener-1": {
@@ -1921,6 +1933,12 @@
                   "summary": "https://mempool.space/lightning/node/03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f",
                   "value": {
                     "uri": "https://mempool.space/lightning/node/03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f"
+                  }
+                },
+                "resolve-met-1": {
+                  "summary": "https://www.metmuseum.org/art/collection/search/436535",
+                  "value": {
+                    "uri": "https://www.metmuseum.org/art/collection/search/436535"
                   }
                 },
                 "resolve-mobilizon-fr-events-86a665ae-e495-4e4f-88d4-4cffd44a82f1": {

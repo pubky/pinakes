@@ -50,7 +50,9 @@ or got plain web cards before are read by their source.
 
 ## Sources
 
+- [`artic`](artic.md): Art Institute of Chicago artworks by id.
 - [`bluesky`](bluesky.md): Bluesky posts and profiles.
+- [`cleveland`](cleveland.md): Cleveland Museum of Art artworks by accession number.
 - [`courtlistener`](courtlistener.md): US court opinions by cluster id.
 - [`discourse`](discourse.md): Topics and posts on any Discourse forum.
 - [`ecfr`](ecfr.md): sections and parts of the Code of Federal Regulations.
@@ -71,6 +73,7 @@ or got plain web cards before are read by their source.
 - [`mastodon`](mastodon.md): Mastodon posts on any server.
 - [`mempool`](mempool.md): Bitcoin blocks, transactions and addresses, and Lightning nodes and
   channels, from mempool.space (Esplora as fallback).
+- [`met`](met.md): The Metropolitan Museum of Art's works by object id.
 - [`public_inbox`](public_inbox.md): mailing-list messages in public-inbox archives (gnusha.org, lore.kernel.org, others), and old bitcoin-dev pipermail addresses
 - [`sec`](sec.md): SEC EDGAR filings, their documents and companies.
 - [`stacker_news`](stacker_news.md): Stacker News posts and comments by item id.

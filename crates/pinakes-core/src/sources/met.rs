@@ -4,9 +4,14 @@
 //! Every metmuseum.org link of one object (with or without a language prefix, the older
 //! "collection online" form, and the API's own URL) is an alias of one identifier,
 //! `met:{objectID}`. The API's data is CC0; images are shown only for public-domain works.
-use super::kit::{host_and_segments, int, json, plain, text, Card, Key, Request};
-use anyhow::{ensure, Result};
+use super::kit::{fetch, host_and_segments, int, json, plain, text, Card, Key, Request};
+use super::{Context, Example, Source};
+use crate::model::ResourceMeta;
+use anyhow::{ensure, Context as _, Result};
+use async_trait::async_trait;
 use serde_json::Value;
+
+pub const SITE: &str = "The Met";
 
 const API: &str = "https://collectionapi.metmuseum.org/public/collection/v1/objects";
 const CREDIT: &str = "The Metropolitan Museum of Art";
@@ -59,6 +64,17 @@ pub fn request(id: u64) -> Option<Request> {
     Request::get(&format!("{API}/{id}"))
 }
 
+/// The object of a root, `met:{objectID}` (the id without leading zeros).
+pub fn from_root(uri: &str) -> Option<u64> {
+    let id = uri.strip_prefix("met:")?;
+    object_id(id).filter(|n| n.to_string() == id)
+}
+
+/// The object of a root or a metmuseum.org link.
+pub fn target(uri: &str) -> Option<u64> {
+    from_root(uri).or_else(|| from_uri(uri))
+}
+
 /// The Q-id of a Wikidata entity URL (`https://www.wikidata.org/wiki/Q…`), and nothing else.
 pub(crate) fn wikidata_id(v: &Value) -> Option<String> {
     let (host, segments) = host_and_segments(v.as_str()?)?;
@@ -86,7 +102,8 @@ pub fn parse(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
     card.name = text(&v["title"]);
     let public_domain = v["isPublicDomain"].as_bool();
     if public_domain == Some(true) {
-        card.image = text(&v["primaryImage"]).or_else(|| text(&v["primaryImageSmall"]));
+        // The web-sized image; `primaryImage` is the full-resolution original.
+        card.image = text(&v["primaryImageSmall"]).or_else(|| text(&v["primaryImage"]));
         card.attribution = Some(format!("{CREDIT}, CC0"));
     } else {
         card.attribution = Some(CREDIT.into());
@@ -118,6 +135,67 @@ pub fn parse(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
         card.alias(url);
     }
     Ok(Some(card))
+}
+
+/// The source: The Met's collection API.
+pub struct Met;
+
+#[async_trait]
+impl Source for Met {
+    fn name(&self) -> &'static str {
+        "met"
+    }
+    fn reads(&self, uri: &str) -> bool {
+        target(uri).is_some()
+    }
+    fn alias_root(&self, uri: &str) -> Option<String> {
+        let root = identifier(target(uri)?);
+        (root != uri).then_some(root)
+    }
+    fn invalid(&self, uri: &str) -> bool {
+        uri.starts_with("met:") && from_root(uri).is_none()
+    }
+    fn facts(&self) -> &'static [&'static str] {
+        &[
+            "page_url",
+            "artist",
+            "artist_bio",
+            "artist_wikidata",
+            "date",
+            "begin_year",
+            "end_year",
+            "object_name",
+            "medium",
+            "dimensions",
+            "department",
+            "culture",
+            "classification",
+            "accession_number",
+            "credit_line",
+            "gallery_number",
+            "public_domain",
+            "wikidata",
+        ]
+    }
+    fn budgets(&self) -> &'static [super::Budget] {
+        &[("collectionapi.metmuseum.org", 1.0, None)]
+    }
+    fn examples(&self) -> &'static [Example] {
+        &[Example {
+            uri: "https://www.metmuseum.org/art/collection/search/436535",
+            card_type: "VisualArtwork",
+        }]
+    }
+    async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
+        let Some(id) = target(uri) else {
+            return Ok(cx.missing(uri, self));
+        };
+        let f = fetch(cx, &request(id).context("object id")?).await?;
+        Ok(match parse(f.status, &f.body, id)? {
+            Some(card) => card.into_doc(cx.card(uri, self), SITE),
+            None => cx.missing(uri, self),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -184,7 +262,7 @@ mod tests {
         assert_eq!(card.description, None);
         assert_eq!(
             card.image.as_deref(),
-            Some("https://images.metmuseum.org/CRDImages/ep/original/DP-42549-001.jpg")
+            Some("https://images.metmuseum.org/CRDImages/ep/web-large/DP-42549-001.jpg")
         );
         assert_eq!(card.start, None);
         assert_eq!(
@@ -230,6 +308,48 @@ mod tests {
         v["primaryImage"] = json!("https://images.metmuseum.org/x.jpg");
         let raw = serde_json::to_vec(&v).unwrap();
         assert_eq!(parse(200, &raw, 488221).unwrap().unwrap().image, None);
+    }
+
+    #[test]
+    fn roots_and_aliases() {
+        let m = Met;
+        assert!(m.reads("met:436535"));
+        assert_eq!(m.alias_root("met:436535"), None);
+        assert!(!m.invalid("met:436535"));
+        for uri in [
+            "https://www.metmuseum.org/art/collection/search/436535",
+            "https://www.metmuseum.org/fr/art/collection/search/436535?img=0",
+            "https://collectionapi.metmuseum.org/public/collection/v1/objects/436535",
+        ] {
+            assert_eq!(m.alias_root(uri).as_deref(), Some("met:436535"), "{uri}");
+        }
+        for uri in ["met:0436535", "met:0", "met:x", "met:"] {
+            assert!(m.invalid(uri), "{uri}");
+            assert!(!m.reads(uri), "{uri}");
+        }
+        for example in m.examples() {
+            assert!(m.reads(example.uri), "{}", example.uri);
+        }
+    }
+
+    #[test]
+    fn documents() {
+        for (file, id) in [
+            ("object-436535.json", 436535),
+            ("object-436532.json", 436532),
+            ("object-488221.json", 488221),
+        ] {
+            let card = parse(200, &read(file), id).unwrap().unwrap();
+            let doc = crate::sources::kit::checked(&Met, &card);
+            assert_eq!(doc.attributes["page_url"], card.url);
+            assert_eq!(doc.source_root.as_deref(), Some(card.id.as_str()));
+        }
+        let card = parse(200, &read("object-436535.json"), 436535)
+            .unwrap()
+            .unwrap();
+        let doc = crate::sources::kit::checked(&Met, &card);
+        assert_eq!(doc.attributes["wikidata"], "Q18689458");
+        assert_eq!(doc.attributes["artist_wikidata"], "Q5582");
     }
 
     #[test]

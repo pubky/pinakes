@@ -68,7 +68,9 @@ pub mod zenodo;
 /// Every source, one line each, in alphabetical order of name.
 #[rustfmt::skip]
 pub static REGISTRY: &[&dyn Source] = &[
+    &artic::Artic,
     &bluesky::Bluesky,
+    &cleveland::Cleveland,
     &courtlistener::Courtlistener,
     &discourse::Discourse,
     &ecfr::Ecfr,
@@ -88,6 +90,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &lobsters::Lobsters,
     &mastodon::Mastodon,
     &mempool::Mempool,
+    &met::Met,
     &public_inbox::PublicInbox,
     &sec::Sec,
     &stacker_news::StackerNews,

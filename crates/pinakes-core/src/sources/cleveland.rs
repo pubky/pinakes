@@ -7,12 +7,17 @@
 //! accession number in the API's answer, and the card names it as an alias.
 //!
 //! The API's data is CC0; images are shown only for works the API marks CC0.
-use super::kit::html_text;
 use super::kit::{
-    host_and_segments, int, json, plain, text, texts, web_url, Card, Key, Link, Request,
+    fetch, host_and_segments, html_text, int, json, plain, text, texts, web_url, Card, Key, Link,
+    Request,
 };
 use super::met::wikidata_id;
-use anyhow::{ensure, Context, Result};
+use super::{Context, Example, Source};
+use crate::model::ResourceMeta;
+use anyhow::{ensure, Context as _, Result};
+use async_trait::async_trait;
+
+pub const SITE: &str = "Cleveland Museum of Art";
 
 const API: &str = "https://openaccess-api.clevelandart.org/api/artworks";
 const CREDIT: &str = "Cleveland Museum of Art";
@@ -78,6 +83,17 @@ pub fn request(artwork: &Artwork) -> Option<Request> {
         Artwork::Accession(a) => format!("{API}/{a}"),
         Artwork::Id(id) => format!("{API}/{id}"),
     })
+}
+
+/// The artwork of a root, `cleveland:{accession number}` (already in lower case).
+pub fn from_root(uri: &str) -> Option<Artwork> {
+    let a = uri.strip_prefix("cleveland:")?;
+    accession(a).filter(|n| n == a).map(Artwork::Accession)
+}
+
+/// The artwork of a root or a clevelandart.org link.
+pub fn target(uri: &str) -> Option<Artwork> {
+    from_root(uri).or_else(|| from_uri(uri))
 }
 
 /// An artwork, or `None` when the API does not know it (404 "Artwork not found").
@@ -166,6 +182,70 @@ pub fn parse(status: u16, raw: &[u8], artwork: &Artwork) -> Result<Option<Card>>
         }
     }
     Ok(Some(card))
+}
+
+/// The source: the Cleveland Museum of Art's Open Access API.
+pub struct Cleveland;
+
+#[async_trait]
+impl Source for Cleveland {
+    fn name(&self) -> &'static str {
+        "cleveland"
+    }
+    fn reads(&self, uri: &str) -> bool {
+        target(uri).is_some()
+    }
+    /// The root of an accession-number link; a numeric-id link is named by the fetch.
+    fn alias_root(&self, uri: &str) -> Option<String> {
+        let root = identifier(&target(uri)?)?;
+        (root != uri).then_some(root)
+    }
+    fn invalid(&self, uri: &str) -> bool {
+        uri.starts_with("cleveland:") && from_root(uri).is_none()
+    }
+    fn facts(&self) -> &'static [&'static str] {
+        &[
+            "page_url",
+            "creators",
+            "creation_date",
+            "begin_year",
+            "end_year",
+            "original_title",
+            "technique",
+            "measurements",
+            "department",
+            "type",
+            "collection",
+            "current_location",
+            "credit_line",
+            "copyright",
+            "culture",
+            "accession_number",
+            "former_accession_numbers",
+            "object_id",
+            "share_license_status",
+            "wikidata",
+        ]
+    }
+    fn budgets(&self) -> &'static [super::Budget] {
+        &[("openaccess-api.clevelandart.org", 1.0, None)]
+    }
+    fn examples(&self) -> &'static [Example] {
+        &[Example {
+            uri: "https://www.clevelandart.org/art/1958.39",
+            card_type: "VisualArtwork",
+        }]
+    }
+    async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
+        let Some(artwork) = target(uri) else {
+            return Ok(cx.missing(uri, self));
+        };
+        let f = fetch(cx, &request(&artwork).context("artwork")?).await?;
+        Ok(match parse(f.status, &f.body, &artwork)? {
+            Some(card) => card.into_doc(cx.card(uri, self), SITE),
+            None => cx.missing(uri, self),
+        })
+    }
 }
 
 /// An Internet Archive item page, `https://archive.org/details/{identifier}`.
@@ -347,6 +427,68 @@ mod tests {
         assert_eq!(
             parse(200, &raw, &acc("1997.246")).unwrap().unwrap().image,
             None
+        );
+    }
+
+    #[test]
+    fn roots_and_aliases() {
+        let c = Cleveland;
+        for uri in ["cleveland:1958.39", "cleveland:1916.1511.a"] {
+            assert!(c.reads(uri), "{uri}");
+            assert_eq!(c.alias_root(uri), None, "{uri}");
+            assert!(!c.invalid(uri), "{uri}");
+        }
+        for uri in [
+            "https://www.clevelandart.org/art/1958.39",
+            "https://openaccess-api.clevelandart.org/api/artworks/1958.39",
+        ] {
+            assert_eq!(
+                c.alias_root(uri).as_deref(),
+                Some("cleveland:1958.39"),
+                "{uri}"
+            );
+        }
+        // A numeric id is named by the fetch: the card's root becomes the link's root.
+        let by_id = "https://www.clevelandart.org/art/135382";
+        assert!(c.reads(by_id));
+        assert_eq!(c.alias_root(by_id), None);
+        for uri in [
+            "cleveland:1958.39A",
+            "cleveland:1916.1511.A",
+            "cleveland:135382",
+            "cleveland:1958..39",
+            "cleveland:",
+        ] {
+            assert!(c.invalid(uri), "{uri}");
+            assert!(!c.reads(uri), "{uri}");
+        }
+        for example in c.examples() {
+            assert!(c.reads(example.uri), "{}", example.uri);
+        }
+    }
+
+    #[test]
+    fn documents() {
+        for (file, artwork) in [
+            ("artwork-1958.39.json", acc("1958.39")),
+            ("artwork-1958.31.json", acc("1958.31")),
+            ("artwork-1997.246.json", acc("1997.246")),
+            ("artwork-135382.json", Artwork::Id(135382)),
+        ] {
+            let card = parse(200, &read(file), &artwork).unwrap().unwrap();
+            let doc = crate::sources::kit::checked(&Cleveland, &card);
+            assert_eq!(doc.attributes["page_url"], card.url);
+            assert_eq!(doc.source_root.as_deref(), Some(card.id.as_str()));
+        }
+        let card = parse(200, &read("artwork-135382.json"), &Artwork::Id(135382))
+            .unwrap()
+            .unwrap();
+        let doc = crate::sources::kit::checked(&Cleveland, &card);
+        assert_eq!(doc.source_root.as_deref(), Some("cleveland:1958.39"));
+        assert_eq!(doc.attributes["wikidata"], "Q50772913");
+        assert_eq!(
+            doc.attributes["creators"],
+            "Claude Monet (French, 1840–1926)"
         );
     }
 

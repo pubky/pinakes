@@ -7,9 +7,13 @@
 //!
 //! The API's data is CC0 except the long `description`, which is CC BY 4.0, so a card prefers the
 //! CC0 `short_description`.
-use super::kit::html_text;
-use super::kit::{host_and_segments, int, json, plain, text, Card, Request};
-use anyhow::{ensure, Result};
+use super::kit::{fetch, host_and_segments, html_text, int, json, plain, text, Card, Request};
+use super::{Context, Example, Source};
+use crate::model::ResourceMeta;
+use anyhow::{ensure, Context as _, Result};
+use async_trait::async_trait;
+
+pub const SITE: &str = "Art Institute of Chicago";
 
 const API: &str = "https://api.artic.edu/api/v1/artworks";
 const CREDIT: &str = "Art Institute of Chicago";
@@ -17,12 +21,6 @@ const CREDIT: &str = "Art Institute of Chicago";
 pub const FIELDS: &str = "id,title,artist_display,date_display,date_start,date_end,\
 medium_display,dimensions,credit_line,place_of_origin,department_title,artwork_type_title,\
 is_public_domain,image_id,description,short_description,main_reference_number,copyright_notice";
-/// The value of the `AIC-User-Agent` header the API asks for: who we are and how to reach us.
-pub const AIC_USER_AGENT: &str = concat!(
-    "pinakes/",
-    env!("CARGO_PKG_VERSION"),
-    " (+https://pubky.app; info@synonym.to)"
-);
 
 /// An artwork id: decimal digits, read as a number.
 pub fn artwork_id(value: &str) -> Option<u64> {
@@ -51,12 +49,21 @@ pub fn page(id: u64) -> String {
     format!("https://www.artic.edu/artworks/{id}")
 }
 
-/// The API record, limited to `FIELDS`, with the `AIC-User-Agent` header.
-pub fn request(id: u64) -> Option<Request> {
-    Some(
-        Request::get(&format!("{API}/{id}?fields={FIELDS}"))?
-            .header("AIC-User-Agent", AIC_USER_AGENT),
-    )
+/// The API record, limited to `FIELDS`, with the `AIC-User-Agent` header the API asks for (the
+/// operator's contact User-Agent).
+pub fn request(id: u64, user_agent: &str) -> Option<Request> {
+    Some(Request::get(&format!("{API}/{id}?fields={FIELDS}"))?.header("AIC-User-Agent", user_agent))
+}
+
+/// The artwork of a root, `artic:{id}` (the id without leading zeros).
+pub fn from_root(uri: &str) -> Option<u64> {
+    let id = uri.strip_prefix("artic:")?;
+    artwork_id(id).filter(|n| n.to_string() == id)
+}
+
+/// The artwork of a root or an artic.edu link.
+pub fn target(uri: &str) -> Option<u64> {
+    from_root(uri).or_else(|| from_uri(uri))
 }
 
 /// An artwork, or `None` when the API does not know the id (404 "Not found").
@@ -102,8 +109,66 @@ pub fn parse(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
     card.detail("begin_year", int(&d["date_start"]));
     card.detail("end_year", int(&d["date_end"]));
     card.detail("public_domain", public_domain);
-    card.detail("license_text", text(&v["info"]["license_text"]));
     Ok(Some(card))
+}
+
+/// The source: the Art Institute of Chicago's public API.
+pub struct Artic;
+
+#[async_trait]
+impl Source for Artic {
+    fn name(&self) -> &'static str {
+        "artic"
+    }
+    fn reads(&self, uri: &str) -> bool {
+        target(uri).is_some()
+    }
+    fn alias_root(&self, uri: &str) -> Option<String> {
+        let root = identifier(target(uri)?);
+        (root != uri).then_some(root)
+    }
+    fn invalid(&self, uri: &str) -> bool {
+        uri.starts_with("artic:") && from_root(uri).is_none()
+    }
+    fn facts(&self) -> &'static [&'static str] {
+        &[
+            "page_url",
+            "artist_display",
+            "date_display",
+            "begin_year",
+            "end_year",
+            "medium",
+            "dimensions",
+            "place_of_origin",
+            "department",
+            "artwork_type",
+            "main_reference_number",
+            "credit_line",
+            "copyright_notice",
+            "public_domain",
+            "image_id",
+        ]
+    }
+    fn budgets(&self) -> &'static [super::Budget] {
+        &[("api.artic.edu", 1.0, None)]
+    }
+    fn examples(&self) -> &'static [Example] {
+        &[Example {
+            uri: "https://www.artic.edu/artworks/27992",
+            card_type: "VisualArtwork",
+        }]
+    }
+    async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
+        let Some(id) = target(uri) else {
+            return Ok(cx.missing(uri, self));
+        };
+        let user_agent = crate::resolver::egress::user_agent(cx.contact().unwrap_or(""));
+        let f = fetch(cx, &request(id, &user_agent).context("artwork id")?).await?;
+        Ok(match parse(f.status, &f.body, id)? {
+            Some(card) => card.into_doc(cx.card(uri, self), SITE),
+            None => cx.missing(uri, self),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -151,18 +216,13 @@ mod tests {
 
     #[test]
     fn request_names_fields_and_sends_the_header() {
-        let r = request(27992).unwrap();
+        let ua = "pinakes/0.1.0 (+https://pubky.app; ops@example.org)";
+        let r = request(27992, ua).unwrap();
         assert_eq!(
             r.url.as_str(),
             format!("https://api.artic.edu/api/v1/artworks/27992?fields={FIELDS}")
         );
-        assert_eq!(
-            r.headers,
-            [(
-                "AIC-User-Agent",
-                "pinakes/0.1.0 (+https://pubky.app; info@synonym.to)".to_owned()
-            )]
-        );
+        assert_eq!(r.headers, [("AIC-User-Agent", ua.to_owned())]);
     }
 
     #[test]
@@ -201,10 +261,6 @@ mod tests {
         assert_eq!(d["department"], "Painting and Sculpture of Europe");
         assert_eq!(d["public_domain"], true);
         assert!(!d.contains_key("copyright_notice"));
-        assert!(d["license_text"]
-            .as_str()
-            .unwrap()
-            .contains("Creative Commons Zero (CC0) 1.0"));
 
         let card = parse(200, &read("artwork-28560.json"), 28560)
             .unwrap()
@@ -249,6 +305,42 @@ mod tests {
             card.attribution.as_deref(),
             Some("Art Institute of Chicago, CC0 1.0; description CC BY 4.0")
         );
+    }
+
+    #[test]
+    fn roots_and_aliases() {
+        let a = Artic;
+        assert!(a.reads("artic:27992"));
+        assert_eq!(a.alias_root("artic:27992"), None);
+        assert!(!a.invalid("artic:27992"));
+        for uri in [
+            "https://www.artic.edu/artworks/27992/a-sunday-on-la-grande-jatte-1884",
+            "https://api.artic.edu/api/v1/artworks/27992",
+        ] {
+            assert_eq!(a.alias_root(uri).as_deref(), Some("artic:27992"), "{uri}");
+        }
+        for uri in ["artic:027992", "artic:0", "artic:abc", "artic:"] {
+            assert!(a.invalid(uri), "{uri}");
+            assert!(!a.reads(uri), "{uri}");
+        }
+        assert!(!a.invalid("https://www.artic.edu/artworks/abc"));
+        for example in a.examples() {
+            assert!(a.reads(example.uri), "{}", example.uri);
+        }
+    }
+
+    #[test]
+    fn documents() {
+        for (file, id) in [
+            ("artwork-27992.json", 27992),
+            ("artwork-28560.json", 28560),
+            ("artwork-111628.json", 111628),
+        ] {
+            let card = parse(200, &read(file), id).unwrap().unwrap();
+            let doc = crate::sources::kit::checked(&Artic, &card);
+            assert_eq!(doc.attributes["page_url"], card.url);
+            assert_eq!(doc.source_root.as_deref(), Some(card.id.as_str()));
+        }
     }
 
     #[test]

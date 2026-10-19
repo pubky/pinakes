@@ -192,6 +192,21 @@
     "type": "ScholarlyArticle"
   },
   {
+    "kind": "artic",
+    "uri": "https://www.artic.edu/artworks/27992",
+    "type": "VisualArtwork"
+  },
+  {
+    "kind": "cleveland",
+    "uri": "https://www.clevelandart.org/art/1958.39",
+    "type": "VisualArtwork"
+  },
+  {
+    "kind": "met",
+    "uri": "https://www.metmuseum.org/art/collection/search/436535",
+    "type": "VisualArtwork"
+  },
+  {
     "kind": "web",
     "uri": "https://example.org/",
     "type": "WebPage"

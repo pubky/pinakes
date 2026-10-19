@@ -116,7 +116,10 @@ impl Fixture {
             {"kind":"mempool","uri":"https://mempool.space/lightning/node/03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f","type":"LightningNode"},
             {"kind":"figshare","uri":"https://figshare.com/articles/dataset/Garden_data_set/1018700","type":"Dataset"},
             {"kind":"huggingface","uri":"https://huggingface.co/datasets/openai/gsm8k","type":"Dataset"},
-            {"kind":"zenodo","uri":"https://zenodo.org/records/1234567","type":"ScholarlyArticle"}
+            {"kind":"zenodo","uri":"https://zenodo.org/records/1234567","type":"ScholarlyArticle"},
+            {"kind":"artic","uri":"https://www.artic.edu/artworks/27992","type":"VisualArtwork"},
+            {"kind":"cleveland","uri":"https://www.clevelandart.org/art/1958.39","type":"VisualArtwork"},
+            {"kind":"met","uri":"https://www.metmuseum.org/art/collection/search/436535","type":"VisualArtwork"}
         ]);
         Ok(Self {
             boundary: Arc::default(),
@@ -172,6 +175,9 @@ impl Dns for FixtureDns {
                 | "zenodo.org"
                 | "huggingface.co"
                 | "api.figshare.com"
+                | "collectionapi.metmuseum.org"
+                | "openaccess-api.clevelandart.org"
+                | "api.artic.edu"
         ) {
             "93.184.216.34"
         } else {
@@ -228,6 +234,9 @@ impl Transport for Fixture {
             "api.figshare.com" if u.path()=="/v2/articles/1018700"=>("application/json",include_str!("../tests/fixtures/sources/figshare/article-1018700.json").into()),
             "huggingface.co" if u.path()=="/api/datasets/openai/gsm8k"=>("application/json",include_str!("../tests/fixtures/sources/huggingface/dataset-gsm8k.json").into()),
             "zenodo.org" if u.path()=="/api/records/1234567"=>("application/json",include_str!("../tests/fixtures/sources/zenodo/record-1234567.json").into()),
+            "api.artic.edu" if u.path()=="/api/v1/artworks/27992"=>{ensure!(o.headers.iter().any(|(k,_)|*k=="AIC-User-Agent"),"missing AIC-User-Agent");("application/json",include_str!("../tests/fixtures/sources/artic/artwork-27992.json").into())},
+            "openaccess-api.clevelandart.org" if u.path()=="/api/artworks/1958.39"=>("application/json",include_str!("../tests/fixtures/sources/cleveland/artwork-1958.39.json").into()),
+            "collectionapi.metmuseum.org" if u.path()=="/public/collection/v1/objects/436535"=>("application/json",include_str!("../tests/fixtures/sources/met/object-436535.json").into()),
             _=>bail!("no fixture for upstream host {}",u.host_str().unwrap_or("")),
         };
         Ok(Fetched {
