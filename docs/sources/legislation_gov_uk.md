@@ -28,8 +28,11 @@ Retained EU law (`/eur/…`) is the UK's amended copy, a different object from t
 ## What it reads
 
 `GET https://www.legislation.gov.uk/{type}/{year}/{number}/introduction[/{version}]/data.xml`
-(tens of KB): a provision's card is its item's, for the same version. An item the site does not
-know is `missing` (it answers 400).
+(tens of KB). A provision is read from its own data,
+`…/{number}/{provision}[/{version}]/data.xml`, which carries the item's metadata: its card is the
+item's, for the same version. A provision over the 1 MB body limit (a long part) takes its card
+from the introduction instead. An item or provision the site does not know is `missing` (it
+answers 400 or 404).
 
 ## Card
 
@@ -42,7 +45,7 @@ and described by its long title.
 | `category` | `primary`, `secondary` or `euretained` |
 | `year`, `number` | As in its address |
 | `enacted`, `made` | `YYYY-MM-DD` (made for statutory instruments) |
-| `provision` | For a provision, e.g. `section/1` |
+| `provision` | For a provision, e.g. `section 1`, `schedule 2 paragraph 3` |
 | `version` | For a version, e.g. `enacted`, `2020-01-31` |
 | `page_url` | The item on legislation.gov.uk |
 

@@ -9,6 +9,17 @@
     "status": 200,
     "url": "https://www.legislation.gov.uk/eur/2016/679/introduction/data.xml"
   },
+  "missing_ukpga_2018_12_section_999": {
+    "accept": "application/xml",
+    "bytes": 12293,
+    "content_type": "text/html;charset=utf-8",
+    "file": "missing_ukpga_2018_12_section_999.html",
+    "note": "legislation.gov.uk: a provision the act does not have answers 404.",
+    "recorded_at": "2026-10-19T18:33:42+00:00",
+    "sha256": "ed5b7c895f8ea3f73874581626328b9339cdb83ad71588f56c778d553e4ffafe",
+    "status": 404,
+    "url": "https://www.legislation.gov.uk/ukpga/2018/12/section/999/data.xml"
+  },
   "missing_ukpga_2018_9999_introduction": {
     "accept": "application/xml",
     "bytes": 15725,
@@ -39,6 +50,17 @@
     "sha256": "6c92729edb93b2f2c3faa6b8f62e45244be69078b532844713bddeb16ec57302",
     "status": 200,
     "url": "https://www.legislation.gov.uk/ukpga/2018/12/introduction/2020-01-31/data.xml"
+  },
+  "ukpga_2018_12_section_1_2020-01-31": {
+    "accept": "application/xml",
+    "bytes": 15490,
+    "content_type": "application/xml;charset=utf-8",
+    "file": "ukpga_2018_12_section_1_2020-01-31.xml",
+    "note": "legislation.gov.uk, Open Government Licence v3.0. A provision's own data, in a version.",
+    "recorded_at": "2026-10-19T18:33:39+00:00",
+    "sha256": "6aef28fa8d7bf2e262ee7a99e6266237a79a2abc74ddbc131db64d25317bfa3c",
+    "status": 200,
+    "url": "https://www.legislation.gov.uk/ukpga/2018/12/section/1/2020-01-31/data.xml"
   },
   "uksi_2019_419_introduction_made": {
     "accept": "application/xml",

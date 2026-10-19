@@ -1,6 +1,6 @@
 //! UK legislation from legislation.gov.uk: Acts, statutory instruments, devolved legislation and
-//! retained EU law, read from each item's `introduction/data.xml`. Open Government Licence v3.0;
-//! no key; 1,500 requests per 5 minutes.
+//! retained EU law, read from each item's `introduction/data.xml` (a provision's from its own
+//! `data.xml`). Open Government Licence v3.0; no key; 1,500 requests per 5 minutes.
 use super::{web_url, Budget, Context, Example, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
@@ -149,11 +149,22 @@ impl Item {
         }
         root
     }
-    /// The item's introduction data (the act's, for a provision), in the version asked for.
+    /// The data to read, in the version asked for: a provision's own (which also tells whether
+    /// the act has it, and carries the act's metadata), else the item's introduction.
     pub fn data_url(&self) -> String {
+        match &self.provision {
+            Some(p) => self.versioned(&format!("{}/{p}", self.act())),
+            None => self.introduction_url(),
+        }
+    }
+    /// The item's introduction data, in the version asked for.
+    pub fn introduction_url(&self) -> String {
+        self.versioned(&format!("{}/introduction", self.act()))
+    }
+    fn versioned(&self, base: &str) -> String {
         match &self.version {
-            Some(v) => format!("{}/introduction/{v}/data.xml", self.act()),
-            None => format!("{}/introduction/data.xml", self.act()),
+            Some(v) => format!("{base}/{v}/data.xml"),
+            None => format!("{base}/data.xml"),
         }
     }
     /// `section 1`, `schedule 2 paragraph 3`.
@@ -176,8 +187,8 @@ fn value(node: Option<roxmltree::Node<'_, '_>>, attribute: &str) -> Option<Strin
         .map(str::to_owned)
 }
 
-/// The card of an item from its introduction data, or `None` when the site has no such item
-/// (it answers 400 or 404).
+/// The card of an item from its data (a provision's or the introduction's; both carry the
+/// item's metadata), or `None` when the site has no such item or provision (400 or 404).
 pub fn card(
     mut doc: ResourceMeta,
     item: &Item,
@@ -295,16 +306,22 @@ impl Source for LegislationGovUk {
     }
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let item = Item::of_uri(uri).context("not legislation")?;
-        let f = cx
-            .fetch(
-                &item.data_url(),
-                &FetchOptions {
-                    accept: Some("application/xml".into()),
-                    extra_types: &["application/xml"],
-                    ..Default::default()
-                },
-            )
-            .await?;
+        let xml = FetchOptions {
+            accept: Some("application/xml".into()),
+            extra_types: &["application/xml"],
+            ..Default::default()
+        };
+        let f = match cx.fetch(&item.data_url(), &xml).await {
+            // A provision too large to read exists; its card comes from the introduction.
+            Err(e)
+                if item.provision.is_some()
+                    && e.chain()
+                        .any(|c| c.is::<crate::resolver::egress::BodyTooLarge>()) =>
+            {
+                cx.fetch(&item.introduction_url(), &xml).await?
+            }
+            f => f?,
+        };
         Ok(card(cx.card(uri, self), &item, f.status, &f.body)?
             .unwrap_or_else(|| cx.missing(uri, self)))
     }
@@ -460,19 +477,41 @@ mod tests {
             .unwrap()
             .contains("Commission Decision 2011/833/EU"));
 
-        // A provision in a version: the act's card from that version, plus the provision.
+        // The act in a version.
+        let dated =
+            Item::of_uri("https://www.legislation.gov.uk/ukpga/2018/12/2020-01-31").unwrap();
+        assert_eq!(
+            dated.data_url(),
+            "https://www.legislation.gov.uk/ukpga/2018/12/introduction/2020-01-31/data.xml"
+        );
+        let doc = card(
+            base(&dated),
+            &dated,
+            200,
+            &read("ukpga_2018_12_introduction_2020-01-31.xml"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(doc.name.as_deref(), Some("Data Protection Act 2018"));
+        assert_eq!(doc.attributes["version"], "2020-01-31");
+
+        // A provision in a version, from its own data: the act's card plus the provision.
         let section =
             Item::of_uri("https://www.legislation.gov.uk/ukpga/2018/12/section/1/2020-01-31")
                 .unwrap();
         assert_eq!(
             section.data_url(),
+            "https://www.legislation.gov.uk/ukpga/2018/12/section/1/2020-01-31/data.xml"
+        );
+        assert_eq!(
+            section.introduction_url(),
             "https://www.legislation.gov.uk/ukpga/2018/12/introduction/2020-01-31/data.xml"
         );
         let doc = card(
             base(&section),
             &section,
             200,
-            &read("ukpga_2018_12_introduction_2020-01-31.xml"),
+            &read("ukpga_2018_12_section_1_2020-01-31.xml"),
         )
         .unwrap()
         .unwrap();
@@ -496,5 +535,10 @@ mod tests {
         assert!(card(base(&act), &item("ukpga", 2018, 9999), 400, &missing)
             .unwrap()
             .is_none());
+        // A provision the act does not have is missing.
+        let absent =
+            Item::of_uri("https://www.legislation.gov.uk/ukpga/2018/12/section/999").unwrap();
+        let page = read("missing_ukpga_2018_12_section_999.html");
+        assert!(card(base(&absent), &absent, 404, &page).unwrap().is_none());
     }
 }
