@@ -1,8 +1,10 @@
 //! SEC EDGAR filings and companies. A filing's card comes from its header (`{accession}.hdr.sgml`,
 //! about 1 KB), never from its documents (often several MB); a company's from
-//! `data.sec.gov/submissions`. EDGAR asks for at most ten requests per second and a User-Agent
-//! naming the operator and an email address (`http.contact`).
-use super::{list, Context, Example, Source};
+//! `data.sec.gov/submissions`. Ownership filings (Forms 3, 4 and 5) name the issuer as the
+//! company and the reporting owner as a fact; asset-backed filings add their depositor. EDGAR
+//! asks for at most ten requests per second and a User-Agent naming the operator and an email
+//! address (`http.contact`).
+use super::{list, Budget, Context, Example, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -215,6 +217,9 @@ pub fn alias_root(uri: &str) -> Option<String> {
     (root != normalized).then_some(root)
 }
 
+/// One party of a filing: (CIK, conformed name, file number).
+pub type Party = (u64, String, Option<String>);
+
 /// A filing's header (`.hdr.sgml`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Header {
@@ -223,8 +228,38 @@ pub struct Header {
     pub filing_date: Option<String>,
     pub period: Option<String>,
     pub items: Vec<String>,
-    /// The filers (or subject company) in order: (CIK, conformed name, file number).
-    pub filers: Vec<(u64, String, Option<String>)>,
+    /// The companies, primary first: the issuer (or issuing entity) of an ownership or
+    /// asset-backed filing, else the filers (or subject company) in order.
+    pub filers: Vec<Party>,
+    /// The reporting owners of an ownership filing (Forms 3, 4 and 5, Form 144).
+    pub owners: Vec<Party>,
+    /// An asset-backed filing's depositor: its name when the header has a `<DEPOSITOR>`
+    /// section, and its CIK.
+    pub depositor: Option<String>,
+    pub depositor_cik: Option<u64>,
+    pub asset_class: Option<String>,
+}
+
+/// The header sections that name a party, by role.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Issuer,
+    Filer,
+    Owner,
+    Depositor,
+}
+
+/// The section being read: its role, CIK, conformed name and file number.
+type Section = (Role, Option<u64>, Option<String>, Option<String>);
+
+fn role(section: &str) -> Option<Role> {
+    Some(match section {
+        "ISSUER" | "ISSUING_ENTITY" => Role::Issuer,
+        "FILER" | "SUBJECT-COMPANY" | "FILED-BY" => Role::Filer,
+        "REPORTING-OWNER" => Role::Owner,
+        "DEPOSITOR" => Role::Depositor,
+        _ => return None,
+    })
 }
 
 /// `20260106` as `2026-01-06`.
@@ -233,10 +268,17 @@ fn date(value: &str) -> Option<String> {
     Some(d.format("%Y-%m-%d").to_string())
 }
 
+fn add(parties: &mut Vec<Party>, party: Party) {
+    if !parties.iter().any(|p| p.0 == party.0) {
+        parties.push(party);
+    }
+}
+
 /// Read an EDGAR SGML header: one `<TAG>value` per line, sections opened by `<TAG>` alone.
 pub fn parse_header(body: &str) -> Result<Header> {
     let mut header = Header::default();
-    let mut current: Option<(Option<u64>, Option<String>, Option<String>)> = None;
+    let (mut issuers, mut filers) = (vec![], vec![]);
+    let mut current: Option<Section> = None;
     for line in body.lines() {
         let Some(rest) = line.trim().strip_prefix('<') else {
             continue;
@@ -245,39 +287,62 @@ pub fn parse_header(body: &str) -> Result<Header> {
             continue;
         };
         let value = value.trim();
+        if value.is_empty() {
+            if let Some(r) = role(tag) {
+                current = Some((r, None, None, None));
+                continue;
+            }
+        }
+        if let Some(r) = tag.strip_prefix('/').and_then(role) {
+            if let Some((role, cik, name, file)) = current.take().filter(|c| c.0 == r) {
+                match (role, cik, name) {
+                    (Role::Depositor, cik, name) => {
+                        header.depositor = name.or(header.depositor.take());
+                        header.depositor_cik = cik.or(header.depositor_cik);
+                    }
+                    (Role::Issuer, Some(cik), Some(name)) => add(&mut issuers, (cik, name, file)),
+                    (Role::Filer, Some(cik), Some(name)) => add(&mut filers, (cik, name, file)),
+                    (Role::Owner, Some(cik), Some(name)) => {
+                        add(&mut header.owners, (cik, name, file))
+                    }
+                    _ => {}
+                }
+            }
+            continue;
+        }
         match tag {
             "ACCESSION-NUMBER" => header.accession = accession(value).unwrap_or_default(),
             "TYPE" if header.form.is_empty() => header.form = value.to_owned(),
             "FILING-DATE" => header.filing_date = date(value),
             "PERIOD" => header.period = date(value),
             "ITEMS" if !value.is_empty() => header.items.push(value.to_owned()),
-            "FILER" | "SUBJECT-COMPANY" | "FILED-BY" if value.is_empty() => {
-                current = Some((None, None, None))
-            }
-            "/FILER" | "/SUBJECT-COMPANY" | "/FILED-BY" => {
-                if let Some((Some(cik), Some(name), file)) = current.take() {
-                    if !header.filers.iter().any(|f| f.0 == cik) {
-                        header.filers.push((cik, name, file));
-                    }
-                }
-            }
+            "DEPOSITOR-CIK" if current.is_none() => header.depositor_cik = cik(value),
+            "ABS-ASSET-CLASS" if !value.is_empty() => header.asset_class = Some(value.to_owned()),
             "CONFORMED-NAME" => {
-                if let Some(c) = current.as_mut().filter(|c| c.1.is_none()) {
-                    c.1 = Some(value.to_owned());
-                }
-            }
-            "CIK" => {
-                if let Some(c) = current.as_mut().filter(|c| c.0.is_none()) {
-                    c.0 = cik(value);
-                }
-            }
-            "FILE-NUMBER" => {
                 if let Some(c) = current.as_mut().filter(|c| c.2.is_none()) {
                     c.2 = Some(value.to_owned()).filter(|v| !v.is_empty());
                 }
             }
+            "CIK" => {
+                if let Some(c) = current.as_mut().filter(|c| c.1.is_none()) {
+                    c.1 = cik(value);
+                }
+            }
+            "FILE-NUMBER" => {
+                if let Some(c) = current.as_mut().filter(|c| c.3.is_none()) {
+                    c.3 = Some(value.to_owned()).filter(|v| !v.is_empty());
+                }
+            }
             _ => {}
         }
+    }
+    for party in filers {
+        add(&mut issuers, party);
+    }
+    header.filers = issuers;
+    // An owner's filing without an issuer section still has a party to name.
+    if header.filers.is_empty() {
+        header.filers = header.owners.clone();
     }
     anyhow::ensure!(
         !header.accession.is_empty() && !header.form.is_empty() && !header.filers.is_empty(),
@@ -322,6 +387,11 @@ pub fn filing_card(
 ) -> ResourceMeta {
     doc.set_type("Report");
     let (primary_cik, name, file_number) = &header.filers[0];
+    // An ownership filing carries the issuer's file number in the owner's section.
+    let file_number = file_number
+        .clone()
+        .or_else(|| header.owners.iter().find_map(|o| o.2.clone()));
+    let owners: Vec<String> = header.owners.iter().map(|o| o.1.clone()).collect();
     doc.name = Some(format!("Form {} · {name}", header.form));
     let mut about = vec![];
     if let Some(d) = &header.filing_date {
@@ -333,6 +403,9 @@ pub fn filing_card(
     if !header.items.is_empty() {
         about.push(format!("items {}", header.items.join(", ")));
     }
+    if !owners.is_empty() && header.filers[0].0 != header.owners[0].0 {
+        about.push(format!("reporting owner {}", owners.join(", ")));
+    }
     doc.description = (!about.is_empty()).then(|| about.join(" · "));
     let filers: Vec<String> = header.filers.iter().map(|f| f.1.clone()).collect();
     for (key, value) in [
@@ -343,7 +416,11 @@ pub fn filing_card(
         ("items", list(&header.items)),
         ("company", list(&filers)),
         ("cik", Some(primary_cik.to_string())),
-        ("file_number", file_number.clone()),
+        ("file_number", file_number),
+        ("reporting_owner", list(&owners)),
+        ("depositor", header.depositor.clone()),
+        ("depositor_cik", header.depositor_cik.map(|c| c.to_string())),
+        ("asset_class", header.asset_class.clone()),
         (
             "page_url",
             Some(filing_url(
@@ -357,28 +434,32 @@ pub fn filing_card(
             doc.attributes.insert(key.into(), value);
         }
     }
-    match document {
-        Some((file, row)) => {
-            doc.attributes.insert("document".into(), file.into());
-            if let Some((kind, description)) = row {
-                if !kind.is_empty() {
-                    doc.attributes.insert("exhibit".into(), kind);
-                }
-                if !description.is_empty() {
-                    doc.attributes
-                        .insert("exhibit_description".into(), description);
-                }
-            }
+    // A spelling under a co-registrant's (or owner's) CIK is an alias of the primary filer's.
+    let accession = header.accession.clone();
+    doc.source_root = Some(
+        match document {
+            Some((file, _)) => Target::Document {
+                cik: *primary_cik,
+                accession,
+                file: file.to_owned(),
+            },
+            None => Target::Filing {
+                cik: *primary_cik,
+                accession,
+            },
         }
-        // A co-registrant's spelling of the filing is an alias of the primary filer's.
-        None => {
-            doc.source_root = Some(
-                Target::Filing {
-                    cik: *primary_cik,
-                    accession: header.accession.clone(),
-                }
-                .root(),
-            )
+        .root(),
+    );
+    if let Some((file, row)) = document {
+        doc.attributes.insert("document".into(), file.into());
+        if let Some((kind, description)) = row {
+            if !kind.is_empty() {
+                doc.attributes.insert("exhibit".into(), kind);
+            }
+            if !description.is_empty() {
+                doc.attributes
+                    .insert("exhibit_description".into(), description);
+            }
         }
     }
     doc
@@ -524,6 +605,10 @@ impl Source for Sec {
             "company",
             "cik",
             "file_number",
+            "reporting_owner",
+            "depositor",
+            "depositor_cik",
+            "asset_class",
             "page_url",
             "document",
             "exhibit",
@@ -544,6 +629,14 @@ impl Source for Sec {
             "effective_on",
             "cfr_references",
             "page_count",
+        ]
+    }
+    fn budgets(&self) -> &'static [Budget] {
+        // EDGAR allows ten requests per second in total.
+        &[
+            ("www.sec.gov", 5.0, None),
+            ("sec.gov", 2.0, None),
+            ("data.sec.gov", 2.0, None),
         ]
     }
     fn examples(&self) -> &'static [Example] {
@@ -798,7 +891,90 @@ mod tests {
         );
         assert_eq!(doc.attributes["exhibit"], "EX-99.1");
         assert_eq!(doc.attributes["document"], "ea029862901ex99-1.htm");
-        assert_eq!(doc.source_root, None);
+        assert_eq!(doc.source_root.as_deref(), Some(exhibit.as_str()));
+        // An exhibit under a co-registrant's CIK is an alias of the primary filer's.
+        let elsewhere =
+            "https://www.sec.gov/Archives/edgar/data/1/000121390026079805/ea029862901ex99-1.htm";
+        let doc = filing_card(
+            base(elsewhere),
+            1,
+            &h,
+            Some(("ea029862901ex99-1.htm", None)),
+        );
+        assert_eq!(doc.source_root.as_deref(), Some(exhibit.as_str()));
+    }
+
+    #[test]
+    fn ownership_filings_name_the_issuer() {
+        let h = header("sec-hdr-xxi-form4.sgml");
+        assert_eq!(h.form, "4");
+        assert_eq!(
+            h.filers,
+            [(2070457, "Twenty One Capital, Inc.".into(), None)]
+        );
+        assert_eq!(
+            h.owners,
+            [(
+                2133238,
+                "Goldschmidt David J".into(),
+                Some("001-42997".into())
+            )]
+        );
+        // EDGAR files the form under the owner's CIK too.
+        let uri = "https://www.sec.gov/Archives/edgar/data/2133238/000121390026098382/";
+        let doc = filing_card(base(uri), 2133238, &h, None);
+        assert_eq!(
+            doc.name.as_deref(),
+            Some("Form 4 · Twenty One Capital, Inc.")
+        );
+        assert_eq!(
+            doc.description.as_deref(),
+            Some("Filed 2026-09-09 · period 2026-09-08 · reporting owner Goldschmidt David J")
+        );
+        assert_eq!(doc.attributes["company"], "Twenty One Capital, Inc.");
+        assert_eq!(doc.attributes["cik"], "2070457");
+        assert_eq!(doc.attributes["reporting_owner"], "Goldschmidt David J");
+        assert_eq!(doc.attributes["file_number"], "001-42997");
+        assert_eq!(
+            doc.source_root.as_deref(),
+            Some("https://www.sec.gov/Archives/edgar/data/2070457/000121390026098382/")
+        );
+        // A header with owners only still names a party.
+        let body = "<ACCESSION-NUMBER>0000000001-26-000001\n<TYPE>4\n<REPORTING-OWNER>\n\
+                    <OWNER-DATA>\n<CONFORMED-NAME>Someone\n<CIK>0000000030\n</OWNER-DATA>\n\
+                    </REPORTING-OWNER>\n";
+        assert_eq!(parse_header(body).unwrap().filers[0].0, 30);
+    }
+
+    #[test]
+    fn asset_backed_filings_name_their_depositor() {
+        let h = header("sec-hdr-bmw-10d.sgml");
+        assert_eq!(h.filers[0].1, "BMW Vehicle Owner Trust 2023-A");
+        assert_eq!(h.depositor, None);
+        assert_eq!(h.depositor_cik, Some(1136586));
+        assert_eq!(h.asset_class.as_deref(), Some("Auto loans"));
+        let uri = "https://www.sec.gov/Archives/edgar/data/1979860/000092963826003805/";
+        let doc = filing_card(base(uri), 1979860, &h, None);
+        assert_eq!(doc.attributes["depositor_cik"], "1136586");
+        assert_eq!(doc.attributes["asset_class"], "Auto loans");
+
+        let h = header("sec-hdr-park-abs15g.sgml");
+        assert_eq!(h.form, "ABS-15G");
+        assert_eq!(h.filers.len(), 1);
+        assert_eq!(
+            h.depositor.as_deref(),
+            Some("Park Capital Management Depositor LLC")
+        );
+        assert_eq!(h.depositor_cik, Some(1877944));
+        // An issuing entity is the company, ahead of the filer.
+        let body = "<ACCESSION-NUMBER>0000000001-26-000001\n<TYPE>10-D\n<FILER>\n\
+                    <COMPANY-DATA>\n<CONFORMED-NAME>Depositor LLC\n<CIK>0000000010\n\
+                    </COMPANY-DATA>\n</FILER>\n<ISSUING_ENTITY>\n<COMPANY-DATA>\n\
+                    <CONFORMED-NAME>Trust 2026-1\n<CIK>0000000020\n</COMPANY-DATA>\n\
+                    </ISSUING_ENTITY>\n";
+        let h = parse_header(body).unwrap();
+        assert_eq!(h.filers[0].1, "Trust 2026-1");
+        assert_eq!(h.filers.len(), 2);
     }
 
     #[test]
