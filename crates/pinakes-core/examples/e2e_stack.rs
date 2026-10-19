@@ -98,7 +98,8 @@ impl Fixture {
             {"kind":"eur_lex","uri":"https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32016R0679","type":"Legislation"},
             {"kind":"fedlex","uri":"https://www.fedlex.admin.ch/eli/cc/1999/404/de","type":"Legislation"},
             {"kind":"zefix","uri":"https://register.ld.admin.ch/zefix/company/126286","type":"Organization"},
-            {"kind":"govinfo","uri":"https://www.govinfo.gov/app/details/PLAW-117publ58","type":"Legislation"}
+            {"kind":"govinfo","uri":"https://www.govinfo.gov/app/details/PLAW-117publ58","type":"Legislation"},
+            {"kind":"stacker_news","uri":"https://stacker.news/items/1596515","type":"DiscussionForumPosting"}
         ]);
         Ok(Self {
             boundary: Arc::default(),
@@ -134,6 +135,7 @@ impl Dns for FixtureDns {
                 | "fedlex.data.admin.ch"
                 | "ld.admin.ch"
                 | "www.govinfo.gov"
+                | "stacker.news"
                 | "web.example"
                 | "www.federalregister.gov"
                 | "www.sec.gov"
@@ -171,6 +173,7 @@ impl Transport for Fixture {
             "fedlex.data.admin.ch" if u.path()=="/sparqlendpoint"=>("application/sparql-results+json",include_str!("../tests/fixtures/sources/fedlex/eli_cc_1999_404.json").into()),
             "ld.admin.ch" if u.path()=="/query"=>("application/sparql-results+json",include_str!("../tests/fixtures/sources/zefix/sparql_company_126286_spo.json").into()),
             "www.govinfo.gov" if u.path()=="/metadata/pkg/PLAW-117publ58/mods.xml"=>("application/xml",gunzip(include_bytes!("../tests/fixtures/sources/govinfo/mods_pkg_PLAW-117publ58.xml.gz"))),
+            "stacker.news" if u.path()=="/api/graphql"=>("application/json",include_str!("../tests/fixtures/sources/stacker_news/sn-item-1596515.json").into()),
             "web.example"=>("text/html","<title>Fixture page</title>".into()),
             "www.ecfr.gov" if u.path()=="/api/versioner/v1/ancestry/current/title-17.json"=>("application/json",include_str!("../tests/fixtures/sources/ecfr/ancestry_current_title-17_section-240.10b-5.json").into()),
             "www.sec.gov" if u.path()=="/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959.hdr.sgml"=>("text/sgml",include_str!("../tests/fixtures/sources/sec/sec-hdr-ms-s1.sgml").into()),

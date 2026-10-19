@@ -29,6 +29,7 @@ pub mod gleif;
 pub mod govinfo;
 pub mod legislation_gov_uk;
 pub mod sec;
+pub mod stacker_news;
 pub mod swiss_parliament;
 pub mod uk_parliament_bills;
 pub mod zefix;
@@ -45,6 +46,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &govinfo::Govinfo,
     &legislation_gov_uk::LegislationGovUk,
     &sec::Sec,
+    &stacker_news::StackerNews,
     &swiss_parliament::SwissParliament,
     &uk_parliament_bills::UkParliamentBills,
     &zefix::Zefix,
@@ -78,6 +80,11 @@ pub trait Source: Send + Sync {
     /// more than one request in flight per host, which meets any `max_in_flight`.
     fn budgets(&self) -> &'static [Budget] {
         &[]
+    }
+    /// Whether a card quotes people's own posts (a comment, a social post): social content keeps
+    /// a 200-character excerpt, refreshes within the hour and is purged once the object is gone.
+    fn social(&self, _doc: &ResourceMeta) -> bool {
+        false
     }
     /// Plain example links with the card type they resolve to: the OpenAPI examples, also
     /// listed in `docs/sources/<name>.md`.

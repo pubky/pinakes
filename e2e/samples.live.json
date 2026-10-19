@@ -112,6 +112,11 @@
     "type": "Legislation"
   },
   {
+    "kind": "stacker_news",
+    "uri": "https://stacker.news/items/1596515",
+    "type": "DiscussionForumPosting"
+  },
+  {
     "kind": "web",
     "uri": "https://example.org/",
     "type": "WebPage"

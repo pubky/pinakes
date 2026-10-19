@@ -1893,6 +1893,18 @@
                     "uri": "https://www.sec.gov/files/rules/sro/nasdaqtx/2026/34-106268.pdf"
                   }
                 },
+                "resolve-stacker-news-1": {
+                  "summary": "https://stacker.news/items/1596515",
+                  "value": {
+                    "uri": "https://stacker.news/items/1596515"
+                  }
+                },
+                "resolve-stacker-news-2": {
+                  "summary": "https://stacker.news/items/1596515?commentId=1596517",
+                  "value": {
+                    "uri": "https://stacker.news/items/1596515?commentId=1596517"
+                  }
+                },
                 "resolve-swiss-parliament-1": {
                   "summary": "https://www.parlament.ch/de/ratsbetrieb/suche-curia-vista/geschaeft?AffairId=20223765",
                   "value": {

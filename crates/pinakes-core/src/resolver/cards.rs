@@ -1043,8 +1043,9 @@ fn csl_date(v: &Value) -> Option<String> {
     )
 }
 /// Social content: a note or post whose card quotes its text (Nostr, ActivityPub, a Pubky
-/// object described by its content). Its excerpt is short, refreshes within the hour and is
-/// purged, with its change history, once the object is confirmed gone.
+/// object described by its content, an official-API source's posts and comments). Its excerpt
+/// is short, refreshes within the hour and is purged, with its change history, once the object
+/// is confirmed gone.
 pub fn social(doc: &ResourceMeta) -> bool {
     match doc.source.as_str() {
         "nostr" | "activitypub" => matches!(
@@ -1052,7 +1053,7 @@ pub fn social(doc: &ResourceMeta) -> bool {
             "SocialMediaPosting" | "Article" | "CreativeWork"
         ),
         "pubky" => doc.type_name == "SocialMediaPosting",
-        _ => false,
+        name => crate::sources::by_name(name).is_some_and(|s| s.social(doc)),
     }
 }
 impl CardResolver {

@@ -49,6 +49,7 @@ or got plain web cards before are read by their source.
 - [`govinfo`](govinfo.md): US public laws, bills, US Code sections and the Statutes at Large.
 - [`legislation_gov_uk`](legislation_gov_uk.md): UK Acts, statutory instruments and retained EU law.
 - [`sec`](sec.md): SEC EDGAR filings, their documents and companies.
+- [`stacker_news`](stacker_news.md): Stacker News posts and comments by item id.
 - [`swiss_parliament`](swiss_parliament.md): Swiss Parliament business items (Curia Vista) by affair id.
 - [`uk_parliament_bills`](uk_parliament_bills.md): UK Parliament bills and Acts by bill id.
 - [`zefix`](zefix.md): Swiss companies in the commercial register, by register id.

@@ -71,6 +71,8 @@ enabled = true
 enabled = true
 [sources.sec]
 enabled = true
+[sources.stacker_news]
+enabled = true
 [sources.swiss_parliament]
 enabled = true
 [sources.uk_parliament_bills]
