@@ -89,7 +89,7 @@ body, and answer `If-None-Match` with 304.
 | `venue` | `{name, id}`: the venue's name and, when it resolved to a resource, its ID |
 | `organizer` | `{name, url}` |
 | `from` | Where the card's metadata came from when it is not the page itself: the [source](#sources) whose official API answered, e.g. `federal_register` |
-| `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …); lists are joined with `; `. Each source's page lists its facts |
+| `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …), then the facts the [also-on](#also-on) sources read for it (`isrc`, `upc`, `mbid`, `artist`, `duration` in seconds); several values of one name are joined with `; `. Each source's page lists its facts. `null` when there are none. Facts never join anything |
 | `aliases` | Other spellings of this link that resolve to it ([aliases](#aliases)), at most 50; a page's own `url`, `@id`, `sameAs` or canonical claims are not aliases and are not listed |
 | `updated_at` | When the current metadata was accepted |
 | `maybe_same` | An event's card only: up to ten events that are [possibly the same event](#possibly-the-same-event), best first (the card's `maybe_same` is the first three) |
@@ -696,8 +696,9 @@ is looked up exactly, never by title or name:
 - `musicbrainz`: what MusicBrainz relates the link to (one recording, release or release group,
   or artist; several are ambiguous and give nothing), that entity's current links on music
   services, and its MBIDs as keys (`mb:recording:…`, `mb:release:…`, `mb:release-group:…`,
-  `mb:artist:…`). A release with a barcode also gets its Apple Music album from iTunes
-  (`via: "itunes"`) when exactly one album answers.
+  `mb:artist:…`). Its facts: `mbid`, the recording's `isrc`s, the release's barcode as `upc`,
+  the `artist` credit and the recording's `duration`. A release with a barcode also gets its
+  Apple Music album from iTunes (`via: "itunes"`) when exactly one album answers.
 - `wikidata`: the one item carrying the link's own service ID (Spotify, Apple Music, Deezer,
   TIDAL, Qobuz, YouTube, SoundCloud, Amazon Music, Bandcamp), read back and compared exactly
   (two items are ambiguous and give nothing); its other music-service IDs as links and its Q-id

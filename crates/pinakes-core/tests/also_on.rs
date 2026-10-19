@@ -127,6 +127,7 @@ async fn hub_keys_join_and_derived_links_reach_the_cards(pool: PgPool) {
                 // The card itself: never listed.
                 Link::new(spotify, "Spotify", "musicbrainz"),
             ],
+            ..Default::default()
         }),
     );
     hub.answer(
@@ -138,6 +139,7 @@ async fn hub_keys_join_and_derived_links_reach_the_cards(pool: PgPool) {
                 "YouTube",
                 "wikidata",
             )],
+            ..Default::default()
         }),
     );
     let sources: Vec<Arc<dyn Source>> = vec![hub.clone()];
@@ -235,6 +237,7 @@ async fn a_card_shows_eight_and_the_read_all(pool: PgPool) {
         Ok(Found {
             keys: vec![],
             links,
+            ..Default::default()
         }),
     );
     let sources: Vec<Arc<dyn Source>> = vec![hub];
@@ -274,6 +277,7 @@ async fn runs_replace_their_rows_failures_keep_them_and_rows_expire(pool: PgPool
                 "TIDAL",
                 "musicbrainz",
             )],
+            ..Default::default()
         }),
     );
     wiki.answer(
@@ -285,6 +289,7 @@ async fn runs_replace_their_rows_failures_keep_them_and_rows_expire(pool: PgPool
                 "Wikipedia",
                 "wikidata",
             )],
+            ..Default::default()
         }),
     );
     let sources: Vec<Arc<dyn Source>> = vec![music.clone(), wiki.clone()];
@@ -323,6 +328,7 @@ async fn runs_replace_their_rows_failures_keep_them_and_rows_expire(pool: PgPool
                 "Apple Music",
                 "musicbrainz",
             )],
+            ..Default::default()
         }),
     );
     drain(&pool, &cx, &sources).await;
@@ -422,6 +428,7 @@ async fn answers_are_checked_and_bounded(pool: PgPool) {
                 Link::new("https://badvia.example/x", "B", "Wiki Data"),
             ])
             .collect(),
+        ..Default::default()
     };
     let config = Config::default();
     also_on::record(
@@ -576,4 +583,60 @@ async fn music_link_spellings_are_one_resource(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(root_of, canonical_video);
+}
+
+/// A source's facts reach the read's `details.facts` (several values of one name joined), are
+/// checked like everything else, and never join anything.
+#[sqlx::test(migrations = "../../migrations")]
+async fn facts_are_shown_checked_and_never_join(pool: PgPool) {
+    use pinakes_core::also_on::Fact;
+    let (a, b) = (
+        "https://open.spotify.com/track/aaaaaaaaaaaaaaaaaaaaaa",
+        "https://www.deezer.com/track/1",
+    );
+    let (ia, ib) = (page(&pool, a, "Song").await, page(&pool, b, "Song").await);
+    let hub = Fake::new("music");
+    let facts = vec![
+        Fact::new("isrc", "GBAYE9701376"),
+        Fact::new("isrc", "GBBKS1700108"),
+        Fact::new("artist", "Radiohead"),
+        // Refused: an upper-case name, a padded value, a control character, an empty value.
+        Fact::new("ISRC", "X"),
+        Fact::new("upc", " 123 "),
+        Fact::new("note", "a\u{7}b"),
+        Fact::new("empty", ""),
+    ];
+    for uri in [a, b] {
+        hub.answer(
+            uri,
+            Ok(Found {
+                facts: facts.clone(),
+                ..Default::default()
+            }),
+        );
+    }
+    let sources: Vec<Arc<dyn Source>> = vec![hub];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let read = get(&app, &format!("/v1/resources/{ia}")).await;
+    assert_eq!(
+        read["details"]["facts"],
+        json!({"artist": "Radiohead", "isrc": "GBAYE9701376; GBBKS1700108"})
+    );
+    // The same ISRC on both links joins nothing: a fact is not a key.
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let grouped: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM group_unit WHERE resource_id IN ($1,$2) AND group_id IS NOT NULL",
+    )
+    .bind(&ia)
+    .bind(&ib)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(grouped, 0);
+    // A link without facts has none.
+    let other = page(&pool, "https://tidal.com/track/9", "Song").await;
+    assert!(get(&app, &format!("/v1/resources/{other}")).await["details"]["facts"].is_null());
 }

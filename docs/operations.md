@@ -53,6 +53,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `group_max_graph_bytes` | `33554432` | Bytes one grouping pass may read. |
 | `also_on_links_per_source` | `32` | Derived links one source keeps per resource. |
 | `also_on_keys_per_source` | `16` | Join keys one source keeps per resource. |
+| `also_on_facts_per_source` | `32` | Facts one source keeps per resource. |
 | `also_on_concurrency` | `2` | Resources whose sources run at once. |
 | `also_on_retry_secs` | `300` | First retry of a failed source run (seconds); doubles up to an hour. |
 | `event_max_line_bytes` | `65536` | Longest calendar content line (bytes). |
@@ -448,10 +449,11 @@ after a save that changed its document or status, and again when the shortest li
 them has passed. Its queue is `also_on_dirty`; `limits.also_on_concurrency` (2) resources run at
 once, and a failed run keeps the previous rows and retries after `limits.also_on_retry_secs`
 (300 s), doubling up to an hour. Each run replaces its source's rows (`resource_key`,
-`derived_link`); rows live twice the source's lifetime and the hourly maintenance deletes the
+`derived_link`, `resource_fact`); rows live twice the source's lifetime and the hourly maintenance deletes the
 expired ones (a deleted key regroups its resource). A source keeps at most
-`limits.also_on_links_per_source` (32) links and `limits.also_on_keys_per_source` (16) keys per
-resource. `[also_on] enabled = false` stops the worker; `derive_links = false` keeps keys only;
+`limits.also_on_links_per_source` (32) links, `limits.also_on_keys_per_source` (16) keys and
+`limits.also_on_facts_per_source` (32) facts per resource. `[also_on] enabled = false` stops the
+worker; `derive_links = false` keeps keys and facts only;
 `[also_on.sources.<id>] enabled = false` turns one source off (an unknown ID stops startup).
 The sources are `musicbrainz` and `wikidata` (music; [the API](api.md#also-on) says what each
 reads); `[also_on] apple_storefront` (`us`, a two-letter country code) is the Apple Music

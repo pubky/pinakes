@@ -136,6 +136,10 @@ pub mod musicbrainz {
         pub barcode: Option<String>,
         /// Releases: their release group.
         pub release_group: Option<String>,
+        /// The artist credit as MusicBrainz writes it ("A feat. B").
+        pub artist: Option<String>,
+        /// Recordings: the length in milliseconds.
+        pub length_ms: Option<u64>,
     }
     /// What a URL is linked to: each current target with its level.
     #[derive(Clone, Debug, Default, PartialEq)]
@@ -174,6 +178,22 @@ pub mod musicbrainz {
         targets.dedup();
         UrlTargets { targets }
     }
+    /// An artist credit: each name and its join phrase, in order.
+    fn credit(v: &Value) -> Option<String> {
+        let credit: String = v["artist-credit"]
+            .as_array()?
+            .iter()
+            .map(|c| {
+                format!(
+                    "{}{}",
+                    c["name"].as_str().unwrap_or_default(),
+                    c["joinphrase"].as_str().unwrap_or_default()
+                )
+            })
+            .collect();
+        let credit = credit.trim();
+        (!credit.is_empty()).then(|| credit.to_owned())
+    }
     /// `GET /{kind}/{mbid}?inc=url-rels…`.
     pub fn parse_entity(kind: MbKind, v: &Value) -> Option<Entity> {
         let mut isrcs: Vec<String> = v["isrcs"]
@@ -200,12 +220,16 @@ pub mod musicbrainz {
                 .filter(|b| (8..=14).contains(&b.len()) && b.bytes().all(|c| c.is_ascii_digit()))
                 .map(str::to_owned),
             release_group: v["release-group"]["id"].as_str().and_then(mbid),
+            artist: credit(v),
+            length_ms: v["length"]
+                .as_u64()
+                .filter(|ms| (1..=86_400_000).contains(ms)),
         })
     }
     fn inc(kind: MbKind) -> &'static str {
         match kind {
-            MbKind::Recording => "url-rels+isrcs",
-            MbKind::Release => "url-rels+release-groups",
+            MbKind::Recording => "url-rels+isrcs+artist-credits",
+            MbKind::Release => "url-rels+release-groups+artist-credits",
             MbKind::ReleaseGroup | MbKind::Artist => "url-rels",
         }
     }

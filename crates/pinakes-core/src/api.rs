@@ -629,7 +629,9 @@ pub struct Details {
     /// Where the card's metadata came from when it is not the page itself: the official API
     /// that answered (docs/sources).
     pub from: Option<String>,
-    /// The fields that API names for the object, by name; lists are joined with "; ".
+    /// The fields that API names for the object, and the facts the also-on sources read for it
+    /// (`isrc`, `upc`, `mbid`, `artist`, `duration`), by name; several values are joined with
+    /// "; ". Absent when there are none.
     #[schema(value_type = Option<Object>)]
     pub facts: Option<std::collections::BTreeMap<String, String>>,
     /// Other spellings of this link that resolve to it (its aliases), by URI, at most 50. A
@@ -903,6 +905,30 @@ fn label<T: Serialize>(v: &Option<T>) -> Option<String> {
         .and_then(|v| serde_json::to_value(v).ok())
         .and_then(|v| v.as_str().map(str::to_owned))
 }
+/// A card's facts: its official API's fields first, then the also-on sources'; a name both
+/// give keeps each value once.
+fn merge_facts(
+    document: Option<std::collections::BTreeMap<String, String>>,
+    sources: Option<std::collections::BTreeMap<String, String>>,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    let mut merged = document.unwrap_or_default();
+    for (name, values) in sources.into_iter().flatten() {
+        let joined = match merged.remove(&name) {
+            Some(first) => {
+                let mut all: Vec<&str> = first.split("; ").collect();
+                for value in values.split("; ") {
+                    if !all.contains(&value) {
+                        all.push(value);
+                    }
+                }
+                all.join("; ")
+            }
+            None => values,
+        };
+        merged.insert(name, joined);
+    }
+    (!merged.is_empty()).then_some(merged)
+}
 fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
     let doc: Option<ResourceMeta> = if row["doc"].get("type").is_some() {
         Some(serde_json::from_value(row["doc"].clone())?)
@@ -911,6 +937,8 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
     };
     // The alias rows `read` joins in, not the document's claims.
     let aliases: Vec<String> = serde_json::from_value(row["aliases"].clone()).unwrap_or_default();
+    let facts: Option<std::collections::BTreeMap<String, String>> =
+        serde_json::from_value(row["facts"].clone()).ok().flatten();
     let details = match &doc {
         Some(d) => Details {
             category: present(d.category.as_deref()),
@@ -929,7 +957,7 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
                 (name.is_some() || url.is_some()).then_some(OrganizerRef { name, url })
             }),
             from: crate::sources::from(d).map(str::to_owned),
-            facts: crate::sources::facts(d),
+            facts: merge_facts(crate::sources::facts(d), facts.clone()),
             aliases: aliases.clone(),
             updated_at: row["resolved_at"].as_str().and_then(|s| s.parse().ok()),
             maybe_same: same_events(row),
@@ -945,7 +973,7 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
             venue: None,
             organizer: None,
             from: None,
-            facts: None,
+            facts,
             aliases,
             updated_at: None,
             maybe_same: None,
@@ -1399,7 +1427,7 @@ async fn read(
     config: &Config,
 ) -> Result<Option<ResourceDetail>, ApiError> {
     let value: Option<Value> =
-        sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',CASE WHEN $3 THEN same_event_hint(r.id,r.type_path,10) END,'also_on',also_on(r.id,r.id,256,$2),'aliases',coalesce((SELECT jsonb_agg(uri ORDER BY uri) FROM (SELECT x.uri FROM resource_alias a JOIN resource x ON x.id=a.alias_id WHERE a.root_id=r.id ORDER BY x.uri LIMIT 50) s),'[]')) FROM resource_document r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)")
+        sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',CASE WHEN $3 THEN same_event_hint(r.id,r.type_path,10) END,'also_on',also_on(r.id,r.id,256,$2),'aliases',coalesce((SELECT jsonb_agg(uri ORDER BY uri) FROM (SELECT x.uri FROM resource_alias a JOIN resource x ON x.id=a.alias_id WHERE a.root_id=r.id ORDER BY x.uri LIMIT 50) s),'[]'),'facts',(SELECT jsonb_object_agg(name,vals) FROM (SELECT name,string_agg(value,'; ' ORDER BY value) AS vals FROM resource_fact WHERE resource_id=r.id AND expires_at>now() GROUP BY name) f)) FROM resource_document r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)")
             .bind(id)
             .bind(config.groups.enabled)
             .bind(same_event(config))
@@ -2179,6 +2207,26 @@ pub async fn curate_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A card's facts: its official API's fields, then the also-on sources', each value once.
+    #[test]
+    fn document_and_source_facts_merge() {
+        let map = |pairs: &[(&str, &str)]| {
+            Some(
+                pairs
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+            )
+        };
+        assert_eq!(
+            merge_facts(
+                map(&[("citation", "1 CFR 2"), ("isrc", "A")]),
+                map(&[("isrc", "A; B"), ("mbid", "m")])
+            ),
+            map(&[("citation", "1 CFR 2"), ("isrc", "A; B"), ("mbid", "m")])
+        );
+        assert_eq!(merge_facts(None, None), None);
+    }
     /// A range header is read without overflow: the largest last byte means "to the end".
     #[test]
     fn byte_ranges_never_overflow() {

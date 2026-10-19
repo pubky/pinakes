@@ -687,6 +687,7 @@ impl Config {
         let a = &self.also_on;
         if !(1..=256).contains(&a.links_per_source)
             || !(1..=64).contains(&a.keys_per_source)
+            || !(1..=256).contains(&a.facts_per_source)
             || !(1..=16).contains(&a.concurrency)
             || !(1..=86400).contains(&a.retry_secs)
         {
@@ -1249,6 +1250,8 @@ limits! {
     also_on_links_per_source: usize = |c| c.also_on.links_per_source => [|c, v| c.also_on.links_per_source = v],
     /// Join keys one source keeps per resource.
     also_on_keys_per_source: usize = |c| c.also_on.keys_per_source => [|c, v| c.also_on.keys_per_source = v],
+    /// Facts one source keeps per resource.
+    also_on_facts_per_source: usize = |c| c.also_on.facts_per_source => [|c, v| c.also_on.facts_per_source = v],
     /// Resources whose sources run at once.
     also_on_concurrency: usize = |c| c.also_on.concurrency => [|c, v| c.also_on.concurrency = v],
     /// First retry of a failed source run (seconds); doubles up to an hour.

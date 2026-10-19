@@ -91,6 +91,7 @@ impl Source for MusicBrainzSource {
         if let Some(group) = &entity.release_group {
             key(MbKind::ReleaseGroup, group);
         }
+        found.facts = facts(&entity);
         found.links = entity
             .urls
             .iter()
@@ -103,6 +104,27 @@ impl Source for MusicBrainzSource {
         }
         Ok(found)
     }
+}
+
+/// What a MusicBrainz entity says about the object: its MBID, ISRCs, barcode (`upc`), artist
+/// credit and length (`duration`, in seconds).
+fn facts(entity: &musicbrainz::Entity) -> Vec<crate::also_on::Fact> {
+    use crate::also_on::Fact;
+    let mut facts = vec![Fact::new("mbid", &entity.mbid)];
+    facts.extend(entity.isrcs.iter().map(|isrc| Fact::new("isrc", isrc)));
+    facts.extend(entity.barcode.iter().map(|upc| Fact::new("upc", upc)));
+    facts.extend(
+        entity
+            .artist
+            .iter()
+            .map(|artist| Fact::new("artist", artist)),
+    );
+    facts.extend(
+        entity
+            .length_ms
+            .map(|ms| Fact::new("duration", ((ms + 500) / 1000).to_string())),
+    );
+    facts
 }
 
 /// Apple Music's album for a barcode: iTunes `lookup?upc=` in the configured storefront, when
@@ -395,6 +417,33 @@ mod tests {
             (link.uri.as_str(), link.site.as_str()),
             ("https://music.apple.com/gb/album/1097861387", "Apple Music")
         );
+    }
+
+    #[test]
+    fn a_recording_says_its_isrcs_artist_and_length() {
+        let recording =
+            musicbrainz::parse_entity(MbKind::Recording, &fixture("mb-recording.json")).unwrap();
+        let facts: Vec<(String, String)> = facts(&recording)
+            .into_iter()
+            .map(|f| (f.name, f.value))
+            .collect();
+        let has = |n: &str, v: &str| facts.iter().any(|(a, b)| a == n && b == v);
+        assert!(
+            has("mbid", "9f9cf187-d6f9-437f-9d98-d59cdbd52757"),
+            "{facts:?}"
+        );
+        assert!(
+            has("isrc", "GBAYE9701376") && has("isrc", "GBBKS1700108"),
+            "{facts:?}"
+        );
+        assert!(has("artist", "Radiohead"), "{facts:?}");
+        assert!(has("duration", "384"), "{facts:?}");
+        let release =
+            musicbrainz::parse_entity(MbKind::Release, &fixture("mb-release.json")).unwrap();
+        assert!(facts_of(&release).contains(&("upc".into(), "634904078164".into())));
+    }
+    fn facts_of(e: &musicbrainz::Entity) -> Vec<(String, String)> {
+        facts(e).into_iter().map(|f| (f.name, f.value)).collect()
     }
 
     #[test]

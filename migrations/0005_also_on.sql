@@ -23,6 +23,23 @@ CREATE TABLE resource_key (
 CREATE INDEX resource_key_source_idx ON resource_key USING btree (resource_id, source);
 CREATE INDEX resource_key_key_idx ON resource_key USING btree (key);
 
+-- Facts a source reads for a resource (`isrc`, `upc`, `mbid`, `artist`, `duration`): shown in
+-- the read's `details.facts` and searchable by `key`; unlike keys they never join anything.
+CREATE TABLE resource_fact (
+    resource_id text NOT NULL REFERENCES resource(id) ON DELETE CASCADE,
+    name text NOT NULL,
+    value text NOT NULL,
+    source text NOT NULL,
+    seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    PRIMARY KEY (resource_id, name, value),
+    CONSTRAINT resource_fact_name_check CHECK ((name ~ '^[a-z][a-z0-9_]{0,31}$')),
+    CONSTRAINT resource_fact_value_check CHECK ((octet_length(value) BETWEEN 1 AND 512)),
+    CONSTRAINT resource_fact_source_check CHECK ((source ~ '^[a-z0-9_]{1,32}$'))
+);
+CREATE INDEX resource_fact_source_idx ON resource_fact USING btree (resource_id, source);
+CREATE INDEX resource_fact_value_idx ON resource_fact USING btree (name, value);
+
 -- Links to the same thing that nobody tagged, found by a source: shown in the card's
 -- `also_on` with `derived: true`, never fetched, never counted as references, never ranked.
 -- `link_id` is the link's resource ID, so a derived link and a tagged member that are the

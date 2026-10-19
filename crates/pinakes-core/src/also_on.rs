@@ -40,6 +40,8 @@ pub struct AlsoOnConfig {
     #[serde(skip)]
     pub keys_per_source: usize,
     #[serde(skip)]
+    pub facts_per_source: usize,
+    #[serde(skip)]
     pub concurrency: usize,
     #[serde(skip)]
     pub retry_secs: u64,
@@ -53,6 +55,7 @@ impl Default for AlsoOnConfig {
             apple_storefront: "us".into(),
             links_per_source: 32,
             keys_per_source: 16,
+            facts_per_source: 32,
             concurrency: 2,
             retry_secs: 300,
         }
@@ -102,6 +105,23 @@ impl Subject {
 pub struct Found {
     pub keys: Vec<Key>,
     pub links: Vec<Link>,
+    /// Facts about the object (`isrc`, `upc`, `artist`, …): shown and searchable, never joined.
+    pub facts: Vec<Fact>,
+}
+/// A fact a source reads for a resource: a lower-case `name` (`[a-z][a-z0-9_]`, at most 32
+/// bytes) and a printable `value` (at most 512 bytes). Several values of one name are kept.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Fact {
+    pub name: String,
+    pub value: String,
+}
+impl Fact {
+    pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            value: value.into(),
+        }
+    }
 }
 /// An exact join key, `{namespace}:{value}` (`mb:recording:{mbid}`, `wikidata:Q42`, `isrc:…`
 /// stays an attribute and is not a key). `via` names the hub it came through.
@@ -191,13 +211,32 @@ pub fn valid_key(key: &str) -> bool {
         && value.chars().all(|c| !c.is_control() && !c.is_whitespace())
 }
 
+/// A derived link as stored: its resource ID, its normalised URI and the link.
+type CheckedLink = (String, String, Link);
+/// A fact's name and value as stored.
+fn valid_fact(f: &Fact) -> bool {
+    let name = f.name.as_bytes();
+    (1..=32).contains(&name.len())
+        && name[0].is_ascii_lowercase()
+        && name
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_')
+        && (1..=512).contains(&f.value.len())
+        && f.value.trim() == f.value
+        && !f.value.chars().any(char::is_control)
+}
 /// A source's result, checked and bounded: keys valid, links HTTP(S) URLs that are not the
-/// resource itself (normalised, deduplicated by their resource ID), sites and vias well formed.
+/// resource itself (normalised, deduplicated by their resource ID), sites and vias well formed,
+/// facts well formed and each once.
 fn checked(
     resource_id: &str,
     found: Found,
     cfg: &AlsoOnConfig,
-) -> (Vec<Key>, Vec<(String, String, Link)>) {
+) -> (Vec<Key>, Vec<CheckedLink>, Vec<Fact>) {
+    let mut facts: Vec<Fact> = found.facts.into_iter().filter(valid_fact).collect();
+    facts.sort();
+    facts.dedup();
+    facts.truncate(cfg.facts_per_source);
     let mut keys: Vec<Key> = found
         .keys
         .into_iter()
@@ -242,7 +281,7 @@ fn checked(
             }
         }
     }
-    (keys, links)
+    (keys, links, facts)
 }
 
 /// Replace `source`'s keys and links for `resource_id` with `found` (checked and bounded); they
@@ -256,7 +295,7 @@ pub async fn record(
     cfg: &AlsoOnConfig,
 ) -> Result<()> {
     anyhow::ensure!(token(source), "invalid source id {source}");
-    let (keys, links) = checked(resource_id, found, cfg);
+    let (keys, links, facts) = checked(resource_id, found, cfg);
     let expires = Utc::now()
         + chrono::Duration::from_std(ttl.saturating_mul(2)).unwrap_or(chrono::Duration::days(60));
     let mut tx = pool.begin().await?;
@@ -277,6 +316,15 @@ pub async fn record(
         .bind(resource_id).bind(source).bind(Value::from(link_rows.clone())).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO derived_link(resource_id,link_id,uri,site,source,via,kind,at,expires_at) SELECT $1,v->>'id',v->>'uri',v->>'site',$2,v->>'via',v->>'kind',(v->>'at')::timestamptz,$4 FROM jsonb_array_elements($3) v ON CONFLICT(resource_id,link_id) DO UPDATE SET uri=excluded.uri,site=excluded.site,via=excluded.via,kind=excluded.kind,at=excluded.at,seen_at=now(),expires_at=excluded.expires_at WHERE derived_link.source=excluded.source")
         .bind(resource_id).bind(source).bind(Value::from(link_rows)).bind(expires).execute(&mut *tx).await?;
+    let fact_rows: Vec<Value> = facts
+        .iter()
+        .map(|f| serde_json::json!({"name": f.name, "value": f.value}))
+        .collect();
+    sqlx::query("DELETE FROM resource_fact WHERE resource_id=$1 AND source=$2 AND NOT (name,value) IN (SELECT v->>'name',v->>'value' FROM jsonb_array_elements($3) v)")
+        .bind(resource_id).bind(source).bind(Value::from(fact_rows.clone())).execute(&mut *tx).await?;
+    // A fact another source already reports keeps that source.
+    sqlx::query("INSERT INTO resource_fact(resource_id,name,value,source,expires_at) SELECT $1,v->>'name',v->>'value',$2,$4 FROM jsonb_array_elements($3) v ON CONFLICT(resource_id,name,value) DO UPDATE SET seen_at=now(),expires_at=greatest(resource_fact.expires_at,excluded.expires_at) WHERE resource_fact.source=excluded.source")
+        .bind(resource_id).bind(source).bind(Value::from(fact_rows)).bind(expires).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -291,7 +339,11 @@ pub async fn prune(pool: &PgPool) -> Result<u64> {
         .execute(pool)
         .await?
         .rows_affected();
-    Ok(keys + links)
+    let facts = sqlx::query("DELETE FROM resource_fact WHERE expires_at<=now()")
+        .execute(pool)
+        .await?
+        .rows_affected();
+    Ok(keys + links + facts)
 }
 
 async fn subject(pool: &PgPool, id: &str) -> Result<Option<Subject>> {
