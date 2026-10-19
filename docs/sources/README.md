@@ -26,8 +26,8 @@ on again. The whole route can be switched off with `[cards.official] enabled = f
 ## Politeness
 
 Every request carries the operator's contact in the User-Agent (`http.contact`, see
-[operations](../operations.md#deployment-and-egress)); a source whose service asks for an email
-address is skipped while it is empty. Requests share the per-host budget
+[operations](../operations.md#deployment-and-egress)); while it is empty, the links of a source
+whose service requires an email address ([SEC EDGAR](sec.md)) wait and are retried hourly. Requests share the per-host budget
 (`limits.host_requests_per_second`, one per second by default) and never have more than one
 request in flight per host; a source whose service publishes a limit sets that host's rate (a
 windowed limit as its average rate), and `limits.host_rates` overrides it. Each page below names

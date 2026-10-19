@@ -354,6 +354,8 @@ async fn run(pool: sqlx::PgPool, f: Fixture) -> Result<()> {
     cfg.osm.nominatim_url = base.clone();
     cfg.osm.requests_per_second = 10.;
     cfg.canary.enabled = false;
+    // Services that need a contact (SEC EDGAR) wait without one.
+    cfg.egress.contact = "info@synonym.to".into();
     cfg.pubky.enabled = false;
     cfg.api.requests_per_minute = 10000;
     let state = AppState::new(pool.clone(), cfg.clone())?;
@@ -454,6 +456,8 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
     pinakes_core::migrate(&pool).await?;
     let mut cfg = Config::default();
     cfg.canary.enabled = false;
+    // Services that need a contact (SEC EDGAR) wait without one.
+    cfg.egress.contact = "info@synonym.to".into();
     cfg.api.requests_per_minute = 10000;
     cfg.nexus_url = std::env::var("PINAKES_E2E_NEXUS").unwrap_or_else(|_| cfg.nexus_url.clone());
     let cfg = Arc::new(cfg);

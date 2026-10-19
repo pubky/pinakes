@@ -31,11 +31,13 @@ pub enum Key {
 /// for corrigenda and consolidated versions. Upper case.
 pub fn celex(value: &str) -> Option<String> {
     let v = value.trim().to_ascii_uppercase();
-    let ok = (8..=40).contains(&v.len())
-        && v.as_bytes()[0].is_ascii_alphanumeric()
-        && v[1..5].bytes().all(|b| b.is_ascii_digit())
-        && v.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"()-._".contains(&b));
+    // Bytes, not string slices: a link may carry any character.
+    let b = v.as_bytes();
+    let ok = (8..=40).contains(&b.len())
+        && b.iter()
+            .all(|c| c.is_ascii_alphanumeric() || b"()-._".contains(c))
+        && b[0].is_ascii_alphanumeric()
+        && b[1..5].iter().all(u8::is_ascii_digit);
     ok.then_some(v)
 }
 fn eli_part(value: &str) -> bool {
@@ -339,6 +341,7 @@ mod tests {
             "https://eur-lex.europa.eu/homepage.html",
             "https://eur-lex.europa.eu/eli/reg/2016/679",
             "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:x",
+            "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX%3AAXYZ%C3%A9123",
         ] {
             assert!(!EurLex.reads(uri), "{uri}");
         }

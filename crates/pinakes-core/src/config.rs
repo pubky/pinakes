@@ -361,7 +361,7 @@ impl Default for ResolverConfig {
 pub struct HttpConfig {
     /// The operator's contact address. Sent in the User-Agent of every request
     /// (`pinakes/<version> (+https://pubky.app; <contact>)`) and as the `email` parameter of the
-    /// APIs that ask for one. Empty: neither, and the sources that need a contact are skipped.
+    /// APIs that ask for one. Empty: neither, and the links of sources that need a contact wait.
     pub contact: String,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]

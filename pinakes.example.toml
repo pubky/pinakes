@@ -107,7 +107,7 @@ websocket = true # Nostr relays: one relay hint, after both HTTP indexers miss.
 
 [http]
 # Sent in the User-Agent, pinakes/<version> (+https://pubky.app; <contact>), and as the email
-# parameter of APIs that ask for one. Empty: sources that need a contact are skipped.
+# parameter of APIs that ask for one. Empty: the links of sources that need a contact wait.
 contact = "info@synonym.to"
 
 [egress]

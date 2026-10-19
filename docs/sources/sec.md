@@ -4,8 +4,8 @@ Filings and companies on the US Securities and Exchange Commission's EDGAR syste
 card comes from its header (`{accession}.hdr.sgml`, about 1 KB); the filed documents themselves,
 often several megabytes, are never fetched. Public data; no key. EDGAR's [access
 rules](https://www.sec.gov/os/accessing-edgar-data) ask for at most ten requests per second and a
-User-Agent with an email address: set `http.contact`, or EDGAR refuses the requests. One request
-per second per host by default.
+User-Agent with an email address: while `http.contact` is empty, EDGAR links wait (they are retried
+hourly) instead of being sent. One request per second per host by default.
 
 ## Links
 

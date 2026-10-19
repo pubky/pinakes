@@ -429,6 +429,42 @@ mod tests {
         }
     }
 
+    /// Link-derived text may hold any character: no address check may slice a string inside one.
+    #[test]
+    fn a_multibyte_character_anywhere_in_a_link_never_panics() {
+        let mut links: Vec<String> = vec![];
+        for source in REGISTRY {
+            links.extend(source.examples().iter().map(|e| e.uri.to_owned()));
+            // Every address the source's page shows without a placeholder.
+            let page = repo(&format!("docs/sources/{}.md", source.name()));
+            for token in page.split('`').skip(1).step_by(2) {
+                let token = token.split_whitespace().next().unwrap_or_default();
+                let link = token.starts_with("http")
+                    || token.split_once(':').is_some_and(|(s, r)| {
+                        s.len() <= 4 && s.bytes().all(|b| b.is_ascii_lowercase()) && !r.is_empty()
+                    });
+                if link && !token.contains(['{', '…']) {
+                    links.push(token.to_owned());
+                }
+            }
+        }
+        assert!(links.len() > 40, "{}", links.len());
+        for link in &links {
+            for at in (0..=link.len()).filter(|i| link.is_char_boundary(*i)) {
+                for insert in ["é", "€", "😀", "\u{301}"] {
+                    let uri = format!("{}{insert}{}", &link[..at], &link[at..]);
+                    for source in REGISTRY {
+                        source.reads(&uri);
+                        source.alias_root(&uri);
+                        source.invalid(&uri);
+                    }
+                    crate::alias::root(&uri);
+                    crate::resolver::classify(&uri);
+                }
+            }
+        }
+    }
+
     #[test]
     fn switches_and_names() {
         let mut config = Config::default();

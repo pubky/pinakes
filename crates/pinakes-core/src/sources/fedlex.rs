@@ -96,7 +96,13 @@ pub fn dossier_act(body: &[u8]) -> Result<Option<String>> {
         .iter()
         .filter_map(|r| r.get("act"))
         .filter_map(|(a, _)| a.strip_prefix("https://fedlex.data.admin.ch/"))
-        .filter(|a| a.starts_with("eli/cc/"))
+        // The ELI goes into the next query: it must have the shape a link's would.
+        .filter(|a| {
+            matches!(
+                a.split('/').collect::<Vec<_>>().as_slice(),
+                ["eli", "cc", x, y] if eli_part(x) && eli_part(y)
+            )
+        })
         .map(str::to_owned)
         .collect();
     acts.sort();
@@ -366,5 +372,7 @@ mod tests {
                 .as_deref(),
             Some("eli/cc/1999/404")
         );
+        let odd = br#"{"results":{"bindings":[{"act":{"type":"uri","value":"https://fedlex.data.admin.ch/eli/cc/1999/404> } UNION { ?s ?p ?o"}}]}}"#;
+        assert_eq!(dossier_act(odd).unwrap(), None);
     }
 }

@@ -11,9 +11,11 @@ pub struct Gleif;
 /// A valid LEI (ISO 17442: 18 characters, 2 check digits, MOD 97-10), in upper case.
 pub fn lei(value: &str) -> Option<String> {
     let lei = value.trim().to_ascii_uppercase();
-    let shape = lei.len() == 20
-        && lei[..18].bytes().all(|b| b.is_ascii_alphanumeric())
-        && lei[18..].bytes().all(|b| b.is_ascii_digit());
+    // Bytes, not string slices: a link may carry any character.
+    let b = lei.as_bytes();
+    let shape = b.len() == 20
+        && b[..18].iter().all(u8::is_ascii_alphanumeric)
+        && b[18..].iter().all(u8::is_ascii_digit);
     if !shape {
         return None;
     }
@@ -64,6 +66,7 @@ pub fn card(
     anyhow::ensure!(a["lei"] == lei, "GLEIF answered for another LEI");
     let entity = &a["entity"];
     doc.set_type("Organization");
+    doc.site = "GLEIF".into();
     doc.name = text(&entity["legalName"]["name"]);
     let address = &entity["legalAddress"];
     for (key, value) in [
@@ -211,6 +214,8 @@ mod tests {
             "KY37LUS27QQX7BB93L2",
             "KY37LUS27QQX7BB93LAB",
             "",
+            "AAAAAAAAAAAAAAAAAá1",
+            "AAAAAAAAAAAAAAAAAA1á",
         ] {
             assert_eq!(lei(bad), None, "{bad}");
         }
@@ -245,6 +250,7 @@ mod tests {
         .unwrap();
         assert_eq!(doc.type_name, "Organization");
         assert_eq!(doc.name.as_deref(), Some("NESTLÉ S.A."));
+        assert_eq!(doc.site, "GLEIF");
         assert_eq!(
             doc.description.as_deref(),
             Some("LEI KY37LUS27QQX7BB93L28 · VEVEY, CH · active")

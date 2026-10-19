@@ -567,6 +567,14 @@ impl Source for Sec {
         ]
     }
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
+        // EDGAR refuses requests whose User-Agent has no email address: wait for one.
+        if cx.contact().is_none() {
+            return Err(crate::resolver::RetryLater {
+                class: "disabled",
+                seconds: 3600,
+            }
+            .into());
+        }
         let target = Target::of_uri(uri).context("not an EDGAR link")?;
         if let Target::Release { release, file } = &target {
             let json = FetchOptions {
@@ -835,6 +843,25 @@ mod tests {
         let doc = release_card(base(uri), "34-106268", "34-106268.pdf", None);
         assert_eq!(doc.type_name, "Report");
         assert_eq!(doc.name.as_deref(), Some("Release No. 34-106268"));
+    }
+
+    #[tokio::test]
+    async fn without_a_contact_edgar_links_wait() {
+        let egress = crate::resolver::egress::Egress::new(Default::default());
+        assert_eq!(egress.contact(), None);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let error = Sec
+            .resolve(
+                &cx,
+                "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0002070457",
+            )
+            .await
+            .unwrap_err();
+        let retry = error.downcast_ref::<crate::resolver::RetryLater>().unwrap();
+        assert_eq!(retry.class, "disabled");
     }
 
     #[test]

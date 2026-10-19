@@ -144,7 +144,8 @@ time out after ten seconds. Images stay origin URLs and are never fetched.
 Every request introduces itself as `pinakes/<version> (+https://pubky.app; <contact>)`, with
 `http.contact` as the contact (`info@synonym.to` in the example configuration; without one,
 `pinakes/<version> (+https://pubky.app)`). Set it to an address the services you read can reach:
-some refuse requests without one. The User-Agent never names a code-hosting site, which some
+some refuse requests without one, and the links of the sources that need it (SEC EDGAR) wait
+until it is set. The User-Agent never names a code-hosting site, which some
 services refuse as an undeclared tool. Event platform adapters that need a browser profile keep
 their own User-Agent.
 
