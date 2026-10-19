@@ -623,6 +623,11 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
     let app = api::router(state);
     let nexus = Nexus::new(&cfg.nexus_url)?;
     let ready = json!({"pinakes":base,"nexus":cfg.nexus_url,"mock":false});
+    let also_on = pinakes_core::also_on::Context {
+        egress: egress.clone(),
+        config: cfg.clone(),
+    };
+    let sources = pinakes_core::also_on::registry();
     let polling = tokio::spawn(async move {
         loop {
             if let Err(e) =
@@ -650,6 +655,10 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
             }
             if let Err(e) = pinakes_core::same_event::drain(&pool, &cfg, 200).await {
                 eprintln!("live same-event pass: {e}");
+            }
+            // The samples' also-on sources (their hubs, live): derived links and hub keys.
+            if let Err(e) = pinakes_core::also_on::drain(&pool, &also_on, &sources, 16).await {
+                eprintln!("live also-on: {e}");
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }

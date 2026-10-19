@@ -238,6 +238,16 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
         return true;
       }, timeout, signal);
       report.assertions.push(`same-event hints (${twins.map(([a, b]) => `${a}~${b}`).join(', ') || 'no pairs'})`);
+      // A sample naming `derived` services shows each as a derived link: the same thing on a
+      // service nobody tagged, found by an exact hub lookup.
+      for (const sample of samples.filter(s => s.derived)) {
+        const card = await waitFor(`also on for ${sample.kind}`, async () => {
+          const card = await json(`${pinakes}/v1/resources/${docs.get(sample.kind).id}`);
+          return sample.derived.every(site => card.also_on.some(e => e.derived && e.site === site)) && card;
+        }, timeout, signal);
+        assert(card.also_on.every(e => !e.derived || (e.via && e.uri !== card.uri)), 'a derived link names its hub and is never the card');
+        report.assertions.push(`also on: ${sample.kind} derived ${sample.derived.join(', ')} (${card.also_on.filter(e => e.derived).length} derived links)`);
+      }
       if (docs.has('isbn') && docs.has('isbn_page')) report.assertions.push('a book and its edition page keep their own cards');
     }, report, journal);
     assert(report.cleanup.every(c => c.deleted), 'Tag cleanup failed; retry using journal');

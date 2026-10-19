@@ -270,5 +270,13 @@
     "kind": "pubky",
     "uri": "pubky://{author}/pub/pinakes.e2e/objects/sample",
     "type": "CreativeWork"
+  },
+  {
+    "kind": "music",
+    "uri": "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq",
+    "type": "MusicRecording",
+    "derived": [
+      "Deezer"
+    ]
   }
 ]
