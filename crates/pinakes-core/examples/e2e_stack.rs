@@ -263,7 +263,7 @@ impl Transport for Fixture {
             "commons.wikimedia.org" if u.path()=="/w/api.php" && u.query_pairs().any(|(k,v)| k=="titles" && v=="File:Golden Gate Bridge as seen from Battery East.jpg")=>("application/json",include_str!("../tests/fixtures/sources/commons/golden-gate.json").into()),
             "data.rcsb.org" if u.path()=="/rest/v1/core/entry/4HHB"=>("application/json",include_str!("../tests/fixtures/sources/pdb/entry-4hhb.json").into()),
             "pubchem.ncbi.nlm.nih.gov" if u.path().starts_with("/rest/pug/compound/cid/2244/property/")=>("application/json",include_str!("../tests/fixtures/sources/pubchem/compound-2244.json").into()),
-            "rest.uniprot.org" if u.path()=="/uniprotkb/P69905.json"=>("application/json",include_str!("../tests/fixtures/sources/uniprot/entry-p69905.json").into()),
+            "rest.uniprot.org" if u.path()=="/uniprotkb/search" && u.query_pairs().any(|(k,v)| k=="query" && v=="accession:P69905")=>("application/json",include_str!("../tests/fixtures/sources/uniprot/search-p69905.json").into()),
             "api.gbif.org" if u.path()=="/v1/species/1341976"=>("application/json",include_str!("../tests/fixtures/sources/gbif/species-1341976.json").into()),
             "api.inaturalist.org" if u.path()=="/v1/observations/333069440"=>("application/json",gunzip(include_bytes!("../tests/fixtures/sources/inaturalist/observation-333069440.json.gz"))),
             "clinicaltrials.gov" if u.path()=="/api/v2/studies/NCT04368728"=>("application/json",gunzip(include_bytes!("../tests/fixtures/sources/clinicaltrials/NCT04368728.json.gz"))),

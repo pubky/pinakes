@@ -5,17 +5,21 @@
 //! entry name (`HBA_HUMAN`) names the same entry once `name_request` finds exactly one current
 //! entry with that name. A FASTA or GFF file is the sequence or features, not the entry.
 //!
-//! UniProt redirects a merged accession to the entry it was merged into: that redirect is the
+//! An accession is read through UniProt's search by accession, which answers with the entry's
+//! fields and never redirects: the entry endpoint redirects a merged accession to the full record
+//! of the entry it was merged into, which can be larger than a card may read. A merged accession
+//! answers with the entry it was merged into, which is then read: UniProt's own record is the
 //! proof, so the link becomes an alias of that entry. A demerged accession gets its own card
-//! naming the accessions that replace it, and a deleted one is missing. The data is
-//! CC BY 4.0, credited to UniProt.
+//! naming the accessions that replace it, and a deleted one is missing. The data is CC BY 4.0,
+//! credited to UniProt.
 use super::{
     kit::{encode, fetch, host_and_segments, int, json, text, time, Card, Link, Request},
     Example, Source,
 };
 use crate::model::ResourceMeta;
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
+use serde_json::Value;
 
 pub const SITE: &str = "UniProt";
 const VIA: &str = "uniprot";
@@ -122,12 +126,13 @@ pub fn page(acc: &str) -> String {
     format!("https://www.uniprot.org/uniprotkb/{acc}/entry")
 }
 
-/// The entry's record. UniProt redirects a merged accession to the entry it was merged into,
-/// whose full record (without the `fields` list) is the answer.
+/// The entry of an accession, through the search by accession: the entry's fields, or for an
+/// inactive accession its own record (never a redirect).
 pub fn request(acc: &str) -> Option<Request> {
     Request::get(&format!(
-        "https://rest.uniprot.org/uniprotkb/{}.json?fields={FIELDS}",
-        accession(acc)?
+        "https://rest.uniprot.org/uniprotkb/search?query={}&fields={}&format=json&size=2",
+        encode(&format!("accession:{}", accession(acc)?)),
+        encode(FIELDS)
     ))
 }
 
@@ -157,31 +162,46 @@ pub fn parse_name(status: u16, raw: &[u8], name: &str) -> Result<Option<String>>
     Ok(entry["primaryAccession"].as_str().and_then(accession))
 }
 
-/// An entry, or `None` when the accession was never assigned or its entry was deleted. `url` is
-/// the URL that answered: when UniProt redirected a merged accession there, the card is the
-/// entry it names (whose root the link is then an alias of).
-pub fn parse(status: u16, raw: &[u8], acc: &str, url: &str) -> Result<Option<Card>> {
-    let Some(v) = json(status, raw, &[404])? else {
+/// What UniProt holds for an accession.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Entry {
+    /// The entry's card; a demerged accession's card names the accessions that replace it.
+    Card(Box<Card>),
+    /// The accession was merged into this entry.
+    MergedInto(String),
+}
+
+/// The entry of `acc` from the search by accession, or `None` when UniProt has no such
+/// accession or deleted it. The answer must hold exactly that accession (or nothing).
+pub fn parse(status: u16, raw: &[u8], acc: &str) -> Result<Option<Entry>> {
+    let Some(v) = json(status, raw, &[])? else {
         return Ok(None);
     };
-    let Some(Target::Accession(answered)) = from_uri(url) else {
-        bail!("the answer came from {url}");
-    };
-    let redirected = answered != acc;
-    let acc = answered.as_str();
-    ensure!(
-        v["primaryAccession"]
-            .as_str()
-            .and_then(accession)
-            .as_deref()
-            == Some(acc),
-        "the API answered for another entry"
-    );
+    let acc = accession(acc).context("not an accession")?;
+    let results = v["results"].as_array().context("no results")?;
+    let found: Vec<&Value> = results
+        .iter()
+        .filter(|r| {
+            r["primaryAccession"]
+                .as_str()
+                .and_then(accession)
+                .as_deref()
+                == Some(&acc)
+        })
+        .collect();
+    match found.as_slice() {
+        [] if results.is_empty() => Ok(None),
+        [entry] if results.len() == 1 => self::entry(entry, &acc),
+        _ => bail!("the search answered for other entries"),
+    }
+}
+
+/// One entry of a search answer.
+fn entry(v: &Value, acc: &str) -> Result<Option<Entry>> {
     let mut card = Card::new("Protein", format!("uniprot:{acc}"), page(acc));
     card.attribution = Some(ATTRIBUTION.into());
     let entry_type = v["entryType"].as_str().context("no entry type")?;
     if entry_type == "Inactive" {
-        ensure!(!redirected, "redirected to an inactive entry");
         let reason = &v["inactiveReason"];
         let kind = reason["inactiveReasonType"]
             .as_str()
@@ -196,9 +216,12 @@ pub fn parse(status: u16, raw: &[u8], acc: &str, url: &str) -> Result<Option<Car
             .flatten()
             .filter_map(|a| a.as_str().and_then(accession))
             .collect();
+        if let ("merged", [into]) = (kind.as_str(), to.as_slice()) {
+            return Ok(Some(Entry::MergedInto(into.clone())));
+        }
         card.detail("inactive", kind);
         card.detail("replaced_by", to);
-        return Ok(Some(card));
+        return Ok(Some(Entry::Card(Box::new(card))));
     }
     let protein = &v["proteinDescription"];
     card.name = text(&protein["recommendedName"]["fullName"]["value"])
@@ -267,7 +290,7 @@ pub fn parse(status: u16, raw: &[u8], acc: &str, url: &str) -> Result<Option<Car
             VIA,
         ));
     }
-    Ok(Some(card))
+    Ok(Some(Entry::Card(Box::new(card))))
 }
 
 /// The entry of a root, `uniprot:{ACC}` (the accession in upper case).
@@ -345,10 +368,23 @@ impl Source for Uniprot {
             None => return Ok(cx.missing(uri, self)),
         };
         let f = fetch(cx, &request(&acc).context("no reader")?).await?;
-        Ok(match parse(f.status, &f.body, &acc, f.url.as_str())? {
-            Some(card) => card.into_doc(cx.card(uri, self), SITE),
-            None => cx.missing(uri, self),
-        })
+        let card = match parse(f.status, &f.body, &acc)? {
+            Some(Entry::Card(card)) => *card,
+            // UniProt's record names the entry the accession now lives in: read that one; the
+            // link becomes its alias.
+            Some(Entry::MergedInto(into)) => {
+                let f = fetch(cx, &request(&into).context("no reader")?).await?;
+                match parse(f.status, &f.body, &into)? {
+                    Some(Entry::Card(card)) => *card,
+                    Some(Entry::MergedInto(again)) => {
+                        bail!("{acc} was merged into {into}, itself merged into {again}")
+                    }
+                    None => return Ok(cx.missing(uri, self)),
+                }
+            }
+            None => return Ok(cx.missing(uri, self)),
+        };
+        Ok(card.into_doc(cx.card(uri, self), SITE))
     }
 }
 
@@ -361,9 +397,12 @@ mod tests {
     fn read(name: &str) -> Vec<u8> {
         fixture::read("uniprot", name)
     }
-    /// The URL that answers an accession without a redirect.
-    fn url(acc: &str) -> String {
-        request(acc).unwrap().url.to_string()
+    /// The card of an accession's recorded search answer.
+    fn card(file: &str, acc: &str) -> Card {
+        match parse(200, &read(file), acc).unwrap() {
+            Some(Entry::Card(card)) => *card,
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -455,11 +494,15 @@ mod tests {
 
     #[test]
     fn requests() {
-        let r = request("P69905").unwrap();
+        let r = request("p69905").unwrap();
         assert_eq!(
             r.url.as_str(),
-            format!("https://rest.uniprot.org/uniprotkb/P69905.json?fields={FIELDS}")
+            format!(
+                "https://rest.uniprot.org/uniprotkb/search?query=accession%3AP69905&fields={}&format=json&size=2",
+                encode(FIELDS)
+            )
         );
+        assert!(request("HBA_HUMAN").is_none());
         assert_eq!(
             name_request("hba_human").unwrap().url.as_str(),
             "https://rest.uniprot.org/uniprotkb/search?query=id%3AHBA_HUMAN%20AND%20active%3Atrue&fields=accession%2Cid&format=json&size=2"
@@ -493,9 +536,7 @@ mod tests {
 
     #[test]
     fn haemoglobin_alpha() {
-        let card = parse(200, &read("entry-p69905.json"), "P69905", &url("P69905"))
-            .unwrap()
-            .unwrap();
+        let card = card("search-p69905.json", "P69905");
         assert_eq!(card.type_name, "Protein");
         assert_eq!(card.id, "uniprot:P69905");
         assert_eq!(card.url, "https://www.uniprot.org/uniprotkb/P69905/entry");
@@ -530,14 +571,12 @@ mod tests {
             card.also_on[0].uri,
             "https://alphafold.ebi.ac.uk/entry/P69905"
         );
-        assert!(parse(200, &read("entry-p69905.json"), "P04637", &url("P04637")).is_err());
+        assert!(parse(200, &read("search-p69905.json"), "P04637").is_err());
     }
 
     #[test]
     fn p53() {
-        let card = parse(200, &read("entry-p04637.json"), "P04637", &url("P04637"))
-            .unwrap()
-            .unwrap();
+        let card = card("search-p04637.json", "P04637");
         assert_eq!(card.name.as_deref(), Some("Cellular tumor antigen p53"));
         assert!(card
             .description
@@ -555,83 +594,36 @@ mod tests {
 
     #[test]
     fn inactive_entries() {
-        // UniProt redirects a merged accession to the entry it was merged into.
-        let followed = "https://rest.uniprot.org/uniprotkb/P04637?from=Q15086";
-        let card = parse(
-            200,
-            &read("entry-q15086-followed.json.gz"),
-            "Q15086",
-            followed,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(card.id, "uniprot:P04637");
-        assert_eq!(card.url, "https://www.uniprot.org/uniprotkb/P04637/entry");
-        assert_eq!(card.name.as_deref(), Some("Cellular tumor antigen p53"));
-        assert_eq!(card.details["gene"], "TP53");
-        assert!(!card.details.contains_key("inactive"));
-        // Its own inactive record, should it ever come without the redirect.
-        let card = parse(
-            200,
-            &read("entry-q15086-merged.json"),
-            "Q15086",
-            &url("Q15086"),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(card.id, "uniprot:Q15086");
-        assert_eq!(card.details["inactive"], "merged");
-        assert_eq!(card.details["replaced_by"], json!(["P04637"]));
-        // A redirect to an inactive entry, or to anything but an entry, is not an answer.
-        let to_inactive = "https://rest.uniprot.org/uniprotkb/P00001?from=Q15086";
-        assert!(parse(
-            200,
-            &read("entry-p00001-demerged.json"),
-            "Q15086",
-            to_inactive
-        )
-        .is_err());
-        assert!(parse(
-            200,
-            &read("entry-p69905.json"),
-            "P69905",
-            "https://www.uniprot.org/"
-        )
-        .is_err());
-        let card = parse(
-            200,
-            &read("entry-p00001-demerged.json"),
-            "P00001",
-            &url("P00001"),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(card.details["inactive"], "demerged");
-        assert_eq!(card.details["replaced_by"], json!(["P99999", "P99998"]));
+        // A merged accession answers with the entry it was merged into, which is read next.
         assert_eq!(
-            parse(
-                200,
-                &read("entry-o51290-deleted.json"),
-                "O51290",
-                &url("O51290")
-            )
-            .unwrap(),
-            None
+            parse(200, &read("search-q15086.json"), "Q15086").unwrap(),
+            Some(Entry::MergedInto("P04637".into()))
+        );
+        let merged = card("search-p04637.json", "P04637");
+        assert_eq!(merged.id, "uniprot:P04637");
+        let demerged = card("search-p00001.json", "P00001");
+        assert_eq!(demerged.id, "uniprot:P00001");
+        assert_eq!(demerged.name, None);
+        assert_eq!(demerged.details["inactive"], "demerged");
+        assert_eq!(demerged.details["replaced_by"], json!(["P99999", "P99998"]));
+        assert_eq!(
+            parse(200, &read("search-o51290.json"), "O51290").unwrap(),
+            None,
+            "deleted"
         );
         assert_eq!(
-            parse(404, &read("entry-missing.json"), "P0DZZ9", &url("P0DZZ9")).unwrap(),
-            None
+            parse(200, &read("search-p0dzz9.json"), "P0DZZ9").unwrap(),
+            None,
+            "never assigned"
         );
-        // Egress follows redirects: a 303 is never an answer.
-        assert!(parse(
-            303,
-            &read("entry-q15086-merged.json"),
-            "Q15086",
-            &url("Q15086")
-        )
-        .is_err());
-        assert!(parse(429, b"", "P69905", &url("P69905")).is_err());
-        assert!(parse(500, b"", "P69905", &url("P69905")).is_err());
+        // An answer for other accessions, or for more than one entry, is not an answer.
+        assert!(parse(200, &read("search-q15086.json"), "P00001").is_err());
+        let two = br#"{"results":[{"primaryAccession":"P69905","entryType":"Inactive"},{"primaryAccession":"P69905","entryType":"Inactive"}]}"#;
+        assert!(parse(200, two, "P69905").is_err());
+        assert!(parse(200, b"{}", "P69905").is_err());
+        assert!(parse(400, b"{}", "P69905").is_err());
+        assert!(parse(429, b"", "P69905").is_err());
+        assert!(parse(500, b"", "P69905").is_err());
     }
 
     #[test]
@@ -671,31 +663,16 @@ mod tests {
 
     #[test]
     fn documents() {
-        let cards = [
-            parse(200, &read("entry-p69905.json"), "P69905", &url("P69905")),
-            parse(200, &read("entry-p04637.json"), "P04637", &url("P04637")),
-            parse(
-                200,
-                &read("entry-q15086-followed.json.gz"),
-                "Q15086",
-                "https://rest.uniprot.org/uniprotkb/P04637?from=Q15086",
-            ),
-            parse(
-                200,
-                &read("entry-p00001-demerged.json"),
-                "P00001",
-                &url("P00001"),
-            ),
-        ];
-        for card in cards {
-            let card = card.unwrap().unwrap();
+        for card in [
+            card("search-p69905.json", "P69905"),
+            card("search-p04637.json", "P04637"),
+            card("search-p00001.json", "P00001"),
+        ] {
             let doc = crate::sources::kit::checked(&Uniprot, &card);
             assert_eq!(doc.source_root.as_deref(), Some(card.id.as_str()));
             assert_eq!(doc.attributes["page_url"], card.url);
         }
-        let card = parse(200, &read("entry-p69905.json"), "P69905", &url("P69905"))
-            .unwrap()
-            .unwrap();
+        let card = card("search-p69905.json", "P69905");
         let doc = card.into_doc(ResourceMeta::new("uniprot:P69905", "uniprot", 60), SITE);
         assert_eq!(doc.site, "UniProt");
         assert_eq!(doc.attributes["genes"], "HBA1; HBA2");
