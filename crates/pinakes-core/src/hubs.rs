@@ -354,6 +354,28 @@ pub mod wikidata {
         items.sort_by(|a, b| a.qid.cmp(&b.qid));
         items
     }
+    /// The item a Wikidata item link names, with the link's canonical form
+    /// (`https://www.wikidata.org/wiki/{Q-id}`): `/wiki/Q…`, `/entity/Q…` and
+    /// `/wiki/Special:EntityPage/Q…`, on `www.`, `m.` or the bare host.
+    pub fn item_link(uri: &str) -> Option<(String, String)> {
+        let url = url::Url::parse(uri).ok()?;
+        if !matches!(url.scheme(), "http" | "https")
+            || !matches!(
+                url.host_str()?,
+                "www.wikidata.org" | "m.wikidata.org" | "wikidata.org"
+            )
+        {
+            return None;
+        }
+        let id = url
+            .path()
+            .strip_prefix("/wiki/Special:EntityPage/")
+            .or_else(|| url.path().strip_prefix("/wiki/"))
+            .or_else(|| url.path().strip_prefix("/entity/"))?;
+        let qid = qid(id)?;
+        let canonical = format!("https://www.wikidata.org/wiki/{qid}");
+        Some((qid, canonical))
+    }
     /// `list=search` hits as item IDs.
     pub fn parse_search(v: &Value) -> Vec<String> {
         v["query"]["search"]

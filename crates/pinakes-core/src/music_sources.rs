@@ -315,6 +315,20 @@ fn property_url(template: &str, value: &str, storefront: &str) -> String {
     template.replace("{sf}", storefront).replace("{}", &value)
 }
 
+/// The music-service pages an item's best-rank IDs name, at any level.
+pub fn service_links(item: &wikidata::Item, storefront: &str) -> Vec<Link> {
+    let mut links = vec![];
+    for (property, _, _, template) in PROPERTIES {
+        for value in item.id(property).iter().take(4) {
+            let url = property_url(template, value, storefront);
+            if let Some(found) = music::parse(&url) {
+                links.push(Link::new(found.canonical, found.service.name(), "wikidata"));
+            }
+        }
+    }
+    links
+}
+
 /// Wikidata's item for an exact service ID.
 pub struct WikidataSource;
 #[async_trait]

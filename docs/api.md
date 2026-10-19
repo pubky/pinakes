@@ -738,6 +738,12 @@ languages first, with its Britannica, Stanford Encyclopedia of Philosophy, Inter
 of Philosophy, Scholarpedia and Namuwiki entries, and its Q-id is the key, so two editions of one
 article join. Titles are never matched across languages.
 
+**Wikidata items.** `wikidata_item`: a Wikidata item link (`/wiki/Q…`, `/entity/Q…`,
+`Special:EntityPage`, the mobile host: all aliases of `https://www.wikidata.org/wiki/{Q-id}`) is
+its own hub. Its card lists the item's encyclopedia entries, the music services its best-rank
+IDs name, and all its Wikipedia editions (the major languages first), with the Q-id as key. Only
+the item's own claims and sitelinks count, never a search.
+
 The level is exact: a track lists tracks and videos of the recording, an album lists albums and
 YouTube's album playlists, an artist lists artist pages and channels. Two editions of an album
 join through their release group. Apple Music links use the storefront

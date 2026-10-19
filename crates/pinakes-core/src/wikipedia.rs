@@ -175,13 +175,27 @@ pub fn parse_item(v: &Value) -> Option<String> {
 }
 /// An item's keys and links, without `own` (the article itself).
 pub fn found(item: &wikidata::Item, own: &Article) -> Found {
-    let mut found = Found::default();
-    if let Some(key) = hubs::key::wikidata(&item.qid) {
-        found.keys.push(Key {
+    let mut found = Found {
+        keys: item_key(item),
+        ..Default::default()
+    };
+    found.links = encyclopedias(item);
+    found.links.extend(editions(item, Some(&own.lang)));
+    found
+}
+/// An item's Q-id as a key.
+fn item_key(item: &wikidata::Item) -> Vec<Key> {
+    hubs::key::wikidata(&item.qid)
+        .map(|key| Key {
             key,
             via: "wikidata".into(),
-        });
-    }
+        })
+        .into_iter()
+        .collect()
+}
+/// An item's entries in the other encyclopedias.
+pub fn encyclopedias(item: &wikidata::Item) -> Vec<Link> {
+    let mut links = vec![];
     for e in ENCYCLOPEDIAS {
         for value in item.id(e.property).iter().filter(|v| (e.valid)(v)).take(2) {
             let value = if e.property == "P8885" {
@@ -190,18 +204,22 @@ pub fn found(item: &wikidata::Item, own: &Article) -> Found {
             } else {
                 value.clone()
             };
-            found.links.push(Link::new(
+            links.push(Link::new(
                 e.template.replace("{}", &value),
                 e.site,
                 "wikidata",
             ));
         }
     }
+    links
+}
+/// An item's Wikipedia editions (its sitelinks), the major languages first, without `skip`.
+pub fn editions(item: &wikidata::Item, skip: Option<&str>) -> Vec<Link> {
     let mut editions: Vec<Article> = item
         .sitelinks
         .values()
         .filter_map(|url| parse(url))
-        .filter(|a| a.lang != own.lang)
+        .filter(|a| Some(a.lang.as_str()) != skip)
         .collect();
     let rank = |lang: &str| {
         LANGUAGES
@@ -210,12 +228,47 @@ pub fn found(item: &wikidata::Item, own: &Article) -> Found {
             .unwrap_or(LANGUAGES.len())
     };
     editions.sort_by(|a, b| (rank(&a.lang), &a.lang).cmp(&(rank(&b.lang), &b.lang)));
-    found.links.extend(
-        editions
-            .into_iter()
-            .map(|a| Link::new(a.canonical, format!("Wikipedia ({})", a.lang), "wikidata")),
-    );
+    editions
+        .into_iter()
+        .map(|a| Link::new(a.canonical, format!("Wikipedia ({})", a.lang), "wikidata"))
+        .collect()
+}
+/// What a Wikidata item link lists: its Q-id as key; its encyclopedia entries, the music
+/// services its best-rank IDs name (every level: the item is the thing itself) and its
+/// Wikipedia editions. Only the item's own claims and sitelinks, never a search.
+pub fn item_found(item: &wikidata::Item, storefront: &str) -> Found {
+    let mut found = Found {
+        keys: item_key(item),
+        ..Default::default()
+    };
+    found.links = encyclopedias(item);
     found
+        .links
+        .extend(crate::music_sources::service_links(item, storefront));
+    found.links.extend(editions(item, None));
+    found
+}
+
+/// A Wikidata item link: the item's own hub.
+pub struct WikidataItemSource;
+#[async_trait]
+impl Source for WikidataItemSource {
+    fn id(&self) -> &'static str {
+        "wikidata_item"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        wikidata::item_link(&subject.uri).is_some()
+    }
+    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
+        let Some((qid, _)) = wikidata::item_link(&subject.uri) else {
+            return Ok(Found::default());
+        };
+        Ok(wikidata::items(&cx.egress, &[qid])
+            .await?
+            .first()
+            .map(|item| item_found(item, &cx.config.also_on.apple_storefront))
+            .unwrap_or_default())
+    }
 }
 
 /// Language editions and other encyclopedias of a Wikipedia article.
@@ -381,6 +434,54 @@ mod tests {
         );
         // Wikiquote and Wikisource sitelinks are not Wikipedia editions.
         assert!(editions.len() > 100, "{}", editions.len());
+    }
+
+    #[test]
+    fn a_wikidata_item_link_is_its_own_hub() {
+        for uri in [
+            "https://www.wikidata.org/wiki/Q90",
+            "http://www.wikidata.org/entity/Q90",
+            "https://m.wikidata.org/wiki/Q90#sitelinks",
+            "https://www.wikidata.org/wiki/Special:EntityPage/Q90",
+            "https://wikidata.org/wiki/Q90",
+        ] {
+            assert_eq!(
+                wikidata::item_link(uri),
+                Some(("Q90".into(), "https://www.wikidata.org/wiki/Q90".into())),
+                "{uri}"
+            );
+        }
+        for uri in [
+            "https://www.wikidata.org/wiki/Property:P31",
+            "https://www.wikidata.org/wiki/Q0",
+            "https://www.wikidata.org/wiki/Special:EntityData/Q90.json",
+            "https://evil.example/wiki/Q90",
+        ] {
+            assert!(wikidata::item_link(uri).is_none(), "{uri}");
+        }
+        // Kant's item: encyclopedias and every edition, English included.
+        let kant = &wikidata::parse_entities(&fixture("wd-kant.json"))[0];
+        let found = item_found(kant, "us");
+        assert_eq!(found.keys[0].key, "wikidata:Q9312");
+        let sites: Vec<&str> = found.links.iter().map(|l| l.site.as_str()).collect();
+        assert!(sites.contains(&"Britannica") && sites.contains(&"Wikipedia (en)"));
+        let editions: Vec<&&str> = sites
+            .iter()
+            .filter(|s| s.starts_with("Wikipedia"))
+            .collect();
+        assert_eq!(*editions[0], "Wikipedia (en)");
+        // OK Computer's item: the music services its IDs name, then its editions.
+        let album = wikidata::parse_entities(&fixture("wd-entities.json"))
+            .into_iter()
+            .find(|i| i.qid == "Q202996")
+            .unwrap();
+        let uris: Vec<String> = item_found(&album, "us")
+            .links
+            .into_iter()
+            .map(|l| l.uri)
+            .collect();
+        assert!(uris.contains(&"https://open.spotify.com/album/2fGCAYUMssLKiUAoNdxGLx".into()));
+        assert!(uris.contains(&"https://en.wikipedia.org/wiki/OK_Computer".into()));
     }
 
     #[test]

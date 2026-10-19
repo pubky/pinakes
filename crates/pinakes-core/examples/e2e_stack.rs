@@ -613,8 +613,8 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
     }
     // The scope stays small and explicit: only listed samples are ever fetched.
     ensure!(
-        (1..=12).contains(&selected.len()),
-        "live driver requires one to twelve sample resources"
+        (1..=16).contains(&selected.len()),
+        "live driver requires one to sixteen sample resources"
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);

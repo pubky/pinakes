@@ -412,3 +412,82 @@ async fn wikipedia_editions_join_through_their_item(pool: sqlx::PgPool) {
         .iter()
         .any(|e| e["uri"] == "https://en.wikipedia.org/wiki/Immanuel_Kant"));
 }
+
+/// A Wikidata item link is its own hub: any spelling is the item's canonical link, and its card
+/// lists the item's encyclopedia entries and Wikipedia editions from its own claims and
+/// sitelinks (one request, no search).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_wikidata_item_lists_its_editions_and_encyclopedias(pool: sqlx::PgPool) {
+    use tower::ServiceExt;
+    let spelled = "https://m.wikidata.org/wiki/Q9312";
+    let alias = store::ensure_resource(&pool, spelled).await.unwrap();
+    let id = pinakes_core::model::identity("https://www.wikidata.org/wiki/Q9312")
+        .unwrap()
+        .0;
+    let root: String = sqlx::query_scalar("SELECT root_id FROM resource_alias WHERE alias_id=$1")
+        .bind(&alias)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(root, id);
+    let mut d = ResourceMeta::new(
+        "https://www.wikidata.org/wiki/Q9312",
+        "event_platform",
+        86400,
+    );
+    d.set_type("Person");
+    d.name = Some("Immanuel Kant".into());
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let config = Config::default();
+    let cx = also_on::Context {
+        egress: egress(t.clone()),
+        config: Arc::new(config.clone()),
+    };
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    let seen = t.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "one request: {seen:?}");
+    assert!(seen[0].contains("action=wbgetentities") && seen[0].contains("ids=Q9312"));
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    let mut request = axum::http::Request::builder()
+        .uri(format!("/v1/resources/{id}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
+    ));
+    let response = app.oneshot(request).await.unwrap();
+    let bytes = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let card: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let sites: Vec<&str> = card["also_on"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["site"].as_str().unwrap())
+        .collect();
+    for site in [
+        "Britannica",
+        "Stanford Encyclopedia of Philosophy",
+        "Wikipedia (en)",
+        "Wikipedia (de)",
+    ] {
+        assert!(sites.contains(&site), "{site} in {sites:?}");
+    }
+    let keys: Vec<String> = sqlx::query_scalar("SELECT key FROM resource_key WHERE resource_id=$1")
+        .bind(&id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(keys, ["wikidata:Q9312"]);
+}

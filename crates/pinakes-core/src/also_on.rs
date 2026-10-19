@@ -181,6 +181,7 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         Arc::new(crate::music_sources::MusicBrainzSource),
         Arc::new(crate::music_sources::WikidataSource),
         Arc::new(crate::wikipedia::WikipediaSource),
+        Arc::new(crate::wikipedia::WikidataItemSource),
     ]
 }
 /// The source IDs `[also_on.sources]` may name.

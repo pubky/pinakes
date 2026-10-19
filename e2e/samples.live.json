@@ -278,5 +278,14 @@
     "derived": [
       "Deezer"
     ]
+  },
+  {
+    "kind": "wikidata",
+    "uri": "https://www.wikidata.org/wiki/Q90",
+    "type": "Place",
+    "derived": [
+      "Wikipedia (fr)",
+      "Wikipedia (en)"
+    ]
   }
 ]
