@@ -20,8 +20,8 @@ so the Message-ID is recorded (`message_id`) but merges nothing across archives.
 
 On gnusha.org, lore.kernel.org, inbox.sourceware.org and public-inbox.org the aliases apply from
 the link alone. A path segment shaped like a Message-ID on any other host is read as a message
-too: a host whose `/raw` does not answer as an mbox is remembered for a day, and its links get
-ordinary web cards.
+too: a host whose `/raw` answers something other than an mbox (a 404 for one message aside) is
+remembered for a day, and its links get ordinary web cards.
 
 ## What it reads
 

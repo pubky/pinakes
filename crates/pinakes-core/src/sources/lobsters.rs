@@ -50,7 +50,14 @@ pub fn card(
     anyhow::ensure!(v["short_id"] == id, "Lobsters answered for another story");
     doc.set_type("DiscussionForumPosting");
     doc.name = Some(text(&v["title"]).context("no title")?);
-    doc.description = text(&v["description_plain"]);
+    doc.description = text(&v["description_plain"]).map(|d| {
+        let d = d.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut cut: String = d.chars().take(200).collect();
+        if cut.len() < d.len() {
+            cut.push('…');
+        }
+        cut
+    });
     for (key, value) in [
         ("author", text(&v["submitter_user"])),
         ("published", text(&v["created_at"])),
@@ -168,6 +175,13 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(card(base, "abcdef", 200, &read("lobsters-wtthju.json")).is_err());
+        assert!(card(base.clone(), "abcdef", 200, &read("lobsters-wtthju.json")).is_err());
+        // A long description is cut to 200 characters.
+        let mut long: Value = serde_json::from_slice(&read("lobsters-wtthju.json")).unwrap();
+        long["description_plain"] = "word ".repeat(500).into();
+        let doc = card(base, "wtthju", 200, &serde_json::to_vec(&long).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc.description.unwrap().chars().count(), 201);
     }
 }

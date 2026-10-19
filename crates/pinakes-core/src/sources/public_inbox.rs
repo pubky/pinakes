@@ -560,6 +560,8 @@ impl Source for PublicInbox {
                 doc.site = host;
                 return Ok(doc);
             }
+            // A missing message says nothing about the host; any other answer does.
+            404 => return Err(Declined.into()),
             _ => {
                 if !known {
                     ARCHIVES.set(&host, false);
@@ -787,6 +789,12 @@ mod tests {
                 "text/plain",
                 read("raw-missing.html"),
             ),
+            (
+                "https://pages.example.org/devel/abc@example.org/raw",
+                200,
+                "text/html",
+                b"<html>a page</html>".to_vec(),
+            ),
         ]);
         let cx = Context {
             egress: &egress,
@@ -817,13 +825,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(doc.status, Status::Missing);
-        // Another host that does not answer as public-inbox: an ordinary web card from now on.
+        // Another host: a missing message (404) says nothing about it, any other answer that
+        // is no mbox makes its links ordinary web cards from now on.
         let other = "https://lists.example.org/devel/abc@example.org/";
         assert!(PublicInbox
             .resolve(&cx, other)
             .await
             .unwrap_err()
             .is::<Declined>());
-        assert!(!PublicInbox.reads(other));
+        assert!(PublicInbox.reads(other));
+        let page = "https://pages.example.org/devel/abc@example.org/";
+        assert!(PublicInbox
+            .resolve(&cx, page)
+            .await
+            .unwrap_err()
+            .is::<Declined>());
+        assert!(!PublicInbox.reads(page));
     }
 }

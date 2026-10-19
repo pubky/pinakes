@@ -18,6 +18,13 @@ fn item(value: &str) -> Option<u64> {
 
 /// The item of `https://stacker.news/items/{id}[/…]`; with `?commentId={c}` the comment `c`.
 pub fn of_uri(uri: &str) -> Option<u64> {
+    let (item, comment) = parts(uri)?;
+    Some(comment.unwrap_or(item))
+}
+
+/// The item a link's path names and the comment its `?commentId=` names, if any. The comment
+/// counts only once its own record says it is in that item's thread.
+fn parts(uri: &str) -> Option<(u64, Option<u64>)> {
     let url = web_url(uri)?;
     if !matches!(url.host_str()?, "stacker.news" | "www.stacker.news") {
         return None;
@@ -30,7 +37,7 @@ pub fn of_uri(uri: &str) -> Option<u64> {
         .query_pairs()
         .find(|(k, _)| k == "commentId")
         .and_then(|(_, v)| item(&v));
-    comment.or_else(|| item(id))
+    Some((item(id)?, comment.filter(|c| Some(*c) != item(id))))
 }
 
 pub fn root(id: u64) -> String {
@@ -114,8 +121,13 @@ impl Source for StackerNews {
     fn reads(&self, uri: &str) -> bool {
         of_uri(uri).is_some()
     }
+    /// A link naming a comment is an alias only after its fetch (the comment must be in the
+    /// thread its path names).
     fn alias_root(&self, uri: &str) -> Option<String> {
-        let root = root(of_uri(uri)?);
+        let (item, None) = parts(uri)? else {
+            return None;
+        };
+        let root = root(item);
         let (_, normalized, _) = crate::model::identity(uri).ok()?;
         (root != normalized).then_some(root)
     }
@@ -148,19 +160,34 @@ impl Source for StackerNews {
         ]
     }
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
-        let id = of_uri(uri).context("not a Stacker News item")?;
-        let f = cx
-            .fetch(
-                API,
-                &FetchOptions {
-                    accept: Some("application/json".into()),
-                    json_body: Some(query(id)),
-                    ..Default::default()
-                },
-            )
-            .await?;
-        Ok(card(cx.card(uri, self), id, f.status, &f.body)?
-            .unwrap_or_else(|| cx.missing(uri, self)))
+        let (item, comment) = parts(uri).context("not a Stacker News item")?;
+        let get = |id: u64| async move {
+            let f = cx
+                .fetch(
+                    API,
+                    &FetchOptions {
+                        accept: Some("application/json".into()),
+                        json_body: Some(query(id)),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            card(cx.card(uri, self), id, f.status, &f.body)
+        };
+        if let Some(comment) = comment {
+            // The comment, when its record puts it in the path's thread; else the thread.
+            if let Some(mut doc) = get(comment).await? {
+                if doc.attributes.get("thread") == Some(&root(item)) {
+                    doc.source_root = Some(root(comment));
+                    return Ok(doc);
+                }
+            }
+        }
+        let mut doc = get(item).await?.unwrap_or_else(|| cx.missing(uri, self));
+        if comment.is_some() {
+            doc.source_root = Some(root(item));
+        }
+        Ok(doc)
     }
 }
 
@@ -187,10 +214,6 @@ mod tests {
                 "https://stacker.news/items/1596515",
             ),
             (
-                "https://stacker.news/items/1596515?commentId=1596517",
-                "https://stacker.news/items/1596517",
-            ),
-            (
                 "https://stacker.news/items/1596515/related",
                 "https://stacker.news/items/1596515",
             ),
@@ -201,6 +224,11 @@ mod tests {
             StackerNews.alias_root("https://stacker.news/items/1596515"),
             None
         );
+        // A comment named by `?commentId=` is not trusted from the link alone.
+        assert_eq!(
+            StackerNews.alias_root("https://stacker.news/items/1596515?commentId=1596517"),
+            None
+        );
         for uri in [
             "https://stacker.news/~bitcoin",
             "https://stacker.news/items/x",
@@ -208,6 +236,11 @@ mod tests {
         ] {
             assert!(!StackerNews.reads(uri), "{uri}");
         }
+        // The comment's own record names its thread, which the link's path must match.
+        let comment = card(base(1596517), 1596517, 200, &read("sn-item-1596517.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(comment.attributes["thread"], root(1596515));
         let recorded: Value = serde_json::from_slice(&read("provenance.json")).unwrap();
         assert_eq!(recorded["sn-item-1"]["body"], query(1));
     }

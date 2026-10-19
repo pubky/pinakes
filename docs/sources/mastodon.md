@@ -14,9 +14,10 @@ A server's copy of another server's post (`https://{other}/@{account}@{server}/{
 answer naming an id on another host, keeps its own card, with the id as the `activitypub_id`
 fact: only the id's own server can say that two links are one post.
 
-A server that does not answer as Mastodon (another program, or one that refuses unauthenticated
-reads) is remembered for a day, and its links get ordinary web cards (which read ActivityPub
-where the server offers it).
+A server whose answer is not JSON (another program) is remembered for a day, and its links get
+ordinary web cards (which read ActivityPub where the server offers it). A JSON refusal (a private
+post, a server that refuses unauthenticated reads) gives the link a web card without marking
+the server.
 
 ## What it reads
 

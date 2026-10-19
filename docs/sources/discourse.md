@@ -15,8 +15,9 @@ On any host, these are read as forum links:
 
 The forum names the topic's slug, and the address with the slug is the root: every other address
 of the topic or post (without the slug, with tracking such as `?u={user}`, or `/p/{id}`) becomes an
-alias of it after its first fetch. A site that does not answer as Discourse is remembered for a
-day, and its links get ordinary web cards.
+alias of it after its first fetch. A site whose answer is not Discourse's JSON is remembered for a
+day, and its links get ordinary web cards; a JSON refusal (a topic in a private category) is
+about that topic alone.
 
 ## What it reads
 

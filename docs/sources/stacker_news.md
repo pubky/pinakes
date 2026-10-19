@@ -8,7 +8,8 @@ limit (one request per second). Posts and comments are social content: the card 
 
 `https://stacker.news/items/{id}` is the root; the item's sub-pages and referral forms
 (`/items/{id}/r/{name}`, `?r={name}`) are aliases of it. A link to a comment in its thread,
-`/items/{post}?commentId={comment}`, is an alias of the comment's own item.
+`/items/{post}?commentId={comment}`, becomes an alias of the comment's own item after its first
+fetch, when the comment's record puts it in that thread; otherwise it stands for the thread.
 
 ## What it reads
 

@@ -213,8 +213,11 @@ impl Source for Mastodon {
             )
             .await?;
         let result = card(cx.card(uri, self), &target, f.status, &f.body);
+        // Only an answer that is not JSON at all says the server is not Mastodon; a JSON
+        // refusal (a private post, one server's rule) is about this post alone.
+        let json = serde_json::from_slice::<Value>(&f.body).is_ok();
         match &result {
-            Err(e) if e.is::<Declined>() => INSTANCES.set(&target.host, false),
+            Err(e) if e.is::<Declined>() && !json => INSTANCES.set(&target.host, false),
             Ok(Some(_)) => INSTANCES.set(&target.host, true),
             _ => {}
         }

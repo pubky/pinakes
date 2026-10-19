@@ -24,7 +24,8 @@ fn slug(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 200
         && value.bytes().any(|b| !b.is_ascii_digit())
-        && !value.contains(['/', '?', '#'])
+        && !value.contains(['/', '?', '#', '\\'])
+        && !value.contains("..")
 }
 
 /// What a forum link names.
@@ -135,7 +136,8 @@ pub fn topic_card(
     let Some(v) = json(status, body)? else {
         return Ok(None);
     };
-    let (Some(title), Some(slug)) = (text(&v["title"]), text(&v["slug"])) else {
+    let (Some(title), Some(slug)) = (text(&v["title"]), text(&v["slug"]).filter(|s| slug(s)))
+    else {
         return Err(Declined.into());
     };
     anyhow::ensure!(
@@ -205,7 +207,7 @@ pub fn post_card(
     let (Some(topic), Some(n), Some(slug)) = (
         v["topic_id"].as_u64(),
         v["post_number"].as_u64(),
-        text(&v["topic_slug"]),
+        text(&v["topic_slug"]).filter(|s| slug(s)),
     ) else {
         return Err(Declined.into());
     };
@@ -280,8 +282,11 @@ impl Source for Discourse {
             }
             Target::Post { id, .. } => post_card(cx.card(uri, self), &host, *id, f.status, &f.body),
         };
+        // Only an answer that is not JSON at all says the site is not Discourse; a JSON refusal
+        // (a private category) is about this topic alone.
+        let json = serde_json::from_slice::<Value>(&f.body).is_ok();
         match &result {
-            Err(e) if e.is::<Declined>() => FORUMS.set(&host, false),
+            Err(e) if e.is::<Declined>() && !json => FORUMS.set(&host, false),
             Ok(_) => FORUMS.set(&host, true),
             _ => {}
         }
@@ -346,6 +351,23 @@ mod tests {
             "http://delvingbitcoin.org/t/304",
         ] {
             assert_eq!(Target::of_uri(uri), None, "{uri}");
+        }
+    }
+
+    #[test]
+    fn a_slug_never_changes_the_path() {
+        for bad in ["a/../../x", "..", "a\\b", "x?y", "123"] {
+            let mut v: Value = serde_json::from_slice(&read("topic-304.json")).unwrap();
+            v["slug"] = bad.into();
+            let answer = topic_card(
+                base(),
+                HOST,
+                304,
+                None,
+                200,
+                &serde_json::to_vec(&v).unwrap(),
+            );
+            assert!(answer.is_err(), "{bad}");
         }
     }
 
