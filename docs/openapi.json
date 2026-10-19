@@ -1405,6 +1405,14 @@
               "group-9780140328721": {
                 "summary": "isbn:9780140328721, https://openlibrary.org/books/OL7353617M",
                 "value": "3089a188a2893b2477e80be72b8fdb8c"
+              },
+              "group-en-wikipedia-org-wiki-immanuel-kant": {
+                "summary": "https://en.wikipedia.org/wiki/Immanuel_Kant, https://de.wikipedia.org/wiki/Immanuel_Kant",
+                "value": "ca608de60e30acbafbdf80065b3dad2d"
+              },
+              "group-open-spotify-com-track-6lgjvl0xdtc73rj1mmpotq": {
+                "summary": "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq, https://www.deezer.com/track/138539973",
+                "value": "722489247ea3402853880aea5ba198e0"
               }
             },
             "in": "path",
@@ -1722,6 +1730,12 @@
                     "uri": "https://www.courtlistener.com/opinion/2812209/obergefell-v-hodges/"
                   }
                 },
+                "resolve-de-wikipedia-org-wiki-immanuel-kant": {
+                  "summary": "https://de.wikipedia.org/wiki/Immanuel_Kant",
+                  "value": {
+                    "uri": "https://de.wikipedia.org/wiki/Immanuel_Kant"
+                  }
+                },
                 "resolve-dir8gnjfnhdn5cpo8gxmfxfpqm9kffkoqpmsefcjkdpkxo15d5ey-pub-pin": {
                   "summary": "pubky://dir8gnjfnhdn5cpo8gxmfxfpqm9kffkoqpmsefcjkdpkxo15d5ey/pub/pinakes.e2e/none.json",
                   "value": {
@@ -1786,6 +1800,12 @@
                   "summary": "https://en.wikipedia.org/wiki/Bitcoin",
                   "value": {
                     "uri": "https://en.wikipedia.org/wiki/Bitcoin"
+                  }
+                },
+                "resolve-en-wikipedia-org-wiki-immanuel-kant": {
+                  "summary": "https://en.wikipedia.org/wiki/Immanuel_Kant",
+                  "value": {
+                    "uri": "https://en.wikipedia.org/wiki/Immanuel_Kant"
                   }
                 },
                 "resolve-en-wikipedia-org-wiki-lugano": {
@@ -2100,6 +2120,24 @@
                     "uri": "https://mobilizon.fr/events/86a665ae-e495-4e4f-88d4-4cffd44a82f1"
                   }
                 },
+                "resolve-music-apple-com-gb-album-ok-computer-1097861387": {
+                  "summary": "https://music.apple.com/gb/album/ok-computer/1097861387",
+                  "value": {
+                    "uri": "https://music.apple.com/gb/album/ok-computer/1097861387"
+                  }
+                },
+                "resolve-music-apple-com-gb-song-1097861770": {
+                  "summary": "https://music.apple.com/gb/song/1097861770",
+                  "value": {
+                    "uri": "https://music.apple.com/gb/song/1097861770"
+                  }
+                },
+                "resolve-music-youtube-com-playlist-list-olak5uy-nc6afxsnmk8ofml8df9q": {
+                  "summary": "https://music.youtube.com/playlist?list=OLAK5uy_nc6afxSnmK8OFML8dF9q_0D1MBMXsGnL4",
+                  "value": {
+                    "uri": "https://music.youtube.com/playlist?list=OLAK5uy_nc6afxSnmK8OFML8dF9q_0D1MBMXsGnL4"
+                  }
+                },
                 "resolve-n26-com": {
                   "summary": "https://n26.com/",
                   "value": {
@@ -2124,10 +2162,34 @@
                     "uri": "nostr:note1qqqdltcknk9rq52w5xq5srdx3znx4cvr4nmst5xz2rtwkm87ay9qeuwqtd"
                   }
                 },
+                "resolve-open-qobuz-com-album-0634904078164": {
+                  "summary": "https://open.qobuz.com/album/0634904078164",
+                  "value": {
+                    "uri": "https://open.qobuz.com/album/0634904078164"
+                  }
+                },
+                "resolve-open-spotify-com-album-6dviqq8qmq5gbnj9shoyge": {
+                  "summary": "https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE",
+                  "value": {
+                    "uri": "https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE"
+                  }
+                },
+                "resolve-open-spotify-com-artist-4z8w4fkeb5yxbusrsdqvpb": {
+                  "summary": "https://open.spotify.com/artist/4Z8W4fKeB5YxbusRsdQVPb",
+                  "value": {
+                    "uri": "https://open.spotify.com/artist/4Z8W4fKeB5YxbusRsdQVPb"
+                  }
+                },
                 "resolve-open-spotify-com-show-4rooj6egrf8k2irywzwomk": {
                   "summary": "https://open.spotify.com/show/4rOoJ6Egrf8K2IrywzwOMk",
                   "value": {
                     "uri": "https://open.spotify.com/show/4rOoJ6Egrf8K2IrywzwOMk"
+                  }
+                },
+                "resolve-open-spotify-com-track-6lgjvl0xdtc73rj1mmpotq": {
+                  "summary": "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq",
+                  "value": {
+                    "uri": "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq"
                   }
                 },
                 "resolve-openlibrary-org-books-ol7353617m": {
@@ -2208,6 +2270,12 @@
                     "uri": "https://lore.kernel.org/git/pull.2458.git.git.1792437798463.gitgitgadget@gmail.com/"
                   }
                 },
+                "resolve-radiohead-bandcamp-com-album-ok-computer": {
+                  "summary": "https://radiohead.bandcamp.com/album/ok-computer",
+                  "value": {
+                    "uri": "https://radiohead.bandcamp.com/album/ok-computer"
+                  }
+                },
                 "resolve-ror-1": {
                   "summary": "https://ror.org/03yrm5c26",
                   "value": {
@@ -2280,6 +2348,12 @@
                     "uri": "https://ti.to/scipy/scipy2026.ics"
                   }
                 },
+                "resolve-tidal-com-track-58990512": {
+                  "summary": "https://tidal.com/track/58990512",
+                  "value": {
+                    "uri": "https://tidal.com/track/58990512"
+                  }
+                },
                 "resolve-uk-parliament-bills-1": {
                   "summary": "https://bills.parliament.uk/bills/3737",
                   "value": {
@@ -2332,6 +2406,18 @@
                   "summary": "https://www.calendarlabs.com/ical-calendar/ics/76/US_Holidays.ics",
                   "value": {
                     "uri": "https://www.calendarlabs.com/ical-calendar/ics/76/US_Holidays.ics"
+                  }
+                },
+                "resolve-www-deezer-com-album-14879699": {
+                  "summary": "https://www.deezer.com/album/14879699",
+                  "value": {
+                    "uri": "https://www.deezer.com/album/14879699"
+                  }
+                },
+                "resolve-www-deezer-com-track-138539973": {
+                  "summary": "https://www.deezer.com/track/138539973",
+                  "value": {
+                    "uri": "https://www.deezer.com/track/138539973"
                   }
                 },
                 "resolve-www-designmynight-com-london-whats-on-theatre-the-magic-hour": {
@@ -2996,6 +3082,28 @@
           },
           {
             "description": "Links carrying one exact identifier, on any service and in any spelling:\n`mbid:{uuid}` (a MusicBrainz recording, release, release group or artist),\n`wikidata:{Q-id}`, `isrc:{code}` or `upc:{barcode}`.",
+            "examples": {
+              "(none)": {
+                "summary": "(none)",
+                "value": ""
+              },
+              "key-634904078164": {
+                "summary": "upc:634904078164",
+                "value": "upc:634904078164"
+              },
+              "key-9f9cf187-d6f9-437f-9d98-d59cdbd52757": {
+                "summary": "mbid:9f9cf187-d6f9-437f-9d98-d59cdbd52757",
+                "value": "mbid:9f9cf187-d6f9-437f-9d98-d59cdbd52757"
+              },
+              "key-gbaye9701376": {
+                "summary": "isrc:GBAYE9701376",
+                "value": "isrc:GBAYE9701376"
+              },
+              "key-q9312": {
+                "summary": "wikidata:Q9312",
+                "value": "wikidata:Q9312"
+              }
+            },
             "in": "query",
             "name": "key",
             "required": false,
@@ -3128,6 +3236,18 @@
               "sort-start": {
                 "summary": "start",
                 "value": "start"
+              },
+              "trending-24h": {
+                "summary": "trending, window=24h",
+                "value": "trending"
+              },
+              "trending-30d": {
+                "summary": "trending, window=30d",
+                "value": "trending"
+              },
+              "trending-7d": {
+                "summary": "trending, window=7d",
+                "value": "trending"
               }
             },
             "in": "query",
@@ -3142,6 +3262,24 @@
           },
           {
             "description": "With `sort=trending`: how far back references count, `1h`–`90d` (`{n}h` or `{n}d`),\ndefault `7d`.",
+            "examples": {
+              "(none)": {
+                "summary": "(none)",
+                "value": ""
+              },
+              "trending-24h": {
+                "summary": "24h",
+                "value": "24h"
+              },
+              "trending-30d": {
+                "summary": "30d",
+                "value": "30d"
+              },
+              "trending-7d": {
+                "summary": "7d",
+                "value": "7d"
+              }
+            },
             "in": "query",
             "name": "window",
             "required": false,

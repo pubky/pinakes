@@ -204,11 +204,24 @@ of the same URIs and checks that this list matches.
 | `POST /v1/resolve {"uri":"geo:47.3769,8.5417"}` | Place |
 | `POST /v1/resolve {"uri":"https://en.wikipedia.org/wiki/Bitcoin"}` | Article |
 | `POST /v1/resolve {"uri":"https://en.wikipedia.org/wiki/Lugano"}` | Article |
+| `POST /v1/resolve {"uri":"https://en.wikipedia.org/wiki/Immanuel_Kant"}` | Article |
+| `POST /v1/resolve {"uri":"https://de.wikipedia.org/wiki/Immanuel_Kant"}` | Article |
 | `POST /v1/resolve {"uri":"https://www.wikidata.org/wiki/Q90"}` | Place |
 | `POST /v1/resolve {"uri":"https://n26.com/"}` | WebPage |
 | `POST /v1/resolve {"uri":"https://pubky.org/"}` | CreativeWork |
 | `POST /v1/resolve {"uri":"https://casa.io/"}` | WebPage |
 | `POST /v1/resolve {"uri":"https://example.org/"}` | WebPage |
+| `POST /v1/resolve {"uri":"https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq"}` | MusicRecording |
+| `POST /v1/resolve {"uri":"https://music.apple.com/gb/song/1097861770"}` | MusicRecording |
+| `POST /v1/resolve {"uri":"https://www.deezer.com/track/138539973"}` | MusicRecording |
+| `POST /v1/resolve {"uri":"https://tidal.com/track/58990512"}` | MusicRecording |
+| `POST /v1/resolve {"uri":"https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE"}` | MusicAlbum |
+| `POST /v1/resolve {"uri":"https://music.apple.com/gb/album/ok-computer/1097861387"}` | MusicAlbum |
+| `POST /v1/resolve {"uri":"https://www.deezer.com/album/14879699"}` | MusicAlbum |
+| `POST /v1/resolve {"uri":"https://radiohead.bandcamp.com/album/ok-computer"}` | MusicAlbum |
+| `POST /v1/resolve {"uri":"https://open.qobuz.com/album/0634904078164"}` | MusicAlbum |
+| `POST /v1/resolve {"uri":"https://music.youtube.com/playlist?list=OLAK5uy_nc6afxSnmK8OFML8dF9q_0D1MBMXsGnL4"}` | MusicPlaylist |
+| `POST /v1/resolve {"uri":"https://open.spotify.com/artist/4Z8W4fKeB5YxbusRsdQVPb"}` | MusicGroup |
 | `POST /v1/resolve {"uri":"https://www.youtube.com/watch?v=dQw4w9WgXcQ"}` | VideoObject |
 | `POST /v1/resolve {"uri":"https://www.youtube.com/watch?v=Up2i2Z4m-Kg"}` | VideoObject |
 | `POST /v1/resolve {"uri":"https://vimeo.com/76979871"}` | VideoObject |
@@ -280,6 +293,13 @@ GET /v1/search?from=now+7d&to=now+30d
 GET /v1/search?sort=start
 GET /v1/search?sort=recent
 GET /v1/search?sort=activity
+GET /v1/search?sort=trending&window=24h
+GET /v1/search?sort=trending&window=7d
+GET /v1/search?sort=trending&window=30d
+GET /v1/search?key=mbid:9f9cf187-d6f9-437f-9d98-d59cdbd52757
+GET /v1/search?key=isrc:GBAYE9701376
+GET /v1/search?key=upc:634904078164
+GET /v1/search?key=wikidata:Q9312
 GET /v1/search?collapse=group&type=Book
 GET /v1/search?collapse=group&type=ScholarlyArticle
 GET /v1/search?bbox=8.90,45.98,9.00,46.03&cluster=12
@@ -317,6 +337,8 @@ GET /v1/resources/by-uri?uri=pubky:%2F%2F47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e
 ```text
 GET /v1/groups/d1b4a3fefc115a5b7ea5bed6fb231011
 GET /v1/groups/3089a188a2893b2477e80be72b8fdb8c
+GET /v1/groups/722489247ea3402853880aea5ba198e0
+GET /v1/groups/ca608de60e30acbafbdf80065b3dad2d
 ```
 
 ### GET /v1/resources/{id}/occurrences
