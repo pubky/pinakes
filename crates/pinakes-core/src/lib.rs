@@ -10,6 +10,7 @@ pub mod config;
 pub mod event;
 pub mod group_keys;
 pub mod groups;
+pub mod hubs;
 pub mod identity;
 pub mod ingest;
 pub mod locks;
