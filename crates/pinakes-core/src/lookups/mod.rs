@@ -170,6 +170,45 @@ pub(crate) mod fixture {
 mod tests {
     use super::*;
 
+    /// Link-derived text may hold any character: no link or id check may slice a string inside
+    /// one.
+    #[test]
+    fn a_multibyte_character_anywhere_in_a_link_never_panics() {
+        let links = [
+            "https://arxiv.org/abs/1304.1068v2",
+            "https://arxiv.org/pdf/2101.00001v1.pdf",
+            "http://arxiv.org/abs/hep-th/9901001",
+            "https://doi.org/10.48550/arXiv.1304.1068",
+            "https://www.alphaxiv.org/abs/1706.03762",
+            "https://crates.io/crates/serde_json",
+            "https://docs.rs/crate/rand/0.10.3",
+            "https://www.npmjs.com/package/@sigstore/sign",
+            "https://www.jsdelivr.com/package/npm/vite",
+            "https://pypi.org/project/urllib3/",
+            "https://github.com/npm/node-semver.git",
+            "https://store.steampowered.com/app/620/Portal_2/",
+            "https://www.pcgamingwiki.com/api/appid.php?appid=620",
+            "https://example.com/",
+            "Q7024",
+        ];
+        for link in links {
+            for at in (0..=link.len()).filter(|i| link.is_char_boundary(*i)) {
+                for insert in ["é", "€", "😀", "\u{301}"] {
+                    let s = format!("{}{insert}{}", &link[..at], &link[at..]);
+                    papers::arxiv_from_uri(&s);
+                    papers::arxiv_id(&s);
+                    packages::Package::from_uri(&s);
+                    packages::Repo::from_url(&s);
+                    games::appid_from_uri(&s);
+                    games::appid(&s);
+                    places::wikidata_tag(&s);
+                    wikidata::qid(&s);
+                    archive::wayback_request(&s, chrono::Utc::now());
+                }
+            }
+        }
+    }
+
     #[test]
     fn statuses() {
         assert_eq!(body(200, b"x", &[404]).unwrap(), Some(&b"x"[..]));
