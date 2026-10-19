@@ -134,7 +134,8 @@ CREATE FUNCTION also_on(unit text, resource text, cap integer, members boolean) 
  SELECT coalesce((SELECT jsonb_agg(e ORDER BY o,k1,k2) FROM (SELECT * FROM entries ORDER BY o,k1,k2 LIMIT cap) x),'[]'::jsonb)
 $$;
 
--- A music service's URL forms are spellings of one object (`music::parse`).
+-- A music service's and Wikipedia's URL forms are spellings of one object (`music::parse`,
+-- `wikipedia::parse`).
 ALTER TABLE resource_alias DROP CONSTRAINT resource_alias_basis;
 ALTER TABLE resource_alias ADD CONSTRAINT resource_alias_basis CHECK ((basis = ANY (ARRAY['cursor'::text, 'osm'::text, 'identifier'::text, 'service'::text, 'tracking'::text, 'canonical'::text])));
 

@@ -477,6 +477,9 @@ root, and a read, lookup, change query or occurrence read of the alias answers w
   track) → `https://music.amazon.{tld}/{kind}/{id}`; Bandcamp without parameters. Short links
   that need a request to expand (`spotify.link`, `deezer.page.link`, `on.soundcloud.com`) are not
   folded.
+- **Wikipedia articles**: the mobile host, `index.php?title=…` (a revision with `oldid` too),
+  spaces and percent-encoding are aliases of `https://{lang}.wikipedia.org/wiki/{Title}`. A
+  redirect's title stays its own link.
 - **The page's own canonical**: after a fetch, a page whose head canonical link or
   all-permanent redirect chain names a URL that differs from it only by a trailing slash and tracking
   parameters becomes an alias of that URL. A canonical to another path (a homepage, a sibling
@@ -705,6 +708,12 @@ is looked up exactly, never by title or name:
   TIDAL, Qobuz, YouTube, SoundCloud, Amazon Music, Bandcamp), read back and compared exactly
   (two items are ambiguous and give nothing); its other music-service IDs as links and its Q-id
   and MusicBrainz ID as keys.
+
+**Wikipedia.** `wikipedia`: the article's own Wikipedia names its Wikidata item (following
+redirects); the item's other language editions are listed as `Wikipedia ({lang})`, the major
+languages first, with its Britannica, Stanford Encyclopedia of Philosophy, Internet Encyclopedia
+of Philosophy, Scholarpedia and Namuwiki entries, and its Q-id is the key, so two editions of one
+article join. Titles are never matched across languages.
 
 The level is exact: a track lists tracks and videos of the recording, an album lists albums and
 YouTube's album playlists, an artist lists artist pages and channels. Two editions of an album

@@ -30,6 +30,7 @@ pub mod sources;
 pub mod spatial;
 pub mod store;
 pub mod telemetry;
+pub mod wikipedia;
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
