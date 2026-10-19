@@ -106,7 +106,9 @@ impl Fixture {
             {"kind":"mastodon","uri":"https://mastodon.social/@Gargron/1","type":"SocialMediaPosting"},
             {"kind":"discourse","uri":"https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304","type":"DiscussionForumPosting"},
             {"kind":"forgejo","uri":"https://codeberg.org/forgejo/forgejo","type":"SoftwareSourceCode"},
-            {"kind":"gitlab","uri":"https://gitlab.com/inkscape/inkscape","type":"SoftwareSourceCode"}
+            {"kind":"gitlab","uri":"https://gitlab.com/inkscape/inkscape","type":"SoftwareSourceCode"},
+            {"kind":"wordpress","uri":"https://bitcoinmagazine.com/markets/no-uptober-yet-as-bitcoin-slips","type":"Article"},
+            {"kind":"ghost","uri":"https://www.privacyguides.org/news/2026/10/19/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/","type":"Article"}
         ]);
         Ok(Self {
             boundary: Arc::default(),
@@ -150,6 +152,8 @@ impl Dns for FixtureDns {
                 | "delvingbitcoin.org"
                 | "codeberg.org"
                 | "gitlab.com"
+                | "bitcoinmagazine.com"
+                | "www.privacyguides.org"
                 | "web.example"
                 | "www.federalregister.gov"
                 | "www.sec.gov"
@@ -195,6 +199,10 @@ impl Transport for Fixture {
             "delvingbitcoin.org" if u.path()=="/t/304.json"=>("application/json",include_str!("../tests/fixtures/sources/discourse/topic-304.json").into()),
             "codeberg.org" if u.path()=="/api/v1/repos/forgejo/forgejo"=>("application/json",include_str!("../tests/fixtures/sources/forgejo/repo-forgejo.json").into()),
             "gitlab.com" if u.path()=="/api/v4/projects/inkscape%2Finkscape"=>("application/json",include_str!("../tests/fixtures/sources/gitlab/project-inkscape.json").into()),
+            "bitcoinmagazine.com" if u.path()=="/markets/no-uptober-yet-as-bitcoin-slips"=>("text/html; charset=UTF-8",gunzip(include_bytes!("../tests/fixtures/sources/wordpress/page-no-uptober.html.gz"))),
+            "bitcoinmagazine.com" if u.path()=="/wp-json/wp/v2/posts/55992"=>("application/json",include_str!("../tests/fixtures/sources/wordpress/post-55992.json").into()),
+            "www.privacyguides.org" if u.path()=="/ghost/api/content/posts/slug/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/"=>("application/json",include_str!("../tests/fixtures/sources/ghost/post-cellebrite.json").into()),
+            "www.privacyguides.org" if u.path()=="/news/2026/10/19/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/"=>("text/html; charset=utf-8",include_str!("../tests/fixtures/sources/ghost/page-cellebrite.html").into()),
             "web.example"=>("text/html","<title>Fixture page</title>".into()),
             "www.ecfr.gov" if u.path()=="/api/versioner/v1/ancestry/current/title-17.json"=>("application/json",include_str!("../tests/fixtures/sources/ecfr/ancestry_current_title-17_section-240.10b-5.json").into()),
             "www.sec.gov" if u.path()=="/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959.hdr.sgml"=>("text/sgml",include_str!("../tests/fixtures/sources/sec/sec-hdr-ms-s1.sgml").into()),

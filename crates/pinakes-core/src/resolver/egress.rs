@@ -230,8 +230,20 @@ pub async fn read_response_with(
             .filter(|s| s.len() <= 2048)
             .map(str::to_owned)
     };
+    // Every `Link` header, as one comma-separated value (RFC 8288), up to 2 KB of whole headers.
+    let mut link = String::new();
+    for value in response.headers().get_all("link").iter() {
+        let Ok(value) = value.to_str() else { continue };
+        if link.len() + value.len() + 2 > 2048 {
+            break;
+        }
+        if !link.is_empty() {
+            link.push_str(", ");
+        }
+        link.push_str(value);
+    }
     let validators = Validators {
-        link: header("link"),
+        link: Some(link).filter(|s| !s.is_empty()),
         etag: header("etag"),
         last_modified: header("last-modified"),
     };
@@ -1555,6 +1567,44 @@ mod tests {
         let response = PinnedTransport.get(&url, &[addr]).await.unwrap();
         assert_eq!(response.status, 302);
         task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn every_link_header_is_kept() {
+        use axum::{http::HeaderMap, routing::get, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/",
+                    get(|| async {
+                        let mut headers = HeaderMap::new();
+                        headers.insert("content-type", "text/html".parse().unwrap());
+                        for value in [
+                            "<https://w.example/wp-json/>; rel=\"https://api.w.org/\"",
+                            "<https://w.example/wp-json/wp/v2/posts/7>; rel=\"alternate\"; type=\"application/json\"",
+                        ] {
+                            headers.append("link", value.parse().unwrap());
+                        }
+                        headers.append("link", "x".repeat(3000).parse().unwrap());
+                        (headers, "<html></html>")
+                    }),
+                ),
+            )
+            .await
+            .unwrap()
+        });
+        let url = Url::parse(&format!("http://{addr}/")).unwrap();
+        let fetched = read_response(url.clone(), reqwest::get(url).await.unwrap())
+            .await
+            .unwrap();
+        // Whole headers only, up to 2 KB.
+        assert_eq!(
+            fetched.validators.link.as_deref(),
+            Some("<https://w.example/wp-json/>; rel=\"https://api.w.org/\", <https://w.example/wp-json/wp/v2/posts/7>; rel=\"alternate\"; type=\"application/json\"")
+        );
+        task.abort();
     }
     #[tokio::test]
     async fn non_allowlisted_content_type_is_refused_before_reading() {

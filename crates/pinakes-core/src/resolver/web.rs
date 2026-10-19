@@ -169,6 +169,10 @@ impl WebResolver {
                 )
                 .await?;
             }
+            // A service the page names about itself (WordPress, Ghost) may say more.
+            extracted.doc =
+                crate::sources::page_hooks(&self.egress, uri, &fetched, extracted.doc, deadline)
+                    .await;
             // Account for the title fallback when deciding whether another request is
             // needed, while retaining oEmbed's established precedence if fetched.
             let mut candidate = extracted.doc.clone();
@@ -228,7 +232,13 @@ impl WebResolver {
                 extracted.doc.event.warnings.push("truncated".into());
             }
             extracted.doc.alias_candidates = candidates;
-            let doc = extracted.doc.bounded(ATTRIBUTES)?;
+            // A page hook's card keeps its source's facts.
+            let attributes = if crate::sources::by_name(&extracted.doc.source).is_some() {
+                crate::sources::attributes()
+            } else {
+                ATTRIBUTES
+            };
+            let doc = extracted.doc.bounded(attributes)?;
             crate::telemetry::document(observation, &self.manifest(), &doc);
             Ok(doc)
         })

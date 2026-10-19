@@ -10,6 +10,12 @@ For their links, Pinakes reads that API instead of the page. Every source here:
 - records itself on the card: `details.from` names the source and `details.facts` holds the
   fields its API names for the object, by name (lists joined with `; `).
 
+A few sources are page hooks instead (WordPress, Ghost): they claim no links. The web route
+fetches the page as usual, and when the page names its own record on its service (a header or
+head tag on the page's own origin), the source reads that record and improves the page's card,
+within the web fetch's deadline and at most 3 seconds. The card then names the source in
+`details.from` too; a failure leaves the page's own card.
+
 ## Switches
 
 Each source has its own switch, on by default:
@@ -48,6 +54,7 @@ or got plain web cards before are read by their source.
 - [`federal_register`](federal_register.md): Federal Register documents by document number.
 - [`fedlex`](fedlex.md): Swiss federal law in the classified compilation, by ELI.
 - [`forgejo`](forgejo.md): repositories, branches, tags, releases and files on Forgejo and Gitea instances (Codeberg, gitea.com, others)
+- [`ghost`](ghost.md): page hook: a Ghost post's title, excerpt, image, dates, authors and tags from the Content API
 - [`gitlab`](gitlab.md): projects, branches, tags, releases and files on gitlab.com and other GitLab instances
 - [`gleif`](gleif.md): Legal Entity Identifier records.
 - [`govinfo`](govinfo.md): US public laws, bills, US Code sections and the Statutes at Large.
@@ -59,4 +66,5 @@ or got plain web cards before are read by their source.
 - [`stacker_news`](stacker_news.md): Stacker News posts and comments by item id.
 - [`swiss_parliament`](swiss_parliament.md): Swiss Parliament business items (Curia Vista) by affair id.
 - [`uk_parliament_bills`](uk_parliament_bills.md): UK Parliament bills and Acts by bill id.
+- [`wordpress`](wordpress.md): page hook: a WordPress post's editorial title, excerpt, dates and featured image from its REST record
 - [`zefix`](zefix.md): Swiss companies in the commercial register, by register id.

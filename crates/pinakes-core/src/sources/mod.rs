@@ -28,6 +28,7 @@ pub mod eur_lex;
 pub mod federal_register;
 pub mod fedlex;
 pub mod forgejo;
+pub mod ghost;
 pub mod gitlab;
 pub mod gleif;
 pub mod govinfo;
@@ -39,6 +40,7 @@ pub mod sec;
 pub mod stacker_news;
 pub mod swiss_parliament;
 pub mod uk_parliament_bills;
+pub mod wordpress;
 pub mod zefix;
 
 /// Every source, one line each, in alphabetical order of name.
@@ -52,6 +54,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &federal_register::FederalRegister,
     &fedlex::Fedlex,
     &forgejo::Forgejo,
+    &ghost::Ghost,
     &gitlab::Gitlab,
     &gleif::Gleif,
     &govinfo::Govinfo,
@@ -63,6 +66,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &stacker_news::StackerNews,
     &swiss_parliament::SwissParliament,
     &uk_parliament_bills::UkParliamentBills,
+    &wordpress::Wordpress,
     &zefix::Zefix,
 ];
 
@@ -105,6 +109,74 @@ pub trait Source: Send + Sync {
     fn examples(&self) -> &'static [Example];
     /// The card of `uri`, a link this source reads.
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta>;
+    /// Whether this source improves web cards of pages its service serves (`page`), found by
+    /// what a fetched page says about itself rather than by its link. Its examples are then
+    /// links of such pages, read by the web route.
+    fn hooks_pages(&self) -> bool {
+        false
+    }
+    /// A page hook: the card of a fetched page (`doc`, from its own metadata) improved from this
+    /// source's service, or `None` when the page is not the service's. It runs on the web route
+    /// with a short deadline; an error leaves the page's own card.
+    async fn page(
+        &self,
+        _cx: &Context<'_>,
+        _uri: &str,
+        _page: &Fetched,
+        _doc: &ResourceMeta,
+    ) -> Result<Option<ResourceMeta>> {
+        Ok(None)
+    }
+}
+
+/// The longest a page hook may take, within the web fetch's own deadline.
+pub const PAGE_HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Run the switched-on page hooks on a fetched page's card; the first that answers wins.
+pub async fn page_hooks(
+    egress: &Egress,
+    uri: &str,
+    page: &Fetched,
+    doc: ResourceMeta,
+    deadline: tokio::time::Instant,
+) -> ResourceMeta {
+    if doc.status != Status::Ok || page.status != 200 || !page.content_type.contains("html") {
+        return doc;
+    }
+    let switches = SWITCHES.read().unwrap_or_else(|e| e.into_inner()).clone();
+    page_hooks_with(egress, uri, page, doc, deadline, switches.as_ref()).await
+}
+pub(crate) async fn page_hooks_with(
+    egress: &Egress,
+    uri: &str,
+    page: &Fetched,
+    doc: ResourceMeta,
+    deadline: tokio::time::Instant,
+    switches: Option<&SourcesConfig>,
+) -> ResourceMeta {
+    let hooks = REGISTRY
+        .iter()
+        .copied()
+        .filter(|s| s.hooks_pages() && switches.is_none_or(|c| c.enabled(s.name())));
+    let cx = Context {
+        egress,
+        ttl: doc.ttl_secs,
+    };
+    for hook in hooks {
+        let left = deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+            .saturating_sub(std::time::Duration::from_millis(25))
+            .min(PAGE_HOOK_TIMEOUT);
+        match tokio::time::timeout(left, hook.page(&cx, uri, page, &doc)).await {
+            Ok(Ok(Some(improved))) => {
+                crate::telemetry::discovery("page_hook", "applied");
+                return improved;
+            }
+            Ok(Ok(None)) => {}
+            Ok(Err(_)) | Err(_) => crate::telemetry::discovery("page_hook", "failed"),
+        }
+    }
+    doc
 }
 
 /// `(host, requests_per_second, max_in_flight)`.
@@ -539,6 +611,34 @@ pub(crate) mod fixture {
             })
         }
     }
+    /// A fetched page, as the web route has it.
+    pub fn page(
+        url: &str,
+        content_type: &str,
+        body: Vec<u8>,
+        link: Option<&str>,
+    ) -> crate::resolver::egress::Fetched {
+        crate::resolver::egress::Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            validators: crate::resolver::egress::Validators {
+                link: link.map(str::to_owned),
+                ..Default::default()
+            },
+            url: url::Url::parse(url).unwrap(),
+            content_type: content_type.into(),
+            status: 200,
+            retry_after_secs: 60,
+            location: None,
+            body,
+        }
+    }
+    /// The recorded `Link` headers of a fixture (`provenance.json`, key `link`).
+    pub fn link(source: &str, name: &str) -> String {
+        let provenance: serde_json::Value =
+            serde_json::from_slice(&read(source, "provenance.json")).unwrap();
+        provenance[name]["link"].as_str().unwrap().to_owned()
+    }
     struct PublicDns;
     #[async_trait::async_trait]
     impl crate::resolver::egress::Dns for PublicDns {
@@ -596,7 +696,7 @@ mod tests {
             assert!(!source.examples().is_empty(), "{name} has no example");
             for example in source.examples() {
                 assert!(
-                    source.reads(example.uri),
+                    source.reads(example.uri) || source.hooks_pages(),
                     "{name} does not read {}",
                     example.uri
                 );

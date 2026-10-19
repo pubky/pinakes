@@ -293,16 +293,17 @@ only for calendars, where they commit with the parsed snapshot.
 
 ## Web pages and access walls
 
-Generic web resolution reads JSON-LD, microformats, OpenGraph, oEmbed and the title. Canonical,
-alternate and oEmbed links come from the document head only. Media pages use the pinned
-390-provider oEmbed registry (`data/`): `media.oembed = "when_needed"` (default) asks
-path-specific providers first and broad patterns only for an incomplete, failed or truncated
-page; `"always"` also fetches every matching provider and trusted page-advertised endpoints,
-which must share the page's origin or its registry provider. Healthy page JSON-LD stays
-authoritative and oEmbed fills gaps. `web.discover_feeds` (web pages) and
-`cards.media.discover_feeds` (media pages: podcast feed scanning) follow RSS alternates on pages
-without a typed card. Discovery decisions are counted in
-`pinakes_discovery_decisions_total{kind,decision}`.
+Generic web resolution reads JSON-LD, microformats, OpenGraph, oEmbed and the title, then the
+page hooks of switched-on sources (WordPress and Ghost records a page names on its own origin;
+see [docs/sources](sources/README.md)). Canonical, alternate and oEmbed links come from the
+document head only. Media pages use the pinned 390-provider oEmbed registry (`data/`):
+`media.oembed = "when_needed"` (default) asks path-specific providers first and broad patterns
+only for an incomplete, failed or truncated page; `"always"` also fetches every matching
+provider and trusted page-advertised endpoints, which must share the page's origin or its
+registry provider. Healthy page JSON-LD stays authoritative and oEmbed fills gaps.
+`web.discover_feeds` (web pages) and `cards.media.discover_feeds` (media pages: podcast feed
+scanning) follow RSS alternates on pages without a typed card. Discovery decisions are counted
+in `pinakes_discovery_decisions_total{kind,decision}`.
 
 A challenge page (a bot wall, captcha or sign-in redirect) is a failed fetch: the resource turns
 `unreachable` and is retried with the normal backoff, dead-lettering after

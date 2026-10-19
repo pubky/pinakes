@@ -4,7 +4,7 @@ The harness builds tags with `pubky-app-specs` and, in live mode, writes them wi
 `@synonymdev/pubky`. The samples cover an OSM node, geo pin, event page,
 ICS feed (the mock exercises recurrence), NIP-52 naddr, DOI with its publisher page, ISBN, oEmbed
 video, ordinary web page, official-API sources (a Federal Register document by number with one of
-its page addresses, an alias, an SEC EDGAR filing, an eCFR section and a GLEIF LEI record, a UK Parliament bill, a Swiss Parliament business item, a CourtListener opinion, a UK Act on legislation.gov.uk, an EUR-Lex act, a Fedlex act, a Zefix company, a GovInfo public law, a Stacker News post, a Hacker News story, a Lobsters story, a Bluesky post, a Mastodon post, a Discourse topic, a Codeberg file, a GitLab file), and live a Pubky object of another app. It checks the
+its page addresses, an alias, an SEC EDGAR filing, an eCFR section and a GLEIF LEI record, a UK Parliament bill, a Swiss Parliament business item, a CourtListener opinion, a UK Act on legislation.gov.uk, an EUR-Lex act, a Fedlex act, a Zefix company, a GovInfo public law, a Stacker News post, a Hacker News story, a Lobsters story, a Bluesky post, a Mastodon post, a Discourse topic, a Codeberg file, a GitLab file, a WordPress post, a Ghost post), and live a Pubky object of another app. It checks the
 Nexus reference feed, Pinakes typed documents, facets, bbox/Event/venue search,
 occurrences, changes, group membership and Nexus hydration by URI (`by_ids` with `uris`: the
 cards' own `uri` and `details.aliases`, and an occurrence's `occurrence.feed_uri`, matched by

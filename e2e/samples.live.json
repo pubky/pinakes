@@ -152,6 +152,16 @@
     "type": "SoftwareSourceCode"
   },
   {
+    "kind": "wordpress",
+    "uri": "https://bitcoinmagazine.com/markets/no-uptober-yet-as-bitcoin-slips",
+    "type": "Article"
+  },
+  {
+    "kind": "ghost",
+    "uri": "https://www.privacyguides.org/news/2026/10/19/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/",
+    "type": "Article"
+  },
+  {
     "kind": "web",
     "uri": "https://example.org/",
     "type": "WebPage"

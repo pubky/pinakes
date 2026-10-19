@@ -1755,6 +1755,12 @@
                     "uri": "https://codeberg.org/forgejo/forgejo/releases/tag/v11.0.1"
                   }
                 },
+                "resolve-ghost-1": {
+                  "summary": "https://www.privacyguides.org/news/2026/10/19/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/",
+                  "value": {
+                    "uri": "https://www.privacyguides.org/news/2026/10/19/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/"
+                  }
+                },
                 "resolve-github-com-pubky-pubky-core-releases-atom": {
                   "summary": "https://github.com/pubky/pubky-core/releases.atom",
                   "value": {
@@ -2017,6 +2023,12 @@
                   "summary": "https://vimeo.com/76979871",
                   "value": {
                     "uri": "https://vimeo.com/76979871"
+                  }
+                },
+                "resolve-wordpress-1": {
+                  "summary": "https://bitcoinmagazine.com/markets/no-uptober-yet-as-bitcoin-slips",
+                  "value": {
+                    "uri": "https://bitcoinmagazine.com/markets/no-uptober-yet-as-bitcoin-slips"
                   }
                 },
                 "resolve-www-calendarlabs-com-ical-calendar-ics-76-us-holidays-ics": {
