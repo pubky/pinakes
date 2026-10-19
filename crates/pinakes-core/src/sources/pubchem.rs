@@ -1,0 +1,304 @@
+//! Chemical compounds in PubChem, read from PUG REST by compound id (CID).
+//!
+//! Every PubChem link of one compound (its page, the legacy `summary.cgi` page and PUG REST and
+//! PUG View URLs) is an alias of `pubchem:cid/{cid}`. A page by name (`/compound/aspirin`) names
+//! the same compound once `name_request` lists exactly one CID for the name. Substances
+//! (`/substance/{sid}`) are depositors' records, not compounds.
+//!
+//! The service asks for at most 5 requests a second and reports its load in the
+//! `X-Throttling-Control` header. Structure depictions are public domain.
+use super::kit::{
+    encode, float, host_and_segments, json, plain, text, web_url, Card, Key, Request,
+};
+use anyhow::{bail, ensure, Context, Result};
+use percent_encoding::percent_decode_str;
+
+pub const ATTRIBUTION: &str = "PubChem (NCBI)";
+/// The properties the card reads. `SMILES` is the full (isomeric) SMILES; PubChem maps the old
+/// names `IsomericSMILES` and `CanonicalSMILES` to `SMILES` and `ConnectivitySMILES`.
+const PROPERTIES: &str =
+    "Title,IUPACName,MolecularFormula,MolecularWeight,InChIKey,SMILES,ConnectivitySMILES,XLogP,ExactMass";
+/// The longest compound name looked up.
+const MAX_NAME: usize = 200;
+
+/// What a link names: a compound by CID, or by name (which needs `name_request`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    Cid(u64),
+    Name(String),
+}
+
+/// A compound id: a positive decimal number without leading zeros.
+pub fn cid(value: &str) -> Option<u64> {
+    (plain(value, 12, |c| c.is_ascii_digit()) && !value.starts_with('0'))
+        .then(|| value.parse().ok())
+        .flatten()
+}
+
+/// A standard InChIKey (`XXXXXXXXXXXXXX-XXXXXXXXXX-X`, upper-case letters).
+pub fn inchikey(value: &str) -> Option<String> {
+    let parts: Vec<&str> = value.split('-').collect();
+    let ok = matches!(parts.as_slice(), [a, b, c] if a.len() == 14 && b.len() == 10 && c.len() == 1)
+        && parts
+            .iter()
+            .all(|p| p.bytes().all(|b| b.is_ascii_uppercase()));
+    ok.then(|| value.to_owned())
+}
+
+/// What a PubChem link names: compound pages by CID or name, and PUG REST and PUG View URLs.
+pub fn from_uri(uri: &str) -> Option<Target> {
+    let (host, segments) = host_and_segments(uri)?;
+    if host != "pubchem.ncbi.nlm.nih.gov" {
+        return None;
+    }
+    let s: Vec<&str> = segments.iter().map(String::as_str).collect();
+    Some(match s.as_slice() {
+        ["compound", id] if id.bytes().all(|b| b.is_ascii_digit()) => Target::Cid(cid(id)?),
+        ["compound", id] => {
+            let name = percent_decode_str(id).decode_utf8().ok()?;
+            let name = name.trim();
+            ensure_name(name)?;
+            Target::Name(name.to_owned())
+        }
+        ["rest", "pug", "compound", "cid", id, ..]
+        | ["rest", "pug_view", "data", "compound", id, ..] => Target::Cid(cid(id)?),
+        ["summary", "summary.cgi"] => Target::Cid(
+            web_url(uri)?
+                .query_pairs()
+                .find(|(k, _)| k == "cid")
+                .and_then(|(_, v)| cid(&v))?,
+        ),
+        _ => return None,
+    })
+}
+
+fn ensure_name(name: &str) -> Option<()> {
+    (!name.is_empty() && name.len() <= MAX_NAME && !name.chars().any(char::is_control))
+        .then_some(())
+}
+
+/// The identifier, or `None` for a name (its CID comes from `name_request`).
+pub fn identifier(target: &Target) -> Option<String> {
+    match target {
+        Target::Cid(c) => Some(format!("pubchem:cid/{c}")),
+        Target::Name(_) => None,
+    }
+}
+
+pub fn page(cid: u64) -> String {
+    format!("https://pubchem.ncbi.nlm.nih.gov/compound/{cid}")
+}
+
+/// The compound's computed properties.
+pub fn request(cid: u64) -> Option<Request> {
+    Request::get(&format!(
+        "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/property/{PROPERTIES}/JSON"
+    ))
+}
+
+/// The CIDs PubChem lists for a name.
+pub fn name_request(name: &str) -> Option<Request> {
+    ensure_name(name)?;
+    Request::get(&format!(
+        "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{}/cids/JSON",
+        encode(name)
+    ))
+}
+
+/// The CID of a name, or `None` when PubChem lists none or more than one.
+pub fn parse_name(status: u16, raw: &[u8]) -> Result<Option<u64>> {
+    let Some(v) = json(status, raw, &[404])? else {
+        return Ok(None);
+    };
+    let cids = v["IdentifierList"]["CID"]
+        .as_array()
+        .context("no CID list")?;
+    Ok(match cids.as_slice() {
+        [one] => one.as_u64().filter(|c| *c > 0),
+        _ => None,
+    })
+}
+
+/// A compound, or `None` when there is no compound with this CID (PUG REST answers an unknown
+/// CID's properties with a row holding only the CID, and other unknown ids with a 404 Fault).
+pub fn parse(status: u16, raw: &[u8], cid: u64) -> Result<Option<Card>> {
+    let Some(v) = json(status, raw, &[404])? else {
+        return Ok(None);
+    };
+    let rows = v["PropertyTable"]["Properties"]
+        .as_array()
+        .context("no property table")?;
+    let [row] = rows.as_slice() else {
+        bail!("{} property rows", rows.len());
+    };
+    ensure!(
+        row["CID"].as_u64() == Some(cid),
+        "the API answered for another compound"
+    );
+    let key = row["InChIKey"].as_str().and_then(inchikey);
+    if key.is_none() && text(&row["MolecularFormula"]).is_none() {
+        return Ok(None);
+    }
+    let mut card = Card::new("MolecularEntity", format!("pubchem:cid/{cid}"), page(cid));
+    card.name = text(&row["Title"]);
+    card.image = Some(format!(
+        "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/PNG"
+    ));
+    card.attribution = Some(ATTRIBUTION.into());
+    card.detail("iupac_name", text(&row["IUPACName"]));
+    card.detail("formula", text(&row["MolecularFormula"]));
+    card.detail("molecular_weight", float(&row["MolecularWeight"]));
+    card.detail("exact_mass", float(&row["ExactMass"]));
+    card.detail("inchikey", key.clone());
+    card.detail("smiles", text(&row["SMILES"]));
+    card.detail("xlogp", float(&row["XLogP"]));
+    if let Some(key) = key {
+        card.key(Key::new("inchikey", &key));
+    }
+    Ok(Some(card))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sources::kit::fixture;
+
+    fn read(name: &str) -> Vec<u8> {
+        fixture::read("pubchem", name)
+    }
+
+    #[test]
+    fn every_link_form_of_one_compound() {
+        for uri in [
+            "https://pubchem.ncbi.nlm.nih.gov/compound/2244",
+            "https://pubchem.ncbi.nlm.nih.gov/compound/2244#section=Names-and-Identifiers",
+            "http://pubchem.ncbi.nlm.nih.gov/compound/2244/",
+            "https://pubchem.ncbi.nlm.nih.gov/summary/summary.cgi?cid=2244",
+            "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/2244/JSON",
+            "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/2244/property/Title/JSON",
+            "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/2244/PNG",
+            "https://pubchem.ncbi.nlm.nih.gov/rest/pug_view/data/compound/2244/JSON",
+        ] {
+            assert_eq!(
+                from_uri(uri).as_ref().and_then(identifier).as_deref(),
+                Some("pubchem:cid/2244"),
+                "{uri}"
+            );
+        }
+        assert_eq!(
+            from_uri("https://pubchem.ncbi.nlm.nih.gov/compound/aspirin"),
+            Some(Target::Name("aspirin".into()))
+        );
+        assert_eq!(
+            from_uri("https://pubchem.ncbi.nlm.nih.gov/compound/acetylsalicylic%20acid"),
+            Some(Target::Name("acetylsalicylic acid".into()))
+        );
+        assert_eq!(identifier(&Target::Name("aspirin".into())), None);
+    }
+
+    #[test]
+    fn invalid_links() {
+        for uri in [
+            "https://pubchem.ncbi.nlm.nih.gov/compound/0",
+            "https://pubchem.ncbi.nlm.nih.gov/compound/02244",
+            "https://pubchem.ncbi.nlm.nih.gov/compound/2244/extra",
+            "https://pubchem.ncbi.nlm.nih.gov/substance/3243128",
+            "https://pubchem.ncbi.nlm.nih.gov/rest/pug/substance/sid/3243128/JSON",
+            "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/aspirin/JSON",
+            "https://pubchem.ncbi.nlm.nih.gov/summary/summary.cgi?sid=3243128",
+            "https://pubchem.ncbi.nlm.nih.gov/compound/%00",
+            "https://example.org/compound/2244",
+        ] {
+            assert_eq!(from_uri(uri), None, "{uri}");
+        }
+    }
+
+    #[test]
+    fn requests() {
+        assert_eq!(
+            request(2244).unwrap().url.as_str(),
+            "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/2244/property/Title,IUPACName,MolecularFormula,MolecularWeight,InChIKey,SMILES,ConnectivitySMILES,XLogP,ExactMass/JSON"
+        );
+        assert_eq!(
+            name_request("acetylsalicylic acid").unwrap().url.as_str(),
+            "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/acetylsalicylic%20acid/cids/JSON"
+        );
+        assert_eq!(page(2244), "https://pubchem.ncbi.nlm.nih.gov/compound/2244");
+    }
+
+    #[test]
+    fn names() {
+        assert_eq!(
+            parse_name(200, &read("name-aspirin.json")).unwrap(),
+            Some(2244)
+        );
+        assert_eq!(
+            parse_name(200, &read("name-glucose.json")).unwrap(),
+            Some(5793)
+        );
+        assert_eq!(parse_name(404, &read("name-missing.json")).unwrap(), None);
+        let two = br#"{"IdentifierList":{"CID":[5793,79025]}}"#;
+        assert_eq!(parse_name(200, two).unwrap(), None);
+        assert!(parse_name(503, b"",).is_err());
+    }
+
+    #[test]
+    fn aspirin() {
+        let card = parse(200, &read("compound-2244.json"), 2244)
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.type_name, "MolecularEntity");
+        assert_eq!(card.id, "pubchem:cid/2244");
+        assert_eq!(card.url, "https://pubchem.ncbi.nlm.nih.gov/compound/2244");
+        assert_eq!(card.name.as_deref(), Some("Aspirin"));
+        assert_eq!(card.description, None);
+        assert_eq!(
+            card.image.as_deref(),
+            Some("https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/2244/PNG")
+        );
+        let d = &card.details;
+        assert_eq!(d["iupac_name"], "2-acetyloxybenzoic acid");
+        assert_eq!(d["formula"], "C9H8O4");
+        assert_eq!(d["molecular_weight"], 180.16);
+        assert_eq!(d["exact_mass"], 180.04225873);
+        assert_eq!(d["inchikey"], "BSYNRYMUTXBXSQ-UHFFFAOYSA-N");
+        assert_eq!(d["smiles"], "CC(=O)OC1=CC=CC=C1C(=O)O");
+        assert_eq!(d["xlogp"], 1.2);
+        assert_eq!(
+            card.keys,
+            [Key::new("inchikey", "BSYNRYMUTXBXSQ-UHFFFAOYSA-N")]
+        );
+        assert!(card.also_on.is_empty());
+        assert!(parse(200, &read("compound-2244.json"), 2519).is_err());
+    }
+
+    #[test]
+    fn caffeine() {
+        let card = parse(200, &read("compound-2519.json"), 2519)
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.name.as_deref(), Some("Caffeine"));
+        assert_eq!(card.details["formula"], "C8H10N4O2");
+        assert_eq!(card.details["xlogp"], -0.1);
+        assert_eq!(
+            card.keys,
+            [Key::new("inchikey", "RYYVLZVUVIJVGH-UHFFFAOYSA-N")]
+        );
+    }
+
+    #[test]
+    fn missing() {
+        assert_eq!(
+            parse(200, &read("compound-missing.json"), 999999999).unwrap(),
+            None
+        );
+        assert_eq!(
+            parse(404, &read("record-missing.json"), 999999999).unwrap(),
+            None
+        );
+        assert!(parse(503, b"", 2244).is_err());
+        assert!(parse(429, b"", 2244).is_err());
+        assert!(parse(400, b"{}", 2244).is_err());
+        assert_eq!(inchikey("BSYNRYMUTXBXSQ-UHFFFAOYSA-n"), None);
+    }
+}

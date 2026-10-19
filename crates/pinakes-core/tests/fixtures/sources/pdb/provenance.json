@@ -1,0 +1,49 @@
+{
+  "entry-1hhb-obsolete": {
+    "bytes": 106,
+    "content_type": "application/json",
+    "file": "entry-1hhb-obsolete.json",
+    "note": "obsolete since 1984, superseded by 2HHB, 3HHB, 4HHB",
+    "recorded_at": "2026-10-19T16:20:14+00:00",
+    "sha256": "3933e5d3bed4a0fdc81c5112f2f9b03d48c23897dd71bef6de347b1885349756",
+    "status": 404,
+    "url": "https://data.rcsb.org/rest/v1/core/entry/1HHB"
+  },
+  "entry-4hhb": {
+    "bytes": 26055,
+    "content_type": "application/json",
+    "file": "entry-4hhb.json",
+    "recorded_at": "2026-10-19T16:19:00+00:00",
+    "sha256": "a95a79421b90211667e08cc21555acb6e2c384fe882bb7c9b174eadb4e9fdb1a",
+    "status": 200,
+    "url": "https://data.rcsb.org/rest/v1/core/entry/4HHB"
+  },
+  "entry-6vxx": {
+    "bytes": 19889,
+    "content_type": "application/json",
+    "file": "entry-6vxx.json",
+    "recorded_at": "2026-10-19T16:19:02+00:00",
+    "sha256": "148f7e45d95b04e25c304dbd51e52eb97ef1f75d3c10f748c364f346ca858442",
+    "status": 200,
+    "url": "https://data.rcsb.org/rest/v1/core/entry/6VXX"
+  },
+  "entry-missing": {
+    "bytes": 106,
+    "content_type": "application/json",
+    "file": "entry-missing.json",
+    "note": "an id never assigned",
+    "recorded_at": "2026-10-19T16:20:12+00:00",
+    "sha256": "617eaca0bc851680db11e10e2f284b538dc1e562e19e18a2830a7ce756cf591c",
+    "status": 404,
+    "url": "https://data.rcsb.org/rest/v1/core/entry/9999"
+  },
+  "status-1hhb": {
+    "bytes": 254,
+    "content_type": "application/json",
+    "file": "status-1hhb.json",
+    "recorded_at": "2026-10-19T16:20:15+00:00",
+    "sha256": "7079c2ddecfc2af0c761fd9e818e4f6531e3b3ccba22842052d01eb226f540a4",
+    "status": 200,
+    "url": "https://data.rcsb.org/rest/v1/holdings/status/1HHB"
+  }
+}
