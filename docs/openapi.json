@@ -1851,6 +1851,12 @@
                     "uri": "https://ti.to/scipy/scipy2026.ics"
                   }
                 },
+                "resolve-uk-parliament-bills-1": {
+                  "summary": "https://bills.parliament.uk/bills/3737",
+                  "value": {
+                    "uri": "https://bills.parliament.uk/bills/3737"
+                  }
+                },
                 "resolve-v4-wegow-com-es-conciertos-konzert-von-yasi-hofer-band-in-bo": {
                   "summary": "https://v4.wegow.com/es/conciertos/konzert-von-yasi-hofer-band-in-bonn-harmonie",
                   "value": {

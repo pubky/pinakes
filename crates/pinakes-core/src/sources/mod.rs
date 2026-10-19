@@ -24,6 +24,7 @@ pub mod ecfr;
 pub mod federal_register;
 pub mod gleif;
 pub mod sec;
+pub mod uk_parliament_bills;
 
 /// Every source, one line each, in alphabetical order of name.
 #[rustfmt::skip]
@@ -32,6 +33,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &federal_register::FederalRegister,
     &gleif::Gleif,
     &sec::Sec,
+    &uk_parliament_bills::UkParliamentBills,
 ];
 
 /// One official API.

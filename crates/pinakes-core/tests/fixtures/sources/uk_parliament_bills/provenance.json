@@ -1,0 +1,20 @@
+{
+  "bill_3737_employment_rights_act_2025": {
+    "bytes": 2478,
+    "content_type": "application/json; charset=utf-8",
+    "file": "bill_3737_employment_rights_act_2025.json",
+    "recorded_at": "2026-10-19T16:19:56+00:00",
+    "sha256": "6a08b62843a9281c473b6ecd99e9b5ca18fd4ade8509bf2dd7c6f9d3cdbbf892",
+    "status": 200,
+    "url": "https://bills-api.parliament.uk/api/v1/Bills/3737"
+  },
+  "bill_999999_missing": {
+    "bytes": 42,
+    "content_type": "text/plain; charset=utf-8",
+    "file": "bill_999999_missing.txt",
+    "recorded_at": "2026-10-19T16:19:58+00:00",
+    "sha256": "70b5f8c43683c54853bbcbd07ddcc4c92dff42d30b50422510790dee01e8d033",
+    "status": 404,
+    "url": "https://bills-api.parliament.uk/api/v1/Bills/999999"
+  }
+}
