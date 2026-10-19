@@ -131,9 +131,6 @@ pub fn parse(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
     if let Some(q) = wikidata_id(&v["objectWikidata_URL"]) {
         card.key(Key::new("wikidata", &q));
     }
-    if let Some(url) = text(&v["objectURL"]).filter(|u| from_uri(u) == Some(id)) {
-        card.alias(url);
-    }
     Ok(Some(card))
 }
 
@@ -270,7 +267,6 @@ mod tests {
             Some("The Metropolitan Museum of Art, CC0")
         );
         assert_eq!(card.keys, [Key::new("wikidata", "Q18689458")]);
-        assert!(card.aliases.is_empty());
         let d = &card.details;
         assert_eq!(d["artist"], "Vincent van Gogh");
         assert_eq!(d["artist_bio"], "Dutch, Zundert 1853–1890 Auvers-sur-Oise");

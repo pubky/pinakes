@@ -7,5 +7,5 @@ requests.
 `provenance.json` lists each fixture's request URL, status, content type, recording time, and the
 size and SHA-256 of the body as served. `redirect.json` is a renamed file
 (`File:Bitcoin BTC symbol.svg` → `File:BitcoinSign.svg`); `curid-*` are requests by page id.
-File description text is CC BY-SA 4.0 (Wikimedia Commons); structured data is CC0; each file has
+File description text is CC BY-SA 4.0 (Wikimedia Commons); each file has
 its own licence, named in its `extmetadata` (`LicenseShortName`, `LicenseUrl`, `Artist`).

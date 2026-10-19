@@ -154,8 +154,6 @@ pub struct Card {
     pub details: BTreeMap<&'static str, Value>,
     /// Other ids of the same object that it proves, e.g. `doi:…`.
     pub keys: Vec<Key>,
-    /// Other link forms of the same object that the answer names (e.g. every USGS event id).
-    pub aliases: Vec<String>,
     /// The same object elsewhere, for the step-8 foundation.
     pub also_on: Vec<Link>,
 }
@@ -174,7 +172,6 @@ impl Card {
             attribution: None,
             details: BTreeMap::new(),
             keys: vec![],
-            aliases: vec![],
             also_on: vec![],
         }
     }
@@ -195,11 +192,6 @@ impl Card {
     pub fn key(&mut self, key: Key) {
         if !self.keys.contains(&key) {
             self.keys.push(key);
-        }
-    }
-    pub fn alias(&mut self, uri: String) {
-        if uri != self.url && !self.aliases.contains(&uri) {
-            self.aliases.push(uri);
         }
     }
     pub fn link(&mut self, link: Link) {
@@ -641,12 +633,8 @@ mod tests {
         card.detail("empty", "");
         card.detail("none", Value::Null);
         card.detail("n", 3);
-        card.alias("https://a/1".into());
-        card.alias("https://a/one".into());
-        card.alias("https://a/one".into());
         card.link(Link::new("A", "https://a/1", "x"));
         assert_eq!(card.details.keys().collect::<Vec<_>>(), [&"n"]);
-        assert_eq!(card.aliases, ["https://a/one"]);
         assert!(card.also_on.is_empty());
     }
 

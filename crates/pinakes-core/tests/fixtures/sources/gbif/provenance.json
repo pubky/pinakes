@@ -27,24 +27,6 @@
     "status": 404,
     "url": "https://api.gbif.org/v1/occurrence/999999999999"
   },
-  "search-inat-333069440": {
-    "bytes": 6669,
-    "content_type": "application/json",
-    "file": "search-inat-333069440.json",
-    "recorded_at": "2026-10-19T16:21:09+00:00",
-    "sha256": "0f4f163a4b684566a1f858026f9520183f734bd256adfed1158b0c4090da3daa",
-    "status": 200,
-    "url": "https://api.gbif.org/v1/occurrence/search?occurrenceID=https%3A%2F%2Fwww.inaturalist.org%2Fobservations%2F333069440&limit=2"
-  },
-  "search-inat-missing": {
-    "bytes": 77,
-    "content_type": "application/json",
-    "file": "search-inat-missing.json",
-    "recorded_at": "2026-10-19T16:21:11+00:00",
-    "sha256": "8b8b92809ae59f7161024eb26fd3e2e8074f742418eaf2f62f1df2dc7171bb14",
-    "status": 200,
-    "url": "https://api.gbif.org/v1/occurrence/search?occurrenceID=https%3A%2F%2Fwww.inaturalist.org%2Fobservations%2F999999999999&limit=2"
-  },
   "species-10951632-synonym": {
     "bytes": 957,
     "content_type": "application/json",

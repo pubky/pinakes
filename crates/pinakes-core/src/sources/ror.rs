@@ -357,7 +357,6 @@ mod tests {
         let card = parse(200, &raw, "042nb2s44").unwrap().unwrap();
         assert_eq!(card.details["other_names"], json!(["Mass Tech"]));
         assert!(!card.details.contains_key("aliases"));
-        assert!(card.aliases.iter().all(|a| a.starts_with("https://")));
     }
 
     #[test]

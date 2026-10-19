@@ -73,32 +73,6 @@ pub fn request(id: &str) -> Option<Request> {
     ))
 }
 
-/// Whether an id is current, obsolete or unreleased, and what replaced an obsolete entry.
-pub fn status_request(id: &str) -> Option<Request> {
-    Request::get(&format!(
-        "https://data.rcsb.org/rest/v1/holdings/status/{}",
-        pdb_id(id)?
-    ))
-}
-
-/// The entry that replaced an obsolete one, or `None` when it is not obsolete (or unknown).
-pub fn parse_replaced_by(status: u16, raw: &[u8], id: &str) -> Result<Option<String>> {
-    let Some(v) = json(status, raw, &[404])? else {
-        return Ok(None);
-    };
-    ensure!(
-        v["rcsb_id"].as_str().and_then(pdb_id).as_deref() == Some(id),
-        "the API answered for another entry"
-    );
-    let holdings = &v["rcsb_repository_holdings_combined"];
-    if holdings["status_code"].as_str() != Some("OBS") {
-        return Ok(None);
-    }
-    Ok(holdings["id_code_replaced_by_latest"]
-        .as_str()
-        .and_then(pdb_id))
-}
-
 /// The date part of a Data API timestamp.
 fn date(v: &Value) -> Option<String> {
     time(v).map(|t| t.format("%Y-%m-%d").to_string())
@@ -313,10 +287,6 @@ mod tests {
             request("4HHB").unwrap().url.as_str(),
             "https://data.rcsb.org/rest/v1/core/entry/4HHB"
         );
-        assert_eq!(
-            status_request("1HHB").unwrap().url.as_str(),
-            "https://data.rcsb.org/rest/v1/holdings/status/1HHB"
-        );
         assert_eq!(page("4HHB"), "https://www.rcsb.org/structure/4HHB");
     }
 
@@ -395,13 +365,6 @@ mod tests {
             parse(404, &read("entry-1hhb-obsolete.json"), "1HHB").unwrap(),
             None
         );
-        assert_eq!(
-            parse_replaced_by(200, &read("status-1hhb.json"), "1HHB")
-                .unwrap()
-                .as_deref(),
-            Some("4HHB")
-        );
-        assert!(parse_replaced_by(200, &read("status-1hhb.json"), "4HHB").is_err());
         assert!(parse(429, b"", "4HHB").is_err());
         assert!(parse(503, b"", "4HHB").is_err());
         assert!(parse(200, b"<html>", "4HHB").is_err());

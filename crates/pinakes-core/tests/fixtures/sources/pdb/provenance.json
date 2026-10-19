@@ -36,14 +36,5 @@
     "sha256": "617eaca0bc851680db11e10e2f284b538dc1e562e19e18a2830a7ce756cf591c",
     "status": 404,
     "url": "https://data.rcsb.org/rest/v1/core/entry/9999"
-  },
-  "status-1hhb": {
-    "bytes": 254,
-    "content_type": "application/json",
-    "file": "status-1hhb.json",
-    "recorded_at": "2026-10-19T16:20:15+00:00",
-    "sha256": "7079c2ddecfc2af0c761fd9e818e4f6531e3b3ccba22842052d01eb226f540a4",
-    "status": 200,
-    "url": "https://data.rcsb.org/rest/v1/holdings/status/1HHB"
   }
 }

@@ -1,5 +1,5 @@
 Internet Archive item metadata API responses (`archive.org/metadata/{identifier}/metadata`, plus
-the full record and `item_size` where a rule depends on them), recorded once on 2026-10-19 with
+the full record where a rule depends on it), recorded once on 2026-10-19 with
 the Pinakes user agent (`pinakes/0.1.0 (+https://pubky.app; info@synonym.to)`), at least 2.5 s
 apart. Parser regression fixtures for `pinakes_core::sources::internet_archive`; test runs make no
 requests.

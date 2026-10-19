@@ -7,8 +7,7 @@
 //! the same compound once `name_request` lists exactly one CID for the name. Substances
 //! (`/substance/{sid}`) are depositors' records, not compounds.
 //!
-//! The service asks for at most 5 requests a second and reports its load in the
-//! `X-Throttling-Control` header. Structure depictions are public domain.
+//! The service asks for at most 5 requests a second. Structure depictions are public domain.
 use super::{
     kit::{
         encode, fetch, float, host_and_segments, json, plain, text, web_url, Card, Key, Request,

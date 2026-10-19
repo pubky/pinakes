@@ -11,7 +11,7 @@
 //! separate small request (`size_request`). An unknown identifier and a taken-down ("darked")
 //! item both answer 200 with an error that names the identifier.
 use super::kit::{
-    fetch, host_and_segments, html_text, int, json, plain, text, web_url, Card, Key, Link, Request,
+    fetch, host_and_segments, html_text, json, plain, text, web_url, Card, Key, Link, Request,
 };
 use super::{Example, Source};
 use crate::{model::ResourceMeta, resolver::cards};
@@ -70,14 +70,6 @@ pub fn page(id: &str) -> String {
 pub fn request(id: &str) -> Option<Request> {
     Request::get(&format!(
         "https://archive.org/metadata/{}/metadata",
-        item_id(id)?
-    ))
-}
-
-/// The item's total size in bytes, for `parse_size`.
-pub fn size_request(id: &str) -> Option<Request> {
-    Request::get(&format!(
-        "https://archive.org/metadata/{}/item_size",
         item_id(id)?
     ))
 }
@@ -266,18 +258,6 @@ pub fn parse(status: u16, raw: &[u8], id: &str) -> Result<Option<Card>> {
     Ok(Some(card))
 }
 
-/// The item's total size in bytes, or `None` for an unknown item.
-pub fn parse_size(status: u16, raw: &[u8], id: &str) -> Result<Option<u64>> {
-    let v = json(status, raw, &[])?.context("no body")?;
-    if v["error"].as_str() == Some(&format!("Couldn't locate item '{id}'")) {
-        return Ok(None);
-    }
-    int(&v["result"])
-        .and_then(|n| u64::try_from(n).ok())
-        .map(Some)
-        .context("no item size")
-}
-
 /// The source: Internet Archive items by identifier.
 pub struct InternetArchive;
 
@@ -410,10 +390,6 @@ mod tests {
             request("bitcoin-whitepaper").unwrap().url.as_str(),
             "https://archive.org/metadata/bitcoin-whitepaper/metadata"
         );
-        assert_eq!(
-            size_request("bitcoin-whitepaper").unwrap().url.as_str(),
-            "https://archive.org/metadata/bitcoin-whitepaper/item_size"
-        );
         assert_eq!(request("a/b"), None);
     }
 
@@ -481,15 +457,6 @@ mod tests {
             "http://creativecommons.org/publicdomain/mark/1.0/"
         );
         assert!(card.keys.is_empty());
-        assert_eq!(
-            parse_size(
-                200,
-                &read("bitcoin-whitepaper-size.json"),
-                "bitcoin-whitepaper"
-            )
-            .unwrap(),
-            Some(9257619)
-        );
     }
 
     #[test]
@@ -536,10 +503,6 @@ mod tests {
         );
         assert_eq!(parse(200, &read("dark.json"), DARK).unwrap(), None);
         assert_eq!(parse(200, &read("dark-full.json"), DARK).unwrap(), None);
-        assert_eq!(
-            parse_size(200, &read("missing.json"), unknown).unwrap(),
-            None
-        );
         // An answer for another item, including an error that names another one.
         assert!(parse(
             200,

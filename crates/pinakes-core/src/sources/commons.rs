@@ -198,17 +198,6 @@ pub fn request(target: &Target) -> Option<Request> {
     ])
 }
 
-/// The structured data of a file (`M{page id}`), for `parse_depicts`.
-pub fn structured_request(page_id: u64) -> Option<Request> {
-    api(&[
-        ("action", "wbgetentities"),
-        ("format", "json"),
-        ("formatversion", "2"),
-        ("ids", &format!("M{page_id}")),
-        ("props", "claims"),
-    ])
-}
-
 /// The URL without its `utm_*` tracking parameters.
 fn untracked(raw: &str) -> Option<String> {
     let mut url = web_url(raw)?;
@@ -290,12 +279,6 @@ pub fn parse(status: u16, raw: &[u8], target: &Target) -> Result<Option<Card>> {
         .context("not a file title")?;
     let t = Target::Title(name.clone());
     let mut card = Card::new("ImageObject", identifier(&t).expect("a title"), page(&t));
-    if &t != target {
-        card.alias(page(target));
-    }
-    if let Some(short) = info["descriptionshorturl"].as_str().and_then(web_url) {
-        card.alias(short.into());
-    }
     let meta = |field: &str| info["extmetadata"][field]["value"].as_str();
     let plain = |field: &str| meta(field).and_then(html_text);
     let mime = text(&info["mime"]).unwrap_or_default();
@@ -353,34 +336,6 @@ pub fn parse(status: u16, raw: &[u8], target: &Target) -> Result<Option<Card>> {
     card.detail("size", info["size"].as_u64());
     card.detail("page_id", p["pageid"].as_u64());
     Ok(Some(card))
-}
-
-/// What a file depicts (`P180`), as Wikidata ids: the values of its structured data that are not
-/// deprecated. Empty when the file has no structured data.
-pub fn parse_depicts(status: u16, raw: &[u8], page_id: u64) -> Result<Vec<String>> {
-    let v = json(status, raw, &[])?.context("no body")?;
-    if v.get("error").is_some() {
-        bail!("the API answered an error: {}", v["error"]["code"]);
-    }
-    let id = format!("M{page_id}");
-    let e = &v["entities"][&id];
-    ensure!(
-        e["id"].as_str() == Some(id.as_str()),
-        "the API answered for another entity"
-    );
-    let statements = e.get("statements").unwrap_or(&e["claims"]);
-    Ok(statements["P180"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|s| s["rank"].as_str() != Some("deprecated"))
-        .filter_map(|s| s["mainsnak"]["datavalue"]["value"]["id"].as_str())
-        .filter(|q| {
-            q.strip_prefix('Q')
-                .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()) && !n.is_empty())
-        })
-        .map(str::to_owned)
-        .collect())
 }
 
 /// The source: Wikimedia Commons files by title (or page id).
@@ -538,10 +493,6 @@ mod tests {
             recorded("curid-30202095.json")
         );
         assert_eq!(
-            structured_request(60353189).unwrap().url.as_str(),
-            recorded("structured-M60353189.json")
-        );
-        assert_eq!(
             page(&title("Été_(1).jpg")),
             "https://commons.wikimedia.org/wiki/File:%C3%89t%C3%A9_(1).jpg"
         );
@@ -601,10 +552,6 @@ mod tests {
             (&5388.into(), &3368.into(), &13848964.into())
         );
         assert_eq!(card.details["page_id"], 60353189);
-        assert_eq!(
-            card.aliases,
-            ["https://commons.wikimedia.org/w/index.php?curid=60353189"]
-        );
         assert!(card.keys.is_empty());
     }
 
@@ -646,9 +593,9 @@ mod tests {
             card.url,
             "https://commons.wikimedia.org/wiki/File:BitcoinSign.svg"
         );
-        assert!(card
-            .aliases
-            .contains(&"https://commons.wikimedia.org/wiki/File:Bitcoin_BTC_symbol.svg".into()));
+        // The old title's link becomes an alias of this root once the card is stored
+        // (`source_root`).
+        assert_eq!(card.id, "commons:File:BitcoinSign.svg");
     }
 
     #[test]
@@ -679,18 +626,6 @@ mod tests {
         assert_eq!(type_name("audio/ogg"), "AudioObject");
         assert_eq!(type_name("application/pdf"), "DigitalDocument");
         assert_eq!(type_name("application/ogg"), "MediaObject");
-    }
-
-    #[test]
-    fn depicts() {
-        let raw = read("structured-M60353189.json");
-        assert_eq!(
-            parse_depicts(200, &raw, 60353189).unwrap(),
-            ["Q44440", "Q220032", "Q1438659", "Q4022", "Q527", "Q8074"]
-        );
-        assert!(parse_depicts(200, &raw, 1).is_err());
-        let none = br#"{"entities":{"M7":{"id":"M7","missing":""}},"success":1}"#;
-        assert!(parse_depicts(200, none, 7).unwrap().is_empty());
     }
 
     #[test]

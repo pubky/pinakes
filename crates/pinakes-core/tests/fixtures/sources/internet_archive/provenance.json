@@ -18,15 +18,6 @@
     "status": 200,
     "url": "https://archive.org/metadata/bitcoin-whitepaper/metadata"
   },
-  "bitcoin-whitepaper-size": {
-    "bytes": 18,
-    "content_type": "application/json",
-    "file": "bitcoin-whitepaper-size.json",
-    "recorded_at": "2026-10-19T16:24:22+00:00",
-    "sha256": "f68209291132a7218f420a0a1dd74c30f399867c7e5b9a1e2810c65aba882cfc",
-    "status": 200,
-    "url": "https://archive.org/metadata/bitcoin-whitepaper/item_size"
-  },
   "case-variant": {
     "bytes": 53,
     "content_type": "application/json",

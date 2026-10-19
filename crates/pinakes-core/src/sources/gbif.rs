@@ -6,8 +6,7 @@
 //!
 //! The licence is per record: an occurrence card credits its own licence and rights holder.
 use super::kit::{
-    encode, float, host_and_segments, int, json, plain, text, texts, time, Card, Link, Point,
-    Request,
+    float, host_and_segments, int, json, plain, text, texts, time, Card, Link, Point, Request,
 };
 use super::{Example, Source};
 use crate::model::ResourceMeta;
@@ -299,36 +298,6 @@ pub fn parse_occurrence(status: u16, raw: &[u8], key: u64) -> Result<Option<Card
     }
     card.detail("occurrence_id", occurrence_id);
     Ok(Some(card))
-}
-
-/// The iNaturalist page of an observation as GBIF stores it in `occurrenceID`.
-fn inat_occurrence_id(observation: u64) -> String {
-    format!("https://www.inaturalist.org/observations/{observation}")
-}
-
-/// The search for the GBIF occurrence of an iNaturalist observation (exact `occurrenceID`).
-pub fn inat_request(observation: u64) -> Option<Request> {
-    Request::get(&format!(
-        "{API}/occurrence/search?occurrenceID={}&limit=2",
-        encode(&inat_occurrence_id(observation))
-    ))
-}
-
-/// The occurrence key of an iNaturalist observation: `None` unless exactly one occurrence has
-/// exactly that `occurrenceID`.
-pub fn parse_inat_search(status: u16, raw: &[u8], observation: u64) -> Result<Option<u64>> {
-    let v = json(status, raw, &[])?.context("no search answer")?;
-    let results = v["results"].as_array().context("no results")?;
-    let wanted = inat_occurrence_id(observation);
-    let matches: Vec<u64> = results
-        .iter()
-        .filter(|r| r["occurrenceID"].as_str() == Some(wanted.as_str()))
-        .filter_map(|r| r["key"].as_u64())
-        .collect();
-    Ok(match (int(&v["count"]), matches.as_slice()) {
-        (Some(1), [key]) => Some(*key),
-        _ => None,
-    })
 }
 
 /// The source: GBIF species and occurrences, one request per card.
@@ -658,31 +627,6 @@ mod tests {
             licence("http://creativecommons.org/publicdomain/zero/1.0/legalcode"),
             "CC0 1.0"
         );
-    }
-
-    #[test]
-    fn inat_join() {
-        assert_eq!(
-            inat_request(333069440).unwrap().url.as_str(),
-            "https://api.gbif.org/v1/occurrence/search?occurrenceID=https%3A%2F%2Fwww.inaturalist.org%2Fobservations%2F333069440&limit=2"
-        );
-        let found = read("search-inat-333069440.json");
-        assert_eq!(
-            parse_inat_search(200, &found, 333069440).unwrap(),
-            Some(5938027305)
-        );
-        // The answer must name exactly the observation asked for.
-        assert_eq!(parse_inat_search(200, &found, 33306944).unwrap(), None);
-        assert_eq!(
-            parse_inat_search(200, &read("search-inat-missing.json"), 999999999999).unwrap(),
-            None
-        );
-        let two = br#"{"count":2,"results":[
-            {"key":1,"occurrenceID":"https://www.inaturalist.org/observations/5"},
-            {"key":2,"occurrenceID":"https://www.inaturalist.org/observations/5"}]}"#;
-        assert_eq!(parse_inat_search(200, two, 5).unwrap(), None);
-        assert!(parse_inat_search(429, b"", 5).is_err());
-        assert!(parse_inat_search(200, b"{}", 5).is_err());
     }
 
     #[test]

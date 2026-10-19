@@ -122,9 +122,6 @@ pub fn parse(status: u16, raw: &[u8], id: &str) -> Result<Option<Card>> {
     card.detail("felt", int(&p["felt"]));
     card.detail("significance", int(&p["sig"]));
     card.detail("ids", all.clone());
-    for other in &all {
-        card.alias(page(other));
-    }
     Ok(Some(card))
 }
 
@@ -300,10 +297,10 @@ mod tests {
         assert_eq!(card.details["significance"], 2184);
         assert!(!card.details.contains_key("alert"));
         assert_eq!(card.details["ids"].as_array().unwrap().len(), 7);
-        assert_eq!(card.aliases.len(), 6, "every id but the preferred one");
-        assert!(card
-            .aliases
-            .contains(&"https://earthquake.usgs.gov/earthquakes/eventpage/usp000hvnu".into()));
+        assert!(card.details["ids"]
+            .as_array()
+            .unwrap()
+            .contains(&"usp000hvnu".into()));
         assert!(card.also_on.is_empty());
     }
 
@@ -327,9 +324,10 @@ mod tests {
         assert_eq!(card.details["magnitude"], 7.1);
         assert_eq!(card.details["place"], "Ridgecrest Earthquake Sequence");
         assert_eq!(card.details["event_type"], "earthquake");
-        assert!(card
-            .aliases
-            .contains(&"https://earthquake.usgs.gov/earthquakes/eventpage/us70004bn0".into()));
+        assert!(card.details["ids"]
+            .as_array()
+            .unwrap()
+            .contains(&"us70004bn0".into()));
     }
 
     #[test]

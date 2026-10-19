@@ -1,8 +1,7 @@
 # PubChem
 
 Chemical compounds in PubChem, read from PUG REST by compound id (CID). Public data, credited to
-PubChem; no key. PubChem asks for at most 5 requests a second (this source uses 4) and reports its
-load in the `X-Throttling-Control` header.
+PubChem; no key. PubChem asks for at most 5 requests a second (this source uses 4).
 
 ## Links
 

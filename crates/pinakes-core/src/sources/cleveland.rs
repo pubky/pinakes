@@ -4,7 +4,8 @@
 //! The identifier is `cleveland:{accession number}` (in lower case, e.g. `cleveland:1958.39`):
 //! the museum's own pages are named by it, so it comes from most links alone. clevelandart.org
 //! and the API also accept the numeric id (`/art/135382`); such a link is identified by the
-//! accession number in the API's answer, and the card names it as an alias.
+//! accession number in the API's answer, and becomes an alias of that root once its card is
+//! stored.
 //!
 //! The API's data is CC0; images are shown only for works the API marks CC0.
 use super::kit::{
@@ -120,10 +121,6 @@ pub fn parse(status: u16, raw: &[u8], artwork: &Artwork) -> Result<Option<Card>>
         identifier(&named).expect("an accession number"),
         page(&named),
     );
-    card.alias(page(&Artwork::Id(id as u64)));
-    if let Some(url) = text(&d["url"]).filter(|u| from_uri(u).as_ref() == Some(&named)) {
-        card.alias(url);
-    }
     card.name = text(&d["title"]);
     card.description = text(&d["description"])
         .or_else(|| text(&d["wall_description"]))
@@ -355,13 +352,7 @@ mod tests {
             Some("Cleveland Museum of Art, CC0")
         );
         assert_eq!(card.keys, [Key::new("wikidata", "Q50772913")]);
-        assert_eq!(
-            card.aliases,
-            [
-                "https://www.clevelandart.org/art/135382",
-                "https://clevelandart.org/art/1958.39"
-            ]
-        );
+        assert_eq!(card.details["object_id"], 135382);
         assert_eq!(
             card.also_on,
             [Link::new(

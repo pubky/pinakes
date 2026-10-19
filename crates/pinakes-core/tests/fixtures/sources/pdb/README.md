@@ -4,6 +4,5 @@ seconds. Parser regression fixtures for `pinakes_core::sources::pdb`; test runs 
 
 `provenance.json` lists each fixture's request URL, status, content type, recording time, and the
 size and SHA-256 of the body as served. `entry-missing` is an id never assigned (9999);
-`entry-1hhb-obsolete` is an obsolete entry (404 like a missing one), and `status-1hhb` is its
-holdings status, naming 4HHB as its latest replacement.
+`entry-1hhb-obsolete` is an obsolete entry (404 like a missing one).
 The PDB data is released under CC0 1.0 (https://www.rcsb.org/pages/usage-policy).

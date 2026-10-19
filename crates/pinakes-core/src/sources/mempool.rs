@@ -410,7 +410,7 @@ pub fn settled(status: u16, raw: &[u8], tip: u64) -> Result<bool> {
     Ok(v["in_best_chain"].as_bool() == Some(true) && tip + 1 >= height + SETTLED_DEPTH)
 }
 
-/// Explorers that show the same on-chain object (each checked through its own Esplora API).
+/// Explorers that show the same on-chain object.
 fn chain_mirrors(card: &mut Card, network: Network, kind: &str, id: &str) {
     let blockstream = match network {
         Network::Mainnet => Some(""),

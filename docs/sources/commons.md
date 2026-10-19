@@ -59,7 +59,7 @@ file's credit line and licence, e.g. "© Frank Schulenburg / CC BY-SA 4.0".
 ## Licence
 
 Every file has its own licence and author; the card carries them as its attribution. File
-descriptions are CC BY-SA 4.0; structured data is CC0.
+descriptions are CC BY-SA 4.0.
 
 ## Examples
 

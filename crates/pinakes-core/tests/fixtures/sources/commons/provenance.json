@@ -55,15 +55,5 @@
     "sha256": "fc709e0ca706acd5d18729ff8b82f27c9bb96a29b80acf724c8e045104db5321",
     "status": 200,
     "url": "https://commons.wikimedia.org/w/api.php?action=query&format=json&formatversion=2&redirects=1&prop=imageinfo%7Ccoordinates&iiprop=url%7Csize%7Cmime%7Cextmetadata%7Ctimestamp&iiurlwidth=1280&iiextmetadatafilter=ObjectName%7CImageDescription%7CArtist%7CCredit%7CAttribution%7CLicenseShortName%7CLicenseUrl%7CUsageTerms%7CAttributionRequired%7CDateTimeOriginal&iiextmetadatalanguage=en&titles=File%3ABitcoin+BTC+symbol.svg"
-  },
-  "structured-M60353189": {
-    "bytes": 8232,
-    "content_type": "application/json",
-    "file": "structured-M60353189.json",
-    "note": "structured data of File:Golden Gate Bridge as seen from Battery East.jpg",
-    "recorded_at": "2026-10-19T16:24:59+00:00",
-    "sha256": "ba56ca67ff6d265669d881ca4121af3676c995877e6881d4ee9198edb2b04b32",
-    "status": 200,
-    "url": "https://commons.wikimedia.org/w/api.php?action=wbgetentities&format=json&formatversion=2&ids=M60353189&props=claims"
   }
 }

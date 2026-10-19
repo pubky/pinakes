@@ -4,8 +4,8 @@
 //! which shares figshare.com's article ids) and its API URL are aliases of `figshare:{id}`. A link
 //! to one version (`…/{id}/{version}`) is a dated version, not the article, and is not read
 //! here. The card is the article as a whole, read from its latest version, whose number is in
-//! `version`. Portals on their own domains are not recognised from the link; the answer names
-//! their pages as aliases.
+//! `version`. Portals on their own domains are not recognised from the link; the card's page is
+//! the one the answer names.
 //!
 //! Figshare gives each version a DOI ending in `.v{n}`; the same DOI without the suffix names the
 //! article and resolves to its latest version. Both are keys. DOI links
@@ -166,9 +166,6 @@ pub fn parse(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
         .cloned()
         .unwrap_or_else(|| page(id));
     let mut card = Card::new(type_name(&kind), identifier(id), url);
-    for p in pages.iter().filter(|p| from_uri(p) == Some(id)) {
-        card.alias(p.clone());
-    }
     card.name = text(&v["title"]);
     card.description = v["description"].as_str().and_then(html_text);
     card.detail(
@@ -349,7 +346,6 @@ mod tests {
             card.url,
             "https://figshare.com/articles/dataset/Garden_data_set/1018700"
         );
-        assert!(card.aliases.is_empty());
         assert_eq!(card.name.as_deref(), Some("Garden data set"));
         assert_eq!(
             card.description.as_deref(),
@@ -422,7 +418,6 @@ mod tests {
             .unwrap();
         assert_eq!(v1.id, card.id);
         assert_eq!(v1.url, card.url);
-        assert!(v1.aliases.is_empty(), "{:?}", v1.aliases);
         assert_eq!(v1.keys[0], card.keys[0]);
     }
 
