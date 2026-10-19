@@ -9,7 +9,7 @@
 //! randomised, so its card has no point.
 use super::kit::html_text;
 use super::kit::{
-    float, host_and_segments, int, json, plain, text, time, Card, Key, Link, Point, Request,
+    float, host_and_segments, int, json, plain, text, time, Card, Link, Point, Request,
 };
 use super::{Example, Source};
 use crate::model::ResourceMeta;
@@ -234,7 +234,7 @@ pub fn parse_observation(status: u16, raw: &[u8], id: u64) -> Result<Option<Card
         if let (Some("GBIF"), Some(o @ super::gbif::Object::Occurrence(key))) =
             (link["source"].as_str(), gbif)
         {
-            card.key(Key::new("gbif", &format!("occurrence/{key}")));
+            card.detail("gbif_occurrence", key);
             card.link(Link::new("GBIF", super::gbif::page(o), VIA));
         }
     }
@@ -330,7 +330,7 @@ impl Source for Inaturalist {
             "ancestry",
             "parent_id",
             // Keys
-            "gbif",
+            "gbif_occurrence",
         ]
     }
     fn budgets(&self) -> &'static [super::Budget] {
@@ -487,7 +487,8 @@ mod tests {
             card.attribution.as_deref(),
             Some("(c) ramchop, some rights reserved (CC BY-NC), via iNaturalist")
         );
-        assert_eq!(card.keys, [Key::new("gbif", "occurrence/5938027305")]);
+        assert!(card.keys.is_empty(), "another service's object is a fact");
+        assert_eq!(card.details["gbif_occurrence"], 5938027305u64);
         assert_eq!(
             card.also_on[0].uri,
             "https://www.gbif.org/occurrence/5938027305"
@@ -520,7 +521,7 @@ mod tests {
             card.start.unwrap().to_rfc3339(),
             "2023-12-31T21:16:30+00:00"
         );
-        assert_eq!(card.keys, [Key::new("gbif", "occurrence/4993788366")]);
+        assert_eq!(card.details["gbif_occurrence"], 4993788366u64);
         // Any one of the three signals hides the point.
         for (field, value) in [
             ("obscured", Value::Bool(true)),
@@ -651,7 +652,7 @@ mod tests {
             ResourceMeta::new("inat:observation/333069440", "inaturalist", 60),
             SITE,
         );
-        assert_eq!(doc.attributes["gbif"], "occurrence/5938027305");
+        assert_eq!(doc.attributes["gbif_occurrence"], "5938027305");
         assert_eq!(doc.site, "iNaturalist");
     }
 }

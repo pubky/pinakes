@@ -33,14 +33,15 @@ the scientific name it was identified as.
 
 - **Point:** the record's coordinates, except when the publisher withheld or generalised
   information (`informationWithheld`, `dataGeneralizations`, e.g. "Coordinate uncertainty
-  increased to 27816m") or GBIF flags the coordinates as invalid or mismatched. Then the card
+  increased to 27816m"), the coordinates are uncertain by more than 1,000 metres
+  (`coordinateUncertaintyInMeters`), or GBIF flags them as invalid or mismatched. Then the card
   has no point.
 - **Start:** `eventDate` when it is a full date or date-time. GBIF gives the time in local time
   with no offset; it is exact when `eventTime` carries the offset (as iNaturalist records do),
   otherwise the card keeps the date alone. A range of two full dates is a start and an end. A
   year or month alone stays in `event_date`.
 - An occurrence published from iNaturalist (its `occurrenceID` an iNaturalist observation link)
-  is the same observation: the card carries the `inat` key, `observation/{id}`, and links to it.
+  names that observation in the `inat_observation` fact.
 
 | Fact | Meaning |
 | --- | --- |
@@ -58,7 +59,7 @@ the scientific name it was identified as.
 | `uncertainty_m` | Coordinate uncertainty in metres |
 | `information_withheld`, `data_generalizations` | What the publisher withheld or generalised |
 | `license`, `occurrence_id` | The record's licence (e.g. `CC BY 4.0`) and its publisher's id |
-| `inat` | The iNaturalist observation, `observation/{id}` |
+| `inat_observation` | The iNaturalist observation this occurrence was published from, by id |
 | `page_url` | The record's page on gbif.org |
 
 ## Licence and attribution

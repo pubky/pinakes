@@ -133,6 +133,16 @@ fn cc_name(url: &str) -> Option<String> {
     }
 }
 
+/// Whether a licence (as `cc_name` names it) lets anyone show the item's image with a credit:
+/// CC0, the Public Domain Mark, or CC BY without further terms.
+fn open_image(name: &str) -> bool {
+    name.starts_with("CC0 ")
+        || name.starts_with("Public Domain Mark ")
+        || name
+            .strip_prefix("CC BY ")
+            .is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
+}
+
 /// An Open Library id of the given kind (`M` edition, `W` work).
 fn openlibrary(value: Option<String>, kind: char) -> Option<String> {
     let value = value?;
@@ -188,11 +198,18 @@ pub fn parse(status: u16, raw: &[u8], id: &str) -> Result<Option<Card>> {
         .filter_map(|d| html_text(d))
         .collect();
     card.description = (!description.is_empty()).then(|| description.join("\n"));
-    card.image = Some(format!("https://archive.org/services/img/{id}"));
     let date = text(&m["date"]);
     let license = text(&m["licenseurl"])
         .and_then(|u| web_url(&u))
         .map(String::from);
+    // The item's own thumbnail, only when its licence lets anyone show it with a credit.
+    if license
+        .as_deref()
+        .and_then(cc_name)
+        .is_some_and(|n| open_image(&n))
+    {
+        card.image = Some(format!("https://archive.org/services/img/{id}"));
+    }
     let rights = values(&m["rights"]).iter().find_map(|r| html_text(r));
     card.attribution = license
         .as_deref()
@@ -232,9 +249,11 @@ pub fn parse(status: u16, raw: &[u8], id: &str) -> Result<Option<Card>> {
             VIA,
         ));
     }
-    if let Some(work) = openlibrary(single(&m["openlibrary_work"]), 'W') {
-        card.key(Key::new("openlibrary", &work));
-    }
+    // The work is every edition, not this item: a fact, not a key.
+    card.detail(
+        "openlibrary_work",
+        openlibrary(single(&m["openlibrary_work"]), 'W'),
+    );
     let doi = single(&m["doi"]).and_then(|d| {
         let d = d.trim_matches(|c: char| {
             c.is_whitespace() || matches!(c, '\u{200e}' | '\u{200f}' | '\u{feff}')
@@ -280,6 +299,7 @@ impl Source for InternetArchive {
     fn facts(&self) -> &'static [&'static str] {
         &[
             "page_url",
+            "openlibrary_work",
             "creators",
             "date",
             "publishers",
@@ -411,10 +431,7 @@ mod tests {
             card.description.as_deref(),
             Some("Publisher's chromolithographed pictorial wrappers\nEx libris Elvah Karshner")
         );
-        assert_eq!(
-            card.image.as_deref(),
-            Some("https://archive.org/services/img/goodytwoshoes00newyiala")
-        );
+        assert_eq!(card.image, None, "the item names no licence");
         // "c1888" is not a full date.
         assert_eq!(card.start, None);
         assert_eq!(card.details["date"], "c1888");
@@ -429,10 +446,8 @@ mod tests {
         assert_eq!(card.details["languages"], serde_json::json!(["eng"]));
         assert_eq!(card.details["ark"], "ark:/13960/t53f4ms96");
         assert_eq!(card.attribution, None);
-        assert_eq!(
-            keys(&card),
-            ["openlibrary:OL7095326M", "openlibrary:OL16077419W"]
-        );
+        assert_eq!(keys(&card), ["openlibrary:OL7095326M"]);
+        assert_eq!(card.details["openlibrary_work"], "OL16077419W");
         assert_eq!(
             card.also_on[0].uri,
             "https://openlibrary.org/books/OL7095326M"
@@ -458,6 +473,10 @@ mod tests {
         assert_eq!(card.details["public_date"], "2020-10-07 17:57:24");
         assert_eq!(card.attribution.as_deref(), Some("Public Domain Mark 1.0"));
         assert_eq!(
+            card.image.as_deref(),
+            Some("https://archive.org/services/img/bitcoin-whitepaper")
+        );
+        assert_eq!(
             card.details["license_url"],
             "http://creativecommons.org/publicdomain/mark/1.0/"
         );
@@ -478,23 +497,24 @@ mod tests {
         // An ISBN-10 and ISBN-13 of one edition; the older `openlibrary` field names another
         // edition, so no edition key.
         let crime = card("crimepunishment00dost_0", "crimepunishment00dost_0");
-        assert_eq!(
-            keys(&crime),
-            ["isbn:9780140449136", "openlibrary:OL166894W"]
-        );
+        assert_eq!(keys(&crime), ["isbn:9780140449136"]);
+        // The work is every edition: a fact, not a key.
+        assert_eq!(crime.details["openlibrary_work"], "OL166894W");
         assert!(crime.also_on.is_empty());
         // The ISBNs of two editions.
         let algo = card(
             "introductiontoal0000unse_t3a6",
             "introductiontoal0000unse_t3a6",
         );
-        assert_eq!(
-            keys(&algo),
-            ["openlibrary:OL23170657M", "openlibrary:OL16921783W"]
-        );
+        assert_eq!(keys(&algo), ["openlibrary:OL23170657M"]);
+        assert_eq!(algo.details["openlibrary_work"], "OL16921783W");
         let paper = card("aside-cardiovascular-319", "aside-cardiovascular-319");
         assert_eq!(keys(&paper), ["doi:10.71079/aside.cv.042826319"]);
         assert_eq!(paper.attribution.as_deref(), Some("CC BY 4.0"));
+        assert_eq!(
+            paper.image.as_deref(),
+            Some("https://archive.org/services/img/aside-cardiovascular-319")
+        );
         assert_eq!(paper.details["rights"], "Authors retain copyright.");
         assert_eq!(
             paper.start, None,
@@ -598,7 +618,8 @@ mod tests {
         let doc = card("goodytwoshoes00newyiala", "goodytwoshoes00newyiala")
             .into_doc(ResourceMeta::new("x", "internet_archive", 60), SITE);
         assert_eq!(doc.site, "Internet Archive");
-        assert_eq!(doc.attributes["openlibrary"], "OL7095326M; OL16077419W");
+        assert_eq!(doc.attributes["openlibrary"], "OL7095326M");
+        assert_eq!(doc.attributes["openlibrary_work"], "OL16077419W");
         assert_eq!(doc.attributes["collections"], "cdl; yrlsc; iacl; americana");
         let doc = card("crimepunishment00dost_0", "crimepunishment00dost_0")
             .into_doc(ResourceMeta::new("x", "internet_archive", 60), SITE);

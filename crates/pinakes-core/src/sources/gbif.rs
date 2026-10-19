@@ -2,13 +2,11 @@
 //!
 //! Every gbif.org link of one object, with or without a language prefix or a tab, and its API
 //! URL are aliases of one identifier: `gbif:species/{key}` or `gbif:occurrence/{key}`. An
-//! occurrence published from iNaturalist is the same observation as the iNaturalist one, so its
-//! card carries the `inat:observation/{id}` key; `inat_request` finds the occurrence of an
-//! iNaturalist observation.
+//! occurrence published from iNaturalist names that observation (`inat_observation`).
 //!
 //! The licence is per record: an occurrence card credits its own licence and rights holder.
 use super::kit::{
-    encode, float, host_and_segments, int, json, plain, text, texts, time, Card, Key, Link, Point,
+    encode, float, host_and_segments, int, json, plain, text, texts, time, Card, Link, Point,
     Request,
 };
 use super::{Example, Source};
@@ -215,11 +213,16 @@ const BAD_COORDINATES: [&str; 4] = [
     "COUNTRY_COORDINATE_MISMATCH",
 ];
 
+/// Coordinates less certain than this are an area, not a point.
+pub const MAX_UNCERTAINTY_M: f64 = 1000.0;
+
 /// The occurrence's point, unless the publisher withheld or generalised information (often the
-/// location, e.g. "Coordinate uncertainty increased to 27816m") or GBIF flags the coordinates.
+/// location, e.g. "Coordinate uncertainty increased to 27816m"), the coordinates are uncertain by
+/// more than `MAX_UNCERTAINTY_M`, or GBIF flags them.
 fn occurrence_point(v: &Value) -> Option<Point> {
     let issues = texts(&v["issues"]);
     let withheld = text(&v["informationWithheld"]).is_some()
+        || float(&v["coordinateUncertaintyInMeters"]).is_some_and(|m| m > MAX_UNCERTAINTY_M)
         || text(&v["dataGeneralizations"]).is_some()
         || v["hasGeospatialIssues"].as_bool() == Some(true)
         || issues.iter().any(|i| BAD_COORDINATES.contains(&i.as_str()));
@@ -287,7 +290,7 @@ pub fn parse_occurrence(status: u16, raw: &[u8], key: u64) -> Result<Option<Card
     );
     let occurrence_id = text(&v["occurrenceID"]);
     if let Some(id) = occurrence_id.as_deref().and_then(inat_observation) {
-        card.key(Key::new("inat", &format!("observation/{id}")));
+        card.detail("inat_observation", id);
         card.link(Link::new(
             "iNaturalist",
             super::inaturalist::page(super::inaturalist::Object::Observation(id)),
@@ -381,8 +384,7 @@ impl Source for Gbif {
             "data_generalizations",
             "license",
             "occurrence_id",
-            // Keys
-            "inat",
+            "inat_observation",
         ]
     }
     fn budgets(&self) -> &'static [super::Budget] {
@@ -576,7 +578,8 @@ mod tests {
             card.attribution.as_deref(),
             Some("CC BY-NC 4.0 (ramchop), via GBIF.org")
         );
-        assert_eq!(card.keys, [Key::new("inat", "observation/333069440")]);
+        assert!(card.keys.is_empty(), "another service's object is a fact");
+        assert_eq!(card.details["inat_observation"], 333069440);
         assert_eq!(
             card.also_on[0].uri,
             "https://www.inaturalist.org/observations/333069440"
@@ -589,6 +592,21 @@ mod tests {
         assert!(parse_occurrence(200, &read("occurrence-5938027305.json"), 5938027306).is_err());
         assert!(parse_occurrence(500, b"", 5938027305).is_err());
         assert!(parse_occurrence(200, b"<html>", 5938027305).is_err());
+    }
+
+    #[test]
+    fn uncertain_coordinates_give_no_point() {
+        let raw = read("occurrence-5938027305.json");
+        let with = |metres: f64| {
+            let mut v: Value = serde_json::from_slice(&raw).unwrap();
+            v["coordinateUncertaintyInMeters"] = metres.into();
+            let raw = serde_json::to_vec(&v).unwrap();
+            parse_occurrence(200, &raw, 5938027305).unwrap().unwrap()
+        };
+        assert!(with(MAX_UNCERTAINTY_M).point.is_some());
+        let vague = with(1500.0);
+        assert_eq!(vague.point, None, "an area, not a point");
+        assert_eq!(vague.details["uncertainty_m"], 1500.0);
     }
 
     #[test]
@@ -607,7 +625,7 @@ mod tests {
             "Coordinate uncertainty increased to 27816m at the request of the observer"
         );
         assert_eq!(card.details["license"], "CC BY 4.0");
-        assert_eq!(card.keys, [Key::new("inat", "observation/195404405")]);
+        assert_eq!(card.details["inat_observation"], 195404405);
     }
 
     #[test]
@@ -728,7 +746,7 @@ mod tests {
             ResourceMeta::new("gbif:occurrence/5938027305", "gbif", 60),
             SITE,
         );
-        assert_eq!(doc.attributes["inat"], "observation/333069440");
+        assert_eq!(doc.attributes["inat_observation"], "333069440");
         assert_eq!(doc.site, "GBIF");
     }
 }

@@ -40,8 +40,8 @@ scientific name).
 - **Start:** the time observed, with its offset, else the date observed.
 - **Image:** the first photo at medium size, only when the photo has a Creative Commons licence;
   its own credit is `image_attribution`.
-- iNaturalist names the GBIF occurrence it published the observation as: the card carries the
-  `gbif` key, `occurrence/{key}`, and links to it.
+- iNaturalist names the GBIF occurrence it published the observation as, in the
+  `gbif_occurrence` fact.
 
 A taxon is a `Taxon`, with `name` the scientific name, the default photo as `image` when it has a
 Creative Commons licence, and `description` the Wikipedia summary iNaturalist shows (as text).
@@ -62,7 +62,7 @@ Creative Commons licence, and `description` the Wikipedia summary iNaturalist sh
 | `is_active`, `extinct`, `parent_id` | Whether the taxon is current, extinct, its parent |
 | `ancestry` | The ancestor taxa, from kingdom down |
 | `wikipedia_url` | The taxon's Wikipedia article |
-| `gbif` | The GBIF occurrence, `occurrence/{key}` |
+| `gbif_occurrence` | The GBIF occurrence iNaturalist published this observation as, by key |
 | `page_url` | The page on inaturalist.org |
 
 ## Licence and attribution

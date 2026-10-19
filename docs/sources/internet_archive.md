@@ -34,7 +34,8 @@ The type follows the item's `mediatype`: `Book` (texts), `VideoObject` (movies),
 (audio, etree), `ImageObject` (image), `SoftwareApplication` (software), `Dataset` (data),
 `WebSite` (web), `Collection` (collection), else `CreativeWork`. `site` is "Internet Archive",
 `name` the title, `description` the plain text of the item's description, `image` the item's
-thumbnail (`https://archive.org/services/img/{identifier}`). The item's `date`, as given (often
+thumbnail (`https://archive.org/services/img/{identifier}`) when its licence lets anyone show it
+with a credit (CC0, the Public Domain Mark or CC BY without further terms). The item's `date`, as given (often
 just a year such as `1888`), is a fact. The attribution is the
 item's licence (the short name of a Creative Commons licence, else the licence URL), else its
 rights statement.
@@ -53,7 +54,8 @@ rights statement.
 | `public_date` | When the item was made public on archive.org |
 | `ark` | The item's ARK, e.g. `ark:/13960/t53f4ms96` |
 | `isbn` | The ISBN-13, when every ISBN the item lists is the same book |
-| `openlibrary` | The Open Library edition (`OL…M`) and work (`OL…W`) ids, when single and unambiguous |
+| `openlibrary` | The Open Library edition (`OL…M`), when single and unambiguous |
+| `openlibrary_work` | The Open Library work (`OL…W`) the edition belongs to, when single |
 | `doi` | The DOI, in lower case, when the item names one |
 | `page_url` | The item's page on archive.org |
 

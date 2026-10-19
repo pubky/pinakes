@@ -205,10 +205,14 @@ pub fn parse(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
             doi.strip_suffix(&format!(".v{n}"))
                 .filter(|base| base.ends_with(&format!(".{id}")))
         });
-        if let Some(base) = article {
-            card.key(Key::new("doi", base));
+        // A version's DOI names that version: a fact. The article's own DOI is the key.
+        match article {
+            Some(base) => {
+                card.key(Key::new("doi", base));
+                card.detail("version_doi", doi.as_str());
+            }
+            None => card.key(Key::new("doi", &doi)),
         }
-        card.key(Key::new("doi", &doi));
     }
     Ok(Some(card))
 }
@@ -234,6 +238,7 @@ impl Source for Figshare {
     fn facts(&self) -> &'static [&'static str] {
         &[
             "page_url",
+            "version_doi",
             "published",
             "doi",
             "authors",
@@ -364,10 +369,12 @@ mod tests {
         assert_eq!(card.details["version"], 1);
         assert_eq!(
             card.keys,
-            [
-                Key::new("doi", "10.6084/m9.figshare.1018700"),
-                Key::new("doi", "10.6084/m9.figshare.1018700.v1"),
-            ]
+            [Key::new("doi", "10.6084/m9.figshare.1018700")],
+            "a version's DOI names that version"
+        );
+        assert_eq!(
+            card.details["version_doi"],
+            "10.6084/m9.figshare.1018700.v1"
         );
         assert!(parse(200, &read("article-1018700.json"), 5616445).is_err());
         assert!(parse(429, b"", 1018700).is_err());
@@ -401,10 +408,12 @@ mod tests {
         assert_eq!(card.details["tags"][0], "RDMF");
         assert_eq!(
             card.keys,
-            [
-                Key::new("doi", "10.6084/m9.figshare.5616445"),
-                Key::new("doi", "10.6084/m9.figshare.5616445.v2"),
-            ]
+            [Key::new("doi", "10.6084/m9.figshare.5616445")],
+            "a version's DOI names that version"
+        );
+        assert_eq!(
+            card.details["version_doi"],
+            "10.6084/m9.figshare.5616445.v2"
         );
         // The first version's record names the same article; its page with the version is a
         // dated version, never an alias.
@@ -507,9 +516,10 @@ mod tests {
             .unwrap()
             .unwrap();
         let doc = crate::sources::kit::checked(&Figshare, &card);
+        assert_eq!(doc.attributes["doi"], "10.6084/m9.figshare.1018700");
         assert_eq!(
-            doc.attributes["doi"],
-            "10.6084/m9.figshare.1018700; 10.6084/m9.figshare.1018700.v1"
+            doc.attributes["version_doi"],
+            "10.6084/m9.figshare.1018700.v1"
         );
         assert_eq!(doc.attributes["version"], "1");
     }

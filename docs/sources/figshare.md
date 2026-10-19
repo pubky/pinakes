@@ -40,7 +40,8 @@ CC0 or CC BY.
 | Fact | Meaning |
 | --- | --- |
 | `published` | When the latest version was published (RFC 3339) |
-| `doi` | The latest version's DOI, and the article's own DOI (without the `.v{n}` suffix) when Figshare minted it; a publisher's DOI for some portal articles |
+| `doi` | The article's own DOI (without the `.v{n}` suffix) when Figshare minted it; a publisher's DOI for some portal articles |
+| `version_doi` | The latest version's DOI (`….v{n}`), when Figshare minted it |
 | `authors` | The authors, by name |
 | `license` | The licence, e.g. "CC BY 4.0" |
 | `item_type` | E.g. "dataset", "presentation", "journal contribution" |
