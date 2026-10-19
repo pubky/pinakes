@@ -41,6 +41,16 @@ fn repo(namespace: &str, name: &str) -> Option<Repo> {
     })
 }
 
+/// The tabs of the owner's view of a repository (`/repository/docker/{ns}/{name}/{tab}`).
+const OWNER_TABS: &[&str] = &[
+    "general",
+    "tags",
+    "builds",
+    "collaborators",
+    "webhooks",
+    "settings",
+];
+
 /// The repository a Docker Hub link names: `/_/{name}` (official images), `/r/{ns}/{name}`, the
 /// owner's `/repository/docker/{ns}/{name}` (each with any tab), and the v2 API's repository URLs.
 pub fn from_uri(uri: &str) -> Option<Repo> {
@@ -50,8 +60,10 @@ pub fn from_uri(uri: &str) -> Option<Repo> {
     }
     let s: Vec<&str> = segments.iter().map(String::as_str).collect();
     match s.as_slice() {
-        ["_", name, ..] => repo(LIBRARY, name),
-        ["r", ns, name, ..] | ["repository", "docker", ns, name, ..] => repo(ns, name),
+        ["_", name] | ["_", name, "tags"] => repo(LIBRARY, name),
+        ["r", ns, name] | ["r", ns, name, "tags"] => repo(ns, name),
+        ["repository", "docker", ns, name] => repo(ns, name),
+        ["repository", "docker", ns, name, tab] if OWNER_TABS.contains(tab) => repo(ns, name),
         ["v2", "repositories", ns, name] | ["v2", "namespaces", ns, "repositories", name] => {
             repo(ns, name)
         }
@@ -239,6 +251,12 @@ mod tests {
     #[test]
     fn invalid_links() {
         for uri in [
+            // Only the real tabs, at their own depth.
+            "https://hub.docker.com/_/nginx/tags/latest",
+            "https://hub.docker.com/r/lncm/bitcoind/anything",
+            "https://hub.docker.com/repository/docker/lncm/bitcoind/general/more",
+            "https://hub.docker.com/repository/docker/lncm/bitcoind/unknown",
+            "https://hub.docker.com:8443/_/nginx",
             "https://hub.docker.com/_/",
             "https://hub.docker.com/r/lncm",
             "https://hub.docker.com/u/lncm",

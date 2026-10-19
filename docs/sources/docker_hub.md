@@ -9,9 +9,10 @@ licence for the data; the descriptions are written by each repository's owner.
 Names are in lower case. `docker:{namespace}/{name}` and every Docker Hub address of a repository
 are one resource; official images are in the `library` namespace (`docker:library/nginx`):
 
-- `https://hub.docker.com/_/{name}` (an official image), with any tab (`/tags`, …);
-- `https://hub.docker.com/r/{namespace}/{name}`, with any tab, including `/r/library/{name}`;
-- `https://hub.docker.com/repository/docker/{namespace}/{name}` (the owner's view);
+- `https://hub.docker.com/_/{name}` (an official image) and its `/tags` tab;
+- `https://hub.docker.com/r/{namespace}/{name}` and its `/tags` tab, including `/r/library/{name}`;
+- `https://hub.docker.com/repository/docker/{namespace}/{name}` (the owner's view) and its tabs
+  (`/general`, `/tags`, `/builds`, `/collaborators`, `/webhooks`, `/settings`);
 - `https://hub.docker.com/v2/repositories/{namespace}/{name}/`;
 - `https://hub.docker.com/v2/namespaces/{namespace}/repositories/{name}`.
 

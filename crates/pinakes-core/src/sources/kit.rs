@@ -21,7 +21,14 @@ use url::Url;
 
 #[cfg(test)]
 pub(crate) use super::fixture;
-pub use super::{text, texts, web_url};
+pub use super::{text, texts};
+
+/// An `https` or `http` URL with a host and no port, user name or password, as given. A link
+/// that names one of these is not the service's own link form.
+pub fn web_url(value: &str) -> Option<Url> {
+    let url = super::web_url(value)?;
+    (url.port().is_none() && url.username().is_empty() && url.password().is_none()).then_some(url)
+}
 
 /// One HTTP GET to an external API.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -657,5 +664,14 @@ mod tests {
             ("example.org", vec!["a".into(), "b".into()])
         );
         assert!(host_and_segments("ftp://example.org/a").is_none());
+        // A port, a user name or a password is never a service's own link form.
+        for uri in [
+            "https://example.org:8443/a",
+            "https://user@example.org/a",
+            "https://user:secret@example.org/a",
+        ] {
+            assert!(host_and_segments(uri).is_none(), "{uri}");
+        }
+        assert!(host_and_segments("https://example.org:443/a").is_some());
     }
 }

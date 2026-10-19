@@ -131,7 +131,7 @@ pub fn channel_id(value: &str) -> Option<u64> {
         number(tx, 0xFF_FFFF)?,
         number(output, 0xFFFF)?,
     );
-    Some(block << 40 | tx << 16 | output)
+    Some(block << 40 | tx << 16 | output).filter(|id| *id > 0)
 }
 
 /// The short form of a decimal channel id.
@@ -182,7 +182,22 @@ fn segwit_address(value: &str, hrp: &str) -> Option<String> {
         1..=16 => 0x2bc8_30a3,
         _ => return None,
     };
-    (bech32_polymod(&values) == expected).then_some(value)
+    // The witness program: the 5-bit groups between the version and the 6-group checksum, as
+    // bytes, with at most 4 zero bits of padding. Version 0 has 20 or 32 bytes; the others 2 to 40.
+    let groups = &data[1..data.len() - 6];
+    let bits = groups.len() * 5;
+    let padding = bits % 8;
+    let last = u32::from(*groups.last()?);
+    let program = bits / 8;
+    let length_ok = match version {
+        0 => matches!(program, 20 | 32),
+        _ => (2..=40).contains(&program),
+    };
+    (bech32_polymod(&values) == expected
+        && length_ok
+        && padding <= 4
+        && last & ((1 << padding) - 1) == 0)
+        .then_some(value)
 }
 
 const BASE58: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -249,8 +264,9 @@ fn language(segment: &str) -> bool {
 /// and the API's own URLs. A `bitcoin:` URI names a mainnet address.
 pub fn from_uri(uri: &str) -> Option<Target> {
     if let Some(rest) = uri
-        .strip_prefix("bitcoin:")
-        .or_else(|| uri.strip_prefix("BITCOIN:"))
+        .get(..8)
+        .filter(|scheme| scheme.eq_ignore_ascii_case("bitcoin:"))
+        .map(|_| &uri[8..])
     {
         let addr = rest.split(['?', '#']).next()?;
         return Some(Target {
@@ -407,7 +423,8 @@ pub fn settled(status: u16, raw: &[u8], tip: u64) -> Result<bool> {
         return Ok(false);
     };
     let height = v["height"].as_u64().context("no height")?;
-    Ok(v["in_best_chain"].as_bool() == Some(true) && tip + 1 >= height + SETTLED_DEPTH)
+    Ok(v["in_best_chain"].as_bool() == Some(true)
+        && tip.saturating_add(1) >= height.saturating_add(SETTLED_DEPTH))
 }
 
 /// Explorers that show the same on-chain object.
@@ -630,7 +647,10 @@ pub fn parse_channel(status: u16, raw: &[u8], network: Network, id: u64) -> Resu
         return Ok(None);
     };
     ensure!(
-        int(&v["id"]) == i64::try_from(id).ok(),
+        match &v["id"] {
+            Value::String(s) => s.parse::<u64>().ok(),
+            n => n.as_u64(),
+        } == Some(id),
         "the API answered for another channel"
     );
     let t = on(network, Object::Channel(id));
@@ -1031,8 +1051,40 @@ mod tests {
     }
 
     #[test]
+    fn edge_cases() {
+        // The URI scheme in any case.
+        for scheme in ["bitcoin", "BITCOIN", "Bitcoin", "bItCoIn"] {
+            assert_eq!(
+                id(&format!("{scheme}:1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa")).as_deref(),
+                Some("btc:address/1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"),
+                "{scheme}"
+            );
+        }
+        // BIP 350: a version-1 (taproot) address with a 32-byte program.
+        let taproot = "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0";
+        assert_eq!(address(taproot, Network::Mainnet).as_deref(), Some(taproot));
+        // A channel id above i64::MAX is still read and checked.
+        let big = u64::MAX - 1;
+        let raw = read("channel-892785849701564416.json");
+        let mut v: Value = serde_json::from_slice(&raw).unwrap();
+        v["id"] = big.to_string().into();
+        let raw = serde_json::to_vec(&v).unwrap();
+        assert!(parse_channel(200, &raw, Network::Mainnet, big)
+            .unwrap()
+            .is_some());
+        assert!(parse_channel(200, &raw, Network::Mainnet, 892785849701564416).is_err());
+        // The tip never overflows.
+        assert!(settled(200, &read("block-481824-status.json"), u64::MAX).unwrap());
+    }
+
+    #[test]
     fn invalid_links() {
         for uri in [
+            "https://mempool.space:8443/tx/a1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d",
+            "https://mempool.space/lightning/channel/0x0x0",
+            // BIP 173: a valid checksum, but version 0 takes a 20- or 32-byte program, not 16.
+            "https://mempool.space/address/BC1QR508D6QEJXTDG4Y5R3ZARVARYV98GJ9P",
+            "https://mempool.space/address/bc1qr508d6qejxtdg4y5r3zarvaryv98gj9p",
             "https://mempool.space/tx/abc",
             "https://mempool.space/address/1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNb",
             "https://mempool.space/address/bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdx",

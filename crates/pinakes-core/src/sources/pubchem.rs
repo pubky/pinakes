@@ -90,8 +90,11 @@ pub fn from_uri(uri: &str) -> Option<Target> {
 const RECORD_FORMATS: &[&str] = &["JSON", "XML", "SDF", "ASNT", "ASNB", "CSV", "TXT"];
 
 fn ensure_name(name: &str) -> Option<()> {
-    (!name.is_empty() && name.len() <= MAX_NAME && !name.chars().any(char::is_control))
-        .then_some(())
+    (!name.is_empty()
+        && name.len() <= MAX_NAME
+        && !name.chars().any(char::is_control)
+        && !name.chars().all(|c| c == '.'))
+    .then_some(())
 }
 
 /// The identifier, or `None` for a name (its CID comes from `name_request`).
@@ -314,6 +317,8 @@ mod tests {
     #[test]
     fn invalid_links() {
         for uri in [
+            "https://pubchem.ncbi.nlm.nih.gov/compound/%2E%2E",
+            "https://pubchem.ncbi.nlm.nih.gov/compound/%2E",
             "https://pubchem.ncbi.nlm.nih.gov/compound/0",
             "https://pubchem.ncbi.nlm.nih.gov/compound/02244",
             "https://pubchem.ncbi.nlm.nih.gov/compound/2244/extra",

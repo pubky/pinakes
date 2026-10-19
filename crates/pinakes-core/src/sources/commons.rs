@@ -58,8 +58,13 @@ pub fn file_name(raw: &str) -> Option<String> {
     if name.is_empty() || name.len() > 240 || name.contains(bad) || escaped {
         return None;
     }
+    // The first letter in upper case, as MediaWiki's `ucfirst` writes it: a letter whose upper
+    // case is two letters (`ß`) stays, and so do Georgian letters, which MediaWiki leaves alone.
     let mut chars = name.chars();
     let first = chars.next()?;
+    if matches!(first, '\u{10D0}'..='\u{10FA}' | '\u{10FD}'..='\u{10FF}') {
+        return Some(name);
+    }
     let mut upper = first.to_uppercase();
     Some(match (upper.next(), upper.next()) {
         (Some(u), None) => format!("{u}{}", chars.as_str()),
@@ -92,11 +97,14 @@ pub fn from_uri(uri: &str) -> Option<Target> {
     ) {
         return None;
     }
+    // A parameter given twice names nothing exact.
     let query = |name: &str| {
-        web_url(uri)?
-            .query_pairs()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| v.into_owned())
+        let url = web_url(uri)?;
+        let mut values = url.query_pairs().filter(|(k, _)| k == name);
+        match (values.next(), values.next()) {
+            (Some((_, v)), None) => Some(v.into_owned()),
+            _ => None,
+        }
     };
     // A past revision of the page (`oldid`, `diff`) is a dated version, not the file.
     if query("oldid").is_some() || query("diff").is_some() {
@@ -459,8 +467,19 @@ mod tests {
     }
 
     #[test]
+    fn first_letters_as_mediawiki_writes_them() {
+        assert_eq!(file_name("été.jpg").as_deref(), Some("Été.jpg"));
+        // Georgian letters and a letter whose upper case is two letters stay as they are.
+        assert_eq!(file_name("ქალაქი.jpg").as_deref(), Some("ქალაქი.jpg"));
+        assert_eq!(file_name("ßtraße.jpg").as_deref(), Some("ßtraße.jpg"));
+    }
+
+    #[test]
     fn invalid_links() {
         for uri in [
+            // A parameter given twice names nothing exact.
+            "https://commons.wikimedia.org/w/index.php?title=File:A.jpg&title=File:B.jpg",
+            "https://commons.wikimedia.org/w/index.php?curid=1&curid=2",
             "https://upload.wikimedia.org/wikipedia/commons/4/46/Bitcoin.svg",
             "https://en.wikipedia.org/wiki/File:Bitcoin.svg",
             "https://commons.wikimedia.org/wiki/Category:Bitcoin",

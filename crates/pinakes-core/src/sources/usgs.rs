@@ -125,7 +125,6 @@ pub fn parse(status: u16, raw: &[u8], id: &str) -> Result<Option<Card>> {
     Ok(Some(card))
 }
 
-/// The source: the USGS FDSN event service.
 /// A fetch that timed out becomes a retry the queue treats as the service not answering us
 /// (`upstream_denied`): it never counts toward dead letter, and after three days of it the link is
 /// `unreachable` and its attempts count, with the usual backoff. USGS can take 10 to 25 seconds for
@@ -144,6 +143,7 @@ pub fn slow_answer(error: anyhow::Error) -> anyhow::Error {
     }
 }
 
+/// The source: the USGS FDSN event service.
 pub struct Usgs;
 
 #[async_trait]

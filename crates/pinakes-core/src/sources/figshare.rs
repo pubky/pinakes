@@ -66,7 +66,9 @@ fn number(s: &str) -> Option<u64> {
 /// not the article.
 fn article_path(s: &[&str]) -> Option<u64> {
     match s {
-        [id] | [_, id] => number(id),
+        [id] => number(id),
+        // Two numbers are an article and one of its versions, not a slug and an article.
+        [slug, id] if !slug.bytes().all(|b| b.is_ascii_digit()) => number(id),
         [kind, _, id] if TYPES.contains(kind) => number(id),
         _ => None,
     }
@@ -314,6 +316,8 @@ mod tests {
     #[test]
     fn invalid_links() {
         for uri in [
+            // An article id and a version, not a slug and an id.
+            "https://figshare.com/articles/5616445/2",
             "https://figshare.com/articles/presentation/x/05616445",
             "https://figshare.com/articles/presentation/x/abc",
             "https://figshare.com/articles/presentation/x/5616445/v2",
