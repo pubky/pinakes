@@ -67,6 +67,8 @@ enabled = true
 enabled = true
 [sources.discourse]
 enabled = true
+[sources.docker_hub]
+enabled = true
 [sources.ecfr]
 enabled = true
 [sources.eur_lex]
@@ -115,6 +117,8 @@ enabled = true
 enabled = true
 [sources.public_inbox]
 enabled = true
+[sources.ror]
+enabled = true
 [sources.sec]
 enabled = true
 [sources.stacker_news]
@@ -124,6 +128,8 @@ enabled = true
 [sources.uk_parliament_bills]
 enabled = true
 [sources.uniprot]
+enabled = true
+[sources.usgs]
 enabled = true
 [sources.wordpress]
 enabled = true

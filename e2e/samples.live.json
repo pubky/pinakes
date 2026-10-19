@@ -247,6 +247,21 @@
     "type": "Observation"
   },
   {
+    "kind": "docker_hub",
+    "uri": "https://hub.docker.com/_/nginx",
+    "type": "SoftwareApplication"
+  },
+  {
+    "kind": "ror",
+    "uri": "https://ror.org/042nb2s44",
+    "type": "EducationalOrganization"
+  },
+  {
+    "kind": "usgs",
+    "uri": "https://earthquake.usgs.gov/earthquakes/eventpage/ci38457511/executive",
+    "type": "Event"
+  },
+  {
     "kind": "web",
     "uri": "https://example.org/",
     "type": "WebPage"

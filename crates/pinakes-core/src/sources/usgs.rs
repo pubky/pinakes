@@ -4,13 +4,20 @@
 //! An event has one preferred id and the ids every contributing network gave it (`ids`). Every
 //! event page and API link, by any of those ids, is an alias of `usgs:{preferred id}`. The data
 //! is public domain; USGS asks to be credited.
-use super::kit::{
-    float, host_and_segments, int, json, plain, text, unix_ms, web_url, Card, Point, Request,
+use super::{
+    kit::{
+        fetch, float, host_and_segments, int, json, plain, text, unix_ms, web_url, Card, Point,
+        Request,
+    },
+    Example, Source,
 };
+use crate::model::ResourceMeta;
 use anyhow::{ensure, Context, Result};
+use async_trait::async_trait;
 use serde_json::Value;
 
 pub const ATTRIBUTION: &str = "U.S. Geological Survey";
+pub const SITE: &str = "USGS";
 
 /// An event id: a network code and the network's own code, in lower case, e.g. `ci38457511`.
 pub fn event_id(value: &str) -> Option<String> {
@@ -46,6 +53,17 @@ pub fn from_uri(uri: &str) -> Option<String> {
 
 pub fn identifier(id: &str) -> String {
     format!("usgs:{id}")
+}
+
+/// The event id of a root (`usgs:{id}`, the id already in lower case).
+pub fn from_root(uri: &str) -> Option<String> {
+    let id = uri.strip_prefix("usgs:")?;
+    event_id(id).filter(|i| i == id)
+}
+
+/// The event id of a root or a USGS link.
+pub fn target(uri: &str) -> Option<String> {
+    from_root(uri).or_else(|| from_uri(uri))
 }
 
 /// The event page.
@@ -106,6 +124,70 @@ pub fn parse(status: u16, raw: &[u8], id: &str) -> Result<Option<Card>> {
         card.alias(page(other));
     }
     Ok(Some(card))
+}
+
+/// The source: the USGS FDSN event service.
+pub struct Usgs;
+
+#[async_trait]
+impl Source for Usgs {
+    fn name(&self) -> &'static str {
+        "usgs"
+    }
+    fn reads(&self, uri: &str) -> bool {
+        target(uri).is_some()
+    }
+    /// The root of the id in the link. When that id is not the event's preferred one, the
+    /// fetched card's root is the preferred id's, and this root becomes its alias.
+    fn alias_root(&self, uri: &str) -> Option<String> {
+        let root = identifier(&target(uri)?);
+        (root != uri).then_some(root)
+    }
+    fn invalid(&self, uri: &str) -> bool {
+        uri.starts_with("usgs:") && from_root(uri).is_none()
+    }
+    fn facts(&self) -> &'static [&'static str] {
+        &[
+            "page_url",
+            "magnitude",
+            "magnitude_type",
+            "depth_km",
+            "place",
+            "event_type",
+            "tsunami",
+            "alert",
+            "status",
+            "felt",
+            "significance",
+            "ids",
+        ]
+    }
+    fn budgets(&self) -> &'static [super::Budget] {
+        &[("earthquake.usgs.gov", 1.0, None)]
+    }
+    fn examples(&self) -> &'static [Example] {
+        &[
+            Example {
+                uri:
+                    "https://earthquake.usgs.gov/earthquakes/eventpage/official20110311054624120_30",
+                card_type: "Event",
+            },
+            Example {
+                uri: "https://earthquake.usgs.gov/earthquakes/eventpage/ci38457511/executive",
+                card_type: "Event",
+            },
+        ]
+    }
+    async fn resolve(&self, cx: &super::Context<'_>, uri: &str) -> Result<ResourceMeta> {
+        let Some(id) = target(uri) else {
+            return Ok(cx.missing(uri, self));
+        };
+        let f = fetch(cx, &request(&id).context("no request")?).await?;
+        Ok(match parse(f.status, &f.body, &id)? {
+            Some(card) => card.into_doc(cx.card(uri, self), SITE),
+            None => cx.missing(uri, self),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -226,6 +308,59 @@ mod tests {
         assert!(card
             .aliases
             .contains(&"https://earthquake.usgs.gov/earthquakes/eventpage/us70004bn0".into()));
+    }
+
+    #[test]
+    fn roots_and_aliases() {
+        let u = Usgs;
+        for uri in ["usgs:ci38457511", "usgs:official20110311054624120_30"] {
+            assert!(u.reads(uri), "{uri}");
+            assert_eq!(u.alias_root(uri), None, "{uri}");
+            assert!(!u.invalid(uri), "{uri}");
+        }
+        assert_eq!(
+            u.alias_root("https://earthquake.usgs.gov/earthquakes/eventpage/CI38457511/map")
+                .as_deref(),
+            Some("usgs:ci38457511")
+        );
+        // A non-preferred id is its own root until the fetch names the preferred one.
+        assert_eq!(
+            u.alias_root("https://earthquake.usgs.gov/earthquakes/eventpage/usp000hvnu")
+                .as_deref(),
+            Some("usgs:usp000hvnu")
+        );
+        for uri in ["usgs:CI38457511", "usgs:", "usgs:a/b"] {
+            assert!(u.invalid(uri), "{uri}");
+            assert!(!u.reads(uri), "{uri}");
+        }
+        assert!(!u.invalid("https://example.org/usgs:x"));
+        for example in u.examples() {
+            assert!(u.reads(example.uri), "{}", example.uri);
+        }
+    }
+
+    #[test]
+    fn documents() {
+        for (file, id) in [
+            ("event-tohoku.json.gz", TOHOKU),
+            ("event-tohoku-usp000hvnu.json.gz", "usp000hvnu"),
+            ("event-ci38457511.json.gz", "ci38457511"),
+        ] {
+            let card = parse(200, &read(file), id).unwrap().unwrap();
+            let doc = crate::sources::kit::checked(&Usgs, &card);
+            assert_eq!(doc.source_root.as_deref(), Some(card.id.as_str()));
+            assert_eq!(doc.attributes["page_url"], card.url);
+        }
+        let card = parse(200, &read("event-tohoku-usp000hvnu.json.gz"), "usp000hvnu")
+            .unwrap()
+            .unwrap();
+        let doc = card.into_doc(ResourceMeta::new("usgs:usp000hvnu", "usgs", 60), SITE);
+        assert_eq!(
+            doc.source_root.as_deref(),
+            Some("usgs:official20110311054624120_30")
+        );
+        assert_eq!(doc.attributes["tsunami"], "false");
+        assert!(doc.attributes["ids"].contains("usp000hvnu"));
     }
 
     #[test]

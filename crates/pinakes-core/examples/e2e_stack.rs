@@ -127,7 +127,10 @@ impl Fixture {
             {"kind":"uniprot","uri":"https://www.uniprot.org/uniprotkb/P69905/entry","type":"Protein"},
             {"kind":"clinicaltrials","uri":"https://clinicaltrials.gov/study/NCT04368728","type":"MedicalTrial"},
             {"kind":"gbif","uri":"https://www.gbif.org/species/1341976","type":"Taxon"},
-            {"kind":"inaturalist","uri":"https://www.inaturalist.org/observations/333069440","type":"Observation"}
+            {"kind":"inaturalist","uri":"https://www.inaturalist.org/observations/333069440","type":"Observation"},
+            {"kind":"docker_hub","uri":"https://hub.docker.com/_/nginx","type":"SoftwareApplication"},
+            {"kind":"ror","uri":"https://ror.org/03yrm5c26","type":"ArchiveOrganization"},
+            {"kind":"usgs","uri":"https://earthquake.usgs.gov/earthquakes/eventpage/official20110311054624120_30","type":"Event"}
         ]);
         Ok(Self {
             boundary: Arc::default(),
@@ -194,6 +197,9 @@ impl Dns for FixtureDns {
                 | "clinicaltrials.gov"
                 | "api.inaturalist.org"
                 | "api.gbif.org"
+                | "earthquake.usgs.gov"
+                | "api.ror.org"
+                | "hub.docker.com"
         ) {
             "93.184.216.34"
         } else {
@@ -261,6 +267,9 @@ impl Transport for Fixture {
             "api.gbif.org" if u.path()=="/v1/species/1341976"=>("application/json",include_str!("../tests/fixtures/sources/gbif/species-1341976.json").into()),
             "api.inaturalist.org" if u.path()=="/v1/observations/333069440"=>("application/json",gunzip(include_bytes!("../tests/fixtures/sources/inaturalist/observation-333069440.json.gz"))),
             "clinicaltrials.gov" if u.path()=="/api/v2/studies/NCT04368728"=>("application/json",gunzip(include_bytes!("../tests/fixtures/sources/clinicaltrials/NCT04368728.json.gz"))),
+            "hub.docker.com" if u.path()=="/v2/repositories/library/nginx/"=>("application/json",include_str!("../tests/fixtures/sources/docker_hub/repo-library-nginx.json").into()),
+            "api.ror.org" if u.path()=="/v2/organizations/03yrm5c26"=>("application/json",include_str!("../tests/fixtures/sources/ror/org-03yrm5c26.json").into()),
+            "earthquake.usgs.gov" if u.path()=="/fdsnws/event/1/query" && u.query()==Some("eventid=official20110311054624120_30&format=geojson")=>("application/json",gunzip(include_bytes!("../tests/fixtures/sources/usgs/event-tohoku.json.gz"))),
             _=>bail!("no fixture for upstream host {}",u.host_str().unwrap_or("")),
         };
         Ok(Fetched {

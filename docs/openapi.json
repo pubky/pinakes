@@ -1653,6 +1653,24 @@
                     "uri": "https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304/2"
                   }
                 },
+                "resolve-docker-hub-1": {
+                  "summary": "https://hub.docker.com/_/nginx",
+                  "value": {
+                    "uri": "https://hub.docker.com/_/nginx"
+                  }
+                },
+                "resolve-docker-hub-2": {
+                  "summary": "https://hub.docker.com/r/btcpayserver/btcpayserver",
+                  "value": {
+                    "uri": "https://hub.docker.com/r/btcpayserver/btcpayserver"
+                  }
+                },
+                "resolve-docker-hub-3": {
+                  "summary": "https://hub.docker.com/r/lncm/bitcoind/tags",
+                  "value": {
+                    "uri": "https://hub.docker.com/r/lncm/bitcoind/tags"
+                  }
+                },
                 "resolve-doi-org-10-1038-nature12373": {
                   "summary": "https://doi.org/10.1038/nature12373",
                   "value": {
@@ -2103,6 +2121,18 @@
                     "uri": "https://lore.kernel.org/git/pull.2458.git.git.1792437798463.gitgitgadget@gmail.com/"
                   }
                 },
+                "resolve-ror-1": {
+                  "summary": "https://ror.org/03yrm5c26",
+                  "value": {
+                    "uri": "https://ror.org/03yrm5c26"
+                  }
+                },
+                "resolve-ror-2": {
+                  "summary": "https://ror.org/042nb2s44",
+                  "value": {
+                    "uri": "https://ror.org/042nb2s44"
+                  }
+                },
                 "resolve-s3-eu-west-1-amazonaws-com-starticket-wwwroot-ticketing-feed": {
                   "summary": "https://s3-eu-west-1.amazonaws.com/starticket/wwwroot/ticketing/feeds/starticketfeed_D.xml",
                   "value": {
@@ -2179,6 +2209,18 @@
                   "summary": "https://www.uniprot.org/uniprotkb/P04637/entry",
                   "value": {
                     "uri": "https://www.uniprot.org/uniprotkb/P04637/entry"
+                  }
+                },
+                "resolve-usgs-1": {
+                  "summary": "https://earthquake.usgs.gov/earthquakes/eventpage/official20110311054624120_30",
+                  "value": {
+                    "uri": "https://earthquake.usgs.gov/earthquakes/eventpage/official20110311054624120_30"
+                  }
+                },
+                "resolve-usgs-2": {
+                  "summary": "https://earthquake.usgs.gov/earthquakes/eventpage/ci38457511/executive",
+                  "value": {
+                    "uri": "https://earthquake.usgs.gov/earthquakes/eventpage/ci38457511/executive"
                   }
                 },
                 "resolve-v4-wegow-com-es-conciertos-konzert-von-yasi-hofer-band-in-bo": {

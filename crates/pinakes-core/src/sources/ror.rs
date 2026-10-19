@@ -4,13 +4,19 @@
 //! Every ror.org and API link of one organization is an alias of `ror:{id}`. A ROR id is `0`, six
 //! Crockford base32 characters and two check digits (ISO 7064 mod 97-10 over the base32 value),
 //! in lower case; ids with a wrong check are rejected. The data is CC0.
-use super::kit::{
-    float, host_and_segments, int, json, text, texts, Card, Key, Link, Point, Request,
+use super::{
+    kit::{
+        fetch, float, host_and_segments, int, json, text, texts, Card, Key, Link, Point, Request,
+    },
+    Example, Source,
 };
+use crate::model::ResourceMeta;
 use anyhow::{ensure, Context, Result};
+use async_trait::async_trait;
 use serde_json::Value;
 
 pub const ATTRIBUTION: &str = "Research Organization Registry (CC0)";
+pub const SITE: &str = "ROR";
 /// Crockford base32 without `i`, `l`, `o` and `u`.
 const BASE32: &str = "0123456789abcdefghjkmnpqrstvwxyz";
 
@@ -46,6 +52,17 @@ pub fn from_uri(uri: &str) -> Option<String> {
 
 pub fn identifier(id: &str) -> String {
     format!("ror:{id}")
+}
+
+/// The ROR id of a root (`ror:{id}`, the id already in lower case).
+pub fn from_root(uri: &str) -> Option<String> {
+    let id = uri.strip_prefix("ror:")?;
+    ror_id(id).filter(|i| i == id)
+}
+
+/// The ROR id of a root or a ROR link.
+pub fn target(uri: &str) -> Option<String> {
+    from_root(uri).or_else(|| from_uri(uri))
 }
 
 pub fn page(id: &str) -> String {
@@ -190,6 +207,72 @@ pub fn parse(status: u16, raw: &[u8], id: &str) -> Result<Option<Card>> {
         card.link(Link::new("Wikipedia", wikipedia.as_str(), "ror"));
     }
     Ok(Some(card))
+}
+
+/// The source: the ROR v2 API.
+pub struct Ror;
+
+#[async_trait]
+impl Source for Ror {
+    fn name(&self) -> &'static str {
+        "ror"
+    }
+    fn reads(&self, uri: &str) -> bool {
+        target(uri).is_some()
+    }
+    fn alias_root(&self, uri: &str) -> Option<String> {
+        let root = identifier(&target(uri)?);
+        (root != uri).then_some(root)
+    }
+    fn invalid(&self, uri: &str) -> bool {
+        uri.starts_with("ror:") && from_root(uri).is_none()
+    }
+    fn facts(&self) -> &'static [&'static str] {
+        &[
+            "page_url",
+            "city",
+            "country",
+            "country_code",
+            "established",
+            "types",
+            "status",
+            "website",
+            "acronyms",
+            "aliases",
+            "labels",
+            "domains",
+            // Keys, by namespace
+            "wikidata",
+            "isni",
+            "fundref",
+            "grid",
+        ]
+    }
+    fn budgets(&self) -> &'static [super::Budget] {
+        &[("api.ror.org", 1.0, None)]
+    }
+    fn examples(&self) -> &'static [Example] {
+        &[
+            Example {
+                uri: "https://ror.org/03yrm5c26",
+                card_type: "ArchiveOrganization",
+            },
+            Example {
+                uri: "https://ror.org/042nb2s44",
+                card_type: "EducationalOrganization",
+            },
+        ]
+    }
+    async fn resolve(&self, cx: &super::Context<'_>, uri: &str) -> Result<ResourceMeta> {
+        let Some(id) = target(uri) else {
+            return Ok(cx.missing(uri, self));
+        };
+        let f = fetch(cx, &request(&id).context("no request")?).await?;
+        Ok(match parse(f.status, &f.body, &id)? {
+            Some(card) => card.into_doc(cx.card(uri, self), SITE),
+            None => cx.missing(uri, self),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -340,6 +423,61 @@ mod tests {
         assert_eq!(external_key(&broken), None);
         let other = json!({"type": "orgref", "all": ["1"], "preferred": "1"});
         assert_eq!(external_key(&other), None);
+    }
+
+    #[test]
+    fn roots_and_aliases() {
+        let r = Ror;
+        for uri in ["ror:03yrm5c26", "ror:042nb2s44"] {
+            assert!(r.reads(uri), "{uri}");
+            assert_eq!(r.alias_root(uri), None, "{uri}");
+            assert!(!r.invalid(uri), "{uri}");
+        }
+        assert_eq!(
+            r.alias_root("https://www.ror.org/042NB2S44").as_deref(),
+            Some("ror:042nb2s44")
+        );
+        assert_eq!(
+            r.alias_root("https://api.ror.org/v2/organizations/03yrm5c26")
+                .as_deref(),
+            Some("ror:03yrm5c26")
+        );
+        for uri in [
+            "ror:042nb2s45",
+            "ror:042NB2S44",
+            "ror:",
+            "ror:https://ror.org/042nb2s44",
+        ] {
+            assert!(r.invalid(uri), "{uri}");
+            assert!(!r.reads(uri), "{uri}");
+        }
+        assert!(!r.invalid("https://example.org/ror:x"));
+        for example in r.examples() {
+            assert!(r.reads(example.uri), "{}", example.uri);
+        }
+    }
+
+    #[test]
+    fn documents() {
+        for (file, id) in [
+            ("org-03yrm5c26.json", "03yrm5c26"),
+            ("org-042nb2s44.json", "042nb2s44"),
+        ] {
+            let card = parse(200, &read(file), id).unwrap().unwrap();
+            let doc = crate::sources::kit::checked(&Ror, &card);
+            assert_eq!(doc.source_root.as_deref(), Some(card.id.as_str()));
+            assert_eq!(doc.attributes["page_url"], card.url);
+        }
+        let card = parse(200, &read("org-042nb2s44.json"), "042nb2s44")
+            .unwrap()
+            .unwrap();
+        let doc = card.into_doc(ResourceMeta::new("ror:042nb2s44", "ror", 60), SITE);
+        assert_eq!(doc.attributes["wikidata"], "Q49108");
+        assert_eq!(doc.attributes["isni"], "0000000123412786");
+        assert_eq!(doc.attributes["fundref"], "100006919");
+        assert_eq!(doc.attributes["grid"], "grid.116068.8");
+        assert_eq!(doc.attributes["established"], "1861");
+        assert_eq!(doc.site, "ROR");
     }
 
     #[test]

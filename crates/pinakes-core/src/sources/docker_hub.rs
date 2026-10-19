@@ -4,8 +4,15 @@
 //! Every Docker Hub link of one repository is an alias of `docker:{namespace}/{name}`. Official
 //! images live in the `library` namespace, which the site writes as `/_/{name}`
 //! (`docker:library/nginx`). The API allows 180 anonymous requests a minute.
-use super::kit::{host_and_segments, int, json, plain, text, time, Card, Request};
-use anyhow::{ensure, Result};
+use super::{
+    kit::{fetch, host_and_segments, int, json, plain, text, time, Card, Request},
+    Example, Source,
+};
+use crate::model::ResourceMeta;
+use anyhow::{ensure, Context, Result};
+use async_trait::async_trait;
+
+pub const SITE: &str = "Docker Hub";
 
 const LIBRARY: &str = "library";
 
@@ -54,6 +61,17 @@ pub fn from_uri(uri: &str) -> Option<Repo> {
 
 pub fn identifier(r: &Repo) -> String {
     format!("docker:{}/{}", r.namespace, r.name)
+}
+
+/// The repository of a root (`docker:{namespace}/{name}`, already in lower case).
+pub fn from_root(uri: &str) -> Option<Repo> {
+    let (ns, name) = uri.strip_prefix("docker:")?.split_once('/')?;
+    repo(ns, name).filter(|r| identifier(r) == uri)
+}
+
+/// The repository of a root or a Docker Hub link.
+pub fn target(uri: &str) -> Option<Repo> {
+    from_root(uri).or_else(|| from_uri(uri))
 }
 
 /// The repository page: `/_/{name}` for an official image, else `/r/{ns}/{name}`.
@@ -113,6 +131,67 @@ pub fn parse(status: u16, raw: &[u8], r: &Repo) -> Result<Option<Card>> {
             .collect::<Vec<_>>(),
     );
     Ok(Some(card))
+}
+
+/// The source: Docker Hub's v2 API.
+pub struct DockerHub;
+
+#[async_trait]
+impl Source for DockerHub {
+    fn name(&self) -> &'static str {
+        "docker_hub"
+    }
+    fn reads(&self, uri: &str) -> bool {
+        target(uri).is_some()
+    }
+    fn alias_root(&self, uri: &str) -> Option<String> {
+        let root = identifier(&target(uri)?);
+        (root != uri).then_some(root)
+    }
+    fn invalid(&self, uri: &str) -> bool {
+        uri.starts_with("docker:") && from_root(uri).is_none()
+    }
+    fn facts(&self) -> &'static [&'static str] {
+        &[
+            "page_url",
+            "pull_count",
+            "star_count",
+            "last_updated",
+            "official",
+            "status",
+            "archived",
+            "categories",
+        ]
+    }
+    fn budgets(&self) -> &'static [super::Budget] {
+        &[("hub.docker.com", 3.0, None)]
+    }
+    fn examples(&self) -> &'static [Example] {
+        &[
+            Example {
+                uri: "https://hub.docker.com/_/nginx",
+                card_type: "SoftwareApplication",
+            },
+            Example {
+                uri: "https://hub.docker.com/r/btcpayserver/btcpayserver",
+                card_type: "SoftwareApplication",
+            },
+            Example {
+                uri: "https://hub.docker.com/r/lncm/bitcoind/tags",
+                card_type: "SoftwareApplication",
+            },
+        ]
+    }
+    async fn resolve(&self, cx: &super::Context<'_>, uri: &str) -> Result<ResourceMeta> {
+        let Some(repo) = target(uri) else {
+            return Ok(cx.missing(uri, self));
+        };
+        let f = fetch(cx, &request(&repo).context("no request")?).await?;
+        Ok(match parse(f.status, &f.body, &repo)? {
+            Some(card) => card.into_doc(cx.card(uri, self), SITE),
+            None => cx.missing(uri, self),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -232,6 +311,55 @@ mod tests {
         );
         assert_eq!(card.details["pull_count"], 4117458);
         assert_eq!(card.details["categories"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn roots_and_aliases() {
+        let d = DockerHub;
+        for uri in ["docker:library/nginx", "docker:lncm/bitcoind"] {
+            assert!(d.reads(uri), "{uri}");
+            assert_eq!(d.alias_root(uri), None, "{uri}");
+            assert!(!d.invalid(uri), "{uri}");
+        }
+        assert_eq!(
+            d.alias_root("https://hub.docker.com/_/nginx").as_deref(),
+            Some("docker:library/nginx")
+        );
+        assert_eq!(
+            d.alias_root("https://hub.docker.com/r/LNCM/bitcoind/tags")
+                .as_deref(),
+            Some("docker:lncm/bitcoind")
+        );
+        for uri in [
+            "docker:nginx",
+            "docker:LNCM/bitcoind",
+            "docker:a/b/c",
+            "docker:-a/b",
+        ] {
+            assert!(d.invalid(uri), "{uri}");
+            assert!(!d.reads(uri), "{uri}");
+        }
+        assert!(!d.invalid("https://example.org/docker:x"));
+        for example in d.examples() {
+            assert!(d.reads(example.uri), "{}", example.uri);
+        }
+    }
+
+    #[test]
+    fn documents() {
+        for (file, r) in [
+            ("repo-library-nginx.json", repo(LIBRARY, "nginx").unwrap()),
+            (
+                "repo-btcpayserver-btcpayserver.json",
+                repo("btcpayserver", "btcpayserver").unwrap(),
+            ),
+            ("repo-lncm-bitcoind.json", lncm()),
+        ] {
+            let card = parse(200, &read(file), &r).unwrap().unwrap();
+            let doc = crate::sources::kit::checked(&DockerHub, &card);
+            assert_eq!(doc.source_root.as_deref(), Some(card.id.as_str()));
+            assert_eq!(doc.attributes["page_url"], card.url);
+        }
     }
 
     #[test]
