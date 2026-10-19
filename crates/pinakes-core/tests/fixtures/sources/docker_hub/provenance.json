@@ -1,0 +1,38 @@
+{
+  "repo-btcpayserver-btcpayserver": {
+    "bytes": 1073,
+    "content_type": "application/json",
+    "file": "repo-btcpayserver-btcpayserver.json",
+    "recorded_at": "2026-10-19T16:23:21+00:00",
+    "sha256": "a06d227f7a25c738eaa6b94852445d947126d32dfcbe9a449127f9442f2a591a",
+    "status": 200,
+    "url": "https://hub.docker.com/v2/repositories/btcpayserver/btcpayserver/"
+  },
+  "repo-library-nginx": {
+    "bytes": 17842,
+    "content_type": "application/json",
+    "file": "repo-library-nginx.json",
+    "recorded_at": "2026-10-19T16:23:18+00:00",
+    "sha256": "2e94d44142a3570f66a549b441b3124f55f03f1ae6a72a548f13c7ce3757510e",
+    "status": 200,
+    "url": "https://hub.docker.com/v2/repositories/library/nginx/"
+  },
+  "repo-lncm-bitcoind": {
+    "bytes": 8390,
+    "content_type": "application/json",
+    "file": "repo-lncm-bitcoind.json",
+    "recorded_at": "2026-10-19T16:23:23+00:00",
+    "sha256": "b00a1c4450818c58a835388df9e33c36de612eb78427635536b38cc47819ddca",
+    "status": 200,
+    "url": "https://hub.docker.com/v2/repositories/lncm/bitcoind/"
+  },
+  "repo-missing": {
+    "bytes": 43,
+    "content_type": "application/json",
+    "file": "repo-missing.json",
+    "recorded_at": "2026-10-19T16:23:25+00:00",
+    "sha256": "80019e0eccb66899c98d834b3cb71c777f67f5724ec63cc7ce355350e28da5e7",
+    "status": 404,
+    "url": "https://hub.docker.com/v2/repositories/btcpayserver/no-such-repo-pinakes/"
+  }
+}
