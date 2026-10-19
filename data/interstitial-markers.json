@@ -1,0 +1,30 @@
+{
+  "text": [
+    "request access",
+    "just a moment",
+    "attention required",
+    "access denied",
+    "verify you are human",
+    "please verify you are a human",
+    "enable javascript",
+    "enable js and disable any ad blocker",
+    "unusual traffic",
+    "request unsuccessful. incapsula",
+    "incapsula incident id",
+    "are you a robot",
+    "press & hold",
+    "checking your browser"
+  ],
+  "captcha_selectors": [
+    ".g-recaptcha",
+    ".h-captcha",
+    ".cf-turnstile",
+    "#challenge-form",
+    "#cf-challenge-running",
+    "#px-captcha",
+    "iframe[src*=\"captcha-delivery.com\"]",
+    "iframe[src*=\"_Incapsula_Resource\"]"
+  ],
+  "wall_host_prefixes": ["unblock.", "challenge.", "consent.", "login."],
+  "wall_paths": ["/login", "/authwall", "/signin", "/checkpoint", "/accounts/login", "/uas/login"]
+}

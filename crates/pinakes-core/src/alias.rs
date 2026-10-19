@@ -1,0 +1,302 @@
+//! Aliases: the same object under another URI, resolved deterministically to one resource.
+//!
+//! An alias keeps its own resource ID and references (Nexus's identity is unchanged), but it is
+//! never fetched: its references count for the root, and reads, lookups, changes and occurrences
+//! answer with the root. Groups are a different thing (`groups`): evidence that two objects are
+//! one, never a spelling.
+use anyhow::Result;
+use sqlx::{PgPool, Postgres, Transaction};
+use url::Url;
+
+/// Query parameters that only track how a link was shared, on every host (with `utm_*`).
+const TRACKING: &[&str] = &[
+    "fbclid", "gclid", "dclid", "msclkid", "igshid", "mc_cid", "mc_eid", "_gl",
+];
+/// Parameters that track only on these platforms; elsewhere they may carry identity or access.
+const PLATFORM_TRACKING: &[(&[&str], &[&str])] = &[
+    (
+        &["meetup.com"],
+        &["recId", "recSource", "searchId", "eventOrigin"],
+    ),
+    (&["luma.com", "lu.ma"], &["tk"]),
+];
+#[derive(Debug, PartialEq)]
+pub struct Alias {
+    pub root: String,
+    /// `osm`, `identifier`, `tracking` or `canonical`.
+    pub basis: &'static str,
+}
+/// The root of a URI known from the URI alone, when it differs from the URI itself.
+pub fn root(uri: &str) -> Option<Alias> {
+    let (_, uri, _) = crate::model::identity(uri).ok()?;
+    let found = if let Some(osm) = crate::resolver::osm::parse_id(&uri) {
+        Some((osm.uri(), "osm"))
+    } else if let Some(isbn) = crate::resolver::cards::isbn(&uri) {
+        Some((
+            format!("isbn:{}", crate::resolver::cards::isbn13(&isbn)),
+            "identifier",
+        ))
+    } else if let Some(doi) = crate::resolver::cards::doi(&uri) {
+        Some((format!("doi:{doi}"), "identifier"))
+    } else {
+        untracked(&uri).map(|root| (root, "tracking"))
+    }?;
+    let (_, root, _) = crate::model::identity(&found.0).ok()?;
+    (root != uri).then_some(Alias {
+        root,
+        basis: found.1,
+    })
+}
+/// The URI without its tracking parameters, if it had any. Parameters are dropped from the raw
+/// query string, so every kept value keeps its own encoding.
+fn untracked(uri: &str) -> Option<String> {
+    let mut u = Url::parse(uri).ok()?;
+    if !matches!(u.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = u.host_str().unwrap_or_default().to_owned();
+    let platform: Vec<&str> = PLATFORM_TRACKING
+        .iter()
+        .filter(|(hosts, _)| {
+            hosts
+                .iter()
+                .any(|h| host == *h || host.ends_with(&format!(".{h}")))
+        })
+        .flat_map(|(_, names)| names.iter().copied())
+        .collect();
+    let tracking = |piece: &str| {
+        let name = piece.split('=').next().unwrap_or_default();
+        let name = percent_encoding::percent_decode_str(name).decode_utf8_lossy();
+        name.starts_with("utm_")
+            || TRACKING.contains(&name.as_ref())
+            || platform.contains(&name.as_ref())
+    };
+    let pieces: Vec<&str> = u.query()?.split('&').collect();
+    let kept: Vec<&str> = pieces.iter().copied().filter(|p| !tracking(p)).collect();
+    if kept.len() == pieces.len() {
+        return None;
+    }
+    let kept = kept.join("&");
+    u.set_query((!kept.is_empty()).then_some(kept.as_str()));
+    Some(u.to_string())
+}
+/// The page's own canonical (or permanent redirect) as an alias: it may differ from the page
+/// only by a trailing slash and tracking parameters (`untracked`). A canonical to another path
+/// (a homepage, a sibling page) or another query (`/events/?event_id=42` naming `/events/`, a
+/// cookie wall's `?error=…`) is a claim, not a spelling, and never aliases.
+pub fn canonical(uri: &str, canonical: &str) -> Option<Alias> {
+    let (_, uri, _) = crate::model::identity(uri).ok()?;
+    let (_, root, _) = crate::model::identity(canonical).ok()?;
+    let root = self::root(&root).map_or(root, |a| a.root);
+    let spelling = |s: &str| {
+        let mut u = Url::parse(&untracked(s).unwrap_or_else(|| s.to_owned())).ok()?;
+        if !matches!(u.scheme(), "http" | "https") {
+            return None;
+        }
+        let path = u.path().trim_end_matches('/').to_owned();
+        u.set_path(&path);
+        Some(u.to_string())
+    };
+    (root != uri && spelling(&uri)? == spelling(&root)?).then_some(Alias {
+        root,
+        basis: "canonical",
+    })
+}
+/// Make `id` an alias of `alias.root`: the root row exists and is queued, the alias row is
+/// never fetched again. An ID that is itself a root keeps its own aliases pointing at it.
+pub async fn assign(tx: &mut Transaction<'_, Postgres>, id: &str, alias: &Alias) -> Result<()> {
+    // Every assignment takes the same lock, so an alias never commits against a root that has
+    // meanwhile become an alias itself (reads follow one hop).
+    crate::store::lock_search_revision(tx).await?;
+    let (named, root_uri, _) = crate::model::identity(&alias.root)?;
+    // A root is never itself an alias: one that became one passes the alias to its own root.
+    let hop: Option<String> =
+        sqlx::query_scalar("SELECT root_id FROM resource_alias WHERE alias_id=$1")
+            .bind(&named)
+            .fetch_optional(&mut **tx)
+            .await?;
+    let root_id = hop.clone().unwrap_or(named);
+    if root_id == id {
+        return Ok(());
+    }
+    if hop.is_none() {
+        crate::store::insert_plain(tx, &root_id, &root_uri).await?;
+    }
+    let previous: Option<String> =
+        sqlx::query_scalar("SELECT root_id FROM resource_alias WHERE alias_id=$1")
+            .bind(id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,$3) ON CONFLICT(alias_id) DO UPDATE SET root_id=excluded.root_id,basis=excluded.basis")
+        .bind(id).bind(&root_id).bind(alias.basis).execute(&mut **tx).await?;
+    if previous.as_deref() != Some(root_id.as_str()) {
+        // Clients that cached the resource learn which root answers for it now. The line carries
+        // the root's type (or the alias's own while the root is unfetched) for `?type=` filters.
+        let type_path: Vec<String> = sqlx::query_scalar(
+            "SELECT coalesce((SELECT nullif(type_path,'{}') FROM resource WHERE id=$1),(SELECT type_path FROM resource WHERE id=$2),'{}')",
+        )
+        .bind(&root_id)
+        .bind(id)
+        .fetch_one(&mut **tx)
+        .await?;
+        crate::changes::append(
+            tx,
+            id,
+            "alias",
+            None,
+            Some(serde_json::json!({ "root": root_id, "type_path": type_path })),
+            crate::changes::Diff {
+                class: "aliased",
+                fields: vec!["root".into()],
+            },
+            None,
+        )
+        .await?;
+    }
+    // Aliases of the alias follow it to the root.
+    sqlx::query("UPDATE resource_alias SET root_id=$2 WHERE root_id=$1")
+        .bind(id)
+        .bind(&root_id)
+        .execute(&mut **tx)
+        .await?;
+    // An OSM spelling drops its OSM envelope: only the root holds the object. The generation
+    // bump fences any job still running on the alias. This statement must keep naming a column
+    // of the `group_resource_revision` trigger (`doc`, `osm_version`): the trigger fires on the
+    // columns an UPDATE names, not on changed values, and its `group_revision` bump is what fails
+    // a concurrent grouping run's fence on the alias.
+    sqlx::query("UPDATE resource SET generation=generation+1,resolver=NULL,lease_until=NULL,priority_at=NULL,osm_type=NULL,osm_id=NULL,osm_version=NULL,doc=CASE WHEN osm_id IS NULL THEN doc ELSE '{}'::jsonb END,type_path=CASE WHEN osm_id IS NULL THEN type_path ELSE '{}'::text[] END WHERE id=$1")
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+    // The root is wanted now; its own schedule continues after its first fetch.
+    sqlx::query("UPDATE resource SET priority_at=coalesce(priority_at,now()) WHERE id=$1 AND resolved_at IS NULL")
+        .bind(&root_id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM group_unit WHERE resource_id=$1")
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM resource_group WHERE resource_id=$1")
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+    crate::store::recompute_scores(tx, &[id.to_owned(), root_id]).await
+}
+/// The root of a resource ID, or the ID itself.
+pub async fn resolve_id(pool: &PgPool, id: &str) -> Result<String> {
+    Ok(sqlx::query_scalar(
+        "SELECT coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn spellings_resolve_to_one_root() {
+        let r = |u: &str| root(u).map(|a| (a.root, a.basis));
+        assert_eq!(
+            r("https://www.meetup.com/g/events/123/?recId=1&recSource=x&searchId=2&eventOrigin=find_page"),
+            Some(("https://www.meetup.com/g/events/123/".into(), "tracking"))
+        );
+        assert_eq!(
+            r("https://example.org/a?id=7&utm_source=x&fbclid=y"),
+            Some(("https://example.org/a?id=7".into(), "tracking"))
+        );
+        assert_eq!(r("https://example.org/a?id=7"), None);
+        // Platform parameters track only on their platform; kept values keep their encoding.
+        assert_eq!(
+            r("https://lu.ma/party?tk=abc"),
+            Some(("https://lu.ma/party".into(), "tracking"))
+        );
+        for uri in [
+            "https://example.org/a?tk=secret",
+            "https://example.org/a?recId=1",
+            "https://lu.ma/party?recId=1",
+        ] {
+            assert_eq!(r(uri), None, "{uri}");
+        }
+        let (e9, e8) = (
+            r("https://example.org/s?q=%E9&utm_source=x"),
+            r("https://example.org/s?q=%E8&utm_source=x"),
+        );
+        assert_eq!(e9, Some(("https://example.org/s?q=%E9".into(), "tracking")));
+        assert_ne!(e9, e8);
+        assert_eq!(
+            r("https://osm.org/node/240109189/"),
+            Some(("https://www.openstreetmap.org/node/240109189".into(), "osm"))
+        );
+        assert_eq!(r("https://www.openstreetmap.org/node/240109189"), None);
+        assert_eq!(
+            r("isbn:0140328726"),
+            Some(("isbn:9780140328721".into(), "identifier"))
+        );
+        assert_eq!(r("isbn:9780140328721"), None);
+        assert_eq!(
+            r("https://doi.org/10.1038/NATURE12373"),
+            Some(("doi:10.1038/nature12373".into(), "identifier"))
+        );
+        assert_eq!(r("doi:10.1038/nature12373"), None);
+        for uri in [
+            "https://www.openstreetmap.org/node/240109189",
+            "isbn:9780140328721",
+            "https://www.meetup.com/g/events/123/",
+        ] {
+            assert_eq!(root(uri), None, "{uri}");
+        }
+    }
+    #[test]
+    fn only_a_same_path_canonical_is_an_alias() {
+        let c = |u: &str, c: &str| canonical(u, c).map(|a| a.root);
+        assert_eq!(
+            c(
+                "https://shop.example/item/7?utm_source=feed",
+                "https://shop.example/item/7"
+            ),
+            Some("https://shop.example/item/7".into())
+        );
+        assert_eq!(
+            c(
+                "https://shop.example/item/7/",
+                "https://shop.example/item/7"
+            ),
+            Some("https://shop.example/item/7".into())
+        );
+
+        // A homepage, a sibling path, another host or scheme is a claim, never a spelling.
+        for (uri, target) in [
+            ("https://thebiz.pro/episodes/1/a", "https://thebiz.pro/"),
+            ("https://pubky.org/eli5/", "https://pubky.org/introduction/"),
+            ("https://docs.pubky.org/x", "https://pubky.org/x"),
+            ("http://shop.example/item/7", "https://shop.example/item/7"),
+            ("https://shop.example/item/7", "https://shop.example/item/7"),
+            (
+                "https://www.nature.com/articles/nature12373",
+                "https://www.nature.com/articles/nature12373?error=cookies_not_supported&code=5",
+            ),
+            (
+                "https://shop.example/item/7?a=1",
+                "https://shop.example/item/7?a=2",
+            ),
+            // A permalink canonical drops a parameter that names the object.
+            (
+                "https://wp.example/events/?event_id=42",
+                "https://wp.example/events/",
+            ),
+            (
+                "https://shop.example/item/7?ref=home",
+                "https://shop.example/item/7",
+            ),
+            (
+                "https://shop.example/item?id=7&ref=home",
+                "https://shop.example/item?id=7",
+            ),
+        ] {
+            assert_eq!(c(uri, target), None, "{uri} → {target}");
+        }
+    }
+}

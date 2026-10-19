@@ -1,0 +1,723 @@
+use crate::{
+    config::{Config, QueueConfig},
+    model::Status,
+    resolver::{
+        egress::Egress, geo::GeoResolver, osm::OsmResolver, pubky::PubkyResolver, web::WebResolver,
+        Resolver,
+    },
+};
+use anyhow::{bail, Result};
+use futures_util::FutureExt;
+use sqlx::{FromRow, PgPool};
+use std::{collections::HashMap, sync::Arc, time::Duration};
+use tokio::{
+    sync::{watch, Mutex, Notify},
+    task::JoinSet,
+    time::Instant,
+};
+
+pub const RESOLVE_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Debug, FromRow)]
+pub struct Job {
+    pub id: String,
+    pub uri: String,
+    pub attempts: i32,
+    pub generation: i64,
+}
+pub async fn claim(pool: &PgPool, resolver: &str, cfg: &QueueConfig) -> Result<Option<Job>> {
+    Ok(claim_batch(pool, resolver, cfg, 1).await?.pop())
+}
+pub async fn claim_batch(
+    pool: &PgPool,
+    resolver: &str,
+    cfg: &QueueConfig,
+    size: usize,
+) -> Result<Vec<Job>> {
+    claim_sources(pool, &[resolver], cfg, size).await
+}
+pub async fn claim_sources(
+    pool: &PgPool,
+    sources: &[&str],
+    cfg: &QueueConfig,
+    size: usize,
+) -> Result<Vec<Job>> {
+    let size = size.clamp(1, 50);
+    Ok(sqlx::query_as(r#"UPDATE resource SET lease_until=now()+$2*interval '1 second', generation=generation+1
+        WHERE id IN (SELECT id FROM resource WHERE resolver=ANY($1) AND NOT dead_letter AND NOT final AND next_attempt_at<=now()
+          AND (lease_until IS NULL OR lease_until<now())
+          AND (NOT EXISTS(SELECT 1 FROM resource_derivation d WHERE d.child_id=resource.id)
+               OR EXISTS(SELECT 1 FROM resource_derivation d WHERE d.child_id=resource.id AND (d.expires_at IS NULL OR d.expires_at>now()))
+               OR EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=resource.id))
+          ORDER BY priority_at DESC NULLS LAST,next_attempt_at,id FOR UPDATE SKIP LOCKED LIMIT $3)
+        RETURNING id,uri,attempts,generation"#).bind(sources).bind(cfg.lease_secs.max(15 * size as u64 + 10) as f64).bind(size as i64).fetch_all(pool).await?)
+}
+
+/// `pinakesd reextract`: re-run `classify` on the selected rows (every row for `all`, else the
+/// rows routed to or classified as one of `routes`) and re-queue them now, in batches of 1000.
+/// Each loses its HTTP validators and, on the OSM route, its cache entry, so its next fetch
+/// re-extracts instead of answering 304 or reading the cache. A row entering or leaving the OSM
+/// route swaps its identity envelope and becomes pending, as does an OSM-host URL moving to web
+/// (which may hold no facts there); other rows keep their document until the fetch replaces it.
+/// Leases are fenced by the generation bump. The daemon must not be running (the caller holds
+/// the instance lock).
+/// `reextract`'s arguments: `all` or route and card-kind names.
+pub fn check_routes(routes: &[String]) -> Result<()> {
+    anyhow::ensure!(!routes.is_empty(), "reextract needs a route or `all`");
+    let known: Vec<&str> = crate::resolver::ROUTES
+        .iter()
+        .chain(crate::resolver::cards::KINDS.iter())
+        .copied()
+        .collect();
+    for route in routes.iter().filter(|r| *r != "all") {
+        anyhow::ensure!(
+            known.contains(&route.as_str()),
+            "unknown route {route}; routes are {} or all",
+            known.join(", ")
+        );
+    }
+    Ok(())
+}
+pub async fn reextract(pool: &PgPool, routes: &[String]) -> Result<u64> {
+    check_routes(routes)?;
+    let all = routes.iter().any(|r| r == "all");
+    let (mut last, mut total) = (String::new(), 0u64);
+    loop {
+        let rows: Vec<(String, String, Option<String>, bool)> = sqlx::query_as(
+            "SELECT id,uri,resolver,EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=resource.id) FROM resource WHERE id>$1 ORDER BY id LIMIT 1000",
+        )
+        .bind(&last)
+        .fetch_all(pool)
+        .await?;
+        let Some(end) = rows.last().map(|r| r.0.clone()) else {
+            return Ok(total);
+        };
+        let (mut ids, mut new_routes, mut types, mut osm_ids) = (vec![], vec![], vec![], vec![]);
+        let mut aliases = vec![];
+        for (id, uri, stored, is_alias) in rows {
+            // An alias has no route of its own; a URI that now has a static root becomes one.
+            if is_alias {
+                continue;
+            }
+            if let Some(alias) = crate::alias::root(&uri) {
+                if all || stored.as_ref().is_some_and(|s| routes.contains(s)) {
+                    aliases.push((id, alias));
+                }
+                continue;
+            }
+            // A page its own card promoted to media or activitypub stays on that route: the
+            // classifier only knows the URL, not what the page turned out to be.
+            let promoted = stored
+                .as_deref()
+                .filter(|s| matches!(*s, "media" | "activitypub"));
+            let route = promoted
+                .map(str::to_owned)
+                .or_else(|| crate::resolver::classify(&uri).map(str::to_owned))
+                .or(stored.clone());
+            let Some(route) = route else { continue };
+            if !all
+                && !routes
+                    .iter()
+                    .any(|r| Some(r) == stored.as_ref() || *r == route)
+            {
+                continue;
+            }
+            let osm = (route == "osm")
+                .then(|| crate::resolver::osm::parse_id(&uri))
+                .flatten();
+            ids.push(id);
+            new_routes.push(route);
+            types.push(osm.as_ref().map(|o| o.osm_type.clone()));
+            osm_ids.push(osm.map(|o| o.id));
+        }
+        if !aliases.is_empty() {
+            let mut tx = pool.begin().await?;
+            crate::store::lock_search_revision(&mut tx).await?;
+            for (id, alias) in &aliases {
+                crate::alias::assign(&mut tx, id, alias).await?;
+            }
+            tx.commit().await?;
+            total += aliases.len() as u64;
+        }
+        if !ids.is_empty() {
+            let mut tx = pool.begin().await?;
+            sqlx::query("UPDATE osm_place o SET refresh_at=least(o.refresh_at,now()) FROM resource r WHERE r.id=ANY($1) AND o.osm_type=r.osm_type AND o.osm_id=r.osm_id")
+                .bind(&ids)
+                .execute(&mut *tx)
+                .await?;
+            total += sqlx::query(r#"WITH v AS (
+                  SELECT v.*,
+                    (v.osm_id IS NOT NULL)<>(r.osm_id IS NOT NULL)
+                      OR (v.route='web' AND lower(rtrim(r.host,'.')) ~ '(^|[.])(openstreetmap[.]org|osm[.]org)$') AS reset
+                  FROM unnest($1::text[],$2::text[],$3::text[],$4::bigint[]) v(id,route,osm_type,osm_id) JOIN resource r ON r.id=v.id)
+                UPDATE resource r SET resolver=v.route,osm_type=v.osm_type,osm_id=v.osm_id,
+                doc=CASE WHEN v.osm_id IS NOT NULL THEN jsonb_build_object('type','Place','url',r.uri,'osm_id',v.osm_type||'/'||v.osm_id,'source','osm','status','pending')
+                  WHEN v.reset THEN '{}'::jsonb ELSE r.doc END,
+                type_path=CASE WHEN v.osm_id IS NOT NULL THEN NULL WHEN v.reset THEN '{}' ELSE r.type_path END,
+                name=CASE WHEN v.reset THEN NULL ELSE r.name END,
+                point=CASE WHEN v.reset THEN NULL ELSE r.point END,
+                category=CASE WHEN v.reset THEN NULL ELSE r.category END,
+                type=CASE WHEN v.reset THEN NULL ELSE r.type END,
+                start_at=CASE WHEN v.reset THEN NULL ELSE r.start_at END,
+                end_at=CASE WHEN v.reset THEN NULL ELSE r.end_at END,
+                venue_id=CASE WHEN v.reset THEN NULL ELSE r.venue_id END,
+                status=CASE WHEN v.reset THEN 'pending' ELSE r.status END,
+                resolved_at=CASE WHEN v.reset THEN NULL ELSE r.resolved_at END,
+                refresh_at=CASE WHEN v.reset THEN NULL ELSE r.refresh_at END,
+                osm_version=CASE WHEN v.reset THEN NULL ELSE r.osm_version END,
+                attempts=0,timeout_streak=0,dead_letter=false,final=false,last_error=NULL,
+                lease_until=NULL,priority_at=NULL,generation=r.generation+1,next_attempt_at=now()
+                FROM v WHERE r.id=v.id"#)
+                .bind(&ids).bind(&new_routes).bind(&types).bind(&osm_ids).execute(&mut *tx).await?.rows_affected();
+            tx.commit().await?;
+        }
+        last = end;
+    }
+}
+
+pub fn backoff(cfg: &QueueConfig, attempt: u32) -> u64 {
+    cfg.backoff_secs
+        .saturating_mul(
+            1u64.checked_shl(attempt.saturating_sub(1))
+                .unwrap_or(u64::MAX),
+        )
+        .min(cfg.max_backoff_secs)
+}
+pub async fn failed(pool: &PgPool, job: &Job, cfg: &QueueConfig, error: &str) -> Result<()> {
+    failed_as(pool, job, cfg, error, Status::Error).await
+}
+async fn failed_as(
+    pool: &PgPool,
+    job: &Job,
+    cfg: &QueueConfig,
+    error: &str,
+    status: Status,
+) -> Result<()> {
+    let attempt = job.attempts as u32 + 1;
+    sqlx::query(r#"UPDATE resource SET attempts=attempts+1, timeout_streak=0, dead_letter=$3, status=$6, lease_until=NULL,priority_at=NULL,
+        next_attempt_at=now()+$4*interval '1 second', last_error=$5 WHERE id=$1 AND generation=$2"#)
+        .bind(&job.id).bind(job.generation).bind(attempt>=cfg.max_failures).bind(backoff(cfg,attempt) as f64).bind(error).bind(status.as_str()).execute(pool).await?;
+    Ok(())
+}
+async fn timed_out(pool: &PgPool, job: &Job, cfg: &QueueConfig, seconds: u64) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    crate::store::lock_search_revision(&mut tx).await?;
+    let row: Option<(i32, i32)> = sqlx::query_as("SELECT CASE WHEN last_error='timeout' THEN timeout_streak ELSE 0 END,attempts FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE")
+        .bind(&job.id).bind(job.generation).fetch_optional(&mut *tx).await?;
+    if let Some((streak, attempts)) = row {
+        let streak = streak.saturating_add(1);
+        let charged = streak as u32 > cfg.timeout_grace;
+        let attempts = attempts.saturating_add(i32::from(charged));
+        let base = cfg.backoff_secs.max(seconds.clamp(1, 3600));
+        let delay = base
+            .saturating_mul(
+                1u64.checked_shl(streak.saturating_sub(1) as u32)
+                    .unwrap_or(u64::MAX),
+            )
+            .min(cfg.max_backoff_secs.max(base));
+        sqlx::query("UPDATE resource SET timeout_streak=$2,attempts=$3,dead_letter=$4,status=CASE WHEN $5 THEN 'error' ELSE status END,lease_until=NULL,priority_at=NULL,last_error='timeout',next_attempt_at=now()+$6*interval '1 second' WHERE id=$1")
+            .bind(&job.id).bind(streak).bind(attempts).bind(charged && attempts as u32>=cfg.max_failures).bind(charged).bind(delay as f64).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+async fn denied(
+    pool: &PgPool,
+    job: &Job,
+    cfg: &QueueConfig,
+    retry: &crate::resolver::RetryLater,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    crate::store::lock_search_revision(&mut tx).await?;
+    let row: Option<(i32,i32,bool)> = sqlx::query_as("SELECT denial_streak,attempts,coalesce(denied_since<=now()-interval '3 days',false) FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE")
+        .bind(&job.id).bind(job.generation).fetch_optional(&mut *tx).await?;
+    if let Some((streak, attempts, expired)) = row {
+        let attempts = attempts.saturating_add(i32::from(expired));
+        let delay = if expired {
+            backoff(cfg, attempts as u32).max(retry.seconds)
+        } else {
+            retry.seconds.clamp(1, 3600)
+        };
+        // Continue recovery probes at normal backoff; denial never dead-letters a
+        // shared feed, and accepted facts remain available with an honest status.
+        sqlx::query("UPDATE resource SET denial_streak=$2,denied_since=coalesce(denied_since,now()),attempts=$3,status=CASE WHEN $4 THEN 'unreachable' ELSE status END,timeout_streak=0,dead_letter=false,lease_until=NULL,priority_at=NULL,last_error=$5,next_attempt_at=now()+$6*interval '1 second' WHERE id=$1")
+            .bind(&job.id).bind(streak.saturating_add(1)).bind(attempts).bind(expired).bind(retry.class).bind(delay as f64).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+pub async fn run_job(
+    pool: &PgPool,
+    resolver: &dyn Resolver,
+    cfg: &QueueConfig,
+    job: &Job,
+) -> Result<()> {
+    // Heap-allocate the large persistence/reconciliation future before composing it
+    // with resolver futures, keeping default worker and test thread stacks bounded.
+    Box::pin(run_job_inner(pool, resolver, cfg, job)).await
+}
+async fn run_job_inner(
+    pool: &PgPool,
+    resolver: &dyn Resolver,
+    cfg: &QueueConfig,
+    job: &Job,
+) -> Result<()> {
+    let result = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        RESOLVE_TIMEOUT,
+        resolver.resolve(&job.uri),
+    ))
+    .catch_unwind()
+    .await
+    .map_err(|_| anyhow::anyhow!("resolver panic"))
+    .and_then(|r| {
+        r.map_err(|_| {
+            crate::resolver::RetryLater {
+                class: "timeout",
+                seconds: 60,
+            }
+            .into()
+        })
+    })
+    .and_then(|r| r);
+    guarded_finish_job(
+        pool,
+        resolver,
+        cfg,
+        &crate::config::RefreshConfig::default(),
+        job,
+        result,
+    )
+    .await
+}
+async fn guarded_finish_job(
+    pool: &PgPool,
+    resolver: &dyn Resolver,
+    cfg: &QueueConfig,
+    refresh: &crate::config::RefreshConfig,
+    job: &Job,
+    result: Result<crate::model::ResourceMeta>,
+) -> Result<()> {
+    match std::panic::AssertUnwindSafe(finish_job(pool, resolver, cfg, refresh, job, result))
+        .catch_unwind()
+        .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            crate::telemetry::parser_error();
+            tracing::error!(resource_id=%job.id, resolver=resolver.name(), "job completion panicked");
+            failed(pool, job, cfg, "parse").await
+        }
+    }
+}
+async fn finish_job(
+    pool: &PgPool,
+    resolver: &dyn Resolver,
+    cfg: &QueueConfig,
+    refresh: &crate::config::RefreshConfig,
+    job: &Job,
+    result: Result<crate::model::ResourceMeta>,
+) -> Result<()> {
+    let result = match result {
+        Err(error) if error.is::<crate::resolver::NotModified>() => {
+            let value: Option<serde_json::Value> =
+                sqlx::query_scalar("SELECT doc FROM resource_document WHERE id=$1")
+                    .bind(&job.id)
+                    .fetch_optional(pool)
+                    .await?;
+            value
+                .ok_or_else(|| anyhow::anyhow!("304 without an accepted document"))
+                .and_then(|v| {
+                    serde_json::from_value::<crate::model::ResourceMeta>(v).map_err(Into::into)
+                })
+                .map(|mut doc| {
+                    doc.fetched_at = chrono::Utc::now().timestamp_millis();
+                    doc
+                })
+        }
+        other => other,
+    };
+    let result = async {
+        let mut doc = result?;
+        if doc.status == Status::Error {
+            bail!("upstream returned a transient HTTP error");
+        }
+        let invalid_identifier =
+            doc.status == Status::Missing && crate::resolver::cards::invalid_identifier(&job.uri);
+        if resolver.name() != "osm" && !invalid_identifier {
+            doc.ttl_secs = if doc.status == Status::Missing {
+                cfg.missing_ttl_secs
+            } else {
+                resolver.refresh_after(&doc).as_secs()
+            };
+        }
+        if doc.status == Status::Missing {
+            let dates: (
+                Option<chrono::DateTime<chrono::Utc>>,
+                Option<chrono::DateTime<chrono::Utc>>,
+            ) = sqlx::query_as("SELECT start_at,end_at FROM resource WHERE id=$1")
+                .bind(&job.id)
+                .fetch_one(pool)
+                .await?;
+            doc.start = doc.start.or(dates.0);
+            doc.end = doc.end.or(dates.1);
+        }
+        if matches!(
+            resolver.name(),
+            "web" | "pubky" | "geo" | "osm" | "media" | "isbn" | "doi" | "activitypub"
+        ) {
+            let now = chrono::Utc::now();
+            let mut manifest = resolver.manifest_for(&job.uri);
+            if resolver.name() == "osm" {
+                manifest.cadence_floor = doc.ttl_secs;
+            }
+            if doc.status != Status::Missing
+                || doc.end.or(doc.start).is_some_and(|end| {
+                    end.checked_add_signed(chrono::Duration::hours(24))
+                        .is_some_and(|at| now >= at)
+                })
+            {
+                let next = crate::scheduler::next(&manifest, &doc, now, refresh);
+                doc.ttl_secs = next.map_or(0, |at| (at - now).num_seconds().max(0) as u64);
+            } else if resolver.name() != "osm" {
+                doc.ttl_secs = doc.ttl_secs.max(3600);
+            }
+        }
+        if invalid_identifier {
+            doc.ttl_secs = 0;
+        }
+        if crate::resolver::cards::social(&doc) {
+            doc.ttl_secs = doc.ttl_secs.min(3600);
+        }
+        let attrs = match resolver.name() {
+            "web" | "media" | "isbn" | "doi" | "activitypub" => crate::resolver::web::ATTRIBUTES,
+            "pubky" => crate::resolver::pubky::ATTRIBUTES,
+            "geo" => crate::resolver::geo::ATTRIBUTES,
+            "osm" => crate::resolver::osm::ATTRIBUTES,
+            _ => &[],
+        };
+        doc.validate(attrs)?;
+        crate::changes::save(pool, &job.id, job.generation, &doc, cfg).await?;
+        // The page names itself (its head canonical, or the end of an all-permanent redirect
+        // chain) up to a trailing slash and tracking: it is an alias of that URL, which is
+        // fetched in its place from now on. Other claimed URLs are never candidates.
+        if doc.status == Status::Ok {
+            if let Some(alias) = doc
+                .alias_candidates
+                .iter()
+                .find_map(|a| crate::alias::canonical(&job.uri, a))
+            {
+                let mut tx = pool.begin().await?;
+                crate::store::lock_search_revision(&mut tx).await?;
+                // The generation fence covers the alias too: a stale job writes nothing.
+                let current: Option<String> = sqlx::query_scalar(
+                    "SELECT id FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE",
+                )
+                .bind(&job.id)
+                .bind(job.generation)
+                .fetch_optional(&mut *tx)
+                .await?;
+                if current.is_some() {
+                    crate::alias::assign(&mut tx, &job.id, &alias).await?;
+                }
+                tx.commit().await?;
+            }
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        tracing::warn!(resource_id=%job.id,resolver=resolver.name(),error=%error,"resolution failed");
+        if error.is::<crate::resolver::interstitial::Blocked>() {
+            // A challenge page: unreachable, with the normal failure backoff and dead letter.
+            // The last accepted document stays; a wall never confirms disappearance.
+            failed_as(pool, job, cfg, "wall", Status::Unreachable).await?;
+        } else if let Some(retry) = error.downcast_ref::<crate::resolver::RetryLater>() {
+            if retry.class == "timeout" {
+                timed_out(pool, job, cfg, retry.seconds).await?;
+            } else if matches!(retry.class, "upstream_denied" | "graphql") {
+                denied(pool, job, cfg, retry).await?;
+            } else {
+                sqlx::query("UPDATE resource SET timeout_streak=0,lease_until=NULL,priority_at=NULL,next_attempt_at=now()+$3*interval '1 second',last_error=$4 WHERE id=$1 AND generation=$2")
+                    .bind(&job.id).bind(job.generation).bind(retry.seconds.clamp(1,3600) as f64).bind(if retry.class=="rate_limited" {"http_4xx"} else {retry.class}).execute(pool).await?;
+            }
+        } else if crate::resolver::error_class(&error) == "timeout" {
+            timed_out(pool, job, cfg, 60).await?;
+        } else if crate::resolver::error_class(&error) == "policy"
+            && url::Url::parse(&job.uri)
+                .ok()
+                .and_then(|u| u.host_str().map(crate::resolver::osm::osm_host))
+                .unwrap_or(false)
+        {
+            // Web refuses every OSM-host page that is not an object or a location link before any
+            // fetch. The refusal is local and permanent: store it once as final, not toward
+            // dead-letter; a later routing change revives it through the reroute trigger.
+            sqlx::query("UPDATE resource SET status='error',attempts=attempts+1,timeout_streak=0,dead_letter=false,final=true,lease_until=NULL,priority_at=NULL,last_error='unsupported',next_attempt_at='infinity' WHERE id=$1 AND generation=$2")
+                .bind(&job.id).bind(job.generation).execute(pool).await?;
+        } else {
+            let mut cfg = cfg.clone();
+            if resolver.name() == "geo"
+                || error
+                    .downcast_ref::<crate::resolver::ErrorClass>()
+                    .is_some_and(|c| c.0 == "policy")
+            {
+                cfg.max_failures = 1;
+            }
+            failed(pool, job, &cfg, crate::resolver::error_class(&error)).await?;
+        }
+    }
+    Ok(())
+}
+pub async fn run_batch(
+    pool: &PgPool,
+    resolver: &dyn Resolver,
+    cfg: &QueueConfig,
+    jobs: &[Job],
+) -> Result<()> {
+    run_batch_config(
+        pool,
+        resolver,
+        cfg,
+        &crate::config::RefreshConfig::default(),
+        jobs,
+    )
+    .await
+}
+async fn run_batch_config(
+    pool: &PgPool,
+    resolver: &dyn Resolver,
+    cfg: &QueueConfig,
+    refresh: &crate::config::RefreshConfig,
+    jobs: &[Job],
+) -> Result<()> {
+    let uris = jobs.iter().map(|j| j.uri.clone()).collect::<Vec<_>>();
+    let results = tokio::time::timeout(
+        RESOLVE_TIMEOUT * jobs.len() as u32,
+        std::panic::AssertUnwindSafe(resolver.resolve_batch(&uris)).catch_unwind(),
+    )
+    .await;
+    let results = match results {
+        Ok(Ok(results)) if results.len() == jobs.len() => results,
+        Err(_) if resolver.name() == "osm" => jobs
+            .iter()
+            .map(|_| {
+                Err(crate::resolver::RetryLater {
+                    class: "timeout",
+                    seconds: 60,
+                }
+                .into())
+            })
+            .collect(),
+        _ => jobs
+            .iter()
+            .map(|_| Err(anyhow::anyhow!("batch timeout or invalid response count")))
+            .collect(),
+    };
+    if results.iter().any(|r| {
+        r.as_ref()
+            .is_err_and(|e| !e.is::<crate::resolver::NotModified>())
+    }) {
+        crate::telemetry::parser_error();
+    }
+    let error = results.iter().find_map(|r| match r {
+        Err(e) if !e.is::<crate::resolver::NotModified>() => {
+            Some(crate::resolver::error_class(e).to_owned())
+        }
+        Ok(doc) if matches!(doc.status, Status::Unreachable | Status::Error) => Some(
+            if doc.status == Status::Unreachable {
+                "http_4xx"
+            } else {
+                "http_5xx"
+            }
+            .into(),
+        ),
+        _ => None,
+    });
+    if crate::telemetry::last_fetch().is_some() {
+        crate::source::outcome(
+            pool,
+            &resolver.manifest_for(&jobs[0].uri).source,
+            error.as_deref(),
+        )
+        .await?;
+    }
+    for (job, result) in jobs.iter().zip(results) {
+        guarded_finish_job(pool, resolver, cfg, refresh, job, result).await?;
+    }
+    Ok(())
+}
+/// Limits new work attributable to a public author, across both resolver kinds.
+#[derive(Default)]
+pub struct AuthorBudget(Mutex<HashMap<String, Instant>>);
+impl AuthorBudget {
+    pub async fn admit(&self, pool: &PgPool, job: &Job, rate: f64) -> Result<bool> {
+        let authors: Vec<String> = sqlx::query_scalar(
+            "WITH inputs AS (SELECT $1::text AS id UNION SELECT alias_id FROM resource_alias WHERE root_id=$1)
+            SELECT DISTINCT author FROM (
+                SELECT f.author FROM inputs i JOIN effective_reference f ON f.resource_id=i.id
+                UNION ALL SELECT f.author FROM inputs i JOIN resource_derivation d ON d.child_id=i.id JOIN effective_reference f ON f.resource_id=d.parent_id
+                UNION ALL SELECT 'adapter:'||d.adapter FROM inputs i JOIN resource_derivation d ON d.child_id=i.id WHERE NOT EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=d.parent_id)
+            ) sponsors ORDER BY author",
+        )
+        .bind(&job.id)
+        .fetch_all(pool)
+        .await?;
+        if authors.is_empty() {
+            return Ok(true);
+        }
+        let now = Instant::now();
+        let mut budgets = self.0.lock().await;
+        budgets.retain(|_, next| *next > now);
+        // Any referring author can sponsor the shared fetch; never charge it once per reference.
+        let author = authors.iter().find(|a| !budgets.contains_key(*a));
+        if let Some(author) = author {
+            budgets.insert(author.clone(), now + Duration::from_secs_f64(1.0 / rate));
+            return Ok(true);
+        }
+        let delay = authors
+            .iter()
+            .filter_map(|a| budgets.get(a))
+            .min()
+            .expect("nonempty authors")
+            .duration_since(now);
+        drop(budgets);
+        sqlx::query("UPDATE resource SET lease_until=NULL,next_attempt_at=now()+$3*interval '1 second' WHERE id=$1 AND generation=$2")
+            .bind(&job.id).bind(job.generation).bind(delay.as_secs_f64()).execute(pool).await?;
+        Ok(false)
+    }
+}
+
+pub fn spawn(
+    pool: PgPool,
+    config: Config,
+    wake: Arc<Notify>,
+    shutdown: watch::Receiver<bool>,
+    metrics: Arc<crate::telemetry::Metrics>,
+) -> Result<JoinSet<()>> {
+    let egress = Egress::new(config.egress.clone());
+    spawn_with_egress(pool, config, wake, shutdown, metrics, egress)
+}
+/// Injectable upstream transport for deterministic integration stacks. Production uses `spawn`.
+pub fn spawn_with_egress(
+    pool: PgPool,
+    mut config: Config,
+    wake: Arc<Notify>,
+    shutdown: watch::Receiver<bool>,
+    metrics: Arc<crate::telemetry::Metrics>,
+    egress: Egress,
+) -> Result<JoinSet<()>> {
+    config.queue.groups = config.groups.clone();
+    let mut workers = JoinSet::new();
+    let authors = Arc::new(AuthorBudget::default());
+    let mut resolvers: Vec<(Arc<dyn Resolver>, crate::config::ResolverConfig)> = vec![];
+    let osm = Arc::new(OsmResolver::new(pool.clone(), config.osm.clone())?);
+    if config.web.enabled {
+        resolvers.push((
+            Arc::new(WebResolver {
+                oembed_policy: config.media.oembed,
+                cards: Some(Arc::new(config.cards.clone())),
+                egress: egress.clone(),
+                config: config.web.clone(),
+            }),
+            config.web.clone(),
+        ));
+    }
+    for kind in crate::resolver::cards::KINDS {
+        if config.cards.resolver(kind).enabled {
+            resolvers.push((
+                Arc::new(crate::resolver::cards::CardResolver::new(
+                    kind,
+                    Arc::new(config.clone()),
+                    egress.clone(),
+                )),
+                config.cards.resolver(kind).clone(),
+            ));
+        }
+    }
+    if config.pubky.enabled {
+        resolvers.push((
+            Arc::new(PubkyResolver::new(config.pubky.clone(), egress.clone())?),
+            config.pubky.clone(),
+        ));
+    }
+    if config.geo.enabled {
+        resolvers.push((
+            Arc::new(GeoResolver),
+            crate::config::ResolverConfig {
+                concurrency: 1,
+                requests_per_second: 100.0,
+                ..Default::default()
+            },
+        ));
+    }
+    if config.osm.enabled {
+        resolvers.push((
+            osm,
+            crate::config::ResolverConfig {
+                concurrency: 1,
+                requests_per_second: config.osm.requests_per_second,
+                ttl_secs: config.osm.ttl_secs,
+                enabled: true,
+                ..Default::default()
+            },
+        ));
+    }
+    for (resolver, budget) in resolvers {
+        let rate = Arc::new(Mutex::new(Instant::now()));
+        for _ in 0..budget.concurrency {
+            let authors = authors.clone();
+            let metrics = metrics.clone();
+            let refresh = config.refresh.clone();
+            let canary = config.canary.clone();
+            let (pool, resolver, cfg, wake, mut shutdown, rate) = (
+                pool.clone(),
+                resolver.clone(),
+                config.queue.clone(),
+                wake.clone(),
+                shutdown.clone(),
+                rate.clone(),
+            );
+            workers.spawn(async move {
+                let mut canary_check=Instant::now();
+                loop {
+                    tokio::select! {
+                        _=shutdown.changed()=>break,
+                        _=async {
+                            { let mut next=rate.lock().await; tokio::time::sleep_until(*next).await; *next=Instant::now()+Duration::from_secs_f64(1.0/budget.requests_per_second); }
+                            if Instant::now()>=canary_check {
+                                canary_check=Instant::now()+Duration::from_secs(60);
+                            for manifest in resolver.manifests() {
+                            if resolver.canary_allowed_for(&manifest) {
+                            match crate::canary::claim(&pool,&manifest,&canary).await {
+                                Ok(Some(generation))=>{if let Err(e)=crate::canary::run_manifest(&pool,resolver.as_ref(),&manifest,&canary,&metrics,generation).await {tracing::warn!(error=%e,"canary bookkeeping failed");}return;},
+                                Err(e)=>tracing::warn!(error=%e,"canary claim failed"),
+                                _=>{}
+                            }
+                            } else if let Err(e)=crate::canary::suspend(&pool,&manifest).await {tracing::warn!(error=%e,"canary suspension failed");}
+                            }
+                            }
+                            match claim_sources(&pool,&resolver.queue_sources(),&cfg,resolver.batch_size()).await {
+                                Ok(jobs) if !jobs.is_empty()=>{
+                                    let result=async {
+                                        if resolver.name()=="geo" || authors.admit(&pool,&jobs[0],cfg.author_requests_per_second).await? {
+                                            let (result,_)=crate::telemetry::observe(&metrics,&resolver.manifest_for(&jobs[0].uri),run_batch_config(&pool,resolver.as_ref(),&cfg,&refresh,&jobs)).await;
+                                            result?;
+                                        } else {
+                                            for job in jobs.iter().skip(1) {
+                                                sqlx::query("UPDATE resource SET lease_until=NULL,next_attempt_at=now()+interval '1 second' WHERE id=$1 AND generation=$2").bind(&job.id).bind(job.generation).execute(&pool).await?;
+                                            }
+                                        }
+                                        Ok::<_,anyhow::Error>(())
+                                    }.await;
+                                    if let Err(e)=result { tracing::error!(error=%e,"queue persistence failed"); }
+                                },
+                                Ok(_)=>{ tokio::select! { _=wake.notified()=>{},_=tokio::time::sleep(Duration::from_millis(250))=>{} } },
+                                Err(e)=>{ tracing::error!(error=%e,"queue claim failed"); tokio::time::sleep(Duration::from_secs(1)).await; }
+                            }
+                        }=>{}
+                    }
+                }
+            });
+        }
+    }
+    Ok(workers)
+}

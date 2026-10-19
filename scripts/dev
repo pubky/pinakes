@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+config_path="${1:-pinakes-dev.toml}"
+if [[ ! -f "$config_path" ]]; then
+  echo "Create $config_path from pinakes.example.toml first." >&2
+  exit 1
+fi
+mkdir -p .runtime
+cargo build -p pinakesd
+./target/debug/pinakesd --config "$config_path" --migrate
+./target/debug/pinakesd --config "$config_path" > .runtime/pinakesd.log 2>&1 &
+daemon_pid=$!
+echo "$daemon_pid" > .runtime/pinakesd.pid
+tail -n 20 -F --pid="$daemon_pid" .runtime/pinakesd.log &
+tail_pid=$!
+cleanup() { kill "$daemon_pid" "$tail_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || true; }
+trap cleanup EXIT
+trap 'exit 0' INT TERM
+wait "$daemon_pid"

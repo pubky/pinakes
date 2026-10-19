@@ -1,0 +1,71 @@
+# Operator choices only. Every cap, timeout, budget, backoff and refresh tier has a default and
+# can be changed in an optional [limits] section; the table of limits is in docs/operations.md.
+# Any key can also be set by environment variable: PINAKES__SECTION__KEY (e.g.
+# PINAKES__LIMITS__RESOLVER_CONCURRENCY=8).
+
+# Use a peer-authenticated Unix socket locally, or a secret supplied via PINAKES__DATABASE_URL.
+database_url = "postgresql:///pinakes?host=/var/run/postgresql"
+listen = "127.0.0.1:8090"
+admin_listen = "127.0.0.1:9090"
+# admin_token = "" # Prefer PINAKES__ADMIN_TOKEN; required for a non-loopback admin bind.
+nexus_url = "http://127.0.0.1:8080"
+
+[web]
+enabled = true
+# Follow RSS alternates (podcast feeds) on pages without a typed card.
+discover_feeds = false
+
+[pubky]
+# Objects of other apps, fetched through the egress policy from the homeserver's public HTTPS
+# domain; homeservers with only key-pinned endpoints are unreachable. See docs/operations.md.
+enabled = true
+# The PKARR relays that name each owner's homeserver (HTTPS, through the egress policy; every
+# record's signature is checked here).
+pkarr_relays = ["https://pkarr.pubky.app", "https://pkarr.pubky.org"]
+
+[geo]
+# geo: URIs and map links that name a point, resolved offline; points never group.
+enabled = true
+
+# Referenced OSM objects, including aliases; no search/reverse-geocoding proxy.
+# The public Nominatim is for a small development run; deployments use their own URL.
+[osm]
+enabled = true
+nominatim_url = "https://nominatim.openstreetmap.org"
+requests_per_second = 0.5 # The public host allows at most one request per second.
+# The ODbL dump file (osm_place.ndjson.gz), rewritten daily; it needs room for every cached place.
+dump_dir = "/var/lib/pinakes/dumps"
+
+# Card resolvers; HTTP fallbacks can still use web.
+[cards.media]
+enabled = true
+discover_feeds = false # Podcast feed scanning from media pages.
+[cards.isbn]
+enabled = true
+[cards.doi]
+enabled = true
+[cards.activitypub]
+enabled = true
+
+[media]
+oembed = "when_needed" # "always" restores eager registry discovery.
+
+[egress]
+# Exact names or *.example.org. An empty allow list permits all public hosts.
+# Lists never override the IP policy. Deny wins.
+allow_hosts = []
+deny_hosts = []
+
+[groups]
+enabled = true
+cross_container_occurrences = "off" # Or "corroborated": the cross-feed ICS UID mode.
+
+[api]
+# Applied to every public /v1 route using the direct peer IP.
+requests_per_minute = 120
+
+[canary]
+enabled = true # Periodic resolver canaries, reported in metrics.
+
+# [limits]
+# resolver_concurrency = 2 # pubky and each card resolver; web_concurrency (4) for web

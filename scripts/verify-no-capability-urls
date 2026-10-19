@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""Reject calendar capabilities without ever echoing the capability itself."""
+import argparse
+import gzip
+from pathlib import Path
+import re
+import sys
+import os
+import subprocess
+
+PATTERN = re.compile(
+    r"outlook\.(?:office365|live)\.com/owa/calendar/"
+    r"|icloud\.com/published/"
+    r"|calendar\.google\.com/calendar/ical/[^\s\"<>]*/private-"
+    r"|(?:https?|webcals?)://[^\s\"<>/]+/remote\.php/dav/public-calendars/[^\s\"<>]"
+    r"|proton\.me/api/calendar/v1/url/|calendar\.proton\.me/share/", re.IGNORECASE)
+SYNTHETIC = (
+    "https://cloud.example/remote.php/dav/public-calendars/abc?export",
+    "https://calendar.proton.me/share/secret-capability?key=private",
+    "https://outlook.office365.com/owa/calendar/00000000-0000-4000-8000-000000000000@example.edu/11111111-1111-4111-8111-111111111111/calendar.ics",
+    "https://p29-caldav.icloud.com/published/2/synthetic-fixture",
+    "https://calendar.example.org/remote.php/dav/public-calendars/synthetic-fixture?export",
+)
+GUARD_PROBES = (
+    "https://calendar.proton.me/share/SECRET",
+    "https://outlook.office365.com/owa/calendar/SECRET/calendar.ics",
+    "https://outlook.live.com/owa/calendar/SECRET/calendar.ics",
+    "https://p29-caldav.icloud.com/published/SECRET",
+    "https://calendar.google.com/calendar/ical/test/private-SECRET/basic.ics",
+    "https://calendar.example.org/remote.php/dav/public-calendars/SECRET/",
+    "https://proton.me/api/calendar/v1/url/SECRET",
+)
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
+args = parser.parse_args()
+failed = False
+# Scan every source path, including Rust, scripts and root-level files. Git's ignore
+# rules exclude build/runtime artifacts and local credentials, never tracked files.
+if (args.root / ".git").exists():
+    names = subprocess.check_output(["git", "-C", str(args.root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"]).decode().split("\0")
+    paths = sorted({args.root / name for name in names if name})
+else:
+    paths = []
+    for directory, children, files in os.walk(args.root):
+        children[:] = [name for name in children if name not in (".git", "target", "node_modules")]
+        paths.extend(Path(directory) / name for name in files)
+for path in paths:
+    if not path.is_file() or path.is_symlink() or any(name in (".git", "target", "node_modules") for name in path.relative_to(args.root).parts):
+        continue
+    raw = gzip.decompress(path.read_bytes()) if path.suffix == ".gz" else path.read_bytes()
+    text = raw.decode("utf-8", errors="replace").replace("\\/", "/")
+    relative = path.relative_to(args.root).as_posix()
+    allowed = []
+    # Exact, deliberately public parser fixtures only; no domain-wide exception.
+    if relative in (
+        "crates/pinakes-core/tests/fixtures/adapters/cases.json",
+        "crates/pinakes-core/tests/fixtures/adapters/responses.json",
+        "crates/pinakes-core/tests/adapters.rs",
+        "scripts/verify-no-capability-urls",
+    ):
+        allowed.extend(SYNTHETIC)
+    if relative in ("crates/pinakes-core/tests/capability_urls.rs", "scripts/verify-no-capability-urls"):
+        allowed.extend(GUARD_PROBES)
+    for value in allowed:
+        text = re.sub(re.escape(value) + r"(?=[\s\"'<>]|$)", "", text)
+    if PATTERN.search(text):
+        print(f"Capability URL pattern in {relative} (value redacted)", file=sys.stderr)
+        failed = True
+sys.exit(int(failed))

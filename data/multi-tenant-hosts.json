@@ -1,0 +1,60 @@
+{
+  "anchor.fm": {
+    "path": {
+      "segment": 1,
+      "extend": [
+        "s"
+      ]
+    }
+  },
+  "blogspot.com": "subdomain",
+  "calendar.google.com": {
+    "path": {
+      "segment": 3,
+      "skip": [
+        "u/*"
+      ],
+      "query": [
+        "src",
+        "cid"
+      ]
+    }
+  },
+  "carrd.co": "subdomain",
+  "feed.podbean.com": {
+    "path_segment": 1
+  },
+  "feeds.acast.com": {
+    "path_segment": 3
+  },
+  "feeds.buzzsprout.com": "first_path_segment",
+  "feeds.libsyn.com": "first_path_segment",
+  "feeds.megaphone.fm": "first_path_segment",
+  "feeds.redcircle.com": "first_path_segment",
+  "feeds.simplecast.com": "first_path_segment",
+  "feeds.soundcloud.com": {
+    "path_segment": 2
+  },
+  "feeds.transistor.fm": "first_path_segment",
+  "github.io": "subdomain",
+  "gitlab.io": "subdomain",
+  "linktr.ee": "first_path_segment",
+  "medium.com": "first_path_segment",
+  "neocities.org": "subdomain",
+  "netlify.app": "subdomain",
+  "notion.site": "subdomain",
+  "pages.dev": "subdomain",
+  "podbean.com": "subdomain",
+  "rss.com": {
+    "path_segment": 2
+  },
+  "sites.google.com": {
+    "path_segment": 2
+  },
+  "squarespace.com": "subdomain",
+  "substack.com": "subdomain",
+  "tumblr.com": "subdomain",
+  "vercel.app": "subdomain",
+  "wixsite.com": "subdomain",
+  "wordpress.com": "subdomain"
+}
