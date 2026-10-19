@@ -538,3 +538,42 @@ async fn saves_make_sources_due_and_unknown_sources_are_refused(pool: PgPool) {
         toml::from_str::<Config>("[also_on.sources.nope]\nenabled = false\n").map(|c| c.validate());
     assert!(matches!(unknown, Ok(Err(_))), "{unknown:?}");
 }
+
+/// Every spelling of one music object is an alias of its canonical URL (`service`), so the
+/// card and its references are the one resource's.
+#[sqlx::test(migrations = "../../migrations")]
+async fn music_link_spellings_are_one_resource(pool: PgPool) {
+    let canonical = "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq";
+    let root = store::ensure_resource(&pool, canonical).await.unwrap();
+    for variant in [
+        "https://open.spotify.com/intl-de/track/6LgJvl0Xdtc73RJ1mmpotq?si=abc",
+        "spotify:track:6LgJvl0Xdtc73RJ1mmpotq",
+    ] {
+        let id = store::ensure_resource(&pool, variant).await.unwrap();
+        let (root_id, basis): (String, String) =
+            sqlx::query_as("SELECT root_id,basis FROM resource_alias WHERE alias_id=$1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            (root_id.as_str(), basis.as_str()),
+            (root.as_str(), "service"),
+            "{variant}"
+        );
+    }
+    let video = store::ensure_resource(&pool, "https://youtu.be/dQw4w9WgXcQ")
+        .await
+        .unwrap();
+    let canonical_video =
+        pinakes_core::model::identity("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+            .unwrap()
+            .0;
+    let root_of: String =
+        sqlx::query_scalar("SELECT root_id FROM resource_alias WHERE alias_id=$1")
+            .bind(&video)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(root_of, canonical_video);
+}

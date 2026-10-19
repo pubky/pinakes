@@ -457,6 +457,19 @@ root, and a read, lookup, change query or occurrence read of the alias answers w
   alias of that root after its first fetch.
 - **Cursor feed variants** (BTC Map's delta feed with parameters, the portal's endpoints) are
   aliases of their feed.
+- **Music service links**: every spelling of one track, album, artist or playlist on one service
+  is an alias of its canonical URL: Spotify (`intl-xx` paths, `spotify:{kind}:{id}`, the old
+  `user/…/playlist/…` form) → `https://open.spotify.com/{kind}/{id}`; Apple Music →
+  `https://music.apple.com/{country}/{kind}/{id}` without the name slug, an album URL with
+  `?i={id}` naming that track (`/song/{id}`); YouTube and YouTube Music (`youtu.be`,
+  `m.`/`music.youtube.com`, `/shorts/`, `/embed/`) → `https://www.youtube.com/watch?v={id}` and
+  `…/playlist?list={id}`; Deezer without the language path → `https://www.deezer.com/{kind}/{id}`;
+  TIDAL (`/browse/`, `listen.tidal.com`) → `https://tidal.com/{kind}/{id}`; Qobuz store album
+  pages → `https://open.qobuz.com/{kind}/{id}`; SoundCloud (`m.`, any letter case, parameters) →
+  `https://soundcloud.com/{user}/{track}`; Amazon Music (`albums/{id}?trackAsin=` naming that
+  track) → `https://music.amazon.{tld}/{kind}/{id}`; Bandcamp without parameters. Short links
+  that need a request to expand (`spotify.link`, `deezer.page.link`, `on.soundcloud.com`) are not
+  folded.
 - **The page's own canonical**: after a fetch, a page whose head canonical link or
   all-permanent redirect chain names a URL that differs from it only by a trailing slash and tracking
   parameters becomes an alias of that URL. A canonical to another path (a homepage, a sibling
