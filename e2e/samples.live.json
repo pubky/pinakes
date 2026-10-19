@@ -77,6 +77,11 @@
     "type": "Legislation"
   },
   {
+    "kind": "swiss_parliament",
+    "uri": "https://www.parlament.ch/de/ratsbetrieb/suche-curia-vista/geschaeft?AffairId=20223765",
+    "type": "Legislation"
+  },
+  {
     "kind": "web",
     "uri": "https://example.org/",
     "type": "WebPage"

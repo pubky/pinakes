@@ -61,6 +61,8 @@ enabled = true
 enabled = true
 [sources.sec]
 enabled = true
+[sources.swiss_parliament]
+enabled = true
 [sources.uk_parliament_bills]
 enabled = true
 

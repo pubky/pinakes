@@ -1,0 +1,20 @@
+{
+  "business_20223765_DE_select": {
+    "bytes": 1120,
+    "content_type": "application/json;odata=verbose;charset=utf-8",
+    "file": "business_20223765_DE_select.json",
+    "recorded_at": "2026-10-19T16:20:38+00:00",
+    "sha256": "d8d34da8c29bc3c9ed691e4799e3b58f58cd97691f0c9b6c0ee352560473ae2e",
+    "status": 200,
+    "url": "https://ws.parlament.ch/odata.svc/Business(ID=20223765,Language='DE')?$select=ID,Language,BusinessShortNumber,BusinessType,BusinessTypeName,BusinessTypeAbbreviation,Title,SubmittedBy,BusinessStatus,BusinessStatusText,BusinessStatusDate,SubmissionDate,SubmissionCouncil,SubmissionCouncilName,SubmissionCouncilAbbreviation,ResponsibleDepartmentName,ResponsibleDepartmentAbbreviation,FederalCouncilProposalText,TagNames,Modified&$format=json"
+  },
+  "business_99999999_DE_missing": {
+    "bytes": 105,
+    "content_type": "application/json;odata=verbose;charset=utf-8",
+    "file": "business_99999999_DE_missing.json",
+    "recorded_at": "2026-10-19T16:20:42+00:00",
+    "sha256": "ae72bd7be6063eb00259c6c4b72b0ed86967e21d4d19305194ec06d837df6591",
+    "status": 404,
+    "url": "https://ws.parlament.ch/odata.svc/Business(ID=99999999,Language='DE')?$select=ID,Language,BusinessShortNumber,BusinessType,BusinessTypeName,BusinessTypeAbbreviation,Title,SubmittedBy,BusinessStatus,BusinessStatusText,BusinessStatusDate,SubmissionDate,SubmissionCouncil,SubmissionCouncilName,SubmissionCouncilAbbreviation,ResponsibleDepartmentName,ResponsibleDepartmentAbbreviation,FederalCouncilProposalText,TagNames,Modified&$format=json"
+  }
+}

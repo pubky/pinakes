@@ -42,4 +42,5 @@ or got plain web cards before are read again.
 - [`federal_register`](federal_register.md): Federal Register documents by document number.
 - [`gleif`](gleif.md): Legal Entity Identifier records.
 - [`sec`](sec.md): SEC EDGAR filings, their documents and companies.
+- [`swiss_parliament`](swiss_parliament.md): Swiss Parliament business items (Curia Vista) by affair id.
 - [`uk_parliament_bills`](uk_parliament_bills.md): UK Parliament bills and Acts by bill id.

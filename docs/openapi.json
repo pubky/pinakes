@@ -1839,6 +1839,12 @@
                     "uri": "https://www.sec.gov/files/rules/sro/nasdaqtx/2026/34-106268.pdf"
                   }
                 },
+                "resolve-swiss-parliament-1": {
+                  "summary": "https://www.parlament.ch/de/ratsbetrieb/suche-curia-vista/geschaeft?AffairId=20223765",
+                  "value": {
+                    "uri": "https://www.parlament.ch/de/ratsbetrieb/suche-curia-vista/geschaeft?AffairId=20223765"
+                  }
+                },
                 "resolve-thebiz-pro-episodes-1-making-cypherpunk-products-and-busines": {
                   "summary": "https://thebiz.pro/episodes/1/making-cypherpunk-products-and-businesses",
                   "value": {

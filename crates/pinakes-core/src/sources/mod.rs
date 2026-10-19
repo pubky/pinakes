@@ -24,6 +24,7 @@ pub mod ecfr;
 pub mod federal_register;
 pub mod gleif;
 pub mod sec;
+pub mod swiss_parliament;
 pub mod uk_parliament_bills;
 
 /// Every source, one line each, in alphabetical order of name.
@@ -33,6 +34,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &federal_register::FederalRegister,
     &gleif::Gleif,
     &sec::Sec,
+    &swiss_parliament::SwissParliament,
     &uk_parliament_bills::UkParliamentBills,
 ];
 
