@@ -492,16 +492,25 @@ impl Source for Gitlab {
             let host = host.clone();
             let json = json.clone();
             async move {
-                let f = cx.fetch(&url, &json).await?;
-                if f.status != 200 && !is_gitlab(&f.body) {
-                    if INSTANCES.get(&host).is_none() && !KNOWN.contains(&host.as_str()) {
+                // Only a host not yet known either way is judged by this answer; a known
+                // instance is never marked as not one.
+                let unknown = INSTANCES.get(&host).is_none() && !KNOWN.contains(&host.as_str());
+                let not_gitlab = || {
+                    if unknown {
                         INSTANCES.set(&host, false);
                     }
-                    return Err(Declined.into());
+                    Err(Declined.into())
+                };
+                let f = match cx.fetch(&url, &json).await {
+                    Ok(f) => f,
+                    Err(e) if unknown && !super::own_rate_limit(&e) => return not_gitlab(),
+                    Err(e) => return Err(e),
+                };
+                if f.status != 200 && !is_gitlab(&f.body) {
+                    return not_gitlab();
                 }
                 if f.status == 200 && serde_json::from_slice::<Value>(&f.body).is_err() {
-                    INSTANCES.set(&host, false);
-                    return Err(Declined.into());
+                    return not_gitlab();
                 }
                 INSTANCES.set(&host, true);
                 Ok::<_, anyhow::Error>(f)
@@ -838,5 +847,50 @@ mod tests {
             .unwrap_err()
             .is::<Declined>());
         assert_eq!(recorded.asked().len(), asked);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failures_judge_unknown_hosts_only() {
+        let (egress, recorded) = fixture::egress(vec![
+            (
+                "https://busy.example/api/v4/projects/a%2Fb/repository/branches/main",
+                503,
+                "text/html",
+                b"<html>busy</html>".to_vec(),
+            ),
+            (
+                "https://framagit.org/api/v4/projects/a%2Fb",
+                200,
+                "text/html",
+                b"<html>a wall</html>".to_vec(),
+            ),
+        ]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        // An unknown host that fails is not GitLab for a day.
+        let busy = "https://busy.example/a/b/-/tree/main";
+        assert!(Gitlab
+            .resolve(&cx, busy)
+            .await
+            .unwrap_err()
+            .is::<Declined>());
+        assert!(!Gitlab.reads(busy));
+        let asked = recorded.asked().len();
+        assert!(Gitlab
+            .resolve(&cx, busy)
+            .await
+            .unwrap_err()
+            .is::<Declined>());
+        assert_eq!(recorded.asked().len(), asked);
+        // A known instance answering something else once stays an instance.
+        let known = "https://framagit.org/a/b";
+        assert!(Gitlab
+            .resolve(&cx, known)
+            .await
+            .unwrap_err()
+            .is::<Declined>());
+        assert!(Gitlab.reads(known));
     }
 }

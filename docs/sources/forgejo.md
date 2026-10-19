@@ -18,11 +18,15 @@ A branch name can contain `/` (`v11.0/forgejo`), so the split between branch and
 of the API: the first one, two or three segments are tried as the branch (or tag), shortest
 first.
 
-Repository pages are read on codeberg.org and gitea.com, and on any host that has answered as an
-instance since the daemon started. The deeper shapes (`/src/branch/…`, `/releases/tag/…`) are
-read on any host: an unknown host is first asked for `/api/v1/version` (once a day), and one that
-does not answer as Forgejo or Gitea gets ordinary web cards. Pages under `/explore`, `/user`,
-`/api` and the instance's other own paths are not read, nor issues and pull requests.
+Repository pages are read on codeberg.org and gitea.com, and on any host that answered as an
+instance within the last day. The deeper shapes (`/src/branch/…`, `/releases/tag/…`) are read on
+any host: an unknown host is first asked for `/api/v1/version`, which must answer exactly as
+Forgejo and Gitea do (`{"version": "…"}`, the value a version such as `1.22.0` or
+`11.0.1+gitea-1.22.0`). The answer is remembered for a day, in memory: a host that answers
+otherwise, fails or does not answer gets ordinary web cards. On a host learned this way, a
+two-segment page the API does not know as a repository gets an ordinary web card too. Pages
+under `/explore`, `/user`, `/api` and the instance's other own paths are not read, nor issues
+and pull requests.
 
 The address the API gives a repository (`html_url`) is its root; every other spelling (another
 letter case, `.git`) becomes an alias of it after its first fetch. On codeberg.org and gitea.com
@@ -37,7 +41,8 @@ letter case, `.git`) becomes an alias of it after its first fetch. On codeberg.o
   (about 3 KB). The file itself is never fetched.
 - A release: `GET …/releases/tags/{tag}`.
 
-A repository, ref, path or release the instance does not have is `missing`.
+A ref, path or release the instance does not have is `missing`, and so is a repository on
+codeberg.org or gitea.com.
 
 ## Card
 

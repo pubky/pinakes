@@ -302,6 +302,14 @@ fn check_headers(headers: &[(&'static str, String)]) -> Result<()> {
     Ok(())
 }
 
+/// Whether an error is this daemon's own host budget (the slot is further away than a fetch
+/// may wait), which says nothing about the host's answer.
+pub fn own_rate_limit(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<crate::resolver::RetryLater>()
+        .is_some_and(|r| r.class == "rate_limited")
+}
+
 /// A source looked at a link it claimed from its shape alone (a forum path, a post path on any
 /// host) and found the site is not its service: the link gets an ordinary web card instead.
 #[derive(Debug)]

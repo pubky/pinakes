@@ -401,12 +401,29 @@ pub fn release_card(
 }
 
 /// Whether `/api/v1/version` answered as Forgejo or Gitea.
+/// Whether `/api/v1/version` answered as Forgejo or Gitea do: exactly `{"version": "…"}`, the
+/// value a version (`1.22.0`, `11.0.1+gitea-1.22.0`, `16.0.0-dev-785-465b60ef+gitea-1.22.0`).
 pub fn is_instance(status: u16, body: &[u8]) -> bool {
     status == 200
-        && serde_json::from_slice::<Value>(body)
+        && serde_json::from_slice::<serde_json::Map<String, Value>>(body)
             .ok()
-            .and_then(|v| text(&v["version"]))
-            .is_some()
+            .is_some_and(|m| {
+                m.len() == 1
+                    && m.get("version")
+                        .and_then(Value::as_str)
+                        .is_some_and(version)
+            })
+}
+fn version(v: &str) -> bool {
+    let core = v.split(['+', '-']).next().unwrap_or_default();
+    let parts: Vec<&str> = core.split('.').collect();
+    v.len() <= 100
+        && v.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"+-._".contains(&b))
+        && (2..=3).contains(&parts.len())
+        && parts
+            .iter()
+            .all(|p| (1..=6).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
 #[async_trait]
@@ -485,10 +502,16 @@ impl Source for Forgejo {
             Some(true) => {}
             None if KNOWN.contains(&host.as_str()) => {}
             None => {
-                let f = cx
+                // Any failed or other answer means "not an instance" for the memo's day; only
+                // this daemon's own host budget is no answer at all.
+                let is = match cx
                     .fetch(&format!("https://{host}/api/v1/version"), &json)
-                    .await?;
-                let is = is_instance(f.status, &f.body);
+                    .await
+                {
+                    Ok(f) => is_instance(f.status, &f.body),
+                    Err(e) if super::own_rate_limit(&e) => return Err(e),
+                    Err(_) => false,
+                };
                 INSTANCES.set(&host, is);
                 if !is {
                     return Err(Declined.into());
@@ -500,7 +523,9 @@ impl Source for Forgejo {
                 let f = cx.fetch(&target.api(), &json).await?;
                 match f.status {
                     200 => Some(repo_card(cx.card(uri, self), &host, &f.body)?),
-                    404 => None,
+                    404 if KNOWN.contains(&host.as_str()) => None,
+                    // A page shaped like a repository on a learned host may be any page.
+                    404 => return Err(Declined.into()),
                     s => anyhow::bail!("the instance answered {s}"),
                 }
             }
@@ -653,6 +678,11 @@ mod tests {
         assert!(!is_instance(410, &read("not-forgejo-version.html")));
         assert!(!is_instance(200, b"<html>"));
         assert!(!is_instance(200, b"{\"version\":\"\"}"));
+        // Only Forgejo's and Gitea's exact answer: one field, a version.
+        assert!(!is_instance(200, b"{\"version\":\"x\"}"));
+        assert!(!is_instance(200, b"{\"version\":\"1.0\",\"name\":\"app\"}"));
+        assert!(!is_instance(200, b"{\"version\":\"v2\"}"));
+        assert!(is_instance(200, b"{\"version\":\"1.22.0\"}"));
     }
 
     #[test]
@@ -858,7 +888,41 @@ mod resolve_tests {
         let doc = Forgejo.resolve(&cx, release).await.unwrap();
         assert_eq!(doc.attributes["tag"], "v11.0.1");
         assert_eq!(doc.site, "forge.example");
-        // Its repository pages are read from now on.
+        // Its repository pages are read from now on; one the API does not know is any page of
+        // the site, and gets a web card.
         assert!(Forgejo.reads("https://forge.example/forgejo/forgejo"));
+        let page = "https://forge.example/blog/a-post";
+        assert!(Forgejo
+            .resolve(&cx, page)
+            .await
+            .unwrap_err()
+            .is::<Declined>());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_probe_is_remembered() {
+        let (egress, recorded) = fixture::egress(vec![(
+            "https://busy.example/api/v1/version",
+            503,
+            "text/html",
+            b"<html>busy</html>".to_vec(),
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let link = "https://busy.example/a/b/releases/tag/v1";
+        assert!(Forgejo
+            .resolve(&cx, link)
+            .await
+            .unwrap_err()
+            .is::<Declined>());
+        assert!(!Forgejo.reads(link));
+        assert!(Forgejo
+            .resolve(&cx, link)
+            .await
+            .unwrap_err()
+            .is::<Declined>());
+        assert_eq!(recorded.asked().len(), 1);
     }
 }

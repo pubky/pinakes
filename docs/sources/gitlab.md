@@ -18,9 +18,10 @@ or three segments are tried as a branch, then as a tag, shortest first. A 40-cha
 is the ref by itself.
 
 Project pages are read on gitlab.com, framagit.org, gitlab.freedesktop.org, gitlab.gnome.org,
-invent.kde.org and salsa.debian.org, and on any host that has answered as GitLab since the
-daemon started. The `/-/` shapes are read on any host; one that does not answer as GitLab is
-remembered for a day and gets ordinary web cards. A page shaped like a project that the API does
+invent.kde.org and salsa.debian.org, and on any host that answered as GitLab within the last
+day. The `/-/` shapes are read on any host; one that answers otherwise, fails or does not answer
+is remembered for a day, in memory, and gets ordinary web cards. A known instance is never
+marked as not GitLab. A page shaped like a project that the API does
 not know (a group, a user, an old page address) gets an ordinary web card too. Issues and merge
 requests are not read.
 
