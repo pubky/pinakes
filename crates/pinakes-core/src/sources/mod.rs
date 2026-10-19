@@ -26,6 +26,7 @@ pub mod eur_lex;
 pub mod federal_register;
 pub mod fedlex;
 pub mod gleif;
+pub mod govinfo;
 pub mod legislation_gov_uk;
 pub mod sec;
 pub mod swiss_parliament;
@@ -41,6 +42,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &federal_register::FederalRegister,
     &fedlex::Fedlex,
     &gleif::Gleif,
+    &govinfo::Govinfo,
     &legislation_gov_uk::LegislationGovUk,
     &sec::Sec,
     &swiss_parliament::SwissParliament,

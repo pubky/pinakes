@@ -65,6 +65,8 @@ enabled = true
 enabled = true
 [sources.gleif]
 enabled = true
+[sources.govinfo]
+enabled = true
 [sources.legislation_gov_uk]
 enabled = true
 [sources.sec]

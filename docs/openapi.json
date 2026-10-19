@@ -1731,6 +1731,18 @@
                     "uri": "https://api.gleif.org/api/v1/lei-records/5493001KJTIIGC8Y1R12"
                   }
                 },
+                "resolve-govinfo-1": {
+                  "summary": "https://www.govinfo.gov/app/details/PLAW-117publ58",
+                  "value": {
+                    "uri": "https://www.govinfo.gov/app/details/PLAW-117publ58"
+                  }
+                },
+                "resolve-govinfo-2": {
+                  "summary": "https://www.govinfo.gov/link/uscode/26/501",
+                  "value": {
+                    "uri": "https://www.govinfo.gov/link/uscode/26/501"
+                  }
+                },
                 "resolve-grounds-stager-co-shop-default-events-111608505": {
                   "summary": "https://grounds.stager.co/shop/default/events/111608505",
                   "value": {

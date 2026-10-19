@@ -97,7 +97,8 @@ impl Fixture {
             {"kind":"legislation_gov_uk","uri":"https://www.legislation.gov.uk/ukpga/2018/12/contents","type":"Legislation"},
             {"kind":"eur_lex","uri":"https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32016R0679","type":"Legislation"},
             {"kind":"fedlex","uri":"https://www.fedlex.admin.ch/eli/cc/1999/404/de","type":"Legislation"},
-            {"kind":"zefix","uri":"https://register.ld.admin.ch/zefix/company/126286","type":"Organization"}
+            {"kind":"zefix","uri":"https://register.ld.admin.ch/zefix/company/126286","type":"Organization"},
+            {"kind":"govinfo","uri":"https://www.govinfo.gov/app/details/PLAW-117publ58","type":"Legislation"}
         ]);
         Ok(Self {
             boundary: Arc::default(),
@@ -132,6 +133,7 @@ impl Dns for FixtureDns {
                 | "publications.europa.eu"
                 | "fedlex.data.admin.ch"
                 | "ld.admin.ch"
+                | "www.govinfo.gov"
                 | "web.example"
                 | "www.federalregister.gov"
                 | "www.sec.gov"
@@ -168,6 +170,7 @@ impl Transport for Fixture {
             "publications.europa.eu" if u.path()=="/webapi/rdf/sparql"=>("application/sparql-results+json",include_str!("../tests/fixtures/sources/eur_lex/celex_32016R0679.json").into()),
             "fedlex.data.admin.ch" if u.path()=="/sparqlendpoint"=>("application/sparql-results+json",include_str!("../tests/fixtures/sources/fedlex/eli_cc_1999_404.json").into()),
             "ld.admin.ch" if u.path()=="/query"=>("application/sparql-results+json",include_str!("../tests/fixtures/sources/zefix/sparql_company_126286_spo.json").into()),
+            "www.govinfo.gov" if u.path()=="/metadata/pkg/PLAW-117publ58/mods.xml"=>("application/xml",gunzip(include_bytes!("../tests/fixtures/sources/govinfo/mods_pkg_PLAW-117publ58.xml.gz"))),
             "web.example"=>("text/html","<title>Fixture page</title>".into()),
             "www.ecfr.gov" if u.path()=="/api/versioner/v1/ancestry/current/title-17.json"=>("application/json",include_str!("../tests/fixtures/sources/ecfr/ancestry_current_title-17_section-240.10b-5.json").into()),
             "www.sec.gov" if u.path()=="/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959.hdr.sgml"=>("text/sgml",include_str!("../tests/fixtures/sources/sec/sec-hdr-ms-s1.sgml").into()),
@@ -245,6 +248,15 @@ struct Page {
     cursor: usize,
     #[serde(default = "page_limit")]
     limit: usize,
+}
+/// A recorded fixture stored gzip-compressed, as text.
+fn gunzip(raw: &[u8]) -> String {
+    use std::io::Read;
+    let mut out = String::new();
+    flate2::read::GzDecoder::new(raw)
+        .read_to_string(&mut out)
+        .expect("gzip fixture");
+    out
 }
 fn page_limit() -> usize {
     1000

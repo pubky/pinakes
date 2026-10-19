@@ -107,6 +107,11 @@
     "type": "Organization"
   },
   {
+    "kind": "govinfo",
+    "uri": "https://www.govinfo.gov/app/details/PLAW-117publ58",
+    "type": "Legislation"
+  },
+  {
     "kind": "web",
     "uri": "https://example.org/",
     "type": "WebPage"
