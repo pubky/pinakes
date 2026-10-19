@@ -12,6 +12,7 @@ use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use std::fmt;
 use url::Url;
 
+pub mod archive;
 pub mod games;
 pub mod packages;
 pub mod papers;
