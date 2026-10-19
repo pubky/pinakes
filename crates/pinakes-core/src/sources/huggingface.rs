@@ -7,13 +7,24 @@
 //! case, because the Hub ignores case in repo ids (it redirects any other case to the canonical
 //! one, which the card shows).
 //!
-//! A name without an owner (`huggingface.co/gpt2`, `huggingface.co/datasets/gsm8k`) is a legacy
-//! id and has no identifier of its own: the API answers it with a redirect to the namespaced repo
-//! it moved to (`redirect`), and the legacy links are aliases of that repo's identifier. Any
-//! other redirect works the same way: the Hub's redirect is what proves a rename.
-use super::kit::{host_and_segments, int, json, plain, text, texts, time, Card, Key, Request};
-use anyhow::{ensure, Result};
+//! The API redirects an old name of a renamed repo to its new one; the redirect is what proves
+//! the rename, so the card's root is the repo the final API URL names (`moved_to`), and the old
+//! links become its aliases.
+//!
+//! A name without an owner (`huggingface.co/gpt2`, `huggingface.co/datasets/gsm8k`) is either a
+//! legacy repo id, which the API redirects to the namespaced repo it moved to, or a user's or
+//! organisation's profile page; the link alone can't tell which, so the source does not read
+//! these links (they get ordinary web cards).
+use super::{
+    kit::{fetch, host_and_segments, int, json, plain, text, texts, time, Card, Key, Request},
+    Context, Example, Source,
+};
+use crate::model::ResourceMeta;
+use anyhow::{ensure, Context as _, Result};
+use async_trait::async_trait;
 use serde_json::Value;
+
+pub const SITE: &str = "Hugging Face";
 
 /// What kind of repo a link names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -198,8 +209,7 @@ pub fn from_uri(uri: &str) -> Option<Repo> {
     }
 }
 
-/// The identifier every link form of the repo is an alias of, or `None` for a legacy id (its
-/// repo comes from `redirect`).
+/// The identifier (root) every link form of the repo is an alias of, or `None` for a legacy id.
 pub fn identifier(repo: &Repo) -> Option<String> {
     (!repo.legacy()).then(|| {
         format!(
@@ -215,8 +225,7 @@ pub fn page(repo: &Repo) -> String {
     format!("https://huggingface.co/{}{}", repo.kind.prefix(), repo.id)
 }
 
-/// The repo's API record. Redirects are not followed: a redirect names the repo the id now
-/// belongs to (`redirect`).
+/// The repo's API record. Egress follows the API's redirect of another case or an old name.
 pub fn request(repo: &Repo) -> Option<Request> {
     Request::get(&format!(
         "https://huggingface.co/api/{}/{}",
@@ -225,19 +234,32 @@ pub fn request(repo: &Repo) -> Option<Request> {
     ))
 }
 
-/// The repo a redirect of the API (status and `Location` header) moves `repo` to: the canonical
-/// case of its id, or the namespaced repo a legacy or renamed id now belongs to. The links of
-/// `repo` are aliases of that repo's identifier (`Card::alias(page(repo))` records them).
-pub fn redirect(status: u16, location: &str, repo: &Repo) -> Option<Repo> {
-    if !matches!(status, 301 | 302 | 307 | 308) {
-        return None;
-    }
-    let target = url::Url::parse("https://huggingface.co/api/")
-        .ok()?
-        .join(location)
-        .ok()?;
-    let to = from_uri(target.as_str())?;
-    (to.kind == repo.kind && !to.legacy() && target.path().starts_with("/api/")).then_some(to)
+/// The repo the final URL of an API request (after Egress followed the Hub's redirects) names,
+/// when it is an API URL of a namespaced repo of the same kind: the canonical case of the id, or
+/// the repo an old or legacy name now belongs to.
+pub fn moved_to(final_url: &str, repo: &Repo) -> Option<Repo> {
+    let path = url::Url::parse(final_url).ok()?.path().to_owned();
+    let to = from_uri(final_url)?;
+    (to.kind == repo.kind && !to.legacy() && path.starts_with("/api/")).then_some(to)
+}
+
+/// The repo of a root (`hf:model/{owner}/{name}`, in lower case).
+pub fn from_root(uri: &str) -> Option<Repo> {
+    let (kind, id) = uri.strip_prefix("hf:")?.split_once('/')?;
+    let kind = match kind {
+        "model" => Kind::Model,
+        "dataset" => Kind::Dataset,
+        "space" => Kind::Space,
+        _ => return None,
+    };
+    let (owner, name) = id.split_once('/')?;
+    let r = repo(kind, Some(owner), name)?;
+    (r.id == r.id.to_ascii_lowercase()).then_some(r)
+}
+
+/// The namespaced repo of a root or a Hugging Face link (never a legacy name).
+pub fn target(uri: &str) -> Option<Repo> {
+    from_root(uri).or_else(|| from_uri(uri).filter(|r| !r.legacy()))
 }
 
 /// One `license` value, or all of them when the repo names several.
@@ -326,8 +348,77 @@ pub fn parse(status: u16, raw: &[u8], repo: &Repo) -> Result<Option<Card>> {
             papers.push(doi);
         }
     }
-    card.detail("doi", papers);
+    card.detail("paper_doi", papers);
     Ok(Some(card))
+}
+
+/// The source: the Hugging Face Hub API.
+pub struct HuggingFace;
+
+#[async_trait]
+impl Source for HuggingFace {
+    fn name(&self) -> &'static str {
+        "huggingface"
+    }
+    fn reads(&self, uri: &str) -> bool {
+        target(uri).is_some()
+    }
+    fn alias_root(&self, uri: &str) -> Option<String> {
+        let root = identifier(&target(uri)?)?;
+        (root != uri).then_some(root)
+    }
+    fn invalid(&self, uri: &str) -> bool {
+        uri.starts_with("hf:") && from_root(uri).is_none()
+    }
+    fn facts(&self) -> &'static [&'static str] {
+        &[
+            "page_url",
+            "doi",
+            "author",
+            "title",
+            "downloads",
+            "likes",
+            "pipeline_tag",
+            "library_name",
+            "license",
+            "gated",
+            "sdk",
+            "app_url",
+            "last_modified",
+            "arxiv",
+            "paper_doi",
+        ]
+    }
+    fn budgets(&self) -> &'static [super::Budget] {
+        &[("huggingface.co", 1.6, None)]
+    }
+    fn examples(&self) -> &'static [Example] {
+        &[
+            Example {
+                uri: "https://huggingface.co/meta-llama/Llama-2-7b-hf",
+                card_type: "SoftwareSourceCode",
+            },
+            Example {
+                uri: "https://huggingface.co/datasets/openai/gsm8k",
+                card_type: "Dataset",
+            },
+            Example {
+                uri: "https://huggingface.co/spaces/huggingface-projects/llama-2-7b-chat",
+                card_type: "WebApplication",
+            },
+        ]
+    }
+    async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
+        let Some(repo) = target(uri) else {
+            return Ok(cx.missing(uri, self));
+        };
+        let f = fetch(cx, &request(&repo).context("repo id")?).await?;
+        let repo = moved_to(f.url.as_str(), &repo).unwrap_or(repo);
+        Ok(match parse(f.status, &f.body, &repo)? {
+            Some(card) => card.into_doc(cx.card(uri, self), SITE),
+            None => cx.missing(uri, self),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -402,7 +493,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_ids_wait_for_the_redirect() {
+    fn legacy_ids_are_not_read() {
+        let h = HuggingFace;
         for (uri, kind, name) in [
             ("https://huggingface.co/gpt2", Kind::Model, "gpt2"),
             (
@@ -416,39 +508,148 @@ mod tests {
                 Kind::Dataset,
                 "gsm8k",
             ),
+            (
+                "https://huggingface.co/meta-llama",
+                Kind::Model,
+                "meta-llama",
+            ),
         ] {
             let r = from_uri(uri).unwrap();
             assert_eq!(r, repo(kind, name), "{uri}");
             assert!(r.legacy());
             assert_eq!(identifier(&r), None);
+            assert!(!h.reads(uri), "{uri}");
+            assert_eq!(h.alias_root(uri), None, "{uri}");
         }
+    }
+
+    #[test]
+    fn redirects_name_the_repo() {
+        // The recorded 307s (see provenance.json): Egress follows them, and the final URL names
+        // the repo.
         let gpt2 = repo(Kind::Model, "gpt2");
         assert_eq!(
-            request(&gpt2).unwrap().url.as_str(),
-            "https://huggingface.co/api/models/gpt2"
-        );
-        // The recorded 307s (see provenance.json for their `Location` headers).
-        assert_eq!(
-            redirect(307, "/api/models/openai-community/gpt2", &gpt2),
+            moved_to(
+                "https://huggingface.co/api/models/openai-community/gpt2",
+                &gpt2
+            ),
             Some(repo(Kind::Model, "openai-community/gpt2"))
         );
         let gsm8k = repo(Kind::Dataset, "gsm8k");
-        let to = redirect(307, "/api/datasets/openai/gsm8k", &gsm8k).unwrap();
+        let to = moved_to("https://huggingface.co/api/datasets/openai/gsm8k", &gsm8k).unwrap();
         assert_eq!(identifier(&to).as_deref(), Some("hf:dataset/openai/gsm8k"));
         // A different case redirects to the canonical one: the same identifier.
         let upper = repo(Kind::Model, "META-LLAMA/llama-2-7b-hf");
-        let to = redirect(307, "/api/models/meta-llama/Llama-2-7b-hf", &upper).unwrap();
+        let to = moved_to(
+            "https://huggingface.co/api/models/meta-llama/Llama-2-7b-hf",
+            &upper,
+        )
+        .unwrap();
         assert_eq!(to.id, "meta-llama/Llama-2-7b-hf");
         assert_eq!(identifier(&to), identifier(&upper));
-        // Not a redirect, another kind, another legacy name, or a page.
-        assert_eq!(redirect(200, "/api/models/a/b", &gpt2), None);
-        assert_eq!(redirect(307, "/api/datasets/a/b", &gpt2), None);
-        assert_eq!(redirect(307, "/api/models/gpt3", &gpt2), None);
-        assert_eq!(redirect(307, "https://huggingface.co/a/b", &gpt2), None);
+        let card = parse(200, &read("model-llama-2-7b-hf.json"), &to)
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.id, "hf:model/meta-llama/llama-2-7b-hf");
+        // A renamed repo: the answer for the new name is that repo's card.
+        let old = repo(Kind::Model, "someone/gpt2");
+        let to = moved_to(
+            "https://huggingface.co/api/models/openai-community/gpt2",
+            &old,
+        )
+        .unwrap();
+        let card = parse(200, &read("model-gpt2.json"), &to).unwrap().unwrap();
+        assert_eq!(card.id, "hf:model/openai-community/gpt2");
+        assert!(parse(200, &read("model-gpt2.json"), &old).is_err());
+        // Another kind, a legacy name, or a page.
         assert_eq!(
-            redirect(307, "https://huggingface.co/api/models/a/b", &gpt2),
-            Some(repo(Kind::Model, "a/b"))
+            moved_to("https://huggingface.co/api/datasets/a/b", &gpt2),
+            None
         );
+        assert_eq!(
+            moved_to("https://huggingface.co/api/models/gpt3", &gpt2),
+            None
+        );
+        assert_eq!(moved_to("https://huggingface.co/a/b", &gpt2), None);
+    }
+
+    #[test]
+    fn roots_and_aliases() {
+        let h = HuggingFace;
+        for uri in [
+            "hf:model/meta-llama/llama-2-7b-hf",
+            "hf:dataset/openai/gsm8k",
+            "hf:space/huggingface-projects/llama-2-7b-chat",
+        ] {
+            assert!(h.reads(uri), "{uri}");
+            assert_eq!(h.alias_root(uri), None, "{uri}");
+            assert!(!h.invalid(uri), "{uri}");
+            assert_eq!(
+                target(uri).as_ref().and_then(identifier).as_deref(),
+                Some(uri)
+            );
+        }
+        assert_eq!(
+            h.alias_root("https://hf.co/META-LLAMA/Llama-2-7b-hf/tree/main")
+                .as_deref(),
+            Some("hf:model/meta-llama/llama-2-7b-hf")
+        );
+        assert_eq!(
+            request(&target("hf:dataset/openai/gsm8k").unwrap())
+                .unwrap()
+                .url
+                .as_str(),
+            "https://huggingface.co/api/datasets/openai/gsm8k"
+        );
+        for uri in [
+            "hf:model/Meta-Llama/Llama-2-7b-hf",
+            "hf:model/gpt2",
+            "hf:space/a",
+            "hf:org/a/b",
+            "hf:model/a/b/c",
+            "hf:model/a--b/c",
+        ] {
+            assert!(h.invalid(uri), "{uri}");
+            assert!(!h.reads(uri), "{uri}");
+        }
+        assert!(!h.invalid("https://huggingface.co/hf:model/x"));
+        for example in h.examples() {
+            assert!(h.reads(example.uri), "{}", example.uri);
+        }
+    }
+
+    #[test]
+    fn documents() {
+        for (file, r) in [
+            (
+                "model-llama-2-7b-hf.json",
+                repo(Kind::Model, "meta-llama/Llama-2-7b-hf"),
+            ),
+            (
+                "model-gpt2.json",
+                repo(Kind::Model, "openai-community/gpt2"),
+            ),
+            ("dataset-gsm8k.json", repo(Kind::Dataset, "openai/gsm8k")),
+            (
+                "space-llama-2-7b-chat.json",
+                repo(Kind::Space, "huggingface-projects/llama-2-7b-chat"),
+            ),
+        ] {
+            let card = parse(200, &read(file), &r).unwrap().unwrap();
+            let doc = crate::sources::kit::checked(&HuggingFace, &card);
+            assert_eq!(doc.attributes["page_url"], card.url, "{file}");
+            assert_eq!(doc.source_root.as_deref(), Some(card.id.as_str()));
+        }
+        let card = parse(
+            200,
+            &read("model-gpt2.json"),
+            &repo(Kind::Model, "openai-community/gpt2"),
+        )
+        .unwrap()
+        .unwrap();
+        let doc = crate::sources::kit::checked(&HuggingFace, &card);
+        assert_eq!(doc.attributes["doi"], "10.57967/hf/0039");
+        assert_eq!(doc.attributes["gated"], "false");
     }
 
     #[test]

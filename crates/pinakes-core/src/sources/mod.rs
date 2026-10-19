@@ -76,12 +76,14 @@ pub static REGISTRY: &[&dyn Source] = &[
     &federal_register::FederalRegister,
     &fedlex::Fedlex,
     &feed::Feed,
+    &figshare::Figshare,
     &forgejo::Forgejo,
     &ghost::Ghost,
     &gitlab::Gitlab,
     &gleif::Gleif,
     &govinfo::Govinfo,
     &hacker_news::HackerNews,
+    &huggingface::HuggingFace,
     &legislation_gov_uk::LegislationGovUk,
     &lobsters::Lobsters,
     &mastodon::Mastodon,
@@ -93,6 +95,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &uk_parliament_bills::UkParliamentBills,
     &wordpress::Wordpress,
     &zefix::Zefix,
+    &zenodo::Zenodo,
 ];
 
 /// One official API.

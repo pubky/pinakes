@@ -9,9 +9,18 @@
 //! Figshare gives each version a DOI ending in `.v{n}`; the same DOI without the suffix names the
 //! article and resolves to its latest version. Both are keys. DOI links
 //! (`doi.org/10.6084/m9.figshare.{id}`) belong to the DOI source.
-use super::kit::html_text;
-use super::kit::{host_and_segments, int, json, plain, text, texts, time, Card, Key, Request};
-use anyhow::{ensure, Result};
+use super::{
+    kit::{
+        fetch, host_and_segments, html_text, int, json, plain, text, texts, time, Card, Key,
+        Request,
+    },
+    Context, Example, Source,
+};
+use crate::model::ResourceMeta;
+use anyhow::{ensure, Context as _, Result};
+use async_trait::async_trait;
+
+pub const SITE: &str = "Figshare";
 
 /// The type segment of an article page, e.g. `journal_contribution`.
 const TYPES: &[&str] = &[
@@ -94,6 +103,16 @@ pub fn from_uri(uri: &str) -> Option<u64> {
 
 pub fn identifier(id: u64) -> String {
     format!("figshare:{id}")
+}
+
+/// The article of a root (`figshare:{id}`).
+pub fn from_root(uri: &str) -> Option<u64> {
+    number(uri.strip_prefix("figshare:")?)
+}
+
+/// The article of a root or a Figshare link.
+pub fn target(uri: &str) -> Option<u64> {
+    from_root(uri).or_else(|| from_uri(uri))
 }
 
 /// A page of the article on figshare.com, for use before the API names the canonical one (the
@@ -184,7 +203,6 @@ pub fn parse(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
     card.detail("categories", categories);
     card.detail("tags", texts(&v["tags"]));
     let doi = text(&v["doi"]).map(|d| d.to_ascii_lowercase());
-    card.detail("doi", doi.clone());
     if let Some(doi) = doi {
         let article = version.and_then(|n| {
             doi.strip_suffix(&format!(".v{n}"))
@@ -196,6 +214,63 @@ pub fn parse(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
         card.key(Key::new("doi", &doi));
     }
     Ok(Some(card))
+}
+
+/// The source: the Figshare API.
+pub struct Figshare;
+
+#[async_trait]
+impl Source for Figshare {
+    fn name(&self) -> &'static str {
+        "figshare"
+    }
+    fn reads(&self, uri: &str) -> bool {
+        target(uri).is_some()
+    }
+    fn alias_root(&self, uri: &str) -> Option<String> {
+        let root = identifier(target(uri)?);
+        (root != uri).then_some(root)
+    }
+    fn invalid(&self, uri: &str) -> bool {
+        uri.starts_with("figshare:") && from_root(uri).is_none()
+    }
+    fn facts(&self) -> &'static [&'static str] {
+        &[
+            "page_url",
+            "doi",
+            "authors",
+            "license",
+            "item_type",
+            "version",
+            "categories",
+            "tags",
+        ]
+    }
+    fn budgets(&self) -> &'static [super::Budget] {
+        &[("api.figshare.com", 1.0, None)]
+    }
+    fn examples(&self) -> &'static [Example] {
+        &[
+            Example {
+                uri: "https://figshare.com/articles/dataset/Garden_data_set/1018700",
+                card_type: "Dataset",
+            },
+            Example {
+                uri: "https://figshare.com/articles/presentation/Using_APIs_to_customise_repositories_and_engage_audiences/5616445",
+                card_type: "CreativeWork",
+            },
+        ]
+    }
+    async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
+        let Some(id) = target(uri) else {
+            return Ok(cx.missing(uri, self));
+        };
+        let f = fetch(cx, &request(id).context("article id")?).await?;
+        Ok(match parse(f.status, &f.body, id)? {
+            Some(card) => card.into_doc(cx.card(uri, self), SITE),
+            None => cx.missing(uri, self),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -283,7 +358,6 @@ mod tests {
             serde_json::json!(["Pehr Söderman"])
         );
         assert_eq!(card.details["version"], 1);
-        assert_eq!(card.details["doi"], "10.6084/m9.figshare.1018700.v1");
         assert_eq!(
             card.keys,
             [
@@ -379,5 +453,58 @@ mod tests {
         assert_eq!(type_name("thesis"), "Thesis");
         assert_eq!(type_name("poster"), "CreativeWork");
         assert_eq!(type_name("figure"), "ImageObject");
+    }
+
+    #[test]
+    fn roots_and_aliases() {
+        let f = Figshare;
+        assert!(f.reads("figshare:5616445"));
+        assert_eq!(f.alias_root("figshare:5616445"), None);
+        assert!(!f.invalid("figshare:5616445"));
+        assert_eq!(
+            target("figshare:5616445").map(identifier).as_deref(),
+            Some("figshare:5616445")
+        );
+        assert_eq!(
+            f.alias_root("https://sheffield.figshare.com/articles/presentation/x/5616445/1")
+                .as_deref(),
+            Some("figshare:5616445")
+        );
+        for uri in [
+            "figshare:05616445",
+            "figshare:abc",
+            "figshare:",
+            "figshare:5616445.v1",
+        ] {
+            assert!(f.invalid(uri), "{uri}");
+            assert!(!f.reads(uri), "{uri}");
+        }
+        for example in f.examples() {
+            assert!(f.reads(example.uri), "{}", example.uri);
+        }
+    }
+
+    #[test]
+    fn documents() {
+        for (file, id) in [
+            ("article-1018700.json", 1018700),
+            ("article-5616445.json", 5616445),
+            ("article-5616445-v1.json", 5616445),
+            ("article-34700883.json", 34700883),
+        ] {
+            let card = parse(200, &read(file), id).unwrap().unwrap();
+            let doc = crate::sources::kit::checked(&Figshare, &card);
+            assert_eq!(doc.attributes["page_url"], card.url, "{file}");
+            assert_eq!(doc.source_root.as_deref(), Some(card.id.as_str()));
+        }
+        let card = parse(200, &read("article-1018700.json"), 1018700)
+            .unwrap()
+            .unwrap();
+        let doc = crate::sources::kit::checked(&Figshare, &card);
+        assert_eq!(
+            doc.attributes["doi"],
+            "10.6084/m9.figshare.1018700; 10.6084/m9.figshare.1018700.v1"
+        );
+        assert_eq!(doc.attributes["version"], "1");
     }
 }

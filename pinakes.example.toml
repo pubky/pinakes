@@ -69,6 +69,8 @@ enabled = true
 enabled = true
 [sources.feed]
 enabled = true
+[sources.figshare]
+enabled = true
 [sources.forgejo]
 enabled = true
 [sources.ghost]
@@ -80,6 +82,8 @@ enabled = true
 [sources.govinfo]
 enabled = true
 [sources.hacker_news]
+enabled = true
+[sources.huggingface]
 enabled = true
 [sources.legislation_gov_uk]
 enabled = true
@@ -102,6 +106,8 @@ enabled = true
 [sources.wordpress]
 enabled = true
 [sources.zefix]
+enabled = true
+[sources.zenodo]
 enabled = true
 
 [media]

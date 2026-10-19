@@ -10,10 +10,19 @@
 //! The DOI comes from the answer, never from the id: records can carry a publisher's DOI.
 //! Links to a record's files name the files, not the record. `sandbox.zenodo.org` is a test
 //! service, and DOI links (`doi.org/10.5281/zenodo.{id}`) belong to the DOI source.
-use super::kit::html_text;
-use super::kit::{host_and_segments, int, json, plain, text, texts, time, Card, Key, Request};
-use anyhow::{bail, Result};
+use super::{
+    kit::{
+        fetch, host_and_segments, html_text, int, json, plain, text, texts, time, Card, Key,
+        Request,
+    },
+    Context, Example, Source,
+};
+use crate::model::ResourceMeta;
+use anyhow::{bail, Context as _, Result};
+use async_trait::async_trait;
 use serde_json::Value;
+
+pub const SITE: &str = "Zenodo";
 
 /// A record id: decimal digits without a leading zero (the API has no record `07790295`).
 fn record_id(s: &str) -> Option<u64> {
@@ -37,6 +46,16 @@ pub fn from_uri(uri: &str) -> Option<u64> {
 
 pub fn identifier(id: u64) -> String {
     format!("zenodo:{id}")
+}
+
+/// The record of a root (`zenodo:{id}`).
+pub fn from_root(uri: &str) -> Option<u64> {
+    record_id(uri.strip_prefix("zenodo:")?)
+}
+
+/// The record of a root or a zenodo.org link.
+pub fn target(uri: &str) -> Option<u64> {
+    from_root(uri).or_else(|| from_uri(uri))
 }
 
 /// The record's page on zenodo.org.
@@ -157,6 +176,62 @@ pub fn parse(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
         card.key(Key::new("doi", &doi.to_ascii_lowercase()));
     }
     Ok(Some(card))
+}
+
+/// The source: the Zenodo REST API.
+pub struct Zenodo;
+
+#[async_trait]
+impl Source for Zenodo {
+    fn name(&self) -> &'static str {
+        "zenodo"
+    }
+    fn reads(&self, uri: &str) -> bool {
+        target(uri).is_some()
+    }
+    fn alias_root(&self, uri: &str) -> Option<String> {
+        let root = identifier(target(uri)?);
+        (root != uri).then_some(root)
+    }
+    fn invalid(&self, uri: &str) -> bool {
+        uri.starts_with("zenodo:") && from_root(uri).is_none()
+    }
+    fn facts(&self) -> &'static [&'static str] {
+        &[
+            "page_url",
+            "doi",
+            "creators",
+            "license",
+            "resource_type",
+            "access_right",
+            "communities",
+            "keywords",
+            "latest_version",
+            "publication_date",
+            "version",
+            "concept_record",
+            "concept_doi",
+        ]
+    }
+    fn budgets(&self) -> &'static [super::Budget] {
+        &[("zenodo.org", 2.2, None)]
+    }
+    fn examples(&self) -> &'static [Example] {
+        &[Example {
+            uri: "https://zenodo.org/records/1234567",
+            card_type: "ScholarlyArticle",
+        }]
+    }
+    async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
+        let Some(id) = target(uri) else {
+            return Ok(cx.missing(uri, self));
+        };
+        let f = fetch(cx, &request(id).context("record id")?).await?;
+        Ok(match parse(f.status, &f.body, id)? {
+            Some(card) => card.into_doc(cx.card(uri, self), SITE),
+            None => cx.missing(uri, self),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -345,5 +420,58 @@ mod tests {
         ] {
             assert_eq!(type_name(kind, subtype), name);
         }
+    }
+
+    #[test]
+    fn roots_and_aliases() {
+        let z = Zenodo;
+        assert!(z.reads("zenodo:1234567"));
+        assert_eq!(z.alias_root("zenodo:1234567"), None);
+        assert!(!z.invalid("zenodo:1234567"));
+        assert_eq!(
+            target("zenodo:1234567").map(identifier).as_deref(),
+            Some("zenodo:1234567")
+        );
+        assert_eq!(
+            z.alias_root("https://zenodo.org/record/1234567").as_deref(),
+            Some("zenodo:1234567")
+        );
+        for uri in [
+            "zenodo:01234567",
+            "zenodo:abc",
+            "zenodo:",
+            "zenodo:1234567/files",
+        ] {
+            assert!(z.invalid(uri), "{uri}");
+            assert!(!z.reads(uri), "{uri}");
+        }
+        assert!(!z.invalid("https://zenodo.org/records/zenodo:1"));
+        for example in z.examples() {
+            assert!(z.reads(example.uri), "{}", example.uri);
+        }
+    }
+
+    #[test]
+    fn documents() {
+        for (file, id) in [
+            ("record-1234567.json", 1234567),
+            ("record-7790295.json", 7790295),
+            ("record-13882307.json", 13882307),
+            ("concept-7790294-followed.json", 7790294),
+        ] {
+            let card = parse(200, &read(file), id).unwrap().unwrap();
+            let doc = crate::sources::kit::checked(&Zenodo, &card);
+            assert_eq!(doc.attributes["page_url"], card.url, "{file}");
+            assert_eq!(doc.source_root.as_deref(), Some(card.id.as_str()));
+        }
+        let card = parse(200, &read("record-1234567.json"), 1234567)
+            .unwrap()
+            .unwrap();
+        let doc = crate::sources::kit::checked(&Zenodo, &card);
+        assert_eq!(doc.attributes["doi"], "10.1175/2010mwr3413.1");
+        assert_eq!(
+            doc.attributes["creators"],
+            "Coniglio, Michael C.; Corfidi, Stephen F.; Kain, John S."
+        );
     }
 }

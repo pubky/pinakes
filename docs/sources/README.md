@@ -58,12 +58,14 @@ or got plain web cards before are read by their source.
 - [`federal_register`](federal_register.md): Federal Register documents by document number.
 - [`fedlex`](fedlex.md): Swiss federal law in the classified compilation, by ELI.
 - [`feed`](feed.md): wall hook: a walled page's card from the exact item in its site's RSS/Atom feed or news sitemap
+- [`figshare`](figshare.md): Figshare articles (datasets, figures, papers) by article id.
 - [`forgejo`](forgejo.md): repositories, branches, tags, releases and files on Forgejo and Gitea instances (Codeberg, gitea.com, others)
 - [`ghost`](ghost.md): page hook: a Ghost post's title, excerpt, image, dates, authors and tags from the Content API
 - [`gitlab`](gitlab.md): projects, branches, tags, releases and files on gitlab.com and other GitLab instances
 - [`gleif`](gleif.md): Legal Entity Identifier records.
 - [`govinfo`](govinfo.md): US public laws, bills, US Code sections and the Statutes at Large.
 - [`hacker_news`](hacker_news.md): Hacker News items by id (and hnsignals.com pages).
+- [`huggingface`](huggingface.md): Hugging Face models, datasets and Spaces by repo id.
 - [`legislation_gov_uk`](legislation_gov_uk.md): UK Acts, statutory instruments and retained EU law.
 - [`lobsters`](lobsters.md): Lobsters stories by short id.
 - [`mastodon`](mastodon.md): Mastodon posts on any server.
@@ -76,3 +78,4 @@ or got plain web cards before are read by their source.
 - [`uk_parliament_bills`](uk_parliament_bills.md): UK Parliament bills and Acts by bill id.
 - [`wordpress`](wordpress.md): page hook: a WordPress post's editorial title, excerpt, dates and featured image from its REST record
 - [`zefix`](zefix.md): Swiss companies in the commercial register, by register id.
+- [`zenodo`](zenodo.md): Zenodo records (datasets, software, papers) by record id.

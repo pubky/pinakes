@@ -113,7 +113,10 @@ impl Fixture {
             {"kind":"ghost","uri":"https://www.privacyguides.org/news/2026/10/19/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/","type":"Article"},
             {"kind":"public_inbox","uri":"https://gnusha.org/pi/bitcoindev/atCSAVprBE-tAnN3@erisian.com.au/","type":"EmailMessage"},
             {"kind":"feed","uri":"https://www.theblock.co/news/business/2026-10-19-mesh-visa-partner-spend-crypto-stablecoins-421058","type":"Article"},
-            {"kind":"mempool","uri":"https://mempool.space/lightning/node/03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f","type":"LightningNode"}
+            {"kind":"mempool","uri":"https://mempool.space/lightning/node/03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f","type":"LightningNode"},
+            {"kind":"figshare","uri":"https://figshare.com/articles/dataset/Garden_data_set/1018700","type":"Dataset"},
+            {"kind":"huggingface","uri":"https://huggingface.co/datasets/openai/gsm8k","type":"Dataset"},
+            {"kind":"zenodo","uri":"https://zenodo.org/records/1234567","type":"ScholarlyArticle"}
         ]);
         Ok(Self {
             boundary: Arc::default(),
@@ -166,6 +169,9 @@ impl Dns for FixtureDns {
                 | "www.sec.gov"
                 | "www.ecfr.gov"
                 | "mempool.space"
+                | "zenodo.org"
+                | "huggingface.co"
+                | "api.figshare.com"
         ) {
             "93.184.216.34"
         } else {
@@ -219,6 +225,9 @@ impl Transport for Fixture {
             "www.sec.gov" if u.path()=="/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959.hdr.sgml"=>("text/sgml",include_str!("../tests/fixtures/sources/sec/sec-hdr-ms-s1.sgml").into()),
             "www.federalregister.gov" if u.path()=="/api/v1/documents/2026-18291.json"=>("application/json",include_str!("../tests/fixtures/sources/federal_register/fr-2026-18291.json").into()),
             "mempool.space" if u.path()=="/api/v1/lightning/nodes/03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f"=>("application/json",include_str!("../tests/fixtures/sources/mempool/node-acinq.json").into()),
+            "api.figshare.com" if u.path()=="/v2/articles/1018700"=>("application/json",include_str!("../tests/fixtures/sources/figshare/article-1018700.json").into()),
+            "huggingface.co" if u.path()=="/api/datasets/openai/gsm8k"=>("application/json",include_str!("../tests/fixtures/sources/huggingface/dataset-gsm8k.json").into()),
+            "zenodo.org" if u.path()=="/api/records/1234567"=>("application/json",include_str!("../tests/fixtures/sources/zenodo/record-1234567.json").into()),
             _=>bail!("no fixture for upstream host {}",u.host_str().unwrap_or("")),
         };
         Ok(Fetched {
