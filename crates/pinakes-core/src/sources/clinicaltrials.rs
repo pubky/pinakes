@@ -6,7 +6,7 @@
 use super::kit::{host_and_segments, int, json, text, texts, time, web_url, Card, Link, Request};
 use super::{Example, Source};
 use crate::model::ResourceMeta;
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -59,7 +59,7 @@ pub fn page(nct: &str) -> String {
 /// The study's API record, without the results section.
 pub fn request(nct: &str) -> Option<Request> {
     Request::get(&format!(
-        "https://clinicaltrials.gov/api/v2/studies/{}?fields={FIELDS}",
+        "https://clinicaltrials.gov/api/v2/studies?filter.ids={}&fields={FIELDS}&pageSize=2",
         self::nct(nct)?
     ))
 }
@@ -81,16 +81,33 @@ fn full_date(v: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
 }
 
 /// The study card, or `None` when the registry has no such NCT number.
-pub fn parse(status: u16, raw: &[u8], nct: &str) -> Result<Option<Card>> {
-    let Some(v) = json(status, raw, &[404])? else {
+pub fn parse(status: u16, raw: &[u8], asked: &str) -> Result<Option<Card>> {
+    let Some(v) = json(status, raw, &[])? else {
         return Ok(None);
+    };
+    let studies = v["studies"].as_array().context("no studies")?;
+    // The study whose number, or one of whose former numbers (`nctIdAliases`), is the one asked.
+    let names = |s: &&Value| {
+        let id = &s["protocolSection"]["identificationModule"];
+        id["nctId"].as_str().and_then(self::nct).as_deref() == Some(asked)
+            || texts(&id["nctIdAliases"])
+                .iter()
+                .any(|a| self::nct(a).as_deref() == Some(asked))
+    };
+    let found: Vec<&Value> = studies.iter().filter(names).collect();
+    let v = match found.as_slice() {
+        [] if studies.is_empty() => return Ok(None),
+        [study] if studies.len() == 1 => *study,
+        _ => bail!("ClinicalTrials.gov answered for another study"),
     };
     let p = &v["protocolSection"];
     let id = &p["identificationModule"];
-    ensure!(
-        id["nctId"].as_str().and_then(self::nct).as_deref() == Some(nct),
-        "ClinicalTrials.gov answered for another study"
-    );
+    // A former number's card is the study's own: the link becomes its alias.
+    let nct = id["nctId"]
+        .as_str()
+        .and_then(self::nct)
+        .context("no NCT number")?;
+    let nct = nct.as_str();
     let mut card = Card::new("MedicalTrial", identifier(nct), page(nct));
     card.name = Some(
         text(&id["briefTitle"])
@@ -190,7 +207,7 @@ impl Source for ClinicalTrials {
         ]
     }
     fn budgets(&self) -> &'static [super::Budget] {
-        &[("clinicaltrials.gov", 1.0, None)]
+        &[("clinicaltrials.gov", 0.8, None)]
     }
     fn examples(&self) -> &'static [Example] {
         &[Example {
@@ -256,7 +273,7 @@ mod tests {
         assert_eq!(page(PFIZER), "https://clinicaltrials.gov/study/NCT04368728");
         assert_eq!(
             request("nct04368728").unwrap().url.as_str(),
-            "https://clinicaltrials.gov/api/v2/studies/NCT04368728?fields=protocolSection,hasResults"
+            "https://clinicaltrials.gov/api/v2/studies?filter.ids=NCT04368728&fields=protocolSection,hasResults&pageSize=2"
         );
     }
 
@@ -280,7 +297,7 @@ mod tests {
 
     #[test]
     fn study() {
-        let card = parse(200, &read("NCT04368728.json.gz"), PFIZER)
+        let card = parse(200, &read("search-NCT04368728.json.gz"), PFIZER)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -329,7 +346,7 @@ mod tests {
         );
         assert!(card.keys.is_empty());
 
-        let moderna = parse(200, &read("NCT04470427.json.gz"), "NCT04470427")
+        let moderna = parse(200, &read("search-NCT04470427.json.gz"), "NCT04470427")
             .unwrap()
             .unwrap();
         assert_eq!(moderna.details["sponsor"], "ModernaTX, Inc.");
@@ -345,7 +362,7 @@ mod tests {
 
     #[test]
     fn month_only_dates_stay_in_details() {
-        let card = parse(200, &read("NCT01278719.json"), "NCT01278719")
+        let card = parse(200, &read("search-NCT01278719.json"), "NCT01278719")
             .unwrap()
             .unwrap();
         assert_eq!((card.start, card.end), (None, None));
@@ -354,12 +371,36 @@ mod tests {
     }
 
     #[test]
+    fn a_former_number_is_the_study() {
+        // NCT04482322 was merged into NCT04140292: the search answers with that study, which
+        // lists the former number, so the card is the study's and the link becomes its alias.
+        let card = parse(200, &read("search-NCT04482322.json.gz"), "NCT04482322")
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.id, "nct:NCT04140292");
+        assert_eq!(card.url, "https://clinicaltrials.gov/study/NCT04140292");
+        // Its own number reads the same study.
+        let same = parse(200, &read("search-NCT04482322.json.gz"), "NCT04140292")
+            .unwrap()
+            .unwrap();
+        assert_eq!(same.id, card.id);
+        // A study that neither is nor was the number asked is no answer.
+        assert!(parse(200, &read("search-NCT04482322.json.gz"), "NCT04368728").is_err());
+        assert_eq!(
+            request("nct04482322").unwrap().url.as_str(),
+            format!(
+                "https://clinicaltrials.gov/api/v2/studies?filter.ids=NCT04482322&fields={FIELDS}&pageSize=2"
+            )
+        );
+    }
+
+    #[test]
     fn missing_and_errors() {
         assert_eq!(
-            parse(404, &read("missing.txt"), "NCT99999999").unwrap(),
+            parse(200, &read("search-NCT99999999.json"), "NCT99999999").unwrap(),
             None
         );
-        assert!(parse(200, &read("NCT04470427.json.gz"), PFIZER).is_err());
+        assert!(parse(200, &read("search-NCT04470427.json.gz"), PFIZER).is_err());
         assert!(parse(429, b"", PFIZER).is_err());
         assert!(parse(503, b"", PFIZER).is_err());
         assert!(parse(200, b"not json", PFIZER).is_err());
@@ -388,9 +429,10 @@ mod tests {
     #[test]
     fn documents() {
         for (file, nct) in [
-            ("NCT04368728.json.gz", PFIZER),
-            ("NCT04470427.json.gz", "NCT04470427"),
-            ("NCT01278719.json", "NCT01278719"),
+            ("search-NCT04368728.json.gz", PFIZER),
+            ("search-NCT04470427.json.gz", "NCT04470427"),
+            ("search-NCT01278719.json", "NCT01278719"),
+            ("search-NCT04482322.json.gz", "NCT04482322"),
         ] {
             let card = parse(200, &read(file), nct).unwrap().unwrap();
             let doc = crate::sources::kit::checked(&ClinicalTrials, &card);

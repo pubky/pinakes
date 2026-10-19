@@ -266,7 +266,7 @@ impl Transport for Fixture {
             "rest.uniprot.org" if u.path()=="/uniprotkb/search" && u.query_pairs().any(|(k,v)| k=="query" && v=="accession:P69905")=>("application/json",include_str!("../tests/fixtures/sources/uniprot/search-p69905.json").into()),
             "api.gbif.org" if u.path()=="/v1/species/1341976"=>("application/json",include_str!("../tests/fixtures/sources/gbif/species-1341976.json").into()),
             "api.inaturalist.org" if u.path()=="/v1/observations/333069440"=>("application/json",gunzip(include_bytes!("../tests/fixtures/sources/inaturalist/observation-333069440.json.gz"))),
-            "clinicaltrials.gov" if u.path()=="/api/v2/studies/NCT04368728"=>("application/json",gunzip(include_bytes!("../tests/fixtures/sources/clinicaltrials/NCT04368728.json.gz"))),
+            "clinicaltrials.gov" if u.path()=="/api/v2/studies" && u.query_pairs().any(|(k,v)| k=="filter.ids" && v=="NCT04368728")=>("application/json",gunzip(include_bytes!("../tests/fixtures/sources/clinicaltrials/search-NCT04368728.json.gz"))),
             "hub.docker.com" if u.path()=="/v2/repositories/library/nginx/"=>("application/json",include_str!("../tests/fixtures/sources/docker_hub/repo-library-nginx.json").into()),
             "api.ror.org" if u.path()=="/v2/organizations/03yrm5c26"=>("application/json",include_str!("../tests/fixtures/sources/ror/org-03yrm5c26.json").into()),
             "earthquake.usgs.gov" if u.path()=="/fdsnws/event/1/query" && u.query()==Some("eventid=official20110311054624120_30&format=geojson")=>("application/json",gunzip(include_bytes!("../tests/fixtures/sources/usgs/event-tohoku.json.gz"))),

@@ -1,8 +1,8 @@
 # ClinicalTrials.gov
 
 Clinical studies registered at ClinicalTrials.gov (U.S. National Library of Medicine), read from
-its API (v2) by NCT number. Public domain; no key; no published rate limit (one request per
-second).
+its API (v2) by NCT number. Public domain; no key; no published rate limit (about 50 requests a
+minute, so 0.8 a second).
 
 ## Links
 
@@ -17,12 +17,15 @@ version and not read here:
   `classic.clinicaltrials.gov`;
 - `https://clinicaltrials.gov/api/v2/studies/{NCT}`.
 
-An NCT number the registry does not know (404) is `missing`.
+A former number of a study (one it lists in `nctIdAliases`, e.g. after two registrations were
+merged) reads that study: its card is the study's, and the link becomes an alias of the study's
+root. An NCT number the registry does not know is `missing`.
 
 ## What it reads
 
-`GET https://clinicaltrials.gov/api/v2/studies/{NCT}?fields=protocolSection,hasResults` (the
-results section is left out: it can be megabytes).
+`GET https://clinicaltrials.gov/api/v2/studies?filter.ids={NCT}&fields=protocolSection,hasResults&pageSize=2`
+(the results section is left out: it can be megabytes). The search answers a former number with
+its study, where `/api/v2/studies/{NCT}` would redirect to the study's full record.
 
 ## Card
 
