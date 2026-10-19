@@ -1,0 +1,47 @@
+{
+  "address-genesis": {
+    "bytes": 285,
+    "content_type": "application/json",
+    "file": "address-genesis.json",
+    "recorded_at": "2026-10-19T16:08:24+00:00",
+    "sha256": "f150ccb22ae6b12dc4b33ab6f9b4d3deafa7f9cc57c7d3b059e2309d67a51f58",
+    "status": 200,
+    "url": "https://blockstream.info/api/address/1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+  },
+  "block-481824": {
+    "bytes": 437,
+    "content_type": "application/json",
+    "file": "block-481824.json",
+    "recorded_at": "2026-10-19T16:08:16+00:00",
+    "sha256": "f316ad439adc2c3781a71f9c6422688d038f9d0923a22a6108ecb805b669dac4",
+    "status": 200,
+    "url": "https://blockstream.info/api/block/0000000000000000001c8018d9cb3b742ef25114f27563e3fc4a1902167f9893"
+  },
+  "block-height-481824": {
+    "bytes": 64,
+    "content_type": "text/plain",
+    "file": "block-height-481824.txt",
+    "recorded_at": "2026-10-19T16:08:18+00:00",
+    "sha256": "c30a50ae0139c789a1f42a7e842b4e5fc60dc34659df4fd1a53e3d697607a9d2",
+    "status": 200,
+    "url": "https://blockstream.info/api/block-height/481824"
+  },
+  "tx-missing": {
+    "bytes": 21,
+    "content_type": "text/plain",
+    "file": "tx-missing.txt",
+    "recorded_at": "2026-10-19T16:08:27+00:00",
+    "sha256": "eb7c4fd482b03186246905d0ca9ae16dc91a498d08bee6cdfb290d6873f55cab",
+    "status": 404,
+    "url": "https://blockstream.info/api/tx/0000000000000000000000000000000000000000000000000000000000000001"
+  },
+  "tx-pizza": {
+    "bytes": 138492,
+    "content_type": "application/json",
+    "file": "tx-pizza.json.gz",
+    "recorded_at": "2026-10-19T16:08:21+00:00",
+    "sha256": "0496b986805c6b6b43c946224c570eb0a18364c7e331166d22f8508fcf50d26c",
+    "status": 200,
+    "url": "https://blockstream.info/api/tx/a1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d"
+  }
+}
