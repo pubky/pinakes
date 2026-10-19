@@ -1,0 +1,58 @@
+{
+  "observation-195404405-obscured": {
+    "bytes": 99153,
+    "content_type": "application/json",
+    "file": "observation-195404405-obscured.json.gz",
+    "note": "geoprivacy obscured: public coordinates are randomised",
+    "recorded_at": "2026-10-19T16:21:05+00:00",
+    "sha256": "92f71f7876cd6b4f566d68b7d1868942b4f1339794414b428365843a51f1c583",
+    "status": 200,
+    "url": "https://api.inaturalist.org/v1/observations/195404405"
+  },
+  "observation-333069440": {
+    "bytes": 90290,
+    "content_type": "application/json",
+    "file": "observation-333069440.json.gz",
+    "recorded_at": "2026-10-19T16:19:26+00:00",
+    "sha256": "5046015a0e30f90218502fb39a3557c53e2b2b7b23c8d43cbed7f53db112fafc",
+    "status": 200,
+    "url": "https://api.inaturalist.org/v1/observations/333069440"
+  },
+  "observation-missing": {
+    "bytes": 54,
+    "content_type": "application/json",
+    "file": "observation-missing.json",
+    "recorded_at": "2026-10-19T16:19:34+00:00",
+    "sha256": "fe405348f0257c7541f676ccb25723d7126a4917ec661bd7eec5f3d841ffcdf8",
+    "status": 200,
+    "url": "https://api.inaturalist.org/v1/observations/999999999999"
+  },
+  "sites": {
+    "bytes": 4588,
+    "content_type": "application/json",
+    "file": "sites.json",
+    "note": "the iNaturalist Network: every site shares the same observation and taxon ids",
+    "recorded_at": "2026-10-19T16:24:42+00:00",
+    "sha256": "b7230f54230cc9606ca5653b2d6ab97b71f2b62ea6445606c5f71f10ff84cb22",
+    "status": 200,
+    "url": "https://api.inaturalist.org/v1/sites"
+  },
+  "taxon-47219": {
+    "bytes": 112514,
+    "content_type": "application/json",
+    "file": "taxon-47219.json.gz",
+    "recorded_at": "2026-10-19T16:19:30+00:00",
+    "sha256": "9676edfe4074b8ad4c0cece41652af5d8a1e7da804e13a88f0b5427541c7d2ec",
+    "status": 200,
+    "url": "https://api.inaturalist.org/v1/taxa/47219"
+  },
+  "taxon-missing": {
+    "bytes": 55,
+    "content_type": "application/json",
+    "file": "taxon-missing.json",
+    "recorded_at": "2026-10-19T16:19:37+00:00",
+    "sha256": "78121ac0a936c811e88bcbe5aa1b9de4ca52e1eb36ae076aac06726c1f8f3be5",
+    "status": 200,
+    "url": "https://api.inaturalist.org/v1/taxa/999999999"
+  }
+}
