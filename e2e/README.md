@@ -3,7 +3,8 @@
 The harness builds tags with `pubky-app-specs` and, in live mode, writes them with
 `@synonymdev/pubky`. The samples cover an OSM node, geo pin, event page,
 ICS feed (the mock exercises recurrence), NIP-52 naddr, DOI with its publisher page, ISBN, oEmbed
-video and ordinary web page, and live a Pubky object of another app. It checks the
+video, ordinary web page, official-API sources (a Federal Register document by number with one of
+its page addresses, an alias), and live a Pubky object of another app. It checks the
 Nexus reference feed, Pinakes typed documents, facets, bbox/Event/venue search,
 occurrences, changes, group membership and Nexus hydration by URI (`by_ids` with `uris`: the
 cards' own `uri` and `details.aliases`, and an occurrence's `occurrence.feed_uri`, matched by

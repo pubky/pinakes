@@ -148,6 +148,12 @@ some refuse requests without one. The User-Agent never names a code-hosting site
 services refuse as an undeclared tool. Event platform adapters that need a browser profile keep
 their own User-Agent.
 
+The official-API sources ([docs/sources](sources/README.md)) run on the `official` card route
+(`[cards.official]`), each with its own switch, `[sources.<name>] enabled` (on by default;
+`PINAKES__SOURCES__<NAME>__ENABLED=false`). A source sets its service's published rate for that
+host unless `limits.host_rates` names the host. After an upgrade that adds a source, run
+`pinakesd reextract` for its hosts.
+
 Two clients are outside that policy. Nominatim and Nexus are trusted, operator-configured
 upstreams at fixed URLs that no reference can change: their clients do not apply the web DNS
 pinning or the private-address refusal (Nexus defaults to loopback), so configure their URLs and

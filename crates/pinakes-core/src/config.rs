@@ -21,6 +21,8 @@ pub struct Config {
     pub osm: OsmConfig,
     pub cards: crate::resolver::cards::CardConfig,
     pub media: crate::resolver::cards::MediaConfig,
+    /// One switch per official-API source (`[sources.<name>]`, see `crate::sources`).
+    pub sources: crate::sources::SourcesConfig,
     pub event: EventConfig,
     pub egress: EgressConfig,
     pub http: HttpConfig,
@@ -55,7 +57,11 @@ impl Default for Config {
 }
 /// Map sections whose entries an operator names: a `PINAKES__…` override may create one (and
 /// its keys); `deny_unknown_fields` and `adapters::validate` still refuse what is unknown.
-const ENV_MAPS: &[&[&str]] = &[&["event", "adapters", "platforms"], HOST_RATES];
+const ENV_MAPS: &[&[&str]] = &[
+    &["event", "adapters", "platforms"],
+    &["sources"],
+    HOST_RATES,
+];
 /// The one map whose new entries are numbers.
 const HOST_RATES: &[&str] = &["limits", "host_rates"];
 /// Apply `PINAKES__SECTION__KEY` overrides onto the file form. Strings are literal; numbers,
@@ -134,6 +140,7 @@ impl Config {
             },
             cards: Default::default(),
             media: Default::default(),
+            sources: Default::default(),
             event: EventConfig::default(),
             geo: GeoConfig::default(),
             osm: OsmConfig::default(),
@@ -571,6 +578,10 @@ impl Config {
     fn share_contact(&mut self) {
         self.egress.contact = self.http.contact.trim().to_owned();
         self.osm.contact = self.egress.contact.clone();
+        // A source's published limits, for hosts the operator did not rate.
+        for (host, rate) in crate::sources::budgets() {
+            self.egress.host_rates.entry(host.into()).or_insert(rate);
+        }
     }
     pub fn validate(&self) -> Result<()> {
         if self.pubky.enabled {
@@ -592,6 +603,7 @@ impl Config {
             }
         }
         self.cards.validate()?;
+        self.sources.validate()?;
         let contact = self.http.contact.trim();
         if !contact.is_empty()
             && (contact.len() > 254
@@ -1093,19 +1105,20 @@ limits! {
         |c, v| c.pubky.concurrency = v,
         |c, v| c.cards.media.concurrency = v, |c, v| c.cards.isbn.concurrency = v,
         |c, v| c.cards.doi.concurrency = v, |c, v| c.cards.nostr.concurrency = v,
-        |c, v| c.cards.activitypub.concurrency = v],
+        |c, v| c.cards.activitypub.concurrency = v, |c, v| c.cards.official.concurrency = v],
     /// Jobs per second per pubky or card resolver.
     resolver_requests_per_second: f64 = |c| c.pubky.requests_per_second => [
         |c, v| c.pubky.requests_per_second = v,
         |c, v| c.cards.media.requests_per_second = v, |c, v| c.cards.isbn.requests_per_second = v,
         |c, v| c.cards.doi.requests_per_second = v, |c, v| c.cards.nostr.requests_per_second = v,
-        |c, v| c.cards.activitypub.requests_per_second = v],
+        |c, v| c.cards.activitypub.requests_per_second = v,
+        |c, v| c.cards.official.requests_per_second = v],
     /// Default document lifetime (seconds) for web, pubky and card resolvers.
     resolver_ttl_secs: u64 = |c| c.web.ttl_secs => [
         |c, v| c.web.ttl_secs = v, |c, v| c.pubky.ttl_secs = v,
         |c, v| c.cards.media.ttl_secs = v, |c, v| c.cards.isbn.ttl_secs = v,
         |c, v| c.cards.doi.ttl_secs = v, |c, v| c.cards.nostr.ttl_secs = v,
-        |c, v| c.cards.activitypub.ttl_secs = v],
+        |c, v| c.cards.activitypub.ttl_secs = v, |c, v| c.cards.official.ttl_secs = v],
     /// Requests per second to any one upstream host.
     host_requests_per_second: f64 = |c| c.egress.host_requests_per_second => [|c, v| c.egress.host_requests_per_second = v],
     /// Per-host overrides of `host_requests_per_second`.

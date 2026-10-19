@@ -48,6 +48,13 @@ enabled = true
 enabled = true
 [cards.activitypub]
 enabled = true
+[cards.official]
+# Cards read from a service's own API (docs/sources), one switch per source below.
+enabled = true
+
+# Official-API sources, in alphabetical order (docs/sources/README.md).
+[sources.federal_register]
+enabled = true
 
 [media]
 oembed = "when_needed" # "always" restores eager registry discovery.

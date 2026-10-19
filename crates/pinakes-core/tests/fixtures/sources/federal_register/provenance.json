@@ -1,0 +1,41 @@
+{
+  "fr-2026-18291": {
+    "bytes": 2487,
+    "content_type": "application/json; charset=utf-8",
+    "file": "fr-2026-18291.json",
+    "note": "Federal Register API, public domain.",
+    "recorded_at": "2026-10-19T15:18:44+00:00",
+    "sha256": "e7bf574dede1435a5052428372710ecbc01121cdc3710433c0fd2a7bddbacff8",
+    "status": 200,
+    "url": "https://www.federalregister.gov/api/v1/documents/2026-18291.json"
+  },
+  "fr-2026-20818": {
+    "bytes": 4547,
+    "content_type": "application/json; charset=utf-8",
+    "file": "fr-2026-20818.json",
+    "note": "Federal Register API, public domain.",
+    "recorded_at": "2026-10-19T15:18:45+00:00",
+    "sha256": "2b488cdff2fca8fb9c9584ae4b867caa6255f81ee9b9fac6633c59287b3cf228",
+    "status": 200,
+    "url": "https://www.federalregister.gov/api/v1/documents/2026-20818.json"
+  },
+  "fr-missing": {
+    "bytes": 4569,
+    "content_type": "text/html",
+    "file": "fr-missing.html",
+    "recorded_at": "2026-10-19T15:18:47+00:00",
+    "sha256": "7d80334cd926333e2ad7bec254d8b787c397ef2b9dd0f6f944168b300e340edf",
+    "status": 404,
+    "url": "https://www.federalregister.gov/api/v1/documents/2026-99999.json"
+  },
+  "govinfo-mods-2026-18291": {
+    "bytes": 8755,
+    "content_type": "text/xml;charset=UTF-8",
+    "file": "govinfo-mods-2026-18291.xml",
+    "note": "GovInfo MODS record, public domain.",
+    "recorded_at": "2026-10-19T15:18:48+00:00",
+    "sha256": "739fa9b4aa13e9cc035f0220358401c7081832721446e728147a9a82b00a5b74",
+    "status": 200,
+    "url": "https://www.govinfo.gov/metadata/granule/FR-2026-09-09/2026-18291/mods.xml"
+  }
+}

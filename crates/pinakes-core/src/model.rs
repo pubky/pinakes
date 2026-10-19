@@ -96,6 +96,10 @@ pub struct ResourceMeta {
     /// redirect chain. The only alias candidates (`alias::canonical`); never stored.
     #[serde(skip)]
     pub alias_candidates: Vec<String>,
+    /// The root an official API names for this object (a filing under its primary filer): the
+    /// URI becomes an alias of it after the fetch (`alias::source`). Never stored.
+    #[serde(skip)]
+    pub source_root: Option<String>,
     pub source: String,
     #[serde(default)]
     pub fetched_at: i64,

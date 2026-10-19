@@ -445,8 +445,10 @@ async fn finish_job(
             doc.ttl_secs = doc.ttl_secs.min(3600);
         }
         let attrs = match resolver.name() {
-            "web" | "event" | "event_platform" | "media" | "isbn" | "doi" | "nostr"
-            | "activitypub" => crate::resolver::web::ATTRIBUTES,
+            "web" | "official" => crate::sources::attributes(),
+            "event" | "event_platform" | "media" | "isbn" | "doi" | "nostr" | "activitypub" => {
+                crate::resolver::web::ATTRIBUTES
+            }
             "pubky" => crate::resolver::pubky::ATTRIBUTES,
             "geo" => crate::resolver::geo::ATTRIBUTES,
             "osm" => crate::resolver::osm::ATTRIBUTES,
@@ -454,14 +456,20 @@ async fn finish_job(
         };
         doc.validate(attrs)?;
         crate::changes::save(pool, &job.id, job.generation, &doc, cfg).await?;
-        // The page names itself (its head canonical, or the end of an all-permanent redirect
-        // chain) up to a trailing slash and tracking: it is an alias of that URL, which is
-        // fetched in its place from now on. Other claimed URLs are never candidates.
+        // An official API names the object's root (`source_root`), or the page names itself (its
+        // head canonical, or the end of an all-permanent redirect chain) up to a trailing slash
+        // and tracking: the link is an alias of that URL, which is fetched in its place from now
+        // on. Other claimed URLs are never candidates.
         if doc.status == Status::Ok {
             if let Some(alias) = doc
-                .alias_candidates
-                .iter()
-                .find_map(|a| crate::alias::canonical(&job.uri, a))
+                .source_root
+                .as_deref()
+                .and_then(|root| crate::alias::source(&job.uri, root))
+                .or_else(|| {
+                    doc.alias_candidates
+                        .iter()
+                        .find_map(|a| crate::alias::canonical(&job.uri, a))
+                })
             {
                 let mut tx = pool.begin().await?;
                 crate::store::lock_search_revision(&mut tx).await?;

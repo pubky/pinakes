@@ -391,6 +391,20 @@
               "null"
             ]
           },
+          "facts": {
+            "description": "The fields that API names for the object, by name; lists are joined with \"; \".",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "from": {
+            "description": "Where the card's metadata came from when it is not the page itself: the official API\nthat answered (docs/sources).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "organizer": {
             "oneOf": [
               {
@@ -1637,6 +1651,18 @@
                   "summary": "https://example.org/",
                   "value": {
                     "uri": "https://example.org/"
+                  }
+                },
+                "resolve-federal-register-1": {
+                  "summary": "fr:2026-18291",
+                  "value": {
+                    "uri": "fr:2026-18291"
+                  }
+                },
+                "resolve-federal-register-2": {
+                  "summary": "https://www.federalregister.gov/documents/2026/09/09/2026-18291/self-regulatory-organizations-nasdaq-texas-llc-notice-of-filing-and-order-granting-accelerated",
+                  "value": {
+                    "uri": "https://www.federalregister.gov/documents/2026/09/09/2026-18291/self-regulatory-organizations-nasdaq-texas-llc-notice-of-filing-and-order-granting-accelerated"
                   }
                 },
                 "resolve-fixr-co-event-halloween-2026-welcome-to-the-haunted-hotel-ti": {

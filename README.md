@@ -27,6 +27,8 @@ own: the two combine by URI, never by ID.
 - **Events**: event pages, ICS/RSS/Atom/JSON calendar feeds with recurrence, event platforms
   (Luma, Meetup, BTC Map and others in `data/event-adapters.json`) and NIP-52 calendars.
 - **Cards**: media (oEmbed, podcasts), ISBN (Open Library), DOI (CSL), Nostr and ActivityPub.
+- **Official APIs**: keyless APIs that answer exactly where a page is walled or thin, such as
+  Federal Register documents by number ([docs/sources](docs/sources/README.md)).
 - **Aliases and groups**: spellings of one object (tracking parameters, OSM URL forms, ISBN-10)
   are one resource; a DOI or ISBN and the landing page that cites it, or one ICS UID within a
   feed, form a group: a hint on each member's card, never a merge (search shows one row per

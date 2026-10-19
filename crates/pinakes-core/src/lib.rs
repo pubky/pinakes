@@ -20,6 +20,7 @@ pub mod recipes;
 pub mod resolver;
 pub mod scheduler;
 pub mod source;
+pub mod sources;
 pub mod spatial;
 pub mod store;
 pub mod telemetry;

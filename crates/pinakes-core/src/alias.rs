@@ -40,6 +40,8 @@ pub fn root(uri: &str) -> Option<Alias> {
         ))
     } else if let Some(doi) = crate::resolver::cards::doi(&uri) {
         Some((format!("doi:{doi}"), "identifier"))
+    } else if let Some(root) = crate::sources::alias_root(&uri) {
+        Some((root, "identifier"))
     } else {
         untracked(&uri).map(|root| (root, "tracking"))
     }?;
@@ -102,6 +104,16 @@ pub fn canonical(uri: &str, canonical: &str) -> Option<Alias> {
     (root != uri && spelling(&uri)? == spelling(&root)?).then_some(Alias {
         root,
         basis: "canonical",
+    })
+}
+/// The root an official API named for `uri` (`ResourceMeta::source_root`), when it is another
+/// URI. The API's own record is the evidence, as an identifier is.
+pub fn source(uri: &str, root: &str) -> Option<Alias> {
+    let (_, uri, _) = crate::model::identity(uri).ok()?;
+    let (_, root, _) = crate::model::identity(root).ok()?;
+    (root != uri).then_some(Alias {
+        root,
+        basis: "identifier",
     })
 }
 /// Make `id` an alias of `alias.root`: the root row exists and is queued, the alias row is
@@ -206,6 +218,24 @@ pub async fn resolve_id(pool: &PgPool, id: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn official_api_spellings_and_named_roots() {
+        let r = |u: &str| root(u).map(|a| (a.root, a.basis));
+        assert_eq!(
+            r("https://www.federalregister.gov/d/2026-18291"),
+            Some(("fr:2026-18291".into(), "identifier"))
+        );
+        assert_eq!(r("fr:2026-18291"), None);
+        let named = source("https://example.org/a/", "https://example.org/b/").unwrap();
+        assert_eq!(
+            (named.root.as_str(), named.basis),
+            ("https://example.org/b/", "identifier")
+        );
+        assert_eq!(
+            source("https://example.org/a", "HTTPS://EXAMPLE.ORG/a"),
+            None
+        );
+    }
     #[test]
     fn spellings_resolve_to_one_root() {
         let r = |u: &str| root(u).map(|a| (a.root, a.basis));
