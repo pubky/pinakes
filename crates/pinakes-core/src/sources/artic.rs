@@ -80,7 +80,7 @@ pub fn parse(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
     };
     let d = &v["data"];
     ensure!(
-        int(&d["id"]) == Some(id as i64),
+        int(&d["id"]).and_then(|n| u64::try_from(n).ok()) == Some(id),
         "the API answered for another artwork"
     );
     let mut card = Card::new("VisualArtwork", identifier(id), page(id));

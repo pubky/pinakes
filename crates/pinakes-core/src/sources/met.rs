@@ -95,7 +95,7 @@ pub fn parse(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
         return Ok(None);
     };
     ensure!(
-        int(&v["objectID"]) == Some(id as i64),
+        int(&v["objectID"]).and_then(|n| u64::try_from(n).ok()) == Some(id),
         "the API answered for another object"
     );
     let mut card = Card::new("VisualArtwork", identifier(id), page(id));

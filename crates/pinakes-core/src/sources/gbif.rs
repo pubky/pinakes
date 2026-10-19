@@ -127,7 +127,7 @@ pub fn parse(status: u16, raw: &[u8], object: Object) -> Result<Option<Card>> {
 
 fn checked(v: &Value, key: u64, what: &str) -> Result<()> {
     ensure!(
-        int(&v["key"]) == Some(key as i64),
+        int(&v["key"]).and_then(|k| u64::try_from(k).ok()) == Some(key),
         "GBIF answered for another {what}"
     );
     Ok(())

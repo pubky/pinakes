@@ -111,7 +111,7 @@ pub fn parse(status: u16, raw: &[u8], artwork: &Artwork) -> Result<Option<Card>>
     ensure!(
         match artwork {
             Artwork::Accession(a) => *a == acc,
-            Artwork::Id(n) => *n as i64 == id,
+            Artwork::Id(n) => i64::try_from(*n).ok() == Some(id),
         },
         "the API answered for another artwork"
     );
