@@ -471,20 +471,21 @@ that is off by default (an unknown ID stops startup). Sources run in a fixed ord
 sees the keys the ones before it found in the same run (a barcode MusicBrainz names, then the
 services looked up by it); a source that no longer applies (its key is gone) drops its rows.
 The sources, in the order they run, are `service`, `musicbrainz`, `wikidata`, `deezer` and
-`itunes` (music), `wikipedia` and `wikidata_item`
+`itunes` (music), `wikipedia`, `wikidata_item` and `books`
 ([the API](api.md#also-on) says what each reads); `[also_on] apple_storefront` (`us`, a two-letter country code) is the Apple Music
-storefront of the Apple links they build. `[also_on.sources.musicbrainz] base_url`
+and Apple Books storefront of the Apple links they build. `[also_on.sources.musicbrainz] base_url`
 (`https://musicbrainz.org/ws/2`) points the `musicbrainz` source at a MusicBrainz mirror's web
 service instead, an http(s) URL without a trailing slash and reached through the egress policy;
 every instance on one public address shares MusicBrainz's 1 request/s, which a mirror does not
 limit. The worker takes up to 100 due resources at a time and asks MusicBrainz about their links'
-URLs together (50 to a request; MusicBrainz echoes each URL, and an answer applies only to the
-URL it names) and Wikidata for their item links' items together (10 to a request). Each music
-link then costs one MusicBrainz request for its entity (up to four when the URL names several
-releases; one more for a track found by its ISRC, and one for a track's original album), up to
-two iTunes lookups for an album with barcodes, and two Wikidata requests (a search by its
-service ID cannot batch); each Wikipedia article one request to its Wikipedia and one to
-Wikidata. `deezer` is off by default: Deezer's API terms allow non-commercial use
+URLs together (50 to a request; MusicBrainz echoes each URL, and an answer applies only to the URL
+it names) and Wikidata for their item links' items together (10 to a request). Each music link then
+costs one MusicBrainz request for its entity (up to four when the URL names several releases; one
+more for a track found by its ISRC, and one for a track's original album), up to two iTunes lookups
+for an album with barcodes, and two Wikidata requests (a search by its service ID cannot batch);
+each Wikipedia article one request to its Wikipedia and one to Wikidata; each book one Open Library
+request, one iTunes lookup for an ebook edition, and two Wikidata requests when Open Library names
+its work. `deezer` is off by default: Deezer's API terms allow non-commercial use
 only, so turn it on (`[also_on.sources.deezer] enabled = true`) only where they do; it costs one
 request per Deezer link and up to two per other track or album with an ISRC or barcode.
 

@@ -13,6 +13,9 @@
 //! in its text) are never keys: a key comes from the service that owns the identifier, or from
 //! an exact hub lookup (MusicBrainz, Wikidata).
 use crate::{config::Config, model::ResourceMeta, resolver::egress::Egress};
+
+pub mod books;
+pub mod media;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -221,6 +224,7 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         Arc::new(crate::music_sources::ItunesSource),
         Arc::new(crate::wikipedia::WikipediaSource),
         Arc::new(crate::wikipedia::WikidataItemSource),
+        Arc::new(books::Books),
     ]
 }
 /// The source IDs `[also_on.sources]` may name.

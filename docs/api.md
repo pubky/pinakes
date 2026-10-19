@@ -796,9 +796,27 @@ its own hub. Its card lists the item's encyclopedia entries, the music services 
 IDs name, and all its Wikipedia editions (the major languages first), with the Q-id as key. Only
 the item's own claims and sitelinks count, never a search.
 
+**Books.** `books`: an ISBN (`isbn:…`, `openlibrary.org/isbn/{isbn}`) or an Open Library edition
+page (`openlibrary.org/books/OL…M`) is looked up exactly, never by title:
+- Open Library's edition record must list the ISBN asked. Its edition and work IDs are keys
+  (`openlibrary:edition:…`, `openlibrary:work:…`, so the editions of one work join, a hint like
+  every group), its ISBN-13s are `isbn` facts, and it links the edition, its work
+  (`kind: "work"`), its Internet Archive copy (`ocaid`), and its Goodreads, LibraryThing and
+  Google Books pages when it holds exactly one ID for each.
+- A printed edition's 978 ISBN gives its Amazon page (`amazon.com/dp/{ISBN-10}`, `via: "isbn"`).
+- An ebook edition's ISBN gives its Apple Books page when iTunes lists exactly one ebook for it.
+  A printed edition's ISBN is never asked: iTunes answers it with loose matches, such as an
+  edition in another language.
+- The work's Wikidata item (by its Open Library work ID) gives its Q-id as a key and its
+  LibraryThing, Goodreads (the work's editions), Google Books, Project Gutenberg and BookBrainz
+  pages.
+
+Goodreads' `book/isbn/{isbn}` redirect is never used: it answers an unknown ISBN with an
+unrelated book.
+
 The level is exact: a track lists tracks and videos of the recording, an album lists albums and
 YouTube's album playlists, an artist lists artist pages and channels. Album links group by
-their release group, while two editions (two MusicBrainz releases) stay apart. Apple Music links use the storefront
+their release group, while two editions (two MusicBrainz releases) stay apart. Apple Music and Apple Books links use the storefront
 `[also_on] apple_storefront` (`us`).
 
 ## Cards and resolvers
