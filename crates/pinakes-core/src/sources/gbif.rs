@@ -277,16 +277,17 @@ pub fn parse_occurrence(status: u16, raw: &[u8], key: u64) -> Result<Option<Card
     card.detail("data_generalizations", text(&v["dataGeneralizations"]));
     let licence = text(&v["license"]).map(|l| licence(&l));
     card.detail("license", licence.clone());
-    card.attribution = Some(
-        match (
-            licence,
-            text(&v["rightsHolder"]).or_else(|| text(&v["recordedBy"])),
-        ) {
-            (Some(l), Some(holder)) => format!("{l} ({holder}), via GBIF.org"),
-            (Some(l), None) => format!("{l}, via GBIF.org"),
-            (None, _) => "via GBIF.org".into(),
-        },
-    );
+    let holder = text(&v["rightsHolder"]).or_else(|| text(&v["recordedBy"]));
+    let credit = [holder, text(&v["datasetName"]), licence]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(", ");
+    card.attribution = Some(if credit.is_empty() {
+        "via GBIF.org".into()
+    } else {
+        format!("{credit}, via GBIF.org")
+    });
     let occurrence_id = text(&v["occurrenceID"]);
     if let Some(id) = occurrence_id.as_deref().and_then(inat_observation) {
         card.detail("inat_observation", id);
@@ -545,7 +546,7 @@ mod tests {
         );
         assert_eq!(
             card.attribution.as_deref(),
-            Some("CC BY-NC 4.0 (ramchop), via GBIF.org")
+            Some("ramchop, iNaturalist research-grade observations, CC BY-NC 4.0, via GBIF.org")
         );
         assert!(card.keys.is_empty(), "another service's object is a fact");
         assert_eq!(card.details["inat_observation"], 333069440);

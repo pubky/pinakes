@@ -11,7 +11,10 @@
 //! Links to a record's files name the files, not the record. `sandbox.zenodo.org` is a test
 //! service, and DOI links (`doi.org/10.5281/zenodo.{id}`) belong to the DOI source.
 use super::{
-    kit::{fetch, host_and_segments, html_text, int, json, plain, text, texts, Card, Key, Request},
+    kit::{
+        credit, fetch, host_and_segments, html_text, int, json, plain, text, texts, Card, Key,
+        Request,
+    },
     Context, Example, Source,
 };
 use crate::model::ResourceMeta;
@@ -128,7 +131,6 @@ pub fn parse(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
     card.name = text(&m["title"]);
     card.description = m["description"].as_str().and_then(html_text);
     let licence = text(&m["license"]["id"]);
-    card.attribution = licence.as_deref().map(licence_name);
     let open = text(&m["access_right"]).as_deref() == Some("open");
     if open && licence.as_deref().is_some_and(open_licence) {
         card.image = text(&v["links"]["thumbnails"]["750"]);
@@ -139,6 +141,7 @@ pub fn parse(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
         .flatten()
         .filter_map(|c| text(&c["name"]))
         .collect();
+    card.attribution = credit(&creators, licence.as_deref().map(licence_name).as_deref());
     card.detail("creators", creators);
     card.detail("license", licence);
     card.detail("resource_type", text(&m["resource_type"]["title"]));
@@ -297,7 +300,10 @@ mod tests {
         );
         assert_eq!(card.details["publication_date"], "2011-04-01");
         assert_eq!(card.keys, [Key::new("doi", "10.1175/2010mwr3413.1")]);
-        assert_eq!(card.attribution.as_deref(), Some("CC0 1.0"));
+        assert_eq!(
+            card.attribution.as_deref(),
+            Some("Coniglio, Michael C.; Corfidi, Stephen F.; Kain, John S. / CC0 1.0")
+        );
         assert_eq!(
             card.image.as_deref(),
             Some(
@@ -335,7 +341,7 @@ mod tests {
         assert_eq!(card.details["version"], "5.8");
         assert_eq!(card.details["concept_doi"], "10.5281/zenodo.7790294");
         assert_eq!(card.details["license"], "cc-by-4.0");
-        assert_eq!(card.attribution.as_deref(), Some("CC BY 4.0"));
+        assert_eq!(card.attribution.as_deref(), Some("Flash Funds / CC BY 4.0"));
         assert_eq!(card.image, None, "no thumbnail for a video file");
     }
 

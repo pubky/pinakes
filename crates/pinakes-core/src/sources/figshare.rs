@@ -12,8 +12,8 @@
 //! (`doi.org/10.6084/m9.figshare.{id}`) belong to the DOI source.
 use super::{
     kit::{
-        fetch, host_and_segments, html_text, int, json, plain, text, texts, time, Card, Key,
-        Request,
+        credit, fetch, host_and_segments, html_text, int, json, plain, text, texts, time, Card,
+        Key, Request,
     },
     Context, Example, Source,
 };
@@ -175,7 +175,6 @@ pub fn parse(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
         time(&v["published_date"]).map(|t| t.to_rfc3339()),
     );
     let licence = text(&v["license"]["name"]);
-    card.attribution = licence.clone();
     if licence.as_deref().is_some_and(open_licence) {
         card.image = text(&v["thumb"]);
     }
@@ -192,6 +191,7 @@ pub fn parse(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
         .filter_map(|c| text(&c["title"]))
         .collect();
     let version = v["version"].as_u64();
+    card.attribution = credit(&authors, licence.as_deref());
     card.detail("authors", authors);
     card.detail("license", licence);
     card.detail("item_type", text(&v["defined_type_name"]));
@@ -360,7 +360,11 @@ mod tests {
             "a date of a thing, not of an event, is a fact"
         );
         assert_eq!(card.details["published"], "2014-05-07T12:19:41+00:00");
-        assert_eq!(card.attribution.as_deref(), Some("CC BY 4.0"));
+        assert_eq!(
+            card.attribution.as_deref(),
+            Some("Pehr Söderman / CC BY 4.0"),
+            "the creator as well as the licence"
+        );
         assert_eq!(card.image, None, "no thumbnail");
         assert_eq!(
             card.details["authors"],

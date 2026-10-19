@@ -250,6 +250,23 @@ impl Card {
     }
 }
 
+/// A credit line for a record with creators and a licence: up to three creators (then "et al."),
+/// a slash and the licence, e.g. "Writer, A.; Writer, B. / CC BY 4.0". Names are joined with
+/// "; ", since a name may itself hold a comma ("Family, Given").
+pub fn credit(creators: &[String], licence: Option<&str>) -> Option<String> {
+    let names = match creators {
+        [] => None,
+        [a] => Some(a.clone()),
+        [a, b] => Some(format!("{a}; {b}")),
+        [a, b, c] => Some(format!("{a}; {b}; {c}")),
+        [a, b, c, ..] => Some(format!("{a}; {b}; {c} et al.")),
+    };
+    match (names, licence) {
+        (Some(n), Some(l)) => Some(format!("{n} / {l}")),
+        (n, l) => n.or_else(|| l.map(str::to_owned)),
+    }
+}
+
 /// A detail as a fact string: text as it is, numbers and booleans written out, lists joined
 /// with "; ". Objects are not facts.
 pub fn fact(value: &Value) -> Option<String> {
@@ -632,6 +649,22 @@ mod tests {
         );
         assert_eq!(Point::new(0.0, 0.0), None);
         assert_eq!(Point::new(91.0, 0.0), None);
+    }
+
+    #[test]
+    fn credits() {
+        let names = |n: &[&str]| n.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert_eq!(credit(&[], None), None);
+        assert_eq!(credit(&[], Some("CC0 1.0")).as_deref(), Some("CC0 1.0"));
+        assert_eq!(credit(&names(&["A"]), None).as_deref(), Some("A"));
+        assert_eq!(
+            credit(&names(&["Writer, A.", "Writer, B."]), Some("CC BY 4.0")).as_deref(),
+            Some("Writer, A.; Writer, B. / CC BY 4.0")
+        );
+        assert_eq!(
+            credit(&names(&["A", "B", "C", "D"]), Some("CC BY 4.0")).as_deref(),
+            Some("A; B; C et al. / CC BY 4.0")
+        );
     }
 
     #[test]

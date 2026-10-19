@@ -4,7 +4,7 @@
 //! Every metmuseum.org link of one object (with or without a language prefix, the older
 //! "collection online" form, and the API's own URL) is an alias of one identifier,
 //! `met:{objectID}`. The API's data is CC0; images are shown only for public-domain works.
-use super::kit::{fetch, host_and_segments, int, json, plain, text, Card, Key, Request};
+use super::kit::{fetch, host_and_segments, int, json, plain, text, web_url, Card, Key, Request};
 use super::{Context, Example, Source};
 use crate::model::ResourceMeta;
 use anyhow::{ensure, Context as _, Result};
@@ -103,7 +103,9 @@ pub fn parse(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
     let public_domain = v["isPublicDomain"].as_bool();
     if public_domain == Some(true) {
         // The web-sized image; `primaryImage` is the full-resolution original.
-        card.image = text(&v["primaryImageSmall"]).or_else(|| text(&v["primaryImage"]));
+        card.image = text(&v["primaryImageSmall"])
+            .or_else(|| text(&v["primaryImage"]))
+            .filter(|u| web_url(u).is_some());
         card.attribution = Some(format!("{CREDIT}, CC0"));
     } else {
         card.attribution = Some(CREDIT.into());

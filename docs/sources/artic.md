@@ -2,7 +2,8 @@
 
 Artworks of the Art Institute of Chicago, read from its public API by id. No key; 60 requests per
 minute (one per second). Every request names the operator in the `AIC-User-Agent` header the API
-asks for (the contact User-Agent, see [Politeness](README.md#politeness)).
+asks for (the contact User-Agent, see [Politeness](README.md#politeness)); without a contact set,
+the header is left out.
 
 ## Links
 

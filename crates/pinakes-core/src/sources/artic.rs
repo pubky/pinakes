@@ -51,8 +51,15 @@ pub fn page(id: u64) -> String {
 
 /// The API record, limited to `FIELDS`, with the `AIC-User-Agent` header the API asks for (the
 /// operator's contact User-Agent).
-pub fn request(id: u64, user_agent: &str) -> Option<Request> {
-    Some(Request::get(&format!("{API}/{id}?fields={FIELDS}"))?.header("AIC-User-Agent", user_agent))
+pub fn request(id: u64, contact: Option<&str>) -> Option<Request> {
+    let request = Request::get(&format!("{API}/{id}?fields={FIELDS}"))?;
+    Some(match contact {
+        Some(contact) => request.header(
+            "AIC-User-Agent",
+            crate::resolver::egress::user_agent(contact),
+        ),
+        None => request,
+    })
 }
 
 /// The artwork of a root, `artic:{id}` (the id without leading zeros).
@@ -162,8 +169,7 @@ impl Source for Artic {
         let Some(id) = target(uri) else {
             return Ok(cx.missing(uri, self));
         };
-        let user_agent = crate::resolver::egress::user_agent(cx.contact().unwrap_or(""));
-        let f = fetch(cx, &request(id, &user_agent).context("artwork id")?).await?;
+        let f = fetch(cx, &request(id, cx.contact()).context("artwork id")?).await?;
         Ok(match parse(f.status, &f.body, id)? {
             Some(card) => card.into_doc(cx.card(uri, self), SITE),
             None => cx.missing(uri, self),
@@ -216,13 +222,23 @@ mod tests {
 
     #[test]
     fn request_names_fields_and_sends_the_header() {
-        let ua = "pinakes/0.1.0 (+https://pubky.app; ops@example.org)";
-        let r = request(27992, ua).unwrap();
+        let r = request(27992, Some("ops@example.org")).unwrap();
         assert_eq!(
             r.url.as_str(),
             format!("https://api.artic.edu/api/v1/artworks/27992?fields={FIELDS}")
         );
-        assert_eq!(r.headers, [("AIC-User-Agent", ua.to_owned())]);
+        assert_eq!(
+            r.headers,
+            [(
+                "AIC-User-Agent",
+                format!(
+                    "pinakes/{} (+https://pubky.app; ops@example.org)",
+                    env!("CARGO_PKG_VERSION")
+                )
+            )]
+        );
+        // Without a contact there is nothing to name: no header.
+        assert!(request(27992, None).unwrap().headers.is_empty());
     }
 
     #[test]

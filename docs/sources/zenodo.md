@@ -13,8 +13,8 @@ Every address of one record is one resource, with `zenodo:{id}` as the root:
 
 A record is one version of a work. The work as a whole (all its versions) is a concept record
 with an id of its own; the API redirects that id to the latest version. A concept id's card is
-the concept: the latest version's title and text under the concept's root and page, with the
-concept DOI. Links to a record's files, `sandbox.zenodo.org` (a test service) and DOI links
+the concept: the latest version's title, text, licence and image under the concept's root and
+page, with the concept DOI. Links to a record's files, `sandbox.zenodo.org` (a test service) and DOI links
 (`doi.org/10.5281/zenodo.{id}`, read by the DOI route) are not read here.
 
 A record the API doesn't know (404) or that was deleted (410) is `missing`.
@@ -30,7 +30,9 @@ The type follows the record's resource type: `Dataset`, `SoftwareSourceCode`, `S
 `VideoObject`, else `CreativeWork`. `site` is "Zenodo", `name` the title, `description` the
 description as plain text; the publication date, as given, is the `publication_date` fact. `image` is
 Zenodo's preview of the record's files, only for open records under CC0 or CC BY. `attribution`
-is the licence, e.g. "CC BY 4.0".
+credits the creators (up to three, then "et al.") and the licence, e.g. "Coniglio, Michael C.;
+Corfidi, Stephen F.; Kain, John S. / CC0 1.0". A concept card shows the latest version's title,
+text, licence and image.
 
 | Fact | Meaning |
 | --- | --- |

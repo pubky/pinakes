@@ -35,7 +35,8 @@ The type follows the item type: `Dataset`, `SoftwareSourceCode`, `ImageObject` (
 is "Figshare", `name` the title and `description` the description as plain text; the latest
 version's publication time is the `published` fact. `image` is Figshare's thumbnail, only under
 CC0 or CC BY.
-`attribution` is the licence, e.g. "CC BY 4.0".
+`attribution` credits the authors (up to three, then "et al.") and the licence, e.g.
+"Pehr Söderman / CC BY 4.0".
 
 | Fact | Meaning |
 | --- | --- |

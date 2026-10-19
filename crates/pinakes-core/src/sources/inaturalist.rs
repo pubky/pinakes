@@ -224,6 +224,9 @@ pub fn parse_observation(status: u16, raw: &[u8], id: u64) -> Result<Option<Card
     }
     let name = text(&v["user"]["name"]).or(observer);
     card.attribution = Some(match (licence, name) {
+        (Some(l), Some(n)) if l == "CC0" => {
+            format!("{n}, no rights reserved (CC0), via iNaturalist")
+        }
         (Some(l), Some(n)) => format!("(c) {n}, some rights reserved ({l}), via iNaturalist"),
         (None, Some(n)) => format!("(c) {n}, all rights reserved, via iNaturalist"),
         (_, None) => "via iNaturalist".into(),
@@ -572,6 +575,19 @@ mod tests {
         );
         assert!(parse_taxon(200, &read("taxon-47219.json.gz"), 47220).is_err());
         assert!(parse_taxon(429, b"", 47219).is_err());
+    }
+
+    #[test]
+    fn a_waived_licence_reserves_no_rights() {
+        let raw = read("observation-333069440.json.gz");
+        let mut v: Value = serde_json::from_slice(&raw).unwrap();
+        v["results"][0]["license_code"] = "cc0".into();
+        let raw = serde_json::to_vec(&v).unwrap();
+        let card = parse_observation(200, &raw, 333069440).unwrap().unwrap();
+        assert_eq!(
+            card.attribution.as_deref(),
+            Some("ramchop, no rights reserved (CC0), via iNaturalist")
+        );
     }
 
     #[test]

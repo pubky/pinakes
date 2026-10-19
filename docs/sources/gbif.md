@@ -65,7 +65,8 @@ the scientific name it was identified as.
 ## Licence and attribution
 
 Occurrences carry their own licence (CC0, CC BY 4.0 or CC BY-NC 4.0); the card's attribution is
-the licence, the rights holder and "via GBIF.org", e.g. "CC BY-NC 4.0 (ramchop), via GBIF.org".
+the rights holder, the dataset, the licence and "via GBIF.org", e.g. "ramchop, iNaturalist
+research-grade observations, CC BY-NC 4.0, via GBIF.org".
 Species of the GBIF Backbone Taxonomy are credited "GBIF Backbone Taxonomy (CC BY 4.0), via
 GBIF.org".
 
