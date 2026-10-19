@@ -22,6 +22,7 @@ use std::{collections::BTreeMap, sync::OnceLock};
 
 pub mod bluesky;
 pub mod courtlistener;
+pub mod discourse;
 pub mod ecfr;
 pub mod eur_lex;
 pub mod federal_register;
@@ -43,6 +44,7 @@ pub mod zefix;
 pub static REGISTRY: &[&dyn Source] = &[
     &bluesky::Bluesky,
     &courtlistener::Courtlistener,
+    &discourse::Discourse,
     &ecfr::Ecfr,
     &eur_lex::EurLex,
     &federal_register::FederalRegister,

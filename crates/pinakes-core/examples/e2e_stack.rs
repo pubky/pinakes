@@ -103,7 +103,8 @@ impl Fixture {
             {"kind":"hacker_news","uri":"https://news.ycombinator.com/item?id=8863","type":"DiscussionForumPosting"},
             {"kind":"lobsters","uri":"https://lobste.rs/s/wtthju/a5_v1_0","type":"DiscussionForumPosting"},
             {"kind":"bluesky","uri":"https://bsky.app/profile/did:plc:z72i7hdynmk6r22z27h6tvur/post/3mxzez2m7wk2r","type":"SocialMediaPosting"},
-            {"kind":"mastodon","uri":"https://mastodon.social/@Gargron/1","type":"SocialMediaPosting"}
+            {"kind":"mastodon","uri":"https://mastodon.social/@Gargron/1","type":"SocialMediaPosting"},
+            {"kind":"discourse","uri":"https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304","type":"DiscussionForumPosting"}
         ]);
         Ok(Self {
             boundary: Arc::default(),
@@ -144,6 +145,7 @@ impl Dns for FixtureDns {
                 | "lobste.rs"
                 | "public.api.bsky.app"
                 | "mastodon.social"
+                | "delvingbitcoin.org"
                 | "web.example"
                 | "www.federalregister.gov"
                 | "www.sec.gov"
@@ -186,6 +188,7 @@ impl Transport for Fixture {
             "lobste.rs" if u.path()=="/s/wtthju.json"=>("application/json",include_str!("../tests/fixtures/sources/lobsters/lobsters-wtthju.json").into()),
             "public.api.bsky.app" if u.path()=="/xrpc/app.bsky.feed.getPostThread"=>("application/json",include_str!("../tests/fixtures/sources/bluesky/bsky-thread-3mxzez2m7wk2r.json").into()),
             "mastodon.social" if u.path()=="/api/v1/statuses/1"=>("application/json",include_str!("../tests/fixtures/sources/mastodon/status-1.json").into()),
+            "delvingbitcoin.org" if u.path()=="/t/304.json"=>("application/json",include_str!("../tests/fixtures/sources/discourse/topic-304.json").into()),
             "web.example"=>("text/html","<title>Fixture page</title>".into()),
             "www.ecfr.gov" if u.path()=="/api/versioner/v1/ancestry/current/title-17.json"=>("application/json",include_str!("../tests/fixtures/sources/ecfr/ancestry_current_title-17_section-240.10b-5.json").into()),
             "www.sec.gov" if u.path()=="/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959.hdr.sgml"=>("text/sgml",include_str!("../tests/fixtures/sources/sec/sec-hdr-ms-s1.sgml").into()),

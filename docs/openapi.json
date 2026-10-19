@@ -1611,6 +1611,18 @@
                     "uri": "pubky://dir8gnjfnhdn5cpo8gxmfxfpqm9kffkoqpmsefcjkdpkxo15d5ey/pub/pinakes.e2e/none.json"
                   }
                 },
+                "resolve-discourse-1": {
+                  "summary": "https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304",
+                  "value": {
+                    "uri": "https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304"
+                  }
+                },
+                "resolve-discourse-2": {
+                  "summary": "https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304/2",
+                  "value": {
+                    "uri": "https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304/2"
+                  }
+                },
                 "resolve-doi-org-10-1038-nature12373": {
                   "summary": "https://doi.org/10.1038/nature12373",
                   "value": {

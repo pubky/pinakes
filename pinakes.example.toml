@@ -57,6 +57,8 @@ enabled = true
 enabled = true
 [sources.courtlistener]
 enabled = true
+[sources.discourse]
+enabled = true
 [sources.ecfr]
 enabled = true
 [sources.eur_lex]

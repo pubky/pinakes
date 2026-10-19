@@ -137,6 +137,11 @@
     "type": "SocialMediaPosting"
   },
   {
+    "kind": "discourse",
+    "uri": "https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304",
+    "type": "DiscussionForumPosting"
+  },
+  {
     "kind": "web",
     "uri": "https://example.org/",
     "type": "WebPage"

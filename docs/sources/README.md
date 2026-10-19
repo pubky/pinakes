@@ -42,6 +42,7 @@ or got plain web cards before are read by their source.
 
 - [`bluesky`](bluesky.md): Bluesky posts and profiles.
 - [`courtlistener`](courtlistener.md): US court opinions by cluster id.
+- [`discourse`](discourse.md): Topics and posts on any Discourse forum.
 - [`ecfr`](ecfr.md): sections and parts of the Code of Federal Regulations.
 - [`eur_lex`](eur_lex.md): EU law by CELEX number, ELI or Official Journal id.
 - [`federal_register`](federal_register.md): Federal Register documents by document number.
