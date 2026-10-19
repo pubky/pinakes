@@ -23,6 +23,7 @@ pub struct Config {
     pub media: crate::resolver::cards::MediaConfig,
     pub event: EventConfig,
     pub egress: EgressConfig,
+    pub http: HttpConfig,
     pub groups: crate::groups::GroupConfig,
     pub api: ApiConfig,
     pub canary: CanaryConfig,
@@ -48,6 +49,7 @@ impl Default for Config {
     fn default() -> Self {
         let mut config = Self::base();
         config.limits = Limits::of(&config);
+        config.share_contact();
         config
     }
 }
@@ -137,6 +139,7 @@ impl Config {
             osm: OsmConfig::default(),
             search: SearchConfig::default(),
             egress: EgressConfig::default(),
+            http: HttpConfig::default(),
             queue: QueueConfig::default(),
             groups: Default::default(),
             preview: PreviewConfig::default(),
@@ -345,11 +348,23 @@ impl Default for ResolverConfig {
         }
     }
 }
+/// `[http]`: how Pinakes introduces itself to the services it reads.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HttpConfig {
+    /// The operator's contact address. Sent in the User-Agent of every request
+    /// (`pinakes/<version> (+https://pubky.app; <contact>)`) and as the `email` parameter of the
+    /// APIs that ask for one. Empty: neither, and the sources that need a contact are skipped.
+    pub contact: String,
+}
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EgressConfig {
     #[serde(skip)]
     pub host_requests_per_second: f64,
+    /// `http.contact`, copied at load.
+    #[serde(skip)]
+    pub contact: String,
     pub allow_hosts: Vec<String>,
     pub deny_hosts: Vec<String>,
     #[serde(skip)]
@@ -359,6 +374,7 @@ impl Default for EgressConfig {
     fn default() -> Self {
         Self {
             host_requests_per_second: 1.0,
+            contact: String::new(),
             allow_hosts: vec![],
             deny_hosts: vec![],
             host_rates: BTreeMap::new(),
@@ -422,6 +438,9 @@ pub struct OsmConfig {
     pub dump_every_hours: u64,
     #[serde(skip)]
     pub dump_downloads_per_hour: usize,
+    /// `http.contact`, copied at load.
+    #[serde(skip)]
+    pub contact: String,
 }
 impl Default for OsmConfig {
     fn default() -> Self {
@@ -433,6 +452,7 @@ impl Default for OsmConfig {
             dump_dir: "dumps".into(),
             dump_every_hours: 24,
             dump_downloads_per_hour: 6,
+            contact: String::new(),
         }
     }
 }
@@ -543,8 +563,14 @@ impl Config {
         let limits = cfg.limits.clone();
         limits.apply(&mut cfg);
         cfg.queue.groups = cfg.groups.clone();
+        cfg.share_contact();
         cfg.validate()?;
         Ok(cfg)
+    }
+    /// Every HTTP client sends `http.contact` (`resolver::egress::user_agent`).
+    fn share_contact(&mut self) {
+        self.egress.contact = self.http.contact.trim().to_owned();
+        self.osm.contact = self.egress.contact.clone();
     }
     pub fn validate(&self) -> Result<()> {
         if self.pubky.enabled {
@@ -566,6 +592,16 @@ impl Config {
             }
         }
         self.cards.validate()?;
+        let contact = self.http.contact.trim();
+        if !contact.is_empty()
+            && (contact.len() > 254
+                || !contact.contains('@')
+                || contact
+                    .chars()
+                    .any(|c| c.is_control() || c.is_whitespace() || "()<>;".contains(c)))
+        {
+            bail!("http.contact must be an email address (or empty)");
+        }
         let origins = &self.api.cors_allow_origins;
         if origins.iter().any(|o| o == "*") && origins.len() > 1 {
             bail!("api.cors_allow_origins: \"*\" must be the only entry");
@@ -913,6 +949,20 @@ mod tests {
             crate::groups::CrossContainerOccurrences::Off
         );
         assert!(!Config::default().web.discover_feeds);
+    }
+    #[test]
+    fn the_contact_reaches_every_client() {
+        let cfg = with(serde_json::json!({"http":{"contact":" info@synonym.to "}})).unwrap();
+        assert_eq!(cfg.egress.contact, "info@synonym.to");
+        assert_eq!(cfg.osm.contact, "info@synonym.to");
+        assert_eq!(Config::default().egress.contact, "");
+        for bad in ["nobody", "a b@example.org", "x@example.org)"] {
+            assert!(
+                with(serde_json::json!({"http":{"contact":bad}})).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(with(serde_json::json!({"egress":{"contact":"x@example.org"}})).is_err());
     }
     #[test]
     fn limits_apply_once_to_every_resolver_and_caps_left_the_sections() {

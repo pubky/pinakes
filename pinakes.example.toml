@@ -76,6 +76,11 @@ websocket = true # Nostr relays: one relay hint, after both HTTP indexers miss.
 # [event.adapters.platforms.resident_advisor]
 # enabled = true # Unofficial GraphQL, fragile and off by default.
 
+[http]
+# Sent in the User-Agent, pinakes/<version> (+https://pubky.app; <contact>), and as the email
+# parameter of APIs that ask for one. Empty: sources that need a contact are skipped.
+contact = "info@synonym.to"
+
 [egress]
 # Exact names or *.example.org. An empty allow list permits all public hosts.
 # Lists never override the IP policy. Deny wins.

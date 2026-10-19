@@ -26,8 +26,20 @@ pub const BODY_CAP: usize = 1024 * 1024;
 pub const USER_AGENT: &str = concat!(
     "pinakes/",
     env!("CARGO_PKG_VERSION"),
-    " (+https://github.com/pubky/pinakes)"
+    " (+https://pubky.app)"
 );
+/// The User-Agent with the operator's contact (`http.contact`), or `USER_AGENT` without one.
+/// It never names a code host: some services refuse such agents as undeclared tools.
+pub fn user_agent(contact: &str) -> String {
+    if contact.is_empty() {
+        USER_AGENT.to_owned()
+    } else {
+        format!(
+            "pinakes/{} (+https://pubky.app; {contact})",
+            env!("CARGO_PKG_VERSION")
+        )
+    }
+}
 pub const ALLOWED_TYPES: &[&str] = &[
     "text/html",
     "application/xhtml+xml",
@@ -427,6 +439,10 @@ impl Egress {
             && (self.cfg.allow_hosts.is_empty()
                 || self.cfg.allow_hosts.iter().any(|h| host_matches(&host, h)))
     }
+    /// The operator's contact address (`http.contact`), for APIs that ask for one.
+    pub fn contact(&self) -> Option<&str> {
+        Some(self.cfg.contact.as_str()).filter(|c| !c.is_empty())
+    }
     pub fn new(cfg: EgressConfig) -> Self {
         let mut e = Self::with_backends(cfg, Arc::new(SystemDns), Arc::new(PinnedTransport));
         e.network_relays = true;
@@ -642,6 +658,20 @@ impl Egress {
             // Pin checked addresses to the connection; a second DNS lookup could rebind to a private IP.
             let _permit = self.host_permit(&host).await;
             let mut observation = crate::telemetry::FetchGuard::start();
+            let with_agent;
+            let default_agent = options
+                .user_agent
+                .as_deref()
+                .is_none_or(|ua| ua == USER_AGENT);
+            let options = if default_agent && !self.cfg.contact.is_empty() {
+                with_agent = FetchOptions {
+                    user_agent: Some(user_agent(&self.cfg.contact)),
+                    ..options.clone()
+                };
+                &with_agent
+            } else {
+                options
+            };
             let mut response = self.transport.get_with(&url, &addresses, options).await?;
             observation.status(response.status);
             drop(observation);
@@ -838,6 +868,71 @@ mod tests {
             );
         }
         server.abort();
+    }
+    #[tokio::test]
+    async fn the_default_agent_carries_the_operator_contact() {
+        #[derive(Default)]
+        struct Agents(std::sync::Mutex<Vec<Option<String>>>);
+        #[async_trait]
+        impl Transport for Agents {
+            async fn get(&self, url: &Url, addresses: &[SocketAddr]) -> Result<Fetched> {
+                self.get_with(url, addresses, &FetchOptions::default())
+                    .await
+            }
+            async fn get_with(
+                &self,
+                url: &Url,
+                _: &[SocketAddr],
+                options: &FetchOptions,
+            ) -> Result<Fetched> {
+                self.0.lock().unwrap().push(options.user_agent.clone());
+                Ok(Fetched {
+                    permanent_redirect: false,
+                    truncated: false,
+                    url: url.clone(),
+                    status: 200,
+                    content_type: "application/json".into(),
+                    validators: Default::default(),
+                    location: None,
+                    retry_after_secs: 60,
+                    body: b"{}".to_vec(),
+                })
+            }
+        }
+        let with_contact = format!(
+            "pinakes/{} (+https://pubky.app; info@synonym.to)",
+            env!("CARGO_PKG_VERSION")
+        );
+        for (contact, agent, sent) in [
+            ("info@synonym.to", None, Some(with_contact.as_str())),
+            (
+                "info@synonym.to",
+                Some(USER_AGENT),
+                Some(with_contact.as_str()),
+            ),
+            ("info@synonym.to", Some("Browser/1.0"), Some("Browser/1.0")),
+            ("", None, None),
+        ] {
+            let transport = Arc::new(Agents::default());
+            let egress = Egress::with_backends(
+                EgressConfig {
+                    contact: contact.into(),
+                    ..Default::default()
+                },
+                Arc::new(FakeDns),
+                transport.clone(),
+            );
+            assert_eq!(egress.contact(), Some(contact).filter(|c| !c.is_empty()));
+            let options = FetchOptions {
+                user_agent: agent.map(str::to_owned),
+                ..Default::default()
+            };
+            egress
+                .fetch_with("https://public.example/api", &options)
+                .await
+                .unwrap();
+            assert_eq!(transport.0.lock().unwrap()[0].as_deref(), sent);
+        }
     }
     #[tokio::test(start_paused = true)]
     async fn graphql_error_expires_before_the_next_retry() {

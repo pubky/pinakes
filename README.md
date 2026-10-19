@@ -84,6 +84,10 @@ the environment wins over the file. A platform's key
 (`PINAKES__LIMITS__HOST_RATES__<HOST>`) create their entry. Unknown keys and invalid values stop
 startup, so a misspelt variable is an error, not a silent default.
 
+Set `[http] contact` (`PINAKES__HTTP__CONTACT`) to an address the services you read can reach:
+it goes into the User-Agent, `pinakes/<version> (+https://pubky.app; <contact>)`, and into the
+`email` parameter of the APIs that ask for one. Some services refuse requests without it.
+
 [`.env.example`](.env.example) lists every variable this version reads for secrets (the database
 URL with its password, the admin token, the platform keys) with fake values. Copy it to `.env`,
 fill in what you use and load it:

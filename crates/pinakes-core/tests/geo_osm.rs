@@ -44,10 +44,7 @@ async fn nominatim(
     Query(q): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
-    assert_eq!(
-        headers["user-agent"],
-        "pinakes/0.1.0 (+https://github.com/pubky/pinakes)"
-    );
+    assert_eq!(headers["user-agent"], "pinakes/0.1.0 (+https://pubky.app)");
     assert!(headers["accept-encoding"]
         .to_str()
         .unwrap()

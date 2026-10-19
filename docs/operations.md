@@ -141,6 +141,13 @@ redirects count). `egress.allow_hosts` and `egress.deny_hosts` take exact names 
 decoded body; an oversized page keeps its head metadata with a `truncated` warning. Requests
 time out after ten seconds. Images stay origin URLs and are never fetched.
 
+Every request introduces itself as `pinakes/<version> (+https://pubky.app; <contact>)`, with
+`http.contact` as the contact (`info@synonym.to` in the example configuration; without one,
+`pinakes/<version> (+https://pubky.app)`). Set it to an address the services you read can reach:
+some refuse requests without one. The User-Agent never names a code-hosting site, which some
+services refuse as an undeclared tool. Event platform adapters that need a browser profile keep
+their own User-Agent.
+
 Two clients are outside that policy. Nominatim and Nexus are trusted, operator-configured
 upstreams at fixed URLs that no reference can change: their clients do not apply the web DNS
 pinning or the private-address refusal (Nexus defaults to loopback), so configure their URLs and
