@@ -124,6 +124,12 @@ fn facts(entity: &musicbrainz::Entity) -> Vec<crate::also_on::Fact> {
             .length_ms
             .map(|ms| Fact::new("duration", ((ms + 500) / 1000).to_string())),
     );
+    facts.extend(
+        entity
+            .artist_type
+            .iter()
+            .map(|t| Fact::new("artist_type", t)),
+    );
     facts
 }
 

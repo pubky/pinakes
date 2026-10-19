@@ -285,9 +285,18 @@ async fn run_job_inner(
             .into()
         })
     })
-    .and_then(|r| r)
-    .map(|mut doc| {
-        crate::music::type_card(&job.uri, &mut doc);
+    .and_then(|r| r);
+    // What the also-on sources said about the artist (a person or a group), if anything.
+    let artist_type: Option<String> = if result.is_ok() {
+        sqlx::query_scalar("SELECT value FROM resource_fact WHERE resource_id=$1 AND name='artist_type' AND expires_at>now() ORDER BY value LIMIT 1")
+            .bind(&job.id)
+            .fetch_optional(pool)
+            .await?
+    } else {
+        None
+    };
+    let result = result.map(|mut doc| {
+        crate::music::type_card(&job.uri, artist_type.as_deref(), &mut doc);
         doc
     });
     guarded_finish_job(

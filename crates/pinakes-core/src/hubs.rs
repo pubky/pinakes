@@ -140,6 +140,8 @@ pub mod musicbrainz {
         pub artist: Option<String>,
         /// Recordings: the length in milliseconds.
         pub length_ms: Option<u64>,
+        /// Artists: `Person`, `Group`, `Orchestra`, `Choir`, `Character` or `Other`.
+        pub artist_type: Option<String>,
     }
     /// What a URL is linked to: each current target with its level.
     #[derive(Clone, Debug, Default, PartialEq)]
@@ -224,6 +226,11 @@ pub mod musicbrainz {
             length_ms: v["length"]
                 .as_u64()
                 .filter(|ms| (1..=86_400_000).contains(ms)),
+            artist_type: (kind == MbKind::Artist)
+                .then(|| v["type"].as_str())
+                .flatten()
+                .filter(|t| t.len() <= 32 && t.bytes().all(|b| b.is_ascii_alphabetic()))
+                .map(str::to_owned),
         })
     }
     fn inc(kind: MbKind) -> &'static str {

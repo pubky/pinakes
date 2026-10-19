@@ -872,3 +872,64 @@ async fn trending_counts_references_inside_the_window(pool: PgPool) {
         "{plan:?}"
     );
 }
+
+/// An artist page is a `MusicGroup`, or a `Person` once MusicBrainz says the artist is one
+/// (`artist_type`): the next resolve types it so.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_artist_is_a_person_when_musicbrainz_says_so(pool: PgPool) {
+    use pinakes_core::{also_on::Fact, config::QueueConfig, queue, resolver::Resolver};
+    struct Page;
+    #[async_trait]
+    impl Resolver for Page {
+        fn name(&self) -> &'static str {
+            "web"
+        }
+        fn matches(&self, _: &str) -> bool {
+            true
+        }
+        async fn resolve(&self, uri: &str) -> anyhow::Result<ResourceMeta> {
+            let mut d = ResourceMeta::new(uri, "web", 3600);
+            d.name = Some("Thom Yorke".into());
+            Ok(d)
+        }
+        fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+            Duration::from_secs(3600)
+        }
+    }
+    let uri = "https://www.deezer.com/artist/1";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let resolve = || async {
+        sqlx::query("UPDATE resource SET next_attempt_at=now(),final=false WHERE id=$1")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let job = queue::claim(&pool, "web", &QueueConfig::default())
+            .await
+            .unwrap()
+            .expect("due");
+        queue::run_job(&pool, &Page, &QueueConfig::default(), &job)
+            .await
+            .unwrap();
+        sqlx::query_scalar::<_, String>("SELECT type FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    assert_eq!(resolve().await, "MusicGroup");
+    pinakes_core::also_on::record(
+        &pool,
+        &id,
+        "musicbrainz",
+        Found {
+            facts: vec![Fact::new("artist_type", "Person")],
+            ..Default::default()
+        },
+        Duration::from_secs(86400),
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resolve().await, "Person");
+}
