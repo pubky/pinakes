@@ -34,8 +34,8 @@ The type follows the item's `mediatype`: `Book` (texts), `VideoObject` (movies),
 (audio, etree), `ImageObject` (image), `SoftwareApplication` (software), `Dataset` (data),
 `WebSite` (web), `Collection` (collection), else `CreativeWork`. `site` is "Internet Archive",
 `name` the title, `description` the plain text of the item's description, `image` the item's
-thumbnail (`https://archive.org/services/img/{identifier}`). `start` is the item's `date` only
-when it is a full date (a year such as `1888` stays in the `date` fact). The attribution is the
+thumbnail (`https://archive.org/services/img/{identifier}`). The item's `date`, as given (often
+just a year such as `1888`), is a fact. The attribution is the
 item's licence (the short name of a Creative Commons licence, else the licence URL), else its
 rights statement.
 

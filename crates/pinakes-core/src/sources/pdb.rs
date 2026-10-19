@@ -117,7 +117,7 @@ pub fn parse(status: u16, raw: &[u8], id: &str) -> Result<Option<Card>> {
     card.name = text(&v["struct"]["title"]);
     card.attribution = Some(ATTRIBUTION.into());
     let accession = &v["rcsb_accession_info"];
-    card.start = time(&accession["initial_release_date"]);
+    card.detail("released", date(&accession["initial_release_date"]));
     card.detail("deposit_date", date(&accession["deposit_date"]));
     card.detail("revision_date", date(&accession["revision_date"]));
     let methods: Vec<String> = v["exptl"]
@@ -207,6 +207,7 @@ impl Source for Pdb {
     fn facts(&self) -> &'static [&'static str] {
         &[
             "page_url",
+            "released",
             "doi",
             "deposit_date",
             "revision_date",
@@ -332,9 +333,10 @@ mod tests {
             Some("THE CRYSTAL STRUCTURE OF HUMAN DEOXYHAEMOGLOBIN AT 1.74 ANGSTROMS RESOLUTION")
         );
         assert_eq!(
-            card.start.unwrap().to_rfc3339(),
-            "1984-07-17T00:00:00+00:00"
+            card.start, None,
+            "a date of a thing, not of an event, is a fact"
         );
+        assert_eq!(card.details["released"], "1984-07-17");
         assert_eq!(card.attribution.as_deref(), Some(ATTRIBUTION));
         let d = &card.details;
         assert_eq!(d["deposit_date"], "1984-03-07");
@@ -370,9 +372,10 @@ mod tests {
             Some("Structure of the SARS-CoV-2 spike glycoprotein (closed state)")
         );
         assert_eq!(
-            card.start.unwrap().to_rfc3339(),
-            "2020-03-11T00:00:00+00:00"
+            card.start, None,
+            "a date of a thing, not of an event, is a fact"
         );
+        assert_eq!(card.details["released"], "2020-03-11");
         let d = &card.details;
         assert_eq!(d["methods"], json!(["ELECTRON MICROSCOPY"]));
         assert_eq!(d["resolution"], 2.8);

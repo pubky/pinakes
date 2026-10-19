@@ -49,10 +49,10 @@ The card types are local, not schema.org: `BitcoinBlock`, `BitcoinTransaction`,
 - Block: `name` "Block 481,824", `start` the block time.
 - Transaction: `name` "Transaction {txid}", `start` the block time once confirmed.
 - Address: `name` the address.
-- Lightning node: `name` its alias, `start` when it was first seen. Its location is IP
-  geolocation, not a place, so the card has no point.
-- Lightning channel: `name` "Channel {short id}", `start` when it was opened and `end` when it
-  closed.
+- Lightning node: `name` its alias; when it was first seen is the `first_seen` fact. Its location
+  is IP geolocation, not a place, so the card has no point.
+- Lightning channel: `name` "Channel {short id}"; when it was opened and closed are the `created`
+  and `closed` facts (an open channel has no `closed`).
 
 | Fact | Meaning |
 | --- | --- |
@@ -66,7 +66,9 @@ The card types are local, not schema.org: `BitcoinBlock`, `BitcoinTransaction`,
 | `fee`, `vsize`, `inputs`, `outputs`, `output_value`, `coinbase` | A transaction (satoshis, vbytes) |
 | `received`, `balance`, `unconfirmed_tx_count` | An address (confirmed satoshis) |
 | `public_key`, `alias`, `color`, `capacity`, `channels`, `updated_at` | A Lightning node (capacity in satoshis) |
+| `first_seen` | When the Lightning node was first seen (RFC 3339) |
 | `short_id`, `status`, `funding_tx`, `funding_output`, `closing_tx` | A Lightning channel (`active`, `inactive` or `closed`) |
+| `created`, `closed` | When the channel was opened and closed (RFC 3339) |
 | `node1`, `node1_alias`, `node2`, `node2_alias` | The channel's two nodes |
 
 ## Limits

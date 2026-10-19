@@ -28,7 +28,7 @@ A record the API doesn't know (404) or that was deleted (410) is `missing`.
 The type follows the record's resource type: `Dataset`, `SoftwareSourceCode`, `ScholarlyArticle`
 (a publication; `Book`, `Chapter`, `Report` or `Thesis` for those subtypes), `ImageObject`,
 `VideoObject`, else `CreativeWork`. `site` is "Zenodo", `name` the title, `description` the
-description as plain text, and `start` the publication date when it is a full date. `image` is
+description as plain text; the publication date, as given, is the `publication_date` fact. `image` is
 Zenodo's preview of the record's files, only for open records under CC0 or CC BY. `attribution`
 is the licence, e.g. "CC BY 4.0".
 
@@ -41,7 +41,7 @@ is the licence, e.g. "CC BY 4.0".
 | `access_right` | `open`, `embargoed`, `restricted` or `closed` |
 | `communities` | The Zenodo communities the record is in |
 | `keywords` | The record's keywords |
-| `publication_date` | The publication date, when it is less precise than a day |
+| `publication_date` | The publication date, as given (`YYYY-MM-DD`, or less precise) |
 | `version` | The version the record names |
 | `concept_record`, `concept_doi` | The work (all versions) the record is a version of |
 | `latest_version` | On a concept card: the latest version's record id |

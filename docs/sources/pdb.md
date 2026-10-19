@@ -27,12 +27,12 @@ well).
 ## Card
 
 `Dataset`, with `site` "RCSB PDB", `name` the structure's title (as deposited, often in capitals),
-`start` the initial release, and the attribution "RCSB PDB (CC0 1.0)".
+and the attribution "RCSB PDB (CC0 1.0)". A structure is not an event, so its dates are facts.
 
 | Fact | Meaning |
 | --- | --- |
 | `doi` | The entry's own DOI (`10.2210/pdb{id}/pdb`), when the entry states it |
-| `deposit_date`, `revision_date` | `YYYY-MM-DD` |
+| `released`, `deposit_date`, `revision_date` | The initial release, deposit and last revision, `YYYY-MM-DD` |
 | `methods` | Experimental methods, e.g. `X-RAY DIFFRACTION` |
 | `resolution` | In ångströms |
 | `polymer_entity_count` | Distinct polymer entities |

@@ -11,8 +11,7 @@
 //! separate small request (`size_request`). An unknown identifier and a taken-down ("darked")
 //! item both answer 200 with an error that names the identifier.
 use super::kit::{
-    fetch, host_and_segments, html_text, int, json, plain, text, time, web_url, Card, Key, Link,
-    Request,
+    fetch, host_and_segments, html_text, int, json, plain, text, web_url, Card, Key, Link, Request,
 };
 use super::{Example, Source};
 use crate::{model::ResourceMeta, resolver::cards};
@@ -191,7 +190,6 @@ pub fn parse(status: u16, raw: &[u8], id: &str) -> Result<Option<Card>> {
     card.description = (!description.is_empty()).then(|| description.join("\n"));
     card.image = Some(format!("https://archive.org/services/img/{id}"));
     let date = text(&m["date"]);
-    card.start = date.as_ref().and_then(|d| time(&Value::from(d.as_str())));
     let license = text(&m["licenseurl"])
         .and_then(|u| web_url(&u))
         .map(String::from);
@@ -450,8 +448,8 @@ mod tests {
             Some("The Bitcoin white paper by Satoshi Nakamoto")
         );
         assert_eq!(
-            card.start.unwrap().to_rfc3339(),
-            "2008-10-31T00:00:00+00:00"
+            card.start, None,
+            "a date of a thing, not of an event, is a fact"
         );
         assert_eq!(
             card.details["creators"],
@@ -499,8 +497,8 @@ mod tests {
         assert_eq!(paper.attribution.as_deref(), Some("CC BY 4.0"));
         assert_eq!(paper.details["rights"], "Authors retain copyright.");
         assert_eq!(
-            paper.start.unwrap().to_rfc3339(),
-            "2026-04-28T00:00:00+00:00"
+            paper.start, None,
+            "a date of a thing, not of an event, is a fact"
         );
     }
 

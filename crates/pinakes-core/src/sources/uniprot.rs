@@ -13,7 +13,7 @@
 //! naming the accessions that replace it, and a deleted one is missing. The data is CC BY 4.0,
 //! credited to UniProt.
 use super::{
-    kit::{encode, fetch, host_and_segments, int, json, text, time, Card, Link, Request},
+    kit::{encode, fetch, host_and_segments, int, json, text, Card, Link, Request},
     Example, Source,
 };
 use crate::model::ResourceMeta;
@@ -242,7 +242,7 @@ fn entry(v: &Value, acc: &str) -> Result<Option<Entry>> {
         })
         .filter(|t| !t.is_empty());
     let audit = &v["entryAudit"];
-    card.start = time(&audit["firstPublicDate"]);
+    card.detail("first_public", text(&audit["firstPublicDate"]));
     card.detail("entry_name", text(&v["uniProtkbId"]));
     let genes: Vec<String> = v["genes"]
         .as_array()
@@ -325,6 +325,7 @@ impl Source for Uniprot {
     fn facts(&self) -> &'static [&'static str] {
         &[
             "page_url",
+            "first_public",
             "entry_name",
             "gene",
             "genes",
@@ -546,9 +547,10 @@ mod tests {
             Some("Involved in oxygen transport from the lung to the various peripheral tissues")
         );
         assert_eq!(
-            card.start.unwrap().to_rfc3339(),
-            "1986-07-21T00:00:00+00:00"
+            card.start, None,
+            "a date of a thing, not of an event, is a fact"
         );
+        assert_eq!(card.details["first_public"], "1986-07-21");
         assert_eq!(card.attribution.as_deref(), Some(ATTRIBUTION));
         let d = &card.details;
         assert_eq!(d["entry_name"], "HBA_HUMAN");
@@ -584,9 +586,10 @@ mod tests {
             .unwrap()
             .starts_with("Multifunctional transcription factor"));
         assert_eq!(
-            card.start.unwrap().to_rfc3339(),
-            "1987-08-13T00:00:00+00:00"
+            card.start, None,
+            "a date of a thing, not of an event, is a fact"
         );
+        assert_eq!(card.details["first_public"], "1987-08-13");
         assert_eq!(card.details["gene"], "TP53");
         assert_eq!(card.details["length"], 393);
         assert_eq!(card.details["sequence_version"], 4);

@@ -18,7 +18,6 @@ use super::{Example, Source};
 use crate::model::ResourceMeta;
 use anyhow::{bail, ensure, Context, Result};
 use async_trait::async_trait;
-use chrono::NaiveDate;
 use percent_encoding::{
     percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS, NON_ALPHANUMERIC,
 };
@@ -219,21 +218,6 @@ fn untracked(raw: &str) -> Option<String> {
     Some(url.into())
 }
 
-/// The day of an Exif-style date (`2017-06-24 08:45:10`, a camera's local time, or a bare date).
-/// Read as midnight UTC, like every date without a time zone.
-fn day(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    let (date, rest) = (value.get(..10)?, &value[10..]);
-    let time = rest.get(1..).unwrap_or_default();
-    let clock = rest.starts_with([' ', 'T'])
-        && time.len() >= 5
-        && time.bytes().all(|b| b.is_ascii_digit() || b == b':');
-    if !(rest.is_empty() || clock) {
-        return None;
-    }
-    let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
-    Some(date.and_hms_opt(0, 0, 0)?.and_utc())
-}
-
 /// The schema.org type of a file by its MIME type.
 fn type_name(mime: &str) -> &'static str {
     match mime.split('/').next() {
@@ -339,7 +323,6 @@ pub fn parse(status: u16, raw: &[u8], target: &Target) -> Result<Option<Card>> {
         .find(|c| c["primary"].as_bool() == Some(true) && c["globe"].as_str() == Some("earth"))
         .and_then(|c| Point::new(float(&c["lat"])?, float(&c["lon"])?));
     let date = plain("DateTimeOriginal");
-    card.start = date.as_deref().and_then(day);
     let author = plain("Artist");
     let license = plain("LicenseShortName");
     let credit = plain("Attribution").or_else(|| author.clone());
@@ -593,8 +576,8 @@ mod tests {
         );
         assert_eq!(card.point, Point::new(37.808838, -122.47525));
         assert_eq!(
-            card.start.unwrap().to_rfc3339(),
-            "2017-06-24T00:00:00+00:00"
+            card.start, None,
+            "a date of a thing, not of an event, is a fact"
         );
         assert_eq!(
             card.attribution.as_deref(),

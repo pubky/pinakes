@@ -171,7 +171,10 @@ pub fn parse(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
     }
     card.name = text(&v["title"]);
     card.description = v["description"].as_str().and_then(html_text);
-    card.start = time(&v["published_date"]);
+    card.detail(
+        "published",
+        time(&v["published_date"]).map(|t| t.to_rfc3339()),
+    );
     let licence = text(&v["license"]["name"]);
     card.attribution = licence.clone();
     if licence.as_deref().is_some_and(open_licence) {
@@ -231,6 +234,7 @@ impl Source for Figshare {
     fn facts(&self) -> &'static [&'static str] {
         &[
             "page_url",
+            "published",
             "doi",
             "authors",
             "license",
@@ -347,9 +351,10 @@ mod tests {
             Some("Temperature data from a WSN node located in a garden. 5000 data points, 1 per minute.")
         );
         assert_eq!(
-            card.start.unwrap().to_rfc3339(),
-            "2014-05-07T12:19:41+00:00"
+            card.start, None,
+            "a date of a thing, not of an event, is a fact"
         );
+        assert_eq!(card.details["published"], "2014-05-07T12:19:41+00:00");
         assert_eq!(card.attribution.as_deref(), Some("CC BY 4.0"));
         assert_eq!(card.image, None, "no thumbnail");
         assert_eq!(

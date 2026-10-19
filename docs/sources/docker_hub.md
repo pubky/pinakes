@@ -25,11 +25,12 @@ is `missing`.
 ## Card
 
 `SoftwareApplication`, with `site` "Docker Hub", `name` the image name (`nginx` for an official
-image, else `{namespace}/{name}`), `description` the repository's short description and `start`
-the date it was registered.
+image, else `{namespace}/{name}`), `description` the repository's short description; the date it was
+registered is the `registered` fact.
 
 | Fact | Meaning |
 | --- | --- |
+| `registered` | When the repository was registered (RFC 3339) |
 | `pull_count` | Pulls so far |
 | `star_count` | Stars |
 | `last_updated` | When an image was last pushed |

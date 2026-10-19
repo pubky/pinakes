@@ -312,7 +312,7 @@ pub fn parse(status: u16, raw: &[u8], repo: &Repo) -> Result<Option<Card>> {
         Kind::Space => text(&v["cardData"]["short_description"]),
         Kind::Model => None,
     };
-    card.start = time(&v["createdAt"]);
+    card.detail("created", time(&v["createdAt"]).map(|t| t.to_rfc3339()));
     let tags = texts(&v["tags"]);
     card.detail("author", text(&v["author"]));
     card.detail(
@@ -371,6 +371,7 @@ impl Source for HuggingFace {
     fn facts(&self) -> &'static [&'static str] {
         &[
             "page_url",
+            "created",
             "doi",
             "author",
             "title",
@@ -722,9 +723,10 @@ mod tests {
         assert_eq!(card.name.as_deref(), Some("meta-llama/Llama-2-7b-hf"));
         assert_eq!(card.description, None);
         assert_eq!(
-            card.start.unwrap().to_rfc3339(),
-            "2023-07-13T16:16:13+00:00"
+            card.start, None,
+            "a date of a thing, not of an event, is a fact"
         );
+        assert_eq!(card.details["created"], "2023-07-13T16:16:13+00:00");
         assert_eq!(card.details["author"], "meta-llama");
         assert_eq!(card.details["gated"], "manual");
         assert_eq!(card.details["license"], "llama2");
@@ -784,9 +786,10 @@ mod tests {
         assert_eq!(card.details["license"], "mit");
         assert_eq!(card.details["arxiv"], serde_json::json!(["2110.14168"]));
         assert_eq!(
-            card.start.unwrap().to_rfc3339(),
-            "2022-04-12T10:22:10+00:00"
+            card.start, None,
+            "a date of a thing, not of an event, is a fact"
         );
+        assert_eq!(card.details["created"], "2022-04-12T10:22:10+00:00");
     }
 
     #[test]

@@ -263,6 +263,16 @@ pub fn fact(value: &Value) -> Option<String> {
     }
 }
 
+/// The card types that happen at a time, and so carry `start` and `end`: a card with a past
+/// start or end is final, so every other date is a fact.
+pub const DATED: &[&str] = &[
+    "Event",
+    "Observation",
+    "MedicalTrial",
+    "BitcoinBlock",
+    "BitcoinTransaction",
+];
+
 /// The document of a parsed card, checked the way the `official` route checks it: every
 /// attribute is one of the source's facts, no detail is an object, the type is known, and the
 /// document fits its bounds.
@@ -286,6 +296,16 @@ pub fn checked(source: &dyn super::Source, card: &Card) -> ResourceMeta {
         );
     }
     assert_eq!(doc.type_name, card.type_name, "an unknown type");
+    // A past start or end makes a card final (`scheduler::next`): only things that happen at a
+    // time carry them; every other date is a fact.
+    if !DATED.contains(&card.type_name) {
+        assert!(
+            card.start.is_none() && card.end.is_none(),
+            "{}: a {} has no start or end",
+            source.name(),
+            card.type_name
+        );
+    }
     let bounded = doc.clone().bounded(super::attributes()).expect("bounded");
     assert_eq!(
         bounded.attributes.len(),
@@ -443,6 +463,36 @@ pub fn time(v: &Value) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A card of a thing (not an event) is refreshed on the official route's schedule, however
+    /// old its dates; the same card with a past `start` would be final.
+    #[test]
+    fn a_thing_with_old_dates_is_refreshed() {
+        use crate::{model::ResourceMeta, resolver::cards::manifests, sources::docker_hub};
+        let manifest = manifests(&Default::default())
+            .into_iter()
+            .find(|m| m.source == "official")
+            .expect("the official route");
+        let repo = docker_hub::from_uri("https://hub.docker.com/_/nginx").unwrap();
+        let raw = fixture::read("docker_hub", "repo-library-nginx.json");
+        let card = docker_hub::parse(200, &raw, &repo).unwrap().unwrap();
+        assert_eq!(card.details["registered"], "2014-06-05T19:14:45+00:00");
+        let doc = card.into_doc(
+            ResourceMeta::new("docker:library/nginx", "docker_hub", 60),
+            "x",
+        );
+        let now = Utc::now();
+        let refresh = Default::default();
+        let next = crate::scheduler::next(&manifest, &doc, now, &refresh);
+        assert!(next.is_some_and(|at| at > now), "refreshed");
+        let mut dated = doc;
+        dated.start = Some(Utc.with_ymd_and_hms(2014, 6, 5, 19, 14, 45).unwrap());
+        assert_eq!(
+            crate::scheduler::next(&manifest, &dated, now, &refresh),
+            None,
+            "final"
+        );
+    }
 
     /// Link and root forms beyond the sources' examples, one or more per id shape.
     const FORMS: &[&str] = &[

@@ -583,7 +583,7 @@ pub fn parse_node(status: u16, raw: &[u8], network: Network, key: &str) -> Resul
     let mut card = new_card("LightningNode", &t);
     card.name = text(&v["alias"]).or_else(|| Some(key.into()));
     // A node's location is IP geolocation, not a place: no point.
-    card.start = unix(&v["first_seen"]);
+    card.detail("first_seen", unix(&v["first_seen"]).map(|t| t.to_rfc3339()));
     card.detail("public_key", key);
     card.detail("alias", text(&v["alias"]));
     card.detail("color", text(&v["color"]));
@@ -618,8 +618,8 @@ pub fn parse_channel(status: u16, raw: &[u8], network: Network, id: u64) -> Resu
     let mut card = new_card("LightningChannel", &t);
     let short = short_channel_id(id);
     card.name = Some(format!("Channel {short}"));
-    card.start = time(&v["created"]);
-    card.end = time(&v["closing_date"]);
+    card.detail("created", time(&v["created"]).map(|t| t.to_rfc3339()));
+    card.detail("closed", time(&v["closing_date"]).map(|t| t.to_rfc3339()));
     card.detail("short_id", short);
     card.detail("capacity", v["capacity"].as_u64());
     card.detail(
@@ -774,6 +774,9 @@ impl Source for Mempool {
     fn facts(&self) -> &'static [&'static str] {
         &[
             "page_url",
+            "first_seen",
+            "created",
+            "closed",
             // Blocks
             "height",
             "hash",
@@ -1179,9 +1182,10 @@ mod tests {
         assert_eq!(card.name.as_deref(), Some("ACINQ"));
         assert_eq!(card.point, None, "IP geolocation is not a place");
         assert_eq!(
-            card.start.unwrap().to_rfc3339(),
-            "2019-01-02T18:13:39+00:00"
+            card.start, None,
+            "a date of a thing, not of an event, is a fact"
         );
+        assert_eq!(card.details["first_seen"], "2019-01-02T18:13:39+00:00");
         assert_eq!(card.details["capacity"], 36108321892i64);
         assert_eq!(card.details["channels"], 1834);
         assert_eq!(card.also_on.len(), 3);
@@ -1207,10 +1211,12 @@ mod tests {
         assert_eq!(card.type_name, "LightningChannel");
         assert_eq!(card.name.as_deref(), Some("Channel 811984x2037x0"));
         assert_eq!(
-            card.start.unwrap().to_rfc3339(),
-            "2023-10-13T09:32:44+00:00"
+            card.start, None,
+            "a date of a thing, not of an event, is a fact"
         );
-        assert_eq!(card.end, None, "still open");
+        assert_eq!(card.details["created"], "2023-10-13T09:32:44+00:00");
+        assert!(!card.details.contains_key("closed"), "still open");
+        assert_eq!(card.end, None);
         assert_eq!(card.details["capacity"], 500000000);
         assert_eq!(card.details["status"], "active");
         assert_eq!(

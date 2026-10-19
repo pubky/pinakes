@@ -36,12 +36,13 @@ private one; both are `missing` (there is no public repo).
 ## Card
 
 `SoftwareSourceCode` for a model, `Dataset` for a dataset and `WebApplication` for a Space, with
-`site` "Hugging Face", `name` the repo id and `start` its creation time. A dataset's
+`site` "Hugging Face" and `name` the repo id; its creation time is the `created` fact. A dataset's
 `description` is the text the Hub extracts from its dataset card; a Space's is its short
 description; a model has none.
 
 | Fact | Meaning |
 | --- | --- |
+| `created` | When the repo was created (RFC 3339) |
 | `author` | The owner (user or organisation) |
 | `title` | The card's title or pretty name, when it has one |
 | `downloads`, `likes` | As the Hub counts them |

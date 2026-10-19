@@ -37,8 +37,8 @@ A file Commons does not have, and a page id that is not a file's page, are `miss
 `MediaObject` otherwise), with `site` "Wikimedia Commons", `name` the file's object name (else its
 name without the extension), `description` the plain text of its English description, `image` a
 1280-pixel rendering (the file itself when it is a smaller JPEG, PNG, GIF or WebP), `location` the
-file's primary coordinates on Earth, and `start` the day the photo was taken when the file gives a
-full date (the camera's local day; the time stays in `date_original`). The attribution is the
+file's primary coordinates on Earth. The date the photo was taken, as the file gives it, is the
+`date_original` fact. The attribution is the
 file's credit line and licence, e.g. "© Frank Schulenburg / CC BY-SA 4.0".
 
 | Fact | Meaning |

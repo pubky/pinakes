@@ -37,11 +37,12 @@ into. For a merged accession a second search reads that entry. An entry-name lin
 ## Card
 
 `Protein`, with `site` "UniProt", `name` the recommended name, `description` UniProt's curated
-function text, `start` the date the entry was first public, and the attribution
-"UniProt (CC BY 4.0)".
+function text, and the attribution "UniProt (CC BY 4.0)"; the date the entry was first public is
+the `first_public` fact.
 
 | Fact | Meaning |
 | --- | --- |
+| `first_public` | The date the entry was first public, `YYYY-MM-DD` |
 | `entry_name` | E.g. `HBA_HUMAN` |
 | `gene`, `genes` | The gene name, or the names when several genes encode the protein |
 | `organism`, `taxon_id` | Scientific name and NCBI taxonomy id |

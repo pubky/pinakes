@@ -111,7 +111,10 @@ pub fn parse(status: u16, raw: &[u8], r: &Repo) -> Result<Option<Card>> {
         format!("{}/{}", r.namespace, r.name)
     });
     card.description = text(&v["description"]);
-    card.start = time(&v["date_registered"]);
+    card.detail(
+        "registered",
+        time(&v["date_registered"]).map(|t| t.to_rfc3339()),
+    );
     card.detail("pull_count", int(&v["pull_count"]));
     card.detail("star_count", int(&v["star_count"]));
     card.detail(
@@ -154,6 +157,7 @@ impl Source for DockerHub {
     fn facts(&self) -> &'static [&'static str] {
         &[
             "page_url",
+            "registered",
             "pull_count",
             "star_count",
             "last_updated",
@@ -276,9 +280,10 @@ mod tests {
             Some("Official build of Nginx.")
         );
         assert_eq!(
-            card.start.unwrap().to_rfc3339(),
-            "2014-06-05T19:14:45+00:00"
+            card.start, None,
+            "a date of a thing, not of an event, is a fact"
         );
+        assert_eq!(card.details["registered"], "2014-06-05T19:14:45+00:00");
         assert_eq!(card.details["pull_count"], 13485840765i64);
         assert_eq!(card.details["star_count"], 21412);
         assert_eq!(card.details["official"], true);

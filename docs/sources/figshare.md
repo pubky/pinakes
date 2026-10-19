@@ -32,12 +32,14 @@ An article the API doesn't know is `missing`.
 The type follows the item type: `Dataset`, `SoftwareSourceCode`, `ImageObject` (a figure),
 `MediaObject`, `ScholarlyArticle` (a journal or conference contribution, a preprint), `Thesis`,
 `Book`, `Chapter`, `Report`, else `CreativeWork` (posters and presentations among them). `site`
-is "Figshare", `name` the title, `description` the description as plain text, and `start` the
-latest version's publication time. `image` is Figshare's thumbnail, only under CC0 or CC BY.
+is "Figshare", `name` the title and `description` the description as plain text; the latest
+version's publication time is the `published` fact. `image` is Figshare's thumbnail, only under
+CC0 or CC BY.
 `attribution` is the licence, e.g. "CC BY 4.0".
 
 | Fact | Meaning |
 | --- | --- |
+| `published` | When the latest version was published (RFC 3339) |
 | `doi` | The latest version's DOI, and the article's own DOI (without the `.v{n}` suffix) when Figshare minted it; a publisher's DOI for some portal articles |
 | `authors` | The authors, by name |
 | `license` | The licence, e.g. "CC BY 4.0" |

@@ -11,16 +11,12 @@
 //! Links to a record's files name the files, not the record. `sandbox.zenodo.org` is a test
 //! service, and DOI links (`doi.org/10.5281/zenodo.{id}`) belong to the DOI source.
 use super::{
-    kit::{
-        fetch, host_and_segments, html_text, int, json, plain, text, texts, time, Card, Key,
-        Request,
-    },
+    kit::{fetch, host_and_segments, html_text, int, json, plain, text, texts, Card, Key, Request},
     Context, Example, Source,
 };
 use crate::model::ResourceMeta;
 use anyhow::{bail, Context as _, Result};
 use async_trait::async_trait;
-use serde_json::Value;
 
 pub const SITE: &str = "Zenodo";
 
@@ -163,12 +159,7 @@ pub fn parse(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
         }
         return Ok(Some(card));
     }
-    // A date with less than a day's precision stays a detail.
-    let date = text(&m["publication_date"]);
-    match date.as_deref().filter(|d| d.len() == 10) {
-        Some(d) => card.start = time(&Value::from(d)),
-        None => card.detail("publication_date", date),
-    }
+    card.detail("publication_date", text(&m["publication_date"]));
     card.detail("version", text(&m["version"]));
     card.detail("concept_record", concept);
     card.detail("concept_doi", concept_doi);
@@ -301,9 +292,10 @@ mod tests {
             .unwrap()
             .starts_with("This study documents the complex environment"));
         assert_eq!(
-            card.start.unwrap().to_rfc3339(),
-            "2011-04-01T00:00:00+00:00"
+            card.start, None,
+            "a date of a thing, not of an event, is a fact"
         );
+        assert_eq!(card.details["publication_date"], "2011-04-01");
         assert_eq!(card.keys, [Key::new("doi", "10.1175/2010mwr3413.1")]);
         assert_eq!(card.attribution.as_deref(), Some("CC0 1.0"));
         assert_eq!(
