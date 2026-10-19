@@ -53,6 +53,7 @@ or got plain web cards before are read by their source.
 - [`artic`](artic.md): Art Institute of Chicago artworks by id.
 - [`bluesky`](bluesky.md): Bluesky posts and profiles.
 - [`cleveland`](cleveland.md): Cleveland Museum of Art artworks by accession number.
+- [`commons`](commons.md): Wikimedia Commons files (images, video, audio) by file name.
 - [`courtlistener`](courtlistener.md): US court opinions by cluster id.
 - [`discourse`](discourse.md): Topics and posts on any Discourse forum.
 - [`ecfr`](ecfr.md): sections and parts of the Code of Federal Regulations.
@@ -68,6 +69,7 @@ or got plain web cards before are read by their source.
 - [`govinfo`](govinfo.md): US public laws, bills, US Code sections and the Statutes at Large.
 - [`hacker_news`](hacker_news.md): Hacker News items by id (and hnsignals.com pages).
 - [`huggingface`](huggingface.md): Hugging Face models, datasets and Spaces by repo id.
+- [`internet_archive`](internet_archive.md): Internet Archive items (books, films, audio, software…) by identifier.
 - [`legislation_gov_uk`](legislation_gov_uk.md): UK Acts, statutory instruments and retained EU law.
 - [`lobsters`](lobsters.md): Lobsters stories by short id.
 - [`mastodon`](mastodon.md): Mastodon posts on any server.

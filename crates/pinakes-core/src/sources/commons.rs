@@ -11,13 +11,20 @@
 //! Wikimedia asks for a descriptive User-Agent and, without an account, at most one request at a
 //! time and well under five a second. Every file has its own licence and author, which the card
 //! carries as its attribution.
-use super::kit::html_text;
-use super::kit::{float, host_and_segments, json, text, web_url, Card, Point, Request};
+use super::kit::{
+    fetch, float, host_and_segments, html_text, json, text, web_url, Card, Point, Request,
+};
+use super::{Example, Source};
+use crate::model::ResourceMeta;
 use anyhow::{bail, ensure, Context, Result};
+use async_trait::async_trait;
 use chrono::NaiveDate;
-use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
+use percent_encoding::{
+    percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS, NON_ALPHANUMERIC,
+};
 use serde_json::Value;
 
+pub const SITE: &str = "Wikimedia Commons";
 const API: &str = "https://commons.wikimedia.org/w/api.php";
 /// The width of the image the card shows.
 pub const THUMB_WIDTH: u32 = 1280;
@@ -108,11 +115,29 @@ pub fn from_uri(uri: &str) -> Option<Target> {
 }
 
 /// The identifier of a file by title; `None` for a page id until the answer names the title.
+/// Letters outside ASCII are percent-encoded, as URI normalisation writes them.
 pub fn identifier(target: &Target) -> Option<String> {
     match target {
-        Target::Title(name) => Some(format!("commons:File:{name}")),
+        Target::Title(name) => Some(format!(
+            "commons:File:{}",
+            utf8_percent_encode(name, CONTROLS)
+        )),
         Target::PageId(_) => None,
     }
+}
+
+/// The file of a root (`commons:File:{Name}`), already in normal form with letters outside ASCII
+/// percent-encoded (`identifier`).
+pub fn from_root(uri: &str) -> Option<Target> {
+    let encoded = uri.strip_prefix("commons:File:")?;
+    let name = percent_decode_str(encoded).decode_utf8().ok()?;
+    let target = file_name(&name).filter(|n| *n == name).map(Target::Title)?;
+    (identifier(&target).as_deref() == Some(uri)).then_some(target)
+}
+
+/// The file of a root or a Commons link.
+pub fn target(uri: &str) -> Option<Target> {
+    from_root(uri).or_else(|| from_uri(uri))
 }
 
 /// What MediaWiki leaves unescaped in a page URL (`wfUrlencode`).
@@ -371,6 +396,69 @@ pub fn parse_depicts(status: u16, raw: &[u8], page_id: u64) -> Result<Vec<String
         .collect())
 }
 
+/// The source: Wikimedia Commons files by title (or page id).
+pub struct Commons;
+
+#[async_trait]
+impl Source for Commons {
+    fn name(&self) -> &'static str {
+        "commons"
+    }
+    fn reads(&self, uri: &str) -> bool {
+        target(uri).is_some()
+    }
+    /// A `?curid=` link has no root until the answer names the title.
+    fn alias_root(&self, uri: &str) -> Option<String> {
+        let root = identifier(&target(uri)?)?;
+        (root != uri).then_some(root)
+    }
+    fn invalid(&self, uri: &str) -> bool {
+        uri.starts_with("commons:") && from_root(uri).is_none()
+    }
+    fn facts(&self) -> &'static [&'static str] {
+        &[
+            "page_url",
+            "author",
+            "credit",
+            "license_short_name",
+            "license_url",
+            "usage_terms",
+            "attribution_required",
+            "date_original",
+            "mime",
+            "width",
+            "height",
+            "size",
+            "page_id",
+        ]
+    }
+    fn budgets(&self) -> &'static [super::Budget] {
+        &[("commons.wikimedia.org", 1.0, Some(1))]
+    }
+    fn examples(&self) -> &'static [Example] {
+        &[
+            Example {
+                uri: "https://commons.wikimedia.org/wiki/File:Golden_Gate_Bridge_as_seen_from_Battery_East.jpg",
+                card_type: "ImageObject",
+            },
+            Example {
+                uri: "https://commons.wikimedia.org/wiki/File:Bitcoin.svg",
+                card_type: "ImageObject",
+            },
+        ]
+    }
+    async fn resolve(&self, cx: &super::Context<'_>, uri: &str) -> Result<ResourceMeta> {
+        let Some(target) = target(uri) else {
+            return Ok(cx.missing(uri, self));
+        };
+        let f = fetch(cx, &request(&target).context("file title")?).await?;
+        Ok(match parse(f.status, &f.body, &target)? {
+            Some(card) => card.into_doc(cx.card(uri, self), SITE),
+            None => cx.missing(uri, self),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,7 +504,7 @@ mod tests {
         }
         assert_eq!(
             id("https://commons.wikimedia.org/wiki/File:%C3%A9t%C3%A9_%C3%A0_Paris.jpg").as_deref(),
-            Some("commons:File:Été_à_Paris.jpg")
+            Some("commons:File:%C3%89t%C3%A9_%C3%A0_Paris.jpg")
         );
         for uri in [
             "https://commons.wikimedia.org/w/index.php?curid=30202095",
@@ -613,5 +701,82 @@ mod tests {
         assert!(parse_depicts(200, &raw, 1).is_err());
         let none = br#"{"entities":{"M7":{"id":"M7","missing":""}},"success":1}"#;
         assert!(parse_depicts(200, none, 7).unwrap().is_empty());
+    }
+
+    #[test]
+    fn roots_and_aliases() {
+        let c = Commons;
+        for root in [
+            format!("commons:File:{GATE}"),
+            "commons:File:Bitcoin.svg".into(),
+            "commons:File:BitcoinSign.svg".into(),
+            "commons:File:%C3%89t%C3%A9_%C3%A0_Paris.jpg".into(),
+            "commons:File:100%_pure.jpg".into(),
+        ] {
+            assert!(c.reads(&root), "{root}");
+            assert_eq!(c.alias_root(&root), None, "{root}");
+            assert!(!c.invalid(&root), "{root}");
+            assert_eq!(crate::model::identity(&root).unwrap().1, root);
+        }
+        assert_eq!(
+            c.alias_root(&format!(
+                "https://commons.m.wikimedia.org/wiki/Image:{GATE}"
+            )),
+            Some(format!("commons:File:{GATE}"))
+        );
+        // A renamed file's old title is its own static root until the fetch names the new one.
+        assert_eq!(
+            c.alias_root("https://commons.wikimedia.org/wiki/File:Bitcoin_BTC_symbol.svg")
+                .as_deref(),
+            Some("commons:File:Bitcoin_BTC_symbol.svg")
+        );
+        // A page id names a file only after the fetch.
+        let curid = "https://commons.wikimedia.org/w/index.php?curid=30202095";
+        assert!(c.reads(curid));
+        assert_eq!(c.alias_root(curid), None);
+        for uri in [
+            "commons:File:",
+            "commons:File:bitcoin.svg",
+            "commons:File:Bitcoin BTC symbol.svg",
+            "commons:File:A__b.jpg",
+            "commons:Image:Bitcoin.svg",
+            "commons:Bitcoin.svg",
+            "commons:File:Été_à_Paris.jpg",
+            "commons:File:%C3%A9t%C3%A9.jpg",
+            "commons:File:%42itcoin.svg",
+        ] {
+            assert!(c.invalid(uri), "{uri}");
+            assert!(!c.reads(uri), "{uri}");
+        }
+        assert!(!c.invalid("https://upload.wikimedia.org/wikipedia/commons/4/46/Bitcoin.svg"));
+    }
+
+    #[test]
+    fn documents() {
+        let c = Commons;
+        for (file, target) in [
+            ("golden-gate.json", title(GATE)),
+            ("bitcoin-svg.json", title("Bitcoin.svg")),
+            ("curid-30202095.json", Target::PageId(30202095)),
+            ("redirect.json", title("Bitcoin_BTC_symbol.svg")),
+        ] {
+            let card = parse(200, &read(file), &target).unwrap().unwrap();
+            let doc = crate::sources::kit::checked(&c, &card);
+            assert_eq!(doc.attributes["page_url"], card.url);
+            assert_eq!(doc.source_root.as_deref(), Some(card.id.as_str()));
+        }
+        let card = parse(
+            200,
+            &read("redirect.json"),
+            &title("Bitcoin_BTC_symbol.svg"),
+        )
+        .unwrap()
+        .unwrap();
+        let doc = card.into_doc(ResourceMeta::new("x", "commons", 60), SITE);
+        assert_eq!(doc.site, "Wikimedia Commons");
+        assert_eq!(
+            doc.source_root.as_deref(),
+            Some("commons:File:BitcoinSign.svg")
+        );
     }
 }

@@ -9,14 +9,17 @@
 //! item with thousands of files (the full record lists every file). The item's total size is a
 //! separate small request (`size_request`). An unknown identifier and a taken-down ("darked")
 //! item both answer 200 with an error that names the identifier.
-use super::kit::html_text;
 use super::kit::{
-    host_and_segments, int, json, plain, text, time, web_url, Card, Key, Link, Request,
+    fetch, host_and_segments, html_text, int, json, plain, text, time, web_url, Card, Key, Link,
+    Request,
 };
-use crate::resolver::cards;
+use super::{Example, Source};
+use crate::{model::ResourceMeta, resolver::cards};
 use anyhow::{bail, ensure, Context, Result};
+use async_trait::async_trait;
 use serde_json::Value;
 
+pub const SITE: &str = "Internet Archive";
 const VIA: &str = "internet_archive";
 
 /// An item identifier as archive.org writes it: letters, digits, `.`, `-` and `_`.
@@ -44,6 +47,16 @@ pub fn from_uri(uri: &str) -> Option<String> {
 
 pub fn identifier(id: &str) -> String {
     format!("ia:{id}")
+}
+
+/// The item of a root (`ia:{identifier}`).
+pub fn from_root(uri: &str) -> Option<String> {
+    item_id(uri.strip_prefix("ia:")?)
+}
+
+/// The item of a root or an archive.org link.
+pub fn target(uri: &str) -> Option<String> {
+    from_root(uri).or_else(|| from_uri(uri))
 }
 
 /// The item's details page.
@@ -243,6 +256,65 @@ pub fn parse_size(status: u16, raw: &[u8], id: &str) -> Result<Option<u64>> {
         .and_then(|n| u64::try_from(n).ok())
         .map(Some)
         .context("no item size")
+}
+
+/// The source: Internet Archive items by identifier.
+pub struct InternetArchive;
+
+#[async_trait]
+impl Source for InternetArchive {
+    fn name(&self) -> &'static str {
+        "internet_archive"
+    }
+    fn reads(&self, uri: &str) -> bool {
+        target(uri).is_some()
+    }
+    fn alias_root(&self, uri: &str) -> Option<String> {
+        let root = identifier(&target(uri)?);
+        (root != uri).then_some(root)
+    }
+    fn invalid(&self, uri: &str) -> bool {
+        uri.starts_with("ia:") && from_root(uri).is_none()
+    }
+    fn facts(&self) -> &'static [&'static str] {
+        &[
+            "page_url",
+            "creators",
+            "date",
+            "publishers",
+            "languages",
+            "collections",
+            "subjects",
+            "mediatype",
+            "license_url",
+            "rights",
+            "public_date",
+            "ark",
+            // Keys
+            "isbn",
+            "openlibrary",
+            "doi",
+        ]
+    }
+    fn budgets(&self) -> &'static [super::Budget] {
+        &[("archive.org", 0.5, None)]
+    }
+    fn examples(&self) -> &'static [Example] {
+        &[Example {
+            uri: "https://archive.org/details/bitcoin-whitepaper",
+            card_type: "Book",
+        }]
+    }
+    async fn resolve(&self, cx: &super::Context<'_>, uri: &str) -> Result<ResourceMeta> {
+        let Some(id) = target(uri) else {
+            return Ok(cx.missing(uri, self));
+        };
+        let f = fetch(cx, &request(&id).context("item identifier")?).await?;
+        Ok(match parse(f.status, &f.body, &id)? {
+            Some(card) => card.into_doc(cx.card(uri, self), SITE),
+            None => cx.missing(uri, self),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -473,5 +545,59 @@ mod tests {
             Some("CC0 1.0")
         );
         assert_eq!(cc_name("https://example.org/licenses/by/4.0/"), None);
+    }
+
+    #[test]
+    fn roots_and_aliases() {
+        let ia = InternetArchive;
+        for root in [
+            "ia:bitcoin-whitepaper",
+            "ia:Bitcoin-Whitepaper",
+            &format!("ia:{DARK}"),
+        ] {
+            assert!(ia.reads(root), "{root}");
+            assert_eq!(ia.alias_root(root), None, "{root}");
+            assert!(!ia.invalid(root), "{root}");
+            assert_eq!(crate::model::identity(root).unwrap().1, root);
+        }
+        assert_eq!(
+            ia.alias_root("https://archive.org/details/bitcoin-whitepaper/page/n1/mode/2up")
+                .as_deref(),
+            Some("ia:bitcoin-whitepaper")
+        );
+        for uri in ["ia:", "ia:a/b", "ia:.x", "ia:bitcoin whitepaper"] {
+            assert!(ia.invalid(uri), "{uri}");
+            assert!(!ia.reads(uri), "{uri}");
+        }
+        assert!(!ia.invalid("https://archive.org/download/x/y.pdf"));
+        assert!(!ia.reads("https://archive.org/download/x/y.pdf"));
+    }
+
+    #[test]
+    fn documents() {
+        let ia = InternetArchive;
+        for (name, id) in [
+            ("goodytwoshoes00newyiala", "goodytwoshoes00newyiala"),
+            ("bitcoin-whitepaper", "bitcoin-whitepaper"),
+            ("crimepunishment00dost_0", "crimepunishment00dost_0"),
+            (
+                "introductiontoal0000unse_t3a6",
+                "introductiontoal0000unse_t3a6",
+            ),
+            ("aside-cardiovascular-319", "aside-cardiovascular-319"),
+        ] {
+            let card = card(name, id);
+            let doc = crate::sources::kit::checked(&ia, &card);
+            assert_eq!(doc.attributes["page_url"], card.url);
+            assert_eq!(doc.source_root.as_deref(), Some(card.id.as_str()));
+        }
+        let doc = card("goodytwoshoes00newyiala", "goodytwoshoes00newyiala")
+            .into_doc(ResourceMeta::new("x", "internet_archive", 60), SITE);
+        assert_eq!(doc.site, "Internet Archive");
+        assert_eq!(doc.attributes["openlibrary"], "OL7095326M; OL16077419W");
+        assert_eq!(doc.attributes["collections"], "cdl; yrlsc; iacl; americana");
+        let doc = card("crimepunishment00dost_0", "crimepunishment00dost_0")
+            .into_doc(ResourceMeta::new("x", "internet_archive", 60), SITE);
+        assert_eq!(doc.attributes["isbn"], "9780140449136");
     }
 }

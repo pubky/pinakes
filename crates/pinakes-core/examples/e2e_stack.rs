@@ -119,7 +119,9 @@ impl Fixture {
             {"kind":"zenodo","uri":"https://zenodo.org/records/1234567","type":"ScholarlyArticle"},
             {"kind":"artic","uri":"https://www.artic.edu/artworks/27992","type":"VisualArtwork"},
             {"kind":"cleveland","uri":"https://www.clevelandart.org/art/1958.39","type":"VisualArtwork"},
-            {"kind":"met","uri":"https://www.metmuseum.org/art/collection/search/436535","type":"VisualArtwork"}
+            {"kind":"met","uri":"https://www.metmuseum.org/art/collection/search/436535","type":"VisualArtwork"},
+            {"kind":"commons","uri":"https://commons.wikimedia.org/wiki/File:Golden_Gate_Bridge_as_seen_from_Battery_East.jpg","type":"ImageObject"},
+            {"kind":"internet_archive","uri":"https://archive.org/details/bitcoin-whitepaper","type":"Book"}
         ]);
         Ok(Self {
             boundary: Arc::default(),
@@ -178,6 +180,8 @@ impl Dns for FixtureDns {
                 | "collectionapi.metmuseum.org"
                 | "openaccess-api.clevelandart.org"
                 | "api.artic.edu"
+                | "commons.wikimedia.org"
+                | "archive.org"
         ) {
             "93.184.216.34"
         } else {
@@ -237,6 +241,8 @@ impl Transport for Fixture {
             "api.artic.edu" if u.path()=="/api/v1/artworks/27992"=>{ensure!(o.headers.iter().any(|(k,_)|*k=="AIC-User-Agent"),"missing AIC-User-Agent");("application/json",include_str!("../tests/fixtures/sources/artic/artwork-27992.json").into())},
             "openaccess-api.clevelandart.org" if u.path()=="/api/artworks/1958.39"=>("application/json",include_str!("../tests/fixtures/sources/cleveland/artwork-1958.39.json").into()),
             "collectionapi.metmuseum.org" if u.path()=="/public/collection/v1/objects/436535"=>("application/json",include_str!("../tests/fixtures/sources/met/object-436535.json").into()),
+            "archive.org" if u.path()=="/metadata/bitcoin-whitepaper/metadata"=>("application/json",include_str!("../tests/fixtures/sources/internet_archive/bitcoin-whitepaper.json").into()),
+            "commons.wikimedia.org" if u.path()=="/w/api.php" && u.query_pairs().any(|(k,v)| k=="titles" && v=="File:Golden Gate Bridge as seen from Battery East.jpg")=>("application/json",include_str!("../tests/fixtures/sources/commons/golden-gate.json").into()),
             _=>bail!("no fixture for upstream host {}",u.host_str().unwrap_or("")),
         };
         Ok(Fetched {

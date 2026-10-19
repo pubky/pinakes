@@ -59,6 +59,8 @@ enabled = true
 enabled = true
 [sources.cleveland]
 enabled = true
+[sources.commons]
+enabled = true
 [sources.courtlistener]
 enabled = true
 [sources.discourse]
@@ -88,6 +90,8 @@ enabled = true
 [sources.hacker_news]
 enabled = true
 [sources.huggingface]
+enabled = true
+[sources.internet_archive]
 enabled = true
 [sources.legislation_gov_uk]
 enabled = true

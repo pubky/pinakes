@@ -1611,6 +1611,18 @@
                     "uri": "https://www.clevelandart.org/art/1958.39"
                   }
                 },
+                "resolve-commons-1": {
+                  "summary": "https://commons.wikimedia.org/wiki/File:Golden_Gate_Bridge_as_seen_from_Battery_East.jpg",
+                  "value": {
+                    "uri": "https://commons.wikimedia.org/wiki/File:Golden_Gate_Bridge_as_seen_from_Battery_East.jpg"
+                  }
+                },
+                "resolve-commons-2": {
+                  "summary": "https://commons.wikimedia.org/wiki/File:Bitcoin.svg",
+                  "value": {
+                    "uri": "https://commons.wikimedia.org/wiki/File:Bitcoin.svg"
+                  }
+                },
                 "resolve-courtlistener-1": {
                   "summary": "https://www.courtlistener.com/opinion/2812209/obergefell-v-hodges/",
                   "value": {
@@ -1879,6 +1891,12 @@
                   "summary": "https://infomaniak.events/en-ch/conferences/seminaire-des-autorites-2026/92392f2a-6711-4917-b9e9-60c88e8c550a/events/396911",
                   "value": {
                     "uri": "https://infomaniak.events/en-ch/conferences/seminaire-des-autorites-2026/92392f2a-6711-4917-b9e9-60c88e8c550a/events/396911"
+                  }
+                },
+                "resolve-internet-archive-1": {
+                  "summary": "https://archive.org/details/bitcoin-whitepaper",
+                  "value": {
+                    "uri": "https://archive.org/details/bitcoin-whitepaper"
                   }
                 },
                 "resolve-legislation-gov-uk-1": {
