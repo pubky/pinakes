@@ -26,6 +26,15 @@
     "status": 200,
     "url": "https://itunes.apple.com/lookup?id=1200361736&entity=podcast&country=us"
   },
+  "itunes-podcast-1584274529": {
+    "bytes": 1587,
+    "content_type": "text/javascript",
+    "file": "itunes-podcast-1584274529.json",
+    "recorded_at": "2026-10-19T22:21:28+00:00",
+    "sha256": "51ef2b8c7256252ca7a9348e74420bcda15c9430a4670c19551061244686db46",
+    "status": 200,
+    "url": "https://itunes.apple.com/lookup?id=1584274529&entity=podcast&country=us"
+  },
   "itunes-podcast-missing": {
     "bytes": 42,
     "content_type": "text/javascript",

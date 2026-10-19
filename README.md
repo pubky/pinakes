@@ -92,7 +92,8 @@ refuse requests without it; links to them (SEC EDGAR) wait until it is set. An a
 github is refused, since some services block such User-Agents.
 
 [`.env.example`](.env.example) lists every variable this version reads for secrets (the database
-URL with its password, the admin token, the platform keys) with fake values. Copy it to `.env`,
+URL with its password, the admin token, the platform keys, the Podcast Index key and secret)
+with fake values. Copy it to `.env`,
 fill in what you use and load it:
 
 - a shell: `set -a; . ./.env; set +a`, then start `pinakesd`;

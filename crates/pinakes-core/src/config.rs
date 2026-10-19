@@ -29,6 +29,8 @@ pub struct Config {
     pub groups: crate::groups::GroupConfig,
     /// "Also on": keys and derived links from sources (`also_on::registry`).
     pub also_on: crate::also_on::AlsoOnConfig,
+    /// The Podcast Index API's key and secret, for the `podcasts` also-on source.
+    pub podcast_index: crate::also_on::podcasts::PodcastIndexConfig,
     pub api: ApiConfig,
     pub canary: CanaryConfig,
     /// Every cap, timeout, budget, backoff and refresh tier, with documented defaults
@@ -127,6 +129,7 @@ impl Config {
             refresh: RefreshConfig::default(),
             canary: CanaryConfig::default(),
             also_on: Default::default(),
+            podcast_index: Default::default(),
             nexus_url: "http://127.0.0.1:8080".into(),
             poll_secs: 5,
             ingest: IngestConfig::default(),
@@ -911,6 +914,24 @@ mod tests {
         ] {
             assert!(load(&[(unknown, "x")]).is_err(), "{unknown}");
         }
+    }
+    #[test]
+    fn the_podcast_index_pair_comes_from_the_environment_and_stays_secret() {
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        apply_env(
+            &mut value,
+            [
+                ("PINAKES__PODCAST_INDEX__KEY", "ABCDEFKEY"),
+                ("PINAKES__PODCAST_INDEX__SECRET", "ABCDEFSECRET"),
+            ]
+            .map(|(k, v)| (k.to_string(), v.to_string())),
+        )
+        .unwrap();
+        let cfg = Config::from_value(value).unwrap();
+        assert_eq!(cfg.podcast_index.key.as_deref(), Some("ABCDEFKEY"));
+        assert_eq!(cfg.podcast_index.secret.as_deref(), Some("ABCDEFSECRET"));
+        let shown = format!("{cfg:?} {}", serde_json::to_string(&cfg).unwrap());
+        assert!(!shown.contains("ABCDEF"), "{shown}");
     }
     /// `.env.example` names only variables the config accepts (its commented examples too), and
     /// a key for every platform that needs one.

@@ -1,7 +1,7 @@
 //! The book, podcast and film sources through Egress, against the answers recorded in
 //! `tests/fixtures/media` (each family's `provenance.json` names the URL of every file).
 use pinakes_core::{
-    also_on::{books::Books, Context, Found, Source, Subject},
+    also_on::{books::Books, podcasts::Podcasts, Context, Found, Source, Subject},
     config::{Config, EgressConfig},
     model::ResourceMeta,
     resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport},
@@ -35,6 +35,8 @@ struct Answer {
 struct Recorded {
     answers: BTreeMap<String, Answer>,
     seen: Mutex<Vec<String>>,
+    /// The Podcast Index key each Podcast Index request carried.
+    signed_with: Mutex<Vec<Option<String>>>,
 }
 fn read(family: &str, file: &str) -> Vec<u8> {
     let path = format!(
@@ -79,7 +81,22 @@ impl Recorded {
         Arc::new(Self {
             answers,
             seen: Mutex::new(Vec::new()),
+            signed_with: Mutex::new(Vec::new()),
         })
+    }
+    /// The same, with one more answer.
+    fn with(url: &str, status: u16, location: &str) -> Arc<Self> {
+        let mut recorded = Arc::into_inner(Self::new()).unwrap();
+        recorded.answers.insert(
+            url.into(),
+            Answer {
+                status,
+                location: Some(location.into()),
+                content_type: "text/html".into(),
+                body: Vec::new(),
+            },
+        );
+        Arc::new(recorded)
     }
     fn seen(&self) -> Vec<String> {
         self.seen.lock().unwrap().clone()
@@ -95,9 +112,21 @@ impl Transport for Recorded {
         &self,
         url: &url::Url,
         _: &[SocketAddr],
-        _: &FetchOptions,
+        options: &FetchOptions,
     ) -> anyhow::Result<Fetched> {
         self.seen.lock().unwrap().push(url.to_string());
+        if url.host_str() == Some("api.podcastindex.org") {
+            assert!(options.sensitive);
+            let header = |name: &str| {
+                options
+                    .headers
+                    .iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| v.clone())
+            };
+            assert_eq!(header("Authorization").map(|h| h.len()), Some(40));
+            self.signed_with.lock().unwrap().push(header("X-Auth-Key"));
+        }
         let param = |u: &url::Url, k: &str| {
             u.query_pairs()
                 .find(|(key, _)| key == k)
@@ -264,4 +293,215 @@ async fn an_unknown_isbn_finds_nothing() {
         .unwrap();
     assert_eq!(found, Found::default());
     assert_eq!(recorded.seen().len(), 1);
+}
+
+/// A config with a Podcast Index key and secret (fake: the answers are recorded).
+fn indexed() -> Config {
+    let mut config = Config::default();
+    config.podcast_index.key = Some("KEY".into());
+    config.podcast_index.secret = Some("SECRET".into());
+    config
+}
+fn feed_card(uri: &str, feed: &str, item: Option<&str>) -> Subject {
+    let mut doc = ResourceMeta::new(uri, "media", 3600);
+    doc.attributes.insert("podcast_feed".into(), feed.into());
+    if let Some(item) = item {
+        doc.attributes.insert("podcast_guid".into(), item.into());
+    }
+    let kind = if item.is_some() {
+        "PodcastEpisode"
+    } else {
+        "PodcastSeries"
+    };
+    subject(uri, Some(kind), Some(doc))
+}
+const DAILY: &str = "https://podcasts.apple.com/us/podcast/the-daily/id1200361736";
+
+#[tokio::test]
+async fn an_apple_show_without_podcast_index() {
+    let recorded = Recorded::new();
+    let cx = cx(recorded.clone(), Config::default());
+    let found = Podcasts
+        .lookup(&cx, &subject(DAILY, None, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        keys(&found),
+        ["podcast:apple:1200361736", "wikidata:Q48741148"]
+    );
+    assert_eq!(
+        links(&found),
+        [
+            (
+                "Apple Podcasts",
+                "https://podcasts.apple.com/us/podcast/id1200361736",
+                "itunes"
+            ),
+            ("Pocket Casts", "https://pca.st/itunes/1200361736", "itunes"),
+            ("Castro", "https://castro.fm/itunes/1200361736", "itunes"),
+            (
+                "Spotify",
+                "https://open.spotify.com/show/3IM0lmZxpFAY7CwMuv9H4g",
+                "wikidata"
+            ),
+            (
+                "Podcast Index",
+                "https://podcastindex.org/podcast/743229",
+                "wikidata"
+            ),
+            (
+                "Podchaser",
+                "https://www.podchaser.com/podcasts/243479",
+                "wikidata"
+            ),
+            ("Castbox", "https://castbox.fm/channel/id463650", "wikidata"),
+        ]
+    );
+    assert!(!recorded.seen().iter().any(|u| u.contains("podcastindex")));
+}
+
+#[tokio::test]
+async fn an_apple_show_with_podcast_index() {
+    let recorded = Recorded::new();
+    let cx = cx(recorded.clone(), indexed());
+    let found = Podcasts
+        .lookup(&cx, &subject(DAILY, None, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        keys(&found),
+        [
+            "podcast:apple:1200361736",
+            "podcast:guid:304b84f0-07b0-5265-b6b7-da5cf5aeb56e",
+            "wikidata:Q48741148"
+        ]
+    );
+    assert!(links(&found).contains(&(
+        "Podcast Index",
+        "https://podcastindex.org/podcast/743229",
+        "podcastindex"
+    )));
+    assert_eq!(found.facts.len(), 1);
+    assert_eq!(
+        *recorded.signed_with.lock().unwrap(),
+        [Some("KEY".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_apple_id_asks_nobody_else() {
+    let recorded = Recorded::new();
+    let cx = cx(recorded.clone(), indexed());
+    let found = Podcasts
+        .lookup(
+            &cx,
+            &subject("https://podcasts.apple.com/us/podcast/id1", None, None),
+        )
+        .await
+        .unwrap();
+    assert_eq!(found, Found::default());
+    assert_eq!(recorded.seen().len(), 1, "Podcast Index would name a show");
+}
+
+#[tokio::test]
+async fn an_apple_episode() {
+    let recorded = Recorded::new();
+    let cx = cx(recorded.clone(), Config::default());
+    let found = Podcasts
+        .lookup(
+            &cx,
+            &subject(&format!("{DAILY}?i=1000797051580"), None, None),
+        )
+        .await
+        .unwrap();
+    assert_eq!(keys(&found), ["podcast:apple_episode:1000797051580"]);
+    assert_eq!(
+        links(&found),
+        [(
+            "Apple Podcasts",
+            "https://podcasts.apple.com/us/podcast/id1200361736?i=1000797051580",
+            "itunes"
+        )]
+    );
+    let gone = Podcasts
+        .lookup(&cx, &subject(&format!("{DAILY}?i=1"), None, None))
+        .await
+        .unwrap();
+    assert_eq!(gone, Found::default());
+}
+
+#[tokio::test]
+async fn a_feed_names_its_guid() {
+    let recorded = Recorded::new();
+    let cx = cx(recorded.clone(), Config::default());
+    let feed = "https://feeds.podcastindex.org/pc20.xml";
+    let found = Podcasts
+        .lookup(&cx, &feed_card(feed, feed, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        keys(&found),
+        ["podcast:guid:917393e3-1b1e-5cef-ace4-edaa54e1f810"]
+    );
+    assert_eq!(found.keys[0].via, "feed");
+    assert!(found.links.is_empty(), "no Apple ID without Podcast Index");
+}
+
+#[tokio::test]
+async fn a_moved_feed_through_podcast_index() {
+    // The show's first URL now redirects: the feed it ends on may be another publisher's, so its
+    // GUID is Podcast Index's, which names the first URL as the feed's own.
+    let old = "https://mp3s.nashownotes.com/pc20rss.xml";
+    let recorded = Recorded::with(old, 301, "https://feeds.podcastindex.org/pc20.xml");
+    let cx = cx(recorded.clone(), indexed());
+    let found = Podcasts
+        .lookup(&cx, &feed_card(old, old, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        keys(&found),
+        [
+            "podcast:guid:917393e3-1b1e-5cef-ace4-edaa54e1f810",
+            "podcast:apple:1584274529"
+        ]
+    );
+    assert_eq!(found.keys[0].via, "podcastindex");
+    assert_eq!(
+        links(&found),
+        [
+            (
+                "Podcast Index",
+                "https://podcastindex.org/podcast/920666",
+                "podcastindex"
+            ),
+            (
+                "Apple Podcasts",
+                "https://podcasts.apple.com/us/podcast/id1584274529",
+                "itunes"
+            ),
+            ("Pocket Casts", "https://pca.st/itunes/1584274529", "itunes"),
+            ("Castro", "https://castro.fm/itunes/1584274529", "itunes"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_feed_episode_on_apple_podcasts() {
+    let recorded = Recorded::new();
+    let cx = cx(recorded.clone(), indexed());
+    let feed = "https://feeds.simplecast.com/54nAGcIl";
+    let card = feed_card(
+        "https://www.nytimes.com/2026/10/19/podcasts/the-daily/putin-ukraine.html",
+        feed,
+        Some("1897475d-9b60-447d-ba9b-79aa09f59551"),
+    );
+    let found = Podcasts.lookup(&cx, &card).await.unwrap();
+    assert_eq!(keys(&found), ["podcast:apple_episode:1000797051580"]);
+    assert_eq!(found.links.len(), 1);
+    // Without Podcast Index the feed has no Apple ID.
+    let found = Podcasts
+        .lookup(&crate::cx(Recorded::new(), Config::default()), &card)
+        .await
+        .unwrap();
+    assert_eq!(found, Found::default());
 }

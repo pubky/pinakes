@@ -814,9 +814,25 @@ page (`openlibrary.org/books/OL…M`) is looked up exactly, never by title:
 Goodreads' `book/isbn/{isbn}` redirect is never used: it answers an unknown ISBN with an
 unrelated book.
 
+**Podcasts.** `podcasts`: an Apple Podcasts link (`podcasts.apple.com/{cc}/podcast/{slug}/id{n}`
+in any spelling, an episode with `?i={n}`) or a podcast feed's card (a `PodcastSeries`, or a
+`PodcastEpisode` with its item's GUID) is looked up exactly:
+- iTunes must know an Apple ID as a show. The show's key is `podcast:apple:{id}`, and it links
+  Apple Podcasts and the players that open a show by its Apple ID (Pocket Casts, Castro).
+- A show's GUID is its `podcast:guid:{uuid}` key and its `podcast_guid` fact. A feed card takes
+  the GUID its feed names (read at the card's feed URL, never through a redirect); a feed that
+  names none gets the GUID derived from its URL, as the podcast namespace says.
+- With an operator's Podcast Index key ([operations](operations.md#also-on)), Podcast Index joins
+  an Apple ID to its feed and a feed to its Apple ID, and links the show there. Its answer must
+  name the ID or feed URL asked, and an Apple ID it names counts only once iTunes knows it.
+- An episode's key is its Apple track, `podcast:apple_episode:{id}`, with its Apple Podcasts
+  page: a feed item is found among the show's latest 200 episodes on iTunes by its GUID.
+- The show's Wikidata item (by its Apple ID) gives its Q-id as a key and its Spotify, Podcast
+  Index, Podchaser, Pocket Casts and Castbox pages.
+
 The level is exact: a track lists tracks and videos of the recording, an album lists albums and
 YouTube's album playlists, an artist lists artist pages and channels. Album links group by
-their release group, while two editions (two MusicBrainz releases) stay apart. Apple Music and Apple Books links use the storefront
+their release group, while two editions (two MusicBrainz releases) stay apart. Apple Music, Apple Books and Apple Podcasts links use the storefront
 `[also_on] apple_storefront` (`us`).
 
 ## Cards and resolvers

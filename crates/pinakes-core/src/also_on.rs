@@ -16,6 +16,7 @@ use crate::{config::Config, model::ResourceMeta, resolver::egress::Egress};
 
 pub mod books;
 pub mod media;
+pub mod podcasts;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -225,6 +226,7 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         Arc::new(crate::wikipedia::WikipediaSource),
         Arc::new(crate::wikipedia::WikidataItemSource),
         Arc::new(books::Books),
+        Arc::new(podcasts::Podcasts),
     ]
 }
 /// The source IDs `[also_on.sources]` may name.
