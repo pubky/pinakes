@@ -31,6 +31,8 @@ No messages are sent or contact points provisioned by these files.
 | `pinakes_fetch_total{source,mode,outcome}` | Actual upstream requests; outcomes ok, not_modified, missing, unreachable, rate_limited, error, drift |
 | `pinakes_fetch_duration_seconds{source}` | Network/body duration histogram, excluding worker rate waits |
 | `pinakes_changes_total{source,class}` | Persistent accepted change counts, unaffected by retention |
+| `pinakes_feed_held_total{source}` | Persistent quarantined container snapshots |
+| `pinakes_source_cursor_resets_total{source}` | Persistent upstream resets |
 | `pinakes_source_last_success_timestamp_seconds{source}` | Last successful upstream fetch |
 | `pinakes_canary_ok{source}` | Latest executed canary result, 0/1 |
 | `pinakes_canary_fields_missing{source}` | Missing declared fields in the last canary |
@@ -56,8 +58,8 @@ and use the same workers and host-rate limiter as ordinary resolutions.
 The rules encode the design's starting thresholds. `IngestionStalled` has separate
 rules for 15 minutes without success and 10 minutes above 1000 lag, avoiding an
 extra delay on the first condition. `CanaryDown` uses the durable failure streak,
-not repeated Prometheus scrapes of one failed run. For `CursorReset`, `SchemaDrift`
-and `RateLimited`, a new event stays visible for an hour.
+not repeated Prometheus scrapes of one failed run. For `FeedHeld`, `CursorReset`,
+`SchemaDrift` and `RateLimited`, a new event stays visible for an hour.
 
 Run `scripts/check-ops` for promtool syntax validation. If promtool is absent, this script runs the Rust YAML/metric-registry test as a required gate. `scripts/test` also parses
 the YAML/dashboard and checks every referenced metric against an initialized

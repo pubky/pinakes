@@ -59,11 +59,13 @@ pub trait Resolver: Send + Sync {
 }
 /// Every route `classify` returns besides the card kinds (`cards::KINDS`). `classify` returns
 /// only these constants, so a new route is added here.
-pub const ROUTES: [&str; 4] = ["web", "pubky", "geo", "osm"];
+pub const ROUTES: [&str; 6] = ["web", "pubky", "geo", "osm", "event", "event_platform"];
 const WEB: &str = ROUTES[0];
 const PUBKY: &str = ROUTES[1];
 const GEO: &str = ROUTES[2];
 const OSM: &str = ROUTES[3];
+const EVENT: &str = ROUTES[4];
+const EVENT_PLATFORM: &str = ROUTES[5];
 
 /// The app of a `pubky://` object (`/pub/{app}/…`), its path decoded as a homeserver decodes it.
 /// `None` outside `/pub/`, for an empty app, and for any segment that decodes to a separator or
@@ -104,16 +106,30 @@ fn classify_route(uri: &str) -> Option<&'static str> {
     }
     match url.scheme() {
         "pubky" if pubky_app(&url).is_some_and(|app| app != "pubky.app") => Some(PUBKY),
+        "http" | "https"
+            if url.host_str() == Some("api.nostr.wine")
+                && crate::event::adapters::detect(uri).is_none() =>
+        {
+            None
+        }
         "http" | "https" if osm::parse_id(uri).is_some() => Some(OSM),
         // Map links that name a point; never identity, so they never group.
         "http" | "https" if geo::location_link(uri).is_some() => Some(GEO),
+        "nostr" => Some(EVENT_PLATFORM),
+        "http" | "https" | "webcal" | "webcals"
+            if crate::event::adapters::detect(uri).is_some_and(|d| d.id != "ics") =>
+        {
+            Some(EVENT_PLATFORM)
+        }
+        "webcal" | "webcals" => Some(EVENT),
+        "http" | "https" if crate::event::service::is_feed(uri) => Some(EVENT),
         "http" | "https" => Some(WEB),
         "geo" => Some(GEO),
         _ => None,
     }
 }
 
-/// Persisted routing hints are configuration-independent; a disabled card kind uses web workers.
+/// Persisted routing hints are configuration-independent; disabled calendars use web workers.
 pub fn classify_config(uri: &str, config: &crate::config::Config) -> Option<&'static str> {
     match classify(uri) {
         Some(kind) if cards::KINDS.contains(&kind) && !config.cards.resolver(kind).enabled => {
@@ -122,6 +138,16 @@ pub fn classify_config(uri: &str, config: &crate::config::Config) -> Option<&'st
             } else {
                 None
             }
+        }
+        Some("event") if !config.event.enabled || !config.event.calendars => Some("web"),
+        Some("event_platform")
+            if crate::event::adapters::detect(uri)
+                .is_some_and(|d| !crate::event::adapters::manifest(d, &config.event).enabled)
+                && url::Url::parse(uri).is_ok_and(|u| {
+                    matches!(u.scheme(), "http" | "https" | "webcal" | "webcals")
+                }) =>
+        {
+            Some("web")
         }
         other => other,
     }
@@ -201,6 +227,8 @@ mod tests {
             "https://www.openstreetmap.org/node/1",
             "https://osm.org/go/0EEQjE--",
             "geo:46.0,8.9",
+            "webcal://example.org/calendar.ics",
+            "nostr:naddr1qqxnzd3cxqmrzv3exgmr2wfeqgsxu35yyt0mwjjh8pcz4zprhxegz69t4wr9t74vk6zne58wzh0waycrqsqqqa28pccpzu",
             "pubky://o1gg96ewuojmopcjbz8895478wdtxtzzber7aezq6ror5a91j7dy/pub/example.app/x",
         ];
         let routed: std::collections::BTreeSet<_> =

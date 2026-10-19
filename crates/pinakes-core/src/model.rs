@@ -55,6 +55,9 @@ pub struct ResourceMeta {
     pub group_keys: Vec<crate::group_keys::GroupKey>,
     #[serde(default, flatten)]
     pub event: crate::event::EventFields,
+    /// A resolution result, never embedded in the bounded resource document.
+    #[serde(skip)]
+    pub container: Option<Box<crate::event::Container>>,
     #[serde(rename = "type")]
     pub type_name: String,
     pub type_path: Vec<String>,

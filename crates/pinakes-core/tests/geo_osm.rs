@@ -1158,6 +1158,7 @@ async fn osm_url_styles_resolve_as_the_object_a_point_or_one_final_refusal(pool:
     let web = pinakes_core::resolver::web::WebResolver {
         oembed_policy: Default::default(),
         cards: None,
+        events: None,
         egress: pinakes_core::resolver::egress::Egress::new(Default::default()),
         config: Default::default(),
     };
@@ -1345,6 +1346,7 @@ async fn reextract_makes_object_shortlinks_aliases_and_refuses_osm_host_pages(po
     let web = pinakes_core::resolver::web::WebResolver {
         oembed_policy: Default::default(),
         cards: None,
+        events: None,
         egress: pinakes_core::resolver::egress::Egress::new(Default::default()),
         config: Default::default(),
     };

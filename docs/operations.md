@@ -3,10 +3,11 @@
 ## Configuration
 
 `pinakes.example.toml` lists the operator choices: addresses and credentials, each resolver's
-and feature's `enabled` switch, egress allow and deny lists, and the public API's budget. Every cap, timeout, budget,
+and feature's `enabled` switch, the event platforms (`enabled`, `key`), egress allow and deny
+lists, and the public API's budget. Every cap, timeout, budget,
 backoff and refresh tier is a limit: it has a default and can be set in an optional `[limits]`
-section (or as `PINAKES__LIMITS__<NAME>`). The web limits cover the web resolver; the resolver
-limits apply to pubky and to each card resolver.
+section (or as `PINAKES__LIMITS__<NAME>`). The web limits cover the web resolver and the event
+routes on it; the resolver limits apply to pubky and to each card resolver.
 
 | Limit | Default | Meaning |
 | --- | --- | --- |
@@ -17,8 +18,8 @@ limits apply to pubky and to each card resolver.
 | `refresh_cursor_secs` | `300` | Cursor feed refresh interval (seconds). |
 | `change_retention_days` | `90` | Days change lines are retained. |
 | `canary_interval_secs` | `21600` | Adapter canary interval (seconds). |
-| `web_concurrency` | `4` | Concurrent jobs of the web resolver. |
-| `web_requests_per_second` | `4.0` | Jobs per second of the web resolver. |
+| `web_concurrency` | `4` | Concurrent jobs of the web resolver, which the event routes share. |
+| `web_requests_per_second` | `4.0` | Jobs per second of the web resolver and the event routes. |
 | `resolver_concurrency` | `2` | Concurrent jobs per pubky or card resolver. |
 | `resolver_requests_per_second` | `2.0` | Jobs per second per pubky or card resolver. |
 | `resolver_ttl_secs` | `86400` | Default document lifetime (seconds) for web, pubky and card resolvers. |
@@ -45,7 +46,33 @@ limits apply to pubky and to each card resolver.
 | `group_max_distance_m` | `500.0` | Farthest two located members of one group (metres). |
 | `group_max_graph_units` | `20000` | Units one grouping pass may read. |
 | `group_max_graph_bytes` | `33554432` | Bytes one grouping pass may read. |
-
+| `event_max_line_bytes` | `65536` | Longest calendar content line (bytes). |
+| `event_max_date_values` | `4096` | Most date values in one calendar property. |
+| `event_feed_body_bytes` | `33554432` | Largest calendar or feed body (bytes). |
+| `event_max_occurrences_per_series` | `50` | Most occurrences one series expands to. |
+| `event_max_occurrences_per_feed` | `10000` | Most occurrences one feed yields. |
+| `event_max_components` | `100000` | Most components one calendar may hold. |
+| `event_max_revisions` | `10000` | Most revisions of one event (RECURRENCE-ID overrides). |
+| `event_max_document_bytes` | `8388608` | Largest retained event document set per feed (bytes). |
+| `event_max_recurrence_steps` | `100000` | Most recurrence steps one series may take. |
+| `event_parse_timeout_ms` | `2000` | Calendar parse deadline (milliseconds). |
+| `event_months_back` | `1` | Months of past occurrences kept in the horizon. |
+| `event_months_forward` | `12` | Months of future occurrences kept in the horizon. |
+| `geocode_score` | `0.8` | Lowest accepted geocoding score. |
+| `held_retry_secs` | `60` | Retry interval of a held feed snapshot (seconds). |
+| `feed_max_changes` | `100` | Occurrence changes per snapshot before they become one summary line. |
+| `feed_max_rows` | `10000` | Most stored rows of one feed. |
+| `feed_max_new_keys` | `1000` | New keys one snapshot may add before it is held. |
+| `feed_retention_days` | `30` | Days cancelled and past rows are kept. |
+| `feed_max_holds` | `5` | Consecutive holds before a feed dead-letters. |
+| `feed_cadence_floor` | `3600` | Shortest feed refresh interval (seconds). |
+| `websocket_deadline_ms` | `2000` | Nostr relay websocket deadline (milliseconds). |
+| `max_cursor_pages` | `10` | Pages one cursor feed fetch may read. |
+| `max_indexer_pages` | `10` | Pages one Nostr indexer lookup may read. |
+| `max_derived_resources` | `10000` | Derived links one adapter may hold across all parents. |
+| `max_calendar_members` | `50` | Members one NIP-52 calendar may list. |
+| `calendar_member_wait_hours` | `48` | Hours a NIP-52 calendar waits for a member that has never resolved. |
+| `max_linked_resources` | `100` | Website links one BTC Map feed may derive. |
 
 ## Database
 
@@ -212,7 +239,8 @@ Refresh follows the time to an event's start (`limits.refresh_resource_secs`,
 `limits.refresh_container_secs`): 7 days, 2 days, 6 hours and 1 hour. One fetch at end + 24
 hours makes a resource final, and a new reference reopens a final resource; `geo:` stays final.
 OSM places refresh after `limits.osm_ttl_secs`; a confirmed missing object stays cached as
-missing for the same period. Conditional responses keep accepted facts.
+missing for the same period. Conditional responses keep accepted facts, but validators are kept
+only for calendars, where they commit with the parsed snapshot.
 
 ## Web pages and access walls
 
@@ -229,8 +257,8 @@ without a typed card. Discovery decisions are counted in
 
 A challenge page (a bot wall, captcha or sign-in redirect) is a failed fetch: the resource turns
 `unreachable` and is retried with the normal backoff, dead-lettering after
-`limits.max_failures`. Its last accepted document stays, and a wall never counts toward a
-disappearance. Fetches that hit one count as outcome `blocked` in
+`limits.max_failures`. Its last accepted document, event dates and feed occurrences stay, and a
+wall never counts toward a disappearance. Fetches that hit one count as outcome `blocked` in
 `pinakes_fetch_total`.
 
 The markers are the built-in `data/interstitial-markers.json` (text markers, captcha selectors,
@@ -240,6 +268,92 @@ bytes) or challenge statuses (403, 429, 503). A redirect of the requested path t
 sign-in path (`/login`, `/authwall`, `/signin`, `/checkpoint`, …) is a wall unless the
 requested path is itself one. A meta refresh without a URL is content; a refresh slower than ten
 seconds is a hop only on a short page that does not refresh itself.
+
+## Calendars and events
+
+`[event]` enables event pages (JSON-LD Event types, microformats h-event, ActivityPub Event
+negotiation), `event.calendars` the calendar feeds and `event.geocoding` venue geocoding. With
+calendars off, feed URLs fall back to web cards. ActivityPub is negotiated once per resolution
+for an advertised alternate, an event-looking page without an extracted Event, or an Event
+without a zone. An event page can follow a same-host link to its own ICS; discovered URLs share
+an LRU cache (10,000 entries, 32 MiB; one-hour minimum TTL, five minutes for failures).
+
+Calendar GETs follow the web policy, decompress, and are capped at `limits.event_feed_body_bytes`;
+lines are unfolded from that bounded body and parsed on a blocking worker under
+`limits.event_parse_timeout_ms`. A malformed VEVENT is skipped with a warning; exceeding a work
+or feed cap rejects the snapshot. A JSON feed (Gancio, a JSON Feed) is parsed as one document,
+so its parsed form can take several times `limits.event_feed_body_bytes` of memory; size that
+limit with the worker count in mind. `webcal://` is fetched over HTTPS and never downgrades. A
+feed-provided refresh interval is clamped to one hour through 30 days. Held snapshots retry after
+`limits.held_retry_secs`, backing off from the normal cadence.
+
+`event.utc_series_wall_clock` (default `"x_wr_timezone"`; also `"coordinates"`, `"never"`)
+chooses which zone sources make a series with a UTC DTSTART expand on local wall-clock time
+instead of in UTC. The default keeps Google's exports right (UTC DTSTART plus `X-WR-TIMEZONE`)
+and leaves feeds whose zone comes only from coordinates in UTC. `event.default_timezone` places
+floating times. A change of either applies at each calendar's next re-parse;
+`pinakesd reextract event event_platform` applies it at once. Instances such a re-parse moves
+get new keys once: the old rows are cancelled after two snapshots, or the feed is held if more
+than half its keys move.
+
+Page coordinates win over geocoding, and online events are not geocoded. A structured Nominatim
+search is accepted only for one sufficiently matching address (`limits.geocode_score`); an OSM
+venue link also needs the name and full address to match. Geocoded facts stay in `osm_place`;
+documents store versioned references and compose coordinates at read time.
+
+### Event platforms
+
+`data/event-adapters.json` declares each platform's mode, identity, cancellation signal, cadence
+floor, expected fields, user-agent profile, key requirement and canary. Configure a platform
+under `[event.adapters.platforms.<id>]` with `enabled` and `key`; a missing key disables only
+that platform and no key ever appears in `/v1/info`. Resident Advisor (an unofficial GraphQL
+API) is off by default; Posh is marked fragile. `event.adapters.enabled = false` sends platform
+URLs to the web resolver. The `browser` and `firefox` user-agent profiles imitate browsers to
+pass bot walls; consider the provider's terms before enabling those platforms.
+
+Luma, Meetup, Eventbrite, Partiful, Posh, RingCentral, Airmeet, Mobilizon, Gancio, Wikidata,
+Dice, Xceed, Ents24 and Ticketino supplement JSON-LD with bounded state parsing; JavaScript is
+never executed. Self-hosted Pretix, Eventyay, Gathio, Gancio and Mobilizon are detected from page
+signatures, a heuristic that can cost one bounded discovery request. Authenticated APIs never
+redirect, and credentials are removed from retained URLs and errors.
+
+Cursor feeds (an event portal, BTC Map, the Google Calendar API) keep their checkpoints in
+`event_fetch` and commit them with each accepted batch; an expired cursor resyncs under the
+ordinary hold rules. BTC Map requests every delta status and deletion, never advances its cursor
+past the local fetch time, and allows five minutes of clock skew. Malformed cursor rows are
+skipped (`invalid_cursor_row`, drift) and never imply deletions. With
+`event.adapters.derive_resources` (default on), NIP-52 calendar members and BTC Map event
+websites are queued as resources, charged to the referring authors (or a per-adapter sponsor)
+within `limits.max_calendar_members`, `limits.max_linked_resources` and
+`limits.max_derived_resources`. A BTC Map link expires with its event, capped at the horizon
+and extended at each feed apply as the horizon reaches it (a link that lapsed at the cap comes
+back while its event is ahead). Each link records which feed rows name it: a website shared by
+two events keeps the farther instant, and a tombstoned or re-linked row stops extending it;
+a NIP-52 member link ends when the calendar stops listing the member and otherwise lives 24 hours
+from the calendar's last fetch. A lapsed link keeps its child through the orphan grace
+(`limits.grace_days`) counted from the link's expiry, so a feed that failed for a day deletes no
+member, and a revived link meets the same per-parent and global caps as a new one.
+Portal coordinates are page facts, never written to `osm_place`.
+
+Nostr identifiers and client URLs use signed NIP-52 events through two HTTP indexers (Wine at one
+request per second, Archives at two), paginating `until` windows within
+`limits.max_indexer_pages`; the newest matching revision wins, and `nevent`/`note` pin one. Both
+must miss before absence is accepted. With `event.adapters.websocket`, one relay hint is asked
+after both miss (`limits.websocket_deadline_ms`, one MB, 256 frames, DNS checked and pinned); an
+unfinished subscription never confirms absence. A full tied page, an exhausted budget or an
+indexer 404 is inconclusive and retries after five minutes without charging an attempt.
+
+Only parser failures fall back to a web card. Upstream failures keep the accepted document and
+retry; a refresh never replaces a dated Event with a start-less card. Registry-listed secondary
+denials and GraphQL failures defer, and after three days become `unreachable` with ordinary
+backoff. HTTP 451 and cursor 401/403/404 follow two-observation disappearance. Direct Wikidata
+404/410 do too, and a missing entity never removes a live Wikipedia article.
+
+`cargo run -p pinakes-core --example adapter_probe -- MANIFEST.json REPLAYS.json OUTPUT_DIR`
+(with `DATABASE_URL`) runs a read-only, keyless canary pass and records requests, user-agent
+profiles, statuses, hashes and parser output; secrets are refused. `PINAKES_PROBE_OFFLINE=1`
+replays captures without network access. Recorded responses for the keyless probes run in
+`scripts/test`.
 
 ## Groups
 

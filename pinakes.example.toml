@@ -44,11 +44,37 @@ discover_feeds = false # Podcast feed scanning from media pages.
 enabled = true
 [cards.doi]
 enabled = true
+[cards.nostr]
+enabled = true
 [cards.activitypub]
 enabled = true
 
 [media]
 oembed = "when_needed" # "always" restores eager registry discovery.
+
+[event]
+enabled = true
+calendars = true
+geocoding = true
+# A recurring series whose DTSTART is UTC (...Z) expands in UTC, as RFC 5545 says, unless its zone
+# comes from a source chosen here: "x_wr_timezone" (default: an explicit X-WR-TIMEZONE, Google's
+# exports, or a TZID), "coordinates" (also default_timezone and coordinate-derived zones) or
+# "never".
+utc_series_wall_clock = "x_wr_timezone"
+# default_timezone = "Europe/Zurich" # For floating ICS times only.
+
+# Event platforms (data/event-adapters.json); effective policies: /v1/info.
+[event.adapters]
+enabled = true
+derive_resources = true # Derived links: NIP-52 calendar members, BTC Map event websites.
+websocket = true # Nostr relays: one relay hint, after both HTTP indexers miss.
+
+# Each platform takes enabled and key. Missing keys disable only that platform; secrets never
+# appear in /v1/info.
+# [event.adapters.platforms.ticketmaster]
+# key = "" # Supply through protected config or PINAKES__EVENT__ADAPTERS__PLATFORMS__TICKETMASTER__KEY.
+# [event.adapters.platforms.resident_advisor]
+# enabled = true # Unofficial GraphQL, fragile and off by default.
 
 [egress]
 # Exact names or *.example.org. An empty allow list permits all public hosts.
@@ -65,7 +91,7 @@ cross_container_occurrences = "off" # Or "corroborated": the cross-feed ICS UID 
 requests_per_minute = 120
 
 [canary]
-enabled = true # Periodic resolver canaries, reported in metrics.
+enabled = true # Periodic event-platform canaries, reported in metrics.
 
 # [limits]
-# resolver_concurrency = 2 # pubky and each card resolver; web_concurrency (4) for web
+# resolver_concurrency = 2 # pubky and each card resolver; web_concurrency (4) for web and events

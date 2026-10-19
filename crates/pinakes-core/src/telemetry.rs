@@ -32,6 +32,8 @@ pub struct Metrics {
     pub discovery: IntCounterVec,
     pub duration: HistogramVec,
     pub changes: IntCounterVec,
+    pub held: IntCounterVec,
+    pub resets: IntCounterVec,
     pub success: IntGaugeVec,
     pub canary_ok: IntGaugeVec,
     pub canary_missing: IntGaugeVec,
@@ -118,6 +120,18 @@ impl Metrics {
                 "Accepted document changes",
                 &["source", "class"]
             ),
+            held: metric!(
+                IntCounterVec,
+                "pinakes_feed_held_total",
+                "Quarantined container snapshots",
+                &["source"]
+            ),
+            resets: metric!(
+                IntCounterVec,
+                "pinakes_source_cursor_resets_total",
+                "Upstream cursor resets",
+                &["source"]
+            ),
             success: metric!(
                 IntGaugeVec,
                 "pinakes_source_last_success_timestamp_seconds",
@@ -186,6 +200,8 @@ impl Metrics {
                 out.changes
                     .with_label_values(&[manifest.source.as_str(), *class]);
             }
+            out.held.with_label_values(&[&manifest.source]);
+            out.resets.with_label_values(&[&manifest.source]);
             out.success.with_label_values(&[&manifest.source]);
         }
         Ok(out)
@@ -204,6 +220,7 @@ impl Metrics {
         self.canary_failures.reset();
         for source in sqlx::query("SELECT *,coalesce(extract(epoch FROM last_success_at),0)::bigint AS success FROM source_state").fetch_all(pool).await? {
             let name:String=source.try_get("source")?;self.success.with_label_values(&[&name]).set(source.try_get("success")?);
+            sync_counter(&self.held.with_label_values(&[&name]),source.try_get("feed_held_total")?);sync_counter(&self.resets.with_label_values(&[&name]),source.try_get("cursor_resets_total")?);
             let changes:serde_json::Value=source.try_get("change_totals")?;for (class,count) in changes.as_object().into_iter().flatten() {sync_counter(&self.changes.with_label_values(&[&name,class]),count.as_i64().unwrap_or(0));}
             if let Some(ok)=source.try_get::<Option<bool>,_>("canary_ok")? {self.canary_ok.with_label_values(&[&name]).set(i64::from(ok));self.canary_missing.with_label_values(&[&name]).set(source.try_get::<Vec<String>,_>("canary_missing")?.len() as i64);self.canary_failures.with_label_values(&[&name]).set(source.try_get::<i32,_>("canary_failures")? as i64);}
         }

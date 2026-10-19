@@ -17,6 +17,35 @@ microformats names into the pinned vocabulary. Bumping the vocabulary is an
 explicit repository change, followed by re-resolution to update stored paths.
 
 
+## Calendar zones
+
+`windows-zones.json` is derived from Unicode CLDR **47** `windowsZones.xml`, keeping
+only territory `001` mappings (Windows name to the first IANA identifier). Source:
+<https://raw.githubusercontent.com/unicode-org/cldr/release-47/common/supplemental/windowsZones.xml>.
+Source SHA-256: `39714d7a5a276508aeca2289a490dddb8424dea0063f3f5fbc8bd8520dcbfcba`.
+Derived SHA-256: `7ab89dbcedfcc61b06c03339bf86d32046cf9408c68a50d0a86e4ab02782a480`.
+Unicode/CLDR attribution and terms are preserved in [LICENSE.cldr.txt](LICENSE.cldr.txt).
+Regenerate with `scripts/windows-zones /path/to/windowsZones.xml` after downloading
+that exact release. It validates the source digest and performs no network request.
+
+IANA rules are pinned through `chrono-tz = 0.10.4`. Coordinate lookup uses
+`tzf-rs = 1.1.4` with `tzf-rel = 0.0.2025-c` in Cargo.lock (Timezone Boundary Builder
+2025c with oceans). The lookup data is bundled by that dependency, never downloaded
+at runtime. It is unmodified ODbL data, separately licensed from this repository's
+source: [LICENSE.tzf-rel.md](LICENSE.tzf-rel.md). Attribution: Timezone Boundary
+Builder and OpenStreetMap contributors. Source and regeneration instructions:
+<https://github.com/ringsaturn/tzf-rel/tree/2025c> and
+<https://github.com/evansiroky/timezone-boundary-builder/releases/tag/2025c>.
+A card whose event zone was derived from coordinates carries this attribution in its
+`attribution`. Never treat an offset alone as an IANA zone. Source upgrades are explicit lockfile/data changes.
+
+`rails-zones.json` derives ActiveSupport TimeZone::MAPPING from Rails **8.1.0**,
+for RingCentral/Hopin names. Source: <https://raw.githubusercontent.com/rails/rails/v8.1.0/activesupport/lib/active_support/values/time_zone.rb>.
+Source SHA-256: `c20a9fb54a413919aa8944649d7424e6dbc1e4b5c95cd02a1b169682bfbb0285`.
+The table preserves all 152 mappings; IANA rules still come from chrono-tz.
+Copyright Rails contributors, MIT; see [LICENSE.rails.txt](LICENSE.rails.txt).
+Regenerate with `scripts/rails-zones /path/to/time_zone.rb`.
+
 ## oEmbed providers
 
 `oembed-providers.json` pins the 390-provider registry downloaded from

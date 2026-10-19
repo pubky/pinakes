@@ -1,5 +1,5 @@
 use crate::config::EgressConfig;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use std::{
     collections::HashMap,
@@ -332,6 +332,7 @@ type DiscoveryCache = Arc<Mutex<HashMap<String, DiscoveryEntry>>>;
 #[derive(Clone)]
 pub struct Egress {
     cfg: EgressConfig,
+    network_relays: bool,
     dns: Arc<dyn Dns>,
     transport: Arc<dyn Transport>,
     hosts: Arc<Mutex<HashMap<String, HostBudget>>>,
@@ -339,6 +340,80 @@ pub struct Egress {
     discoveries: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 impl Egress {
+    /// One bounded Nostr subscription. DNS is checked once and the checked address is connected directly.
+    pub async fn nostr_request(
+        &self,
+        uri: &str,
+        filter: serde_json::Value,
+        deadline_ms: u64,
+    ) -> Result<Vec<serde_json::Value>> {
+        let key = format!(
+            "{uri}|REQ:{}",
+            blake3::hash(&serde_json::to_vec(&filter)?).to_hex()
+        );
+        let fetched = self
+            .cached(key, 3600, async {
+                let values = self.nostr_request_inner(uri, filter, deadline_ms).await?;
+                Ok(Fetched {
+                    permanent_redirect: false,
+                    truncated: false,
+                    url: Url::parse(uri)?,
+                    validators: Default::default(),
+                    content_type: "application/json".into(),
+                    status: 200,
+                    retry_after_secs: 60,
+                    location: None,
+                    body: serde_json::to_vec(&values)?,
+                })
+            })
+            .await?;
+        Ok(tokio::task::spawn_blocking(move || serde_json::from_slice(&fetched.body)).await??)
+    }
+    async fn nostr_request_inner(
+        &self,
+        uri: &str,
+        filter: serde_json::Value,
+        deadline_ms: u64,
+    ) -> Result<Vec<serde_json::Value>> {
+        use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+        tokio::time::timeout(Duration::from_millis(deadline_ms), async {
+            let url = Url::parse(uri)?;
+            if url.scheme() != "wss" || !url.username().is_empty() || url.password().is_some() {
+                bail!("invalid relay URL");
+            }
+            let host = url
+                .host_str()
+                .context("relay host missing")?
+                .trim_end_matches('.')
+                .to_ascii_lowercase();
+            if !self.allows_host(&host) {
+                bail!("relay denied by egress policy");
+            }
+            let addresses = self
+                .dns
+                .lookup(&host, url.port_or_known_default().context("relay port")?)
+                .await?;
+            if addresses.is_empty() || addresses.iter().any(|a| !public_ip(a.ip())) {
+                bail!("relay DNS resolved to non-public address");
+            }
+            anyhow::ensure!(
+                self.network_relays,
+                "relay network disabled for injected transports"
+            );
+            let _permit = self.host_permit(&host).await;
+            let stream = tokio::net::TcpStream::connect(addresses.as_slice()).await?;
+            let config = WebSocketConfig::default()
+                .max_message_size(Some(BODY_CAP))
+                .max_frame_size(Some(BODY_CAP));
+            let mut observation = crate::telemetry::FetchGuard::start();
+            let (mut socket, _) =
+                tokio_tungstenite::client_async_tls_with_config(uri, stream, Some(config), None)
+                    .await?;
+            observation.status(101);
+            nostr_subscription(&mut socket, filter).await
+        })
+        .await?
+    }
     pub fn allows(&self, uri: &str) -> bool {
         Url::parse(uri)
             .ok()
@@ -353,7 +428,9 @@ impl Egress {
                 || self.cfg.allow_hosts.iter().any(|h| host_matches(&host, h)))
     }
     pub fn new(cfg: EgressConfig) -> Self {
-        Self::with_backends(cfg, Arc::new(SystemDns), Arc::new(PinnedTransport))
+        let mut e = Self::with_backends(cfg, Arc::new(SystemDns), Arc::new(PinnedTransport));
+        e.network_relays = true;
+        e
     }
     pub fn with_backends(
         cfg: EgressConfig,
@@ -362,6 +439,7 @@ impl Egress {
     ) -> Self {
         Self {
             cfg,
+            network_relays: false,
             dns,
             transport,
             hosts: Arc::default(),
@@ -619,12 +697,18 @@ impl Egress {
         unreachable!()
     }
     async fn host_permit(&self, host: &str) -> OwnedMutexGuard<Instant> {
-        let rate = self
+        let mut rate = self
             .cfg
             .host_rates
             .get(host)
             .copied()
             .unwrap_or(self.cfg.host_requests_per_second);
+        if matches!(host, "api.nostr.wine" | "portal.einundzwanzig.space") {
+            rate = rate.min(1.0);
+        }
+        if host == "api.nostrarchives.com" {
+            rate = rate.min(2.0);
+        }
         let budget = {
             let mut hosts = self.hosts.lock().await;
             if hosts.len() >= 10000 {
@@ -652,6 +736,62 @@ fn host_matches(host: &str, rule: &str) -> bool {
     } else {
         host == rule.trim_end_matches('.')
     }
+}
+
+async fn nostr_subscription<S>(
+    socket: &mut tokio_tungstenite::WebSocketStream<S>,
+    filter: serde_json::Value,
+) -> Result<Vec<serde_json::Value>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    socket
+        .send(Message::Text(
+            serde_json::json!(["REQ", "pinakes", filter])
+                .to_string()
+                .into(),
+        ))
+        .await?;
+    let mut events = vec![];
+    let mut bytes = 0;
+    let mut complete = false;
+    for _ in 0..256 {
+        let Some(message) = socket.next().await else {
+            break;
+        };
+        let message = message?;
+        bytes += message.len();
+        if bytes > BODY_CAP {
+            bail!("relay response exceeds cap");
+        }
+        if let Message::Text(text) = message {
+            let value: serde_json::Value =
+                tokio::task::spawn_blocking(move || serde_json::from_str(&text)).await??;
+            if value[1] != "pinakes" {
+                continue;
+            }
+            if value[0] == "EOSE" {
+                complete = true;
+                break;
+            }
+            if value[0] == "EVENT" {
+                events.push(value[2].clone());
+            }
+            if value[0] == "CLOSED" {
+                break;
+            }
+        }
+    }
+    socket
+        .send(Message::Text("[\"CLOSE\",\"pinakes\"]".into()))
+        .await?;
+    let _ = socket.close(None).await;
+    if !complete {
+        bail!("relay did not finish subscription");
+    }
+    Ok(events)
 }
 
 #[cfg(test)]
@@ -700,6 +840,62 @@ mod tests {
         server.abort();
     }
     #[tokio::test(start_paused = true)]
+    async fn graphql_error_expires_before_the_next_retry() {
+        struct Graphql(AtomicUsize);
+        #[async_trait]
+        impl Transport for Graphql {
+            async fn get(&self, url: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+                Ok(Fetched {
+                    permanent_redirect: false,
+                    truncated: false,
+                    url: url.clone(),
+                    status: 200,
+                    content_type: "application/json".into(),
+                    validators: Default::default(),
+                    location: None,
+                    retry_after_secs: 60,
+                    body: if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                        br#"{"errors":[{"message":"temporary"}]}"#.to_vec()
+                    } else {
+                        br#"{"data":{"event":null}}"#.to_vec()
+                    },
+                })
+            }
+        }
+        let transport = Arc::new(Graphql(AtomicUsize::new(0)));
+        let egress =
+            Egress::with_backends(Default::default(), Arc::new(FakeDns), transport.clone());
+        let options = FetchOptions {
+            json_body: Some(serde_json::json!({"query":"fixture"})),
+            ..Default::default()
+        };
+        let uri = "https://public.example/api";
+        let definition = crate::event::adapters::definition("mobilizon").unwrap();
+        for advance in [0, 299] {
+            tokio::time::advance(Duration::from_secs(advance)).await;
+            let error = crate::event::adapters::service::discover_enrichment(
+                &egress, uri, &options, 86400, definition,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error
+                    .downcast_ref::<super::super::RetryLater>()
+                    .unwrap()
+                    .class,
+                "graphql"
+            );
+        }
+        assert_eq!(transport.0.load(Ordering::SeqCst), 1);
+        tokio::time::advance(Duration::from_secs(2)).await;
+        crate::event::adapters::service::discover_enrichment(
+            &egress, uri, &options, 86400, definition,
+        )
+        .await
+        .unwrap();
+        assert_eq!(transport.0.load(Ordering::SeqCst), 2);
+    }
+    #[tokio::test(start_paused = true)]
     async fn discovery_capacity_evicts_lru_and_failures_expire_after_five_minutes() {
         let egress = Egress::new(Default::default());
         let now = Instant::now();
@@ -742,9 +938,7 @@ mod tests {
             assert!(!cache.contains_key("1"));
         }
         egress
-            .cached("failure".into(), 86400, async {
-                anyhow::bail!("transport")
-            })
+            .cached("failure".into(), 86400, async { bail!("transport") })
             .await
             .unwrap_err();
         tokio::time::advance(Duration::from_secs(299)).await;
@@ -1097,6 +1291,7 @@ mod osm_policy_tests {
         let web = crate::resolver::web::WebResolver {
             oembed_policy: Default::default(),
             cards: None,
+            events: None,
             egress: Egress::new(EgressConfig {
                 allow_hosts: vec!["only.example".into()],
                 ..Default::default()
@@ -1105,5 +1300,73 @@ mod osm_policy_tests {
         };
         assert!(!crate::resolver::Resolver::canary_allowed(&web));
         assert!(crate::adapter::manifest("web").expected_fields.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod relay_protocol_tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::{
+        tungstenite::{protocol::Role, Message},
+        WebSocketStream,
+    };
+    #[tokio::test]
+    async fn eose_closes_subscription_incomplete_and_stalled_relays_fail() {
+        for complete in [true, false] {
+            let (a, b) = tokio::io::duplex(4096);
+            let mut client = WebSocketStream::from_raw_socket(a, Role::Client, None).await;
+            let mut server = WebSocketStream::from_raw_socket(b, Role::Server, None).await;
+            let task = tokio::spawn(async move {
+                let req = server.next().await.unwrap().unwrap().into_text().unwrap();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&req).unwrap()[0],
+                    "REQ"
+                );
+                server
+                    .send(Message::Text(r#"["EVENT","other",{}]"#.into()))
+                    .await
+                    .unwrap();
+                server
+                    .send(Message::Text(
+                        r#"["EVENT","pinakes",{"id":"fixture"}]"#.into(),
+                    ))
+                    .await
+                    .unwrap();
+                server
+                    .send(Message::Text(
+                        if complete {
+                            r#"["EOSE","pinakes"]"#
+                        } else {
+                            r#"["CLOSED","pinakes","denied"]"#
+                        }
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+                let close = server.next().await.unwrap().unwrap().into_text().unwrap();
+                assert_eq!(close, r#"["CLOSE","pinakes"]"#);
+            });
+            let result = tokio::time::timeout(
+                Duration::from_secs(1),
+                nostr_subscription(&mut client, serde_json::json!({"kinds":[31923]})),
+            )
+            .await
+            .unwrap();
+            if complete {
+                assert_eq!(result.unwrap().len(), 1)
+            } else {
+                assert!(result.is_err())
+            }
+            task.await.unwrap();
+        }
+        let (a, _b) = tokio::io::duplex(4096);
+        let mut socket = WebSocketStream::from_raw_socket(a, Role::Client, None).await;
+        assert!(tokio::time::timeout(
+            Duration::from_millis(20),
+            nostr_subscription(&mut socket, serde_json::json!({}))
+        )
+        .await
+        .is_err());
     }
 }

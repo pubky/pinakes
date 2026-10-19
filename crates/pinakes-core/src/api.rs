@@ -4,6 +4,7 @@ use crate::{
     nexus::Nexus,
     store,
 };
+use anyhow::Context;
 use axum::{
     extract::{ConnectInfo, DefaultBodyLimit, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
@@ -37,12 +38,15 @@ pub struct AppState {
     /// ODbL dump downloads per client address in the current hour.
     downloads: Arc<Mutex<HashMap<std::net::IpAddr, (Instant, usize)>>>,
     info_cache: Arc<Mutex<Option<(Instant, Value)>>>,
-    /// The request clock for relative times; tests set it, the daemon never
+    pub(crate) cursor_mac: SimpleHmac<blake3::Hasher>,
+    /// The request clock for relative times and search cursors; tests set it, the daemon never
     /// does (wall clock).
     pub clock: Option<Clock>,
 }
 impl AppState {
     pub fn new(pool: PgPool, config: Config) -> anyhow::Result<Self> {
+        let mut cursor_key = [0; 32];
+        getrandom::fill(&mut cursor_key).context("cursor key entropy unavailable")?;
         let metrics = Arc::new(crate::telemetry::Metrics::new()?);
         Ok(Self {
             pool,
@@ -53,6 +57,8 @@ impl AppState {
             limiter: Arc::default(),
             downloads: Arc::default(),
             info_cache: Arc::default(),
+            cursor_mac: SimpleHmac::<blake3::Hasher>::new_from_slice(&cursor_key)
+                .context("initialize cursor MAC")?,
             clock: None,
         })
     }
@@ -186,6 +192,14 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/resources/lookup", post(lookup))
         .route("/v1/resources/by-uri", get(by_uri))
         .route("/v1/resources/{id}", get(resource))
+        .route(
+            "/v1/resources/{id}/occurrences",
+            get(crate::event::storage::list),
+        )
+        .route(
+            "/v1/occurrences/lookup",
+            post(crate::event::storage::lookup),
+        )
         .route("/v1/resolve", post(resolve))
         .route("/v1/dumps/osm_place.ndjson.gz", get(osm_dump));
     with_public_layers(routes, state)
@@ -659,10 +673,14 @@ pub async fn resolve(
     let target = crate::alias::root(&uri).map_or_else(|| uri.clone(), |a| a.root);
     let resolver = crate::resolver::classify_config(&target, &state.config)
         .ok_or_else(|| ApiError::bad("no resolver available for this URI"))?;
-    if (resolver == "web" && !state.config.web.enabled)
+    if (resolver == "event_platform"
+        && crate::event::adapters::detect(&target)
+            .is_none_or(|d| !crate::event::adapters::manifest(d, &state.config.event).enabled))
+        || (resolver == "web" && !state.config.web.enabled)
         || (resolver == "pubky" && !state.config.pubky.enabled)
         || (resolver == "geo" && !state.config.geo.enabled)
         || (resolver == "osm" && !state.config.osm.enabled)
+        || (resolver == "event" && (!state.config.event.enabled || !state.config.event.calendars))
     {
         return Err(ApiError::bad("resolver is disabled"));
     }
@@ -701,6 +719,8 @@ pub struct InfoLimits {
     pub lookup: usize,
     /// Resource IDs or URIs in one `POST /v1/changes/lookup`.
     pub change_lookup: usize,
+    /// Feed IDs or URIs in one `POST /v1/occurrences/lookup`.
+    pub occurrence_lookup: usize,
     /// Requests per minute per client address, every public route together.
     pub requests_per_minute: usize,
     /// `POST /v1/resolve` requests per minute per client address, and per URI.
@@ -727,6 +747,8 @@ pub async fn info(State(state): State<AppState>) -> Json<Info> {
         ("pubky", c.pubky.enabled),
         ("geo", c.geo.enabled),
         ("osm", c.osm.enabled),
+        ("event", c.event.enabled),
+        ("calendar", c.event.enabled && c.event.calendars),
     ]
     .into_iter()
     .filter(|(_, on)| *on)
@@ -744,6 +766,7 @@ pub async fn info(State(state): State<AppState>) -> Json<Info> {
         limits: InfoLimits {
             lookup: 500,
             change_lookup: 500,
+            occurrence_lookup: 500,
             requests_per_minute: c.api.requests_per_minute,
             previews_per_minute: c.preview.requests_per_minute,
             previews_per_uri_per_minute: c.preview.uri_requests_per_minute,
@@ -772,10 +795,10 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         sqlx::query_scalar("SELECT to_jsonb(s) FROM source_state s ORDER BY source")
             .fetch_all(&state.pool)
             .await?;
-    let row=sqlx::query("SELECT (SELECT count(*) FROM resource) AS resources,(SELECT count(*) FROM reference) AS references").fetch_one(&state.pool).await?;
+    let row=sqlx::query("SELECT (SELECT count(*) FROM resource) AS resources,(SELECT count(*) FROM reference) AS references,(SELECT count(*) FROM occurrence) AS occurrences").fetch_one(&state.pool).await?;
     let ingestion:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('nexus',nexus,'cursor',cursor,'feed_length',feed_length,'lag',greatest(feed_length-cursor,0),'epoch',epoch,'updated_at',updated_at) FROM feed_cursor ORDER BY nexus").fetch_all(&state.pool).await?;
     let statuses:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('resolver',resolver,'status',status,'count',count(*),'dead_letter',count(*) FILTER (WHERE dead_letter),'leased',count(*) FILTER (WHERE lease_until>now())) FROM resource GROUP BY resolver,status ORDER BY resolver,status").fetch_all(&state.pool).await?;
-    let mut body = json!({"groups":state.config.groups,"version":env!("CARGO_PKG_VERSION"),"manifests":crate::adapter::configured(&state.config),"sources":sources,"metrics":state.metrics.summary(),"ingestion":ingestion,"counts":{"resources":row.try_get::<i64,_>("resources")?,"references":row.try_get::<i64,_>("references")?},"osm_licence":{"licence":"ODbL-1.0","attribution":crate::resolver::osm::ATTRIBUTION,"url":"https://opendatacommons.org/licenses/odbl/1-0/","dump":"/v1/dumps/osm_place.ndjson.gz","updated_at":dump_updated_at(&state.config)},"resolvers":{"geo":{"enabled":state.config.geo.enabled,"network":false},"osm":{"enabled":state.config.osm.enabled,"concurrency":1,"batch_size":50,"requests_per_second":state.config.osm.requests_per_second},"web":{"enabled":state.config.web.enabled,"concurrency":state.config.web.concurrency},"pubky":{"enabled":state.config.pubky.enabled,"concurrency":state.config.pubky.concurrency},"statuses":statuses}});
+    let mut body = json!({"groups":state.config.groups,"version":env!("CARGO_PKG_VERSION"),"manifests":crate::adapter::configured(&state.config),"sources":sources,"metrics":state.metrics.summary(),"ingestion":ingestion,"counts":{"resources":row.try_get::<i64,_>("resources")?,"references":row.try_get::<i64,_>("references")?,"occurrences":row.try_get::<i64,_>("occurrences")?},"osm_licence":{"licence":"ODbL-1.0","attribution":crate::resolver::osm::ATTRIBUTION,"url":"https://opendatacommons.org/licenses/odbl/1-0/","dump":"/v1/dumps/osm_place.ndjson.gz","updated_at":dump_updated_at(&state.config)},"resolvers":{"event":{"enabled":state.config.event.enabled,"calendar":state.config.event.calendars,"geocoding":state.config.event.geocoding,"months_back":state.config.event.months_back,"months_forward":state.config.event.months_forward},"geo":{"enabled":state.config.geo.enabled,"network":false},"osm":{"enabled":state.config.osm.enabled,"concurrency":1,"batch_size":50,"requests_per_second":state.config.osm.requests_per_second},"web":{"enabled":state.config.web.enabled,"concurrency":state.config.web.concurrency},"pubky":{"enabled":state.config.pubky.enabled,"concurrency":state.config.pubky.concurrency},"statuses":statuses}});
     for kind in crate::resolver::cards::KINDS {
         let c = state.config.cards.resolver(kind);
         body["resolvers"][kind] = json!({"enabled":c.enabled,"concurrency":c.concurrency,"requests_per_second":c.requests_per_second});

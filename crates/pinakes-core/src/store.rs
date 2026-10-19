@@ -16,6 +16,221 @@ pub async fn ensure_resource(pool: &PgPool, uri: &str) -> Result<String> {
     tx.commit().await?;
     Ok(id)
 }
+/// Admit derived identities once per parent, including across subsequent polls.
+/// The lineage survives refreshes so author budgets apply when the child is claimed.
+pub async fn derive_resource(
+    pool: &PgPool,
+    parent: &str,
+    uri: &str,
+    adapter: &str,
+    cap: usize,
+) -> Result<Option<String>> {
+    derive_resource_until(pool, parent, uri, adapter, cap, 10000, None).await
+}
+/// The latest expiry a derived link may carry: the event horizon (`event.months_forward`).
+pub fn derivation_horizon(cfg: &crate::config::EventConfig) -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now()
+        .checked_add_months(chrono::Months::new(cfg.months_forward))
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC)
+}
+/// Extend one parent's derived links whose event has entered the horizon to the event's own
+/// instant (`until`), inside a delta-feed apply (`storage::apply`): a link capped at the horizon
+/// when it was derived then lives until its event while the horizon moves on. A link that lapsed
+/// at the cap meanwhile (an event more than one horizon away) comes back while its instant is
+/// still ahead, nearest event first, only within the per-parent (`$3`) and per-adapter (`$4`)
+/// caps, as a new link would; if its child was cleaned up, the row went with it and the next
+/// feed row naming the link derives it again.
+pub(crate) const EXTEND_PARENT_DERIVATIONS: &str = "WITH live AS (SELECT (SELECT count(*) FROM resource_derivation WHERE parent_id=$1 AND (expires_at IS NULL OR expires_at>now())) AS parent,
+ (SELECT count(*) FROM resource_derivation WHERE adapter IN (SELECT adapter FROM resource_derivation WHERE parent_id=$1) AND (expires_at IS NULL OR expires_at>now())) AS total),
+ revived AS (SELECT c.child_id FROM (SELECT d.child_id,row_number() OVER (ORDER BY d.until,d.child_id) AS n FROM resource_derivation d
+   WHERE d.parent_id=$1 AND d.until IS NOT NULL AND d.until<=$2 AND d.until>now() AND d.expires_at<=now()) c,live
+   WHERE c.n<=least($3-live.parent,$4-live.total))
+ UPDATE resource_derivation SET expires_at=until WHERE parent_id=$1 AND until IS NOT NULL AND until<=$2 AND until>now() AND (expires_at IS NULL OR expires_at<until)
+   AND (expires_at IS NULL OR expires_at>now() OR child_id IN (SELECT child_id FROM revived))";
+/// `EXTEND_PARENT_DERIVATIONS` outside a feed apply.
+pub async fn extend_parent_links(
+    pool: &PgPool,
+    parent: &str,
+    horizon: chrono::DateTime<chrono::Utc>,
+    caps: (usize, usize),
+) -> Result<u64> {
+    let parent = identity(parent)?.0;
+    let mut tx = pool.begin().await?;
+    sqlx::query(LOCK_PARENT_ADAPTER)
+        .bind(&parent)
+        .execute(&mut *tx)
+        .await?;
+    let extended = sqlx::query(EXTEND_PARENT_DERIVATIONS)
+        .bind(&parent)
+        .bind(horizon)
+        .bind(caps.0 as i64)
+        .bind(caps.1 as i64)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    tx.commit().await?;
+    Ok(extended)
+}
+/// The adapter lock a new derived link takes (`derive_resource_within`), for the adapter of
+/// `$1`'s links: a revival and a new link never count the caps at the same time.
+pub(crate) const LOCK_PARENT_ADAPTER: &str = "SELECT pg_advisory_xact_lock(hashtextextended(adapter,17614)) FROM (SELECT DISTINCT adapter FROM resource_derivation WHERE parent_id=$1 ORDER BY adapter) a";
+/// Record which feed rows name which of `parent`'s links. `live` are this batch's rows with a
+/// link (row key, link URL, the row's instant); `gone` are its row keys that name no future link
+/// any more (tombstoned, past, or without a website). A row key names one link at a time: a
+/// re-linked row leaves its previous link. Each link's `until` becomes the farthest instant among
+/// the rows still naming it, or NULL when none does, and its expiry never stays past that. A
+/// link records at most 64 naming rows, those asking for the farthest instants.
+pub async fn link_sources(
+    pool: &PgPool,
+    parent: &str,
+    live: &[(String, String, chrono::DateTime<chrono::Utc>)],
+    gone: &[String],
+) -> Result<()> {
+    let parent_id = identity(parent)?.0;
+    let live: Vec<serde_json::Value> = live
+        .iter()
+        .filter_map(|(key, link, until)| {
+            identity(link)
+                .ok()
+                .map(|(child, _, _)| serde_json::json!({"key":key,"child":child,"until":until}))
+        })
+        .collect();
+    let leaving: Vec<String> = live
+        .iter()
+        .filter_map(|v| v["key"].as_str().map(str::to_owned))
+        .chain(gone.iter().cloned())
+        .collect();
+    if leaving.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        r#"WITH merged AS (
+             SELECT d.parent_id,d.child_id,
+               (d.sources - $2::text[]) || coalesce((SELECT jsonb_object_agg(v->>'key',v->'until') FROM jsonb_array_elements($3) v WHERE v->>'child'=d.child_id),'{}'::jsonb) AS sources
+             FROM resource_derivation d
+             WHERE d.parent_id=$1 AND (d.sources ?| $2::text[] OR d.child_id IN (SELECT v->>'child' FROM jsonb_array_elements($3) v))),
+           touched AS (
+             SELECT m.parent_id,m.child_id,(SELECT coalesce(jsonb_object_agg(e.key,e.value),'{}'::jsonb) FROM
+               (SELECT key,value FROM jsonb_each(m.sources) ORDER BY (value#>>'{}')::timestamptz DESC,key LIMIT 64) e) AS sources
+             FROM merged m)
+           UPDATE resource_derivation d SET sources=t.sources,
+             until=(SELECT max(value::timestamptz) FROM jsonb_each_text(t.sources)),
+             expires_at=CASE WHEN t.sources='{}'::jsonb THEN least(d.expires_at,now())
+               ELSE least(d.expires_at,(SELECT max(value::timestamptz) FROM jsonb_each_text(t.sources))) END
+           FROM touched t WHERE d.parent_id=t.parent_id AND d.child_id=t.child_id"#,
+    )
+    .bind(&parent_id)
+    .bind(&leaving)
+    .bind(serde_json::Value::Array(live))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+/// Time-scoped sponsorship frees expired event slots without fetching every historical link.
+pub async fn derive_resource_until(
+    pool: &PgPool,
+    parent: &str,
+    uri: &str,
+    adapter: &str,
+    cap: usize,
+    global_cap: usize,
+    expires: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<Option<String>> {
+    derive_resource_within(pool, parent, uri, adapter, cap, global_cap, expires, None).await
+}
+/// `derive_resource_until` for a link whose event asks for `until` but whose expiry is capped
+/// at `horizon`; the uncapped instant is kept so each feed apply can extend it as the horizon moves.
+#[allow(clippy::too_many_arguments)]
+pub async fn derive_resource_within(
+    pool: &PgPool,
+    parent: &str,
+    uri: &str,
+    adapter: &str,
+    cap: usize,
+    global_cap: usize,
+    until: Option<chrono::DateTime<chrono::Utc>>,
+    horizon: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<Option<String>> {
+    if until.is_some_and(|at| at <= chrono::Utc::now()) {
+        return Ok(None);
+    }
+    // Never past the last storable instant (`time::bounded`), whatever the caller derived.
+    let latest = chrono::DateTime::from_timestamp(253402300799, 0).expect("9999-12-31T23:59:59Z");
+    let until = until.map(|at| at.min(latest));
+    let expires = until.map(|at| horizon.map_or(at, |h| at.min(h)));
+    let (parent_id, _, _) = identity(parent)?;
+    let (id, uri, _) = identity(uri)?;
+    if parent_id == id {
+        return Ok(None);
+    }
+    let mut tx = pool.begin().await?;
+    // Lock order: the search revision, then the adapter, then the parent, as a feed apply takes
+    // them (`EXTEND_PARENT_DERIVATIONS`). Always: inserting the child bumps the revision too.
+    lock_search_revision(&mut tx).await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,17614))")
+        .bind(adapter)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,17613))")
+        .bind(&parent_id)
+        .execute(&mut *tx)
+        .await?;
+    // A resolver probe or a removed parent must never create background work.
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource WHERE id=$1)")
+        .bind(&parent_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if !exists {
+        return Ok(None);
+    }
+    let known: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM resource_derivation WHERE parent_id=$1 AND child_id=$2 AND (expires_at IS NULL OR expires_at>now()))",
+    )
+    .bind(&parent_id)
+    .bind(&id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !known {
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM resource_derivation WHERE parent_id=$1 AND (expires_at IS NULL OR expires_at>now())")
+                .bind(&parent_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        let total: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM resource_derivation WHERE adapter=$1 AND (expires_at IS NULL OR expires_at>now())")
+                .bind(adapter)
+                .fetch_one(&mut *tx)
+                .await?;
+        if count >= cap as i64 || total >= global_cap as i64 {
+            return Ok(None);
+        }
+        insert_resource(&mut tx, &id, &uri).await?;
+        sqlx::query("INSERT INTO resource_derivation(parent_id,child_id,adapter,expires_at,until) VALUES($1,$2,$3,$4,$5) ON CONFLICT(parent_id,child_id) DO UPDATE SET expires_at=excluded.expires_at,until=excluded.until")
+            .bind(&parent_id)
+            .bind(&id)
+            .bind(adapter)
+            .bind(expires)
+            .bind(until)
+            .execute(&mut *tx)
+            .await?;
+    }
+    if known {
+        // A shared link keeps the farthest instant any row asked for: another row's nearer edit
+        // never shortens it (`link_sources` lowers it when a row stops naming the link).
+        sqlx::query(
+            "UPDATE resource_derivation SET until=CASE WHEN $4::timestamptz IS NULL THEN NULL ELSE greatest(until,$4) END,expires_at=CASE WHEN $4::timestamptz IS NULL THEN $3 ELSE least(greatest(until,$4),coalesce($5,greatest(until,$4))) END WHERE parent_id=$1 AND child_id=$2",
+        )
+        .bind(&parent_id)
+        .bind(&id)
+        .bind(expires)
+        .bind(until)
+        .bind(horizon)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(Some(id))
+}
 /// Insert a resource row once; a URI with a static alias root (`alias::root`) becomes an alias
 /// of that root, which is inserted and queued in its place.
 pub async fn insert_resource(

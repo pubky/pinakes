@@ -54,6 +54,14 @@ pub fn manifest(source: &str) -> Manifest {
             vec!["name", "location"],
             Some("https://www.openstreetmap.org/node/240109189"),
         ),
+        "event" => (
+            Mode::Container,
+            3600,
+            "feed/uid/recurrence_id",
+            "explicit_or_missing_twice",
+            vec![],
+            None,
+        ),
         "web" => (
             Mode::Resource,
             3600,
@@ -96,7 +104,7 @@ pub fn manifest(source: &str) -> Manifest {
     }
 }
 pub fn manifests() -> Vec<Manifest> {
-    ["web", "pubky", "geo", "osm"]
+    ["web", "pubky", "geo", "osm", "event"]
         .into_iter()
         .map(manifest)
         .collect()
@@ -107,6 +115,9 @@ impl Manifest {
         self.expected_fields
             .iter()
             .filter(|field| {
+                if field.as_str() == "cursor" {
+                    return doc.container.as_ref().is_none_or(|c| c.cursor.is_none());
+                }
                 let value = field.split('.').try_fold(&value, |v, k| v.get(k));
                 value.is_none_or(|v| {
                     v.is_null()
@@ -124,6 +135,7 @@ pub fn configured(config: &crate::config::Config) -> Vec<Manifest> {
     for m in &mut all {
         m.enabled = match m.source.as_str() {
             "web" => config.web.enabled,
+            "event" => config.event.enabled && config.event.calendars,
             "pubky" => config.pubky.enabled,
             "geo" => config.geo.enabled,
             "osm" => config.osm.enabled,
@@ -133,6 +145,7 @@ pub fn configured(config: &crate::config::Config) -> Vec<Manifest> {
             m.cadence_floor = config.osm.ttl_secs.max(3600);
         }
     }
+    all.extend(crate::event::adapters::manifests(&config.event));
     all.extend(crate::resolver::cards::manifests(&config.cards));
     all
 }

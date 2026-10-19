@@ -360,9 +360,35 @@ async fn multibyte_input_never_panics_any_public_route(pool: PgPool) {
                 "/v1/changes/lookup".into(),
                 Some(json!({"resource_ids":[id],"since":"now","cursor":value})),
             ),
+            (
+                "POST",
+                "/v1/occurrences/lookup".into(),
+                Some(json!({"resource_ids":[value]})),
+            ),
         ];
+        for name in ["from", "to", "cursor"] {
+            requests.push((
+                "POST",
+                "/v1/occurrences/lookup".into(),
+                Some(json!({"resource_ids":[id],name:value})),
+            ));
+        }
+        // A feed's occurrences: the path, the window (`from`, `to`, in RFC 3339), `limit` and
+        // `cursor`.
+        requests.push(("GET", format!("/v1/resources/{v}/occurrences"), None));
+        for name in ["from", "to", "limit", "cursor"] {
+            requests.push((
+                "GET",
+                format!("/v1/resources/{id}/occurrences?{name}={v}"),
+                None,
+            ));
+        }
         for raw in ["%FF", "now%FF", "%FF,1"] {
-            requests.push(("GET", format!("/v1/resources/by-uri?uri={raw}"), None));
+            requests.push((
+                "GET",
+                format!("/v1/resources/{id}/occurrences?from={raw}"),
+                None,
+            ));
         }
         for (method, target, body) in requests {
             let since = body
@@ -386,8 +412,8 @@ async fn multibyte_input_never_panics_any_public_route(pool: PgPool) {
             sent += 1;
         }
     }
-    // Nine body and path requests and three raw values per value.
-    assert_eq!(sent, values.len() * 12, "the sweep lost requests");
+    // Thirteen body and path requests, five occurrence queries and three raw values per value.
+    assert_eq!(sent, values.len() * 21, "the sweep lost requests");
     assert_eq!(panics.get(), 0, "no handler panicked");
 }
 

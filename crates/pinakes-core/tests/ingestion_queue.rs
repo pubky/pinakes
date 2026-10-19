@@ -956,7 +956,7 @@ async fn invalid_non_event_feed_clock_has_its_own_rejection_reason(pool: PgPool)
 /// `pinakesd reextract <route…|all>` re-queues only the selected rows, now, fenced by a
 /// generation bump, without their HTTP validators.
 #[sqlx::test(migrations = "../../migrations")]
-async fn reextract_requeues_only_the_selected_routes(pool: PgPool) {
+async fn reextract_requeues_the_selected_routes_without_validators(pool: PgPool) {
     let web = store::ensure_resource(&pool, "https://example.org/page")
         .await
         .unwrap();
@@ -967,6 +967,11 @@ async fn reextract_requeues_only_the_selected_routes(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
+    sqlx::query("INSERT INTO event_fetch(resource_id,validators) VALUES($1,'{\"etag\":\"x\"}')")
+        .bind(&web)
+        .execute(&pool)
+        .await
+        .unwrap();
     let state = |id: String| {
         let pool = pool.clone();
         async move {
@@ -983,6 +988,13 @@ async fn reextract_requeues_only_the_selected_routes(pool: PgPool) {
     assert_eq!(queue::reextract(&pool, &["web".into()]).await.unwrap(), 1);
     assert_eq!(state(web.clone()).await, (true, 0, before + 1));
     assert!(!state(geo.clone()).await.0, "another route is left alone");
+    let validators: serde_json::Value =
+        sqlx::query_scalar("SELECT validators FROM event_fetch WHERE resource_id=$1")
+            .bind(&web)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(validators, serde_json::json!({}));
     assert_eq!(queue::reextract(&pool, &["all".into()]).await.unwrap(), 2);
     assert!(queue::reextract(&pool, &[]).await.is_err());
 }

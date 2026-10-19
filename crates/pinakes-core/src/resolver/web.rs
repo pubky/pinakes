@@ -32,6 +32,7 @@ pub const ATTRIBUTES: &[&str] = &[
 pub struct WebResolver {
     pub oembed_policy: super::cards::OembedPolicy,
     pub cards: Option<std::sync::Arc<super::cards::CardConfig>>,
+    pub events: Option<std::sync::Arc<crate::event::service::EventService>>,
     pub egress: Egress,
     pub config: ResolverConfig,
 }
@@ -42,6 +43,16 @@ impl Resolver for WebResolver {
     }
     fn queue_sources(&self) -> Vec<&'static str> {
         let mut sources = vec!["web"];
+        if self.events.as_ref().is_none_or(|e| !e.config.calendars) {
+            sources.push("event");
+        }
+        if self
+            .events
+            .as_ref()
+            .is_none_or(|e| !e.config.adapters.enabled)
+        {
+            sources.push("event_platform");
+        }
         for kind in super::cards::KINDS {
             if self
                 .cards
@@ -74,16 +85,41 @@ impl WebResolver {
         uri: &str,
         policy: super::cards::OembedPolicy,
     ) -> Result<ResourceMeta> {
-        if !url::Url::parse(uri).is_ok_and(|u| matches!(u.scheme(), "http" | "https")) {
+        if !url::Url::parse(uri)
+            .is_ok_and(|u| matches!(u.scheme(), "http" | "https" | "webcal" | "webcals"))
+        {
             return Err(super::RetryLater {
                 class: "disabled",
                 seconds: 3600,
             }
             .into());
         }
+        if Url::parse(uri).is_ok_and(|u| u.host_str() == Some("api.nostr.wine"))
+            && crate::event::adapters::detect(uri).is_none()
+        {
+            return Err(super::ErrorClass("policy").into());
+        }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         tokio::time::timeout_at(deadline, async {
-            let fetched = self.egress.fetch(uri).await?;
+            let fetched = if let Some(events) = &self.events {
+                events.fetch(&self.egress, uri).await?
+            } else {
+                let uri = if uri.starts_with("webcal:") || uri.starts_with("webcals:") {
+                    crate::event::calendar::canonical_feed(uri)
+                } else {
+                    uri.to_owned()
+                };
+                self.egress.fetch(&uri).await?
+            };
+            if let Some(events) = &self.events {
+                if let Some(doc) = events.container(uri, &fetched, deadline).await? {
+                    return Ok(doc);
+                }
+                let feed = crate::event::service::feed_like(&fetched);
+                if let Some(doc) = events.disappeared(uri, fetched.status, feed).await? {
+                    return Ok(doc);
+                }
+            }
             if fetched.status == 304 {
                 return Err(super::NotModified.into());
             }
@@ -99,11 +135,27 @@ impl WebResolver {
                 tokio::task::spawn_blocking(move || extract(&input_uri, &input, ttl)).await?;
             // Later steps may replace the document; the page's own candidates stay.
             let candidates = std::mem::take(&mut extracted.doc.alias_candidates);
-            if extracted.doc.type_path.contains(&"Event".into()) {
+            if let Some(events) = &self.events {
+                extracted.doc = events
+                    .page(uri, &fetched, extracted.doc, &self.egress, deadline)
+                    .await?;
+            } else if extracted.doc.type_path.contains(&"Event".into()) {
                 extracted.doc.set_type("WebPage");
                 extracted.doc.start = None;
                 extracted.doc.end = None;
                 extracted.doc.event = Default::default();
+            }
+
+            if self
+                .events
+                .as_ref()
+                .is_some_and(|e| e.config.adapters.enabled)
+            {
+                if let Some(doc) =
+                    crate::event::adapters::service::wikipedia(uri, &fetched, &self.egress).await?
+                {
+                    extracted.doc = doc;
+                }
             }
 
             if let Some(cards) = &self.cards {
@@ -1310,6 +1362,7 @@ mod tests {
         let resolver = WebResolver {
             oembed_policy: Default::default(),
             cards: None,
+            events: None,
             egress: Egress::with_backends(Default::default(), Arc::new(TestDns), Arc::new(Pages)),
             config: Default::default(),
         };

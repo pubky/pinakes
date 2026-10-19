@@ -22,6 +22,10 @@ groups:
         expr: (sum by (source) (increase(pinakes_fetch_total{outcome="unreachable"}[2h])) / sum by (source) (increase(pinakes_fetch_total[2h])) > 0.5) and (sum by (source) (increase(pinakes_fetch_total[2h])) >= 20)
         labels: {severity: warning}
         annotations: {summary: "More than half of {{ $labels.source }} fetches are blocked"}
+      - alert: FeedHeld
+        expr: increase(pinakes_feed_held_total[1h]) > 0
+        labels: {severity: warning}
+        annotations: {summary: "Pinakes quarantined a container snapshot for {{ $labels.source }}"}
       - alert: CancellationBurst
         expr: sum by (source) (increase(pinakes_changes_total{class="cancelled"}[1h])) > 20
         labels: {severity: warning}
@@ -31,7 +35,7 @@ groups:
         labels: {severity: critical}
         annotations: {summary: "Pinakes ingestion panicked outside a feed line; the Nexus cursor is held"}
       - alert: CursorReset
-        expr: label_replace(increase(pinakes_ingest_epoch_resets_total[1h]) > 0, "source", "nexus", "", "")
+        expr: (increase(pinakes_source_cursor_resets_total[1h]) > 0) or label_replace(increase(pinakes_ingest_epoch_resets_total[1h]) > 0, "source", "nexus", "", "")
         labels: {severity: info}
         annotations: {summary: "Pinakes resynchronized the {{ $labels.source }} cursor"}
       - alert: RateLimited

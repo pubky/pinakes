@@ -39,7 +39,7 @@ pub fn needs_embed(doc: &ResourceMeta) -> bool {
         || doc.image.is_none()
         || doc.event.warnings.iter().any(|w| w == "truncated")
 }
-pub const KINDS: [&str; 4] = ["media", "isbn", "doi", "activitypub"];
+pub const KINDS: [&str; 5] = ["media", "isbn", "doi", "nostr", "activitypub"];
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CardConfig {
@@ -47,6 +47,7 @@ pub struct CardConfig {
     pub media: ResolverConfig,
     pub isbn: ResolverConfig,
     pub doi: ResolverConfig,
+    pub nostr: ResolverConfig,
     pub activitypub: ResolverConfig,
     #[serde(skip)]
     pub openlibrary_url: String,
@@ -61,6 +62,7 @@ impl Default for CardConfig {
             media: Default::default(),
             isbn: Default::default(),
             doi: Default::default(),
+            nostr: Default::default(),
             activitypub: Default::default(),
             openlibrary_url: "https://openlibrary.org/api/books".into(),
             doi_url: "https://doi.org/".into(),
@@ -73,6 +75,7 @@ impl CardConfig {
         match kind {
             "isbn" => &self.isbn,
             "doi" => &self.doi,
+            "nostr" => &self.nostr,
             "activitypub" => &self.activitypub,
             _ => &self.media,
         }
@@ -310,7 +313,19 @@ pub fn classify(uri: &str) -> Option<&'static str> {
     if uri.starts_with("doi:") || doi(uri).is_some() {
         return Some("doi");
     }
-    if provider_endpoint(uri).is_some() {
+    if uri.starts_with("nostr:")
+        || crate::event::adapters::detect(uri).is_some_and(|d| d.id == "nip52")
+    {
+        let target = crate::event::adapters::nostr::Target::decode(uri).ok()?;
+        return if target.kind.is_some_and(|k| (31922..=31925).contains(&k)) {
+            None
+        } else {
+            Some("nostr")
+        };
+    }
+    if provider_endpoint(uri).is_some()
+        && !crate::event::adapters::detect(uri).is_some_and(|d| d.id != "ics")
+    {
         return Some("media");
     }
     None
@@ -331,6 +346,7 @@ impl CardResolver {
         let web = web::WebResolver {
             oembed_policy: config.media.oembed,
             cards: Some(Arc::new(config.cards.clone())),
+            events: None,
             egress,
             config: ResolverConfig {
                 discover_feeds: kind == "media" && config.cards.media.discover_feeds,
@@ -370,7 +386,12 @@ impl Resolver for CardResolver {
     }
     async fn resolve(&self, uri: &str) -> Result<ResourceMeta> {
         let ttl = self.config.cards.resolver(self.kind).ttl_secs;
-        let result = tokio::time::timeout(Duration::from_secs(10), async {
+        let budget = if self.kind == "nostr" {
+            crate::queue::RESOLVE_TIMEOUT - Duration::from_secs(1)
+        } else {
+            Duration::from_secs(10)
+        };
+        let result = tokio::time::timeout(budget, async {
             match self.kind {
                 "isbn" => {
                     let Some(number) = isbn(uri) else { return Ok(missing(uri,"isbn",0)); };
@@ -404,6 +425,28 @@ impl Resolver for CardResolver {
                         .await?;
                     let uri = uri.to_owned();
                     tokio::task::spawn_blocking(move || parse_doi(&uri, &f, ttl)).await?
+                }
+                "nostr" => {
+                    let target = crate::event::adapters::nostr::Target::decode(uri)?;
+                    let event = crate::event::adapters::nostr::lookup(
+                        &target,
+                        &self.web.egress,
+                        &self.config.event,
+                    )
+                    .await?;
+                    let Some(event) = event else {
+                        return Ok(missing(uri, "nostr", ttl));
+                    };
+                    if matches!(event.kind.as_u16(), 31922 | 31923) {
+                        if !self.config.event.enabled {
+                            return Err(super::RetryLater { class: "disabled", seconds: 3600 }.into());
+                        }
+                        return crate::event::adapters::nostr::parse(
+                            uri,
+                            &event,);
+                    }
+                    let uri=uri.to_owned();
+                    tokio::task::spawn_blocking(move || parse_nostr(&uri, &event, ttl)).await?
                 }
                 "media" => self.media(uri,ttl).await,
                 "activitypub" => {
@@ -606,6 +649,50 @@ pub fn parse_doi(uri: &str, f: &Fetched, ttl: u64) -> Result<ResourceMeta> {
         .collect::<Vec<_>>();
     for page in pages {
         registry_url(&mut d, &f.url, &page);
+    }
+    d.bounded(web::ATTRIBUTES)
+}
+pub fn parse_nostr(uri: &str, e: &nostr::event::Event, ttl: u64) -> Result<ResourceMeta> {
+    e.verify()?;
+    let mut d = ResourceMeta::new(uri, "nostr", ttl);
+    d.attributes.insert("author".into(), e.pubkey.to_hex());
+    match e.kind.as_u16() {
+        0 => {
+            let v: Value = serde_json::from_str(&e.content)?;
+            d.set_type("Person");
+            d.name = text(v.get("display_name")).or_else(|| text(v.get("name")));
+            d.description = text(v.get("about"));
+            d.image = v["picture"]
+                .as_str()
+                .and_then(|s| Url::parse(s).ok())
+                .filter(|u| matches!(u.scheme(), "http" | "https"))
+                .map(|u| u.to_string());
+        }
+        1 | 30023 => {
+            d.set_type(if e.kind.as_u16() == 1 {
+                "SocialMediaPosting"
+            } else {
+                "Article"
+            });
+            d.name = e
+                .tags
+                .iter()
+                .find_map(|t| {
+                    let a = t.as_slice();
+                    (a.first().is_some_and(|s| s == "title"))
+                        .then(|| a.get(1).cloned())
+                        .flatten()
+                })
+                .or_else(|| Some(e.content.chars().take(120).collect()));
+            d.description = Some(e.content.chars().take(200).collect());
+            d.ttl_secs = ttl.min(3600);
+        }
+        _ => {
+            d.set_type("CreativeWork");
+            d.name = Some(format!("Nostr event (kind {})", e.kind.as_u16()));
+            d.description = Some(e.content.chars().take(200).collect());
+            d.ttl_secs = ttl.min(3600);
+        }
     }
     d.bounded(web::ATTRIBUTES)
 }
@@ -941,12 +1028,12 @@ fn csl_date(v: &Value) -> Option<String> {
         .to_string(),
     )
 }
-/// Social content: a note or post whose card quotes its text (ActivityPub, a Pubky
+/// Social content: a note or post whose card quotes its text (Nostr, ActivityPub, a Pubky
 /// object described by its content). Its excerpt is short, refreshes within the hour and is
 /// purged, with its change history, once the object is confirmed gone.
 pub fn social(doc: &ResourceMeta) -> bool {
     match doc.source.as_str() {
-        "activitypub" => matches!(
+        "nostr" | "activitypub" => matches!(
             doc.type_name.as_str(),
             "SocialMediaPosting" | "Article" | "CreativeWork"
         ),

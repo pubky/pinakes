@@ -23,13 +23,15 @@ const PLATFORM_TRACKING: &[(&[&str], &[&str])] = &[
 #[derive(Debug, PartialEq)]
 pub struct Alias {
     pub root: String,
-    /// `osm`, `identifier`, `tracking` or `canonical`.
+    /// `cursor`, `osm`, `identifier`, `tracking` or `canonical`.
     pub basis: &'static str,
 }
 /// The root of a URI known from the URI alone, when it differs from the URI itself.
 pub fn root(uri: &str) -> Option<Alias> {
     let (_, uri, _) = crate::model::identity(uri).ok()?;
-    let found = if let Some(osm) = crate::resolver::osm::parse_id(&uri) {
+    let found = if let Some(root) = crate::event::adapters::cursor::canonical_root(&uri) {
+        Some((root, "cursor"))
+    } else if let Some(osm) = crate::resolver::osm::parse_id(&uri) {
         Some((osm.uri(), "osm"))
     } else if let Some(isbn) = crate::resolver::cards::isbn(&uri) {
         Some((
@@ -173,6 +175,14 @@ pub async fn assign(tx: &mut Transaction<'_, Postgres>, id: &str, alias: &Alias)
         .bind(&root_id)
         .execute(&mut **tx)
         .await?;
+    sqlx::query("DELETE FROM occurrence WHERE resource_id=$1")
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM event_fetch WHERE resource_id=$1")
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
     sqlx::query("DELETE FROM group_unit WHERE resource_id=$1")
         .bind(id)
         .execute(&mut **tx)
@@ -241,6 +251,10 @@ mod tests {
             Some(("doi:10.1038/nature12373".into(), "identifier"))
         );
         assert_eq!(r("doi:10.1038/nature12373"), None);
+        assert_eq!(
+            r("https://api.btcmap.org/v4/events?updated_since=2026-01-01"),
+            Some(("https://api.btcmap.org/v4/events".into(), "cursor"))
+        );
         for uri in [
             "https://www.openstreetmap.org/node/240109189",
             "isbn:9780140328721",

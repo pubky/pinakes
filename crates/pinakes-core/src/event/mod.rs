@@ -1,9 +1,11 @@
-//! The event facts a document carries. Fetch health and event lifecycle are distinct.
+//! Generic events and calendar instances. Fetch health and event lifecycle are distinct.
 use crate::model::{LocationSource, Point, ResourceMeta};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub mod adapters;
+pub mod calendar;
 pub mod page;
 pub mod service;
 pub mod storage;
@@ -154,16 +156,82 @@ impl EventFields {
         }
     }
 }
+#[derive(Clone, Debug)]
+pub struct Occurrence {
+    pub uid: String,
+    pub recurrence_id: String,
+    pub doc: ResourceMeta,
+    pub sequence: i64,
+    pub modified: Option<DateTime<Utc>>,
+    pub content_hash: String,
+}
+impl Occurrence {
+    pub fn key(&self) -> String {
+        serde_json::to_string(&(&self.uid, &self.recurrence_id)).expect("strings")
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ContainerLimits {
+    pub max_changes: usize,
+    pub max_rows: usize,
+    pub max_new_keys: usize,
+    pub retention_days: u32,
+    pub max_holds: u32,
+    pub cadence_floor: u64,
+}
+impl Default for ContainerLimits {
+    fn default() -> Self {
+        Self {
+            max_changes: 100,
+            max_rows: 10000,
+            max_new_keys: 1000,
+            retention_days: 30,
+            max_holds: 5,
+            cadence_floor: 3600,
+        }
+    }
+}
 /// Instants Postgres can store (`time::bounded`), applied to every document before it is saved:
-/// an out-of-range start or end is dropped with its `start_out_of_range` or `end_out_of_range`
-/// warning. `None` when nothing was out of range, so the common case does not copy the document.
+/// an occurrence whose start is out of range is dropped with the feed's
+/// `occurrence_start_out_of_range`; an out-of-range occurrence end or modified time is dropped
+/// with the item's `end_out_of_range`/`modified_out_of_range`, as is a document's own start or
+/// end. One bad item therefore never fails the feed's apply. `None` when nothing was out of
+/// range, so the common case does not copy the document. This is the early pass:
+/// `storage::prepare` bounds each upsert row again (`bound_item`), after anything that may
+/// re-derive times, and `changes::save` clears the document again (`clear_instants`) after
+/// `preserve_venue`.
 pub fn bound_instants(doc: &ResourceMeta) -> Option<ResourceMeta> {
     let out = |t: &Option<DateTime<Utc>>| t.is_some_and(|t| time::bounded(t).is_none());
-    if !out(&doc.start) && !out(&doc.end) {
+    let item = |d: &ResourceMeta| out(&d.start) || out(&d.end);
+    if !item(doc)
+        && !doc.container.as_ref().is_some_and(|c| {
+            c.occurrences
+                .iter()
+                .any(|o| item(&o.doc) || out(&o.modified))
+        })
+    {
         return None;
     }
     let mut doc = doc.clone();
     clear_instants(&mut doc);
+    if let Some(c) = &mut doc.container {
+        let before = c.occurrences.len();
+        c.occurrences
+            .retain(|o| o.doc.start.is_none_or(|t| time::bounded(t).is_some()));
+        if c.occurrences.len() < before {
+            c.warnings.push("occurrence_start_out_of_range".into());
+            doc.event
+                .warnings
+                .push("occurrence_start_out_of_range".into());
+            doc.event.warnings.sort();
+            doc.event.warnings.dedup();
+            doc.event.warnings.truncate(16);
+        }
+        for o in &mut c.occurrences {
+            bound_item(&mut o.doc, &mut o.modified);
+        }
+    }
     Some(doc)
 }
 /// Bound a document's start and end (`time::bounded`, which also truncates to the microseconds
@@ -191,4 +259,39 @@ fn tidy_warnings(d: &mut ResourceMeta) {
     d.event.warnings.sort();
     d.event.warnings.dedup();
     d.event.warnings.truncate(16);
+}
+/// One occurrence's instants: `false` when its start is out of range (the row must be dropped);
+/// otherwise each instant is truncated to microseconds and an out-of-range end or modified time
+/// is dropped with the item's warning.
+pub fn bound_item(d: &mut ResourceMeta, modified: &mut Option<DateTime<Utc>>) -> bool {
+    if d.start.is_some_and(|t| time::bounded(t).is_none()) {
+        return false;
+    }
+    if let Some(t) = *modified {
+        *modified = time::bounded(t);
+        if modified.is_none() {
+            d.event.warnings.push("modified_out_of_range".into());
+            tidy_warnings(d);
+        }
+    }
+    clear_instants(d);
+    true
+}
+#[derive(Clone, Debug, Default)]
+pub struct Container {
+    /// Committed with the snapshot, never before parsing or a generation fence.
+    pub validators: Option<crate::resolver::egress::Validators>,
+    pub limits: ContainerLimits,
+    pub delta: bool,
+    pub deleted_uids: Vec<String>,
+    pub cursor: Option<adapters::cursor::Checkpoint>,
+    pub occurrences: Vec<Occurrence>,
+    pub feed_ttl: Option<u64>,
+    pub warnings: Vec<String>,
+    pub horizon_start: DateTime<Utc>,
+    pub horizon_end: DateTime<Utc>,
+    pub held_retry_secs: u64,
+    /// The adapter's per-parent and global derived-link caps: a lapsed link comes back only
+    /// within them (`store::EXTEND_PARENT_DERIVATIONS`). `(0, 0)` revives none.
+    pub link_caps: (usize, usize),
 }

@@ -182,6 +182,7 @@ async fn optional_fetch_policy_and_metrics() {
             web: WebResolver {
                 oembed_policy: Default::default(),
                 cards: None,
+                events: None,
                 config: Default::default(),
                 egress: Egress::with_backends(
                     Default::default(),
@@ -363,6 +364,55 @@ fn podcast_selection_and_schema_media_keys() {
         assert_eq!(d.attributes["isrc"], "US-S1Z-99-00001");
     }
 }
+#[test]
+fn generic_nostr_signed_profile_note_and_nip52_routing() {
+    use nostr::prelude::*;
+    let keys = Keys::parse(&"11".repeat(32)).unwrap();
+    for (kind, content, ty) in [
+        (
+            0,
+            r#"{"name":"Alice","picture":"https://example.org/a.png"}"#,
+            "Person",
+        ),
+        (1, "Hello nostr", "SocialMediaPosting"),
+        (6, "Reposted", "CreativeWork"),
+        (7, "+", "CreativeWork"),
+    ] {
+        let unsigned = EventBuilder::new(Kind::from(kind), content)
+            .custom_created_at(Timestamp::from_secs(1700000000))
+            .finalize_unsigned(keys.public_key());
+        let sig = keys.sign_schnorr_with_aux_rand(
+            &secp256k1::Secp256k1::new(),
+            unsigned.compute_id().as_bytes(),
+            &[0; 32],
+        );
+        let event = unsigned.add_signature(sig).unwrap();
+        let uri = if kind == 0 {
+            format!("nostr:{}", keys.public_key().to_bech32().unwrap())
+        } else {
+            format!("nostr:{}", event.id.to_bech32().unwrap())
+        };
+        assert_eq!(cards::classify(&uri), Some("nostr"));
+        assert_eq!(
+            cards::parse_nostr(&uri, &event, 3600).unwrap().type_name,
+            ty
+        );
+        let mut v = serde_json::to_value(event).unwrap();
+        v["content"] = Value::String("tampered".into());
+        assert!(cards::parse_nostr(&uri, &serde_json::from_value(v).unwrap(), 3600).is_err());
+    }
+    let t = pinakes_core::event::adapters::nostr::Target::coordinate(&format!(
+        "31923:{}:event",
+        keys.public_key().to_hex()
+    ))
+    .unwrap();
+    assert_eq!(
+        pinakes_core::resolver::classify(&t.uri().unwrap()),
+        Some("event_platform")
+    );
+    let _: ResourceMeta = ResourceMeta::new("nostr:x", "nostr", 3600);
+}
+
 #[tokio::test]
 async fn blog_rss_preserves_jsonld_and_single_episode_feed_is_series() {
     let r = resolver(
@@ -476,6 +526,7 @@ async fn recorded_youtube_head_and_oembed_survive_oversize_or_failed_page() {
         web: WebResolver {
             oembed_policy: Default::default(),
             cards: None,
+            events: None,
             egress: Egress::with_backends(
                 Default::default(),
                 Arc::new(PublicDns),
@@ -647,6 +698,7 @@ async fn oembed_first_keeps_rich_page_types_and_ap_denial_falls_back() {
         web: WebResolver {
             oembed_policy: Default::default(),
             cards: None,
+            events: None,
             config: Default::default(),
             egress: Egress::with_backends(Default::default(), Arc::new(PublicDns), Arc::new(Rich)),
         },
@@ -751,6 +803,7 @@ async fn redirected_feed_cannot_inherit_destination_container() {
     let r = WebResolver {
         oembed_policy: Default::default(),
         cards: Some(Arc::new(Default::default())),
+        events: None,
         config: Default::default(),
         egress: e,
     };
@@ -817,6 +870,7 @@ async fn advertised_oembed_uses_policy_and_origin_checks() {
         let r = WebResolver {
             oembed_policy: policy,
             cards: None,
+            events: None,
             config: Default::default(),
             egress: Egress::with_backends(Default::default(), Arc::new(PublicDns), t.clone()),
         };

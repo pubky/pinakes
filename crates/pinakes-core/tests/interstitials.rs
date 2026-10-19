@@ -632,6 +632,7 @@ async fn reextract_repairs_text_stored_before_the_decoding_fix(pool: PgPool) {
     let resolver = web::WebResolver {
         oembed_policy: Default::default(),
         cards: None,
+        events: None,
         config: Default::default(),
         egress: Egress::with_backends(
             EgressConfig {

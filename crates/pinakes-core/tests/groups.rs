@@ -337,6 +337,145 @@ async fn members_keep_their_own_cards_and_counts(pool: PgPool) {
     );
 }
 
+#[sqlx::test(migrations = "../../migrations")]
+async fn recurring_uid_is_scoped_to_start_and_a_page_joins_only_when_corroborated(pool: PgPool) {
+    use pinakes_core::{config::EventConfig, event::calendar};
+    let date = chrono::Utc::now() + chrono::Duration::days(1);
+    let feed = "https://example.org/test.ics";
+    let id = store::ensure_resource(&pool, feed).await.unwrap();
+    let text=format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:stable-series\r\nDTSTART:{}\r\nRRULE:FREQ=DAILY;COUNT=2\r\nSUMMARY:Series\r\nGEO:47;8\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",date.format("%Y%m%dT%H%M%SZ"));
+    let d = calendar::parse(
+        feed,
+        text.as_bytes(),
+        &EventConfig::default(),
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(DISTINCT coalesce(group_id,unit_id)) FROM group_unit WHERE resource_id=$1 AND occurrence_key<>''")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 2);
+    let (page, mut doc) = save(&pool, "page", &[], None).await;
+    doc.set_type("Event");
+    doc.name = Some("Series".into());
+    doc.location = Some(Point {
+        lat: 47.0,
+        lon: 8.0,
+    });
+    doc.start = Some(date.with_nanosecond(0).unwrap());
+    group_keys::add(&mut doc, "ics_uid", "stable-series");
+    store::save_document(&pool, &page, 0, &doc).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM group_unit WHERE group_id=$1")
+        .bind(gid(&pool, &page).await)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0); // Default off: a page's copied UID cannot join a feed.
+    let cfg = groups::GroupConfig {
+        cross_container_occurrences: groups::CrossContainerOccurrences::Corroborated,
+        ..Default::default()
+    };
+    assert!(groups::reconcile(&pool, &page, &cfg).await);
+    assert_ne!(gid(&pool, &page).await, page);
+    groups::drain(&pool, &cfg, 100).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(DISTINCT coalesce(group_id,unit_id)) FROM group_unit WHERE resource_id=$1 AND occurrence_key<>''")
+        .bind(&id).fetch_one(&pool).await.unwrap();
+    assert_eq!(count, 2);
+    let members: i64 = sqlx::query_scalar("SELECT count(*) FROM group_unit WHERE group_id=$1")
+        .bind(gid(&pool, &page).await)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(members, 2);
+    // The occurrence route names the joined instance's group, as every card does.
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let joined = json!(gid(&pool, &page).await);
+    let items = get(&app, &format!("/v1/resources/{id}/occurrences")).await["items"].clone();
+    let groups: Vec<&Value> = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| &o["group"])
+        .collect();
+    assert_eq!(
+        groups.iter().filter(|g| g["id"] == joined).count(),
+        1,
+        "{items}"
+    );
+    assert_eq!(groups.iter().filter(|g| g.is_null()).count(), 1, "{items}");
+}
+/// A UID is free text: a NIP-52 coordinate, a URN or `{feed}:{uid}` never spells another
+/// feed's key, and no UID joins across feeds unless the corroborated mode is on.
+#[sqlx::test(migrations = "../../migrations")]
+async fn forged_or_colon_uids_never_join_across_feeds(pool: PgPool) {
+    use pinakes_core::{config::EventConfig, event::calendar};
+    let date = (chrono::Utc::now() + chrono::Duration::days(1)).format("%Y%m%dT%H%M%SZ");
+    let save_feed = |uri: &'static str, uids: Vec<String>| {
+        let pool = pool.clone();
+        let date = date.to_string();
+        async move {
+            let id = store::ensure_resource(&pool, uri).await.unwrap();
+            let events: String = uids.iter().map(|uid| format!("BEGIN:VEVENT\r\nUID:{uid}\r\nDTSTART:{date}\r\nSUMMARY:Same night\r\nGEO:47;8\r\nEND:VEVENT\r\n")).collect();
+            let text = format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n{events}END:VCALENDAR\r\n");
+            let d = calendar::parse(
+                uri,
+                text.as_bytes(),
+                &EventConfig::default(),
+                chrono::Utc::now(),
+            )
+            .unwrap();
+            store::save_document(&pool, &id, 0, &d).await.unwrap();
+            id
+        }
+    };
+    let victim = save_feed("https://victim.example/a.ics", vec!["victim".into()]).await;
+    let coordinate = format!("31923:{}:party", "a".repeat(64));
+    let forger = save_feed(
+        "https://forger.example/b.ics",
+        vec![format!("{victim}:victim"), "a:b".into(), coordinate.clone()],
+    )
+    .await;
+    let third = save_feed(
+        "https://third.example/c.ics",
+        vec!["a:b".into(), coordinate],
+    )
+    .await;
+    let grouped = |pool: PgPool| async move {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM group_unit WHERE group_id IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    assert_eq!(
+        grouped(pool.clone()).await,
+        0,
+        "the default mode never joins feeds"
+    );
+    let cfg = groups::GroupConfig {
+        cross_container_occurrences: groups::CrossContainerOccurrences::Corroborated,
+        ..Default::default()
+    };
+    for id in [&victim, &forger, &third] {
+        groups::reconcile(&pool, id, &cfg).await;
+    }
+    groups::drain(&pool, &cfg, 100).await.unwrap();
+    // Corroborated: the two equal UIDs join pairwise; the forged one never reaches the victim.
+    let groups: Vec<(i64, Vec<String>)> = sqlx::query_as(
+        "SELECT count(*),array_agg(DISTINCT resource_id ORDER BY resource_id) FROM group_unit WHERE group_id IS NOT NULL GROUP BY group_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let mut pair = vec![forger.clone(), third.clone()];
+    pair.sort();
+    assert_eq!(groups, vec![(2, pair.clone()), (2, pair)]);
+}
+use chrono::Timelike;
+
 #[test]
 fn tenant_rules_scope_publishers() {
     let shapes: std::collections::BTreeMap<String, Vec<String>> =

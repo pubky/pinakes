@@ -21,6 +21,7 @@ pub struct Config {
     pub osm: OsmConfig,
     pub cards: crate::resolver::cards::CardConfig,
     pub media: crate::resolver::cards::MediaConfig,
+    pub event: EventConfig,
     pub egress: EgressConfig,
     pub groups: crate::groups::GroupConfig,
     pub api: ApiConfig,
@@ -48,12 +49,14 @@ impl Default for Config {
         config
     }
 }
-/// Map sections whose entries an operator names: a `PINAKES__…` override may create one.
-const ENV_MAPS: &[&[&str]] = &[HOST_RATES];
+/// Map sections whose entries an operator names: a `PINAKES__…` override may create one (and
+/// its keys); `deny_unknown_fields` and `adapters::validate` still refuse what is unknown.
+const ENV_MAPS: &[&[&str]] = &[&["event", "adapters", "platforms"], HOST_RATES];
 /// The one map whose new entries are numbers.
 const HOST_RATES: &[&str] = &["limits", "host_rates"];
 /// Apply `PINAKES__SECTION__KEY` overrides onto the file form. Strings are literal; numbers,
-/// booleans and arrays are JSON. A new `limits.host_rates` entry is a number.
+/// booleans and arrays are JSON. A new map entry's keys are strings except `enabled`, and a
+/// new `limits.host_rates` entry is a number.
 fn apply_env(
     value: &mut serde_json::Value,
     vars: impl IntoIterator<Item = (String, String)>,
@@ -114,7 +117,8 @@ impl Config {
             poll_secs: 5,
             ingest: IngestConfig::default(),
             grace_days: 7,
-            // The web route fetches arbitrary hosts: twice the other resolvers' workers and rate.
+            // The web route (and the event routes on it) fetches arbitrary hosts: twice the
+            // other resolvers' workers and rate.
             web: ResolverConfig {
                 concurrency: 4,
                 requests_per_second: 4.0,
@@ -126,6 +130,7 @@ impl Config {
             },
             cards: Default::default(),
             media: Default::default(),
+            event: EventConfig::default(),
             geo: GeoConfig::default(),
             osm: OsmConfig::default(),
             egress: EgressConfig::default(),
@@ -133,6 +138,87 @@ impl Config {
             groups: Default::default(),
             preview: PreviewConfig::default(),
             api: ApiConfig::default(),
+        }
+    }
+}
+/// Which zone sources make a recurring series with a UTC (`Z`) DTSTART expand on local wall-clock
+/// time instead of in UTC (RFC 5545).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UtcSeriesWallClock {
+    /// An explicit `X-WR-TIMEZONE` (Google's exports) or a `TZID` on DTSTART.
+    #[default]
+    XWrTimezone,
+    /// Any zone the series has, including `default_timezone` and coordinate-derived zones.
+    Coordinates,
+    /// Never: UTC series always expand in UTC.
+    Never,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EventConfig {
+    #[serde(skip)]
+    pub container: crate::event::ContainerLimits,
+    #[serde(skip)]
+    pub max_line_bytes: usize,
+    #[serde(skip)]
+    pub max_date_values: usize,
+    pub adapters: crate::event::adapters::AdapterConfig,
+    pub enabled: bool,
+    pub calendars: bool,
+    pub geocoding: bool,
+    /// Wall-clock expansion of UTC-DTSTART series (see `UtcSeriesWallClock`).
+    pub utc_series_wall_clock: UtcSeriesWallClock,
+    #[serde(skip)]
+    pub feed_body_bytes: usize,
+    #[serde(skip)]
+    pub max_occurrences_per_series: usize,
+    #[serde(skip)]
+    pub max_occurrences_per_feed: usize,
+    #[serde(skip)]
+    pub max_components: usize,
+    #[serde(skip)]
+    pub max_event_revisions: usize,
+    #[serde(skip)]
+    pub max_event_document_bytes: usize,
+    #[serde(skip)]
+    pub max_recurrence_steps: usize,
+    #[serde(skip)]
+    pub parse_timeout_ms: u64,
+    #[serde(skip)]
+    pub months_back: u32,
+    #[serde(skip)]
+    pub months_forward: u32,
+    pub default_timezone: Option<String>,
+    #[serde(skip)]
+    pub geocode_score: f64,
+    #[serde(skip)]
+    pub held_retry_secs: u64,
+}
+impl Default for EventConfig {
+    fn default() -> Self {
+        Self {
+            adapters: Default::default(),
+            enabled: true,
+            container: Default::default(),
+            max_line_bytes: 65536,
+            max_date_values: 4096,
+            calendars: true,
+            geocoding: true,
+            utc_series_wall_clock: UtcSeriesWallClock::XWrTimezone,
+            feed_body_bytes: 32 * 1024 * 1024,
+            max_occurrences_per_series: 50,
+            max_occurrences_per_feed: 10000,
+            max_components: 100000,
+            max_event_revisions: 10000,
+            max_event_document_bytes: 8 * 1024 * 1024,
+            max_recurrence_steps: 100000,
+            parse_timeout_ms: 2000,
+            months_back: 1,
+            months_forward: 12,
+            default_timezone: None,
+            geocode_score: 0.8,
+            held_retry_secs: 60,
         }
     }
 }
@@ -467,6 +553,39 @@ impl Config {
         {
             bail!("invalid grouping limits");
         }
+        crate::event::adapters::validate(&self.event)?;
+        let e = &self.event;
+        let c = &e.container;
+        if !(1..=1000).contains(&c.max_changes)
+            || !(1..=10000).contains(&c.max_rows)
+            || !(1..=10000).contains(&c.max_new_keys)
+            || !(1..=3650).contains(&c.retention_days)
+            || !(1..=32).contains(&c.max_holds)
+            || !(3600..=604800).contains(&c.cadence_floor)
+        {
+            bail!("invalid container storage limits");
+        }
+        if !(1024..=262144).contains(&e.max_line_bytes)
+            || !(1..=10000).contains(&e.max_date_values)
+            || !(1024..=64 * 1024 * 1024).contains(&e.feed_body_bytes)
+            || !(1..=1000).contains(&e.max_occurrences_per_series)
+            || !(1..=10000).contains(&e.max_occurrences_per_feed)
+            || !(1..=100000).contains(&e.max_components)
+            || !(1..=10000).contains(&e.max_event_revisions)
+            || !(1024..=32 * 1024 * 1024).contains(&e.max_event_document_bytes)
+            || !(1..=1000000).contains(&e.max_recurrence_steps)
+            || !(1..=5000).contains(&e.parse_timeout_ms)
+            || e.months_back > 12
+            || !(1..=36).contains(&e.months_forward)
+            || !e.geocode_score.is_finite()
+            || !(0.0..=1.0).contains(&e.geocode_score)
+            || !(1..=604800).contains(&e.held_retry_secs)
+            || e.default_timezone
+                .as_deref()
+                .is_some_and(|s| crate::event::time::zone(s).is_none())
+        {
+            bail!("invalid event budget or timezone");
+        }
         self.listen.parse::<std::net::SocketAddr>()?;
         self.admin_listen.parse::<std::net::SocketAddr>()?;
         if self.admin_listen == self.listen
@@ -591,7 +710,7 @@ mod tests {
         }
     }
     #[test]
-    fn env_overrides_create_host_rate_entries() {
+    fn env_overrides_create_platform_and_host_rate_entries() {
         let load = |vars: &[(&str, &str)]| {
             let mut value = serde_json::to_value(Config::default()).unwrap();
             apply_env(
@@ -600,13 +719,32 @@ mod tests {
             )?;
             Config::from_value(value)
         };
-        let cfg = load(&[("PINAKES__LIMITS__HOST_RATES__EXAMPLE.ORG", "0.5")]).unwrap();
+        let cfg = load(&[
+            (
+                "PINAKES__EVENT__ADAPTERS__PLATFORMS__TICKETMASTER__KEY",
+                "12345",
+            ),
+            (
+                "PINAKES__EVENT__ADAPTERS__PLATFORMS__RESIDENT_ADVISOR__ENABLED",
+                "true",
+            ),
+            ("PINAKES__LIMITS__HOST_RATES__EXAMPLE.ORG", "0.5"),
+        ])
+        .unwrap();
+        let platforms = &cfg.event.adapters.platforms;
+        assert_eq!(platforms["ticketmaster"].key.as_deref(), Some("12345"));
+        assert_eq!(platforms["resident_advisor"].enabled, Some(true));
         assert_eq!(cfg.egress.host_rates["example.org"], 0.5);
-        for unknown in ["PINAKES__WEB__NO_SUCH_KEY", "PINAKES__NO_SUCH__KEY"] {
+        for unknown in [
+            "PINAKES__EVENT__ADAPTERS__PLATFORMS__NO_SUCH__KEY",
+            "PINAKES__EVENT__ADAPTERS__PLATFORMS__TICKETMASTER__TYPO",
+            "PINAKES__EVENT__NO_SUCH__KEY",
+        ] {
             assert!(load(&[(unknown, "x")]).is_err(), "{unknown}");
         }
     }
-    /// `.env.example` names only variables the config accepts (its commented examples too).
+    /// `.env.example` names only variables the config accepts (its commented examples too), and
+    /// a key for every platform that needs one.
     #[test]
     fn the_env_example_holds_only_keys_the_config_accepts() {
         let example = include_str!("../../../.env.example");
@@ -624,6 +762,20 @@ mod tests {
             let mut value = serde_json::to_value(Config::default()).unwrap();
             apply_env(&mut value, [var.clone()]).unwrap_or_else(|e| panic!("{var:?}: {e:#}"));
             Config::from_value(value).unwrap_or_else(|e| panic!("{var:?}: {e:#}"));
+        }
+        let registry: serde_json::Value =
+            serde_json::from_str(include_str!("../../../data/event-adapters.json")).unwrap();
+        let adapters = registry
+            .as_array()
+            .or_else(|| registry["adapters"].as_array());
+        for adapter in adapters.into_iter().flatten() {
+            if adapter["requires_key"] == true {
+                let name = format!(
+                    "PINAKES__EVENT__ADAPTERS__PLATFORMS__{}__KEY=",
+                    adapter["id"].as_str().unwrap().to_uppercase()
+                );
+                assert!(example.contains(&name), "{name}");
+            }
         }
     }
     #[test]
@@ -709,7 +861,7 @@ mod tests {
     #[test]
     fn limits_apply_once_to_every_resolver_and_caps_left_the_sections() {
         let cfg = with(serde_json::json!({"limits":{"resolver_concurrency":8},"egress":{"deny_hosts":["*.example.org"]}})).unwrap();
-        for c in [&cfg.pubky, &cfg.cards.media, &cfg.cards.activitypub] {
+        for c in [&cfg.pubky, &cfg.cards.media, &cfg.cards.nostr] {
             assert_eq!(c.concurrency, 8);
             assert_eq!(c.ttl_secs, 86400);
         }
@@ -722,6 +874,7 @@ mod tests {
         for moved in [
             serde_json::json!({"web":{"concurrency":8}}),
             serde_json::json!({"queue":{"backoff_secs":5}}),
+            serde_json::json!({"event":{"months_forward":24}}),
             serde_json::json!({"web":{"typo":true}}),
             serde_json::json!({"limits":{"typo":1}}),
         ] {
@@ -735,7 +888,7 @@ mod tests {
     fn the_example_config_loads_and_lists_only_operator_choices() {
         let path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../pinakes.example.toml");
-        Config::load(Some(&path)).unwrap();
+        let config = Config::load(Some(&path)).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let limits = serde_json::to_value(Limits::default()).unwrap();
         for key in limits.as_object().unwrap().keys() {
@@ -744,6 +897,11 @@ mod tests {
                 "{key} is a limit, not an operator choice"
             );
         }
+        assert_eq!(
+            config.event.utc_series_wall_clock,
+            UtcSeriesWallClock::XWrTimezone
+        );
+        assert!(toml::from_str::<Config>("[event]\nutc_series_wall_clock = \"always\"\n").is_err());
     }
     #[test]
     fn ingest_limits_have_safe_defaults_and_config_bounds() {
@@ -812,26 +970,28 @@ limits! {
     change_retention_days: u32 = |c| c.refresh.retention_days => [|c, v| c.refresh.retention_days = v],
     /// Adapter canary interval (seconds).
     canary_interval_secs: u64 = |c| c.canary.interval_secs => [|c, v| c.canary.interval_secs = v],
-    /// Concurrent jobs of the web resolver.
+    /// Concurrent jobs of the web resolver, which the event routes share.
     web_concurrency: usize = |c| c.web.concurrency => [|c, v| c.web.concurrency = v],
-    /// Jobs per second of the web resolver.
+    /// Jobs per second of the web resolver and the event routes.
     web_requests_per_second: f64 = |c| c.web.requests_per_second => [|c, v| c.web.requests_per_second = v],
     /// Concurrent jobs per pubky or card resolver.
     resolver_concurrency: usize = |c| c.pubky.concurrency => [
         |c, v| c.pubky.concurrency = v,
         |c, v| c.cards.media.concurrency = v, |c, v| c.cards.isbn.concurrency = v,
-        |c, v| c.cards.doi.concurrency = v, |c, v| c.cards.activitypub.concurrency = v],
+        |c, v| c.cards.doi.concurrency = v, |c, v| c.cards.nostr.concurrency = v,
+        |c, v| c.cards.activitypub.concurrency = v],
     /// Jobs per second per pubky or card resolver.
     resolver_requests_per_second: f64 = |c| c.pubky.requests_per_second => [
         |c, v| c.pubky.requests_per_second = v,
         |c, v| c.cards.media.requests_per_second = v, |c, v| c.cards.isbn.requests_per_second = v,
-        |c, v| c.cards.doi.requests_per_second = v,
+        |c, v| c.cards.doi.requests_per_second = v, |c, v| c.cards.nostr.requests_per_second = v,
         |c, v| c.cards.activitypub.requests_per_second = v],
     /// Default document lifetime (seconds) for web, pubky and card resolvers.
     resolver_ttl_secs: u64 = |c| c.web.ttl_secs => [
         |c, v| c.web.ttl_secs = v, |c, v| c.pubky.ttl_secs = v,
         |c, v| c.cards.media.ttl_secs = v, |c, v| c.cards.isbn.ttl_secs = v,
-        |c, v| c.cards.doi.ttl_secs = v, |c, v| c.cards.activitypub.ttl_secs = v],
+        |c, v| c.cards.doi.ttl_secs = v, |c, v| c.cards.nostr.ttl_secs = v,
+        |c, v| c.cards.activitypub.ttl_secs = v],
     /// Requests per second to any one upstream host.
     host_requests_per_second: f64 = |c| c.egress.host_requests_per_second => [|c, v| c.egress.host_requests_per_second = v],
     /// Per-host overrides of `host_requests_per_second`.
@@ -878,4 +1038,58 @@ limits! {
     group_max_graph_units: usize = |c| c.groups.max_graph_units => [|c, v| c.groups.max_graph_units = v],
     /// Bytes one grouping pass may read.
     group_max_graph_bytes: usize = |c| c.groups.max_graph_bytes => [|c, v| c.groups.max_graph_bytes = v],
+    /// Longest calendar content line (bytes).
+    event_max_line_bytes: usize = |c| c.event.max_line_bytes => [|c, v| c.event.max_line_bytes = v],
+    /// Most date values in one calendar property.
+    event_max_date_values: usize = |c| c.event.max_date_values => [|c, v| c.event.max_date_values = v],
+    /// Largest calendar or feed body (bytes).
+    event_feed_body_bytes: usize = |c| c.event.feed_body_bytes => [|c, v| c.event.feed_body_bytes = v],
+    /// Most occurrences one series expands to.
+    event_max_occurrences_per_series: usize = |c| c.event.max_occurrences_per_series => [|c, v| c.event.max_occurrences_per_series = v],
+    /// Most occurrences one feed yields.
+    event_max_occurrences_per_feed: usize = |c| c.event.max_occurrences_per_feed => [|c, v| c.event.max_occurrences_per_feed = v],
+    /// Most components one calendar may hold.
+    event_max_components: usize = |c| c.event.max_components => [|c, v| c.event.max_components = v],
+    /// Most revisions of one event (RECURRENCE-ID overrides).
+    event_max_revisions: usize = |c| c.event.max_event_revisions => [|c, v| c.event.max_event_revisions = v],
+    /// Largest retained event document set per feed (bytes).
+    event_max_document_bytes: usize = |c| c.event.max_event_document_bytes => [|c, v| c.event.max_event_document_bytes = v],
+    /// Most recurrence steps one series may take.
+    event_max_recurrence_steps: usize = |c| c.event.max_recurrence_steps => [|c, v| c.event.max_recurrence_steps = v],
+    /// Calendar parse deadline (milliseconds).
+    event_parse_timeout_ms: u64 = |c| c.event.parse_timeout_ms => [|c, v| c.event.parse_timeout_ms = v],
+    /// Months of past occurrences kept in the horizon.
+    event_months_back: u32 = |c| c.event.months_back => [|c, v| c.event.months_back = v],
+    /// Months of future occurrences kept in the horizon.
+    event_months_forward: u32 = |c| c.event.months_forward => [|c, v| c.event.months_forward = v],
+    /// Lowest accepted geocoding score.
+    geocode_score: f64 = |c| c.event.geocode_score => [|c, v| c.event.geocode_score = v],
+    /// Retry interval of a held feed snapshot (seconds).
+    held_retry_secs: u64 = |c| c.event.held_retry_secs => [|c, v| c.event.held_retry_secs = v],
+    /// Occurrence changes per snapshot before they become one summary line.
+    feed_max_changes: usize = |c| c.event.container.max_changes => [|c, v| c.event.container.max_changes = v],
+    /// Most stored rows of one feed.
+    feed_max_rows: usize = |c| c.event.container.max_rows => [|c, v| c.event.container.max_rows = v],
+    /// New keys one snapshot may add before it is held.
+    feed_max_new_keys: usize = |c| c.event.container.max_new_keys => [|c, v| c.event.container.max_new_keys = v],
+    /// Days cancelled and past rows are kept.
+    feed_retention_days: u32 = |c| c.event.container.retention_days => [|c, v| c.event.container.retention_days = v],
+    /// Consecutive holds before a feed dead-letters.
+    feed_max_holds: u32 = |c| c.event.container.max_holds => [|c, v| c.event.container.max_holds = v],
+    /// Shortest feed refresh interval (seconds).
+    feed_cadence_floor: u64 = |c| c.event.container.cadence_floor => [|c, v| c.event.container.cadence_floor = v],
+    /// Nostr relay websocket deadline (milliseconds).
+    websocket_deadline_ms: u64 = |c| c.event.adapters.websocket_deadline_ms => [|c, v| c.event.adapters.websocket_deadline_ms = v],
+    /// Pages one cursor feed fetch may read.
+    max_cursor_pages: usize = |c| c.event.adapters.max_cursor_pages => [|c, v| c.event.adapters.max_cursor_pages = v],
+    /// Pages one Nostr indexer lookup may read.
+    max_indexer_pages: usize = |c| c.event.adapters.max_indexer_pages => [|c, v| c.event.adapters.max_indexer_pages = v],
+    /// Derived links one adapter may hold across all parents.
+    max_derived_resources: usize = |c| c.event.adapters.max_derived_resources => [|c, v| c.event.adapters.max_derived_resources = v],
+    /// Members one NIP-52 calendar may list.
+    max_calendar_members: usize = |c| c.event.adapters.max_calendar_members => [|c, v| c.event.adapters.max_calendar_members = v],
+    /// Hours a NIP-52 calendar waits for a member that has never resolved.
+    calendar_member_wait_hours: u64 = |c| c.event.adapters.calendar_member_wait_hours => [|c, v| c.event.adapters.calendar_member_wait_hours = v],
+    /// Website links one BTC Map feed may derive.
+    max_linked_resources: usize = |c| c.event.adapters.max_linked_resources => [|c, v| c.event.adapters.max_linked_resources = v],
 }

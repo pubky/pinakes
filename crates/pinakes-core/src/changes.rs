@@ -137,13 +137,26 @@ pub async fn save(
 ) -> Result<()> {
     let bounded = crate::event::bound_instants(doc);
     let doc = bounded.as_ref().unwrap_or(doc);
+    let mut prepared = if let Some(container) = &doc.container {
+        Some(
+            crate::event::storage::prepare(pool, id, container, doc.fetched_at, doc.ttl_secs)
+                .await?,
+        )
+    } else {
+        None
+    };
+    let adapter_source = crate::event::adapters::definition(&doc.source).map(|d| d.id.as_str());
+    if let (Some(plan), Some(source)) = (&mut prepared, adapter_source) {
+        plan.source = source.into();
+    }
     let mut tx = pool.begin().await?;
     crate::store::lock_search_revision(&mut tx).await?;
     let row=sqlx::query("SELECT r.*,CASE WHEN r.osm_id IS NULL THEN r.doc ELSE o.versions->r.osm_version END AS accepted FROM resource r LEFT JOIN osm_place o ON r.osm_type=o.osm_type AND r.osm_id=o.osm_id WHERE r.id=$1 AND r.generation=$2 FOR UPDATE OF r")
         .bind(id).bind(generation).fetch_optional(&mut *tx).await?;
     let Some(row) = row else { return Ok(()) };
-    let source = row
-        .try_get::<Option<String>, _>("resolver")?
+    let source = adapter_source
+        .map(str::to_owned)
+        .or(row.try_get::<Option<String>, _>("resolver")?)
         .unwrap_or_else(|| doc.source.clone());
     if matches!(
         doc.status,
@@ -175,7 +188,15 @@ pub async fn save(
         }
         .into());
     }
-    let mut doc = doc.clone();
+    // The transient container is serde-skipped: copy only the small parent document,
+    // without cloning thousands of already-prepared occurrence documents.
+    let mut doc: ResourceMeta = serde_json::from_value(serde_json::to_value(doc)?)?;
+    if let Some(plan) = prepared.as_ref().filter(|p| !p.warnings.is_empty()) {
+        doc.event.warnings.extend(plan.warnings.iter().cloned());
+        doc.event.warnings.sort();
+        doc.event.warnings.dedup();
+        doc.event.warnings.truncate(16);
+    }
     let social_missing = doc.status == Status::Missing
         && before.as_ref().is_some_and(|v| {
             serde_json::from_value::<ResourceMeta>(v.clone())
@@ -208,6 +229,17 @@ pub async fn save(
             .execute(&mut *tx)
             .await?;
         if streak < 2 {
+            // Record the empty snapshot on this first parent observation too, so the
+            // next observation confirms both the parent and its mutable occurrences.
+            if let Some(plan) = &prepared {
+                if crate::event::storage::apply(&mut tx, id, plan).await? == Some(true) {
+                    if plan.exceeds_limit(0) {
+                        plan.append_summary(&mut tx, id, None).await?;
+                    } else {
+                        plan.append_changes(&mut tx, id).await?;
+                    }
+                }
+            }
             let retry = cfg.missing_ttl_secs.max(3600) as f64;
             sqlx::query("UPDATE resource SET lease_until=NULL,priority_at=NULL,attempts=0,timeout_streak=0,last_error=NULL,refresh_at=now()+$2*interval '1 second',next_attempt_at=now()+$2*interval '1 second' WHERE id=$1").bind(id).bind(retry).execute(&mut *tx).await?;
             if source == "osm" {
@@ -234,6 +266,38 @@ pub async fn save(
             .execute(&mut *tx)
             .await?;
     }
+    doc.container = None;
+    if let Some(plan) = &prepared {
+        let applied = crate::event::storage::apply(&mut tx, id, plan).await?;
+        if applied != Some(true) {
+            sqlx::query("UPDATE resource SET lease_until=NULL,priority_at=NULL,dead_letter=coalesce($3,dead_letter),next_attempt_at=now()+$2*interval '1 second' WHERE id=$1").bind(id).bind(if applied==Some(false){plan.retry_secs as f64}else{doc.ttl_secs.max(3600) as f64}).bind((applied==Some(false)).then_some(plan.dead_letter)).execute(&mut *tx).await?;
+            tx.commit().await?;
+            return Ok(());
+        }
+    }
+    if let Some(old) = before
+        .as_ref()
+        .and_then(|v| serde_json::from_value::<ResourceMeta>(v.clone()).ok())
+    {
+        let had_start = doc.start.is_some();
+        crate::event::storage::preserve_venue(&mut doc, &old);
+        // It may re-derive the times under the stored zone, after `bound_instants`.
+        crate::event::clear_instants(&mut doc);
+        // Agree with the drift guard above, and with the occurrence path, which keeps its stored
+        // row: a start this late pass drops never replaces a storable stored start.
+        if had_start
+            && doc.start.is_none()
+            && old.start.and_then(crate::event::time::bounded).is_some()
+            && stored_event
+        {
+            crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
+            return Err(crate::resolver::RetryLater {
+                class: "drift",
+                seconds: 3600,
+            }
+            .into());
+        }
+    }
     let before = before
         .map(|v| serde_json::from_value::<ResourceMeta>(v).map(|d| normalize(&d)))
         .transpose()?;
@@ -241,8 +305,18 @@ pub async fn save(
     crate::store::write_document(&mut tx, id, generation, &doc).await?;
     let diff = diff(before.as_ref(), Some(&after))
         .filter(|_| !social_missing && (before.is_some() || doc.status != Status::Missing));
-    if let Some(diff) = diff {
-        append(&mut tx, id, &source, before, Some(after), diff, None).await?;
+    if let Some(plan) = prepared
+        .as_ref()
+        .filter(|p| p.exceeds_limit(usize::from(diff.is_some())))
+    {
+        plan.append_summary(&mut tx, id, diff.as_ref()).await?;
+    } else {
+        if let Some(plan) = prepared {
+            plan.append_changes(&mut tx, id).await?;
+        }
+        if let Some(diff) = diff {
+            append(&mut tx, id, &source, before, Some(after), diff, None).await?;
+        }
     }
     tx.commit().await?;
     // Grouping is derived work. Its failure must never roll back accepted facts or charge the resolver.
@@ -287,6 +361,7 @@ pub async fn delete_orphans(pool: &PgPool, grace_days: u32) -> Result<u64> {
     Ok(rows.len() as u64)
 }
 pub async fn retain(pool: &PgPool, days: u32) -> Result<()> {
+    sqlx::query("DELETE FROM occurrence o USING event_fetch e WHERE o.resource_id=e.resource_id AND (o.status IN ('cancelled','superseded') OR o.start_at<e.horizon_start) AND coalesce(o.end_at,o.start_at)<now()-e.retention_days*interval '1 day'").execute(pool).await?;
     let mut tx = pool.begin().await?;
     lock_sequence(&mut tx).await?;
     sqlx::query("DELETE FROM resource_change WHERE at<now()-$1*interval '1 day'")

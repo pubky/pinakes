@@ -141,6 +141,10 @@ pub async fn reextract(pool: &PgPool, routes: &[String]) -> Result<u64> {
         }
         if !ids.is_empty() {
             let mut tx = pool.begin().await?;
+            sqlx::query("UPDATE event_fetch SET validators='{}' WHERE resource_id=ANY($1) AND validators<>'{}'")
+                .bind(&ids)
+                .execute(&mut *tx)
+                .await?;
             sqlx::query("UPDATE osm_place o SET refresh_at=least(o.refresh_at,now()) FROM resource r WHERE r.id=ANY($1) AND o.osm_type=r.osm_type AND o.osm_id=r.osm_id")
                 .bind(&ids)
                 .execute(&mut *tx)
@@ -317,6 +321,19 @@ async fn finish_job(
     job: &Job,
     result: Result<crate::model::ResourceMeta>,
 ) -> Result<()> {
+    let slow_cfg;
+    let manifest = resolver.manifest_for(&job.uri);
+    let cfg = if resolver.name() == "event_platform" && manifest.mode == crate::adapter::Mode::None
+    {
+        slow_cfg = QueueConfig {
+            backoff_secs: cfg.backoff_secs.max(manifest.cadence_floor),
+            max_backoff_secs: cfg.max_backoff_secs.max(manifest.cadence_floor),
+            ..cfg.clone()
+        };
+        &slow_cfg
+    } else {
+        cfg
+    };
     let result = match result {
         Err(error) if error.is::<crate::resolver::NotModified>() => {
             let value: Option<serde_json::Value> =
@@ -363,7 +380,17 @@ async fn finish_job(
         }
         if matches!(
             resolver.name(),
-            "web" | "pubky" | "geo" | "osm" | "media" | "isbn" | "doi" | "activitypub"
+            "web"
+                | "event"
+                | "event_platform"
+                | "pubky"
+                | "geo"
+                | "osm"
+                | "media"
+                | "isbn"
+                | "doi"
+                | "nostr"
+                | "activitypub"
         ) {
             let now = chrono::Utc::now();
             let mut manifest = resolver.manifest_for(&job.uri);
@@ -376,7 +403,36 @@ async fn finish_job(
                         .is_some_and(|at| now >= at)
                 })
             {
-                let next = crate::scheduler::next(&manifest, &doc, now, refresh);
+                let next = if let Some(container) = &doc.container {
+                    if container.cursor.is_some() {
+                        manifest.mode = crate::adapter::Mode::Cursor;
+                    } else {
+                        manifest.mode = crate::adapter::Mode::Container;
+                    }
+                    crate::scheduler::container_next(
+                        &manifest,
+                        container
+                            .occurrences
+                            .iter()
+                            .map(|o| (o.doc.start, o.doc.end)),
+                        container.feed_ttl,
+                        now,
+                        refresh,
+                    )
+                } else {
+                    if manifest.mode == crate::adapter::Mode::None
+                        && resolver.name() == "event_platform"
+                    {
+                        now.checked_add_signed(
+                            chrono::Duration::try_seconds(
+                                manifest.cadence_floor.min(i64::MAX as u64) as i64,
+                            )
+                            .unwrap_or(chrono::Duration::MAX),
+                        )
+                    } else {
+                        crate::scheduler::next(&manifest, &doc, now, refresh)
+                    }
+                };
                 doc.ttl_secs = next.map_or(0, |at| (at - now).num_seconds().max(0) as u64);
             } else if resolver.name() != "osm" {
                 doc.ttl_secs = doc.ttl_secs.max(3600);
@@ -389,7 +445,8 @@ async fn finish_job(
             doc.ttl_secs = doc.ttl_secs.min(3600);
         }
         let attrs = match resolver.name() {
-            "web" | "media" | "isbn" | "doi" | "activitypub" => crate::resolver::web::ATTRIBUTES,
+            "web" | "event" | "event_platform" | "media" | "isbn" | "doi" | "nostr"
+            | "activitypub" => crate::resolver::web::ATTRIBUTES,
             "pubky" => crate::resolver::pubky::ATTRIBUTES,
             "geo" => crate::resolver::geo::ATTRIBUTES,
             "osm" => crate::resolver::osm::ATTRIBUTES,
@@ -610,13 +667,49 @@ pub fn spawn_with_egress(
     let authors = Arc::new(AuthorBudget::default());
     let mut resolvers: Vec<(Arc<dyn Resolver>, crate::config::ResolverConfig)> = vec![];
     let osm = Arc::new(OsmResolver::new(pool.clone(), config.osm.clone())?);
+    let events = config.event.enabled.then(|| {
+        Arc::new(crate::event::service::EventService {
+            pool: pool.clone(),
+            config: config.event.clone(),
+            osm: osm.clone(),
+        })
+    });
     if config.web.enabled {
         resolvers.push((
             Arc::new(WebResolver {
                 oembed_policy: config.media.oembed,
                 cards: Some(Arc::new(config.cards.clone())),
+                events: events.clone(),
                 egress: egress.clone(),
                 config: config.web.clone(),
+            }),
+            config.web.clone(),
+        ));
+    }
+    if let Some(events) = events.clone().filter(|_| config.event.adapters.enabled) {
+        resolvers.push((
+            Arc::new(crate::event::adapters::service::PlatformResolver {
+                web: WebResolver {
+                    oembed_policy: config.media.oembed,
+                    cards: Some(Arc::new(config.cards.clone())),
+                    egress: egress.clone(),
+                    config: config.web.clone(),
+                    events: Some(events),
+                },
+            }),
+            config.web.clone(),
+        ));
+    }
+    if let Some(events) = events.filter(|_| config.event.calendars) {
+        resolvers.push((
+            Arc::new(crate::event::service::CalendarResolver {
+                web: WebResolver {
+                    oembed_policy: config.media.oembed,
+                    cards: Some(Arc::new(config.cards.clone())),
+                    egress: egress.clone(),
+                    config: config.web.clone(),
+                    events: Some(events),
+                },
             }),
             config.web.clone(),
         ));
