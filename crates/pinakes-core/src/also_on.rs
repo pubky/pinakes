@@ -252,6 +252,25 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         Arc::new(titles::Titles),
         Arc::new(crate::lookups::sources::OsmWikidata),
         Arc::new(crate::lookups::sources::WikidataOsm),
+        Arc::new(crate::lookups::sources::Btcmap),
+        Arc::new(crate::lookups::sources::FederalRegister),
+        Arc::new(crate::lookups::sources::Unpaywall),
+        Arc::new(crate::lookups::sources::Ncbi),
+        Arc::new(crate::lookups::sources::Datacite),
+        Arc::new(crate::lookups::sources::HuggingFacePapers),
+        Arc::new(crate::lookups::sources::Packages(
+            crate::lookups::packages::Registry::Crates,
+        )),
+        Arc::new(crate::lookups::sources::Packages(
+            crate::lookups::packages::Registry::Npm,
+        )),
+        Arc::new(crate::lookups::sources::Packages(
+            crate::lookups::packages::Registry::PyPI,
+        )),
+        Arc::new(crate::lookups::sources::SoftwareHeritage),
+        Arc::new(crate::lookups::sources::Steam),
+        Arc::new(crate::lookups::sources::WikidataStores),
+        Arc::new(crate::lookups::sources::Wayback),
     ]
 }
 /// The source IDs `[also_on.sources]` may name.

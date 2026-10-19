@@ -121,7 +121,7 @@ impl Package {
     pub fn links(&self) -> Vec<Link> {
         let n = &self.name;
         let via = match self.registry {
-            Registry::Crates => "crates.io",
+            Registry::Crates => "crates",
             Registry::Npm => "npm",
             Registry::PyPI => "pypi",
         };
@@ -226,7 +226,7 @@ impl Release {
         if let Some(repo) = &self.repository {
             found.push_key(repo.key());
             found.push_link(repo.link(match self.package.registry {
-                Registry::Crates => "crates.io",
+                Registry::Crates => "crates",
                 Registry::Npm => "npm",
                 Registry::PyPI => "pypi",
             }));

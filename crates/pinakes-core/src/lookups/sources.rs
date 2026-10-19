@@ -258,6 +258,621 @@ impl Source for WikidataOsm {
     }
 }
 
+/// A request a builder made, through the shared discovery cache (an hour), with its `Accept`.
+/// A busy service (429, 5xx) answers `RetryLater` with `class`.
+async fn send(
+    cx: &Context,
+    request: &super::Request,
+    class: &'static str,
+) -> Result<crate::resolver::egress::Fetched> {
+    let options = FetchOptions {
+        accept: Some(request.accept.unwrap_or("application/json").into()),
+        // JSON under its own media types: PyPI's provenance, JSON:API.
+        extra_types: &[
+            "application/vnd.pypi.integrity.v1+json",
+            "application/vnd.api+json",
+        ],
+        ..Default::default()
+    };
+    let f = cx
+        .egress
+        .discover(request.url.as_str(), &options, 3600)
+        .await?;
+    if f.status == 429 || f.status >= 500 {
+        return Err(RetryLater {
+            class,
+            seconds: f.retry_after_secs.clamp(60, 3600),
+        }
+        .into());
+    }
+    Ok(f)
+}
+
+/// The operator's contact, for APIs that ask for an email address.
+fn contact(cx: &Context) -> Option<&str> {
+    super::contact(&cx.config.http.contact)
+}
+
+/// A Federal Register document: its GovInfo copies, regulations.gov document and
+/// public-inspection PDF from the API record, and `fr:{number}`, which a GovInfo copy someone
+/// tags shares (read from its address alone).
+pub struct FederalRegister;
+#[async_trait]
+impl Source for FederalRegister {
+    fn id(&self) -> &'static str {
+        "federal_register"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        use crate::sources::federal_register as fr;
+        fr::number(&subject.uri).is_some() || fr::from_govinfo_uri(&subject.uri).is_some()
+    }
+    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<also_on::Found> {
+        use crate::sources::federal_register as fr;
+        let key = |number: &str| also_on::Key {
+            key: format!("fr:{number}"),
+            via: "federalregister".into(),
+        };
+        if let Some(number) = fr::from_govinfo_uri(&subject.uri) {
+            return Ok(also_on::Found {
+                keys: vec![key(&number)],
+                ..Default::default()
+            });
+        }
+        let Some(number) = fr::number(&subject.uri) else {
+            return Ok(also_on::Found::default());
+        };
+        let Some(url) = fr::api_url(&number) else {
+            return Ok(also_on::Found::default());
+        };
+        let (status, body) = get(cx, &url, "federalregister_busy").await?;
+        let Some(document) = fr::parse(status, &body, &number)? else {
+            return Ok(also_on::Found::default());
+        };
+        let links = document
+            .related
+            .into_iter()
+            .map(|r| {
+                let mut link = also_on::Link::new(r.uri, r.site, "federalregister");
+                link.kind = r.kind.map(str::to_owned);
+                link
+            })
+            .collect();
+        Ok(also_on::Found {
+            keys: vec![key(&document.number)],
+            links,
+            ..Default::default()
+        })
+    }
+}
+
+/// BTC Map's places by OSM object, from its keyless sync (`updated_since`, deleted places
+/// included), kept in memory and brought up to date at most hourly.
+#[derive(Default)]
+struct BtcmapIndex {
+    places: std::collections::HashSet<String>,
+    since: Option<String>,
+    synced: Option<std::time::Instant>,
+}
+static BTCMAP: std::sync::LazyLock<tokio::sync::Mutex<BtcmapIndex>> =
+    std::sync::LazyLock::new(Default::default);
+/// Rows per sync page (each about 200 bytes, so a page stays under the body limit).
+const BTCMAP_PAGE: u32 = 2000;
+/// Pages per lookup; a longer first sync continues on the next lookup.
+const BTCMAP_PAGES: usize = 25;
+const BTCMAP_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
+
+impl BtcmapIndex {
+    async fn sync(&mut self, cx: &Context) -> Result<()> {
+        if self.synced.is_some_and(|at| at.elapsed() < BTCMAP_EVERY) {
+            return Ok(());
+        }
+        for _ in 0..BTCMAP_PAGES {
+            let since = self
+                .since
+                .clone()
+                .unwrap_or_else(|| "2010-01-01T00:00:00Z".to_owned());
+            let request = places::btcmap_sync_request(&since, BTCMAP_PAGE)
+                .ok_or_else(|| anyhow::anyhow!("invalid sync time {since}"))?;
+            let f = send(cx, &request, "btcmap_busy").await?;
+            let page = places::parse_btcmap_places(f.status, &f.body)?;
+            for place in &page {
+                if let Some(osm) = &place.osm {
+                    if place.deleted {
+                        self.places.remove(&osm.key());
+                    } else {
+                        self.places.insert(osm.key());
+                    }
+                }
+            }
+            let next = places::btcmap_next_since(&page).map(str::to_owned);
+            let last = page.len() < BTCMAP_PAGE as usize || next == self.since;
+            if next.is_some() {
+                self.since = next;
+            }
+            if last {
+                self.synced = Some(std::time::Instant::now());
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// An OSM object that BTC Map lists: its merchant page.
+pub struct Btcmap;
+#[async_trait]
+impl Source for Btcmap {
+    fn id(&self) -> &'static str {
+        "btcmap"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        crate::resolver::osm::parse_id(&subject.uri).is_some()
+    }
+    fn ttl(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(7 * 86_400)
+    }
+    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<also_on::Found> {
+        let Some(osm) = crate::resolver::osm::parse_id(&subject.uri) else {
+            return Ok(also_on::Found::default());
+        };
+        let mut index = BTCMAP.lock().await;
+        index.sync(cx).await?;
+        if index.synced.is_none() {
+            // The first sync is still under way: come back for the rest.
+            return Err(RetryLater {
+                class: "btcmap_sync",
+                seconds: 60,
+            }
+            .into());
+        }
+        let place = places::BtcmapPlace {
+            id: 0,
+            osm: Some(osm.clone()),
+            updated_at: String::new(),
+            deleted: false,
+        };
+        let links = index
+            .places
+            .contains(&osm.key())
+            .then(|| place.link())
+            .flatten()
+            .into_iter()
+            .collect();
+        Ok(super::Found {
+            keys: vec![],
+            links,
+        }
+        .into_also_on("btcmap"))
+    }
+}
+
+/// The DOI of a card, unless it is arXiv's own (`10.48550/arXiv.…`, read as an arXiv paper).
+fn journal_doi(subject: &Subject) -> Option<String> {
+    let doi = crate::resolver::cards::doi(&subject.uri)?;
+    (!doi.starts_with("10.48550/")).then_some(doi)
+}
+/// The arXiv paper of a card: its arXiv, alphaXiv or arXiv DOI link, or a key another source
+/// found for it.
+fn arxiv(subject: &Subject) -> Option<String> {
+    super::papers::arxiv_from_uri(&subject.uri)
+        .or_else(|| subject.keys_in("arxiv").find_map(super::papers::arxiv_id))
+}
+
+/// Open copies of a paper from Unpaywall (links, never keys). Needs the contact setting.
+pub struct Unpaywall;
+#[async_trait]
+impl Source for Unpaywall {
+    fn id(&self) -> &'static str {
+        "unpaywall"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        journal_doi(subject).is_some()
+    }
+    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<also_on::Found> {
+        let (Some(doi), Some(contact)) = (journal_doi(subject), contact(cx)) else {
+            return Ok(also_on::Found::default());
+        };
+        let Some(request) = super::papers::unpaywall_request(&doi, contact) else {
+            return Ok(also_on::Found::default());
+        };
+        let f = send(cx, &request, "unpaywall_busy").await?;
+        let links = super::papers::parse_unpaywall(f.status, &f.body, &doi)?;
+        Ok(super::Found {
+            keys: vec![],
+            links,
+        }
+        .into_also_on("unpaywall"))
+    }
+}
+
+/// PubMed and PubMed Central for a DOI, from the NCBI ID Converter. Needs the contact setting.
+pub struct Ncbi;
+#[async_trait]
+impl Source for Ncbi {
+    fn id(&self) -> &'static str {
+        "ncbi"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        journal_doi(subject).is_some()
+    }
+    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<also_on::Found> {
+        let (Some(doi), Some(contact)) = (journal_doi(subject), contact(cx)) else {
+            return Ok(also_on::Found::default());
+        };
+        let Some(request) = super::papers::ncbi_request(&[&doi], contact) else {
+            return Ok(also_on::Found::default());
+        };
+        let f = send(cx, &request, "ncbi_busy").await?;
+        Ok(super::papers::parse_ncbi(f.status, &f.body)?
+            .into_iter()
+            .find(|(requested, _)| requested.eq_ignore_ascii_case(&doi))
+            .map(|(_, found)| found.into_also_on("ncbi"))
+            .unwrap_or_default())
+    }
+}
+
+/// The arXiv preprint and its journal version, which DataCite names exactly in both directions;
+/// an arXiv paper also gets its arXiv and alphaXiv pages.
+pub struct Datacite;
+#[async_trait]
+impl Source for Datacite {
+    fn id(&self) -> &'static str {
+        "datacite"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        journal_doi(subject).is_some() || super::papers::arxiv_from_uri(&subject.uri).is_some()
+    }
+    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<also_on::Found> {
+        use super::papers;
+        if let Some(id) = papers::arxiv_from_uri(&subject.uri) {
+            let Some(request) = papers::datacite_arxiv_request(&id) else {
+                return Ok(also_on::Found::default());
+            };
+            let f = send(cx, &request, "datacite_busy").await?;
+            let mut found = papers::parse_datacite_arxiv(f.status, &f.body, &id)?;
+            for link in papers::arxiv_links(&id, "datacite") {
+                found.push_link(link);
+            }
+            return Ok(found.into_also_on("datacite"));
+        }
+        let Some(doi) = journal_doi(subject) else {
+            return Ok(also_on::Found::default());
+        };
+        let Some(request) = papers::datacite_versions_request(&doi) else {
+            return Ok(also_on::Found::default());
+        };
+        let f = send(cx, &request, "datacite_busy").await?;
+        Ok(papers::parse_datacite_versions(f.status, &f.body, &doi)?.into_also_on("datacite"))
+    }
+}
+
+/// The Hugging Face Papers page of an arXiv paper, only when its API says the page exists.
+pub struct HuggingFacePapers;
+#[async_trait]
+impl Source for HuggingFacePapers {
+    fn id(&self) -> &'static str {
+        "huggingface"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        arxiv(subject).is_some()
+    }
+    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<also_on::Found> {
+        let Some(id) = arxiv(subject) else {
+            return Ok(also_on::Found::default());
+        };
+        let Some(request) = super::papers::hugging_face_request(&id) else {
+            return Ok(also_on::Found::default());
+        };
+        let f = send(cx, &request, "huggingface_busy").await?;
+        let links = super::papers::parse_hugging_face(f.status, &f.body, &id)?
+            .into_iter()
+            .collect();
+        Ok(super::Found {
+            keys: vec![],
+            links,
+        }
+        .into_also_on("huggingface"))
+    }
+}
+
+/// A package on crates.io, npm or PyPI: its pages on the registry and documentation sites, its
+/// name as key, and its source repository only when signed build provenance names it.
+pub struct Packages(pub super::packages::Registry);
+impl Packages {
+    fn package(&self, subject: &Subject) -> Option<super::packages::Package> {
+        super::packages::Package::from_uri(&subject.uri).filter(|p| p.registry == self.0)
+    }
+    /// deps.dev's `SLSA_ATTESTATION` source repository, when the registry's own record names
+    /// none.
+    async fn depsdev(
+        cx: &Context,
+        package: &super::packages::Package,
+        version: &str,
+    ) -> Result<Option<super::packages::Repo>> {
+        let Some(request) = super::packages::depsdev_request(package, version) else {
+            return Ok(None);
+        };
+        let f = send(cx, &request, "depsdev_busy").await?;
+        super::packages::parse_depsdev(f.status, &f.body)
+    }
+}
+#[async_trait]
+impl Source for Packages {
+    fn id(&self) -> &'static str {
+        match self.0 {
+            super::packages::Registry::Crates => "crates",
+            super::packages::Registry::Npm => "npm",
+            super::packages::Registry::PyPI => "pypi",
+        }
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        self.package(subject).is_some()
+    }
+    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<also_on::Found> {
+        use super::packages::{self as p, Registry};
+        let Some(package) = self.package(subject) else {
+            return Ok(also_on::Found::default());
+        };
+        let release = match self.0 {
+            Registry::Crates => {
+                let Some(request) = p::crates_request(&package) else {
+                    return Ok(also_on::Found::default());
+                };
+                let f = send(cx, &request, "crates_busy").await?;
+                p::parse_crates(f.status, &f.body, &package)?
+            }
+            Registry::Npm => {
+                let Some(request) = p::npm_latest_request(&package) else {
+                    return Ok(also_on::Found::default());
+                };
+                let f = send(cx, &request, "npm_busy").await?;
+                match p::parse_npm_latest(f.status, &f.body, &package)? {
+                    None => None,
+                    Some(latest) => {
+                        let repository = match &latest.attestations {
+                            Some(request) => {
+                                let f = send(cx, request, "npm_busy").await?;
+                                p::parse_npm_attestations(
+                                    f.status,
+                                    &f.body,
+                                    &package,
+                                    &latest.version,
+                                )?
+                            }
+                            None => None,
+                        };
+                        Some(p::Release {
+                            package: package.clone(),
+                            version: latest.version,
+                            repository,
+                        })
+                    }
+                }
+            }
+            Registry::PyPI => {
+                let Some(request) = p::pypi_request(&package) else {
+                    return Ok(also_on::Found::default());
+                };
+                let f = send(cx, &request, "pypi_busy").await?;
+                match p::parse_pypi(f.status, &f.body, &package)? {
+                    None => None,
+                    Some(latest) => {
+                        let mut repository = None;
+                        // The first file with provenance names the publisher.
+                        for file in latest.files.iter().take(2) {
+                            let Some(request) = p::pypi_provenance_request(&latest, file) else {
+                                continue;
+                            };
+                            let f = send(cx, &request, "pypi_busy").await?;
+                            if let Some(repo) = p::parse_pypi_provenance(f.status, &f.body)? {
+                                repository = Some(repo);
+                                break;
+                            }
+                        }
+                        Some(p::Release {
+                            package: latest.package.clone(),
+                            version: latest.version,
+                            repository,
+                        })
+                    }
+                }
+            }
+        };
+        let Some(mut release) = release else {
+            return Ok(also_on::Found::default());
+        };
+        if release.repository.is_none() {
+            release.repository = Self::depsdev(cx, &release.package, &release.version).await?;
+        }
+        Ok(release.found().into_also_on(self.id()))
+    }
+}
+
+/// A repository on GitHub or GitLab that Software Heritage archives: its archive page.
+pub struct SoftwareHeritage;
+#[async_trait]
+impl Source for SoftwareHeritage {
+    fn id(&self) -> &'static str {
+        "software_heritage"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        super::packages::Repo::from_url(&subject.uri).is_some()
+    }
+    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<also_on::Found> {
+        let Some(repo) = super::packages::Repo::from_url(&subject.uri) else {
+            return Ok(also_on::Found::default());
+        };
+        let Some(request) = super::packages::software_heritage_request(&repo) else {
+            return Ok(also_on::Found::default());
+        };
+        let f = send(cx, &request, "software_heritage_busy").await?;
+        let links = super::packages::parse_software_heritage(f.status, &f.body, &repo)?
+            .into_iter()
+            .collect();
+        Ok(super::Found {
+            keys: vec![repo.key()],
+            links,
+        }
+        .into_also_on("software_heritage"))
+    }
+}
+
+/// A Steam game: SteamDB (from the appid alone), ProtonDB (when its summary exists),
+/// PCGamingWiki (where its appid lookup leads) and GOG (through GOG GamesDB).
+pub struct Steam;
+#[async_trait]
+impl Source for Steam {
+    fn id(&self) -> &'static str {
+        "steam"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        super::games::appid_from_uri(&subject.uri).is_some()
+    }
+    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<also_on::Found> {
+        use super::games;
+        let Some(appid) = games::appid_from_uri(&subject.uri) else {
+            return Ok(also_on::Found::default());
+        };
+        let mut found = super::Found::default();
+        found.push_key(games::steam_key(appid));
+        for link in games::templates(appid) {
+            found.push_link(link);
+        }
+        if let Some(request) = games::protondb_request(appid) {
+            let f = send(cx, &request, "protondb_busy").await?;
+            if let Some(link) = games::parse_protondb(f.status, &f.body, appid)? {
+                found.push_link(link);
+            }
+        }
+        if let Some(request) = games::pcgamingwiki_request(appid) {
+            // Egress follows the redirect; where it ended is the page the appid names.
+            let f = send(cx, &request, "pcgamingwiki_busy").await?;
+            let moved = (f.url.as_str() != request.url.as_str()).then(|| f.url.to_string());
+            let status = if moved.is_some() { 302 } else { f.status };
+            if let Some(link) = games::parse_pcgamingwiki(status, moved.as_deref())? {
+                found.push_link(link);
+            }
+        }
+        if let Some(request) = games::gog_gamesdb_request(appid) {
+            let f = send(cx, &request, "gog_busy").await?;
+            if let Some(product) = games::parse_gog_gamesdb(f.status, &f.body, appid)? {
+                found.push_key(games::gog_key(product));
+                if let Some(request) = games::gog_product_request(product) {
+                    let f = send(cx, &request, "gog_busy").await?;
+                    if let Some(link) = games::parse_gog_product(f.status, &f.body, product)? {
+                        found.push_link(link);
+                    }
+                }
+            }
+        }
+        Ok(found.into_also_on("steam"))
+    }
+}
+
+/// The Wikidata property a store link names, its value, and the stores to list for the item.
+pub fn store_property(uri: &str) -> Option<(&'static str, String, &'static [items::Property])> {
+    let url = super::web_url(uri)?;
+    let host = url.host_str()?.trim_start_matches("www.");
+    let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
+    let query = |name: &str| {
+        url.query_pairs()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.into_owned())
+    };
+    let package =
+        |v: &str| super::plain(v, 200, |c| c.is_ascii_alphanumeric() || "._-".contains(c));
+    let (pid, value, set) = match (host, segments.as_slice()) {
+        ("store.steampowered.com", ["app", id, ..]) => {
+            ("P1733", super::games::appid(id)?.to_string(), items::GAME)
+        }
+        ("gog.com", [lang, "game", slug]) if lang.len() == 2 => {
+            ("P2725", format!("game/{slug}"), items::GAME)
+        }
+        ("gog.com", ["game", slug]) => ("P2725", format!("game/{slug}"), items::GAME),
+        ("apps.apple.com", rest) => {
+            let id = rest.last()?.strip_prefix("id")?;
+            (super::plain(id, 20, |c| c.is_ascii_digit()) && rest.contains(&"app")).then_some(())?;
+            ("P3861", id.to_owned(), items::APP)
+        }
+        ("play.google.com", ["store", "apps", "details"]) => ("P3418", query("id")?, items::APP),
+        ("f-droid.org", [.., "packages", id]) => ("P3597", (*id).to_owned(), items::APP),
+        ("flathub.org", ["apps", "details", id]) | ("flathub.org", ["apps", id]) => {
+            ("P4655", (*id).to_owned(), items::APP)
+        }
+        ("snapcraft.io", [id]) => ("P4435", (*id).to_owned(), items::APP),
+        _ => return None,
+    };
+    (pid == "P2725" || pid == "P3861" || pid == "P1733" || package(&value))
+        .then_some((pid, value, set))
+}
+
+/// An app or game on a store: the one Wikidata item carrying that store's ID (read back and
+/// compared exactly; several are ambiguous and give nothing), its other stores and game
+/// databases, and its Q-id as key.
+pub struct WikidataStores;
+#[async_trait]
+impl Source for WikidataStores {
+    fn id(&self) -> &'static str {
+        "wikidata_stores"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        store_property(&subject.uri).is_some()
+    }
+    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<also_on::Found> {
+        let Some((pid, value, set)) = store_property(&subject.uri) else {
+            return Ok(also_on::Found::default());
+        };
+        // An answer over its read's cap is no answer: asking again would read the same megabytes.
+        let found = match hubs::wikidata::item_with(&cx.egress, pid, &value).await {
+            Err(error) if crate::resolver::egress::over_cap(&error) => {
+                return Ok(also_on::Found::default())
+            }
+            found => found?,
+        };
+        let hubs::wikidata::Found::One(hub) = found else {
+            return Ok(also_on::Found::default());
+        };
+        let Some((raw, _)) = item(cx, &hub.qid).await? else {
+            return Ok(also_on::Found::default());
+        };
+        let mut found = super::Found::default();
+        found.push_key(items::key(&hub.qid));
+        for link in items::links(&raw, set) {
+            found.push_link(link);
+        }
+        Ok(found.into_also_on("wikidata"))
+    }
+}
+
+/// A page that is gone or unreachable: its Wayback Machine capture (HTTP 200 only) closest to
+/// when it was first referenced, with that time.
+pub struct Wayback;
+#[async_trait]
+impl Source for Wayback {
+    fn id(&self) -> &'static str {
+        "wayback"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        matches!(subject.status.as_str(), "missing" | "unreachable")
+            && super::web_url(&subject.uri).is_some()
+    }
+    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<also_on::Found> {
+        let near = subject.first_seen_at.unwrap_or_else(chrono::Utc::now);
+        let Some(request) = super::archive::wayback_request(&subject.uri, near) else {
+            return Ok(also_on::Found::default());
+        };
+        let f = send(cx, &request, "wayback_busy").await?;
+        let links = super::archive::parse_wayback(f.status, &f.body, &subject.uri, near)?
+            .into_iter()
+            .collect();
+        Ok(super::Found {
+            keys: vec![],
+            links,
+        }
+        .into_also_on("wayback"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,6 +1002,398 @@ mod tests {
             Some("Q64")
         )));
         assert!(!WikidataOsm.applies(&subject("https://example.org/", None)));
+    }
+
+    /// Every recorded lookup answer, by its request URL (a redirect's body is its `Location`),
+    /// plus `extra` routes for requests made differently from the recording.
+    fn recorded(extra: Vec<(String, &str)>) -> Context {
+        let provenance: Value =
+            serde_json::from_slice(&read("provenance.json")).expect("provenance");
+        let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
+        let mut routes: Vec<(String, u16, &'static str, Vec<u8>)> = vec![];
+        for entry in provenance.as_object().unwrap().values() {
+            let status = entry["status"].as_u64().unwrap() as u16;
+            let kind = leak(
+                entry["content_type"]
+                    .as_str()
+                    .unwrap_or("text/html")
+                    .to_owned(),
+            );
+            let body = match (entry["location"].as_str(), entry["file"].as_str()) {
+                (Some(location), _) => location.as_bytes().to_vec(),
+                (None, Some(file)) => read(file),
+                (None, None) => vec![],
+            };
+            routes.push((
+                entry["url"].as_str().unwrap().to_owned(),
+                status,
+                kind,
+                body,
+            ));
+        }
+        for (url, like) in extra {
+            let entry = &provenance[like];
+            let kind = leak(entry["content_type"].as_str().unwrap().to_owned());
+            routes.push((
+                url,
+                entry["status"].as_u64().unwrap() as u16,
+                kind,
+                read(entry["file"].as_str().unwrap()),
+            ));
+        }
+        context(
+            routes
+                .iter()
+                .map(|(u, s, k, b)| (u.as_str(), *s, *k, b.clone()))
+                .collect(),
+        )
+    }
+    fn at(uri: &str) -> Subject {
+        Subject {
+            doc: None,
+            ..subject(uri, None)
+        }
+    }
+    fn sites(found: &also_on::Found) -> Vec<String> {
+        found
+            .links
+            .iter()
+            .map(|l| format!("{} {}", l.site, l.uri))
+            .collect()
+    }
+    fn keys(found: &also_on::Found) -> Vec<&str> {
+        found.keys.iter().map(|k| k.key.as_str()).collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn papers() {
+        use crate::lookups::papers as p;
+        let doi_text = "10.1038/nature12373";
+        let mut cx = recorded(vec![
+            (
+                p::ncbi_request(&[doi_text], "info@synonym.to")
+                    .unwrap()
+                    .url
+                    .into(),
+                "ncbi-idconv",
+            ),
+            (
+                p::datacite_versions_request(doi_text).unwrap().url.into(),
+                "datacite-versions-nature12373",
+            ),
+        ]);
+        let mut config = crate::config::Config::default();
+        config.http.contact = "info@synonym.to".into();
+        cx.config = std::sync::Arc::new(config);
+        let doi = at("doi:10.1038/nature12373");
+        for source in [&Unpaywall as &dyn Source, &Ncbi, &Datacite] {
+            assert!(source.applies(&doi), "{}", source.id());
+        }
+        assert!(!HuggingFacePapers.applies(&doi));
+        let open = Unpaywall.lookup(&cx, &doi).await.unwrap();
+        assert!(!open.links.is_empty() && open.keys.is_empty());
+        assert!(open.links.iter().all(|l| l.via == "unpaywall"));
+        let ncbi = Ncbi.lookup(&cx, &doi).await.unwrap();
+        assert_eq!(keys(&ncbi).len(), 2, "{:?}", keys(&ncbi));
+        assert!(sites(&ncbi)
+            .iter()
+            .any(|s| s.starts_with("PubMed https://pubmed.ncbi.nlm.nih.gov/")));
+        let preprint = Datacite.lookup(&cx, &doi).await.unwrap();
+        assert_eq!(keys(&preprint), ["arxiv:1304.1068"]);
+        assert!(sites(&preprint).contains(&"arXiv https://arxiv.org/abs/1304.1068".to_owned()));
+
+        // The arXiv side names the journal version: the two share `arxiv:…`.
+        let arxiv = at("https://arxiv.org/abs/1304.1068v2");
+        assert!(!Unpaywall.applies(&arxiv) && Datacite.applies(&arxiv));
+        let journal = Datacite.lookup(&cx, &arxiv).await.unwrap();
+        assert_eq!(
+            keys(&journal),
+            ["arxiv:1304.1068", "doi:10.1038/nature12373"]
+        );
+        let journal_sites = sites(&journal);
+        assert!(
+            journal_sites.contains(&"alphaXiv https://www.alphaxiv.org/abs/1304.1068".to_owned())
+        );
+        assert!(journal_sites
+            .contains(&"Journal version https://doi.org/10.1038/nature12373".to_owned()));
+        // Hugging Face only when its API knows the paper.
+        assert!(HuggingFacePapers
+            .lookup(&cx, &arxiv)
+            .await
+            .unwrap()
+            .links
+            .is_empty());
+        let attention = HuggingFacePapers
+            .lookup(&cx, &at("https://arxiv.org/abs/1706.03762"))
+            .await
+            .unwrap();
+        assert_eq!(
+            sites(&attention),
+            ["Hugging Face Papers https://huggingface.co/papers/1706.03762"]
+        );
+
+        // Without a contact, the sources that need one find nothing (and ask nothing).
+        let cx = recorded(vec![]);
+        assert_eq!(
+            Unpaywall.lookup(&cx, &doi).await.unwrap(),
+            Default::default()
+        );
+        assert_eq!(Ncbi.lookup(&cx, &doi).await.unwrap(), Default::default());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn packages() {
+        use crate::lookups::packages::Registry;
+        let cx = recorded(vec![]);
+        let crates = Packages(Registry::Crates);
+        let rand = at("https://crates.io/crates/rand");
+        assert!(crates.applies(&rand) && !Packages(Registry::Npm).applies(&rand));
+        let found = crates.lookup(&cx, &rand).await.unwrap();
+        assert!(keys(&found).contains(&"crate:rand"), "{:?}", keys(&found));
+        assert!(sites(&found).contains(&"Docs.rs https://docs.rs/rand".to_owned()));
+        // rand's provenance (trusted publishing, or deps.dev's SLSA attestation) names its repository.
+        assert!(
+            keys(&found).contains(&"repo:github.com/rust-random/rand"),
+            "{:?}",
+            keys(&found)
+        );
+        assert!(found.links.iter().all(|l| l.via == "crates"));
+
+        let semver = Packages(Registry::Npm)
+            .lookup(&cx, &at("https://www.npmjs.com/package/semver"))
+            .await
+            .unwrap();
+        assert!(keys(&semver).contains(&"npm:semver"));
+        assert!(
+            keys(&semver).contains(&"repo:github.com/npm/node-semver"),
+            "{:?}",
+            keys(&semver)
+        );
+        // left-pad publishes no provenance: no repository.
+        let left_pad = Packages(Registry::Npm)
+            .lookup(&cx, &at("https://www.npmjs.com/package/left-pad"))
+            .await
+            .unwrap();
+        assert_eq!(keys(&left_pad), ["npm:left-pad"]);
+
+        let urllib3 = Packages(Registry::PyPI)
+            .lookup(&cx, &at("https://pypi.org/project/urllib3/"))
+            .await
+            .unwrap();
+        assert!(keys(&urllib3).contains(&"pypi:urllib3"));
+        assert!(
+            keys(&urllib3).contains(&"repo:github.com/urllib3/urllib3"),
+            "{:?}",
+            keys(&urllib3)
+        );
+
+        // The repository itself, on Software Heritage (120 requests an hour: one every 30 s).
+        let repo = at("https://github.com/rust-random/rand");
+        assert!(SoftwareHeritage.applies(&repo));
+        let archived = SoftwareHeritage.lookup(&cx, &repo).await.unwrap();
+        assert_eq!(keys(&archived), ["repo:github.com/rust-random/rand"]);
+        assert_eq!(archived.links.len(), 1);
+        tokio::time::advance(std::time::Duration::from_secs(31)).await;
+        let missing = SoftwareHeritage
+            .lookup(&cx, &at("https://github.com/pubky/pinakes-no-such-repo"))
+            .await
+            .unwrap();
+        assert!(missing.links.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn games_and_stores() {
+        let cx = recorded(vec![]);
+        let portal = at("https://store.steampowered.com/app/620/Portal_2/");
+        let found = Steam.lookup(&cx, &portal).await.unwrap();
+        assert!(keys(&found).contains(&"steam:620"));
+        let s = sites(&found);
+        assert!(s.iter().any(|s| s.starts_with("SteamDB ")), "{s:?}");
+        assert!(s.iter().any(|s| s.starts_with("ProtonDB ")), "{s:?}");
+        assert!(
+            s.contains(&"PCGamingWiki https://www.pcgamingwiki.com/wiki/Portal_2".to_owned()),
+            "{s:?}"
+        );
+        // An appid nobody knows: the templates only.
+        let none = Steam
+            .lookup(&cx, &at("https://store.steampowered.com/app/1/"))
+            .await
+            .unwrap();
+        assert!(
+            sites(&none).iter().all(|s| s.starts_with("Steam")),
+            "{:?}",
+            sites(&none)
+        );
+
+        // Through Wikidata: the one item with the store's ID, its other stores and databases.
+        assert!(WikidataStores.applies(&portal));
+        let item = WikidataStores.lookup(&cx, &portal).await.unwrap();
+        assert_eq!(keys(&item), ["wikidata:Q279446"]);
+        let s = sites(&item);
+        assert!(
+            s.contains(&"PCGamingWiki https://www.pcgamingwiki.com/wiki/Portal_2".to_owned()),
+            "{s:?}"
+        );
+        assert!(
+            s.contains(&"IGDB https://www.igdb.com/games/portal-2".to_owned()),
+            "{s:?}"
+        );
+        // MobyGames names two games: ambiguous, left out.
+        assert!(!s.iter().any(|s| s.starts_with("MobyGames")), "{s:?}");
+        let app = at("https://play.google.com/store/apps/details?id=de.danoeh.antennapod&hl=en");
+        let item = WikidataStores.lookup(&cx, &app).await.unwrap();
+        assert_eq!(keys(&item), ["wikidata:Q16927599"]);
+        assert!(
+            sites(&item)
+                .contains(&"F-Droid https://f-droid.org/packages/de.danoeh.antennapod".to_owned()),
+            "{:?}",
+            sites(&item)
+        );
+    }
+
+    #[test]
+    fn store_links() {
+        for (uri, pid, value) in [
+            (
+                "https://store.steampowered.com/app/620/Portal_2/",
+                "P1733",
+                "620",
+            ),
+            (
+                "https://www.gog.com/en/game/the_witcher_3_wild_hunt",
+                "P2725",
+                "game/the_witcher_3_wild_hunt",
+            ),
+            (
+                "https://apps.apple.com/us/app/signal-private-messenger/id874139669",
+                "P3861",
+                "874139669",
+            ),
+            (
+                "https://play.google.com/store/apps/details?id=org.thoughtcrime.securesms",
+                "P3418",
+                "org.thoughtcrime.securesms",
+            ),
+            (
+                "https://f-droid.org/en/packages/de.danoeh.antennapod/",
+                "P3597",
+                "de.danoeh.antennapod",
+            ),
+            (
+                "https://flathub.org/apps/org.mozilla.firefox",
+                "P4655",
+                "org.mozilla.firefox",
+            ),
+            ("https://snapcraft.io/firefox", "P4435", "firefox"),
+        ] {
+            let (p, v, _) = store_property(uri).unwrap_or_else(|| panic!("{uri}"));
+            assert_eq!((p, v.as_str()), (pid, value), "{uri}");
+        }
+        for uri in [
+            "https://play.google.com/store/apps/details",
+            "https://play.google.com/store/apps/details?id=a%20b",
+            "https://apps.apple.com/us/app/x/idabc",
+            "https://snapcraft.io/docs/x",
+            "https://example.org/app/1",
+        ] {
+            assert!(store_property(uri).is_none(), "{uri}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn federal_register_and_its_govinfo_copies() {
+        let record = "https://www.federalregister.gov/api/v1/documents/2026-18291.json";
+        let (egress, _) = crate::sources::fixture::egress(vec![(
+            record,
+            200,
+            JSON,
+            crate::sources::fixture::read("federal_register", "fr-2026-18291.json"),
+        )]);
+        let cx = Context {
+            egress,
+            config: Default::default(),
+        };
+        let doc = at("fr:2026-18291");
+        assert!(FederalRegister.applies(&doc));
+        let found = FederalRegister.lookup(&cx, &doc).await.unwrap();
+        assert_eq!(keys(&found), ["fr:2026-18291"]);
+        let s = sites(&found);
+        assert!(
+            s.contains(
+                &"GovInfo https://www.govinfo.gov/app/details/FR-2026-09-09/2026-18291".to_owned()
+            ),
+            "{s:?}"
+        );
+        assert!(
+            s.contains(
+                &"Regulations.gov https://www.regulations.gov/document/SEC-2026-5584-0001"
+                    .to_owned()
+            ),
+            "{s:?}"
+        );
+        assert!(found.links.iter().any(|l| l.kind.as_deref() == Some("pdf")));
+        // A GovInfo copy someone tags shares the key, from its address alone.
+        let copy = at("https://www.govinfo.gov/content/pkg/FR-2026-09-09/pdf/2026-18291.pdf");
+        assert!(FederalRegister.applies(&copy));
+        let found = FederalRegister.lookup(&cx, &copy).await.unwrap();
+        assert_eq!(
+            (keys(&found), found.links.len()),
+            (vec!["fr:2026-18291"], 0)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn archived_copies_and_btcmap() {
+        let near: chrono::DateTime<chrono::Utc> = "2015-06-01T00:00:00Z".parse().unwrap();
+        let cx = recorded(vec![
+            (
+                places::btcmap_sync_request("2010-01-01T00:00:00Z", BTCMAP_PAGE)
+                    .unwrap()
+                    .url
+                    .into(),
+                "btcmap-places",
+            ),
+            (
+                crate::lookups::archive::wayback_request("https://example.com/", near)
+                    .unwrap()
+                    .url
+                    .into(),
+                "wayback-cdx-example",
+            ),
+        ]);
+        let mut gone = at("https://example.com/");
+        gone.status = "missing".into();
+        gone.first_seen_at = Some(near);
+        assert!(Wayback.applies(&gone));
+        let found = Wayback.lookup(&cx, &gone).await.unwrap();
+        assert_eq!(found.links.len(), 1);
+        let link = &found.links[0];
+        assert_eq!(
+            (link.kind.as_deref(), link.via.as_str()),
+            (Some("archived"), "wayback")
+        );
+        assert!(link.at.is_some() && link.uri.starts_with("https://web.archive.org/web/"));
+        // A page that answers is not offered an archived copy.
+        assert!(!Wayback.applies(&at("https://example.com/")));
+
+        let places: Vec<places::BtcmapPlace> =
+            places::parse_btcmap_places(200, &read("btcmap-places.json")).unwrap();
+        let listed = places
+            .iter()
+            .find(|p| !p.deleted && p.osm.is_some())
+            .unwrap();
+        let osm = listed.osm.as_ref().unwrap();
+        let uri = format!("https://www.openstreetmap.org/{}/{}", osm.osm_type, osm.id);
+        let found = Btcmap.lookup(&cx, &at(&uri)).await.unwrap();
+        assert_eq!(found.links.len(), 1, "{uri}");
+        assert!(found.links[0]
+            .uri
+            .starts_with("https://btcmap.org/merchant/"));
+        let found = Btcmap
+            .lookup(&cx, &at("https://www.openstreetmap.org/node/1"))
+            .await
+            .unwrap();
+        assert!(found.links.is_empty());
     }
 
     #[test]

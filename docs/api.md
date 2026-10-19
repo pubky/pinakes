@@ -947,6 +947,51 @@ looked up itself; it joins as one of a title's links, by the title's IMDb ID.
   its item) or a resource another source keyed with a Q-id gets the item's OpenStreetMap object:
   its relation (P402) when it has exactly one, else its only OSM link of any type; several give
   nothing.
+- `btcmap`: an OSM object that BTC Map lists gets its merchant page
+  (`btcmap.org/merchant/{type}:{id}`), from BTC Map's place list by OSM ID, never by probing a
+  page.
+
+**Papers.** A DOI card (and an arXiv paper):
+- `unpaywall`: the open copies Unpaywall lists (repository and preprint copies, arXiv and PubMed
+  Central at their canonical addresses); links only, since Unpaywall matches copies itself.
+- `ncbi`: its PubMed and PubMed Central pages from the NCBI ID Converter, with `pmid:` and
+  `pmcid:` keys.
+- `datacite`: the arXiv preprint and its journal version where DataCite names them exactly
+  (`IsVersionOf`, only when there is one); both get the `arxiv:{id}` key and join, the arXiv side
+  also `doi:{journal DOI}`, and an arXiv paper its arXiv and alphaXiv pages.
+- `huggingface`: an arXiv paper's Hugging Face Papers page, only when its API knows the paper.
+
+`unpaywall` and `ncbi` send the operator's contact (`[http] contact`) as their APIs ask; without
+one they find nothing.
+
+**Software.** A package page on crates.io (and docs.rs, lib.rs), npm (and jsDelivr) or PyPI:
+- `crates`, `npm`, `pypi`: the package's pages on its registry and documentation sites, its name
+  as key (`crate:`, `npm:`, `pypi:`, normalized as each registry does), and its source repository
+  only when signed build provenance names it (crates.io trusted publishing, npm SLSA provenance,
+  PyPI trusted publishers, else deps.dev's `SLSA_ATTESTATION`), with a `repo:` key. A package's
+  own `repository` field is the publisher's claim and joins nothing.
+- `software_heritage`: a GitHub or GitLab repository's Software Heritage archive page, when it
+  archives it, and the same `repo:` key, so the repository and its packages join.
+
+**Games and apps.**
+- `steam`: a Steam game (store, community, SteamDB, ProtonDB or PCGamingWiki appid link) gets its
+  SteamDB page, its ProtonDB page when ProtonDB has reports, its PCGamingWiki page where the appid
+  lookup leads, and its GOG page through GOG GamesDB (only GOG's and Steam's own rows), with
+  `steam:` and `gog:` keys.
+- `wikidata_stores`: a link on Steam, GOG, the App Store, Google Play, F-Droid, Flathub or the Snap
+  Store gets the one Wikidata item carrying that store's ID (read back and compared exactly;
+  several are ambiguous and give nothing), its other stores and game databases (Epic Games
+  Store, itch.io, IGDB, MobyGames, PCGamingWiki, HowLongToBeat, Homebrew) with one value each,
+  and its Q-id as key.
+
+**Archived copies.** `wayback`: a page that is `missing` or `unreachable` gets its Wayback
+Machine capture closest to when it was first referenced (captures that answered 200 only), with
+`kind: "archived"` and the capture time in `at`. archive.today is never used.
+
+**Federal Register.** `federal_register`: a document gets its GovInfo PDF and details page, its
+regulations.gov document and its public-inspection PDF from its API record, and the key
+`fr:{number}`; a GovInfo copy of it someone tags gets the same key from its address alone, so the
+two join.
 
 The level is exact: a track lists tracks and videos of the recording, an album lists albums and
 YouTube's album playlists, an artist lists artist pages and channels. Album links group by
