@@ -1,7 +1,8 @@
-//! Exact lookups on external services, as pure request builders and response parsers.
+//! Exact lookups on external services, as pure request builders and response parsers, and the
+//! "also on" sources that run them ([`sources`]).
 //!
-//! Nothing here performs I/O. A builder returns the `Request` to send; the caller fetches it
-//! through Egress and hands the status and body to the matching parser. Parsers return
+//! The family modules perform no I/O. A builder returns the `Request` to send; a source fetches
+//! it through Egress and hands the status and body to the matching parser. Parsers return
 //! `Ok(None)` (or an empty result) when the service answers that the object does not exist, and
 //! an error for anything else they cannot read, so the caller retries later.
 //!
@@ -17,6 +18,7 @@ pub mod games;
 pub mod packages;
 pub mod papers;
 pub mod places;
+pub mod sources;
 pub mod wikidata;
 
 /// One HTTP GET to an external API.

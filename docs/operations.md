@@ -488,7 +488,8 @@ that is off by default (an unknown ID stops startup). Sources run in a fixed ord
 sees the keys the ones before it found in the same run (a barcode MusicBrainz names, then the
 services looked up by it); a source that no longer applies (its key is gone) drops its rows.
 The sources, in the order they run, are `service`, `tidal`, `musicbrainz`, `musicbrainz_entity`,
-`wikidata`, `deezer` and `itunes` (music), `wikipedia`, `wikidata_item`, `books`, `films`, `podcasts` and `titles`
+`wikidata`, `deezer` and `itunes` (music), `wikipedia`, `wikidata_item`, `books`, `films`, `podcasts` and `titles`,
+and `osm_wikidata` and `wikidata_osm` (places)
 ([the API](api.md#also-on) says what each reads); `[also_on] apple_storefront` (`us`, a
 two-letter country code) is the Apple Music, Apple Books and Apple Podcasts storefront of the
 Apple links they build. `[also_on.sources.musicbrainz] base_url`
@@ -506,7 +507,8 @@ for an album with barcodes, and two Wikidata requests (a search by its service I
 each Wikipedia article one request to its Wikipedia and one to Wikidata; each MusicBrainz page
 one request for its entity (an ISRC's page one more for the ISRC; MusicBrainz has no lookup of
 several entities at once, and a read the card already made is taken from the cache) and one for a
-recording's original album; each book one Open Library
+recording's original album; each tagged OSM object one Wikidata request (the places sources share
+an item's read with the others through the discovery cache); each book one Open Library
 request, one iTunes lookup for an ebook edition, and two Wikidata requests when Open Library names
 its work; each podcast show one iTunes lookup, two or three Podcast Index requests (the last asks
 who owns the show's GUID), its feed (usually still cached from its card) and two Wikidata requests;

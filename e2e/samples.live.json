@@ -455,5 +455,14 @@
     "uri": "https://podcastindex.org/podcast/577105",
     "type": "PodcastSeries",
     "name": "Darknet Diaries"
+  },
+  {
+    "kind": "place",
+    "uri": "https://www.openstreetmap.org/node/240109189",
+    "type": "City",
+    "derived": [
+      "Wikidata",
+      "Wikipedia (en)"
+    ]
   }
 ]

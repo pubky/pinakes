@@ -250,6 +250,8 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         Arc::new(films::Films),
         Arc::new(podcasts::Podcasts),
         Arc::new(titles::Titles),
+        Arc::new(crate::lookups::sources::OsmWikidata),
+        Arc::new(crate::lookups::sources::WikidataOsm),
     ]
 }
 /// The source IDs `[also_on.sources]` may name.
