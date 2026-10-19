@@ -122,6 +122,9 @@ impl Transport for Recorded {
         options: &FetchOptions,
     ) -> anyhow::Result<Fetched> {
         self.seen.lock().unwrap().push(url.to_string());
+        if url.host_str() == Some("unreadable.example") {
+            anyhow::bail!("body over the cap");
+        }
         if url.host_str() == Some("api.podcastindex.org") {
             assert!(options.sensitive);
             let header = |name: &str| {
@@ -267,6 +270,14 @@ async fn a_printed_book_and_its_work() {
                 "wikidata"
             ),
         ]
+    );
+    assert!(
+        found
+            .links
+            .iter()
+            .filter(|l| l.via == "wikidata")
+            .all(|l| l.kind.as_deref() == Some("work")),
+        "the item's pages are the work's"
     );
     assert!(
         !recorded.seen().iter().any(|u| u.contains("itunes")),
@@ -632,4 +643,17 @@ async fn letterboxd_and_tvmaze_by_imdb_id() {
         .unwrap();
     assert_eq!(keys(&found), ["imdb:tt9999999"]);
     assert!(found.links.is_empty());
+}
+
+#[tokio::test]
+async fn an_unreadable_feed_has_no_guid_and_fails_nothing() {
+    let feed = "https://unreadable.example/feed.xml";
+    let found = Podcasts
+        .lookup(
+            &cx(Recorded::new(), Config::default()),
+            &feed_card(feed, feed, None),
+        )
+        .await
+        .unwrap();
+    assert_eq!(found, Found::default());
 }

@@ -809,7 +809,7 @@ page (`openlibrary.org/books/OL…M`) is looked up exactly, never by title:
   edition in another language.
 - The work's Wikidata item (by its Open Library work ID) gives its Q-id as a key and its
   LibraryThing, Goodreads (the work's editions), Google Books, Project Gutenberg and BookBrainz
-  pages.
+  pages, each with `kind: "work"`.
 
 Goodreads' `book/isbn/{isbn}` redirect is never used: it answers an unknown ISBN with an
 unrelated book.

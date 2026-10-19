@@ -444,9 +444,16 @@ impl Podcasts {
     }
     /// The feed's own GUID, read from the feed at exactly this URL (a redirect may be another
     /// publisher's feed), or the GUID derived from its URL when it names none. `None` when the
-    /// feed can't be read as one.
+    /// feed can't be read as one (e.g. a body over the page cap); a retry is passed on.
     async fn feed(cx: &Context, url: &str) -> Result<Option<(String, &'static str)>> {
-        let f = cx.egress.discover(url, &Default::default(), 3600).await?;
+        let f = match cx.egress.discover(url, &Default::default(), 3600).await {
+            Ok(f) => f,
+            Err(e) if e.is::<crate::resolver::RetryLater>() => return Err(e),
+            Err(e) => {
+                tracing::debug!(error = %format!("{e:#}"), "podcast feed unreadable");
+                return Ok(None);
+            }
+        };
         if f.status != 200 || !same_feed(f.url.as_str(), url) {
             return Ok(None);
         }

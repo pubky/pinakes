@@ -368,7 +368,9 @@ impl Source for Books {
                         key,
                         via: "wikidata".into(),
                     }));
-                for l in media::links(&item, WIKIDATA) {
+                // The item is the work's: its pages are the work's too.
+                for mut l in media::links(&item, WIKIDATA) {
+                    l.kind = Some("work".into());
                     if !found.links.iter().any(|f| f.uri == l.uri) {
                         found.links.push(l);
                     }
