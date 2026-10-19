@@ -23,17 +23,29 @@ fn post_id(value: &str) -> Option<u64> {
 }
 
 /// The post a REST address names (`…/wp-json/wp/v2/posts/{id}` or
-/// `?rest_route=/wp/v2/posts/{id}`), on the page's origin.
-fn rest_post(url: &Url, page: &Url) -> Option<u64> {
+/// `?rest_route=/wp/v2/posts/{id}`), on the page's origin, and the record's address rebuilt from
+/// the id alone: no other path or query of the page's choosing is ever requested.
+fn rest_post(url: &Url, page: &Url) -> Option<(Url, u64)> {
     if url.origin() != page.origin() {
         return None;
     }
+    let origin = page.origin().ascii_serialization();
     if let Some((_, route)) = url.query_pairs().find(|(k, _)| k == "rest_route") {
-        return post_id(route.strip_prefix("/wp/v2/posts/")?.trim_end_matches('/'));
+        let id = post_id(route.strip_prefix("/wp/v2/posts/")?.trim_end_matches('/'))?;
+        let record = Url::parse(&format!("{origin}/?rest_route=/wp/v2/posts/{id}")).ok()?;
+        return Some((record, id));
     }
     let path = url.path().trim_end_matches('/');
-    let (_, id) = path.rsplit_once("/wp-json/wp/v2/posts/")?;
-    post_id(id)
+    let (prefix, id) = path.rsplit_once("/wp-json/wp/v2/posts/")?;
+    let id = post_id(id)?;
+    // A WordPress installed in a subdirectory (`/blog/wp-json/…`) keeps that directory.
+    let clean = prefix
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"/-_".contains(&b))
+        && prefix.len() <= 100;
+    clean.then_some(())?;
+    let record = Url::parse(&format!("{origin}{prefix}/wp-json/wp/v2/posts/{id}")).ok()?;
+    Some((record, id))
 }
 
 /// The site's REST record of the post a page names about itself: (record address, post id).
@@ -49,7 +61,7 @@ pub fn post_api(page: &Fetched) -> Option<(Url, u64)> {
                 return None;
             }
             let url = base.join(href).ok()?;
-            Some((url.clone(), rest_post(&url, base)?))
+            rest_post(&url, base)
         })
     });
     if from_header.is_some() {
@@ -71,8 +83,8 @@ pub fn post_api(page: &Fetched) -> Option<(Url, u64)> {
             continue;
         };
         if rel.eq_ignore_ascii_case("alternate") && el.attr("type") == Some("application/json") {
-            if let Some(id) = rest_post(&url, base) {
-                return Some((url, id));
+            if let Some(found) = rest_post(&url, base) {
+                return Some(found);
             }
         }
         if rel.eq_ignore_ascii_case("shortlink") && url.origin() == base.origin() {
@@ -84,9 +96,13 @@ pub fn post_api(page: &Fetched) -> Option<(Url, u64)> {
         }
     }
     // `?rest_route=` works with and without pretty permalinks.
-    let (mut url, id) = shortlink?;
-    url.set_query(Some(&format!("rest_route=/wp/v2/posts/{id}")));
-    Some((url, id))
+    let (_, id) = shortlink?;
+    let record = Url::parse(&format!(
+        "{}/?rest_route=/wp/v2/posts/{id}",
+        base.origin().ascii_serialization()
+    ))
+    .ok()?;
+    Some((record, id))
 }
 
 /// The record's address with the featured image embedded and only the fields a card needs.
@@ -214,6 +230,9 @@ impl Source for Wordpress {
                 &record_url(&api),
                 &FetchOptions {
                     accept: Some("application/json".into()),
+                    // No redirect to another host (nor any other): the record is on the page's
+                    // origin or not read.
+                    sensitive: true,
                     ..Default::default()
                 },
             )
@@ -289,6 +308,25 @@ mod tests {
         ] {
             assert_eq!(post_api(&html(head)), None, "{head}");
         }
+        // The record's address is rebuilt from the id: no other path or query of the page's.
+        let hostile = Some("<https://w.example/wp-login.php?action=x&rest_route=/wp/v2/posts/1>; rel=\"alternate\"; type=\"application/json\"");
+        let (url, _) = post_api(&fixture::page(
+            "https://w.example/a",
+            "text/html",
+            vec![],
+            hostile,
+        ))
+        .unwrap();
+        assert_eq!(url.as_str(), "https://w.example/?rest_route=/wp/v2/posts/1");
+        let blog = Some("<https://w.example/blog/wp-json/wp/v2/posts/3?x=1>; rel=\"alternate\"; type=\"application/json\"");
+        let (url, _) = post_api(&fixture::page(
+            "https://w.example/a",
+            "text/html",
+            vec![],
+            blog,
+        ))
+        .unwrap();
+        assert_eq!(url.as_str(), "https://w.example/blog/wp-json/wp/v2/posts/3");
         let header = Some("<https://other.example/wp-json/wp/v2/posts/7>; rel=\"alternate\"; type=\"application/json\"");
         assert_eq!(
             post_api(&fixture::page(

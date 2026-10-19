@@ -42,7 +42,7 @@ impl Site {
             return None;
         }
         let html = scraper::Html::parse_document(&body);
-        let generator = scraper::Selector::parse("meta[name='generator']").ok()?;
+        let generator = scraper::Selector::parse("head meta[name='generator']").ok()?;
         let ghost = html
             .select(&generator)
             .filter_map(|m| m.value().attr("content"))
@@ -50,7 +50,7 @@ impl Site {
         if !ghost {
             return None;
         }
-        let scripts = scraper::Selector::parse("script[data-key][data-api]").ok()?;
+        let scripts = scraper::Selector::parse("head script[data-key][data-api]").ok()?;
         let (api, key) = html.select(&scripts).find_map(|s| {
             let el = s.value();
             let api = page.url.join(el.attr("data-api")?).ok()?;
@@ -246,6 +246,21 @@ mod tests {
             )
         )))
         .is_some());
+        // Markers in the body are the page's text, not its head.
+        let body = fixture::page(
+            "https://g.example/a-post/",
+            "text/html",
+            format!(
+                "<html><head></head><body>{ghost}{}</body></html>",
+                script(
+                    "https://g.example/ghost/api/content/",
+                    "0123456789abcdef0123456789"
+                )
+            )
+            .into_bytes(),
+            None,
+        );
+        assert_eq!(Site::of_page(&body), None);
         for head in [
             // Not Ghost.
             script(

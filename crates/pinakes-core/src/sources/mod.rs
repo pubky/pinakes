@@ -188,7 +188,12 @@ pub async fn page_hooks(
     doc: ResourceMeta,
     deadline: tokio::time::Instant,
 ) -> ResourceMeta {
-    if doc.status != Status::Ok || page.status != 200 || !page.content_type.contains("html") {
+    // A card ActivityPub or a podcast feed already made is not a plain page's to improve.
+    if doc.status != Status::Ok
+        || page.status != 200
+        || !page.content_type.contains("html")
+        || matches!(doc.source.as_str(), "activitypub" | "media")
+    {
         return doc;
     }
     let switches = SWITCHES.read().unwrap_or_else(|e| e.into_inner()).clone();

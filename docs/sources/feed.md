@@ -1,7 +1,6 @@
 # Feeds (for walled pages)
 
-Cards for links whose page answers with an access wall: a bot challenge, 401 or 403 (staging had
-20 such links on theblock.co). This source is a wall hook: it claims no links by their shape. When
+Cards for links whose page answers with an access wall: a bot challenge, 401 or 403. This source is a wall hook: it claims no links by their shape. When
 the web route meets a wall, the same site's own feeds are searched for an item whose link is
 exactly the page's address, and that item makes the card. No key.
 
@@ -21,7 +20,9 @@ Matching is exact: the item's link and the page's address must be the same once 
 normalizes them; no search by title, no near spelling. Every feed,
 sitemap and `robots.txt` goes through the shared discovery cache (an hour; `robots.txt` a day;
 a failed fetch five minutes) and the host's normal rate, within the web fetch's deadline and at
-most 6 seconds. A host whose feeds all answered and none listed any item is remembered for a day.
+most 6 seconds. At one request a second, a site's first walled link may spend that time on
+the page and its feeds; the news sitemaps are then read on a later attempt, once the feeds are
+cached. A host whose feeds all answered and none listed any item is remembered for a day.
 
 ## Card
 

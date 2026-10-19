@@ -167,8 +167,9 @@ pub fn entries(body: &[u8]) -> Vec<Entry> {
     out
 }
 
-/// The news sitemaps a `robots.txt` names on `host` (`Sitemap:` lines whose address says news).
-pub fn news_sitemaps(robots: &str, host: &str) -> Vec<String> {
+/// The news sitemaps a `robots.txt` names on the page's own origin (`Sitemap:` lines whose
+/// address says news).
+pub fn news_sitemaps(robots: &str, page: &url::Url) -> Vec<String> {
     robots
         .lines()
         .filter_map(|line| {
@@ -179,7 +180,7 @@ pub fn news_sitemaps(robots: &str, host: &str) -> Vec<String> {
         })
         .filter_map(super::web_url)
         .filter(|url| {
-            url.host_str() == Some(host) && url.path().to_ascii_lowercase().contains("news")
+            url.origin() == page.origin() && url.path().to_ascii_lowercase().contains("news")
         })
         .map(String::from)
         .take(MAX_SITEMAPS)
@@ -298,7 +299,7 @@ impl Source for Feed {
             .discover(&format!("{origin}/robots.txt"), &robots, 86_400)
             .await
         {
-            Ok(f) if f.status == 200 => news_sitemaps(&String::from_utf8_lossy(&f.body), &host),
+            Ok(f) if f.status == 200 => news_sitemaps(&String::from_utf8_lossy(&f.body), &url),
             _ => vec![],
         };
         for address in sitemaps {
@@ -370,11 +371,21 @@ mod tests {
         assert!(entries(b"\xff\xfe").is_empty());
 
         let robots = String::from_utf8(read("theblock-robots.txt")).unwrap();
+        let page = url::Url::parse(ARTICLE).unwrap();
         assert_eq!(
-            news_sitemaps(&robots, "www.theblock.co"),
+            news_sitemaps(&robots, &page),
             ["https://www.theblock.co/sitemap_tbco_news.xml"]
         );
-        assert!(news_sitemaps(&robots, "theblock.co").is_empty());
+        for other in [
+            "https://theblock.co/a",
+            "http://www.theblock.co/a",
+            "https://www.theblock.co:8443/a",
+        ] {
+            assert!(
+                news_sitemaps(&robots, &url::Url::parse(other).unwrap()).is_empty(),
+                "{other}"
+            );
+        }
     }
 
     #[test]

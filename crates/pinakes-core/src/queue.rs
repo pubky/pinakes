@@ -446,8 +446,13 @@ async fn finish_job(
         }
         let attrs = match resolver.name() {
             "web" | "official" => crate::sources::attributes(),
+            // These routes fall back to the web fetch, whose page hooks may name a source.
             "event" | "event_platform" | "media" | "isbn" | "doi" | "nostr" | "activitypub" => {
-                crate::resolver::web::ATTRIBUTES
+                if crate::sources::by_name(&doc.source).is_some() {
+                    crate::sources::attributes()
+                } else {
+                    crate::resolver::web::ATTRIBUTES
+                }
             }
             "pubky" => crate::resolver::pubky::ATTRIBUTES,
             "geo" => crate::resolver::geo::ATTRIBUTES,

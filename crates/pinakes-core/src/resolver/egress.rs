@@ -235,7 +235,7 @@ pub async fn read_response_with(
     for value in response.headers().get_all("link").iter() {
         let Ok(value) = value.to_str() else { continue };
         if link.len() + value.len() + 2 > 2048 {
-            break;
+            continue;
         }
         if !link.is_empty() {
             link.push_str(", ");
