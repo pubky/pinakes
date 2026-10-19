@@ -18,6 +18,16 @@
     "status": 200,
     "url": "https://mastodon.social/api/v1/statuses/1"
   },
+  "status-1-opted-out": {
+    "bytes": 2742,
+    "content_type": "application/json; charset=utf-8",
+    "file": "status-1-opted-out.json",
+    "note": "Derived by hand from status-1.json: account.indexable false and account.noindex true, as an opted-out author's post answers (a real opted-out post is not recorded).",
+    "recorded_at": "2026-10-19T17:32:56+00:00",
+    "sha256": "4e4b356e0bedf18c01b6f0dcbf1dcd8177e5963c0adfadd4cc4dfd4ce9d557d4",
+    "status": 200,
+    "url": "https://mastodon.social/api/v1/statuses/1"
+  },
   "status-media-116929144390213579": {
     "bytes": 5462,
     "content_type": "application/json; charset=utf-8",

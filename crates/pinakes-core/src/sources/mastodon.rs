@@ -91,6 +91,18 @@ pub fn card(
     anyhow::ensure!(id == target.id, "the instance answered for another post");
     let ap = web_url(&ap).context("no ActivityPub id")?;
     let account = &v["account"];
+    // An author who opted out of search indexing: the post resolves and groups, but its card
+    // shows no text, image or name.
+    if opted_out(account) {
+        doc.set_type("SocialMediaPosting");
+        doc.name = Some(format!("Post on {}", target.host));
+        doc.attributes
+            .insert("activitypub_id".into(), ap.to_string());
+        if same_host(&ap, &target.host) {
+            doc.source_root = Some(ap.to_string());
+        }
+        return Ok(Some(doc));
+    }
     let content = text(&v["content"]).map(|c| plain(&c)).unwrap_or_default();
     let warning = text(&v["spoiler_text"]);
     doc.set_type("SocialMediaPosting");
@@ -143,6 +155,12 @@ pub fn card(
         doc.source_root = Some(ap.to_string());
     }
     Ok(Some(doc))
+}
+
+/// Whether an account opted out of search indexing (`indexable: false`, or `noindex`, which
+/// the profile's `robots` meta tag also carries).
+fn opted_out(account: &Value) -> bool {
+    account["indexable"] == false || account["noindex"] == true
 }
 
 fn same_host(url: &url::Url, host: &str) -> bool {
@@ -290,6 +308,30 @@ mod tests {
         let error = card(base.clone(), &target, 404, &read("not-mastodon.html")).unwrap_err();
         assert!(error.is::<Declined>());
         assert!(card(base, &media, 200, &read("status-1.json")).is_err());
+    }
+
+    #[test]
+    fn an_author_who_opted_out_shows_nothing_of_theirs() {
+        let target = Target {
+            host: "mastodon.social".into(),
+            id: "1".into(),
+        };
+        let base = ResourceMeta::new("https://mastodon.social/@Gargron/1", "mastodon", 3600);
+        let doc = card(base, &target, 200, &read("status-1-opted-out.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc.type_name, "SocialMediaPosting");
+        assert_eq!(doc.name.as_deref(), Some("Post on mastodon.social"));
+        assert_eq!((doc.description, doc.image), (None, None));
+        assert_eq!(
+            doc.attributes.keys().collect::<Vec<_>>(),
+            ["activitypub_id"]
+        );
+        // It still resolves and groups: the same root as the post itself.
+        assert_eq!(
+            doc.source_root.as_deref(),
+            Some("https://mastodon.social/users/Gargron/statuses/1")
+        );
     }
 
     #[test]

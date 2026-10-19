@@ -123,6 +123,13 @@ fn excerpt(text: &str, max: usize) -> String {
     cut
 }
 
+/// Whether an account carries the `!no-unauthenticated` self-label.
+fn no_unauthenticated(labels: &Value) -> bool {
+    labels
+        .as_array()
+        .is_some_and(|l| l.iter().any(|l| l["val"] == "!no-unauthenticated"))
+}
+
 /// The card of a post from `getPostThread`, or `None` when the post does not exist.
 pub fn post_card(
     mut doc: ResourceMeta,
@@ -144,9 +151,16 @@ pub fn post_card(
     let post = &thread["post"];
     anyhow::ensure!(post["uri"] == at_uri, "Bluesky answered for another post");
     let author = &post["author"];
-    let body_text = text(&post["record"]["text"]).unwrap_or_default();
     doc.set_type("SocialMediaPosting");
     doc.site = "bsky.app".into();
+    // An author who asked apps not to show their content to logged-out viewers: the post
+    // resolves and groups, but its card shows no text, image or name.
+    if no_unauthenticated(&author["labels"]) {
+        doc.name = Some("Post on bsky.app".into());
+        doc.attributes.insert("at_uri".into(), at_uri.to_owned());
+        return Ok(Some(doc));
+    }
+    let body_text = text(&post["record"]["text"]).unwrap_or_default();
     let by = text(&author["displayName"]).or_else(|| text(&author["handle"]));
     doc.name = if body_text.is_empty() {
         by.as_ref().map(|by| format!("Post by {by}"))
@@ -203,6 +217,11 @@ pub fn profile_card(
     anyhow::ensure!(v["did"] == did_, "Bluesky answered for another actor");
     doc.set_type("Person");
     doc.site = "bsky.app".into();
+    if no_unauthenticated(&v["labels"]) {
+        doc.name = Some("Profile on bsky.app".into());
+        doc.attributes.insert("did".into(), did_.to_owned());
+        return Ok(Some(doc));
+    }
     doc.name = text(&v["displayName"]).or_else(|| text(&v["handle"]));
     doc.description = text(&v["description"]).map(|d| excerpt(&d, 200));
     doc.image = text(&v["avatar"]).filter(|a| web_url(a).is_some());
@@ -363,6 +382,37 @@ mod tests {
         ] {
             assert!(!Bluesky.reads(uri), "{uri}");
         }
+    }
+
+    #[test]
+    fn an_author_who_opted_out_shows_nothing_of_theirs() {
+        let at = format!("at://{DID}/app.bsky.feed.post/3mxzez2m7wk2r");
+        let base = ResourceMeta::new(
+            "https://bsky.app/profile/bsky.app/post/3mxzez2m7wk2r",
+            "bluesky",
+            3600,
+        );
+        let doc = post_card(
+            base,
+            &at,
+            200,
+            &read("bsky-thread-3mxzez2m7wk2r-no-unauthenticated.json"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(doc.type_name, "SocialMediaPosting");
+        assert_eq!(doc.name.as_deref(), Some("Post on bsky.app"));
+        assert_eq!((doc.description, doc.image), (None, None));
+        assert_eq!(doc.attributes.keys().collect::<Vec<_>>(), ["at_uri"]);
+        let mut profile: Value =
+            serde_json::from_slice(&read("bsky-profile-bsky-app.json")).unwrap();
+        profile["labels"] = serde_json::json!([{"val": "!no-unauthenticated"}]);
+        let base = ResourceMeta::new("https://bsky.app/profile/bsky.app", "bluesky", 3600);
+        let doc = profile_card(base, DID, 200, &serde_json::to_vec(&profile).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc.name.as_deref(), Some("Profile on bsky.app"));
+        assert_eq!((doc.description, doc.image), (None, None));
     }
 
     #[test]

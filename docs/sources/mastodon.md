@@ -30,6 +30,11 @@ A `SocialMediaPosting` named by the start of its text (or its content warning, w
 the text it hides), with its first attachment's preview unless it is marked sensitive (else the
 author's avatar).
 
+An author who opted out of search indexing (the account's `indexable: false` or `noindex: true`,
+the flag behind the profile's `robots` `noindex` tag) gets a card without their text, image or
+name: a `SocialMediaPosting` named "Post on {server}", with only the `activitypub_id` fact. The
+link still resolves, groups with the post's other addresses, and its references count.
+
 | Fact | Meaning |
 | --- | --- |
 | `author`, `author_name` | The author's account (`name` or `name@server`) and display name |

@@ -26,6 +26,16 @@
     "status": 200,
     "url": "https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread?uri=at%3A%2F%2Fdid%3Aplc%3Az72i7hdynmk6r22z27h6tvur%2Fapp.bsky.feed.post%2F3mxzez2m7wk2r&depth=0&parentHeight=0"
   },
+  "bsky-thread-3mxzez2m7wk2r-no-unauthenticated": {
+    "bytes": 11064,
+    "content_type": "application/json; charset=utf-8",
+    "file": "bsky-thread-3mxzez2m7wk2r-no-unauthenticated.json",
+    "note": "Derived by hand from bsky-thread-3mxzez2m7wk2r.json: the author carries the !no-unauthenticated self-label (a real labelled account's post is not recorded).",
+    "recorded_at": "2026-10-19T16:05:40+00:00",
+    "sha256": "2d0542f8ad83d396b6f7088933711d6e64a66940e3b760664b477e2ffcba576e",
+    "status": 200,
+    "url": "https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread?uri=at%3A%2F%2Fdid%3Aplc%3Az72i7hdynmk6r22z27h6tvur%2Fapp.bsky.feed.post%2F3mxzez2m7wk2r&depth=0&parentHeight=0"
+  },
   "bsky-thread-missing": {
     "bytes": 119,
     "content_type": "application/json; charset=utf-8",

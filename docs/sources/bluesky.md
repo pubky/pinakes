@@ -26,6 +26,12 @@ A post is a `SocialMediaPosting` named by the start of its text, with the first 
 (else the author's avatar). A profile is a `Person` named by its display name, with its avatar
 and the start of its description.
 
+An account with the `!no-unauthenticated` self-label (it asks apps not to show its content to
+logged-out viewers) gets cards without its text, images or name: a post is a
+`SocialMediaPosting` named "Post on bsky.app" with only `at_uri`, a profile a `Person` named
+"Profile on bsky.app" with only `did`. The links still resolve and group, and their references
+count.
+
 | Fact | Meaning |
 | --- | --- |
 | `author`, `author_name` | For a post, the author's handle and display name |
