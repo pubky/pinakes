@@ -36,6 +36,11 @@ async fn main() -> Result<()> {
     if migrate_only {
         return Ok(());
     }
+    // After migrations, before serving: clustering needs h3 >= 4.2.3.
+    pinakes_core::check_extensions(&pool).await?;
+    // Build the public document now, so a malformed recipe file stops startup before workers,
+    // ingestion and the listeners start.
+    let _ = api::openapi_document();
     // Host, author and IP budgets are process-local; one daemon owns this database.
     let mut instance_lock = pool.acquire().await?;
     let owns_database: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(73822917)")
@@ -182,11 +187,18 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
             }
             "--migrate" => command = Command::Migrate,
             "reextract" => routes = Some(vec![]),
+            "--openapi" => {
+                return Ok((
+                    config,
+                    Command::Print(serde_json::to_string_pretty(&api::openapi_document())?),
+                ))
+            }
             "--help" => {
                 return Ok((
                     config,
                     Command::Print(
-                        "pinakesd [--config PATH] [--migrate | reextract ROUTE…|all]".into(),
+                        "pinakesd [--config PATH] [--migrate | --openapi | reextract ROUTE…|all]"
+                            .into(),
                     ),
                 ))
             }

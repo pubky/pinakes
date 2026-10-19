@@ -4,7 +4,7 @@
 
 `pinakes.example.toml` lists the operator choices: addresses and credentials, each resolver's
 and feature's `enabled` switch, the event platforms (`enabled`, `key`), egress allow and deny
-lists, and the public API's budget. Every cap, timeout, budget,
+lists, and the public API's budget, CORS origins and Swagger UI. Every cap, timeout, budget,
 backoff and refresh tier is a limit: it has a default and can be set in an optional `[limits]`
 section (or as `PINAKES__LIMITS__<NAME>`). The web limits cover the web resolver and the event
 routes on it; the resolver limits apply to pubky and to each card resolver.
@@ -37,7 +37,12 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `osm_ttl_secs` | `2592000` | OSM place cache lifetime (seconds). |
 | `osm_dump_every_hours` | `24` | Hours between two writes of the ODbL dump file. |
 | `osm_dump_downloads_per_hour` | `6` | ODbL dump downloads per hour per client address. |
+| `reach_timeout_secs` | `5` | Nexus reach deadline per search (seconds). |
+| `max_radius_m` | `200000.0` | Largest `near` radius (metres). |
+| `h3_resolutions` | `[0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 11, 11, 11, 11, 11, 11, 11]` | H3 resolution per map zoom level. |
+| `max_cluster_cells` | `10000` | Most cells one cluster query returns. |
 | `api_cache_capacity` | `10000` | API response cache entries. |
+| `reach_cost` | `6` | Budget units a reach search costs. |
 | `preview_requests_per_minute` | `30` | Preview requests per minute per client. |
 | `preview_uri_requests_per_minute` | `30` | Preview requests per minute per URI. |
 | `preview_cache_capacity` | `10000` | Preview cache entries. |
@@ -76,7 +81,13 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 
 ## Database
 
-Supported: PostgreSQL 16–18, PostGIS 3.4+, `pg_trgm` and h3.
+Supported: PostgreSQL 16–18, PostGIS 3.4+, `pg_trgm` and h3 4.2.3 or newer (h3-pg added
+`h3_latlng_to_cell(point, integer)` in 4.2.3; without it every `cluster=` search fails). After
+migrating and before serving, `pinakesd` checks `to_regprocedure('h3_latlng_to_cell(point,integer)')`
+and refuses to start without it, naming the h3 `extversion` it found; development and suffixed
+builds that have the function start normally. Upgrading the package does not upgrade the
+extension in a database, because `CREATE EXTENSION IF NOT EXISTS` keeps the installed version:
+run `ALTER EXTENSION h3 UPDATE;` (and `ALTER EXTENSION h3_postgis UPDATE;` if installed).
 
 `pinakesd --config <path> --migrate` applies the migrations in `migrations/` and exits; the
 daemon applies them at startup too. Pinakes rebuilds everything from the Nexus feed, so a
@@ -87,8 +98,8 @@ dropdb pinakes && createdb pinakes
 pinakesd --config pinakes.toml --migrate
 ```
 
-A database advisory lock allows one daemon per database. Resolver, host, author and IP
-budgets are process-local, and the lock keeps their guarantees.
+A database advisory lock allows one daemon per database. Resolver, host, author, reach-cache and
+IP budgets are process-local, and the lock keeps their guarantees.
 
 **Re-extraction.** A parser or routing change reaches stored documents through one command, run
 while the daemon is stopped (it takes the instance lock):
@@ -202,8 +213,27 @@ previews have their own per-IP and per-URI budgets. Forwarded headers are delibe
 behind a reverse proxy the proxy's address gets the aggregate budget, so set client-IP limits at
 the edge.
 
+CORS: `api.cors_allow_origins` (default `["*"]`, safe because the public API takes no cookies or
+tokens and writes nothing but budgeted previews) lets browser apps on other origins call the
+public listener. List exact `scheme://host[:port]` origins to restrict it (no wildcard patterns
+such as `https://*.pubky.app`), or `[]` to send no CORS headers. Preflights get 204 with
+`Access-Control-Allow-Methods: GET, POST`, `Access-Control-Allow-Headers: content-type` and
+`Access-Control-Max-Age: 600`, and spend the per-IP budget. In `*` mode every response, 429s and
+requests without an `Origin` included, carries `Access-Control-Allow-Origin: *` and exposes
+`Retry-After` and `ETag`, so a shared cache filled by a non-browser client still serves
+browsers. With an origin list only allowed origins get the headers (echoed) and every response
+adds `Vary: Origin`. No `Access-Control-Allow-Credentials` is sent, and the admin listener never
+sends CORS headers.
+
 The admin listener (`admin_listen`, default `127.0.0.1:9090`) requires `admin_token` (or
 `PINAKES__ADMIN_TOKEN`) for a non-loopback bind; terminate TLS at a trusted reverse proxy.
+
+Swagger UI (`api.swagger_ui`, default on) serves the vendored `utoipa-swagger-ui` bundle (Swagger
+UI 5.17.14) at `/swagger-ui`; builds never download it, and a build environment must not set
+`SWAGGER_UI_DOWNLOAD_URL`. Every `/swagger-ui` response carries `X-Content-Type-Options: nosniff`
+and a CSP of `default-src 'self'` with no inline script; the bundle's one inline `<style>` is
+allowed by its SHA-256 hash, which a test recomputes from the served bundle. The validator badge
+is off. Swagger UI shares the `/v1` per-IP budget.
 
 ## Ingestion
 
@@ -361,7 +391,7 @@ Grouping runs after a document commits, from its own dirty queue with its own ba
 seconds of jitter, growing to an hour), so a grouping failure never blocks a save. A document
 records its evidence as group keys: an identifier card's `doi`/`isbn` and the landing pages its
 registry names (`registry`), a page's head citations (`cites_doi`, `cites_isbn`) and ICS UIDs
-(`ics_uid`). Groups form only from those: an identifier card with
+(`ics_uid`). Groups form only from those (see [the API](api.md#groups)): an identifier card with
 a named landing page that cites it, one UID within one feed, and curation. A group stores
 membership only; cards read it when they are served. Each key of a run may
 make a capped number of compatibility checks (`limits.group_max_members`² × 2, between 100,000
@@ -381,7 +411,7 @@ also joins one UID across feeds when the instances are within 500 m, 300 s and a
 of 0.5; a determined publisher can copy that, so it is off by default.
 
 Tenant rules (`data/multi-tenant-hosts.json`) say which part of a multi-tenant host is one
-publisher; the canonical alias rule needs the same tenant. A rule is
+publisher; the canonical [alias](api.md#aliases) rule needs the same tenant. A rule is
 `"subdomain"`, `"first_path_segment"`, `{"path_segment":N}` or
 `{"path":{"segment":N,"skip":["u/*"],"extend":["s"],"query":["src"]}}`: `skip` drops a noise
 window (Google Calendar's `u/{n}`), `extend` takes the next segment too (anchor.fm `/s/{id}`),

@@ -18,6 +18,7 @@ use std::{
     time::Duration,
 };
 use tower::ServiceExt;
+mod common;
 async fn request(
     app: &Router,
     method: &str,
@@ -39,12 +40,15 @@ async fn request(
     let parsed: Option<Value> = serde_json::from_slice(&bytes).ok();
     (status, parsed, String::from_utf8_lossy(&bytes).to_string())
 }
-/// A public listener request.
+/// A public listener request; its JSON is checked against the public document.
 async fn call(app: &Router, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
     let (status, parsed, text) = request(app, method, path, body).await;
+    if let Some(value) = &parsed {
+        common::check_response(method, path, status, value);
+    }
     (status, parsed.unwrap_or_else(|| json!(text)))
 }
-/// An admin listener request.
+/// An admin listener request (the admin listener has no OpenAPI document).
 async fn admin_call(app: &Router, method: &str, path: &str) -> (u16, Value) {
     let (status, parsed, text) = request(app, method, path, None).await;
     (status, parsed.unwrap_or_else(|| json!(text)))

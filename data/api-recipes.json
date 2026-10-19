@@ -1,0 +1,1705 @@
+{
+  "about": "Named examples of the public API (Swagger UI dropdowns, run by tests/recipes.rs, listed in docs/api.md), where id(URI) is a URI's resource ID, group(URI,...) the ID those members' group gets when it forms, and card_type the resolved card's type.",
+  "recipes": [
+    {
+      "name": "resolve-luma-com-376whqyw",
+      "summary": "https://luma.com/376whqyw",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://luma.com/376whqyw"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-luma-com-je0oh6s1",
+      "summary": "https://luma.com/je0oh6s1",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://luma.com/je0oh6s1"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-www-meetup-com-bitcoin-meetup-switzerland-events-316899925",
+      "summary": "https://www.meetup.com/bitcoin-meetup-switzerland/events/316899925/",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://www.meetup.com/bitcoin-meetup-switzerland/events/316899925/"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-www-eventbrite-com-e-se-bitcoin-sovereignty-economics-ticket",
+      "summary": "https://www.eventbrite.com/e/se-bitcoin-sovereignty-economics-tickets-1978412197139",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://www.eventbrite.com/e/se-bitcoin-sovereignty-economics-tickets-1978412197139"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-partiful-com-e-ak0fmv5lu2pmfsyxuxwy",
+      "summary": "https://partiful.com/e/AK0FMV5lu2PmfSyxuXwY",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://partiful.com/e/AK0FMV5lu2PmfSyxuXwY"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-posh-vip-e-halloween-2026-eden",
+      "summary": "https://posh.vip/e/halloween-2026-eden",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://posh.vip/e/halloween-2026-eden"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-events-ringcentral-com-events-innovators-retreat-2026",
+      "summary": "https://events.ringcentral.com/events/innovators-retreat-2026",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://events.ringcentral.com/events/innovators-retreat-2026"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-mobilizon-fr-events-86a665ae-e495-4e4f-88d4-4cffd44a82f1",
+      "summary": "https://mobilizon.fr/events/86a665ae-e495-4e4f-88d4-4cffd44a82f1",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://mobilizon.fr/events/86a665ae-e495-4e4f-88d4-4cffd44a82f1"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-events-sfconservancy-org-1ukbcqfkkaer0orz7pdgq",
+      "summary": "https://events.sfconservancy.org/1ukbcQFkKAEr0OrZ7PDgq",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://events.sfconservancy.org/1ukbcQFkKAEr0OrZ7PDgq"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-www-petzi-ch-en-events-61387-fri-son-kim-wilde-uk",
+      "summary": "https://www.petzi.ch/en/events/61387-fri-son-kim-wilde-uk/",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://www.petzi.ch/en/events/61387-fri-son-kim-wilde-uk/"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-eventyay-com-ev-88882f3e",
+      "summary": "https://eventyay.com/ev/88882f3e/",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://eventyay.com/ev/88882f3e/"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-www-guidle-com-de-veranstaltungen-dies-das-ueberlingen-grego",
+      "summary": "https://www.guidle.com/de/veranstaltungen/dies-das/ueberlingen/gregor-haegele-live-2027_A2rCGkH",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://www.guidle.com/de/veranstaltungen/dies-das/ueberlingen/gregor-haegele-live-2027_A2rCGkH"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-allevents-in-zurich-200029487725505",
+      "summary": "https://allevents.in/zurich/200029487725505",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://allevents.in/zurich/200029487725505"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-www-fatsoma-com-e-npky3qjt-the-official-dublin-student-hallo",
+      "summary": "https://www.fatsoma.com/e/npky3qjt/the-official-dublin-student-halloween-ball-2026",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://www.fatsoma.com/e/npky3qjt/the-official-dublin-student-halloween-ball-2026"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-www-designmynight-com-london-whats-on-theatre-the-magic-hour",
+      "summary": "https://www.designmynight.com/london/whats-on/theatre/the-magic-hour-park-lane",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://www.designmynight.com/london/whats-on/theatre/the-magic-hour-park-lane"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-fixr-co-event-halloween-2026-welcome-to-the-haunted-hotel-ti",
+      "summary": "https://fixr.co/event/halloween-2026-welcome-to-the-haunted-hotel-tickets-404456056",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://fixr.co/event/halloween-2026-welcome-to-the-haunted-hotel-tickets-404456056"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-v4-wegow-com-es-conciertos-konzert-von-yasi-hofer-band-in-bo",
+      "summary": "https://v4.wegow.com/es/conciertos/konzert-von-yasi-hofer-band-in-bonn-harmonie",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://v4.wegow.com/es/conciertos/konzert-von-yasi-hofer-band-in-bonn-harmonie"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-grounds-stager-co-shop-default-events-111608505",
+      "summary": "https://grounds.stager.co/shop/default/events/111608505",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://grounds.stager.co/shop/default/events/111608505"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-www-songkick-com-concerts-42408878-bausa-at-komplex-457",
+      "summary": "https://www.songkick.com/concerts/42408878-bausa-at-komplex-457",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://www.songkick.com/concerts/42408878-bausa-at-komplex-457"
+      },
+      "expect": "card",
+      "card_type": "MusicEvent"
+    },
+    {
+      "name": "resolve-events-humanitix-com-great-northern-contemporary-craft-fair",
+      "summary": "https://events.humanitix.com/great-northern-contemporary-craft-fair",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://events.humanitix.com/great-northern-contemporary-craft-fair"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-infomaniak-events-en-ch-conferences-seminaire-des-autorites",
+      "summary": "https://infomaniak.events/en-ch/conferences/seminaire-des-autorites-2026/92392f2a-6711-4917-b9e9-60c88e8c550a/events/396911",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://infomaniak.events/en-ch/conferences/seminaire-des-autorites-2026/92392f2a-6711-4917-b9e9-60c88e8c550a/events/396911"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-xceed-me-en-roma-event-dissonanze-2026-day-1-220015",
+      "summary": "https://xceed.me/en/roma/event/dissonanze-2026-day-1/220015",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://xceed.me/en/roma/event/dissonanze-2026-day-1/220015"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-www-ents24-com-london-events-eventim-apollo-simon-brodkin-74",
+      "summary": "https://www.ents24.com/london-events/eventim-apollo/simon-brodkin/7474018",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://www.ents24.com/london-events/eventim-apollo/simon-brodkin/7474018"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-www-ticketino-com-en-event-ticketino-bbq-192364",
+      "summary": "https://www.ticketino.com/en/Event/TICKETINO-BBQ/192364",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://www.ticketino.com/en/Event/TICKETINO-BBQ/192364"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-api-btcmap-org-v4-events-1",
+      "summary": "https://api.btcmap.org/v4/events/1",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://api.btcmap.org/v4/events/1"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-naddr1qqjrvvp3vycxye33956nycec956x2ery94snqvfk95ergefnx9snqd",
+      "summary": "nostr:naddr1qqjrvvp3vycxye33956nycec956x2ery94snqvfk95ergefnx9snqdeh8yekyq3qxfx8p5gzdyv0kgakc365pag8ej2p6g7l72k0hszt0g5m0k0wyymsxpqqqp7txuf3y56",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "nostr:naddr1qqjrvvp3vycxye33956nycec956x2ery94snqvfk95ergefnx9snqdeh8yekyq3qxfx8p5gzdyv0kgakc365pag8ej2p6g7l72k0hszt0g5m0k0wyymsxpqqqp7txuf3y56"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-51da3n5m8s6oaq38uqs7jznp6ezbc3qbtmic8oy6fj3g6mokdyco-pub-eve",
+      "summary": "pubky://51da3n5m8s6oaq38uqs7jznp6ezbc3qbtmic8oy6fj3g6mokdyco/pub/eventky.app/events/0034FED2YCDKG",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "pubky://51da3n5m8s6oaq38uqs7jznp6ezbc3qbtmic8oy6fj3g6mokdyco/pub/eventky.app/events/0034FED2YCDKG"
+      },
+      "expect": "card",
+      "card_type": "Event"
+    },
+    {
+      "name": "resolve-naddr1qqjx2dryvcmn2c3395enwce4956rxeny943x2c35943kvetrvf3xyc",
+      "summary": "nostr:naddr1qqjx2dryvcmn2c3395enwce4956rxeny943x2c35943kvetrvf3xycmyvvcrjq3qs0mv35668yg7t4jk49zdltkezn0em0s3jpt2qn8mkneurnw2edwsxpqqqp7tgmysyuc",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "nostr:naddr1qqjx2dryvcmn2c3395enwce4956rxeny943x2c35943kvetrvf3xycmyvvcrjq3qs0mv35668yg7t4jk49zdltkezn0em0s3jpt2qn8mkneurnw2edwsxpqqqp7tgmysyuc"
+      },
+      "expect": "card",
+      "card_type": "Collection"
+    },
+    {
+      "name": "resolve-calendar-google-com-calendar-ical-en-ch-23holiday-40group-v",
+      "summary": "https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics"
+      },
+      "expect": "card",
+      "card_type": "DataFeed"
+    },
+    {
+      "name": "resolve-calendar-google-com-calendar-ical-en-ch-23holiday-40group-v-2",
+      "summary": "webcal://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "webcal://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics"
+      },
+      "expect": "card",
+      "card_type": "DataFeed"
+    },
+    {
+      "name": "resolve-www-calendarlabs-com-ical-calendar-ics-76-us-holidays-ics",
+      "summary": "https://www.calendarlabs.com/ical-calendar/ics/76/US_Holidays.ics",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://www.calendarlabs.com/ical-calendar/ics/76/US_Holidays.ics"
+      },
+      "expect": "card",
+      "card_type": "DataFeed"
+    },
+    {
+      "name": "resolve-ti-to-scipy-scipy2026-ics",
+      "summary": "https://ti.to/scipy/scipy2026.ics",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://ti.to/scipy/scipy2026.ics"
+      },
+      "expect": "card",
+      "card_type": "DataFeed"
+    },
+    {
+      "name": "resolve-pretix-eu-demo-democon-ical",
+      "summary": "https://pretix.eu/demo/democon/ical/",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://pretix.eu/demo/democon/ical/"
+      },
+      "expect": "card",
+      "card_type": "DataFeed"
+    },
+    {
+      "name": "resolve-api-weezevent-com-sites-view-live-e1114506-ics",
+      "summary": "https://api.weezevent.com/sites/view/live/E1114506.ics",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://api.weezevent.com/sites/view/live/E1114506.ics"
+      },
+      "expect": "card",
+      "card_type": "DataFeed"
+    },
+    {
+      "name": "resolve-eventfrog-ch-stream-de-event-7503702322012243890-ics",
+      "summary": "https://eventfrog.ch/stream/de/event/7503702322012243890.ics",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://eventfrog.ch/stream/de/event/7503702322012243890.ics"
+      },
+      "expect": "card",
+      "card_type": "DataFeed"
+    },
+    {
+      "name": "resolve-s3-eu-west-1-amazonaws-com-starticket-wwwroot-ticketing-feed",
+      "summary": "https://s3-eu-west-1.amazonaws.com/starticket/wwwroot/ticketing/feeds/starticketfeed_D.xml",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://s3-eu-west-1.amazonaws.com/starticket/wwwroot/ticketing/feeds/starticketfeed_D.xml"
+      },
+      "expect": "card",
+      "card_type": "DataFeed"
+    },
+    {
+      "name": "resolve-bitcoinops-org-feed-xml",
+      "summary": "https://bitcoinops.org/feed.xml",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://bitcoinops.org/feed.xml"
+      },
+      "expect": "card",
+      "card_type": "DataFeed"
+    },
+    {
+      "name": "resolve-github-com-pubky-pubky-core-releases-atom",
+      "summary": "https://github.com/pubky/pubky-core/releases.atom",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://github.com/pubky/pubky-core/releases.atom"
+      },
+      "expect": "card",
+      "card_type": "DataFeed"
+    },
+    {
+      "name": "resolve-www-jsonfeed-org-feed-json",
+      "summary": "https://www.jsonfeed.org/feed.json",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://www.jsonfeed.org/feed.json"
+      },
+      "expect": "card",
+      "card_type": "DataFeed"
+    },
+    {
+      "name": "resolve-www-openstreetmap-org-node-240109189",
+      "summary": "https://www.openstreetmap.org/node/240109189",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://www.openstreetmap.org/node/240109189"
+      },
+      "expect": "card",
+      "card_type": "Place"
+    },
+    {
+      "name": "resolve-www-openstreetmap-org-way-50637691",
+      "summary": "https://www.openstreetmap.org/way/50637691",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://www.openstreetmap.org/way/50637691"
+      },
+      "expect": "card",
+      "card_type": "Place"
+    },
+    {
+      "name": "resolve-www-openstreetmap-org-relation-146656",
+      "summary": "https://www.openstreetmap.org/relation/146656",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://www.openstreetmap.org/relation/146656"
+      },
+      "expect": "card",
+      "card_type": "Place"
+    },
+    {
+      "name": "resolve-osm-org-node-240109189",
+      "summary": "https://osm.org/node/240109189",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://osm.org/node/240109189"
+      },
+      "expect": "card",
+      "card_type": "Place"
+    },
+    {
+      "name": "resolve-www-openstreetmap-org-edit-node-240109189",
+      "summary": "https://www.openstreetmap.org/edit?node=240109189",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://www.openstreetmap.org/edit?node=240109189"
+      },
+      "expect": "card",
+      "card_type": "Place"
+    },
+    {
+      "name": "resolve-www-openstreetmap-org-node-240109189-history",
+      "summary": "https://www.openstreetmap.org/node/240109189/history",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://www.openstreetmap.org/node/240109189/history"
+      },
+      "expect": "card",
+      "card_type": "Place"
+    },
+    {
+      "name": "resolve-osm-org-go-0eeqje",
+      "summary": "https://osm.org/go/0EEQjE--",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://osm.org/go/0EEQjE--"
+      },
+      "expect": "card",
+      "card_type": "Place"
+    },
+    {
+      "name": "resolve-www-openstreetmap-org-mlat-46-0037-mlon-8-9511-map-16-46-003",
+      "summary": "https://www.openstreetmap.org/?mlat=46.0037&mlon=8.9511#map=16/46.0037/8.9511",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://www.openstreetmap.org/?mlat=46.0037&mlon=8.9511#map=16/46.0037/8.9511"
+      },
+      "expect": "card",
+      "card_type": "Place"
+    },
+    {
+      "name": "resolve-47-3769-8-5417",
+      "summary": "geo:47.3769,8.5417",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "geo:47.3769,8.5417"
+      },
+      "expect": "card",
+      "card_type": "Place"
+    },
+    {
+      "name": "resolve-en-wikipedia-org-wiki-bitcoin",
+      "summary": "https://en.wikipedia.org/wiki/Bitcoin",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://en.wikipedia.org/wiki/Bitcoin"
+      },
+      "expect": "card",
+      "card_type": "Article"
+    },
+    {
+      "name": "resolve-en-wikipedia-org-wiki-lugano",
+      "summary": "https://en.wikipedia.org/wiki/Lugano",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://en.wikipedia.org/wiki/Lugano"
+      },
+      "expect": "card",
+      "card_type": "Article"
+    },
+    {
+      "name": "resolve-www-wikidata-org-wiki-q90",
+      "summary": "https://www.wikidata.org/wiki/Q90",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://www.wikidata.org/wiki/Q90"
+      },
+      "expect": "card",
+      "card_type": "Place"
+    },
+    {
+      "name": "resolve-n26-com",
+      "summary": "https://n26.com/",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://n26.com/"
+      },
+      "expect": "card",
+      "card_type": "WebPage"
+    },
+    {
+      "name": "resolve-pubky-org",
+      "summary": "https://pubky.org/",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://pubky.org/"
+      },
+      "expect": "card",
+      "card_type": "CreativeWork"
+    },
+    {
+      "name": "resolve-casa-io",
+      "summary": "https://casa.io/",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://casa.io/"
+      },
+      "expect": "card",
+      "card_type": "WebPage"
+    },
+    {
+      "name": "resolve-example-org",
+      "summary": "https://example.org/",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://example.org/"
+      },
+      "expect": "card",
+      "card_type": "WebPage"
+    },
+    {
+      "name": "resolve-www-youtube-com-watch-v-dqw4w9wgxcq",
+      "summary": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+      },
+      "expect": "card",
+      "card_type": "VideoObject"
+    },
+    {
+      "name": "resolve-www-youtube-com-watch-v-up2i2z4m-kg",
+      "summary": "https://www.youtube.com/watch?v=Up2i2Z4m-Kg",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://www.youtube.com/watch?v=Up2i2Z4m-Kg"
+      },
+      "expect": "card",
+      "card_type": "VideoObject"
+    },
+    {
+      "name": "resolve-vimeo-com-76979871",
+      "summary": "https://vimeo.com/76979871",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://vimeo.com/76979871"
+      },
+      "expect": "card",
+      "card_type": "VideoObject"
+    },
+    {
+      "name": "resolve-open-spotify-com-show-4rooj6egrf8k2irywzwomk",
+      "summary": "https://open.spotify.com/show/4rOoJ6Egrf8K2IrywzwOMk",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://open.spotify.com/show/4rOoJ6Egrf8K2IrywzwOMk"
+      },
+      "expect": "card",
+      "card_type": "PodcastSeries"
+    },
+    {
+      "name": "resolve-thebiz-pro-episodes-1-making-cypherpunk-products-and-busines",
+      "summary": "https://thebiz.pro/episodes/1/making-cypherpunk-products-and-businesses",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://thebiz.pro/episodes/1/making-cypherpunk-products-and-businesses"
+      },
+      "expect": "card",
+      "card_type": "CreativeWork"
+    },
+    {
+      "name": "resolve-9780140328721",
+      "summary": "isbn:9780140328721",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "isbn:9780140328721"
+      },
+      "expect": "card",
+      "card_type": "Book"
+    },
+    {
+      "name": "resolve-0140328726",
+      "summary": "isbn:0140328726",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "isbn:0140328726"
+      },
+      "expect": "card",
+      "card_type": "Book"
+    },
+    {
+      "name": "resolve-978-0-14-032872-1",
+      "summary": "isbn:978-0-14-032872-1",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "isbn:978-0-14-032872-1"
+      },
+      "expect": "card",
+      "card_type": "Book"
+    },
+    {
+      "name": "resolve-openlibrary-org-books-ol7353617m",
+      "summary": "https://openlibrary.org/books/OL7353617M",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://openlibrary.org/books/OL7353617M"
+      },
+      "expect": "card",
+      "card_type": "CreativeWork"
+    },
+    {
+      "name": "resolve-9780262033848",
+      "summary": "isbn:9780262033848",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "isbn:9780262033848"
+      },
+      "expect": "card",
+      "card_type": "Book"
+    },
+    {
+      "name": "resolve-10-1038-nature12373",
+      "summary": "doi:10.1038/nature12373",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "doi:10.1038/nature12373"
+      },
+      "expect": "card",
+      "card_type": "ScholarlyArticle"
+    },
+    {
+      "name": "resolve-doi-org-10-1038-nature12373",
+      "summary": "https://doi.org/10.1038/nature12373",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://doi.org/10.1038/nature12373"
+      },
+      "expect": "card",
+      "card_type": "ScholarlyArticle"
+    },
+    {
+      "name": "resolve-dx-doi-org-10-1038-nature12373",
+      "summary": "https://dx.doi.org/10.1038/nature12373",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://dx.doi.org/10.1038/nature12373"
+      },
+      "expect": "card",
+      "card_type": "ScholarlyArticle"
+    },
+    {
+      "name": "resolve-www-nature-com-articles-nature12373",
+      "summary": "https://www.nature.com/articles/nature12373",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://www.nature.com/articles/nature12373"
+      },
+      "expect": "card",
+      "card_type": "ScholarlyArticle"
+    },
+    {
+      "name": "resolve-10-1038-nphys1170",
+      "summary": "doi:10.1038/nphys1170",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "doi:10.1038/nphys1170"
+      },
+      "expect": "card",
+      "card_type": "ScholarlyArticle"
+    },
+    {
+      "name": "resolve-mastodon-social-gargron-1",
+      "summary": "https://mastodon.social/@Gargron/1",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://mastodon.social/@Gargron/1"
+      },
+      "expect": "card",
+      "card_type": "SocialMediaPosting"
+    },
+    {
+      "name": "resolve-note1qqqdltcknk9rq52w5xq5srdx3znx4cvr4nmst5xz2rtwkm87ay9qeuw",
+      "summary": "nostr:note1qqqdltcknk9rq52w5xq5srdx3znx4cvr4nmst5xz2rtwkm87ay9qeuwqtd",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "nostr:note1qqqdltcknk9rq52w5xq5srdx3znx4cvr4nmst5xz2rtwkm87ay9qeuwqtd"
+      },
+      "expect": "card",
+      "card_type": "SocialMediaPosting"
+    },
+    {
+      "name": "resolve-c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey-pub-map",
+      "summary": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G"
+      },
+      "expect": "card",
+      "card_type": "SocialMediaPosting"
+    },
+    {
+      "name": "resolve-c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey-pub-map-2",
+      "summary": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/reviews/00355XPM88EHG",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/reviews/00355XPM88EHG"
+      },
+      "expect": "card",
+      "card_type": "SocialMediaPosting"
+    },
+    {
+      "name": "resolve-c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey-pub-map-3",
+      "summary": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/collections/00351MVGE211G",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/collections/00351MVGE211G"
+      },
+      "expect": "card",
+      "card_type": "CreativeWork"
+    },
+    {
+      "name": "resolve-9g3zsjpwijn3gsh7ibghjxxadpjidceos5rw4387a6hhziqi8aoy-pub-map",
+      "summary": "pubky://9g3zsjpwijn3gsh7ibghjxxadpjidceos5rw4387a6hhziqi8aoy/pub/mapky.app/geo_captures/0035C4V0GVX90",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "pubky://9g3zsjpwijn3gsh7ibghjxxadpjidceos5rw4387a6hhziqi8aoy/pub/mapky.app/geo_captures/0035C4V0GVX90"
+      },
+      "expect": "card",
+      "card_type": "CreativeWork"
+    },
+    {
+      "name": "resolve-3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo-pub-loo",
+      "summary": "pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json"
+      },
+      "expect": "card",
+      "card_type": "CreativeWork"
+    },
+    {
+      "name": "resolve-47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao-pub-pub",
+      "summary": "pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2"
+      },
+      "expect": "card",
+      "card_type": "CreativeWork"
+    },
+    {
+      "name": "resolve-www-mexc-com",
+      "summary": "https://www.mexc.com/",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://www.mexc.com/"
+      },
+      "expect": "unreachable"
+    },
+    {
+      "name": "resolve-dir8gnjfnhdn5cpo8gxmfxfpqm9kffkoqpmsefcjkdpkxo15d5ey-pub-pin",
+      "summary": "pubky://dir8gnjfnhdn5cpo8gxmfxfpqm9kffkoqpmsefcjkdpkxo15d5ey/pub/pinakes.e2e/none.json",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "pubky://dir8gnjfnhdn5cpo8gxmfxfpqm9kffkoqpmsefcjkdpkxo15d5ey/pub/pinakes.e2e/none.json"
+      },
+      "expect": "missing"
+    },
+    {
+      "name": "resolve-www-privacyguides-org-dns",
+      "summary": "https://www.privacyguides.org/dns/",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://www.privacyguides.org/dns/"
+      },
+      "expect": "pending"
+    },
+    {
+      "name": "lookup-events",
+      "summary": "https://luma.com/376whqyw, https://www.meetup.com/bitcoin-meetup-switzerland/events/316899925/, nostr:naddr1qqjrvvp3vycxye33956nycec956x2ery94snqvfk95ergefnx9snqdeh8yekyq3qxfx8p5gzdyv0kgakc365pag8ej2p6g7l72k0hszt0g5m0k0wyymsxpqqqp7txuf3y56",
+      "method": "POST",
+      "path": "/v1/resources/lookup",
+      "body": {
+        "uris": [
+          "https://luma.com/376whqyw",
+          "https://www.meetup.com/bitcoin-meetup-switzerland/events/316899925/",
+          "nostr:naddr1qqjrvvp3vycxye33956nycec956x2ery94snqvfk95ergefnx9snqdeh8yekyq3qxfx8p5gzdyv0kgakc365pag8ej2p6g7l72k0hszt0g5m0k0wyymsxpqqqp7txuf3y56"
+        ]
+      },
+      "expect": "items"
+    },
+    {
+      "name": "lookup-places",
+      "summary": "https://www.openstreetmap.org/node/240109189, geo:47.3769,8.5417",
+      "method": "POST",
+      "path": "/v1/resources/lookup",
+      "body": {
+        "uris": [
+          "https://www.openstreetmap.org/node/240109189",
+          "geo:47.3769,8.5417"
+        ]
+      },
+      "expect": "items"
+    },
+    {
+      "name": "lookup-pubky",
+      "summary": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G, pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json, pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2",
+      "method": "POST",
+      "path": "/v1/resources/lookup",
+      "body": {
+        "uris": [
+          "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G",
+          "pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json",
+          "pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2"
+        ]
+      },
+      "expect": "items"
+    },
+    {
+      "name": "lookup-media",
+      "summary": "https://www.youtube.com/watch?v=dQw4w9WgXcQ, https://vimeo.com/76979871, https://www.youtube.com/watch?v=Up2i2Z4m-Kg",
+      "method": "POST",
+      "path": "/v1/resources/lookup",
+      "body": {
+        "uris": [
+          "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+          "https://vimeo.com/76979871",
+          "https://www.youtube.com/watch?v=Up2i2Z4m-Kg"
+        ]
+      },
+      "expect": "items"
+    },
+    {
+      "name": "lookup-books-and-articles",
+      "summary": "isbn:9780140328721, doi:10.1038/nature12373, https://doi.org/10.1038/nature12373",
+      "method": "POST",
+      "path": "/v1/resources/lookup",
+      "body": {
+        "uris": [
+          "isbn:9780140328721",
+          "doi:10.1038/nature12373",
+          "https://doi.org/10.1038/nature12373"
+        ]
+      },
+      "expect": "items"
+    },
+    {
+      "name": "lookup-ids",
+      "summary": "https://www.openstreetmap.org/node/240109189, isbn:9780140328721",
+      "method": "POST",
+      "path": "/v1/resources/lookup",
+      "body": {
+        "ids": [
+          "id(https://www.openstreetmap.org/node/240109189)",
+          "id(isbn:9780140328721)"
+        ]
+      },
+      "expect": "items"
+    },
+    {
+      "name": "type-place",
+      "summary": "type=Place",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "type": "Place"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "type-event",
+      "summary": "type=Event",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "type": "Event"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "type-musicevent",
+      "summary": "type=MusicEvent",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "type": "MusicEvent"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "type-book",
+      "summary": "type=Book",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "type": "Book"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "type-scholarlyarticle",
+      "summary": "type=ScholarlyArticle",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "type": "ScholarlyArticle"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "type-article",
+      "summary": "type=Article",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "type": "Article"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "type-videoobject",
+      "summary": "type=VideoObject",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "type": "VideoObject"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "type-podcastseries",
+      "summary": "type=PodcastSeries",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "type": "PodcastSeries"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "type-webpage",
+      "summary": "type=WebPage",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "type": "WebPage"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "type-socialmediaposting",
+      "summary": "type=SocialMediaPosting",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "type": "SocialMediaPosting"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "type-datafeed",
+      "summary": "type=DataFeed",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "type": "DataFeed"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "type-creativework",
+      "summary": "type=CreativeWork",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "type": "CreativeWork"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "q-lugano",
+      "summary": "q=lugano",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "q": "lugano"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "q-bitcoin",
+      "summary": "q=bitcoin",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "q": "bitcoin"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "q-berlin",
+      "summary": "q=berlin",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "q": "berlin"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "tags-bitcoin",
+      "summary": "tags=bitcoin",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "tags": "bitcoin"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "tags-pubky",
+      "summary": "tags=pubky",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "tags": "pubky"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "tags-lugano",
+      "summary": "tags=lugano",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "tags": "lugano"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "tags-meetup",
+      "summary": "tags=meetup",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "tags": "meetup"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "facet-tags",
+      "summary": "facet=tags",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "facet": "tags"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "facet-type",
+      "summary": "facet=type",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "facet": "type"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "facet-type-tags",
+      "summary": "facet=type,tags",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "facet": "type,tags"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "near-lugano",
+      "summary": "near=46.0037,8.9511&radius=5000",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "near": "46.0037,8.9511",
+        "radius": "5000"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "near-zurich",
+      "summary": "near=47.3769,8.5417&radius=10000",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "near": "47.3769,8.5417",
+        "radius": "10000"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "near-berlin",
+      "summary": "near=52.5170,13.3889&radius=20000",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "near": "52.5170,13.3889",
+        "radius": "20000"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "window-next-day",
+      "summary": "from=now&to=now+1d",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "from": "now",
+        "to": "now+1d"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "window-rest-of-week",
+      "summary": "from=now+1d&to=now+7d",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "from": "now+1d",
+        "to": "now+7d"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "window-rest-of-month",
+      "summary": "from=now+7d&to=now+30d",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "from": "now+7d",
+        "to": "now+30d"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "sort-start",
+      "summary": "sort=start",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "sort": "start"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "sort-recent",
+      "summary": "sort=recent",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "sort": "recent"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "sort-activity",
+      "summary": "sort=activity",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "sort": "activity"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "collapse-book",
+      "summary": "type=Book&collapse=group",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "type": "Book",
+        "collapse": "group"
+      },
+      "expect": "items",
+      "labels": {
+        "type": "Book, collapse=group",
+        "collapse": "group, type=Book"
+      }
+    },
+    {
+      "name": "collapse-scholarlyarticle",
+      "summary": "type=ScholarlyArticle&collapse=group",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "type": "ScholarlyArticle",
+        "collapse": "group"
+      },
+      "expect": "items",
+      "labels": {
+        "type": "ScholarlyArticle, collapse=group",
+        "collapse": "group, type=ScholarlyArticle"
+      }
+    },
+    {
+      "name": "map-lugano",
+      "summary": "bbox=8.90,45.98,9.00,46.03&cluster=12",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "bbox": "8.90,45.98,9.00,46.03",
+        "cluster": "12"
+      },
+      "expect": "map"
+    },
+    {
+      "name": "map-zurich",
+      "summary": "bbox=8.45,47.33,8.62,47.42&cluster=10",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "bbox": "8.45,47.33,8.62,47.42",
+        "cluster": "10"
+      },
+      "expect": "map"
+    },
+    {
+      "name": "map-berlin",
+      "summary": "bbox=13.25,52.45,13.55,52.58&cluster=14",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "bbox": "13.25,52.45,13.55,52.58",
+        "cluster": "14"
+      },
+      "expect": "map"
+    },
+    {
+      "name": "reach-following",
+      "summary": "reach=following&viewer=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "reach": "following",
+        "viewer": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+      },
+      "expect": "items",
+      "labels": {
+        "viewer": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy, reach=following"
+      }
+    },
+    {
+      "name": "reach-friends",
+      "summary": "reach=friends&viewer=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "reach": "friends",
+        "viewer": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+      },
+      "expect": "items",
+      "labels": {
+        "viewer": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy, reach=friends"
+      }
+    },
+    {
+      "name": "read-www-openstreetmap-org-node-240109189",
+      "summary": "https://www.openstreetmap.org/node/240109189",
+      "method": "GET",
+      "path": "/v1/resources/{id}",
+      "params": {
+        "id": "id(https://www.openstreetmap.org/node/240109189)"
+      },
+      "labels": {
+        "id": "https://www.openstreetmap.org/node/240109189"
+      },
+      "expect": "card"
+    },
+    {
+      "name": "read-luma-com-376whqyw",
+      "summary": "https://luma.com/376whqyw",
+      "method": "GET",
+      "path": "/v1/resources/{id}",
+      "params": {
+        "id": "id(https://luma.com/376whqyw)"
+      },
+      "labels": {
+        "id": "https://luma.com/376whqyw"
+      },
+      "expect": "card"
+    },
+    {
+      "name": "read-calendar-google-com-calendar-ical-en-ch-23holiday-40group-v",
+      "summary": "https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics",
+      "method": "GET",
+      "path": "/v1/resources/{id}",
+      "params": {
+        "id": "id(https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics)"
+      },
+      "labels": {
+        "id": "https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics"
+      },
+      "expect": "card"
+    },
+    {
+      "name": "read-9780140328721",
+      "summary": "isbn:9780140328721",
+      "method": "GET",
+      "path": "/v1/resources/{id}",
+      "params": {
+        "id": "id(isbn:9780140328721)"
+      },
+      "labels": {
+        "id": "isbn:9780140328721"
+      },
+      "expect": "card"
+    },
+    {
+      "name": "read-www-youtube-com-watch-v-dqw4w9wgxcq",
+      "summary": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      "method": "GET",
+      "path": "/v1/resources/{id}",
+      "params": {
+        "id": "id(https://www.youtube.com/watch?v=dQw4w9WgXcQ)"
+      },
+      "labels": {
+        "id": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+      },
+      "expect": "card"
+    },
+    {
+      "name": "read-c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey-pub-map",
+      "summary": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G",
+      "method": "GET",
+      "path": "/v1/resources/{id}",
+      "params": {
+        "id": "id(pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G)"
+      },
+      "labels": {
+        "id": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G"
+      },
+      "expect": "card"
+    },
+    {
+      "name": "by-uri-www-openstreetmap-org-node-240109189",
+      "summary": "https://www.openstreetmap.org/node/240109189",
+      "method": "GET",
+      "path": "/v1/resources/by-uri",
+      "query": {
+        "uri": "https://www.openstreetmap.org/node/240109189"
+      },
+      "expect": "card"
+    },
+    {
+      "name": "by-uri-doi-org-10-1038-nature12373",
+      "summary": "https://doi.org/10.1038/nature12373",
+      "method": "GET",
+      "path": "/v1/resources/by-uri",
+      "query": {
+        "uri": "https://doi.org/10.1038/nature12373"
+      },
+      "expect": "card"
+    },
+    {
+      "name": "by-uri-luma-com-376whqyw",
+      "summary": "https://luma.com/376whqyw",
+      "method": "GET",
+      "path": "/v1/resources/by-uri",
+      "query": {
+        "uri": "https://luma.com/376whqyw"
+      },
+      "expect": "card"
+    },
+    {
+      "name": "by-uri-9780140328721",
+      "summary": "isbn:9780140328721",
+      "method": "GET",
+      "path": "/v1/resources/by-uri",
+      "query": {
+        "uri": "isbn:9780140328721"
+      },
+      "expect": "card"
+    },
+    {
+      "name": "by-uri-c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey-pub-map",
+      "summary": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G",
+      "method": "GET",
+      "path": "/v1/resources/by-uri",
+      "query": {
+        "uri": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G"
+      },
+      "expect": "card"
+    },
+    {
+      "name": "by-uri-47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao-pub-pub",
+      "summary": "pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2",
+      "method": "GET",
+      "path": "/v1/resources/by-uri",
+      "query": {
+        "uri": "pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2"
+      },
+      "expect": "card"
+    },
+    {
+      "name": "group-10-1038-nature12373",
+      "summary": "doi:10.1038/nature12373, https://www.nature.com/articles/nature12373",
+      "method": "GET",
+      "path": "/v1/groups/{id}",
+      "params": {
+        "id": "group(doi:10.1038/nature12373,https://www.nature.com/articles/nature12373)"
+      },
+      "labels": {
+        "id": "doi:10.1038/nature12373, https://www.nature.com/articles/nature12373"
+      },
+      "expect": "group"
+    },
+    {
+      "name": "group-9780140328721",
+      "summary": "isbn:9780140328721, https://openlibrary.org/books/OL7353617M",
+      "method": "GET",
+      "path": "/v1/groups/{id}",
+      "params": {
+        "id": "group(isbn:9780140328721,https://openlibrary.org/books/OL7353617M)"
+      },
+      "labels": {
+        "id": "isbn:9780140328721, https://openlibrary.org/books/OL7353617M"
+      },
+      "expect": "group"
+    },
+    {
+      "name": "dates-calendar-google-com-calendar-ical-en-ch-23holiday-40group-v",
+      "summary": "https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics",
+      "method": "GET",
+      "path": "/v1/resources/{id}/occurrences",
+      "params": {
+        "id": "id(https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics)"
+      },
+      "query": {
+        "limit": "20"
+      },
+      "labels": {
+        "id": "https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "dates-calendar-google-com-calendar-ical-en-german-23holiday-40grou",
+      "summary": "https://calendar.google.com/calendar/ical/en.german%23holiday%40group.v.calendar.google.com/public/basic.ics",
+      "method": "GET",
+      "path": "/v1/resources/{id}/occurrences",
+      "params": {
+        "id": "id(https://calendar.google.com/calendar/ical/en.german%23holiday%40group.v.calendar.google.com/public/basic.ics)"
+      },
+      "query": {
+        "limit": "10"
+      },
+      "labels": {
+        "id": "https://calendar.google.com/calendar/ical/en.german%23holiday%40group.v.calendar.google.com/public/basic.ics"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "dates-of-calendar",
+      "summary": "https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics",
+      "method": "POST",
+      "path": "/v1/occurrences/lookup",
+      "body": {
+        "uris": [
+          "https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics"
+        ],
+        "limit": 20
+      },
+      "expect": "items"
+    },
+    {
+      "name": "dates-of-calendar-and-event",
+      "summary": "https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics, https://luma.com/376whqyw",
+      "method": "POST",
+      "path": "/v1/occurrences/lookup",
+      "body": {
+        "uris": [
+          "https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics",
+          "https://luma.com/376whqyw"
+        ],
+        "limit": 10
+      },
+      "expect": "items"
+    },
+    {
+      "name": "dates-of-calendar-by-id",
+      "summary": "2dea92aa8c3cf8ae1cffad92cf3ca718",
+      "method": "POST",
+      "path": "/v1/occurrences/lookup",
+      "body": {
+        "resource_ids": [
+          "id(https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics)"
+        ],
+        "limit": 5
+      },
+      "expect": "items"
+    },
+    {
+      "name": "changes-of-events",
+      "summary": "https://luma.com/376whqyw, https://www.meetup.com/bitcoin-meetup-switzerland/events/316899925/, nostr:naddr1qqjrvvp3vycxye33956nycec956x2ery94snqvfk95ergefnx9snqdeh8yekyq3qxfx8p5gzdyv0kgakc365pag8ej2p6g7l72k0hszt0g5m0k0wyymsxpqqqp7txuf3y56",
+      "method": "POST",
+      "path": "/v1/changes/lookup",
+      "body": {
+        "uris": [
+          "https://luma.com/376whqyw",
+          "https://www.meetup.com/bitcoin-meetup-switzerland/events/316899925/",
+          "nostr:naddr1qqjrvvp3vycxye33956nycec956x2ery94snqvfk95ergefnx9snqdeh8yekyq3qxfx8p5gzdyv0kgakc365pag8ej2p6g7l72k0hszt0g5m0k0wyymsxpqqqp7txuf3y56"
+        ]
+      },
+      "expect": "lines"
+    },
+    {
+      "name": "changes-of-places",
+      "summary": "https://www.openstreetmap.org/node/240109189, geo:47.3769,8.5417 since now-30d",
+      "method": "POST",
+      "path": "/v1/changes/lookup",
+      "body": {
+        "uris": [
+          "https://www.openstreetmap.org/node/240109189",
+          "geo:47.3769,8.5417"
+        ],
+        "since": "now-30d"
+      },
+      "expect": "lines"
+    },
+    {
+      "name": "changes-of-pubky",
+      "summary": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G, pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json, pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2 since now-30d",
+      "method": "POST",
+      "path": "/v1/changes/lookup",
+      "body": {
+        "uris": [
+          "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G",
+          "pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json",
+          "pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2"
+        ],
+        "since": "now-30d"
+      },
+      "expect": "lines"
+    },
+    {
+      "name": "changes-of-media",
+      "summary": "https://www.youtube.com/watch?v=dQw4w9WgXcQ, https://vimeo.com/76979871, https://www.youtube.com/watch?v=Up2i2Z4m-Kg since now-30d",
+      "method": "POST",
+      "path": "/v1/changes/lookup",
+      "body": {
+        "uris": [
+          "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+          "https://vimeo.com/76979871",
+          "https://www.youtube.com/watch?v=Up2i2Z4m-Kg"
+        ],
+        "since": "now-30d"
+      },
+      "expect": "lines"
+    },
+    {
+      "name": "changes-of-books-and-articles",
+      "summary": "isbn:9780140328721, doi:10.1038/nature12373, https://doi.org/10.1038/nature12373 since now-30d",
+      "method": "POST",
+      "path": "/v1/changes/lookup",
+      "body": {
+        "uris": [
+          "isbn:9780140328721",
+          "doi:10.1038/nature12373",
+          "https://doi.org/10.1038/nature12373"
+        ],
+        "since": "now-30d"
+      },
+      "expect": "lines"
+    },
+    {
+      "name": "changes-of-ids",
+      "summary": "https://www.openstreetmap.org/node/240109189, isbn:9780140328721 since now-7d",
+      "method": "POST",
+      "path": "/v1/changes/lookup",
+      "body": {
+        "resource_ids": [
+          "id(https://www.openstreetmap.org/node/240109189)",
+          "id(isbn:9780140328721)"
+        ],
+        "since": "now-7d"
+      },
+      "expect": "lines"
+    }
+  ]
+}

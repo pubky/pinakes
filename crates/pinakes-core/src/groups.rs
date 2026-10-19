@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Transaction};
 use std::collections::{BTreeMap, BTreeSet};
-#[derive(Clone, Debug, Deserialize, Serialize)]
+use utoipa::ToSchema;
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct GroupConfig {
     pub enabled: bool,
@@ -39,7 +40,7 @@ impl Default for GroupConfig {
         }
     }
 }
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CrossContainerOccurrences {
     Off,
@@ -59,13 +60,13 @@ impl GroupConfig {
         })
     }
 }
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Member {
     pub resource_id: String,
     pub occurrence: Option<crate::event::storage::OccurrenceRef>,
 }
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Curation {
     pub members: Vec<Member>,

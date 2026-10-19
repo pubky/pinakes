@@ -3,8 +3,9 @@ use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{Postgres, QueryBuilder, Row};
+use utoipa::ToSchema;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 /// One change: which resource (and occurrence) changed, when, how and in which fields. Clients
 /// read the current facts from the resource itself.
 pub struct ChangeLine {
@@ -20,14 +21,40 @@ pub struct ChangeLine {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<String>,
 }
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ChangePage {
     pub lines: Vec<ChangeLine>,
     pub next_cursor: i64,
     pub has_more: bool,
     pub oldest_cursor: i64,
 }
-#[derive(Deserialize)]
+/// `since`: a string (RFC 3339, Unix milliseconds as text, or `now-30d`) or an integer (Unix ms).
+fn since_schema() -> utoipa::openapi::schema::Schema {
+    use utoipa::openapi::schema::{
+        KnownFormat, ObjectBuilder, OneOfBuilder, Schema, SchemaFormat, Type,
+    };
+    Schema::OneOf(
+        OneOfBuilder::new()
+            .description(Some(
+                "Inclusive lower bound on the change time, as a string or as Unix milliseconds",
+            ))
+            .item(
+                ObjectBuilder::new()
+                    .schema_type(Type::String)
+                    .description(Some(
+                        "RFC 3339, Unix milliseconds as text, or relative to the request: now, now-Nd, now-Nh, now+Nd or now+Nh (the current minute); a later page keeps the first page's window",
+                    )),
+            )
+            .item(
+                ObjectBuilder::new()
+                    .schema_type(Type::Integer)
+                    .format(Some(SchemaFormat::KnownFormat(KnownFormat::Int64)))
+                    .description(Some("Unix milliseconds")),
+            )
+            .build(),
+    )
+}
+#[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ChangeLookup {
     /// Resource IDs; with `uris`, 1–500 together.
@@ -36,8 +63,10 @@ pub struct ChangeLookup {
     pub uris: Option<Vec<String>>,
     /// RFC3339, Unix milliseconds (number or text), or relative to the request (`now-30d`).
     /// Without it, every retained change of these resources, in pages.
+    #[schema(schema_with = since_schema, required = false)]
     pub since: Option<Value>,
     pub cursor: Option<i64>,
+    #[schema(minimum = 1, maximum = 500)]
     pub limit: Option<usize>,
 }
 /// The changes to `ids` since `since`, after `cursor`.
@@ -99,6 +128,7 @@ pub fn capped_since(
             .unwrap_or(cursor_at),
     )
 }
+#[utoipa::path(post,tag="Changes",path="/v1/changes/lookup",operation_id="lookup_changes",request_body=ChangeLookup,responses((status=200,body=ChangePage),(status=400,description="Invalid IDs or since"),(status=410,description="Cursor expired")))]
 pub async fn lookup(
     State(state): State<AppState>,
     Json(body): Json<ChangeLookup>,

@@ -10,6 +10,7 @@ use pinakes_core::{
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use tower::ServiceExt;
+mod common;
 
 /// A page at `https://example.org/{name}` that cites `doi:10.5555/{c}` in its head for each
 /// name in `cites`.
@@ -69,11 +70,33 @@ async fn get(app: &axum::Router, path: &str) -> Value {
     let status = response.status();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(status, 200, "{}", String::from_utf8_lossy(&bytes));
-    serde_json::from_slice(&bytes).unwrap()
+    let value = serde_json::from_slice(&bytes).unwrap();
+    common::check_response("GET", path, status.as_u16(), &value);
+    value
+}
+async fn status(app: &axum::Router, path: &str) -> u16 {
+    let mut request = Request::builder().uri(path).body(Body::empty()).unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    app.clone()
+        .oneshot(request)
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
 }
 /// The `{id, uri, site}` a card's group hint names `id` by.
 fn named(id: &str, name: &str) -> Value {
     json!({"id": id, "uri": format!("https://example.org/{name}"), "site": "example.org"})
+}
+fn ids(page: &Value) -> Vec<String> {
+    page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_owned())
+        .collect()
 }
 async fn tag(pool: &PgPool, id: &str, author: &str, label: &str) {
     sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag',$3,$4,now())").bind(id).bind(author).bind(label).bind(format!("/pub/app/tags/{id}-{label}")).execute(pool).await.unwrap();
@@ -257,10 +280,10 @@ async fn evidence_loss_splits_and_curation_preserves_identity(pool: PgPool) {
     );
 }
 
-/// A group is a hint: every member keeps its own card and references, and each card names the
-/// others.
+/// A group is a hint: every member keeps its own card, references, ranking and counts; each card
+/// names the others; `collapse=group` shows the member with the most references, as itself.
 #[sqlx::test(migrations = "../../migrations")]
-async fn members_keep_their_own_cards_and_counts(pool: PgPool) {
+async fn members_keep_their_own_cards_and_counts_and_collapse_is_a_view(pool: PgPool) {
     let a = card(&pool, "joined", &["other"], None).await;
     let (b, _) = save(&pool, "other", &["joined"], Some(47.0001)).await;
     let (c, _) = save(&pool, "separate", &[], Some(47.0002)).await;
@@ -312,12 +335,68 @@ async fn members_keep_their_own_cards_and_counts(pool: PgPool) {
     let mut expected = [(a.as_str(), "joined card"), (b.as_str(), "other")];
     expected.sort();
     assert_eq!(names, expected.iter().map(|e| e.1).collect::<Vec<_>>());
-    // Removing a member leaves the other its own card; after the next run it has no group.
+
+    // Uncollapsed, both members are rows of their own, each naming the other.
+    let plain = get(&app, "/v1/search?tags=music&facet=tags,type").await;
+    let mut rows = ids(&plain);
+    rows.sort();
+    let mut both = vec![a.clone(), b.clone()];
+    both.sort();
+    assert_eq!(rows, both, "{plain}");
+    let separate = get(&app, "/v1/search?tags=other").await;
+    assert!(separate["items"][0]["group"].is_null(), "{separate}");
+    // Collapsed: one row, the member with the most references (b: two), as its own card; the
+    // facets still count both members.
+    let collapsed = get(&app, "/v1/search?collapse=group&tags=music&facet=tags,type").await;
+    assert_eq!(ids(&collapsed), vec![b.clone()], "{collapsed}");
+    assert_eq!(collapsed["items"][0]["name"], "other");
+    assert_eq!(collapsed["facets"], plain["facets"]);
+    let music = collapsed["facets"]["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["label"] == "music")
+        .unwrap()
+        .clone();
+    assert_eq!(music["count"], 2, "{collapsed}");
+    // Equal references: the lower ID.
+    tag(&pool, &a, &second, "rare").await;
+    let collapsed = get(&app, "/v1/search?collapse=group&tags=music").await;
+    assert_eq!(
+        ids(&collapsed),
+        vec![a.clone().min(b.clone())],
+        "{collapsed}"
+    );
+    for sort in ["activity", "recent", "distance"] {
+        let result = get(
+            &app,
+            &format!("/v1/search?collapse=group&near=47,8&radius=1000&sort={sort}"),
+        )
+        .await;
+        assert_eq!(ids(&result).len(), 2, "{result}");
+    }
+    // Clusters count every located link; collapse is a list view only.
+    let cluster = get(
+        &app,
+        "/v1/search?bbox=7.99,46.99,8.01,47.01&cluster=5&limit=1",
+    )
+    .await;
+    assert_eq!(cluster["clusters"][0]["count"], 2, "{cluster}");
+    assert_eq!(
+        status(
+            &app,
+            "/v1/search?collapse=group&bbox=7.99,46.99,8.01,47.01&cluster=5"
+        )
+        .await,
+        400
+    );
+    // Removing a member leaves the other its own row; after the next run it has no group.
     sqlx::query("DELETE FROM resource WHERE id=$1")
         .bind(&a)
         .execute(&pool)
         .await
         .unwrap();
+    assert_eq!(ids(&get(&app, "/v1/search?collapse=group").await).len(), 2);
     groups::drain(&pool, &Default::default(), 100)
         .await
         .unwrap();
@@ -515,11 +594,14 @@ async fn curation_sets_members_only_and_invalid_curation_is_refused(pool: PgPool
     assert_eq!(response.status(), 200);
     let curated: Value =
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    common::check_response("GET", &format!("/v1/groups/{id}"), 200, &curated);
     assert_eq!(curated["curated"], true);
     assert_eq!(curated["members"][0]["id"], a.as_str());
     let app = api::router(state);
     tag(&pool, &a, &"t".repeat(52), "curated").await;
     assert_eq!(get(&app, &format!("/v1/groups/{id}")).await, curated);
+    let collapsed = get(&app, "/v1/search?collapse=group&tags=curated").await;
+    assert_eq!(collapsed["items"][0]["name"], "member", "{collapsed}");
     for invalid in [
         json!({"members":[]}),
         json!({"members":[{"resource_id":"x"}]}),
@@ -728,6 +810,105 @@ async fn a_hint_lists_other_resources_before_a_feeds_many_occurrences(pool: PgPo
         .await
         .unwrap();
     assert_eq!(hint(unit).await, ids[1..9].to_vec());
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn populated_collapse_and_hints_build_only_page_cards(pool: PgPool) {
+    let count = 6000_i32;
+    sqlx::query("INSERT INTO resource(id,uri,host,resolver,type,type_path,name,status,doc) SELECT md5('bench-'||i),'https://bench.example/'||i,'bench.example','web','WebPage',ARRAY['Thing','CreativeWork','WebPage'],'Bench '||i,'ok',jsonb_build_object('type','WebPage','type_path',jsonb_build_array('Thing','CreativeWork','WebPage'),'name','Bench '||i,'source','web','url','https://bench.example/'||i,'status','ok','site','bench.example','fetched_at',0,'ttl_secs',3600,'attributes','{}'::jsonb) FROM generate_series(1,$1) i").bind(count).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO \"group\"(id) SELECT md5('bench-group-'||i) FROM generate_series(0,$1/2-1) i",
+    )
+    .bind(count)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO group_unit(unit_id,resource_id,group_id) SELECT md5('bench-'||i),md5('bench-'||i),md5('bench-group-'||((i-1)/2)) FROM generate_series(1,$1) i").bind(count).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) SELECT md5('bench-'||i),repeat('a',52),'tag','/pub/test/tags/'||i,'bench',now() FROM generate_series(1,$1) i").bind(count).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO resource_score(resource_id,score,updated_at,newest_at) SELECT id,1,now(),now() FROM resource").execute(&pool).await.unwrap();
+    sqlx::query("UPDATE resource SET point=ST_SetSRID(ST_MakePoint(8.0,47.0+((substring(uri from '[0-9]+$'))::integer)/100000.0),4326),doc=doc||jsonb_build_object('location',jsonb_build_object('lat',47.0+((substring(uri from '[0-9]+$'))::integer)/100000.0,'lon',8.0))").execute(&pool).await.unwrap();
+    sqlx::query("ANALYZE").execute(&pool).await.unwrap();
+    // One page of hints, read through the function every card uses.
+    let plan:Value=sqlx::query_scalar("EXPLAIN(ANALYZE,BUFFERS,VERBOSE,FORMAT JSON) SELECT jsonb_agg(group_hint(unit_id)) FROM (SELECT unit_id FROM group_unit ORDER BY unit_id LIMIT 20) page").fetch_one(&pool).await.unwrap();
+    let ms = plan[0]["Execution Time"].as_f64().unwrap();
+    if ms > 100.0 {
+        eprintln!("SOFT group-hint hydration target exceeded: {ms} ms");
+    }
+    assert!(ms < 5000.0);
+    if let Ok(path) = std::env::var("PINAKES_GROUP_HYDRATION_PLAN_FILE") {
+        std::fs::write(path, serde_json::to_vec_pretty(&plan).unwrap()).unwrap();
+    }
+    let mut evidence = Vec::new();
+    for request in [
+        "/v1/search?collapse=group&bbox=7.9,47.0,8.1,47.006&limit=20",
+        "/v1/search?collapse=group&facet=tags&limit=20",
+        // Every row names its group; the hints are read for the page only.
+        "/v1/search?bbox=7.9,47.0,8.1,47.006&limit=20",
+    ] {
+        // One connection retains the exact production statement prepared by the API.
+        let connection = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with((*pool.connect_options()).clone())
+            .await
+            .unwrap();
+        let app = api::router(AppState::new(connection.clone(), Config::default()).unwrap());
+        let started = std::time::Instant::now();
+        let response = get(&app, request).await;
+        let api_ms = started.elapsed().as_secs_f64() * 1000.0;
+        if api_ms > 100.0 {
+            eprintln!(
+                "SOFT performance target exceeded: {request}: {api_ms:.3} ms (target 100 ms)"
+            );
+        }
+        // About 14 times the measured time on a loaded machine: a per-row scan fails here.
+        assert!(api_ms < 1000.0, "{request}: {api_ms} ms");
+        assert_eq!(response["items"].as_array().unwrap().len(), 20);
+        if request.contains("facet") {
+            // Facets count links, collapsed or not.
+            assert_eq!(response["facets"]["tags"][0]["count"], count);
+        }
+        assert!(response["items"].as_array().unwrap().iter().all(
+            |r| r["group"]["size"] == 2 && r["group"]["members"].as_array().unwrap().len() == 1
+        ));
+        let (name,statement,types):(String,String,Vec<String>)=sqlx::query_as("SELECT name,statement,ARRAY(SELECT t::text FROM unnest(parameter_types) t) FROM pg_prepared_statements WHERE statement LIKE 'WITH eligible%' OR statement LIKE 'WITH filtered%'").fetch_one(&connection).await.unwrap();
+        assert!(name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'));
+        let mut coords = [7.9, 47.0, 8.1, 47.006].into_iter();
+        let params: Vec<String> = types
+            .iter()
+            .map(|ty| match ty.as_str() {
+                "timestamp with time zone" => {
+                    format!("'{}'::timestamptz", chrono::Utc::now().to_rfc3339())
+                }
+                "double precision" => coords.next().unwrap().to_string(),
+                "bigint" | "integer" => "21".into(),
+                _ => panic!("unexpected search parameter type {ty}"),
+            })
+            .collect();
+        let explain = format!(
+            "EXPLAIN(ANALYZE,BUFFERS,VERBOSE,FORMAT JSON) EXECUTE {name}({})",
+            params.join(",")
+        );
+        let plan: Value = sqlx::query_scalar(&explain)
+            .fetch_one(&connection)
+            .await
+            .unwrap();
+        assert!(
+            plan[0]["Execution Time"].as_f64().unwrap() < 1000.0,
+            "{request}: {plan}"
+        );
+        evidence.push(json!({"request":request,"api_ms":api_ms,"statement":statement,"parameters":params,"explain":plan}));
+        connection.close().await;
+    }
+    if let Ok(path) = std::env::var("PINAKES_GROUP_PLAN_FILE") {
+        std::fs::write(
+            path,
+            serde_json::to_vec_pretty(
+                &json!({"resources":count,"groups":count/2,"queries":evidence}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    }
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -1183,6 +1364,15 @@ async fn a_book_and_its_open_library_edition_page_stay_two_cards(pool: PgPool) {
         .collect();
     assert!(names.contains(&("Book", card.name.as_deref().unwrap())));
     assert!(names.contains(&("WebPage", "Fantastic Mr. Fox by Roald Dahl | Open Library")));
+    // Collapsed, equal references: the member with the lower ID, as its own card.
+    let rows = get(&app, "/v1/search?collapse=group&tags=books").await["items"].clone();
+    assert_eq!(rows.as_array().unwrap().len(), 1, "{rows}");
+    let first = isbn.clone().min(edition.clone());
+    assert_eq!(rows[0]["id"], first.as_str());
+    assert_eq!(
+        rows[0]["type"],
+        if first == isbn { "Book" } else { "WebPage" }
+    );
 }
 /// Two ISBN cards whose (editable) records name one Open Library edition page never join each
 /// other: the edition key joins a card only to the page itself, once that page is indexed.
@@ -1568,6 +1758,33 @@ async fn a_unit_regroups_any_number_of_times(pool: PgPool) {
         assert_eq!(gid(&pool, &held).await, group, "cycle {k}");
         assert_eq!(gid(&pool, &moved).await, moved, "cycle {k}");
     }
+}
+
+/// Facets count links: collapsing changes the rows, not the counts.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_type_facet_counts_every_member_collapsed_or_not(pool: PgPool) {
+    let (card, page) = pair(&pool, "facet", None).await;
+    for id in [&card, &page] {
+        tag(&pool, id, &"f".repeat(52), "facet").await;
+    }
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let separate = get(&app, "/v1/search?tags=facet&facet=type").await;
+    let total = |v: &Value| {
+        v["facets"]["type"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["count"].as_i64().unwrap())
+            .sum::<i64>()
+    };
+    assert_eq!(total(&separate), 2, "{separate}");
+    let collapsed = get(&app, "/v1/search?tags=facet&facet=type&collapse=group").await;
+    assert_eq!(
+        collapsed["items"].as_array().unwrap().len(),
+        1,
+        "{collapsed}"
+    );
+    assert_eq!(collapsed["facets"], separate["facets"]);
 }
 
 /// Orphan expiry removes a member's group rows with it: the group's size follows at once, the

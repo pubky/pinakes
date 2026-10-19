@@ -5,6 +5,7 @@ use pinakes_core::{
     model::ResourceMeta,
 };
 use serde_json::{json, Value};
+mod common;
 fn now() -> DateTime<Utc> {
     "2026-10-16T00:00:00Z".parse().unwrap()
 }
@@ -386,6 +387,9 @@ async fn send(app: &Router, method: &str, path: &str, body: Option<Value>) -> (u
     let status = r.status().as_u16();
     let bytes = r.into_body().collect().await.unwrap().to_bytes();
     let parsed: Option<Value> = serde_json::from_slice(&bytes).ok();
+    if let Some(value) = &parsed {
+        common::check_response(method, path, status, value);
+    }
     (
         status,
         parsed.unwrap_or(json!(String::from_utf8_lossy(&bytes))),
@@ -560,7 +564,7 @@ async fn single_key_loss_requires_two_and_regenerated_uid_links_supersedes(pool:
     assert_eq!(change["supersedes"], "[\"id0\",\"\"]");
 }
 #[sqlx::test(migrations = "../../migrations")]
-async fn occurrence_route_and_event_reference_lifecycle(pool: PgPool) {
+async fn event_units_pagination_occurrence_route_pubky_recurrences_and_venue(pool: PgPool) {
     let feed = "https://example.org/events.ics";
     reference(
         &pool,
@@ -632,9 +636,60 @@ async fn occurrence_route_and_event_reference_lifecycle(pool: PgPool) {
         .await
         .unwrap();
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (code, v) = call(
+        &app,
+        "/v1/search?type=Event&sort=start&bbox=7,46,9,48&limit=2",
+    )
+    .await;
+    assert_eq!(code, 200, "{v}");
+    assert_eq!(v["items"].as_array().unwrap().len(), 2);
+    let mut seen = vec![];
+    let mut v = v;
+    loop {
+        seen.extend(v["items"].as_array().unwrap().iter().cloned());
+        let Some(cursor) = v["cursor"].as_str() else {
+            break;
+        };
+        let result = call(
+            &app,
+            &format!("/v1/search?type=Event&sort=start&bbox=7,46,9,48&limit=2&cursor={cursor}"),
+        )
+        .await;
+        assert_eq!(result.0, 200, "{}", result.1);
+        v = result.1;
+    }
+    assert_eq!(seen.len(), 6);
+    assert_eq!(seen.iter().filter(|v| v.get("event").is_some()).count(), 2);
+    assert_eq!(
+        seen.iter()
+            .filter(|v| v.get("occurrence").is_some())
+            .count(),
+        3
+    );
+    assert!(seen.iter().all(|v| v.get("start").is_some()));
+    let (code, v) = call(&app, &format!("/v1/search?type=Event&venue={venue_id}")).await;
+    assert_eq!(code, 200, "{v}");
+    assert_eq!(v["items"].as_array().unwrap().len(), 3);
     let (code, v) = call(&app, &format!("/v1/resources/{id}/occurrences")).await;
     assert_eq!(code, 200, "{v}");
     assert_eq!(v["items"].as_array().unwrap().len(), 3);
+    let (code, v) = call(
+        &app,
+        "/v1/search?type=Event&bbox=7,46,9,48&cluster=8&limit=1",
+    )
+    .await;
+    assert_eq!(code, 200, "{v}");
+    assert_eq!(v["total"], 6);
+    assert_eq!(v["clusters"][0]["count"], 6);
+    let top = v["clusters"][0]["top"].as_array().unwrap();
+    assert_eq!(top.len(), 3);
+    assert_eq!(
+        top.iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3
+    );
 
     reference(
         &pool,
@@ -3743,4 +3798,7 @@ async fn occurrence_cards_report_their_lifecycle_beside_the_feed_status(pool: Pg
     let (code, page) = call(&app, &format!("/v1/resources/{id}/occurrences")).await;
     assert_eq!(code, 200, "{page}");
     assert_eq!(lifecycle(&page["items"]), expected, "{page}");
+    let (code, found) = call(&app, "/v1/search?type=Event&from=now&sort=start").await;
+    assert_eq!(code, 200, "{found}");
+    assert_eq!(lifecycle(&found["items"]), expected, "{found}");
 }

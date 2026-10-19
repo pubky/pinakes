@@ -468,22 +468,23 @@ impl Prepared {
         Ok(())
     }
 }
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct OccurrenceQuery {
     /// Inclusive start time; defaults to this feed's last accepted horizon start.
     pub from: Option<chrono::DateTime<chrono::Utc>>,
     pub to: Option<chrono::DateTime<chrono::Utc>>,
+    #[param(minimum = 1, maximum = 500)]
     pub limit: Option<usize>,
     /// Signed keyset cursor, scoped to this resource and window; invalid after restart.
     pub cursor: Option<String>,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct OccurrenceRef {
     pub uid: String,
     pub recurrence_id: Option<String>,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct ReferenceEvent {
     pub author: String,
     pub object_path: String,
@@ -492,13 +493,13 @@ pub struct ReferenceEvent {
     pub end: Option<chrono::DateTime<chrono::Utc>>,
     pub status: String,
 }
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, utoipa::ToSchema)]
 pub struct OccurrencePage {
     /// One card per occurrence, with `occurrence` naming the feed instance and its lifecycle.
     pub items: Vec<crate::api::Card>,
     pub cursor: Option<String>,
 }
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OccurrenceLookup {
     /// Feed resource IDs; with `uris`, 1–500 together. An alias reads its root, an unknown ID
@@ -508,9 +509,12 @@ pub struct OccurrenceLookup {
     pub uris: Option<Vec<String>>,
     /// Inclusive start time (RFC 3339); defaults to the earliest accepted horizon start of these
     /// feeds.
+    #[schema(format = DateTime)]
     pub from: Option<String>,
+    #[schema(format = DateTime)]
     pub to: Option<String>,
     /// 1–500, default 100.
+    #[schema(minimum = 1, maximum = 500)]
     pub limit: Option<usize>,
     /// Signed keyset cursor, scoped to these feeds and window; invalid after restart.
     pub cursor: Option<String>,
@@ -560,6 +564,7 @@ impl OccurrenceCursor {
         serde_json::from_slice(payload).map_err(|_| invalid())
     }
 }
+#[utoipa::path(get,path="/v1/resources/{id}/occurrences",operation_id="list_occurrences",tag="Events",params(("id"=String,Path),OccurrenceQuery),responses((status=200,body=OccurrencePage),(status=400,description="Invalid window, limit or cursor"),(status=404,description="Resource not found")),description="Calendar instances ordered by start, UID and recurrence ID. Inclusive window, default limit 100, maximum 500. Superseded keys are omitted.")]
 pub async fn list(
     axum::extract::State(state): axum::extract::State<crate::api::AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -576,6 +581,7 @@ pub async fn list(
         )
     })
 }
+#[utoipa::path(post,path="/v1/occurrences/lookup",operation_id="lookup_occurrences",tag="Events",request_body=OccurrenceLookup,responses((status=200,body=OccurrencePage),(status=400,description="1–500 valid IDs, a valid window, limit or cursor")),description="The calendar instances of several feeds in one time-ordered page: by start, then feed, UID and recurrence ID. Each card's `id` is its feed. The window and limits are those of `GET /v1/resources/{id}/occurrences`; unknown IDs add nothing.")]
 pub async fn lookup(
     axum::extract::State(state): axum::extract::State<crate::api::AppState>,
     axum::Json(body): axum::Json<OccurrenceLookup>,

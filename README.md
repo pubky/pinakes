@@ -5,14 +5,15 @@ media that people reference on Pubky.
 
 Nexus records references and never fetches. Pinakes reads Nexus's reference feed, resolves each
 URI into one small typed document through a resolver per kind, keeps the facts a query needs
-beside the public references, and answers card reads, lookups, groups and a change feed. The
-rule for clients is **Pinakes ranks, Nexus hydrates**: clients pass the URIs of the cards
-Pinakes returns (`uri`, and `details.aliases` for other spellings; for an occurrence,
+beside the public references, and answers one search: text, type, map area, time, tags and
+reach. The rule for clients is **Pinakes ranks, Nexus hydrates**: clients pass the URIs of the
+cards Pinakes returns (`uri`, and `details.aliases` for other spellings; for an occurrence,
 `occurrence.feed_uri`, since its own URL was never tagged) to Nexus
 `/v0/stream/resources/by_ids` as `uris` (batches of 100) for social state. Pinakes IDs are its
 own: the two combine by URI, never by ID.
 
 - [docs/design.md](docs/design.md): what Pinakes is and the decisions behind it.
+- [docs/api.md](docs/api.md): the `/v1` API, response shapes and a catalogue of example requests.
 - [docs/operations.md](docs/operations.md): configuration, limits, deployment and maintenance.
 - [ops/README.md](ops/README.md): metrics, alerts and the Grafana dashboard.
 - [data/README.md](data/README.md): pinned data sets and their licences.
@@ -28,14 +29,16 @@ own: the two combine by URI, never by ID.
 - **Cards**: media (oEmbed, podcasts), ISBN (Open Library), DOI (CSL), Nostr and ActivityPub.
 - **Aliases and groups**: spellings of one object (tracking parameters, OSM URL forms, ISBN-10)
   are one resource; a DOI or ISBN and the landing page that cites it, or one ICS UID within a
-  feed, form a group: a hint on each member's card, never a merge.
+  feed, form a group: a hint on each member's card, never a merge (search shows one row per
+  group only with `collapse=group`).
 
 It also keeps a change journal, so clients can ask what changed for the links they cached.
 
 ## Running locally
 
-Requires Rust 1.89 or newer, PostgreSQL **16–18** with PostGIS **3.4+**, `pg_trgm` and h3. Docker
-is not required. On Ubuntu, install
+Requires Rust 1.89 or newer, PostgreSQL **16–18** with PostGIS **3.4+**, `pg_trgm` and h3
+**4.2.3+** (`pinakesd` refuses to start without `h3_latlng_to_cell(point, integer)`). Docker is
+not required. On Ubuntu, install
 `postgresql-16 postgresql-16-postgis-3 postgresql-contrib-16 postgresql-16-h3` (from the
 [PGDG repository](https://www.postgresql.org/download/linux/ubuntu/) if the distribution lacks
 version 16).
@@ -55,13 +58,17 @@ application role.
 
 ```sh
 curl http://127.0.0.1:8090/v1/info
+curl 'http://127.0.0.1:8090/v1/search?tags=rust&facet=tags&limit=10'
 curl -H 'Content-Type: application/json' -d '{"uri":"https://example.org/"}' \
   http://127.0.0.1:8090/v1/resolve
 ```
 
+Swagger UI is at `http://127.0.0.1:8090/swagger-ui`, with examples for every kind of card and
+source, each named by its value.
+
 `pinakes.example.toml` lists the operator choices: addresses, credentials, one `enabled` switch
-per resolver and feature, event platform keys, egress lists and the public API's budget.
-Every cap, timeout and refresh tier has a default in an optional `[limits]` section,
+per resolver and feature, event platform keys, egress lists and the public API's budget and
+CORS. Every cap, timeout and refresh tier has a default in an optional `[limits]` section,
 documented in [docs/operations.md](docs/operations.md).
 
 Pubky objects are fetched through the same egress policy as web pages, from the homeserver's
@@ -100,7 +107,8 @@ reaches stored documents through `pinakesd --config <path> reextract <route…|a
   the change journal and the API.
 - `crates/pinakesd`: the daemon: migrations, the two HTTP listeners, feed polling and workers.
 - `data/`: the pinned schema.org vocabulary, oEmbed registry, event adapter manifests, wall
-  markers, multi-tenant host rules and time zone tables.
+  markers, multi-tenant host rules, time zone tables and the API examples.
+- `e2e/`: the end-to-end harness and the read-only demo lookup.
 - `ops/`: Prometheus alerts and the Grafana dashboard.
 
 ## Verification
@@ -118,5 +126,12 @@ transports; the production IP policy has no localhost bypass. The tests that run
 `scripts/verify-osm-boundary` also need `psql`, `pg_dump` and `rg`: under `scripts/test` they
 fail without them, and a bare `cargo test` skips that check with a message.
 
+- `scripts/e2e --mock` runs the end-to-end flow against fixtures; `scripts/e2e --isolated-live`
+  writes real tags through the Pubky SDK and deletes them after. See [e2e/README.md](e2e/README.md).
+- `scripts/demo-lookup [--base URL] [--file e2e/samples.lookup.json]` previews a curated list of
+  public URIs through `POST /v1/resolve` against any running daemon, prints kind, URI, type,
+  site, status and group, and exits 1 when one fails, stays pending or misses its expected type
+  (an ancestor matches) or status. It is read-only and paced under the preview budget.
 - `scripts/verify-osm-boundary [out.sql]` checks a resolved database keeps OSM-derived facts
   only in `osm_place`, and can export that table.
+- `scripts/openapi` regenerates the OpenAPI snapshots in `docs/`.

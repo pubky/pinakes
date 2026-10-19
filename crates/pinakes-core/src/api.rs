@@ -12,11 +12,12 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::{DateTime, Utc};
 use hmac::{KeyInit, Mac, SimpleHmac};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 use std::{
     collections::{BTreeMap, HashMap},
     net::SocketAddr,
@@ -24,6 +25,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, Notify};
+use utoipa::{IntoParams, OpenApi, ToSchema};
 
 /// A request clock (`AppState::clock`).
 pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
@@ -50,7 +52,10 @@ impl AppState {
         let metrics = Arc::new(crate::telemetry::Metrics::new()?);
         Ok(Self {
             pool,
-            nexus: Nexus::new(&config.nexus_url)?,
+            nexus: Nexus::with_reach_timeout(
+                &config.nexus_url,
+                Duration::from_secs(config.search.reach_timeout_secs),
+            )?,
             config,
             wake: Arc::default(),
             metrics,
@@ -62,7 +67,7 @@ impl AppState {
             clock: None,
         })
     }
-    /// Now, for relative times.
+    /// Now, for relative times and search cursors.
     pub fn now(&self) -> DateTime<Utc> {
         self.clock.as_ref().map_or_else(Utc::now, |clock| clock())
     }
@@ -167,6 +172,15 @@ async fn public_budget(
         )
         .into_response();
     };
+    let cost = if request.method() != axum::http::Method::OPTIONS
+        && request.uri().path() == "/v1/search"
+        && url::form_urlencoded::parse(request.uri().query().unwrap_or_default().as_bytes())
+            .any(|(key, _)| key == "reach")
+    {
+        state.config.api.reach_cost
+    } else {
+        1
+    };
     if let Err(error) = state
         .budget(
             &[(
@@ -175,7 +189,7 @@ async fn public_budget(
             )],
             state.config.api.cache_capacity,
             "API rate limit exceeded",
-            1,
+            cost,
         )
         .await
     {
@@ -184,10 +198,127 @@ async fn public_budget(
     next.run(request).await
 }
 
+/// Whether `origin` may call the public listener (`api.cors_allow_origins`).
+fn cors_allowed(state: &AppState, origin: Option<&header::HeaderValue>) -> bool {
+    let origins = &state.config.api.cors_allow_origins;
+    origin.is_some_and(|origin| {
+        origins.iter().any(|o| o == "*")
+            || origin
+                .to_str()
+                .is_ok_and(|origin| origins.iter().any(|o| o == origin))
+    })
+}
+/// CORS headers for browser clients on the public listener, outermost so that budget refusals
+/// (429 with `Retry-After`) are readable cross-origin too. No credentials: the public API takes
+/// no cookies or tokens. In `*` mode every response carries them; with an origin list only
+/// allowed origins get them, and every response carries `Vary: Origin`.
+async fn cors_headers(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let origin = request.headers().get(header::ORIGIN).cloned();
+    let mut response = next.run(request).await;
+    let origins = &state.config.api.cors_allow_origins;
+    if origins.is_empty() {
+        return response;
+    }
+    let any = origins.iter().any(|o| o == "*");
+    // In `*` mode the headers do not depend on the request, so they go on every response: a
+    // shared cache filled by a request without Origin (curl, a server) still serves browsers.
+    let allowed = any || cors_allowed(&state, origin.as_ref());
+    let headers = response.headers_mut();
+    if !any {
+        headers.append(header::VARY, header::HeaderValue::from_static("origin"));
+    }
+    if allowed {
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            if any {
+                header::HeaderValue::from_static("*")
+            } else {
+                origin.expect("allowed origin")
+            },
+        );
+        headers.insert(
+            header::ACCESS_CONTROL_EXPOSE_HEADERS,
+            header::HeaderValue::from_static("retry-after, etag"),
+        );
+    }
+    response
+}
+/// Answer CORS preflights inside the budget layer, so they share the per-IP budget. A refused
+/// origin gets no CORS headers, which the browser treats as a refusal.
+async fn cors_preflight(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let preflight = request.method() == axum::http::Method::OPTIONS
+        && request
+            .headers()
+            .contains_key(header::ACCESS_CONTROL_REQUEST_METHOD);
+    if !preflight || state.config.api.cors_allow_origins.is_empty() {
+        return next.run(request).await;
+    }
+    if !cors_allowed(&state, request.headers().get(header::ORIGIN)) {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    (
+        StatusCode::NO_CONTENT,
+        [
+            (header::ACCESS_CONTROL_ALLOW_METHODS, "GET, POST"),
+            (header::ACCESS_CONTROL_ALLOW_HEADERS, "content-type"),
+            (header::ACCESS_CONTROL_MAX_AGE, "600"),
+        ],
+    )
+        .into_response()
+}
+
+/// Swagger UI for the public document, from the vendored bundle; no second spec route.
+fn swagger_ui(config: &crate::config::ApiConfig) -> Router<AppState> {
+    if !config.swagger_ui {
+        return Router::new();
+    }
+    // No validator badge: off localhost Swagger UI would load validator.swagger.io as an image.
+    Router::from(
+        utoipa_swagger_ui::SwaggerUi::new("/swagger-ui")
+            .config(utoipa_swagger_ui::Config::new(["/v1/openapi.json"]).validator_url("none")),
+    )
+}
+/// The vendored bundle (Swagger UI 5.17.14) runs no inline script. Its standalone preset renders
+/// the logo SVG with one fixed `<style>` element, allowed by its hash (a test recomputes it from
+/// the served bundle), and its CSS embeds eight data: images.
+pub const SWAGGER_UI_CSP: &str = "default-src 'self'; style-src 'self' 'sha256-RL3ie0nH+Lzz2YNqQN83mnU0J1ot4QL7b99vMdIX99w='; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
+/// Outermost, so `/swagger-ui` redirects, assets, asset 404s and budget 429s all carry the
+/// headers, and no other path does (a layer on the merged router would also wrap its fallback,
+/// i.e. every unmatched public path).
+async fn swagger_headers(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = request.uri().path();
+    let swagger = path == "/swagger-ui" || path.starts_with("/swagger-ui/");
+    let mut response = next.run(request).await;
+    if swagger {
+        let headers = response.headers_mut();
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            header::HeaderValue::from_static(SWAGGER_UI_CSP),
+        );
+        headers.insert(
+            header::X_CONTENT_TYPE_OPTIONS,
+            header::HeaderValue::from_static("nosniff"),
+        );
+    }
+    response
+}
 pub fn router(state: AppState) -> Router {
+    std::sync::LazyLock::force(&PUBLIC_DOCUMENT);
     let routes = Router::new()
         .route("/v1/info", get(info))
         .route("/v1/changes/lookup", post(crate::change_api::lookup))
+        .route("/v1/search", get(search))
         .route("/v1/groups/{id}", get(group))
         .route("/v1/resources/lookup", post(lookup))
         .route("/v1/resources/by-uri", get(by_uri))
@@ -201,26 +332,40 @@ pub fn router(state: AppState) -> Router {
             post(crate::event::storage::lookup),
         )
         .route("/v1/resolve", post(resolve))
-        .route("/v1/dumps/osm_place.ndjson.gz", get(osm_dump));
+        .route("/v1/openapi.json", get(openapi))
+        .route("/v1/dumps/osm_place.ndjson.gz", get(osm_dump))
+        .merge(swagger_ui(&state.config.api));
     with_public_layers(routes, state)
 }
-/// The public listener's layer stack around `routes`: the panic backstop innermost, then the
-/// per-IP budget and the body limit. Public so a test can mount a route under exactly this stack.
+/// The public listener's layer stack around `routes`: the panic backstop innermost, then CORS
+/// preflights, the per-IP budget, CORS headers, the body limit and, outermost, the path-scoped
+/// Swagger headers. Public so a test can mount a route under exactly this stack.
 pub fn with_public_layers(routes: Router<AppState>, state: AppState) -> Router {
-    panic_backstop(routes, &state, "public")
+    let mut router = panic_backstop(routes, &state, "public")
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            cors_preflight,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             public_budget,
         ))
-        .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
-        .with_state(state)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            cors_headers,
+        ))
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024));
+    if state.config.api.swagger_ui {
+        router = router.layer(axum::middleware::from_fn(swagger_headers));
+    }
+    router.with_state(state)
 }
 /// Marks a response the panic backstop produced, so the layer around it can log the path.
 #[derive(Clone, Copy)]
 struct CaughtPanic;
 /// Backstop: a handler panic answers 500 (counted in `pinakes_api_panics_total`) instead of
 /// dropping the connection, and the request path is logged (never the payload). Innermost, so
-/// the listener's other layers still shape the response.
+/// the listener's other layers (CORS, Swagger headers) still shape the response.
 fn panic_backstop(
     routes: Router<AppState>,
     state: &AppState,
@@ -282,9 +427,90 @@ impl IntoResponse for ApiError {
         response
     }
 }
+#[derive(Clone, Debug, Default, Deserialize, Serialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+pub struct SearchQuery {
+    pub q: Option<String>,
+    #[serde(rename = "type")]
+    pub type_name: Option<String>,
+    pub category: Option<String>,
+    pub host: Option<String>,
+    pub tags: Option<String>,
+    #[serde(rename = "match")]
+    pub match_mode: Option<String>,
+    pub author: Option<String>,
+    pub reach: Option<String>,
+    pub viewer: Option<String>,
+    pub sort: Option<String>,
+    #[param(minimum = 1, maximum = 500)]
+    pub limit: Option<usize>,
+    /// Authenticated opaque keyset cursor from this daemon; invalid after restart. Restart pagination on HTTP 400.
+    pub cursor: Option<String>,
+    /// Counts over the whole filtered set: `tags` (labels), `type` (card types) or both
+    /// (`type,tags`); `collapse` changes the rows, not the counts.
+    pub facet: Option<String>,
+    /// West,south,east,north in degrees; west > east crosses the antimeridian.
+    pub bbox: Option<String>,
+    /// Latitude,longitude in degrees; requires radius and excludes bbox.
+    pub near: Option<String>,
+    /// Positive metres, at most the configured maximum (200000 by default).
+    pub radius: Option<String>,
+    /// Inclusive start time lower bound: RFC3339, Unix milliseconds, or relative to the request
+    /// (`now`, `now+7d`, `now-12h`; the current minute).
+    pub from: Option<String>,
+    /// Inclusive start time upper bound: RFC3339, Unix milliseconds, or relative (`now+30d`).
+    pub to: Option<String>,
+    /// Finite map zoom; fractional zooms are floored and clamped to the table. Requires bbox; large views coarsen to the configured cell budget.
+    pub cluster: Option<String>,
+    /// Resource ID of the accepted event venue; filters event units.
+    pub venue: Option<String>,
+    /// A list view with one row per group: the matching member with the most references, as its
+    /// own card; links in no group stay rows of their own. Not with `cluster`.
+    #[param(value_type = Option<CollapseMode>)]
+    pub collapse: Option<String>,
+}
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CollapseMode {
+    Group,
+}
+#[derive(Deserialize, Serialize)]
+struct PageCursor {
+    version: u8,
+    score: f64,
+    id: String,
+    at: DateTime<Utc>,
+    filter: String,
+}
+impl PageCursor {
+    fn encode(&self, template: &SimpleHmac<blake3::Hasher>) -> anyhow::Result<String> {
+        let payload = serde_json::to_vec(self)?;
+        let mut mac = template.clone();
+        mac.update(&payload);
+        let mut signed = mac.finalize().into_bytes().to_vec();
+        signed.extend_from_slice(&payload);
+        Ok(URL_SAFE_NO_PAD.encode(signed))
+    }
+    fn decode(s: &str, template: &SimpleHmac<blake3::Hasher>) -> Result<Self, ApiError> {
+        let invalid = || ApiError::bad("invalid cursor");
+        if s.len() > 2048 {
+            return Err(invalid());
+        }
+        let signed = URL_SAFE_NO_PAD.decode(s).map_err(|_| invalid())?;
+        if signed.len() <= 32 {
+            return Err(invalid());
+        }
+        let (tag, payload) = signed.split_at(32);
+        let mut mac = template.clone();
+        mac.update(payload);
+        // RustCrypto's verify_slice compares the complete MAC in constant time.
+        mac.verify_slice(tag).map_err(|_| invalid())?;
+        serde_json::from_slice(payload).map_err(|_| invalid())
+    }
+}
 /// The one card every route returns for a resource, occurrence or reference event. Absent
 /// values are null, never "".
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct Card {
     pub id: String,
     pub uri: String,
@@ -312,11 +538,12 @@ pub struct Card {
     pub occurrence: Option<OccurrenceKey>,
     /// For a Nexus event reference: the reference this card is.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<crate::event::storage::ReferenceEvent>)]
     pub event: Option<Value>,
 }
 /// A hint that the same thing is also elsewhere: the group this card is in. Nothing is merged;
 /// every member keeps its own card.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct GroupRef {
     pub id: String,
     /// Members in the group, this one included.
@@ -324,7 +551,7 @@ pub struct GroupRef {
     /// Up to eight other members, by ID and URI; `GET /v1/groups/{id}` lists them all.
     pub members: Vec<GroupMember>,
 }
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct OccurrenceKey {
     pub feed_id: String,
     /// The feed's URI: the link people tagged. To combine with Nexus, send this, not the card's
@@ -337,15 +564,16 @@ pub struct OccurrenceKey {
     pub status: String,
 }
 /// `GET /v1/resources/{id}` and `/v1/resolve`: the card plus the resource's details.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ResourceDetail {
     #[serde(flatten)]
     pub card: Card,
     pub details: Details,
 }
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct Details {
     pub category: Option<String>,
+    #[schema(value_type = Option<Object>)]
     pub address: Option<Value>,
     pub bbox: Option<[f64; 4]>,
     pub tz: Option<String>,
@@ -360,17 +588,86 @@ pub struct Details {
     pub aliases: Vec<String>,
     pub updated_at: Option<DateTime<Utc>>,
 }
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct OrganizerRef {
     pub name: Option<String>,
     pub url: Option<String>,
 }
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct VenueRef {
     pub name: Option<String>,
     pub id: Option<String>,
 }
-#[derive(Deserialize)]
+#[derive(Serialize, ToSchema)]
+pub struct TagFacet {
+    pub label: String,
+    pub count: i64,
+}
+#[derive(Serialize, ToSchema)]
+pub struct TypeFacet {
+    #[serde(rename = "type")]
+    pub type_name: String,
+    pub count: i64,
+}
+/// The facets `facet` asked for, over the whole filtered set.
+#[derive(Serialize, ToSchema)]
+pub struct Facets {
+    /// `facet=tags`: the labels the filtered links carry, most frequent first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<TagFacet>>,
+    /// `facet=type`: the card types of the filtered set, most frequent first.
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub types: Option<Vec<TypeFacet>>,
+}
+/// The facets of a search: `tags`, `type` or both (`type,tags`).
+fn facets_asked(facet: Option<&str>) -> Result<(bool, bool), ApiError> {
+    let Some(facet) = facet else {
+        return Ok((false, false));
+    };
+    let mut asked = (false, false);
+    for name in facet.split(',') {
+        match name {
+            "tags" => asked.0 = true,
+            "type" => asked.1 = true,
+            _ => {
+                return Err(ApiError::bad(
+                    "facet must be tags, type or both (type,tags)",
+                ))
+            }
+        }
+    }
+    Ok(asked)
+}
+#[derive(Serialize, ToSchema)]
+pub struct SearchResponse {
+    pub items: Vec<Card>,
+    pub cursor: Option<String>,
+    pub reach_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub facets: Option<Facets>,
+}
+#[derive(Serialize, ToSchema)]
+pub struct Cluster {
+    pub cell: String,
+    pub count: i64,
+    pub lat: f64,
+    pub lon: f64,
+    pub top: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<String>,
+}
+#[derive(Serialize, ToSchema)]
+pub struct ClusterResponse {
+    pub resolution: u8,
+    pub clusters: Vec<Cluster>,
+    pub points: Vec<Card>,
+    pub truncated: bool,
+    pub total: i64,
+    pub reach_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub facets: Option<Facets>,
+}
+#[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LookupRequest {
     #[serde(alias = "resource_ids")]
@@ -403,7 +700,7 @@ pub(crate) fn lookup_ids(
     }
     Ok(all)
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResolveRequest {
     pub uri: String,
@@ -561,6 +858,427 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
         details,
     })
 }
+fn validate_search(q: &SearchQuery) -> Result<Vec<String>, ApiError> {
+    if q.venue.as_deref().is_some_and(|v| !model::valid_id(v)) {
+        return Err(ApiError::bad("venue must be a resource ID"));
+    }
+    if q.collapse.as_deref().is_some_and(|v| v != "group") {
+        return Err(ApiError::bad("collapse must be group"));
+    }
+    if !(1..=500).contains(&q.limit.unwrap_or(50)) {
+        return Err(ApiError::bad("limit must be 1–500"));
+    }
+    if !matches!(
+        q.sort.as_deref(),
+        None | Some("activity" | "recent" | "distance" | "start")
+    ) {
+        return Err(ApiError::bad(
+            "sort must be activity, recent, distance or start",
+        ));
+    }
+    if !matches!(q.match_mode.as_deref(), None | Some("any" | "all")) {
+        return Err(ApiError::bad("match must be any or all"));
+    }
+    facets_asked(q.facet.as_deref())?;
+    if let Some(reach) = &q.reach {
+        if reach == "wot_2" {
+            return Err(ApiError::bad("wot_2 is not available"));
+        }
+        if !matches!(reach.as_str(), "following" | "friends") || q.viewer.is_none() {
+            return Err(ApiError::bad(
+                "reach must be following or friends and requires viewer",
+            ));
+        }
+    }
+    for id in [&q.viewer, &q.author].into_iter().flatten() {
+        if !crate::nexus::valid_author(id) {
+            return Err(ApiError::bad("invalid author/viewer ID"));
+        }
+    }
+    if q.type_name
+        .as_ref()
+        .is_some_and(|t| model::type_path(t).is_empty())
+    {
+        return Err(ApiError::bad("unknown schema.org type"));
+    }
+    for text in [&q.q, &q.category, &q.host].into_iter().flatten() {
+        if text.len() > 256 {
+            return Err(ApiError::bad("filter exceeds 256 bytes"));
+        }
+    }
+    let mut tags = q
+        .tags
+        .as_ref()
+        .map(|s| s.split(',').map(str::to_owned).collect::<Vec<_>>())
+        .unwrap_or_default();
+    tags.sort();
+    tags.dedup();
+    if tags.len() > 5
+        || (q.match_mode.as_deref() == Some("all") && tags.len() > 3)
+        || tags.iter().any(|t| t.is_empty() || t.len() > 128)
+    {
+        return Err(ApiError::bad(
+            "tags allows at most 5 labels, or 3 with match=all; each is 1–128 bytes",
+        ));
+    }
+    Ok(tags)
+}
+fn scope(
+    sql: &mut QueryBuilder<'_, Postgres>,
+    q: &SearchQuery,
+    reach: &Option<crate::nexus::ReachSet>,
+) {
+    if let Some(author) = &q.author {
+        sql.push(" AND f.author=").push_bind(author.clone());
+    }
+    if let Some(reach) = reach {
+        sql.push(" AND f.author=ANY(")
+            .push_bind(reach.authors.clone())
+            .push(")");
+    }
+}
+#[utoipa::path(get,tag="Search",path="/v1/search",params(SearchQuery),responses((status=200,body=SearchResult),(status=304,description="ETag unchanged"),(status=400,description="Invalid or unavailable filter"),(status=502,description="Nexus reach unavailable")))]
+pub async fn search(
+    State(state): State<AppState>,
+    Query(q): Query<SearchQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let tags = validate_search(&q)?;
+    if q.collapse.is_some() && !state.config.groups.enabled {
+        return Err(ApiError::bad("groups are disabled"));
+    }
+    if q.collapse.is_some() && q.cluster.is_some() {
+        return Err(ApiError::bad(
+            "collapse=group is a list view; a map with cluster shows every member",
+        ));
+    }
+    let cursor = q
+        .cursor
+        .as_deref()
+        .map(|s| PageCursor::decode(s, &state.cursor_mac))
+        .transpose()?;
+    // A later page resolves relative times at the cursor's pinned instant, as page one did.
+    let at = cursor.as_ref().map_or_else(|| state.now(), |c| c.at);
+    let spatial = crate::spatial::Filters::parse_at(&q, &state.config.search, at)
+        .map_err(|e| ApiError::bad(e.to_string()))?;
+    let reach = if let (Some(viewer), Some(reach)) = (&q.viewer, &q.reach) {
+        Some(state.nexus.reach(viewer, reach).await.map_err(|e| {
+            tracing::warn!(error=%e,"reach unavailable");
+            ApiError(StatusCode::BAD_GATEWAY, "Nexus reach unavailable".into())
+        })?)
+    } else {
+        None
+    };
+    let mut fingerprint = q.clone();
+    fingerprint.cursor = None;
+    fingerprint.limit = None;
+    let reach_revision = reach.as_ref().map(|r| {
+        let mut authors = r.authors.clone();
+        authors.sort();
+        authors.dedup();
+        (
+            blake3::hash(authors.join("\n").as_bytes())
+                .to_hex()
+                .to_string(),
+            r.truncated,
+        )
+    });
+    let filter = blake3::hash(&serde_json::to_vec(&(&fingerprint, &reach_revision))?)
+        .to_hex()
+        .to_string();
+    if let Some(c) = &cursor {
+        if c.version != 2
+            || c.filter != filter
+            || !c.score.is_finite()
+            || !model::valid_id(&c.id)
+            || c.at > state.now() + chrono::Duration::seconds(5)
+        {
+            return Err(ApiError::bad("cursor does not match this search"));
+        }
+    }
+    let mut sql = QueryBuilder::<Postgres>::new(if q.collapse.is_some() {
+        "WITH eligible AS (SELECT r.*, "
+    } else {
+        "WITH filtered AS (SELECT r.*, "
+    });
+    if q.sort.as_deref() == Some("distance") {
+        sql.push("-");
+        spatial.distance(&mut sql);
+    } else if q.sort.as_deref() == Some("start") {
+        sql.push("-extract(epoch FROM r.start_at)::double precision");
+    } else if q.sort.as_deref() == Some("recent") {
+        sql.push("coalesce(extract(epoch FROM s.newest_at),0)::double precision");
+    } else {
+        sql.push("coalesce(s.score * exp(-ln(2.0)*greatest(0,extract(epoch FROM (")
+            .push_bind(at)
+            .push("::timestamptz-s.updated_at)))/2592000.0),0)::double precision");
+    }
+    sql.push(
+        " AS rank FROM search_unit r LEFT JOIN resource_score s ON s.resource_id=r.id WHERE true",
+    );
+    spatial.apply(&mut sql);
+    if let Some(venue) = &q.venue {
+        sql.push(" AND r.venue_id=").push_bind(venue.clone());
+    }
+    if let Some(author) = &q.author {
+        sql.push(" AND (r.event_author IS NULL OR r.event_author=")
+            .push_bind(author.clone())
+            .push(")");
+    }
+    if let Some(reach) = &reach {
+        sql.push(" AND (r.event_author IS NULL OR r.event_author=ANY(")
+            .push_bind(reach.authors.clone())
+            .push("))");
+    }
+    if q.sort.as_deref() == Some("start") {
+        sql.push(" AND r.start_at IS NOT NULL");
+    }
+    if let Some(t) = &q.type_name {
+        let name = model::type_path(t).pop().unwrap();
+        sql.push(" AND r.type_path @> ").push_bind(vec![name]);
+    }
+    for (column, value) in [("r.category", &q.category), ("r.host", &q.host)] {
+        if let Some(value) = value {
+            sql.push(" AND ")
+                .push(column)
+                .push("=")
+                .push_bind(value.clone());
+        }
+    }
+    if let Some(text) = q.q.as_ref().filter(|s| !s.is_empty()) {
+        let prefix = format!(
+            "%{}%",
+            text.replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        sql.push(" AND (r.search_text @@ websearch_to_tsquery('simple',")
+            .push_bind(text.clone())
+            .push(") OR r.name ILIKE ")
+            .push_bind(prefix)
+            .push(" OR r.name % ")
+            .push_bind(text.clone())
+            .push(")");
+    }
+    sql.push(" AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id");
+    scope(&mut sql, &q, &reach);
+    sql.push(")");
+    if !tags.is_empty() {
+        if q.match_mode.as_deref() == Some("all") {
+            for tag in &tags {
+                sql.push(
+                    " AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id AND f.label=",
+                )
+                .push_bind(tag.clone());
+                scope(&mut sql, &q, &reach);
+                sql.push(")");
+            }
+        } else {
+            sql.push(
+                " AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id AND f.label=ANY(",
+            )
+            .push_bind(tags)
+            .push(")");
+            scope(&mut sql, &q, &reach);
+            sql.push(")");
+        }
+    }
+    if q.collapse.is_some() {
+        // One row per group: the member with the most references (ties by ID), as itself.
+        // The references are counted once, for the grouped rows only (a per-row count would scan
+        // the alias-resolving view once per row).
+        sql.push("), filtered AS (SELECT DISTINCT ON(coalesce(u.group_id,e.unit_id)) e.* FROM eligible e LEFT JOIN group_unit u ON u.unit_id=e.unit_id AND u.group_id IS NOT NULL LEFT JOIN (SELECT f.resource_id,count(*) AS refs FROM effective_reference f WHERE f.resource_id IN (SELECT x.id FROM eligible x JOIN group_unit g ON g.unit_id=x.unit_id AND g.group_id IS NOT NULL) GROUP BY f.resource_id) c ON c.resource_id=e.id ORDER BY coalesce(u.group_id,e.unit_id),coalesce(c.refs,0) DESC,e.id,e.unit_id");
+    }
+    if let Some(resolution) = spatial.resolution {
+        sql.push("), cells AS (SELECT *, h3_latlng_to_cell(point(ST_X(point),ST_Y(point)),")
+            .push_bind(i32::from(u8::from(resolution)))
+            .push(")::text AS cell FROM filtered WHERE point IS NOT NULL), groups AS (SELECT cell,count(*) AS count,avg(ST_Y(point)) AS lat,degrees(atan2(avg(sin(radians(ST_X(point)))),avg(cos(radians(ST_X(point)))))) AS lon,ARRAY(SELECT id FROM (SELECT DISTINCT ON (id) id,rank,unit_id FROM cells t WHERE t.cell=cells.cell ORDER BY id,rank DESC,unit_id DESC) unique_ids ORDER BY rank DESC,unit_id DESC LIMIT 3) AS top,max(rank) AS rank,CASE WHEN bool_or(osm_id IS NOT NULL OR doc->>'attribution' IS NOT NULL) THEN ")
+            .push_bind(crate::resolver::osm::ATTRIBUTION)
+            .push(" ELSE NULL END AS attribution FROM cells GROUP BY cell LIMIT ")
+            .push_bind((state.config.search.max_cluster_cells+1) as i64)
+            .push("), entries AS (SELECT 'cluster' AS kind,cell AS id,cell AS unit_id,rank,to_jsonb(g)-'rank' AS item FROM groups g WHERE count>1 AND (SELECT count(*) FROM filtered)>")
+            .push_bind(q.limit.unwrap_or(50) as i64)
+            .push(" UNION ALL SELECT 'point',c.id,c.unit_id,c.rank,to_jsonb(c) FROM cells c JOIN groups g USING(cell) WHERE g.count=1 OR (SELECT count(*) FROM filtered)<=")
+            .push_bind(q.limit.unwrap_or(50) as i64)
+            .push("), page AS (SELECT * FROM entries ORDER BY rank DESC,unit_id DESC LIMIT ")
+            .push_bind((q.limit.unwrap_or(50)+1) as i64)
+            .push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p)");
+        if state.config.groups.enabled {
+            sql.push(" || CASE WHEN p.kind='point' THEN jsonb_build_object('item',p.item||jsonb_build_object('group',group_hint(p.unit_id))) ELSE '{}'::jsonb END");
+        }
+        sql.push(" ORDER BY rank DESC,unit_id DESC) FROM page p),'[]') AS items, (SELECT count(*) FROM filtered) AS total, (SELECT count(*) FROM groups) AS cell_count, ");
+    } else {
+        sql.push("), page AS (SELECT * FROM filtered");
+        if let Some(c) = &cursor {
+            sql.push(" WHERE (rank,unit_id)<(")
+                .push_bind(c.score)
+                .push(",")
+                .push_bind(c.id.clone())
+                .push(")");
+        }
+        sql.push(" ORDER BY rank DESC,unit_id DESC LIMIT ")
+            .push_bind((q.limit.unwrap_or(50) + 1) as i64)
+            .push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p)");
+        if state.config.groups.enabled {
+            sql.push(" || jsonb_build_object('group',group_hint(p.unit_id))");
+        }
+        sql.push(" ORDER BY rank DESC,unit_id DESC) FROM page p),'[]') AS items, ");
+    }
+    let (tag_facet, type_facet) = facets_asked(q.facet.as_deref())?;
+    // Facets count every matching link, collapsed or not.
+    let counted = if q.collapse.is_some() {
+        "eligible"
+    } else {
+        "filtered"
+    };
+    sql.push("jsonb_build_object('type',");
+    if type_facet {
+        sql.push("coalesce((SELECT jsonb_agg(jsonb_build_object('type',type,'count',count) ORDER BY count DESC,type) FROM (SELECT r.type,count(DISTINCT r.unit_id) AS count FROM ")
+            .push(counted)
+            .push(" r WHERE r.type IS NOT NULL GROUP BY r.type) t),'[]')");
+    } else {
+        sql.push("NULL");
+    }
+    sql.push(",'tags',");
+    if tag_facet {
+        sql.push("coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY count DESC,label) FROM (SELECT f.label,count(DISTINCT r.unit_id) AS count FROM ")
+            .push(counted)
+            .push(" r JOIN effective_reference f ON r.id=f.resource_id WHERE f.label IS NOT NULL");
+
+        scope(&mut sql, &q, &reach);
+        sql.push(" GROUP BY f.label) t),'[]')");
+    } else {
+        sql.push("NULL");
+    }
+    sql.push(") AS facets, jsonb_build_array((SELECT jsonb_agg(jsonb_build_array(cursor,epoch) ORDER BY nexus) FROM feed_cursor),(SELECT revision FROM search_revision WHERE id=1)) AS revision");
+    let row = sql.build().fetch_one(&state.pool).await?;
+    if spatial.resolution.is_some()
+        && row.try_get::<i64, _>("cell_count")? > state.config.search.max_cluster_cells as i64
+    {
+        return Err(ApiError::bad(
+            "cluster cell budget exceeded; use a smaller viewport",
+        ));
+    }
+    let mut items: Vec<Value> = serde_json::from_value(row.try_get("items")?)?;
+    let has_more = items.len() > q.limit.unwrap_or(50);
+    items.truncate(q.limit.unwrap_or(50));
+    let next = if has_more && spatial.resolution.is_none() {
+        let last = items.last().expect("nonempty page");
+        Some(
+            PageCursor {
+                version: 2,
+                score: last["rank"].as_f64().context("missing rank")?,
+                id: last["unit_id"]
+                    .as_str()
+                    .context("missing resource ID")?
+                    .into(),
+                at,
+                filter,
+            }
+            .encode(&state.cursor_mac)?,
+        )
+    } else {
+        None
+    };
+    let facets = if tag_facet || type_facet {
+        let values: Value = row.try_get("facets")?;
+        let list = |key: &str| values[key].as_array().cloned();
+        Some(Facets {
+            tags: list("tags").map(|v| {
+                v.into_iter()
+                    .map(|v| TagFacet {
+                        label: v["label"].as_str().unwrap_or_default().into(),
+                        count: v["count"].as_i64().unwrap_or(0),
+                    })
+                    .collect()
+            }),
+            types: list("type").map(|v| {
+                v.into_iter()
+                    .map(|v| TypeFacet {
+                        type_name: v["type"].as_str().unwrap_or_default().into(),
+                        count: v["count"].as_i64().unwrap_or(0),
+                    })
+                    .collect()
+            }),
+        })
+    } else {
+        None
+    };
+    let revision: Value = row.try_get("revision")?;
+    let etag = format!(
+        "\"{}\"",
+        // Relative times (`from=now`) resolve per request: hash the resolved window too.
+        blake3::hash(&serde_json::to_vec(&(
+            q.clone(),
+            revision,
+            reach_revision,
+            spatial.from,
+            spatial.to
+        ))?)
+        .to_hex()
+    );
+    let mut response = if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|h| h.to_str().ok())
+        .is_some_and(|h| {
+            h.split(',')
+                .any(|v| v.trim().trim_start_matches("W/") == etag || v.trim() == "*")
+        }) {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else if spatial.resolution.is_some() {
+        let mut clusters = Vec::new();
+        let mut points = Vec::new();
+        for entry in items {
+            let item = &entry["item"];
+            if entry["kind"] == "cluster" {
+                clusters.push(Cluster {
+                    cell: item["cell"].as_str().unwrap_or_default().into(),
+                    count: item["count"].as_i64().unwrap_or(0),
+                    lat: item["lat"].as_f64().unwrap_or(0.0),
+                    lon: item["lon"].as_f64().unwrap_or(0.0),
+                    top: serde_json::from_value(item["top"].clone())?,
+                    attribution: item["attribution"].as_str().map(str::to_owned),
+                });
+            } else {
+                points.push(card(item)?);
+            }
+        }
+        Json(ClusterResponse {
+            resolution: u8::from(spatial.resolution.expect("cluster mode")),
+            clusters,
+            points,
+            truncated: has_more,
+            total: row.try_get("total")?,
+            reach_truncated: reach.is_some_and(|r| r.truncated),
+            facets,
+        })
+        .into_response()
+    } else {
+        Json(SearchResponse {
+            items: items.iter().map(card).collect::<Result<_, _>>()?,
+            cursor: next,
+            reach_truncated: reach.is_some_and(|r| r.truncated),
+            facets,
+        })
+        .into_response()
+    };
+    response
+        .headers_mut()
+        .insert(header::ETAG, etag.parse().expect("hash header"));
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("public, max-age=30"),
+    );
+    Ok(response)
+}
+#[derive(ToSchema)]
+#[allow(dead_code)]
+#[serde(untagged)]
+pub enum SearchResult {
+    Page(SearchResponse),
+    Cluster(ClusterResponse),
+}
+
 async fn read(pool: &PgPool, id: &str, groups: bool) -> Result<Option<ResourceDetail>, ApiError> {
     let value: Option<Value> =
         sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'aliases',coalesce((SELECT jsonb_agg(uri ORDER BY uri) FROM (SELECT x.uri FROM resource_alias a JOIN resource x ON x.id=a.alias_id WHERE a.root_id=r.id ORDER BY x.uri LIMIT 50) s),'[]')) FROM resource_document r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)")
@@ -570,8 +1288,8 @@ async fn read(pool: &PgPool, id: &str, groups: bool) -> Result<Option<ResourceDe
             .await?;
     value.as_ref().map(detail).transpose()
 }
-/// A read's JSON, cacheable for 30 seconds, with an ETag of its content; 304 when
-/// `If-None-Match` names it.
+/// A read's JSON, cacheable for 30 seconds like a search page, with an ETag of its content; 304
+/// when `If-None-Match` names it.
 fn tagged<T: Serialize>(headers: &HeaderMap, value: &T) -> Result<Response, ApiError> {
     let body = serde_json::to_vec(value)?;
     let etag = format!("\"{}\"", &blake3::hash(&body).to_hex()[..32]);
@@ -599,6 +1317,7 @@ fn tagged<T: Serialize>(headers: &HeaderMap, value: &T) -> Result<Response, ApiE
     );
     Ok(response)
 }
+#[utoipa::path(get,tag="Previews",path="/v1/resources/{id}",params(("id"=String,Path,description="32 lowercase hex resource ID")),responses((status=200,body=ResourceDetail),(status=304,description="ETag unchanged"),(status=400,description="Invalid ID"),(status=404,description="Unknown resource")))]
 pub async fn resource(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -612,7 +1331,7 @@ pub async fn resource(
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "resource not found".into()))?;
     tagged(&headers, &detail)
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct ByUri {
     /// The link as referenced: normalised like every URI, and an alias answers with its root.
@@ -620,6 +1339,7 @@ pub struct ByUri {
 }
 /// One link's card by its URI, as `POST /v1/resources/lookup` answers for it: a link Pinakes
 /// does not know is a 404 and is not fetched (`POST /v1/resolve` resolves it).
+#[utoipa::path(get,tag="Previews",path="/v1/resources/by-uri",params(ByUri),responses((status=200,body=ResourceDetail),(status=304,description="ETag unchanged"),(status=400,description="Invalid URI"),(status=404,description="Unknown link; nothing is fetched")))]
 pub async fn by_uri(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -633,6 +1353,7 @@ pub async fn by_uri(
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "link not known".into()))?;
     tagged(&headers, &detail)
 }
+#[utoipa::path(post,tag="Previews",path="/v1/resources/lookup",operation_id="lookup_resources",request_body=LookupRequest,responses((status=200,body=Vec<Card>),(status=400,description="Exactly one list of 1–500 IDs or URIs")))]
 pub async fn lookup(
     State(state): State<AppState>,
     Json(body): Json<LookupRequest>,
@@ -663,6 +1384,7 @@ pub async fn lookup(
     let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END) FROM unnest($1::text[]) WITH ORDINALITY AS wanted(id,n) LEFT JOIN resource_alias a ON a.alias_id=wanted.id JOIN resource_document r ON r.id=coalesce(a.root_id,wanted.id) ORDER BY wanted.n").bind(ids).bind(state.config.groups.enabled).fetch_all(&state.pool).await?;
     Ok(Json(rows.iter().map(card).collect::<Result<_, _>>()?))
 }
+#[utoipa::path(post,tag="Previews",path="/v1/resolve",request_body=ResolveRequest,responses((status=200,body=ResourceDetail),(status=202,body=ResourceDetail,description="Queued; poll resource by ID"),(status=400,description="Unsupported URI or disabled resolver"),(status=429,description="Preview rate limit")))]
 pub async fn resolve(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -705,7 +1427,7 @@ pub async fn resolve(
 }
 /// What a client needs: the version, what this instance resolves, the limits a client must
 /// respect, and the licence of the OSM-derived values its cards carry.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct Info {
     pub version: String,
     /// The kinds of links this instance resolves: its routes and card kinds that are on.
@@ -713,7 +1435,7 @@ pub struct Info {
     pub limits: InfoLimits,
     pub osm_licence: OsmLicence,
 }
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct InfoLimits {
     /// IDs or URIs in one `POST /v1/resources/lookup`.
     pub lookup: usize,
@@ -721,13 +1443,15 @@ pub struct InfoLimits {
     pub change_lookup: usize,
     /// Feed IDs or URIs in one `POST /v1/occurrences/lookup`.
     pub occurrence_lookup: usize,
+    /// The largest `limit` of one search page.
+    pub search_page: usize,
     /// Requests per minute per client address, every public route together.
     pub requests_per_minute: usize,
     /// `POST /v1/resolve` requests per minute per client address, and per URI.
     pub previews_per_minute: usize,
     pub previews_per_uri_per_minute: usize,
 }
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct OsmLicence {
     pub licence: String,
     pub attribution: String,
@@ -740,6 +1464,7 @@ pub struct OsmLicence {
 fn dump_updated_at(config: &Config) -> Option<DateTime<Utc>> {
     crate::osm_dump::written_at(std::path::Path::new(&config.osm.dump_dir)).map(DateTime::from)
 }
+#[utoipa::path(get,tag="Service",path="/v1/info",responses((status=200,body=Info)),description="The version, what this instance resolves and the limits a client must respect. The same path on admin_listen has the operator detail.")]
 pub async fn info(State(state): State<AppState>) -> Json<Info> {
     let c = &state.config;
     let mut resolves: Vec<String> = [
@@ -767,6 +1492,7 @@ pub async fn info(State(state): State<AppState>) -> Json<Info> {
             lookup: 500,
             change_lookup: 500,
             occurrence_lookup: 500,
+            search_page: 500,
             requests_per_minute: c.api.requests_per_minute,
             previews_per_minute: c.preview.requests_per_minute,
             previews_per_uri_per_minute: c.preview.uri_requests_per_minute,
@@ -806,6 +1532,69 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
     *cache = Some((Instant::now(), body.clone()));
     Ok(body)
 }
+#[derive(OpenApi)]
+#[openapi(
+    info(
+        title = "Pinakes",
+        version = "0.1.0",
+        description = "Pinakes ranks, Nexus hydrates. External resource metadata and search. Every operation carries examples named by their values, covering every kind of card and source; pick one in a dropdown and use Try it out.",
+        license(name = "MIT")
+    ),
+    tags(
+        (name = "Previews", description = "Link previews and cards: resolve a pasted link, look up the cards of a page of posts, open one card."),
+        (name = "Search", description = "Map viewports, nearby places, events, tag pages, the search box and social reach."),
+        (name = "Events", description = "The dates of calendar feeds."),
+        (name = "Groups", description = "Links to the same thing on several services: a hint on each card, never a merge."),
+        (name = "Changes", description = "Freshness: what changed for the links a client keeps."),
+        (name = "Service", description = "Version, resolvers, licence and this document."),
+        (name = "Licensing", description = "The ODbL share-alike download of the OpenStreetMap-derived data.")
+    ),
+    paths(
+        group,
+        crate::event::storage::list,
+        crate::event::storage::lookup,
+        search,
+        resource,
+        by_uri,
+        lookup,
+        resolve,
+        info,
+        openapi,
+        osm_dump,
+        crate::change_api::lookup
+    ),
+    components(schemas(
+        CollapseMode,
+        crate::event::storage::OccurrencePage,
+        crate::event::storage::OccurrenceLookup,
+        crate::event::storage::ReferenceEvent,
+        crate::change_api::ChangeLine,
+        crate::change_api::ChangePage,
+        crate::change_api::ChangeLookup,
+        model::Point,
+        Card,
+        GroupRef,
+        OccurrenceKey,
+        ResourceDetail,
+        Details,
+        GroupDetail,
+        GroupMember,
+        VenueRef,
+        SearchResponse,
+        SearchResult,
+        ClusterResponse,
+        Cluster,
+        LookupRequest,
+        ResolveRequest,
+        TagFacet,
+        TypeFacet,
+        Facets,
+        OsmDumpLine,
+        OsmDumpNotice,
+        OsmDumpPlace
+    ))
+)]
+pub struct ApiDoc;
 /// The stored document of a resource, with the internal fields the public card leaves out
 /// (`source`, `ttl_secs`, `group_keys`, `attributes`, `warnings`).
 pub async fn admin_document(
@@ -822,13 +1611,88 @@ pub async fn admin_document(
         .map(Json)
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "resource not found".into()))
 }
-/// The public dump line format: the licence notice first, then one cached OSM object per line;
-/// a new `osm_place` column is not exported until it is added here.
+/// The public listener's document: exactly the operations `router` serves.
+/// Built once: a malformed recipe file fails when the router is built (at startup), not on
+/// every `/v1/openapi.json` request.
+static PUBLIC_DOCUMENT: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
+    let mut doc = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI serialization");
+    crate::recipes::apply(&mut doc);
+    doc
+});
+pub fn openapi_document() -> Value {
+    PUBLIC_DOCUMENT.clone()
+}
+#[utoipa::path(get,tag="Service",path="/v1/openapi.json",responses((status=200,body=Value)))]
+async fn openapi() -> Json<&'static Value> {
+    Json(&PUBLIC_DOCUMENT)
+}
+
+/// First line of the OSM dump: the ODbL notice.
+#[derive(ToSchema)]
+#[allow(dead_code)]
+pub struct OsmDumpNotice {
+    notice: String,
+    #[schema(example = "ODbL-1.0")]
+    licence: String,
+    licence_url: String,
+    attribution_url: String,
+    #[schema(example = "osm_place")]
+    table: String,
+}
+/// One cached OSM object per line after the notice; every field is present, null where unknown.
+/// The projection is explicit (`OSM_DUMP_LINE`): internal columns never reach the dump.
+#[derive(ToSchema)]
+#[allow(dead_code)]
+pub struct OsmDumpPlace {
+    #[schema(example = "node")]
+    osm_type: String,
+    #[schema(example = 240109189)]
+    osm_id: i64,
+    #[schema(required = true)]
+    name: Option<String>,
+    /// Schema.org type, e.g. `City`.
+    r#type: String,
+    type_path: Vec<String>,
+    /// OSM `key/value` category, e.g. `place/city`.
+    #[schema(required = true)]
+    category: Option<String>,
+    /// Null for cached missing objects.
+    #[schema(required = true)]
+    point: Option<model::Point>,
+    /// `[min_lon, min_lat, max_lon, max_lat]`.
+    #[schema(required = true)]
+    bbox: Option<Vec<f64>>,
+    #[schema(value_type = Object)]
+    address: Value,
+    /// Allowlisted OSM tags.
+    #[schema(value_type = Object)]
+    tags: Value,
+    #[schema(required = true)]
+    display_name: Option<String>,
+    /// `ok` or `missing`.
+    status: String,
+    fetched_at: chrono::DateTime<chrono::Utc>,
+    /// Every derived document served publicly, keyed by the version hash that change entries
+    /// and pinned resource documents name.
+    #[schema(value_type = Object)]
+    versions: Value,
+}
+/// A dump line: the notice first, then one place per line.
+#[derive(ToSchema)]
+#[allow(dead_code, clippy::large_enum_variant)]
+#[serde(untagged)]
+pub enum OsmDumpLine {
+    Notice(OsmDumpNotice),
+    Place(OsmDumpPlace),
+}
+/// The public dump line format (see `OsmDumpPlace`); a new `osm_place` column is not exported
+/// until it is added here, to the schema and to docs/api.md.
 pub const OSM_DUMP_LINE: &str = "SELECT jsonb_build_object('osm_type',osm_type,'osm_id',osm_id,'name',name,'type',type,'type_path',type_path,'category',category,\
     'point',CASE WHEN point IS NULL THEN NULL ELSE jsonb_build_object('lat',ST_Y(point),'lon',ST_X(point)) END,\
     'bbox',bbox,'address',address,'tags',tags,'display_name',display_name,'status',status,'fetched_at',fetched_at,'versions',versions) \
     FROM osm_place ORDER BY osm_type,osm_id";
 
+#[utoipa::path(get,tag="Licensing",path="/v1/dumps/osm_place.ndjson.gz",responses((status=200,description="The ODbL derivative database, written daily, as a gzip file download. Decompressed it is one JSON object per line: the licence notice first (`OsmDumpNotice`), then one cached OSM object per line (`OsmDumpPlace`). Single byte ranges are served (206)",content_type="application/gzip",headers(("Content-Disposition"=String,description="`attachment; filename=\"osm_place.ndjson.gz\"`"),("ETag"=String),("Last-Modified"=String),("Accept-Ranges"=String,description="`bytes`"))),(status=206,description="The requested byte range of the file",content_type="application/gzip"),(status=304,description="ETag or Last-Modified unchanged"),(status=416,description="Range not satisfiable"),(status=429,description="Over `limits.osm_dump_downloads_per_hour` transfers (200 or 206) to this address in the last hour; HEAD, 304 and 416 are free"),(status=503,description="No dump file written yet; retry later")))]
 async fn osm_dump(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -1056,7 +1920,7 @@ async fn metrics(State(state): State<AppState>) -> Result<Response, ApiError> {
 
 /// `GET /v1/groups/{id}`: what joined the group and every member's own card. A group is a hint
 /// that the members are one thing on several services; nothing about them is merged.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct GroupDetail {
     pub id: String,
     /// The type most members have (ties by name).
@@ -1070,12 +1934,13 @@ pub struct GroupDetail {
     pub members: Vec<Card>,
 }
 /// A group member named on a card: enough to link to it.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct GroupMember {
     pub id: String,
     pub uri: String,
     pub site: Option<String>,
 }
+#[utoipa::path(get,tag="Groups",path="/v1/groups/{id}",params(("id"=String,Path)),responses((status=200,body=GroupDetail),(status=400,description="Invalid ID or disabled module"),(status=404,description="Unknown group")))]
 pub async fn group(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1183,5 +2048,27 @@ mod tests {
         ));
         assert!(matches!(byte_range("bytes=0-1,5-6", len), Range::Ignored));
         assert!(matches!(byte_range("items=0-1", len), Range::Ignored));
+    }
+    /// A cursor reads its rank back bit for bit: one ULP high, the next page repeats this one.
+    #[test]
+    fn a_search_cursor_keeps_its_rank_exactly() {
+        let template = SimpleHmac::<blake3::Hasher>::new_from_slice(&[7; 32]).unwrap();
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        for _ in 0..10_000 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let score = (seed >> 11) as f64 / (1u64 << 53) as f64 * (-((seed % 40) as f64)).exp();
+            let cursor = PageCursor {
+                version: 2,
+                score,
+                id: "0".repeat(32),
+                at: Utc::now(),
+                filter: String::new(),
+            };
+            let read = PageCursor::decode(&cursor.encode(&template).unwrap(), &template)
+                .unwrap_or_else(|_| panic!("{score}"));
+            assert_eq!(read.score.to_bits(), score.to_bits(), "{score}");
+        }
     }
 }

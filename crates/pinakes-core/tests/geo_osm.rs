@@ -10,7 +10,7 @@ use http_body_util::BodyExt;
 use pinakes_core::{
     api::{self, AppState},
     config::{Config, OsmConfig, QueueConfig},
-    model::Status,
+    model::{ResourceMeta, Status},
     queue,
     resolver::{
         geo,
@@ -30,6 +30,7 @@ use std::{
 };
 use tokio::sync::Mutex;
 use tower::ServiceExt;
+mod common;
 
 #[derive(Clone, Default)]
 struct Mock {
@@ -137,6 +138,7 @@ async fn changes_of(app: &Router, id: &str) -> Value {
     assert_eq!(response.status(), 200);
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     let value: Value = serde_json::from_slice(&bytes).unwrap();
+    common::check_response("POST", "/v1/changes/lookup", 200, &value);
     value
 }
 async fn call(app: &Router, path: &str, etag: Option<&str>) -> (u16, HeaderMap, Value) {
@@ -153,6 +155,9 @@ async fn call(app: &Router, path: &str, etag: Option<&str>) -> (u16, HeaderMap, 
     let headers = response.headers().clone();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     let parsed: Option<Value> = serde_json::from_slice(&bytes).ok();
+    if let Some(value) = &parsed {
+        common::check_response("GET", path, status, value);
+    }
     let value = parsed.unwrap_or_else(|| json!(String::from_utf8_lossy(&bytes).to_string()));
     (status, headers, value)
 }
@@ -302,6 +307,15 @@ async fn fifty_one_jobs_two_calls_cache_refresh_and_separation(pool: PgPool) {
     assert_eq!(rows[0]["licence"], "ODbL-1.0");
     assert!(rows.iter().any(|r| r["name"] == "Berlin"));
     // Every line has exactly the documented fields; no internal column leaks.
+    let spec = serde_json::to_value(api::openapi_document()).unwrap();
+    let fields = |schema: &str| {
+        spec["components"]["schemas"][schema]["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+    };
     let keys = |row: &Value| {
         row.as_object()
             .unwrap()
@@ -309,38 +323,35 @@ async fn fifty_one_jobs_two_calls_cache_refresh_and_separation(pool: PgPool) {
             .cloned()
             .collect::<std::collections::BTreeSet<_>>()
     };
-    let set = |fields: &[&str]| {
-        fields
-            .iter()
-            .map(|s| s.to_string())
-            .collect::<std::collections::BTreeSet<_>>()
-    };
+    assert_eq!(keys(&rows[0]), fields("OsmDumpNotice"));
+    let place = fields("OsmDumpPlace");
     assert_eq!(
-        keys(&rows[0]),
-        set(&[
-            "attribution_url",
-            "licence",
-            "licence_url",
-            "notice",
-            "table"
-        ])
+        place.iter().map(String::as_str).collect::<Vec<_>>(),
+        [
+            "address",
+            "bbox",
+            "category",
+            "display_name",
+            "fetched_at",
+            "name",
+            "osm_id",
+            "osm_type",
+            "point",
+            "status",
+            "tags",
+            "type",
+            "type_path",
+            "versions"
+        ],
+        "the public dump line format changed"
     );
-    let place = set(&[
-        "address",
-        "bbox",
-        "category",
-        "display_name",
-        "fetched_at",
-        "name",
-        "osm_id",
-        "osm_type",
-        "point",
-        "status",
-        "tags",
-        "type",
-        "type_path",
-        "versions",
-    ]);
+    let required = spec["components"]["schemas"]["OsmDumpPlace"]["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k.as_str().unwrap().to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(required, place, "every field is on every line");
     for row in &rows[1..] {
         assert_eq!(keys(row), place, "{row}");
     }
@@ -376,7 +387,7 @@ async fn fifty_one_jobs_two_calls_cache_refresh_and_separation(pool: PgPool) {
     server.abort();
 }
 #[sqlx::test(migrations = "../../migrations")]
-async fn unknown_objects_are_missing_429_defers_and_carry_their_category(pool: PgPool) {
+async fn unknown_objects_are_missing_429_defers_and_category_filters(pool: PgPool) {
     let (state, resolver, server) = mock(&pool).await;
     let uri = "https://www.openstreetmap.org/node/111";
     assert_eq!(resolver.resolve(uri).await.unwrap().status, Status::Missing);
@@ -408,11 +419,21 @@ async fn unknown_objects_are_missing_429_defers_and_carry_their_category(pool: P
     let id = store::ensure_resource(&pool, uri).await.unwrap();
     let doc = resolver.resolve(uri).await.unwrap();
     store::save_document(&pool, &id, 0, &doc).await.unwrap();
-    assert_eq!(doc.category.as_deref(), Some("place/city"));
+    reference(&pool, &id, "city").await;
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (status, _, found) = call(
+        &app,
+        "/v1/search?bbox=13,52,14,53&type=Place&category=place%2Fcity&q=Berlin&facet=tags",
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{found}");
+    assert_eq!(found["items"][0]["id"], id.as_str());
+    assert_eq!(found["facets"]["tags"][0]["count"], 1);
     server.abort();
 }
 #[sqlx::test(migrations = "../../migrations")]
-async fn geo_is_final(pool: PgPool) {
+async fn geo_is_final_and_sql_h3_agrees_with_h3o(pool: PgPool) {
     let uri = "geo:46.0051,8.9528,20;crs=wgs84;u=5";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
     let job = queue::claim(&pool, "geo", &QueueConfig::default())
@@ -438,7 +459,225 @@ async fn geo_is_final(pool: PgPool) {
         .await
         .unwrap()
         .is_none());
+    for res in 0u8..=11 {
+        let sql: String =
+            sqlx::query_scalar("SELECT h3_latlng_to_cell(point(8.9528,46.0051),$1)::text")
+                .bind(i32::from(res))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let rust = h3o::LatLng::new(46.0051, 8.9528)
+            .unwrap()
+            .to_cell(res.try_into().unwrap())
+            .to_string();
+        assert_eq!(sql, rust);
+    }
 }
+#[sqlx::test(migrations = "../../migrations")]
+async fn viewport_distance_time_facets_clustering_and_etag(pool: PgPool) {
+    let mut ids = Vec::new();
+    for (i, (lat, lon)) in [
+        (46.0, 8.0),
+        (46.001, 8.001),
+        (46.002, 8.002),
+        (47.0, 9.0),
+        (0.0, 179.9),
+        (0.0, -179.9),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let uri = format!("geo:{lat:.5},{lon:.5}");
+        let id = store::ensure_resource(&pool, &uri).await.unwrap();
+        let doc = geo::parse(&uri).unwrap();
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+        reference(&pool, &id, if i < 4 { "swiss" } else { "dateline" }).await;
+        ids.push(id);
+    }
+    for (i, date) in ["2026-10-15T12:00:00Z", "2026-10-16T12:00:00Z"]
+        .into_iter()
+        .enumerate()
+    {
+        let uri = format!("https://example.org/event/{i}");
+        let id = store::ensure_resource(&pool, &uri).await.unwrap();
+        let mut doc = ResourceMeta::new(&uri, "web", 86400);
+        doc.set_type("MusicEvent");
+        doc.start = Some(date.parse().unwrap());
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+        reference(&pool, &id, "music").await;
+    }
+    let (mock, resolver, server) = mock(&pool).await;
+    let uri = "https://www.openstreetmap.org/node/240109189";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let doc = resolver.resolve(uri).await.unwrap();
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    reference(&pool, &id, "berlin").await;
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (status, headers, view) = call(
+        &app,
+        "/v1/search?bbox=5,45,11,48&type=Place&facet=tags",
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{view}");
+    assert_eq!(view["items"].as_array().unwrap().len(), 4);
+    assert!(view["items"][0]["point"].is_object());
+    assert_eq!(view["facets"]["tags"][0]["count"], 4);
+    assert_eq!(headers["cache-control"], "public, max-age=30");
+    let etag = headers["etag"].to_str().unwrap();
+    assert_eq!(
+        call(
+            &app,
+            "/v1/search?bbox=5,45,11,48&type=Place&facet=tags",
+            Some(etag)
+        )
+        .await
+        .0,
+        304
+    );
+    sqlx::query("UPDATE resource SET resolved_at=now() WHERE id=$1")
+        .bind(&ids[0])
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        call(
+            &app,
+            "/v1/search?bbox=5,45,11,48&type=Place&facet=tags",
+            Some(etag)
+        )
+        .await
+        .0,
+        200
+    );
+    let (_, _, view) = call(&app, "/v1/search?bbox=170,-10,-170,10&facet=tags", None).await;
+    assert_eq!(view["items"].as_array().unwrap().len(), 2);
+    assert_eq!(view["facets"]["tags"][0]["label"], "dateline");
+    let (status, _, view) = call(
+        &app,
+        "/v1/search?near=46,8&radius=1000&sort=distance&limit=1&facet=tags",
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{view}");
+    assert_eq!(view["items"][0]["id"], ids[0]);
+    assert_eq!(view["facets"]["tags"][0]["count"], 3);
+    let cursor = view["cursor"].as_str().unwrap();
+    let (_, _, next) = call(
+        &app,
+        &format!(
+            "/v1/search?near=46,8&radius=1000&sort=distance&limit=1&facet=tags&cursor={cursor}"
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(next["items"][0]["id"], ids[1]);
+    let (status, _, view) = call(
+        &app,
+        "/v1/search?from=2026-10-15T12:00:00Z&to=1792065600000&sort=start&type=Event",
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{view}");
+    assert_eq!(view["items"].as_array().unwrap().len(), 1);
+    let (_, _, view) = call(&app, "/v1/search?sort=start&limit=1", None).await;
+    assert!(view["items"][0]["uri"].as_str().unwrap().ends_with("/0"));
+    let cursor = view["cursor"].as_str().unwrap();
+    let (_, _, view) = call(
+        &app,
+        &format!("/v1/search?sort=start&limit=1&cursor={cursor}"),
+        None,
+    )
+    .await;
+    assert!(view["items"][0]["uri"].as_str().unwrap().ends_with("/1"));
+    let (status, _, view) = call(
+        &app,
+        "/v1/search?bbox=5,45,11,48&cluster=8&type=Place&limit=2&facet=tags",
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{view}");
+    assert_eq!(view["truncated"], false);
+    let clusters = view["clusters"].as_array().unwrap();
+    let points = view["points"].as_array().unwrap();
+    assert_eq!(
+        clusters
+            .iter()
+            .map(|c| c["count"].as_u64().unwrap())
+            .sum::<u64>()
+            + points.len() as u64,
+        4
+    );
+    assert_eq!(view["total"], 4);
+    assert!(clusters
+        .iter()
+        .all(|c| c["top"].as_array().unwrap().len() <= 3));
+    assert!((clusters[0]["lat"].as_f64().unwrap() - 46.001).abs() < 1e-6);
+    let (_, _, view) = call(
+        &app,
+        "/v1/search?bbox=5,45,11,48&cluster=8&type=Place&limit=50",
+        None,
+    )
+    .await;
+    assert_eq!(view["clusters"], json!([]));
+    assert_eq!(view["points"].as_array().unwrap().len(), 4);
+    assert!(view["points"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|point| point.get("score").is_none()));
+    let (_, _, view) = call(
+        &app,
+        "/v1/search?bbox=13,52,14,53&type=Place&facet=tags",
+        None,
+    )
+    .await;
+    assert_eq!(
+        view["items"][0]["uri"],
+        "https://www.openstreetmap.org/node/240109189"
+    );
+    assert_eq!(view["items"][0]["attribution"], osm::ATTRIBUTION);
+    assert!(view["items"][0]["point"].is_object());
+    assert_eq!(mock.calls.lock().await.len(), 1);
+    for query in [
+        "bbox=0,0,1,1&near=0,0&radius=10",
+        "near=0,0&radius=200001",
+        "near=91,0&radius=1",
+        "near=0,0&radius=NaN",
+        "bbox=0,0,1,1&cluster=NaN",
+        "bbox=0,0,1,1&cluster=8&cursor=abc",
+        "from=2027-01-01T00:00:00Z&to=2026-01-01T00:00:00Z",
+    ] {
+        assert_eq!(
+            call(&app, &format!("/v1/search?{query}"), None).await.0,
+            400,
+            "{query}"
+        );
+    }
+    let (status, _, limited) =
+        call(&app, "/v1/search?bbox=5,45,11,48&cluster=8&limit=1", None).await;
+    assert_eq!(status, 200, "{limited}");
+    assert_eq!(limited["truncated"], true);
+    let (_, before, _) = call(&app, "/v1/search?bbox=5,45,11,48&facet=tags", None).await;
+    sqlx::query(
+        "INSERT INTO feed_cursor(nexus,cursor,epoch,feed_length) VALUES('test',1,'epoch',1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        call(
+            &app,
+            "/v1/search?bbox=5,45,11,48&facet=tags",
+            Some(before["etag"].to_str().unwrap())
+        )
+        .await
+        .0,
+        200
+    );
+    server.abort();
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn osm_history_and_unconfirmed_fetches_stay_in_derivative_table(pool: PgPool) {
     let (state, resolver, server) = mock(&pool).await;
@@ -475,6 +714,9 @@ async fn osm_history_and_unconfirmed_fetches_stay_in_derivative_table(pool: PgPo
         "Synthetic renamed city"
     );
     store::save_document(&pool, &id, 0, &missing).await.unwrap();
+    let (_, _, spatial) = call(&app, "/v1/search?bbox=13,52,14,53", None).await;
+    assert_eq!(spatial["items"][0]["name"], "Synthetic renamed city");
+    assert_eq!(spatial["items"][0]["status"], "ok");
     // A cache hit of the same observation is not a second successful fetch.
     store::save_document(&pool, &id, 0, &resolver.resolve(uri).await.unwrap())
         .await

@@ -3,6 +3,7 @@ use crate::model::{LocationSource, Point, ResourceMeta};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use utoipa::ToSchema;
 
 pub mod adapters;
 pub mod calendar;
@@ -11,7 +12,7 @@ pub mod service;
 pub mod storage;
 pub mod time;
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
 pub struct EventFields {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tz: Option<String>,
@@ -41,7 +42,7 @@ pub struct EventFields {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub join_mode: Option<String>,
 }
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EventStatus {
     Scheduled,
@@ -76,14 +77,14 @@ impl EventStatus {
         }
     }
 }
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Attendance {
     Offline,
     Online,
     Mixed,
 }
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
 pub struct Venue {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -101,13 +102,13 @@ pub struct Venue {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location_source: Option<LocationSource>,
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct Organizer {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 }
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
 pub struct Offers {
     pub low_price: Option<f64>,
     pub high_price: Option<f64>,

@@ -38,6 +38,8 @@ pub struct Config {
     #[serde(skip)]
     pub grace_days: u32,
     #[serde(skip)]
+    pub search: SearchConfig,
+    #[serde(skip)]
     pub queue: QueueConfig,
     #[serde(skip)]
     pub preview: PreviewConfig,
@@ -133,6 +135,7 @@ impl Config {
             event: EventConfig::default(),
             geo: GeoConfig::default(),
             osm: OsmConfig::default(),
+            search: SearchConfig::default(),
             egress: EgressConfig::default(),
             queue: QueueConfig::default(),
             groups: Default::default(),
@@ -435,16 +438,45 @@ impl Default for OsmConfig {
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
+pub struct SearchConfig {
+    pub reach_timeout_secs: u64,
+    pub max_radius_m: f64,
+    pub h3_resolutions: Vec<u8>,
+    pub max_cluster_cells: usize,
+}
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            reach_timeout_secs: 5,
+            max_radius_m: 200_000.0,
+            h3_resolutions: (0u8..=22).map(|z| z.saturating_sub(4).min(11)).collect(),
+            max_cluster_cells: 10000,
+        }
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct ApiConfig {
     pub requests_per_minute: usize,
     #[serde(skip)]
     pub cache_capacity: usize,
+    #[serde(skip)]
+    pub reach_cost: usize,
+    /// Browser origins allowed to call the public listener (CORS): `["*"]` (any origin; the
+    /// public API takes no cookies or tokens), a list of `scheme://host[:port]` origins, or `[]`
+    /// to send no CORS headers. Never applied to the admin listener.
+    pub cors_allow_origins: Vec<String>,
+    /// Serve Swagger UI for the public document at `/swagger-ui` (as pubky-nexus does).
+    pub swagger_ui: bool,
 }
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
             requests_per_minute: 120,
             cache_capacity: 10000,
+            reach_cost: 6,
+            cors_allow_origins: vec!["*".into()],
+            swagger_ui: true,
         }
     }
 }
@@ -534,6 +566,22 @@ impl Config {
             }
         }
         self.cards.validate()?;
+        let origins = &self.api.cors_allow_origins;
+        if origins.iter().any(|o| o == "*") && origins.len() > 1 {
+            bail!("api.cors_allow_origins: \"*\" must be the only entry");
+        }
+        for origin in origins.iter().filter(|o| *o != "*") {
+            // Origins are exact: the url crate accepts `*` in a host, which would never match.
+            let valid = !origin.contains('*')
+                && url::Url::parse(origin).is_ok_and(|u| {
+                    matches!(u.scheme(), "http" | "https")
+                        && u.host_str().is_some()
+                        && u.origin().ascii_serialization() == *origin
+                });
+            if !valid {
+                bail!("api.cors_allow_origins: {origin:?} is not an origin (scheme://host[:port], no path or trailing slash)");
+            }
+        }
         let admin: std::net::SocketAddr =
             self.admin_listen.parse().context("invalid admin_listen")?;
         if self.admin_token.as_ref().is_some_and(|t| {
@@ -627,10 +675,18 @@ impl Config {
             || self.osm.dump_dir.trim().is_empty()
             || !(1..=168).contains(&self.osm.dump_every_hours)
             || !(1..=1000).contains(&self.osm.dump_downloads_per_hour)
+            || !(122..=100000).contains(&self.search.max_cluster_cells)
             || !(1..=10000).contains(&self.api.requests_per_minute)
             || !(2..=100000).contains(&self.api.cache_capacity)
+            || !(2..=100).contains(&self.api.reach_cost)
+            || !(1..=60).contains(&self.search.reach_timeout_secs)
+            || !self.search.max_radius_m.is_finite()
+            || !(1.0..=200_000.0).contains(&self.search.max_radius_m)
+            || self.search.h3_resolutions.is_empty()
+            || self.search.h3_resolutions.len() > 31
+            || self.search.h3_resolutions.iter().any(|r| *r > 11)
         {
-            bail!("invalid OSM or API budget (public Nominatim maximum 1 request/s)");
+            bail!("invalid OSM or spatial budget (public Nominatim maximum 1 request/s)");
         }
         for r in [&self.web, &self.pubky] {
             if r.concurrency == 0
@@ -897,6 +953,8 @@ mod tests {
                 "{key} is a limit, not an operator choice"
             );
         }
+        assert!(text.lines().any(|l| l == r#"cors_allow_origins = ["*"]"#));
+        assert_eq!(config.api.cors_allow_origins, ["*"]);
         assert_eq!(
             config.event.utc_series_wall_clock,
             UtcSeriesWallClock::XWrTimezone
@@ -904,11 +962,17 @@ mod tests {
         assert!(toml::from_str::<Config>("[event]\nutc_series_wall_clock = \"always\"\n").is_err());
     }
     #[test]
-    fn ingest_limits_have_safe_defaults_and_config_bounds() {
+    fn reach_and_ingest_limits_have_safe_defaults_and_config_bounds() {
         let config = Config::default();
+        assert_eq!(config.search.reach_timeout_secs, 5);
+        assert_eq!(config.api.reach_cost, 6);
         assert_eq!(config.ingest.max_label_bytes, 128);
         assert_eq!(config.ingest.max_object_path_bytes, 2048);
         for (key, value) in [
+            ("reach_timeout_secs", 0),
+            ("reach_timeout_secs", 61),
+            ("reach_cost", 1),
+            ("reach_cost", 101),
             ("max_label_bytes", 0),
             ("max_label_bytes", 1025),
             ("max_object_path_bytes", 0),
@@ -1020,8 +1084,18 @@ limits! {
     osm_dump_every_hours: u64 = |c| c.osm.dump_every_hours => [|c, v| c.osm.dump_every_hours = v],
     /// ODbL dump downloads per hour per client address.
     osm_dump_downloads_per_hour: usize = |c| c.osm.dump_downloads_per_hour => [|c, v| c.osm.dump_downloads_per_hour = v],
+    /// Nexus reach deadline per search (seconds).
+    reach_timeout_secs: u64 = |c| c.search.reach_timeout_secs => [|c, v| c.search.reach_timeout_secs = v],
+    /// Largest `near` radius (metres).
+    max_radius_m: f64 = |c| c.search.max_radius_m => [|c, v| c.search.max_radius_m = v],
+    /// H3 resolution per map zoom level.
+    h3_resolutions: Vec<u8> = |c| c.search.h3_resolutions.clone() => [|c, v| c.search.h3_resolutions = v],
+    /// Most cells one cluster query returns.
+    max_cluster_cells: usize = |c| c.search.max_cluster_cells => [|c, v| c.search.max_cluster_cells = v],
     /// API response cache entries.
     api_cache_capacity: usize = |c| c.api.cache_capacity => [|c, v| c.api.cache_capacity = v],
+    /// Budget units a reach search costs.
+    reach_cost: usize = |c| c.api.reach_cost => [|c, v| c.api.reach_cost = v],
     /// Preview requests per minute per client.
     preview_requests_per_minute: usize = |c| c.preview.requests_per_minute => [|c, v| c.preview.requests_per_minute = v],
     /// Preview requests per minute per URI.

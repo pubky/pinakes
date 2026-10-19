@@ -466,9 +466,10 @@ async fn walls_are_unreachable_with_normal_backoff_and_keep_their_facts(pool: Pg
             serde_json::from_slice::<serde_json::Value>(&body).unwrap()
         }
     };
-    let found = get(format!("/v1/resources/{id}")).await;
-    assert_eq!(found["status"], "unreachable", "{found}");
-    assert_eq!(found["name"], "Accepted event");
+    let found = get("/v1/search?tags=news".into()).await;
+    assert_eq!(found["items"][0]["id"], id.as_str(), "{found}");
+    assert_eq!(found["items"][0]["status"], "unreachable");
+    assert_eq!(found["items"][0]["name"], "Accepted event");
     d.fetched_at += 1;
     store::save_document(&pool, &id, 0, &d).await.unwrap();
     assert_eq!(get(format!("/v1/resources/{id}")).await["status"], "ok");

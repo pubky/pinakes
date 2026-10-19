@@ -3061,7 +3061,7 @@ fn nested_flight_and_nuxt_share_one_deadline() {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn alias_references_scope_occurrence_reads(pool: PgPool) {
+async fn alias_references_scope_search_and_occurrence_reads(pool: PgPool) {
     use pinakes_core::api::{self, AppState};
     use tower::ServiceExt;
     let alias_uri = "https://api.btcmap.org/v4/events?variant=one";
@@ -3075,7 +3075,10 @@ async fn alias_references_scope_occurrence_reads(pool: PgPool) {
     let doc = snapshot(root_uri, 3, Utc::now().timestamp_millis());
     store::save_document(&pool, &root, 0, &doc).await.unwrap();
     let app = api::router(AppState::new(pool.clone(), Default::default()).unwrap());
-    for path in [format!("/v1/resources/{alias}/occurrences?limit=2")] {
+    for path in [
+        format!("/v1/resources/{alias}/occurrences?limit=2"),
+        "/v1/search?type=Event&tags=review&facet=tags".into(),
+    ] {
         let r = app
             .clone()
             .oneshot(

@@ -2,8 +2,9 @@
 use crate::model::{identity, ResourceMeta};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::LazyLock};
+use utoipa::ToSchema;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TenantRule {
     Subdomain,
@@ -16,7 +17,7 @@ pub enum TenantRule {
     /// first listed query parameter present scopes the tenant (`embed?src=`).
     Path(PathRule),
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PathRule {
     pub segment: usize,
@@ -94,7 +95,7 @@ pub fn valid_stored(key: &GroupKey) -> bool {
         )
         && key.target.as_ref().is_none_or(|s| s.len() <= 2048)
 }
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq)]
 pub struct GroupKey {
     pub key: String,
     pub basis: String,

@@ -5,11 +5,12 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::OnceLock,
 };
+use utoipa::ToSchema;
 
 pub const DOCUMENT_CAP: usize = 8192;
 pub const ATTRIBUTE_CAP: usize = 32;
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
     Ok,
@@ -30,12 +31,12 @@ impl Status {
         }
     }
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct Point {
     pub lat: f64,
     pub lon: f64,
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LocationSource {
     Uri,
@@ -43,13 +44,13 @@ pub enum LocationSource {
     Page,
     Geocoded,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize, Serialize, ToSchema)]
 pub struct OsmId {
     #[serde(rename = "type")]
     pub osm_type: String,
     pub id: i64,
 }
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
 pub struct ResourceMeta {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_keys: Vec<crate::group_keys::GroupKey>,
@@ -57,6 +58,7 @@ pub struct ResourceMeta {
     pub event: crate::event::EventFields,
     /// A resolution result, never embedded in the bounded resource document.
     #[serde(skip)]
+    #[schema(ignore)]
     pub container: Option<Box<crate::event::Container>>,
     #[serde(rename = "type")]
     pub type_name: String,
