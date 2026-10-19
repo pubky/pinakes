@@ -494,8 +494,13 @@ pub fn without_addresses(text: &str) -> String {
 /// Markdown as plain text for a 200-character excerpt: images, heading and quote marks, emphasis
 /// and code marks dropped, links kept as their text.
 pub fn markdown_excerpt(markdown: &str) -> String {
+    // 2 KB is ample for 200 characters, and bounds the work on any input.
+    let mut end = markdown.len().min(2048);
+    while !markdown.is_char_boundary(end) {
+        end -= 1;
+    }
     let mut out = String::new();
-    for line in markdown.lines() {
+    for line in markdown[..end].lines() {
         let line = line.trim().trim_start_matches(['#', '>']).trim();
         if line.is_empty() || line.starts_with("![") {
             continue;
@@ -508,6 +513,7 @@ pub fn markdown_excerpt(markdown: &str) -> String {
             break;
         }
     }
+    let out = without_addresses(&out);
     let mut cut = out.chars().take(200).collect::<String>();
     if cut.len() < out.len() {
         cut.push('…');
@@ -884,6 +890,21 @@ mod tests {
             "Release highlights - Filter Gallery: see the docs and code"
         );
         assert_eq!(markdown_excerpt("a ](b) [c"), "a ](b) [c");
+        // Hostile input costs no more than its first 2 KB.
+        for hostile in [
+            "[]()".repeat(262_144),
+            "[a](b)".repeat(174_763),
+            "é".repeat(600_000),
+        ] {
+            let start = std::time::Instant::now();
+            let excerpt = markdown_excerpt(&hostile);
+            assert!(
+                start.elapsed() < std::time::Duration::from_millis(200),
+                "{:?}",
+                start.elapsed()
+            );
+            assert!(excerpt.chars().count() <= 201);
+        }
         assert_eq!(
             without_addresses("Mail <ann@example.org> or mailto:bob@x.org, not @user@host or a@b"),
             "Mail or not @user@host or a@b"
