@@ -73,6 +73,37 @@ test('lookups only POST /v1/resolve and GET resources, paced and bounded', async
   assert.ok(calls.filter(([, key]) => key.startsWith('GET /v1/resources/d')).length <= 3, 'polling stops at the deadline');
 });
 
+test('an entry with derived waits for those services among its derived links', async () => {
+  let clock = 0;
+  const book = { id: 'b', status: 'ok', type: 'Book', also_on: [] };
+  const reads = {
+    b: [
+      { ...book, also_on: [{ id: 'x', uri: 'isbn:0140328726', site: null }] },
+      { ...book, also_on: [{ uri: 'https://openlibrary.org/books/OL7353617M', site: 'Open Library', derived: true, via: 'openlibrary' }] },
+    ],
+  };
+  const fetch = async (url, init = {}) => {
+    const { pathname } = new URL(url);
+    if (init.method === 'POST') {
+      const uri = JSON.parse(init.body).uri;
+      return { status: 200, json: async () => (uri.startsWith('isbn') ? book : { id: 'f', status: 'ok', type: 'Movie', also_on: [] }) };
+    }
+    const id = pathname.split('/').pop();
+    const body = id === 'b' ? (reads.b.length > 1 ? reads.b.shift() : reads.b[0]) : { id: 'f', status: 'ok', type: 'Movie', also_on: [] };
+    return { status: 200, json: async () => body };
+  };
+  validateEntries([{ kind: 'isbn', uri: 'isbn:9780140328721', derived: ['Open Library'] }]);
+  assert.throws(() => validateEntries([{ kind: 'x', uri: 'x', derived: [] }]), /derived/);
+  const rows = await lookupAll([
+    { kind: 'isbn', uri: 'isbn:9780140328721', type: 'Book', derived: ['Open Library'] },
+    { kind: 'film', uri: 'https://www.imdb.com/title/tt0111161/', derived: ['Letterboxd'] },
+  ], { base: 'http://127.0.0.1:8090', timeoutSecs: 3, fetch, now: () => clock, sleep: async ms => { clock += ms; } });
+  assert.deepEqual(rows.map(r => [r.kind, r.derived, r.problem]), [
+    ['isbn', ['Open Library'], null],
+    ['film', [], 'no derived link on Letterboxd'],
+  ]);
+});
+
 test('the curated list is valid and covers every resolver kind', async () => {
   const entries = validateEntries(JSON.parse(await readFile(new URL('./samples.lookup.json', import.meta.url), 'utf8')));
   const kinds = new Set(entries.map(e => e.kind));

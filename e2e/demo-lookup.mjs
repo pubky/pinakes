@@ -1,6 +1,7 @@
 // Read-only demo and resolver regression check: POST /v1/resolve for a curated list of public
-// URIs, poll each resource until it is no longer pending, print one table row per entry and
-// exit non-zero on any mismatch. Never writes to Pubky or Nexus.
+// URIs, poll each resource until it is no longer pending (and, for an entry with `derived`, until
+// those services appear among its derived also-on links), print one table row per entry and exit
+// non-zero on any mismatch. Never writes to Pubky or Nexus.
 import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
@@ -42,6 +43,10 @@ export function validateEntries(entries) {
         throw new Error(`${e.kind}: ${key} must be a string or a non-empty list of strings`);
       }
     }
+    const d = e.derived;
+    if (d !== undefined && !(Array.isArray(d) && d.length && d.every(x => typeof x === 'string'))) {
+      throw new Error(`${e.kind}: derived must be a non-empty list of service names`);
+    }
   }
   return entries;
 }
@@ -56,8 +61,13 @@ export function verdict(entry, row) {
   // A type matches itself or any ancestor (Place accepts Restaurant).
   if (!accepts(entry.type, ...ancestors(row.type))) problems.push(`type ${row.type ?? '-'} ≠ ${[entry.type].flat().join('|')}`);
   if (!accepts(entry.status, row.status)) problems.push(`status ${row.status} ≠ ${[entry.status].flat().join('|')}`);
+  const missing = (entry.derived ?? []).filter(site => !(row.derived ?? []).includes(site));
+  if (missing.length) problems.push(`no derived link on ${missing.join(', ')}`);
   return problems.join('; ') || null;
 }
+
+// The services a resource's derived also-on links are on.
+const derivedSites = view => [...new Set((view?.also_on ?? []).filter(e => e.derived).map(e => e.site))].sort();
 
 export function toRow(entry, view) {
   const group = view?.group;
@@ -68,6 +78,7 @@ export function toRow(entry, view) {
     site: view?.site ?? null,
     status: view?.status ?? null,
     group: group?.id ? `${group.id.slice(0, 8)}×${group.size ?? 0}` : null,
+    derived: view?.also_on ? derivedSites(view) : null,
   };
 }
 
@@ -105,12 +116,15 @@ export async function lookupAll(entries, { base, timeoutSecs, fetch = globalThis
       if (response.status !== 200 && response.status !== 202) throw new Error(`resolve HTTP ${response.status}${body.error ? `: ${body.error}` : ''}`);
       let view = body;
       const deadline = now() + timeoutSecs * 1000;
-      while (view.status === 'pending' && now() < deadline) {
+      // Derived links come from the also-on worker after the card is saved: the full read
+      // (GET) lists them all, so an entry expecting some is read until they appear.
+      const done = v => v.status !== 'pending' && (!entry.derived || (v.read && entry.derived.every(s => derivedSites(v).includes(s))));
+      while (!done(view) && now() < deadline) {
         await sleep(pollMs);
         const poll = await fetch(`${base}/v1/resources/${view.id}`);
         if (poll.status === 429) continue;
         if (poll.status !== 200) throw new Error(`resource HTTP ${poll.status}`);
-        view = await poll.json();
+        view = { ...(await poll.json()), read: true };
       }
       row = toRow(entry, view);
     } catch (error) {

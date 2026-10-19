@@ -7,7 +7,7 @@
   {"kind": "web", "uri": "https://example.org/", "type": "WebPage", "status": "ok"},
   {"kind": "doi", "uri": "doi:10.1038/nature12373", "type": "ScholarlyArticle", "status": "ok"},
   {"kind": "doi_page", "uri": "https://www.nature.com/articles/nature12373", "type": "ScholarlyArticle", "status": "ok"},
-  {"kind": "isbn", "uri": "isbn:9780140328721", "type": "Book", "status": "ok"},
+  {"kind": "isbn", "uri": "isbn:9780140328721", "type": "Book", "status": "ok", "derived": ["Open Library", "Amazon"]},
   {"kind": "isbn_page", "uri": "https://openlibrary.org/books/OL7353617M", "type": "CreativeWork", "status": "ok"},
   {"kind": "youtube", "uri": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "type": "VideoObject", "status": "ok"},
   {"kind": "vimeo", "uri": "https://vimeo.com/76979871", "type": "VideoObject", "status": "ok"},
@@ -19,5 +19,9 @@
   {"kind": "meetup", "uri": "https://www.meetup.com/bitcoin-meetup-switzerland/events/316894744/", "type": "Event", "status": "ok"},
   {"kind": "btcmap", "uri": "https://api.btcmap.org/v4/events/143", "type": "Event", "status": "ok"},
   {"kind": "ics", "uri": "https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics", "type": "DataFeed", "status": "ok"},
-  {"kind": "activitypub_note", "uri": "https://mastodon.social/@Gargron/1", "type": "SocialMediaPosting", "status": "ok"}
+  {"kind": "activitypub_note", "uri": "https://mastodon.social/@Gargron/1", "type": "SocialMediaPosting", "status": "ok"},
+  {"kind": "podcast_apple", "uri": "https://podcasts.apple.com/us/podcast/the-daily/id1200361736", "type": "CreativeWork", "status": "ok", "derived": ["Apple Podcasts", "Pocket Casts", "Spotify"]},
+  {"kind": "podcast_feed", "uri": "https://einundzwanzig.space/feed.xml", "type": "PodcastSeries", "status": "ok"},
+  {"kind": "film_imdb", "uri": "https://www.imdb.com/title/tt0111161/", "type": "CreativeWork", "status": "ok", "derived": ["TMDB", "Letterboxd"]},
+  {"kind": "series_tvmaze", "uri": "https://www.tvmaze.com/shows/169/breaking-bad", "type": "CreativeWork", "status": "ok", "derived": ["IMDb", "TMDB"]}
 ]
