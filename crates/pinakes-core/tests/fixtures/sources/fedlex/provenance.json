@@ -1,0 +1,79 @@
+{
+  "dossier_19995395": {
+    "accept": "application/sparql-results+json",
+    "bytes": 316,
+    "content_type": "application/sparql-results+json",
+    "file": "dossier_19995395.json",
+    "note": "SPARQL GET; query text in queries.json",
+    "recorded_at": "2026-10-19T16:22:55+00:00",
+    "sha256": "81a84ba0575bc8f89219d420f5efcae059c965ad635076ad9dcff9edd7f57be3",
+    "status": 200,
+    "url": "https://fedlex.data.admin.ch/sparqlendpoint?query=PREFIX%20jolux%3A%20%3Chttp%3A%2F%2Fdata.legilux.public.lu%2Fresource%2Fontology%2Fjolux%23%3E%0APREFIX%20dcterms%3A%20%3Chttp%3A%2F%2Fpurl.org%2Fdc%2Fterms%2F%3E%0ASELECT%20DISTINCT%20%3Fact%20%3Fstatus%20WHERE%20%7B%0A%20%20%3Fact%20dcterms%3Aidentifier%20%2219995395%22%5E%5E%3Chttps%3A%2F%2Ffedlex.data.admin.ch%2Fdatatype%2Fdossier%3E%20%3B%20jolux%3AinForceStatus%20%3Fstatus%20.%0A%7D"
+  },
+  "eli_cc_1999_404": {
+    "accept": "application/sparql-results+json",
+    "bytes": 6137,
+    "content_type": "application/sparql-results+json",
+    "file": "eli_cc_1999_404.json",
+    "note": "SPARQL GET; query text in queries.json",
+    "recorded_at": "2026-10-19T16:22:43+00:00",
+    "sha256": "7e74559d9c11a7d3fc72db0e36c4bd7aaf5b88af93a36088b24d270494e95c2d",
+    "status": 200,
+    "url": "https://fedlex.data.admin.ch/sparqlendpoint?query=PREFIX%20jolux%3A%20%3Chttp%3A%2F%2Fdata.legilux.public.lu%2Fresource%2Fontology%2Fjolux%23%3E%0APREFIX%20skos%3A%20%3Chttp%3A%2F%2Fwww.w3.org%2F2004%2F02%2Fskos%2Fcore%23%3E%0APREFIX%20dcterms%3A%20%3Chttp%3A%2F%2Fpurl.org%2Fdc%2Fterms%2F%3E%0ASELECT%20DISTINCT%20%3Flang%20%3Ftitle%20%3Fshort%20%3Fsr%20%3FdateDocument%20%3FdateEntryInForce%20%3FlatestApplicability%20%3Fstatus%20%3FstatusLabel%20%3FtypeLabel%20%3Fdossier%20WHERE%20%7B%0A%20%20BIND%28%3Chttps%3A%2F%2Ffedlex.data.admin.ch%2Feli%2Fcc%2F1999%2F404%3E%20AS%20%3Fact%29%0A%20%20%3Fact%20jolux%3AisRealizedBy%20%3Fexpr%20.%0A%20%20%3Fexpr%20jolux%3Alanguage%20%3Flang%20%3B%20jolux%3Atitle%20%3Ftitle%20.%0A%20%20OPTIONAL%20%7B%20%3Fexpr%20jolux%3AtitleShort%20%3Fshort%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fact%20jolux%3AclassifiedByTaxonomyEntry%2Fskos%3Anotation%20%3Fsr%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fact%20jolux%3AdateDocument%20%3FdateDocument%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fact%20jolux%3AdateEntryInForce%20%3FdateEntryInForce%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fact%20dcterms%3Aidentifier%20%3Fdossier%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fact%20jolux%3AinForceStatus%20%3Fstatus%20.%20OPTIONAL%20%7B%20%3Fstatus%20skos%3AprefLabel%20%3FstatusLabel%20FILTER%28lang%28%3FstatusLabel%29%20%3D%20%22en%22%29%20%7D%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fact%20jolux%3AtypeDocument%20%3Ft%20.%20%3Ft%20skos%3AprefLabel%20%3FtypeLabel%20FILTER%28lang%28%3FtypeLabel%29%20%3D%20%22en%22%29%20%7D%0A%20%20OPTIONAL%20%7B%20SELECT%20%28MAX%28%3Fd%29%20AS%20%3FlatestApplicability%29%20WHERE%20%7B%0A%20%20%20%20%3Fcons%20jolux%3AisMemberOf%20%3Chttps%3A%2F%2Ffedlex.data.admin.ch%2Feli%2Fcc%2F1999%2F404%3E%20%3B%20jolux%3AdateApplicability%20%3Fd%20.%0A%20%20%20%20FILTER%28STR%28%3Fd%29%20%3C%3D%20SUBSTR%28STR%28NOW%28%29%29%2C%201%2C%2010%29%29%20%7D%20%7D%0A%7D"
+  },
+  "eli_cc_24_233_245_233": {
+    "accept": "application/sparql-results+json",
+    "bytes": 5813,
+    "content_type": "application/sparql-results+json",
+    "file": "eli_cc_24_233_245_233.json",
+    "note": "SPARQL GET; query text in queries.json",
+    "recorded_at": "2026-10-19T16:22:46+00:00",
+    "sha256": "d0b60e30ee68a1ff9cb7013ce853a7ca53922959452ec94464f0f2ac92f65a2e",
+    "status": 200,
+    "url": "https://fedlex.data.admin.ch/sparqlendpoint?query=PREFIX%20jolux%3A%20%3Chttp%3A%2F%2Fdata.legilux.public.lu%2Fresource%2Fontology%2Fjolux%23%3E%0APREFIX%20skos%3A%20%3Chttp%3A%2F%2Fwww.w3.org%2F2004%2F02%2Fskos%2Fcore%23%3E%0APREFIX%20dcterms%3A%20%3Chttp%3A%2F%2Fpurl.org%2Fdc%2Fterms%2F%3E%0ASELECT%20DISTINCT%20%3Flang%20%3Ftitle%20%3Fshort%20%3Fsr%20%3FdateDocument%20%3FdateEntryInForce%20%3FlatestApplicability%20%3Fstatus%20%3FstatusLabel%20%3FtypeLabel%20%3Fdossier%20WHERE%20%7B%0A%20%20BIND%28%3Chttps%3A%2F%2Ffedlex.data.admin.ch%2Feli%2Fcc%2F24%2F233_245_233%3E%20AS%20%3Fact%29%0A%20%20%3Fact%20jolux%3AisRealizedBy%20%3Fexpr%20.%0A%20%20%3Fexpr%20jolux%3Alanguage%20%3Flang%20%3B%20jolux%3Atitle%20%3Ftitle%20.%0A%20%20OPTIONAL%20%7B%20%3Fexpr%20jolux%3AtitleShort%20%3Fshort%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fact%20jolux%3AclassifiedByTaxonomyEntry%2Fskos%3Anotation%20%3Fsr%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fact%20jolux%3AdateDocument%20%3FdateDocument%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fact%20jolux%3AdateEntryInForce%20%3FdateEntryInForce%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fact%20dcterms%3Aidentifier%20%3Fdossier%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fact%20jolux%3AinForceStatus%20%3Fstatus%20.%20OPTIONAL%20%7B%20%3Fstatus%20skos%3AprefLabel%20%3FstatusLabel%20FILTER%28lang%28%3FstatusLabel%29%20%3D%20%22en%22%29%20%7D%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fact%20jolux%3AtypeDocument%20%3Ft%20.%20%3Ft%20skos%3AprefLabel%20%3FtypeLabel%20FILTER%28lang%28%3FtypeLabel%29%20%3D%20%22en%22%29%20%7D%0A%20%20OPTIONAL%20%7B%20SELECT%20%28MAX%28%3Fd%29%20AS%20%3FlatestApplicability%29%20WHERE%20%7B%0A%20%20%20%20%3Fcons%20jolux%3AisMemberOf%20%3Chttps%3A%2F%2Ffedlex.data.admin.ch%2Feli%2Fcc%2F24%2F233_245_233%3E%20%3B%20jolux%3AdateApplicability%20%3Fd%20.%0A%20%20%20%20FILTER%28STR%28%3Fd%29%20%3C%3D%20SUBSTR%28STR%28NOW%28%29%29%2C%201%2C%2010%29%29%20%7D%20%7D%0A%7D"
+  },
+  "eli_cc_27_317_321_377": {
+    "accept": "application/sparql-results+json",
+    "bytes": 6204,
+    "content_type": "application/sparql-results+json",
+    "file": "eli_cc_27_317_321_377.json",
+    "note": "SPARQL GET; query text in queries.json",
+    "recorded_at": "2026-10-19T16:22:49+00:00",
+    "sha256": "738660825a4661f7b2ac3135b91d006ad5098ade20df926ff9da3abd57c33c53",
+    "status": 200,
+    "url": "https://fedlex.data.admin.ch/sparqlendpoint?query=PREFIX%20jolux%3A%20%3Chttp%3A%2F%2Fdata.legilux.public.lu%2Fresource%2Fontology%2Fjolux%23%3E%0APREFIX%20skos%3A%20%3Chttp%3A%2F%2Fwww.w3.org%2F2004%2F02%2Fskos%2Fcore%23%3E%0APREFIX%20dcterms%3A%20%3Chttp%3A%2F%2Fpurl.org%2Fdc%2Fterms%2F%3E%0ASELECT%20DISTINCT%20%3Flang%20%3Ftitle%20%3Fshort%20%3Fsr%20%3FdateDocument%20%3FdateEntryInForce%20%3FlatestApplicability%20%3Fstatus%20%3FstatusLabel%20%3FtypeLabel%20%3Fdossier%20WHERE%20%7B%0A%20%20BIND%28%3Chttps%3A%2F%2Ffedlex.data.admin.ch%2Feli%2Fcc%2F27%2F317_321_377%3E%20AS%20%3Fact%29%0A%20%20%3Fact%20jolux%3AisRealizedBy%20%3Fexpr%20.%0A%20%20%3Fexpr%20jolux%3Alanguage%20%3Flang%20%3B%20jolux%3Atitle%20%3Ftitle%20.%0A%20%20OPTIONAL%20%7B%20%3Fexpr%20jolux%3AtitleShort%20%3Fshort%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fact%20jolux%3AclassifiedByTaxonomyEntry%2Fskos%3Anotation%20%3Fsr%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fact%20jolux%3AdateDocument%20%3FdateDocument%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fact%20jolux%3AdateEntryInForce%20%3FdateEntryInForce%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fact%20dcterms%3Aidentifier%20%3Fdossier%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fact%20jolux%3AinForceStatus%20%3Fstatus%20.%20OPTIONAL%20%7B%20%3Fstatus%20skos%3AprefLabel%20%3FstatusLabel%20FILTER%28lang%28%3FstatusLabel%29%20%3D%20%22en%22%29%20%7D%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fact%20jolux%3AtypeDocument%20%3Ft%20.%20%3Ft%20skos%3AprefLabel%20%3FtypeLabel%20FILTER%28lang%28%3FtypeLabel%29%20%3D%20%22en%22%29%20%7D%0A%20%20OPTIONAL%20%7B%20SELECT%20%28MAX%28%3Fd%29%20AS%20%3FlatestApplicability%29%20WHERE%20%7B%0A%20%20%20%20%3Fcons%20jolux%3AisMemberOf%20%3Chttps%3A%2F%2Ffedlex.data.admin.ch%2Feli%2Fcc%2F27%2F317_321_377%3E%20%3B%20jolux%3AdateApplicability%20%3Fd%20.%0A%20%20%20%20FILTER%28STR%28%3Fd%29%20%3C%3D%20SUBSTR%28STR%28NOW%28%29%29%2C%201%2C%2010%29%29%20%7D%20%7D%0A%7D"
+  },
+  "eli_missing_cc_1999_99999": {
+    "accept": "application/sparql-results+json",
+    "bytes": 247,
+    "content_type": "application/sparql-results+json",
+    "file": "eli_missing_cc_1999_99999.json",
+    "note": "SPARQL GET; query text in queries.json",
+    "recorded_at": "2026-10-19T16:22:51+00:00",
+    "sha256": "705399cb183085369568586f6718105601f5895c9869977bcd788d744fc1b5f3",
+    "status": 200,
+    "url": "https://fedlex.data.admin.ch/sparqlendpoint?query=PREFIX%20jolux%3A%20%3Chttp%3A%2F%2Fdata.legilux.public.lu%2Fresource%2Fontology%2Fjolux%23%3E%0APREFIX%20skos%3A%20%3Chttp%3A%2F%2Fwww.w3.org%2F2004%2F02%2Fskos%2Fcore%23%3E%0APREFIX%20dcterms%3A%20%3Chttp%3A%2F%2Fpurl.org%2Fdc%2Fterms%2F%3E%0ASELECT%20DISTINCT%20%3Flang%20%3Ftitle%20%3Fshort%20%3Fsr%20%3FdateDocument%20%3FdateEntryInForce%20%3FlatestApplicability%20%3Fstatus%20%3FstatusLabel%20%3FtypeLabel%20%3Fdossier%20WHERE%20%7B%0A%20%20BIND%28%3Chttps%3A%2F%2Ffedlex.data.admin.ch%2Feli%2Fcc%2F1999%2F99999%3E%20AS%20%3Fact%29%0A%20%20%3Fact%20jolux%3AisRealizedBy%20%3Fexpr%20.%0A%20%20%3Fexpr%20jolux%3Alanguage%20%3Flang%20%3B%20jolux%3Atitle%20%3Ftitle%20.%0A%20%20OPTIONAL%20%7B%20%3Fexpr%20jolux%3AtitleShort%20%3Fshort%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fact%20jolux%3AclassifiedByTaxonomyEntry%2Fskos%3Anotation%20%3Fsr%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fact%20jolux%3AdateDocument%20%3FdateDocument%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fact%20jolux%3AdateEntryInForce%20%3FdateEntryInForce%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fact%20dcterms%3Aidentifier%20%3Fdossier%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fact%20jolux%3AinForceStatus%20%3Fstatus%20.%20OPTIONAL%20%7B%20%3Fstatus%20skos%3AprefLabel%20%3FstatusLabel%20FILTER%28lang%28%3FstatusLabel%29%20%3D%20%22en%22%29%20%7D%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fact%20jolux%3AtypeDocument%20%3Ft%20.%20%3Ft%20skos%3AprefLabel%20%3FtypeLabel%20FILTER%28lang%28%3FtypeLabel%29%20%3D%20%22en%22%29%20%7D%0A%20%20OPTIONAL%20%7B%20SELECT%20%28MAX%28%3Fd%29%20AS%20%3FlatestApplicability%29%20WHERE%20%7B%0A%20%20%20%20%3Fcons%20jolux%3AisMemberOf%20%3Chttps%3A%2F%2Ffedlex.data.admin.ch%2Feli%2Fcc%2F1999%2F99999%3E%20%3B%20jolux%3AdateApplicability%20%3Fd%20.%0A%20%20%20%20FILTER%28STR%28%3Fd%29%20%3C%3D%20SUBSTR%28STR%28NOW%28%29%29%2C%201%2C%2010%29%29%20%7D%20%7D%0A%7D"
+  },
+  "sr_101": {
+    "accept": "application/sparql-results+json",
+    "bytes": 689,
+    "content_type": "application/sparql-results+json",
+    "file": "sr_101.json",
+    "note": "SPARQL GET; query text in queries.json",
+    "recorded_at": "2026-10-19T16:22:53+00:00",
+    "sha256": "c78d3e5415bd261292f73cd1606f4c8ca9b3158551576f37f029f219c39650f5",
+    "status": 200,
+    "url": "https://fedlex.data.admin.ch/sparqlendpoint?query=PREFIX%20jolux%3A%20%3Chttp%3A%2F%2Fdata.legilux.public.lu%2Fresource%2Fontology%2Fjolux%23%3E%0APREFIX%20skos%3A%20%3Chttp%3A%2F%2Fwww.w3.org%2F2004%2F02%2Fskos%2Fcore%23%3E%0ASELECT%20DISTINCT%20%3Fact%20%3Fstatus%20%3FstatusLabel%20WHERE%20%7B%0A%20%20%3Fact%20jolux%3AhistoricalLegalId%20%22101%22%20%3B%20jolux%3AinForceStatus%20%3Fstatus%20.%0A%20%20OPTIONAL%20%7B%20%3Fstatus%20skos%3AprefLabel%20%3FstatusLabel%20FILTER%28lang%28%3FstatusLabel%29%20%3D%20%22en%22%29%20%7D%0A%7D"
+  },
+  "sr_210": {
+    "accept": "application/sparql-results+json",
+    "bytes": 415,
+    "content_type": "application/sparql-results+json",
+    "file": "sr_210.json",
+    "note": "SPARQL GET; query text in queries.json",
+    "recorded_at": "2026-10-19T16:22:52+00:00",
+    "sha256": "35ff555203c9f142afe6f8721b471ae792e5c23ae2321e892763196a62544784",
+    "status": 200,
+    "url": "https://fedlex.data.admin.ch/sparqlendpoint?query=PREFIX%20jolux%3A%20%3Chttp%3A%2F%2Fdata.legilux.public.lu%2Fresource%2Fontology%2Fjolux%23%3E%0APREFIX%20skos%3A%20%3Chttp%3A%2F%2Fwww.w3.org%2F2004%2F02%2Fskos%2Fcore%23%3E%0ASELECT%20DISTINCT%20%3Fact%20%3Fstatus%20%3FstatusLabel%20WHERE%20%7B%0A%20%20%3Fact%20jolux%3AhistoricalLegalId%20%22210%22%20%3B%20jolux%3AinForceStatus%20%3Fstatus%20.%0A%20%20OPTIONAL%20%7B%20%3Fstatus%20skos%3AprefLabel%20%3FstatusLabel%20FILTER%28lang%28%3FstatusLabel%29%20%3D%20%22en%22%29%20%7D%0A%7D"
+  }
+}

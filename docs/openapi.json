@@ -1695,6 +1695,18 @@
                     "uri": "https://www.federalregister.gov/documents/2026/09/09/2026-18291/self-regulatory-organizations-nasdaq-texas-llc-notice-of-filing-and-order-granting-accelerated"
                   }
                 },
+                "resolve-fedlex-1": {
+                  "summary": "https://www.fedlex.admin.ch/eli/cc/1999/404/de",
+                  "value": {
+                    "uri": "https://www.fedlex.admin.ch/eli/cc/1999/404/de"
+                  }
+                },
+                "resolve-fedlex-2": {
+                  "summary": "https://www.fedlex.admin.ch/eli/cc/24/233_245_233/fr",
+                  "value": {
+                    "uri": "https://www.fedlex.admin.ch/eli/cc/24/233_245_233/fr"
+                  }
+                },
                 "resolve-fixr-co-event-halloween-2026-welcome-to-the-haunted-hotel-ti": {
                   "summary": "https://fixr.co/event/halloween-2026-welcome-to-the-haunted-hotel-tickets-404456056",
                   "value": {

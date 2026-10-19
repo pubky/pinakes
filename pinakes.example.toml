@@ -61,6 +61,8 @@ enabled = true
 enabled = true
 [sources.federal_register]
 enabled = true
+[sources.fedlex]
+enabled = true
 [sources.gleif]
 enabled = true
 [sources.legislation_gov_uk]

@@ -1,0 +1,4 @@
+
+{ "head": { "link": [], "vars": ["act", "status"] },
+  "results": { "distinct": false, "ordered": true, "bindings": [
+    { "act": { "type": "uri", "value": "https://fedlex.data.admin.ch/eli/cc/1999/404" }	, "status": { "type": "uri", "value": "https://fedlex.data.admin.ch/vocabulary/enforcement-status/0" }} ] } }

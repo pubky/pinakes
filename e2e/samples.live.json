@@ -97,6 +97,11 @@
     "type": "Legislation"
   },
   {
+    "kind": "fedlex",
+    "uri": "https://www.fedlex.admin.ch/eli/cc/1999/404/de",
+    "type": "Legislation"
+  },
+  {
     "kind": "web",
     "uri": "https://example.org/",
     "type": "WebPage"
