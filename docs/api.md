@@ -47,7 +47,10 @@ before rendering them as HTML.
 A music link is typed by what it is, whatever the service's page or player calls it: a track is a
 `MusicRecording`, an album a `MusicAlbum`, an artist a `MusicGroup` (a `Person` from the next
 refresh after MusicBrainz says the artist is one) and a playlist a `MusicPlaylist`, on every
-service ([music service links](#aliases)). A video stays a `VideoObject`.
+service ([music service links](#aliases)). A video stays a `VideoObject`. The card's `site` is the
+service's name (`Spotify`, `Apple Music`, `TIDAL`, `YouTube`, …), as derived links show it, in
+any page language. A Bandcamp root or `/music` page features an album but is the artist's page: a
+`MusicGroup` named after the artist, without the album's description.
 
 ### Card
 

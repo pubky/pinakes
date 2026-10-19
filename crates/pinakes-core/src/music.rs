@@ -309,8 +309,8 @@ pub fn parse(uri: &str) -> Option<Link> {
 /// says: a track is a `MusicRecording`, an album a `MusicAlbum`, an artist a `MusicGroup` (a
 /// `Person` when MusicBrainz says the artist is one: `artist_type`), a playlist a
 /// `MusicPlaylist`; a video stays as resolved. The card's site is the service's name ("Apple
-/// Music", "TIDAL", "YouTube"), as derived links show it. A card that did not resolve is left
-/// alone.
+/// Music", "TIDAL", "YouTube"), as derived links show it. A Bandcamp root (an artist page that
+/// features an album) is named after the artist. A card that did not resolve is left alone.
 pub fn type_card(uri: &str, artist_type: Option<&str>, doc: &mut crate::model::ResourceMeta) {
     if doc.status != crate::model::Status::Ok {
         return;
@@ -318,7 +318,15 @@ pub fn type_card(uri: &str, artist_type: Option<&str>, doc: &mut crate::model::R
     let Some(link) = parse(uri) else {
         return;
     };
-    doc.site = link.service.name().into();
+    let page_site = std::mem::replace(&mut doc.site, link.service.name().into());
+    // A Bandcamp root shows the artist's featured album: the card is the artist, named as the
+    // page's site name says, without the album's text.
+    if link.service == Service::Bandcamp && link.level == Level::Artist {
+        if !page_site.trim().is_empty() {
+            doc.name = Some(page_site.trim().to_owned());
+        }
+        doc.description = None;
+    }
     match link.level {
         Level::Video => {}
         Level::Artist if artist_type == Some("Person") => doc.set_type("Person"),
@@ -696,6 +704,18 @@ mod tests {
             (d.type_name.as_str(), d.site.as_str()),
             ("VideoObject", "YouTube")
         );
+        // A Bandcamp root features an album: the card is the artist.
+        let mut d = ResourceMeta::new("https://radiohead.bandcamp.com/", "web", 3600);
+        d.set_type("MusicAlbum");
+        d.name = Some("OK Computer".into());
+        d.description = Some("The album's notes".into());
+        d.site = "Radiohead".into();
+        type_card("https://radiohead.bandcamp.com/", None, &mut d);
+        assert_eq!(
+            (d.type_name.as_str(), d.name.as_deref(), d.site.as_str()),
+            ("MusicGroup", Some("Radiohead"), "Bandcamp")
+        );
+        assert!(d.description.is_none());
         // A solo artist, as MusicBrainz says.
         let mut d = ResourceMeta::new("https://www.deezer.com/artist/1", "web", 3600);
         type_card("https://www.deezer.com/artist/1", Some("Person"), &mut d);
