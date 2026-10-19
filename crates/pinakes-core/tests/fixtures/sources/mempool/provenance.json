@@ -89,6 +89,24 @@
     "status": 500,
     "url": "https://mempool.space/api/v1/lightning/nodes/020000000000000000000000000000000000000000000000000000000000000001"
   },
+  "search-acinq": {
+    "bytes": 175,
+    "content_type": "application/json",
+    "file": "search-acinq.json",
+    "recorded_at": "2026-10-19T20:13:00+00:00",
+    "sha256": "878e89287a55d6dd8316ae06a072a79089f7ab7bd46fed647bda27c3f1f1482d",
+    "status": 200,
+    "url": "https://mempool.space/api/v1/lightning/search?searchText=03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f"
+  },
+  "search-missing": {
+    "bytes": 26,
+    "content_type": "application/json",
+    "file": "search-missing.json",
+    "recorded_at": "2026-10-19T20:13:02+00:00",
+    "sha256": "ddbff77ac666636d87e9393b36b03319edcebcb66aa6a8f8231e23d43eb9ae88",
+    "status": 200,
+    "url": "https://mempool.space/api/v1/lightning/search?searchText=020000000000000000000000000000000000000000000000000000000000000001"
+  },
   "signet-block-height-1000": {
     "bytes": 64,
     "content_type": "text/plain",

@@ -375,6 +375,25 @@ pub fn parse_height(status: u16, raw: &[u8]) -> Result<Option<String>> {
         .context("not a block hash")
 }
 
+/// The Lightning graph's search for a node key: the check `node_listed` makes when the node's
+/// own record fails.
+pub fn search_request(network: Network, key: &str) -> Option<Request> {
+    api(
+        Api::Mempool,
+        network,
+        &format!("v1/lightning/search?searchText={}", node_key(key)?),
+    )
+}
+
+/// Whether the search lists a node with exactly this key.
+pub fn node_listed(status: u16, raw: &[u8], key: &str) -> Result<bool> {
+    let v = json(status, raw, &[])?.context("no answer")?;
+    let nodes = v["nodes"].as_array().context("no nodes")?;
+    Ok(nodes
+        .iter()
+        .any(|n| n["public_key"].as_str().and_then(node_key).as_deref() == Some(key)))
+}
+
 /// The tip height.
 pub fn parse_tip(status: u16, raw: &[u8]) -> Result<u64> {
     let raw = body(status, raw, &[])?.context("no tip")?;
@@ -851,7 +870,24 @@ impl Source for Mempool {
             Err(e) if request(Api::Esplora, &target).is_some() => {
                 read(cx, Api::Esplora, &target).await.map_err(|_| e)?
             }
-            Err(e) => return Err(e),
+            Err(e) => match (
+                &target.object,
+                e.downcast_ref::<crate::resolver::RetryLater>(),
+            ) {
+                // mempool.space answers a server error for a node it doesn't know as well as on a
+                // fault: the search tells them apart. A node it doesn't list is missing; a listed
+                // node whose record keeps failing counts toward the failure limit.
+                (Object::Node(key), Some(_)) => {
+                    let search = search_request(target.network, key).context("node search")?;
+                    let f = fetch(cx, &search).await?;
+                    if !node_listed(f.status, &f.body, key)? {
+                        return Ok(cx.missing(uri, self));
+                    }
+                    return Err(anyhow::Error::new(crate::resolver::ErrorClass("http_5xx"))
+                        .context("mempool.space fails the record of a node it lists"));
+                }
+                _ => return Err(e),
+            },
         };
         Ok(match read {
             Some((card, named)) => {
@@ -1190,8 +1226,21 @@ mod tests {
         assert_eq!(card.details["channels"], 1834);
         assert_eq!(card.also_on.len(), 3);
         assert_eq!(card.also_on[0].uri, format!("https://1ml.com/node/{ACINQ}"));
-        // An unknown key and a fault look the same: retry.
+        // An unknown key and a fault look the same; the search tells them apart.
         assert!(parse_node(500, &read("node-missing.json"), Network::Mainnet, ACINQ).is_err());
+        let missing = "020000000000000000000000000000000000000000000000000000000000000001";
+        assert_eq!(
+            search_request(Network::Mainnet, missing)
+                .unwrap()
+                .url
+                .as_str(),
+            format!("https://mempool.space/api/v1/lightning/search?searchText={missing}")
+        );
+        assert!(node_listed(200, &read("search-acinq.json"), ACINQ).unwrap());
+        assert!(!node_listed(200, &read("search-missing.json"), missing).unwrap());
+        // A search that lists another node with a similar key is no match.
+        assert!(!node_listed(200, &read("search-acinq.json"), missing).unwrap());
+        assert!(node_listed(429, b"", ACINQ).is_err());
         assert_eq!(parse_node(404, b"", Network::Mainnet, ACINQ).unwrap(), None);
     }
 
