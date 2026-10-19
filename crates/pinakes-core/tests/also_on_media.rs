@@ -1,7 +1,7 @@
 //! The book, podcast and film sources through Egress, against the answers recorded in
 //! `tests/fixtures/media` (each family's `provenance.json` names the URL of every file).
 use pinakes_core::{
-    also_on::{books::Books, podcasts::Podcasts, Context, Found, Source, Subject},
+    also_on::{books::Books, films::Films, podcasts::Podcasts, Context, Found, Source, Subject},
     config::{Config, EgressConfig},
     model::ResourceMeta,
     resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport},
@@ -84,18 +84,25 @@ impl Recorded {
             signed_with: Mutex::new(Vec::new()),
         })
     }
-    /// The same, with one more answer.
-    fn with(url: &str, status: u16, location: &str) -> Arc<Self> {
+    /// The same, with more answers: a URL and its status, and its `Location` or HTML body.
+    fn with(more: &[(&str, u16, &str)]) -> Arc<Self> {
         let mut recorded = Arc::into_inner(Self::new()).unwrap();
-        recorded.answers.insert(
-            url.into(),
-            Answer {
-                status,
-                location: Some(location.into()),
-                content_type: "text/html".into(),
-                body: Vec::new(),
-            },
-        );
+        for (url, status, then) in more {
+            let redirect = (300..400).contains(status);
+            recorded.answers.insert(
+                (*url).into(),
+                Answer {
+                    status: *status,
+                    location: redirect.then(|| (*then).into()),
+                    content_type: "text/html".into(),
+                    body: if redirect {
+                        Vec::new()
+                    } else {
+                        then.as_bytes().to_vec()
+                    },
+                },
+            );
+        }
         Arc::new(recorded)
     }
     fn seen(&self) -> Vec<String> {
@@ -452,7 +459,7 @@ async fn a_moved_feed_through_podcast_index() {
     // The show's first URL now redirects: the feed it ends on may be another publisher's, so its
     // GUID is Podcast Index's, which names the first URL as the feed's own.
     let old = "https://mp3s.nashownotes.com/pc20rss.xml";
-    let recorded = Recorded::with(old, 301, "https://feeds.podcastindex.org/pc20.xml");
+    let recorded = Recorded::with(&[(old, 301, "https://feeds.podcastindex.org/pc20.xml")]);
     let cx = cx(recorded.clone(), indexed());
     let found = Podcasts
         .lookup(&cx, &feed_card(old, old, None))
@@ -504,4 +511,125 @@ async fn a_feed_episode_on_apple_podcasts() {
         .await
         .unwrap();
     assert_eq!(found, Found::default());
+}
+
+/// Letterboxd's film page, where its `imdb/` redirect for The Shawshank Redemption ends.
+const SHAWSHANK_PAGE: (&str, u16, &str) = (
+    "https://letterboxd.com/film/the-shawshank-redemption/",
+    200,
+    "<html><head><title>The Shawshank Redemption (1994)</title></head><body></body></html>",
+);
+fn sites(found: &Found) -> Vec<&str> {
+    found.links.iter().map(|l| l.site.as_str()).collect()
+}
+
+#[tokio::test]
+async fn a_film_by_its_imdb_link() {
+    let recorded = Recorded::new();
+    let cx = cx(recorded.clone(), Config::default());
+    let s = subject("https://www.imdb.com/title/tt0111161/", None, None);
+    assert!(Films.applies(&s));
+    let found = Films.lookup(&cx, &s).await.unwrap();
+    assert_eq!(keys(&found), ["imdb:tt0111161", "wikidata:Q172241"]);
+    assert_eq!(found.keys[0].via, "imdb");
+    assert_eq!(
+        sites(&found),
+        [
+            "TMDB",
+            "Letterboxd",
+            "Trakt",
+            "Rotten Tomatoes",
+            "TheTVDB",
+            "Apple TV",
+            "Netflix",
+            "MUBI"
+        ],
+        "never the card's own service"
+    );
+    let seen = recorded.seen();
+    assert!(
+        !seen.iter().any(|u| u.contains("letterboxd.com")),
+        "the item has its Letterboxd page"
+    );
+    // A film is no show on TVmaze.
+    assert!(seen.contains(&"https://api.tvmaze.com/lookup/shows?imdb=tt0111161".to_string()));
+    assert!(!sites(&found).contains(&"TVmaze"));
+}
+
+#[tokio::test]
+async fn a_film_by_its_tmdb_link_reaches_its_imdb_id_through_wikidata() {
+    let recorded = Recorded::new();
+    let cx = cx(recorded.clone(), Config::default());
+    let found = Films
+        .lookup(
+            &cx,
+            &subject(
+                "https://www.themoviedb.org/movie/278-the-shawshank-redemption",
+                None,
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(keys(&found), ["imdb:tt0111161", "wikidata:Q172241"]);
+    assert_eq!(found.keys[0].via, "wikidata");
+    assert!(sites(&found).contains(&"IMDb"));
+    assert!(!sites(&found).contains(&"TMDB"));
+}
+
+#[tokio::test]
+async fn a_series_by_its_tvmaze_link() {
+    let recorded = Recorded::new();
+    let cx = cx(recorded.clone(), Config::default());
+    let found = Films
+        .lookup(
+            &cx,
+            &subject("https://www.tvmaze.com/shows/169/breaking-bad", None, None),
+        )
+        .await
+        .unwrap();
+    assert_eq!(keys(&found), ["imdb:tt0903747", "wikidata:Q1079"]);
+    assert_eq!(found.keys[0].via, "tvmaze");
+    assert!(!sites(&found).contains(&"TVmaze"));
+    assert!(sites(&found).contains(&"IMDb"));
+    // Letterboxd has no film for a series: its imdb/ page answers "not found".
+    assert!(recorded
+        .seen()
+        .contains(&"https://letterboxd.com/imdb/tt0903747/".to_string()));
+    assert!(!sites(&found).contains(&"Letterboxd"));
+}
+
+#[tokio::test]
+async fn letterboxd_and_tvmaze_by_imdb_id() {
+    // An IMDb ID Wikidata has no item for: Letterboxd's redirect names the film exactly.
+    let tt = "https://www.imdb.com/title/tt9999999/";
+    let recorded = Recorded::with(&[
+        (
+            "https://letterboxd.com/imdb/tt9999999/",
+            302,
+            "/film/the-shawshank-redemption/",
+        ),
+        SHAWSHANK_PAGE,
+    ]);
+    let cx = cx(recorded.clone(), Config::default());
+    let found = Films.lookup(&cx, &subject(tt, None, None)).await.unwrap();
+    assert_eq!(keys(&found), ["imdb:tt9999999"]);
+    assert_eq!(
+        links(&found),
+        [(
+            "Letterboxd",
+            "https://letterboxd.com/film/the-shawshank-redemption/",
+            "letterboxd"
+        )]
+    );
+    // Without the redirect, and with TVmaze's 404, nothing.
+    let found = Films
+        .lookup(
+            &crate::cx(Recorded::new(), Config::default()),
+            &subject(tt, None, None),
+        )
+        .await
+        .unwrap();
+    assert_eq!(keys(&found), ["imdb:tt9999999"]);
+    assert!(found.links.is_empty());
 }

@@ -830,6 +830,21 @@ in any spelling, an episode with `?i={n}`) or a podcast feed's card (a `PodcastS
 - The show's Wikidata item (by its Apple ID) gives its Q-id as a key and its Spotify, Podcast
   Index, Podchaser, Pocket Casts and Castbox pages.
 
+**Films and series.** `films`: an IMDb title (`imdb.com/title/tt…`), a TMDB movie or series, a
+Letterboxd film or a TVmaze show is looked up exactly, never by title:
+- The IMDb title ID is the join, as the key `imdb:{tt…}`. An IMDb link names it, TVmaze's record
+  of a show names it, and a TMDB or Letterboxd link reaches it through the one Wikidata item
+  with that link's ID.
+- The title's Wikidata item (by its IMDb ID) gives its Q-id as a key and its IMDb, TMDB,
+  Letterboxd, Trakt, Rotten Tomatoes, TheTVDB, Apple TV, Netflix, MUBI, TVmaze, MyAnimeList and
+  AniList pages.
+- Letterboxd and TVmaze are asked by IMDb ID only when the item has no link there: Letterboxd's
+  `imdb/{tt}/` redirects to its film (an unknown ID answers a page, not a redirect), and
+  TVmaze's `lookup/shows?imdb=` to its show, whose record must name the same IMDb ID. TVmaze's
+  data is CC BY-SA; its links say `via: "tvmaze"`.
+
+A title never lists its own service.
+
 The level is exact: a track lists tracks and videos of the recording, an album lists albums and
 YouTube's album playlists, an artist lists artist pages and channels. Album links group by
 their release group, while two editions (two MusicBrainz releases) stay apart. Apple Music, Apple Books and Apple Podcasts links use the storefront

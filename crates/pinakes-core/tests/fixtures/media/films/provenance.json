@@ -18,6 +18,15 @@
     "status": 302,
     "url": "https://letterboxd.com/imdb/tt0111161/"
   },
+  "letterboxd-imdb-tt0903747": {
+    "bytes": 77949,
+    "content_type": "text/html",
+    "file": "letterboxd-imdb-tt0903747.html.gz",
+    "recorded_at": "2026-10-19T22:24:36+00:00",
+    "sha256": "b1644e2398a8b55e574ad3a870f23cc2dbfb178f1877fe684e6235a7f09b318f",
+    "status": 200,
+    "url": "https://letterboxd.com/imdb/tt0903747/"
+  },
   "tvmaze-imdb-missing": {
     "bytes": 4,
     "content_type": "application/json",
@@ -45,5 +54,14 @@
     "sha256": "b4bd2b87bc61ffb7d4f82358cdca2ed221d6838b17180fbdd95c85fa9b7dca32",
     "status": 200,
     "url": "https://api.tvmaze.com/lookup/shows?imdb=tt0903747"
+  },
+  "tvmaze-imdb-tt9999999": {
+    "bytes": 4,
+    "content_type": "application/json",
+    "file": "tvmaze-imdb-tt9999999.json",
+    "recorded_at": "2026-10-19T22:24:24+00:00",
+    "sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+    "status": 404,
+    "url": "https://api.tvmaze.com/lookup/shows?imdb=tt9999999"
   }
 }
