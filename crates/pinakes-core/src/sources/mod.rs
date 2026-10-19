@@ -22,6 +22,7 @@ use std::{collections::BTreeMap, sync::OnceLock};
 
 pub mod courtlistener;
 pub mod ecfr;
+pub mod eur_lex;
 pub mod federal_register;
 pub mod gleif;
 pub mod legislation_gov_uk;
@@ -34,6 +35,7 @@ pub mod uk_parliament_bills;
 pub static REGISTRY: &[&dyn Source] = &[
     &courtlistener::Courtlistener,
     &ecfr::Ecfr,
+    &eur_lex::EurLex,
     &federal_register::FederalRegister,
     &gleif::Gleif,
     &legislation_gov_uk::LegislationGovUk,
@@ -284,6 +286,42 @@ pub fn web_url(value: &str) -> Option<url::Url> {
     let url = url::Url::parse(value).ok()?;
     (matches!(url.scheme(), "https" | "http") && url.host_str().is_some()).then_some(url)
 }
+/// A SPARQL query as a GET (`{endpoint}?query=…`), for `Context::fetch` with `SPARQL_JSON`.
+pub fn sparql_url(endpoint: &str, query: &str) -> String {
+    let mut url = url::Url::parse(endpoint).expect("SPARQL endpoint");
+    url.query_pairs_mut().append_pair("query", query);
+    url.to_string()
+}
+/// The `Accept` header and content type of SPARQL JSON results.
+pub const SPARQL_JSON: &str = "application/sparql-results+json";
+/// One SPARQL result row: each bound variable's `value`, with its language tag if it has one.
+pub type Row = BTreeMap<String, (String, Option<String>)>;
+/// The rows of a SPARQL JSON result (`results.bindings`).
+pub fn sparql_rows(body: &[u8]) -> Result<Vec<Row>> {
+    let v: serde_json::Value = serde_json::from_slice(body)?;
+    let bindings = v["results"]["bindings"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("not SPARQL results"))?;
+    Ok(bindings
+        .iter()
+        .filter_map(|b| b.as_object())
+        .map(|b| {
+            b.iter()
+                .filter_map(|(var, cell)| {
+                    let value = cell["value"].as_str()?.to_owned();
+                    let lang = cell["xml:lang"].as_str().map(str::to_owned);
+                    Some((var.clone(), (value, lang)))
+                })
+                .collect()
+        })
+        .collect())
+}
+/// A SPARQL string literal's content, escaped (`"` and `\`); identifiers are validated first,
+/// this is a second guard.
+pub fn sparql_literal(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// A list fact: the values joined with "; ".
 pub fn list(values: &[String]) -> Option<String> {
     let joined = values
@@ -405,6 +443,27 @@ mod tests {
             .0
             .insert("nonesuch".into(), Switch::default());
         assert!(config.sources.validate().is_err());
+    }
+
+    #[test]
+    fn sparql() {
+        assert_eq!(
+            sparql_url(
+                "https://example.org/sparql",
+                "SELECT ?a WHERE { ?a ?b \"c\" }"
+            ),
+            "https://example.org/sparql?query=SELECT+%3Fa+WHERE+%7B+%3Fa+%3Fb+%22c%22+%7D"
+        );
+        let body = br#"{"head":{"vars":["t","n"]},"results":{"bindings":[
+            {"t":{"type":"literal","value":"Titel","xml:lang":"de"},"n":{"type":"literal","value":"1"}},
+            {"t":{"type":"uri","value":"https://x/"}}]}}"#;
+        let rows = sparql_rows(body).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["t"], ("Titel".to_owned(), Some("de".to_owned())));
+        assert_eq!(rows[0]["n"].0, "1");
+        assert!(!rows[1].contains_key("n"));
+        assert!(sparql_rows(b"{}").is_err());
+        assert_eq!(sparql_literal("a\"b\\"), "a\\\"b\\\\");
     }
 
     #[test]

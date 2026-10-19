@@ -1635,6 +1635,18 @@
                     "uri": "https://en.wikipedia.org/wiki/Lugano"
                   }
                 },
+                "resolve-eur-lex-1": {
+                  "summary": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32016R0679",
+                  "value": {
+                    "uri": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32016R0679"
+                  }
+                },
+                "resolve-eur-lex-2": {
+                  "summary": "https://eur-lex.europa.eu/eli/reg/2023/1114/oj",
+                  "value": {
+                    "uri": "https://eur-lex.europa.eu/eli/reg/2023/1114/oj"
+                  }
+                },
                 "resolve-eventfrog-ch-stream-de-event-7503702322012243890-ics": {
                   "summary": "https://eventfrog.ch/stream/de/event/7503702322012243890.ics",
                   "value": {

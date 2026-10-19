@@ -94,7 +94,8 @@ impl Fixture {
             {"kind":"uk_parliament_bills","uri":"https://bills.parliament.uk/bills/3737","type":"Legislation"},
             {"kind":"swiss_parliament","uri":"https://www.parlament.ch/de/ratsbetrieb/suche-curia-vista/geschaeft?AffairId=20223765","type":"Legislation"},
             {"kind":"courtlistener","uri":"https://www.courtlistener.com/opinion/2812209/obergefell-v-hodges/","type":"CreativeWork"},
-            {"kind":"legislation_gov_uk","uri":"https://www.legislation.gov.uk/ukpga/2018/12/contents","type":"Legislation"}
+            {"kind":"legislation_gov_uk","uri":"https://www.legislation.gov.uk/ukpga/2018/12/contents","type":"Legislation"},
+            {"kind":"eur_lex","uri":"https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32016R0679","type":"Legislation"}
         ]);
         Ok(Self {
             boundary: Arc::default(),
@@ -126,6 +127,7 @@ impl Dns for FixtureDns {
                 | "ws.parlament.ch"
                 | "www.courtlistener.com"
                 | "www.legislation.gov.uk"
+                | "publications.europa.eu"
                 | "web.example"
                 | "www.federalregister.gov"
                 | "www.sec.gov"
@@ -159,6 +161,7 @@ impl Transport for Fixture {
             "ws.parlament.ch" if u.path()=="/odata.svc/Business(ID=20223765,Language='DE')"=>("application/json",include_str!("../tests/fixtures/sources/swiss_parliament/business_20223765_DE_select.json").into()),
             "www.courtlistener.com" if u.path()=="/api/rest/v4/search/"=>("application/json",include_str!("../tests/fixtures/sources/courtlistener/search_o_cluster_id_2812209_obergefell.json").into()),
             "www.legislation.gov.uk" if u.path()=="/ukpga/2018/12/introduction/data.xml"=>("application/xml",include_str!("../tests/fixtures/sources/legislation_gov_uk/ukpga_2018_12_introduction.xml").into()),
+            "publications.europa.eu" if u.path()=="/webapi/rdf/sparql"=>("application/sparql-results+json",include_str!("../tests/fixtures/sources/eur_lex/celex_32016R0679.json").into()),
             "web.example"=>("text/html","<title>Fixture page</title>".into()),
             "www.ecfr.gov" if u.path()=="/api/versioner/v1/ancestry/current/title-17.json"=>("application/json",include_str!("../tests/fixtures/sources/ecfr/ancestry_current_title-17_section-240.10b-5.json").into()),
             "www.sec.gov" if u.path()=="/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959.hdr.sgml"=>("text/sgml",include_str!("../tests/fixtures/sources/sec/sec-hdr-ms-s1.sgml").into()),
