@@ -30,7 +30,9 @@ all its products; often over 100 KB).
 The service can take 10 to 25 seconds to answer for an event it hasn't served recently, longer
 than a request may take (10 seconds), and it keeps an answer only once it has delivered it, for
 under a minute. A link whose answer takes too long is tried again every ten minutes, and that never
-counts as a failure: its card arrives on the first attempt USGS answers in time.
+counts as a failure: its card arrives on the first attempt USGS answers in time. After three days
+of slow answers the link is shown as `unreachable` and tried with the usual growing backoff; it is
+never given up.
 
 ## Card
 

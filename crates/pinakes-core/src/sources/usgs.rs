@@ -129,15 +129,16 @@ pub fn parse(status: u16, raw: &[u8], id: &str) -> Result<Option<Card>> {
 }
 
 /// The source: the USGS FDSN event service.
-/// A fetch that timed out becomes a plain retry (`upstream`), which never counts toward dead
-/// letter. USGS can take 10 to 25 seconds for an event it hasn't served recently, longer than a
-/// request may take, and keeps only an answer it delivered (for under a minute), so a retry is
-/// not sure to be faster; the link waits `SLOW_RETRY_SECS` and tries again. Any other error is
-/// returned as it is.
+/// A fetch that timed out becomes a retry the queue treats as the service not answering us
+/// (`upstream_denied`): it never counts toward dead letter, and after three days of it the link is
+/// `unreachable` and its attempts count, with the usual backoff. USGS can take 10 to 25 seconds for
+/// an event it hasn't served recently, longer than a request may take, and keeps only an answer
+/// it delivered (for under a minute), so a retry is not sure to be faster; the link waits
+/// `SLOW_RETRY_SECS` and tries again. Any other error is returned as it is.
 pub fn slow_answer(error: anyhow::Error) -> anyhow::Error {
     if crate::resolver::error_class(&error) == "timeout" {
         crate::resolver::RetryLater {
-            class: "upstream",
+            class: "upstream_denied",
             seconds: SLOW_RETRY_SECS,
         }
         .into()
@@ -406,8 +407,11 @@ mod tests {
         let retry = error
             .downcast_ref::<crate::resolver::RetryLater>()
             .expect("a retry");
-        assert_eq!((retry.class, retry.seconds), ("upstream", SLOW_RETRY_SECS));
-        assert_eq!(crate::resolver::error_class(&error), "upstream");
+        assert_eq!(
+            (retry.class, retry.seconds),
+            ("upstream_denied", SLOW_RETRY_SECS)
+        );
+        assert_eq!(crate::resolver::error_class(&error), "upstream_denied");
         // Anything else is not a slow answer.
         let other = slow_answer(anyhow::anyhow!("malformed"));
         assert!(other

@@ -402,7 +402,8 @@ impl Resolver for CardResolver {
     }
     async fn resolve(&self, uri: &str) -> Result<ResourceMeta> {
         let ttl = self.config.cards.resolver(self.kind).ttl_secs;
-        let budget = if self.kind == "nostr" {
+        // Nostr and the official APIs leave their own fetch timeouts room to answer first.
+        let budget = if matches!(self.kind, "nostr" | "official") {
             crate::queue::RESOLVE_TIMEOUT - Duration::from_secs(1)
         } else {
             Duration::from_secs(10)

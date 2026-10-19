@@ -1193,8 +1193,7 @@ async fn our_own_rate_limit_is_its_own_class_and_no_failure(pool: PgPool) {
 }
 
 /// A source that answers `RetryLater` with a class other than `timeout` (a server error, a rate
-/// limit, a USGS answer slower than a request may take) is rescheduled and never counts toward
-/// dead letter, however often it happens.
+/// limit) is rescheduled and never counts toward dead letter, however often it happens.
 #[sqlx::test(migrations = "../../migrations")]
 async fn upstream_retries_never_count_toward_dead_letter(pool: PgPool) {
     let cfg = QueueConfig {

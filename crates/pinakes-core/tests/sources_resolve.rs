@@ -1,5 +1,5 @@
-//! Official-API sources through the cards resolver, with a scripted transport: how a failing
-//! service ends.
+//! Official-API sources through the cards resolver, with a scripted transport: how a slow or
+//! failing service ends.
 use anyhow::Result;
 use async_trait::async_trait;
 use pinakes_core::{
@@ -22,7 +22,7 @@ impl Dns for PublicDns {
     }
 }
 
-/// mempool.space fails every node record with a server error and its search
+/// USGS never answers; mempool.space fails every node record with a server error and its search
 /// lists only `LISTED`.
 struct Scripted;
 const LISTED: &str = "03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f";
@@ -49,6 +49,7 @@ impl Transport for Scripted {
     }
     async fn get_with(&self, u: &Url, _: &[SocketAddr], _: &FetchOptions) -> Result<Fetched> {
         match (u.host_str(), u.path()) {
+            (Some("earthquake.usgs.gov"), _) => std::future::pending().await,
             (Some("mempool.space"), path) if path.starts_with("/api/v1/lightning/nodes/") => {
                 Ok(answer(u, 500, r#"{"error":"Failed to get node"}"#.into()))
             }
@@ -80,6 +81,19 @@ fn official() -> CardResolver {
         Arc::new(Config::default()),
         Egress::with_backends(Default::default(), Arc::new(PublicDns), Arc::new(Scripted)),
     )
+}
+
+/// A USGS fetch that outlasts its timeout is the non-counting retry, never the route's own
+/// `timeout` (which counts toward dead letter): the route leaves the fetch room to time out first.
+#[tokio::test(start_paused = true)]
+async fn a_slow_usgs_answer_is_a_retry_that_never_counts() {
+    let error = official()
+        .resolve("https://earthquake.usgs.gov/earthquakes/eventpage/ci38457511")
+        .await
+        .unwrap_err();
+    let retry = error.downcast_ref::<RetryLater>().expect("a retry");
+    assert_eq!(retry.class, "upstream_denied");
+    assert_eq!(retry.seconds, pinakes_core::sources::usgs::SLOW_RETRY_SECS);
 }
 
 /// mempool.space answers a server error for a node it doesn't know: the search decides.
