@@ -127,6 +127,11 @@
     "type": "DiscussionForumPosting"
   },
   {
+    "kind": "bluesky",
+    "uri": "https://bsky.app/profile/bsky.app/post/3mxzez2m7wk2r",
+    "type": "SocialMediaPosting"
+  },
+  {
     "kind": "web",
     "uri": "https://example.org/",
     "type": "WebPage"

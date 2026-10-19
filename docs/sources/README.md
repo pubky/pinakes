@@ -40,6 +40,7 @@ or got plain web cards before are read by their source.
 
 ## Sources
 
+- [`bluesky`](bluesky.md): Bluesky posts and profiles.
 - [`courtlistener`](courtlistener.md): US court opinions by cluster id.
 - [`ecfr`](ecfr.md): sections and parts of the Code of Federal Regulations.
 - [`eur_lex`](eur_lex.md): EU law by CELEX number, ELI or Official Journal id.

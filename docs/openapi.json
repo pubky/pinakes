@@ -1551,6 +1551,18 @@
                     "uri": "https://bitcoinops.org/feed.xml"
                   }
                 },
+                "resolve-bluesky-1": {
+                  "summary": "https://bsky.app/profile/bsky.app/post/3mxzez2m7wk2r",
+                  "value": {
+                    "uri": "https://bsky.app/profile/bsky.app/post/3mxzez2m7wk2r"
+                  }
+                },
+                "resolve-bluesky-2": {
+                  "summary": "https://bsky.app/profile/bsky.app",
+                  "value": {
+                    "uri": "https://bsky.app/profile/bsky.app"
+                  }
+                },
                 "resolve-c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey-pub-map": {
                   "summary": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G",
                   "value": {

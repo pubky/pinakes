@@ -53,6 +53,8 @@ enabled = true
 enabled = true
 
 # Official-API sources, in alphabetical order (docs/sources/README.md).
+[sources.bluesky]
+enabled = true
 [sources.courtlistener]
 enabled = true
 [sources.ecfr]

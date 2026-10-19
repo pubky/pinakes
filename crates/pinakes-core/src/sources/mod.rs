@@ -20,6 +20,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::OnceLock};
 
+pub mod bluesky;
 pub mod courtlistener;
 pub mod ecfr;
 pub mod eur_lex;
@@ -39,6 +40,7 @@ pub mod zefix;
 /// Every source, one line each, in alphabetical order of name.
 #[rustfmt::skip]
 pub static REGISTRY: &[&dyn Source] = &[
+    &bluesky::Bluesky,
     &courtlistener::Courtlistener,
     &ecfr::Ecfr,
     &eur_lex::EurLex,
