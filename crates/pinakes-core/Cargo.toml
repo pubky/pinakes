@@ -1,0 +1,55 @@
+[package]
+name = "pinakes-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+base64.workspace = true
+blake3 = { workspace = true, features = ["traits-preview"] }
+chrono.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+utoipa.workspace = true
+utoipa-swagger-ui.workspace = true
+# Signed packets only: PKARR records come from relays through Egress (`resolver::pkarr_relays`).
+pkarr = { version = "=8.1.0", default-features = false, features = ["signed_packet"] }
+getrandom = "0.4"
+hmac = "0.13"
+scraper = "0.24"
+# The HTML named character references (the same table scraper's parser uses).
+markup5ever = "=0.35.0"
+toml = "0.9"
+ipnet = "2"
+h3o = "0.11"
+async-stream = "0.3"
+prometheus = "0.14"
+chrono-tz = "=0.10.4"
+percent-encoding = "2"
+rrule = "=0.14.0"
+roxmltree = "=0.21.1"
+sha2 = "=0.10.9"
+tzf-rs = { version = "=1.1.4", default-features = false }
+nostr = { version = "=0.45.5", default-features = false, features = ["std"] }
+tokio-tungstenite = { version = "=0.28.0", features = ["rustls-tls-webpki-roots"] }
+psl = "=2.1.241"
+tower-http = { version = "=0.6.11", default-features = false, features = ["catch-panic"] }
+flate2 = "=1.1.10"
+httpdate = "=1.0.3"
+
+[dev-dependencies]
+secp256k1 = "=0.30.0"
+serde_yaml_ng = "0.10"
+tokio = { workspace = true, features = ["test-util"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

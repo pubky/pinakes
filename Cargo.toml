@@ -1,0 +1,29 @@
+[workspace]
+members = ["crates/pinakes-core", "crates/pinakesd"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/pubky/pinakes"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
+base64 = "0.22"
+blake3 = "1"
+chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "gzip", "brotli", "deflate"] }
+serde = { version = "1", features = ["derive"] }
+# Exact float parsing: a search cursor carries its f64 rank and must read it back unchanged.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "json", "macros", "migrate"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+url = { version = "2", features = ["serde"] }
+utoipa = { version = "5", features = ["axum_extras", "chrono"] }
+utoipa-swagger-ui = { version = "9.0.2", default-features = false, features = ["axum", "vendored"] }
+pinakes-core = { path = "crates/pinakes-core" }

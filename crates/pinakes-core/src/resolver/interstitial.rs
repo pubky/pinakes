@@ -1,0 +1,273 @@
+//! Interstitials are observations of access failure, never publisher identity evidence.
+use super::egress::Fetched;
+use scraper::{Html, Selector};
+use serde::Deserialize;
+use std::sync::LazyLock;
+use url::Url;
+
+#[derive(Debug)]
+pub struct Blocked;
+impl std::fmt::Display for Blocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("upstream access interstitial")
+    }
+}
+impl std::error::Error for Blocked {}
+
+#[derive(Debug, PartialEq)]
+pub enum Page {
+    Content,
+    Redirect(String),
+    Blocked,
+}
+/// The challenge-page markers in `data/interstitial-markers.json`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Walls {
+    text: Vec<String>,
+    captcha_selectors: Vec<String>,
+    wall_host_prefixes: Vec<String>,
+    wall_paths: Vec<String>,
+}
+static WALLS: LazyLock<Walls> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("../../../../data/interstitial-markers.json"))
+        .expect("interstitial markers")
+});
+impl Walls {
+    fn marked(&self, text: &str) -> bool {
+        let text = text.to_lowercase();
+        self.text
+            .iter()
+            .any(|marker| text.contains(marker.as_str()))
+    }
+}
+fn select(s: &str) -> Selector {
+    Selector::parse(s).expect("static selector")
+}
+fn quoted(s: &str) -> Option<&str> {
+    let s = s.trim_start();
+    let quote = s.chars().next().filter(|c| matches!(c, '\'' | '"'))?;
+    s[1..].split_once(quote).map(|(v, _)| v)
+}
+/// `N`, `N; url=X`, `N;URL='X'` or `N, X`: the delay and an optional target.
+fn refresh(content: &str) -> (f64, Option<String>) {
+    let (delay, rest) = match content.find([';', ',']) {
+        Some(i) => (&content[..i], Some(&content[i + 1..])),
+        None => (content, None),
+    };
+    let delay = delay.trim().parse().unwrap_or(0.0);
+    let target = rest.map(str::trim).map(|s| {
+        // Page content: byte 3 may fall inside a multi-byte character.
+        match s.get(..3).zip(s.get(3..)) {
+            Some((p, rest)) if p.eq_ignore_ascii_case("url") => {
+                rest.trim_start().strip_prefix('=').unwrap_or(rest).trim()
+            }
+            _ => s,
+        }
+    });
+    let target = target
+        .map(|s| s.trim_matches(['\'', '"']).trim())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    (delay, target)
+}
+fn wall_path(walls: &Walls, path: &str) -> bool {
+    let path = path.to_ascii_lowercase();
+    walls.wall_paths.iter().any(|p| {
+        path == *p
+            || path
+                .strip_prefix(p.as_str())
+                .is_some_and(|rest| rest.starts_with(['/', '.']))
+    })
+}
+/// A challenge page (bot wall, captcha, sign-in redirect) is `Blocked`, a meta refresh or
+/// script redirect stub is a `Redirect` hop, anything else is content.
+pub fn inspect(requested: &Url, f: &Fetched) -> Page {
+    let walls = &*WALLS;
+    // A redirect from the requested host to a challenge or sign-in host of the same site. A
+    // page referenced on such a host itself (`login.example.org/help`) is content.
+    if let (Some(a), Some(b)) = (requested.host_str(), f.url.host_str()) {
+        if a != b
+            && psl::domain_str(a).is_some()
+            && psl::domain_str(a) == psl::domain_str(b)
+            && walls
+                .wall_host_prefixes
+                .iter()
+                .any(|p| b.starts_with(p.as_str()))
+        {
+            return Page::Blocked;
+        }
+    }
+    // A requested page redirected to a sign-in path (LinkedIn /authwall, Facebook /login/).
+    // Case or slash normalisation is not a redirect, and a sign-in page moving within its
+    // own flow (/signin to /signin/callback) is the page that was asked for.
+    let normal = |p: &str| p.trim_end_matches('/').to_ascii_lowercase();
+    if normal(f.url.path()) != normal(requested.path())
+        && !wall_path(walls, requested.path())
+        && wall_path(walls, f.url.path())
+    {
+        return Page::Blocked;
+    }
+    if !f.content_type.contains("html")
+        && !(matches!(f.status, 403 | 429 | 503)
+            && matches!(f.content_type.as_str(), "text/plain" | ""))
+    {
+        return Page::Content;
+    }
+    let text = String::from_utf8_lossy(&f.body);
+    let html = Html::parse_document(&text);
+    let title = html
+        .select(&select("title"))
+        .next()
+        .map(|v| v.text().collect::<String>())
+        .unwrap_or_default();
+    // Exclude script/style/noscript text: client-rendered shells say "enable JavaScript"
+    // there, and a real article merely discussing a challenge is not a wall.
+    let visible = html
+        .select(&select("body"))
+        .next()
+        .map(|el| {
+            el.descendants()
+                .filter_map(|n| n.value().as_text().map(|t| (n, t)))
+                .filter(|(n, _)| {
+                    !n.ancestors().any(|a| {
+                        a.value().as_element().is_some_and(|e| {
+                            matches!(e.name(), "script" | "style" | "noscript" | "template")
+                        })
+                    })
+                })
+                .map(|(_, t)| t.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default();
+    let heading = html
+        .select(&select("h1"))
+        .next()
+        .map(|v| v.text().collect::<String>())
+        .unwrap_or_default();
+    let challenge = matches!(f.status, 403 | 429 | 503);
+    let short = visible.trim().len() < 2000;
+    // Titles and headings are only evidence on short or challenge pages: a film called
+    // "Just a Moment" is not a wall. Captcha widgets in comment forms need the same context.
+    let title_marked = walls.marked(&title);
+    if ((challenge || short) && (title_marked || (heading.len() < 200 && walls.marked(&heading))))
+        || (short && walls.marked(&visible))
+        || ((challenge || short || title_marked)
+            && walls
+                .captcha_selectors
+                .iter()
+                .any(|s| html.select(&select(s)).next().is_some()))
+    {
+        return Page::Blocked;
+    }
+    for el in html.select(&select("meta[http-equiv]")) {
+        if el
+            .value()
+            .attr("http-equiv")
+            .is_some_and(|s| s.eq_ignore_ascii_case("refresh"))
+        {
+            // A refresh without a target is an auto-reload, and a slow refresh of a full page
+            // or of itself is content. Immediate refreshes (a self-refresh too: a cookie
+            // challenge, bounded by the hop limit) and short stubs are redirect hops.
+            let (delay, target) = refresh(el.value().attr("content").unwrap_or(""));
+            if let Some(target) = target {
+                let itself = f.url.join(&target).is_ok_and(|t| t == f.url);
+                if delay <= 10.0 || (short && !itself) {
+                    return Page::Redirect(target);
+                }
+            }
+        }
+    }
+    for script in html
+        .select(&select("script"))
+        .filter(|_| visible.trim().len() < 500)
+    {
+        let body: String = script.text().collect();
+        for marker in ["location.replace(", "location.assign("] {
+            if let Some((_, tail)) = body.split_once(marker) {
+                if let Some(target) = quoted(tail) {
+                    return Page::Redirect(target.to_owned());
+                }
+            }
+        }
+    }
+    let redirect_title = title.trim().to_ascii_lowercase().starts_with("redirecting");
+    let redirect_body = visible
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("redirecting");
+    if redirect_title || (redirect_body && visible.len() < 500) {
+        if let Some(target) = html
+            .select(&select("a[href]"))
+            .next()
+            .and_then(|a| a.value().attr("href"))
+        {
+            return Page::Redirect(target.to_owned());
+        }
+        if let Some((_, target)) = title.split_once(':') {
+            if !target.trim().is_empty() {
+                return Page::Redirect(target.trim().into());
+            }
+        }
+        return Page::Blocked;
+    }
+    Page::Content
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_marker_file_is_bounded_lower_case_and_parses() {
+        let w = &*WALLS;
+        for list in [
+            &w.text,
+            &w.captcha_selectors,
+            &w.wall_host_prefixes,
+            &w.wall_paths,
+        ] {
+            assert!(!list.is_empty() && list.len() <= 256);
+            assert!(list.iter().all(|v| !v.trim().is_empty() && v.len() <= 256));
+        }
+        for v in w
+            .text
+            .iter()
+            .chain(&w.wall_host_prefixes)
+            .chain(&w.wall_paths)
+        {
+            assert_eq!(*v, v.to_lowercase());
+        }
+        assert!(w.wall_paths.iter().all(|p| p.starts_with('/')));
+        for s in &w.captcha_selectors {
+            assert!(Selector::parse(s).is_ok(), "{s}");
+        }
+    }
+    #[test]
+    fn refresh_parsing_survives_multi_byte_content() {
+        let tokens = [
+            "0", "5", ";", ",", " ", "url", "URL", "=", "'", "\"", "€", "é", "😀", "a", "/x", "ü",
+        ];
+        // Every sequence of up to four tokens, so each byte offset meets a multi-byte char.
+        let mut inputs = vec![String::new()];
+        for _ in 0..4 {
+            let next: Vec<String> = inputs
+                .iter()
+                .flat_map(|s| tokens.iter().map(move |t| format!("{s}{t}")))
+                .collect();
+            inputs.extend(next);
+            inputs.sort();
+            inputs.dedup();
+        }
+        assert!(inputs.len() > 60_000);
+        for s in &inputs {
+            let (_, target) = refresh(s);
+            assert!(target.is_none_or(|t| !t.is_empty()), "{s}");
+        }
+        assert_eq!(refresh("5; a€b"), (5.0, Some("a€b".into())));
+        assert_eq!(refresh("0;url€=x"), (0.0, Some("€=x".into())));
+        assert_eq!(refresh("1; URL='/next'"), (1.0, Some("/next".into())));
+        assert_eq!(refresh("1, ur"), (1.0, Some("ur".into())));
+    }
+}
