@@ -359,6 +359,66 @@ pub fn float(v: &Value) -> Option<f64> {
     }
     .filter(|f: &f64| f.is_finite())
 }
+/// Plain text of an HTML fragment: tags dropped, entities decoded, scripts and styles skipped,
+/// one line per block (`p`, `div`, `li`, `br`, …), white space collapsed. `None` when nothing
+/// is left.
+pub fn html_text(html: &str) -> Option<String> {
+    use scraper::{ElementRef, Html, Node};
+    const BLOCKS: &[&str] = &[
+        "address",
+        "blockquote",
+        "br",
+        "dd",
+        "div",
+        "dl",
+        "dt",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "hr",
+        "li",
+        "ol",
+        "p",
+        "pre",
+        "table",
+        "td",
+        "th",
+        "tr",
+        "ul",
+    ];
+    fn walk(el: ElementRef, out: &mut String) {
+        for child in el.children() {
+            match child.value() {
+                Node::Text(t) => out.push_str(t),
+                Node::Element(e) if !matches!(e.name(), "script" | "style") => {
+                    let block = BLOCKS.contains(&e.name());
+                    if block {
+                        out.push('\n');
+                    }
+                    if let Some(c) = ElementRef::wrap(child) {
+                        walk(c, out);
+                    }
+                    if block {
+                        out.push('\n');
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(Html::parse_fragment(html).root_element(), &mut out);
+    let lines: Vec<String> = out
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|l| !l.is_empty())
+        .collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
 /// A time from Unix seconds.
 pub fn unix(v: &Value) -> Option<DateTime<Utc>> {
     Utc.timestamp_opt(int(v)?, 0).single()
@@ -431,6 +491,16 @@ mod tests {
         assert_eq!(card.details.keys().collect::<Vec<_>>(), [&"n"]);
         assert_eq!(card.aliases, ["https://a/one"]);
         assert!(card.also_on.is_empty());
+    }
+
+    #[test]
+    fn html_to_text() {
+        assert_eq!(
+            html_text("<p>A&nbsp;<em>B</em> &amp; C</p><p>D<br>E</p><script>x</script>").as_deref(),
+            Some("A B & C\nD\nE")
+        );
+        assert_eq!(html_text(" <span> </span> "), None);
+        assert_eq!(html_text("plain"), Some("plain".into()));
     }
 
     #[test]

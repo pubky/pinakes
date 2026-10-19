@@ -30,12 +30,14 @@ pub mod eur_lex;
 pub mod federal_register;
 pub mod fedlex;
 pub mod feed;
+pub mod figshare;
 pub mod forgejo;
 pub mod ghost;
 pub mod gitlab;
 pub mod gleif;
 pub mod govinfo;
 pub mod hacker_news;
+pub mod huggingface;
 pub mod kit;
 pub mod legislation_gov_uk;
 pub mod lobsters;
@@ -50,6 +52,7 @@ pub mod uk_parliament_bills;
 pub mod usgs;
 pub mod wordpress;
 pub mod zefix;
+pub mod zenodo;
 
 /// Every source, one line each, in alphabetical order of name.
 #[rustfmt::skip]
