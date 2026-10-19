@@ -354,18 +354,34 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
             })
         })
         .collect();
+    let page: Vec<String> = [uri.to_owned(), fetched.url.to_string()]
+        .into_iter()
+        .chain(
+            html.select(&selector("head link[rel~=canonical][href]"))
+                .filter_map(|l| origin_url(&fetched.url, l.value().attr("href")?)),
+        )
+        .filter_map(|u| entity_identity(&u))
+        .collect();
+    // An organization or person whose own url/@id is this (non-root) page is the page's subject
+    // (an artist page, a profile), not a publisher helper: it outranks a site-wide app node.
+    let subject = |v: &Value| {
+        let named = || {
+            ["url", "@id"]
+                .into_iter()
+                .filter_map(|f| v.get(f).and_then(Value::as_str))
+                .filter_map(|u| origin_url(&fetched.url, u).and_then(|u| entity_identity(&u)))
+                .any(|id| page.contains(&id))
+        };
+        if v.is_object() && type_priority(v) == 20 && fetched.url.path() != "/" && named() {
+            100
+        } else {
+            entity_priority(v)
+        }
+    };
     if let Some(best) = (1..scripts.len()).fold((!scripts.is_empty()).then_some(0), |best, i| {
-        best.filter(|b| entity_priority(&scripts[i].0) <= entity_priority(&scripts[*b].0))
+        best.filter(|b| subject(&scripts[i].0) <= subject(&scripts[*b].0))
             .or(Some(i))
     }) {
-        let page: Vec<String> = [uri.to_owned(), fetched.url.to_string()]
-            .into_iter()
-            .chain(
-                html.select(&selector("head link[rel~=canonical][href]"))
-                    .filter_map(|l| origin_url(&fetched.url, l.value().attr("href")?)),
-            )
-            .filter_map(|u| entity_identity(&u))
-            .collect();
         let (entity, head) = &scripts[best];
         let named = entity_urls(entity)
             .filter_map(|u| origin_url(&fetched.url, u).and_then(|u| entity_identity(&u)))
@@ -1144,6 +1160,49 @@ mod tests {
             .aliases
             .contains(&"https://example.org/canonical".into()));
     }
+    #[test]
+    fn the_pages_own_artist_outranks_a_site_wide_app_node() {
+        let fetch = |url: &str, body: Vec<u8>| Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            url: Url::parse(url).unwrap(),
+            body,
+            content_type: "text/html".into(),
+            status: 200,
+            location: None,
+            retry_after_secs: 60,
+            validators: Default::default(),
+        };
+        // TIDAL's artist page: its own MusicGroup, and a graph with the site's Organization,
+        // WebSite and WebApplication (all named "TIDAL").
+        let path = format!(
+            "{}/tests/fixtures/web/tidal-artist-64518.html",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let url = "https://tidal.com/artist/64518";
+        let out = extract(url, &fetch(url, std::fs::read(path).unwrap()), 100);
+        assert_eq!(
+            (out.doc.type_name.as_str(), out.doc.name.as_deref()),
+            ("MusicGroup", Some("Radiohead"))
+        );
+        // A homepage's Organization naming the site root is its publisher, not its subject.
+        let home = r#"<head><script type="application/ld+json">{"@type":"Organization","@id":"https://shop.example/","url":"https://shop.example/","name":"Shop Ltd"}</script><script type="application/ld+json">{"@type":"WebPage","url":"https://shop.example/","name":"Welcome"}</script></head>"#;
+        let out = extract(
+            "https://shop.example/",
+            &fetch("https://shop.example/", home.as_bytes().to_vec()),
+            100,
+        );
+        assert_eq!(out.doc.type_name, "WebPage");
+        // An organization naming another page stays a helper.
+        let other = r#"<head><script type="application/ld+json">{"@type":"Organization","url":"https://shop.example/","name":"Shop Ltd"}</script><script type="application/ld+json">{"@type":"WebApplication","name":"App"}</script></head>"#;
+        let out = extract(
+            "https://shop.example/about",
+            &fetch("https://shop.example/about", other.as_bytes().to_vec()),
+            100,
+        );
+        assert_eq!(out.doc.type_name, "WebApplication");
+    }
+
     #[test]
     fn pages_cite_their_own_identifiers_from_meta() {
         let keys = |head: &str| {
