@@ -200,12 +200,8 @@ pub fn parse(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
     card.detail("tags", texts(&v["tags"]));
     let doi = text(&v["doi"]).map(|d| d.to_ascii_lowercase());
     if let Some(doi) = doi {
-        let article = version.and_then(|n| {
-            doi.strip_suffix(&format!(".v{n}"))
-                .filter(|base| base.ends_with(&format!(".{id}")))
-        });
         // A version's DOI names that version: a fact. The article's own DOI is the key.
-        match article {
+        match article_doi(&doi, id) {
             Some(base) => {
                 card.key(Key::new("doi", base));
                 card.detail("version_doi", doi.as_str());
@@ -214,6 +210,13 @@ pub fn parse(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
         }
     }
     Ok(Some(card))
+}
+
+/// The article's own DOI when `doi` is one of its version DOIs (`….{id}.v{n}`, any `n`).
+fn article_doi(doi: &str, id: u64) -> Option<&str> {
+    let (base, n) = doi.rsplit_once(".v")?;
+    (!n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) && base.ends_with(&format!(".{id}")))
+        .then_some(base)
 }
 
 /// The source: the Figshare API.
@@ -383,6 +386,39 @@ mod tests {
         assert!(parse(200, &read("article-1018700.json"), 5616445).is_err());
         assert!(parse(429, b"", 1018700).is_err());
         assert!(parse(502, b"", 1018700).is_err());
+    }
+
+    #[test]
+    fn any_version_doi_of_the_article_is_a_fact() {
+        let base = "10.6084/m9.figshare.1018700";
+        for doi in [
+            format!("{base}.v1"),
+            format!("{base}.v3"),
+            format!("{base}.v12"),
+        ] {
+            assert_eq!(article_doi(&doi, 1018700), Some(base), "{doi}");
+        }
+        assert_eq!(article_doi(base, 1018700), None, "already the article's");
+        assert_eq!(article_doi(&format!("{base}.v"), 1018700), None);
+        assert_eq!(article_doi(&format!("{base}.v1a"), 1018700), None);
+        assert_eq!(
+            article_doi(&format!("{base}.v1"), 18700),
+            None,
+            "another article"
+        );
+        assert_eq!(
+            article_doi("10.1371/journal.pone.0099999.v1", 1018700),
+            None
+        );
+        // The record's own version need not match the DOI's.
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&read("article-1018700.json")).unwrap();
+        v["doi"] = format!("{base}.v3").into();
+        let card = parse(200, &serde_json::to_vec(&v).unwrap(), 1018700)
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.keys, [Key::new("doi", base)]);
+        assert_eq!(card.details["version_doi"], format!("{base}.v3"));
     }
 
     #[test]
