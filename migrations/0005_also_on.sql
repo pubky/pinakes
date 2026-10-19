@@ -139,5 +139,9 @@ $$;
 ALTER TABLE resource_alias DROP CONSTRAINT resource_alias_basis;
 ALTER TABLE resource_alias ADD CONSTRAINT resource_alias_basis CHECK ((basis = ANY (ARRAY['cursor'::text, 'osm'::text, 'identifier'::text, 'service'::text, 'tracking'::text, 'canonical'::text])));
 
+-- Joins the last grouping run refused because they would put two values of one single-object
+-- hub key namespace (an MBID, a Q-id, a Discogs ID) in one group.
+ALTER TABLE group_input ADD COLUMN key_conflicts integer DEFAULT 0 NOT NULL;
+
 -- `sort=trending` counts the references made inside a window.
 CREATE INDEX reference_created_idx ON reference USING btree (created_at);

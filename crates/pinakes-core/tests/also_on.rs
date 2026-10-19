@@ -1071,3 +1071,63 @@ async fn the_production_queue_types_and_names_music_links(pool: PgPool) {
         );
     }
 }
+
+/// Wikidata has wrong IDs: two links of different recordings that share a Q-id stay apart, a
+/// third with only the Q-id joins one of them, and the refusal is counted.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_shared_q_id_never_joins_two_recordings(pool: PgPool) {
+    let (a, b, c) = (
+        "https://example.org/a",
+        "https://example.org/b",
+        "https://example.org/c",
+    );
+    let mut ids = vec![];
+    let hub = Fake::new("music");
+    for (uri, keys) in [
+        (a, vec!["wikidata:Q1", "mb:recording:aaaa"]),
+        (b, vec!["wikidata:Q1", "mb:recording:bbbb"]),
+        (c, vec!["wikidata:Q1"]),
+    ] {
+        ids.push(page(&pool, uri, "Song").await);
+        hub.answer(
+            uri,
+            Ok(Found {
+                keys: keys.into_iter().map(key).collect(),
+                ..Default::default()
+            }),
+        );
+    }
+    let sources: Vec<Arc<dyn Source>> = vec![hub];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let group = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT group_id FROM group_unit WHERE resource_id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let (ga, gb, gc) = (
+        group(ids[0].clone()).await,
+        group(ids[1].clone()).await,
+        group(ids[2].clone()).await,
+    );
+    assert!(gc.is_some(), "the Q-id alone joins one of them");
+    assert_ne!(ga, gb, "two recordings never share a group");
+    assert!(gc == ga || gc == gb);
+    let refused: i64 = sqlx::query_scalar("SELECT count(*) FROM group_input WHERE key_conflicts>0")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(refused > 0);
+    let metrics = pinakes_core::telemetry::Metrics::new().unwrap();
+    metrics.refresh(&pool).await.unwrap();
+    assert!(metrics.group_key_conflicts.get() > 0);
+}

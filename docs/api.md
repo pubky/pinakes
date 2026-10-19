@@ -629,7 +629,10 @@ one thing, only on evidence that cannot be spoofed:
   located within 500 m, starting within 300 s, with a name similarity of at least 0.5.
 - **An exact key a source vouches for** ([Also on](#also-on)): two links a hub names as the same
   recording, release or Wikidata item, by its own identifier (`mb:recording:{mbid}`,
-  `wikidata:Q…`). A page's own claims are never such a key.
+  `wikidata:Q…`). A page's own claims are never such a key. A group holds at most one
+  MusicBrainz recording, release, release group and artist, one Wikidata item and one Discogs
+  artist, master and release: a join that would bring a second (a wrong ID on a hub) is refused,
+  so one bad claim never chains two groups. ISRCs and barcodes may be several.
 - **Curation** on the admin listener.
 
 `sameAs`, canonical and other URL claims, and other identifiers, never group. Two located
@@ -751,8 +754,8 @@ IDs name, and all its Wikipedia editions (the major languages first), with the Q
 the item's own claims and sitelinks count, never a search.
 
 The level is exact: a track lists tracks and videos of the recording, an album lists albums and
-YouTube's album playlists, an artist lists artist pages and channels. Two editions of an album
-join through their release group. Apple Music links use the storefront
+YouTube's album playlists, an artist lists artist pages and channels. Album links group by
+their release group, while two editions (two MusicBrainz releases) stay apart. Apple Music links use the storefront
 `[also_on] apple_storefront` (`us`).
 
 ## Cards and resolvers

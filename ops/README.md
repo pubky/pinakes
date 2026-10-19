@@ -40,6 +40,7 @@ No messages are sent or contact points provisioned by these files.
 | `pinakes_queue_depth{resolver,state}` | Ready pending, currently leased or dead jobs; future refreshes are excluded from pending |
 | `pinakes_refresh_overdue{resolver}` | Non-final resources past refresh time, including failed jobs but excluding dead letters |
 | `pinakes_group_budget_resources{state}` | Resources whose last grouping run parked a key that alone exceeded the work cap (`parked`), stopped on the run cap and retries hourly (`stopped`), or settled after 24 stopped runs on unchanged input (`settled`) |
+| `pinakes_group_key_conflict_resources` | Resources whose last grouping run refused a join that would put two MusicBrainz IDs, Q-ids or Discogs IDs of one kind in a group (usually a wrong ID on a hub) |
 | `pinakes_resources{resolver,status}` | Current resource totals |
 
 Database metric refreshes are cached for 15 seconds. Overdue excludes dead letters.
