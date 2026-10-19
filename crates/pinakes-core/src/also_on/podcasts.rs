@@ -168,7 +168,7 @@ pub fn derived_guid(feed_url: &str) -> Option<String> {
     ))
 }
 /// A GUID in lower case, if it is one.
-fn guid(v: &str) -> Option<String> {
+pub fn guid(v: &str) -> Option<String> {
     let v = v.trim().to_ascii_lowercase();
     media::uuid(&v).then_some(v)
 }

@@ -437,7 +437,8 @@ pub struct SearchQuery {
     pub host: Option<String>,
     /// Links carrying one exact identifier, on any service and in any spelling:
     /// `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist),
-    /// `wikidata:{Q-id}`, `isrc:{code}` or `upc:{barcode}`.
+    /// `wikidata:{Q-id}`, `isrc:{code}`, `upc:{barcode}`, `isbn:{ISBN-10 or ISBN-13}`,
+    /// `imdb:{tt…}` (an IMDb title) or `podcast:{GUID}` (a podcast's `podcast:guid`).
     pub key: Option<String>,
     pub tags: Option<String>,
     #[serde(rename = "match")]
@@ -1100,7 +1101,7 @@ pub(crate) struct KeyFilter {
 }
 pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
     let bad = || {
-        ApiError::bad("key is mbid:{uuid}, wikidata:{Q-id}, isrc:{ISRC} or upc:{UPC, EAN or GTIN with its check digit}")
+        ApiError::bad("key is mbid:{uuid}, wikidata:{Q-id}, isrc:{ISRC}, upc:{UPC, EAN or GTIN with its check digit}, isbn:{ISBN-10 or ISBN-13}, imdb:{tt and 7–8 digits} or podcast:{GUID}")
     };
     let (kind, value) = key.split_once(':').ok_or_else(bad)?;
     let keys = |keys: Vec<String>| KeyFilter { keys, fact: None };
@@ -1129,6 +1130,14 @@ pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
         ])),
         "isrc" => Ok(both("isrc", crate::music::isrc(value).ok_or_else(bad)?)),
         "upc" => Ok(both("upc", crate::music::gtin13(value).ok_or_else(bad)?)),
+        // The books source records each edition's ISBN-13s as facts.
+        "isbn" => crate::resolver::cards::isbn(key)
+            .map(|n| both("isbn", crate::resolver::cards::isbn13(&n)))
+            .ok_or_else(bad),
+        "imdb" if crate::also_on::films::imdb(value) => Ok(keys(vec![format!("imdb:{value}")])),
+        "podcast" => crate::also_on::podcasts::guid(value)
+            .map(|g| keys(vec![format!("podcast:guid:{g}")]))
+            .ok_or_else(bad),
         _ => Err(bad()),
     }
 }

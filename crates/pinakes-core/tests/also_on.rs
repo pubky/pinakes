@@ -779,6 +779,92 @@ async fn search_by_key_finds_the_same_object_on_every_service(pool: PgPool) {
     }
 }
 
+/// `key=` finds a book edition by either ISBN, a title by its IMDb ID and a show by its GUID,
+/// as the books, films and podcasts sources record them.
+#[sqlx::test(migrations = "../../migrations")]
+async fn search_by_key_finds_books_films_and_podcasts(pool: PgPool) {
+    use pinakes_core::also_on::Fact;
+    let guid = "917393e3-1b1e-5cef-ace4-edaa54e1f810";
+    let rows: [(&str, Found); 3] = [
+        (
+            "https://openlibrary.org/books/OL23109860M",
+            Found {
+                facts: vec![Fact::new("isbn", "9780743273565")],
+                ..Default::default()
+            },
+        ),
+        (
+            "https://www.themoviedb.org/movie/278",
+            Found {
+                keys: vec![key("imdb:tt0111161")],
+                ..Default::default()
+            },
+        ),
+        (
+            "https://podcasts.apple.com/us/podcast/id1584274529",
+            Found {
+                keys: vec![key(&format!("podcast:guid:{guid}"))],
+                ..Default::default()
+            },
+        ),
+    ];
+    let hub = Fake::new("media");
+    let mut ids = vec![];
+    for (uri, found) in rows {
+        ids.push(page(&pool, uri, "x").await);
+        hub.answer(uri, Ok(found));
+    }
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) SELECT id,repeat('a',52),'tag','/pub/test/tags/'||id,'media',now() FROM unnest($1::text[]) id")
+        .bind(&ids)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let sources: Vec<Arc<dyn Source>> = vec![hub];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let found = |key: &str| {
+        let (app, key) = (app.clone(), key.to_owned());
+        async move {
+            get(&app, &format!("/v1/search?key={key}")).await["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["id"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        }
+    };
+    for isbn in [
+        "isbn:9780743273565",
+        "isbn:0743273567",
+        "isbn:978-0-7432-7356-5",
+    ] {
+        assert_eq!(found(isbn).await, [ids[0].clone()], "{isbn}");
+    }
+    assert_eq!(found("imdb:tt0111161").await, [ids[1].clone()]);
+    assert_eq!(found(&format!("podcast:{guid}")).await, [ids[2].clone()]);
+    assert_eq!(
+        found(&format!("podcast:{}", guid.to_uppercase())).await,
+        [ids[2].clone()]
+    );
+    for bad in [
+        "isbn:9780743273566",
+        "imdb:nm0000151",
+        "imdb:tt011116",
+        "podcast:the-daily",
+        "podcast:apple:1584274529",
+    ] {
+        let mut request = Request::builder()
+            .uri(format!("/v1/search?key={bad}"))
+            .body(Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        let status = app.clone().oneshot(request).await.unwrap().status();
+        assert_eq!(status, 400, "{bad}");
+    }
+}
+
 /// `sort=trending` ranks by the references made inside the window (7 days by default), shows
 /// only links referenced in it, combines with tags and `collapse=group` (one song across
 /// services is one row), and refuses windows outside 1h–90d.
