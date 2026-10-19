@@ -133,7 +133,8 @@ pub struct Validators {
 }
 #[derive(Clone, Debug, Default)]
 pub struct FetchOptions {
-    pub headers: Vec<(String, String)>,
+    /// Extra request headers, by literal name.
+    pub headers: Vec<(&'static str, String)>,
     pub json_body: Option<serde_json::Value>,
     pub sensitive: bool,
     pub accept: Option<String>,
@@ -199,7 +200,7 @@ impl Transport for PinnedTransport {
                 .unwrap_or_else(|| ALLOWED_TYPES.join(", ")),
         );
         for (key, value) in &options.headers {
-            request = request.header(key, value);
+            request = request.header(*key, value);
         }
         if let Some(v) = &options.validators.etag {
             request = request.header("if-none-match", v);

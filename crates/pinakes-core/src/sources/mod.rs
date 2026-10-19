@@ -47,9 +47,11 @@ pub trait Source: Send + Sync {
     fn facts(&self) -> &'static [&'static str] {
         &[]
     }
-    /// Default request rates per host (requests per second), from the service's published
-    /// limits. `limits.host_rates` overrides them.
-    fn budgets(&self) -> &'static [(&'static str, f64)] {
+    /// The service's published limits per host, as `(host, requests_per_second,
+    /// max_in_flight)`; a windowed limit is given as its average rate (60 per minute → 1.0).
+    /// The rate becomes the host's default (`limits.host_rates` overrides it). Egress never has
+    /// more than one request in flight per host, which meets any `max_in_flight`.
+    fn budgets(&self) -> &'static [Budget] {
         &[]
     }
     /// Plain example links with the card type they resolve to: the OpenAPI examples, also
@@ -58,6 +60,29 @@ pub trait Source: Send + Sync {
     /// The card of `uri`, a link this source reads.
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta>;
 }
+
+/// `(host, requests_per_second, max_in_flight)`.
+pub type Budget = (&'static str, f64, Option<usize>);
+
+/// Request headers a source may not set: they belong to the connection, carry credentials or
+/// replace the User-Agent.
+const REFUSED_HEADERS: &[&str] = &[
+    "authorization",
+    "connection",
+    "cookie",
+    "host",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    "user-agent",
+];
+/// The most extra headers one source request may carry.
+pub const MAX_HEADERS: usize = 4;
 
 /// An example link and the card type it resolves to.
 #[derive(Clone, Copy, Debug)]
@@ -79,8 +104,11 @@ impl Context<'_> {
         self.egress.contact()
     }
     /// A GET (or, with `options.json_body`, a POST) through the egress policy. Rate limits and
-    /// server errors become `RetryLater`; other statuses are the caller's to read.
+    /// server errors become `RetryLater`; other statuses are the caller's to read. At most
+    /// `MAX_HEADERS` extra headers (`options.headers`, e.g. a service's own identification
+    /// header); connection, credential and User-Agent headers are refused.
     pub async fn fetch(&self, url: &str, options: &FetchOptions) -> Result<Fetched> {
+        check_headers(&options.headers)?;
         let fetched = self.egress.fetch_with(url, options).await?;
         retry(&fetched)?;
         Ok(fetched)
@@ -95,6 +123,17 @@ impl Context<'_> {
         doc.status = Status::Missing;
         doc
     }
+}
+
+fn check_headers(headers: &[(&'static str, String)]) -> Result<()> {
+    anyhow::ensure!(headers.len() <= MAX_HEADERS, "too many request headers");
+    for (name, _) in headers {
+        anyhow::ensure!(
+            !REFUSED_HEADERS.contains(&name.to_ascii_lowercase().as_str()),
+            "request header {name} refused"
+        );
+    }
+    Ok(())
 }
 
 /// A source's switch.
@@ -145,7 +184,9 @@ pub fn invalid(uri: &str) -> bool {
 }
 /// Every source's default host rates, for hosts the operator did not set.
 pub fn budgets() -> impl Iterator<Item = (&'static str, f64)> {
-    REGISTRY.iter().flat_map(|s| s.budgets().iter().copied())
+    REGISTRY
+        .iter()
+        .flat_map(|s| s.budgets().iter().map(|(host, rate, _)| (*host, *rate)))
 }
 
 /// Every attribute a card on the `official` or web route may store: the web keys and every
@@ -320,8 +361,9 @@ mod tests {
                     example.uri
                 );
             }
-            for (host, rate) in source.budgets() {
+            for (host, rate, in_flight) in source.budgets() {
                 assert!(rate.is_finite() && *rate > 0.0 && !host.is_empty());
+                assert!(in_flight.is_none_or(|n| n >= 1));
             }
         }
     }
@@ -346,6 +388,43 @@ mod tests {
             .0
             .insert("nonesuch".into(), Switch::default());
         assert!(config.sources.validate().is_err());
+    }
+
+    #[test]
+    fn request_headers() {
+        let ok = vec![("AIC-User-Agent", "pinakes".to_owned())];
+        assert!(check_headers(&ok).is_ok());
+        for name in [
+            "Authorization",
+            "cookie",
+            "Host",
+            "Connection",
+            "User-Agent",
+        ] {
+            assert!(check_headers(&[(name, "x".to_owned())]).is_err(), "{name}");
+        }
+        let many: Vec<_> = (0..=MAX_HEADERS).map(|_| ("X-A", String::new())).collect();
+        assert!(check_headers(&many).is_err());
+    }
+
+    #[test]
+    fn attribution_reaches_the_card() {
+        let mut doc = ResourceMeta::new("fr:2026-18291", "federal_register", 60);
+        doc.set_type("Legislation");
+        doc.attribution = Some("Source: an official register (CC BY 4.0)".into());
+        let doc = doc.bounded(attributes()).unwrap();
+        let row = serde_json::json!({
+            "id": crate::model::identity("fr:2026-18291").unwrap().0,
+            "uri": "fr:2026-18291",
+            "status": "ok",
+            "type": "Legislation",
+            "doc": doc,
+        });
+        let card = crate::api::card(&row).unwrap();
+        assert_eq!(
+            card.attribution.as_deref(),
+            Some("Source: an official register (CC BY 4.0)")
+        );
     }
 
     #[test]

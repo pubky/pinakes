@@ -12,6 +12,12 @@ sponsors. See [schema.org terms](https://schema.org/docs/terms.html) and the
 [license text](LICENSE.schemaorg.txt). The derived table removes properties and
 comments and shortens `schema:` identifiers; it does not change the hierarchy.
 
+`local-types.json` is Pinakes's MIT-licensed table of its own card types, for objects schema.org
+has no class for (Bitcoin blocks, transactions and addresses, Lightning nodes and channels). They
+are **not schema.org**: plain names, each with `Thing` as its parent, merged into the same type
+paths. Adding one is a line here plus its entry in docs/api.md; a name that schema.org already
+uses is refused at startup.
+
 `type-mappings.json` is Pinakes's MIT-licensed mapping of OpenGraph, oEmbed and
 microformats names into the pinned vocabulary. Bumping the vocabulary is an
 explicit repository change, followed by re-resolution to update stored paths.

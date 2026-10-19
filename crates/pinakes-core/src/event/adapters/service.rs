@@ -681,7 +681,7 @@ pub fn endpoint(
         "billetto_api" => Some((
             keyed_url("billetto_api",uri)?.into(),
             FetchOptions {
-                headers: vec![("Api-Keypair".into(), key()?.into())],
+                headers: vec![("Api-Keypair", key()?.into())],
                 sensitive: true,
                 ..opts
             },
@@ -689,7 +689,7 @@ pub fn endpoint(
         "eventfrog_api" => Some((
             keyed_url("eventfrog_api",uri)?.into(),
             FetchOptions {
-                headers: vec![("authorization".into(), format!("Bearer {}", key()?))],
+                headers: vec![("authorization", format!("Bearer {}", key()?))],
                 sensitive: true,
                 ..opts
             },

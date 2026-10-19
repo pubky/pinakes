@@ -51,7 +51,7 @@ before rendering them as HTML.
 | `id` | Resource ID; for an occurrence, the feed's ID |
 | `uri` | The resource URI; for an occurrence, its own URL when it has one, else the feed's. To combine with Nexus, send `uri`, and for an occurrence `occurrence.feed_uri` (its own URL was never tagged) |
 | `status` | Fetch health: `ok`, `pending`, `missing`, `unreachable` or `error` |
-| `type` | schema.org type (`MusicEvent`, `Book`, `Place`, …) |
+| `type` | schema.org type (`MusicEvent`, `Book`, `Place`, …), or one of Pinakes's own types for what schema.org has no class for: `BitcoinBlock`, `BitcoinTransaction`, `BitcoinAddress`, `LightningNode` and `LightningChannel` (not schema.org; each a child of `Thing`) |
 | `name`, `description`, `image` | Display metadata; images point to the origin and are never proxied |
 | `site` | The publishing host; for `pubky://` objects the app path segment (`mapky.app`), not the public key; for a card read from an official API without a host of its own, the service's name (`Federal Register`) |
 | `point` | `{lat, lon}` |
