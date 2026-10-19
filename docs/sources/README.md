@@ -38,6 +38,7 @@ or got plain web cards before are read again.
 
 ## Sources
 
+- [`courtlistener`](courtlistener.md): US court opinions by cluster id.
 - [`ecfr`](ecfr.md): sections and parts of the Code of Federal Regulations.
 - [`federal_register`](federal_register.md): Federal Register documents by document number.
 - [`gleif`](gleif.md): Legal Entity Identifier records.

@@ -1587,6 +1587,12 @@
                     "uri": "https://casa.io/"
                   }
                 },
+                "resolve-courtlistener-1": {
+                  "summary": "https://www.courtlistener.com/opinion/2812209/obergefell-v-hodges/",
+                  "value": {
+                    "uri": "https://www.courtlistener.com/opinion/2812209/obergefell-v-hodges/"
+                  }
+                },
                 "resolve-dir8gnjfnhdn5cpo8gxmfxfpqm9kffkoqpmsefcjkdpkxo15d5ey-pub-pin": {
                   "summary": "pubky://dir8gnjfnhdn5cpo8gxmfxfpqm9kffkoqpmsefcjkdpkxo15d5ey/pub/pinakes.e2e/none.json",
                   "value": {

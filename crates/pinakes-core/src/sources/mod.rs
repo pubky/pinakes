@@ -20,6 +20,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::OnceLock};
 
+pub mod courtlistener;
 pub mod ecfr;
 pub mod federal_register;
 pub mod gleif;
@@ -30,6 +31,7 @@ pub mod uk_parliament_bills;
 /// Every source, one line each, in alphabetical order of name.
 #[rustfmt::skip]
 pub static REGISTRY: &[&dyn Source] = &[
+    &courtlistener::Courtlistener,
     &ecfr::Ecfr,
     &federal_register::FederalRegister,
     &gleif::Gleif,

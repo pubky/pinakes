@@ -82,6 +82,11 @@
     "type": "Legislation"
   },
   {
+    "kind": "courtlistener",
+    "uri": "https://www.courtlistener.com/opinion/2812209/obergefell-v-hodges/",
+    "type": "CreativeWork"
+  },
+  {
     "kind": "web",
     "uri": "https://example.org/",
     "type": "WebPage"

@@ -53,6 +53,8 @@ enabled = true
 enabled = true
 
 # Official-API sources, in alphabetical order (docs/sources/README.md).
+[sources.courtlistener]
+enabled = true
 [sources.ecfr]
 enabled = true
 [sources.federal_register]
