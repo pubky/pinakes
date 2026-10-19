@@ -692,6 +692,11 @@ impl Config {
         {
             bail!("invalid also_on limits");
         }
+        if a.apple_storefront.len() != 2
+            || !a.apple_storefront.bytes().all(|b| b.is_ascii_lowercase())
+        {
+            bail!("also_on.apple_storefront must be a two-letter country code in lower case");
+        }
         let e = &self.event;
         let c = &e.container;
         if !(1..=1000).contains(&c.max_changes)

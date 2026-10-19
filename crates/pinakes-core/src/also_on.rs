@@ -33,6 +33,8 @@ pub struct AlsoOnConfig {
     /// `[also_on.sources.<id>] enabled = false` turns one source off; the IDs are
     /// [`registry`]'s.
     pub sources: BTreeMap<String, SourceOptions>,
+    /// The Apple Music storefront (country) of the Apple links sources build, `us` by default.
+    pub apple_storefront: String,
     #[serde(skip)]
     pub links_per_source: usize,
     #[serde(skip)]
@@ -48,6 +50,7 @@ impl Default for AlsoOnConfig {
             enabled: true,
             derive_links: true,
             sources: BTreeMap::new(),
+            apple_storefront: "us".into(),
             links_per_source: 32,
             keys_per_source: 16,
             concurrency: 2,
@@ -154,7 +157,10 @@ pub trait Source: Send + Sync {
 
 /// Every source this build has. A source added by a later change is listed here.
 pub fn registry() -> Vec<Arc<dyn Source>> {
-    vec![]
+    vec![
+        Arc::new(crate::music_sources::MusicBrainzSource),
+        Arc::new(crate::music_sources::WikidataSource),
+    ]
 }
 /// The source IDs `[also_on.sources]` may name.
 pub fn source_ids() -> Vec<&'static str> {

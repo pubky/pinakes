@@ -453,6 +453,10 @@ expired ones (a deleted key regroups its resource). A source keeps at most
 `limits.also_on_links_per_source` (32) links and `limits.also_on_keys_per_source` (16) keys per
 resource. `[also_on] enabled = false` stops the worker; `derive_links = false` keeps keys only;
 `[also_on.sources.<id>] enabled = false` turns one source off (an unknown ID stops startup).
+The sources are `musicbrainz` and `wikidata` (music; [the API](api.md#also-on) says what each
+reads); `[also_on] apple_storefront` (`us`, a two-letter country code) is the Apple Music
+storefront of the Apple links they build. Each music link costs two MusicBrainz requests (the
+URL, then the entity), one iTunes lookup for a release with a barcode, and two Wikidata requests.
 
 Sources reach their services through the egress policy and its per-host budgets, one request
 at a time per host. A service's published limit is its host's default pace and its ceiling

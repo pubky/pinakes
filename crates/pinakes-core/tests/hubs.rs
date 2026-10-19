@@ -1,11 +1,16 @@
 //! The hub clients through Egress, against recorded MusicBrainz and Wikidata answers.
 use pinakes_core::{
-    config::EgressConfig,
+    also_on,
+    api::{self, AppState},
+    config::{Config, EgressConfig},
+    groups,
     hubs::{musicbrainz, wikidata, MbKind},
+    model::ResourceMeta,
     resolver::{
         egress::{Dns, Egress, FetchOptions, Fetched, Transport},
         RetryLater,
     },
+    store,
 };
 use std::{
     net::SocketAddr,
@@ -58,11 +63,18 @@ impl Transport for Recorded {
                     (200, fixture("mb-url-spotify-track.json"))
                 }
                 "https://busy.example/x" => (503, fixture("mb-503.json")),
+                "https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE" => {
+                    (200, fixture("mb-url-spotify-album.json"))
+                }
                 _ => (404, fixture("mb-url-unknown.json")),
             },
             "/ws/2/recording/9f9cf187-d6f9-437f-9d98-d59cdbd52757" => {
                 (200, fixture("mb-recording.json"))
             }
+            "/ws/2/release/30702389-5c67-4438-9ea0-2351c8de0f1d" => {
+                (200, fixture("mb-release.json"))
+            }
+            "/lookup" if query("upc") == "634904078164" => (200, fixture("itunes-upc.json")),
             "/w/api.php" if query("list") == "search" => (200, fixture("wd-search-p436.json")),
             "/w/api.php" if query("action") == "wbgetentities" => {
                 (200, fixture("wd-entities.json"))
@@ -165,4 +177,143 @@ async fn wikidata_reads_back_every_hit_before_choosing_one() {
         wikidata::Found::None
     );
     assert_eq!(t.seen.lock().unwrap().len(), before);
+}
+
+/// Two Spotify editions of one album: MusicBrainz names the first (a release, its links and,
+/// through its barcode, the Apple Music album), Wikidata the second (its item and release
+/// group). The shared release group joins them; each card lists the other first, then the
+/// derived links by service.
+#[sqlx::test(migrations = "../../migrations")]
+async fn music_links_join_through_the_hubs_and_list_each_other(pool: sqlx::PgPool) {
+    use tower::ServiceExt;
+    let first = "https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE";
+    let second = "https://open.spotify.com/album/2fGCAYUMssLKiUAoNdxGLx";
+    let mut ids = vec![];
+    for (uri, name) in [(first, "OK Computer"), (second, "OK Computer OKNOTOK")] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "media", 86400);
+        d.set_type("MusicAlbum");
+        d.name = Some(name.into());
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.push(id);
+    }
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let config = Config::default();
+    let cx = also_on::Context {
+        egress: egress(t.clone()),
+        config: Arc::new(config.clone()),
+    };
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    let keys = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(
+                "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key",
+            )
+            .bind(id)
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(
+        keys(ids[0].clone()).await,
+        [
+            "mb:release-group:b1392450-e666-3926-a536-22c65f834433 musicbrainz",
+            "mb:release:30702389-5c67-4438-9ea0-2351c8de0f1d musicbrainz"
+        ]
+    );
+    // The first album's Spotify ID is not the one Wikidata records: no item, no key.
+    assert_eq!(
+        keys(ids[1].clone()).await,
+        [
+            "mb:release-group:b1392450-e666-3926-a536-22c65f834433 wikidata",
+            "wikidata:Q202996 wikidata"
+        ]
+    );
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    let mut request = axum::http::Request::builder()
+        .uri(format!("/v1/resources/{}", ids[0]))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
+    ));
+    let response = app.oneshot(request).await.unwrap();
+    let bytes = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let card: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let also_on = card["also_on"].as_array().unwrap();
+    // The other edition first, as a tagged member with its ID.
+    assert_eq!(also_on[0]["id"], ids[1].as_str(), "{card}");
+    let derived: Vec<(&str, &str, &str)> = also_on[1..]
+        .iter()
+        .map(|e| {
+            assert_eq!(e["derived"], true);
+            (
+                e["site"].as_str().unwrap(),
+                e["uri"].as_str().unwrap(),
+                e["via"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    // Both editions' derived links, each URL once (the same Apple album came through
+    // iTunes for the first and through Wikidata for the second).
+    for expected in [
+        ("Apple Music", "https://music.apple.com/us/album/1097861387"),
+        ("Apple Music", "https://music.apple.com/gb/album/1097861387"),
+        (
+            "Bandcamp",
+            "https://radiohead.bandcamp.com/album/ok-computer",
+        ),
+        ("Deezer", "https://www.deezer.com/album/14879699"),
+        ("TIDAL", "https://tidal.com/album/58990510"),
+    ] {
+        assert!(
+            derived
+                .iter()
+                .any(|(site, uri, _)| (*site, *uri) == expected),
+            "{expected:?} in {derived:?}"
+        );
+    }
+    let uris: Vec<&str> = derived.iter().map(|d| d.1).collect();
+    let mut once = uris.clone();
+    once.dedup();
+    assert_eq!(uris.len(), once.len());
+    let itunes: String =
+        sqlx::query_scalar("SELECT uri FROM derived_link WHERE resource_id=$1 AND via='itunes'")
+            .bind(&ids[0])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(itunes, "https://music.apple.com/us/album/1097861387");
+    // Album level only: no track, no artist, and never a non-music page.
+    for (_, uri, _) in &derived {
+        let link = pinakes_core::music::parse(uri).unwrap();
+        assert!(
+            matches!(
+                link.level,
+                pinakes_core::music::Level::Album | pinakes_core::music::Level::Playlist
+            ),
+            "{uri}"
+        );
+    }
+    // By service name, then URL.
+    let sites: Vec<String> = derived.iter().map(|d| d.0.to_lowercase()).collect();
+    let mut sorted = sites.clone();
+    sorted.sort();
+    assert_eq!(sites, sorted);
 }

@@ -691,6 +691,23 @@ source's lifetime, typically 30 days); a source's links and keys live twice that
 refresh keeps them, and they go when the source stops returning them. A source's exact keys
 (an MBID, a Q-id) also [group](#groups) the links that share them.
 
+**Music.** A track, album or artist link on a music service ([music service links](#aliases))
+is looked up exactly, never by title or name:
+- `musicbrainz`: what MusicBrainz relates the link to (one recording, release or release group,
+  or artist; several are ambiguous and give nothing), that entity's current links on music
+  services, and its MBIDs as keys (`mb:recording:…`, `mb:release:…`, `mb:release-group:…`,
+  `mb:artist:…`). A release with a barcode also gets its Apple Music album from iTunes
+  (`via: "itunes"`) when exactly one album answers.
+- `wikidata`: the one item carrying the link's own service ID (Spotify, Apple Music, Deezer,
+  TIDAL, Qobuz, YouTube, SoundCloud, Amazon Music, Bandcamp), read back and compared exactly
+  (two items are ambiguous and give nothing); its other music-service IDs as links and its Q-id
+  and MusicBrainz ID as keys.
+
+The level is exact: a track lists tracks and videos of the recording, an album lists albums and
+YouTube's album playlists, an artist lists artist pages and channels. Two editions of an album
+join through their release group. Apple Music links use the storefront
+`[also_on] apple_storefront` (`us`).
+
 ## Cards and resolvers
 
 Public `/v1/info` names the kinds this instance resolves in `resolves`; the admin `/v1/info`

@@ -17,6 +17,7 @@ pub mod locks;
 pub mod maintenance;
 pub mod model;
 pub mod music;
+pub mod music_sources;
 pub mod nexus;
 pub mod osm_dump;
 pub mod queue;

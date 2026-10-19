@@ -115,6 +115,13 @@ pub fn parse(uri: &str) -> Option<Link> {
         "youtube.com" | "m.youtube.com" | "music.youtube.com" => match segments.as_slice() {
             ["watch"] => youtube_video(&query("v")?),
             ["shorts" | "embed" | "live", id] => youtube_video(id),
+            // A channel: the artist's own page on YouTube.
+            ["channel", id] if id.len() == 24 && id.starts_with("UC") && token(id, 24, 24) => link(
+                Service::YouTube,
+                Level::Artist,
+                id,
+                format!("https://www.youtube.com/channel/{id}"),
+            ),
             ["playlist"] => {
                 let list = query("list")?;
                 if !token(&list, 8, 64) {
@@ -555,6 +562,19 @@ mod tests {
                 "{expected}"
             );
         }
+    }
+
+    #[test]
+    fn a_youtube_channel_is_an_artist_page() {
+        let l = parse("https://music.youtube.com/channel/UCq19-LqvG35A-30oyAiPiqA").unwrap();
+        assert_eq!(
+            (l.level, l.canonical.as_str()),
+            (
+                Level::Artist,
+                "https://www.youtube.com/channel/UCq19-LqvG35A-30oyAiPiqA"
+            )
+        );
+        assert!(parse("https://www.youtube.com/channel/short").is_none());
     }
 
     #[test]

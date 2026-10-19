@@ -1,0 +1,438 @@
+//! "Also on" for music: the same track, album or artist on other services, from exact hub
+//! lookups only (never a title or name).
+//!
+//! - [`MusicBrainzSource`]: what MusicBrainz relates the tagged link to (one recording, release
+//!   or artist), that entity's current links on music services at the same level, and its
+//!   MBIDs as keys. A release with a barcode also gets its Apple Music album from iTunes'
+//!   `lookup?upc=` when exactly one album answers.
+//! - [`WikidataSource`]: the one item carrying the link's service ID, that item's other music
+//!   service IDs at the same level as links, and its Q-id and MusicBrainz IDs as keys.
+//!
+//! The level is exact: a track lists tracks (and videos of the recording), an album lists
+//! albums (and YouTube's album playlists), an artist lists artist pages.
+use crate::{
+    also_on::{Context, Found, Key, Link, Source, Subject},
+    hubs::{self, musicbrainz, wikidata, MbKind},
+    music::{self, Level, Service},
+};
+use anyhow::Result;
+use async_trait::async_trait;
+use serde_json::Value;
+
+/// The level a link is joined at: a video counts as its recording, a YouTube playlist as the
+/// album it holds; other playlists are not joined.
+fn join_level(link: &music::Link) -> Option<Level> {
+    match (link.level, link.service) {
+        (Level::Video, _) => Some(Level::Track),
+        (Level::Playlist, Service::YouTube) => Some(Level::Album),
+        (Level::Playlist, _) => None,
+        (level, _) => Some(level),
+    }
+}
+/// A link found on a hub, when it is a music link at `level`: its canonical URL and service.
+fn derived(url: &str, level: Level, via: &str) -> Option<Link> {
+    let found = music::parse(url)?;
+    (join_level(&found)? == level).then(|| Link::new(found.canonical, found.service.name(), via))
+}
+
+/// MusicBrainz relations of an exact link.
+pub struct MusicBrainzSource;
+#[async_trait]
+impl Source for MusicBrainzSource {
+    fn id(&self) -> &'static str {
+        "musicbrainz"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        music::parse(&subject.uri).is_some_and(|l| join_level(&l).is_some())
+    }
+    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
+        let Some(link) = music::parse(&subject.uri) else {
+            return Ok(Found::default());
+        };
+        let Some(level) = join_level(&link) else {
+            return Ok(Found::default());
+        };
+        let Some(targets) = musicbrainz::url(&cx.egress, &link.canonical).await? else {
+            return Ok(Found::default());
+        };
+        let at = |kind: MbKind| -> Vec<&String> {
+            targets
+                .targets
+                .iter()
+                .filter(|(k, _)| *k == kind)
+                .map(|(_, id)| id)
+                .collect()
+        };
+        // Exactly one entity at the link's level; several are ambiguous and join nothing.
+        let (kind, id) = match level {
+            Level::Track => (MbKind::Recording, at(MbKind::Recording)),
+            Level::Artist => (MbKind::Artist, at(MbKind::Artist)),
+            _ => match at(MbKind::Release).as_slice() {
+                [] => (MbKind::ReleaseGroup, at(MbKind::ReleaseGroup)),
+                releases => (MbKind::Release, releases.to_vec()),
+            },
+        };
+        let [id] = id.as_slice() else {
+            return Ok(Found::default());
+        };
+        let Some(entity) = musicbrainz::entity(&cx.egress, kind, id).await? else {
+            return Ok(Found::default());
+        };
+        let mut found = Found::default();
+        let mut key = |kind: MbKind, id: &str| {
+            if let Some(key) = hubs::key::mb(kind, id) {
+                found.keys.push(Key {
+                    key,
+                    via: "musicbrainz".into(),
+                });
+            }
+        };
+        key(kind, &entity.mbid);
+        if let Some(group) = &entity.release_group {
+            key(MbKind::ReleaseGroup, group);
+        }
+        found.links = entity
+            .urls
+            .iter()
+            .filter_map(|u| derived(&u.url, level, "musicbrainz"))
+            .collect();
+        if let Some(barcode) = &entity.barcode {
+            if let Some(apple) = itunes_album(cx, barcode).await? {
+                found.links.push(apple);
+            }
+        }
+        Ok(found)
+    }
+}
+
+/// Apple Music's album for a barcode: iTunes `lookup?upc=` in the configured storefront, when
+/// exactly one album answers (an unknown code can return unrelated albums).
+async fn itunes_album(cx: &Context, barcode: &str) -> Result<Option<Link>> {
+    let storefront = &cx.config.also_on.apple_storefront;
+    let url =
+        format!("https://itunes.apple.com/lookup?upc={barcode}&entity=album&country={storefront}");
+    let options = crate::resolver::egress::FetchOptions {
+        accept: Some("application/json".into()),
+        ..Default::default()
+    };
+    let fetched = cx.egress.discover(&url, &options, 3600).await?;
+    match fetched.status {
+        200 => {}
+        429 | 500..=599 => {
+            return Err(crate::resolver::RetryLater {
+                class: "itunes_busy",
+                seconds: fetched.retry_after_secs.clamp(60, 3600),
+            }
+            .into())
+        }
+        _ => return Ok(None),
+    }
+    // iTunes answers `text/javascript` with leading newlines.
+    let v: Value = serde_json::from_slice(fetched.body.trim_ascii())?;
+    Ok(itunes_parse(&v))
+}
+/// The one album of an iTunes lookup, as an Apple Music link.
+pub fn itunes_parse(v: &Value) -> Option<Link> {
+    let albums: Vec<&Value> = v["results"]
+        .as_array()?
+        .iter()
+        .filter(|r| r["wrapperType"] == "collection" && r["collectionType"] == "Album")
+        .collect();
+    let [album] = albums.as_slice() else {
+        return None;
+    };
+    derived(album["collectionViewUrl"].as_str()?, Level::Album, "itunes")
+}
+
+/// The Wikidata properties of music services, by service and level, and how each value makes
+/// a URL (`{sf}` is the Apple storefront).
+const PROPERTIES: &[(&str, Service, Level, &str)] = &[
+    (
+        "P2207",
+        Service::Spotify,
+        Level::Track,
+        "https://open.spotify.com/track/{}",
+    ),
+    (
+        "P2205",
+        Service::Spotify,
+        Level::Album,
+        "https://open.spotify.com/album/{}",
+    ),
+    (
+        "P1902",
+        Service::Spotify,
+        Level::Artist,
+        "https://open.spotify.com/artist/{}",
+    ),
+    (
+        "P10110",
+        Service::AppleMusic,
+        Level::Track,
+        "https://music.apple.com/{sf}/song/{}",
+    ),
+    (
+        "P2281",
+        Service::AppleMusic,
+        Level::Album,
+        "https://music.apple.com/{sf}/album/{}",
+    ),
+    (
+        "P2850",
+        Service::AppleMusic,
+        Level::Artist,
+        "https://music.apple.com/{sf}/artist/{}",
+    ),
+    (
+        "P2724",
+        Service::Deezer,
+        Level::Track,
+        "https://www.deezer.com/track/{}",
+    ),
+    (
+        "P2723",
+        Service::Deezer,
+        Level::Album,
+        "https://www.deezer.com/album/{}",
+    ),
+    (
+        "P2722",
+        Service::Deezer,
+        Level::Artist,
+        "https://www.deezer.com/artist/{}",
+    ),
+    (
+        "P4578",
+        Service::Tidal,
+        Level::Track,
+        "https://tidal.com/track/{}",
+    ),
+    (
+        "P4577",
+        Service::Tidal,
+        Level::Album,
+        "https://tidal.com/album/{}",
+    ),
+    (
+        "P4576",
+        Service::Tidal,
+        Level::Artist,
+        "https://tidal.com/artist/{}",
+    ),
+    (
+        "P11770",
+        Service::Qobuz,
+        Level::Album,
+        "https://open.qobuz.com/album/{}",
+    ),
+    (
+        "P11578",
+        Service::Qobuz,
+        Level::Artist,
+        "https://open.qobuz.com/artist/{}",
+    ),
+    (
+        "P1651",
+        Service::YouTube,
+        Level::Video,
+        "https://www.youtube.com/watch?v={}",
+    ),
+    (
+        "P4300",
+        Service::YouTube,
+        Level::Playlist,
+        "https://www.youtube.com/playlist?list={}",
+    ),
+    (
+        "P2397",
+        Service::YouTube,
+        Level::Artist,
+        "https://www.youtube.com/channel/{}",
+    ),
+    (
+        "P3040",
+        Service::SoundCloud,
+        Level::Artist,
+        "https://soundcloud.com/{}",
+    ),
+    (
+        "P13398",
+        Service::AmazonMusic,
+        Level::Track,
+        "https://music.amazon.com/tracks/{}",
+    ),
+    (
+        "P6276",
+        Service::AmazonMusic,
+        Level::Artist,
+        "https://music.amazon.com/artists/{}",
+    ),
+    (
+        "P3283",
+        Service::Bandcamp,
+        Level::Artist,
+        "https://{}.bandcamp.com/",
+    ),
+];
+/// The MusicBrainz property of each level, whose values become keys.
+fn mb_property(level: Level) -> (&'static str, MbKind) {
+    match level {
+        Level::Track | Level::Video => ("P4404", MbKind::Recording),
+        Level::Artist => ("P434", MbKind::Artist),
+        _ => ("P436", MbKind::ReleaseGroup),
+    }
+}
+fn property_url(template: &str, value: &str, storefront: &str) -> String {
+    let value: String = url::form_urlencoded::byte_serialize(value.as_bytes()).collect();
+    template.replace("{sf}", storefront).replace("{}", &value)
+}
+
+/// Wikidata's item for an exact service ID.
+pub struct WikidataSource;
+#[async_trait]
+impl Source for WikidataSource {
+    fn id(&self) -> &'static str {
+        "wikidata"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        music::parse(&subject.uri).is_some_and(|l| property_of(&l).is_some())
+    }
+    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
+        let Some(link) = music::parse(&subject.uri) else {
+            return Ok(Found::default());
+        };
+        let (Some(property), Some(level)) = (property_of(&link), join_level(&link)) else {
+            return Ok(Found::default());
+        };
+        let item = match wikidata::item_with(&cx.egress, property, &link.id).await? {
+            wikidata::Found::One(item) => item,
+            _ => return Ok(Found::default()),
+        };
+        Ok(found(&item, level, &cx.config.also_on.apple_storefront))
+    }
+}
+/// The Wikidata property for a link's own service ID, if Wikidata has one.
+fn property_of(link: &music::Link) -> Option<&'static str> {
+    PROPERTIES
+        .iter()
+        .find(|(_, service, level, _)| *service == link.service && *level == link.level)
+        .map(|(p, ..)| *p)
+}
+/// An item's keys and same-level links.
+pub fn found(item: &wikidata::Item, level: Level, storefront: &str) -> Found {
+    let mut found = Found::default();
+    if let Some(key) = hubs::key::wikidata(&item.qid) {
+        found.keys.push(Key {
+            key,
+            via: "wikidata".into(),
+        });
+    }
+    // One MusicBrainz ID at this level is a key; several mean the item spans entities.
+    let (property, kind) = mb_property(level);
+    if let [mbid] = item.id(property) {
+        if let Some(key) = hubs::key::mb(kind, mbid) {
+            found.keys.push(Key {
+                key,
+                via: "wikidata".into(),
+            });
+        }
+    }
+    for (property, _, _, template) in PROPERTIES {
+        for value in item.id(property).iter().take(4) {
+            if let Some(link) = derived(
+                &property_url(template, value, storefront),
+                level,
+                "wikidata",
+            ) {
+                found.links.push(link);
+            }
+        }
+    }
+    found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn fixture(name: &str) -> Value {
+        let path = format!("{}/tests/fixtures/hubs/{name}", env!("CARGO_MANIFEST_DIR"));
+        serde_json::from_slice(std::fs::read(path).unwrap().trim_ascii()).unwrap()
+    }
+
+    #[test]
+    fn hub_links_keep_the_level() {
+        // A track takes tracks and videos of the recording, never an album.
+        assert!(derived("https://www.deezer.com/track/1", Level::Track, "x").is_some());
+        assert!(derived("https://youtu.be/dQw4w9WgXcQ", Level::Track, "x").is_some());
+        assert!(derived("https://www.deezer.com/album/1", Level::Track, "x").is_none());
+        // An album takes albums and YouTube's album playlists, never a Spotify playlist.
+        assert!(derived(
+            "https://www.youtube.com/playlist?list=OLAK5uy_nc6afxSnmK8OFML8dF9q_0D1MBMXsGnL4",
+            Level::Album,
+            "x"
+        )
+        .is_some());
+        assert!(derived(
+            "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M",
+            Level::Album,
+            "x"
+        )
+        .is_none());
+        // Not a music service: no link.
+        assert!(derived(
+            "https://www.discogs.com/release/11993641",
+            Level::Album,
+            "x"
+        )
+        .is_none());
+        let link = derived(
+            "https://music.apple.com/gb/album/ok-computer/1097861387",
+            Level::Album,
+            "musicbrainz",
+        )
+        .unwrap();
+        assert_eq!(
+            (link.uri.as_str(), link.site.as_str()),
+            ("https://music.apple.com/gb/album/1097861387", "Apple Music")
+        );
+    }
+
+    #[test]
+    fn itunes_counts_only_one_album() {
+        let link = itunes_parse(&fixture("itunes-upc.json")).unwrap();
+        assert_eq!(link.uri, "https://music.apple.com/us/album/1097861387");
+        assert_eq!(link.via, "itunes");
+        assert!(itunes_parse(&fixture("itunes-upc-many.json")).is_none());
+    }
+
+    #[test]
+    fn a_wikidata_item_gives_its_ids_at_the_level() {
+        let items = wikidata::parse_entities(&fixture("wd-entities.json"));
+        let item = items.iter().find(|i| i.qid == "Q202996").unwrap();
+        let found = found(item, Level::Album, "us");
+        let keys: Vec<&str> = found.keys.iter().map(|k| k.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "wikidata:Q202996",
+                "mb:release-group:b1392450-e666-3926-a536-22c65f834433"
+            ]
+        );
+        let uris: Vec<&str> = found.links.iter().map(|l| l.uri.as_str()).collect();
+        assert!(
+            uris.contains(&"https://open.spotify.com/album/2fGCAYUMssLKiUAoNdxGLx"),
+            "{uris:?}"
+        );
+        assert!(found.links.iter().all(|l| l.via == "wikidata"));
+        // The same item read as an artist gives no album links.
+        assert!(super::found(item, Level::Artist, "us")
+            .links
+            .iter()
+            .all(|l| { music::parse(&l.uri).is_some_and(|m| m.level == Level::Artist) }));
+        // Property values become valid URLs: the Apple storefront fills its place.
+        assert_eq!(
+            property_url("https://music.apple.com/{sf}/album/{}", "1097861387", "gb"),
+            "https://music.apple.com/gb/album/1097861387"
+        );
+    }
+}
