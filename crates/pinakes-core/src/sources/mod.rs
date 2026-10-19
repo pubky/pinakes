@@ -123,8 +123,8 @@ pub struct Context<'a> {
     pub ttl: u64,
 }
 impl Context<'_> {
-    /// The operator's contact address (`http.contact`), for APIs that ask for one. A source
-    /// that needs it answers `RetryLater` (class `disabled`) without it.
+    /// The operator's contact address (`http.contact`). A source whose service refuses requests
+    /// without one answers `RetryLater` (class `disabled`) while it is empty.
     pub fn contact(&self) -> Option<&str> {
         self.egress.contact()
     }
@@ -199,9 +199,25 @@ pub fn reading(uri: &str) -> Option<&'static dyn Source> {
 pub fn enabled_source(uri: &str, config: &Config) -> Option<&'static dyn Source> {
     reading(uri).filter(|s| config.sources.enabled(s.name()))
 }
-/// The static alias root of a source's spelling, from the link alone.
+/// The switches the daemon started with (`configure`); every source is on until then.
+static SWITCHES: std::sync::RwLock<Option<SourcesConfig>> = std::sync::RwLock::new(None);
+
+/// Record the daemon's switches, so a switched-off source's address rules no longer merge links
+/// (its links then get ordinary web cards, as its routes do).
+pub fn configure(config: &SourcesConfig) {
+    *SWITCHES.write().unwrap_or_else(|e| e.into_inner()) = Some(config.clone());
+}
+
+/// The static alias root of a source's spelling, from the link alone, while that source is on.
 pub fn alias_root(uri: &str) -> Option<String> {
-    REGISTRY.iter().find_map(|s| s.alias_root(uri))
+    let switches = SWITCHES.read().unwrap_or_else(|e| e.into_inner());
+    alias_root_with(uri, switches.as_ref())
+}
+fn alias_root_with(uri: &str, switches: Option<&SourcesConfig>) -> Option<String> {
+    REGISTRY
+        .iter()
+        .filter(|s| switches.is_none_or(|c| c.enabled(s.name())))
+        .find_map(|s| s.alias_root(uri))
 }
 /// A link no source could ever resolve (a malformed identifier of a source's own scheme).
 pub fn invalid(uri: &str) -> bool {
@@ -322,10 +338,14 @@ pub fn sparql_rows(body: &[u8]) -> Result<Vec<Row>> {
         })
         .collect())
 }
-/// A SPARQL string literal's content, escaped (`"` and `\`); identifiers are validated first,
-/// this is a second guard.
+/// A SPARQL string literal's content, escaped (`"`, `\` and line breaks); identifiers are
+/// validated first, this is a second guard.
 pub fn sparql_literal(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
 }
 
 /// A list fact: the values joined with "; ".
@@ -466,6 +486,20 @@ mod tests {
     }
 
     #[test]
+    fn a_switched_off_source_merges_nothing() {
+        let uri = "https://www.federalregister.gov/d/2026-18291";
+        assert_eq!(alias_root_with(uri, None).as_deref(), Some("fr:2026-18291"));
+        let mut off = SourcesConfig::default();
+        assert_eq!(
+            alias_root_with(uri, Some(&off)).as_deref(),
+            Some("fr:2026-18291")
+        );
+        off.0
+            .insert("federal_register".into(), Switch { enabled: false });
+        assert_eq!(alias_root_with(uri, Some(&off)), None);
+    }
+
+    #[test]
     fn switches_and_names() {
         let mut config = Config::default();
         let uri = federal_register::FederalRegister.examples()[0].uri;
@@ -506,6 +540,7 @@ mod tests {
         assert!(!rows[1].contains_key("n"));
         assert!(sparql_rows(b"{}").is_err());
         assert_eq!(sparql_literal("a\"b\\"), "a\\\"b\\\\");
+        assert_eq!(sparql_literal("a\nb\rc"), "a\\nb\\rc");
     }
 
     #[test]

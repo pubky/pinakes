@@ -151,9 +151,13 @@ their own User-Agent.
 
 The official-API sources ([docs/sources](sources/README.md)) run on the `official` card route
 (`[cards.official]`), each with its own switch, `[sources.<name>] enabled` (on by default;
-`PINAKES__SOURCES__<NAME>__ENABLED=false`). A source sets its service's published rate for that
-host unless `limits.host_rates` names the host. After an upgrade that adds a source, run
-`pinakesd reextract` for its hosts.
+`PINAKES__SOURCES__<NAME>__ENABLED=false`); a switched-off source's links get ordinary web cards
+and its address rules no longer merge links. A source lowers its service's host to the
+service's published rate (never above `limits.host_requests_per_second`) unless
+`limits.host_rates` names the host, and a request that would wait more than five seconds for its
+host (its slot, or the request ahead of it) is retried later instead of timing out. After an
+upgrade that adds a source, run `pinakesd reextract web official`: links already known get their
+source's card.
 
 Two clients are outside that policy. Nominatim and Nexus are trusted, operator-configured
 upstreams at fixed URLs that no reference can change: their clients do not apply the web DNS

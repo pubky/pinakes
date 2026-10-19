@@ -27,14 +27,16 @@ on again. The whole route can be switched off with `[cards.official] enabled = f
 
 Every request carries the operator's contact in the User-Agent (`http.contact`, see
 [operations](../operations.md#deployment-and-egress)); while it is empty, the links of a source
-whose service requires an email address ([SEC EDGAR](sec.md)) wait and are retried hourly. Requests share the per-host budget
-(`limits.host_requests_per_second`, one per second by default) and never have more than one
-request in flight per host; a source whose service publishes a limit sets that host's rate (a
-windowed limit as its average rate), and `limits.host_rates` overrides it. Each page below names
-the service's limits, licence and any attribution the card carries.
+whose service requires an email address ([SEC EDGAR](sec.md)) wait and are retried hourly.
+Requests share the per-host budget (`limits.host_requests_per_second`, one per second by
+default) and never have more than one request in flight per host. A source whose service
+publishes a lower limit lowers that host's rate (a windowed limit as its average rate); a host
+whose next request is further away than a fetch may wait is retried later. `limits.host_rates`
+overrides both. Each page below names the service's limits, licence and any attribution the card
+carries.
 
-After an upgrade that adds a source, run `pinakesd reextract` for its hosts, so links that failed
-or got plain web cards before are read again.
+After an upgrade that adds a source, run `pinakesd reextract web official`, so links that failed
+or got plain web cards before are read by their source.
 
 ## Sources
 

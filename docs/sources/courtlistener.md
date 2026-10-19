@@ -3,7 +3,8 @@
 US court opinions from CourtListener, the Free Law Project's case-law archive, by opinion cluster
 id, through its search API. Case law is in the public domain; no key. Without a token
 CourtListener answers at most five requests per minute, which is this host's budget, so cards
-arrive slowly when many opinions are new. The card carries the source: "Source: CourtListener,
+arrive slowly when many opinions are new: a link whose request would wait more than a few seconds
+for the host is retried when its turn comes, instead of timing out. The card carries the source: "Source: CourtListener,
 Free Law Project".
 
 ## Links
