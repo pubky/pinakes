@@ -67,6 +67,8 @@ enabled = true
 enabled = true
 [sources.fedlex]
 enabled = true
+[sources.feed]
+enabled = true
 [sources.forgejo]
 enabled = true
 [sources.ghost]

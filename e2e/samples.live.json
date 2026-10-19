@@ -167,6 +167,11 @@
     "type": "EmailMessage"
   },
   {
+    "kind": "feed",
+    "uri": "https://www.theblock.co/news/business/2026-10-19-mesh-visa-partner-spend-crypto-stablecoins-421058",
+    "type": "Article"
+  },
+  {
     "kind": "web",
     "uri": "https://example.org/",
     "type": "WebPage"

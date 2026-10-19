@@ -1731,6 +1731,12 @@
                     "uri": "https://www.fedlex.admin.ch/eli/cc/24/233_245_233/fr"
                   }
                 },
+                "resolve-feed-1": {
+                  "summary": "https://www.theblock.co/news/business/2026-10-19-mesh-visa-partner-spend-crypto-stablecoins-421058",
+                  "value": {
+                    "uri": "https://www.theblock.co/news/business/2026-10-19-mesh-visa-partner-spend-crypto-stablecoins-421058"
+                  }
+                },
                 "resolve-fixr-co-event-halloween-2026-welcome-to-the-haunted-hotel-ti": {
                   "summary": "https://fixr.co/event/halloween-2026-welcome-to-the-haunted-hotel-tickets-404456056",
                   "value": {

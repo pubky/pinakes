@@ -102,14 +102,31 @@ impl WebResolver {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         tokio::time::timeout_at(deadline, async {
             let fetched = if let Some(events) = &self.events {
-                events.fetch(&self.egress, uri).await?
+                events.fetch(&self.egress, uri).await
             } else {
                 let uri = if uri.starts_with("webcal:") || uri.starts_with("webcals:") {
                     crate::event::calendar::canonical_feed(uri)
                 } else {
                     uri.to_owned()
                 };
-                self.egress.fetch(&uri).await?
+                self.egress.fetch(&uri).await
+            };
+            // A page behind an access wall may still be described by its site's own feed.
+            let fetched = match fetched {
+                Err(e) if e.is::<super::interstitial::Blocked>() => {
+                    return match crate::sources::wall_hooks(
+                        &self.egress,
+                        uri,
+                        self.config.ttl_secs,
+                        deadline,
+                    )
+                    .await
+                    {
+                        Some(doc) => Ok(doc),
+                        None => Err(e),
+                    };
+                }
+                fetched => fetched?,
             };
             if let Some(events) = &self.events {
                 if let Some(doc) = events.container(uri, &fetched, deadline).await? {
@@ -133,6 +150,13 @@ impl WebResolver {
             let ttl = self.config.ttl_secs;
             let mut extracted =
                 tokio::task::spawn_blocking(move || extract(&input_uri, &input, ttl)).await?;
+            if extracted.doc.status == Status::Unreachable {
+                if let Some(doc) =
+                    crate::sources::wall_hooks(&self.egress, uri, ttl, deadline).await
+                {
+                    return Ok(doc);
+                }
+            }
             // Later steps may replace the document; the page's own candidates stay.
             let candidates = std::mem::take(&mut extracted.doc.alias_candidates);
             if let Some(events) = &self.events {

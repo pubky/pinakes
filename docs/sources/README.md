@@ -16,6 +16,10 @@ head tag on the page's own origin), the source reads that record and improves th
 within the web fetch's deadline and at most 3 seconds. The card then names the source in
 `details.from` too; a failure leaves the page's own card.
 
+One source is a wall hook ([`feed`](feed.md)): when a page answers with an access wall, it looks
+for that exact link in the same site's RSS or Atom feed or news sitemap, and the item makes the
+card.
+
 ## Switches
 
 Each source has its own switch, on by default:
@@ -53,6 +57,7 @@ or got plain web cards before are read by their source.
 - [`eur_lex`](eur_lex.md): EU law by CELEX number, ELI or Official Journal id.
 - [`federal_register`](federal_register.md): Federal Register documents by document number.
 - [`fedlex`](fedlex.md): Swiss federal law in the classified compilation, by ELI.
+- [`feed`](feed.md): wall hook: a walled page's card from the exact item in its site's RSS/Atom feed or news sitemap
 - [`forgejo`](forgejo.md): repositories, branches, tags, releases and files on Forgejo and Gitea instances (Codeberg, gitea.com, others)
 - [`ghost`](ghost.md): page hook: a Ghost post's title, excerpt, image, dates, authors and tags from the Content API
 - [`gitlab`](gitlab.md): projects, branches, tags, releases and files on gitlab.com and other GitLab instances

@@ -1,0 +1,57 @@
+{
+  "theblock-article": {
+    "accept": "text/html",
+    "bytes": 5808,
+    "content_type": "text/html; charset=UTF-8",
+    "file": "theblock-article.html",
+    "note": "The article itself: a challenge page (403).",
+    "recorded_at": "2026-10-19T19:42:46+00:00",
+    "sha256": "dc02329dc68d08176ba279a48c5c4a80b8776701033a50144d774342f4c63367",
+    "status": 403,
+    "url": "https://www.theblock.co/news/business/2026-10-19-mesh-visa-partner-spend-crypto-stablecoins-421058"
+  },
+  "theblock-feed": {
+    "accept": "application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.9",
+    "bytes": 167,
+    "content_type": "text/html; charset=UTF-8",
+    "file": null,
+    "location": "https://www.theblock.co/rss.xml",
+    "note": "No feed at /feed.",
+    "recorded_at": "2026-10-19T19:42:47+00:00",
+    "sha256": "446a6087825fa73eadb045e5a2e9e2adf7df241b571228187728191d961dda1f",
+    "status": 301,
+    "url": "https://www.theblock.co/feed"
+  },
+  "theblock-news-sitemap": {
+    "accept": "application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.9",
+    "bytes": 10096,
+    "content_type": "text/xml;charset=UTF-8",
+    "file": "theblock-news-sitemap.xml",
+    "note": "The Block's Google News sitemap.",
+    "recorded_at": "2026-10-19T19:42:50+00:00",
+    "sha256": "1a2fb5815c5720c6dd9a5cff8dcafdfa4cb1dbbf02c35e096676d72ddea2e637",
+    "status": 200,
+    "url": "https://www.theblock.co/sitemap_tbco_news.xml"
+  },
+  "theblock-robots": {
+    "accept": "text/plain",
+    "bytes": 890,
+    "content_type": "text/plain; charset=utf-8",
+    "file": "theblock-robots.txt",
+    "recorded_at": "2026-10-19T19:42:49+00:00",
+    "sha256": "d77a608a93b15c03788e4b618e9e82598d6fe678238599c3d5f45edbaa16315a",
+    "status": 200,
+    "url": "https://www.theblock.co/robots.txt"
+  },
+  "theblock-rss": {
+    "accept": "application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.9",
+    "bytes": 30234,
+    "content_type": "text/xml; charset=UTF-8",
+    "file": "theblock-rss.xml",
+    "note": "The Block's RSS feed (latest items).",
+    "recorded_at": "2026-10-19T19:42:48+00:00",
+    "sha256": "f4345fc5f97fa982c2171b68c83858da051aa0ea68f422a6d4b685aafe67b6c2",
+    "status": 200,
+    "url": "https://www.theblock.co/rss.xml"
+  }
+}

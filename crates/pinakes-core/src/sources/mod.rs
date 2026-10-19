@@ -27,6 +27,7 @@ pub mod ecfr;
 pub mod eur_lex;
 pub mod federal_register;
 pub mod fedlex;
+pub mod feed;
 pub mod forgejo;
 pub mod ghost;
 pub mod gitlab;
@@ -54,6 +55,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &eur_lex::EurLex,
     &federal_register::FederalRegister,
     &fedlex::Fedlex,
+    &feed::Feed,
     &forgejo::Forgejo,
     &ghost::Ghost,
     &gitlab::Gitlab,
@@ -129,6 +131,50 @@ pub trait Source: Send + Sync {
     ) -> Result<Option<ResourceMeta>> {
         Ok(None)
     }
+    /// Whether this source answers for pages behind an access wall (`walled`).
+    fn hooks_walls(&self) -> bool {
+        false
+    }
+    /// A wall hook: the card of `uri` when its page answered with an access wall (a challenge,
+    /// 401 or 403), from what its site publishes elsewhere, or `None`. It runs on the web route
+    /// with a short deadline; an error leaves the wall.
+    async fn walled(&self, _cx: &Context<'_>, _uri: &str) -> Result<Option<ResourceMeta>> {
+        Ok(None)
+    }
+}
+
+/// The longest a wall hook may take, within the web fetch's own deadline.
+pub const WALL_HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// Run the switched-on wall hooks for a walled page; the first card wins.
+pub async fn wall_hooks(
+    egress: &Egress,
+    uri: &str,
+    ttl: u64,
+    deadline: tokio::time::Instant,
+) -> Option<ResourceMeta> {
+    let switches = SWITCHES.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let hooks: Vec<&dyn Source> = REGISTRY
+        .iter()
+        .copied()
+        .filter(|s| s.hooks_walls() && switches.as_ref().is_none_or(|c| c.enabled(s.name())))
+        .collect();
+    let cx = Context { egress, ttl };
+    for hook in hooks {
+        let left = deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+            .saturating_sub(std::time::Duration::from_millis(25))
+            .min(WALL_HOOK_TIMEOUT);
+        match tokio::time::timeout(left, hook.walled(&cx, uri)).await {
+            Ok(Ok(Some(doc))) => {
+                crate::telemetry::discovery("wall_hook", "applied");
+                return doc.bounded(attributes()).ok();
+            }
+            Ok(Ok(None)) => crate::telemetry::discovery("wall_hook", "none"),
+            Ok(Err(_)) | Err(_) => crate::telemetry::discovery("wall_hook", "failed"),
+        }
+    }
+    None
 }
 
 /// The longest a page hook may take, within the web fetch's own deadline.
@@ -701,7 +747,7 @@ mod tests {
             assert!(!source.examples().is_empty(), "{name} has no example");
             for example in source.examples() {
                 assert!(
-                    source.reads(example.uri) || source.hooks_pages(),
+                    source.reads(example.uri) || source.hooks_pages() || source.hooks_walls(),
                     "{name} does not read {}",
                     example.uri
                 );

@@ -308,8 +308,10 @@ in `pinakes_discovery_decisions_total{kind,decision}`.
 
 A challenge page (a bot wall, captcha or sign-in redirect) is a failed fetch: the resource turns
 `unreachable` and is retried with the normal backoff, dead-lettering after
-`limits.max_failures`. Its last accepted document, event dates and feed occurrences stay, and a
-wall never counts toward a disappearance. Fetches that hit one count as outcome `blocked` in
+`limits.max_failures`, unless the site's own feed lists the exact link (the
+[`feed`](sources/feed.md) wall hook, also for plain 401 and 403 answers); then that item is the
+card. Its last accepted document, event dates and feed occurrences stay, and a wall never counts
+toward a disappearance. Fetches that hit one count as outcome `blocked` in
 `pinakes_fetch_total`.
 
 The markers are the built-in `data/interstitial-markers.json` (text markers, captcha selectors,
