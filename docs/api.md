@@ -739,7 +739,9 @@ is looked up exactly, never by title or name:
 - `wikidata`: the one item carrying the link's own service ID (Spotify, Apple Music, Deezer,
   TIDAL, Qobuz, YouTube, SoundCloud, Amazon Music, Bandcamp), read back and compared exactly
   (two items are ambiguous and give nothing); its other music-service IDs as links and its Q-id
-  and MusicBrainz ID as keys.
+  and MusicBrainz ID as keys. A track takes only an item that is one recording (one MusicBrainz
+  recording ID, no work ID): a song item is a work that its studio, live and remastered
+  recordings share, so a track takes neither its Q-id nor its tracks.
 
 **Wikipedia.** `wikipedia`: the article's own Wikipedia names its Wikidata item (following
 redirects); the item's other language editions are listed as `Wikipedia ({lang})`, the major

@@ -408,9 +408,18 @@ fn property_of(link: &music::Link) -> Option<&'static str> {
         .find(|(_, service, level, _)| *service == link.service && *level == link.level)
         .map(|(p, ..)| *p)
 }
-/// An item's keys and same-level links.
+/// Whether an item is one recording: exactly one MusicBrainz recording ID and no work ID. A song
+/// item is a work (its studio, live and remastered recordings share it), so a track takes
+/// nothing from it, neither its Q-id nor its tracks.
+fn recording_item(item: &wikidata::Item) -> bool {
+    item.id("P4404").len() == 1 && item.id("P435").is_empty()
+}
+/// An item's keys and same-level links; at track level only a recording item's.
 pub fn found(item: &wikidata::Item, level: Level, storefront: &str) -> Found {
     let mut found = Found::default();
+    if level == Level::Track && !recording_item(item) {
+        return found;
+    }
     if let Some(key) = hubs::key::wikidata(&item.qid) {
         found.keys.push(Key {
             key,
@@ -587,6 +596,26 @@ mod tests {
             .links
             .iter()
             .all(|l| { music::parse(&l.uri).is_some_and(|m| m.level == Level::Artist) }));
+        // A track takes a recording item only: never a song (a work) or an item of unknown level.
+        let item = |ids: &[(&str, &str)]| wikidata::Item {
+            qid: "Q1".into(),
+            ids: ids
+                .iter()
+                .map(|(p, v)| (p.to_string(), vec![v.to_string()]))
+                .collect(),
+            sitelinks: Default::default(),
+        };
+        let spotify = ("P2207", "6LgJvl0Xdtc73RJ1mmpotq");
+        let recording = ("P4404", "b1a9c0e9-d987-4042-ae91-78d6a3267d69");
+        let work = ("P435", "ebd75d2a-0c3e-3b32-b4a5-d9c0eb0e5f8f");
+        let keys = |ids: &[(&str, &str)]| super::found(&item(ids), Level::Track, "us").keys.len();
+        assert_eq!(keys(&[spotify, recording]), 2);
+        assert_eq!(keys(&[spotify, recording, work]), 0);
+        assert_eq!(keys(&[spotify, work]), 0);
+        assert_eq!(keys(&[spotify]), 0);
+        assert!(super::found(&item(&[spotify, work]), Level::Track, "us")
+            .links
+            .is_empty());
         // Property values become valid URLs: the Apple storefront fills its place.
         assert_eq!(
             property_url("https://music.apple.com/{sf}/album/{}", "1097861387", "gb"),
