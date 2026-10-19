@@ -98,8 +98,13 @@ impl Source for MusicBrainzSource {
             .filter_map(|u| derived(&u.url, level, "musicbrainz"))
             .collect();
         if let Some(barcode) = &entity.barcode {
-            if let Some(apple) = itunes_album(cx, barcode).await? {
-                found.links.push(apple);
+            // iTunes is a second service: its failure never costs MusicBrainz's answer.
+            match itunes_album(cx, barcode).await {
+                Ok(Some(apple)) => found.links.push(apple),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(error = %format!("{error:#}"), "iTunes lookup failed; MusicBrainz's answer is kept")
+                }
             }
         }
         Ok(found)
@@ -139,11 +144,7 @@ async fn itunes_album(cx: &Context, barcode: &str) -> Result<Option<Link>> {
     let storefront = &cx.config.also_on.apple_storefront;
     let url =
         format!("https://itunes.apple.com/lookup?upc={barcode}&entity=album&country={storefront}");
-    let options = crate::resolver::egress::FetchOptions {
-        accept: Some("application/json".into()),
-        ..Default::default()
-    };
-    let fetched = cx.egress.discover(&url, &options, 3600).await?;
+    let fetched = cx.egress.discover(&url, &itunes_options(), 3600).await?;
     match fetched.status {
         200 => {}
         429 | 500..=599 => {
@@ -158,6 +159,14 @@ async fn itunes_album(cx: &Context, barcode: &str) -> Result<Option<Link>> {
     // iTunes answers `text/javascript` with leading newlines.
     let v: Value = serde_json::from_slice(fetched.body.trim_ascii())?;
     Ok(itunes_parse(&v))
+}
+/// How iTunes is asked: for JSON, which it serves as `text/javascript`.
+fn itunes_options() -> crate::resolver::egress::FetchOptions {
+    crate::resolver::egress::FetchOptions {
+        accept: Some("application/json".into()),
+        extra_types: &["text/javascript"],
+        ..Default::default()
+    }
 }
 /// The one album of an iTunes lookup, as an Apple Music link.
 pub fn itunes_parse(v: &Value) -> Option<Link> {
@@ -464,6 +473,47 @@ mod tests {
     }
     fn facts_of(e: &musicbrainz::Entity) -> Vec<(String, String)> {
         facts(e).into_iter().map(|f| (f.name, f.value)).collect()
+    }
+
+    /// iTunes' real answer (`text/javascript`) passes the egress checks; without admitting it,
+    /// the lookup was refused as `policy` and took MusicBrainz's answer down with it.
+    #[tokio::test]
+    async fn itunes_javascript_json_is_admitted() {
+        use axum::{routing::get, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/lookup",
+            get(|| async {
+                (
+                    [("content-type", "text/javascript; charset=utf-8")],
+                    "\n\n\n{\"resultCount\":0,\"results\":[]}",
+                )
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let url: url::Url = format!("http://{addr}/lookup").parse().unwrap();
+        let client = reqwest::Client::new();
+        let read = |options: crate::resolver::egress::FetchOptions| {
+            let (url, request) = (url.clone(), client.get(url.clone()));
+            async move {
+                crate::resolver::egress::read_response_with(
+                    url,
+                    request.send().await.unwrap(),
+                    &options,
+                )
+                .await
+            }
+        };
+        let fetched = read(itunes_options()).await.unwrap();
+        assert_eq!(fetched.status, 200);
+        let v: Value = serde_json::from_slice(fetched.body.trim_ascii()).unwrap();
+        assert!(itunes_parse(&v).is_none());
+        assert!(
+            read(Default::default()).await.is_err(),
+            "refused without the admission"
+        );
+        server.abort();
     }
 
     #[test]

@@ -96,6 +96,12 @@ impl Transport for Recorded {
             }
             other => panic!("unexpected request {other}"),
         };
+        // As the services answer: iTunes says its JSON is JavaScript.
+        let content_type = if url.path() == "/lookup" {
+            "text/javascript"
+        } else {
+            "application/json"
+        };
         Ok(Fetched {
             permanent_redirect: false,
             truncated: false,
@@ -104,7 +110,7 @@ impl Transport for Recorded {
             status,
             retry_after_secs: 120,
             location: None,
-            content_type: "application/json".into(),
+            content_type: content_type.into(),
             body,
         })
     }
