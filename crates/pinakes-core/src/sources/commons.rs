@@ -1,0 +1,617 @@
+//! Wikimedia Commons files, read from the MediaWiki API of commons.wikimedia.org.
+//!
+//! Every link to a file's description page (desktop or mobile, `/wiki/` or `index.php?title=`,
+//! the `Image:` alias, any case of the namespace, spaces or underscores, percent-encoded or not)
+//! is an alias of one identifier, `commons:File:{Name_with_underscores}`, with the title
+//! normalised the MediaWiki way. A `?curid=` link names the file by page id; its identifier comes
+//! from the answer, which names the title. A renamed file answers through its redirect: the card
+//! then carries the new title's identifier, and the old title's page is an alias of it. The media
+//! file itself (`upload.wikimedia.org`) and other wikis' `File:` pages are not these objects.
+//!
+//! Wikimedia asks for a descriptive User-Agent and, without an account, at most one request at a
+//! time and well under five a second. Every file has its own licence and author, which the card
+//! carries as its attribution.
+use super::kit::html_text;
+use super::kit::{float, host_and_segments, json, text, web_url, Card, Point, Request};
+use anyhow::{bail, ensure, Context, Result};
+use chrono::NaiveDate;
+use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
+use serde_json::Value;
+
+const API: &str = "https://commons.wikimedia.org/w/api.php";
+/// The width of the image the card shows.
+pub const THUMB_WIDTH: u32 = 1280;
+/// The `extmetadata` fields the card reads.
+const FIELDS: &str = "ObjectName|ImageDescription|Artist|Credit|Attribution|LicenseShortName|\
+                      LicenseUrl|UsageTerms|AttributionRequired|DateTimeOriginal";
+
+/// A file, by title or by page id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// The file name without the namespace, normalised, with underscores.
+    Title(String),
+    /// A page id (`?curid=`), whose title the answer names.
+    PageId(u64),
+}
+
+/// A file name in MediaWiki's normal form, with underscores: underscores and runs of spaces
+/// become one, the ends are trimmed and the first letter is upper case. `None` for a name
+/// MediaWiki rejects.
+pub fn file_name(raw: &str) -> Option<String> {
+    let name = raw.replace('_', " ");
+    let name = name
+        .split(' ')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+    let name = name.join("_");
+    let bad = |c: char| c.is_control() || "#<>[]|{}/".contains(c);
+    let escaped = name
+        .as_bytes()
+        .windows(3)
+        .any(|w| w[0] == b'%' && w[1].is_ascii_hexdigit() && w[2].is_ascii_hexdigit());
+    if name.is_empty() || name.len() > 240 || name.contains(bad) || escaped {
+        return None;
+    }
+    let mut chars = name.chars();
+    let first = chars.next()?;
+    let mut upper = first.to_uppercase();
+    Some(match (upper.next(), upper.next()) {
+        (Some(u), None) => format!("{u}{}", chars.as_str()),
+        _ => name,
+    })
+}
+
+/// The file a title names (`File:…` or `Image:…`, any case).
+fn title(raw: &str) -> Option<Target> {
+    let (ns, name) = raw.split_once(':')?;
+    let ns = ns.trim_matches([' ', '_']);
+    (ns.eq_ignore_ascii_case("file") || ns.eq_ignore_ascii_case("image"))
+        .then(|| file_name(name).map(Target::Title))
+        .flatten()
+}
+
+fn page_id(raw: &str) -> Option<Target> {
+    raw.parse()
+        .ok()
+        .filter(|id| *id > 0 && raw.len() <= 12)
+        .map(Target::PageId)
+}
+
+/// What a Commons link names: a file description page or the API's query for one file.
+pub fn from_uri(uri: &str) -> Option<Target> {
+    let (host, segments) = host_and_segments(uri)?;
+    if !matches!(
+        host.as_str(),
+        "commons.wikimedia.org" | "commons.m.wikimedia.org"
+    ) {
+        return None;
+    }
+    let query = |name: &str| {
+        web_url(uri)?
+            .query_pairs()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.into_owned())
+    };
+    let s: Vec<&str> = segments.iter().map(String::as_str).collect();
+    match s.as_slice() {
+        ["wiki", t] => title(&percent_decode_str(t).decode_utf8().ok()?),
+        ["w", "index.php"] => match query("curid") {
+            Some(id) => page_id(&id),
+            None => title(&query("title")?),
+        },
+        ["w", "api.php"] => match query("titles") {
+            Some(t) => title(&t),
+            None => page_id(&query("pageids")?),
+        },
+        _ => None,
+    }
+}
+
+/// The identifier of a file by title; `None` for a page id until the answer names the title.
+pub fn identifier(target: &Target) -> Option<String> {
+    match target {
+        Target::Title(name) => Some(format!("commons:File:{name}")),
+        Target::PageId(_) => None,
+    }
+}
+
+/// What MediaWiki leaves unescaped in a page URL (`wfUrlencode`).
+const TITLE: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~')
+    .remove(b';')
+    .remove(b'@')
+    .remove(b'$')
+    .remove(b'!')
+    .remove(b'*')
+    .remove(b'(')
+    .remove(b')')
+    .remove(b',')
+    .remove(b'/')
+    .remove(b':');
+
+/// The file's description page, as MediaWiki writes its URL.
+pub fn page(target: &Target) -> String {
+    match target {
+        Target::Title(name) => format!(
+            "https://commons.wikimedia.org/wiki/{}",
+            utf8_percent_encode(&format!("File:{name}"), TITLE)
+        ),
+        Target::PageId(id) => format!("https://commons.wikimedia.org/w/index.php?curid={id}"),
+    }
+}
+
+fn api(params: &[(&str, &str)]) -> Option<Request> {
+    let mut url = url::Url::parse(API).ok()?;
+    url.query_pairs_mut().extend_pairs(params);
+    Request::get(url.as_str())
+}
+
+/// The file's image information, licence and coordinates, following a renamed file's redirect.
+pub fn request(target: &Target) -> Option<Request> {
+    let (key, value) = match target {
+        Target::Title(name) => ("titles", format!("File:{}", name.replace('_', " "))),
+        Target::PageId(id) => ("pageids", id.to_string()),
+    };
+    let width = THUMB_WIDTH.to_string();
+    api(&[
+        ("action", "query"),
+        ("format", "json"),
+        ("formatversion", "2"),
+        ("redirects", "1"),
+        ("prop", "imageinfo|coordinates"),
+        ("iiprop", "url|size|mime|extmetadata|timestamp"),
+        ("iiurlwidth", &width),
+        ("iiextmetadatafilter", FIELDS),
+        ("iiextmetadatalanguage", "en"),
+        (key, &value),
+    ])
+}
+
+/// The structured data of a file (`M{page id}`), for `parse_depicts`.
+pub fn structured_request(page_id: u64) -> Option<Request> {
+    api(&[
+        ("action", "wbgetentities"),
+        ("format", "json"),
+        ("formatversion", "2"),
+        ("ids", &format!("M{page_id}")),
+        ("props", "claims"),
+    ])
+}
+
+/// The URL without its `utm_*` tracking parameters.
+fn untracked(raw: &str) -> Option<String> {
+    let mut url = web_url(raw)?;
+    if url.query_pairs().all(|(k, _)| k.starts_with("utm_")) {
+        url.set_query(None);
+    }
+    Some(url.into())
+}
+
+/// The day of an Exif-style date (`2017-06-24 08:45:10`, a camera's local time, or a bare date).
+/// Read as midnight UTC, like every date without a time zone.
+fn day(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let (date, rest) = (value.get(..10)?, &value[10..]);
+    let time = rest.get(1..).unwrap_or_default();
+    let clock = rest.starts_with([' ', 'T'])
+        && time.len() >= 5
+        && time.bytes().all(|b| b.is_ascii_digit() || b == b':');
+    if !(rest.is_empty() || clock) {
+        return None;
+    }
+    let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+    Some(date.and_hms_opt(0, 0, 0)?.and_utc())
+}
+
+/// The schema.org type of a file by its MIME type.
+fn type_name(mime: &str) -> &'static str {
+    match mime.split('/').next() {
+        Some("image") => "ImageObject",
+        Some("video") => "VideoObject",
+        Some("audio") => "AudioObject",
+        _ if mime == "application/pdf" => "DigitalDocument",
+        _ => "MediaObject",
+    }
+}
+
+/// The title the API answers for: the asked title through MediaWiki's own `normalized` and
+/// `redirects` lists.
+fn answered_title(query: &Value, asked: String) -> String {
+    let follow = |list: &Value, from: String| {
+        list.as_array()
+            .into_iter()
+            .flatten()
+            .find(|m| m["from"].as_str() == Some(from.as_str()))
+            .and_then(|m| text(&m["to"]))
+            .unwrap_or(from)
+    };
+    let title = follow(&query["normalized"], asked);
+    follow(&query["redirects"], title)
+}
+
+/// A file, or `None` when Commons has no such file (or the page id is not a file's page).
+pub fn parse(status: u16, raw: &[u8], target: &Target) -> Result<Option<Card>> {
+    let Some(v) = json(status, raw, &[])? else {
+        return Ok(None);
+    };
+    if v.get("error").is_some() {
+        bail!("the API answered an error: {}", v["error"]["code"]);
+    }
+    let query = &v["query"];
+    let pages = query["pages"].as_array().context("no pages")?;
+    let [p] = pages.as_slice() else {
+        bail!("expected one page, got {}", pages.len());
+    };
+    let title = text(&p["title"]);
+    match target {
+        Target::Title(name) => {
+            let asked = format!("File:{}", name.replace('_', " "));
+            ensure!(
+                title.as_deref() == Some(answered_title(query, asked).as_str()),
+                "the API answered for another file"
+            );
+        }
+        Target::PageId(id) => {
+            let redirected = query["redirects"].as_array().is_some_and(|r| !r.is_empty());
+            ensure!(
+                redirected || p["pageid"].as_u64() == Some(*id),
+                "the API answered for another page"
+            );
+        }
+    }
+    if p["missing"].as_bool() == Some(true) || p["invalid"].as_bool() == Some(true) {
+        return Ok(None);
+    }
+    if p["ns"].as_i64() != Some(6) {
+        return Ok(None);
+    }
+    let Some(info) = p["imageinfo"].as_array().and_then(|i| i.first()) else {
+        return Ok(None);
+    };
+    let name = title
+        .as_deref()
+        .and_then(|t| t.strip_prefix("File:"))
+        .and_then(file_name)
+        .context("not a file title")?;
+    let t = Target::Title(name.clone());
+    let mut card = Card::new("ImageObject", identifier(&t).expect("a title"), page(&t));
+    if &t != target {
+        card.alias(page(target));
+    }
+    if let Some(short) = info["descriptionshorturl"].as_str().and_then(web_url) {
+        card.alias(short.into());
+    }
+    let meta = |field: &str| info["extmetadata"][field]["value"].as_str();
+    let plain = |field: &str| meta(field).and_then(html_text);
+    let mime = text(&info["mime"]).unwrap_or_default();
+    card.type_name = type_name(&mime);
+    card.name = plain("ObjectName").or_else(|| {
+        let stem = name.rsplit_once('.').map_or(name.as_str(), |(s, _)| s);
+        Some(stem.replace('_', " "))
+    });
+    card.description = plain("ImageDescription");
+    let (width, height) = (info["width"].as_u64(), info["height"].as_u64());
+    let small_raster = matches!(
+        mime.as_str(),
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp"
+    ) && width.is_some_and(|w| w <= u64::from(THUMB_WIDTH));
+    card.image = if small_raster {
+        info["url"].as_str()
+    } else {
+        info["thumburl"].as_str()
+    }
+    .and_then(untracked);
+    card.point = p["coordinates"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|c| c["primary"].as_bool() == Some(true) && c["globe"].as_str() == Some("earth"))
+        .and_then(|c| Point::new(float(&c["lat"])?, float(&c["lon"])?));
+    let date = plain("DateTimeOriginal");
+    card.start = date.as_deref().and_then(day);
+    let author = plain("Artist");
+    let license = plain("LicenseShortName");
+    let credit = plain("Attribution").or_else(|| author.clone());
+    card.attribution = match (credit, license.clone()) {
+        (Some(c), Some(l)) => Some(format!("{c} / {l}")),
+        (c, l) => c.or(l),
+    };
+    card.detail("author", author);
+    card.detail("credit", plain("Credit"));
+    card.detail("license_short_name", license);
+    card.detail(
+        "license_url",
+        meta("LicenseUrl").and_then(web_url).map(String::from),
+    );
+    card.detail("usage_terms", plain("UsageTerms"));
+    card.detail(
+        "attribution_required",
+        match meta("AttributionRequired") {
+            Some("true") => Some(true),
+            Some("false") => Some(false),
+            _ => None,
+        },
+    );
+    card.detail("date_original", date);
+    card.detail("mime", mime);
+    card.detail("width", width);
+    card.detail("height", height);
+    card.detail("size", info["size"].as_u64());
+    card.detail("page_id", p["pageid"].as_u64());
+    Ok(Some(card))
+}
+
+/// What a file depicts (`P180`), as Wikidata ids: the values of its structured data that are not
+/// deprecated. Empty when the file has no structured data.
+pub fn parse_depicts(status: u16, raw: &[u8], page_id: u64) -> Result<Vec<String>> {
+    let v = json(status, raw, &[])?.context("no body")?;
+    if v.get("error").is_some() {
+        bail!("the API answered an error: {}", v["error"]["code"]);
+    }
+    let id = format!("M{page_id}");
+    let e = &v["entities"][&id];
+    ensure!(
+        e["id"].as_str() == Some(id.as_str()),
+        "the API answered for another entity"
+    );
+    let statements = e.get("statements").unwrap_or(&e["claims"]);
+    Ok(statements["P180"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|s| s["rank"].as_str() != Some("deprecated"))
+        .filter_map(|s| s["mainsnak"]["datavalue"]["value"]["id"].as_str())
+        .filter(|q| {
+            q.strip_prefix('Q')
+                .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()) && !n.is_empty())
+        })
+        .map(str::to_owned)
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sources::kit::fixture;
+
+    const GATE: &str = "Golden_Gate_Bridge_as_seen_from_Battery_East.jpg";
+
+    fn read(name: &str) -> Vec<u8> {
+        fixture::read("commons", name)
+    }
+    fn id(uri: &str) -> Option<String> {
+        from_uri(uri).as_ref().and_then(identifier)
+    }
+    fn title(name: &str) -> Target {
+        Target::Title(name.into())
+    }
+    /// The URL a fixture was recorded from.
+    fn recorded(file: &str) -> String {
+        let p: Value = serde_json::from_slice(&read("provenance.json")).unwrap();
+        p.as_object()
+            .unwrap()
+            .values()
+            .find(|e| e["file"] == file)
+            .and_then(|e| e["url"].as_str())
+            .unwrap()
+            .into()
+    }
+
+    #[test]
+    fn every_link_form_of_one_file() {
+        let gate = format!("commons:File:{GATE}");
+        for uri in [
+            format!("https://commons.wikimedia.org/wiki/File:{GATE}"),
+            format!("https://commons.m.wikimedia.org/wiki/File:{GATE}"),
+            format!("http://commons.wikimedia.org/wiki/Image:{GATE}#Licensing"),
+            "https://commons.wikimedia.org/wiki/file:Golden%20Gate%20Bridge%20as%20seen%20from%20Battery%20East.jpg".into(),
+            "https://commons.wikimedia.org/wiki/File:golden__Gate_Bridge_as_seen_from_Battery_East.jpg?uselang=de".into(),
+            "https://commons.wikimedia.org/w/index.php?title=File:Golden+Gate+Bridge+as+seen+from+Battery+East.jpg&action=history".into(),
+            "https://commons.wikimedia.org/w/index.php?title=File%3AGolden_Gate_Bridge_as_seen_from_Battery_East.jpg".into(),
+            "https://commons.wikimedia.org/w/api.php?action=query&titles=File:Golden%20Gate%20Bridge%20as%20seen%20from%20Battery%20East.jpg".into(),
+        ] {
+            assert_eq!(id(&uri).as_deref(), Some(gate.as_str()), "{uri}");
+        }
+        assert_eq!(
+            id("https://commons.wikimedia.org/wiki/File:%C3%A9t%C3%A9_%C3%A0_Paris.jpg").as_deref(),
+            Some("commons:File:Été_à_Paris.jpg")
+        );
+        for uri in [
+            "https://commons.wikimedia.org/w/index.php?curid=30202095",
+            "https://commons.wikimedia.org/w/index.php?title=File:X.jpg&curid=30202095",
+            "https://commons.wikimedia.org/w/api.php?action=query&pageids=30202095",
+        ] {
+            assert_eq!(from_uri(uri), Some(Target::PageId(30202095)), "{uri}");
+            assert_eq!(id(uri), None);
+        }
+    }
+
+    #[test]
+    fn invalid_links() {
+        for uri in [
+            "https://upload.wikimedia.org/wikipedia/commons/4/46/Bitcoin.svg",
+            "https://en.wikipedia.org/wiki/File:Bitcoin.svg",
+            "https://commons.wikimedia.org/wiki/Category:Bitcoin",
+            "https://commons.wikimedia.org/wiki/Bitcoin.svg",
+            "https://commons.wikimedia.org/wiki/File:",
+            "https://commons.wikimedia.org/wiki/File:a%7Cb.jpg",
+            "https://commons.wikimedia.org/wiki/File:a/b.jpg",
+            "https://commons.wikimedia.org/wiki/Special:FilePath/Bitcoin.svg",
+            "https://commons.wikimedia.org/w/index.php?curid=0",
+            "https://commons.wikimedia.org/w/index.php?curid=abc",
+            "https://commons.wikimedia.org/w/api.php?titles=File:A.jpg%7CFile:B.jpg",
+            "https://commons.wikimedia.org/wiki/File:a%2541.jpg",
+        ] {
+            assert_eq!(from_uri(uri), None, "{uri}");
+        }
+    }
+
+    #[test]
+    fn requests() {
+        let gate = title(GATE);
+        assert_eq!(
+            request(&gate).unwrap().url.as_str(),
+            recorded("golden-gate.json")
+        );
+        assert_eq!(
+            request(&Target::PageId(30202095)).unwrap().url.as_str(),
+            recorded("curid-30202095.json")
+        );
+        assert_eq!(
+            structured_request(60353189).unwrap().url.as_str(),
+            recorded("structured-M60353189.json")
+        );
+        assert_eq!(
+            page(&title("Été_(1).jpg")),
+            "https://commons.wikimedia.org/wiki/File:%C3%89t%C3%A9_(1).jpg"
+        );
+    }
+
+    #[test]
+    fn photo_with_location() {
+        let gate = title(GATE);
+        let card = parse(200, &read("golden-gate.json"), &gate)
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.type_name, "ImageObject");
+        assert_eq!(card.id, format!("commons:File:{GATE}"));
+        assert_eq!(
+            card.url,
+            format!("https://commons.wikimedia.org/wiki/File:{GATE}")
+        );
+        assert_eq!(
+            card.name.as_deref(),
+            Some("Golden Gate Bridge as seen from Battery East")
+        );
+        assert_eq!(
+            card.description.as_deref(),
+            Some("The Golden Gate Bridge in San Francisco, California, as seen from Battery East")
+        );
+        assert_eq!(
+            card.image.as_deref(),
+            Some(format!(
+                "https://thumb.wikimedia.org/wikipedia/commons/thumb/b/bf/{GATE}/1280px-{GATE}"
+            ))
+            .as_deref()
+        );
+        assert_eq!(card.point, Point::new(37.808838, -122.47525));
+        assert_eq!(
+            card.start.unwrap().to_rfc3339(),
+            "2017-06-24T00:00:00+00:00"
+        );
+        assert_eq!(
+            card.attribution.as_deref(),
+            Some("© Frank Schulenburg / CC BY-SA 4.0")
+        );
+        assert_eq!(card.details["author"], "Frank Schulenburg");
+        assert_eq!(card.details["credit"], "Own work");
+        assert_eq!(card.details["date_original"], "2017-06-24 08:45:10");
+        assert_eq!(
+            card.details["license_url"],
+            "https://creativecommons.org/licenses/by-sa/4.0"
+        );
+        assert_eq!(card.details["attribution_required"], true);
+        assert_eq!(card.details["mime"], "image/jpeg");
+        assert_eq!(
+            (
+                &card.details["width"],
+                &card.details["height"],
+                &card.details["size"]
+            ),
+            (&5388.into(), &3368.into(), &13848964.into())
+        );
+        assert_eq!(card.details["page_id"], 60353189);
+        assert_eq!(
+            card.aliases,
+            ["https://commons.wikimedia.org/w/index.php?curid=60353189"]
+        );
+        assert!(card.keys.is_empty());
+    }
+
+    #[test]
+    fn logo_by_title_and_by_page_id() {
+        let card = parse(200, &read("bitcoin-svg.json"), &title("Bitcoin.svg"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.id, "commons:File:Bitcoin.svg");
+        assert_eq!(card.name.as_deref(), Some("Bitcoin"));
+        assert_eq!(card.description.as_deref(), Some("Logo of Bitcoin"));
+        assert_eq!(
+            card.image.as_deref(),
+            Some("https://thumb.wikimedia.org/wikipedia/commons/thumb/4/46/Bitcoin.svg/1280px-Bitcoin.svg.png")
+        );
+        assert_eq!(
+            card.attribution.as_deref(),
+            Some("Grayliptrot / Public domain")
+        );
+        assert_eq!(card.details["attribution_required"], false);
+        assert_eq!(
+            card.details["credit"],
+            "This file was derived from: Bitcoin logo.svg"
+        );
+        assert_eq!((card.point, card.start), (None, None));
+
+        let by_id = parse(200, &read("curid-30202095.json"), &Target::PageId(30202095))
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_id, card);
+    }
+
+    #[test]
+    fn renamed_file() {
+        let old = title("Bitcoin_BTC_symbol.svg");
+        let card = parse(200, &read("redirect.json"), &old).unwrap().unwrap();
+        assert_eq!(card.id, "commons:File:BitcoinSign.svg");
+        assert_eq!(
+            card.url,
+            "https://commons.wikimedia.org/wiki/File:BitcoinSign.svg"
+        );
+        assert!(card
+            .aliases
+            .contains(&"https://commons.wikimedia.org/wiki/File:Bitcoin_BTC_symbol.svg".into()));
+    }
+
+    #[test]
+    fn missing_and_failures() {
+        let missing = title("Pinakes_does_not_exist_0000.jpg");
+        assert_eq!(parse(200, &read("missing.json"), &missing).unwrap(), None);
+        assert_eq!(
+            parse(200, &read("curid-missing.json"), &Target::PageId(999999999)).unwrap(),
+            None
+        );
+        // An answer for another file or page.
+        assert!(parse(200, &read("bitcoin-svg.json"), &title(GATE)).is_err());
+        assert!(parse(200, &read("bitcoin-svg.json"), &Target::PageId(1)).is_err());
+        assert!(parse(200, &read("missing.json"), &title("Bitcoin.svg")).is_err());
+        assert!(parse(429, b"", &title(GATE)).is_err());
+        assert!(parse(503, b"", &title(GATE)).is_err());
+        assert!(parse(200, b"<html>", &title(GATE)).is_err());
+        let error = br#"{"error":{"code":"maxlag","info":"Waiting for a database server"}}"#;
+        assert!(parse(200, error, &title(GATE)).is_err());
+        let gallery = br#"{"query":{"pages":[{"pageid":5,"ns":0,"title":"Bitcoin"}]}}"#;
+        assert_eq!(parse(200, gallery, &Target::PageId(5)).unwrap(), None);
+    }
+
+    #[test]
+    fn types_by_mime() {
+        assert_eq!(type_name("image/svg+xml"), "ImageObject");
+        assert_eq!(type_name("video/webm"), "VideoObject");
+        assert_eq!(type_name("audio/ogg"), "AudioObject");
+        assert_eq!(type_name("application/pdf"), "DigitalDocument");
+        assert_eq!(type_name("application/ogg"), "MediaObject");
+    }
+
+    #[test]
+    fn depicts() {
+        let raw = read("structured-M60353189.json");
+        assert_eq!(
+            parse_depicts(200, &raw, 60353189).unwrap(),
+            ["Q44440", "Q220032", "Q1438659", "Q4022", "Q527", "Q8074"]
+        );
+        assert!(parse_depicts(200, &raw, 1).is_err());
+        let none = br#"{"entities":{"M7":{"id":"M7","missing":""}},"success":1}"#;
+        assert!(parse_depicts(200, none, 7).unwrap().is_empty());
+    }
+}
