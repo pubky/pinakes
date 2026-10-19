@@ -1,6 +1,7 @@
 //! Pinakes indexes resource facts; Nexus remains the social source of truth.
 pub mod adapter;
 pub mod alias;
+pub mod also_on;
 pub mod api;
 pub mod canary;
 pub mod change_api;

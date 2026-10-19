@@ -80,6 +80,9 @@ pub struct Curation {
 ///   an event page for its own calendar file's UID; it joins across feeds only in the
 ///   corroborated mode (`plan`).
 ///
+/// - `hub:{key}`: an exact key a source vouches for (`also_on`: a MusicBrainz MBID, a Wikidata
+///   Q-id). Two links with the same key are one thing on two services.
+///
 /// A point (`geo:` or a map link) never groups.
 fn evidence(row: &Value) -> Vec<String> {
     let id = row["resource_id"].as_str().unwrap_or("");
@@ -98,6 +101,11 @@ fn evidence(row: &Value) -> Vec<String> {
     }
     if !row["event"].is_null() || row["source"] == "geo" {
         return vec![];
+    }
+    for key in row["hub_keys"].as_array().into_iter().flatten() {
+        if let Some(key) = key.as_str().filter(|k| crate::also_on::valid_key(k)) {
+            keys.insert(format!("hub:{key}"));
+        }
     }
     for k in stored.iter().filter(|k| k.basis == "ics_uid") {
         if let Some(uid) = k.key.strip_prefix("ics_uid:") {
@@ -177,7 +185,7 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
     .bind(id)
     .fetch_all(&mut **tx)
     .await?;
-    let rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('unit_id',unit_id,'resource_id',id,'uri',uri,'keys',coalesce(doc->'group_keys','[]'),'occurrence',occurrence,'event',event,'source',doc->>'source','lat',ST_Y(point),'lon',ST_X(point),'start',start_at,'trigrams',show_trgm(array_to_string(tsvector_to_array(to_tsvector('simple',coalesce(name,''))),' '))) FROM search_unit WHERE id=$1 LIMIT $2")
+    let rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('unit_id',unit_id,'resource_id',id,'uri',uri,'keys',coalesce(doc->'group_keys','[]'),'hub_keys',coalesce((SELECT jsonb_agg(k.key ORDER BY k.key) FROM resource_key k WHERE k.resource_id=search_unit.id AND k.expires_at>now()),'[]'),'occurrence',occurrence,'event',event,'source',doc->>'source','lat',ST_Y(point),'lon',ST_X(point),'start',start_at,'trigrams',show_trgm(array_to_string(tsvector_to_array(to_tsvector('simple',coalesce(name,''))),' '))) FROM search_unit WHERE id=$1 LIMIT $2")
         .bind(id)
         .bind((cfg.max_graph_units + 1) as i64)
         .fetch_all(&mut **tx)

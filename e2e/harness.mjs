@@ -195,7 +195,7 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
           // An alias (another spelling) reads as its root: one resource, no group needed.
           if (ids[0] === ids[1]) continue;
           const card = await json(`${pinakes}/v1/resources/${ids[0]}`);
-          if (!card.group?.members.some(member => member.id === ids[1])) return false;
+          if (!card.also_on.some(entry => entry.id === ids[1])) return false;
           const detail = await json(`${pinakes}/v1/groups/${card.group.id}`);
           assert(!('best' in detail), 'a group has no best card');
           assert(ids.every(id => detail.members.some(member => member.id === id)), 'the group lists both members');
@@ -205,7 +205,7 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
         if (docs.has('isbn') && docs.has('isbn_page')) {
           const book = await json(`${pinakes}/v1/resources/${docs.get('isbn').id}`);
           const page = await json(`${pinakes}/v1/resources/${docs.get('isbn_page').id}`);
-          if (!book.group?.members.some(member => member.id === page.id)) return false;
+          if (!book.also_on.some(entry => entry.id === page.id)) return false;
           assert.equal(book.type, 'Book');
           assert.notEqual(page.type, 'Book');
         }
@@ -213,8 +213,9 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
         if (!collapsed.items.length) return false;
         if (pairs.length) assert(collapsed.items.length < results.items.length, 'grouped samples must collapse');
         for (const row of collapsed.items) if (row.group) {
-          assert(row.group.members.length > 0 && row.group.members.length <= Math.min(row.group.size - 1, 8));
-          assert(!row.group.members.some(member => member.id === row.id && member.uri === row.uri), 'a hint names the other members');
+          const members = row.also_on.filter(entry => entry.id);
+          assert(members.length > 0 && members.length <= Math.min(row.group.size - 1, 8) && row.also_on.length <= 8);
+          assert(!row.also_on.some(entry => entry.id === row.id && entry.uri === row.uri), 'a hint names the other members');
         }
         return true;
       }, timeout, signal);

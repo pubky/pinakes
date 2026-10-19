@@ -56,7 +56,8 @@ before rendering them as HTML.
 | `site` | The publishing host; for `pubky://` objects the app path segment (`mapky.app`), not the public key; for a card read from an official API without a host of its own, the service's name (`Federal Register`) |
 | `point` | `{lat, lon}` |
 | `start`, `end` | RFC 3339 instants for events and occurrences |
-| `group` | When the resource or occurrence is in a [group](#groups): `{id, size, members}`, `members` naming up to eight others as `{id, uri, site}`: other resources first (one entry each, by ID), then other occurrences of its own feed; else `null`. A hint only: every member keeps its own card |
+| `group` | `{id, size}` when the resource or occurrence is in a [group](#groups), else `null` |
+| `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; at most 8 on a card, all on `GET /v1/resources/{id}`. A hint only: every member keeps its own card |
 | `attribution` | Present on OSM cards, events placed at an OSM venue and events whose zone came from coordinates; display it with the card |
 | `occurrence` | Occurrence cards only: `{feed_id, feed_uri, uid, recurrence_id, status}`; `feed_uri` is the feed's URI, the link people tagged |
 | `event` | Pubky event references only: `{author, object_path, recurrence_id, start, end, status}` |
@@ -577,6 +578,9 @@ one thing, only on evidence that cannot be spoofed:
 - **One ICS UID within one feed**, between dated instances that start within five minutes of
   each other. The UID is hashed into the key, so no UID text names another feed. Across feeds only with `groups.cross_container_occurrences = "corroborated"`: both
   located within 500 m, starting within 300 s, with a name similarity of at least 0.5.
+- **An exact key a source vouches for** ([Also on](#also-on)): two links a hub names as the same
+  recording, release or Wikidata item, by its own identifier (`mb:recording:{mbid}`,
+  `wikidata:Q…`). A page's own claims are never such a key.
 - **Curation** on the admin listener.
 
 `sameAs`, canonical and other URL claims, and other identifiers, never group. Two located
@@ -652,6 +656,22 @@ are read (the events already stored when the hint is installed are queued at onc
 pages change their `ETag` when a hint on them changes. `[event] same_event_hint = "off"`
 ([operations](operations.md#calendars-and-events)) removes the field from cards, details and the
 OpenAPI document and stops the pass.
+
+## Also on
+
+A card's `also_on` says where else the same thing is: first the other members of its
+[group](#groups) (links someone tagged, each with its resource `id`), by ID and URI, then
+**derived links**: the same thing on services nobody tagged, found by a source, with
+`derived: true`, the service's name in `site`, the hub or service it came through in `via`
+(`musicbrainz`, `wikidata`), and for some a `kind` (`archived`) and a time `at`. Derived links
+are ordered by service name; each URL appears once (a tagged member wins) and never the card
+itself. A card carries at most 8 entries; `GET /v1/resources/{id}` carries all of them.
+
+A derived link is a hint: it is never fetched, never counted as a reference and never ranks
+anything. Sources read a resource after it is saved and again when their results age (each
+source's lifetime, typically 30 days); a source's links and keys live twice that, so one failed
+refresh keeps them, and they go when the source stops returning them. A source's exact keys
+(an MBID, a Q-id) also [group](#groups) the links that share them.
 
 ## Cards and resolvers
 

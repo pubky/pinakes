@@ -182,6 +182,13 @@ deny_hosts = []
 enabled = true
 cross_container_occurrences = "off" # Or "corroborated": the cross-feed ICS UID mode.
 
+# "Also on": the same thing on other services, from hubs and exact lookups (docs/api.md).
+[also_on]
+enabled = true
+derive_links = true # Off: keys only (links still group), no derived links on cards.
+# [also_on.sources.<id>]
+# enabled = false # Turn one source off.
+
 [api]
 # Applied to every public /v1 route using the direct peer IP.
 requests_per_minute = 120

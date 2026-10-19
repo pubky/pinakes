@@ -27,6 +27,8 @@ pub struct Config {
     pub egress: EgressConfig,
     pub http: HttpConfig,
     pub groups: crate::groups::GroupConfig,
+    /// "Also on": keys and derived links from sources (`also_on::registry`).
+    pub also_on: crate::also_on::AlsoOnConfig,
     pub api: ApiConfig,
     pub canary: CanaryConfig,
     /// Every cap, timeout, budget, backoff and refresh tier, with documented defaults
@@ -60,6 +62,7 @@ impl Default for Config {
 const ENV_MAPS: &[&[&str]] = &[
     &["event", "adapters", "platforms"],
     &["sources"],
+    &["also_on", "sources"],
     HOST_RATES,
 ];
 /// The one map whose new entries are numbers.
@@ -123,6 +126,7 @@ impl Config {
             admin_token: None,
             refresh: RefreshConfig::default(),
             canary: CanaryConfig::default(),
+            also_on: Default::default(),
             nexus_url: "http://127.0.0.1:8080".into(),
             poll_secs: 5,
             ingest: IngestConfig::default(),
@@ -671,6 +675,23 @@ impl Config {
             bail!("invalid grouping limits");
         }
         crate::event::adapters::validate(&self.event)?;
+        let known = crate::also_on::source_ids();
+        if let Some(unknown) = self
+            .also_on
+            .sources
+            .keys()
+            .find(|id| !known.contains(&id.as_str()))
+        {
+            bail!("unknown also_on source {unknown}");
+        }
+        let a = &self.also_on;
+        if !(1..=256).contains(&a.links_per_source)
+            || !(1..=64).contains(&a.keys_per_source)
+            || !(1..=16).contains(&a.concurrency)
+            || !(1..=86400).contains(&a.retry_secs)
+        {
+            bail!("invalid also_on limits");
+        }
         let e = &self.event;
         let c = &e.container;
         if !(1..=1000).contains(&c.max_changes)
@@ -1219,6 +1240,14 @@ limits! {
     group_max_graph_units: usize = |c| c.groups.max_graph_units => [|c, v| c.groups.max_graph_units = v],
     /// Bytes one grouping pass may read.
     group_max_graph_bytes: usize = |c| c.groups.max_graph_bytes => [|c, v| c.groups.max_graph_bytes = v],
+    /// Derived links one source keeps per resource.
+    also_on_links_per_source: usize = |c| c.also_on.links_per_source => [|c, v| c.also_on.links_per_source = v],
+    /// Join keys one source keeps per resource.
+    also_on_keys_per_source: usize = |c| c.also_on.keys_per_source => [|c, v| c.also_on.keys_per_source = v],
+    /// Resources whose sources run at once.
+    also_on_concurrency: usize = |c| c.also_on.concurrency => [|c, v| c.also_on.concurrency = v],
+    /// First retry of a failed source run (seconds); doubles up to an hour.
+    also_on_retry_secs: u64 = |c| c.also_on.retry_secs => [|c, v| c.also_on.retry_secs = v],
     /// Longest calendar content line (bytes).
     event_max_line_bytes: usize = |c| c.event.max_line_bytes => [|c, v| c.event.max_line_bytes = v],
     /// Most date values in one calendar property.

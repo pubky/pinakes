@@ -32,5 +32,8 @@ pub async fn run(
         if let Err(e) = crate::store::cleanup(&pool, grace_days).await {
             tracing::warn!(error=%e,"cleanup failed");
         }
+        if let Err(e) = crate::also_on::prune(&pool).await {
+            tracing::warn!(error=%e,"also-on pruning failed");
+        }
     }
 }

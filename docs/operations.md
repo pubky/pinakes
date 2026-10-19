@@ -24,7 +24,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `resolver_requests_per_second` | `2.0` | Jobs per second per pubky or card resolver. |
 | `resolver_ttl_secs` | `86400` | Default document lifetime (seconds) for web, pubky and card resolvers. |
 | `host_requests_per_second` | `1.0` | Requests per second to any one upstream host. |
-| `host_rates` | `{}` | Per-host overrides of `host_requests_per_second`. |
+| `host_rates` | `{}` | Per-host overrides of `host_requests_per_second`; a host's published limit stays its ceiling. |
 | `max_failures` | `5` | Failures before a resource dead-letters. |
 | `timeout_grace` | `3` | Timeouts tolerated before they count as failures. |
 | `backoff_secs` | `30` | First retry backoff (seconds). |
@@ -51,6 +51,10 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `group_max_distance_m` | `500.0` | Farthest two located members of one group (metres). |
 | `group_max_graph_units` | `20000` | Units one grouping pass may read. |
 | `group_max_graph_bytes` | `33554432` | Bytes one grouping pass may read. |
+| `also_on_links_per_source` | `32` | Derived links one source keeps per resource. |
+| `also_on_keys_per_source` | `16` | Join keys one source keeps per resource. |
+| `also_on_concurrency` | `2` | Resources whose sources run at once. |
+| `also_on_retry_secs` | `300` | First retry of a failed source run (seconds); doubles up to an hour. |
 | `event_max_line_bytes` | `65536` | Longest calendar content line (bytes). |
 | `event_max_date_values` | `4096` | Most date values in one calendar property. |
 | `event_feed_body_bytes` | `33554432` | Largest calendar or feed body (bytes). |
@@ -437,13 +441,33 @@ profiles, statuses, hashes and parser output; secrets are refused. `PINAKES_PROB
 replays captures without network access. Recorded responses for the keyless probes run in
 `scripts/test`.
 
+## Also on
+
+The also-on worker runs every enabled source that applies to a resource ([the API](api.md#also-on))
+after a save that changed its document or status, and again when the shortest lifetime among
+them has passed. Its queue is `also_on_dirty`; `limits.also_on_concurrency` (2) resources run at
+once, and a failed run keeps the previous rows and retries after `limits.also_on_retry_secs`
+(300 s), doubling up to an hour. Each run replaces its source's rows (`resource_key`,
+`derived_link`); rows live twice the source's lifetime and the hourly maintenance deletes the
+expired ones (a deleted key regroups its resource). A source keeps at most
+`limits.also_on_links_per_source` (32) links and `limits.also_on_keys_per_source` (16) keys per
+resource. `[also_on] enabled = false` stops the worker; `derive_links = false` keeps keys only;
+`[also_on.sources.<id>] enabled = false` turns one source off (an unknown ID stops startup).
+
+Sources reach their services through the egress policy and its per-host budgets, one request
+at a time per host. A service's published limit is its host's default pace and its ceiling
+(`limits.host_rates` can only slow it): MusicBrainz 1 request/s, Wikimedia (`www.wikidata.org`,
+`*.wikipedia.org`, `commons.wikimedia.org`) 200/min, Open Library 3/s, iTunes about 20/min,
+crates.io 1/s, Crossref 10/s, Software Heritage 120/h.
+
 ## Groups
 
 Grouping runs after a document commits, from its own dirty queue with its own backoff (5–10
 seconds of jitter, growing to an hour), so a grouping failure never blocks a save. A document
 records its evidence as group keys: an identifier card's `doi`/`isbn` and the landing pages its
 registry names (`registry`), a page's head citations (`cites_doi`, `cites_isbn`) and ICS UIDs
-(`ics_uid`). Groups form only from those (see [the API](api.md#groups)): an identifier card with
+(`ics_uid`); the exact keys also-on sources vouch for join too (`hub:{key}`, below). Groups form
+only from those (see [the API](api.md#groups)): an identifier card with
 a named landing page that cites it, one UID within one feed, and curation. A group stores
 membership only; cards read it when they are served. Each key of a run may
 make a capped number of compatibility checks (`limits.group_max_members`² × 2, between 100,000

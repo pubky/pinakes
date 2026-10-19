@@ -308,14 +308,12 @@ async fn members_keep_their_own_cards_and_counts_and_collapse_is_a_view(pool: Pg
     let card = get(&app, &format!("/v1/resources/{a}")).await;
     assert_eq!(card["name"], "joined card", "{card}");
     let group = card["group"]["id"].as_str().unwrap().to_owned();
-    assert_eq!(
-        card["group"],
-        json!({"id": group, "size": 2, "members": [named(&b, "other")]})
-    );
+    assert_eq!(card["group"], json!({"id": group, "size": 2}));
+    assert_eq!(card["also_on"], json!([named(&b, "other")]));
     let other = get(&app, &format!("/v1/resources/{b}")).await;
     assert_eq!(other["name"], "other", "{other}");
     assert_eq!(
-        other["group"]["members"],
+        other["also_on"],
         json!([{"id": a, "uri": "doi:10.5555/joined", "site": card["site"]}])
     );
     let mut disabled = Config::default();
@@ -715,7 +713,8 @@ async fn group_failure_keeps_document_and_drain_advances(pool: PgPool) {
     );
 }
 
-/// A hint names the group's size and eight other members, the first by ID, whichever member asks.
+/// A card names its group's size, and `also_on` eight other members, the first by ID, whichever
+/// member asks.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_hint_names_eight_other_members_by_id(pool: PgPool) {
     sqlx::query("INSERT INTO resource(id,uri,host,resolver,type,type_path,name,status,doc) SELECT md5('hint-'||i),'https://hint.example/'||i,'hint.example','web','WebPage',ARRAY['Thing','CreativeWork','WebPage'],'Hint '||i,'ok',jsonb_build_object('type','WebPage','name','Hint '||i,'source','web','url','https://hint.example/'||i,'status','ok','site','hint.example','fetched_at',0,'ttl_secs',3600,'attributes','{}'::jsonb) FROM generate_series(1,12) i").execute(&pool).await.unwrap();
@@ -731,13 +730,14 @@ async fn a_hint_names_eight_other_members_by_id(pool: PgPool) {
             .unwrap();
     ids.sort();
     for own in [&ids[0], &ids[4], &ids[11]] {
-        let hint: Value = sqlx::query_scalar("SELECT group_hint($1)")
-            .bind(own)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let (hint, also_on): (Value, Value) =
+            sqlx::query_as("SELECT group_hint($1), also_on($1, $1, 8, true)")
+                .bind(own)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(hint["size"], 12);
-        let members: Vec<&str> = hint["members"]
+        let members: Vec<&str> = also_on
             .as_array()
             .unwrap()
             .iter()
@@ -754,7 +754,7 @@ async fn a_hint_names_eight_other_members_by_id(pool: PgPool) {
 }
 
 /// A resource with many units in one group (a feed's occurrences) never crowds the others out:
-/// the hint lists up to eight other resources, one entry each, before its own feed's siblings.
+/// `also_on` lists up to eight other resources, one entry each, before its own feed's siblings.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_hint_lists_other_resources_before_a_feeds_many_occurrences(pool: PgPool) {
     sqlx::query("INSERT INTO resource(id,uri,host,resolver,type,type_path,name,status,doc) SELECT md5('multi-'||i),'https://multi.example/'||i,'multi.example','web','WebPage',ARRAY['Thing','CreativeWork','WebPage'],'Multi '||i,'ok',jsonb_build_object('type','WebPage','name','Multi '||i,'source','web','url','https://multi.example/'||i,'status','ok','site','multi.example','fetched_at',0,'ttl_secs',3600,'attributes','{}'::jsonb) FROM generate_series(0,10) i").execute(&pool).await.unwrap();
@@ -783,13 +783,14 @@ async fn a_hint_lists_other_resources_before_a_feeds_many_occurrences(pool: PgPo
     let hint = |unit: String| {
         let pool = pool.clone();
         async move {
-            let v: Value = sqlx::query_scalar("SELECT group_hint($1)")
-                .bind(unit)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-            assert_eq!(v["size"], 30);
-            v["members"]
+            let (hint, also_on): (Value, Value) =
+                sqlx::query_as("SELECT group_hint($1), also_on($1, $1, 8, true)")
+                    .bind(unit)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(hint["size"], 30);
+            also_on
                 .as_array()
                 .unwrap()
                 .iter()
@@ -869,9 +870,11 @@ async fn populated_collapse_and_hints_build_only_page_cards(pool: PgPool) {
             // Facets count links, collapsed or not.
             assert_eq!(response["facets"]["tags"][0]["count"], count);
         }
-        assert!(response["items"].as_array().unwrap().iter().all(
-            |r| r["group"]["size"] == 2 && r["group"]["members"].as_array().unwrap().len() == 1
-        ));
+        assert!(response["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["group"]["size"] == 2 && r["also_on"].as_array().unwrap().len() == 1));
         let (name,statement,types):(String,String,Vec<String>)=sqlx::query_as("SELECT name,statement,ARRAY(SELECT t::text FROM unnest(parameter_types) t) FROM pg_prepared_statements WHERE statement LIKE 'WITH eligible%' OR statement LIKE 'WITH filtered%'").fetch_one(&connection).await.unwrap();
         assert!(name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'));
         let mut coords = [7.9, 47.0, 8.1, 47.006].into_iter();
@@ -1159,7 +1162,7 @@ async fn registry_landing_pages_need_the_page_to_cite_the_identifier(pool: PgPoo
     let card = get(&app, &format!("/v1/resources/{genuine}")).await;
     assert_eq!(card["group"]["id"], group.as_str());
     assert_eq!(
-        card["group"]["members"],
+        card["also_on"],
         json!([{"id": publisher, "uri": landing, "site": "www.nature.com"}]),
         "{card}"
     );

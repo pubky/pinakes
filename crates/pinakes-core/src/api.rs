@@ -529,6 +529,10 @@ pub struct Card {
     pub start: Option<DateTime<Utc>>,
     pub end: Option<DateTime<Utc>>,
     pub group: Option<GroupRef>,
+    /// The same thing elsewhere: the other members of its group (tagged links, with their ID),
+    /// then derived links nobody tagged (`derived: true`), by service name; at most 8 on a card,
+    /// all of them on `GET /v1/resources/{id}`. A hint: every member keeps its own card.
+    pub also_on: Vec<AlsoOn>,
     /// OpenStreetMap cards, events placed at an OSM venue and events whose zone was derived from
     /// coordinates: the ODbL attribution to display with the card.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -561,15 +565,35 @@ pub struct SameEvent {
     /// How alike the two names are, from 0.5 to 1 (pg_trgm similarity of the normalised names).
     pub score: f64,
 }
-/// A hint that the same thing is also elsewhere: the group this card is in. Nothing is merged;
-/// every member keeps its own card.
+/// The group this card is in (its other members are in `also_on`). Nothing is merged; every
+/// member keeps its own card.
 #[derive(Serialize, ToSchema)]
 pub struct GroupRef {
     pub id: String,
     /// Members in the group, this one included.
     pub size: i64,
-    /// Up to eight other members, by ID and URI; `GET /v1/groups/{id}` lists them all.
-    pub members: Vec<GroupMember>,
+}
+/// One entry of a card's `also_on`: a tagged member of its group (with `id`) or a derived link.
+#[derive(Serialize, ToSchema)]
+pub struct AlsoOn {
+    /// A tagged member's resource ID; absent on a derived link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub uri: String,
+    /// The service: a member's site as its card names it, a derived link's service name.
+    pub site: Option<String>,
+    /// A link nobody tagged, found by a source: never fetched, counted or ranked.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub derived: bool,
+    /// For a derived link: the hub or service it came through (`musicbrainz`, `wikidata`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+    /// For a derived link, a qualifier (`archived`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// For a derived link, a time that belongs to it (an archived copy's capture).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at: Option<DateTime<Utc>>,
 }
 #[derive(Serialize, ToSchema)]
 pub struct OccurrenceKey {
@@ -801,20 +825,29 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
             .map(|(id, g)| GroupRef {
                 id: id.into(),
                 size: g["size"].as_i64().unwrap_or(1),
-                members: g["members"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|m| {
-                        let uri = m["uri"].as_str().unwrap_or_default().to_owned();
-                        GroupMember {
-                            id: m["id"].as_str().unwrap_or_default().into(),
-                            site: site(&uri, m["site"].as_str(), m["host"].as_str()),
-                            uri,
-                        }
-                    })
-                    .collect(),
             }),
+        also_on: row["also_on"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|e| {
+                let uri = e["uri"].as_str().unwrap_or_default().to_owned();
+                let derived = e["derived"] == true;
+                AlsoOn {
+                    id: e["id"].as_str().map(str::to_owned),
+                    site: if derived {
+                        e["site"].as_str().map(str::to_owned)
+                    } else {
+                        site(&uri, e["site"].as_str(), e["host"].as_str())
+                    },
+                    uri,
+                    derived,
+                    via: e["via"].as_str().map(str::to_owned),
+                    kind: e["kind"].as_str().map(str::to_owned),
+                    at: e["at"].as_str().and_then(|s| s.parse().ok()),
+                }
+            })
+            .collect(),
         attribution: credits(
             row["osm_id"]
                 .as_i64()
@@ -1170,16 +1203,16 @@ pub async fn search(
             .push_bind((q.limit.unwrap_or(50)+1) as i64)
             .push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p)");
         // A point's card is its `item`, built once: `||` replaces a key, it never merges two items.
-        if state.config.groups.enabled || same_event(&state.config) {
-            sql.push(" || CASE WHEN p.kind='point' THEN jsonb_build_object('item',p.item");
-            if state.config.groups.enabled {
-                sql.push("||jsonb_build_object('group',group_hint(p.unit_id))");
-            }
-            if same_event(&state.config) {
-                sql.push("||jsonb_build_object('maybe_same',same_event_hint(p.unit_id,ARRAY(SELECT jsonb_array_elements_text(p.item->'type_path')),3))");
-            }
-            sql.push(") ELSE '{}'::jsonb END");
+        sql.push(" || CASE WHEN p.kind='point' THEN jsonb_build_object('item',p.item");
+        if state.config.groups.enabled {
+            sql.push("||jsonb_build_object('group',group_hint(p.unit_id),'also_on',also_on(p.unit_id,p.unit_id,8,true))");
+        } else {
+            sql.push("||jsonb_build_object('also_on',also_on(p.unit_id,p.unit_id,8,false))");
         }
+        if same_event(&state.config) {
+            sql.push("||jsonb_build_object('maybe_same',same_event_hint(p.unit_id,ARRAY(SELECT jsonb_array_elements_text(p.item->'type_path')),3))");
+        }
+        sql.push(") ELSE '{}'::jsonb END");
         sql.push(" ORDER BY rank DESC,unit_id DESC) FROM page p),'[]') AS items, (SELECT count(*) FROM filtered) AS total, (SELECT count(*) FROM groups) AS cell_count, ");
     } else {
         sql.push("), page AS (SELECT * FROM filtered");
@@ -1194,7 +1227,9 @@ pub async fn search(
             .push_bind((q.limit.unwrap_or(50) + 1) as i64)
             .push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p)");
         if state.config.groups.enabled {
-            sql.push(" || jsonb_build_object('group',group_hint(p.unit_id))");
+            sql.push(" || jsonb_build_object('group',group_hint(p.unit_id),'also_on',also_on(p.unit_id,p.unit_id,8,true))");
+        } else {
+            sql.push(" || jsonb_build_object('also_on',also_on(p.unit_id,p.unit_id,8,false))");
         }
         if same_event(&state.config) {
             sql.push(
@@ -1364,7 +1399,7 @@ async fn read(
     config: &Config,
 ) -> Result<Option<ResourceDetail>, ApiError> {
     let value: Option<Value> =
-        sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',CASE WHEN $3 THEN same_event_hint(r.id,r.type_path,10) END,'aliases',coalesce((SELECT jsonb_agg(uri ORDER BY uri) FROM (SELECT x.uri FROM resource_alias a JOIN resource x ON x.id=a.alias_id WHERE a.root_id=r.id ORDER BY x.uri LIMIT 50) s),'[]')) FROM resource_document r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)")
+        sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',CASE WHEN $3 THEN same_event_hint(r.id,r.type_path,10) END,'also_on',also_on(r.id,r.id,256,$2),'aliases',coalesce((SELECT jsonb_agg(uri ORDER BY uri) FROM (SELECT x.uri FROM resource_alias a JOIN resource x ON x.id=a.alias_id WHERE a.root_id=r.id ORDER BY x.uri LIMIT 50) s),'[]')) FROM resource_document r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)")
             .bind(id)
             .bind(config.groups.enabled)
             .bind(same_event(config))
@@ -1465,7 +1500,7 @@ pub async fn lookup(
     let roots: Vec<String> = sqlx::query_scalar("SELECT coalesce(a.root_id,w.id) FROM unnest($1::text[]) w(id) LEFT JOIN resource_alias a ON a.alias_id=w.id").bind(&ids).fetch_all(&state.pool).await?;
     store::expedite(&state.pool, &roots).await?;
     state.wake.notify_waiters();
-    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',CASE WHEN $3 THEN same_event_hint(r.id,r.type_path,3) END) FROM unnest($1::text[]) WITH ORDINALITY AS wanted(id,n) LEFT JOIN resource_alias a ON a.alias_id=wanted.id JOIN resource_document r ON r.id=coalesce(a.root_id,wanted.id) ORDER BY wanted.n").bind(ids).bind(state.config.groups.enabled).bind(same_event(&state.config)).fetch_all(&state.pool).await?;
+    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',CASE WHEN $3 THEN same_event_hint(r.id,r.type_path,3) END,'also_on',also_on(r.id,r.id,8,$2)) FROM unnest($1::text[]) WITH ORDINALITY AS wanted(id,n) LEFT JOIN resource_alias a ON a.alias_id=wanted.id JOIN resource_document r ON r.id=coalesce(a.root_id,wanted.id) ORDER BY wanted.n").bind(ids).bind(state.config.groups.enabled).bind(same_event(&state.config)).fetch_all(&state.pool).await?;
     Ok(Json(rows.iter().map(card).collect::<Result<_, _>>()?))
 }
 #[utoipa::path(post,tag="Previews",path="/v1/resolve",request_body=ResolveRequest,responses((status=200,body=ResourceDetail),(status=202,body=ResourceDetail,description="Queued; poll resource by ID"),(status=400,description="Unsupported URI or disabled resolver"),(status=429,description="Preview rate limit")))]
@@ -1662,7 +1697,7 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         ResourceDetail,
         Details,
         GroupDetail,
-        GroupMember,
+        AlsoOn,
         VenueRef,
         SearchResponse,
         SearchResult,
@@ -2057,13 +2092,6 @@ pub struct GroupDetail {
     /// Every member's card, by ID and then member key.
     pub members: Vec<Card>,
 }
-/// A group member named on a card: enough to link to it.
-#[derive(Serialize, ToSchema)]
-pub struct GroupMember {
-    pub id: String,
-    pub uri: String,
-    pub site: Option<String>,
-}
 #[utoipa::path(get,tag="Groups",path="/v1/groups/{id}",params(("id"=String,Path)),responses((status=200,body=GroupDetail),(status=400,description="Invalid ID or disabled module"),(status=404,description="Unknown group")))]
 pub async fn group(
     State(state): State<AppState>,
@@ -2096,7 +2124,7 @@ async fn group_detail(
     .fetch_all(pool)
     .await?;
     let rows: Vec<Value> = sqlx::query_scalar(
-        "SELECT to_jsonb(d)||jsonb_build_object('group',group_hint(d.unit_id),'maybe_same',CASE WHEN $2 THEN same_event_hint(d.unit_id,d.type_path,3) END) FROM group_unit u CROSS JOIN LATERAL (SELECT * FROM group_member_document WHERE unit_id=u.unit_id OFFSET 0) d WHERE u.group_id=$1 ORDER BY d.id,d.unit_id",
+        "SELECT to_jsonb(d)||jsonb_build_object('group',group_hint(d.unit_id),'maybe_same',CASE WHEN $2 THEN same_event_hint(d.unit_id,d.type_path,3) END,'also_on',also_on(d.unit_id,d.unit_id,8,true)) FROM group_unit u CROSS JOIN LATERAL (SELECT * FROM group_member_document WHERE unit_id=u.unit_id OFFSET 0) d WHERE u.group_id=$1 ORDER BY d.id,d.unit_id",
     )
     .bind(id)
     .bind(same)
