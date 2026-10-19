@@ -49,6 +49,13 @@ impl Transport for Recorded {
         options: &FetchOptions,
     ) -> anyhow::Result<Fetched> {
         assert_eq!(options.accept.as_deref(), Some("application/json"));
+        // Much-edited Wikidata items exceed the default cap; their reads may be larger.
+        let wikidata = url.host_str() == Some("www.wikidata.org");
+        assert_eq!(
+            options.body_cap,
+            wikidata.then_some(pinakes_core::hubs::WIKIDATA_CAP),
+            "{url}"
+        );
         let target = format!("{}?{}", url.path(), url.query().unwrap_or(""));
         self.seen.lock().unwrap().push(target.clone());
         let query = |k: &str| {

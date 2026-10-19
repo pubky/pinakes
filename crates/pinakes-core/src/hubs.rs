@@ -98,9 +98,13 @@ fn json(fetched: &Fetched, hub: &'static str) -> Result<Option<Value>> {
         status => bail!("{hub} answered {status}"),
     }
 }
+/// The body cap for Wikidata entities: a much-edited item carries megabytes of claims (Signal's
+/// is 2.6 MB), above the egress default of 1 MB.
+pub const WIKIDATA_CAP: usize = 8 * 1024 * 1024;
 async fn get(egress: &Egress, url: &str, hub: &'static str) -> Result<Option<Value>> {
     let options = FetchOptions {
         accept: Some("application/json".into()),
+        body_cap: (hub == "wikidata").then_some(WIKIDATA_CAP),
         ..Default::default()
     };
     // Shared flights and a short cache: two sources asking the same thing ask once.

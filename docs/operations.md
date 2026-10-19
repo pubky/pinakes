@@ -158,7 +158,8 @@ Web fetches bypass environment proxies, validate every DNS answer, pin the check
 repeat the policy at every redirect (three hops; HTML meta refresh and literal JavaScript
 redirects count). `egress.allow_hosts` and `egress.deny_hosts` take exact names or
 `*.example.org`; they never override the IP policy, and deny wins. Pages are capped at 1 MB of
-decoded body; an oversized page keeps its head metadata with a `truncated` warning. Requests
+decoded body; an oversized page keeps its head metadata with a `truncated` warning. Wikidata
+entity reads may take 8 MB, since a much-edited item carries megabytes of claims. Requests
 time out after ten seconds. Images stay origin URLs and are never fetched.
 
 Every request introduces itself as `pinakes/<version> (+https://pubky.app; <contact>)`, with

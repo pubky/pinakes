@@ -143,8 +143,9 @@ pub struct FetchOptions {
     pub accept: Option<String>,
     pub user_agent: Option<String>,
     pub feed_cap: Option<usize>,
-    /// A cap for every body whatever its type, HTML too: a larger body is refused, never
-    /// truncated (PKARR relay payloads).
+    /// A cap for every body whatever its type, HTML too, in place of the default: a larger body
+    /// is refused, never truncated (PKARR relay payloads below the default, Wikidata entities
+    /// above it).
     pub body_cap: Option<usize>,
     pub feed_hint: bool,
     /// Content types this fetch also admits, within the page cap (`""`: no content type). The
@@ -308,7 +309,8 @@ pub async fn read_response_with(
             let sniff = String::from_utf8_lossy(&body[..body.len().min(256)])
                 .trim_start_matches(['\u{feff}', ' ', '\r', '\n'])
                 .starts_with("BEGIN:VCALENDAR");
-            if body.len() > BODY_CAP
+            if options.body_cap.is_none()
+                && body.len() > BODY_CAP
                 && !(options.feed_cap.is_some() && (feed_type || options.feed_hint || sniff))
             {
                 return Err(BodyTooLarge.into());
@@ -1203,6 +1205,35 @@ mod tests {
                 .unwrap();
             assert_eq!(transport.0.lock().unwrap()[0].as_deref(), sent);
         }
+    }
+    /// A cap above the default admits a larger JSON body (a much-edited Wikidata item).
+    #[tokio::test]
+    async fn a_body_cap_above_the_default_admits_larger_json() {
+        use axum::{routing::get, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/",
+            get(|| async {
+                let body = format!("{{\"x\":\"{}\"}}", "x".repeat(3 * BODY_CAP));
+                ([("content-type", "application/json")], body)
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let url: Url = format!("http://{addr}/").parse().unwrap();
+        let client = reqwest::Client::new();
+        let read = |options: FetchOptions| {
+            let (url, request) = (url.clone(), client.get(url.clone()));
+            async move { read_response_with(url, request.send().await.unwrap(), &options).await }
+        };
+        let large = FetchOptions {
+            body_cap: Some(8 * BODY_CAP),
+            ..Default::default()
+        };
+        assert_eq!(read(large).await.unwrap().body.len(), 3 * BODY_CAP + 8);
+        let error = read(Default::default()).await.unwrap_err();
+        assert!(error.downcast_ref::<BodyTooLarge>().is_some(), "{error:#}");
+        server.abort();
     }
     #[tokio::test(start_paused = true)]
     async fn graphql_error_expires_before_the_next_retry() {
