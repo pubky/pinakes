@@ -123,17 +123,29 @@ pub fn name_request(name: &str) -> Option<Request> {
     ))
 }
 
-/// The CID of a name, or `None` when PubChem lists none or more than one.
-pub fn parse_name(status: u16, raw: &[u8]) -> Result<Option<u64>> {
+/// What PubChem names for a compound name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Named {
+    /// No compound.
+    Nothing,
+    /// Exactly one compound, by CID.
+    One(u64),
+    /// Several compounds: the name is no identifier.
+    Several,
+}
+
+/// The compounds PubChem names for a name.
+pub fn parse_name(status: u16, raw: &[u8]) -> Result<Named> {
     let Some(v) = json(status, raw, &[404])? else {
-        return Ok(None);
+        return Ok(Named::Nothing);
     };
     let cids = v["IdentifierList"]["CID"]
         .as_array()
         .context("no CID list")?;
     Ok(match cids.as_slice() {
-        [one] => one.as_u64().filter(|c| *c > 0),
-        _ => None,
+        [] => Named::Nothing,
+        [one] => Named::One(one.as_u64().filter(|c| *c > 0).context("not a CID")?),
+        _ => Named::Several,
     })
 }
 
@@ -233,20 +245,29 @@ impl Source for Pubchem {
         ]
     }
     async fn resolve(&self, cx: &super::Context<'_>, uri: &str) -> Result<ResourceMeta> {
-        let cid = match target(uri) {
-            Some(Target::Cid(cid)) => cid,
+        let (cid, by_name) = match target(uri) {
+            Some(Target::Cid(cid)) => (cid, false),
             Some(Target::Name(name)) => {
                 let f = fetch(cx, &name_request(&name).context("no lookup")?).await?;
                 match parse_name(f.status, &f.body)? {
-                    Some(cid) => cid,
-                    None => return Ok(cx.missing(uri, self)),
+                    Named::One(cid) => (cid, true),
+                    Named::Nothing => return Ok(cx.missing(uri, self)),
+                    Named::Several => return Err(super::Declined.into()),
                 }
             }
             None => return Ok(cx.missing(uri, self)),
         };
         let f = fetch(cx, &request(cid).context("no reader")?).await?;
         Ok(match parse(f.status, &f.body, cid)? {
-            Some(card) => card.into_doc(cx.card(uri, self), SITE),
+            Some(card) => {
+                let mut doc = card.into_doc(cx.card(uri, self), SITE);
+                // A name is no identifier: the page by name keeps its own card and never becomes
+                // an alias of the compound.
+                if by_name {
+                    doc.source_root = None;
+                }
+                doc
+            }
             None => cx.missing(uri, self),
         })
     }
@@ -331,15 +352,18 @@ mod tests {
     fn names() {
         assert_eq!(
             parse_name(200, &read("name-aspirin.json")).unwrap(),
-            Some(2244)
+            Named::One(2244)
         );
         assert_eq!(
             parse_name(200, &read("name-glucose.json")).unwrap(),
-            Some(5793)
+            Named::One(5793)
         );
-        assert_eq!(parse_name(404, &read("name-missing.json")).unwrap(), None);
+        assert_eq!(
+            parse_name(404, &read("name-missing.json")).unwrap(),
+            Named::Nothing
+        );
         let two = br#"{"IdentifierList":{"CID":[5793,79025]}}"#;
-        assert_eq!(parse_name(200, two).unwrap(), None);
+        assert_eq!(parse_name(200, two).unwrap(), Named::Several);
         assert!(parse_name(503, b"",).is_err());
     }
 

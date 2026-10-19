@@ -20,11 +20,13 @@ load in the `X-Throttling-Control` header.
 Other PUG REST operations name other things (the `/PNG` structure image, related compounds,
 substances, assays) and are not read.
 
-A page by name (`https://pubchem.ncbi.nlm.nih.gov/compound/aspirin`) names the compound when
-PubChem lists exactly one CID for the name; it is then an alias of that compound's root. Substances
+A page by name (`https://pubchem.ncbi.nlm.nih.gov/compound/aspirin`) gets the compound's card when
+PubChem lists exactly one CID for the name, but it is never an alias of the compound: a name is
+no identifier, so nothing merges on it. A name PubChem lists several CIDs for gets an ordinary web
+card. Substances
 (`/substance/{sid}`) are depositors' records, not compounds, and are not read.
 
-A CID PubChem does not know, and a name it lists no CID for (or several), is `missing`.
+A CID PubChem does not know, and a name it lists no CID for, is `missing`.
 
 ## What it reads
 

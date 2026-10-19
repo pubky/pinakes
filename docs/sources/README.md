@@ -3,7 +3,10 @@
 Some services answer exactly from their own API where their page is walled, thin or has moved.
 For their links, Pinakes reads that API instead of the page. Every source here:
 
-- reads one object by an identifier taken from the link (never a search by title or name);
+- reads one object by an identifier taken from the link, never a search by title. A UniProt
+  entry name is UniProt's own identifier. A PubChem compound name gets the compound's card when
+  PubChem names exactly one compound for it, but is never an alias of it (nothing merges on a
+  name); a name with several compounds gets an ordinary web card;
 - needs no key;
 - makes every address of the same object one resource: the other addresses are
   [aliases](../api.md#aliases) of one root;

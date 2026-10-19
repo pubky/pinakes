@@ -70,6 +70,20 @@ impl Transport for Scripted {
                     format!(r#"{{"nodes":{nodes},"channels":[]}}"#),
                 ))
             }
+            (Some("pubchem.ncbi.nlm.nih.gov"), "/rest/pug/compound/name/glucose/cids/JSON") => Ok(
+                answer(u, 200, r#"{"IdentifierList":{"CID":[5793,79025]}}"#.into()),
+            ),
+            (Some("pubchem.ncbi.nlm.nih.gov"), "/rest/pug/compound/name/aspirin/cids/JSON") => Ok(
+                answer(u, 200, r#"{"IdentifierList":{"CID":[2244]}}"#.into()),
+            ),
+            (Some("pubchem.ncbi.nlm.nih.gov"), path) if path.starts_with("/rest/pug/compound/cid/2244/property/") => Ok(
+                answer(u, 200, r#"{"PropertyTable":{"Properties":[{"CID":2244,"MolecularFormula":"C9H8O4","Title":"Aspirin","InChIKey":"BSYNRYMUTXBXSQ-UHFFFAOYSA-N"}]}}"#.into()),
+            ),
+            (Some("pubchem.ncbi.nlm.nih.gov"), "/compound/glucose") => {
+                let mut page = answer(u, 200, "<title>Glucose</title>".into());
+                page.content_type = "text/html".into();
+                Ok(page)
+            }
             _ => anyhow::bail!("no script for {u}"),
         }
     }
@@ -110,4 +124,25 @@ async fn an_unknown_lightning_node_is_missing_and_a_listed_one_counts() {
         .unwrap_err();
     assert!(error.downcast_ref::<RetryLater>().is_none(), "{error:#}");
     assert_eq!(error_class(&error), "http_5xx");
+}
+
+/// A compound name is no identifier: one compound gives its card without merging the page into
+/// it, and several give the page an ordinary web card.
+#[tokio::test(start_paused = true)]
+async fn compound_names_never_merge() {
+    let one = official()
+        .resolve("https://pubchem.ncbi.nlm.nih.gov/compound/aspirin")
+        .await
+        .unwrap();
+    assert_eq!(
+        (one.type_name.as_str(), one.name.as_deref()),
+        ("MolecularEntity", Some("Aspirin"))
+    );
+    assert_eq!(one.source_root, None, "never an alias of the compound");
+    let several = official()
+        .resolve("https://pubchem.ncbi.nlm.nih.gov/compound/glucose")
+        .await
+        .unwrap();
+    assert_eq!(several.source, "web");
+    assert_eq!(several.name.as_deref(), Some("Glucose"));
 }
