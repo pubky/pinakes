@@ -31,7 +31,8 @@ Every mempool.space link of one object is one resource, with a root in the objec
 An unknown block, transaction or channel is `missing`. mempool.space answers an unknown
 Lightning node with a server error, as it does on a fault, so a server error on a node's record
 is followed by the Lightning search for its exact key: a node the search doesn't list is
-`missing`, and a listed node whose record keeps failing counts toward the failure limit.
+`missing`, and a listed node whose record keeps failing counts toward the failure limit. A
+429 or 408 on a node's record is only retried later, with no search.
 
 ## What it reads
 
@@ -40,7 +41,7 @@ is followed by the Lightning search for its exact key: a node the search doesn't
   e.g. `/testnet4/api/…`);
 - for a block by height, `/api/block-height/{height}` first, then `/api/block/{hash}/status` and
   `/api/blocks/tip/height`;
-- when a node's record fails, `/api/v1/lightning/search?searchText={key}`;
+- when a node's record answers a server error, `/api/v1/lightning/search?searchText={key}`;
 - the fallback: the same paths (`/api/block/{hash}` for blocks) at
   `https://blockstream.info/api` (`/testnet/api`, `/signet/api`; no testnet4 and no Lightning).
 

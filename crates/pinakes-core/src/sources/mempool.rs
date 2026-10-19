@@ -896,8 +896,9 @@ impl Source for Mempool {
             ) {
                 // mempool.space answers a server error for a node it doesn't know as well as on a
                 // fault: the search tells them apart. A node it doesn't list is missing; a listed
-                // node whose record keeps failing counts toward the failure limit.
-                (Object::Node(key), Some(_)) => {
+                // node whose record keeps failing counts toward the failure limit. A rate limit is
+                // only a retry.
+                (Object::Node(key), Some(r)) if r.class == "upstream" => {
                     let search = search_request(target.network, key).context("node search")?;
                     let f = fetch(cx, &search).await?;
                     if !node_listed(f.status, &f.body, key)? {

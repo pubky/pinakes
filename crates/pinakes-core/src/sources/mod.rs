@@ -512,16 +512,19 @@ pub async fn resolve(
     Ok(Some(doc.bounded(attributes())?))
 }
 
-/// Rate limits and server errors: retry later, after at least a minute.
+/// Rate limits and timeouts (408, 429: class `rate_limited`) and server errors (class `upstream`):
+/// retry later, after at least a minute.
 pub(crate) fn retry(f: &Fetched) -> Result<()> {
-    if f.status >= 500 || matches!(f.status, 408 | 429) {
-        return Err(crate::resolver::RetryLater {
-            class: "upstream",
-            seconds: f.retry_after_secs.max(60),
-        }
-        .into());
+    let class = match f.status {
+        408 | 429 => "rate_limited",
+        s if s >= 500 => "upstream",
+        _ => return Ok(()),
+    };
+    Err(crate::resolver::RetryLater {
+        class,
+        seconds: f.retry_after_secs.max(60),
     }
-    Ok(())
+    .into())
 }
 
 /// Text with every e-mail address removed (`name@host.tld`, also in `<…>` or after
