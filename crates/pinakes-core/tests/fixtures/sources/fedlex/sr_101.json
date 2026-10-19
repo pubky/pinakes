@@ -1,5 +1,0 @@
-
-{ "head": { "link": [], "vars": ["act", "status", "statusLabel"] },
-  "results": { "distinct": false, "ordered": true, "bindings": [
-    { "act": { "type": "uri", "value": "https://fedlex.data.admin.ch/eli/cc/1999/404" }	, "status": { "type": "uri", "value": "https://fedlex.data.admin.ch/vocabulary/enforcement-status/0" }	, "statusLabel": { "type": "literal", "xml:lang": "en", "value": "In force" }},
-    { "act": { "type": "uri", "value": "https://fedlex.data.admin.ch/eli/cc/1/1_1_1" }	, "status": { "type": "uri", "value": "https://fedlex.data.admin.ch/vocabulary/enforcement-status/3" }	, "statusLabel": { "type": "literal", "xml:lang": "en", "value": "No longer in force" }} ] } }

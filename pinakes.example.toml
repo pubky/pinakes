@@ -106,8 +106,8 @@ websocket = true # Nostr relays: one relay hint, after both HTTP indexers miss.
 # enabled = true # Unofficial GraphQL, fragile and off by default.
 
 [http]
-# Sent in the User-Agent, pinakes/<version> (+https://pubky.app; <contact>), and as the email
-# parameter of APIs that ask for one. Empty: the links of sources that need a contact wait.
+# Sent in the User-Agent, pinakes/<version> (+https://pubky.app; <contact>). Empty: the links of
+# sources that need a contact wait. An address naming github is refused.
 contact = "info@synonym.to"
 
 [egress]

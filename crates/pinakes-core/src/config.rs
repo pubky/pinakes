@@ -359,9 +359,10 @@ impl Default for ResolverConfig {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HttpConfig {
-    /// The operator's contact address. Sent in the User-Agent of every request
-    /// (`pinakes/<version> (+https://pubky.app; <contact>)`) and as the `email` parameter of the
-    /// APIs that ask for one. Empty: neither, and the links of sources that need a contact wait.
+    /// The operator's contact address, sent in the User-Agent of every request
+    /// (`pinakes/<version> (+https://pubky.app; <contact>)`). Empty: none, and the links of
+    /// sources that need a contact wait. An address naming github is refused: some services
+    /// block such User-Agents.
     pub contact: String,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -618,6 +619,10 @@ impl Config {
                     .any(|c| c.is_control() || c.is_whitespace() || "()<>;".contains(c)))
         {
             bail!("http.contact must be an email address (or empty)");
+        }
+        // sec.gov refuses User-Agents that mention github as undeclared tools.
+        if contact.to_ascii_lowercase().contains("github") {
+            bail!("http.contact must not name github: some services refuse such User-Agents");
         }
         let origins = &self.api.cors_allow_origins;
         if origins.iter().any(|o| o == "*") && origins.len() > 1 {
@@ -986,7 +991,13 @@ mod tests {
         assert_eq!(cfg.egress.contact, "info@synonym.to");
         assert_eq!(cfg.osm.contact, "info@synonym.to");
         assert_eq!(Config::default().egress.contact, "");
-        for bad in ["nobody", "a b@example.org", "x@example.org)"] {
+        for bad in [
+            "nobody",
+            "a b@example.org",
+            "x@example.org)",
+            "x@users.noreply.github.com",
+            "GitHub@example.org",
+        ] {
             assert!(
                 with(serde_json::json!({"http":{"contact":bad}})).is_err(),
                 "{bad}"
