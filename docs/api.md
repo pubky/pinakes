@@ -216,7 +216,6 @@ of the same URIs and checks that this list matches.
 | `POST /v1/resolve {"uri":"https://dx.doi.org/10.1038/nature12373"}` | ScholarlyArticle |
 | `POST /v1/resolve {"uri":"https://www.nature.com/articles/nature12373"}` | ScholarlyArticle |
 | `POST /v1/resolve {"uri":"doi:10.1038/nphys1170"}` | ScholarlyArticle |
-| `POST /v1/resolve {"uri":"https://mastodon.social/@Gargron/1"}` | SocialMediaPosting |
 | `POST /v1/resolve {"uri":"nostr:note1qqqdltcknk9rq52w5xq5srdx3znx4cvr4nmst5xz2rtwkm87ay9qeuwqtd"}` | SocialMediaPosting |
 | `POST /v1/resolve {"uri":"pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G"}` | SocialMediaPosting |
 | `POST /v1/resolve {"uri":"pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/reviews/00355XPM88EHG"}` | SocialMediaPosting |

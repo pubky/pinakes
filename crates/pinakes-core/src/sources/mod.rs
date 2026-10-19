@@ -31,6 +31,7 @@ pub mod govinfo;
 pub mod hacker_news;
 pub mod legislation_gov_uk;
 pub mod lobsters;
+pub mod mastodon;
 pub mod sec;
 pub mod stacker_news;
 pub mod swiss_parliament;
@@ -51,6 +52,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &hacker_news::HackerNews,
     &legislation_gov_uk::LegislationGovUk,
     &lobsters::Lobsters,
+    &mastodon::Mastodon,
     &sec::Sec,
     &stacker_news::StackerNews,
     &swiss_parliament::SwissParliament,
@@ -174,6 +176,45 @@ fn check_headers(headers: &[(&'static str, String)]) -> Result<()> {
     Ok(())
 }
 
+/// A source looked at a link it claimed from its shape alone (a forum path, a post path on any
+/// host) and found the site is not its service: the link gets an ordinary web card instead.
+#[derive(Debug)]
+pub struct Declined;
+impl std::fmt::Display for Declined {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("not this source's site")
+    }
+}
+impl std::error::Error for Declined {}
+
+/// What a source learned by asking a host (whether it runs that service), kept for a day so the
+/// question is not asked for every link. Bounded: the oldest answers go first.
+#[derive(Default)]
+pub struct HostMemo(std::sync::Mutex<BTreeMap<String, (bool, std::time::Instant)>>);
+impl HostMemo {
+    const TTL: std::time::Duration = std::time::Duration::from_secs(86_400);
+    const CAP: usize = 10_000;
+    pub fn get(&self, host: &str) -> Option<bool> {
+        let memo = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        memo.get(host)
+            .filter(|(_, at)| at.elapsed() < Self::TTL)
+            .map(|(is, _)| *is)
+    }
+    pub fn set(&self, host: &str, is: bool) {
+        let mut memo = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if memo.len() >= Self::CAP {
+            if let Some(oldest) = memo
+                .iter()
+                .min_by_key(|(_, (_, at))| *at)
+                .map(|(h, _)| h.clone())
+            {
+                memo.remove(&oldest);
+            }
+        }
+        memo.insert(host.to_owned(), (is, std::time::Instant::now()));
+    }
+}
+
 /// A source's switch.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -275,7 +316,8 @@ pub fn facts(doc: &ResourceMeta) -> Option<BTreeMap<String, String>> {
 }
 
 /// Resolve a link on the `official` route. `None` when no switched-on source reads it (it was
-/// queued before its source was switched off): the caller falls back to the web fetch.
+/// queued before its source was switched off) or its source declined it: the caller falls back
+/// to the web fetch.
 pub async fn resolve(
     egress: &Egress,
     config: &Config,
@@ -285,7 +327,11 @@ pub async fn resolve(
     let Some(source) = enabled_source(uri, config) else {
         return Ok(None);
     };
-    let doc = source.resolve(&Context { egress, ttl }, uri).await?;
+    let doc = match source.resolve(&Context { egress, ttl }, uri).await {
+        Ok(doc) => doc,
+        Err(error) if error.is::<Declined>() => return Ok(None),
+        Err(error) => return Err(error),
+    };
     Ok(Some(doc.bounded(attributes())?))
 }
 
@@ -554,6 +600,18 @@ mod tests {
         assert!(sparql_rows(b"{}").is_err());
         assert_eq!(sparql_literal("a\"b\\"), "a\\\"b\\\\");
         assert_eq!(sparql_literal("a\nb\rc"), "a\\nb\\rc");
+    }
+
+    #[test]
+    fn host_memo() {
+        let memo = HostMemo::default();
+        assert_eq!(memo.get("forum.example"), None);
+        memo.set("forum.example", true);
+        memo.set("blog.example", false);
+        assert_eq!(memo.get("forum.example"), Some(true));
+        assert_eq!(memo.get("blog.example"), Some(false));
+        let error = anyhow::Error::from(Declined);
+        assert!(error.is::<Declined>());
     }
 
     #[test]

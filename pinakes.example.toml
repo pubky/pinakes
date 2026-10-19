@@ -75,6 +75,8 @@ enabled = true
 enabled = true
 [sources.lobsters]
 enabled = true
+[sources.mastodon]
+enabled = true
 [sources.sec]
 enabled = true
 [sources.stacker_news]

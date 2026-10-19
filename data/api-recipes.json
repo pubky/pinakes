@@ -772,17 +772,6 @@
       "card_type": "ScholarlyArticle"
     },
     {
-      "name": "resolve-mastodon-social-gargron-1",
-      "summary": "https://mastodon.social/@Gargron/1",
-      "method": "POST",
-      "path": "/v1/resolve",
-      "body": {
-        "uri": "https://mastodon.social/@Gargron/1"
-      },
-      "expect": "card",
-      "card_type": "SocialMediaPosting"
-    },
-    {
       "name": "resolve-note1qqqdltcknk9rq52w5xq5srdx3znx4cvr4nmst5xz2rtwkm87ay9qeuw",
       "summary": "nostr:note1qqqdltcknk9rq52w5xq5srdx3znx4cvr4nmst5xz2rtwkm87ay9qeuwqtd",
       "method": "POST",
