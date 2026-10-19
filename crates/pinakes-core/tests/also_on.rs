@@ -640,3 +640,116 @@ async fn facts_are_shown_checked_and_never_join(pool: PgPool) {
     let other = page(&pool, "https://tidal.com/track/9", "Song").await;
     assert!(get(&app, &format!("/v1/resources/{other}")).await["details"]["facts"].is_null());
 }
+
+/// `key` finds every tagged link carrying one exact identifier, on any service: an MBID at any
+/// level, a Q-id, an ISRC or a barcode. Malformed keys are refused; the lookup is indexed.
+#[sqlx::test(migrations = "../../migrations")]
+async fn search_by_key_finds_the_same_object_on_every_service(pool: PgPool) {
+    use pinakes_core::also_on::Fact;
+    let mbid = "9f9cf187-d6f9-437f-9d98-d59cdbd52757";
+    let links = [
+        "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq",
+        "https://www.deezer.com/track/138539973",
+        "https://tidal.com/track/1",
+    ];
+    let mut ids = vec![];
+    let hub = Fake::new("music");
+    for (n, uri) in links.iter().enumerate() {
+        ids.push(page(&pool, uri, "Paranoid Android").await);
+        // The first two are the recording; the third is something else.
+        let (key, isrc) = if n < 2 {
+            (format!("mb:recording:{mbid}"), "GBAYE9701376")
+        } else {
+            (
+                "mb:recording:00000000-0000-0000-0000-000000000001".into(),
+                "USAAA0000001",
+            )
+        };
+        hub.answer(
+            uri,
+            Ok(Found {
+                keys: vec![Key {
+                    key,
+                    via: "musicbrainz".into(),
+                }],
+                facts: vec![Fact::new("isrc", isrc)],
+                ..Default::default()
+            }),
+        );
+    }
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) SELECT id,repeat('a',52),'tag','/pub/test/tags/'||id,'music',now() FROM unnest($1::text[]) id")
+        .bind(&ids)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let sources: Vec<Arc<dyn Source>> = vec![hub];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let found = |path: String| {
+        let app = app.clone();
+        async move {
+            let mut rows: Vec<String> = get(&app, &path).await["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["id"].as_str().unwrap().to_owned())
+                .collect();
+            rows.sort();
+            rows
+        }
+    };
+    let mut both = ids[..2].to_vec();
+    both.sort();
+    assert_eq!(found(format!("/v1/search?key=mbid:{mbid}")).await, both);
+    assert_eq!(
+        found(format!("/v1/search?key=mbid:{}", mbid.to_uppercase())).await,
+        both
+    );
+    // An ISRC in any letter case.
+    assert_eq!(found("/v1/search?key=isrc:gbaye9701376".into()).await, both);
+    assert!(found("/v1/search?key=wikidata:Q202996".into())
+        .await
+        .is_empty());
+    // With another filter: still the same object only.
+    assert_eq!(
+        found(format!("/v1/search?key=mbid:{mbid}&host=www.deezer.com")).await,
+        [ids[1].clone()]
+    );
+    for bad in [
+        "mbid:nope",
+        "isrc:ABC",
+        "upc:12a",
+        "wikidata:Q0",
+        "spotify:track:x",
+        "mbid",
+    ] {
+        let mut request = Request::builder()
+            .uri(format!("/v1/search?key={bad}"))
+            .body(Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        let status = app.clone().oneshot(request).await.unwrap().status();
+        assert_eq!(status, 400, "{bad}");
+    }
+    // The key and fact lookups use their indexes.
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL enable_seqscan=off")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    for (query, index) in [
+        (
+            "EXPLAIN SELECT resource_id FROM resource_key WHERE key=ANY(ARRAY['mb:recording:x'])",
+            "resource_key_key_idx",
+        ),
+        (
+            "EXPLAIN SELECT resource_id FROM resource_fact WHERE name='isrc' AND value='X'",
+            "resource_fact_value_idx",
+        ),
+    ] {
+        let plan: Vec<String> = sqlx::query_scalar(query).fetch_all(&mut *tx).await.unwrap();
+        assert!(plan.join("\n").contains(index), "{index}: {plan:?}");
+    }
+}

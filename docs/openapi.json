@@ -2995,6 +2995,18 @@
             }
           },
           {
+            "description": "Links carrying one exact identifier, on any service and in any spelling:\n`mbid:{uuid}` (a MusicBrainz recording, release, release group or artist),\n`wikidata:{Q-id}`, `isrc:{code}` or `upc:{barcode}`.",
+            "in": "query",
+            "name": "key",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
             "examples": {
               "(none)": {
                 "summary": "(none)",

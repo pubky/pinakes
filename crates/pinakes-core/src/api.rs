@@ -435,6 +435,10 @@ pub struct SearchQuery {
     pub type_name: Option<String>,
     pub category: Option<String>,
     pub host: Option<String>,
+    /// Links carrying one exact identifier, on any service and in any spelling:
+    /// `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist),
+    /// `wikidata:{Q-id}`, `isrc:{code}` or `upc:{barcode}`.
+    pub key: Option<String>,
     pub tags: Option<String>,
     #[serde(rename = "match")]
     pub match_mode: Option<String>,
@@ -1049,6 +1053,44 @@ fn validate_search(q: &SearchQuery) -> Result<Vec<String>, ApiError> {
     }
     Ok(tags)
 }
+/// What `key` matches: join keys, or one fact.
+#[derive(Debug, PartialEq)]
+pub(crate) enum KeyFilter {
+    Keys(Vec<String>),
+    Fact(&'static str, String),
+}
+pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
+    let bad = || {
+        ApiError::bad("key is mbid:{uuid}, wikidata:{Q-id}, isrc:{12 letters and digits} or upc:{8–14 digits}")
+    };
+    let (kind, value) = key.split_once(':').ok_or_else(bad)?;
+    match kind {
+        "mbid" => {
+            let id = crate::hubs::mbid(value).ok_or_else(bad)?;
+            Ok(KeyFilter::Keys(
+                [
+                    crate::hubs::MbKind::Recording,
+                    crate::hubs::MbKind::Release,
+                    crate::hubs::MbKind::ReleaseGroup,
+                    crate::hubs::MbKind::Artist,
+                ]
+                .into_iter()
+                .filter_map(|k| crate::hubs::key::mb(k, &id))
+                .collect(),
+            ))
+        }
+        "wikidata" => Ok(KeyFilter::Keys(vec![
+            crate::hubs::key::wikidata(value).ok_or_else(bad)?
+        ])),
+        "isrc" if value.len() == 12 && value.bytes().all(|b| b.is_ascii_alphanumeric()) => {
+            Ok(KeyFilter::Fact("isrc", value.to_ascii_uppercase()))
+        }
+        "upc" if (8..=14).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_digit()) => {
+            Ok(KeyFilter::Fact("upc", value.to_owned()))
+        }
+        _ => Err(bad()),
+    }
+}
 fn scope(
     sql: &mut QueryBuilder<'_, Postgres>,
     q: &SearchQuery,
@@ -1070,6 +1112,7 @@ pub async fn search(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let tags = validate_search(&q)?;
+    let key = q.key.as_deref().map(key_filter).transpose()?;
     if q.collapse.is_some() && !state.config.groups.enabled {
         return Err(ApiError::bad("groups are disabled"));
     }
@@ -1170,6 +1213,22 @@ pub async fn search(
                 .push("=")
                 .push_bind(value.clone());
         }
+    }
+    // Exact identifiers: a source's live keys or facts on the resource (aliases read as roots).
+    match &key {
+        Some(KeyFilter::Keys(keys)) => {
+            sql.push(" AND r.id IN (SELECT resource_id FROM resource_key WHERE key=ANY(")
+                .push_bind(keys.clone())
+                .push(") AND expires_at>now())");
+        }
+        Some(KeyFilter::Fact(name, value)) => {
+            sql.push(" AND r.id IN (SELECT resource_id FROM resource_fact WHERE name=")
+                .push_bind(*name)
+                .push(" AND value=")
+                .push_bind(value.clone())
+                .push(" AND expires_at>now())");
+        }
+        None => {}
     }
     if let Some(text) = q.q.as_ref().filter(|s| !s.is_empty()) {
         let prefix = format!(
