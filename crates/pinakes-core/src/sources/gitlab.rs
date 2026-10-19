@@ -241,7 +241,7 @@ fn insert(doc: &mut ResourceMeta, facts: Vec<(&str, Option<String>)>) {
     }
 }
 fn line(value: &Value) -> Option<String> {
-    let line = text(value)?.lines().next()?.trim().to_owned();
+    let line = super::without_addresses(text(value)?.lines().next()?.trim());
     (!line.is_empty()).then(|| line.chars().take(200).collect())
 }
 

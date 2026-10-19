@@ -332,13 +332,43 @@ fn plain_part(headers: &BTreeMap<String, String>, body: &str, depth: u8) -> Opti
 /// signature and list footers left out.
 fn excerpt(text: &str) -> Option<String> {
     let mut words = String::new();
+    // In-body pseudo-headers (`From: Name <address>` when the sender is not the author) come
+    // first; trailers (`Signed-off-by: Name <address>`) anywhere.
+    let mut head = true;
     for line in text.lines() {
         let line = line.trim_end();
         if line == "-- " || line == "--" || line.starts_with("You received this message because") {
             break;
         }
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('>') || trimmed.ends_with("wrote:") {
+        if head && trimmed.is_empty() {
+            continue;
+        }
+        let field = trimmed
+            .split_once(':')
+            .map(|(name, _)| name.to_ascii_lowercase())
+            .filter(|name| {
+                !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphabetic() || b == b'-')
+            });
+        if head
+            && field
+                .as_deref()
+                .is_some_and(|f| matches!(f, "from" | "date" | "subject" | "to" | "cc"))
+        {
+            continue;
+        }
+        head = false;
+        if field.as_deref().is_some_and(|f| {
+            f.ends_with("-by") || matches!(f, "cc" | "to" | "link" | "closes" | "fixes")
+        }) && trimmed.contains(['@', '<'])
+        {
+            continue;
+        }
+        if trimmed.is_empty()
+            || trimmed.starts_with('>')
+            || trimmed.ends_with("wrote:")
+            || trimmed.ends_with("writes:")
+        {
             continue;
         }
         if !words.is_empty() {
@@ -349,7 +379,7 @@ fn excerpt(text: &str) -> Option<String> {
             break;
         }
     }
-    let words = words.split_whitespace().collect::<Vec<_>>().join(" ");
+    let words = super::without_addresses(&words);
     let mut cut: String = words.chars().take(200).collect();
     if cut.len() < words.len() {
         cut.push('…');
@@ -684,6 +714,36 @@ mod tests {
             .contains("aj@"));
         let other = Target::of_uri("https://gnusha.org/pi/bitcoindev/other@x.org/").unwrap();
         assert!(card(base(TOWNS), &other, parse(&read("raw-towns.mbox")).unwrap()).is_err());
+
+        // No address reaches the description either: in-body headers, trailers and any address
+        // left in the text are dropped.
+        for file in [
+            "raw-towns.mbox",
+            "raw-gitgitgadget.mbox",
+            "raw-toaster.mbox",
+        ] {
+            let excerpt = parse(&read(file)).unwrap().excerpt.unwrap();
+            assert_eq!(
+                crate::sources::without_addresses(&excerpt),
+                excerpt,
+                "{file}"
+            );
+            assert!(!excerpt.contains("From:"), "{file}: {excerpt}");
+        }
+        let gadget = parse(&read("raw-gitgitgadget.mbox"))
+            .unwrap()
+            .excerpt
+            .unwrap();
+        assert!(!gadget.contains('@'), "{gadget}");
+        let patch = "Message-ID: <p@x>\nContent-Type: text/plain\n\nFrom: Ann Author <ann@example.org>\n\
+                     Date: Mon, 1 Jan 2026\nSubject: [PATCH] fix\n\nFix the thing; ask bob@example.org.\n\n\
+                     Signed-off-by: Ann Author <ann@example.org>\nCc: Bob <bob@example.org>\n\
+                     Reported-by: carol@example.net\nOn Monday, Dan <dan@example.com>\nwrote:\n\
+                     Eve <eve@example.com> writes:\n";
+        let excerpt = parse(patch.as_bytes()).unwrap().excerpt.unwrap();
+        assert_eq!(excerpt, "Fix the thing; ask On Monday, Dan");
+        let only_trailers = "Message-ID: <q@x>\n\nSigned-off-by: Ann <ann@example.org>\n";
+        assert_eq!(parse(only_trailers.as_bytes()).unwrap().excerpt, None);
 
         // A folded subject, a "via" sender and a patch's own From line in the body.
         let m = parse(&read("raw-gitgitgadget.mbox")).unwrap();

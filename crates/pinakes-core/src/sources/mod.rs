@@ -473,6 +473,24 @@ pub(crate) fn retry(f: &Fetched) -> Result<()> {
     Ok(())
 }
 
+/// Text with every e-mail address removed (`name@host.tld`, also in `<…>` or after
+/// `mailto:`). A backstop for excerpts of mail, commits and release notes: a card never
+/// publishes an address.
+pub fn without_addresses(text: &str) -> String {
+    let address = |token: &str| {
+        let token = token
+            .trim_matches(|c: char| "<>()[]{},;:\"'".contains(c))
+            .trim_start_matches("mailto:");
+        token.rsplit_once('@').is_some_and(|(local, domain)| {
+            !local.is_empty() && domain.contains('.') && !domain.starts_with('.')
+        })
+    };
+    text.split_whitespace()
+        .filter(|token| !address(token))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Markdown as plain text for a 200-character excerpt: images, heading and quote marks, emphasis
 /// and code marks dropped, links kept as their text.
 pub fn markdown_excerpt(markdown: &str) -> String {
@@ -866,6 +884,10 @@ mod tests {
             "Release highlights - Filter Gallery: see the docs and code"
         );
         assert_eq!(markdown_excerpt("a ](b) [c"), "a ](b) [c");
+        assert_eq!(
+            without_addresses("Mail <ann@example.org> or mailto:bob@x.org, not @user@host or a@b"),
+            "Mail or not @user@host or a@b"
+        );
     }
 
     #[test]

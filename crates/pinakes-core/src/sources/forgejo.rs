@@ -204,7 +204,7 @@ fn decode(value: &str) -> String {
 
 /// The first line of a commit or tag message.
 fn headline(value: &Value) -> Option<String> {
-    let line = text(value)?.lines().next()?.trim().to_owned();
+    let line = super::without_addresses(text(value)?.lines().next()?.trim());
     (!line.is_empty()).then(|| line.chars().take(200).collect())
 }
 
