@@ -47,6 +47,7 @@ or got plain web cards before are read by their source.
 - [`fedlex`](fedlex.md): Swiss federal law in the classified compilation, by ELI.
 - [`gleif`](gleif.md): Legal Entity Identifier records.
 - [`govinfo`](govinfo.md): US public laws, bills, US Code sections and the Statutes at Large.
+- [`hacker_news`](hacker_news.md): Hacker News items by id (and hnsignals.com pages).
 - [`legislation_gov_uk`](legislation_gov_uk.md): UK Acts, statutory instruments and retained EU law.
 - [`sec`](sec.md): SEC EDGAR filings, their documents and companies.
 - [`stacker_news`](stacker_news.md): Stacker News posts and comments by item id.

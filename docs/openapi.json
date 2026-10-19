@@ -1749,6 +1749,18 @@
                     "uri": "https://grounds.stager.co/shop/default/events/111608505"
                   }
                 },
+                "resolve-hacker-news-1": {
+                  "summary": "https://news.ycombinator.com/item?id=8863",
+                  "value": {
+                    "uri": "https://news.ycombinator.com/item?id=8863"
+                  }
+                },
+                "resolve-hacker-news-2": {
+                  "summary": "https://hnsignals.com/signal/2921983",
+                  "value": {
+                    "uri": "https://hnsignals.com/signal/2921983"
+                  }
+                },
                 "resolve-infomaniak-events-en-ch-conferences-seminaire-des-autorites": {
                   "summary": "https://infomaniak.events/en-ch/conferences/seminaire-des-autorites-2026/92392f2a-6711-4917-b9e9-60c88e8c550a/events/396911",
                   "value": {

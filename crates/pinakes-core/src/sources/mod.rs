@@ -27,6 +27,7 @@ pub mod federal_register;
 pub mod fedlex;
 pub mod gleif;
 pub mod govinfo;
+pub mod hacker_news;
 pub mod legislation_gov_uk;
 pub mod sec;
 pub mod stacker_news;
@@ -44,6 +45,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &fedlex::Fedlex,
     &gleif::Gleif,
     &govinfo::Govinfo,
+    &hacker_news::HackerNews,
     &legislation_gov_uk::LegislationGovUk,
     &sec::Sec,
     &stacker_news::StackerNews,
