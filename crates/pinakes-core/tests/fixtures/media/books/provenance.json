@@ -1,0 +1,74 @@
+{
+  "itunes-isbn-9780141913414": {
+    "bytes": 42,
+    "content_type": "text/javascript",
+    "file": "itunes-isbn-9780141913414.json",
+    "recorded_at": "2026-10-19T19:59:09+00:00",
+    "sha256": "7f5ce663b726607eae2fde2a6dc438052ac0d1681e636de7cc3377c0bb77e047",
+    "status": 200,
+    "url": "https://itunes.apple.com/lookup?isbn=9780141913414&country=us"
+  },
+  "itunes-isbn-9780743273565": {
+    "bytes": 2379,
+    "content_type": "text/javascript",
+    "file": "itunes-isbn-9780743273565.json",
+    "recorded_at": "2026-10-19T19:59:16+00:00",
+    "sha256": "33c758dee9f220af6a2299326607dec333fca21c105573ad55444e72d0c404e8",
+    "status": 200,
+    "url": "https://itunes.apple.com/lookup?isbn=9780743273565&country=us"
+  },
+  "itunes-isbn-9780804139038": {
+    "bytes": 2823,
+    "content_type": "text/javascript",
+    "file": "itunes-isbn-9780804139038.json",
+    "recorded_at": "2026-10-19T19:59:50+00:00",
+    "sha256": "08d0b7dd5f90ac5ef291eb8ace7b964f40910ebbedc6707f0b22f0f826b2d81c",
+    "status": 200,
+    "url": "https://itunes.apple.com/lookup?isbn=9780804139038&country=us"
+  },
+  "ol-isbn-9780140328721": {
+    "bytes": 1754,
+    "content_type": "application/json",
+    "file": "ol-isbn-9780140328721.json",
+    "recorded_at": "2026-10-19T19:57:24+00:00",
+    "sha256": "5c06c441c0eac420e3fb85b7ea87fd86107e485a4bfd42e70594385884638d36",
+    "status": 200,
+    "url": "https://openlibrary.org/isbn/9780140328721.json"
+  },
+  "ol-isbn-9780141913414": {
+    "bytes": 1665,
+    "content_type": "application/json",
+    "file": "ol-isbn-9780141913414.json",
+    "recorded_at": "2026-10-19T19:59:51+00:00",
+    "sha256": "cadbe1e54175dba701b43cb6e16c35527da8be632648fefe54529d9dc7ea05fd",
+    "status": 200,
+    "url": "https://openlibrary.org/isbn/9780141913414.json"
+  },
+  "ol-isbn-9780743273565": {
+    "bytes": 2490,
+    "content_type": "application/json",
+    "file": "ol-isbn-9780743273565.json",
+    "recorded_at": "2026-10-19T19:57:27+00:00",
+    "sha256": "d41ea014b5e08cf30a014c9d8c9d594a57669271347b8f7c614275ec2757b9a2",
+    "status": 200,
+    "url": "https://openlibrary.org/isbn/9780743273565.json"
+  },
+  "ol-isbn-9780804139038": {
+    "bytes": 2409,
+    "content_type": "application/json",
+    "file": "ol-isbn-9780804139038.json",
+    "recorded_at": "2026-10-19T19:59:48+00:00",
+    "sha256": "17b8e413efb45cc78f19201cbd8af67c152b5397be408886d63014ba6c71d11a",
+    "status": 200,
+    "url": "https://openlibrary.org/isbn/9780804139038.json"
+  },
+  "ol-isbn-missing": {
+    "bytes": 42700,
+    "content_type": "text/html",
+    "file": "ol-isbn-missing.json",
+    "recorded_at": "2026-10-19T19:58:02+00:00",
+    "sha256": "4524fe0f82f9b2ebb16df2c3f42795dbb08be6c663c692f5ebecce0e59480eec",
+    "status": 404,
+    "url": "https://openlibrary.org/isbn/9798999999993.json"
+  }
+}

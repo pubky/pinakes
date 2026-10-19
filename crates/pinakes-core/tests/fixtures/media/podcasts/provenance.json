@@ -1,0 +1,108 @@
+{
+  "feed-pc20": {
+    "bytes": 1782147,
+    "content_type": "application/xml",
+    "file": "feed-pc20.xml.gz",
+    "recorded_at": "2026-10-19T19:57:22+00:00",
+    "sha256": "0208cb8e68310fbf22d2e3d82d7b716ab08c33fbf3732aa10e79e1c5a83a04d5",
+    "status": 200,
+    "url": "https://feeds.podcastindex.org/pc20.xml"
+  },
+  "itunes-episodes-1200361736": {
+    "bytes": 179128,
+    "content_type": "text/javascript",
+    "file": "itunes-episodes-1200361736.json.gz",
+    "recorded_at": "2026-10-19T19:55:55+00:00",
+    "sha256": "8c7b9a7de671e9ad844d95ba8af62de8a56ced2d39a6070f2dc2c5cd89eb617d",
+    "status": 200,
+    "url": "https://itunes.apple.com/lookup?id=1200361736&entity=podcastEpisode&limit=200&country=us"
+  },
+  "itunes-podcast-1200361736": {
+    "bytes": 1679,
+    "content_type": "text/javascript",
+    "file": "itunes-podcast-1200361736.json",
+    "recorded_at": "2026-10-19T19:55:51+00:00",
+    "sha256": "09d48f9b4f0f49ff91475f0e878825e6c1acb7006cc81b6b2db9d0b033e7d4e4",
+    "status": 200,
+    "url": "https://itunes.apple.com/lookup?id=1200361736&entity=podcast&country=us"
+  },
+  "itunes-podcast-missing": {
+    "bytes": 42,
+    "content_type": "text/javascript",
+    "file": "itunes-podcast-missing.json",
+    "recorded_at": "2026-10-19T19:55:59+00:00",
+    "sha256": "7f5ce663b726607eae2fde2a6dc438052ac0d1681e636de7cc3377c0bb77e047",
+    "status": 200,
+    "url": "https://itunes.apple.com/lookup?id=1&entity=podcast&country=us"
+  },
+  "pi-byfeedurl-54nAGcIl": {
+    "bytes": 1773,
+    "content_type": "application/json",
+    "file": "pi-byfeedurl-54nAGcIl.json",
+    "note": "Podcast Index API, signed with the operator's key (not recorded).",
+    "recorded_at": "2026-10-19T19:56:26+00:00",
+    "sha256": "dfa4716e739934473dd717130b4295b5bd5e34701cc267ce7ff0326229438bdf",
+    "status": 200,
+    "url": "https://api.podcastindex.org/api/1.0/podcasts/byfeedurl?url=https%3A%2F%2Ffeeds.simplecast.com%2F54nAGcIl"
+  },
+  "pi-byfeedurl-missing": {
+    "bytes": 54,
+    "content_type": "application/json",
+    "file": "pi-byfeedurl-missing.json",
+    "note": "Podcast Index API, signed with the operator's key (not recorded).",
+    "recorded_at": "2026-10-19T19:56:34+00:00",
+    "sha256": "e8e635019428df20755fc33de378d6ca0e5013ce615fa5c2faa3f2b772cda7dd",
+    "status": 400,
+    "url": "https://api.podcastindex.org/api/1.0/podcasts/byfeedurl?url=https%3A%2F%2Fexample.org%2Fno-such-feed.xml"
+  },
+  "pi-byfeedurl-pc20": {
+    "bytes": 2122,
+    "content_type": "application/json",
+    "file": "pi-byfeedurl-pc20.json",
+    "note": "Podcast Index API, signed with the operator's key (not recorded).",
+    "recorded_at": "2026-10-19T19:56:32+00:00",
+    "sha256": "a602434e697be01b5a84562a939d084073e74e3628220d702db4517c2232d550",
+    "status": 200,
+    "url": "https://api.podcastindex.org/api/1.0/podcasts/byfeedurl?url=https%3A%2F%2Fmp3s.nashownotes.com%2Fpc20rss.xml"
+  },
+  "pi-byguid-304b84f0": {
+    "bytes": 1815,
+    "content_type": "application/json",
+    "file": "pi-byguid-304b84f0.json",
+    "note": "Podcast Index API, signed with the operator's key (not recorded).",
+    "recorded_at": "2026-10-19T19:56:28+00:00",
+    "sha256": "183b32cf4e07f5f6ea94411b92c6fd26ff2409311fc194211ec528b607715732",
+    "status": 200,
+    "url": "https://api.podcastindex.org/api/1.0/podcasts/byguid?guid=304b84f0-07b0-5265-b6b7-da5cf5aeb56e"
+  },
+  "pi-byguid-missing": {
+    "bytes": 125,
+    "content_type": "application/json",
+    "file": "pi-byguid-missing.json",
+    "note": "Podcast Index API, signed with the operator's key (not recorded).",
+    "recorded_at": "2026-10-19T19:56:30+00:00",
+    "sha256": "a1a133f0a2c2f970861f63e4ed24b88a5ddea901d6014bb926bb6b737ca62301",
+    "status": 200,
+    "url": "https://api.podcastindex.org/api/1.0/podcasts/byguid?guid=00000000-0000-5000-8000-000000000000"
+  },
+  "pi-byitunesid-1200361736": {
+    "bytes": 1754,
+    "content_type": "application/json",
+    "file": "pi-byitunesid-1200361736.json",
+    "note": "Podcast Index API, signed with the operator's key (not recorded).",
+    "recorded_at": "2026-10-19T19:56:03+00:00",
+    "sha256": "4332bb86b14b47800897f42e1b8a486deef68d5a08375ea687ac04ca03f86968",
+    "status": 200,
+    "url": "https://api.podcastindex.org/api/1.0/podcasts/byitunesid?id=1200361736"
+  },
+  "pi-byitunesid-missing": {
+    "bytes": 2786,
+    "content_type": "application/json",
+    "file": "pi-byitunesid-missing.json",
+    "note": "Podcast Index API, signed with the operator's key (not recorded).",
+    "recorded_at": "2026-10-19T19:56:05+00:00",
+    "sha256": "413499c0b4e33b894f95ed9fb57ce11286bda2310f4a475a447c3da0463b7765",
+    "status": 200,
+    "url": "https://api.podcastindex.org/api/1.0/podcasts/byitunesid?id=1"
+  }
+}
