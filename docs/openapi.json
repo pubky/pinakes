@@ -1605,6 +1605,18 @@
                     "uri": "https://dx.doi.org/10.1038/nature12373"
                   }
                 },
+                "resolve-ecfr-1": {
+                  "summary": "https://www.ecfr.gov/current/title-17/section-240.10b-5",
+                  "value": {
+                    "uri": "https://www.ecfr.gov/current/title-17/section-240.10b-5"
+                  }
+                },
+                "resolve-ecfr-2": {
+                  "summary": "https://www.ecfr.gov/current/title-14/chapter-I/subchapter-C/part-39",
+                  "value": {
+                    "uri": "https://www.ecfr.gov/current/title-14/chapter-I/subchapter-C/part-39"
+                  }
+                },
                 "resolve-en-wikipedia-org-wiki-bitcoin": {
                   "summary": "https://en.wikipedia.org/wiki/Bitcoin",
                   "value": {

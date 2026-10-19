@@ -20,12 +20,14 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::OnceLock};
 
+pub mod ecfr;
 pub mod federal_register;
 pub mod sec;
 
 /// Every source, one line each, in alphabetical order of name.
 #[rustfmt::skip]
 pub static REGISTRY: &[&dyn Source] = &[
+    &ecfr::Ecfr,
     &federal_register::FederalRegister,
     &sec::Sec,
 ];

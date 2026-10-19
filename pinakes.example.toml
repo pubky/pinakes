@@ -53,6 +53,8 @@ enabled = true
 enabled = true
 
 # Official-API sources, in alphabetical order (docs/sources/README.md).
+[sources.ecfr]
+enabled = true
 [sources.federal_register]
 enabled = true
 [sources.sec]
