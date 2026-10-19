@@ -71,6 +71,8 @@ enabled = true
 enabled = true
 [sources.legislation_gov_uk]
 enabled = true
+[sources.lobsters]
+enabled = true
 [sources.sec]
 enabled = true
 [sources.stacker_news]

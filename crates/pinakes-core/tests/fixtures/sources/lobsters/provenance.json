@@ -1,0 +1,20 @@
+{
+  "lobsters-missing": {
+    "bytes": 3206,
+    "content_type": "text/html; charset=utf-8",
+    "file": "lobsters-missing.html",
+    "recorded_at": "2026-10-19T16:05:38+00:00",
+    "sha256": "c999072d30acf6717e4eecab6c6316abd84fc6ab48f8157b2a4b3f477cecdf6b",
+    "status": 404,
+    "url": "https://lobste.rs/s/zzzzzz.json"
+  },
+  "lobsters-wtthju": {
+    "bytes": 3940,
+    "content_type": "application/json",
+    "file": "lobsters-wtthju.json",
+    "recorded_at": "2026-10-19T16:05:36+00:00",
+    "sha256": "acf607b8146e5787bed422b2a0b1696f6638a71e8b473f95225a10541d843fea",
+    "status": 200,
+    "url": "https://lobste.rs/s/wtthju.json"
+  }
+}

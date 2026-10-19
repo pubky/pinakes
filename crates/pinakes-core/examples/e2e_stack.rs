@@ -100,7 +100,8 @@ impl Fixture {
             {"kind":"zefix","uri":"https://register.ld.admin.ch/zefix/company/126286","type":"Organization"},
             {"kind":"govinfo","uri":"https://www.govinfo.gov/app/details/PLAW-117publ58","type":"Legislation"},
             {"kind":"stacker_news","uri":"https://stacker.news/items/1596515","type":"DiscussionForumPosting"},
-            {"kind":"hacker_news","uri":"https://news.ycombinator.com/item?id=8863","type":"DiscussionForumPosting"}
+            {"kind":"hacker_news","uri":"https://news.ycombinator.com/item?id=8863","type":"DiscussionForumPosting"},
+            {"kind":"lobsters","uri":"https://lobste.rs/s/wtthju/a5_v1_0","type":"DiscussionForumPosting"}
         ]);
         Ok(Self {
             boundary: Arc::default(),
@@ -138,6 +139,7 @@ impl Dns for FixtureDns {
                 | "www.govinfo.gov"
                 | "stacker.news"
                 | "hacker-news.firebaseio.com"
+                | "lobste.rs"
                 | "web.example"
                 | "www.federalregister.gov"
                 | "www.sec.gov"
@@ -177,6 +179,7 @@ impl Transport for Fixture {
             "www.govinfo.gov" if u.path()=="/metadata/pkg/PLAW-117publ58/mods.xml"=>("application/xml",gunzip(include_bytes!("../tests/fixtures/sources/govinfo/mods_pkg_PLAW-117publ58.xml.gz"))),
             "stacker.news" if u.path()=="/api/graphql"=>("application/json",include_str!("../tests/fixtures/sources/stacker_news/sn-item-1596515.json").into()),
             "hacker-news.firebaseio.com" if u.path()=="/v0/item/8863.json"=>("application/json",include_str!("../tests/fixtures/sources/hacker_news/hn-item-8863.json").into()),
+            "lobste.rs" if u.path()=="/s/wtthju.json"=>("application/json",include_str!("../tests/fixtures/sources/lobsters/lobsters-wtthju.json").into()),
             "web.example"=>("text/html","<title>Fixture page</title>".into()),
             "www.ecfr.gov" if u.path()=="/api/versioner/v1/ancestry/current/title-17.json"=>("application/json",include_str!("../tests/fixtures/sources/ecfr/ancestry_current_title-17_section-240.10b-5.json").into()),
             "www.sec.gov" if u.path()=="/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959.hdr.sgml"=>("text/sgml",include_str!("../tests/fixtures/sources/sec/sec-hdr-ms-s1.sgml").into()),

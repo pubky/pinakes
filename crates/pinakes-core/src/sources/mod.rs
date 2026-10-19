@@ -29,6 +29,7 @@ pub mod gleif;
 pub mod govinfo;
 pub mod hacker_news;
 pub mod legislation_gov_uk;
+pub mod lobsters;
 pub mod sec;
 pub mod stacker_news;
 pub mod swiss_parliament;
@@ -47,6 +48,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &govinfo::Govinfo,
     &hacker_news::HackerNews,
     &legislation_gov_uk::LegislationGovUk,
+    &lobsters::Lobsters,
     &sec::Sec,
     &stacker_news::StackerNews,
     &swiss_parliament::SwissParliament,

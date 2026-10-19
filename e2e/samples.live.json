@@ -122,6 +122,11 @@
     "type": "DiscussionForumPosting"
   },
   {
+    "kind": "lobsters",
+    "uri": "https://lobste.rs/s/wtthju/a5_v1_0",
+    "type": "DiscussionForumPosting"
+  },
+  {
     "kind": "web",
     "uri": "https://example.org/",
     "type": "WebPage"

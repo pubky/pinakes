@@ -1779,6 +1779,12 @@
                     "uri": "https://www.legislation.gov.uk/uksi/2019/419/made"
                   }
                 },
+                "resolve-lobsters-1": {
+                  "summary": "https://lobste.rs/s/wtthju/a5_v1_0",
+                  "value": {
+                    "uri": "https://lobste.rs/s/wtthju/a5_v1_0"
+                  }
+                },
                 "resolve-luma-com-376whqyw": {
                   "summary": "https://luma.com/376whqyw",
                   "value": {
