@@ -1,5 +1,6 @@
 //! Swiss Parliament business items (Curia Vista: motions, postulates, bills, interpellations…)
-//! from the Parliament's OData service, by affair id. Open data; no key.
+//! from the Parliament's OData service, by affair id. Bills and initiatives are `Legislation`;
+//! motions, postulates, interpellations and questions are `CreativeWork`. Open data; no key.
 use super::{list, text, web_url, Context, Example, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
@@ -14,6 +15,15 @@ pub const ATTRIBUTION: &str = "Source: Swiss Parliament, Parliamentary Services 
 const SELECT: &str = "ID,Language,BusinessShortNumber,BusinessTypeName,BusinessTypeAbbreviation,\
 Title,SubmittedBy,BusinessStatusText,BusinessStatusDate,SubmissionDate,SubmissionCouncilName,\
 ResponsibleDepartmentAbbreviation,TagNames";
+
+/// The business types (as named in German, the language asked for) that are bills or
+/// initiatives for one; motions, postulates, interpellations and questions are not legislation.
+const LEGISLATION: [&str; 4] = [
+    "Geschäft des Bundesrates",
+    "Geschäft des Parlaments",
+    "Standesinitiative",
+    "Parlamentarische Initiative",
+];
 
 /// An affair id: the four-digit year and a four-digit number (`22.3765` is `20223765`).
 fn affair(value: &str) -> Option<u32> {
@@ -87,7 +97,14 @@ pub fn card(
         d["ID"].as_u64() == Some(u64::from(id)),
         "the service answered for another item"
     );
-    doc.set_type("Legislation");
+    let kind = text(&d["BusinessTypeName"]);
+    doc.set_type(
+        if kind.as_deref().is_some_and(|k| LEGISLATION.contains(&k)) {
+            "Legislation"
+        } else {
+            "CreativeWork"
+        },
+    );
     doc.attribution = Some(ATTRIBUTION.into());
     doc.name = Some(text(&d["Title"]).context("no title")?);
     let about: Vec<String> = [
@@ -159,7 +176,7 @@ impl Source for SwissParliament {
     fn examples(&self) -> &'static [Example] {
         &[Example {
             uri: "https://www.parlament.ch/de/ratsbetrieb/suche-curia-vista/geschaeft?AffairId=20223765",
-            card_type: "Legislation",
+            card_type: "CreativeWork",
         }]
     }
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
@@ -219,7 +236,8 @@ mod tests {
         let base = ResourceMeta::new(&root(20223765), "swiss_parliament", 3600);
         let raw = read("business_20223765_DE_select.json");
         let doc = card(base.clone(), 20223765, 200, &raw).unwrap().unwrap();
-        assert_eq!(doc.type_name, "Legislation");
+        // A postulate is a request to the government, not legislation.
+        assert_eq!(doc.type_name, "CreativeWork");
         assert!(doc
             .name
             .as_deref()
@@ -238,6 +256,13 @@ mod tests {
         assert!(a["tags"].starts_with("Wirtschaft; Soziale Fragen"));
         assert_eq!(doc.attribution.as_deref(), Some(ATTRIBUTION));
         assert!(card(base.clone(), 20223766, 200, &raw).is_err());
+        let bill = String::from_utf8(raw.clone())
+            .unwrap()
+            .replace("\"Postulat\"", "\"Geschäft des Bundesrates\"");
+        let doc = card(base.clone(), 20223765, 200, bill.as_bytes())
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc.type_name, "Legislation");
         let missing = read("business_99999999_DE_missing.json");
         assert!(card(base, 99999999, 404, &missing).unwrap().is_none());
     }

@@ -20,8 +20,10 @@ only (about 1 KB). The card is in German. An id the service does not know is `mi
 
 ## Card
 
-`Legislation`, named by its title and described by its type and number, author, council and
-status ("Po. 22.3765 · Glättli Balthasar · Nationalrat · Erledigt").
+`Legislation` for a Federal Council or Parliament bill and a cantonal or parliamentary
+initiative; `CreativeWork` for motions, postulates, interpellations, questions and petitions.
+Named by its title and described by its type and number, author, council and status ("Po.
+22.3765 · Glättli Balthasar · Nationalrat · Erledigt").
 
 | Fact | Meaning |
 | --- | --- |
