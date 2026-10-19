@@ -21,8 +21,13 @@ pub enum Target {
     Law { package: String },
     /// One version of a bill, e.g. `BILLS-117hr3684enr`.
     Bill { package: String },
-    /// A section of the US Code, in whatever edition is current: `26 U.S.C. 501`.
-    Code { title: String, section: String },
+    /// A section of the US Code: `26 U.S.C. 501`, in whatever edition is current, or one
+    /// edition's copy of it (its package and granule).
+    Code {
+        title: String,
+        section: String,
+        edition: Option<(String, String)>,
+    },
     /// A law as printed in the Statutes at Large: volume and first page.
     Statute { volume: u32, page: u32 },
 }
@@ -105,6 +110,7 @@ fn of_ids(package: &str, granule: Option<&str>) -> Option<Target> {
     (ok_title && code_section(section)).then(|| Target::Code {
         title,
         section: section.to_owned(),
+        edition: Some((package.to_owned(), granule.to_owned())),
     })
 }
 
@@ -147,7 +153,8 @@ impl Target {
                     digits(number, 5)?,
                     query("billversion")?
                 )),
-                ["link", "uscode", title, section] => {
+                // An edition named by `year` is not current, and its granule is not known here.
+                ["link", "uscode", title, section] if query("year").is_none() => {
                     let title = title.to_ascii_lowercase();
                     (title.len() <= 4
                         && title.bytes().all(|b| b.is_ascii_alphanumeric())
@@ -155,6 +162,7 @@ impl Target {
                     .then(|| Self::Code {
                         title,
                         section: (*section).to_owned(),
+                        edition: None,
                     })
                 }
                 ["link", "statute", volume, page] => Some(Self::Statute {
@@ -176,7 +184,11 @@ impl Target {
             Self::Law { package } | Self::Bill { package } => {
                 format!("https://www.govinfo.gov/app/details/{package}")
             }
-            Self::Code { title, section } => {
+            Self::Code {
+                edition: Some((package, granule)),
+                ..
+            } => format!("https://www.govinfo.gov/app/details/{package}/{granule}"),
+            Self::Code { title, section, .. } => {
                 format!("https://www.govinfo.gov/link/uscode/{title}/{section}")
             }
             Self::Statute { volume, page } => format!(
@@ -191,7 +203,11 @@ impl Target {
             Self::Law { package } | Self::Bill { package } => {
                 format!("https://www.govinfo.gov/metadata/pkg/{package}/mods.xml")
             }
-            Self::Code { title, section } => format!(
+            Self::Code {
+                edition: Some((package, granule)),
+                ..
+            } => format!("https://www.govinfo.gov/metadata/granule/{package}/{granule}/mods.xml"),
+            Self::Code { title, section, .. } => format!(
                 "https://www.govinfo.gov/link/uscode/{title}/{section}?link-type=mods"
             ),
             Self::Statute { volume, page } => format!(
@@ -199,6 +215,21 @@ impl Target {
             ),
         }
     }
+}
+
+/// A bill type's citation label: `hr` → `H.R.`.
+fn bill_label(kind: &str) -> Option<&'static str> {
+    Some(match kind {
+        "hr" => "H.R.",
+        "s" => "S.",
+        "hjres" => "H.J.Res.",
+        "sjres" => "S.J.Res.",
+        "hconres" => "H.Con.Res.",
+        "sconres" => "S.Con.Res.",
+        "hres" => "H.Res.",
+        "sres" => "S.Res.",
+        _ => return None,
+    })
 }
 
 fn child<'a, 'i>(node: roxmltree::Node<'a, 'i>, name: &str) -> Option<roxmltree::Node<'a, 'i>> {
@@ -265,18 +296,7 @@ pub fn card(
             if let Target::Law { .. } = target {
                 let bill = in_extensions("bill", &[("priority", "primary")]).and_then(|b| {
                     let kind = b.attribute("type")?.to_ascii_lowercase();
-                    let label = match kind.as_str() {
-                        "hr" => "H.R.",
-                        "s" => "S.",
-                        "hjres" => "H.J.Res.",
-                        "sjres" => "S.J.Res.",
-                        "hconres" => "H.Con.Res.",
-                        "sconres" => "S.Con.Res.",
-                        "hres" => "H.Res.",
-                        "sres" => "S.Res.",
-                        _ => return None,
-                    };
-                    Some(format!("{label} {}", b.attribute("number")?))
+                    Some(format!("{} {}", bill_label(&kind)?, b.attribute("number")?))
                 });
                 facts.extend([
                     ("public_law", citation),
@@ -295,9 +315,17 @@ pub fn card(
                 ]);
             }
         }
-        Target::Code { title: t, section } => {
+        Target::Code {
+            title: t,
+            section,
+            edition,
+        } => {
             anyhow::ensure!(
-                access.starts_with("USCODE-") && access.ends_with(&format!("-sec{section}")),
+                access.starts_with("USCODE-")
+                    && access.ends_with(&format!("-sec{section}"))
+                    && edition
+                        .as_ref()
+                        .is_none_or(|(_, granule)| access == *granule),
                 "GovInfo answered for another section"
             );
             doc.name = title;
@@ -308,9 +336,14 @@ pub fn card(
                 Some(code) => format!("{cite} · {code}"),
                 None => cite.clone(),
             });
+            let year = access
+                .strip_prefix("USCODE-")
+                .and_then(|r| r.split('-').next())
+                .map(str::to_owned);
             facts.extend([
                 ("citation", Some(cite)),
                 ("code_title", code),
+                ("edition", year.filter(|_| edition.is_some())),
                 (
                     "date_issued",
                     host.and_then(|h| {
@@ -341,7 +374,7 @@ pub fn card(
     facts.push((
         "page_url",
         Some(match target {
-            Target::Code { .. } => format!("{}?link-type=details", target.root()),
+            Target::Code { edition: None, .. } => format!("{}?link-type=details", target.root()),
             _ => target.root(),
         }),
     ));
@@ -351,6 +384,37 @@ pub fn card(
         }
     }
     Ok(Some(doc))
+}
+
+/// The card a link names by itself, for a record too large to read: its citation as the name.
+pub fn minimal_card(mut doc: ResourceMeta, target: &Target) -> ResourceMeta {
+    let id = |package: &str, prefix: &str| -> Vec<String> {
+        package
+            .strip_prefix(prefix)
+            .map(|rest| runs(rest).into_iter().map(str::to_owned).collect())
+            .unwrap_or_default()
+    };
+    let citation = match target {
+        Target::Law { package } => match id(package, "PLAW-").as_slice() {
+            [c, kind, n] if kind == "pvtl" => format!("Private Law {c}-{n}"),
+            [c, _, n] => format!("Public Law {c}-{n}"),
+            _ => package.clone(),
+        },
+        Target::Bill { package } => match id(package, "BILLS-").as_slice() {
+            [c, kind, n, version] => format!(
+                "{} {n} ({version}), {c}th Congress",
+                bill_label(kind).unwrap_or(kind)
+            ),
+            _ => package.clone(),
+        },
+        Target::Code { title, section, .. } => format!("{title} U.S.C. {section}"),
+        Target::Statute { volume, page } => format!("{volume} Stat. {page}"),
+    };
+    doc.set_type("Legislation");
+    doc.name = Some(citation.clone());
+    doc.attributes.insert("citation".into(), citation);
+    doc.attributes.insert("page_url".into(), target.root());
+    doc
 }
 
 #[async_trait]
@@ -378,6 +442,7 @@ impl Source for Govinfo {
             "current_chamber",
             "citation",
             "code_title",
+            "edition",
             "page_url",
         ]
     }
@@ -395,7 +460,7 @@ impl Source for Govinfo {
     }
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let target = Target::of_uri(uri).context("not a GovInfo link")?;
-        let f = cx
+        let fetched = cx
             .fetch(
                 &target.mods_url(),
                 &FetchOptions {
@@ -404,7 +469,17 @@ impl Source for Govinfo {
                     ..Default::default()
                 },
             )
-            .await?;
+            .await;
+        let f = match fetched {
+            // A record over the 1 MB cap: the card the link itself names, never a retry loop.
+            Err(e)
+                if e.chain()
+                    .any(|c| c.is::<crate::resolver::egress::BodyTooLarge>()) =>
+            {
+                return Ok(minimal_card(cx.card(uri, self), &target));
+            }
+            other => other?,
+        };
         Ok(
             card(cx.card(uri, self), &target, f.status, f.url.path(), &f.body)?
                 .unwrap_or_else(|| cx.missing(uri, self)),
@@ -442,13 +517,22 @@ mod tests {
         }
         assert_eq!(Govinfo.alias_root(root), None);
         let code = "https://www.govinfo.gov/link/uscode/26/501";
+        assert_eq!(
+            Govinfo
+                .alias_root("https://www.govinfo.gov/link/uscode/26/501?link-type=details")
+                .as_deref(),
+            Some(code)
+        );
+        // Each annual edition's copy of a section is its own resource.
+        let edition = "https://www.govinfo.gov/app/details/USCODE-2022-title26/USCODE-2022-title26-subtitleA-chap1-subchapF-partI-sec501";
         for uri in [
-            "https://www.govinfo.gov/app/details/USCODE-2024-title26/USCODE-2024-title26-subtitleA-chap1-subchapF-partI-sec501",
+            edition,
             "https://www.govinfo.gov/content/pkg/USCODE-2022-title26/html/USCODE-2022-title26-subtitleA-chap1-subchapF-partI-sec501.htm",
-            "https://www.govinfo.gov/link/uscode/26/501?link-type=details",
+            "https://www.govinfo.gov/metadata/granule/USCODE-2022-title26/USCODE-2022-title26-subtitleA-chap1-subchapF-partI-sec501/mods.xml",
         ] {
-            assert_eq!(Govinfo.alias_root(uri).as_deref(), Some(code), "{uri}");
+            assert_eq!(Target::of_uri(uri).unwrap().root(), edition, "{uri}");
         }
+        assert!(!Govinfo.reads("https://www.govinfo.gov/link/uscode/26/501?year=2022"));
         assert_eq!(
             Target::of_uri("https://www.govinfo.gov/link/bills/117/hr/3684?billversion=enr"),
             Some(Target::Bill {
@@ -523,6 +607,7 @@ mod tests {
         let code = Target::Code {
             title: "26".into(),
             section: "501".into(),
+            edition: None,
         };
         let doc = card(
             base(&code),
@@ -542,6 +627,46 @@ mod tests {
             Some("26 U.S.C. 501 · INTERNAL REVENUE CODE")
         );
         assert_eq!(doc.attributes["date_issued"], "2024-12-31");
+        assert!(!doc.attributes.contains_key("edition"));
+        let granule = "USCODE-2024-title26-subtitleA-chap1-subchapF-partI-sec501";
+        let copy = Target::of_uri(&format!(
+            "https://www.govinfo.gov/app/details/USCODE-2024-title26/{granule}"
+        ))
+        .unwrap();
+        let doc = card(
+            base(&copy),
+            &copy,
+            200,
+            "/x",
+            &read("mods_granule_USCODE-2024-title26-sec501.xml.gz"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(doc.attributes["edition"], "2024");
+        let other = Target::of_uri(&format!(
+            "https://www.govinfo.gov/app/details/USCODE-2022-title26/{}",
+            granule.replace("2024", "2022")
+        ))
+        .unwrap();
+        let wrong = card(
+            base(&other),
+            &other,
+            200,
+            "/x",
+            &read("mods_granule_USCODE-2024-title26-sec501.xml.gz"),
+        );
+        assert!(wrong.is_err(), "another edition's record");
+
+        // A record over the size cap: the card the link names.
+        let big = minimal_card(base(&law()), &law());
+        assert_eq!(big.name.as_deref(), Some("Public Law 117-58"));
+        let bill = Target::Bill {
+            package: "BILLS-117hr3684enr".into(),
+        };
+        assert_eq!(
+            minimal_card(base(&bill), &bill).name.as_deref(),
+            Some("H.R. 3684 (enr), 117th Congress")
+        );
 
         let statute = Target::Statute {
             volume: 135,

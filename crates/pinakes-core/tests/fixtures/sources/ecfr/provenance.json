@@ -62,15 +62,5 @@
     "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "status": 302,
     "url": "https://www.ecfr.gov/current/title-17/section-240.10b-5"
-  },
-  "versions_title-17_section-240.10b-5": {
-    "bytes": 424,
-    "content_type": "application/json; charset=utf-8",
-    "file": "versions_title-17_section-240.10b-5.json",
-    "note": "version history of 17 CFR 240.10b-5",
-    "recorded_at": "2026-10-19T16:19:43+00:00",
-    "sha256": "30940060ed5f2f6f1da22f7fc09fc45ad507219048e5f31dbb84f6b70c03fc5d",
-    "status": 200,
-    "url": "https://www.ecfr.gov/api/versioner/v1/versions/title-17.json?section=240.10b-5"
   }
 }

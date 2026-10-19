@@ -18,17 +18,49 @@ const LEG: &str = "http://www.legislation.gov.uk/namespaces/legislation";
 const UKM: &str = "http://www.legislation.gov.uk/namespaces/metadata";
 const DC: &str = "http://purl.org/dc/elements/1.1/";
 
-/// An item of legislation: its type (`ukpga`, `uksi`, `eur`, …), year and number.
+/// An item of legislation (its type, year and number: `ukpga`, `uksi`, `eur`, …), one of its
+/// provisions, or a version of either.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Item {
     pub kind: String,
     pub year: u16,
     pub number: u32,
+    /// A provision, e.g. `section/1` or `schedule/2/paragraph/3`.
+    pub provision: Option<String>,
+    /// A version: `enacted`, `made`, … or a point in time (`YYYY-MM-DD`).
+    pub version: Option<String>,
+}
+
+/// The kinds of provision an address can name, first and nested.
+const PROVISIONS: &[&str] = &[
+    "section",
+    "article",
+    "regulation",
+    "rule",
+    "schedule",
+    "part",
+    "chapter",
+];
+const NESTED: &[&str] = &[
+    "paragraph",
+    "section",
+    "article",
+    "regulation",
+    "rule",
+    "part",
+    "chapter",
+];
+const VERSIONS: &[&str] = &["enacted", "made", "adopted", "created", "prospective"];
+
+fn provision_number(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 12 && value.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
 impl Item {
-    /// `https://www.legislation.gov.uk[/id]/{type}/{year}/{number}[/…]`: every part, version,
-    /// language and format of an item is the item. Items numbered by regnal year are not read.
+    /// `https://www.legislation.gov.uk[/id]/{type}/{year}/{number}[/{provision}][/{version}]`, with
+    /// `/contents`, `/introduction`, a language (`/welsh`) or a data format (`/data.xml`) naming
+    /// the same text. Notes, memoranda, impact assessments and other parts are not read, nor
+    /// items numbered by regnal year.
     pub fn of_uri(uri: &str) -> Option<Self> {
         let url = web_url(uri)?;
         if !matches!(
@@ -42,7 +74,7 @@ impl Item {
             ["id", rest @ ..] => rest,
             rest => rest,
         };
-        let [kind, year, number, ..] = rest else {
+        let [kind, year, number, tail @ ..] = rest else {
             return None;
         };
         let kind = kind.to_ascii_lowercase();
@@ -55,16 +87,78 @@ impl Item {
                 .then(|| number.parse().ok())
                 .flatten()
                 .filter(|n| *n > 0)?;
-        ok_kind.then_some(Self { kind, year, number })
+        if !ok_kind {
+            return None;
+        }
+        // From the end: a data format, a language, a version; the rest names the part.
+        let mut tail: Vec<&str> = tail.to_vec();
+        if tail.last().is_some_and(|s| s.starts_with("data.")) {
+            tail.pop();
+        }
+        if tail
+            .last()
+            .is_some_and(|s| matches!(*s, "welsh" | "english"))
+        {
+            tail.pop();
+        }
+        let version = match tail.last() {
+            Some(v)
+                if VERSIONS.contains(v)
+                    || chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d").is_ok() =>
+            {
+                let v = (*v).to_owned();
+                tail.pop();
+                Some(v)
+            }
+            _ => None,
+        };
+        let provision = match tail.as_slice() {
+            [] | ["contents"] | ["introduction"] => None,
+            [first, ..]
+                if PROVISIONS.contains(first)
+                    && tail.len().is_multiple_of(2)
+                    && tail.len() <= 8 =>
+            {
+                let ok = tail.chunks(2).enumerate().all(|(i, pair)| {
+                    (i == 0 || NESTED.contains(&pair[0])) && provision_number(pair[1])
+                });
+                ok.then(|| tail.join("/"))?.into()
+            }
+            _ => return None,
+        };
+        Some(Self {
+            kind,
+            year,
+            number,
+            provision,
+            version,
+        })
     }
-    pub fn root(&self) -> String {
+    /// The item's own address, without the provision and version.
+    pub fn act(&self) -> String {
         format!(
             "https://www.legislation.gov.uk/{}/{}/{}",
             self.kind, self.year, self.number
         )
     }
+    pub fn root(&self) -> String {
+        let mut root = self.act();
+        for part in [&self.provision, &self.version].into_iter().flatten() {
+            root.push('/');
+            root.push_str(part);
+        }
+        root
+    }
+    /// The item's introduction data (the act's, for a provision), in the version asked for.
     pub fn data_url(&self) -> String {
-        format!("{}/introduction/data.xml", self.root())
+        match &self.version {
+            Some(v) => format!("{}/introduction/{v}/data.xml", self.act()),
+            None => format!("{}/introduction/data.xml", self.act()),
+        }
+    }
+    /// `section 1`, `schedule 2 paragraph 3`.
+    pub fn provision_label(&self) -> Option<String> {
+        self.provision.as_ref().map(|p| p.replace('/', " "))
     }
 }
 
@@ -125,7 +219,11 @@ pub fn card(
     let category = class("DocumentCategory");
 
     doc.set_type("Legislation");
-    doc.name = Some(dc("title").context("no title")?);
+    let title = dc("title").context("no title")?;
+    doc.name = Some(match item.provision_label() {
+        Some(label) => format!("{title}, {label}"),
+        None => title,
+    });
     doc.description = dc("description");
     doc.attribution = Some(if category.as_deref() == Some("euretained") {
         format!("{ATTRIBUTION} {EU_ATTRIBUTION}")
@@ -142,6 +240,8 @@ pub fn card(
             value(child(specific, UKM, "EnactmentDate"), "Date"),
         ),
         ("made", value(child(specific, UKM, "Made"), "Date")),
+        ("provision", item.provision_label()),
+        ("version", item.version.clone()),
         ("page_url", Some(item.root())),
     ] {
         if let Some(value) = value {
@@ -172,6 +272,8 @@ impl Source for LegislationGovUk {
             "number",
             "enacted",
             "made",
+            "provision",
+            "version",
             "page_url",
         ]
     }
@@ -220,6 +322,8 @@ mod tests {
             kind: kind.into(),
             year,
             number,
+            provision: None,
+            version: None,
         }
     }
     fn base(item: &Item) -> ResourceMeta {
@@ -231,11 +335,10 @@ mod tests {
         let root = "https://www.legislation.gov.uk/ukpga/2018/12";
         for uri in [
             "https://www.legislation.gov.uk/ukpga/2018/12/contents",
-            "https://www.legislation.gov.uk/ukpga/2018/12/section/1",
-            "https://www.legislation.gov.uk/ukpga/2018/12/enacted",
-            "https://www.legislation.gov.uk/ukpga/2018/12/2020-01-31",
+            "https://www.legislation.gov.uk/ukpga/2018/12/introduction",
             "https://www.legislation.gov.uk/ukpga/2018/12/data.xml",
             "https://www.legislation.gov.uk/id/ukpga/2018/12",
+            "https://www.legislation.gov.uk/ukpga/2018/12/contents/welsh",
             "http://legislation.gov.uk/ukpga/2018/12",
         ] {
             assert_eq!(
@@ -245,6 +348,39 @@ mod tests {
             );
         }
         assert_eq!(LegislationGovUk.alias_root(root), None);
+        // Provisions and versions are their own resources; their other spellings alias them.
+        for (uri, own) in [
+            (
+                "https://www.legislation.gov.uk/ukpga/2018/12/section/1",
+                "https://www.legislation.gov.uk/ukpga/2018/12/section/1",
+            ),
+            (
+                "https://www.legislation.gov.uk/ukpga/2018/12/section/1/data.xml",
+                "https://www.legislation.gov.uk/ukpga/2018/12/section/1",
+            ),
+            (
+                "https://www.legislation.gov.uk/ukpga/2018/12/schedule/2/paragraph/3",
+                "https://www.legislation.gov.uk/ukpga/2018/12/schedule/2/paragraph/3",
+            ),
+            (
+                "https://www.legislation.gov.uk/ukpga/2018/12/2020-01-31",
+                "https://www.legislation.gov.uk/ukpga/2018/12/2020-01-31",
+            ),
+            (
+                "https://www.legislation.gov.uk/ukpga/2018/12/contents/2020-01-31",
+                "https://www.legislation.gov.uk/ukpga/2018/12/2020-01-31",
+            ),
+            (
+                "https://www.legislation.gov.uk/ukpga/2018/12/enacted",
+                "https://www.legislation.gov.uk/ukpga/2018/12/enacted",
+            ),
+            (
+                "https://www.legislation.gov.uk/ukpga/2018/12/section/1/2020-01-31",
+                "https://www.legislation.gov.uk/ukpga/2018/12/section/1/2020-01-31",
+            ),
+        ] {
+            assert_eq!(Item::of_uri(uri).unwrap().root(), own, "{uri}");
+        }
         assert_eq!(
             Item::of_uri("https://www.legislation.gov.uk/anaw/2016/1/contents/welsh"),
             Some(item("anaw", 2016, 1))
@@ -254,6 +390,12 @@ mod tests {
             "https://www.legislation.gov.uk/ukpga/2018",
             "https://www.legislation.gov.uk/search?title=data",
             "https://www.legislation.gov.uk/ukpga/2018/0",
+            "https://www.legislation.gov.uk/ukpga/2018/12/notes",
+            "https://www.legislation.gov.uk/ukpga/2018/12/notes/contents",
+            "https://www.legislation.gov.uk/uksi/2019/419/memorandum/contents",
+            "https://www.legislation.gov.uk/ukpga/2018/12/impacts",
+            "https://www.legislation.gov.uk/ukpga/2018/12/body",
+            "https://www.legislation.gov.uk/ukpga/2018/12/section",
         ] {
             assert!(!LegislationGovUk.reads(uri), "{uri}");
         }
@@ -280,9 +422,14 @@ mod tests {
         assert_eq!(a["legislation_type"], "UnitedKingdomPublicGeneralAct");
         assert_eq!(a["category"], "primary");
         assert_eq!(a["enacted"], "2018-05-23");
+        assert!(!a.contains_key("provision") && !a.contains_key("version"));
         assert_eq!(doc.attribution.as_deref(), Some(ATTRIBUTION));
 
-        let si = item("uksi", 2019, 419);
+        let si = Item::of_uri("https://www.legislation.gov.uk/uksi/2019/419/made").unwrap();
+        assert_eq!(
+            si.data_url(),
+            "https://www.legislation.gov.uk/uksi/2019/419/introduction/made/data.xml"
+        );
         let doc = card(
             base(&si),
             &si,
@@ -296,6 +443,7 @@ mod tests {
             "UnitedKingdomStatutoryInstrument"
         );
         assert_eq!(doc.attributes["made"], "2019-02-28");
+        assert_eq!(doc.attributes["version"], "made");
 
         let eu = item("eur", 2016, 679);
         let doc = card(
@@ -312,10 +460,34 @@ mod tests {
             .unwrap()
             .contains("Commission Decision 2011/833/EU"));
 
+        // A provision in a version: the act's card from that version, plus the provision.
+        let section =
+            Item::of_uri("https://www.legislation.gov.uk/ukpga/2018/12/section/1/2020-01-31")
+                .unwrap();
+        assert_eq!(
+            section.data_url(),
+            "https://www.legislation.gov.uk/ukpga/2018/12/introduction/2020-01-31/data.xml"
+        );
+        let doc = card(
+            base(&section),
+            &section,
+            200,
+            &read("ukpga_2018_12_introduction_2020-01-31.xml"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            doc.name.as_deref(),
+            Some("Data Protection Act 2018, section 1")
+        );
+        assert_eq!(doc.attributes["provision"], "section 1");
+        assert_eq!(doc.attributes["version"], "2020-01-31");
+
         // The data must be the item asked for.
+        let other = item("ukpga", 2018, 13);
         assert!(card(
             base(&act),
-            &item("ukpga", 2018, 13),
+            &other,
             200,
             &read("ukpga_2018_12_introduction.xml")
         )

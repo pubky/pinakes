@@ -1,6 +1,6 @@
 //! The Electronic Code of Federal Regulations: CFR sections and parts, read from the eCFR
-//! versioner API (the HTML is bot-walled). Every eCFR address of a section or part, current or
-//! at a date, is an alias of its current address. Public domain; no key.
+//! versioner API (the HTML is bot-walled). Every eCFR address of a section or part is an alias
+//! of its root; the text on a date is its own resource. Public domain; no key.
 use super::{web_url, Context, Example, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
@@ -9,11 +9,18 @@ use serde_json::Value;
 
 pub struct Ecfr;
 
-/// A CFR section (`17`, `240.10b-5`) or part (`14`, `39`).
+/// A CFR section (`17`, `240.10b-5`) or part (`14`, `39`), as it reads today or on a date.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Target {
-    Section { title: u16, section: String },
-    Part { title: u16, part: String },
+pub struct Target {
+    pub title: u16,
+    pub object: Object,
+    /// A dated version (`/on/{date}/…`), else the current text.
+    pub date: Option<String>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Object {
+    Section(String),
+    Part(String),
 }
 
 fn title(value: &str) -> Option<u16> {
@@ -40,23 +47,28 @@ fn section(value: &str) -> Option<&str> {
 
 impl Target {
     /// `https://www.ecfr.gov/{current|on/YYYY-MM-DD}/title-{t}/…/section-{s}` or `…/part-{p}`.
-    /// The chapter, subchapter, subpart and subject-group segments never matter.
+    /// The chapter, subchapter and subpart segments before the part or section never matter;
+    /// a subpart, subject-group or appendix page is another object and is not read.
     pub fn of_uri(uri: &str) -> Option<Self> {
         let url = web_url(uri)?;
         if !matches!(url.host_str()?, "www.ecfr.gov" | "ecfr.gov") {
             return None;
         }
         let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
-        let rest = match segments.as_slice() {
-            ["current", rest @ ..] => rest,
+        let (date, rest) = match segments.as_slice() {
+            ["current", rest @ ..] => (None, rest),
             ["on", date, rest @ ..]
                 if chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok() =>
             {
-                rest
+                (Some((*date).to_owned()), rest)
             }
             _ => return None,
         };
         let title = title(rest.first()?.strip_prefix("title-")?)?;
+        let last = rest.last()?;
+        if !(last.starts_with("part-") || last.starts_with("section-")) {
+            return None;
+        }
         let mut found_part = None;
         let mut found_section = None;
         for segment in &rest[1..] {
@@ -64,61 +76,60 @@ impl Target {
                 found_part = Some(part(p)?);
             } else if let Some(s) = segment.strip_prefix("section-") {
                 found_section = Some(section(s)?);
-            } else if ![
-                "chapter-",
-                "subchapter-",
-                "subpart-",
-                "subject-group-",
-                "appendix-",
-            ]
-            .iter()
-            .any(|p| segment.starts_with(p))
+            } else if !["chapter-", "subchapter-", "subpart-", "subject-group-"]
+                .iter()
+                .any(|p| segment.starts_with(p))
             {
                 return None;
             }
         }
-        match (found_part, found_section) {
+        let object = match (found_part, found_section) {
             (part, Some(section)) => {
                 // A part named next to the section must be the section's own.
                 let own = section.split_once('.').map(|(p, _)| p);
-                (part.is_none() || part == own).then(|| Self::Section {
-                    title,
-                    section: section.to_owned(),
-                })
+                (part.is_none() || part == own).then(|| Object::Section(section.to_owned()))?
             }
-            (Some(part), None) => Some(Self::Part {
-                title,
-                part: part.to_owned(),
-            }),
-            (None, None) => None,
-        }
+            (Some(part), None) => Object::Part(part.to_owned()),
+            (None, None) => return None,
+        };
+        Some(Self {
+            title,
+            object,
+            date,
+        })
+    }
+    /// `current`, or `on/{date}` for a dated version.
+    fn when(&self) -> String {
+        self.date
+            .as_ref()
+            .map_or("current".to_owned(), |d| format!("on/{d}"))
     }
     pub fn root(&self) -> String {
-        match self {
-            Self::Section { title, section } => {
-                format!("https://www.ecfr.gov/current/title-{title}/section-{section}")
-            }
-            Self::Part { title, part } => {
-                format!("https://www.ecfr.gov/current/title-{title}/part-{part}")
-            }
+        let (when, title) = (self.when(), self.title);
+        match &self.object {
+            Object::Section(s) => format!("https://www.ecfr.gov/{when}/title-{title}/section-{s}"),
+            Object::Part(p) => format!("https://www.ecfr.gov/{when}/title-{title}/part-{p}"),
         }
     }
-    /// The ancestry of the section or part today: its own heading and every level above it.
+    /// The ancestry of the section or part (today, or on its date): its own heading and every
+    /// level above it.
     pub fn api_url(&self) -> String {
-        match self {
-            Self::Section { title, section } => format!(
-                "https://www.ecfr.gov/api/versioner/v1/ancestry/current/title-{title}.json?section={section}"
+        let at = self.date.as_deref().unwrap_or("current");
+        let title = self.title;
+        match &self.object {
+            Object::Section(s) => format!(
+                "https://www.ecfr.gov/api/versioner/v1/ancestry/{at}/title-{title}.json?section={s}"
             ),
-            Self::Part { title, part } => format!(
-                "https://www.ecfr.gov/api/versioner/v1/ancestry/current/title-{title}.json?part={part}"
+            Object::Part(p) => format!(
+                "https://www.ecfr.gov/api/versioner/v1/ancestry/{at}/title-{title}.json?part={p}"
             ),
         }
     }
     /// The citation, e.g. `17 CFR 240.10b-5` or `14 CFR 39`.
     pub fn citation(&self) -> String {
-        match self {
-            Self::Section { title, section } => format!("{title} CFR {section}"),
-            Self::Part { title, part } => format!("{title} CFR {part}"),
+        match &self.object {
+            Object::Section(s) => format!("{} CFR {s}", self.title),
+            Object::Part(p) => format!("{} CFR {p}", self.title),
         }
     }
 }
@@ -144,9 +155,9 @@ pub fn card(
     let v: Value = serde_json::from_slice(body)?;
     let ancestors = v["ancestors"].as_array().context("no ancestors")?;
     let own = ancestors.last().context("empty ancestry")?;
-    let (kind, id) = match target {
-        Target::Section { section, .. } => ("section", section),
-        Target::Part { part, .. } => ("part", part),
+    let (kind, id) = match &target.object {
+        Object::Section(section) => ("section", section),
+        Object::Part(part) => ("part", part),
     };
     anyhow::ensure!(
         own["type"] == kind && own["identifier"] == id.as_str(),
@@ -178,6 +189,7 @@ pub fn card(
             "reserved",
             (own["reserved"] == true).then(|| "true".to_owned()),
         ),
+        ("version_date", target.date.clone()),
         ("page_url", Some(target.root())),
     ] {
         if let Some(value) = value.filter(|v| !v.is_empty()) {
@@ -245,10 +257,11 @@ mod tests {
     fn read(file: &str) -> Vec<u8> {
         crate::sources::fixture::read("ecfr", file)
     }
-    fn section(t: u16, s: &str) -> Target {
-        Target::Section {
-            title: t,
-            section: s.into(),
+    fn section(title: u16, s: &str, date: Option<&str>) -> Target {
+        Target {
+            title,
+            object: Object::Section(s.into()),
+            date: date.map(str::to_owned),
         }
     }
 
@@ -258,17 +271,29 @@ mod tests {
         for uri in [
             "https://www.ecfr.gov/current/title-17/chapter-II/part-240/subpart-A/subject-group-ECFRbda83517ce4377f/section-240.10b-5",
             "https://www.ecfr.gov/current/title-17/part-240/section-240.10b-5",
-            "https://www.ecfr.gov/on/2020-01-01/title-17/section-240.10b-5",
             "https://ecfr.gov/current/title-17/section-240.10b-5",
         ] {
-            assert_eq!(Target::of_uri(uri), Some(section(17, "240.10b-5")), "{uri}");
+            assert_eq!(Target::of_uri(uri), Some(section(17, "240.10b-5", None)), "{uri}");
             assert_eq!(Ecfr.alias_root(uri).as_deref(), Some(root), "{uri}");
         }
         assert_eq!(Ecfr.alias_root(root), None);
         // A fragment is dropped by normalization: the link is the root itself.
         let anchored = "https://www.ecfr.gov/current/title-17/section-240.10b-5#p-240.10b-5(a)";
-        assert_eq!(Target::of_uri(anchored), Some(section(17, "240.10b-5")));
+        assert_eq!(
+            Target::of_uri(anchored),
+            Some(section(17, "240.10b-5", None))
+        );
         assert_eq!(Ecfr.alias_root(anchored), None);
+        // A dated version is its own resource.
+        let dated = "https://www.ecfr.gov/on/2020-01-01/title-17/part-240/section-240.10b-5";
+        assert_eq!(
+            Target::of_uri(dated),
+            Some(section(17, "240.10b-5", Some("2020-01-01")))
+        );
+        assert_eq!(
+            Ecfr.alias_root(dated).as_deref(),
+            Some("https://www.ecfr.gov/on/2020-01-01/title-17/section-240.10b-5")
+        );
         assert_eq!(
             Ecfr.alias_root("https://www.ecfr.gov/current/title-14/chapter-I/subchapter-C/part-39")
                 .as_deref(),
@@ -282,18 +307,26 @@ mod tests {
             "https://www.ecfr.gov/cgi-bin/text-idx?node=se17.4.240_110b_65",
             "https://www.ecfr.gov/current/title-17/section-240",
             "https://www.ecfr.gov/current/title-17/search/part-240",
+            // Subparts, subject groups and appendices are other objects than their part.
+            "https://www.ecfr.gov/current/title-17/chapter-II/part-240/subpart-A",
+            "https://www.ecfr.gov/current/title-17/part-240/subject-group-ECFRbda83517ce4377f",
+            "https://www.ecfr.gov/current/title-17/part-240/appendix-Appendix%20A",
         ] {
             assert_eq!(Target::of_uri(uri), None, "{uri}");
         }
         assert_eq!(
-            section(17, "240.10b-5").api_url(),
+            section(17, "240.10b-5", None).api_url(),
             "https://www.ecfr.gov/api/versioner/v1/ancestry/current/title-17.json?section=240.10b-5"
+        );
+        assert_eq!(
+            section(17, "240.10b-5", Some("2020-01-01")).api_url(),
+            "https://www.ecfr.gov/api/versioner/v1/ancestry/2020-01-01/title-17.json?section=240.10b-5"
         );
     }
 
     #[test]
     fn section_and_part_cards() {
-        let target = section(17, "240.10b-5");
+        let target = section(17, "240.10b-5", None);
         let base = ResourceMeta::new(&target.root(), "ecfr", 3600);
         let raw = read("ancestry_current_title-17_section-240.10b-5.json");
         let doc = card(base.clone(), &target, 200, &raw).unwrap().unwrap();
@@ -314,13 +347,23 @@ mod tests {
         assert_eq!(a["citation"], "17 CFR 240.10b-5");
         assert_eq!(a["cfr_title"], "Commodity and Securities Exchanges");
         assert_eq!(a["chapter"], "Securities and Exchange Commission");
-        assert!(!a.contains_key("reserved"));
+        assert!(!a.contains_key("reserved") && !a.contains_key("version_date"));
         // The ancestry must end at the object asked for.
-        assert!(card(base.clone(), &section(17, "240.10b-6"), 200, &raw).is_err());
+        assert!(card(base.clone(), &section(17, "240.10b-6", None), 200, &raw).is_err());
 
-        let part = Target::Part {
+        let dated = section(17, "240.10b-5", Some("2020-01-01"));
+        let raw = read("ancestry_2020-01-01_title-17_section-240.10b-5.json");
+        let doc = card(base.clone(), &dated, 200, &raw).unwrap().unwrap();
+        assert_eq!(doc.attributes["version_date"], "2020-01-01");
+        assert_eq!(
+            doc.attributes["page_url"],
+            "https://www.ecfr.gov/on/2020-01-01/title-17/section-240.10b-5"
+        );
+
+        let part = Target {
             title: 14,
-            part: "39".into(),
+            object: Object::Part("39".into()),
+            date: None,
         };
         let raw = read("ancestry_current_title-14_part-39.json");
         let doc = card(base.clone(), &part, 200, &raw).unwrap().unwrap();
@@ -332,9 +375,11 @@ mod tests {
         assert_eq!(doc.attributes["cfr_part"], "Airworthiness Directives");
 
         let missing = read("ancestry_current_title-17_section-240.99zz-missing.json");
-        assert!(card(base.clone(), &section(17, "240.99zz"), 404, &missing)
-            .unwrap()
-            .is_none());
+        assert!(
+            card(base.clone(), &section(17, "240.99zz", None), 404, &missing)
+                .unwrap()
+                .is_none()
+        );
         assert!(card(base, &part, 503, b"").is_err());
     }
 }

@@ -31,7 +31,8 @@ pub fn lei(value: &str) -> Option<String> {
 }
 
 /// The LEI of `lei:{LEI}`, `https://www.gleif.org/lei/{LEI}` or
-/// `https://api.gleif.org/api/v1/lei-records/{LEI}[/…]`.
+/// `https://api.gleif.org/api/v1/lei-records/{LEI}` (its sub-resources, such as a parent, are
+/// other objects).
 pub fn of_uri(uri: &str) -> Option<String> {
     if let Some(rest) = uri.strip_prefix("lei:") {
         return lei(rest);
@@ -40,7 +41,7 @@ pub fn of_uri(uri: &str) -> Option<String> {
     let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
     match (url.host_str()?, segments.as_slice()) {
         ("www.gleif.org" | "gleif.org", [.., "lei", id]) => lei(id),
-        ("api.gleif.org", ["api", "v1", "lei-records", id, ..]) => lei(id),
+        ("api.gleif.org", ["api", "v1", "lei-records", id]) => lei(id),
         _ => None,
     }
 }
@@ -222,7 +223,6 @@ mod tests {
         for uri in [
             "https://www.gleif.org/lei/KY37LUS27QQX7BB93L28",
             "https://api.gleif.org/api/v1/lei-records/KY37LUS27QQX7BB93L28",
-            "https://api.gleif.org/api/v1/lei-records/KY37LUS27QQX7BB93L28/direct-parent",
             "lei:ky37lus27qqx7bb93l28",
         ] {
             assert_eq!(
@@ -232,6 +232,16 @@ mod tests {
             );
         }
         assert_eq!(Gleif.alias_root("lei:KY37LUS27QQX7BB93L28"), None);
+        for other in [
+            "direct-parent",
+            "ultimate-parent",
+            "direct-children",
+            "isins",
+        ] {
+            let uri =
+                format!("https://api.gleif.org/api/v1/lei-records/KY37LUS27QQX7BB93L28/{other}");
+            assert!(!Gleif.reads(&uri), "{uri}");
+        }
         assert!(Gleif.invalid("lei:KY37LUS27QQX7BB93L29"));
         // The search page names the record in its fragment, which a resource's identity drops.
         assert!(!Gleif.reads("https://search.gleif.org/#/record/KY37LUS27QQX7BB93L28"));

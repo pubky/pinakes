@@ -17,14 +17,19 @@ fn id(value: &str) -> Option<u32> {
         .filter(|n| *n > 0)
 }
 
-/// The bill id of `https://bills.parliament.uk/bills/{id}[/…]` or
-/// `https://bills-api.parliament.uk/api/v1/Bills/{id}[/…]`.
+/// The bill id of `https://bills.parliament.uk/bills/{id}` or one of its tabs
+/// (`/bills/{id}/stages`, `/publications`, `/news`, …), or `…/api/v1/Bills/{id}`. Deeper pages,
+/// such as one amendment, are other objects.
 pub fn of_uri(uri: &str) -> Option<u32> {
     let url = web_url(uri)?;
     let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
     match (url.host_str()?, segments.as_slice()) {
-        ("bills.parliament.uk", [bills, n, ..]) if bills.eq_ignore_ascii_case("bills") => id(n),
-        ("bills-api.parliament.uk", ["api", "v1", bills, n, ..])
+        ("bills.parliament.uk", [bills, n] | [bills, n, _])
+            if bills.eq_ignore_ascii_case("bills") =>
+        {
+            id(n)
+        }
+        ("bills-api.parliament.uk", ["api", "v1", bills, n])
             if bills.eq_ignore_ascii_case("bills") =>
         {
             id(n)
@@ -179,7 +184,6 @@ mod tests {
             "https://bills.parliament.uk/bills/3737/stages",
             "https://bills.parliament.uk/bills/3737/publications",
             "https://bills-api.parliament.uk/api/v1/Bills/3737",
-            "https://bills-api.parliament.uk/api/v1/bills/3737/Stages",
         ] {
             assert_eq!(
                 UkParliamentBills.alias_root(uri).as_deref(),
@@ -196,6 +200,9 @@ mod tests {
             "https://bills.parliament.uk/bills/0",
             "https://bills.parliament.uk/bills/x",
             "https://services.parliament.uk/bills/2017-19/x.html",
+            "https://bills.parliament.uk/bills/3737/stages/20388/amendments",
+            "https://bills.parliament.uk/bills/3737/publications/12345/amendment-paper",
+            "https://bills-api.parliament.uk/api/v1/Bills/3737/Stages",
         ] {
             assert!(!UkParliamentBills.reads(uri), "{uri}");
         }

@@ -6,9 +6,10 @@ id. No key; one request per second. Open Parliament Licence v3.0: the card carri
 
 ## Links
 
-`https://bills.parliament.uk/bills/{id}` is the root; every page under it (`/stages`,
-`/publications`, `/news`, …) and the API's `https://bills-api.parliament.uk/api/v1/Bills/{id}`
-are aliases of it. The legacy `services.parliament.uk` bill pages carry no id and are not read.
+`https://bills.parliament.uk/bills/{id}` is the root; its tabs (`/stages`, `/publications`,
+`/news`, …) and the API's `https://bills-api.parliament.uk/api/v1/Bills/{id}` are aliases of it.
+Deeper pages, such as one stage's amendments or a single amendment, name other objects and are
+not read. The legacy `services.parliament.uk` bill pages carry no id and are not read.
 
 ## What it reads
 

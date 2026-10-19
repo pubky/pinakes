@@ -1,6 +1,6 @@
 //! Swiss federal law from Fedlex, the Confederation's publication platform, read through its
 //! SPARQL endpoint (JOLux) by ELI. Every Fedlex address of an act in the classified compilation,
-//! in any language and version, is an alias of its ELI. No key.
+//! in any language, is an alias of its ELI; a dated version is its own resource. No key.
 use super::{sparql_rows, sparql_url, web_url, Context, Example, Row, Source, SPARQL_JSON};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
@@ -14,8 +14,9 @@ pub const ATTRIBUTION: &str = "Source: Fedlex, www.fedlex.admin.ch";
 /// What a Fedlex link names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Key {
-    /// An act of the classified compilation: `eli/cc/{a}/{b}`.
-    Act(String),
+    /// An act of the classified compilation: `eli/cc/{a}/{b}`, or one dated version of it
+    /// (`eli/cc/{a}/{b}/{yyyymmdd}`).
+    Act(String, Option<String>),
     /// The old classified-compilation number of an act (`admin.ch/opc/…/19995395/…`).
     Dossier(String),
 }
@@ -36,7 +37,13 @@ impl Key {
             (
                 "www.fedlex.admin.ch" | "fedlex.admin.ch" | "fedlex.data.admin.ch",
                 ["eli", "cc", a, b, ..],
-            ) if eli_part(a) && eli_part(b) => Some(Self::Act(format!("eli/cc/{a}/{b}"))),
+            ) if eli_part(a) && eli_part(b) => {
+                let version = segments
+                    .get(4)
+                    .filter(|v| chrono::NaiveDate::parse_from_str(v, "%Y%m%d").is_ok())
+                    .map(|v| (*v).to_owned());
+                Some(Self::Act(format!("eli/cc/{a}/{b}"), version))
+            }
             ("www.admin.ch" | "admin.ch", ["opc", _, "classified-compilation", dossier, ..])
                 if dossier.len() == 8 && dossier.bytes().all(|b| b.is_ascii_digit()) =>
             {
@@ -47,14 +54,17 @@ impl Key {
     }
 }
 
-/// The act's ELI URI, the root of every address of it.
-pub fn root(eli: &str) -> String {
-    format!("https://fedlex.data.admin.ch/{eli}")
+/// The act's ELI URI, the root of every address of it; a dated version's adds its date.
+pub fn root(eli: &str, version: Option<&str>) -> String {
+    match version {
+        Some(v) => format!("https://fedlex.data.admin.ch/{eli}/{v}"),
+        None => format!("https://fedlex.data.admin.ch/{eli}"),
+    }
 }
 
 /// The act's titles, abbreviations, SR number, dates, status and type, one row per language.
 pub fn act_query(eli: &str) -> String {
-    let act = root(eli);
+    let act = root(eli, None);
     format!(
         "PREFIX jolux: <http://data.legilux.public.lu/resource/ontology/jolux#>\n\
          PREFIX skos: <http://www.w3.org/2004/02/skos/core#>\n\
@@ -129,6 +139,7 @@ fn value<'a>(rows: &'a [Row], var: &str) -> Option<&'a str> {
 pub fn card(
     mut doc: ResourceMeta,
     eli: &str,
+    version: Option<&str>,
     status: u16,
     body: &[u8],
 ) -> Result<Option<ResourceMeta>> {
@@ -186,15 +197,25 @@ pub fn card(
             value(&rows, "typeLabel").map(str::to_owned),
         ),
         (
+            "version_date",
+            version.and_then(|v| {
+                let d = chrono::NaiveDate::parse_from_str(v, "%Y%m%d").ok()?;
+                Some(d.format("%Y-%m-%d").to_string())
+            }),
+        ),
+        (
             "page_url",
-            Some(format!("https://www.fedlex.admin.ch/{eli}/de")),
+            Some(match version {
+                Some(v) => format!("https://www.fedlex.admin.ch/{eli}/{v}/de"),
+                None => format!("https://www.fedlex.admin.ch/{eli}/de"),
+            }),
         ),
     ] {
         if let Some(value) = value {
             doc.attributes.insert(key.into(), value);
         }
     }
-    doc.source_root = Some(root(eli));
+    doc.source_root = Some(root(eli, version));
     Ok(Some(doc))
 }
 
@@ -207,10 +228,10 @@ impl Source for Fedlex {
         Key::of_uri(uri).is_some()
     }
     fn alias_root(&self, uri: &str) -> Option<String> {
-        let Key::Act(eli) = Key::of_uri(uri)? else {
+        let Key::Act(eli, version) = Key::of_uri(uri)? else {
             return None;
         };
-        let root = root(&eli);
+        let root = root(&eli, version.as_deref());
         let (_, normalized, _) = crate::model::identity(uri).ok()?;
         (root != normalized).then_some(root)
     }
@@ -224,6 +245,7 @@ impl Source for Fedlex {
             "applicable_version",
             "status",
             "document_type",
+            "version_date",
             "page_url",
         ]
     }
@@ -245,15 +267,15 @@ impl Source for Fedlex {
             extra_types: &[SPARQL_JSON],
             ..Default::default()
         };
-        let eli = match Key::of_uri(uri).context("not a Fedlex link")? {
-            Key::Act(eli) => eli,
+        let (eli, version) = match Key::of_uri(uri).context("not a Fedlex link")? {
+            Key::Act(eli, version) => (eli, version),
             Key::Dossier(dossier) => {
                 let f = cx
                     .fetch(&sparql_url(ENDPOINT, &dossier_query(&dossier)), &options)
                     .await?;
                 anyhow::ensure!(f.status == 200, "the SPARQL endpoint answered {}", f.status);
                 match dossier_act(&f.body)? {
-                    Some(eli) => eli,
+                    Some(eli) => (eli, None),
                     None => return Ok(cx.missing(uri, self)),
                 }
             }
@@ -261,8 +283,14 @@ impl Source for Fedlex {
         let f = cx
             .fetch(&sparql_url(ENDPOINT, &act_query(&eli)), &options)
             .await?;
-        Ok(card(cx.card(uri, self), &eli, f.status, &f.body)?
-            .unwrap_or_else(|| cx.missing(uri, self)))
+        Ok(card(
+            cx.card(uri, self),
+            &eli,
+            version.as_deref(),
+            f.status,
+            &f.body,
+        )?
+        .unwrap_or_else(|| cx.missing(uri, self)))
     }
 }
 
@@ -274,16 +302,15 @@ mod tests {
         crate::sources::fixture::read("fedlex", file)
     }
     fn base() -> ResourceMeta {
-        ResourceMeta::new(&root("eli/cc/1999/404"), "fedlex", 3600)
+        ResourceMeta::new(&root("eli/cc/1999/404", None), "fedlex", 3600)
     }
 
     #[test]
     fn addresses() {
-        let constitution = root("eli/cc/1999/404");
+        let constitution = root("eli/cc/1999/404", None);
         for uri in [
             "https://www.fedlex.admin.ch/eli/cc/1999/404/de",
             "https://www.fedlex.admin.ch/eli/cc/1999/404/fr#art_5",
-            "https://www.fedlex.admin.ch/eli/cc/1999/404/20240303/de",
             "https://fedlex.data.admin.ch/eli/cc/1999/404/",
         ] {
             assert_eq!(
@@ -293,6 +320,13 @@ mod tests {
             );
         }
         assert_eq!(Fedlex.alias_root(&constitution), None);
+        // A dated version is its own resource.
+        assert_eq!(
+            Fedlex
+                .alias_root("https://www.fedlex.admin.ch/eli/cc/1999/404/20240303/de")
+                .as_deref(),
+            Some("https://fedlex.data.admin.ch/eli/cc/1999/404/20240303")
+        );
         assert_eq!(
             Key::of_uri("https://www.admin.ch/opc/de/classified-compilation/19995395/index.html"),
             Some(Key::Dossier("19995395".into()))
@@ -322,9 +356,24 @@ mod tests {
 
     #[test]
     fn act_cards() {
+        let dated = card(
+            base(),
+            "eli/cc/1999/404",
+            Some("20240303"),
+            200,
+            &read("eli_cc_1999_404.json"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(dated.attributes["version_date"], "2024-03-03");
+        assert_eq!(
+            dated.source_root.as_deref(),
+            Some("https://fedlex.data.admin.ch/eli/cc/1999/404/20240303")
+        );
         let doc = card(
             base(),
             "eli/cc/1999/404",
+            None,
             200,
             &read("eli_cc_1999_404.json"),
         )
@@ -352,6 +401,7 @@ mod tests {
         let civil = card(
             base(),
             "eli/cc/24/233_245_233",
+            None,
             200,
             &read("eli_cc_24_233_245_233.json"),
         )
@@ -361,6 +411,7 @@ mod tests {
         assert!(card(
             base(),
             "eli/cc/1999/99999",
+            None,
             200,
             &read("eli_missing_cc_1999_99999.json")
         )

@@ -9,8 +9,12 @@ card names its source: "Source: Fedlex, www.fedlex.admin.ch".
 
 An act is named by its ELI, `eli/cc/{a}/{b}`, and its root is
 `https://fedlex.data.admin.ch/eli/cc/{a}/{b}`. Every address of it on www.fedlex.admin.ch or
-fedlex.data.admin.ch, in any language (`/de`, `/fr`, `/it`, `/rm`, `/en`), version
-(`/{yyyymmdd}/…`) or article (`#art_5`), is an alias of it.
+fedlex.data.admin.ch, in any language (`/de`, `/fr`, `/it`, `/rm`, `/en`) or article
+(`#art_5`), is an alias of it.
+
+A dated version, `…/eli/cc/{a}/{b}/{yyyymmdd}[/…]`, is its own resource with the root
+`https://fedlex.data.admin.ch/eli/cc/{a}/{b}/{yyyymmdd}`: the act's card with a `version_date`
+fact and the version's page.
 
 An old classified-compilation address,
 `https://www.admin.ch/opc/{lang}/classified-compilation/{number}/index.html`, is read by its
@@ -36,6 +40,7 @@ its SR number, abbreviation and status ("SR 101 · BV · In force").
 | `english_title` | Its English title, where Fedlex has one |
 | `document_date`, `entry_into_force` | `YYYY-MM-DD` |
 | `applicable_version` | The date of the version in force today |
+| `version_date` | For a dated version: its date (`YYYY-MM-DD`) |
 | `status` | E.g. In force, No longer in force |
 | `document_type` | E.g. Federal act |
 | `page_url` | Its page on Fedlex (German) |

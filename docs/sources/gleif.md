@@ -6,8 +6,10 @@ CC0; no key; GLEIF allows 60 requests per minute (one per second here).
 ## Links
 
 `lei:{LEI}` is the root; `https://www.gleif.org/lei/{LEI}` and
-`https://api.gleif.org/api/v1/lei-records/{LEI}` (and its sub-paths) are aliases of it. An LEI
-is 20 characters with two check digits (ISO 17442); one that fails the check is never read.
+`https://api.gleif.org/api/v1/lei-records/{LEI}` are aliases of it. The record's sub-resources
+(`/direct-parent`, `/ultimate-parent`, `/direct-children`, …) name other entities and are not
+read. An LEI is 20 characters with two check digits (ISO 17442); one that fails the check is
+never read.
 
 GLEIF's search page names a record only in the URL fragment
 (`https://search.gleif.org/#/record/{LEI}`). A resource's identity drops fragments, so these

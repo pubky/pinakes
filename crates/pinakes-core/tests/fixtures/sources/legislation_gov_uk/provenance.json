@@ -29,6 +29,17 @@
     "status": 200,
     "url": "https://www.legislation.gov.uk/ukpga/2018/12/introduction/data.xml"
   },
+  "ukpga_2018_12_introduction_2020-01-31": {
+    "accept": "application/xml",
+    "bytes": 26909,
+    "content_type": "application/xml;charset=utf-8",
+    "file": "ukpga_2018_12_introduction_2020-01-31.xml",
+    "note": "legislation.gov.uk point-in-time introduction, OGL v3.0.",
+    "recorded_at": "2026-10-19T17:46:48+00:00",
+    "sha256": "6c92729edb93b2f2c3faa6b8f62e45244be69078b532844713bddeb16ec57302",
+    "status": 200,
+    "url": "https://www.legislation.gov.uk/ukpga/2018/12/introduction/2020-01-31/data.xml"
+  },
   "uksi_2019_419_introduction_made": {
     "accept": "application/xml",
     "bytes": 17085,
