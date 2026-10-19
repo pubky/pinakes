@@ -1,9 +1,10 @@
 //! Internet Archive items, read from the item metadata API of archive.org.
 //!
-//! Every link to an item (its details page, any view inside it such as `/page/n5/mode/2up`, its
-//! embed player, and the metadata API) is an alias of one identifier, `ia:{identifier}`.
+//! Every link to an item (its details page, the reader's views of it such as `/page/n5/mode/2up`,
+//! its embed player, and the metadata API) is an alias of one identifier, `ia:{identifier}`.
 //! Identifiers are case-sensitive: `Bitcoin-Whitepaper` is not `bitcoin-whitepaper`. A file of an
-//! item (`/download/…`) and the Wayback Machine (`web.archive.org`) are not items.
+//! item (`/download/…`, or its view at `/details/{identifier}/{file}`) and the Wayback Machine
+//! (`web.archive.org`) are not the item.
 //!
 //! The request reads only the item's `metadata` record, which stays a few kilobytes even for an
 //! item with thousands of files (the full record lists every file). The item's total size is a
@@ -38,9 +39,11 @@ pub fn from_uri(uri: &str) -> Option<String> {
     }
     let s: Vec<&str> = segments.iter().map(String::as_str).collect();
     match s.as_slice() {
-        ["details" | "embed", id, ..] | ["metadata", id] | ["metadata", id, "metadata"] => {
+        ["details", id] | ["embed", id] | ["metadata", id] | ["metadata", id, "metadata"] => {
             item_id(id)
         }
+        // The reader's views of the item; any other path after it is one of its files.
+        ["details", id, "page" | "mode", ..] => item_id(id),
         _ => None,
     }
 }
@@ -374,6 +377,9 @@ mod tests {
             "https://ia801905.us.archive.org/26/items/bitcoin-whitepaper/bitcoin.pdf",
             "https://archive.org/details/a%20b",
             "https://archive.org/details/.hidden",
+            "https://archive.org/details/bitcoin-whitepaper/bitcoin.pdf",
+            "https://archive.org/details/goodytwoshoes00newyiala/goodytwoshoes00newyiala.pdf",
+            "https://archive.org/embed/bitcoin-whitepaper/bitcoin.pdf",
             "https://openlibrary.org/books/OL7095326M",
         ] {
             assert_eq!(from_uri(uri), None, "{uri}");

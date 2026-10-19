@@ -1,7 +1,9 @@
 //! Chemical compounds in PubChem, read from PUG REST by compound id (CID).
 //!
-//! Every PubChem link of one compound (its page, the legacy `summary.cgi` page and PUG REST and
-//! PUG View URLs) is an alias of `pubchem:cid/{cid}`. A page by name (`/compound/aspirin`) names
+//! Every PubChem link of one compound (its page, the legacy `summary.cgi` page, and the PUG REST
+//! and PUG View URLs of its whole record or its properties) is an alias of `pubchem:cid/{cid}`.
+//! Other PUG REST operations name other things (the structure image, related compounds,
+//! substances, assays) and are not read. A page by name (`/compound/aspirin`) names
 //! the same compound once `name_request` lists exactly one CID for the name. Substances
 //! (`/substance/{sid}`) are depositors' records, not compounds.
 //!
@@ -66,8 +68,14 @@ pub fn from_uri(uri: &str) -> Option<Target> {
             ensure_name(name)?;
             Target::Name(name.to_owned())
         }
-        ["rest", "pug", "compound", "cid", id, ..]
-        | ["rest", "pug_view", "data", "compound", id, ..] => Target::Cid(cid(id)?),
+        ["rest", "pug", "compound", "cid", id, format]
+        | ["rest", "pug", "compound", "cid", id, "property", _, format]
+            if RECORD_FORMATS.contains(format) =>
+        {
+            Target::Cid(cid(id)?)
+        }
+        ["rest", "pug_view", "data", "compound", id]
+        | ["rest", "pug_view", "data", "compound", id, "JSON" | "XML"] => Target::Cid(cid(id)?),
         ["summary", "summary.cgi"] => Target::Cid(
             web_url(uri)?
                 .query_pairs()
@@ -77,6 +85,10 @@ pub fn from_uri(uri: &str) -> Option<Target> {
         _ => return None,
     })
 }
+
+/// The PUG REST output formats of a compound's whole record or its properties. `PNG` is the
+/// structure image, not the record.
+const RECORD_FORMATS: &[&str] = &["JSON", "XML", "SDF", "ASNT", "ASNB", "CSV", "TXT"];
 
 fn ensure_name(name: &str) -> Option<()> {
     (!name.is_empty() && name.len() <= MAX_NAME && !name.chars().any(char::is_control))
@@ -258,8 +270,9 @@ mod tests {
             "https://pubchem.ncbi.nlm.nih.gov/summary/summary.cgi?cid=2244",
             "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/2244/JSON",
             "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/2244/property/Title/JSON",
-            "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/2244/PNG",
+            "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/2244/SDF",
             "https://pubchem.ncbi.nlm.nih.gov/rest/pug_view/data/compound/2244/JSON",
+            "https://pubchem.ncbi.nlm.nih.gov/rest/pug_view/data/compound/2244",
         ] {
             assert_eq!(
                 from_uri(uri).as_ref().and_then(identifier).as_deref(),
@@ -287,6 +300,12 @@ mod tests {
             "https://pubchem.ncbi.nlm.nih.gov/substance/3243128",
             "https://pubchem.ncbi.nlm.nih.gov/rest/pug/substance/sid/3243128/JSON",
             "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/aspirin/JSON",
+            // Other operations name other things: the image, related compounds, substances.
+            "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/2244/PNG",
+            "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/2244/cids/JSON",
+            "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/2244/sids/JSON",
+            "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/2244/assaysummary/JSON",
+            "https://pubchem.ncbi.nlm.nih.gov/rest/pug_view/data/compound/2244/JSON/extra",
             "https://pubchem.ncbi.nlm.nih.gov/summary/summary.cgi?sid=3243128",
             "https://pubchem.ncbi.nlm.nih.gov/compound/%00",
             "https://example.org/compound/2244",

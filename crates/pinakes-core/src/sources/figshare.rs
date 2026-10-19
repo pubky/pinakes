@@ -1,10 +1,11 @@
 //! Figshare articles, read from the Figshare API by the article id in the link.
 //!
 //! Every link of one article on figshare.com or an institutional portal (`{name}.figshare.com`,
-//! which shares figshare.com's article ids), with or without a version, and its API URL are
-//! aliases of `figshare:{id}`. The card is the article as a whole, read from its latest version,
-//! whose number is in `version`. Portals on their own domains are not recognised from the link;
-//! the answer names their pages as aliases.
+//! which shares figshare.com's article ids) and its API URL are aliases of `figshare:{id}`. A link
+//! to one version (`…/{id}/{version}`) is a dated version, not the article, and is not read
+//! here. The card is the article as a whole, read from its latest version, whose number is in
+//! `version`. Portals on their own domains are not recognised from the link; the answer names
+//! their pages as aliases.
 //!
 //! Figshare gives each version a DOI ending in `.v{n}`; the same DOI without the suffix names the
 //! article and resolves to its latest version. Both are keys. DOI links
@@ -60,21 +61,15 @@ fn number(s: &str) -> Option<u64> {
         .flatten()
 }
 
-/// The article an article page names: `/articles/{type}/{slug}/{id}[/{version}]`, the older
-/// `/articles/{slug}/{id}[/{version}]`, and `/articles/{id}`.
+/// The article an article page names: `/articles/{type}/{slug}/{id}`, the older
+/// `/articles/{slug}/{id}`, and `/articles/{id}`. A page of one version (`…/{id}/{version}`) is
+/// not the article.
 fn article_path(s: &[&str]) -> Option<u64> {
-    let (id, version) = match s {
-        [id] => (id, None),
-        [kind, _, id] if TYPES.contains(kind) => (id, None),
-        [kind, _, id, version] if TYPES.contains(kind) => (id, Some(version)),
-        [_, id] => (id, None),
-        [_, id, version] => (id, Some(version)),
-        _ => return None,
-    };
-    if let Some(v) = version {
-        number(v)?;
+    match s {
+        [id] | [_, id] => number(id),
+        [kind, _, id] if TYPES.contains(kind) => number(id),
+        _ => None,
     }
-    number(id)
 }
 
 /// The article a Figshare link names.
@@ -84,7 +79,6 @@ pub fn from_uri(uri: &str) -> Option<u64> {
     if host == "api.figshare.com" {
         return match s.as_slice() {
             ["v2", "articles", id] => number(id),
-            ["v2", "articles", id, "versions", v] => number(v).and(number(id)),
             _ => None,
         };
     }
@@ -172,8 +166,8 @@ pub fn parse(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
         .cloned()
         .unwrap_or_else(|| page(id));
     let mut card = Card::new(type_name(&kind), identifier(id), url);
-    for p in pages {
-        card.alias(p);
+    for p in pages.iter().filter(|p| from_uri(p) == Some(id)) {
+        card.alias(p.clone());
     }
     card.name = text(&v["title"]);
     card.description = v["description"].as_str().and_then(html_text);
@@ -286,18 +280,23 @@ mod tests {
     fn every_link_form_of_one_article() {
         for uri in [
             "https://figshare.com/articles/presentation/Using_APIs_to_customise_repositories_and_engage_audiences/5616445",
-            "https://figshare.com/articles/presentation/Using_APIs_to_customise_repositories_and_engage_audiences/5616445/1",
-            "https://figshare.com/articles/presentation/Using_APIs_to_customise_repositories_and_engage_audiences/5616445/2?file=9778651",
             "https://www.figshare.com/articles/presentation/x/5616445",
             "https://figshare.com/articles/Using_APIs_to_customise_repositories_and_engage_audiences/5616445",
-            "https://figshare.com/articles/Using_APIs_to_customise_repositories_and_engage_audiences/5616445/1",
             "https://figshare.com/articles/5616445",
             "https://figshare.com/articles/_/5616445",
             "https://sheffield.figshare.com/articles/presentation/x/5616445",
             "https://api.figshare.com/v2/articles/5616445",
-            "https://api.figshare.com/v2/articles/5616445/versions/1",
         ] {
             assert_eq!(from_uri(uri).map(identifier).as_deref(), Some("figshare:5616445"), "{uri}");
+        }
+        // One version of the article is a dated version, not the article.
+        for uri in [
+            "https://figshare.com/articles/presentation/Using_APIs_to_customise_repositories_and_engage_audiences/5616445/1",
+            "https://figshare.com/articles/presentation/Using_APIs_to_customise_repositories_and_engage_audiences/5616445/2?file=9778651",
+            "https://figshare.com/articles/Using_APIs_to_customise_repositories_and_engage_audiences/5616445/1",
+            "https://api.figshare.com/v2/articles/5616445/versions/1",
+        ] {
+            assert_eq!(from_uri(uri), None, "{uri}");
         }
         assert_eq!(page(5616445), "https://figshare.com/articles/_/5616445");
         assert_eq!(
@@ -402,16 +401,14 @@ mod tests {
                 Key::new("doi", "10.6084/m9.figshare.5616445.v2"),
             ]
         );
-        // The first version is the same article; its page with the version is an alias.
+        // The first version's record names the same article; its page with the version is a
+        // dated version, never an alias.
         let v1 = parse(200, &read("article-5616445-v1.json"), 5616445)
             .unwrap()
             .unwrap();
         assert_eq!(v1.id, card.id);
         assert_eq!(v1.url, card.url);
-        assert_eq!(
-            v1.aliases,
-            ["https://figshare.com/articles/presentation/Using_APIs_to_customise_repositories_and_engage_audiences/5616445/1"]
-        );
+        assert!(v1.aliases.is_empty(), "{:?}", v1.aliases);
         assert_eq!(v1.keys[0], card.keys[0]);
     }
 
@@ -466,9 +463,13 @@ mod tests {
             Some("figshare:5616445")
         );
         assert_eq!(
-            f.alias_root("https://sheffield.figshare.com/articles/presentation/x/5616445/1")
+            f.alias_root("https://sheffield.figshare.com/articles/presentation/x/5616445")
                 .as_deref(),
             Some("figshare:5616445")
+        );
+        assert_eq!(
+            f.alias_root("https://sheffield.figshare.com/articles/presentation/x/5616445/1"),
+            None
         );
         for uri in [
             "figshare:05616445",

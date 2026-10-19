@@ -11,8 +11,14 @@ load in the `X-Throttling-Control` header.
 
 - `https://pubchem.ncbi.nlm.nih.gov/compound/{cid}`;
 - the legacy `https://pubchem.ncbi.nlm.nih.gov/summary/summary.cgi?cid={cid}`;
-- `https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/…` and
-  `https://pubchem.ncbi.nlm.nih.gov/rest/pug_view/data/compound/{cid}/…`.
+- the whole record or its properties in PUG REST,
+  `https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/{format}` and
+  `…/cid/{cid}/property/{properties}/{format}` (`JSON`, `XML`, `SDF`, `ASNT`, `ASNB`, `CSV` or
+  `TXT`), and in PUG View, `https://pubchem.ncbi.nlm.nih.gov/rest/pug_view/data/compound/{cid}`
+  and `…/JSON` or `…/XML`.
+
+Other PUG REST operations name other things (the `/PNG` structure image, related compounds,
+substances, assays) and are not read.
 
 A page by name (`https://pubchem.ncbi.nlm.nih.gov/compound/aspirin`) names the compound when
 PubChem lists exactly one CID for the name; it is then an alias of that compound's root. Substances

@@ -99,6 +99,10 @@ pub fn from_uri(uri: &str) -> Option<Target> {
             .find(|(k, _)| k == name)
             .map(|(_, v)| v.into_owned())
     };
+    // A past revision of the page (`oldid`, `diff`) is a dated version, not the file.
+    if query("oldid").is_some() || query("diff").is_some() {
+        return None;
+    }
     let s: Vec<&str> = segments.iter().map(String::as_str).collect();
     match s.as_slice() {
         ["wiki", t] => title(&percent_decode_str(t).decode_utf8().ok()?),
@@ -527,6 +531,9 @@ mod tests {
             "https://commons.wikimedia.org/wiki/File:a%7Cb.jpg",
             "https://commons.wikimedia.org/wiki/File:a/b.jpg",
             "https://commons.wikimedia.org/wiki/Special:FilePath/Bitcoin.svg",
+            "https://commons.wikimedia.org/w/index.php?title=File:Bitcoin.svg&oldid=123456789",
+            "https://commons.wikimedia.org/wiki/File:Bitcoin.svg?oldid=123456789",
+            "https://commons.wikimedia.org/w/index.php?title=File:Bitcoin.svg&diff=prev&oldid=1",
             "https://commons.wikimedia.org/w/index.php?curid=0",
             "https://commons.wikimedia.org/w/index.php?curid=abc",
             "https://commons.wikimedia.org/w/api.php?titles=File:A.jpg%7CFile:B.jpg",

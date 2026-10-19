@@ -11,9 +11,12 @@ repo ids and redirects any other case to the canonical one, which the card shows
 
 - `https://huggingface.co/{owner}/{name}` (a model), `https://huggingface.co/datasets/{owner}/{name}`,
   `https://huggingface.co/spaces/{owner}/{name}`, and the same on `hf.co`;
-- the repo's subpages: `/tree/…`, `/blob/…`, `/resolve/…`, `/raw/…`, `/edit/…`, `/commit/…`,
-  `/commits/…`, `/discussions/…` and the dataset `/viewer/…`;
+- the repo's own tabs: `/tree/main`, `/commits/main`, `/discussions` and the dataset `/viewer`;
 - `https://huggingface.co/api/{models|datasets|spaces}/{owner}/{name}`.
+
+A file (`/blob/…`, `/resolve/…`, `/raw/…`), another revision or folder (`/tree/{other}`), one
+commit, one discussion or a dataset split is another object, not an alias of the repo, so those
+links are not read here.
 
 Site sections that look like `{owner}/{name}` (`/docs/…`, `/blog/…`, `/papers/…`, `/learn/…`,
 `/organizations/…`, `/settings/…`, `/tasks/…`, `/collections/…`, `/posts/…` and so on) are not

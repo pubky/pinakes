@@ -3,7 +3,7 @@
 //! Every clinicaltrials.gov link of one study, current or legacy (`/ct2/show/…`, the classic
 //! site), and its API URL are aliases of one identifier: `nct:{NCT number}`. The registry asks
 //! to be credited with the date of its data, which is the record's last update.
-use super::kit::{host_and_segments, int, json, text, texts, time, Card, Link, Request};
+use super::kit::{host_and_segments, int, json, text, texts, time, web_url, Card, Link, Request};
 use super::{Example, Source};
 use crate::model::ResourceMeta;
 use anyhow::{ensure, Context, Result};
@@ -24,7 +24,8 @@ pub fn nct(value: &str) -> Option<String> {
     (digits.len() == 8 && digits.bytes().all(|b| b.is_ascii_digit())).then_some(value)
 }
 
-/// The NCT number a ClinicalTrials.gov link names; the path decides, queries are ignored.
+/// The NCT number a ClinicalTrials.gov link names; the path decides, and queries are ignored
+/// except a past version's (`?tab=history&a={n}`), which is not the study itself.
 pub fn from_uri(uri: &str) -> Option<String> {
     let (host, segments) = host_and_segments(uri)?;
     let s: Vec<&str> = segments.iter().map(String::as_str).collect();
@@ -38,14 +39,11 @@ pub fn from_uri(uri: &str) -> Option<String> {
             "clinicaltrials.gov" | "classic.clinicaltrials.gov",
             ["ct2", "show", "record" | "study" | "results", id],
         ) => id,
-        ("clinicaltrials.gov", ["study", id, "history", version])
-            if version.bytes().all(|b| b.is_ascii_digit()) =>
-        {
-            id
-        }
         _ => return None,
     };
-    nct(id)
+    // One past version of the record (`?tab=history&a=3`) is a dated version, not the study.
+    let version = web_url(uri)?.query_pairs().any(|(k, _)| k == "a");
+    (!version).then(|| nct(id)).flatten()
 }
 
 /// The identifier every link form of the study is an alias of.
@@ -230,7 +228,6 @@ mod tests {
             "https://www.clinicaltrials.gov/study/NCT04368728?tab=results",
             "https://clinicaltrials.gov/study/nct04368728",
             "https://clinicaltrials.gov/study/NCT04368728/history",
-            "https://clinicaltrials.gov/study/NCT04368728/history/3",
             "https://beta.clinicaltrials.gov/study/NCT04368728",
             "https://clinicaltrials.gov/ct2/show/NCT04368728",
             "https://clinicaltrials.gov/ct2/show/NCT04368728?term=vaccine&draw=2#locn",
@@ -248,6 +245,13 @@ mod tests {
                 Some("nct:NCT04368728"),
                 "{uri}"
             );
+        }
+        // Past versions of the record are dated versions, not the study.
+        for uri in [
+            "https://clinicaltrials.gov/study/NCT04368728?tab=history&a=3",
+            "https://clinicaltrials.gov/study/NCT04368728/history/3",
+        ] {
+            assert_eq!(from_uri(uri), None, "{uri}");
         }
         assert_eq!(page(PFIZER), "https://clinicaltrials.gov/study/NCT04368728");
         assert_eq!(

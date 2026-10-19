@@ -8,7 +8,8 @@ second).
 
 `nct:{NCT number}` is the root (`NCT` and 8 digits, in upper case, e.g. `nct:NCT04368728`).
 Every ClinicalTrials.gov address of the study is an alias of it, whatever its query (`?tab=…`,
-`?term=…`):
+`?term=…`), except a past version of the record (`?tab=history&a={n}`), which is a dated
+version and not read here:
 
 - `https://clinicaltrials.gov/study/{NCT}` and `…/study/{NCT}/history` (also on `beta.`);
 - `https://clinicaltrials.gov/show/{NCT}`;

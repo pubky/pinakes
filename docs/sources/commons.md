@@ -15,7 +15,8 @@ ASCII are percent-encoded (`commons:File:%C3%89t%C3%A9.jpg`), as URIs are stored
 - `https://commons.wikimedia.org/wiki/File:{name}` and the mobile
   `https://commons.m.wikimedia.org/wiki/File:{name}`, with spaces or underscores, percent-encoded
   or not, and the `Image:` alias (any case of the namespace);
-- `https://commons.wikimedia.org/w/index.php?title=File:{name}` (with any other parameters);
+- `https://commons.wikimedia.org/w/index.php?title=File:{name}` (with other parameters such as
+  `action=history`, but not a past revision: `oldid` or `diff` is a dated version, not read here);
 - `https://commons.wikimedia.org/w/api.php?…&titles=File:{name}` (one title).
 
 `https://commons.wikimedia.org/w/index.php?curid={page id}` is read by page id: its root is the

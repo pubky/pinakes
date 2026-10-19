@@ -462,7 +462,7 @@ mod tests {
         "ror:03yrm5c26",
         "https://api.ror.org/v2/organizations/03yrm5c26",
         "hf:model/meta-llama/llama-2-7b-hf",
-        "https://hf.co/meta-llama/Llama-2-7b-hf/blob/main/config.json",
+        "https://hf.co/meta-llama/Llama-2-7b-hf/tree/main",
         "zenodo:1234567",
         "https://zenodo.org/api/records/1234567",
         "figshare:1018700",

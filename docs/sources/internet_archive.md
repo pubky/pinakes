@@ -10,12 +10,13 @@ one request every two seconds).
 `ia:{identifier}` as the root. Identifiers are case-sensitive and kept as written
 (`Bitcoin-Whitepaper` is not `bitcoin-whitepaper`):
 
-- `https://archive.org/details/{identifier}`, with any view inside the item after it (e.g.
-  `/page/n5/mode/2up`);
+- `https://archive.org/details/{identifier}`, and the reader's views of it (`…/page/…`,
+  `…/mode/…`, e.g. `/page/n5/mode/2up`);
 - `https://archive.org/embed/{identifier}`;
 - `https://archive.org/metadata/{identifier}` and `…/metadata`.
 
-A file of an item (`https://archive.org/download/{identifier}/{file}`), user pages
+A file of an item (`https://archive.org/download/{identifier}/{file}`, or its view at
+`https://archive.org/details/{identifier}/{file}`), user pages
 (`/details/@name`) and the Wayback Machine (`web.archive.org`) are not items and are not read
 here.
 

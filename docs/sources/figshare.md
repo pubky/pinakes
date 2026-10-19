@@ -6,16 +6,17 @@ request a second.
 
 ## Links
 
-Every address of one article, in any version, is one resource, with `figshare:{id}` as the root:
+Every address of one article is one resource, with `figshare:{id}` as the root:
 
-- `https://figshare.com/articles/{type}/{slug}/{id}` and `…/{id}/{version}`;
-- the older `https://figshare.com/articles/{slug}/{id}` and `…/{id}/{version}`, and
-  `https://figshare.com/articles/{id}`;
+- `https://figshare.com/articles/{type}/{slug}/{id}`;
+- the older `https://figshare.com/articles/{slug}/{id}`, and `https://figshare.com/articles/{id}`;
 - the same on an institutional portal, `https://{portal}.figshare.com/articles/…` (portals share
   figshare.com's article ids);
-- `https://api.figshare.com/v2/articles/{id}` and `…/versions/{version}`.
+- `https://api.figshare.com/v2/articles/{id}`.
 
-The card is the article as a whole, read from its latest version. Portals on their own domains
+The card is the article as a whole, read from its latest version. A link to one version
+(`…/{id}/{version}`, `…/v2/articles/{id}/versions/{version}`) is a dated version, not the
+article, and is not read here. Portals on their own domains
 are not recognised from the link; the card's page is the one the API names (on the article's
 portal). Private links (`figshare.com/s/…`), files, collections, projects and DOI links
 (`doi.org/10.6084/m9.figshare.{id}`, read by the DOI route) are not read here.

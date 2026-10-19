@@ -1,8 +1,9 @@
 //! Models, datasets and Spaces on the Hugging Face Hub, read from the Hub API by the repo id in
 //! the link.
 //!
-//! Every link of one repo on huggingface.co or hf.co (its page and its subpages: files, commits,
-//! discussions, the dataset viewer) and its API URL are aliases of one identifier:
+//! Every link of one repo on huggingface.co or hf.co (its page and its tabs on the default
+//! branch: files, commits, discussions, the dataset viewer) and its API URL are aliases of one
+//! identifier:
 //! `hf:model/{owner}/{name}`, `hf:dataset/{owner}/{name}` or `hf:space/{owner}/{name}`, in lower
 //! case, because the Hub ignores case in repo ids (it redirects any other case to the canonical
 //! one, which the card shows).
@@ -135,17 +136,14 @@ const RESERVED: &[&str] = &[
     "welcome",
 ];
 
-/// Subpages of a repo (files, history, discussions, the dataset viewer): aliases of the repo.
-const SUBPAGES: &[&str] = &[
-    "blob",
-    "commit",
-    "commits",
-    "discussions",
-    "edit",
-    "raw",
-    "resolve",
-    "tree",
-    "viewer",
+/// The repo's own tabs, which show the repo itself: its files and history on the default branch,
+/// its discussions and the dataset viewer. Anything deeper (a file, another revision, one commit,
+/// one discussion, a split) is another object, not an alias.
+const TABS: &[&[&str]] = &[
+    &["tree", "main"],
+    &["commits", "main"],
+    &["discussions"],
+    &["viewer"],
 ];
 
 /// One part of a repo id: letters, digits, `-`, `_` and `.`, not starting or ending with `-` or
@@ -169,14 +167,14 @@ fn repo(kind: Kind, owner: Option<&str>, name: &str) -> Option<Repo> {
         .then_some(Repo { kind, id })
 }
 
-/// A repo page with an optional subpage, after the kind's prefix.
+/// A repo page or one of its tabs, after the kind's prefix.
 fn page_path(kind: Kind, s: &[&str]) -> Option<Repo> {
     match s {
         [name] => repo(kind, None, name),
-        // A legacy name followed by a subpage, e.g. `bert-base-uncased/blob/main/config.json`.
-        [name, sub, ..] if SUBPAGES.contains(sub) => repo(kind, None, name),
+        // A legacy name followed by a tab, e.g. `bert-base-uncased/tree/main`.
+        [name, tab @ ..] if TABS.contains(&tab) => repo(kind, None, name),
         [owner, name] => repo(kind, Some(owner), name),
-        [owner, name, sub, ..] if SUBPAGES.contains(sub) => repo(kind, Some(owner), name),
+        [owner, name, tab @ ..] if TABS.contains(&tab) => repo(kind, Some(owner), name),
         _ => None,
     }
 }
@@ -447,9 +445,7 @@ mod tests {
             "https://hf.co/meta-llama/Llama-2-7b-hf",
             "https://huggingface.co/META-LLAMA/llama-2-7b-hf",
             "https://huggingface.co/meta-llama/Llama-2-7b-hf/tree/main",
-            "https://huggingface.co/meta-llama/Llama-2-7b-hf/blob/main/config.json",
-            "https://huggingface.co/meta-llama/Llama-2-7b-hf/resolve/main/README.md?download=true",
-            "https://huggingface.co/meta-llama/Llama-2-7b-hf/discussions/12",
+            "https://huggingface.co/meta-llama/Llama-2-7b-hf/discussions",
             "https://huggingface.co/meta-llama/Llama-2-7b-hf/commits/main",
             "https://huggingface.co/meta-llama/Llama-2-7b-hf#model-details",
             "https://huggingface.co/api/models/meta-llama/Llama-2-7b-hf",
@@ -462,15 +458,15 @@ mod tests {
         }
         for uri in [
             "https://huggingface.co/datasets/openai/gsm8k",
-            "https://huggingface.co/datasets/openai/gsm8k/viewer/main/train",
-            "https://hf.co/datasets/openai/gsm8k/tree/main/main",
+            "https://huggingface.co/datasets/openai/gsm8k/viewer",
+            "https://hf.co/datasets/openai/gsm8k/tree/main",
             "https://huggingface.co/api/datasets/openai/gsm8k",
         ] {
             assert_eq!(id(uri).as_deref(), Some("hf:dataset/openai/gsm8k"), "{uri}");
         }
         for uri in [
             "https://huggingface.co/spaces/huggingface-projects/llama-2-7b-chat",
-            "https://huggingface.co/spaces/huggingface-projects/llama-2-7b-chat/blob/main/app.py",
+            "https://huggingface.co/spaces/huggingface-projects/llama-2-7b-chat/tree/main",
             "https://huggingface.co/api/spaces/huggingface-projects/llama-2-7b-chat",
         ] {
             assert_eq!(
@@ -478,6 +474,24 @@ mod tests {
                 Some("hf:space/huggingface-projects/llama-2-7b-chat"),
                 "{uri}"
             );
+        }
+        // Files, other revisions, single commits and discussions, and dataset splits are other
+        // objects.
+        for uri in [
+            "https://huggingface.co/meta-llama/Llama-2-7b-hf/blob/main/config.json",
+            "https://huggingface.co/meta-llama/Llama-2-7b-hf/resolve/main/README.md?download=true",
+            "https://huggingface.co/meta-llama/Llama-2-7b-hf/raw/main/config.json",
+            "https://huggingface.co/meta-llama/Llama-2-7b-hf/tree/v1.0",
+            "https://huggingface.co/meta-llama/Llama-2-7b-hf/tree/main/subdir",
+            "https://huggingface.co/meta-llama/Llama-2-7b-hf/commit/01c7f73d771dfac7d292323805ebc428287df4f9",
+            "https://huggingface.co/meta-llama/Llama-2-7b-hf/commits/v1.0",
+            "https://huggingface.co/meta-llama/Llama-2-7b-hf/discussions/12",
+            "https://huggingface.co/meta-llama/Llama-2-7b-hf/edit/main/README.md",
+            "https://huggingface.co/datasets/openai/gsm8k/viewer/main/train",
+            "https://huggingface.co/spaces/huggingface-projects/llama-2-7b-chat/blob/main/app.py",
+        ] {
+            assert_eq!(from_uri(uri), None, "{uri}");
+            assert!(!HuggingFace.reads(uri), "{uri}");
         }
         let r = from_uri("https://hf.co/meta-llama/Llama-2-7b-hf/tree/main").unwrap();
         assert_eq!(page(&r), "https://huggingface.co/meta-llama/Llama-2-7b-hf");
@@ -498,7 +512,7 @@ mod tests {
         for (uri, kind, name) in [
             ("https://huggingface.co/gpt2", Kind::Model, "gpt2"),
             (
-                "https://huggingface.co/bert-base-uncased/blob/main/config.json",
+                "https://huggingface.co/bert-base-uncased/tree/main",
                 Kind::Model,
                 "bert-base-uncased",
             ),
