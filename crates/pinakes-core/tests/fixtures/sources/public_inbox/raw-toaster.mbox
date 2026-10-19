@@ -1,0 +1,257 @@
+From mboxrd@z Thu Jan  1 00:00:00 1970
+Return-Path: <angus@toaster.cc>
+Received: from smtp4.osuosl.org (smtp4.osuosl.org [IPv6:2605:bc80:3010::137])
+ by lists.linuxfoundation.org (Postfix) with ESMTP id 3BD7CC002A
+ for <bitcoin-dev@lists.linuxfoundation.org>;
+ Mon,  8 May 2023 21:42:09 +0000 (UTC)
+Received: from localhost (localhost [127.0.0.1])
+ by smtp4.osuosl.org (Postfix) with ESMTP id A2CCB41DE6
+ for <bitcoin-dev@lists.linuxfoundation.org>;
+ Mon,  8 May 2023 21:42:08 +0000 (UTC)
+DKIM-Filter: OpenDKIM Filter v2.11.0 smtp4.osuosl.org A2CCB41DE6
+Authentication-Results: smtp4.osuosl.org; dkim=pass (2048-bit key,
+ unprotected) header.d=toaster.cc header.i=@toaster.cc header.a=rsa-sha256
+ header.s=protonmail header.b=mQ1z8yoZ
+X-Virus-Scanned: amavisd-new at osuosl.org
+X-Spam-Flag: NO
+X-Spam-Score: -2.101
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.101 tagged_above=-999 required=5
+ tests=[BAYES_00=-1.9, DKIM_SIGNED=0.1, DKIM_VALID=-0.1,
+ DKIM_VALID_AU=-0.1, DKIM_VALID_EF=-0.1, HTML_MESSAGE=0.001,
+ SPF_HELO_PASS=-0.001, SPF_PASS=-0.001]
+ autolearn=ham autolearn_force=no
+Received: from smtp4.osuosl.org ([127.0.0.1])
+ by localhost (smtp4.osuosl.org [127.0.0.1]) (amavisd-new, port 10024)
+ with ESMTP id Mm4BfIc7-jty
+ for <bitcoin-dev@lists.linuxfoundation.org>;
+ Mon,  8 May 2023 21:42:06 +0000 (UTC)
+X-Greylist: delayed 00:08:17 by SQLgrey-1.8.0
+DKIM-Filter: OpenDKIM Filter v2.11.0 smtp4.osuosl.org D7E8141DCB
+Received: from mail-4321.protonmail.ch (mail-4321.protonmail.ch [185.70.43.21])
+ by smtp4.osuosl.org (Postfix) with ESMTPS id D7E8141DCB
+ for <bitcoin-dev@lists.linuxfoundation.org>;
+ Mon,  8 May 2023 21:42:05 +0000 (UTC)
+Date: Mon, 08 May 2023 21:33:24 +0000
+Authentication-Results: mail-4321.protonmail.ch;
+ dkim=pass (2048-bit key) header.d=toaster.cc header.i=@toaster.cc
+ header.b="mQ1z8yoZ"
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=toaster.cc;
+ s=protonmail; t=1683581615; x=1683840815;
+ bh=5fBzM5cfQ/ozd3oHkknYe2uScSkjYXafNVqOp25nFU8=;
+ h=Date:To:From:Subject:Message-ID:In-Reply-To:References:
+ Feedback-ID:From:To:Cc:Date:Subject:Reply-To:Feedback-ID:
+ Message-ID:BIMI-Selector;
+ b=mQ1z8yoZYDtc/xXW4fcrWdYuY3NK3HxgE4vrkUOP8BQ5nxYpR8JFA6rX8biLfvLXc
+ 99wjNXJL5RBqNBaB3gLQBYVQ+p/HT8HMN2FTO4dUTyNuWrxOl0NsQxkCLvFKtMgqfI
+ cgNYGSmr2vIGGbPOSsaFHTGd4AnbdXAJbXkdXc+gehbiaaTAZXtDRmvx3YvPQnvgDj
+ 7DoM+4yB6xGJNU4me5jxwpb9eECxYLLRDCJfPhGHHEZATqgwlg8Rbt5QjNzUT5TlTr
+ PKfMVouIiUURhJpc7bF38bqyIPwbLfhRs3zVe0rsGdLVS6pcbisFfVhY6SMYf27gf8
+ A7tuMBpKWXKpQ==
+To: Moth <moth_oshi@proton.me>,
+ Bitcoin Protocol Discussion <bitcoin-dev@lists.linuxfoundation.org>
+From: angus <angus@toaster.cc>
+Message-ID: <Ny5lrlyxNcdDUKpy8_vYd8RRl5Q6brWkPDkaxRzjCgM7JF8HXRIZnfs1ubvmIA_OhwYwmdthSXyGsJ8CP8qQ0x0i82qbzlehNzuVtefSeHc=@toaster.cc>
+In-Reply-To: <SzOndBJmU5RPVdT2IhiWUmw925vgy-KCwrbWC4_e8tHVj5VWUn-Tr50TjxTczUUDcaVjUJEiuLVmFjfmtZwwvLyuUSkrGVg9uNje2oARArc=@proton.me>
+References: <SzOndBJmU5RPVdT2IhiWUmw925vgy-KCwrbWC4_e8tHVj5VWUn-Tr50TjxTczUUDcaVjUJEiuLVmFjfmtZwwvLyuUSkrGVg9uNje2oARArc=@proton.me>
+Feedback-ID: 10272201:user:proton
+MIME-Version: 1.0
+Content-Type: multipart/signed; protocol="application/pgp-signature";
+ micalg=pgp-sha512;
+ boundary="------b5b061f79a37a038f783c2a59db711e723ee6ea568238672013138b600499bf3";
+ charset=utf-8
+X-Mailman-Approved-At: Tue, 09 May 2023 01:59:03 +0000
+Subject: Re: [bitcoin-dev] Witness script validation to reject arbitrary data
+X-BeenThere: bitcoin-dev@lists.linuxfoundation.org
+X-Mailman-Version: 2.1.15
+Precedence: list
+List-Id: Bitcoin Protocol Discussion <bitcoin-dev.lists.linuxfoundation.org>
+List-Unsubscribe: <https://lists.linuxfoundation.org/mailman/options/bitcoin-dev>, 
+ <mailto:bitcoin-dev-request@lists.linuxfoundation.org?subject=unsubscribe>
+List-Archive: <http://lists.linuxfoundation.org/pipermail/bitcoin-dev/>
+List-Post: <mailto:bitcoin-dev@lists.linuxfoundation.org>
+List-Help: <mailto:bitcoin-dev-request@lists.linuxfoundation.org?subject=help>
+List-Subscribe: <https://lists.linuxfoundation.org/mailman/listinfo/bitcoin-dev>, 
+ <mailto:bitcoin-dev-request@lists.linuxfoundation.org?subject=subscribe>
+X-List-Received-Date: Mon, 08 May 2023 21:42:09 -0000
+
+This is an OpenPGP/MIME signed message (RFC 4880 and 3156)
+--------b5b061f79a37a038f783c2a59db711e723ee6ea568238672013138b600499bf3
+Content-Type: multipart/mixed;boundary=---------------------fcfcb8d5daee3b8c20ecc3feb795dcec
+
+-----------------------fcfcb8d5daee3b8c20ecc3feb795dcec
+Content-Type: multipart/alternative;boundary=---------------------f9c2a9afff9f071f76174963ca7dbdac
+
+-----------------------f9c2a9afff9f071f76174963ca7dbdac
+Content-Transfer-Encoding: quoted-printable
+Content-Type: text/plain;charset=utf-8
+
+> Is there a reason such a validation check is a bad idea? We already have=
+ OP_RETURN to store arbitrary data that is limited to 80kb.
+
+
+A reason to not ban storing arbitrary/non-functional data is that people w=
+ill still want to store things, so will start (ab)using useful data to do =
+so, which is worse -- see Stamps[1], which stores Inscription-like data in=
+ fake outputs that consume UTXO set storage (using the Counterparty spec I=
+IRC).
+
+The UTXO set getting 'too big' is a much bigger problem than the chain get=
+ting bigger at closer to 4MB/10mins than the 'expected' ~1MB/10mins is (so=
+me nuance/argument to be had here, though).
+
+
+> Was it an oversight that arbitrary data can be inserted between OP_FALSE=
+ and OP_IF when the size limit for witness scripts=C2=A0was lifted as part=
+ of taproot?
+
+
+Kinda? But if we want Taproot to enable large useful scripts, it's probabl=
+y hard/impossible to have an undefeatable definition of 'not useful' to th=
+en filter out. You could say "scripts must not have any unreachable code (=
+dead code)" but then it'd be easy to come up with Inscriptions 2.0 where t=
+he code is reachable but never used, rinse and repeat in a game of whack-a=
+-mole.
+
+In my opinion, it'd be wise to not incentivize people to do something wors=
+e by attempting to censor what they're currently doing, given that it coul=
+d be a fair bit worse!
+
+[1]: https://github.com/mikeinspace/stamps/blob/main/BitcoinStamps.md
+
+Angus
+-----------------------f9c2a9afff9f071f76174963ca7dbdac
+Content-Type: multipart/related;boundary=---------------------4532c9c2e0a6cc5a58057e186dba3ad9
+
+-----------------------4532c9c2e0a6cc5a58057e186dba3ad9
+Content-Type: text/html;charset=utf-8
+Content-Transfer-Encoding: base64
+
+PGRpdiBjbGFzcz0icHJvdG9ubWFpbF9xdW90ZSI+PGJsb2NrcXVvdGUgY2xhc3M9InByb3Rvbm1h
+aWxfcXVvdGUiIHR5cGU9ImNpdGUiPjxkaXYgZGlyPSJhdXRvIj48ZGl2IHN0eWxlPSJsZXR0ZXIt
+c3BhY2luZzogbm9ybWFsOyBvcnBoYW5zOiBhdXRvOyB0ZXh0LWFsaWduOiBzdGFydDsgdGV4dC1p
+bmRlbnQ6IDBweDsgdGV4dC10cmFuc2Zvcm06IG5vbmU7IHdoaXRlLXNwYWNlOiBub3JtYWw7IHdp
+ZG93czogYXV0bzsgd29yZC1zcGFjaW5nOiAwcHg7ICAtd2Via2l0LXRleHQtc2l6ZS1hZGp1c3Q6
+IGF1dG87IC13ZWJraXQtdGV4dC1zdHJva2Utd2lkdGg6IDBweDsgdGV4dC1kZWNvcmF0aW9uOiBu
+b25lOyIgZGlyPSJhdXRvIj5JcyB0aGVyZSBhIHJlYXNvbiBzdWNoIGEgdmFsaWRhdGlvbiBjaGVj
+ayBpcyBhIGJhZCBpZGVhPyBXZSBhbHJlYWR5IGhhdmUgT1BfUkVUVVJOIHRvIHN0b3JlIGFyYml0
+cmFyeSBkYXRhIHRoYXQgaXMgbGltaXRlZCB0byA4MGtiLjwvZGl2PjwvZGl2PjwvYmxvY2txdW90
+ZT48ZGl2IHN0eWxlPSJsZXR0ZXItc3BhY2luZzogbm9ybWFsOyBvcnBoYW5zOiBhdXRvOyB0ZXh0
+LWFsaWduOiBzdGFydDsgdGV4dC1pbmRlbnQ6IDBweDsgdGV4dC10cmFuc2Zvcm06IG5vbmU7IHdo
+aXRlLXNwYWNlOiBub3JtYWw7IHdpZG93czogYXV0bzsgd29yZC1zcGFjaW5nOiAwcHg7ICAtd2Vi
+a2l0LXRleHQtc2l6ZS1hZGp1c3Q6IGF1dG87IC13ZWJraXQtdGV4dC1zdHJva2Utd2lkdGg6IDBw
+eDsgdGV4dC1kZWNvcmF0aW9uOiBub25lOyIgZGlyPSJhdXRvIj48YnI+PC9kaXY+PGRpdiBzdHls
+ZT0ibGV0dGVyLXNwYWNpbmc6IG5vcm1hbDsgb3JwaGFuczogYXV0bzsgdGV4dC1hbGlnbjogc3Rh
+cnQ7IHRleHQtaW5kZW50OiAwcHg7IHRleHQtdHJhbnNmb3JtOiBub25lOyB3aGl0ZS1zcGFjZTog
+bm9ybWFsOyB3aWRvd3M6IGF1dG87IHdvcmQtc3BhY2luZzogMHB4OyAgLXdlYmtpdC10ZXh0LXNp
+emUtYWRqdXN0OiBhdXRvOyAtd2Via2l0LXRleHQtc3Ryb2tlLXdpZHRoOiAwcHg7IHRleHQtZGVj
+b3JhdGlvbjogbm9uZTsiIGRpcj0iYXV0byI+QSByZWFzb24gdG8gbm90IGJhbiBzdG9yaW5nIGFy
+Yml0cmFyeS9ub24tZnVuY3Rpb25hbCBkYXRhIGlzIHRoYXQgcGVvcGxlIHdpbGwgc3RpbGwgd2Fu
+dCB0byBzdG9yZSB0aGluZ3MsIHNvIHdpbGwgc3RhcnQgKGFiKXVzaW5nIHVzZWZ1bCBkYXRhIHRv
+IGRvIHNvLCB3aGljaCBpcyB3b3JzZSAtLSBzZWUgU3RhbXBzWzFdLCB3aGljaCBzdG9yZXMgSW5z
+Y3JpcHRpb24tbGlrZSBkYXRhIGluIGZha2Ugb3V0cHV0cyB0aGF0IGNvbnN1bWUgVVRYTyBzZXQg
+c3RvcmFnZSAodXNpbmcgdGhlIENvdW50ZXJwYXJ0eSBzcGVjIElJUkMpLjwvZGl2PjxkaXYgc3R5
+bGU9ImxldHRlci1zcGFjaW5nOiBub3JtYWw7IG9ycGhhbnM6IGF1dG87IHRleHQtYWxpZ246IHN0
+YXJ0OyB0ZXh0LWluZGVudDogMHB4OyB0ZXh0LXRyYW5zZm9ybTogbm9uZTsgd2hpdGUtc3BhY2U6
+IG5vcm1hbDsgd2lkb3dzOiBhdXRvOyB3b3JkLXNwYWNpbmc6IDBweDsgIC13ZWJraXQtdGV4dC1z
+aXplLWFkanVzdDogYXV0bzsgLXdlYmtpdC10ZXh0LXN0cm9rZS13aWR0aDogMHB4OyB0ZXh0LWRl
+Y29yYXRpb246IG5vbmU7IiBkaXI9ImF1dG8iPjxicj48L2Rpdj48ZGl2IHN0eWxlPSJsZXR0ZXIt
+c3BhY2luZzogbm9ybWFsOyBvcnBoYW5zOiBhdXRvOyB0ZXh0LWFsaWduOiBzdGFydDsgdGV4dC1p
+bmRlbnQ6IDBweDsgdGV4dC10cmFuc2Zvcm06IG5vbmU7IHdoaXRlLXNwYWNlOiBub3JtYWw7IHdp
+ZG93czogYXV0bzsgd29yZC1zcGFjaW5nOiAwcHg7ICAtd2Via2l0LXRleHQtc2l6ZS1hZGp1c3Q6
+IGF1dG87IC13ZWJraXQtdGV4dC1zdHJva2Utd2lkdGg6IDBweDsgdGV4dC1kZWNvcmF0aW9uOiBu
+b25lOyIgZGlyPSJhdXRvIj5UaGUgVVRYTyBzZXQgZ2V0dGluZyAndG9vIGJpZycgaXMgYSBtdWNo
+IGJpZ2dlciBwcm9ibGVtIHRoYW4gdGhlIGNoYWluIGdldHRpbmcgYmlnZ2VyIGF0IGNsb3NlciB0
+byA0TUIvMTBtaW5zIHRoYW4gdGhlICdleHBlY3RlZCcgfjFNQi8xMG1pbnMgaXMgKHNvbWUgbnVh
+bmNlL2FyZ3VtZW50IHRvIGJlIGhhZCBoZXJlLCB0aG91Z2gpLjxicj48L2Rpdj48ZGl2IHN0eWxl
+PSJsZXR0ZXItc3BhY2luZzogbm9ybWFsOyBvcnBoYW5zOiBhdXRvOyB0ZXh0LWFsaWduOiBzdGFy
+dDsgdGV4dC1pbmRlbnQ6IDBweDsgdGV4dC10cmFuc2Zvcm06IG5vbmU7IHdoaXRlLXNwYWNlOiBu
+b3JtYWw7IHdpZG93czogYXV0bzsgd29yZC1zcGFjaW5nOiAwcHg7ICAtd2Via2l0LXRleHQtc2l6
+ZS1hZGp1c3Q6IGF1dG87IC13ZWJraXQtdGV4dC1zdHJva2Utd2lkdGg6IDBweDsgdGV4dC1kZWNv
+cmF0aW9uOiBub25lOyIgZGlyPSJhdXRvIj48YnI+PC9kaXY+PGJsb2NrcXVvdGUgY2xhc3M9InBy
+b3Rvbm1haWxfcXVvdGUiIHR5cGU9ImNpdGUiPjxkaXYgZGlyPSJhdXRvIj48ZGl2IHN0eWxlPSJs
+ZXR0ZXItc3BhY2luZzogbm9ybWFsOyBvcnBoYW5zOiBhdXRvOyB0ZXh0LWFsaWduOiBzdGFydDsg
+dGV4dC1pbmRlbnQ6IDBweDsgdGV4dC10cmFuc2Zvcm06IG5vbmU7IHdoaXRlLXNwYWNlOiBub3Jt
+YWw7IHdpZG93czogYXV0bzsgd29yZC1zcGFjaW5nOiAwcHg7ICAtd2Via2l0LXRleHQtc2l6ZS1h
+ZGp1c3Q6IGF1dG87IC13ZWJraXQtdGV4dC1zdHJva2Utd2lkdGg6IDBweDsgdGV4dC1kZWNvcmF0
+aW9uOiBub25lOyIgZGlyPSJhdXRvIj5XYXMgaXQgYW4gb3ZlcnNpZ2h0IHRoYXQgYXJiaXRyYXJ5
+IGRhdGEgY2FuIGJlIGluc2VydGVkIGJldHdlZW4gT1BfRkFMU0UgYW5kIE9QX0lGIHdoZW4gdGhl
+IHNpemUgbGltaXQgZm9yIHdpdG5lc3Mgc2NyaXB0cyZuYnNwO3dhcyBsaWZ0ZWQgYXMgcGFydCBv
+ZiB0YXByb290PzwvZGl2PjwvZGl2PjwvYmxvY2txdW90ZT48ZGl2IHN0eWxlPSJsZXR0ZXItc3Bh
+Y2luZzogbm9ybWFsOyBvcnBoYW5zOiBhdXRvOyB0ZXh0LWFsaWduOiBzdGFydDsgdGV4dC1pbmRl
+bnQ6IDBweDsgdGV4dC10cmFuc2Zvcm06IG5vbmU7IHdoaXRlLXNwYWNlOiBub3JtYWw7IHdpZG93
+czogYXV0bzsgd29yZC1zcGFjaW5nOiAwcHg7ICAtd2Via2l0LXRleHQtc2l6ZS1hZGp1c3Q6IGF1
+dG87IC13ZWJraXQtdGV4dC1zdHJva2Utd2lkdGg6IDBweDsgdGV4dC1kZWNvcmF0aW9uOiBub25l
+OyIgZGlyPSJhdXRvIj48YnI+PC9kaXY+PGRpdiBzdHlsZT0ibGV0dGVyLXNwYWNpbmc6IG5vcm1h
+bDsgb3JwaGFuczogYXV0bzsgdGV4dC1hbGlnbjogc3RhcnQ7IHRleHQtaW5kZW50OiAwcHg7IHRl
+eHQtdHJhbnNmb3JtOiBub25lOyB3aGl0ZS1zcGFjZTogbm9ybWFsOyB3aWRvd3M6IGF1dG87IHdv
+cmQtc3BhY2luZzogMHB4OyAgLXdlYmtpdC10ZXh0LXNpemUtYWRqdXN0OiBhdXRvOyAtd2Via2l0
+LXRleHQtc3Ryb2tlLXdpZHRoOiAwcHg7IHRleHQtZGVjb3JhdGlvbjogbm9uZTsiIGRpcj0iYXV0
+byI+S2luZGE/IEJ1dCBpZiB3ZSB3YW50IFRhcHJvb3QgdG8gZW5hYmxlIGxhcmdlIHVzZWZ1bCBz
+Y3JpcHRzLCBpdCdzIHByb2JhYmx5IGhhcmQvaW1wb3NzaWJsZSB0byBoYXZlIGFuIHVuZGVmZWF0
+YWJsZSBkZWZpbml0aW9uIG9mICdub3QgdXNlZnVsJyB0byB0aGVuIGZpbHRlciBvdXQuIFlvdSBj
+b3VsZCBzYXkgInNjcmlwdHMgbXVzdCBub3QgaGF2ZSBhbnkgdW5yZWFjaGFibGUgY29kZSAoZGVh
+ZCBjb2RlKSIgYnV0IHRoZW4gaXQnZCBiZSBlYXN5IHRvIGNvbWUgdXAgd2l0aCBJbnNjcmlwdGlv
+bnMgMi4wIHdoZXJlIHRoZSBjb2RlIGlzIHJlYWNoYWJsZSBidXQgbmV2ZXIgdXNlZCwgcmluc2Ug
+YW5kIHJlcGVhdCBpbiBhIGdhbWUgb2Ygd2hhY2stYS1tb2xlLjwvZGl2PjxkaXYgc3R5bGU9Imxl
+dHRlci1zcGFjaW5nOiBub3JtYWw7IG9ycGhhbnM6IGF1dG87IHRleHQtYWxpZ246IHN0YXJ0OyB0
+ZXh0LWluZGVudDogMHB4OyB0ZXh0LXRyYW5zZm9ybTogbm9uZTsgd2hpdGUtc3BhY2U6IG5vcm1h
+bDsgd2lkb3dzOiBhdXRvOyB3b3JkLXNwYWNpbmc6IDBweDsgIC13ZWJraXQtdGV4dC1zaXplLWFk
+anVzdDogYXV0bzsgLXdlYmtpdC10ZXh0LXN0cm9rZS13aWR0aDogMHB4OyB0ZXh0LWRlY29yYXRp
+b246IG5vbmU7IiBkaXI9ImF1dG8iPjxicj48L2Rpdj48ZGl2IHN0eWxlPSJsZXR0ZXItc3BhY2lu
+Zzogbm9ybWFsOyBvcnBoYW5zOiBhdXRvOyB0ZXh0LWFsaWduOiBzdGFydDsgdGV4dC1pbmRlbnQ6
+IDBweDsgdGV4dC10cmFuc2Zvcm06IG5vbmU7IHdoaXRlLXNwYWNlOiBub3JtYWw7IHdpZG93czog
+YXV0bzsgd29yZC1zcGFjaW5nOiAwcHg7ICAtd2Via2l0LXRleHQtc2l6ZS1hZGp1c3Q6IGF1dG87
+IC13ZWJraXQtdGV4dC1zdHJva2Utd2lkdGg6IDBweDsgdGV4dC1kZWNvcmF0aW9uOiBub25lOyIg
+ZGlyPSJhdXRvIj5JbiBteSBvcGluaW9uLCBpdCdkIGJlIHdpc2UgdG8gbm90IGluY2VudGl2aXpl
+IHBlb3BsZSB0byBkbyBzb21ldGhpbmcgd29yc2UgYnkgYXR0ZW1wdGluZyB0byBjZW5zb3Igd2hh
+dCB0aGV5J3JlIGN1cnJlbnRseSBkb2luZywgZ2l2ZW4gdGhhdCBpdCBjb3VsZCBiZSBhIGZhaXIg
+Yml0IHdvcnNlITxicj48L2Rpdj48ZGl2IHN0eWxlPSJsZXR0ZXItc3BhY2luZzogbm9ybWFsOyBv
+cnBoYW5zOiBhdXRvOyB0ZXh0LWFsaWduOiBzdGFydDsgdGV4dC1pbmRlbnQ6IDBweDsgdGV4dC10
+cmFuc2Zvcm06IG5vbmU7IHdoaXRlLXNwYWNlOiBub3JtYWw7IHdpZG93czogYXV0bzsgd29yZC1z
+cGFjaW5nOiAwcHg7ICAtd2Via2l0LXRleHQtc2l6ZS1hZGp1c3Q6IGF1dG87IC13ZWJraXQtdGV4
+dC1zdHJva2Utd2lkdGg6IDBweDsgdGV4dC1kZWNvcmF0aW9uOiBub25lOyIgZGlyPSJhdXRvIj48
+YnI+PC9kaXY+PGRpdiBzdHlsZT0ibGV0dGVyLXNwYWNpbmc6IG5vcm1hbDsgb3JwaGFuczogYXV0
+bzsgdGV4dC1hbGlnbjogc3RhcnQ7IHRleHQtaW5kZW50OiAwcHg7IHRleHQtdHJhbnNmb3JtOiBu
+b25lOyB3aGl0ZS1zcGFjZTogbm9ybWFsOyB3aWRvd3M6IGF1dG87IHdvcmQtc3BhY2luZzogMHB4
+OyAgLXdlYmtpdC10ZXh0LXNpemUtYWRqdXN0OiBhdXRvOyAtd2Via2l0LXRleHQtc3Ryb2tlLXdp
+ZHRoOiAwcHg7IHRleHQtZGVjb3JhdGlvbjogbm9uZTsiIGRpcj0iYXV0byI+WzFdOiA8c3Bhbj48
+YSB0YXJnZXQ9Il9ibGFuayIgcmVsPSJub3JlZmVycmVyIG5vZm9sbG93IG5vb3BlbmVyIiBocmVm
+PSJodHRwczovL2dpdGh1Yi5jb20vbWlrZWluc3BhY2Uvc3RhbXBzL2Jsb2IvbWFpbi9CaXRjb2lu
+U3RhbXBzLm1kIj5odHRwczovL2dpdGh1Yi5jb20vbWlrZWluc3BhY2Uvc3RhbXBzL2Jsb2IvbWFp
+bi9CaXRjb2luU3RhbXBzLm1kPC9hPjwvc3Bhbj48YnI+PC9kaXY+PGRpdiBzdHlsZT0ibGV0dGVy
+LXNwYWNpbmc6IG5vcm1hbDsgb3JwaGFuczogYXV0bzsgdGV4dC1hbGlnbjogc3RhcnQ7IHRleHQt
+aW5kZW50OiAwcHg7IHRleHQtdHJhbnNmb3JtOiBub25lOyB3aGl0ZS1zcGFjZTogbm9ybWFsOyB3
+aWRvd3M6IGF1dG87IHdvcmQtc3BhY2luZzogMHB4OyAgLXdlYmtpdC10ZXh0LXNpemUtYWRqdXN0
+OiBhdXRvOyAtd2Via2l0LXRleHQtc3Ryb2tlLXdpZHRoOiAwcHg7IHRleHQtZGVjb3JhdGlvbjog
+bm9uZTsiIGRpcj0iYXV0byI+PGJyPjwvZGl2PjxkaXYgc3R5bGU9ImxldHRlci1zcGFjaW5nOiBu
+b3JtYWw7IG9ycGhhbnM6IGF1dG87IHRleHQtYWxpZ246IHN0YXJ0OyB0ZXh0LWluZGVudDogMHB4
+OyB0ZXh0LXRyYW5zZm9ybTogbm9uZTsgd2hpdGUtc3BhY2U6IG5vcm1hbDsgd2lkb3dzOiBhdXRv
+OyB3b3JkLXNwYWNpbmc6IDBweDsgIC13ZWJraXQtdGV4dC1zaXplLWFkanVzdDogYXV0bzsgLXdl
+YmtpdC10ZXh0LXN0cm9rZS13aWR0aDogMHB4OyB0ZXh0LWRlY29yYXRpb246IG5vbmU7IiBkaXI9
+ImF1dG8iPkFuZ3VzPGJyPjwvZGl2PjxibG9ja3F1b3RlIGNsYXNzPSJwcm90b25tYWlsX3F1b3Rl
+IiB0eXBlPSJjaXRlIj48ZGl2IGRpcj0iYXV0byI+CiAgICA8L2Rpdj48L2Jsb2NrcXVvdGU+PC9k
+aXY+
+-----------------------4532c9c2e0a6cc5a58057e186dba3ad9--
+-----------------------f9c2a9afff9f071f76174963ca7dbdac--
+-----------------------fcfcb8d5daee3b8c20ecc3feb795dcec--
+
+--------b5b061f79a37a038f783c2a59db711e723ee6ea568238672013138b600499bf3
+Content-Type: application/pgp-signature; name="signature.asc"
+Content-Description: OpenPGP digital signature
+Content-Disposition: attachment; filename="signature.asc"
+
+-----BEGIN PGP SIGNATURE-----
+Version: ProtonMail
+
+wnQEARYKACcFgmRZao8JkMIlymXPPJ1UFiEEmpQAKIPU4CpfaPPKwiXKZc88
+nVQAAK2MAPdmdsJMB4oxZv+Sim5uM625Ky5kVwym9h5m6o+MqMMKAQDfjZzw
+CQlgbfguSUPxmCl2RG1K2MMarzBbNio2iAYRAw==
+=NOrL
+-----END PGP SIGNATURE-----
+
+
+--------b5b061f79a37a038f783c2a59db711e723ee6ea568238672013138b600499bf3--
+
+
+

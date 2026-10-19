@@ -36,6 +36,7 @@ pub mod hacker_news;
 pub mod legislation_gov_uk;
 pub mod lobsters;
 pub mod mastodon;
+pub mod public_inbox;
 pub mod sec;
 pub mod stacker_news;
 pub mod swiss_parliament;
@@ -62,6 +63,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &legislation_gov_uk::LegislationGovUk,
     &lobsters::Lobsters,
     &mastodon::Mastodon,
+    &public_inbox::PublicInbox,
     &sec::Sec,
     &stacker_news::StackerNews,
     &swiss_parliament::SwissParliament,
@@ -556,7 +558,7 @@ pub(crate) mod fixture {
     }
 
     /// An egress that answers recorded responses by exact URL (anything else is a 404) and
-    /// remembers the URLs asked, in order. Pair it with `#[tokio::test(start_paused = true)]`:
+    /// remembers the URLs asked, in order. A redirect's body is its `Location`. Pair it with `#[tokio::test(start_paused = true)]`:
     /// the per-host spacing then costs no time.
     pub fn egress(
         routes: Vec<(&str, u16, &'static str, Vec<u8>)>,
@@ -598,6 +600,9 @@ pub(crate) mod fixture {
                 "text/html",
                 b"<html>not found</html>".to_vec(),
             ));
+            let location = (300..400)
+                .contains(&status)
+                .then(|| String::from_utf8_lossy(&body).into_owned());
             Ok(crate::resolver::egress::Fetched {
                 permanent_redirect: false,
                 truncated: false,
@@ -606,7 +611,7 @@ pub(crate) mod fixture {
                 content_type: kind.into(),
                 status,
                 retry_after_secs: 60,
-                location: None,
+                location,
                 body,
             })
         }

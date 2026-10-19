@@ -108,7 +108,8 @@ impl Fixture {
             {"kind":"forgejo","uri":"https://codeberg.org/forgejo/forgejo","type":"SoftwareSourceCode"},
             {"kind":"gitlab","uri":"https://gitlab.com/inkscape/inkscape","type":"SoftwareSourceCode"},
             {"kind":"wordpress","uri":"https://bitcoinmagazine.com/markets/no-uptober-yet-as-bitcoin-slips","type":"Article"},
-            {"kind":"ghost","uri":"https://www.privacyguides.org/news/2026/10/19/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/","type":"Article"}
+            {"kind":"ghost","uri":"https://www.privacyguides.org/news/2026/10/19/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/","type":"Article"},
+            {"kind":"public_inbox","uri":"https://gnusha.org/pi/bitcoindev/atCSAVprBE-tAnN3@erisian.com.au/","type":"EmailMessage"}
         ]);
         Ok(Self {
             boundary: Arc::default(),
@@ -154,6 +155,7 @@ impl Dns for FixtureDns {
                 | "gitlab.com"
                 | "bitcoinmagazine.com"
                 | "www.privacyguides.org"
+                | "gnusha.org"
                 | "web.example"
                 | "www.federalregister.gov"
                 | "www.sec.gov"
@@ -203,6 +205,7 @@ impl Transport for Fixture {
             "bitcoinmagazine.com" if u.path()=="/wp-json/wp/v2/posts/55992"=>("application/json",include_str!("../tests/fixtures/sources/wordpress/post-55992.json").into()),
             "www.privacyguides.org" if u.path()=="/ghost/api/content/posts/slug/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/"=>("application/json",include_str!("../tests/fixtures/sources/ghost/post-cellebrite.json").into()),
             "www.privacyguides.org" if u.path()=="/news/2026/10/19/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/"=>("text/html; charset=utf-8",include_str!("../tests/fixtures/sources/ghost/page-cellebrite.html").into()),
+            "gnusha.org" if u.path()=="/pi/bitcoindev/atCSAVprBE-tAnN3@erisian.com.au/raw"=>("application/mbox; charset=UTF-8",include_str!("../tests/fixtures/sources/public_inbox/raw-towns.mbox").into()),
             "web.example"=>("text/html","<title>Fixture page</title>".into()),
             "www.ecfr.gov" if u.path()=="/api/versioner/v1/ancestry/current/title-17.json"=>("application/json",include_str!("../tests/fixtures/sources/ecfr/ancestry_current_title-17_section-240.10b-5.json").into()),
             "www.sec.gov" if u.path()=="/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959.hdr.sgml"=>("text/sgml",include_str!("../tests/fixtures/sources/sec/sec-hdr-ms-s1.sgml").into()),

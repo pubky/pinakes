@@ -162,6 +162,11 @@
     "type": "Article"
   },
   {
+    "kind": "public_inbox",
+    "uri": "https://lore.kernel.org/git/pull.2458.git.git.1792437798463.gitgitgadget@gmail.com/",
+    "type": "EmailMessage"
+  },
+  {
     "kind": "web",
     "uri": "https://example.org/",
     "type": "WebPage"

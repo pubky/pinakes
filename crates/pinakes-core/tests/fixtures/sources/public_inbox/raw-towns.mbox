@@ -1,0 +1,319 @@
+From mboxrd@z Thu Jan  1 00:00:00 1970
+Delivery-date: Thu, 15 Oct 2026 05:02:50 -0700
+Received: from mail-oa1-f59.google.com ([209.85.160.59])
+	by mail.fairlystable.org with esmtps  (TLS1.3) tls TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+	(Exim 4.94.2)
+	(envelope-from <bitcoindev+bncBDBNTKFG4EDRBXEBYPLAMGQE7XVFPPA@googlegroups.com>)
+	id 1xHKAb-0003uS-Am
+	for bitcoindev@gnusha.org; Thu, 15 Oct 2026 05:02:49 -0700
+Received: by mail-oa1-f59.google.com with SMTP id 586e51a60fabf-492f39f29c4sf6576508fac.1
+        for <bitcoindev@gnusha.org>; Thu, 15 Oct 2026 05:02:48 -0700 (PDT)
+ARC-Seal: i=2; a=rsa-sha256; t=1792065763; cv=pass;
+        d=google.com; s=arc-20260327;
+        b=qDRUt2B0Brq9CivgaycWPxalieCNfOo1/3iOV6PX0tPYJs1UyWSo6JKTWGbelkCDRS
+         qu8ipa6wYQRp5Wrnp+i+VMM1yL0PkUNABYckU+KgspJJ+CZUec1x5kELyNsiZ+XNIw6o
+         MnWFkj6R0Rvj2aih0Diwdco72r0xGcU55oZuc+7BpT1ienRI4gOSazG23iTWOtsA6Pt3
+         tA3uJQyJxEcPBJZlCn8vozMXfubB5ioKdL5xTVvHpdCZ2WVgm/TfdjkzCnG4SXvLd5yK
+         QMDifbmasYcDw74xxg7aJ5HD/R0exOkWnR+svaDNpiuqRtxWxFNHwvmidtGv4mYUhqYb
+         NtLA==
+ARC-Message-Signature: i=2; a=rsa-sha256; c=relaxed/relaxed; d=google.com; s=arc-20260327;
+        h=list-unsubscribe:list-subscribe:list-archive:list-help:list-post
+         :list-id:mailing-list:precedence:in-reply-to:content-disposition
+         :mime-version:references:message-id:subject:cc:to:from:date:sender
+         :dkim-signature;
+        bh=hE+KY0sCyaiAi4LOb3HvgbpnvBvyOXNdI0fMr1AYjas=;
+        fh=AJtsfOIQys1x/rZBCwwQ6OOaB+Kr310P+fcF8BteN7s=;
+        b=Cc31FTmu/qut0nmwMBJrs3yXl9m/Jf80ADJv9hCamfzUgQB4FRaTFT3pvP9i0mh7ZW
+         mY0Rrnm5ll/fcq8R9EyGVasaARFNHR+6JXwnODImJvEnMzO9kLtzLSqqe3BXakzFoxVG
+         66XmNgQDF2S4T//agP7rbLp2u+k822Wlc3vYicyRLenkOeuUrG65c/2F3LnIdFssi+7x
+         FdkmMgs/fpm2Rvm28j56n/e6X2OWp4q14M2My6tVoqjqqWPPbcVfjhX9lJ2tAgJXpzC/
+         oHUz7PVSlIpmkV5FuxKyY6oztNR9F3/sii0N+kQ5mL4YqVNaWkhK0Xurn8PAbrCCi2hD
+         n6cQ==;
+        darn=gnusha.org
+ARC-Authentication-Results: i=2; gmr-mx.google.com;
+       spf=pass (google.com: domain of aj@erisian.com.au designates 172.104.61.193 as permitted sender) smtp.mailfrom=aj@erisian.com.au
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed;
+        d=googlegroups.com; s=20251104; t=1792065763; x=1792670563; darn=gnusha.org;
+        h=list-unsubscribe:list-subscribe:list-archive:list-help:list-post
+         :list-id:mailing-list:precedence:x-original-authentication-results
+         :x-original-sender:in-reply-to:content-disposition:content-type
+         :mime-version:references:message-id:subject:cc:to:from:date:sender
+         :from:to:cc:subject:date:message-id:reply-to:content-type;
+        bh=hE+KY0sCyaiAi4LOb3HvgbpnvBvyOXNdI0fMr1AYjas=;
+        b=PQqtsewf34RR5UaoqDXfHdck1ORCZo7KaEusgDGc807JnC1brg1NJWsrLhQPe9jna2
+         N0HisgopXwGxRK6BeU+wmWch/foAIL8JvqukbHBT0k2FyPkuQcjiyxJBE5M9to3GWZdy
+         8ALgB/LgkhDVmjPwAKuwZY+Tmyw8ZMN1Sq9f4HopZE8lBjpA+Br6h+/xx48+SQlo8fOa
+         X70Ua2ufb33ser7Kg2oUEuRWjzw9Ly+RtiC6drY4HTNdd3ihv94ficX8FBcx6gys16Ey
+         K13M85vmqfCFdHw2/hB50BN7uwTe+Jqq81vMMz823EQmh0/mK0lSOEBVU7AoiEminjqO
+         iv/g==
+X-Google-DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed;
+        d=1e100.net; s=20260707; t=1792065763; x=1792670563;
+        h=list-unsubscribe:list-subscribe:list-archive:list-help:list-post
+         :list-id:mailing-list:precedence:x-original-authentication-results
+         :x-original-sender:in-reply-to:content-disposition:content-type
+         :mime-version:references:message-id:subject:cc:to:from:date
+         :x-beenthere:x-gm-message-state:sender:from:to:cc:subject:date
+         :message-id:reply-to:content-type;
+        bh=hE+KY0sCyaiAi4LOb3HvgbpnvBvyOXNdI0fMr1AYjas=;
+        b=AePzhFTDr5CRsZWsK1YY/EJON/WxHreqnfOChCqujqt6aTHBTCEfjofMmT2KlssLM7
+         TBBpZJjV12jcJX50+uMdnsiH5wuwgfTh7NsDqlJKKq+k9k9PcL+xzjnyPg6jEQ80r7DY
+         HzRrM6/VDTHgRbktT5OCBchHBHrztt54Nu2EgV+o+7XZVt4odL5V2dU+oIYT1BLAXL/Y
+         RhUo6LgCGrxEaXiwvL2GLd/yTI2gBg8N/VCL4Svdn5e/Ln2sbZCmRP66GM1gEnRgMjtf
+         Z+Nym7M2I7imZQYSh/XptPc2h+HPMPapq+TrW/irLrrgSvmg0ka5ecgXTaPGSGldZgez
+         UTAg==
+Sender: bitcoindev@googlegroups.com
+X-Forwarded-Encrypted: i=2; AKwUvBx+bp4YstEy/vUyr2epaxnMY2ASNNb3cgnoyIrdgnhvjLzkvHuVvyIUeKTrO0Ea5bG8WfHrUYhRgsw1@gnusha.org
+X-Gm-Message-State: AFq9FYKLoOxnUwMNQLuHeQWXPOlaXDYe4zHuMqlw79Glqp56vxlsbFSo
+	nwQ6LTiQCGjw4WxqXorW3sM6HBS1Mzn2U10yGTaUZ6ul1AbC3TN+35dc
+X-Received: by 2002:a05:6870:16ee:b0:485:d1ab:7936 with SMTP id 586e51a60fabf-4a2a8865700mr15895895fac.23.1792065763010;
+        Thu, 15 Oct 2026 05:02:43 -0700 (PDT)
+X-BeenThere: bitcoindev@googlegroups.com; h="ATskLde1ghVpWwGP5bO7qYSQ5m7khrTWtabJwEgVgl8Fl5TlEA=="
+Received: by 2002:a05:6871:c894:10b0:49e:1e26:d0ef with SMTP id
+ 586e51a60fabf-4a2a99ce84als5995333fac.1.-pod-prod-01-us; Thu, 15 Oct 2026
+ 05:02:36 -0700 (PDT)
+X-Received: by 2002:a05:6808:13cb:b0:4cb:f21b:6f8b with SMTP id 5614622812f47-50c5634bd9cmr15763038b6e.30.1792065756181;
+        Thu, 15 Oct 2026 05:02:36 -0700 (PDT)
+Received: by 2002:a05:6809:58:20b0:4eb:5ca0:e012 with SMTP id 5614622812f47-50b0297a0c4msb6e;
+        Thu, 15 Oct 2026 01:43:19 -0700 (PDT)
+X-Received: by 2002:a17:90a:da85:b0:3ac:1c76:61c3 with SMTP id 98e67ed59e1d1-3ac1c767e3fmr8324869a91.27.1792053798017;
+        Thu, 15 Oct 2026 01:43:18 -0700 (PDT)
+ARC-Seal: i=1; a=rsa-sha256; t=1792053798; cv=none;
+        d=google.com; s=arc-20260327;
+        b=a/vMJXAulDJwEct/Pe0m9UhqSNeI4jl38Jl1ZW2+q9K0PZwnJDPbC0Xv3oSAVBytPM
+         Y2sSWx7ImPTNIALnPiuSP5Ak9jH+EnfxaAXFFX0/cFGDrQ2mFiqwrynIbSfPPE/kkTgY
+         OMUz9GBQ9uelehpQdeDvjKH9ndUr0kUEnrsyG25UFy3FEvc580I8MllfXTuwou6Fyn6e
+         pME3k3+xAX3R4nl1D1DMdJrqFxV3ESnMfyb0nqIBB5pSw1CRK/Z7FFc+JHFV/BeuJipc
+         BniFpPc8whxdxX45hAARqTuy+3RpnLQen6A4Wo2rtC8La7Mvgg+B+Z2bdNxjwfsprYst
+         XY+g==
+ARC-Message-Signature: i=1; a=rsa-sha256; c=relaxed/relaxed; d=google.com; s=arc-20260327;
+        h=in-reply-to:content-disposition:mime-version:references:message-id
+         :subject:cc:to:from:date;
+        bh=5evWJWLa4xpvLwfuWbZ5S9/hKQxpnn2MWhdUMqUEuUA=;
+        fh=BbPisW1bpxTeUWorjAdoOQQRo3dBjVUfSGgG7m16zM0=;
+        b=Jw6ZO+icSXRML+2KRSAdl059Vb6qjM5ahwDiNZ/RIuTtx8768VBh2/5nNvASaal0Tr
+         5mZgWTStcxuw20Bhi8Gjmkgo3s9CUniiJ35/RuXYpq+8lBxPmIv7RXmyyoYumXmZnkoZ
+         GsWkKwoq6k5znlhSg/EDrxMRdpEj1W/XM25sprMwJRFBDbRA+L+LTpO5Cl52IzpmXDyK
+         N24brTiT5QRXIfZths4jm6+eChnWwWwIx8LrRnEs+P4r2Drg1z7c8fU9jSamf3olTafx
+         mbO4FKe24dPBtXeWCr3BxZ06ALDqnVb5qzAl0dl/TotUitl65PTFgM5BlhUti+8bJ9YV
+         mMwQ==;
+        dara=google.com
+ARC-Authentication-Results: i=1; gmr-mx.google.com;
+       spf=pass (google.com: domain of aj@erisian.com.au designates 172.104.61.193 as permitted sender) smtp.mailfrom=aj@erisian.com.au
+Received: from cerulean.erisian.com.au (azure.erisian.com.au. [172.104.61.193])
+        by gmr-mx.google.com with ESMTPS id 98e67ed59e1d1-3ac94f466acsi61820a91.1.2026.10.15.01.43.16
+        for <bitcoindev@googlegroups.com>
+        (version=TLS1_3 cipher=TLS_AES_256_GCM_SHA384 bits=256/256);
+        Thu, 15 Oct 2026 01:43:16 -0700 (PDT)
+Received-SPF: pass (google.com: domain of aj@erisian.com.au designates 172.104.61.193 as permitted sender) client-ip=172.104.61.193;
+Received: from aj@azure.erisian.com.au
+	by cerulean.erisian.com.au with esmtpsa  (TLS1.3) tls TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+	(Exim 4.96)
+	(envelope-from <aj@erisian.com.au>)
+	id 1xHH3H-0002N5-1h;
+	Thu, 15 Oct 2026 18:43:14 +1000
+Received: by email (sSMTP sendmail emulation); Thu, 15 Oct 2026 18:42:41 +1000
+Date: Thu, 15 Oct 2026 18:42:41 +1000
+From: Anthony Towns <aj@erisian.com.au>
+To: bitcoindev@googlegroups.com
+Cc: Fabian <fjahr@protonmail.com>
+Subject: Re: [bitcoindev] [BIP Draft] P2P UTXO Set Sharing
+Message-ID: <atCSAVprBE-tAnN3@erisian.com.au>
+References: <CmNC-9nAajMwaJi6dHTdlpgjzLZazPlMjGAxNT8DJXAnyw2sUKCygJJU4BLqaF8OYw3carG_pt1Rriqu66OG3wQ8u2itVlJCFo1AhI3V4es=@protonmail.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="UTF-8"
+Content-Disposition: inline
+In-Reply-To: <CmNC-9nAajMwaJi6dHTdlpgjzLZazPlMjGAxNT8DJXAnyw2sUKCygJJU4BLqaF8OYw3carG_pt1Rriqu66OG3wQ8u2itVlJCFo1AhI3V4es=@protonmail.com>
+X-Spam_score: -0.0
+X-Spam_bar: /
+X-Original-Sender: aj@erisian.com.au
+X-Original-Authentication-Results: gmr-mx.google.com;       spf=pass
+ (google.com: domain of aj@erisian.com.au designates 172.104.61.193 as
+ permitted sender) smtp.mailfrom=aj@erisian.com.au
+Precedence: list
+Mailing-list: list bitcoindev@googlegroups.com; contact bitcoindev+owners@googlegroups.com
+List-ID: <bitcoindev.googlegroups.com>
+X-Google-Group-Id: 786775582512
+List-Post: <https://groups.google.com/group/bitcoindev/post>, <mailto:bitcoindev@googlegroups.com>
+List-Help: <https://groups.google.com/support/>, <mailto:bitcoindev+help@googlegroups.com>
+List-Archive: <https://groups.google.com/group/bitcoindev
+List-Subscribe: <https://groups.google.com/group/bitcoindev/subscribe>, <mailto:bitcoindev+subscribe@googlegroups.com>
+List-Unsubscribe: <mailto:googlegroups-manage+786775582512+unsubscribe@googlegroups.com>,
+ <https://groups.google.com/group/bitcoindev/subscribe>
+X-Spam-Score: -0.8 (/)
+
+On Tue, May 05, 2026 at 03:36:04PM +0000, 'Fabian' via Bitcoin Development Mailing List wrote:
+> #### Chunk Merkle Tree
+> The serialized UTXO set (header + body) is split into chunks of exactly 3,900,000 bytes (3.9 MB). The
+> last chunk contains the remaining bytes and may be smaller.
+
+> ### Messages
+> `getutxotree block_hash`
+> `utxotree block_hash version data_length num_chunks chunk_hashes`
+> `getutxoset block_hash chunk_index`
+> `utxoset block_hash chunk_index data`
+
+Had a bit more of a look at this, I'd like to suggest some changes:
+
+ * hard code a basic summary for the snapshot block in chainparams, eg at
+   height 935,000:
+
+```
+{
+  "network": "main",
+  "base_blockhash": "0000000000000000000147034958af1652b2b91bba607beacc5e72a56f0fb5ee",
+  "coins_count": 164241311,
+  "data_length": 9387990306,
+  "merkle_root": "278d5f18f035129f43849322801d16731d8154f80ed97ee48a88b355dc42f3a8"
+}
+```
+
+ * identify the utxo set by merkle_root, which commits to both the number
+   of chunks and the size and contents of each chunk. use tagged hashes to
+   avoid ambiguity between leaf and internal nodes. include the txoutset
+   header in the merkle tree, not just the coins, so the base_blockhash
+   and network are committed to too.
+
+ * have each chunk/leaf be 65,536 bytes (except for the last) -- power
+   of 2, so they aligns with filesystem pages when stored, and small
+   enough so that you're not wasting much data if a chunk is bad or
+   truncated or whatever. you calculate number of chunks directly from
+   data_length.
+
+ * deal with chunks in sets of 2048: 2048 64kB chunks is 128MB, so a
+   reasonable file size; and 2048 32B hashes is 64kB so an equally
+   reasonable message size
+
+ * as far as syncing goes, get the chunk hashes in sets of 2048 (about
+   70 requests needed on mainnet):
+     `getutxohashes merkle_root index`
+     `utxohashes index path_to_merkle_root hashes...`
+   by providing the path to the merkle root in addition to the hashes
+   (~300 bytes on mainnet) each message is verifiable on its own,
+   without much overhead compared to the 64kB of hashes
+
+ * then you have the hash for each leaf, and can request them in parallel,
+   validating each one as it's received:
+     `getutxoset merkle_root index`
+     `utxoset merkle_root index txoutsetdata`
+   with each response verified against the previously verifed chunk/leaf
+   hash
+
+I think keeping messages small is better for the the net subsystem in
+general, and beyond that, dealing with 64kB chunks would probably also
+allow for more aggressive retries without wasting as much bandwidth,
+if you want to avoid getting stalled due to a slow peer. Grabbing the
+chunk hashes in batches also makes the approach remain viable even if
+the utxo set grows absurdly large.
+
+I've got a little vibe-coded exploratory tool based on that set of ideas:
+
+https://github.com/ajtowns/bitcoin/blob/202610-auto-utxo-snap/contrib/utxo-tools/utxo_snapshot_chunks.py
+
+You can use it like this:
+
+ * bitcoin-cli -rpcclienttimeout=0 -named dumptxoutset path=utxos-965000 rollback=00000000000000000001595977e6000ce56129f5c9b4073e31ccc30b90b97da9
+   - get the dump
+
+ * bitcoin-cli gettxoutsetinfo muhash 965000
+   - get info at that block (if you have coinstatsindex enabled)
+
+ * ./utxo_snapshot_chunks.py split utxos-965000.dat snap/
+   - split it up, calculate metadata, merkle root
+
+ * ./utxo_snapshot_chunks.py summary snap/
+   - get the "basic summary" info mentioned above
+
+ * ./utxo_snapshot_chunks.py verify snap/ --muhash 470693633245ed8224580c7ccc8676a279336abd83a71b02f8345d1cb3861b77 --total-amount 20077898.00887204 --bitcoin-util ../../build/bin/bitcoin-util
+   - verify the utxo set's hashes, and (optionally) check it has the
+     expected muhash and spendable amount as well
+
+ * ./utxo_snapshot_chunks.py init dupe $(./utxo_snapshot_chunks.py summary snap/  | jq -r '.network, .base_blockhash, .coins_count, .data_length, .merkle_root')
+   - initialize a copy from the summary information
+
+ * for a in `seq 0 25`; do ./utxo_snapshot_chunks.py getleafhash snap/ $a | ./utxo_snapshot_chunks.py addleafhash dupe/; done
+   - populate the hashes, one set of 2048 at a time (simulating
+     getutxohashes/utxohashes messages; assumes there's 26 sets total)
+
+ * for a in `seq 0 51`; do ./utxo_snapshot_chunks.py getleaf snap/ ${a}000 ${a}999 | ./utxo_snapshot_chunks.py addleaf dupe/; done
+   - populate the chunks, 1000 at a time (simulating getutxoset/utxoset
+     messages; assumes there's 52000 total)
+
+The "verify" step relies on a new bitcoin-util subcommand, particularly
+for the muhash and total-amount checks. Run directly, it looks like:
+
+```
+$ time ../../build_rel/bin/bitcoin-util -muhash txoutsetsummary < utxos-935000.dat 2>/dev/null
+{
+  "bestblock": "0000000000000000000147034958af1652b2b91bba607beacc5e72a56f0fb5ee",
+  "txouts": 164241311,
+  "total_amount": 19984148.03206779,
+  "hash_serialized_3": "e4b90ef9eae834f56c4b64d2d50143cee10ad87994c614d7d04125e2a6025050",
+  "merkle_root": "278d5f18f035129f43849322801d16731d8154f80ed97ee48a88b355dc42f3a8",
+  "muhash": "1ea5b8ebafcd8929fbedc23b180333a9a1610e2f13b88daedafa53af0fea3b35"
+}
+
+real    1m11.944s
+user    13m35.131s
+sys     0m3.513s
+```
+
+Or you can use the split up files:
+
+```
+$ time cat snap-935000/txout00*.dat | ../../build_rel/bin/bitcoin-util -nomuhash txoutsetsummary 2>/dev/null
+{
+  "bestblock": "0000000000000000000147034958af1652b2b91bba607beacc5e72a56f0fb5ee",
+  "txouts": 164241311,
+  "total_amount": 19984148.03206779,
+  "hash_serialized_3": "e4b90ef9eae834f56c4b64d2d50143cee10ad87994c614d7d04125e2a6025050",
+  "merkle_root": "278d5f18f035129f43849322801d16731d8154f80ed97ee48a88b355dc42f3a8"
+}
+
+real    0m58.223s
+user    2m7.628s
+sys     0m14.686s
+```
+
+Skipping calculating the muhash doesn't save much wall time for me,
+but does save a lot of cpu time. YMMV.
+
+> **3.9 MB chunk size:** The number balances round trips (~2,560 for a ~10 GB set) against memory usage
+> for buffering and verifying a single chunk. Smaller chunks would increase protocol overhead;
+
+I don't think the increase in overhead from ~4MB chunks to 64kB chunks
+is very significant. The metadata store for keeping track of 143k chunks
+at height 935000 is only about 4MB:
+
+-rw-rw-r-- 1 aj aj 4602001 Oct 15 16:10 snap-935000/meta.dat
+
+That's about 0.05% of the 9GB of utxo data, or compares against ~80kB
+of metadata for ~4MB chunks (which would be 0.001%).
+
+If we want to later allow disk-constrained nodes to also participate,
+then FEC encoding and storing 1/16th to 3/16th of the utxo set (so
+630MB to 1900MB rather than 10GB) should be plausible, but because you
+can only validate hashes after combining shards, having each chunk be
+smaller (64kB chunks with 16-shards per chunk means each shard is 4kB)
+is probably better. I think it would be possible to do a leveldb snapshot,
+then calculate the data needed to serve FEC shards reasonably efficiently.
+I think every node would store all the hashes (the 4MB meta.dat/utxohashes
+response data), and only reduce the size of the 10GB txoutset*.dat data
+via FEC encoding.
+
+If we wanted to be more bittorrent-y, and in particular allow nodes
+who've only partially downloaded the utxoset to provide chunks to other
+nodes also downloading it, I think we'd need an additional message to
+indicate which chunks a node actually has available for download. Would
+probably also want to provide some sort of custom "addr" sharing to
+help such nodes find each other, since they almost certainly won't yet
+be participating in ordinary addr relay due to not having completed IBD.
+
+Cheers,
+aj
+
+-- 
+You received this message because you are subscribed to the Google Groups "Bitcoin Development Mailing List" group.
+To unsubscribe from this group and stop receiving emails from it, send an email to bitcoindev+unsubscribe@googlegroups.com.
+To view this discussion visit https://groups.google.com/d/msgid/bitcoindev/atCSAVprBE-tAnN3%40erisian.com.au.
+
+

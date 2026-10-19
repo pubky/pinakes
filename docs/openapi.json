@@ -1947,6 +1947,18 @@
                     "uri": "https://pubky.org/"
                   }
                 },
+                "resolve-public-inbox-1": {
+                  "summary": "https://gnusha.org/pi/bitcoindev/atCSAVprBE-tAnN3@erisian.com.au/",
+                  "value": {
+                    "uri": "https://gnusha.org/pi/bitcoindev/atCSAVprBE-tAnN3@erisian.com.au/"
+                  }
+                },
+                "resolve-public-inbox-2": {
+                  "summary": "https://lore.kernel.org/git/pull.2458.git.git.1792437798463.gitgitgadget@gmail.com/",
+                  "value": {
+                    "uri": "https://lore.kernel.org/git/pull.2458.git.git.1792437798463.gitgitgadget@gmail.com/"
+                  }
+                },
                 "resolve-s3-eu-west-1-amazonaws-com-starticket-wwwroot-ticketing-feed": {
                   "summary": "https://s3-eu-west-1.amazonaws.com/starticket/wwwroot/ticketing/feeds/starticketfeed_D.xml",
                   "value": {
