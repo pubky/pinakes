@@ -503,7 +503,7 @@ async fn finish_job(
                 denied(pool, job, cfg, retry).await?;
             } else {
                 sqlx::query("UPDATE resource SET timeout_streak=0,lease_until=NULL,priority_at=NULL,next_attempt_at=now()+$3*interval '1 second',last_error=$4 WHERE id=$1 AND generation=$2")
-                    .bind(&job.id).bind(job.generation).bind(retry.seconds.clamp(1,3600) as f64).bind(if retry.class=="rate_limited" {"http_4xx"} else {retry.class}).execute(pool).await?;
+                    .bind(&job.id).bind(job.generation).bind(retry.seconds.clamp(1,3600) as f64).bind(retry.class).execute(pool).await?;
             }
         } else if crate::resolver::error_class(&error) == "timeout" {
             timed_out(pool, job, cfg, 60).await?;

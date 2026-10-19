@@ -152,12 +152,13 @@ their own User-Agent.
 The official-API sources ([docs/sources](sources/README.md)) run on the `official` card route
 (`[cards.official]`), each with its own switch, `[sources.<name>] enabled` (on by default;
 `PINAKES__SOURCES__<NAME>__ENABLED=false`); a switched-off source's links get ordinary web cards
-and its address rules no longer merge links. A source lowers its service's host to the
-service's published rate (never above `limits.host_requests_per_second`) unless
-`limits.host_rates` names the host, and a request that would wait more than five seconds for its
-host (its slot, or the request ahead of it) is retried later instead of timing out. After an
-upgrade that adds a source, run `pinakesd reextract web official`: links already known get their
-source's card.
+and its address rules no longer merge new links (links it merged before stay merged). A source
+lowers its service's host to the service's published rate (never above
+`limits.host_requests_per_second`) unless `limits.host_rates` names the host, and a request that
+would wait more than five seconds for its host (its slot, or the request ahead of it) is retried
+later instead of timing out; a redirect within the host keeps the slot it has. After an upgrade
+that adds a source, run `pinakesd reextract web official`: links already known get their source's
+card.
 
 Two clients are outside that policy. Nominatim and Nexus are trusted, operator-configured
 upstreams at fixed URLs that no reference can change: their clients do not apply the web DNS
@@ -442,7 +443,7 @@ changes, canaries, the queue, ingestion lag and grouping. Admin `GET /v1/info` h
 manifests, resolver status, counts, ingestion, source and canary state; public `/v1/info` shows
 only the version, what the instance resolves, the limits a client must respect and the OSM
 licence. Stored errors are sanitized classes (dns, connect, timeout, http_4xx, http_5xx, parse,
-policy). Admin info and database metrics are cached for 15 seconds.
+policy; rate_limited for a link waiting for its host's budget). Admin info and database metrics are cached for 15 seconds.
 
 Canaries (`canary.enabled`) run every `limits.canary_interval_secs`, first one interval after
 startup, on the ordinary workers and host budgets; their state survives restarts and they never

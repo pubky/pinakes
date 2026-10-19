@@ -576,6 +576,15 @@ impl Egress {
             }
         }
         let result = fetch.await;
+        // Our own host budget is not the page's answer: ask again when the slot comes.
+        if result
+            .as_ref()
+            .err()
+            .and_then(|e| e.downcast_ref::<super::RetryLater>())
+            .is_some_and(|r| r.class == "rate_limited")
+        {
+            return result;
+        }
         let mut cache = self.discovered.lock().await;
         let now = Instant::now();
         cache.retain(|_, entry| entry.expires > now);
@@ -627,6 +636,9 @@ impl Egress {
         let requested = Url::parse(uri)?;
         let mut url = requested.clone();
         let mut permanent = true;
+        // A redirect within the same host keeps the slot it has; a slow host's next slot is
+        // further away than a fetch may wait, so a new one would always answer RetryLater.
+        let mut permit: Option<(String, OwnedMutexGuard<Instant>)> = None;
         for redirects in 0..=3 {
             if !matches!(url.scheme(), "http" | "https")
                 || !url.username().is_empty()
@@ -660,7 +672,16 @@ impl Egress {
                     .context("egress refused non-public address"));
             }
             // Pin checked addresses to the connection; a second DNS lookup could rebind to a private IP.
-            let _permit = self.host_permit(&host).await?;
+            match &mut permit {
+                Some((held, guard)) if *held == host => {
+                    **guard = Instant::now() + self.host_interval(&host);
+                }
+                _ => {
+                    // Release the other host's slot before waiting for this one.
+                    drop(permit.take());
+                    permit = Some((host.clone(), self.host_permit(&host).await?));
+                }
+            }
             let mut observation = crate::telemetry::FetchGuard::start();
             let with_agent;
             let default_agent = options
@@ -730,27 +751,14 @@ impl Egress {
         }
         unreachable!()
     }
-    /// The host's next slot, held for the whole request: one request per host at a time. An
+    /// The host's next slot, held for the whole request (and its redirects within the host): one
+    /// request per host at a time. An
     /// operator's `host_rates` entry sets the rate; else a source's published rate lowers the
     /// default, never raises it. A slot further away than `MAX_SLOT_WAIT`, or a queue longer than
     /// that, answers `RetryLater` instead of a wait the fetch timeout would cut short. Only a
     /// request that gets its slot moves the next one, so a cancelled waiter holds nothing back.
     async fn host_permit(&self, host: &str) -> Result<OwnedMutexGuard<Instant>> {
-        let default = self.cfg.host_requests_per_second;
-        let mut rate = match self.cfg.host_rates.get(host) {
-            Some(rate) => *rate,
-            None => self
-                .cfg
-                .source_rates
-                .get(host)
-                .map_or(default, |rate| rate.min(default)),
-        };
-        if matches!(host, "api.nostr.wine" | "portal.einundzwanzig.space") {
-            rate = rate.min(1.0);
-        }
-        if host == "api.nostrarchives.com" {
-            rate = rate.min(2.0);
-        }
+        let rate = self.host_rate(host);
         let budget = {
             let mut hosts = self.hosts.lock().await;
             if hosts.len() >= 10000 {
@@ -779,10 +787,32 @@ impl Egress {
             return Err(retry(guard.saturating_duration_since(Instant::now())));
         }
         tokio::time::sleep_until(*guard).await;
-        // Stable per-host jitter avoids synchronized requests without weakening the minimum interval.
-        let jitter = f64::from(blake3::hash(host.as_bytes()).as_bytes()[0]) / 2550.0;
-        *guard = Instant::now() + Duration::from_secs_f64(1.0 / rate + jitter);
+        *guard = Instant::now() + self.host_interval(host);
         Ok(guard)
+    }
+    /// The least time between two requests to a host: its rate plus a stable per-host jitter,
+    /// which avoids synchronized requests without weakening the minimum interval.
+    fn host_interval(&self, host: &str) -> Duration {
+        let jitter = f64::from(blake3::hash(host.as_bytes()).as_bytes()[0]) / 2550.0;
+        Duration::from_secs_f64(1.0 / self.host_rate(host) + jitter)
+    }
+    fn host_rate(&self, host: &str) -> f64 {
+        let default = self.cfg.host_requests_per_second;
+        let mut rate = match self.cfg.host_rates.get(host) {
+            Some(rate) => *rate,
+            None => self
+                .cfg
+                .source_rates
+                .get(host)
+                .map_or(default, |rate| rate.min(default)),
+        };
+        if matches!(host, "api.nostr.wine" | "portal.einundzwanzig.space") {
+            rate = rate.min(1.0);
+        }
+        if host == "api.nostrarchives.com" {
+            rate = rate.min(2.0);
+        }
+        rate
     }
 }
 fn host_matches(host: &str, rule: &str) -> bool {
@@ -964,6 +994,62 @@ mod tests {
         let start = Instant::now();
         assert!(egress.fetch("https://host.example/after").await.is_ok());
         assert!(Instant::now() - start <= Duration::from_secs(2));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_redirect_within_a_slow_host_keeps_its_slot() {
+        struct Redirects;
+        #[async_trait]
+        impl Transport for Redirects {
+            async fn get(&self, url: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+                let redirect = url.path() == "/old";
+                Ok(Fetched {
+                    permanent_redirect: false,
+                    truncated: false,
+                    url: url.clone(),
+                    status: if redirect { 301 } else { 200 },
+                    content_type: "application/json".into(),
+                    validators: Default::default(),
+                    location: redirect.then(|| "/new".to_owned()),
+                    retry_after_secs: 60,
+                    body: b"{}".to_vec(),
+                })
+            }
+        }
+        let egress = Egress::with_backends(
+            EgressConfig {
+                source_rates: [("slow.example".to_owned(), 5.0 / 60.0)]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+            Arc::new(FakeDns),
+            Arc::new(Redirects),
+        );
+        // With a 12-second interval a second slot is always too far away: the hop keeps the first.
+        let fetched = egress.fetch("https://slow.example/old").await.unwrap();
+        assert_eq!(fetched.url.path(), "/new");
+        assert!(fetched.permanent_redirect);
+        // The next request still waits a full interval after the last hop.
+        let error = egress
+            .fetch("https://slow.example/other")
+            .await
+            .unwrap_err();
+        let retry = error.downcast_ref::<crate::resolver::RetryLater>().unwrap();
+        assert_eq!(retry.class, "rate_limited");
+
+        // Our own budget is not the page's answer: discovery asks again once the slot comes.
+        let options = FetchOptions::default();
+        let error = egress
+            .discover("https://slow.example/page", &options, 3600)
+            .await
+            .unwrap_err();
+        let retry = error.downcast_ref::<crate::resolver::RetryLater>().unwrap();
+        assert_eq!(retry.class, "rate_limited");
+        tokio::time::advance(Duration::from_secs(13)).await;
+        assert!(egress
+            .discover("https://slow.example/page", &options, 3600)
+            .await
+            .is_ok());
     }
     #[tokio::test]
     async fn body_cap_refuses_any_type_html_too() {
