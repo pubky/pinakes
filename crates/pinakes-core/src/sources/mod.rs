@@ -22,6 +22,7 @@ use std::{collections::BTreeMap, sync::OnceLock};
 
 pub mod ecfr;
 pub mod federal_register;
+pub mod gleif;
 pub mod sec;
 
 /// Every source, one line each, in alphabetical order of name.
@@ -29,6 +30,7 @@ pub mod sec;
 pub static REGISTRY: &[&dyn Source] = &[
     &ecfr::Ecfr,
     &federal_register::FederalRegister,
+    &gleif::Gleif,
     &sec::Sec,
 ];
 

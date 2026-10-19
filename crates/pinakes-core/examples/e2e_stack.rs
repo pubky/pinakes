@@ -89,7 +89,8 @@ impl Fixture {
             {"kind":"federal_register","uri":"fr:2026-18291","type":"Legislation"},
             {"kind":"federal_register_page","uri":"https://www.federalregister.gov/d/2026-18291","type":"Legislation","group_with":"federal_register"},
             {"kind":"sec","uri":"https://www.sec.gov/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959-index.htm","type":"Report"},
-            {"kind":"ecfr","uri":"https://www.ecfr.gov/current/title-17/section-240.10b-5","type":"Legislation"}
+            {"kind":"ecfr","uri":"https://www.ecfr.gov/current/title-17/section-240.10b-5","type":"Legislation"},
+            {"kind":"gleif","uri":"lei:KY37LUS27QQX7BB93L28","type":"Organization"}
         ]);
         Ok(Self {
             boundary: Arc::default(),
@@ -116,6 +117,7 @@ impl Dns for FixtureDns {
                 | "openlibrary.org"
                 | "publisher.example"
                 | "www.youtube.com"
+                | "api.gleif.org"
                 | "web.example"
                 | "www.federalregister.gov"
                 | "www.sec.gov"
@@ -144,6 +146,7 @@ impl Transport for Fixture {
             "openlibrary.org" if u.path().starts_with("/books/")=>("text/html","<title>Matilda | Open Library</title><link rel=\"canonical\" href=\"https://openlibrary.org/books/OL7353617M/Matilda\">".into()),
             "openlibrary.org"=>("application/json",json!({"ISBN:9780140328721":{"title":"Matilda","authors":[{"name":"Roald Dahl"}],"url":"https://openlibrary.org/books/OL7353617M/Matilda","key":"/books/OL7353617M"},"ISBN:0140328726":{"title":"Matilda","authors":[{"name":"Roald Dahl"}],"url":"https://openlibrary.org/books/OL7353617M/Matilda","key":"/books/OL7353617M"}}).to_string()),
             "www.youtube.com"=>("application/json",json!({"type":"video","title":"Fixture video","thumbnail_url":"https://image.example/a.jpg"}).to_string()),
+            "api.gleif.org" if u.path()=="/api/v1/lei-records/KY37LUS27QQX7BB93L28"=>("application/vnd.api+json",include_str!("../tests/fixtures/sources/gleif/lei_KY37LUS27QQX7BB93L28_nestle.json").into()),
             "web.example"=>("text/html","<title>Fixture page</title>".into()),
             "www.ecfr.gov" if u.path()=="/api/versioner/v1/ancestry/current/title-17.json"=>("application/json",include_str!("../tests/fixtures/sources/ecfr/ancestry_current_title-17_section-240.10b-5.json").into()),
             "www.sec.gov" if u.path()=="/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959.hdr.sgml"=>("text/sgml",include_str!("../tests/fixtures/sources/sec/sec-hdr-ms-s1.sgml").into()),

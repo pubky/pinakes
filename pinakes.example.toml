@@ -57,6 +57,8 @@ enabled = true
 enabled = true
 [sources.federal_register]
 enabled = true
+[sources.gleif]
+enabled = true
 [sources.sec]
 enabled = true
 

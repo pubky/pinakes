@@ -67,6 +67,11 @@
     "type": "Legislation"
   },
   {
+    "kind": "gleif",
+    "uri": "lei:KY37LUS27QQX7BB93L28",
+    "type": "Organization"
+  },
+  {
     "kind": "web",
     "uri": "https://example.org/",
     "type": "WebPage"

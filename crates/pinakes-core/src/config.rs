@@ -376,6 +376,10 @@ pub struct EgressConfig {
     pub deny_hosts: Vec<String>,
     #[serde(skip)]
     pub host_rates: BTreeMap<String, f64>,
+    /// The official-API sources' published rates per host (`sources::Source::budgets`), used
+    /// where `host_rates` names no rate.
+    #[serde(skip)]
+    pub source_rates: BTreeMap<String, f64>,
 }
 impl Default for EgressConfig {
     fn default() -> Self {
@@ -385,6 +389,7 @@ impl Default for EgressConfig {
             allow_hosts: vec![],
             deny_hosts: vec![],
             host_rates: BTreeMap::new(),
+            source_rates: BTreeMap::new(),
         }
     }
 }
@@ -578,10 +583,10 @@ impl Config {
     fn share_contact(&mut self) {
         self.egress.contact = self.http.contact.trim().to_owned();
         self.osm.contact = self.egress.contact.clone();
-        // A source's published limits, for hosts the operator did not rate.
-        for (host, rate) in crate::sources::budgets() {
-            self.egress.host_rates.entry(host.into()).or_insert(rate);
-        }
+        // A source's published limits, for hosts the operator does not rate.
+        self.egress.source_rates = crate::sources::budgets()
+            .map(|(host, rate)| (host.to_owned(), rate))
+            .collect();
     }
     pub fn validate(&self) -> Result<()> {
         if self.pubky.enabled {
@@ -961,6 +966,19 @@ mod tests {
             crate::groups::CrossContainerOccurrences::Off
         );
         assert!(!Config::default().web.discover_feeds);
+    }
+    #[test]
+    fn source_budgets_never_override_the_operator() {
+        let budgets: Vec<_> = crate::sources::budgets().collect();
+        let Some((host, rate)) = budgets.first().copied() else {
+            return;
+        };
+        let cfg = Config::default();
+        assert_eq!(cfg.egress.source_rates[host], rate);
+        assert!(!cfg.egress.host_rates.contains_key(host));
+        let set = with(serde_json::json!({"limits":{"host_rates":{host: 0.25}}})).unwrap();
+        assert_eq!(set.egress.host_rates[host], 0.25);
+        assert_eq!(set.egress.source_rates[host], rate);
     }
     #[test]
     fn the_contact_reaches_every_client() {

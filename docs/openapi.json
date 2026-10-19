@@ -1689,6 +1689,18 @@
                     "uri": "https://github.com/pubky/pubky-core/releases.atom"
                   }
                 },
+                "resolve-gleif-1": {
+                  "summary": "lei:KY37LUS27QQX7BB93L28",
+                  "value": {
+                    "uri": "lei:KY37LUS27QQX7BB93L28"
+                  }
+                },
+                "resolve-gleif-2": {
+                  "summary": "https://api.gleif.org/api/v1/lei-records/5493001KJTIIGC8Y1R12",
+                  "value": {
+                    "uri": "https://api.gleif.org/api/v1/lei-records/5493001KJTIIGC8Y1R12"
+                  }
+                },
                 "resolve-grounds-stager-co-shop-default-events-111608505": {
                   "summary": "https://grounds.stager.co/shop/default/events/111608505",
                   "value": {

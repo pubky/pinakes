@@ -732,6 +732,7 @@ impl Egress {
             .cfg
             .host_rates
             .get(host)
+            .or_else(|| self.cfg.source_rates.get(host))
             .copied()
             .unwrap_or(self.cfg.host_requests_per_second);
         if matches!(host, "api.nostr.wine" | "portal.einundzwanzig.space") {
