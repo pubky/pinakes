@@ -127,15 +127,27 @@ pub fn card(
         ),
         ("content_warning", warning),
         ("activitypub_id", Some(ap.to_string())),
-        ("page_url", text(&v["url"]).filter(|u| web_url(u).is_some())),
+        (
+            "page_url",
+            text(&v["url"]).filter(|u| web_url(u).is_some_and(|u| same_host(&u, &target.host))),
+        ),
     ] {
         if let Some(value) = value {
             doc.attributes.insert(key.into(), value);
         }
     }
-    // Every address of the post becomes an alias of its ActivityPub id.
-    doc.source_root = Some(ap.to_string());
+    // Every address of the post on its own server becomes an alias of its ActivityPub id. A
+    // server answering with another host's id (a copy, or a claim) keeps its own card: only the
+    // id's own server could say that the two are one post.
+    if same_host(&ap, &target.host) {
+        doc.source_root = Some(ap.to_string());
+    }
     Ok(Some(doc))
+}
+
+fn same_host(url: &url::Url, host: &str) -> bool {
+    url.host_str()
+        .is_some_and(|h| h.trim_end_matches('.').eq_ignore_ascii_case(host))
 }
 
 #[async_trait]
@@ -278,5 +290,31 @@ mod tests {
         let error = card(base.clone(), &target, 404, &read("not-mastodon.html")).unwrap_err();
         assert!(error.is::<Declined>());
         assert!(card(base, &media, 200, &read("status-1.json")).is_err());
+    }
+
+    #[test]
+    fn another_hosts_id_roots_nothing() {
+        // A server answering with another host's ActivityPub id (here someone else's post, as a
+        // hostile server could) keeps its own card: no alias of that post, no page elsewhere.
+        let evil = Target {
+            host: "evil.example".into(),
+            id: "1".into(),
+        };
+        let base = ResourceMeta::new("https://evil.example/@a/1", "mastodon", 3600);
+        let doc = card(base.clone(), &evil, 200, &read("status-1.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc.source_root, None);
+        assert!(!doc.attributes.contains_key("page_url"));
+        let mut hostile: Value = serde_json::from_slice(&read("status-1.json")).unwrap();
+        hostile["uri"] = "https://www.paypal.com/signin".into();
+        let ours = Target {
+            host: "mastodon.social".into(),
+            id: "1".into(),
+        };
+        let doc = card(base, &ours, 200, &serde_json::to_vec(&hostile).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc.source_root, None);
     }
 }
