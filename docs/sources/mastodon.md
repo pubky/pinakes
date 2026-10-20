@@ -34,8 +34,9 @@ author's avatar).
 An author who opted out of search indexing (the account's `indexable: false` or `noindex: true`,
 the flag behind the profile's `robots` `noindex` tag) keeps a normal card, the link preview
 Mastodon itself shows, with the `opted_out` fact. Its text is never found by search (`q=`), and
-its change history keeps no text: what was kept before the opt-out goes, and its change lines
-carry only their kind, fields and time.
+its change history keeps no text: what was kept before the opt-out goes, also from the spellings
+of the post saved before they became its aliases, and its change lines carry only their kind,
+fields and time.
 
 | Fact | Meaning |
 | --- | --- |

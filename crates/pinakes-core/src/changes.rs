@@ -213,6 +213,19 @@ pub async fn save(
             .execute(&mut *tx)
             .await?;
     }
+    if opted_out {
+        // Spellings saved before they became aliases of this post kept its text too: their
+        // lines lose their documents (the `aliased` line keeps its root) and their stored cards
+        // their text.
+        sqlx::query("UPDATE resource_change SET before=NULL,after=NULL WHERE class<>'aliased' AND resource_id IN (SELECT alias_id FROM resource_alias WHERE root_id=$1) AND (before IS NOT NULL OR after IS NOT NULL)")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE resource SET name=NULL,doc=doc||jsonb_build_object('name',NULL,'description',NULL,'image',NULL,'attributes','{}'::jsonb) WHERE doc IS NOT NULL AND id IN (SELECT alias_id FROM resource_alias WHERE root_id=$1)")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
     if doc.status == Status::Missing {
         let fetched = chrono::DateTime::from_timestamp_millis(doc.fetched_at)
             .context("invalid fetch time")?;
