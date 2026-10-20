@@ -381,6 +381,52 @@ pub fn type_card(uri: &str, artist_type: Option<&str>, doc: &mut crate::model::R
         Level::Artist if artist_type == Some("Person") => doc.set_type("Person"),
         level => doc.set_type(level.type_name()),
     }
+    // What the service's own page says about the object, in place of its share blurb: the
+    // artist, then a track's album and length or an album's year.
+    let attribute = |name: &str| {
+        doc.attributes
+            .get(name)
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+    };
+    if let Some(artist) = attribute("artist") {
+        let mut parts = vec![artist.to_owned()];
+        match link.level {
+            Level::Track => {
+                parts.extend(attribute("album").map(str::to_owned));
+                parts.extend(attribute("duration").and_then(length));
+            }
+            Level::Album => parts.extend(
+                attribute("published")
+                    .and_then(|d| d.get(..4))
+                    .filter(|y| y.bytes().all(|b| b.is_ascii_digit()))
+                    .map(str::to_owned),
+            ),
+            _ => {}
+        }
+        doc.description = Some(parts.join(" · "));
+    } else if link.service == Service::Tidal
+        && doc.description.as_deref().is_some_and(|d| {
+            (d.starts_with("Listen to ") || d.starts_with("See the releases of "))
+                && (d.ends_with(" on TIDAL") || d.contains(" on TIDAL in "))
+        })
+    {
+        // TIDAL's share text says nothing about the object.
+        doc.description = None;
+    }
+}
+/// An ISO 8601 duration (`PT5M55S`) as a track length: `5:55`, `1:02:03`.
+fn length(iso: &str) -> Option<String> {
+    let secs = crate::event::time::duration(iso)?.num_seconds();
+    if !(1..=86_400).contains(&secs) {
+        return None;
+    }
+    let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
+    Some(if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    })
 }
 
 /// SoundCloud pages that are not tracks.

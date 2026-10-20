@@ -667,6 +667,13 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
         d.set_type("MusicRecording");
         d.name = Some("Bohemian Rhapsody".into());
         d.attributes.insert("isrc".into(), isrc.into());
+        // As TIDAL's JSON-LD states them.
+        d.attributes.insert("artist".into(), "Queen".into());
+        d.attributes.insert(
+            "album".into(),
+            "A Night At The Opera (Deluxe Edition)".into(),
+        );
+        d.attributes.insert("duration".into(), "PT5M55S".into());
         store::save_document(&pool, &id, 0, &d).await.unwrap();
         ids.push(id);
     }
@@ -729,6 +736,19 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
         ["isrc:GBUM72103841 service tidal"]
     );
     assert!(rows(keys, other_id).await.is_empty());
+    assert_eq!(
+        rows(
+            "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 AND source='service' ORDER BY name",
+            ids[1].clone()
+        )
+        .await,
+        [
+            "album A Night At The Opera (Deluxe Edition)",
+            "artist Queen",
+            "duration 355",
+            "isrc GBUM71029604"
+        ]
+    );
     let group = "SELECT coalesce(group_id,'-') FROM group_unit WHERE resource_id=$1";
     let seed = rows(group, ids[0].clone()).await;
     assert_ne!(seed, ["-"]);

@@ -50,7 +50,11 @@ refresh after MusicBrainz says the artist is one) and a playlist a `MusicPlaylis
 service ([music service links](#aliases)). A video stays a `VideoObject`. The card's `site` is the
 service's name (`Spotify`, `Apple Music`, `TIDAL`, `YouTube`, …), as derived links show it, in
 any page language. A Bandcamp root or `/music` page features an album but is the artist's page: a
-`MusicGroup` named after the artist, without the album's description.
+`MusicGroup` named after the artist, without the album's description. When the service's own
+page names the artist (JSON-LD `byArtist`, as TIDAL's do), the description says what the page
+does instead of its share text: a track's `Queen · A Night At The Opera (Deluxe Edition) · 5:55`
+(artist, album, length), an album's `Tame Impala & JENNIE · 2025` (artist, year); the
+`service` source adds `artist`, `album` and `duration` (seconds) to `details.facts`.
 
 ### Card
 

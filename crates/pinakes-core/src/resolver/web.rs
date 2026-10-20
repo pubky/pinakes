@@ -28,6 +28,8 @@ pub const ATTRIBUTES: &[&str] = &[
     "podcast_feed",
     "duration",
     "isrc",
+    "artist",
+    "album",
 ];
 pub struct WebResolver {
     pub oembed_policy: super::cards::OembedPolicy,
@@ -871,6 +873,32 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url, claims: bool) {
                 .or_insert_with(|| value.into());
         }
     }
+    // A recording's or album's artists and album, as music pages state them.
+    let names = |value: &Value| -> Option<String> {
+        fn one(v: &Value) -> Option<&str> {
+            v.as_str().or_else(|| v["name"].as_str()).map(str::trim)
+        }
+        let names: Vec<&str> = match value {
+            Value::Array(all) => all.iter().filter_map(one).collect(),
+            v => one(v).into_iter().collect(),
+        };
+        let names: Vec<&str> = names
+            .into_iter()
+            .filter(|n| !n.is_empty())
+            .take(8)
+            .collect();
+        (!names.is_empty()).then(|| names.join(" & "))
+    };
+    for (field, attribute) in [("byArtist", "artist"), ("inAlbum", "album")] {
+        if let Some(value) = v.get(field).and_then(names) {
+            doc.attributes.entry(attribute.into()).or_insert(value);
+        }
+    }
+    if let Some(date) = v.get("datePublished").and_then(Value::as_str) {
+        doc.attributes
+            .entry("published".into())
+            .or_insert_with(|| date.trim().into());
+    }
     for field in ["author", "creator"] {
         if !doc.attributes.contains_key("author") {
             if let Some(value) = v.get(field) {
@@ -1185,6 +1213,30 @@ mod tests {
             (out.doc.type_name.as_str(), out.doc.name.as_deref()),
             ("MusicGroup", Some("Radiohead"))
         );
+        // A card says what TIDAL's own JSON-LD says, not its share text.
+        let mut artist = out.doc.clone();
+        artist.status = crate::model::Status::Ok;
+        crate::music::type_card(url, None, &mut artist);
+        assert_eq!(artist.description, None);
+        for (url, file, description) in [
+            (
+                "https://tidal.com/track/534050211",
+                "tidal-track-534050211.html",
+                "Queen · A Night At The Opera (Deluxe Edition) · 5:55",
+            ),
+            (
+                "https://tidal.com/album/495402659",
+                "tidal-album-495402659.html",
+                "Tame Impala & JENNIE · 2025",
+            ),
+        ] {
+            let path = format!("{}/tests/fixtures/web/{file}", env!("CARGO_MANIFEST_DIR"));
+            let mut doc = extract(url, &fetch(url, std::fs::read(path).unwrap()), 100).doc;
+            doc.status = crate::model::Status::Ok;
+            crate::music::type_card(url, None, &mut doc);
+            assert_eq!(doc.description.as_deref(), Some(description), "{url}");
+            assert_eq!(doc.site, "TIDAL");
+        }
         // A homepage's Organization naming the site root is its publisher, not its subject.
         let home = r#"<head><script type="application/ld+json">{"@type":"Organization","@id":"https://shop.example/","url":"https://shop.example/","name":"Shop Ltd"}</script><script type="application/ld+json">{"@type":"WebPage","url":"https://shop.example/","name":"Welcome"}</script></head>"#;
         let out = extract(

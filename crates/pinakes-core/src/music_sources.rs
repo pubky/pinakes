@@ -5,7 +5,7 @@
 //! of its own object. Any other page's claim is a fact at most.
 //!
 //! - [`ServiceSource`]: the ISRC a music service's own track page states (TIDAL's JSON-LD
-//!   `isrcCode`) as the key `isrc:…`.
+//!   `isrcCode`) as the key `isrc:…`, and its artist, album and length as facts.
 //! - [`MusicBrainzSource`]: what MusicBrainz relates the tagged link to (one recording, release
 //!   or artist; for a track it does not relate, the one recording its page's own ISRC is on),
 //!   that entity's current links on music services at the same level, and its MBIDs, ISRCs and
@@ -71,17 +71,40 @@ impl Source for ServiceSource {
         music::parse(&subject.uri).is_some()
     }
     async fn lookup(&self, _: &Context, subject: &Subject) -> Result<Found> {
-        let (Some(link), Some(isrc)) = (music::parse(&subject.uri), own_isrc(subject)) else {
+        let Some(link) = music::parse(&subject.uri) else {
             return Ok(Found::default());
         };
-        Ok(Found {
-            keys: vec![Key {
+        let mut found = Found::default();
+        if let Some(isrc) = own_isrc(subject) {
+            found.keys.push(Key {
                 key: format!("isrc:{isrc}"),
                 via: link.service.token().into(),
-            }],
-            facts: vec![crate::also_on::Fact::new("isrc", isrc)],
-            ..Default::default()
-        })
+            });
+            found.facts.push(crate::also_on::Fact::new("isrc", isrc));
+        }
+        // What its page says: the artist, a track's album and length (seconds).
+        let attributes = subject.doc.as_ref().map(|d| &d.attributes);
+        let attribute = |name: &str| attributes.and_then(|a| a.get(name)).map(|v| v.trim());
+        if let Some(artist) = attribute("artist") {
+            found
+                .facts
+                .push(crate::also_on::Fact::new("artist", artist));
+        }
+        if link.level == Level::Track {
+            if let Some(album) = attribute("album") {
+                found.facts.push(crate::also_on::Fact::new("album", album));
+            }
+            let seconds = attribute("duration")
+                .and_then(crate::event::time::duration)
+                .map(|d| d.num_seconds())
+                .filter(|s| (1..=86_400).contains(s));
+            if let Some(seconds) = seconds {
+                found
+                    .facts
+                    .push(crate::also_on::Fact::new("duration", seconds.to_string()));
+            }
+        }
+        Ok(found)
     }
 }
 
