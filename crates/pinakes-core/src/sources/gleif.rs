@@ -2,7 +2,7 @@
 //! 60 requests per minute.
 use super::{list, text, texts, web_url, Budget, Context, Example, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -30,12 +30,15 @@ pub fn lei(value: &str) -> Option<String> {
     (rest == 1).then_some(lei)
 }
 
-/// The LEI of `lei:{LEI}`, `https://www.gleif.org/lei/{LEI}` or
+/// The LEI of `lei:{LEI}`, `https://www.gleif.org/lei/{LEI}`,
 /// `https://api.gleif.org/api/v1/lei-records/{LEI}` (its sub-resources, such as a parent, are
-/// other objects).
+/// other objects) or the search app's `https://search.gleif.org/#/record/{LEI}[/{tab}]`.
 pub fn of_uri(uri: &str) -> Option<String> {
     if let Some(rest) = uri.strip_prefix("lei:") {
         return lei(rest);
+    }
+    if let Some(id) = search_record(uri) {
+        return lei(id);
     }
     let url = web_url(uri)?;
     let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
@@ -44,6 +47,15 @@ pub fn of_uri(uri: &str) -> Option<String> {
         ("api.gleif.org", ["api", "v1", "lei-records", id]) => lei(id),
         _ => None,
     }
+}
+
+/// The record a search app link routes to (its fragment, which identity keeps), valid or not.
+fn search_record(uri: &str) -> Option<&str> {
+    let route = uri
+        .strip_prefix("https://search.gleif.org/#/record/")?
+        .split('?')
+        .next()?;
+    route.split('/').next().filter(|id| !id.is_empty())
 }
 
 pub fn api_url(lei: &str) -> String {
@@ -131,7 +143,8 @@ impl Source for Gleif {
         "gleif"
     }
     fn reads(&self, uri: &str) -> bool {
-        of_uri(uri).is_some()
+        // A record route with a malformed LEI too: it is missing, not the app's home page.
+        of_uri(uri).is_some() || search_record(uri).is_some()
     }
     fn alias_root(&self, uri: &str) -> Option<String> {
         let root = format!("lei:{}", of_uri(uri)?);
@@ -139,6 +152,7 @@ impl Source for Gleif {
     }
     fn invalid(&self, uri: &str) -> bool {
         uri.strip_prefix("lei:")
+            .or_else(|| search_record(uri))
             .is_some_and(|rest| lei(rest).is_none())
     }
     fn facts(&self) -> &'static [&'static str] {
@@ -172,7 +186,10 @@ impl Source for Gleif {
         ]
     }
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
-        let lei = of_uri(uri).context("not an LEI")?;
+        let Some(lei) = of_uri(uri) else {
+            anyhow::ensure!(search_record(uri).is_some(), "not an LEI");
+            return Ok(cx.missing(uri, self));
+        };
         let f = cx
             .fetch(
                 &api_url(&lei),
@@ -243,8 +260,27 @@ mod tests {
             assert!(!Gleif.reads(&uri), "{uri}");
         }
         assert!(Gleif.invalid("lei:KY37LUS27QQX7BB93L29"));
-        // The search page names the record in its fragment, which a resource's identity drops.
-        assert!(!Gleif.reads("https://search.gleif.org/#/record/KY37LUS27QQX7BB93L28"));
+        // The search app names the record in its fragment, which identity keeps for it.
+        let (_, search, _) = crate::model::identity(
+            "https://search.gleif.org/#/record/ky37lus27qqx7bb93l28/relationships?x=1",
+        )
+        .unwrap();
+        assert_eq!(of_uri(&search).as_deref(), Some("KY37LUS27QQX7BB93L28"));
+        assert_eq!(
+            Gleif.alias_root(&search).as_deref(),
+            Some("lei:KY37LUS27QQX7BB93L28")
+        );
+        let malformed = "https://search.gleif.org/#/record/KY37LUS27QQX7BB93L29";
+        assert!(Gleif.reads(malformed) && Gleif.invalid(malformed));
+        assert_eq!(Gleif.alias_root(malformed), None);
+        for other in [
+            "https://search.gleif.org/",
+            "https://search.gleif.org/#/search/nestle",
+            "https://search.gleif.org/#/record/",
+        ] {
+            let (_, other, _) = crate::model::identity(other).unwrap();
+            assert!(!Gleif.reads(&other) && !Gleif.invalid(&other), "{other}");
+        }
     }
 
     #[test]

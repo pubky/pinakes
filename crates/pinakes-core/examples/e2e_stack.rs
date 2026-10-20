@@ -93,6 +93,7 @@ impl Fixture {
             {"kind":"sec","uri":"https://www.sec.gov/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959-index.htm","type":"Report"},
             {"kind":"ecfr","uri":"https://www.ecfr.gov/current/title-17/section-240.10b-5","type":"Legislation"},
             {"kind":"gleif","uri":"lei:KY37LUS27QQX7BB93L28","type":"Organization"},
+            {"kind":"gleif_search","uri":"https://search.gleif.org/#/record/KY37LUS27QQX7BB93L28","type":"Organization","group_with":"gleif"},
             {"kind":"uk_parliament_bills","uri":"https://bills.parliament.uk/bills/3737","type":"Legislation"},
             {"kind":"swiss_parliament","uri":"https://www.parlament.ch/de/ratsbetrieb/suche-curia-vista/geschaeft?AffairId=20223765","type":"CreativeWork"},
             {"kind":"courtlistener","uri":"https://www.courtlistener.com/opinion/2812209/obergefell-v-hodges/","type":"CreativeWork"},

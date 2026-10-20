@@ -32,7 +32,8 @@ snapshot; a test fails when it is stale.
 | `GET /swagger-ui` | None | Swagger UI (when `api.swagger_ui`) |
 
 URIs are normalized and IDs computed by Pinakes itself: lowercase scheme and host, no default
-port, userinfo or fragment, then BLAKE3. Each URI is at most 2048 bytes; IDs are 32 lowercase hex
+port, userinfo or fragment, then BLAKE3. A fragment stays only where a single-page app routes to one
+object with it: `https://search.gleif.org/#/record/{LEI}` (an alias of `lei:{LEI}`). Each URI is at most 2048 bytes; IDs are 32 lowercase hex
 characters and Pinakes's own, so combine with other indexes by URI. A missing upstream object is a known resource with
 `status: "missing"`, not a 404. `lookup` never fetches an unknown URI; a known overdue resource
 moves to the front of the refresh queue without bypassing its TTL, backoff or final state.

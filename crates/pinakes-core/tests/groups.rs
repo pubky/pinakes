@@ -107,7 +107,8 @@ async fn tag(pool: &PgPool, id: &str, author: &str, label: &str) {
     tx.commit().await.unwrap();
 }
 
-/// ISBN-10 and its ISBN-13, and every DOI spelling, are one resource: the spelling is an alias.
+/// ISBN-10 and its ISBN-13, every DOI spelling, and an LEI's GLEIF pages (the search app's
+/// record route too) are one resource: the spelling is an alias.
 #[sqlx::test(migrations = "../../migrations")]
 async fn identifier_spellings_are_aliases_of_one_resource(pool: PgPool) {
     let root = |uri: &'static str| {
@@ -140,6 +141,28 @@ async fn identifier_spellings_are_aliases_of_one_resource(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(routed, 3, "one routed resource per book or article");
+    let entity = pinakes_core::model::identity("lei:KY37LUS27QQX7BB93L28")
+        .unwrap()
+        .0;
+    for uri in [
+        "https://search.gleif.org/#/record/KY37LUS27QQX7BB93L28",
+        "https://search.gleif.org/#/record/KY37LUS27QQX7BB93L28/relationships",
+        "https://www.gleif.org/lei/KY37LUS27QQX7BB93L28",
+    ] {
+        assert_eq!(root(uri).await, entity, "{uri}");
+    }
+    // Another record is another entity, and the app's own page is neither.
+    assert_ne!(
+        root("https://search.gleif.org/#/record/5493001KJTIIGC8Y1R12").await,
+        entity
+    );
+    let app = root("https://search.gleif.org/#/search/nestle").await;
+    assert_eq!(
+        app,
+        pinakes_core::model::identity("https://search.gleif.org/")
+            .unwrap()
+            .0
+    );
     let mut invalid = ResourceMeta::new("https://example.org/book", "web", 0);
     group_keys::add(&mut invalid, "isbn", "9780140328722");
     group_keys::add(&mut invalid, "doi", "invalid");

@@ -3,11 +3,17 @@
 //! (a card's `uri` and `details.aliases`), never on IDs.
 //!
 //! Normalization uses `url` parsing: lowercase scheme and host, strip default HTTP(S) ports,
-//! userinfo and fragments, and keep the parsed path and query order. Opaque schemes keep their
+//! userinfo and fragments, and keep the parsed path and query order. A fragment stays only when
+//! it is a single-page app's route to one object (`HASH_ROUTES`). Opaque schemes keep their
 //! opaque path without the fragment. When URL parsing fails, a valid RFC 3986 scheme is
 //! lowercased and the remainder kept exactly. The ID is the first 16 bytes of BLAKE3 of the
 //! normalized URI, as lowercase hex.
 use url::Url;
+
+/// Hosts whose pages name an object only in their fragment (a hash router), with the route
+/// prefix that does: such a fragment is the link's one handle on the object, so it stays.
+/// A source reads each route as a spelling of its own identifier (`Source::alias_root`).
+const HASH_ROUTES: &[(&str, &str)] = &[("search.gleif.org", "/record/")];
 
 /// Normalizes a URI for deterministic resource identification.
 /// Returns `(normalized_uri, scheme)`.
@@ -15,7 +21,7 @@ use url::Url;
 /// Rules:
 /// - Lowercase scheme and host
 /// - Strip default ports (80 for http, 443 for https)
-/// - Strip fragments and userinfo
+/// - Strip fragments (except an object's hash route, `HASH_ROUTES`) and userinfo
 /// - Preserve path and query as-is
 /// - Fallback for non-standard schemes that fail URL parsing
 pub fn normalize_uri(uri: &str) -> Result<(String, String), String> {
@@ -82,7 +88,12 @@ fn normalize_parsed_url(parsed: &Url) -> String {
 
     let path = parsed.path();
     let query = parsed.query();
-    // Fragment and userinfo are discarded
+    // Userinfo is discarded, and the fragment unless it routes to an object.
+    let route = parsed.fragment().filter(|f| {
+        HASH_ROUTES
+            .iter()
+            .any(|(h, prefix)| host == *h && f.len() > prefix.len() && f.starts_with(prefix))
+    });
 
     let mut result = format!("{scheme}://{host}");
     if let Some(p) = port {
@@ -92,6 +103,10 @@ fn normalize_parsed_url(parsed: &Url) -> String {
     if let Some(q) = query {
         result.push('?');
         result.push_str(q);
+    }
+    if let Some(f) = route {
+        result.push('#');
+        result.push_str(f);
     }
     result
 }
@@ -115,6 +130,21 @@ mod tests {
         let (uri, scheme) = normalize_uri("HTTPS://Example.COM:443/path?q=1#frag").unwrap();
         assert_eq!(uri, "https://example.com/path?q=1");
         assert_eq!(scheme, "https");
+    }
+
+    #[test]
+    fn test_normalize_keeps_only_an_objects_hash_route() {
+        let (uri, _) =
+            normalize_uri("https://Search.GLEIF.org/#/record/KY37LUS27QQX7BB93L28").unwrap();
+        assert_eq!(
+            uri,
+            "https://search.gleif.org/#/record/KY37LUS27QQX7BB93L28"
+        );
+        // Its other routes (a search) and other hosts' fragments are not objects.
+        let (uri, _) = normalize_uri("https://search.gleif.org/#/search/nestle").unwrap();
+        assert_eq!(uri, "https://search.gleif.org/");
+        let (uri, _) = normalize_uri("https://example.com/#/record/KY37LUS27QQX7BB93L28").unwrap();
+        assert_eq!(uri, "https://example.com/");
     }
 
     #[test]

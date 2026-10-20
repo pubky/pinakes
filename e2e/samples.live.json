@@ -72,6 +72,12 @@
     "type": "Organization"
   },
   {
+    "kind": "gleif_search",
+    "uri": "https://search.gleif.org/#/record/KY37LUS27QQX7BB93L28",
+    "type": "Organization",
+    "group_with": "gleif"
+  },
+  {
     "kind": "uk_parliament_bills",
     "uri": "https://bills.parliament.uk/bills/3737",
     "type": "Legislation"

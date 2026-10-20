@@ -41,7 +41,7 @@ URIs are the contract between the two services; ids are each one's own. Pinakes 
 
 Identity does not fold spellings. Our writers already write one spelling: canonical OSM object URLs and one `geo:` format are writer conventions in the Maps and Events specs, and v1 rejects the `pubky<pk>` short form on the wire. A fold list has no principled end, and every change to it is a backfill in every indexer. The same object under several spellings is an alias in Pinakes, and the same thing under several URIs is a group ([5.3](#document)): both are Pinakes views that never touch ids.
 
-Fragments are stripped, on purpose. The one place a fragment would be the only handle, an event inside a calendar feed, is an occurrence of the feed resource ([5.3](#document)), not a child URI.
+Fragments are stripped, on purpose. An event inside a calendar feed, whose fragment would be its only handle, is an occurrence of the feed resource ([5.3](#document)), not a child URI. The exception is a single-page app that names an object only in its hash route: there the fragment is the link's one handle, so identity keeps it for the listed routes (`HASH_ROUTES` in `identity`: GLEIF's `search.gleif.org/#/record/{LEI}`), and the source reads it as an alias of its identifier. Every other fragment, an in-page anchor such as an eCFR paragraph or a Fedlex article, stays stripped.
 
 
 ## 4. What Pinakes needs from Nexus {#nexus}
