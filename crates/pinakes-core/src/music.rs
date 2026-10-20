@@ -298,11 +298,11 @@ pub fn parse(uri: &str) -> Option<Link> {
             }
             _ => None,
         },
-        _ if host.starts_with("music.amazon.") => {
+        _ if host
+            .strip_prefix("music.amazon.")
+            .is_some_and(|tld| AMAZON_MUSIC_TLDS.contains(&tld)) =>
+        {
             let tld = &host["music.amazon.".len()..];
-            if !tld.bytes().all(|b| b.is_ascii_lowercase() || b == b'.') || tld.is_empty() {
-                return None;
-            }
             let (kind, id) = match segments.as_slice() {
                 ["albums", id] => match query("trackAsin") {
                     Some(track) => ("tracks", track),
@@ -428,6 +428,12 @@ fn length(iso: &str) -> Option<String> {
         format!("{m}:{s:02}")
     })
 }
+
+/// Amazon Music's own hosts, `music.amazon.{tld}`: any other `music.amazon.` host is someone
+/// else's.
+const AMAZON_MUSIC_TLDS: &[&str] = &[
+    "com", "co.uk", "de", "fr", "it", "es", "ca", "com.au", "co.jp", "in", "com.br", "com.mx",
+];
 
 /// SoundCloud pages that are not tracks.
 const SOUNDCLOUD_PAGES: &[&str] = &[
@@ -866,6 +872,9 @@ mod tests {
             "https://evil.bandcamp.com.example/album/x",
             "https://a.b.bandcamp.com/album/x",
             "https://music.amazon.com/search/x",
+            "https://music.amazon.evil.com/tracks/B0ABCDEFGH",
+            "https://music.amazon.com.evil.example/tracks/B0ABCDEFGH",
+            "https://music.amazon.co/tracks/B0ABCDEFGH",
             "ftp://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq",
         ] {
             assert!(parse(uri).is_none(), "{uri}");

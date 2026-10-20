@@ -505,7 +505,8 @@ root, and a read, lookup, change query or occurrence read of the alias answers w
   `https://tidal.com/{kind}/{id}`; Qobuz store album
   pages → `https://open.qobuz.com/{kind}/{id}`; SoundCloud (`m.`, any letter case, parameters) →
   `https://soundcloud.com/{user}/{track}`; Amazon Music (`albums/{id}?trackAsin=` naming that
-  track) → `https://music.amazon.{tld}/{kind}/{id}`; Bandcamp without parameters. Short links
+  track; Amazon's own hosts only, `music.amazon.com`, `.co.uk`, `.de`, `.fr`, `.it`, `.es`, `.ca`,
+  `.com.au`, `.co.jp`, `.in`, `.com.br`, `.com.mx`) → `https://music.amazon.{tld}/{kind}/{id}`; Bandcamp without parameters. Short links
   that need a request to expand (`spotify.link`, `deezer.page.link`, `on.soundcloud.com`) are not
   folded.
 - **Wikipedia articles**: the mobile host, `index.php?title=…` (a revision with `oldid` too),
