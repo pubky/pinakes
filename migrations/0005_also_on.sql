@@ -126,8 +126,9 @@ $$;
 -- own). `members` false (groups switched off) leaves the group out. Read at
 -- request time: OSM-derived values never enter these tables.
 -- A card (`per_site`) shows one link per music service: a tagged member first (the one on the
--- recording's original album, then by ID), then the derived link most members name. Members that
--- are not music always show. The details read (`per_site` false) lists them all.
+-- recording's original album, then by ID), then the derived link most members name. The card's
+-- own service has its link, the card, so it shows no other page there. Members that are not music
+-- always show. The details read (`per_site` false) lists them all.
 CREATE FUNCTION also_on(unit text, resource text, cap integer, members boolean, per_site boolean DEFAULT true) RETURNS jsonb
     LANGUAGE sql STABLE
     AS $$
@@ -160,7 +161,9 @@ CREATE FUNCTION also_on(unit text, resource text, cap integer, members boolean, 
      CASE WHEN music AND site IS NOT NULL THEN lower(site) ELSE 'member:'||id END AS service,
      jsonb_build_object('id',id,'uri',uri,'host',host,'site',site) AS e FROM tagged
    UNION ALL SELECT 2,lower(site),uri,-named,lower(site),jsonb_strip_nulls(jsonb_build_object('uri',uri,'site',site,'derived',true,'via',via,'kind',kind,'at',at)) FROM derived),
- shown AS (SELECT * FROM (SELECT *,row_number() OVER (PARTITION BY service ORDER BY o,rank,k2) AS nth FROM entries) x WHERE NOT per_site OR nth=1)
+ own AS (SELECT lower(r.doc->>'site') AS service FROM resource r WHERE r.id=also_on.resource),
+ shown AS (SELECT * FROM (SELECT *,row_number() OVER (PARTITION BY service ORDER BY o,rank,k2) AS nth FROM entries) x
+   WHERE NOT per_site OR (nth=1 AND service IS DISTINCT FROM (SELECT service FROM own)))
  SELECT coalesce((SELECT jsonb_agg(e ORDER BY o,k1,k2) FROM (SELECT * FROM shown ORDER BY o,k1,k2 LIMIT cap) x),'[]'::jsonb)
 $$;
 

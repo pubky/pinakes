@@ -1345,3 +1345,42 @@ async fn a_card_shows_one_link_per_service(pool: PgPool) {
     assert_eq!(of(&read["details"]["also_on"], "TIDAL"), [tagged, regional]);
     assert_eq!(of(&read["details"]["also_on"], "Spotify").len(), 2);
 }
+
+/// A card's own service has its link, the card: Radiohead's Discogs artist never shows "On A
+/// Friday", the band's earlier name, which Wikidata lists as another Discogs ID. Its details do.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_card_shows_no_other_page_of_its_own_service(pool: PgPool) {
+    let artist = "https://www.discogs.com/artist/3840";
+    let earlier = "https://www.discogs.com/artist/840842";
+    let spotify = "https://open.spotify.com/artist/4Z8W4fKeB5YxbusRsdQVPb";
+    let id = store::ensure_resource(&pool, artist).await.unwrap();
+    let mut d = ResourceMeta::new(artist, "web", 86400);
+    d.set_type("MusicGroup");
+    d.site = "Discogs".into();
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let hub = Fake::new("music");
+    hub.answer(
+        artist,
+        Ok(Found {
+            keys: vec![key("wikidata:Q44190")],
+            links: vec![
+                Link::new(earlier, "Discogs", "wikidata"),
+                Link::new(spotify, "Spotify", "wikidata"),
+            ],
+            ..Default::default()
+        }),
+    );
+    let sources: Vec<Arc<dyn Source>> = vec![hub];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let read = get(&app, &format!("/v1/resources/{id}")).await;
+    let uris = |also: &Value| -> Vec<String> {
+        also.as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["uri"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(uris(&read["also_on"]), [spotify], "{read}");
+    assert_eq!(uris(&read["details"]["also_on"]), [earlier, spotify]);
+}
