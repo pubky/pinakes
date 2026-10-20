@@ -80,13 +80,12 @@ pub fn qid(s: &str) -> Option<String> {
     .then(|| s.to_owned())
 }
 
-/// A hub's answer as JSON: `None` for 404, a retry for 429/503 (and other 5xx), an error for
-/// anything else that is not 200 JSON.
+/// A hub's answer as JSON: `None` for 404, a retry for 429/503 (and other 5xx) and for an API
+/// error Wikidata sends with 200 (`ratelimited`, `maxlag`; an unknown ID is an answer), an error
+/// for anything else that is not 200 JSON.
 fn json(fetched: &Fetched, hub: &'static str) -> Result<Option<Value>> {
-    match fetched.status {
-        200 => Ok(Some(serde_json::from_slice(&fetched.body)?)),
-        404 => Ok(None),
-        429 | 500..=599 => Err(RetryLater {
+    let busy = || -> anyhow::Error {
+        RetryLater {
             class: if hub == "musicbrainz" {
                 "musicbrainz_busy"
             } else {
@@ -94,7 +93,18 @@ fn json(fetched: &Fetched, hub: &'static str) -> Result<Option<Value>> {
             },
             seconds: fetched.retry_after_secs.clamp(60, 3600),
         }
-        .into()),
+        .into()
+    };
+    match fetched.status {
+        200 => {
+            let v: Value = serde_json::from_slice(&fetched.body)?;
+            match v["error"]["code"].as_str() {
+                Some(code) if hub == "wikidata" && code != "no-such-entity" => Err(busy()),
+                _ => Ok(Some(v)),
+            }
+        }
+        404 => Ok(None),
+        429 | 500..=599 => Err(busy()),
         status => bail!("{hub} answered {status}"),
     }
 }
@@ -631,6 +641,28 @@ mod tests {
     fn fixture(name: &str) -> Value {
         let path = format!("{}/tests/fixtures/hubs/{name}", env!("CARGO_MANIFEST_DIR"));
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    /// Wikidata sends a rate limit as a 200 with an `error`: busy, never "no item".
+    #[test]
+    fn a_wikidata_error_sent_with_200_is_busy() {
+        let answer = |body: &str| Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            validators: Default::default(),
+            url: url::Url::parse("https://www.wikidata.org/w/api.php").unwrap(),
+            status: 200,
+            retry_after_secs: 5,
+            location: None,
+            content_type: "application/json".into(),
+            body: body.as_bytes().to_vec(),
+        };
+        let limited = answer(r#"{"error":{"code":"ratelimited","info":"slow down"}}"#);
+        let err = json(&limited, "wikidata").unwrap_err();
+        assert!(err.downcast_ref::<RetryLater>().is_some(), "{err:#}");
+        let unknown = answer(r#"{"error":{"code":"no-such-entity","id":"Q0"}}"#);
+        assert!(json(&unknown, "wikidata").unwrap().is_some());
+        assert!(json(&limited, "musicbrainz").unwrap().is_some());
     }
 
     #[test]
