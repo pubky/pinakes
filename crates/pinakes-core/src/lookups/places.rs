@@ -28,10 +28,10 @@ fn osm_property(osm: &OsmId) -> Option<&'static str> {
     }
 }
 
-/// Whether an OSM object tagged `wikidata=<tag>` and the item fetched for that tag point at
-/// each other: the item is the tagged one (not a redirect target) and one of its best-rank
-/// OSM statements names this object.
-pub fn mutual(osm: &OsmId, tag: &str, item: &Value) -> bool {
+/// Whether an OSM object tagged `wikidata=<tag>` is named back by the item fetched for that
+/// tag: the item is the tagged one (not a redirect target) and one of its best-rank OSM
+/// statements names this object.
+pub fn names(osm: &OsmId, tag: &str, item: &Value) -> bool {
     let Some(qid) = wikidata_tag(tag) else {
         return false;
     };
@@ -41,15 +41,36 @@ pub fn mutual(osm: &OsmId, tag: &str, item: &Value) -> bool {
             .is_some_and(|pid| wikidata::best_values(item, pid).contains(&id.as_str()))
 }
 
-/// What a place card takes from its item: both keys, the item's place links and its Wikipedia
-/// articles. Empty unless the two point at each other.
+/// The OSM objects an item's best-rank statements name, of every type (`node/1`, `way/2`).
+fn objects(item: &Value) -> std::collections::BTreeSet<String> {
+    [("node", "P11693"), ("way", "P10689"), ("relation", "P402")]
+        .into_iter()
+        .flat_map(|(kind, pid)| {
+            wikidata::best_values(item, pid)
+                .into_iter()
+                .map(move |id| format!("{kind}/{id}"))
+        })
+        .collect()
+}
+
+/// Whether an OSM object and its tagged item point at each other one to one: the item names
+/// this object back and no other OSM object (Berlin's item names a node and a relation, so
+/// neither is the item's one object).
+pub fn mutual(osm: &OsmId, tag: &str, item: &Value) -> bool {
+    names(osm, tag, item) && objects(item).into_iter().eq([osm.key()])
+}
+
+/// What a place card takes from its item: the item's place links and its Wikipedia articles
+/// when the item names the object back, and both keys only when the two are one to one.
 pub fn from_item(osm: &OsmId, tag: &str, item: &Value) -> Found {
     let mut found = Found::default();
-    if !mutual(osm, tag, item) {
+    if !names(osm, tag, item) {
         return found;
     }
-    found.push_key(key(osm));
-    found.push_key(wikidata::key(tag));
+    if mutual(osm, tag, item) {
+        found.push_key(key(osm));
+        found.push_key(wikidata::key(tag));
+    }
     for link in wikidata::links(item, wikidata::PLACE)
         .into_iter()
         .chain(wikidata::wikipedia(item))
@@ -174,10 +195,9 @@ mod tests {
             &tags["relation/2888417"],
             &items["Q7024"],
         );
-        assert_eq!(
-            lugano.keys.iter().map(Key::as_str).collect::<Vec<_>>(),
-            ["osm:relation/2888417", "wikidata:Q7024"]
-        );
+        // Lugano's item names its relation and a node: links, but neither object is the item.
+        assert!(lugano.keys.is_empty());
+        assert!(!mutual(&osm("relation/2888417"), "Q7024", &items["Q7024"]));
         assert_eq!(lugano.links[0].uri, "https://www.lugano.ch/");
         assert!(lugano
             .links
@@ -189,13 +209,18 @@ mod tests {
             &tags["node/9984134345"],
             &items["Q153306"],
         );
-        assert_eq!(museum.keys[0].as_str(), "osm:node/9984134345");
+        // The museum's item names this one node: one to one, both keys.
+        assert_eq!(
+            museum.keys.iter().map(Key::as_str).collect::<Vec<_>>(),
+            ["osm:node/9984134345", "wikidata:Q153306"]
+        );
         assert!(museum.links.iter().any(|l| l.site == "Yelp"));
         let archives = from_item(
             &osm("way/70417858"),
             &tags["way/70417858"],
             &items["Q38945047"],
         );
+        assert_eq!(archives.keys[0].as_str(), "osm:way/70417858");
         assert!(archives.links.iter().any(|l| l.site == "Apple Maps"));
 
         // One side only: the item does not name this object, or the tag names another item.

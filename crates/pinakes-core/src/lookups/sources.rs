@@ -106,8 +106,9 @@ fn osm_tag(subject: &Subject) -> Option<String> {
     places::wikidata_tag(tag.trim()).map(str::to_owned)
 }
 
-/// An OSM object tagged `wikidata=Q…` whose item names it back: both keys, and the item's
-/// Wikidata page, official website, maps and Wikipedia editions as derived links.
+/// An OSM object tagged `wikidata=Q…` whose item names it back: the item's Wikidata page,
+/// official website, maps and Wikipedia editions as derived links, and both keys when the item
+/// names no other OSM object.
 pub struct OsmWikidata;
 #[async_trait]
 impl Source for OsmWikidata {
@@ -127,11 +128,10 @@ impl Source for OsmWikidata {
         let Some((raw, hub)) = item(cx, &qid).await? else {
             return Ok(also_on::Found::default());
         };
-        let found = places::from_item(&osm, &qid, &raw);
-        if found.keys.is_empty() {
+        if !places::names(&osm, &qid, &raw) {
             return Ok(also_on::Found::default());
         }
-        let found = found.into_also_on("wikidata");
+        let found = places::from_item(&osm, &qid, &raw).into_also_on("wikidata");
         let mut links = vec![also_on::Link::new(
             format!("https://www.wikidata.org/wiki/{qid}"),
             "Wikidata",
@@ -953,8 +953,9 @@ mod tests {
         let node = subject("https://www.openstreetmap.org/node/240109189", Some("Q64"));
         assert!(OsmWikidata.applies(&node));
         let found = OsmWikidata.lookup(&cx, &node).await.unwrap();
-        let keys: Vec<&str> = found.keys.iter().map(|k| k.key.as_str()).collect();
-        assert_eq!(keys, ["osm:node/240109189", "wikidata:Q64"]);
+        // Berlin's item names this node and relation 62422 (P402): not one to one, so links
+        // only, and neither object joins the item.
+        assert!(found.keys.is_empty());
         let sites: Vec<&str> = found.links.iter().map(|l| l.site.as_str()).collect();
         assert_eq!(
             &sites[..6],
@@ -972,10 +973,10 @@ mod tests {
         assert_eq!(sites[6], "Wikipedia (de)");
         assert!(found.links.iter().all(|l| l.via == "wikidata"));
 
-        // The item names the relation too (P402).
         let relation = subject("https://www.openstreetmap.org/relation/62422", Some("Q64"));
         let found = OsmWikidata.lookup(&cx, &relation).await.unwrap();
-        assert_eq!(found.keys[0].key, "osm:relation/62422");
+        assert!(found.keys.is_empty());
+        assert_eq!(found.links[0].uri, "https://www.wikidata.org/wiki/Q64");
 
         // An object tagged with an item that does not name it back: nothing.
         let other = subject("https://www.openstreetmap.org/node/1", Some("Q64"));
