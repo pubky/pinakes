@@ -743,7 +743,9 @@ is looked up exactly, never by title or name. A key comes from a hub (MusicBrain
 from a known music service's own record of its own object; another host's claim (its JSON-LD
 `isrcCode`, `sameAs`, a canonical link) is a fact at most.
 - `service`: the ISRC a music service's own track page states (TIDAL's JSON-LD `isrcCode`), as
-  the key `isrc:…` (`via` the service).
+  the key `isrc:…` (`via` the service). A track whose ISRC nobody else knows (not MusicBrainz,
+  not another link) stays alone with its key, and joins as soon as another link or MusicBrainz
+  carries the same ISRC.
 - `musicbrainz`: what MusicBrainz relates the link to (one recording, release or release group,
   or artist; several are ambiguous and give nothing), that entity's current links on music
   services, and its MBIDs, the recording's ISRCs (up to eight) and the release's barcode as keys
