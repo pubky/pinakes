@@ -85,7 +85,7 @@ impl Resolver for PubkyResolver {
             // Homeservers serve many objects as `application/octet-stream`; `card` reads JSON
             // whatever the declared type.
             let options = FetchOptions {
-                headers: vec![("pubky-host".into(), owner.to_z32())],
+                headers: vec![("pubky-host", owner.to_z32())],
                 accept: Some(format!(
                     "{}, application/octet-stream",
                     super::egress::ALLOWED_TYPES.join(", ")
@@ -277,7 +277,7 @@ mod tests {
         }
     }
     /// A request's URL and headers.
-    type Request = (String, Vec<(String, String)>);
+    type Request = (String, Vec<(&'static str, String)>);
     /// Answers every request with `status` (and a `Location` for a redirect), recording it.
     #[derive(Default)]
     struct Homeserver {
@@ -404,7 +404,7 @@ mod tests {
             *homeserver.requests.lock().unwrap(),
             [(
                 "https://homeserver.example:9443/pub/other.app/item".to_owned(),
-                vec![("pubky-host".to_owned(), owner.public_key().to_z32())]
+                vec![("pubky-host", owner.public_key().to_z32())]
             )]
         );
     }

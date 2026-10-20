@@ -28,6 +28,10 @@ pub struct Recipe {
     pub expect: String,
     /// The card's type once resolved, for a `/v1/resolve` example.
     pub card_type: Option<String>,
+    /// The official-API source whose example this is (`crate::sources`); its page in
+    /// docs/sources lists it.
+    #[serde(skip)]
+    pub source: Option<&'static str>,
 }
 
 #[derive(Deserialize)]
@@ -35,12 +39,33 @@ struct File {
     recipes: Vec<Recipe>,
 }
 
-/// Every recipe, with `id(URI)` and `group(URI,...)` expanded to IDs.
+/// Every recipe, with `id(URI)` and `group(URI,...)` expanded to IDs: the catalogue file's, then
+/// each official-API source's examples (`sources::Source::examples`).
 pub fn recipes() -> Vec<Recipe> {
     let file: File = serde_json::from_str(include_str!("../../../data/api-recipes.json"))
         .expect("data/api-recipes.json");
+    let sources = crate::sources::REGISTRY.iter().flat_map(|source| {
+        source
+            .examples()
+            .iter()
+            .enumerate()
+            .map(|(n, example)| Recipe {
+                name: format!("resolve-{}-{}", source.name().replace('_', "-"), n + 1),
+                summary: example.uri.into(),
+                labels: BTreeMap::new(),
+                method: "POST".into(),
+                path: "/v1/resolve".into(),
+                params: BTreeMap::new(),
+                query: BTreeMap::new(),
+                body: Some(json!({ "uri": example.uri })),
+                expect: "card".into(),
+                card_type: Some(example.card_type.into()),
+                source: Some(source.name()),
+            })
+    });
     file.recipes
         .into_iter()
+        .chain(sources)
         .map(|mut r| {
             r.params.values_mut().for_each(|v| *v = expand(v));
             r.query.values_mut().for_each(|v| *v = expand(v));

@@ -46,6 +46,132 @@
     "type": "VideoObject"
   },
   {
+    "kind": "federal_register",
+    "uri": "fr:2026-18291",
+    "type": "Legislation"
+  },
+  {
+    "kind": "federal_register_page",
+    "uri": "https://www.federalregister.gov/documents/2026/09/09/2026-18291/self-regulatory-organizations-nasdaq-texas-llc-notice-of-filing-and-order-granting-accelerated",
+    "type": "Legislation",
+    "group_with": "federal_register"
+  },
+  {
+    "kind": "sec",
+    "uri": "https://www.sec.gov/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959-index.htm",
+    "type": "Report"
+  },
+  {
+    "kind": "ecfr",
+    "uri": "https://www.ecfr.gov/current/title-17/section-240.10b-5",
+    "type": "Legislation"
+  },
+  {
+    "kind": "gleif",
+    "uri": "lei:KY37LUS27QQX7BB93L28",
+    "type": "Organization"
+  },
+  {
+    "kind": "uk_parliament_bills",
+    "uri": "https://bills.parliament.uk/bills/3737",
+    "type": "Legislation"
+  },
+  {
+    "kind": "swiss_parliament",
+    "uri": "https://www.parlament.ch/de/ratsbetrieb/suche-curia-vista/geschaeft?AffairId=20223765",
+    "type": "CreativeWork"
+  },
+  {
+    "kind": "courtlistener",
+    "uri": "https://www.courtlistener.com/opinion/2812209/obergefell-v-hodges/",
+    "type": "CreativeWork"
+  },
+  {
+    "kind": "legislation_gov_uk",
+    "uri": "https://www.legislation.gov.uk/ukpga/2018/12/contents",
+    "type": "Legislation"
+  },
+  {
+    "kind": "eur_lex",
+    "uri": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32016R0679",
+    "type": "Legislation"
+  },
+  {
+    "kind": "fedlex",
+    "uri": "https://www.fedlex.admin.ch/eli/cc/1999/404/de",
+    "type": "Legislation"
+  },
+  {
+    "kind": "zefix",
+    "uri": "https://register.ld.admin.ch/zefix/company/126286",
+    "type": "Organization"
+  },
+  {
+    "kind": "govinfo",
+    "uri": "https://www.govinfo.gov/app/details/PLAW-117publ58",
+    "type": "Legislation"
+  },
+  {
+    "kind": "stacker_news",
+    "uri": "https://stacker.news/items/1596515",
+    "type": "DiscussionForumPosting"
+  },
+  {
+    "kind": "hacker_news",
+    "uri": "https://news.ycombinator.com/item?id=8863",
+    "type": "DiscussionForumPosting"
+  },
+  {
+    "kind": "lobsters",
+    "uri": "https://lobste.rs/s/wtthju/a5_v1_0",
+    "type": "DiscussionForumPosting"
+  },
+  {
+    "kind": "bluesky",
+    "uri": "https://bsky.app/profile/bsky.app/post/3mxzez2m7wk2r",
+    "type": "SocialMediaPosting"
+  },
+  {
+    "kind": "mastodon",
+    "uri": "https://mastodon.social/@Gargron/1",
+    "type": "SocialMediaPosting"
+  },
+  {
+    "kind": "discourse",
+    "uri": "https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304",
+    "type": "DiscussionForumPosting"
+  },
+  {
+    "kind": "forgejo",
+    "uri": "https://codeberg.org/forgejo/forgejo/src/branch/forgejo/README.md",
+    "type": "SoftwareSourceCode"
+  },
+  {
+    "kind": "gitlab",
+    "uri": "https://gitlab.com/inkscape/inkscape/-/blob/master/README.md",
+    "type": "SoftwareSourceCode"
+  },
+  {
+    "kind": "wordpress",
+    "uri": "https://bitcoinmagazine.com/markets/no-uptober-yet-as-bitcoin-slips",
+    "type": "Article"
+  },
+  {
+    "kind": "ghost",
+    "uri": "https://www.privacyguides.org/news/2026/10/19/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/",
+    "type": "Article"
+  },
+  {
+    "kind": "public_inbox",
+    "uri": "https://lore.kernel.org/git/pull.2458.git.git.1792437798463.gitgitgadget@gmail.com/",
+    "type": "EmailMessage"
+  },
+  {
+    "kind": "feed",
+    "uri": "https://www.theblock.co/news/business/2026-10-19-mesh-visa-partner-spend-crypto-stablecoins-421058",
+    "type": "Article"
+  },
+  {
     "kind": "web",
     "uri": "https://example.org/",
     "type": "WebPage"

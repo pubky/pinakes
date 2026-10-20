@@ -1,0 +1,48 @@
+{
+  "not-discourse": {
+    "bytes": 577,
+    "content_type": "text/html; charset=utf-8",
+    "file": "not-discourse.html",
+    "recorded_at": "2026-10-19T17:34:10+00:00",
+    "sha256": "25ddf2c883e0d1958ea971d279a7e4f0fd446724ee3db7db19dadabd4a62e484",
+    "status": 404,
+    "url": "https://example.org/t/304.json"
+  },
+  "post-790": {
+    "bytes": 2155,
+    "content_type": "application/json; charset=utf-8",
+    "file": "post-790.json",
+    "recorded_at": "2026-10-19T17:34:07+00:00",
+    "sha256": "83c5dfe19c6ea9315c8e61aecd28e5e3ceaaf3719007fb279fbfb61069ececf5",
+    "status": 200,
+    "url": "https://delvingbitcoin.org/posts/790.json"
+  },
+  "topic-304": {
+    "bytes": 64928,
+    "content_type": "application/json; charset=utf-8",
+    "file": "topic-304.json",
+    "note": "Delving Bitcoin (Discourse) topic JSON.",
+    "recorded_at": "2026-10-19T17:34:04+00:00",
+    "sha256": "a63e616367f6d53839c7f9394016caea3dc36942df16d9fc9f2bb6b12904b2af",
+    "status": 200,
+    "url": "https://delvingbitcoin.org/t/304.json"
+  },
+  "topic-304-2": {
+    "bytes": 64928,
+    "content_type": "application/json; charset=utf-8",
+    "file": "topic-304-2.json",
+    "recorded_at": "2026-10-19T17:34:06+00:00",
+    "sha256": "5651df4b2605914b7b418da143fe4bd4c47d8f010244bd1892aac0ea9fbfc345",
+    "status": 200,
+    "url": "https://delvingbitcoin.org/t/304/2.json"
+  },
+  "topic-missing": {
+    "bytes": 16823,
+    "content_type": "application/json; charset=utf-8",
+    "file": "topic-missing.json",
+    "recorded_at": "2026-10-19T17:34:09+00:00",
+    "sha256": "93115297bfde86cf8e39c6f2da2c40494c251c8f12423d0dca1e234217876422",
+    "status": 404,
+    "url": "https://delvingbitcoin.org/t/999999.json"
+  }
+}

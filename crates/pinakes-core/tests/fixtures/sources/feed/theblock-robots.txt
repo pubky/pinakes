@@ -1,0 +1,33 @@
+User-agent: *
+Content-Signal: search=yes, ai-input=yes, ai-train=yes
+Disallow: /search
+Disallow: /api/
+Disallow: /preview/
+Disallow: /wp-json/
+Disallow: /ping
+Disallow: /ws/
+Disallow: /tbco/prebid.js
+Disallow: /.well-known/assetlinks.json
+Clean-param: utm_source&utm_medium&utm_campaign&utm_term&utm_content&start&return_link&currency
+
+User-agent: GPTBot
+User-agent: ClaudeBot
+User-agent: CCBot
+User-agent: PerplexityBot
+User-agent: Amazonbot
+User-agent: Meta-ExternalAgent
+User-agent: Bytespider
+User-agent: Applebot-Extended
+Content-Signal: search=yes, ai-input=yes, ai-train=yes
+Disallow: /search
+Disallow: /api/
+Disallow: /preview/
+Disallow: /wp-json/
+Disallow: /ping
+Disallow: /ws/
+Disallow: /_tbp/
+Disallow: /tbco/
+
+Sitemap: https://www.theblock.co/sitemap_tbco_index.xml
+Sitemap: https://www.theblock.co/sitemap_tbco_news.xml
+Sitemap: https://www.theblock.co/sitemap_tbco_videos.xml

@@ -141,6 +141,25 @@ redirects count). `egress.allow_hosts` and `egress.deny_hosts` take exact names 
 decoded body; an oversized page keeps its head metadata with a `truncated` warning. Requests
 time out after ten seconds. Images stay origin URLs and are never fetched.
 
+Every request introduces itself as `pinakes/<version> (+https://pubky.app; <contact>)`, with
+`http.contact` as the contact (`info@synonym.to` in the example configuration; without one,
+`pinakes/<version> (+https://pubky.app)`). Set it to an address the services you read can reach:
+some refuse requests without one, and the links of the sources that need it (SEC EDGAR) wait
+until it is set. The User-Agent never names a code-hosting site, which some
+services refuse as an undeclared tool. Event platform adapters that need a browser profile keep
+their own User-Agent.
+
+The official-API sources ([docs/sources](sources/README.md)) run on the `official` card route
+(`[cards.official]`), each with its own switch, `[sources.<name>] enabled` (on by default;
+`PINAKES__SOURCES__<NAME>__ENABLED=false`); a switched-off source's links get ordinary web cards
+and its address rules no longer merge new links (links it merged before stay merged). A source
+lowers its service's host to the service's published rate (never above
+`limits.host_requests_per_second`) unless `limits.host_rates` names the host, and a request that
+would wait more than five seconds for its host (its slot, or the request ahead of it) is retried
+later instead of timing out; a redirect within the host keeps the slot it has. After an upgrade
+that adds a source, run `pinakesd reextract web official`: links already known get their source's
+card.
+
 Two clients are outside that policy. Nominatim and Nexus are trusted, operator-configured
 upstreams at fixed URLs that no reference can change: their clients do not apply the web DNS
 pinning or the private-address refusal (Nexus defaults to loopback), so configure their URLs and
@@ -274,21 +293,25 @@ only for calendars, where they commit with the parsed snapshot.
 
 ## Web pages and access walls
 
-Generic web resolution reads JSON-LD, microformats, OpenGraph, oEmbed and the title. Canonical,
-alternate and oEmbed links come from the document head only. Media pages use the pinned
-390-provider oEmbed registry (`data/`): `media.oembed = "when_needed"` (default) asks
-path-specific providers first and broad patterns only for an incomplete, failed or truncated
-page; `"always"` also fetches every matching provider and trusted page-advertised endpoints,
-which must share the page's origin or its registry provider. Healthy page JSON-LD stays
-authoritative and oEmbed fills gaps. `web.discover_feeds` (web pages) and
-`cards.media.discover_feeds` (media pages: podcast feed scanning) follow RSS alternates on pages
-without a typed card. Discovery decisions are counted in
-`pinakes_discovery_decisions_total{kind,decision}`.
+Generic web resolution reads JSON-LD, microformats, OpenGraph, oEmbed and the title, then the
+page hooks of switched-on sources (WordPress and Ghost records a page names on its own origin;
+see [docs/sources](sources/README.md)). Canonical, alternate and oEmbed links come from the
+document head only. Media pages use the pinned 390-provider oEmbed registry (`data/`, with
+SoundCloud, TikTok, Facebook and Instagram skipped; `scripts/oembed-providers` updates it):
+`media.oembed = "when_needed"` (default) asks path-specific providers first and broad patterns
+only for an incomplete, failed or truncated page; `"always"` also fetches every matching
+provider and trusted page-advertised endpoints, which must share the page's origin or its
+registry provider. Healthy page JSON-LD stays authoritative and oEmbed fills gaps.
+`web.discover_feeds` (web pages) and `cards.media.discover_feeds` (media pages: podcast feed
+scanning) follow RSS alternates on pages without a typed card. Discovery decisions are counted
+in `pinakes_discovery_decisions_total{kind,decision}`.
 
 A challenge page (a bot wall, captcha or sign-in redirect) is a failed fetch: the resource turns
 `unreachable` and is retried with the normal backoff, dead-lettering after
-`limits.max_failures`. Its last accepted document, event dates and feed occurrences stay, and a
-wall never counts toward a disappearance. Fetches that hit one count as outcome `blocked` in
+`limits.max_failures`, unless the site's own feed lists the exact link (the
+[`feed`](sources/feed.md) wall hook, also for plain 401 and 403 answers); then that item is the
+card. Its last accepted document, event dates and feed occurrences stay, and a wall never counts
+toward a disappearance. Fetches that hit one count as outcome `blocked` in
 `pinakes_fetch_total`.
 
 The markers are the built-in `data/interstitial-markers.json` (text markers, captcha selectors,
@@ -424,7 +447,7 @@ changes, canaries, the queue, ingestion lag and grouping. Admin `GET /v1/info` h
 manifests, resolver status, counts, ingestion, source and canary state; public `/v1/info` shows
 only the version, what the instance resolves, the limits a client must respect and the OSM
 licence. Stored errors are sanitized classes (dns, connect, timeout, http_4xx, http_5xx, parse,
-policy). Admin info and database metrics are cached for 15 seconds.
+policy; rate_limited for a link waiting for its host's budget). Admin info and database metrics are cached for 15 seconds.
 
 Canaries (`canary.enabled`) run every `limits.canary_interval_secs`, first one interval after
 startup, on the ordinary workers and host budgets; their state survives restarts and they never

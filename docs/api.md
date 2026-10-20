@@ -51,9 +51,9 @@ before rendering them as HTML.
 | `id` | Resource ID; for an occurrence, the feed's ID |
 | `uri` | The resource URI; for an occurrence, its own URL when it has one, else the feed's. To combine with Nexus, send `uri`, and for an occurrence `occurrence.feed_uri` (its own URL was never tagged) |
 | `status` | Fetch health: `ok`, `pending`, `missing`, `unreachable` or `error` |
-| `type` | schema.org type (`MusicEvent`, `Book`, `Place`, …) |
+| `type` | schema.org type (`MusicEvent`, `Book`, `Place`, …), or one of Pinakes's own types for what schema.org has no class for: `BitcoinBlock`, `BitcoinTransaction`, `BitcoinAddress`, `LightningNode` and `LightningChannel` (not schema.org; each a child of `Thing`) |
 | `name`, `description`, `image` | Display metadata; images point to the origin and are never proxied |
-| `site` | The publishing host; for `pubky://` objects the app path segment (`mapky.app`), not the public key |
+| `site` | The publishing host; for `pubky://` objects the app path segment (`mapky.app`), not the public key; for a card read from an official API without a host of its own, the service's name (`Federal Register`) |
 | `point` | `{lat, lon}` |
 | `start`, `end` | RFC 3339 instants for events and occurrences |
 | `group` | When the resource or occurrence is in a [group](#groups): `{id, size, members}`, `members` naming up to eight others as `{id, uri, site}`: other resources first (one entry each, by ID), then other occurrences of its own feed; else `null`. A hint only: every member keeps its own card |
@@ -81,6 +81,8 @@ body, and answer `If-None-Match` with 304.
 | `attendance` | `offline`, `online` or `mixed` |
 | `venue` | `{name, id}`: the venue's name and, when it resolved to a resource, its ID |
 | `organizer` | `{name, url}` |
+| `from` | Where the card's metadata came from when it is not the page itself: the [source](#sources) whose official API answered, e.g. `federal_register` |
+| `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …); lists are joined with `; `. Each source's page lists its facts |
 | `aliases` | Other spellings of this link that resolve to it ([aliases](#aliases)), at most 50; a page's own `url`, `@id`, `sameAs` or canonical claims are not aliases and are not listed |
 | `updated_at` | When the current metadata was accepted |
 
@@ -214,7 +216,6 @@ of the same URIs and checks that this list matches.
 | `POST /v1/resolve {"uri":"https://dx.doi.org/10.1038/nature12373"}` | ScholarlyArticle |
 | `POST /v1/resolve {"uri":"https://www.nature.com/articles/nature12373"}` | ScholarlyArticle |
 | `POST /v1/resolve {"uri":"doi:10.1038/nphys1170"}` | ScholarlyArticle |
-| `POST /v1/resolve {"uri":"https://mastodon.social/@Gargron/1"}` | SocialMediaPosting |
 | `POST /v1/resolve {"uri":"nostr:note1qqqdltcknk9rq52w5xq5srdx3znx4cvr4nmst5xz2rtwkm87ay9qeuwqtd"}` | SocialMediaPosting |
 | `POST /v1/resolve {"uri":"pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G"}` | SocialMediaPosting |
 | `POST /v1/resolve {"uri":"pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/reviews/00355XPM88EHG"}` | SocialMediaPosting |
@@ -339,7 +340,7 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 
 | Parameter | Meaning |
 | --- | --- |
-| `q` | Full-text name/description search with a trigram/partial-name fallback; at most 256 bytes |
+| `q` | Full-text name/description search with a trigram/partial-name fallback; at most 256 bytes. A post whose author opted out of search indexing (`details.facts.opted_out`: Mastodon's `indexable: false` or `noindex`, Bluesky's `!no-unauthenticated`) never matches |
 | `type` | A schema.org type, ancestors included (`Event` matches `MusicEvent`; `Place` matches cafés and other `LocalBusiness` types) |
 | `category`, `host` | Exact filters |
 | `tags` | Comma-separated labels; at most 5, each 1–128 bytes |
@@ -446,6 +447,10 @@ root, and a read, lookup, change query or occurrence read of the alias answers w
 - **Identifiers**: an ISBN-10 or hyphenated ISBN is an alias of `isbn:` and its ISBN-13;
   `https://doi.org/…`, `https://dx.doi.org/…` and any letter case are aliases of `doi:` in
   lower case.
+- **Official-API spellings**: every address of an object a [source](#sources) reads is an
+  alias of one root, e.g. each Federal Register address of a document is an alias of
+  `fr:{number}`. When the API itself names another root for the object, the link becomes an
+  alias of that root after its first fetch.
 - **Cursor feed variants** (BTC Map's delta feed with parameters, the portal's endpoints) are
   aliases of their feed.
 - **The page's own canonical**: after a fetch, a page whose head canonical link or
@@ -603,7 +608,8 @@ reads, writes and collapse; stored membership stays for when it is turned back o
 ## Cards and resolvers
 
 Public `/v1/info` names the kinds this instance resolves in `resolves`; the admin `/v1/info`
-lists one manifest per resolver and card kind (`media`, `isbn`, `doi`, `nostr`, `activitypub`),
+lists one manifest per resolver and card kind (`media`, `isbn`, `doi`, `nostr`, `activitypub`,
+`official`),
 the event platform adapters, worker status and the effective limits.
 
 - **ISBN**: ISBN-10/13 checksums, metadata from Open Library.
@@ -626,8 +632,18 @@ the event platform adapters, worker status and the effective limits.
   expected fields and canary. BTC Map websites and NIP-52 calendar members are queued as their
   own resources (`event.adapters.derive_resources`).
 
+- **Official APIs**: the [sources](#sources) below.
+
 Disabled identifier routes wait in the queue; an enabled web resolver still gives ordinary HTTP
 links a card.
+
+## Sources
+
+Where a service's page is walled, thin or moved, Pinakes reads the service's own keyless API for
+its links instead: the card's `details.from` names the source and `details.facts` holds the
+API's fields. [docs/sources](sources/README.md) lists every source with the links it reads,
+what it fetches, its card, its facts, its limits and licence, and its examples; each can be
+switched off in `[sources.<name>]`.
 
 ## OpenStreetMap and locations
 

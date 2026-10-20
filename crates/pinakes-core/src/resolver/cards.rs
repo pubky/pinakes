@@ -39,7 +39,8 @@ pub fn needs_embed(doc: &ResourceMeta) -> bool {
         || doc.image.is_none()
         || doc.event.warnings.iter().any(|w| w == "truncated")
 }
-pub const KINDS: [&str; 5] = ["media", "isbn", "doi", "nostr", "activitypub"];
+/// Card routes. `official` reads a service's own API (`crate::sources`).
+pub const KINDS: [&str; 6] = ["media", "isbn", "doi", "nostr", "activitypub", "official"];
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CardConfig {
@@ -49,6 +50,7 @@ pub struct CardConfig {
     pub doi: ResolverConfig,
     pub nostr: ResolverConfig,
     pub activitypub: ResolverConfig,
+    pub official: ResolverConfig,
     #[serde(skip)]
     pub openlibrary_url: String,
     #[serde(skip)]
@@ -64,6 +66,7 @@ impl Default for CardConfig {
             doi: Default::default(),
             nostr: Default::default(),
             activitypub: Default::default(),
+            official: Default::default(),
             openlibrary_url: "https://openlibrary.org/api/books".into(),
             doi_url: "https://doi.org/".into(),
             podcast_items: 1000,
@@ -77,6 +80,7 @@ impl CardConfig {
             "doi" => &self.doi,
             "nostr" => &self.nostr,
             "activitypub" => &self.activitypub,
+            "official" => &self.official,
             _ => &self.media,
         }
     }
@@ -130,8 +134,14 @@ pub fn manifests(c: &CardConfig) -> Vec<Manifest> {
 }
 #[derive(Deserialize)]
 struct Provider {
+    #[serde(default)]
+    provider_name: String,
     endpoints: Vec<Endpoint>,
 }
+/// Registry providers whose public endpoint does not serve a server: SoundCloud (a bot challenge
+/// for server addresses), TikTok (its answers carry no metadata), Facebook and Instagram (an app
+/// token). Their links get ordinary web cards.
+pub const SKIPPED_PROVIDERS: &[&str] = &["Facebook", "Instagram", "SoundCloud", "TikTok"];
 #[derive(Deserialize)]
 struct Endpoint {
     url: String,
@@ -142,8 +152,11 @@ struct Endpoint {
 fn providers() -> &'static Vec<Provider> {
     static P: OnceLock<Vec<Provider>> = OnceLock::new();
     P.get_or_init(|| {
-        serde_json::from_str(include_str!("../../../../data/oembed-providers.json"))
-            .expect("pinned providers")
+        let mut all: Vec<Provider> =
+            serde_json::from_str(include_str!("../../../../data/oembed-providers.json"))
+                .expect("pinned providers");
+        all.retain(|p| !SKIPPED_PROVIDERS.contains(&p.provider_name.as_str()));
+        all
     })
 }
 fn wildcard(pattern: &str, value: &str) -> bool {
@@ -307,6 +320,9 @@ pub fn doi(uri: &str) -> Option<String> {
     .then(|| raw.to_lowercase())
 }
 pub fn classify(uri: &str) -> Option<&'static str> {
+    if crate::sources::reading(uri).is_some() {
+        return Some("official");
+    }
     if uri.starts_with("isbn:") {
         return Some("isbn");
     }
@@ -449,6 +465,12 @@ impl Resolver for CardResolver {
                     tokio::task::spawn_blocking(move || parse_nostr(&uri, &event, ttl)).await?
                 }
                 "media" => self.media(uri,ttl).await,
+                "official" => match crate::sources::resolve(&self.web.egress, &self.config, uri, ttl).await? {
+                    Some(doc) => Ok(doc),
+                    // Queued before its source was switched off.
+                    None if uri.starts_with("http") => self.web.resolve(uri).await,
+                    None => Err(super::RetryLater { class: "disabled", seconds: 3600 }.into()),
+                },
                 "activitypub" => {
                     let f=self.web.egress.fetch_with(uri,&FetchOptions{accept:Some("application/activity+json, application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\"".into()),..Default::default()}).await?;
                     if (200..300).contains(&f.status) { if let Some(d)=parse_activitypub(uri,&f,ttl).await? {return Ok(d);} }
@@ -1012,6 +1034,7 @@ fn podcast_body(
 pub fn invalid_identifier(uri: &str) -> bool {
     (uri.starts_with("isbn:") && isbn(uri).is_none())
         || (uri.starts_with("doi:") && doi(uri).is_none())
+        || crate::sources::invalid(uri)
 }
 fn csl_date(v: &Value) -> Option<String> {
     let parts = v.pointer("/issued/date-parts/0")?.as_array()?;
@@ -1029,8 +1052,9 @@ fn csl_date(v: &Value) -> Option<String> {
     )
 }
 /// Social content: a note or post whose card quotes its text (Nostr, ActivityPub, a Pubky
-/// object described by its content). Its excerpt is short, refreshes within the hour and is
-/// purged, with its change history, once the object is confirmed gone.
+/// object described by its content, an official-API source's posts and comments). Its excerpt
+/// is short, refreshes within the hour and is purged, with its change history, once the object
+/// is confirmed gone.
 pub fn social(doc: &ResourceMeta) -> bool {
     match doc.source.as_str() {
         "nostr" | "activitypub" => matches!(
@@ -1038,7 +1062,7 @@ pub fn social(doc: &ResourceMeta) -> bool {
             "SocialMediaPosting" | "Article" | "CreativeWork"
         ),
         "pubky" => doc.type_name == "SocialMediaPosting",
-        _ => false,
+        name => crate::sources::by_name(name).is_some_and(|s| s.social(doc)),
     }
 }
 impl CardResolver {

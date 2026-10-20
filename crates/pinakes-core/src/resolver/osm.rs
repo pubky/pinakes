@@ -308,10 +308,7 @@ impl OsmResolver {
         let client = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
-            .user_agent(format!(
-                "pinakes/{} (+https://github.com/pubky/pinakes)",
-                env!("CARGO_PKG_VERSION")
-            ))
+            .user_agent(super::egress::user_agent(&config.contact))
             .gzip(true)
             .timeout(Duration::from_secs(10))
             .connect_timeout(Duration::from_secs(5))

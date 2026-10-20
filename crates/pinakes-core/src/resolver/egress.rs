@@ -23,11 +23,26 @@ impl std::fmt::Display for BodyTooLarge {
 impl std::error::Error for BodyTooLarge {}
 
 pub const BODY_CAP: usize = 1024 * 1024;
+/// The longest a request waits for its host's next slot, queue included. It leaves the request
+/// at least half of the ten-second fetch timeout.
+pub const MAX_SLOT_WAIT: Duration = Duration::from_secs(5);
 pub const USER_AGENT: &str = concat!(
     "pinakes/",
     env!("CARGO_PKG_VERSION"),
-    " (+https://github.com/pubky/pinakes)"
+    " (+https://pubky.app)"
 );
+/// The User-Agent with the operator's contact (`http.contact`), or `USER_AGENT` without one.
+/// It never names a code host: some services refuse such agents as undeclared tools.
+pub fn user_agent(contact: &str) -> String {
+    if contact.is_empty() {
+        USER_AGENT.to_owned()
+    } else {
+        format!(
+            "pinakes/{} (+https://pubky.app; {contact})",
+            env!("CARGO_PKG_VERSION")
+        )
+    }
+}
 pub const ALLOWED_TYPES: &[&str] = &[
     "text/html",
     "application/xhtml+xml",
@@ -121,7 +136,8 @@ pub struct Validators {
 }
 #[derive(Clone, Debug, Default)]
 pub struct FetchOptions {
-    pub headers: Vec<(String, String)>,
+    /// Extra request headers, by literal name.
+    pub headers: Vec<(&'static str, String)>,
     pub json_body: Option<serde_json::Value>,
     pub sensitive: bool,
     pub accept: Option<String>,
@@ -187,7 +203,7 @@ impl Transport for PinnedTransport {
                 .unwrap_or_else(|| ALLOWED_TYPES.join(", ")),
         );
         for (key, value) in &options.headers {
-            request = request.header(key, value);
+            request = request.header(*key, value);
         }
         if let Some(v) = &options.validators.etag {
             request = request.header("if-none-match", v);
@@ -214,8 +230,20 @@ pub async fn read_response_with(
             .filter(|s| s.len() <= 2048)
             .map(str::to_owned)
     };
+    // Every `Link` header, as one comma-separated value (RFC 8288), up to 2 KB of whole headers.
+    let mut link = String::new();
+    for value in response.headers().get_all("link").iter() {
+        let Ok(value) = value.to_str() else { continue };
+        if link.len() + value.len() + 2 > 2048 {
+            continue;
+        }
+        if !link.is_empty() {
+            link.push_str(", ");
+        }
+        link.push_str(value);
+    }
     let validators = Validators {
-        link: header("link"),
+        link: Some(link).filter(|s| !s.is_empty()),
         etag: header("etag"),
         last_modified: header("last-modified"),
     };
@@ -400,7 +428,7 @@ impl Egress {
                 self.network_relays,
                 "relay network disabled for injected transports"
             );
-            let _permit = self.host_permit(&host).await;
+            let _permit = self.host_permit(&host).await?;
             let stream = tokio::net::TcpStream::connect(addresses.as_slice()).await?;
             let config = WebSocketConfig::default()
                 .max_message_size(Some(BODY_CAP))
@@ -426,6 +454,10 @@ impl Egress {
             && !self.cfg.deny_hosts.iter().any(|h| host_matches(&host, h))
             && (self.cfg.allow_hosts.is_empty()
                 || self.cfg.allow_hosts.iter().any(|h| host_matches(&host, h)))
+    }
+    /// The operator's contact address (`http.contact`), if set.
+    pub fn contact(&self) -> Option<&str> {
+        Some(self.cfg.contact.as_str()).filter(|c| !c.is_empty())
     }
     pub fn new(cfg: EgressConfig) -> Self {
         let mut e = Self::with_backends(cfg, Arc::new(SystemDns), Arc::new(PinnedTransport));
@@ -556,6 +588,15 @@ impl Egress {
             }
         }
         let result = fetch.await;
+        // Our own host budget is not the page's answer: ask again when the slot comes.
+        if result
+            .as_ref()
+            .err()
+            .and_then(|e| e.downcast_ref::<super::RetryLater>())
+            .is_some_and(|r| r.class == "rate_limited")
+        {
+            return result;
+        }
         let mut cache = self.discovered.lock().await;
         let now = Instant::now();
         cache.retain(|_, entry| entry.expires > now);
@@ -607,6 +648,9 @@ impl Egress {
         let requested = Url::parse(uri)?;
         let mut url = requested.clone();
         let mut permanent = true;
+        // A redirect within the same host keeps the slot it has; a slow host's next slot is
+        // further away than a fetch may wait, so a new one would always answer RetryLater.
+        let mut permit: Option<(String, OwnedMutexGuard<Instant>)> = None;
         for redirects in 0..=3 {
             if !matches!(url.scheme(), "http" | "https")
                 || !url.username().is_empty()
@@ -640,8 +684,31 @@ impl Egress {
                     .context("egress refused non-public address"));
             }
             // Pin checked addresses to the connection; a second DNS lookup could rebind to a private IP.
-            let _permit = self.host_permit(&host).await;
+            match &mut permit {
+                Some((held, guard)) if *held == host => {
+                    **guard = Instant::now() + self.host_interval(&host);
+                }
+                _ => {
+                    // Release the other host's slot before waiting for this one.
+                    drop(permit.take());
+                    permit = Some((host.clone(), self.host_permit(&host).await?));
+                }
+            }
             let mut observation = crate::telemetry::FetchGuard::start();
+            let with_agent;
+            let default_agent = options
+                .user_agent
+                .as_deref()
+                .is_none_or(|ua| ua == USER_AGENT);
+            let options = if default_agent && !self.cfg.contact.is_empty() {
+                with_agent = FetchOptions {
+                    user_agent: Some(user_agent(&self.cfg.contact)),
+                    ..options.clone()
+                };
+                &with_agent
+            } else {
+                options
+            };
             let mut response = self.transport.get_with(&url, &addresses, options).await?;
             observation.status(response.status);
             drop(observation);
@@ -696,19 +763,14 @@ impl Egress {
         }
         unreachable!()
     }
-    async fn host_permit(&self, host: &str) -> OwnedMutexGuard<Instant> {
-        let mut rate = self
-            .cfg
-            .host_rates
-            .get(host)
-            .copied()
-            .unwrap_or(self.cfg.host_requests_per_second);
-        if matches!(host, "api.nostr.wine" | "portal.einundzwanzig.space") {
-            rate = rate.min(1.0);
-        }
-        if host == "api.nostrarchives.com" {
-            rate = rate.min(2.0);
-        }
+    /// The host's next slot, held for the whole request (and its redirects within the host): one
+    /// request per host at a time. An
+    /// operator's `host_rates` entry sets the rate; else a source's published rate lowers the
+    /// default, never raises it. A slot further away than `MAX_SLOT_WAIT`, or a queue longer than
+    /// that, answers `RetryLater` instead of a wait the fetch timeout would cut short. Only a
+    /// request that gets its slot moves the next one, so a cancelled waiter holds nothing back.
+    async fn host_permit(&self, host: &str) -> Result<OwnedMutexGuard<Instant>> {
+        let rate = self.host_rate(host);
         let budget = {
             let mut hosts = self.hosts.lock().await;
             if hosts.len() >= 10000 {
@@ -721,12 +783,48 @@ impl Egress {
                 .or_insert_with(|| Arc::new(Mutex::new(Instant::now())))
                 .clone()
         };
-        let mut guard = budget.lock_owned().await;
+        let retry = |wait: Duration| {
+            anyhow::Error::new(super::RetryLater {
+                class: "rate_limited",
+                seconds: wait.as_secs() + 1,
+            })
+        };
+        let deadline = Instant::now() + MAX_SLOT_WAIT;
+        let Ok(mut guard) = tokio::time::timeout_at(deadline, budget.lock_owned()).await else {
+            return Err(retry(
+                Duration::from_secs_f64(1.0 / rate).max(MAX_SLOT_WAIT),
+            ));
+        };
+        if *guard > deadline {
+            return Err(retry(guard.saturating_duration_since(Instant::now())));
+        }
         tokio::time::sleep_until(*guard).await;
-        // Stable per-host jitter avoids synchronized requests without weakening the minimum interval.
+        *guard = Instant::now() + self.host_interval(host);
+        Ok(guard)
+    }
+    /// The least time between two requests to a host: its rate plus a stable per-host jitter,
+    /// which avoids synchronized requests without weakening the minimum interval.
+    fn host_interval(&self, host: &str) -> Duration {
         let jitter = f64::from(blake3::hash(host.as_bytes()).as_bytes()[0]) / 2550.0;
-        *guard = Instant::now() + Duration::from_secs_f64(1.0 / rate + jitter);
-        guard
+        Duration::from_secs_f64(1.0 / self.host_rate(host) + jitter)
+    }
+    fn host_rate(&self, host: &str) -> f64 {
+        let default = self.cfg.host_requests_per_second;
+        let mut rate = match self.cfg.host_rates.get(host) {
+            Some(rate) => *rate,
+            None => self
+                .cfg
+                .source_rates
+                .get(host)
+                .map_or(default, |rate| rate.min(default)),
+        };
+        if matches!(host, "api.nostr.wine" | "portal.einundzwanzig.space") {
+            rate = rate.min(1.0);
+        }
+        if host == "api.nostrarchives.com" {
+            rate = rate.min(2.0);
+        }
+        rate
     }
 }
 fn host_matches(host: &str, rule: &str) -> bool {
@@ -798,6 +896,173 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    #[tokio::test(start_paused = true)]
+    async fn slow_hosts_answer_retry_later_instead_of_a_doomed_wait() {
+        struct Ok200;
+        #[async_trait]
+        impl Transport for Ok200 {
+            async fn get(&self, url: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+                Ok(Fetched {
+                    permanent_redirect: false,
+                    truncated: false,
+                    url: url.clone(),
+                    status: 200,
+                    content_type: "application/json".into(),
+                    validators: Default::default(),
+                    location: None,
+                    retry_after_secs: 60,
+                    body: b"{}".to_vec(),
+                })
+            }
+        }
+        let egress = Arc::new(Egress::with_backends(
+            EgressConfig {
+                source_rates: [
+                    ("slow.example".to_owned(), 5.0 / 60.0),
+                    ("fast.example".to_owned(), 50.0),
+                ]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+            Arc::new(FakeDns),
+            Arc::new(Ok200),
+        ));
+        // Three links of a host with a 12-second interval claimed together: one goes, the others
+        // learn when to come back, at once.
+        let tasks: Vec<_> = (0..3)
+            .map(|n| {
+                let egress = egress.clone();
+                tokio::spawn(
+                    async move { egress.fetch(&format!("https://slow.example/{n}")).await },
+                )
+            })
+            .collect();
+        let mut results = vec![];
+        for task in tasks {
+            results.push(task.await.unwrap());
+        }
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        for error in results.into_iter().filter_map(Result::err) {
+            let retry = error.downcast_ref::<crate::resolver::RetryLater>().unwrap();
+            assert_eq!(retry.class, "rate_limited");
+            assert!((9..=14).contains(&retry.seconds), "{}", retry.seconds);
+        }
+        tokio::time::advance(Duration::from_secs(13)).await;
+        assert!(egress.fetch("https://slow.example/again").await.is_ok());
+        // A source's rate never raises the default of one request per second.
+        let start = Instant::now();
+        egress.fetch("https://fast.example/1").await.unwrap();
+        egress.fetch("https://fast.example/2").await.unwrap();
+        assert!(Instant::now() - start >= Duration::from_secs(1));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_queue_behind_a_slow_request_answers_retry_later() {
+        struct Slow;
+        #[async_trait]
+        impl Transport for Slow {
+            async fn get(&self, url: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+                if url.path() == "/slow" {
+                    tokio::time::sleep(Duration::from_secs(7)).await;
+                }
+                Ok(Fetched {
+                    permanent_redirect: false,
+                    truncated: false,
+                    url: url.clone(),
+                    status: 200,
+                    content_type: "application/json".into(),
+                    validators: Default::default(),
+                    location: None,
+                    retry_after_secs: 60,
+                    body: b"{}".to_vec(),
+                })
+            }
+        }
+        let egress = Arc::new(Egress::with_backends(
+            EgressConfig::default(),
+            Arc::new(FakeDns),
+            Arc::new(Slow),
+        ));
+        let slow = {
+            let egress = egress.clone();
+            tokio::spawn(async move { egress.fetch("https://host.example/slow").await })
+        };
+        tokio::task::yield_now().await;
+        // A waiter that gives up holds nothing back.
+        let cancelled = {
+            let egress = egress.clone();
+            tokio::spawn(async move { egress.fetch("https://host.example/cancelled").await })
+        };
+        tokio::task::yield_now().await;
+        cancelled.abort();
+        // The next one gives up before the fetch timeout, with a time to come back.
+        let error = egress
+            .fetch("https://host.example/queued")
+            .await
+            .unwrap_err();
+        let retry = error.downcast_ref::<crate::resolver::RetryLater>().unwrap();
+        assert_eq!((retry.class, retry.seconds), ("rate_limited", 6));
+        assert!(slow.await.unwrap().is_ok());
+        let start = Instant::now();
+        assert!(egress.fetch("https://host.example/after").await.is_ok());
+        assert!(Instant::now() - start <= Duration::from_secs(2));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_redirect_within_a_slow_host_keeps_its_slot() {
+        struct Redirects;
+        #[async_trait]
+        impl Transport for Redirects {
+            async fn get(&self, url: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+                let redirect = url.path() == "/old";
+                Ok(Fetched {
+                    permanent_redirect: false,
+                    truncated: false,
+                    url: url.clone(),
+                    status: if redirect { 301 } else { 200 },
+                    content_type: "application/json".into(),
+                    validators: Default::default(),
+                    location: redirect.then(|| "/new".to_owned()),
+                    retry_after_secs: 60,
+                    body: b"{}".to_vec(),
+                })
+            }
+        }
+        let egress = Egress::with_backends(
+            EgressConfig {
+                source_rates: [("slow.example".to_owned(), 5.0 / 60.0)]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+            Arc::new(FakeDns),
+            Arc::new(Redirects),
+        );
+        // With a 12-second interval a second slot is always too far away: the hop keeps the first.
+        let fetched = egress.fetch("https://slow.example/old").await.unwrap();
+        assert_eq!(fetched.url.path(), "/new");
+        assert!(fetched.permanent_redirect);
+        // The next request still waits a full interval after the last hop.
+        let error = egress
+            .fetch("https://slow.example/other")
+            .await
+            .unwrap_err();
+        let retry = error.downcast_ref::<crate::resolver::RetryLater>().unwrap();
+        assert_eq!(retry.class, "rate_limited");
+
+        // Our own budget is not the page's answer: discovery asks again once the slot comes.
+        let options = FetchOptions::default();
+        let error = egress
+            .discover("https://slow.example/page", &options, 3600)
+            .await
+            .unwrap_err();
+        let retry = error.downcast_ref::<crate::resolver::RetryLater>().unwrap();
+        assert_eq!(retry.class, "rate_limited");
+        tokio::time::advance(Duration::from_secs(13)).await;
+        assert!(egress
+            .discover("https://slow.example/page", &options, 3600)
+            .await
+            .is_ok());
+    }
     #[tokio::test]
     async fn body_cap_refuses_any_type_html_too() {
         use axum::{body::Body, routing::get, Router};
@@ -838,6 +1103,71 @@ mod tests {
             );
         }
         server.abort();
+    }
+    #[tokio::test]
+    async fn the_default_agent_carries_the_operator_contact() {
+        #[derive(Default)]
+        struct Agents(std::sync::Mutex<Vec<Option<String>>>);
+        #[async_trait]
+        impl Transport for Agents {
+            async fn get(&self, url: &Url, addresses: &[SocketAddr]) -> Result<Fetched> {
+                self.get_with(url, addresses, &FetchOptions::default())
+                    .await
+            }
+            async fn get_with(
+                &self,
+                url: &Url,
+                _: &[SocketAddr],
+                options: &FetchOptions,
+            ) -> Result<Fetched> {
+                self.0.lock().unwrap().push(options.user_agent.clone());
+                Ok(Fetched {
+                    permanent_redirect: false,
+                    truncated: false,
+                    url: url.clone(),
+                    status: 200,
+                    content_type: "application/json".into(),
+                    validators: Default::default(),
+                    location: None,
+                    retry_after_secs: 60,
+                    body: b"{}".to_vec(),
+                })
+            }
+        }
+        let with_contact = format!(
+            "pinakes/{} (+https://pubky.app; info@synonym.to)",
+            env!("CARGO_PKG_VERSION")
+        );
+        for (contact, agent, sent) in [
+            ("info@synonym.to", None, Some(with_contact.as_str())),
+            (
+                "info@synonym.to",
+                Some(USER_AGENT),
+                Some(with_contact.as_str()),
+            ),
+            ("info@synonym.to", Some("Browser/1.0"), Some("Browser/1.0")),
+            ("", None, None),
+        ] {
+            let transport = Arc::new(Agents::default());
+            let egress = Egress::with_backends(
+                EgressConfig {
+                    contact: contact.into(),
+                    ..Default::default()
+                },
+                Arc::new(FakeDns),
+                transport.clone(),
+            );
+            assert_eq!(egress.contact(), Some(contact).filter(|c| !c.is_empty()));
+            let options = FetchOptions {
+                user_agent: agent.map(str::to_owned),
+                ..Default::default()
+            };
+            egress
+                .fetch_with("https://public.example/api", &options)
+                .await
+                .unwrap();
+            assert_eq!(transport.0.lock().unwrap()[0].as_deref(), sent);
+        }
     }
     #[tokio::test(start_paused = true)]
     async fn graphql_error_expires_before_the_next_retry() {
@@ -1237,6 +1567,44 @@ mod tests {
         let response = PinnedTransport.get(&url, &[addr]).await.unwrap();
         assert_eq!(response.status, 302);
         task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn every_link_header_is_kept() {
+        use axum::{http::HeaderMap, routing::get, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/",
+                    get(|| async {
+                        let mut headers = HeaderMap::new();
+                        headers.insert("content-type", "text/html".parse().unwrap());
+                        for value in [
+                            "<https://w.example/wp-json/>; rel=\"https://api.w.org/\"",
+                            "<https://w.example/wp-json/wp/v2/posts/7>; rel=\"alternate\"; type=\"application/json\"",
+                        ] {
+                            headers.append("link", value.parse().unwrap());
+                        }
+                        headers.append("link", "x".repeat(3000).parse().unwrap());
+                        (headers, "<html></html>")
+                    }),
+                ),
+            )
+            .await
+            .unwrap()
+        });
+        let url = Url::parse(&format!("http://{addr}/")).unwrap();
+        let fetched = read_response(url.clone(), reqwest::get(url).await.unwrap())
+            .await
+            .unwrap();
+        // Whole headers only, up to 2 KB.
+        assert_eq!(
+            fetched.validators.link.as_deref(),
+            Some("<https://w.example/wp-json/>; rel=\"https://api.w.org/\", <https://w.example/wp-json/wp/v2/posts/7>; rel=\"alternate\"; type=\"application/json\"")
+        );
+        task.abort();
     }
     #[tokio::test]
     async fn non_allowlisted_content_type_is_refused_before_reading() {

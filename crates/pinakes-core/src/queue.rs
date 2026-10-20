@@ -445,8 +445,15 @@ async fn finish_job(
             doc.ttl_secs = doc.ttl_secs.min(3600);
         }
         let attrs = match resolver.name() {
-            "web" | "event" | "event_platform" | "media" | "isbn" | "doi" | "nostr"
-            | "activitypub" => crate::resolver::web::ATTRIBUTES,
+            "web" | "official" => crate::sources::attributes(),
+            // These routes fall back to the web fetch, whose page hooks may name a source.
+            "event" | "event_platform" | "media" | "isbn" | "doi" | "nostr" | "activitypub" => {
+                if crate::sources::by_name(&doc.source).is_some() {
+                    crate::sources::attributes()
+                } else {
+                    crate::resolver::web::ATTRIBUTES
+                }
+            }
             "pubky" => crate::resolver::pubky::ATTRIBUTES,
             "geo" => crate::resolver::geo::ATTRIBUTES,
             "osm" => crate::resolver::osm::ATTRIBUTES,
@@ -454,14 +461,20 @@ async fn finish_job(
         };
         doc.validate(attrs)?;
         crate::changes::save(pool, &job.id, job.generation, &doc, cfg).await?;
-        // The page names itself (its head canonical, or the end of an all-permanent redirect
-        // chain) up to a trailing slash and tracking: it is an alias of that URL, which is
-        // fetched in its place from now on. Other claimed URLs are never candidates.
+        // An official API names the object's root (`source_root`), or the page names itself (its
+        // head canonical, or the end of an all-permanent redirect chain) up to a trailing slash
+        // and tracking: the link is an alias of that URL, which is fetched in its place from now
+        // on. Other claimed URLs are never candidates.
         if doc.status == Status::Ok {
             if let Some(alias) = doc
-                .alias_candidates
-                .iter()
-                .find_map(|a| crate::alias::canonical(&job.uri, a))
+                .source_root
+                .as_deref()
+                .and_then(|root| crate::alias::source(&job.uri, root))
+                .or_else(|| {
+                    doc.alias_candidates
+                        .iter()
+                        .find_map(|a| crate::alias::canonical(&job.uri, a))
+                })
             {
                 let mut tx = pool.begin().await?;
                 crate::store::lock_search_revision(&mut tx).await?;
@@ -495,7 +508,7 @@ async fn finish_job(
                 denied(pool, job, cfg, retry).await?;
             } else {
                 sqlx::query("UPDATE resource SET timeout_streak=0,lease_until=NULL,priority_at=NULL,next_attempt_at=now()+$3*interval '1 second',last_error=$4 WHERE id=$1 AND generation=$2")
-                    .bind(&job.id).bind(job.generation).bind(retry.seconds.clamp(1,3600) as f64).bind(if retry.class=="rate_limited" {"http_4xx"} else {retry.class}).execute(pool).await?;
+                    .bind(&job.id).bind(job.generation).bind(retry.seconds.clamp(1,3600) as f64).bind(retry.class).execute(pool).await?;
             }
         } else if crate::resolver::error_class(&error) == "timeout" {
             timed_out(pool, job, cfg, 60).await?;

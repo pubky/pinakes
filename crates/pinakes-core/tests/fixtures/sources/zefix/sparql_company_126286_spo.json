@@ -1,0 +1,549 @@
+{
+  "head" : {
+    "vars" : [
+      "s",
+      "p",
+      "o"
+    ]
+  },
+  "results" : {
+    "bindings" : [
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        "o" : {
+          "type" : "uri",
+          "value" : "http://schema.org/DefinedTerm"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        "o" : {
+          "type" : "uri",
+          "value" : "http://schema.org/Organization"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        "o" : {
+          "type" : "uri",
+          "value" : "https://schema.ld.admin.ch/ZefixOrganisation"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://schema.org/name"
+        },
+        "o" : {
+          "xml:lang" : "fr",
+          "type" : "literal",
+          "value" : "Nestlé S.A."
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://schema.org/name"
+        },
+        "o" : {
+          "xml:lang" : "en",
+          "type" : "literal",
+          "value" : "Nestlé Ltd."
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://schema.org/description"
+        },
+        "o" : {
+          "type" : "literal",
+          "value" : "Beteiligung an Industrie-, Dienstleistungs-, Handels- und Finanzunternehmungen, insbesondere auf dem Gebiete der Nahrungsmittel-, Ernährungs-, Gesundheits- und Wellnessindustrie sowie verwandten Industrien; vollständige Zweckumschreibung gemäss Statuten"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://schema.org/identifier"
+        },
+        "o" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286/UID/CHE105909036"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://schema.org/identifier"
+        },
+        "o" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286/CHID/CH17030010013"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://schema.org/identifier"
+        },
+        "o" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286/EHRAID"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://schema.org/inDefinedTermSet"
+        },
+        "o" : {
+          "type" : "uri",
+          "value" : "https://ld.admin.ch/dimension/zefix"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://schema.org/address"
+        },
+        "o" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286/address"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://schema.org/additionalType"
+        },
+        "o" : {
+          "type" : "uri",
+          "value" : "https://ld.admin.ch/ech/97/legalforms/0106"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://schema.org/legalName"
+        },
+        "o" : {
+          "type" : "literal",
+          "value" : "Nestlé AG"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://www.w3.org/ns/locn#address"
+        },
+        "o" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286/address"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "https://schema.ld.admin.ch/municipality"
+        },
+        "o" : {
+          "type" : "uri",
+          "value" : "https://ld.admin.ch/municipality/1702"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286/address"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        "o" : {
+          "type" : "uri",
+          "value" : "http://schema.org/PostalAddress"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286/address"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        "o" : {
+          "type" : "uri",
+          "value" : "http://www.w3.org/ns/locn#Address"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286/address"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://schema.org/streetAddress"
+        },
+        "o" : {
+          "type" : "literal",
+          "value" : "Zugerstrasse 8"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286/address"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://schema.org/postalCode"
+        },
+        "o" : {
+          "type" : "literal",
+          "value" : "6330"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286/address"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://schema.org/addressLocality"
+        },
+        "o" : {
+          "type" : "literal",
+          "value" : "Cham"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286/address"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://schema.org/addressRegion"
+        },
+        "o" : {
+          "type" : "literal",
+          "value" : "ZG"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286/address"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://www.w3.org/ns/locn#thoroughfare"
+        },
+        "o" : {
+          "type" : "literal",
+          "value" : "Zugerstrasse"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286/address"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://www.w3.org/ns/locn#locatorDesignator"
+        },
+        "o" : {
+          "type" : "literal",
+          "value" : "8"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286/address"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://www.w3.org/ns/locn#postCode"
+        },
+        "o" : {
+          "type" : "literal",
+          "value" : "6330"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286/address"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://www.w3.org/ns/locn#postName"
+        },
+        "o" : {
+          "type" : "literal",
+          "value" : "Cham"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286/address"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://www.w3.org/ns/locn#adminUnitL2"
+        },
+        "o" : {
+          "type" : "literal",
+          "value" : "ZG"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286/UID/CHE105909036"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        "o" : {
+          "type" : "uri",
+          "value" : "http://schema.org/PropertyValue"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286/UID/CHE105909036"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://schema.org/name"
+        },
+        "o" : {
+          "type" : "literal",
+          "value" : "CompanyUID"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286/UID/CHE105909036"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://schema.org/value"
+        },
+        "o" : {
+          "type" : "literal",
+          "value" : "CHE105909036"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286/CHID/CH17030010013"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        "o" : {
+          "type" : "uri",
+          "value" : "http://schema.org/PropertyValue"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286/CHID/CH17030010013"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://schema.org/name"
+        },
+        "o" : {
+          "type" : "literal",
+          "value" : "CompanyCHID"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286/CHID/CH17030010013"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://schema.org/value"
+        },
+        "o" : {
+          "type" : "literal",
+          "value" : "CH17030010013"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286/EHRAID"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        "o" : {
+          "type" : "uri",
+          "value" : "http://schema.org/PropertyValue"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286/EHRAID"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://schema.org/name"
+        },
+        "o" : {
+          "type" : "literal",
+          "value" : "CompanyEHRAID"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://register.ld.admin.ch/zefix/company/126286/EHRAID"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://schema.org/value"
+        },
+        "o" : {
+          "type" : "literal",
+          "value" : "126286"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://ld.admin.ch/ech/97/legalforms/0106"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://schema.org/name"
+        },
+        "o" : {
+          "xml:lang" : "de",
+          "type" : "literal",
+          "value" : "Aktiengesellschaft"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://ld.admin.ch/ech/97/legalforms/0106"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://schema.org/name"
+        },
+        "o" : {
+          "xml:lang" : "fr",
+          "type" : "literal",
+          "value" : "Société anonyme"
+        }
+      },
+      {
+        "s" : {
+          "type" : "uri",
+          "value" : "https://ld.admin.ch/municipality/1702"
+        },
+        "p" : {
+          "type" : "uri",
+          "value" : "http://schema.org/name"
+        },
+        "o" : {
+          "type" : "literal",
+          "value" : "Cham"
+        }
+      }
+    ]
+  }
+}

@@ -85,7 +85,32 @@ impl Fixture {
             {"kind":"isbn_twin","uri":"isbn:0140328726","type":"Book","group_with":"isbn"},
             {"kind":"isbn_page","uri":"https://openlibrary.org/books/OL7353617M","type":"CreativeWork","group_with":"isbn"},
             {"kind":"media","uri":"https://www.youtube.com/watch?v=fixture","type":"VideoObject"},
-            {"kind":"web","uri":"https://web.example/e2e","type":"WebPage"}
+            {"kind":"web","uri":"https://web.example/e2e","type":"WebPage"},
+            {"kind":"federal_register","uri":"fr:2026-18291","type":"Legislation"},
+            {"kind":"federal_register_page","uri":"https://www.federalregister.gov/d/2026-18291","type":"Legislation","group_with":"federal_register"},
+            {"kind":"sec","uri":"https://www.sec.gov/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959-index.htm","type":"Report"},
+            {"kind":"ecfr","uri":"https://www.ecfr.gov/current/title-17/section-240.10b-5","type":"Legislation"},
+            {"kind":"gleif","uri":"lei:KY37LUS27QQX7BB93L28","type":"Organization"},
+            {"kind":"uk_parliament_bills","uri":"https://bills.parliament.uk/bills/3737","type":"Legislation"},
+            {"kind":"swiss_parliament","uri":"https://www.parlament.ch/de/ratsbetrieb/suche-curia-vista/geschaeft?AffairId=20223765","type":"CreativeWork"},
+            {"kind":"courtlistener","uri":"https://www.courtlistener.com/opinion/2812209/obergefell-v-hodges/","type":"CreativeWork"},
+            {"kind":"legislation_gov_uk","uri":"https://www.legislation.gov.uk/ukpga/2018/12/contents","type":"Legislation"},
+            {"kind":"eur_lex","uri":"https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32016R0679","type":"Legislation"},
+            {"kind":"fedlex","uri":"https://www.fedlex.admin.ch/eli/cc/1999/404/de","type":"Legislation"},
+            {"kind":"zefix","uri":"https://register.ld.admin.ch/zefix/company/126286","type":"Organization"},
+            {"kind":"govinfo","uri":"https://www.govinfo.gov/app/details/PLAW-117publ58","type":"Legislation"},
+            {"kind":"stacker_news","uri":"https://stacker.news/items/1596515","type":"DiscussionForumPosting"},
+            {"kind":"hacker_news","uri":"https://news.ycombinator.com/item?id=8863","type":"DiscussionForumPosting"},
+            {"kind":"lobsters","uri":"https://lobste.rs/s/wtthju/a5_v1_0","type":"DiscussionForumPosting"},
+            {"kind":"bluesky","uri":"https://bsky.app/profile/did:plc:z72i7hdynmk6r22z27h6tvur/post/3mxzez2m7wk2r","type":"SocialMediaPosting"},
+            {"kind":"mastodon","uri":"https://mastodon.social/@Gargron/1","type":"SocialMediaPosting"},
+            {"kind":"discourse","uri":"https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304","type":"DiscussionForumPosting"},
+            {"kind":"forgejo","uri":"https://codeberg.org/forgejo/forgejo","type":"SoftwareSourceCode"},
+            {"kind":"gitlab","uri":"https://gitlab.com/inkscape/inkscape","type":"SoftwareSourceCode"},
+            {"kind":"wordpress","uri":"https://bitcoinmagazine.com/markets/no-uptober-yet-as-bitcoin-slips","type":"Article"},
+            {"kind":"ghost","uri":"https://www.privacyguides.org/news/2026/10/19/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/","type":"Article"},
+            {"kind":"public_inbox","uri":"https://gnusha.org/pi/bitcoindev/atCSAVprBE-tAnN3@erisian.com.au/","type":"EmailMessage"},
+            {"kind":"feed","uri":"https://www.theblock.co/news/business/2026-10-19-mesh-visa-partner-spend-crypto-stablecoins-421058","type":"Article"}
         ]);
         Ok(Self {
             boundary: Arc::default(),
@@ -112,7 +137,31 @@ impl Dns for FixtureDns {
                 | "openlibrary.org"
                 | "publisher.example"
                 | "www.youtube.com"
+                | "api.gleif.org"
+                | "bills-api.parliament.uk"
+                | "ws.parlament.ch"
+                | "www.courtlistener.com"
+                | "www.legislation.gov.uk"
+                | "publications.europa.eu"
+                | "fedlex.data.admin.ch"
+                | "ld.admin.ch"
+                | "www.govinfo.gov"
+                | "stacker.news"
+                | "hacker-news.firebaseio.com"
+                | "lobste.rs"
+                | "public.api.bsky.app"
+                | "mastodon.social"
+                | "delvingbitcoin.org"
+                | "codeberg.org"
+                | "gitlab.com"
+                | "bitcoinmagazine.com"
+                | "www.privacyguides.org"
+                | "gnusha.org"
+                | "www.theblock.co"
                 | "web.example"
+                | "www.federalregister.gov"
+                | "www.sec.gov"
+                | "www.ecfr.gov"
         ) {
             "93.184.216.34"
         } else {
@@ -137,7 +186,34 @@ impl Transport for Fixture {
             "openlibrary.org" if u.path().starts_with("/books/")=>("text/html","<title>Matilda | Open Library</title><link rel=\"canonical\" href=\"https://openlibrary.org/books/OL7353617M/Matilda\">".into()),
             "openlibrary.org"=>("application/json",json!({"ISBN:9780140328721":{"title":"Matilda","authors":[{"name":"Roald Dahl"}],"url":"https://openlibrary.org/books/OL7353617M/Matilda","key":"/books/OL7353617M"},"ISBN:0140328726":{"title":"Matilda","authors":[{"name":"Roald Dahl"}],"url":"https://openlibrary.org/books/OL7353617M/Matilda","key":"/books/OL7353617M"}}).to_string()),
             "www.youtube.com"=>("application/json",json!({"type":"video","title":"Fixture video","thumbnail_url":"https://image.example/a.jpg"}).to_string()),
+            "api.gleif.org" if u.path()=="/api/v1/lei-records/KY37LUS27QQX7BB93L28"=>("application/vnd.api+json",include_str!("../tests/fixtures/sources/gleif/lei_KY37LUS27QQX7BB93L28_nestle.json").into()),
+            "bills-api.parliament.uk" if u.path()=="/api/v1/Bills/3737"=>("application/json",include_str!("../tests/fixtures/sources/uk_parliament_bills/bill_3737_employment_rights_act_2025.json").into()),
+            "ws.parlament.ch" if u.path()=="/odata.svc/Business(ID=20223765,Language='DE')"=>("application/json",include_str!("../tests/fixtures/sources/swiss_parliament/business_20223765_DE_select.json").into()),
+            "www.courtlistener.com" if u.path()=="/api/rest/v4/search/"=>("application/json",include_str!("../tests/fixtures/sources/courtlistener/search_o_cluster_id_2812209_obergefell.json").into()),
+            "www.legislation.gov.uk" if u.path()=="/ukpga/2018/12/introduction/data.xml"=>("application/xml",include_str!("../tests/fixtures/sources/legislation_gov_uk/ukpga_2018_12_introduction.xml").into()),
+            "publications.europa.eu" if u.path()=="/webapi/rdf/sparql"=>("application/sparql-results+json",include_str!("../tests/fixtures/sources/eur_lex/celex_32016R0679.json").into()),
+            "fedlex.data.admin.ch" if u.path()=="/sparqlendpoint"=>("application/sparql-results+json",include_str!("../tests/fixtures/sources/fedlex/eli_cc_1999_404.json").into()),
+            "ld.admin.ch" if u.path()=="/query"=>("application/sparql-results+json",include_str!("../tests/fixtures/sources/zefix/sparql_company_126286_spo.json").into()),
+            "www.govinfo.gov" if u.path()=="/metadata/pkg/PLAW-117publ58/mods.xml"=>("application/xml",gunzip(include_bytes!("../tests/fixtures/sources/govinfo/mods_pkg_PLAW-117publ58.xml.gz"))),
+            "stacker.news" if u.path()=="/api/graphql"=>("application/json",include_str!("../tests/fixtures/sources/stacker_news/sn-item-1596515.json").into()),
+            "hacker-news.firebaseio.com" if u.path()=="/v0/item/8863.json"=>("application/json",include_str!("../tests/fixtures/sources/hacker_news/hn-item-8863.json").into()),
+            "lobste.rs" if u.path()=="/s/wtthju.json"=>("application/json",include_str!("../tests/fixtures/sources/lobsters/lobsters-wtthju.json").into()),
+            "public.api.bsky.app" if u.path()=="/xrpc/app.bsky.feed.getPostThread"=>("application/json",include_str!("../tests/fixtures/sources/bluesky/bsky-thread-3mxzez2m7wk2r.json").into()),
+            "mastodon.social" if u.path()=="/api/v1/statuses/1"=>("application/json",include_str!("../tests/fixtures/sources/mastodon/status-1.json").into()),
+            "delvingbitcoin.org" if u.path()=="/t/304.json"=>("application/json",include_str!("../tests/fixtures/sources/discourse/topic-304.json").into()),
+            "codeberg.org" if u.path()=="/api/v1/repos/forgejo/forgejo"=>("application/json",include_str!("../tests/fixtures/sources/forgejo/repo-forgejo.json").into()),
+            "gitlab.com" if u.path()=="/api/v4/projects/inkscape%2Finkscape"=>("application/json",include_str!("../tests/fixtures/sources/gitlab/project-inkscape.json").into()),
+            "bitcoinmagazine.com" if u.path()=="/markets/no-uptober-yet-as-bitcoin-slips"=>("text/html; charset=UTF-8",gunzip(include_bytes!("../tests/fixtures/sources/wordpress/page-no-uptober.html.gz"))),
+            "bitcoinmagazine.com" if u.path()=="/wp-json/wp/v2/posts/55992"=>("application/json",include_str!("../tests/fixtures/sources/wordpress/post-55992.json").into()),
+            "www.privacyguides.org" if u.path()=="/ghost/api/content/posts/slug/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/"=>("application/json",include_str!("../tests/fixtures/sources/ghost/post-cellebrite.json").into()),
+            "www.privacyguides.org" if u.path()=="/news/2026/10/19/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/"=>("text/html; charset=utf-8",include_str!("../tests/fixtures/sources/ghost/page-cellebrite.html").into()),
+            "gnusha.org" if u.path()=="/pi/bitcoindev/atCSAVprBE-tAnN3@erisian.com.au/raw"=>("application/mbox; charset=UTF-8",include_str!("../tests/fixtures/sources/public_inbox/raw-towns.mbox").into()),
+            "www.theblock.co" if u.path()=="/feed"=>("text/xml; charset=UTF-8",include_str!("../tests/fixtures/sources/feed/theblock-rss.xml").into()),
+            "www.theblock.co" if u.path()=="/news/business/2026-10-19-mesh-visa-partner-spend-crypto-stablecoins-421058"=>("text/html; charset=UTF-8",include_str!("../tests/fixtures/sources/feed/theblock-article.html").into()),
             "web.example"=>("text/html","<title>Fixture page</title>".into()),
+            "www.ecfr.gov" if u.path()=="/api/versioner/v1/ancestry/current/title-17.json"=>("application/json",include_str!("../tests/fixtures/sources/ecfr/ancestry_current_title-17_section-240.10b-5.json").into()),
+            "www.sec.gov" if u.path()=="/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959.hdr.sgml"=>("text/sgml",include_str!("../tests/fixtures/sources/sec/sec-hdr-ms-s1.sgml").into()),
+            "www.federalregister.gov" if u.path()=="/api/v1/documents/2026-18291.json"=>("application/json",include_str!("../tests/fixtures/sources/federal_register/fr-2026-18291.json").into()),
             _=>bail!("no fixture for upstream host {}",u.host_str().unwrap_or("")),
         };
         Ok(Fetched {
@@ -211,6 +287,15 @@ struct Page {
     cursor: usize,
     #[serde(default = "page_limit")]
     limit: usize,
+}
+/// A recorded fixture stored gzip-compressed, as text.
+fn gunzip(raw: &[u8]) -> String {
+    use std::io::Read;
+    let mut out = String::new();
+    flate2::read::GzDecoder::new(raw)
+        .read_to_string(&mut out)
+        .expect("gzip fixture");
+    out
 }
 fn page_limit() -> usize {
     1000
@@ -308,6 +393,8 @@ async fn run(pool: sqlx::PgPool, f: Fixture) -> Result<()> {
     cfg.osm.nominatim_url = base.clone();
     cfg.osm.requests_per_second = 10.;
     cfg.canary.enabled = false;
+    // Services that need a contact (SEC EDGAR) wait without one.
+    cfg.egress.contact = "info@synonym.to".into();
     cfg.pubky.enabled = false;
     cfg.api.requests_per_minute = 10000;
     let state = AppState::new(pool.clone(), cfg.clone())?;
@@ -408,6 +495,8 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
     pinakes_core::migrate(&pool).await?;
     let mut cfg = Config::default();
     cfg.canary.enabled = false;
+    // Services that need a contact (SEC EDGAR) wait without one.
+    cfg.egress.contact = "info@synonym.to".into();
     cfg.api.requests_per_minute = 10000;
     cfg.nexus_url = std::env::var("PINAKES_E2E_NEXUS").unwrap_or_else(|_| cfg.nexus_url.clone());
     let cfg = Arc::new(cfg);

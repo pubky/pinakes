@@ -1,0 +1,54 @@
+{
+  "sn-item-1": {
+    "body": {
+      "query": "{ item(id: \"1\") { id title url text createdAt user { name } sub { name } root { id title } parentId noteId ncomments sats deletedAt } }"
+    },
+    "bytes": 351,
+    "content_type": "application/json; charset=utf-8",
+    "file": "sn-item-1.json",
+    "method": "POST",
+    "recorded_at": "2026-10-19T16:05:32+00:00",
+    "sha256": "d9b0afbdf63b327af10c4cd563276e8ddd7bf3278f31fd45e2e2b0819ca8e059",
+    "status": 200,
+    "url": "https://stacker.news/api/graphql"
+  },
+  "sn-item-1596515": {
+    "body": {
+      "query": "{ item(id: \"1596515\") { id title url text createdAt user { name } sub { name } root { id title } parentId noteId ncomments sats deletedAt } }"
+    },
+    "bytes": 5329,
+    "content_type": "application/json; charset=utf-8",
+    "file": "sn-item-1596515.json",
+    "method": "POST",
+    "recorded_at": "2026-10-19T16:05:29+00:00",
+    "sha256": "d7db0a7b9b9447ac5caad0c4f9224fd8547349b49d201ac69ad49639003539b9",
+    "status": 200,
+    "url": "https://stacker.news/api/graphql"
+  },
+  "sn-item-1596517": {
+    "body": {
+      "query": "{ item(id: \"1596517\") { id title url text createdAt user { name } sub { name } root { id title } parentId noteId ncomments sats deletedAt } }"
+    },
+    "bytes": 403,
+    "content_type": "application/json; charset=utf-8",
+    "file": "sn-item-1596517.json",
+    "method": "POST",
+    "recorded_at": "2026-10-19T16:05:30+00:00",
+    "sha256": "eb1d4114eae578cf989a5bba5fc8280835591aae407dfec2a1b55c9a9e37c7b5",
+    "status": 200,
+    "url": "https://stacker.news/api/graphql"
+  },
+  "sn-item-missing": {
+    "body": {
+      "query": "{ item(id: \"999999999\") { id title url text createdAt user { name } sub { name } root { id title } parentId noteId ncomments sats deletedAt } }"
+    },
+    "bytes": 23,
+    "content_type": "application/json; charset=utf-8",
+    "file": "sn-item-missing.json",
+    "method": "POST",
+    "recorded_at": "2026-10-19T16:05:33+00:00",
+    "sha256": "a0767763162fbab1fc2d165c5e986044ef9434a3173d7e53bf6d2e882031cfc1",
+    "status": 200,
+    "url": "https://stacker.news/api/graphql"
+  }
+}

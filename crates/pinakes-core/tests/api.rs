@@ -2114,3 +2114,120 @@ async fn a_deleted_pubky_post_loses_its_excerpt(pool: PgPool) {
     assert!(card["description"].is_null(), "{card}");
     assert_eq!(found("sunrise").await, 0);
 }
+
+/// A Mastodon post whose author opted out of search indexing keeps its card, but its text is
+/// never found by `q=`, and its change history keeps no text: what was kept before goes, and the
+/// opt-out line itself carries only its kind and time.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_opted_out_post_is_not_searched_and_keeps_no_history_text(pool: PgPool) {
+    use pinakes_core::sources::mastodon;
+    let uri = "https://mastodon.social/@Gargron/1";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let target = mastodon::Target {
+        host: "mastodon.social".into(),
+        id: "1".into(),
+    };
+    let fixture = |file: &str| {
+        std::fs::read(format!(
+            "{}/tests/fixtures/sources/mastodon/{file}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+    };
+    let card = |file: &str, at: i64| {
+        let mut doc = ResourceMeta::new(uri, "mastodon", 3600);
+        doc.fetched_at = at;
+        mastodon::card(doc, &target, 200, &fixture(file))
+            .unwrap()
+            .unwrap()
+    };
+    store::save_document(&pool, &id, 0, &card("status-1.json", 1000))
+        .await
+        .unwrap();
+    // The usual `/@{user}/{id}` spelling, saved with the full card before it became an alias of
+    // the post's ActivityPub id.
+    let spelling = "https://mastodon.social/@Gargron/1/";
+    let alias_id = store::ensure_resource(&pool, spelling).await.unwrap();
+    let mut early = card("status-1.json", 900);
+    early.url = spelling.into();
+    store::save_document(&pool, &alias_id, 0, &early)
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    pinakes_core::alias::assign(
+        &mut tx,
+        &alias_id,
+        &pinakes_core::alias::Alias {
+            root: uri.into(),
+            basis: "identifier",
+        },
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','hello','/pub/app/tags/h',now())")
+        .bind(&id)
+        .bind(author(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let found = |q: &'static str| {
+        let app = app.clone();
+        async move {
+            call(&app, "GET", &format!("/v1/search?q={q}"), None)
+                .await
+                .1["items"]
+                .as_array()
+                .unwrap()
+                .len()
+        }
+    };
+    assert_eq!(found("hello").await, 1);
+    let texts = || {
+        sqlx::query_scalar::<_, i64>("SELECT (SELECT count(*) FROM resource_change WHERE resource_id IN ($1,$2) AND (before::text ILIKE '%hello%' OR after::text ILIKE '%hello%' OR before::text ILIKE '%Rochko%' OR after::text ILIKE '%Rochko%')) + (SELECT count(*) FROM resource WHERE id=$2 AND (doc::text ILIKE '%hello%' OR doc::text ILIKE '%Rochko%' OR name ILIKE '%hello%'))")
+            .bind(&id)
+            .bind(&alias_id)
+            .fetch_one(&pool)
+    };
+    assert!(texts().await.unwrap() > 1);
+
+    // The author opts out: the card stays, its text is no longer searched or kept.
+    let opted = card("status-1-opted-out.json", 2000);
+    assert_eq!(opted.attributes["opted_out"], "true");
+    assert_eq!(opted.description.as_deref(), Some("Hello world"));
+    store::save_document(&pool, &id, 0, &opted).await.unwrap();
+    assert_eq!(found("hello").await, 0);
+    assert_eq!(found("Gargron").await, 0);
+    assert_eq!(texts().await.unwrap(), 0);
+    let (lines, with_documents): (i64, i64) = sqlx::query_as(
+        "SELECT count(*), count(*) FILTER (WHERE before IS NOT NULL OR after IS NOT NULL) FROM resource_change WHERE resource_id=$1",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((lines, with_documents), (1, 0));
+    // The alias keeps its `aliased` line (the root it points at) and nothing of the post.
+    let alias_lines: Vec<(String, Option<serde_json::Value>)> = sqlx::query_as(
+        "SELECT class, after FROM resource_change WHERE resource_id=$1 ORDER BY seq",
+    )
+    .bind(&alias_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        alias_lines
+            .iter()
+            .any(|(class, after)| class == "aliased" && after.is_some()),
+        "{alias_lines:?}"
+    );
+    assert!(
+        alias_lines
+            .iter()
+            .all(|(class, after)| class == "aliased" || after.is_none()),
+        "{alias_lines:?}"
+    );
+    let (_, read) = call(&app, "GET", &format!("/v1/resources/{id}"), None).await;
+    assert_eq!(read["name"], "Hello world", "{read}");
+}

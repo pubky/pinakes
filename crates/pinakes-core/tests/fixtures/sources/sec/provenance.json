@@ -1,0 +1,124 @@
+{
+  "fr-docket-34-106268": {
+    "bytes": 205,
+    "content_type": "application/json; charset=utf-8",
+    "file": "fr-docket-34-106268.json",
+    "note": "Federal Register API, public domain.",
+    "recorded_at": "2026-10-19T16:17:24+00:00",
+    "sha256": "2f519d9732e40db6833073f36ad36173e2173bfec6009e20632606c65b641046",
+    "status": 200,
+    "url": "https://www.federalregister.gov/api/v1/documents.json?conditions%5Bdocket_id%5D=34-106268&fields%5B%5D=document_number&fields%5B%5D=docket_ids&per_page=20"
+  },
+  "fr-docket-34-999999": {
+    "bytes": 73,
+    "content_type": "application/json; charset=utf-8",
+    "file": "fr-docket-34-999999.json",
+    "recorded_at": "2026-10-19T16:17:26+00:00",
+    "sha256": "40d743ddd22d1bf2a5baa4d6f1833749cb62c690a57ac6a86bcf0e72ef5841d2",
+    "status": 200,
+    "url": "https://www.federalregister.gov/api/v1/documents.json?conditions%5Bdocket_id%5D=34-999999&fields%5B%5D=document_number&fields%5B%5D=docket_ids&per_page=20"
+  },
+  "sec-hdr-bmw-10d": {
+    "accept": "*/*",
+    "bytes": 879,
+    "content_type": "text/sgml",
+    "file": "sec-hdr-bmw-10d.sgml",
+    "note": "SEC EDGAR, public domain. Asset-backed 10-D: DEPOSITOR-CIK and ABS-ASSET-CLASS.",
+    "recorded_at": "2026-10-19T17:54:20+00:00",
+    "sha256": "6d4a617bb47ba60c1d625c8b425b5fa8955bf3b51a8482cd37d6a9e54ab40829",
+    "status": 200,
+    "url": "https://www.sec.gov/Archives/edgar/data/1979860/000092963826003805/0000929638-26-003805.hdr.sgml"
+  },
+  "sec-hdr-franklin-10q": {
+    "accept": "*/*",
+    "bytes": 832,
+    "content_type": "text/sgml",
+    "file": "sec-hdr-franklin-10q.sgml",
+    "recorded_at": "2026-10-19T16:00:21+00:00",
+    "sha256": "02b4f5cca371cc9fe7736393e4c2c51fa960e61a51eafab47e7dccacb910cabe",
+    "status": 200,
+    "url": "https://www.sec.gov/Archives/edgar/data/1992870/000114036126033208/0001140361-26-033208.hdr.sgml"
+  },
+  "sec-hdr-ishares-s1": {
+    "accept": "*/*",
+    "bytes": 830,
+    "content_type": "text/sgml",
+    "file": "sec-hdr-ishares-s1.sgml",
+    "recorded_at": "2026-10-19T16:00:19+00:00",
+    "sha256": "328f2552443a55f1966e27e65c07c346be6f7b20886a9a4fb37c9bf74519320f",
+    "status": 200,
+    "url": "https://www.sec.gov/Archives/edgar/data/2089969/000143774926001991/0001437749-26-001991.hdr.sgml"
+  },
+  "sec-hdr-missing": {
+    "accept": "*/*",
+    "bytes": 338,
+    "content_type": "application/xml",
+    "file": "sec-hdr-missing.html",
+    "recorded_at": "2026-10-19T16:00:21+00:00",
+    "sha256": "d50181a5d51750ffb584078eb25eaf8d7d7625c0d156d0ef79887995c8bb1763",
+    "status": 404,
+    "url": "https://www.sec.gov/Archives/edgar/data/2103612/000110465926999999/0001104659-26-999999.hdr.sgml"
+  },
+  "sec-hdr-ms-s1": {
+    "accept": "*/*",
+    "bytes": 710,
+    "content_type": "text/sgml",
+    "file": "sec-hdr-ms-s1.sgml",
+    "note": "SEC EDGAR filing header, public.",
+    "recorded_at": "2026-10-19T16:00:18+00:00",
+    "sha256": "059dd05807483e54481880010a83bc87ea51bcebcdbd7fd49594d930d652ffc6",
+    "status": 200,
+    "url": "https://www.sec.gov/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959.hdr.sgml"
+  },
+  "sec-hdr-park-abs15g": {
+    "accept": "*/*",
+    "bytes": 2124,
+    "content_type": "text/sgml",
+    "file": "sec-hdr-park-abs15g.sgml",
+    "note": "SEC EDGAR, public domain. ABS-15G: DEPOSITOR and SECURITIZER sections.",
+    "recorded_at": "2026-10-19T17:54:20+00:00",
+    "sha256": "e524a3ebcf9447d7de217a8ae4fd492b80947a7bf359a67ac998929cf4e97361",
+    "status": 200,
+    "url": "https://www.sec.gov/Archives/edgar/data/1877944/000153949726002627/0001539497-26-002627.hdr.sgml"
+  },
+  "sec-hdr-xxi-8k": {
+    "accept": "*/*",
+    "bytes": 945,
+    "content_type": "text/sgml",
+    "file": "sec-hdr-xxi-8k.sgml",
+    "recorded_at": "2026-10-19T16:00:19+00:00",
+    "sha256": "5a9346fb4c409f94186ac49b0828709d27b49ff2b3846983e052f26f52c1867c",
+    "status": 200,
+    "url": "https://www.sec.gov/Archives/edgar/data/2070457/000121390026079805/0001213900-26-079805.hdr.sgml"
+  },
+  "sec-hdr-xxi-form4": {
+    "accept": "*/*",
+    "bytes": 1155,
+    "content_type": "text/sgml",
+    "file": "sec-hdr-xxi-form4.sgml",
+    "note": "SEC EDGAR, public domain. Form 4: REPORTING-OWNER and ISSUER sections.",
+    "recorded_at": "2026-10-19T17:54:19+00:00",
+    "sha256": "320b04f21b3775c026d017485832f7c1d640ed0bc11437ef642f6ddba2bd763c",
+    "status": 200,
+    "url": "https://www.sec.gov/Archives/edgar/data/2070457/000121390026098382/0001213900-26-098382.hdr.sgml"
+  },
+  "sec-index-xxi-8k": {
+    "accept": "text/html",
+    "bytes": 11036,
+    "content_type": "text/html; charset=UTF-8",
+    "file": "sec-index-xxi-8k.html",
+    "recorded_at": "2026-10-19T16:00:20+00:00",
+    "sha256": "64a2b60ac91044cb9cee1f71d09d562c850919d8a11a560dcb1d8fbf74512e95",
+    "status": 200,
+    "url": "https://www.sec.gov/Archives/edgar/data/2070457/000121390026079805/0001213900-26-079805-index.htm"
+  },
+  "sec-submissions-2070457": {
+    "bytes": 14932,
+    "content_type": "application/json",
+    "file": "sec-submissions-2070457.json",
+    "recorded_at": "2026-10-19T16:00:22+00:00",
+    "sha256": "d12cb5e5e12acfed781092217ac9e66075c9ac43dcb53f5f18990a78fc325d7c",
+    "status": 200,
+    "url": "https://data.sec.gov/submissions/CIK0002070457.json"
+  }
+}

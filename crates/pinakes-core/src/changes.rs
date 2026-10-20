@@ -204,8 +204,24 @@ pub async fn save(
                 .as_ref()
                 .is_some_and(crate::resolver::cards::social)
         });
-    if social_missing {
+    // A post whose author opted out of indexing keeps no text in its history: what was kept
+    // before goes now, and its lines carry only their kind, fields and time.
+    let opted_out = doc.attributes.get("opted_out").is_some_and(|v| v == "true");
+    if social_missing || opted_out {
         sqlx::query("DELETE FROM resource_change WHERE resource_id=$1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    if opted_out {
+        // Spellings saved before they became aliases of this post kept its text too: their
+        // lines lose their documents (the `aliased` line keeps its root) and their stored cards
+        // their text.
+        sqlx::query("UPDATE resource_change SET before=NULL,after=NULL WHERE class<>'aliased' AND resource_id IN (SELECT alias_id FROM resource_alias WHERE root_id=$1) AND (before IS NOT NULL OR after IS NOT NULL)")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE resource SET name=NULL,doc=doc||jsonb_build_object('name',NULL,'description',NULL,'image',NULL,'attributes','{}'::jsonb) WHERE doc IS NOT NULL AND id IN (SELECT alias_id FROM resource_alias WHERE root_id=$1)")
             .bind(id)
             .execute(&mut *tx)
             .await?;
@@ -315,7 +331,12 @@ pub async fn save(
             plan.append_changes(&mut tx, id).await?;
         }
         if let Some(diff) = diff {
-            append(&mut tx, id, &source, before, Some(after), diff, None).await?;
+            let (before, after) = if opted_out {
+                (None, None)
+            } else {
+                (before, Some(after))
+            };
+            append(&mut tx, id, &source, before, after, diff, None).await?;
         }
     }
     tx.commit().await?;

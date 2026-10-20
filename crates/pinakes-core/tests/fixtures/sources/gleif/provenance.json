@@ -1,0 +1,33 @@
+{
+  "lei_529900ZZZZZZZZZZZZ46_unknown_vndjson": {
+    "accept": "application/vnd.api+json",
+    "bytes": 126,
+    "content_type": "application/vnd.api+json",
+    "file": "lei_529900ZZZZZZZZZZZZ46_unknown_vndjson.json",
+    "note": "checksum-valid but unassigned LEI; JSON:API error body when Accept is vnd.api+json",
+    "recorded_at": "2026-10-19T16:16:34+00:00",
+    "sha256": "3e52332e1aa3fa216ab295c2f97e851c4ec5c8102c514bad30eefcf678a34b92",
+    "status": 404,
+    "url": "https://api.gleif.org/api/v1/lei-records/529900ZZZZZZZZZZZZ46"
+  },
+  "lei_5493001KJTIIGC8Y1R12_bloomberg_finance": {
+    "accept": "application/vnd.api+json",
+    "bytes": 2627,
+    "content_type": "application/vnd.api+json",
+    "file": "lei_5493001KJTIIGC8Y1R12_bloomberg_finance.json",
+    "recorded_at": "2026-10-19T16:16:33+00:00",
+    "sha256": "090ee8e5ba7d65db7eb78a202cb321eec898066625955f7e200e72c6af5da144",
+    "status": 200,
+    "url": "https://api.gleif.org/api/v1/lei-records/5493001KJTIIGC8Y1R12"
+  },
+  "lei_KY37LUS27QQX7BB93L28_nestle": {
+    "accept": "application/vnd.api+json",
+    "bytes": 3097,
+    "content_type": "application/vnd.api+json",
+    "file": "lei_KY37LUS27QQX7BB93L28_nestle.json",
+    "recorded_at": "2026-10-19T16:16:31+00:00",
+    "sha256": "a501d026cacfcd79e84886edef2e12efc42ae0814775004d3ac0f2e60791e6f1",
+    "status": 200,
+    "url": "https://api.gleif.org/api/v1/lei-records/KY37LUS27QQX7BB93L28"
+  }
+}

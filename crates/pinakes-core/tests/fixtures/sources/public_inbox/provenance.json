@@ -1,0 +1,57 @@
+{
+  "pipermail-021637": {
+    "accept": "text/html",
+    "bytes": 493,
+    "content_type": "text/html; charset=utf-8",
+    "file": null,
+    "location": "https://gnusha.org/pi/bitcoindev/Ny5lrlyxNcdDUKpy8_vYd8RRl5Q6brWkPDkaxRzjCgM7JF8HXRIZnfs1ubvmIA_OhwYwmdthSXyGsJ8CP8qQ0x0i82qbzlehNzuVtefSeHc=@toaster.cc/",
+    "note": "gnusha.org maps an old pipermail address to the archived message (a redirect).",
+    "recorded_at": "2026-10-19T19:25:41+00:00",
+    "sha256": "ab9ecef0aae3f21847b0243063580d93d0fb1da23053af16559071d4936ac314",
+    "status": 302,
+    "url": "https://gnusha.org/url/https:/lists.linuxfoundation.org/pipermail/bitcoin-dev/2023-May/021637.html"
+  },
+  "raw-gitgitgadget": {
+    "accept": "application/mbox",
+    "bytes": 11828,
+    "content_type": "text/plain; charset=UTF-8",
+    "file": "raw-gitgitgadget.mbox",
+    "note": "public-inbox (lore.kernel.org) raw message, git list.",
+    "recorded_at": "2026-10-19T19:25:38+00:00",
+    "sha256": "6b71d4da12abbb04b797a7a4c95ed9240a96abca1ad120beb4e04908e9c144b7",
+    "status": 200,
+    "url": "https://lore.kernel.org/git/pull.2458.git.git.1792437798463.gitgitgadget@gmail.com/raw"
+  },
+  "raw-missing": {
+    "accept": "application/mbox",
+    "bytes": 9,
+    "content_type": "text/plain; charset=UTF-8",
+    "file": "raw-missing.html",
+    "recorded_at": "2026-10-19T19:25:39+00:00",
+    "sha256": "0019dfc4b32d63c1392aa264aed2253c1e0c2fb09216f8e2cc269bbfb8bb49b5",
+    "status": 404,
+    "url": "https://gnusha.org/pi/bitcoindev/no-such-message@example.org/raw"
+  },
+  "raw-toaster": {
+    "accept": "application/mbox",
+    "bytes": 15159,
+    "content_type": "application/mbox; charset=utf-8",
+    "file": "raw-toaster.mbox",
+    "note": "The message the pipermail address maps to.",
+    "recorded_at": "2026-10-19T19:25:43+00:00",
+    "sha256": "cbcf205d2419289e0f8dc63a2d3174cb25ac2a387dcb729ffdbc003bddd7a6f0",
+    "status": 200,
+    "url": "https://gnusha.org/pi/bitcoindev/Ny5lrlyxNcdDUKpy8_vYd8RRl5Q6brWkPDkaxRzjCgM7JF8HXRIZnfs1ubvmIA_OhwYwmdthSXyGsJ8CP8qQ0x0i82qbzlehNzuVtefSeHc=@toaster.cc/raw"
+  },
+  "raw-towns": {
+    "accept": "application/mbox",
+    "bytes": 17025,
+    "content_type": "application/mbox; charset=UTF-8",
+    "file": "raw-towns.mbox",
+    "note": "public-inbox (gnusha.org) raw message, bitcoindev list.",
+    "recorded_at": "2026-10-19T19:25:37+00:00",
+    "sha256": "cdced3faeb1b771c92f96ced56d568074ce323912e1cee1a5b14c86901122995",
+    "status": 200,
+    "url": "https://gnusha.org/pi/bitcoindev/atCSAVprBE-tAnN3@erisian.com.au/raw"
+  }
+}

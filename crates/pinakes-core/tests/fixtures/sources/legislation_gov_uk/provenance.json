@@ -1,0 +1,75 @@
+{
+  "eur_2016_679_introduction": {
+    "accept": "application/xml",
+    "bytes": 255627,
+    "content_type": "application/xml;charset=utf-8",
+    "file": "eur_2016_679_introduction.xml.gz",
+    "recorded_at": "2026-10-19T16:23:25+00:00",
+    "sha256": "82bd6477492c8750bfdbce42ab92ad36a590f104dd6859f413b05edcffa352d5",
+    "status": 200,
+    "url": "https://www.legislation.gov.uk/eur/2016/679/introduction/data.xml"
+  },
+  "missing_ukpga_2018_12_section_999": {
+    "accept": "application/xml",
+    "bytes": 12293,
+    "content_type": "text/html;charset=utf-8",
+    "file": "missing_ukpga_2018_12_section_999.html",
+    "note": "legislation.gov.uk: a provision the act does not have answers 404.",
+    "recorded_at": "2026-10-19T18:33:42+00:00",
+    "sha256": "ed5b7c895f8ea3f73874581626328b9339cdb83ad71588f56c778d553e4ffafe",
+    "status": 404,
+    "url": "https://www.legislation.gov.uk/ukpga/2018/12/section/999/data.xml"
+  },
+  "missing_ukpga_2018_9999_introduction": {
+    "accept": "application/xml",
+    "bytes": 15725,
+    "content_type": "text/html; charset=UTF-8",
+    "file": "missing_ukpga_2018_9999_introduction.html",
+    "recorded_at": "2026-10-19T16:23:27+00:00",
+    "sha256": "3bd9392f85459de0def0f0b9a3bbc7e2fd734fd024fd9fea5622cddeed34eb8b",
+    "status": 400,
+    "url": "https://www.legislation.gov.uk/ukpga/2018/9999/introduction/data.xml"
+  },
+  "ukpga_2018_12_introduction": {
+    "accept": "application/xml",
+    "bytes": 33430,
+    "content_type": "application/xml;charset=utf-8",
+    "file": "ukpga_2018_12_introduction.xml",
+    "recorded_at": "2026-10-19T16:23:23+00:00",
+    "sha256": "994f706e5fa85c2924a2594e3be078ad2d85ca803aa5b32195d2448a122c27ca",
+    "status": 200,
+    "url": "https://www.legislation.gov.uk/ukpga/2018/12/introduction/data.xml"
+  },
+  "ukpga_2018_12_introduction_2020-01-31": {
+    "accept": "application/xml",
+    "bytes": 26909,
+    "content_type": "application/xml;charset=utf-8",
+    "file": "ukpga_2018_12_introduction_2020-01-31.xml",
+    "note": "legislation.gov.uk point-in-time introduction, OGL v3.0.",
+    "recorded_at": "2026-10-19T17:46:48+00:00",
+    "sha256": "6c92729edb93b2f2c3faa6b8f62e45244be69078b532844713bddeb16ec57302",
+    "status": 200,
+    "url": "https://www.legislation.gov.uk/ukpga/2018/12/introduction/2020-01-31/data.xml"
+  },
+  "ukpga_2018_12_section_1_2020-01-31": {
+    "accept": "application/xml",
+    "bytes": 15490,
+    "content_type": "application/xml;charset=utf-8",
+    "file": "ukpga_2018_12_section_1_2020-01-31.xml",
+    "note": "legislation.gov.uk, Open Government Licence v3.0. A provision's own data, in a version.",
+    "recorded_at": "2026-10-19T18:33:39+00:00",
+    "sha256": "6aef28fa8d7bf2e262ee7a99e6266237a79a2abc74ddbc131db64d25317bfa3c",
+    "status": 200,
+    "url": "https://www.legislation.gov.uk/ukpga/2018/12/section/1/2020-01-31/data.xml"
+  },
+  "uksi_2019_419_introduction_made": {
+    "accept": "application/xml",
+    "bytes": 17085,
+    "content_type": "application/xml;charset=utf-8",
+    "file": "uksi_2019_419_introduction_made.xml",
+    "recorded_at": "2026-10-19T16:23:32+00:00",
+    "sha256": "a7d40ea9855545a9173c9143a4b014f219d7b14e8589110807d257957b1ca6bd",
+    "status": 200,
+    "url": "https://www.legislation.gov.uk/uksi/2019/419/introduction/made/data.xml"
+  }
+}

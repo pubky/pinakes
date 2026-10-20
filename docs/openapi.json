@@ -391,6 +391,20 @@
               "null"
             ]
           },
+          "facts": {
+            "description": "The fields that API names for the object, by name; lists are joined with \"; \".",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "from": {
+            "description": "Where the card's metadata came from when it is not the page itself: the official API\nthat answered (docs/sources).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "organizer": {
             "oneOf": [
               {
@@ -1537,6 +1551,18 @@
                     "uri": "https://bitcoinops.org/feed.xml"
                   }
                 },
+                "resolve-bluesky-1": {
+                  "summary": "https://bsky.app/profile/bsky.app/post/3mxzez2m7wk2r",
+                  "value": {
+                    "uri": "https://bsky.app/profile/bsky.app/post/3mxzez2m7wk2r"
+                  }
+                },
+                "resolve-bluesky-2": {
+                  "summary": "https://bsky.app/profile/bsky.app",
+                  "value": {
+                    "uri": "https://bsky.app/profile/bsky.app"
+                  }
+                },
                 "resolve-c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey-pub-map": {
                   "summary": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G",
                   "value": {
@@ -1573,10 +1599,28 @@
                     "uri": "https://casa.io/"
                   }
                 },
+                "resolve-courtlistener-1": {
+                  "summary": "https://www.courtlistener.com/opinion/2812209/obergefell-v-hodges/",
+                  "value": {
+                    "uri": "https://www.courtlistener.com/opinion/2812209/obergefell-v-hodges/"
+                  }
+                },
                 "resolve-dir8gnjfnhdn5cpo8gxmfxfpqm9kffkoqpmsefcjkdpkxo15d5ey-pub-pin": {
                   "summary": "pubky://dir8gnjfnhdn5cpo8gxmfxfpqm9kffkoqpmsefcjkdpkxo15d5ey/pub/pinakes.e2e/none.json",
                   "value": {
                     "uri": "pubky://dir8gnjfnhdn5cpo8gxmfxfpqm9kffkoqpmsefcjkdpkxo15d5ey/pub/pinakes.e2e/none.json"
+                  }
+                },
+                "resolve-discourse-1": {
+                  "summary": "https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304",
+                  "value": {
+                    "uri": "https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304"
+                  }
+                },
+                "resolve-discourse-2": {
+                  "summary": "https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304/2",
+                  "value": {
+                    "uri": "https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304/2"
                   }
                 },
                 "resolve-doi-org-10-1038-nature12373": {
@@ -1591,6 +1635,18 @@
                     "uri": "https://dx.doi.org/10.1038/nature12373"
                   }
                 },
+                "resolve-ecfr-1": {
+                  "summary": "https://www.ecfr.gov/current/title-17/section-240.10b-5",
+                  "value": {
+                    "uri": "https://www.ecfr.gov/current/title-17/section-240.10b-5"
+                  }
+                },
+                "resolve-ecfr-2": {
+                  "summary": "https://www.ecfr.gov/current/title-14/chapter-I/subchapter-C/part-39",
+                  "value": {
+                    "uri": "https://www.ecfr.gov/current/title-14/chapter-I/subchapter-C/part-39"
+                  }
+                },
                 "resolve-en-wikipedia-org-wiki-bitcoin": {
                   "summary": "https://en.wikipedia.org/wiki/Bitcoin",
                   "value": {
@@ -1601,6 +1657,18 @@
                   "summary": "https://en.wikipedia.org/wiki/Lugano",
                   "value": {
                     "uri": "https://en.wikipedia.org/wiki/Lugano"
+                  }
+                },
+                "resolve-eur-lex-1": {
+                  "summary": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32016R0679",
+                  "value": {
+                    "uri": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32016R0679"
+                  }
+                },
+                "resolve-eur-lex-2": {
+                  "summary": "https://eur-lex.europa.eu/eli/reg/2023/1114/oj",
+                  "value": {
+                    "uri": "https://eur-lex.europa.eu/eli/reg/2023/1114/oj"
                   }
                 },
                 "resolve-eventfrog-ch-stream-de-event-7503702322012243890-ics": {
@@ -1639,10 +1707,64 @@
                     "uri": "https://example.org/"
                   }
                 },
+                "resolve-federal-register-1": {
+                  "summary": "fr:2026-18291",
+                  "value": {
+                    "uri": "fr:2026-18291"
+                  }
+                },
+                "resolve-federal-register-2": {
+                  "summary": "https://www.federalregister.gov/documents/2026/09/09/2026-18291/self-regulatory-organizations-nasdaq-texas-llc-notice-of-filing-and-order-granting-accelerated",
+                  "value": {
+                    "uri": "https://www.federalregister.gov/documents/2026/09/09/2026-18291/self-regulatory-organizations-nasdaq-texas-llc-notice-of-filing-and-order-granting-accelerated"
+                  }
+                },
+                "resolve-fedlex-1": {
+                  "summary": "https://www.fedlex.admin.ch/eli/cc/1999/404/de",
+                  "value": {
+                    "uri": "https://www.fedlex.admin.ch/eli/cc/1999/404/de"
+                  }
+                },
+                "resolve-fedlex-2": {
+                  "summary": "https://www.fedlex.admin.ch/eli/cc/24/233_245_233/fr",
+                  "value": {
+                    "uri": "https://www.fedlex.admin.ch/eli/cc/24/233_245_233/fr"
+                  }
+                },
+                "resolve-feed-1": {
+                  "summary": "https://www.theblock.co/news/business/2026-10-19-mesh-visa-partner-spend-crypto-stablecoins-421058",
+                  "value": {
+                    "uri": "https://www.theblock.co/news/business/2026-10-19-mesh-visa-partner-spend-crypto-stablecoins-421058"
+                  }
+                },
                 "resolve-fixr-co-event-halloween-2026-welcome-to-the-haunted-hotel-ti": {
                   "summary": "https://fixr.co/event/halloween-2026-welcome-to-the-haunted-hotel-tickets-404456056",
                   "value": {
                     "uri": "https://fixr.co/event/halloween-2026-welcome-to-the-haunted-hotel-tickets-404456056"
+                  }
+                },
+                "resolve-forgejo-1": {
+                  "summary": "https://codeberg.org/forgejo/forgejo",
+                  "value": {
+                    "uri": "https://codeberg.org/forgejo/forgejo"
+                  }
+                },
+                "resolve-forgejo-2": {
+                  "summary": "https://codeberg.org/forgejo/forgejo/src/branch/forgejo/README.md",
+                  "value": {
+                    "uri": "https://codeberg.org/forgejo/forgejo/src/branch/forgejo/README.md"
+                  }
+                },
+                "resolve-forgejo-3": {
+                  "summary": "https://codeberg.org/forgejo/forgejo/releases/tag/v11.0.1",
+                  "value": {
+                    "uri": "https://codeberg.org/forgejo/forgejo/releases/tag/v11.0.1"
+                  }
+                },
+                "resolve-ghost-1": {
+                  "summary": "https://www.privacyguides.org/news/2026/10/19/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/",
+                  "value": {
+                    "uri": "https://www.privacyguides.org/news/2026/10/19/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/"
                   }
                 },
                 "resolve-github-com-pubky-pubky-core-releases-atom": {
@@ -1651,16 +1773,88 @@
                     "uri": "https://github.com/pubky/pubky-core/releases.atom"
                   }
                 },
+                "resolve-gitlab-1": {
+                  "summary": "https://gitlab.com/inkscape/inkscape",
+                  "value": {
+                    "uri": "https://gitlab.com/inkscape/inkscape"
+                  }
+                },
+                "resolve-gitlab-2": {
+                  "summary": "https://gitlab.com/inkscape/inkscape/-/blob/master/README.md",
+                  "value": {
+                    "uri": "https://gitlab.com/inkscape/inkscape/-/blob/master/README.md"
+                  }
+                },
+                "resolve-gitlab-3": {
+                  "summary": "https://gitlab.com/inkscape/inkscape/-/releases/INKSCAPE_1_4",
+                  "value": {
+                    "uri": "https://gitlab.com/inkscape/inkscape/-/releases/INKSCAPE_1_4"
+                  }
+                },
+                "resolve-gleif-1": {
+                  "summary": "lei:KY37LUS27QQX7BB93L28",
+                  "value": {
+                    "uri": "lei:KY37LUS27QQX7BB93L28"
+                  }
+                },
+                "resolve-gleif-2": {
+                  "summary": "https://api.gleif.org/api/v1/lei-records/5493001KJTIIGC8Y1R12",
+                  "value": {
+                    "uri": "https://api.gleif.org/api/v1/lei-records/5493001KJTIIGC8Y1R12"
+                  }
+                },
+                "resolve-govinfo-1": {
+                  "summary": "https://www.govinfo.gov/app/details/PLAW-117publ58",
+                  "value": {
+                    "uri": "https://www.govinfo.gov/app/details/PLAW-117publ58"
+                  }
+                },
+                "resolve-govinfo-2": {
+                  "summary": "https://www.govinfo.gov/link/uscode/26/501",
+                  "value": {
+                    "uri": "https://www.govinfo.gov/link/uscode/26/501"
+                  }
+                },
                 "resolve-grounds-stager-co-shop-default-events-111608505": {
                   "summary": "https://grounds.stager.co/shop/default/events/111608505",
                   "value": {
                     "uri": "https://grounds.stager.co/shop/default/events/111608505"
                   }
                 },
+                "resolve-hacker-news-1": {
+                  "summary": "https://news.ycombinator.com/item?id=8863",
+                  "value": {
+                    "uri": "https://news.ycombinator.com/item?id=8863"
+                  }
+                },
+                "resolve-hacker-news-2": {
+                  "summary": "https://hnsignals.com/signal/2921983",
+                  "value": {
+                    "uri": "https://hnsignals.com/signal/2921983"
+                  }
+                },
                 "resolve-infomaniak-events-en-ch-conferences-seminaire-des-autorites": {
                   "summary": "https://infomaniak.events/en-ch/conferences/seminaire-des-autorites-2026/92392f2a-6711-4917-b9e9-60c88e8c550a/events/396911",
                   "value": {
                     "uri": "https://infomaniak.events/en-ch/conferences/seminaire-des-autorites-2026/92392f2a-6711-4917-b9e9-60c88e8c550a/events/396911"
+                  }
+                },
+                "resolve-legislation-gov-uk-1": {
+                  "summary": "https://www.legislation.gov.uk/ukpga/2018/12/contents",
+                  "value": {
+                    "uri": "https://www.legislation.gov.uk/ukpga/2018/12/contents"
+                  }
+                },
+                "resolve-legislation-gov-uk-2": {
+                  "summary": "https://www.legislation.gov.uk/uksi/2019/419/made",
+                  "value": {
+                    "uri": "https://www.legislation.gov.uk/uksi/2019/419/made"
+                  }
+                },
+                "resolve-lobsters-1": {
+                  "summary": "https://lobste.rs/s/wtthju/a5_v1_0",
+                  "value": {
+                    "uri": "https://lobste.rs/s/wtthju/a5_v1_0"
                   }
                 },
                 "resolve-luma-com-376whqyw": {
@@ -1675,7 +1869,7 @@
                     "uri": "https://luma.com/je0oh6s1"
                   }
                 },
-                "resolve-mastodon-social-gargron-1": {
+                "resolve-mastodon-1": {
                   "summary": "https://mastodon.social/@Gargron/1",
                   "value": {
                     "uri": "https://mastodon.social/@Gargron/1"
@@ -1759,10 +1953,64 @@
                     "uri": "https://pubky.org/"
                   }
                 },
+                "resolve-public-inbox-1": {
+                  "summary": "https://gnusha.org/pi/bitcoindev/atCSAVprBE-tAnN3@erisian.com.au/",
+                  "value": {
+                    "uri": "https://gnusha.org/pi/bitcoindev/atCSAVprBE-tAnN3@erisian.com.au/"
+                  }
+                },
+                "resolve-public-inbox-2": {
+                  "summary": "https://lore.kernel.org/git/pull.2458.git.git.1792437798463.gitgitgadget@gmail.com/",
+                  "value": {
+                    "uri": "https://lore.kernel.org/git/pull.2458.git.git.1792437798463.gitgitgadget@gmail.com/"
+                  }
+                },
                 "resolve-s3-eu-west-1-amazonaws-com-starticket-wwwroot-ticketing-feed": {
                   "summary": "https://s3-eu-west-1.amazonaws.com/starticket/wwwroot/ticketing/feeds/starticketfeed_D.xml",
                   "value": {
                     "uri": "https://s3-eu-west-1.amazonaws.com/starticket/wwwroot/ticketing/feeds/starticketfeed_D.xml"
+                  }
+                },
+                "resolve-sec-1": {
+                  "summary": "https://www.sec.gov/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959-index.htm",
+                  "value": {
+                    "uri": "https://www.sec.gov/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959-index.htm"
+                  }
+                },
+                "resolve-sec-2": {
+                  "summary": "https://www.sec.gov/Archives/edgar/data/2070457/000121390026079805/ea029862901ex99-1.htm",
+                  "value": {
+                    "uri": "https://www.sec.gov/Archives/edgar/data/2070457/000121390026079805/ea029862901ex99-1.htm"
+                  }
+                },
+                "resolve-sec-3": {
+                  "summary": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0002070457",
+                  "value": {
+                    "uri": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0002070457"
+                  }
+                },
+                "resolve-sec-4": {
+                  "summary": "https://www.sec.gov/files/rules/sro/nasdaqtx/2026/34-106268.pdf",
+                  "value": {
+                    "uri": "https://www.sec.gov/files/rules/sro/nasdaqtx/2026/34-106268.pdf"
+                  }
+                },
+                "resolve-stacker-news-1": {
+                  "summary": "https://stacker.news/items/1596515",
+                  "value": {
+                    "uri": "https://stacker.news/items/1596515"
+                  }
+                },
+                "resolve-stacker-news-2": {
+                  "summary": "https://stacker.news/items/1596515?commentId=1596517",
+                  "value": {
+                    "uri": "https://stacker.news/items/1596515?commentId=1596517"
+                  }
+                },
+                "resolve-swiss-parliament-1": {
+                  "summary": "https://www.parlament.ch/de/ratsbetrieb/suche-curia-vista/geschaeft?AffairId=20223765",
+                  "value": {
+                    "uri": "https://www.parlament.ch/de/ratsbetrieb/suche-curia-vista/geschaeft?AffairId=20223765"
                   }
                 },
                 "resolve-thebiz-pro-episodes-1-making-cypherpunk-products-and-busines": {
@@ -1777,6 +2025,12 @@
                     "uri": "https://ti.to/scipy/scipy2026.ics"
                   }
                 },
+                "resolve-uk-parliament-bills-1": {
+                  "summary": "https://bills.parliament.uk/bills/3737",
+                  "value": {
+                    "uri": "https://bills.parliament.uk/bills/3737"
+                  }
+                },
                 "resolve-v4-wegow-com-es-conciertos-konzert-von-yasi-hofer-band-in-bo": {
                   "summary": "https://v4.wegow.com/es/conciertos/konzert-von-yasi-hofer-band-in-bonn-harmonie",
                   "value": {
@@ -1787,6 +2041,12 @@
                   "summary": "https://vimeo.com/76979871",
                   "value": {
                     "uri": "https://vimeo.com/76979871"
+                  }
+                },
+                "resolve-wordpress-1": {
+                  "summary": "https://bitcoinmagazine.com/markets/no-uptober-yet-as-bitcoin-slips",
+                  "value": {
+                    "uri": "https://bitcoinmagazine.com/markets/no-uptober-yet-as-bitcoin-slips"
                   }
                 },
                 "resolve-www-calendarlabs-com-ical-calendar-ics-76-us-holidays-ics": {
@@ -1931,6 +2191,12 @@
                   "summary": "https://xceed.me/en/roma/event/dissonanze-2026-day-1/220015",
                   "value": {
                     "uri": "https://xceed.me/en/roma/event/dissonanze-2026-day-1/220015"
+                  }
+                },
+                "resolve-zefix-1": {
+                  "summary": "https://register.ld.admin.ch/zefix/company/126286",
+                  "value": {
+                    "uri": "https://register.ld.admin.ch/zefix/company/126286"
                   }
                 }
               },

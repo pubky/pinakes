@@ -21,8 +21,11 @@ pub struct Config {
     pub osm: OsmConfig,
     pub cards: crate::resolver::cards::CardConfig,
     pub media: crate::resolver::cards::MediaConfig,
+    /// One switch per official-API source (`[sources.<name>]`, see `crate::sources`).
+    pub sources: crate::sources::SourcesConfig,
     pub event: EventConfig,
     pub egress: EgressConfig,
+    pub http: HttpConfig,
     pub groups: crate::groups::GroupConfig,
     pub api: ApiConfig,
     pub canary: CanaryConfig,
@@ -48,12 +51,17 @@ impl Default for Config {
     fn default() -> Self {
         let mut config = Self::base();
         config.limits = Limits::of(&config);
+        config.share_contact();
         config
     }
 }
 /// Map sections whose entries an operator names: a `PINAKES__…` override may create one (and
 /// its keys); `deny_unknown_fields` and `adapters::validate` still refuse what is unknown.
-const ENV_MAPS: &[&[&str]] = &[&["event", "adapters", "platforms"], HOST_RATES];
+const ENV_MAPS: &[&[&str]] = &[
+    &["event", "adapters", "platforms"],
+    &["sources"],
+    HOST_RATES,
+];
 /// The one map whose new entries are numbers.
 const HOST_RATES: &[&str] = &["limits", "host_rates"];
 /// Apply `PINAKES__SECTION__KEY` overrides onto the file form. Strings are literal; numbers,
@@ -132,11 +140,13 @@ impl Config {
             },
             cards: Default::default(),
             media: Default::default(),
+            sources: Default::default(),
             event: EventConfig::default(),
             geo: GeoConfig::default(),
             osm: OsmConfig::default(),
             search: SearchConfig::default(),
             egress: EgressConfig::default(),
+            http: HttpConfig::default(),
             queue: QueueConfig::default(),
             groups: Default::default(),
             preview: PreviewConfig::default(),
@@ -345,23 +355,42 @@ impl Default for ResolverConfig {
         }
     }
 }
+/// `[http]`: how Pinakes introduces itself to the services it reads.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HttpConfig {
+    /// The operator's contact address, sent in the User-Agent of every request
+    /// (`pinakes/<version> (+https://pubky.app; <contact>)`). Empty: none, and the links of
+    /// sources that need a contact wait. An address naming github is refused: some services
+    /// block such User-Agents.
+    pub contact: String,
+}
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EgressConfig {
     #[serde(skip)]
     pub host_requests_per_second: f64,
+    /// `http.contact`, copied at load.
+    #[serde(skip)]
+    pub contact: String,
     pub allow_hosts: Vec<String>,
     pub deny_hosts: Vec<String>,
     #[serde(skip)]
     pub host_rates: BTreeMap<String, f64>,
+    /// The official-API sources' published rates per host (`sources::Source::budgets`), used
+    /// where `host_rates` names no rate.
+    #[serde(skip)]
+    pub source_rates: BTreeMap<String, f64>,
 }
 impl Default for EgressConfig {
     fn default() -> Self {
         Self {
             host_requests_per_second: 1.0,
+            contact: String::new(),
             allow_hosts: vec![],
             deny_hosts: vec![],
             host_rates: BTreeMap::new(),
+            source_rates: BTreeMap::new(),
         }
     }
 }
@@ -422,6 +451,9 @@ pub struct OsmConfig {
     pub dump_every_hours: u64,
     #[serde(skip)]
     pub dump_downloads_per_hour: usize,
+    /// `http.contact`, copied at load.
+    #[serde(skip)]
+    pub contact: String,
 }
 impl Default for OsmConfig {
     fn default() -> Self {
@@ -433,6 +465,7 @@ impl Default for OsmConfig {
             dump_dir: "dumps".into(),
             dump_every_hours: 24,
             dump_downloads_per_hour: 6,
+            contact: String::new(),
         }
     }
 }
@@ -543,8 +576,18 @@ impl Config {
         let limits = cfg.limits.clone();
         limits.apply(&mut cfg);
         cfg.queue.groups = cfg.groups.clone();
+        cfg.share_contact();
         cfg.validate()?;
         Ok(cfg)
+    }
+    /// Every HTTP client sends `http.contact` (`resolver::egress::user_agent`).
+    fn share_contact(&mut self) {
+        self.egress.contact = self.http.contact.trim().to_owned();
+        self.osm.contact = self.egress.contact.clone();
+        // A source's published limits, for hosts the operator does not rate.
+        self.egress.source_rates = crate::sources::budgets()
+            .map(|(host, rate)| (host.to_owned(), rate))
+            .collect();
     }
     pub fn validate(&self) -> Result<()> {
         if self.pubky.enabled {
@@ -566,6 +609,21 @@ impl Config {
             }
         }
         self.cards.validate()?;
+        self.sources.validate()?;
+        let contact = self.http.contact.trim();
+        if !contact.is_empty()
+            && (contact.len() > 254
+                || !contact.contains('@')
+                || contact
+                    .chars()
+                    .any(|c| c.is_control() || c.is_whitespace() || "()<>;".contains(c)))
+        {
+            bail!("http.contact must be an email address (or empty)");
+        }
+        // sec.gov refuses User-Agents that mention github as undeclared tools.
+        if contact.to_ascii_lowercase().contains("github") {
+            bail!("http.contact must not name github: some services refuse such User-Agents");
+        }
         let origins = &self.api.cors_allow_origins;
         if origins.iter().any(|o| o == "*") && origins.len() > 1 {
             bail!("api.cors_allow_origins: \"*\" must be the only entry");
@@ -915,6 +973,39 @@ mod tests {
         assert!(!Config::default().web.discover_feeds);
     }
     #[test]
+    fn source_budgets_never_override_the_operator() {
+        let budgets: Vec<_> = crate::sources::budgets().collect();
+        let Some((host, rate)) = budgets.first().copied() else {
+            return;
+        };
+        let cfg = Config::default();
+        assert_eq!(cfg.egress.source_rates[host], rate);
+        assert!(!cfg.egress.host_rates.contains_key(host));
+        let set = with(serde_json::json!({"limits":{"host_rates":{host: 0.25}}})).unwrap();
+        assert_eq!(set.egress.host_rates[host], 0.25);
+        assert_eq!(set.egress.source_rates[host], rate);
+    }
+    #[test]
+    fn the_contact_reaches_every_client() {
+        let cfg = with(serde_json::json!({"http":{"contact":" info@synonym.to "}})).unwrap();
+        assert_eq!(cfg.egress.contact, "info@synonym.to");
+        assert_eq!(cfg.osm.contact, "info@synonym.to");
+        assert_eq!(Config::default().egress.contact, "");
+        for bad in [
+            "nobody",
+            "a b@example.org",
+            "x@example.org)",
+            "x@users.noreply.github.com",
+            "GitHub@example.org",
+        ] {
+            assert!(
+                with(serde_json::json!({"http":{"contact":bad}})).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(with(serde_json::json!({"egress":{"contact":"x@example.org"}})).is_err());
+    }
+    #[test]
     fn limits_apply_once_to_every_resolver_and_caps_left_the_sections() {
         let cfg = with(serde_json::json!({"limits":{"resolver_concurrency":8},"egress":{"deny_hosts":["*.example.org"]}})).unwrap();
         for c in [&cfg.pubky, &cfg.cards.media, &cfg.cards.nostr] {
@@ -1043,19 +1134,20 @@ limits! {
         |c, v| c.pubky.concurrency = v,
         |c, v| c.cards.media.concurrency = v, |c, v| c.cards.isbn.concurrency = v,
         |c, v| c.cards.doi.concurrency = v, |c, v| c.cards.nostr.concurrency = v,
-        |c, v| c.cards.activitypub.concurrency = v],
+        |c, v| c.cards.activitypub.concurrency = v, |c, v| c.cards.official.concurrency = v],
     /// Jobs per second per pubky or card resolver.
     resolver_requests_per_second: f64 = |c| c.pubky.requests_per_second => [
         |c, v| c.pubky.requests_per_second = v,
         |c, v| c.cards.media.requests_per_second = v, |c, v| c.cards.isbn.requests_per_second = v,
         |c, v| c.cards.doi.requests_per_second = v, |c, v| c.cards.nostr.requests_per_second = v,
-        |c, v| c.cards.activitypub.requests_per_second = v],
+        |c, v| c.cards.activitypub.requests_per_second = v,
+        |c, v| c.cards.official.requests_per_second = v],
     /// Default document lifetime (seconds) for web, pubky and card resolvers.
     resolver_ttl_secs: u64 = |c| c.web.ttl_secs => [
         |c, v| c.web.ttl_secs = v, |c, v| c.pubky.ttl_secs = v,
         |c, v| c.cards.media.ttl_secs = v, |c, v| c.cards.isbn.ttl_secs = v,
         |c, v| c.cards.doi.ttl_secs = v, |c, v| c.cards.nostr.ttl_secs = v,
-        |c, v| c.cards.activitypub.ttl_secs = v],
+        |c, v| c.cards.activitypub.ttl_secs = v, |c, v| c.cards.official.ttl_secs = v],
     /// Requests per second to any one upstream host.
     host_requests_per_second: f64 = |c| c.egress.host_requests_per_second => [|c, v| c.egress.host_requests_per_second = v],
     /// Per-host overrides of `host_requests_per_second`.

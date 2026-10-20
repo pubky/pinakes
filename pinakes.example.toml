@@ -48,6 +48,59 @@ enabled = true
 enabled = true
 [cards.activitypub]
 enabled = true
+[cards.official]
+# Cards read from a service's own API (docs/sources), one switch per source below.
+enabled = true
+
+# Official-API sources, in alphabetical order (docs/sources/README.md).
+[sources.bluesky]
+enabled = true
+[sources.courtlistener]
+enabled = true
+[sources.discourse]
+enabled = true
+[sources.ecfr]
+enabled = true
+[sources.eur_lex]
+enabled = true
+[sources.federal_register]
+enabled = true
+[sources.fedlex]
+enabled = true
+[sources.feed]
+enabled = true
+[sources.forgejo]
+enabled = true
+[sources.ghost]
+enabled = true
+[sources.gitlab]
+enabled = true
+[sources.gleif]
+enabled = true
+[sources.govinfo]
+enabled = true
+[sources.hacker_news]
+enabled = true
+[sources.legislation_gov_uk]
+enabled = true
+[sources.lobsters]
+enabled = true
+[sources.mastodon]
+enabled = true
+[sources.public_inbox]
+enabled = true
+[sources.sec]
+enabled = true
+[sources.stacker_news]
+enabled = true
+[sources.swiss_parliament]
+enabled = true
+[sources.uk_parliament_bills]
+enabled = true
+[sources.wordpress]
+enabled = true
+[sources.zefix]
+enabled = true
 
 [media]
 oembed = "when_needed" # "always" restores eager registry discovery.
@@ -75,6 +128,11 @@ websocket = true # Nostr relays: one relay hint, after both HTTP indexers miss.
 # key = "" # Supply through protected config or PINAKES__EVENT__ADAPTERS__PLATFORMS__TICKETMASTER__KEY.
 # [event.adapters.platforms.resident_advisor]
 # enabled = true # Unofficial GraphQL, fragile and off by default.
+
+[http]
+# Sent in the User-Agent, pinakes/<version> (+https://pubky.app; <contact>). Empty: the links of
+# sources that need a contact wait. An address naming github is refused.
+contact = "info@synonym.to"
 
 [egress]
 # Exact names or *.example.org. An empty allow list permits all public hosts.

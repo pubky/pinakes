@@ -161,12 +161,15 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
       const nextPage = await json(`${pinakes}/v1/changes/lookup`, { resource_ids: ids, since: 0, limit: 1, cursor: firstPage.next_cursor });
       assert(nextPage.lines[0].seq > firstPage.lines[0].seq);
       // The same lookup by the links the samples were tagged with: every line of the lookup by
-      // IDs, and the aliases' own lines besides (an alias spelling is the alias).
+      // IDs, and the aliases' own lines besides (an alias spelling is the alias). A link that
+      // became an alias after its first fetch (an API naming the object's root) has that
+      // fetch's lines too, before its `aliased` line.
       const uris = report.samples.map(s => s.uri);
       const byLinks = await json(`${pinakes}/v1/changes/lookup`, { uris, since: 0, limit: 500 });
       const linked = new Set(byLinks.lines.map(line => line.seq)), byId = new Set(changes.lines.map(line => line.seq));
+      const aliases = new Set(byLinks.lines.filter(line => line.class === 'aliased').map(line => line.resource_id));
       assert(changes.lines.every(line => linked.has(line.seq)), 'a change lookup by links has every line of the lookup by IDs');
-      assert(byLinks.lines.every(line => byId.has(line.seq) || line.class === 'aliased'), 'a change lookup by links adds only aliases\' own lines');
+      assert(byLinks.lines.every(line => byId.has(line.seq) || aliases.has(line.resource_id)), 'a change lookup by links adds only aliases\' own lines');
       report.assertions.push('change lookup by IDs and by links, and its pages');
       // Pinakes and Nexus combine by URI, as a client does: each card's own `uri` and its
       // `details.aliases`, and for an occurrence `occurrence.feed_uri` (its own URL was never

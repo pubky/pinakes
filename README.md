@@ -27,6 +27,8 @@ own: the two combine by URI, never by ID.
 - **Events**: event pages, ICS/RSS/Atom/JSON calendar feeds with recurrence, event platforms
   (Luma, Meetup, BTC Map and others in `data/event-adapters.json`) and NIP-52 calendars.
 - **Cards**: media (oEmbed, podcasts), ISBN (Open Library), DOI (CSL), Nostr and ActivityPub.
+- **Official APIs**: keyless APIs that answer exactly where a page is walled or thin, such as
+  Federal Register documents by number ([docs/sources](docs/sources/README.md)).
 - **Aliases and groups**: spellings of one object (tracking parameters, OSM URL forms, ISBN-10)
   are one resource; a DOI or ISBN and the landing page that cites it, or one ICS UID within a
   feed, form a group: a hint on each member's card, never a merge (search shows one row per
@@ -83,6 +85,11 @@ the environment wins over the file. A platform's key
 (`PINAKES__EVENT__ADAPTERS__PLATFORMS__TICKETMASTER__KEY`) and a host rate
 (`PINAKES__LIMITS__HOST_RATES__<HOST>`) create their entry. Unknown keys and invalid values stop
 startup, so a misspelt variable is an error, not a silent default.
+
+Set `[http] contact` (`PINAKES__HTTP__CONTACT`) to an address the services you read can reach:
+it goes into the User-Agent, `pinakes/<version> (+https://pubky.app; <contact>)`. Some services
+refuse requests without it; links to them (SEC EDGAR) wait until it is set. An address naming
+github is refused, since some services block such User-Agents.
 
 [`.env.example`](.env.example) lists every variable this version reads for secrets (the database
 URL with its password, the admin token, the platform keys) with fake values. Copy it to `.env`,

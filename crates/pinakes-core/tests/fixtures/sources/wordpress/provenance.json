@@ -1,0 +1,24 @@
+{
+  "page-no-uptober": {
+    "accept": "text/html",
+    "bytes": 495238,
+    "content_type": "text/html; charset=UTF-8",
+    "file": "page-no-uptober.html.gz",
+    "link": "<https://cdn-ileamcn.nitrocdn.com>; rel=preconnect, <https://bitcoinmagazine.com/wp-json/>; rel=\"https://api.w.org/\", <https://bitcoinmagazine.com/wp-json/wp/v2/posts/55992>; rel=\"alternate\"; title=\"JSON\"; type=\"application/json\", <https://bitcoinmagazine.com/?p=55992>; rel=shortlink",
+    "note": "A WordPress article page (Bitcoin Magazine); its Link headers are in `link`.",
+    "recorded_at": "2026-10-19T19:12:27+00:00",
+    "sha256": "0193e012b20457a28a46b40ad50e578f37366fdd799ddce7dff6eb5e3aefe865",
+    "status": 200,
+    "url": "https://bitcoinmagazine.com/markets/no-uptober-yet-as-bitcoin-slips"
+  },
+  "post-55992": {
+    "bytes": 6395,
+    "content_type": "application/json; charset=UTF-8",
+    "file": "post-55992.json",
+    "note": "WordPress REST record of the post, featured image embedded.",
+    "recorded_at": "2026-10-19T19:12:28+00:00",
+    "sha256": "f52fb9c4b4db160307c27613e63901f41865a1c774d24596a254cfa8dba14d97",
+    "status": 200,
+    "url": "https://bitcoinmagazine.com/wp-json/wp/v2/posts/55992?_embed=wp%3Afeaturedmedia&_fields=id%2Clink%2Ctitle%2Cexcerpt%2Cdate_gmt%2Cmodified_gmt%2C_links%2C_embedded"
+  }
+}

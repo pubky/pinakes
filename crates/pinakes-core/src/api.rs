@@ -582,6 +582,12 @@ pub struct Details {
     pub attendance: Option<String>,
     pub venue: Option<VenueRef>,
     pub organizer: Option<OrganizerRef>,
+    /// Where the card's metadata came from when it is not the page itself: the official API
+    /// that answered (docs/sources).
+    pub from: Option<String>,
+    /// The fields that API names for the object, by name; lists are joined with "; ".
+    #[schema(value_type = Option<Object>)]
+    pub facts: Option<std::collections::BTreeMap<String, String>>,
     /// Other spellings of this link that resolve to it (its aliases), by URI, at most 50. A
     /// page's own claims (`url`, `@id`, `sameAs`, canonical links) are not aliases and are not
     /// listed.
@@ -836,6 +842,8 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
                 let (name, url) = (present(Some(&o.name)), present(o.url.as_deref()));
                 (name.is_some() || url.is_some()).then_some(OrganizerRef { name, url })
             }),
+            from: crate::sources::from(d).map(str::to_owned),
+            facts: crate::sources::facts(d),
             aliases: aliases.clone(),
             updated_at: row["resolved_at"].as_str().and_then(|s| s.parse().ok()),
         },
@@ -849,6 +857,8 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
             attendance: None,
             venue: None,
             organizer: None,
+            from: None,
+            facts: None,
             aliases,
             updated_at: None,
         },
@@ -1058,7 +1068,8 @@ pub async fn search(
             .push_bind(prefix)
             .push(" OR r.name % ")
             .push_bind(text.clone())
-            .push(")");
+            // A post whose author opted out of search indexing is never found by its text.
+            .push(") AND coalesce(r.doc->'attributes'->>'opted_out','') <> 'true'");
     }
     sql.push(" AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id");
     scope(&mut sql, &q, &reach);

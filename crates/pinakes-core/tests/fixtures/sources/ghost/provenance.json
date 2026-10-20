@@ -1,0 +1,23 @@
+{
+  "page-cellebrite": {
+    "accept": "text/html",
+    "bytes": 39851,
+    "content_type": "text/html; charset=utf-8",
+    "file": "page-cellebrite.html",
+    "note": "A Ghost post page (Privacy Guides) with its public Content API key.",
+    "recorded_at": "2026-10-19T19:13:00+00:00",
+    "sha256": "aef9c67a4a455eb9b24521c6a54024df369a21bd69fc0a86a09048612c1b962d",
+    "status": 200,
+    "url": "https://www.privacyguides.org/news/2026/10/19/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/"
+  },
+  "post-cellebrite": {
+    "bytes": 2410,
+    "content_type": "application/json; charset=utf-8",
+    "file": "post-cellebrite.json",
+    "note": "Ghost Content API; the key is the site's public one, from the page.",
+    "recorded_at": "2026-10-19T19:13:02+00:00",
+    "sha256": "cc5e29f1eb4185bcf5a3b99b526824f165c6581394e9e5c9897174ec5c59001f",
+    "status": 200,
+    "url": "https://www.privacyguides.org/ghost/api/content/posts/slug/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/?key=77a3997ec1bec1a6203fcb4166&include=authors%2Ctags&fields=id%2Cuuid%2Ctitle%2Curl%2Ccustom_excerpt%2Cexcerpt%2Cfeature_image%2Cpublished_at%2Cupdated_at"
+  }
+}

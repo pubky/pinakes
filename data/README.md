@@ -12,6 +12,12 @@ sponsors. See [schema.org terms](https://schema.org/docs/terms.html) and the
 [license text](LICENSE.schemaorg.txt). The derived table removes properties and
 comments and shortens `schema:` identifiers; it does not change the hierarchy.
 
+`local-types.json` is Pinakes's MIT-licensed table of its own card types, for objects schema.org
+has no class for (Bitcoin blocks, transactions and addresses, Lightning nodes and channels). They
+are **not schema.org**: plain names, each with `Thing` as its parent, merged into the same type
+paths. Adding one is a line here plus its entry in docs/api.md; a name that schema.org already
+uses is refused at startup.
+
 `type-mappings.json` is Pinakes's MIT-licensed mapping of OpenGraph, oEmbed and
 microformats names into the pinned vocabulary. Bumping the vocabulary is an
 explicit repository change, followed by re-resolution to update stored paths.
@@ -53,7 +59,13 @@ Regenerate with `scripts/rails-zones /path/to/time_zone.rb`.
 `274d3cadad4ebb51fec4303b422e84128bcac988d4275289448297c205dab19d`.
 The registry project is <https://github.com/iamcal/oembed>; its MIT license is
 preserved as [oembed-LICENSE](oembed-LICENSE). This is a separate upstream data
-license. Updates require an explicit replacement/digest review and resolver tests.
+license. Updates require an explicit replacement/digest review and resolver tests:
+`scripts/oembed-providers [FILE]` downloads (or reads) a newer registry, checks its shape, lists
+the providers added and removed, and rewrites the file and this paragraph's date, count and digest.
+
+Four registry providers are skipped in code
+(`cards::SKIPPED_PROVIDERS`), so an update cannot bring them back: SoundCloud (a bot challenge for
+server addresses), TikTok (answers without metadata), Facebook and Instagram (an app token).
 
 The media resolver matches registry URL schemes locally, uses JSON-capable provider
 endpoints, and applies normal DNS/redirect/size/host budgets to every request. It

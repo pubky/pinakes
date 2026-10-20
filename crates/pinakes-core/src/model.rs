@@ -96,6 +96,10 @@ pub struct ResourceMeta {
     /// redirect chain. The only alias candidates (`alias::canonical`); never stored.
     #[serde(skip)]
     pub alias_candidates: Vec<String>,
+    /// The root an official API names for this object (a filing under its primary filer): the
+    /// URI becomes an alias of it after the fetch (`alias::source`). Never stored.
+    #[serde(skip)]
+    pub source_root: Option<String>,
     pub source: String,
     #[serde(default)]
     pub fetched_at: i64,
@@ -218,8 +222,20 @@ pub fn truncate(s: &mut String, max: usize) {
 pub fn type_path(name: &str) -> Vec<String> {
     static TYPES: OnceLock<BTreeMap<String, Vec<String>>> = OnceLock::new();
     let types = TYPES.get_or_init(|| {
-        serde_json::from_str(include_str!("../../../data/schemaorg-types.json"))
-            .expect("pinned vocabulary")
+        let mut types: BTreeMap<String, Vec<String>> =
+            serde_json::from_str(include_str!("../../../data/schemaorg-types.json"))
+                .expect("pinned vocabulary");
+        // Pinakes's own types for objects schema.org has no class for (not schema.org).
+        let local: BTreeMap<String, Vec<String>> =
+            serde_json::from_str(include_str!("../../../data/local-types.json"))
+                .expect("local types");
+        for (name, parents) in local {
+            assert!(
+                types.insert(name, parents).is_none(),
+                "a local type shadows schema.org"
+            );
+        }
+        types
     });
     let name = name
         .strip_prefix("https://schema.org/")
@@ -292,6 +308,9 @@ mod tests {
             type_path("MusicEvent")
         );
         assert!(type_path("InventedType").is_empty());
+        // Local types (data/local-types.json) sit under Thing.
+        assert_eq!(type_path("BitcoinBlock"), ["Thing", "BitcoinBlock"]);
+        assert_eq!(type_path("LightningChannel"), ["Thing", "LightningChannel"]);
     }
     #[test]
     fn documents_are_bounded() {

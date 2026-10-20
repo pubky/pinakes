@@ -1169,3 +1169,25 @@ async fn a_stale_job_never_assigns_an_alias(pool: PgPool) {
         .unwrap();
     assert!(aliased(pool.clone(), id.clone()).await);
 }
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn our_own_rate_limit_is_its_own_class_and_no_failure(pool: PgPool) {
+    let cfg = QueueConfig::default();
+    let id = store::ensure_resource(&pool, "https://example.org/slow-host")
+        .await
+        .unwrap();
+    let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    queue::run_job(&pool, &DeferredResolver("rate_limited"), &cfg, &job)
+        .await
+        .unwrap();
+    let (attempts, dead, error, delay): (i32, bool, String, f64) = sqlx::query_as(
+        "SELECT attempts,dead_letter,last_error,extract(epoch FROM next_attempt_at-now())::float8 \
+         FROM resource WHERE id=$1",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((attempts, dead, error.as_str()), (0, false, "rate_limited"));
+    assert!(delay > 58.0 && delay <= 60.0, "{delay}");
+}

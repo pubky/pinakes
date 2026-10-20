@@ -1,0 +1,66 @@
+{
+  "ancestry_2020-01-01_title-17_section-240.10b-5": {
+    "bytes": 1779,
+    "content_type": "application/json; charset=utf-8",
+    "file": "ancestry_2020-01-01_title-17_section-240.10b-5.json",
+    "note": "ancestry at a point in time (matches /on/2020-01-01/ URLs)",
+    "recorded_at": "2026-10-19T16:20:02+00:00",
+    "sha256": "2a8d991ec2f99213640dedf16d5455e7059dcee576c617666a18e9e9f89cdded",
+    "status": 200,
+    "url": "https://www.ecfr.gov/api/versioner/v1/ancestry/2020-01-01/title-17.json?section=240.10b-5"
+  },
+  "ancestry_current_title-14_part-39": {
+    "bytes": 918,
+    "content_type": "application/json; charset=utf-8",
+    "file": "ancestry_current_title-14_part-39.json",
+    "note": "ancestry of 14 CFR part 39 at current",
+    "recorded_at": "2026-10-19T16:19:40+00:00",
+    "sha256": "0da9bfff3678e25b164cb2365a2e0d94bfaab6405e09414b9f6d4c43a5b8484b",
+    "status": 200,
+    "url": "https://www.ecfr.gov/api/versioner/v1/ancestry/current/title-14.json?part=39"
+  },
+  "ancestry_current_title-17_section-240.10b-5": {
+    "bytes": 1777,
+    "content_type": "application/json; charset=utf-8",
+    "file": "ancestry_current_title-17_section-240.10b-5.json",
+    "note": "ancestry of 17 CFR 240.10b-5 at current",
+    "recorded_at": "2026-10-19T16:19:38+00:00",
+    "sha256": "8430406b61f624068a649ab4053880fedeb3bb3ebcc5fb5411454426786e5252",
+    "status": 200,
+    "url": "https://www.ecfr.gov/api/versioner/v1/ancestry/current/title-17.json?section=240.10b-5"
+  },
+  "ancestry_current_title-17_section-240.99zz-missing": {
+    "bytes": 4,
+    "content_type": "application/json; charset=utf-8",
+    "file": "ancestry_current_title-17_section-240.99zz-missing.json",
+    "note": "ancestry of a non-existent section",
+    "recorded_at": "2026-10-19T16:19:41+00:00",
+    "sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+    "status": 404,
+    "url": "https://www.ecfr.gov/api/versioner/v1/ancestry/current/title-17.json?section=240.99zz"
+  },
+  "html_cgi-bin_text-idx_legacy": {
+    "accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+    "bytes": 0,
+    "content_type": null,
+    "file": null,
+    "location": "https://unblock.federalregister.gov",
+    "note": "legacy e-CFR URL form",
+    "recorded_at": "2026-10-19T16:20:05+00:00",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "status": 302,
+    "url": "https://www.ecfr.gov/cgi-bin/text-idx?node=se17.4.240_110b_65&rgn=div8"
+  },
+  "html_current_title-17_section-240.10b-5": {
+    "accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+    "bytes": 0,
+    "content_type": null,
+    "file": null,
+    "location": "https://unblock.federalregister.gov",
+    "note": "HTML reader page with our UA: bot-wall check",
+    "recorded_at": "2026-10-19T16:20:04+00:00",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "status": 302,
+    "url": "https://www.ecfr.gov/current/title-17/section-240.10b-5"
+  }
+}

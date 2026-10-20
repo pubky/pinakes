@@ -610,6 +610,20 @@ fn the_api_docs_list_every_recipe() {
         .nth(1)
         .expect("an 'Examples' section");
     for recipe in pinakes_core::recipes::recipes() {
+        // A source's examples are listed on its own page.
+        if let Some(source) = recipe.source {
+            let page = std::fs::read_to_string(format!(
+                "{}/../../docs/sources/{source}.md",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap();
+            assert!(
+                page.contains(&recipe.summary),
+                "docs/sources/{source}.md lacks {}",
+                recipe.summary
+            );
+            continue;
+        }
         let line = recipe.request_line();
         assert!(section.contains(&line), "docs/api.md lacks {line}");
     }

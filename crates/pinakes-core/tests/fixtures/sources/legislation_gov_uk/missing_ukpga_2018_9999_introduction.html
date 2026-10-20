@@ -1,0 +1,428 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML+RDFa 1.0//EN" "http://www.w3.org/MarkUp/DTD/xhtml-rdfa-1.dtd">
+<html lang="en" xml:lang="en" xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=0.1, user-scalable=1"
+    />
+    <link rel="icon" href="/favicon.ico" />
+    <link rel="stylesheet" href="/styles/screen.css" type="text/css" />
+    <link rel="stylesheet" href="/styles/website.css" type="text/css" />
+    <link rel="stylesheet" href="/styles/survey/survey.css" type="text/css" />
+    <!--[if lte IE 6]>
+      <link
+        rel="stylesheet"
+        href="/styles/IE/ie6chromeAdditions.css"
+        type="text/css"
+      />
+    <![endif]-->
+    <!--[if lte IE 7]>
+      <link
+        rel="stylesheet"
+        href="/styles/IE/ie7chromeAdditions.css"
+        type="text/css"
+      />
+    <![endif]-->
+
+    <script type="text/javascript" src="/scripts/jquery-3.7.1.min.js"></script>
+    <script type="text/javascript" src="/scripts/CentralConfig.js"></script>
+    <script type="text/javascript" src="/scripts/survey/survey.js"></script>
+    <script type="text/javascript" src="/scripts/chrome.js"></script>
+    <script
+      type="text/javascript"
+      src="/scripts/jquery-cookie-directive/jquery.cookie.js"
+    ></script>
+    <script
+      type="text/javascript"
+      src="/scripts/jquery-cookie-directive/jquery-cookie-functions.js"
+    ></script>
+    <script type="text/javascript" src="/scripts/cookie-directive.js"></script>
+    <link type="text/css" href="/styles/legBrowse.css" rel="stylesheet" />
+    <!--[if lte IE 6]>
+      <link
+        rel="stylesheet"
+        href="/styles/IE/ie6browseAdditions.css"
+        type="text/css"
+      />
+    <![endif]-->
+    <!--[if IE 7]>
+      <link
+        rel="stylesheet"
+        href="/styles/IE/ie7browseAdditions.css"
+        type="text/css"
+      />
+    <![endif]-->
+    <link
+      rel="stylesheet"
+      href="/styles/print.css"
+      type="text/css"
+      media="print"
+    />
+    <meta name="robots" content="noindex,nofollow" />
+    <title>Legislation.gov.uk</title>
+  </head>
+  <body xml:lang="en" lang="en" id="error">
+    <div id="preloadBg">
+      <script type="text/javascript">
+        //<![CDATA[
+
+        $("body").addClass("js");
+        //]]>
+      </script>
+    </div>
+    <ul id="top" class="accessibleLinks">
+      <li>
+        <a href="#pageTitle">Skip to main content</a>
+      </li>
+      <li>
+        <a href="#primaryNav">Skip to navigation</a>
+      </li>
+    </ul>
+    <div id="layout1" class="js">
+      <div id="header">
+        <h2>
+          <a href="/">legislation.gov.uk<span class="english"></span></a>
+        </h2>
+        <span class="natArch"
+          ><a href="http://www.nationalarchives.gov.uk">
+            <span class="backgroundImage"></span>
+            <span class="accessibleText"
+              >http://www.nationalarchives.gov.uk</span
+            >
+          </a></span
+        >
+        <ul id="secondaryNav">
+          <li>
+            <a
+              class="langaugeSwitch"
+              href="#"
+              title="These Explanatory Notes are not available in Welsh"
+              >Cymraeg</a
+            >
+          </li>
+        </ul>
+      </div>
+      <div id="primaryNav">
+        <div class="navLayout">
+          <ul>
+            <li class="link1">
+              <a href="/"><span>Home</span></a>
+            </li>
+            <li class="link2">
+              <a href="/explore"><span>Explore our collections</span></a>
+            </li>
+            <li class="link3">
+              <a href="/research-tools"><span>Research tools</span></a>
+            </li>
+            <li class="link4">
+              <a href="/help"><span>Help and guidance</span></a>
+            </li>
+            <li class="link5">
+              <a href="/new"><span>What's new</span></a>
+            </li>
+            <li class="link6">
+              <a href="/about-us"><span>About us</span></a>
+            </li>
+            <li id="quickSearch" class="en">
+              <a href="#contentSearch" class="expandCollapseLink close"
+                ><span
+                  >Search Legislation<span class="accessibleText"
+                    >Hide</span
+                  ></span
+                ></a
+              >
+            </li>
+          </ul>
+        </div>
+      </div>
+      <div id="background"></div>
+      <div id="layout2" class="legEnContent">
+        <form
+          id="contentSearch"
+          method="get"
+          action="/search"
+          class="contentSearch"
+          name="contentSearch"
+        >
+          <h2>Search Legislation</h2>
+          <div class="title">
+            <label for="title"
+              >Title: <em>(or keywords in the title)</em></label
+            >
+            <input type="text" id="title" name="title" />
+          </div>
+          <div class="year">
+            <label for="year">Year:</label>
+            <input type="text" id="year" name="year" />
+          </div>
+          <div class="number">
+            <label for="number">Number:</label>
+            <input type="text" id="number" name="number" />
+          </div>
+          <div class="type">
+            <label for="type">Type:</label>
+            <select name="type" id="type">
+              <option value="primary+secondary" selected="selected">
+                All UK Legislation (excluding originating from the EU)
+              </option>
+              <option disabled="disabled">
+                --------------------------------------------
+              </option>
+              <option value="all">
+                All Legislation (including originating from the EU)
+              </option>
+              <option disabled="disabled">
+                --------------------------------------------
+              </option>
+              <option value="primary">All Primary Legislation</option>
+              <option value="ukpga">
+                &nbsp;&nbsp;&nbsp;&nbsp;UK Public General Acts
+              </option>
+              <option value="ukla">
+                &nbsp;&nbsp;&nbsp;&nbsp;UK Local Acts
+              </option>
+              <option value="ukppa">
+                &nbsp;&nbsp;&nbsp;&nbsp;UK Private and Personal Acts
+              </option>
+              <option value="asp">
+                &nbsp;&nbsp;&nbsp;&nbsp;Acts of the Scottish Parliament
+              </option>
+              <option value="asc">
+                &nbsp;&nbsp;&nbsp;&nbsp;Acts of Senedd Cymru
+              </option>
+              <option value="anaw">
+                &nbsp;&nbsp;&nbsp;&nbsp;Acts of the National Assembly for Wales
+              </option>
+              <option value="mwa">
+                &nbsp;&nbsp;&nbsp;&nbsp;Measures of the National Assembly for
+                Wales
+              </option>
+              <option value="ukcm">
+                &nbsp;&nbsp;&nbsp;&nbsp;Church Measures
+              </option>
+              <option value="nia">
+                &nbsp;&nbsp;&nbsp;&nbsp;Acts of the Northern Ireland Assembly
+              </option>
+              <option value="aosp">
+                &nbsp;&nbsp;&nbsp;&nbsp;Acts of the Old Scottish Parliament
+              </option>
+              <option value="aep">
+                &nbsp;&nbsp;&nbsp;&nbsp;Acts of the English Parliament
+              </option>
+              <option value="aip">
+                &nbsp;&nbsp;&nbsp;&nbsp;Acts of the Old Irish Parliament
+              </option>
+              <option value="apgb">
+                &nbsp;&nbsp;&nbsp;&nbsp;Acts of the Parliament of Great Britain
+              </option>
+              <option value="gbla">
+                &nbsp;&nbsp;&nbsp;&nbsp;Local Acts of the Parliament of Great
+                Britain
+              </option>
+              <option value="gbppa">
+                &nbsp;&nbsp;&nbsp;&nbsp;Private and Personal Acts of the
+                Parliament of Great Britain
+              </option>
+              <option value="nisi">
+                &nbsp;&nbsp;&nbsp;&nbsp;Northern Ireland Orders in Council
+              </option>
+              <option value="mnia">
+                &nbsp;&nbsp;&nbsp;&nbsp;Measures of the Northern Ireland
+                Assembly
+              </option>
+              <option value="apni">
+                &nbsp;&nbsp;&nbsp;&nbsp;Acts of the Northern Ireland Parliament
+              </option>
+              <option disabled="disabled">
+                --------------------------------------------
+              </option>
+              <option value="secondary">All Secondary Legislation</option>
+              <option value="uksi">
+                &nbsp;&nbsp;&nbsp;&nbsp;UK Statutory Instruments
+              </option>
+              <option value="wsi">
+                &nbsp;&nbsp;&nbsp;&nbsp;Welsh Statutory Instruments
+              </option>
+              <option value="ssi">
+                &nbsp;&nbsp;&nbsp;&nbsp;Scottish Statutory Instruments
+              </option>
+              <option value="nisr">
+                &nbsp;&nbsp;&nbsp;&nbsp;Northern Ireland Statutory Rules
+              </option>
+              <option value="ukci">
+                &nbsp;&nbsp;&nbsp;&nbsp;Church Instruments
+              </option>
+              <option value="ukmd">
+                &nbsp;&nbsp;&nbsp;&nbsp;UK Ministerial Directions
+              </option>
+              <option value="ukmo">
+                &nbsp;&nbsp;&nbsp;&nbsp;UK Ministerial Orders
+              </option>
+              <option value="uksro">
+                &nbsp;&nbsp;&nbsp;&nbsp;UK Statutory Rules and Orders
+              </option>
+              <option value="nisro">
+                &nbsp;&nbsp;&nbsp;&nbsp;Northern Ireland Statutory Rules and
+                Orders
+              </option>
+              <option disabled="disabled">
+                --------------------------------------------
+              </option>
+              <option value="eu-origin">
+                All Legislation originating from the EU
+              </option>
+              <option value="eur">
+                &nbsp;&nbsp;&nbsp;&nbsp;Regulations originating from the EU
+              </option>
+              <option value="eudn">
+                &nbsp;&nbsp;&nbsp;&nbsp;Decisions originating from the EU
+              </option>
+              <option value="eudr">
+                &nbsp;&nbsp;&nbsp;&nbsp;Directives originating from the EU
+              </option>
+              <option value="eut">
+                &nbsp;&nbsp;&nbsp;&nbsp;European Union Treaties
+              </option>
+              <option disabled="disabled">
+                --------------------------------------------
+              </option>
+              <option value="draft">All Draft Legislation</option>
+              <option value="ukdsi">
+                &nbsp;&nbsp;&nbsp;&nbsp;UK Draft Statutory Instruments
+              </option>
+            	<option value="wdsi">
+            		&nbsp;&nbsp;&nbsp;&nbsp;Welsh Draft Statutory Instruments
+            	</option>
+            	<option value="sdsi">
+                &nbsp;&nbsp;&nbsp;&nbsp;Scottish Draft Statutory Instruments
+              </option>
+              <option value="nidsr">
+                &nbsp;&nbsp;&nbsp;&nbsp;Northern Ireland Draft Statutory Rules
+              </option>
+              <option disabled="disabled">
+                --------------------------------------------
+              </option>
+              <option value="ukia">All Impact Assessments</option>
+              <option value="ukia">
+                &nbsp;&nbsp;&nbsp;&nbsp;UK Impact Assessments
+              </option>
+            </select>
+          </div>
+          <div class="submit">
+            <button
+              type="submit"
+              id="contentSearchSubmit"
+              class="userFunctionalElement"
+            >
+              <span class="btl"></span><span class="btr"></span>Search<span
+                class="bbl"
+              ></span
+              ><span class="bbr"></span>
+            </button>
+          </div>
+          <div class="advSearch">
+            <a href="/search">Advanced Search</a>
+          </div>
+        </form>
+        <div id="title">
+          <h1 id="pageTitle">Invalid Request</h1>
+        </div>
+        <div id="content">
+          <p class="first">
+            Your request is not recognised. This could be because the page you
+            were looking for does not exist.
+          </p>
+          <p>
+            Please modify your request and try again, or use the search
+            functionality to locate the content you are looking for.
+          </p>
+          <p>
+            Please check for any of the following if you see this page after a
+            search:
+          </p>
+          <ul>
+            <li>Spelling mistakes in the search phrase</li>
+            <li>
+              Invalid parameter entered e.g 19988 instead of 1998 for a year
+            </li>
+          </ul>
+          <p>
+            The following are possible links that you could try as alternatives:
+          </p>
+          <ul>
+            <li>
+              <a href="/explore">Explore our collections</a>
+            </li>
+            <li>
+              <a href="/search">Search for legislation</a>
+            </li>
+          </ul>
+        </div>
+      </div>
+      <div id="footerNav">
+        <ul>
+          <li><a href="/new-design">New site design</a></li>
+          <li><a href="/help">Help</a></li>
+          <li><a href="/about-us">About us</a></li>
+          <li><a href="/sitemap">Site map</a></li>
+          <li><a href="/accessibility">Accessibility</a></li>
+          <li><a href="/contact-us">Contact us</a></li>
+          <li><a href="/privacynotice">Privacy notice</a></li>
+          <li><a href="/cookiepolicy" id="cookies-content-link">Cookies</a></li>
+        </ul>
+      </div>
+      <div id="footer">
+        <div>
+          <p class="copyrightstatement">
+            <img src="/images/chrome/ogl-symbol.gif" alt="OGL logo" />
+            <span id="Copyright_Statement"
+              >All content is available under the
+              <a
+                href="http://www.nationalarchives.gov.uk/doc/open-government-licence/version/3"
+                target="_blank"
+                rel="license"
+                >Open Government Licence v3.0</a
+              >
+              except where <a href="/contributors">otherwise stated</a>. This
+              site additionally contains content derived from EUR-Lex, reused
+              under the terms of the
+              <a
+                href="https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX%3A32011D0833"
+                target="_blank"
+                >Commission Decision 2011/833/EU</a
+              >
+              on the reuse of documents from the EU institutions. For more
+              information see the
+              <a
+                href="https://eur-lex.europa.eu/content/legal-notice/legal-notice.html"
+                target="_blank"
+                >EUR-Lex public statement on re-use</a
+              >.</span
+            >
+          </p>
+          <span class="copyright"
+            >&copy;
+            <span
+              rel="dct:rights"
+              resource="http://reference.data.gov.uk/def/copyright/crown-copyright"
+              >Crown and database right</span
+            ></span
+          >
+        </div>
+      </div>
+      <script>
+        $("#statusWarningSubSections").css("display", "none");
+        $(".help").css("display", "none");
+        $("#searchChanges", "#existingSearch").css({ display: "none" });
+      </script>
+
+      <div id="feedback">
+        <a href="#"></a>
+      </div>
+      <div id="survey"></div>
+    </div>
+  </body>
+</html>
+
+

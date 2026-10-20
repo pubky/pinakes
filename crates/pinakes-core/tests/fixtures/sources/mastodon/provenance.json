@@ -1,0 +1,49 @@
+{
+  "not-mastodon": {
+    "bytes": 577,
+    "content_type": "text/html; charset=utf-8",
+    "file": "not-mastodon.html",
+    "recorded_at": "2026-10-19T17:33:00+00:00",
+    "sha256": "25ddf2c883e0d1958ea971d279a7e4f0fd446724ee3db7db19dadabd4a62e484",
+    "status": 404,
+    "url": "https://example.org/api/v1/statuses/1"
+  },
+  "status-1": {
+    "bytes": 2742,
+    "content_type": "application/json; charset=utf-8",
+    "file": "status-1.json",
+    "note": "Mastodon status (public post by its author).",
+    "recorded_at": "2026-10-19T17:32:56+00:00",
+    "sha256": "968492e97708f033c023a19dbdce46c555d376740a2016541ad44e95b9850fe3",
+    "status": 200,
+    "url": "https://mastodon.social/api/v1/statuses/1"
+  },
+  "status-1-opted-out": {
+    "bytes": 2742,
+    "content_type": "application/json; charset=utf-8",
+    "file": "status-1-opted-out.json",
+    "note": "Derived by hand from status-1.json: account.indexable false and account.noindex true, as an opted-out author's post answers (a real opted-out post is not recorded).",
+    "recorded_at": "2026-10-19T17:32:56+00:00",
+    "sha256": "4e4b356e0bedf18c01b6f0dcbf1dcd8177e5963c0adfadd4cc4dfd4ce9d557d4",
+    "status": 200,
+    "url": "https://mastodon.social/api/v1/statuses/1"
+  },
+  "status-media-116929144390213579": {
+    "bytes": 5462,
+    "content_type": "application/json; charset=utf-8",
+    "file": "status-media-116929144390213579.json",
+    "recorded_at": "2026-10-19T17:32:58+00:00",
+    "sha256": "32c4409113ee1afc753e9c015983c1fa9dd62f58fe7b6016a03a039316492d82",
+    "status": 200,
+    "url": "https://mastodon.social/api/v1/statuses/116929144390213579"
+  },
+  "status-missing": {
+    "bytes": 21,
+    "content_type": "application/json; charset=utf-8",
+    "file": "status-missing.json",
+    "recorded_at": "2026-10-19T17:32:59+00:00",
+    "sha256": "e28bf7d9fcc22cdfde0c7c8f31e3648a4847e7bda9cb69f309f24257eee3dd41",
+    "status": 404,
+    "url": "https://mastodon.social/api/v1/statuses/1000000000000000000"
+  }
+}

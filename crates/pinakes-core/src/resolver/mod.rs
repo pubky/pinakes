@@ -132,7 +132,12 @@ fn classify_route(uri: &str) -> Option<&'static str> {
 /// Persisted routing hints are configuration-independent; disabled calendars use web workers.
 pub fn classify_config(uri: &str, config: &crate::config::Config) -> Option<&'static str> {
     match classify(uri) {
-        Some(kind) if cards::KINDS.contains(&kind) && !config.cards.resolver(kind).enabled => {
+        Some(kind)
+            if cards::KINDS.contains(&kind)
+                && (!config.cards.resolver(kind).enabled
+                    || (kind == "official"
+                        && crate::sources::enabled_source(uri, config).is_none())) =>
+        {
             if url::Url::parse(uri).is_ok_and(|u| matches!(u.scheme(), "http" | "https")) {
                 Some("web")
             } else {
