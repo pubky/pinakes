@@ -1038,8 +1038,10 @@ pub const PUBLISHED_RATES: &[(&str, f64)] = &[
     ("api.crossref.org", 10.0),
     // Software Heritage: 120 requests/hour anonymous.
     ("archive.softwareheritage.org", 120.0 / 3600.0),
-    // The Wayback Machine's CDX API asks for a gentle pace.
+    // The Wayback Machine's CDX API asks for a gentle pace (the whole host: tagged captures too).
     ("web.archive.org", 0.5),
+    // NCBI's E-utilities and ID Converter: 3 requests/s without an API key.
+    ("pmc.ncbi.nlm.nih.gov", 3.0),
 ];
 /// The published rate of `host`, if it has one (the most specific rule).
 pub fn published_rate(host: &str) -> Option<f64> {
