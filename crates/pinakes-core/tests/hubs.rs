@@ -114,6 +114,21 @@ impl Transport for Recorded {
             "/ws/2/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69" => {
                 (200, fixture("mb-recording-b1a9c0e9.json"))
             }
+            // A recording with nine ISRCs, the page's own sorting last.
+            "/ws/2/isrc/ZZAAA2600010" => (
+                200,
+                br#"{"isrcs":"ZZAAA2600010","recordings":[{"id":"00000000-0000-4000-8000-000000000009"}]}"#.to_vec(),
+            ),
+            "/ws/2/recording/00000000-0000-4000-8000-000000000009" => (
+                200,
+                serde_json::to_vec(&serde_json::json!({
+                    "id": "00000000-0000-4000-8000-000000000009",
+                    "title": "Many codes",
+                    "isrcs": (1..=8).map(|n| format!("AAAAA260000{n}")).chain(["ZZAAA2600010".to_owned()]).collect::<Vec<_>>(),
+                    "relations": [],
+                }))
+                .unwrap(),
+            ),
             "/ws/2/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711" => {
                 (200, fixture("mb-artist-a74b1b7f.json"))
             }
@@ -1017,6 +1032,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     let single = "https://musicbrainz.org/isrc/GBUM71029604";
     let shared = "https://musicbrainz.org/isrc/GBCEE0100112";
     let artist = "https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711";
+    let many = "https://musicbrainz.org/isrc/ZZAAA2600010";
     let tidal = "https://tidal.com/track/534050211";
     let tidal_artist = "https://tidal.com/artist/64518";
     let mut ids = std::collections::BTreeMap::new();
@@ -1024,6 +1040,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         (recording, "MusicRecording"),
         (single, "MusicRecording"),
         (shared, "MusicRecording"),
+        (many, "MusicRecording"),
         (artist, "MusicGroup"),
         (tidal, "MusicRecording"),
         (tidal_artist, "MusicGroup"),
@@ -1074,6 +1091,10 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         "{isrc_keys:?}"
     );
     assert!(rows(keys, ids[shared].clone()).await.is_empty());
+    // An ISRC page keys its own ISRC even when its recording has more than the eight that fit.
+    assert!(rows(keys, ids[many].clone())
+        .await
+        .contains(&"isrc:ZZAAA2600010".to_owned()));
     assert_eq!(
         rows(
             "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1",

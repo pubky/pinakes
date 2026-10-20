@@ -226,17 +226,23 @@ impl Source for MusicBrainzEntitySource {
         let Some((isrc, _)) = musicbrainz::isrc_link(&subject.uri) else {
             return Ok(Found::default());
         };
+        let own = Key {
+            key: format!("isrc:{isrc}"),
+            via: "musicbrainz".into(),
+        };
         let mut found = match musicbrainz::isrc(&cx.egress, base, &isrc).await? {
             Some(recordings) if recordings.len() == 1 => {
-                entities_found(cx, base, MbKind::Recording, &recordings, Level::Track).await?
+                let mut found =
+                    entities_found(cx, base, MbKind::Recording, &recordings, Level::Track).await?;
+                // Its own ISRC first: a recording's other ISRCs are keys only up to a cap.
+                found.keys.retain(|k| k.key != own.key);
+                found.keys.insert(0, own);
+                found
             }
             Some(recordings) if recordings.len() > 1 => Found::default(),
             // An ISRC MusicBrainz doesn't know is still its own key.
             _ => Found {
-                keys: vec![Key {
-                    key: format!("isrc:{isrc}"),
-                    via: "musicbrainz".into(),
-                }],
+                keys: vec![own],
                 ..Default::default()
             },
         };
