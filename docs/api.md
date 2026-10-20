@@ -718,7 +718,12 @@ A card's `also_on` says where else the same thing is: first the other members of
 `derived: true`, the service's name in `site`, the hub or service it came through in `via`
 (`musicbrainz`, `wikidata`), and for some a `kind` (`archived`) and a time `at`. Derived links
 are ordered by service name; each URL appears once (a tagged member wins) and never the card
-itself. A card carries at most 8 entries; `GET /v1/resources/{id}` carries all of them.
+itself. A card carries at most 8 entries, and a derived link only for a service (by `site`)
+no tagged member is on, one per service: the derived link most group members name. A tagged
+member comes first because someone used that link.
+`GET /v1/resources/{id}` carries all of them. A derived link can be unavailable in some
+countries (a regional release on a streaming service); nothing public says where, so prefer a
+tagged member.
 
 A derived link is a hint: it is never fetched, never counted as a reference and never ranks
 anything. Sources read a resource after it is saved and again when their results age (each

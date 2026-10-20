@@ -1259,3 +1259,87 @@ async fn a_link_an_exact_lookup_names_joins_by_its_key(pool: PgPool) {
         .unwrap();
     assert_eq!(group(y).await, None);
 }
+
+/// A card shows one link per service: the tagged member first (a person used it, so it plays for
+/// them), then the derived link most members name. The details read lists them all.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_card_shows_one_link_per_service(pool: PgPool) {
+    let deezer = "https://www.deezer.com/track/4329888262";
+    let tagged = "https://tidal.com/track/534050211";
+    let regional = "https://tidal.com/track/567396540";
+    let mut ids = vec![];
+    for (uri, site) in [(deezer, "Deezer"), (tagged, "TIDAL")] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "web", 86400);
+        d.set_type("MusicRecording");
+        d.site = site.into();
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.push(id);
+    }
+    let hub = Fake::new("music");
+    let recording = "mb:recording:b1a9c0e9-d987-4042-ae91-78d6a3267d69";
+    hub.answer(
+        deezer,
+        Ok(Found {
+            keys: vec![key(recording)],
+            links: vec![
+                Link::new(regional, "TIDAL", "musicbrainz"),
+                Link::new("https://open.spotify.com/track/a", "Spotify", "musicbrainz"),
+                Link::new("https://open.spotify.com/track/b", "Spotify", "musicbrainz"),
+            ],
+            ..Default::default()
+        }),
+    );
+    hub.answer(
+        tagged,
+        Ok(Found {
+            keys: vec![key(recording)],
+            // Two members name Spotify b: it comes first.
+            links: vec![Link::new(
+                "https://open.spotify.com/track/b",
+                "Spotify",
+                "musicbrainz",
+            )],
+            ..Default::default()
+        }),
+    );
+    let sources: Vec<Arc<dyn Source>> = vec![hub];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) SELECT id,repeat('a',52),'tag','/pub/test/tags/'||id,'music',now() FROM unnest($1::text[]) id")
+        .bind(&ids)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let of = |also: &Value, site: &str| -> Vec<String> {
+        also.as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["site"] == site)
+            .map(|e| e["uri"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let items = get(
+        &app,
+        "/v1/search?key=mbid:b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+    )
+    .await;
+    let card = items["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == ids[0].as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(of(&card["also_on"], "TIDAL"), [tagged], "{card}");
+    assert_eq!(
+        of(&card["also_on"], "Spotify"),
+        ["https://open.spotify.com/track/b"]
+    );
+    let details = get(&app, &format!("/v1/resources/{}", ids[0])).await;
+    assert_eq!(of(&details["also_on"], "TIDAL"), [tagged, regional]);
+    assert_eq!(of(&details["also_on"], "Spotify").len(), 2);
+}

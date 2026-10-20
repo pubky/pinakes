@@ -125,7 +125,9 @@ $$;
 -- card, and the unit for an occurrence or an event reference (whose feed's links are not its
 -- own). `members` false (groups switched off) leaves the group out. Read at
 -- request time: OSM-derived values never enter these tables.
-CREATE FUNCTION also_on(unit text, resource text, cap integer, members boolean) RETURNS jsonb
+-- A card (`per_site`) shows a derived link only for a service no tagged member is on, and one
+-- per service (the one most members name); the details read (`per_site` false) lists them all.
+CREATE FUNCTION also_on(unit text, resource text, cap integer, members boolean, per_site boolean DEFAULT true) RETURNS jsonb
     LANGUAGE sql STABLE
     AS $$
  WITH grp AS (SELECT group_id,resource_id FROM group_unit WHERE members AND unit_id=unit AND group_id IS NOT NULL),
@@ -143,14 +145,16 @@ CREATE FUNCTION also_on(unit text, resource text, cap integer, members boolean) 
    CROSS JOIN LATERAL (SELECT * FROM group_member_document WHERE unit_id=p.unit_id OFFSET 0) d),
  tagged AS (SELECT id,uri,min(host) AS host,min(site) AS site,bool_or(mine) AS mine FROM m GROUP BY id,uri HAVING NOT bool_or(own)),
  owners AS (SELECT resource AS resource_id UNION SELECT u.resource_id FROM grp JOIN group_unit u USING(group_id)),
- derived AS (SELECT DISTINCT ON (l.link_id) l.link_id,l.uri,l.site,l.via,l.kind,l.at
+ derived AS (SELECT DISTINCT ON (l.link_id) l.link_id,l.uri,l.site,l.via,l.kind,l.at,
+     count(*) OVER (PARTITION BY l.link_id) AS named
    FROM derived_link l JOIN owners o USING(resource_id)
    WHERE l.expires_at>now() AND NOT EXISTS(SELECT 1 FROM owners x WHERE x.resource_id=l.link_id)
      AND NOT EXISTS(SELECT 1 FROM tagged t WHERE t.id=l.link_id)
    ORDER BY l.link_id,l.seen_at DESC,l.via),
- entries AS (SELECT CASE WHEN mine THEN 1 ELSE 0 END AS o,id AS k1,uri AS k2,jsonb_build_object('id',id,'uri',uri,'host',host,'site',site) AS e FROM tagged
-   UNION ALL SELECT 2,lower(site),uri,jsonb_strip_nulls(jsonb_build_object('uri',uri,'site',site,'derived',true,'via',via,'kind',kind,'at',at)) FROM derived)
- SELECT coalesce((SELECT jsonb_agg(e ORDER BY o,k1,k2) FROM (SELECT * FROM entries ORDER BY o,k1,k2 LIMIT cap) x),'[]'::jsonb)
+ entries AS (SELECT CASE WHEN mine THEN 1 ELSE 0 END AS o,id AS k1,uri AS k2,0::bigint AS rank,coalesce(lower(site),uri) AS service,jsonb_build_object('id',id,'uri',uri,'host',host,'site',site) AS e FROM tagged
+   UNION ALL SELECT 2,lower(site),uri,-named,lower(site),jsonb_strip_nulls(jsonb_build_object('uri',uri,'site',site,'derived',true,'via',via,'kind',kind,'at',at)) FROM derived),
+ shown AS (SELECT * FROM (SELECT *,row_number() OVER (PARTITION BY service ORDER BY o,rank,k2) AS nth FROM entries) x WHERE NOT per_site OR o<2 OR nth=1)
+ SELECT coalesce((SELECT jsonb_agg(e ORDER BY o,k1,k2) FROM (SELECT * FROM shown ORDER BY o,k1,k2 LIMIT cap) x),'[]'::jsonb)
 $$;
 
 -- A music service's and Wikipedia's URL forms are spellings of one object (`music::parse`,
