@@ -722,9 +722,10 @@ A card's `also_on` says where else the same thing is: first the other members of
 `derived: true`, the service's name in `site`, the hub or service it came through in `via`
 (`musicbrainz`, `wikidata`), and for some a `kind` (`archived`) and a time `at`. Derived links
 are ordered by service name; each URL appears once (a tagged member wins) and never the card
-itself. A card carries at most 8 entries, and a derived link only for a service (by `site`)
-no tagged member is on, one per service: the derived link most group members name. A tagged
-member comes first because someone used that link.
+itself. A card carries at most 8 entries, and one link per music service (by `site`): a tagged
+member first, because someone used that link (of several, the one on the recording's original
+album, the `original_album` fact), then the derived link most group members name. Members that
+are not music always show.
 `GET /v1/resources/{id}` carries all of them. A derived link can be unavailable in some
 countries (a regional release on a streaming service); nothing public says where, so prefer a
 tagged member.
@@ -754,8 +755,9 @@ from a known music service's own record of its own object; another host's claim 
   is on, when MusicBrainz knows exactly one. An album link related to up to four releases of one
   release group (editions MusicBrainz keeps apart) takes the release group's key alone, and the
   links, facts and barcode every one of those releases has. Its facts: `mbid`, the recording's
-  `isrc`s, the release's barcode as `upc`, the `artist` credit, the recording's `duration` and an
-  artist's `artist_type` (`Person`, `Group`, …). ISRCs are stored in upper case and barcodes as
+  `isrc`s, the release's barcode as `upc`, the `artist` credit, the recording's `duration` and
+  `original_album` (the earliest official album that is no compilation, live or remix album),
+  and an artist's `artist_type` (`Person`, `Group`, …). ISRCs are stored in upper case and barcodes as
   GTIN-13 (a 12-digit UPC gains a leading zero), by every source.
 - `deezer` (off unless the operator turns it on: Deezer's API terms allow non-commercial use
   only): a Deezer track's or album's own ISRC or barcode from Deezer's API as a key, and for

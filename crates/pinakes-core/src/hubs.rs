@@ -268,6 +268,41 @@ pub mod musicbrainz {
             .await?
             .map(|v| parse_url(&v)))
     }
+    /// A recording's original album: of its official albums, the earliest release of a release
+    /// group that is an Album with no secondary type (not a compilation, live or remix album);
+    /// the release group's title.
+    pub async fn original_album(
+        egress: &Egress,
+        base: &str,
+        recording: &str,
+    ) -> Result<Option<String>> {
+        let Some(recording) = mbid(recording) else {
+            return Ok(None);
+        };
+        let url = format!("{base}/release?recording={recording}&type=album&status=official&inc=release-groups&limit=100&fmt=json");
+        Ok(get(egress, &url, "musicbrainz")
+            .await?
+            .and_then(|v| parse_original_album(&v)))
+    }
+    pub fn parse_original_album(v: &Value) -> Option<String> {
+        v["releases"]
+            .as_array()?
+            .iter()
+            .filter(|r| {
+                let group = &r["release-group"];
+                group["primary-type"] == "Album"
+                    && group["secondary-types"]
+                        .as_array()
+                        .is_none_or(Vec::is_empty)
+            })
+            .filter_map(|r| {
+                let date = r["date"].as_str().filter(|d| d.len() >= 4)?;
+                let title = r["release-group"]["title"].as_str()?.trim();
+                (!title.is_empty()).then_some((date, title))
+            })
+            .min()
+            .map(|(_, title)| title.to_owned())
+    }
     /// The recordings an ISRC is on; `None` when MusicBrainz does not know the ISRC.
     pub async fn isrc(egress: &Egress, base: &str, isrc: &str) -> Result<Option<Vec<String>>> {
         let Some(isrc) = crate::music::isrc(isrc) else {

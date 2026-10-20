@@ -96,6 +96,11 @@ impl Transport for Recorded {
             "/ws/2/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69" => {
                 (200, fixture("mb-recording-b1a9c0e9.json"))
             }
+            // A recording's official albums (its original album).
+            "/ws/2/release" if query("recording") == "b1a9c0e9-d987-4042-ae91-78d6a3267d69" => {
+                (200, fixture("mb-browse-releases-b1a9c0e9.json"))
+            }
+            "/ws/2/release" => (200, br#"{"release-count":0,"releases":[]}"#.to_vec()),
             "/ws/2/isrc/GBUM71029604" => (200, fixture("mb-isrc-GBUM71029604.json")),
             "/ws/2/isrc/GBCEE0100112" => (200, fixture("mb-isrc-GBCEE0100112.json")),
             "/ws/2/isrc/GBUM72103841" => (404, fixture("mb-isrc-GBUM72103841.json")),
@@ -654,14 +659,26 @@ async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
 async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
     let tracks = [
         // The seed: MusicBrainz relates the URL to recording b1a9c0e9.
-        ("https://tidal.com/track/567396540", "GBCEE0100112"),
+        (
+            "https://tidal.com/track/567396540",
+            "GBCEE0100112",
+            "Greatest Hits - We Will Rock You Edition",
+        ),
         // Not related by URL; its ISRC is on b1a9c0e9 alone.
-        ("https://tidal.com/track/534050211", "GBUM71029604"),
+        (
+            "https://tidal.com/track/534050211",
+            "GBUM71029604",
+            "A Night At The Opera (Deluxe Edition)",
+        ),
         // An ISRC MusicBrainz does not know.
-        ("https://tidal.com/track/551040646", "GBUM72103841"),
+        (
+            "https://tidal.com/track/551040646",
+            "GBUM72103841",
+            "Greatest Hits",
+        ),
     ];
     let mut ids = vec![];
-    for (uri, isrc) in tracks {
+    for (uri, isrc, album) in tracks {
         let id = store::ensure_resource(&pool, uri).await.unwrap();
         let mut d = ResourceMeta::new(uri, "jsonld", 86400);
         d.set_type("MusicRecording");
@@ -669,10 +686,7 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
         d.attributes.insert("isrc".into(), isrc.into());
         // As TIDAL's JSON-LD states them.
         d.attributes.insert("artist".into(), "Queen".into());
-        d.attributes.insert(
-            "album".into(),
-            "A Night At The Opera (Deluxe Edition)".into(),
-        );
+        d.attributes.insert("album".into(), album.into());
         d.attributes.insert("duration".into(), "PT5M55S".into());
         store::save_document(&pool, &id, 0, &d).await.unwrap();
         ids.push(id);
@@ -754,7 +768,29 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
     assert_ne!(seed, ["-"]);
     assert_eq!(rows(group, ids[1].clone()).await, seed);
     assert_eq!(rows(group, ids[2].clone()).await, ["-"]);
-    assert_eq!(rows(group, spotify_id).await, seed);
+    assert_eq!(rows(group, spotify_id.clone()).await, seed);
+    assert_eq!(
+        rows(
+            "SELECT value FROM resource_fact WHERE resource_id=$1 AND name='original_album'",
+            ids[0].clone()
+        )
+        .await,
+        ["A Night at the Opera"]
+    );
+    // Both TIDAL links are tagged: a card shows the one on the original album.
+    let card: serde_json::Value = sqlx::query_scalar("SELECT also_on($1,$1,8,true)")
+        .bind(&spotify_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let tidal: Vec<&str> = card
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["uri"].as_str().unwrap().starts_with("https://tidal.com/"))
+        .map(|e| e["uri"].as_str().unwrap())
+        .collect();
+    assert_eq!(tidal, ["https://tidal.com/track/534050211"], "{card}");
     // The recording's other links, found through the ISRC.
     let links = rows(
         "SELECT uri FROM derived_link WHERE resource_id=$1 ORDER BY uri",

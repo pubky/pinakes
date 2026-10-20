@@ -125,8 +125,9 @@ $$;
 -- card, and the unit for an occurrence or an event reference (whose feed's links are not its
 -- own). `members` false (groups switched off) leaves the group out. Read at
 -- request time: OSM-derived values never enter these tables.
--- A card (`per_site`) shows a derived link only for a service no tagged member is on, and one
--- per service (the one most members name); the details read (`per_site` false) lists them all.
+-- A card (`per_site`) shows one link per music service: a tagged member first (the one on the
+-- recording's original album, then by ID), then the derived link most members name. Members that
+-- are not music always show. The details read (`per_site` false) lists them all.
 CREATE FUNCTION also_on(unit text, resource text, cap integer, members boolean, per_site boolean DEFAULT true) RETURNS jsonb
     LANGUAGE sql STABLE
     AS $$
@@ -140,20 +141,26 @@ CREATE FUNCTION also_on(unit text, resource text, cap integer, members boolean, 
    WHERE u.unit_id<>unit ORDER BY u.unit_id LIMIT cap),
  picked AS (SELECT unit_id FROM others UNION SELECT unit_id FROM siblings UNION SELECT unit FROM grp),
  m AS (SELECT d.id,CASE WHEN d.occurrence IS NULL THEN d.uri ELSE coalesce(nullif(d.doc->>'url',''),d.uri) END AS uri,
-   d.host,d.doc->>'site' AS site,d.unit_id=unit AS own,d.id=(SELECT resource_id FROM grp) AS mine
+   d.host,d.doc->>'site' AS site,d.unit_id=unit AS own,d.id=(SELECT resource_id FROM grp) AS mine,
+   d.type IN ('MusicRecording','MusicAlbum','MusicGroup','MusicPlaylist') AS music,
+   (SELECT f.value FROM resource_fact f WHERE f.resource_id=d.id AND f.name='album' AND f.expires_at>now() ORDER BY f.value LIMIT 1) AS album
    FROM picked p
    CROSS JOIN LATERAL (SELECT * FROM group_member_document WHERE unit_id=p.unit_id OFFSET 0) d),
- tagged AS (SELECT id,uri,min(host) AS host,min(site) AS site,bool_or(mine) AS mine FROM m GROUP BY id,uri HAVING NOT bool_or(own)),
+ tagged AS (SELECT id,uri,min(host) AS host,min(site) AS site,bool_or(mine) AS mine,bool_or(music) AS music,min(album) AS album FROM m GROUP BY id,uri HAVING NOT bool_or(own)),
  owners AS (SELECT resource AS resource_id UNION SELECT u.resource_id FROM grp JOIN group_unit u USING(group_id)),
+ original AS (SELECT lower(min(f.value)) AS title FROM resource_fact f JOIN owners o USING(resource_id) WHERE f.name='original_album' AND f.expires_at>now()),
  derived AS (SELECT DISTINCT ON (l.link_id) l.link_id,l.uri,l.site,l.via,l.kind,l.at,
      count(*) OVER (PARTITION BY l.link_id) AS named
    FROM derived_link l JOIN owners o USING(resource_id)
    WHERE l.expires_at>now() AND NOT EXISTS(SELECT 1 FROM owners x WHERE x.resource_id=l.link_id)
      AND NOT EXISTS(SELECT 1 FROM tagged t WHERE t.id=l.link_id)
    ORDER BY l.link_id,l.seen_at DESC,l.via),
- entries AS (SELECT CASE WHEN mine THEN 1 ELSE 0 END AS o,id AS k1,uri AS k2,0::bigint AS rank,coalesce(lower(site),uri) AS service,jsonb_build_object('id',id,'uri',uri,'host',host,'site',site) AS e FROM tagged
+ entries AS (SELECT CASE WHEN mine THEN 1 ELSE 0 END AS o,id AS k1,uri AS k2,
+     CASE WHEN starts_with(lower(album),(SELECT title FROM original)) THEN -1 ELSE 0 END::bigint AS rank,
+     CASE WHEN music AND site IS NOT NULL THEN lower(site) ELSE 'member:'||id END AS service,
+     jsonb_build_object('id',id,'uri',uri,'host',host,'site',site) AS e FROM tagged
    UNION ALL SELECT 2,lower(site),uri,-named,lower(site),jsonb_strip_nulls(jsonb_build_object('uri',uri,'site',site,'derived',true,'via',via,'kind',kind,'at',at)) FROM derived),
- shown AS (SELECT * FROM (SELECT *,row_number() OVER (PARTITION BY service ORDER BY o,rank,k2) AS nth FROM entries) x WHERE NOT per_site OR o<2 OR nth=1)
+ shown AS (SELECT * FROM (SELECT *,row_number() OVER (PARTITION BY service ORDER BY o,rank,k2) AS nth FROM entries) x WHERE NOT per_site OR nth=1)
  SELECT coalesce((SELECT jsonb_agg(e ORDER BY o,k1,k2) FROM (SELECT * FROM shown ORDER BY o,k1,k2 LIMIT cap) x),'[]'::jsonb)
 $$;
 

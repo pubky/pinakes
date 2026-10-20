@@ -202,6 +202,15 @@ impl Source for MusicBrainzSource {
         }
         // What every entity has (one entity: all of it).
         found.facts = facts(entity);
+        // A recording's original album ranks the card's links of one service (the track there).
+        if kind == MbKind::Recording {
+            if let Some(album) = musicbrainz::original_album(&cx.egress, base, &entity.mbid).await?
+            {
+                found
+                    .facts
+                    .push(crate::also_on::Fact::new("original_album", album));
+            }
+        }
         found
             .facts
             .retain(|f| entities[1..].iter().all(|e| facts(e).contains(f)));
