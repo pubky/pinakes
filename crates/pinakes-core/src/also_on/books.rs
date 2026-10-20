@@ -236,7 +236,7 @@ pub fn isbn10(isbn13: &str) -> Option<String> {
 }
 
 /// The keys, links and facts (its ISBN-13s) of an edition. `isbn` is the ISBN the link named,
-/// if any.
+/// if any. The edition's links are keyed by the edition, its work's by the work.
 pub fn found(edition: &Edition, isbn: Option<&str>) -> Found {
     let mut found = Found {
         facts: edition
@@ -246,11 +246,12 @@ pub fn found(edition: &Edition, isbn: Option<&str>) -> Found {
             .collect(),
         ..Default::default()
     };
+    let key = format!("openlibrary:edition:{}", edition.id);
     found.keys.push(Key {
-        key: format!("openlibrary:edition:{}", edition.id),
+        key: key.clone(),
         via: "openlibrary".into(),
     });
-    let link = |uri: String, site: &str| Link::new(uri, site, "openlibrary");
+    let link = |uri: String, site: &str| Link::new(uri, site, "openlibrary").keyed(&key);
     found.links.push(link(
         format!("{OPEN_LIBRARY}/books/{}", edition.id),
         "Open Library",
@@ -260,7 +261,12 @@ pub fn found(edition: &Edition, isbn: Option<&str>) -> Found {
             key: format!("openlibrary:work:{work}"),
             via: "openlibrary".into(),
         });
-        let mut all = link(format!("{OPEN_LIBRARY}/works/{work}"), "Open Library");
+        let mut all = Link::new(
+            format!("{OPEN_LIBRARY}/works/{work}"),
+            "Open Library",
+            "openlibrary",
+        )
+        .keyed(format!("openlibrary:work:{work}"));
         all.kind = Some("work".into());
         found.links.push(all);
     }
@@ -278,10 +284,14 @@ pub fn found(edition: &Edition, isbn: Option<&str>) -> Found {
     }
     if let Some(id) = &edition.librarything {
         // LibraryThing's IDs are its works'.
-        let mut work = link(
+        let mut work = Link::new(
             format!("https://www.librarything.com/work/{id}"),
             "LibraryThing",
+            "openlibrary",
         );
+        if let Some(w) = &edition.work {
+            work = work.keyed(format!("openlibrary:work:{w}"));
+        }
         work.kind = Some("work".into());
         found.links.push(work);
     }
@@ -293,11 +303,9 @@ pub fn found(edition: &Edition, isbn: Option<&str>) -> Found {
     }
     // A printed book's ISBN-10 is its Amazon product ID; an ebook's product has its own ID.
     if let Some(ten) = isbn.filter(|_| !edition.ebook).and_then(isbn10) {
-        found.links.push(Link::new(
-            format!("https://www.amazon.com/dp/{ten}"),
-            "Amazon",
-            "isbn",
-        ));
+        found.links.push(
+            Link::new(format!("https://www.amazon.com/dp/{ten}"), "Amazon", "isbn").keyed(&key),
+        );
     }
     found
 }
@@ -388,7 +396,7 @@ impl Books {
         }
     }
     /// The work's Wikidata item (the one carrying its Open Library ID): its Q-id as a fact (the
-    /// Open Library work key already joins the work's editions) and its pages.
+    /// Open Library work key already joins the work's editions) and its pages, keyed by the work.
     async fn wikidata(cx: &Context, work: &str, kind: Option<&str>) -> Result<Option<Found>> {
         let wikidata::Found::One(item) = wikidata::item_with(&cx.egress, "P648", work).await?
         else {
@@ -396,7 +404,8 @@ impl Books {
         };
         let mut found = Found::default();
         found.facts.push(Fact::new("wikidata", item.qid.as_str()));
-        for mut l in media::links(&item, WIKIDATA) {
+        for l in media::links(&item, WIKIDATA) {
+            let mut l = l.keyed(format!("openlibrary:work:{work}"));
             l.kind = kind.map(str::to_owned);
             found.links.push(l);
         }
@@ -443,7 +452,9 @@ impl Books {
                     .await?;
                 parse_itunes(f.status, &f.body, storefront)
             };
-            found.links.extend(deferred.take("itunes", apple.await));
+            let apple = deferred.take("itunes", apple.await);
+            let key = format!("openlibrary:edition:{}", edition.id);
+            found.links.extend(apple.map(|l| l.keyed(key)));
         }
         if let Some(work) = &edition.work {
             // The item is the work's: its pages are the work's too.
@@ -472,11 +483,14 @@ impl Books {
                         via: "openlibrary".into(),
                     });
                     if id != asked {
-                        found.links.push(Link::new(
-                            format!("{OPEN_LIBRARY}/works/{id}"),
-                            "Open Library",
-                            "openlibrary",
-                        ));
+                        found.links.push(
+                            Link::new(
+                                format!("{OPEN_LIBRARY}/works/{id}"),
+                                "Open Library",
+                                "openlibrary",
+                            )
+                            .keyed(format!("openlibrary:work:{id}")),
+                        );
                     }
                     let mut deferred = Deferred::default();
                     if let Some(more) =

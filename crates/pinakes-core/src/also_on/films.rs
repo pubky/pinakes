@@ -420,6 +420,9 @@ impl Source for Films {
                 found.links.push(tvmaze_link(show.id));
             }
         }
+        // Every link is the title's, reached through its IMDb ID: a tagged one joins by it.
+        let key = format!("imdb:{tt}");
+        found.links = found.links.into_iter().map(|l| l.keyed(&key)).collect();
         deferred.finish(found)
     }
 }

@@ -584,11 +584,10 @@ fn add(found: &mut Found, link: Link) {
         found.links.push(link);
     }
 }
-/// A show's Apple ID: its key and the pages that open it by that ID.
+/// A show's Apple ID: its key and the pages that open it by that ID, keyed by it.
 pub fn apple_show(found: &mut Found, show: u64, storefront: &str) {
-    found
-        .keys
-        .push(key(format!("podcast:apple:{show}"), "itunes"));
+    let apple = format!("podcast:apple:{show}");
+    found.keys.push(key(apple.clone(), "itunes"));
     for (uri, site) in [
         (
             format!("https://podcasts.apple.com/{storefront}/podcast/id{show}"),
@@ -597,19 +596,26 @@ pub fn apple_show(found: &mut Found, show: u64, storefront: &str) {
         (format!("https://pca.st/itunes/{show}"), "Pocket Casts"),
         (format!("https://castro.fm/itunes/{show}"), "Castro"),
     ] {
-        add(found, Link::new(uri, site, "itunes"));
+        add(found, Link::new(uri, site, "itunes").keyed(&apple));
     }
 }
+/// The exact key a show's derived link is named by: the GUID Podcast Index vouches for, else the
+/// Apple ID iTunes confirmed.
+fn show_key(vouched: Option<&str>, apple: Option<u64>) -> Option<String> {
+    vouched
+        .map(|g| format!("podcast:guid:{g}"))
+        .or_else(|| apple.map(|a| format!("podcast:apple:{a}")))
+}
 /// A show's Podcast Index feed: its page, and the GUID Podcast Index vouches for, as a key.
-fn index_show(found: &mut Found, feed: &IndexFeed, vouched: Option<&str>) {
-    add(
-        found,
-        Link::new(
-            format!("https://podcastindex.org/podcast/{}", feed.id),
-            "Podcast Index",
-            "podcastindex",
-        ),
+/// `apple`: the show's Apple ID, when Podcast Index's feed is the one iTunes names for it.
+fn index_show(found: &mut Found, feed: &IndexFeed, vouched: Option<&str>, apple: Option<u64>) {
+    let mut page = Link::new(
+        format!("https://podcastindex.org/podcast/{}", feed.id),
+        "Podcast Index",
+        "podcastindex",
     );
+    page.key = show_key(vouched, apple);
+    add(found, page);
     if let Some(guid) = vouched {
         found
             .keys
@@ -624,18 +630,18 @@ pub fn vouched<'a>(feed: &'a IndexFeed, owner: Option<&IndexFeed>) -> Option<&'a
         .as_deref()
         .filter(|_| owner.is_some_and(|o| o.id == feed.id))
 }
-/// An episode's Apple track: its key and page.
+/// An episode's Apple track: its key and page, keyed by it.
 pub fn apple_episode(found: &mut Found, show: u64, track: u64, storefront: &str) {
-    found
-        .keys
-        .push(key(format!("podcast:apple_episode:{track}"), "itunes"));
+    let apple = format!("podcast:apple_episode:{track}");
+    found.keys.push(key(apple.clone(), "itunes"));
     add(
         found,
         Link::new(
             format!("https://podcasts.apple.com/{storefront}/podcast/id{show}?i={track}"),
             "Apple Podcasts",
             "itunes",
-        ),
+        )
+        .keyed(apple),
     );
 }
 
@@ -760,7 +766,7 @@ impl Podcasts {
         let owner = deferred.take("podcastindex", Self::index(cx, Ask::Guid(g)).await);
         vouched(feed, owner.as_ref()).map(str::to_owned)
     }
-    /// The show's Wikidata item, by its Apple ID.
+    /// The show's Wikidata item, by its Apple ID: its pages are keyed by that ID.
     async fn wikidata(cx: &Context, found: &mut Found, show: u64) -> Result<Option<()>> {
         if let wikidata::Found::One(item) =
             wikidata::item_with(&cx.egress, "P5842", &show.to_string()).await?
@@ -769,7 +775,7 @@ impl Podcasts {
                 .keys
                 .extend(hubs::key::wikidata(&item.qid).map(|k| key(k, "wikidata")));
             for l in media::links(&item, WIKIDATA) {
-                add(found, l);
+                add(found, l.keyed(format!("podcast:apple:{show}")));
             }
         }
         Ok(Some(()))
@@ -805,7 +811,7 @@ impl Podcasts {
             None => Self::index_for_apple(cx, deferred, show, itunes_feed).await,
         };
         if let Some((feed, vouched)) = &indexed {
-            index_show(found, feed, vouched.as_deref());
+            index_show(found, feed, vouched.as_deref(), Some(show));
         }
         deferred.take("wikidata", Self::wikidata(cx, found, show).await);
         Ok(indexed.and_then(|(f, _)| f.guid))
@@ -921,10 +927,9 @@ impl Source for Podcasts {
                     None => {
                         let guid = indexed.guid.clone();
                         if let Some(url) = &indexed.url {
-                            add(
-                                &mut found,
-                                Link::new(url.clone(), "Podcast feed", "podcastindex"),
-                            );
+                            let mut feed = Link::new(url.clone(), "Podcast feed", "podcastindex");
+                            feed.key = show_key(vouched.as_deref(), apple);
+                            add(&mut found, feed);
                         }
                         match apple {
                             Some(show) => {
@@ -932,7 +937,7 @@ impl Source for Podcasts {
                                 Self::show(cx, &mut found, &mut deferred, show, None, given)
                                     .await?;
                             }
-                            None => index_show(&mut found, &indexed, vouched.as_deref()),
+                            None => index_show(&mut found, &indexed, vouched.as_deref(), None),
                         }
                         if let Some(g) = guid {
                             found.facts.push(Fact::new("podcast_guid", g));
@@ -982,7 +987,9 @@ impl Source for Podcasts {
                                 Self::show(cx, &mut found, &mut deferred, show, None, given)
                                     .await?;
                             }
-                            (None, Some(feed)) => index_show(&mut found, &feed, vouched.as_deref()),
+                            (None, Some(feed)) => {
+                                index_show(&mut found, &feed, vouched.as_deref(), None)
+                            }
                             _ => {}
                         }
                         // The fact: the feed's own GUID, then Podcast Index's, then the derived one.

@@ -829,6 +829,9 @@ exactly, never by title:
   Gutenberg and BookBrainz pages, each with `kind: "work"` on an edition's card. A book can
   therefore list two Goodreads pages: its edition and its work's editions.
 - A failing iTunes or Wikidata request leaves what Open Library said.
+- Each link carries the key it was found through: the edition's pages (Amazon and Apple Books
+  too) its edition key, the work's pages its work key. A tagged Goodreads or LibraryThing link
+  therefore joins its edition or work.
 
 Goodreads' `book/isbn/{isbn}` redirect is never used: it answers an unknown ISBN with an
 unrelated book.
@@ -865,6 +868,9 @@ in any spelling, an episode with `?i={n}`), a player link that opens a show by i
 - A Podcast Index page links the show's feed and its Apple, Pocket Casts and Castro pages.
 - The show's Wikidata item (by its Apple ID) gives its Q-id as a key and its Spotify, Podcast
   Index, Podchaser, Pocket Casts and Castbox pages.
+- Each link carries the key it was found through: the Apple, player and Wikidata item pages the
+  Apple ID, a Podcast Index page or feed the GUID Podcast Index vouches for (else the Apple ID),
+  an episode's Apple page its track. A tagged Spotify show link therefore joins its show.
 - A link never lists its own service. A Podcast Index failure (a refused key, an outage) never
   fails the lookup: what the other services answered still counts.
 - A Pocket Casts short link (`pca.st/{slug}`) carries no Apple ID and is not looked up.
@@ -882,9 +888,11 @@ Letterboxd film, a TVmaze show or a Netflix title is looked up exactly, never by
   `imdb/{tt}/` redirects to its film (an unknown ID answers a page, not a redirect), and
   TVmaze's `lookup/shows?imdb=` to its show, whose record must name the same IMDb ID. TVmaze's
   data is CC BY-SA; its links say `via: "tvmaze"`.
+- Every link of a title with an IMDb ID carries `imdb:{tt…}`, so a tagged Netflix, Trakt or
+  Letterboxd link joins the title.
 
 A title never lists its own service. A Trakt link is typed but not looked up: Trakt's IDs are
-paths, which the Wikidata search does not take.
+paths, which the Wikidata search does not take. It joins as one of a title's links.
 
 The level is exact: a track lists tracks and videos of the recording, an album lists albums and
 YouTube's album playlists, an artist lists artist pages and channels. Album links group by

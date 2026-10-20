@@ -250,6 +250,13 @@ fn subject(uri: &str, type_name: Option<&str>, doc: Option<ResourceMeta>) -> Sub
 fn keys(found: &Found) -> Vec<&str> {
     found.keys.iter().map(|k| k.key.as_str()).collect()
 }
+/// The exact key the link at `uri` is named by.
+fn key_of<'a>(found: &'a Found, uri: &str) -> Option<&'a str> {
+    let link = found.links.iter().find(|l| l.uri == uri);
+    link.unwrap_or_else(|| panic!("no link {uri}"))
+        .key
+        .as_deref()
+}
 fn links(found: &Found) -> Vec<(&str, &str, &str)> {
     found
         .links
@@ -329,6 +336,19 @@ async fn a_printed_book_and_its_work() {
             .all(|l| l.kind.as_deref() == Some("work")),
         "the item's pages are the work's"
     );
+    // Each link is named by the edition or the work it is a page of, so a tagged one joins.
+    let edition = Some("openlibrary:edition:OL23109860M");
+    let work = Some("openlibrary:work:OL468431W");
+    for (uri, key) in [
+        ("https://openlibrary.org/books/OL23109860M", edition),
+        ("https://openlibrary.org/works/OL468431W", work),
+        ("https://www.goodreads.com/book/show/4671", edition),
+        ("https://www.librarything.com/work/2964", work),
+        ("https://www.amazon.com/dp/0743273567", edition),
+        ("https://www.goodreads.com/work/editions/245494", work),
+    ] {
+        assert_eq!(key_of(&found, uri), key, "{uri}");
+    }
     assert!(
         !recorded.seen().iter().any(|u| u.contains("itunes")),
         "a printed ISBN is never asked of iTunes"
@@ -356,6 +376,10 @@ async fn a_work_link() {
         "https://www.goodreads.com/work/editions/1540236",
         "wikidata"
     )));
+    assert_eq!(
+        key_of(&hobbit, "https://www.goodreads.com/work/editions/1540236"),
+        Some("openlibrary:work:OL27482W")
+    );
     assert!(
         hobbit.links.iter().all(|l| l.kind.is_none()),
         "the work itself"
@@ -387,6 +411,10 @@ async fn a_work_link() {
             "openlibrary"
         )]
     );
+    assert_eq!(
+        merged.links[0].key.as_deref(),
+        Some("openlibrary:work:OL893414W")
+    );
 }
 
 #[tokio::test]
@@ -402,6 +430,11 @@ async fn an_ebook_on_apple_books() {
         "https://books.apple.com/us/book/id721429965",
         "itunes"
     )));
+    assert!(
+        key_of(&found, "https://books.apple.com/us/book/id721429965")
+            .is_some_and(|k| k.starts_with("openlibrary:edition:")),
+        "found by the edition's ISBN"
+    );
     assert!(!found.links.iter().any(|l| l.site == "Amazon"));
 }
 
@@ -480,6 +513,13 @@ async fn an_apple_show_without_podcast_index() {
         ],
         "never the card's own service"
     );
+    assert!(
+        found
+            .links
+            .iter()
+            .all(|l| l.key.as_deref() == Some("podcast:apple:1200361736")),
+        "the players open the Apple ID; the item was found by it"
+    );
     assert!(found.facts.is_empty(), "no GUID without Podcast Index");
     assert!(!recorded.seen().iter().any(|u| u.contains("podcastindex")));
 }
@@ -507,6 +547,12 @@ async fn an_apple_show_with_podcast_index() {
         "https://podcastindex.org/podcast/577105",
         "podcastindex"
     )));
+    let guid = format!("podcast:guid:{GUID_DARKNET}");
+    assert_eq!(
+        key_of(&found, "https://podcastindex.org/podcast/577105"),
+        Some(guid.as_str()),
+        "Podcast Index's page is named by the GUID it vouches for"
+    );
     assert_eq!(found.facts, [Fact::new("podcast_guid", GUID_DARKNET)]);
     // Asked by Apple ID, then who owns the GUID.
     assert_eq!(
@@ -813,6 +859,11 @@ async fn an_episode_has_one_key_on_apple_and_podcast_index() {
         .await
         .unwrap();
     assert_eq!(keys(&daily), ["podcast:apple_episode:1000797051580"]);
+    assert_eq!(
+        index.links[0].key.as_deref(),
+        Some("podcast:apple_episode:1000796718231"),
+        "the Apple page of Podcast Index's episode is its track's"
+    );
     // A gone episode has nothing.
     let gone = Podcasts
         .lookup(
@@ -972,6 +1023,13 @@ async fn a_film_by_its_imdb_link() {
     // A film is no show on TVmaze.
     assert!(seen.contains(&"https://api.tvmaze.com/lookup/shows?imdb=tt0111161".to_string()));
     assert!(!sites(&found).contains(&"TVmaze"));
+    assert!(
+        found
+            .links
+            .iter()
+            .all(|l| l.key.as_deref() == Some("imdb:tt0111161")),
+        "every link is the title's, named through its IMDb ID"
+    );
 }
 
 #[tokio::test]
@@ -992,6 +1050,10 @@ async fn a_film_by_its_tmdb_link_reaches_its_imdb_id_through_wikidata() {
     assert_eq!(keys(&found), ["imdb:tt0111161"]);
     assert_eq!(found.keys[0].via, "wikidata");
     assert!(sites(&found).contains(&"IMDb"));
+    assert!(found
+        .links
+        .iter()
+        .all(|l| l.key.as_deref() == Some("imdb:tt0111161")));
     assert!(!sites(&found).contains(&"TMDB"));
 }
 
