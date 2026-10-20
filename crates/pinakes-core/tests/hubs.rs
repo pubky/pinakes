@@ -106,7 +106,24 @@ impl Transport for Recorded {
                 (200, fixture("mb-release-132919b9.json"))
             }
             "/lookup" if query("upc") == "0634904078164" => (200, fixture("itunes-upc.json")),
+            "/lookup" if query("upc") == "0602557656527" => {
+                (200, fixture("itunes-upc-0602557656527.json"))
+            }
             "/lookup" => (200, fixture("itunes-upc-many.json")),
+            // Deezer's API: its own records, and its lookups by ISRC and barcode.
+            path if url.host_str() == Some("api.deezer.com") => {
+                let name = format!(
+                    "deezer-{}.json",
+                    path.trim_start_matches('/').replace(['/', ':'], "-")
+                );
+                let recorded = format!("{}/tests/fixtures/hubs/{name}", env!("CARGO_MANIFEST_DIR"));
+                // What Deezer answers for anything it has no data for.
+                let none = br#"{"error":{"type":"DataException","message":"no data","code":800}}"#;
+                (
+                    200,
+                    std::fs::read(recorded).unwrap_or_else(|_| none.to_vec()),
+                )
+            }
             // A Wikipedia's own API: the article's Wikidata item.
             "/w/api.php" if url.host_str() != Some("www.wikidata.org") => {
                 match (url.host_str().unwrap_or(""), query("titles").as_str()) {
@@ -719,5 +736,111 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
     assert!(
         !seen.iter().any(|s| s.contains("/ws/2/isrc/GBCEE0100112")),
         "{seen:?}"
+    );
+}
+
+/// With Deezer's API on: a Deezer album's own barcode is a key, iTunes names the one Apple album
+/// for it, and the tagged Apple link joins (Cut to the Feeling). A TIDAL track's own ISRC names
+/// the one Deezer track. Off by default, nothing asks Deezer.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_deezer_barcode_names_the_apple_album_that_joins(pool: sqlx::PgPool) {
+    let deezer = "https://www.deezer.com/album/41839661";
+    let apple = "https://music.apple.com/us/album/1445304934";
+    let tidal = "https://tidal.com/track/534050211";
+    let mut ids = vec![];
+    for (uri, kind) in [
+        (deezer, "MusicAlbum"),
+        (apple, "MusicAlbum"),
+        (tidal, "MusicRecording"),
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "jsonld", 86400);
+        d.set_type(kind);
+        if uri == tidal {
+            d.attributes.insert("isrc".into(), "GBUM71029604".into());
+        }
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.push(id);
+    }
+    let run = |config: Config| {
+        let pool = pool.clone();
+        async move {
+            let t = Arc::new(Recorded {
+                seen: Mutex::default(),
+            });
+            let cx = also_on::Context {
+                egress: egress(t.clone()),
+                config: Arc::new(config),
+            };
+            sqlx::query("INSERT INTO also_on_dirty(resource_id) SELECT id FROM resource ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=now()")
+                .execute(&pool)
+                .await
+                .unwrap();
+            also_on::drain(&pool, &cx, &also_on::registry(), 100)
+                .await
+                .unwrap();
+            let seen = t.seen.lock().unwrap().clone();
+            seen
+        }
+    };
+    let seen = run(Config::default()).await;
+    assert!(
+        !seen.iter().any(|s| s.starts_with("api.deezer.com")),
+        "{seen:?}"
+    );
+    let mut on = Config::default();
+    on.also_on.sources.insert(
+        "deezer".into(),
+        also_on::SourceOptions {
+            enabled: Some(true),
+            ..Default::default()
+        },
+    );
+    on.validate().unwrap();
+    let seen = run(on).await;
+    assert!(
+        seen.contains(&"api.deezer.com/album/41839661?".to_owned()),
+        "{seen:?}"
+    );
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let rows = |sql: &'static str, id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(sql)
+                .bind(id)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(
+        rows(
+            "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key",
+            ids[0].clone()
+        )
+        .await,
+        ["upc:0602557656527 deezer"]
+    );
+    assert_eq!(
+        rows(
+            "SELECT uri||' '||via||' '||key FROM derived_link WHERE resource_id=$1 AND key IS NOT NULL",
+            ids[0].clone()
+        )
+        .await,
+        ["https://music.apple.com/us/album/1445304934 itunes upc:0602557656527"]
+    );
+    let group = "SELECT coalesce(group_id,'-') FROM group_unit WHERE resource_id=$1";
+    let album = rows(group, ids[0].clone()).await;
+    assert_ne!(album, ["-"]);
+    assert_eq!(rows(group, ids[1].clone()).await, album);
+    assert_eq!(
+        rows(
+            "SELECT uri||' '||via||' '||key FROM derived_link WHERE resource_id=$1 AND source='deezer'",
+            ids[2].clone()
+        )
+        .await,
+        ["https://www.deezer.com/track/3541552051 deezer isrc:GBUM71029604"]
     );
 }

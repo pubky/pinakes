@@ -459,8 +459,8 @@ worker; `derive_links = false` keeps keys and facts only;
 that is off by default (an unknown ID stops startup). Sources run in a fixed order, and each
 sees the keys the ones before it found in the same run (a barcode MusicBrainz names, then the
 services looked up by it); a source that no longer applies (its key is gone) drops its rows.
-The sources, in the order they run, are `service`, `musicbrainz`, `wikidata` and `itunes`
-(music), `wikipedia` and `wikidata_item`
+The sources, in the order they run, are `service`, `musicbrainz`, `wikidata`, `deezer` and
+`itunes` (music), `wikipedia` and `wikidata_item`
 ([the API](api.md#also-on) says what each reads); `[also_on] apple_storefront` (`us`, a two-letter country code) is the Apple Music
 storefront of the Apple links they build. `[also_on.sources.musicbrainz] base_url`
 (`https://musicbrainz.org/ws/2`) points the `musicbrainz` source at a MusicBrainz mirror's web
@@ -470,11 +470,13 @@ limit. Each music link costs two MusicBrainz requests (the URL, then the entity;
 the URL names several releases; one more for a track found by its ISRC), up to two iTunes
 lookups for an album with barcodes, and two Wikidata requests;
 each Wikipedia article one request to its Wikipedia and one to Wikidata, each Wikidata item link
-one request to Wikidata.
+one request to Wikidata. `deezer` is off by default: Deezer's API terms allow non-commercial use
+only, so turn it on (`[also_on.sources.deezer] enabled = true`) only where they do; it costs one
+request per Deezer link and up to two per other track or album with an ISRC or barcode.
 
 Sources reach their services through the egress policy and its per-host budgets, one request
 at a time per host. A service's published limit is its host's default pace and its ceiling
-(`limits.host_rates` can only slow it): MusicBrainz 1 request/s, Wikimedia (`www.wikidata.org`,
+(`limits.host_rates` can only slow it): MusicBrainz 1 request/s, Deezer 10/s, Wikimedia (`www.wikidata.org`,
 `*.wikipedia.org`, `commons.wikimedia.org`) 200/min, Open Library 3/s, iTunes about 20/min,
 crates.io 1/s, Crossref 10/s, Software Heritage 120/h.
 

@@ -745,6 +745,10 @@ from a known music service's own record of its own object; another host's claim 
   `isrc`s, the release's barcode as `upc`, the `artist` credit, the recording's `duration` and an
   artist's `artist_type` (`Person`, `Group`, …). ISRCs are stored in upper case and barcodes as
   GTIN-13 (a 12-digit UPC gains a leading zero), by every source.
+- `deezer` (off unless the operator turns it on: Deezer's API terms allow non-commercial use
+  only): a Deezer track's or album's own ISRC or barcode from Deezer's API as a key, and for
+  another service's track or album with an ISRC or barcode key, the one Deezer track or album
+  the API names for it, keyed by it.
 - `itunes`: for an album with a barcode key, the Apple Music album iTunes' `lookup?upc=` names
   when exactly one album answers, keyed by that barcode (so a tagged link to that album joins).
 - `wikidata`: the one item carrying the link's own service ID (Spotify, Apple Music, Deezer,

@@ -211,6 +211,7 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         Arc::new(crate::music_sources::ServiceSource),
         Arc::new(crate::music_sources::MusicBrainzSource),
         Arc::new(crate::music_sources::WikidataSource),
+        Arc::new(crate::music_sources::DeezerSource),
         Arc::new(crate::music_sources::ItunesSource),
         Arc::new(crate::wikipedia::WikipediaSource),
         Arc::new(crate::wikipedia::WikidataItemSource),

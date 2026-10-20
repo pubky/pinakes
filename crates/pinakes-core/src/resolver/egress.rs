@@ -847,6 +847,8 @@ pub const PUBLISHED_RATES: &[(&str, f64)] = &[
     ("commons.wikimedia.org", 200.0 / 60.0),
     // Open Library: 3 requests/s with a User-Agent and a contact.
     ("openlibrary.org", 3.0),
+    // Deezer's public API: 50 requests per 5 seconds.
+    ("api.deezer.com", 10.0),
     // iTunes Search and Lookup: about 20 requests/min.
     ("itunes.apple.com", 20.0 / 60.0),
     // crates.io: 1 request/s.
