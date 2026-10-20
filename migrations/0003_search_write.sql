@@ -4,6 +4,10 @@
 -- every transaction an earlier one saw, so an equal revision means the same writes, and a write
 -- still in flight is invisible together with its data.
 
+-- An older daemon still serving bumps the old row until this migration commits. The lock waits for
+-- its writes in flight and holds off new ones, so the count carried over includes every write.
+LOCK TABLE search_revision IN EXCLUSIVE MODE;
+
 CREATE SEQUENCE search_write_id_seq;
 
 CREATE TABLE search_write (

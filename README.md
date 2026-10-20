@@ -104,7 +104,8 @@ never commit real keys, tokens or passwords.
 
 ## Schema
 
-The schema is in `migrations/` (`0001_extensions.sql`, `0002_schema.sql`);
+The schema is in `migrations/` (`0001_extensions.sql`, `0002_schema.sql` and the numbered
+changes after it);
 `pinakesd --config <path> --migrate` builds or migrates a database. A parser or routing change
 reaches stored documents through `pinakesd --config <path> reextract <route…|all>`.
 

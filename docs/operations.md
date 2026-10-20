@@ -90,7 +90,10 @@ extension in a database, because `CREATE EXTENSION IF NOT EXISTS` keeps the inst
 run `ALTER EXTENSION h3 UPDATE;` (and `ALTER EXTENSION h3_postgis UPDATE;` if installed).
 
 `pinakesd --config <path> --migrate` applies the migrations in `migrations/` and exits; the
-daemon applies them at startup too. Pinakes rebuilds everything from the Nexus feed, so a
+daemon applies them at startup too, and so does `reextract`. Stop a running daemon before a newer
+binary migrates its database. Its writes would otherwise fail once a migration changes what they
+use: after `0003_search_write.sql` the search revision is a view, so an older daemon's writes
+fail until it runs the new binary. Pinakes rebuilds everything from the Nexus feed, so a
 database can also be recreated:
 
 ```sh
