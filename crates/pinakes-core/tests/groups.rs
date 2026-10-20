@@ -1898,3 +1898,61 @@ async fn removing_a_tag_and_saving_its_resource_take_locks_in_one_order(pool: Pg
             .unwrap();
     assert!(dirty);
 }
+
+/// Removing a unit from a group marks every member dirty; a save holds its member's row, then
+/// marks it dirty. The removal locks the members' rows before marking them, as a save does, so
+/// the two never deadlock.
+#[sqlx::test(migrations = "../../migrations")]
+async fn removing_a_group_unit_and_saving_a_member_take_locks_in_one_order(pool: PgPool) {
+    let (card, page) = pair(&pool, "member-order", None).await;
+    assert_eq!(gid(&pool, &card).await, gid(&pool, &page).await);
+    sqlx::query("DELETE FROM group_dirty")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // A save of the page: its row first.
+    let mut saving = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR UPDATE")
+        .bind(&page)
+        .execute(&mut *saving)
+        .await
+        .unwrap();
+    // A group run takes the card out of the group, which marks the page dirty too.
+    let removal = tokio::spawn({
+        let pool = pool.clone();
+        let card = card.clone();
+        async move {
+            sqlx::query("DELETE FROM group_unit WHERE resource_id=$1")
+                .bind(&card)
+                .execute(&pool)
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'DELETE FROM group_unit%')")
+                .fetch_one(&pool).await.unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    sqlx::query("UPDATE resource SET doc=jsonb_set(doc,'{name}','\"Saved\"') WHERE id=$1")
+        .bind(&page)
+        .execute(&mut *saving)
+        .await
+        .unwrap();
+    saving.commit().await.unwrap();
+    removal.await.unwrap().unwrap();
+    // The member left behind is regrouped.
+    let dirty: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM group_dirty WHERE resource_id=$1)")
+            .bind(&page)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(dirty);
+}

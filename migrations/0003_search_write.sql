@@ -49,3 +49,15 @@ CREATE OR REPLACE FUNCTION mark_group_dirty() RETURNS trigger
  END IF;
  RETURN NULL;
 END $$;
+
+-- Removing a unit from a group marks every member dirty, so it locks the members' rows first (in
+-- ID order), for the same reason: a save of a member holds its row, then marks it dirty.
+CREATE OR REPLACE FUNCTION group_member_deleted() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$ BEGIN
+ PERFORM 1 FROM resource WHERE id IN(SELECT resource_id FROM group_unit WHERE group_id=OLD.group_id) ORDER BY id FOR KEY SHARE;
+ DELETE FROM group_input WHERE resource_id IN(SELECT resource_id FROM group_unit WHERE group_id=OLD.group_id);
+ INSERT INTO group_dirty(resource_id) SELECT resource_id FROM group_unit WHERE group_id=OLD.group_id ON CONFLICT DO NOTHING;
+ DELETE FROM "group" g WHERE id=OLD.group_id AND NOT curated AND NOT EXISTS(SELECT 1 FROM group_unit u WHERE u.group_id=g.id);
+ RETURN NULL;
+END $$;
