@@ -41,8 +41,8 @@ async fn sample(pool: &PgPool, done: Arc<AtomicBool>) -> Waits {
     while !done.load(Ordering::SeqCst) {
         let (waiting, revision): (i64, i64) = sqlx::query_as(
             "SELECT count(*) FILTER (WHERE a.wait_event_type='Lock'),
-               count(*) FILTER (WHERE a.wait_event_type='Lock' AND (a.query LIKE '%search_revision%'
-                 OR EXISTS(SELECT 1 FROM pg_locks l WHERE l.pid=a.pid AND l.locktype='tuple' AND l.relation=to_regclass('search_revision'))))
+               count(*) FILTER (WHERE a.wait_event_type='Lock' AND (a.query LIKE '%search_write%'
+                 OR EXISTS(SELECT 1 FROM pg_locks l WHERE l.pid=a.pid AND l.locktype='tuple' AND l.relation=to_regclass('search_write'))))
              FROM pg_stat_activity a WHERE a.datname=current_database() AND a.pid<>pg_backend_pid()",
         )
         .fetch_one(pool)
@@ -53,7 +53,7 @@ async fn sample(pool: &PgPool, done: Arc<AtomicBool>) -> Waits {
         waits.revision += u64::from(revision > 0);
         waits.peak = waits.peak.max(waiting);
         let locks: Vec<String> = sqlx::query_scalar(
-            "SELECT CASE WHEN l.locktype='advisory' THEN 'advisory '||l.objid||' '||l.mode WHEN a.query LIKE '%search_revision%' OR EXISTS(SELECT 1 FROM pg_locks t WHERE t.pid=a.pid AND t.locktype='tuple' AND t.relation=to_regclass('search_revision')) THEN 'search revision' ELSE l.locktype||coalesce(' '||l.relation::regclass::text,'') END
+            "SELECT CASE WHEN l.locktype='advisory' THEN 'advisory '||l.objid||' '||l.mode WHEN a.query LIKE '%search_write%' OR EXISTS(SELECT 1 FROM pg_locks t WHERE t.pid=a.pid AND t.locktype='tuple' AND t.relation=to_regclass('search_write')) THEN 'search revision' ELSE l.locktype||coalesce(' '||l.relation::regclass::text,'') END
              FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid WHERE NOT l.granted AND a.datname=current_database()",
         )
         .fetch_all(pool)

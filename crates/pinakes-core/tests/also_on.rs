@@ -859,6 +859,27 @@ async fn trending_counts_references_inside_the_window(pool: PgPool) {
         rows("/v1/search?sort=trending&collapse=group").await.len(),
         1
     );
+    // A collapsed row ranks by its group's references, not by its member's: three more on Deezer
+    // today make the song 3 + 4 in the window, above a lone link with 5 (Deezer, with the most
+    // references overall, is the row).
+    let lone = page(&pool, "https://tidal.com/track/2", "Lone song").await;
+    for (id, count) in [(&ids[1], 3), (&lone, 5)] {
+        sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) SELECT $1,repeat(chr(97+n%20),52),'tag','/pub/test/tags/'||$1||'/today/'||n,'pop',now() FROM generate_series(1,$2) n")
+            .bind(id)
+            .bind(count)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        rows("/v1/search?sort=trending&collapse=group").await,
+        [ids[1].clone(), lone.clone()]
+    );
+    // Uncollapsed, each link keeps its own count.
+    assert_eq!(
+        rows("/v1/search?sort=trending").await,
+        [lone, ids[1].clone(), ids[0].clone()]
+    );
     for bad in [
         "sort=trending&window=0h",
         "sort=trending&window=91d",
@@ -1520,4 +1541,49 @@ async fn a_run_naming_another_resource_waits_for_an_ingested_batch(pool: PgPool)
             .await
             .unwrap();
     assert_eq!(named, 1);
+}
+
+/// A source's keys and facts are searched (`key=`), so their changes change the search revision
+/// (and every search ETag), as derived links do: pruning an expired fact alone too.
+#[sqlx::test(migrations = "../../migrations")]
+async fn pruned_keys_and_facts_change_the_search_revision(pool: PgPool) {
+    let id = page(&pool, "https://open.spotify.com/track/rev", "Track").await;
+    let revision = || async {
+        sqlx::query_scalar::<_, i64>("SELECT revision FROM search_revision")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    for (table, row) in [
+        ("resource_fact", "name,value,source"),
+        ("resource_key", "key,source,via"),
+    ] {
+        let values = if table == "resource_fact" {
+            "'isrc','GBAYE9701376','music'"
+        } else {
+            "'isrc:GBAYE9701376','music','music'"
+        };
+        sqlx::query(&format!("INSERT INTO {table}(resource_id,{row},expires_at) VALUES($1,{values},now()-interval '1 second')"))
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let before = revision().await;
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query(&format!("DELETE FROM {table} WHERE expires_at<=now()"))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert!(revision().await > before, "{table}");
+    }
+    // prune's own fact deletion is one of them.
+    sqlx::query("INSERT INTO resource_fact(resource_id,name,value,source,expires_at) VALUES($1,'upc','0602557656527','music',now()-interval '1 second')")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before = revision().await;
+    assert_eq!(also_on::prune(&pool).await.unwrap(), 1);
+    assert!(revision().await > before);
 }

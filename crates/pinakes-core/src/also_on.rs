@@ -149,8 +149,9 @@ pub struct Key {
 /// such as `archived`, `at` a time that belongs to the link (an archived copy's capture).
 /// `key` is the exact key that named it: the hub entity or item it is a relation or claim of
 /// (`mb:recording:…`, `wikidata:Q…`), or the barcode or ISRC a service's lookup answered with
-/// exactly this link. A tagged resource that is this link takes the key and joins the group
-/// (the single-object rule keeps a link two entities name in one group only). Set it only for
+/// exactly this link. A tagged resource that is this link takes the key and joins the group;
+/// one that two entities of one single-object namespace name carries both and joins no group
+/// (`groups::single_object`). Set it only for
 /// an exact derivation, never for a search or a name match.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Link {

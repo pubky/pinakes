@@ -452,7 +452,9 @@ fn facts(entity: &musicbrainz::Entity) -> Vec<crate::also_on::Fact> {
 }
 
 /// Apple Music's album for a barcode: iTunes `lookup?upc=` in the configured storefront, when
-/// exactly one album answers (an unknown code can return unrelated albums).
+/// exactly one album answers (an unknown code can return unrelated albums). Its results carry no
+/// UPC, so unlike Deezer's the answer can't be read back against the code asked: exactly one
+/// album is the only check, and `upc` is no single-object namespace that would catch a wrong one.
 async fn itunes_album(cx: &Context, barcode: &str) -> Result<Option<Link>> {
     let storefront = &cx.config.also_on.apple_storefront;
     let url =

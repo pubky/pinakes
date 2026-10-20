@@ -1218,13 +1218,20 @@ pub async fn search(
             .push_bind(at);
         scope(&mut sql, &q, &reach);
         sql.push(" GROUP BY f.resource_id), ");
+        if q.collapse.is_some() {
+            // A collapsed row stands for its group: the window's references of every member
+            // resource, each counted once (a feed's instances can share a group).
+            sql.push("group_trend AS (SELECT m.group_id,sum(t.n) AS n FROM (SELECT DISTINCT group_id,resource_id FROM group_unit WHERE group_id IS NOT NULL) m JOIN trend t USING(resource_id) GROUP BY m.group_id), ");
+        }
     }
     sql.push(if q.collapse.is_some() {
         "eligible AS (SELECT r.*, "
     } else {
         "filtered AS (SELECT r.*, "
     });
-    if trending {
+    if trending && q.collapse.is_some() {
+        sql.push("coalesce((SELECT g.n FROM group_unit u JOIN group_trend g USING(group_id) WHERE u.unit_id=r.unit_id),t.n)::double precision");
+    } else if trending {
         sql.push("t.n::double precision");
     } else if q.sort.as_deref() == Some("distance") {
         sql.push("-");

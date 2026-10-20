@@ -388,7 +388,7 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 | `author` | Resources referenced by this 52-character z-base-32 public key |
 | `reach`, `viewer` | `following` or `friends` of the Nexus user `viewer`: only their references and tags count |
 | `venue` | Events at this venue resource ID |
-| `sort` | `activity` (default), `recent`, `distance` (requires `near`), `start` or `trending` (by the references made inside `window`; only links referenced in it; with `collapse=group` one song across services is one row) |
+| `sort` | `activity` (default), `recent`, `distance` (requires `near`), `start` or `trending` (by the references made inside `window`; only links referenced in it; with `collapse=group` one song across services is one row, ranked by the references all its links got in the window) |
 | `window` | With `sort=trending`: `{n}h` or `{n}d`, from `1h` to `90d`, default `7d`, counted back from the first page's instant |
 | `limit` | 1–500, default 50 |
 | `cursor` | The signed next-page token of the previous page |
@@ -761,7 +761,7 @@ from a known music service's own record of its own object; another host's claim 
   services, and its MBIDs, the recording's ISRCs (up to eight) and the release's barcode as keys
   (`mb:recording:…`, `mb:release:…`, `mb:release-group:…`, `mb:artist:…`, `isrc:…`,
   `upc:…`). A track MusicBrainz does not relate by URL takes the recording its page's own ISRC
-  is on, when MusicBrainz knows exactly one. An album link related to up to four releases of one
+  is on when that ISRC is a key (TIDAL, `service` above) and MusicBrainz knows exactly one. An album link related to up to four releases of one
   release group (editions MusicBrainz keeps apart) takes the release group's key alone, and the
   links, facts and barcode every one of those releases has. Its facts: `mbid`, the recording's
   `isrc`s, the release's barcode as `upc`, the `artist` credit, the recording's `duration` and

@@ -1271,6 +1271,31 @@ async fn lock_contention_retries_shortly_without_charging(pool: PgPool) {
         .execute(&mut *holder)
         .await
         .unwrap();
+    // So while an exclusive writer (the hourly orphan cleanup) holds the write order: the run
+    // never waits past its statement timeout to be parked as failed.
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(pinakes_core::locks::WRITE_ORDER)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE group_dirty SET next_attempt_at=now() WHERE resource_id=$1")
+        .bind(&a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(!groups::reconcile(&pool, &a, &Default::default()).await);
+    let (attempts, error): (i32, String) =
+        sqlx::query_as("SELECT attempts,last_error FROM group_dirty WHERE resource_id=$1")
+            .bind(&a)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((attempts, error.as_str()), (0, "lock_busy"));
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(pinakes_core::locks::WRITE_ORDER)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
     drop(holder);
     sqlx::query("UPDATE group_dirty SET next_attempt_at=now() WHERE resource_id=$1")
         .bind(&a)
