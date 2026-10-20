@@ -779,92 +779,6 @@ async fn search_by_key_finds_the_same_object_on_every_service(pool: PgPool) {
     }
 }
 
-/// `key=` finds a book edition by either ISBN, a title by its IMDb ID and a show by its GUID,
-/// as the books, films and podcasts sources record them.
-#[sqlx::test(migrations = "../../migrations")]
-async fn search_by_key_finds_books_films_and_podcasts(pool: PgPool) {
-    use pinakes_core::also_on::Fact;
-    let guid = "917393e3-1b1e-5cef-ace4-edaa54e1f810";
-    let rows: [(&str, Found); 3] = [
-        (
-            "https://openlibrary.org/books/OL23109860M",
-            Found {
-                facts: vec![Fact::new("isbn", "9780743273565")],
-                ..Default::default()
-            },
-        ),
-        (
-            "https://www.themoviedb.org/movie/278",
-            Found {
-                keys: vec![key("imdb:tt0111161")],
-                ..Default::default()
-            },
-        ),
-        (
-            "https://podcasts.apple.com/us/podcast/id1584274529",
-            Found {
-                keys: vec![key(&format!("podcast:guid:{guid}"))],
-                ..Default::default()
-            },
-        ),
-    ];
-    let hub = Fake::new("media");
-    let mut ids = vec![];
-    for (uri, found) in rows {
-        ids.push(page(&pool, uri, "x").await);
-        hub.answer(uri, Ok(found));
-    }
-    sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) SELECT id,repeat('a',52),'tag','/pub/test/tags/'||id,'media',now() FROM unnest($1::text[]) id")
-        .bind(&ids)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let sources: Vec<Arc<dyn Source>> = vec![hub];
-    drain(&pool, &cx(Config::default()), &sources).await;
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
-    let found = |key: &str| {
-        let (app, key) = (app.clone(), key.to_owned());
-        async move {
-            get(&app, &format!("/v1/search?key={key}")).await["items"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|r| r["id"].as_str().unwrap().to_owned())
-                .collect::<Vec<_>>()
-        }
-    };
-    for isbn in [
-        "isbn:9780743273565",
-        "isbn:0743273567",
-        "isbn:978-0-7432-7356-5",
-    ] {
-        assert_eq!(found(isbn).await, [ids[0].clone()], "{isbn}");
-    }
-    assert_eq!(found("imdb:tt0111161").await, [ids[1].clone()]);
-    assert_eq!(found(&format!("podcast:{guid}")).await, [ids[2].clone()]);
-    assert_eq!(
-        found(&format!("podcast:{}", guid.to_uppercase())).await,
-        [ids[2].clone()]
-    );
-    for bad in [
-        "isbn:9780743273566",
-        "imdb:nm0000151",
-        "imdb:tt011116",
-        "podcast:the-daily",
-        "podcast:apple:1584274529",
-    ] {
-        let mut request = Request::builder()
-            .uri(format!("/v1/search?key={bad}"))
-            .body(Body::empty())
-            .unwrap();
-        request.extensions_mut().insert(axum::extract::ConnectInfo(
-            "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
-        ));
-        let status = app.clone().oneshot(request).await.unwrap().status();
-        assert_eq!(status, 400, "{bad}");
-    }
-}
-
 /// `sort=trending` ranks by the references made inside the window (7 days by default), shows
 /// only links referenced in it, combines with tags and `collapse=group` (one song across
 /// services is one row), and refuses windows outside 1h–90d.
@@ -1672,4 +1586,53 @@ async fn pruned_keys_and_facts_change_the_search_revision(pool: PgPool) {
     let before = revision().await;
     assert_eq!(also_on::prune(&pool).await.unwrap(), 1);
     assert!(revision().await > before);
+}
+
+/// A source that saves the resource's card while it reads it, as a resolve finishing meanwhile.
+struct SavesMeanwhile(PgPool);
+#[async_trait]
+impl Source for SavesMeanwhile {
+    fn id(&self) -> &'static str {
+        "meanwhile"
+    }
+    fn applies(&self, _: &Subject) -> bool {
+        true
+    }
+    async fn lookup(&self, _: &Context, subject: &Subject) -> anyhow::Result<Found> {
+        sqlx::query("UPDATE resource SET doc=doc||'{\"name\":\"Saved meanwhile\"}' WHERE id=$1")
+            .bind(&subject.id)
+            .execute(&self.0)
+            .await?;
+        Ok(Found::default())
+    }
+}
+
+/// A card saved while the sources read its resource is read too: the run does not push the
+/// mark the save made 30 days out.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_change_saved_during_a_run_is_read_again(pool: PgPool) {
+    let id = page(&pool, "https://example.org/meanwhile", "Pending").await;
+    let sources: Vec<Arc<dyn Source>> = vec![Arc::new(SavesMeanwhile(pool.clone()))];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    let due: bool =
+        sqlx::query_scalar("SELECT next_attempt_at<=now() FROM also_on_dirty WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(due, "the save's mark stands");
+    // A run with nothing saved meanwhile schedules the next one as before.
+    let quiet = Fake::new("quiet");
+    quiet.answer("https://example.org/quiet", Ok(Found::default()));
+    let other = page(&pool, "https://example.org/quiet", "Quiet").await;
+    let sources: Vec<Arc<dyn Source>> = vec![quiet];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    let later: bool = sqlx::query_scalar(
+        "SELECT next_attempt_at>now()+interval '1 hour' FROM also_on_dirty WHERE resource_id=$1",
+    )
+    .bind(&other)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(later);
 }

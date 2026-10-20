@@ -523,17 +523,21 @@ pub async fn drain(
         .buffer_unordered(cfg.concurrency.max(1))
         .collect::<Vec<_>>()
         .await;
+    // A change saved while a resource was read marked it due again (its lease, ten minutes ahead,
+    // became now): that mark stands, so the change is read too.
     for (id, result) in results {
         match result {
             Ok(Some(next)) => {
-                sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()+$2,attempts=0,last_error=NULL WHERE resource_id=$1")
+                sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()+$2,attempts=0,last_error=NULL WHERE resource_id=$1 AND next_attempt_at>now()")
                     .bind(&id).bind(next).execute(pool).await?;
             }
             Ok(None) => {
-                sqlx::query("DELETE FROM also_on_dirty WHERE resource_id=$1")
-                    .bind(&id)
-                    .execute(pool)
-                    .await?;
+                sqlx::query(
+                    "DELETE FROM also_on_dirty WHERE resource_id=$1 AND next_attempt_at>now()",
+                )
+                .bind(&id)
+                .execute(pool)
+                .await?;
             }
             Err(error) => {
                 tracing::warn!(resource=%id, error=%format!("{error:#}"), "also-on lookup will retry");
