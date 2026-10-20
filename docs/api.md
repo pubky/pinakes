@@ -823,6 +823,14 @@ its own hub. Its card lists the item's encyclopedia entries, the music services 
 IDs name, and all its Wikipedia editions (the major languages first), with the Q-id as key. Only
 the item's own claims and sitelinks count, never a search.
 
+**MusicBrainz pages.** `musicbrainz_entity`: a MusicBrainz recording, release, release group or
+artist page ([its spellings](#aliases)) is its own hub, read as `musicbrainz` reads the entity a
+service link is related to: its MBIDs, the recording's ISRCs and the release's barcode as keys
+(so it joins the links MusicBrainz relates to it), its facts, and its current links on music
+services at its level, each keyed by the entity. An ISRC's page (`/isrc/{ISRC}`) is the ISRC's
+key, and with exactly one recording MusicBrainz gives the ISRC to, that recording's keys, facts
+and links. An ISRC several recordings have names none of them: its page keeps it as a fact only.
+
 **Books.** `books`: an ISBN (`isbn:…`, `openlibrary.org/isbn/{isbn}`), an Open Library edition
 page (`openlibrary.org/books/OL…M`) or work page (`openlibrary.org/works/OL…W`) is looked up
 exactly, never by title:

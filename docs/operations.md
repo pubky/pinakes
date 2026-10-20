@@ -474,8 +474,8 @@ cards, so a tagged link an exact derivation names no longer joins by it either;
 that is off by default (an unknown ID stops startup). Sources run in a fixed order, and each
 sees the keys the ones before it found in the same run (a barcode MusicBrainz names, then the
 services looked up by it); a source that no longer applies (its key is gone) drops its rows.
-The sources, in the order they run, are `service`, `musicbrainz`, `wikidata`, `deezer` and
-`itunes` (music), `wikipedia`, `wikidata_item`, `books`, `films`, `podcasts` and `titles`
+The sources, in the order they run, are `service`, `musicbrainz`, `musicbrainz_entity`,
+`wikidata`, `deezer` and `itunes` (music), `wikipedia`, `wikidata_item`, `books`, `films`, `podcasts` and `titles`
 ([the API](api.md#also-on) says what each reads); `[also_on] apple_storefront` (`us`, a
 two-letter country code) is the Apple Music, Apple Books and Apple Podcasts storefront of the
 Apple links they build. `[also_on.sources.musicbrainz] base_url`
@@ -488,7 +488,10 @@ it names) and Wikidata for their item links' items together (10 to a request). E
 costs one MusicBrainz request for its entity (up to four when the URL names several releases; one
 more for a track found by its ISRC, and one for a track's original album), up to two iTunes lookups
 for an album with barcodes, and two Wikidata requests (a search by its service ID cannot batch);
-each Wikipedia article one request to its Wikipedia and one to Wikidata; each book one Open Library
+each Wikipedia article one request to its Wikipedia and one to Wikidata; each MusicBrainz page
+one request for its entity (an ISRC's page one more for the ISRC; MusicBrainz has no lookup of
+several entities at once, and a read the card already made is taken from the cache) and one for a
+recording's original album; each book one Open Library
 request, one iTunes lookup for an ebook edition, and two Wikidata requests when Open Library names
 its work; each podcast show one iTunes lookup, two or three Podcast Index requests (the last asks
 who owns the show's GUID), its feed (usually still cached from its card) and two Wikidata requests;

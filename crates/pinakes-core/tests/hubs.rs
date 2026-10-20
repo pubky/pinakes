@@ -111,6 +111,9 @@ impl Transport for Recorded {
             "/ws/2/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69" => {
                 (200, fixture("mb-recording-b1a9c0e9.json"))
             }
+            "/ws/2/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711" => {
+                (200, fixture("mb-artist-a74b1b7f.json"))
+            }
             // A recording's official albums (its original album).
             "/ws/2/release" if query("recording") == "b1a9c0e9-d987-4042-ae91-78d6a3267d69" => {
                 (200, fixture("mb-browse-releases-b1a9c0e9.json"))
@@ -999,4 +1002,117 @@ async fn item_links_are_read_in_one_request(pool: sqlx::PgPool) {
     .await
     .unwrap();
     assert_eq!(keys, ["wikidata:Q202996", "wikidata:Q33328630"]);
+}
+
+/// A MusicBrainz page is its own hub: the recording's page carries its keys and lists its links
+/// (keyed by it), so it joins the TIDAL track its ISRC names; the page of an ISRC one recording
+/// has joins too; an ISRC two recordings have names neither (a fact, no key); the artist's page
+/// joins the TIDAL artist.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
+    let recording = "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69";
+    let single = "https://musicbrainz.org/isrc/GBUM71029604";
+    let shared = "https://musicbrainz.org/isrc/GBCEE0100112";
+    let artist = "https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711";
+    let tidal = "https://tidal.com/track/534050211";
+    let tidal_artist = "https://tidal.com/artist/64518";
+    let mut ids = std::collections::BTreeMap::new();
+    for (uri, ty) in [
+        (recording, "MusicRecording"),
+        (single, "MusicRecording"),
+        (shared, "MusicRecording"),
+        (artist, "MusicGroup"),
+        (tidal, "MusicRecording"),
+        (tidal_artist, "MusicGroup"),
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "web", 86400);
+        d.set_type(ty);
+        if uri == tidal {
+            // TIDAL's own page states its ISRC (a key).
+            d.attributes.insert("isrc".into(), "GBUM71029604".into());
+        }
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.insert(uri, id);
+    }
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let cx = also_on::Context {
+        egress: egress(t.clone()),
+        config: Arc::new(Config::default()),
+    };
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let rows = |sql: &'static str, id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(sql)
+                .bind(id)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let keys = "SELECT key FROM resource_key WHERE resource_id=$1 AND source='musicbrainz_entity' ORDER BY key";
+    let mbid = "mb:recording:b1a9c0e9-d987-4042-ae91-78d6a3267d69".to_owned();
+    assert!(rows(keys, ids[recording].clone()).await.contains(&mbid));
+    let isrc_keys = rows(keys, ids[single].clone()).await;
+    assert!(
+        isrc_keys.contains(&mbid) && isrc_keys.contains(&"isrc:GBUM71029604".to_owned()),
+        "{isrc_keys:?}"
+    );
+    assert!(rows(keys, ids[shared].clone()).await.is_empty());
+    assert_eq!(
+        rows(
+            "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1",
+            ids[shared].clone()
+        )
+        .await,
+        ["isrc GBCEE0100112"]
+    );
+    // The recording's links on services, keyed by it, and its facts.
+    let links = rows(
+        "SELECT uri||' '||coalesce(key,'-') FROM derived_link WHERE resource_id=$1 ORDER BY uri",
+        ids[recording].clone(),
+    )
+    .await;
+    assert!(
+        links.contains(&format!("https://www.deezer.com/track/4329888262 {mbid}")),
+        "{links:?}"
+    );
+    let facts = rows(
+        "SELECT name FROM resource_fact WHERE resource_id=$1 AND source='musicbrainz_entity' ORDER BY name",
+        ids[recording].clone(),
+    )
+    .await;
+    for name in ["artist", "duration", "isrc", "mbid", "original_album"] {
+        assert!(facts.contains(&name.to_owned()), "{name}: {facts:?}");
+    }
+    // One group: the recording's page, the single ISRC's page and the TIDAL track.
+    let group = "SELECT coalesce(group_id,'-') FROM group_unit WHERE resource_id=$1";
+    let song = rows(group, ids[recording].clone()).await;
+    assert_ne!(song, ["-"]);
+    assert_eq!(rows(group, ids[single].clone()).await, song);
+    assert_eq!(rows(group, ids[tidal].clone()).await, song);
+    assert_ne!(rows(group, ids[shared].clone()).await, song);
+    // The artist's page joins the TIDAL artist MusicBrainz lists.
+    let band = rows(group, ids[artist].clone()).await;
+    assert_ne!(band, ["-"]);
+    assert_eq!(rows(group, ids[tidal_artist].clone()).await, band);
+    // One read of the recording serves its page and the ISRC's.
+    let seen = t.seen.lock().unwrap().clone();
+    let reads = seen
+        .iter()
+        .filter(|s| s.contains("/ws/2/recording/b1a9c0e9"))
+        .count();
+    assert_eq!(reads, 1, "{seen:?}");
 }
