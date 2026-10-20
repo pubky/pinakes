@@ -965,7 +965,8 @@ looked up itself; it joins as one of a title's links, by the title's IMDb ID.
   nothing.
 - `btcmap`: an OSM object that BTC Map lists gets its merchant page
   (`btcmap.org/merchant/{type}:{id}`), from BTC Map's place list by OSM ID, never by probing a
-  page.
+  page. The page names that one object, so both carry the object's `osm:{type}/{id}` key, and a
+  tagged merchant link joins the object.
 
 **Papers.** A DOI card (and an arXiv paper):
 - `unpaywall`: the open copies Unpaywall lists (repository and preprint copies, arXiv and PubMed

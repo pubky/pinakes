@@ -1239,6 +1239,39 @@ async fn a_shared_key_never_joins_two_places_crates_or_games(pool: PgPool) {
     }
 }
 
+/// BTC Map's merchant page names one OSM object: an object it lists carries its own `osm:` key,
+/// and its merchant link names that key, so the tagged merchant link joins the object.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_tagged_btc_map_link_joins_its_osm_object(pool: PgPool) {
+    let way = "https://example.org/way-259338174";
+    let merchant = "https://btcmap.org/merchant/way:259338174";
+    let x = page(&pool, way, "LAC Lugano").await;
+    let y = page(&pool, merchant, "LAC Lugano").await;
+    let btcmap = Fake::new("btcmap");
+    btcmap.answer(
+        way,
+        Ok(Found {
+            keys: vec![key("osm:way/259338174")],
+            links: vec![Link::new(merchant, "BTC Map", "btcmap").keyed("osm:way/259338174")],
+            ..Default::default()
+        }),
+    );
+    let sources: Vec<Arc<dyn Source>> = vec![btcmap];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let groups: Vec<Option<String>> = sqlx::query_scalar(
+        "SELECT g.group_id FROM unnest($1::text[]) i(id) LEFT JOIN group_unit g ON g.resource_id=i.id",
+    )
+    .bind([x, y])
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(groups[0].is_some());
+    assert_eq!(groups[0], groups[1]);
+}
+
 /// Looks up the barcodes the sources before it found, like iTunes: one keyed link each. Off by
 /// default.
 struct ByBarcode {

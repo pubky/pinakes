@@ -399,7 +399,9 @@ impl BtcmapIndex {
     }
 }
 
-/// An OSM object that BTC Map lists: its merchant page.
+/// An OSM object that BTC Map lists: its merchant page, which names that one object
+/// (`btcmap.org/merchant/{type}:{id}`). Both carry the object's own `osm:` key, so a tagged
+/// merchant link joins the object.
 pub struct Btcmap;
 #[async_trait]
 impl Source for Btcmap {
@@ -432,18 +434,26 @@ impl Source for Btcmap {
             updated_at: String::new(),
             deleted: false,
         };
-        let links = index
+        let Some(link) = index
             .places
             .contains(&osm.key())
             .then(|| place.link())
             .flatten()
-            .into_iter()
-            .collect();
-        Ok(super::Found {
-            keys: vec![],
-            links,
+        else {
+            return Ok(also_on::Found::default());
+        };
+        let key = places::key(&osm);
+        let mut found = super::Found {
+            keys: vec![key.clone()],
+            links: vec![link],
         }
-        .into_also_on("btcmap"))
+        .into_also_on("btcmap");
+        found.links = found
+            .links
+            .into_iter()
+            .map(|l| l.keyed(key.as_str()))
+            .collect();
+        Ok(found)
     }
 }
 
@@ -1471,14 +1481,21 @@ mod tests {
         let uri = format!("https://www.openstreetmap.org/{}/{}", osm.osm_type, osm.id);
         let found = Btcmap.lookup(&cx, &at(&uri)).await.unwrap();
         assert_eq!(found.links.len(), 1, "{uri}");
-        assert!(found.links[0]
-            .uri
-            .starts_with("https://btcmap.org/merchant/"));
+        // The merchant page names this one object: it and the object carry the object's key.
+        let key = format!("osm:{}/{}", osm.osm_type, osm.id);
+        assert_eq!(keys(&found), [key.as_str()]);
+        assert_eq!(
+            (found.links[0].uri.clone(), found.links[0].key.clone()),
+            (
+                format!("https://btcmap.org/merchant/{}:{}", osm.osm_type, osm.id),
+                Some(key.clone())
+            )
+        );
         let found = Btcmap
             .lookup(&cx, &at("https://www.openstreetmap.org/node/1"))
             .await
             .unwrap();
-        assert!(found.links.is_empty());
+        assert!(found.links.is_empty() && found.keys.is_empty());
     }
 
     #[test]
