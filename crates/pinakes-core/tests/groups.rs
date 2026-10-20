@@ -151,9 +151,9 @@ async fn group_fence_ignores_unrelated_saves_and_retries_changed_inputs(pool: Pg
     let (a, b) = pair(&pool, "fence", None).await;
     let (other, _) = save(&pool, "unrelated", &[], None).await;
     for changed in [&other, &b] {
-        // Holding the publication lock lets the sync compute evidence, then pauses its fence.
+        // Holding the write lock lets the sync compute evidence, then pauses its fence.
         let mut writer = pool.begin().await.unwrap();
-        sqlx::query("SELECT revision FROM search_revision WHERE id=1 FOR UPDATE")
+        sqlx::query("SELECT pg_advisory_xact_lock(73822917)")
             .execute(&mut *writer)
             .await
             .unwrap();
@@ -168,7 +168,7 @@ async fn group_fence_ignores_unrelated_saves_and_retries_changed_inputs(pool: Pg
             tokio::spawn(async move { groups::reconcile(&pool2, &id, &Default::default()).await });
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query='SELECT revision FROM search_revision WHERE id=1 FOR UPDATE')")
+                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query='SELECT pg_advisory_xact_lock(73822917)')")
                     .fetch_one(&pool).await.unwrap();
                 if waiting { break; }
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;

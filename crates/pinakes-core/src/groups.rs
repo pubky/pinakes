@@ -864,7 +864,7 @@ impl std::fmt::Display for SnapshotChanged {
 }
 impl std::error::Error for SnapshotChanged {}
 async fn group_lock(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
-    // This lock must precede the final search revision lock, including in curation.
+    // This lock must precede the write lock (`store::lock_writers`), including in curation.
     let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(73491620)")
         .fetch_one(&mut **tx)
         .await?;
@@ -886,7 +886,7 @@ async fn fence(
     tx: &mut Transaction<'_, Postgres>,
     revisions: &BTreeMap<String, Option<i64>>,
 ) -> Result<()> {
-    crate::store::lock_search_revision(tx).await?;
+    crate::store::lock_writers(tx).await?;
     check_revisions(tx, revisions).await
 }
 async fn check_revisions(
@@ -1035,7 +1035,7 @@ pub async fn curate(pool: &PgPool, id: &str, body: Curation, cfg: &GroupConfig) 
                 e.into()
             }
         })?;
-    crate::store::lock_search_revision(&mut tx).await?;
+    crate::store::lock_writers(&mut tx).await?;
     let mut units = vec![];
     let mut previous: Vec<String> =
         sqlx::query_scalar("SELECT group_id FROM group_override WHERE group_id=$1")

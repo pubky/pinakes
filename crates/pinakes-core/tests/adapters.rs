@@ -182,16 +182,16 @@ async fn cursor_resets_head_clock_missing_and_title_fallback(pool: PgPool) {
     }
 }
 
-/// A derived link takes the search revision before the adapter lock, as a feed apply does: the
-/// two never deadlock.
+/// A derived link takes the write lock before the adapter lock, as a feed apply does: the two
+/// never deadlock.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_derived_link_and_a_feed_apply_take_locks_in_one_order(pool: PgPool) {
     store::ensure_resource(&pool, "https://example.org/parent")
         .await
         .unwrap();
-    // A feed apply: the search revision first, then the adapter.
+    // A feed apply: the write lock first, then the adapter.
     let mut apply = pool.begin().await.unwrap();
-    sqlx::query("SELECT revision FROM search_revision WHERE id=1 FOR UPDATE")
+    sqlx::query("SELECT pg_advisory_xact_lock(73822917)")
         .execute(&mut *apply)
         .await
         .unwrap();

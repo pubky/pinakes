@@ -10,7 +10,7 @@ pub async fn ensure_resource(pool: &PgPool, uri: &str) -> Result<String> {
     let mut tx = pool.begin().await?;
     // An alias is assigned under the lock every alias assignment takes (`alias::assign`).
     if crate::alias::root(&uri).is_some() {
-        lock_search_revision(&mut tx).await?;
+        lock_writers(&mut tx).await?;
     }
     insert_resource(&mut tx, &id, &uri).await?;
     tx.commit().await?;
@@ -164,9 +164,9 @@ pub async fn derive_resource_within(
         return Ok(None);
     }
     let mut tx = pool.begin().await?;
-    // Lock order: the search revision, then the adapter, then the parent, as a feed apply takes
-    // them (`EXTEND_PARENT_DERIVATIONS`). Always: inserting the child bumps the revision too.
-    lock_search_revision(&mut tx).await?;
+    // Lock order: the write lock, then the adapter, then the parent, as a feed apply takes them
+    // (`EXTEND_PARENT_DERIVATIONS`).
+    lock_writers(&mut tx).await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,17614))")
         .bind(adapter)
         .execute(&mut *tx)
@@ -362,10 +362,22 @@ pub(crate) async fn write_document(
     Ok(())
 }
 
-/// Acquire before explicit resource row locks, matching the write triggers' lock order.
-pub(crate) async fn lock_search_revision(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
-    sqlx::query("SELECT revision FROM search_revision WHERE id=1 FOR UPDATE")
+/// The write lock, taken before a transaction's first explicit row lock: writers that lock rows
+/// in an order of their own run one at a time. The search revision itself takes no lock
+/// (`search_write`).
+pub(crate) async fn lock_writers(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(73822917)")
         .execute(&mut **tx)
         .await?;
     Ok(())
+}
+/// Fold the counted write transactions into one row, so reading the revision stays one short
+/// sum. Readers see either the rows or their sum, never both, so their revisions do not change.
+pub async fn compact_search_writes(pool: &PgPool) -> Result<u64> {
+    Ok(sqlx::query(
+        "WITH gone AS (DELETE FROM search_write WHERE (SELECT count(*) FROM search_write)>1 RETURNING writes) INSERT INTO search_write(writes) SELECT sum(writes) FROM gone HAVING count(*)>0",
+    )
+    .execute(pool)
+    .await?
+    .rows_affected())
 }

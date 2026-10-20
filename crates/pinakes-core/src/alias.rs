@@ -121,7 +121,7 @@ pub fn source(uri: &str, root: &str) -> Option<Alias> {
 pub async fn assign(tx: &mut Transaction<'_, Postgres>, id: &str, alias: &Alias) -> Result<()> {
     // Every assignment takes the same lock, so an alias never commits against a root that has
     // meanwhile become an alias itself (reads follow one hop).
-    crate::store::lock_search_revision(tx).await?;
+    crate::store::lock_writers(tx).await?;
     let (named, root_uri, _) = crate::model::identity(&alias.root)?;
     // A root is never itself an alias: one that became one passes the alias to its own root.
     let hop: Option<String> =

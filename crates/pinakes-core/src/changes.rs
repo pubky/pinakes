@@ -150,7 +150,7 @@ pub async fn save(
         plan.source = source.into();
     }
     let mut tx = pool.begin().await?;
-    crate::store::lock_search_revision(&mut tx).await?;
+    crate::store::lock_writers(&mut tx).await?;
     let row=sqlx::query("SELECT r.*,CASE WHEN r.osm_id IS NULL THEN r.doc ELSE o.versions->r.osm_version END AS accepted FROM resource r LEFT JOIN osm_place o ON r.osm_type=o.osm_type AND r.osm_id=o.osm_id WHERE r.id=$1 AND r.generation=$2 FOR UPDATE OF r")
         .bind(id).bind(generation).fetch_optional(&mut *tx).await?;
     let Some(row) = row else { return Ok(()) };
@@ -349,7 +349,7 @@ pub async fn save(
 /// past its cap) keeps its child, and its row for a later revival, through the same grace.
 pub async fn delete_orphans(pool: &PgPool, grace_days: u32) -> Result<u64> {
     let mut tx = pool.begin().await?;
-    crate::store::lock_search_revision(&mut tx).await?;
+    crate::store::lock_writers(&mut tx).await?;
     let rows=sqlx::query("SELECT r.id,r.resolver,r.ever_existed,d.doc FROM resource r JOIN resource_document d ON d.id=r.id WHERE r.orphaned_at<now()-$1*interval '1 day' AND NOT EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id) AND NOT EXISTS(SELECT 1 FROM resource_derivation d JOIN resource p ON p.id=d.parent_id WHERE (d.child_id=r.id OR d.child_id IN(SELECT alias_id FROM resource_alias WHERE root_id=r.id)) AND (d.expires_at IS NULL OR d.expires_at>now()-$1*interval '1 day') AND (p.orphaned_at IS NULL OR p.orphaned_at>=now()-$1*interval '1 day' OR EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=p.id))) AND NOT EXISTS(SELECT 1 FROM resource v WHERE v.venue_id=r.id) AND NOT EXISTS(SELECT 1 FROM occurrence o WHERE o.venue_id=r.id) AND (r.lease_until IS NULL OR r.lease_until<now()) FOR UPDATE OF r SKIP LOCKED LIMIT 1000")
         .bind(grace_days as f64).fetch_all(&mut *tx).await?;
     for row in &rows {
