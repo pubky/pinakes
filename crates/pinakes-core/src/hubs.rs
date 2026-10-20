@@ -561,16 +561,16 @@ pub mod wikidata {
         )
     }
     /// A property ID (`P` and digits) and an external-ID value the search syntax can carry
-    /// exactly (letters, digits and `._:-`, at most 200 bytes).
+    /// exactly (letters, digits and `._:-/`, at most 200 bytes; a Trakt ID is `shows/breaking-bad`).
     fn statement(property: &str, value: &str) -> Option<String> {
         let digits = property.strip_prefix('P')?;
         let property_ok = (1..=8).contains(&digits.len())
             && !digits.starts_with('0')
             && digits.bytes().all(|b| b.is_ascii_digit());
         let value_ok = (1..=200).contains(&value.len())
-            && value
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'));
+            && value.bytes().all(|b| {
+                b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-' | b'/')
+            });
         (property_ok && value_ok).then(|| format!("haswbstatement:{property}={value}"))
     }
     pub fn search_lookup(property: &str, value: &str) -> Option<String> {
@@ -755,6 +755,9 @@ mod tests {
         assert!(wikidata::search_lookup("P436", "a b").is_none());
         assert!(wikidata::search_lookup("P0436", "x").is_none());
         assert!(wikidata::search_lookup("P436", "b1392450-e666").is_some());
+        assert!(wikidata::search_lookup("P8013", "shows/breaking-bad")
+            .unwrap()
+            .contains("haswbstatement%3AP8013%3Dshows%2Fbreaking-bad"));
     }
 
     #[test]
