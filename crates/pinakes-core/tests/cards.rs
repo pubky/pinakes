@@ -416,6 +416,20 @@ fn a_feed_cut_off_at_the_cap_reads_to_its_last_whole_item() {
             .unwrap()
             .is_none()
     );
+    // The cut can fall inside a character (a Japanese title's three bytes).
+    let mut body = format!("{head}{whole}<item><title>第四話").into_bytes();
+    body.pop();
+    let f = Fetched { body, ..f };
+    let series = cards::podcast("https://podcast.example/feed", &f, 3600, 1000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(series.name.as_deref(), Some("Long Show"));
+    // Invalid UTF-8 before the cut is still an error.
+    let f = Fetched {
+        body: [&b"<rss>\xff"[..], b"</rss>"].concat(),
+        ..f
+    };
+    assert!(cards::podcast("https://podcast.example/feed", &f, 3600, 1000).is_err());
 }
 #[test]
 fn generic_nostr_signed_profile_note_and_nip52_routing() {

@@ -968,7 +968,14 @@ fn podcast_body(
     cap: usize,
     direct: bool,
 ) -> Result<Option<ResourceMeta>> {
-    let body = std::str::from_utf8(&f.body)?;
+    let body = match std::str::from_utf8(&f.body) {
+        Ok(body) => body,
+        // Cut off inside a character: the whole characters before it.
+        Err(e) if f.truncated && e.error_len().is_none() => {
+            std::str::from_utf8(&f.body[..e.valid_up_to()])?
+        }
+        Err(e) => return Err(e.into()),
+    };
     // A feed cut off at the page cap reads up to its last whole item.
     let completed;
     let body = if f.truncated {
