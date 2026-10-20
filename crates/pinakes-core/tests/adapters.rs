@@ -126,7 +126,7 @@ async fn cursor_resets_head_clock_missing_and_title_fallback(pool: PgPool) {
     assert_eq!(d.container.unwrap().cursor.unwrap().next, "3000");
     assert!(!t.seen.lock().unwrap()[0].0.contains("since_sequence"));
     install_cursor(&pool, uri, "9999999999999999").await;
-    let row = json!({"id":7,"meetup_id":1,"title":null,"start":(Utc::now()+Duration::days(1)).to_rfc3339()});
+    let row = json!({"id":7,"meetup_id":1,"title":null,"meetup.portalLink":"https://portal.einundzwanzig.space/ch/meetup/one","start":(Utc::now()+Duration::days(1)).to_rfc3339()});
     let (egress, _) = mock_egress(vec![
         (
             200,
@@ -141,6 +141,11 @@ async fn cursor_resets_head_clock_missing_and_title_fallback(pool: PgPool) {
     let c = d.container.unwrap();
     assert!(c.cursor.unwrap().reset);
     assert_eq!(c.occurrences[0].doc.name.as_deref(), Some("Meetup 7"));
+    // Its own portal page, not the API.
+    assert_eq!(
+        c.occurrences[0].doc.url,
+        "https://portal.einundzwanzig.space/ch/meetup/one/event/7"
+    );
     let uri = "https://api.btcmap.org/v4/events";
     let def = adapters::definition("btcmap").unwrap();
     let (egress, _) = mock_egress(vec![(

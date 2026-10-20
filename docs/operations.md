@@ -138,6 +138,15 @@ DELETE FROM group_input;
 INSERT INTO group_dirty(resource_id) SELECT DISTINCT resource_id FROM group_unit ON CONFLICT DO NOTHING;
 ```
 
+**Same-event hint rebuild.** The hourly sweep reads again any event in the window whose start,
+place or name changed unseen. To recompute every pair (cards keep their current pairs until each
+event is read again):
+
+```sql
+UPDATE same_event_unit SET fingerprint='';
+INSERT INTO same_event_dirty(resource_id) SELECT DISTINCT resource_id FROM same_event_unit ON CONFLICT DO NOTHING;
+```
+
 ## Deployment and egress
 
 Web fetches bypass environment proxies, validate every DNS answer, pin the checked addresses and
@@ -359,6 +368,20 @@ Page coordinates win over geocoding, and online events are not geocoded. A struc
 search is accepted only for one sufficiently matching address (`limits.geocode_score`); an OSM
 venue link also needs the name and full address to match. Geocoded facts stay in `osm_place`;
 documents store versioned references and compose coordinates at read time.
+
+`event.same_event_hint` (default `"on"`; `"off"`) puts `maybe_same` on event cards: other events
+that are possibly the same one ([the rule](api.md#possibly-the-same-event)). A background pass
+in the daemon computes it for events starting from a day ago to a year ahead. Triggers queue an
+event resource (or a feed) when an event's start, place, name or document changes; the
+migration queues the events already stored. Each pass takes up to 25 queued resources and up to
+200 of their new or changed events, and the next pass follows at once while there was work, else
+after five seconds. An event's normalised name, place and identifiers are stored once read, and
+its pairs are matched among the events already read through their start and geography indexes.
+An hourly sweep drops events that started over a day ago and queues those that entered the window,
+changed unseen, or are no longer events (an alias, a missing feed, a gone occurrence). Requests
+only read the stored pairs. `"off"` stops the pass and
+removes the field from cards, details and `/v1/openapi.json`; the stored pairs stay, and changes
+made meanwhile are read when it is turned back on.
 
 ### Event platforms
 

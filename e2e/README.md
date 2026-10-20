@@ -6,7 +6,7 @@ ICS feed (the mock exercises recurrence), NIP-52 naddr, DOI with its publisher p
 video, ordinary web page, official-API sources (a Federal Register document by number with one of
 its page addresses, an alias, an SEC EDGAR filing, an eCFR section and a GLEIF LEI record, a UK Parliament bill, a Swiss Parliament business item, a CourtListener opinion, a UK Act on legislation.gov.uk, an EUR-Lex act, a Fedlex act, a Zefix company, a GovInfo public law, a Stacker News post, a Hacker News story, a Lobsters story, a Bluesky post, a Mastodon post, a Discourse topic, a Codeberg file, a GitLab file, a WordPress post, a Ghost post, a mailing-list message, a walled article found in its feed; and one link per data source: a Lightning node and the pizza transaction on mempool.space, an earthquake, Docker Hub images, ROR organisations, Hugging Face, Zenodo and Figshare records, Met, Cleveland and Art Institute of Chicago artworks, an Internet Archive item, a Commons file, a PDB structure, UniProt proteins, PubChem compounds, GBIF and iNaturalist records and a ClinicalTrials.gov study), and live a Pubky object of another app. It checks the
 Nexus reference feed, Pinakes typed documents, facets, bbox/Event/venue search,
-occurrences, changes, group membership and Nexus hydration by URI (`by_ids` with `uris`: the
+occurrences, changes, group membership, same-event hints and Nexus hydration by URI (`by_ids` with `uris`: the
 cards' own `uri` and `details.aliases`, and an occurrence's `occurrence.feed_uri`, matched by
 `details.uri`; Pinakes is read by URI too, its IDs being its own), then deletes
 its tags and waits for both indexes to remove their references. `by_ids` lists at most five
@@ -32,7 +32,9 @@ fixtures. No identity secret or public-network access is needed after dependenci
 are installed. The fixture venue test requires a positive match. Samples with `group_with` must end as
 one resource or in one group: an ISBN-10 tag and OSM spellings are aliases of the ISBN-13 and
 the canonical OSM sample, and publisher pages group with the DOI and ISBN resources whose
-registries name them as landing pages and which they cite. Injected transports
+registries name them as landing pages and which they cite. Samples with `maybe_same_with` are
+one event on two pages: each card must name the other in `maybe_same` (possibly the same
+event), and they must not group. Injected transports
 disable direct relay sockets; unknown fixture DNS names resolve to TEST-NET.
 
 Both `--mock` and `--isolated-live` create a unique `pinakes_e2e_owned_*` database

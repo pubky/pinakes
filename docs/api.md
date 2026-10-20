@@ -60,6 +60,7 @@ before rendering them as HTML.
 | `attribution` | Present on OSM cards, events placed at an OSM venue and events whose zone came from coordinates; display it with the card |
 | `occurrence` | Occurrence cards only: `{feed_id, feed_uri, uid, recurrence_id, status}`; `feed_uri` is the feed's URI, the link people tagged |
 | `event` | Pubky event references only: `{author, object_path, recurrence_id, start, end, status}` |
+| `maybe_same` | Event and occurrence cards only: up to three other events that are [possibly the same event](#possibly-the-same-event), best first, each `{id, uri, site, start, score}` (`[]` when there are none). A hint only, like `group`. Absent on other cards, and on every card with `[event] same_event_hint = "off"` |
 
 A `pubky://` object without a name, title or description takes its description from a
 content-like member (`content`, `text`): such a card is a `SocialMediaPosting`, social content like a note, with a 200-character excerpt that refreshes within the hour and is removed once the object is gone.
@@ -85,6 +86,7 @@ body, and answer `If-None-Match` with 304.
 | `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …); lists are joined with `; `. Each source's page lists its facts |
 | `aliases` | Other spellings of this link that resolve to it ([aliases](#aliases)), at most 50; a page's own `url`, `@id`, `sameAs` or canonical claims are not aliases and are not listed |
 | `updated_at` | When the current metadata was accepted |
+| `maybe_same` | An event's card only: up to ten events that are [possibly the same event](#possibly-the-same-event), best first (the card's `maybe_same` is the first three) |
 
 Internal fields (the resolver, TTL, group keys, raw attributes, parser warnings) are not public;
 operators read the stored document with `GET /v1/resources/{id}/document` on the admin listener.
@@ -290,6 +292,7 @@ GET /v1/resources/2dea92aa8c3cf8ae1cffad92cf3ca718
 GET /v1/resources/5bccc93f427b6fd44115fdd02618392f
 GET /v1/resources/0f3820de1c3532e8805674cc996978f9
 GET /v1/resources/fe358c60c13f6a97b50899c4240f27bf
+GET /v1/resources/586d741bd42f9a0dde1c946b58db20ae
 ```
 
 ### GET /v1/resources/by-uri
@@ -604,6 +607,51 @@ Members must exist and have been grouped once. Curation pins its members away fr
 groups and overrides the distance and evidence rules; removing a member lets its automatic
 evidence count again. Invalid curation returns 400. `groups.enabled = false` turns off group
 reads, writes and collapse; stored membership stays for when it is turned back on.
+
+## Possibly the same event
+
+One meetup is often listed on several sites (Meetup, Luma, its organiser's page). These pages
+share no identifier, so they never [group](#groups). Instead an event's card names other events
+that are possibly the same one, in `maybe_same`: `{id, uri, site, start, score}`, best first, up
+to three on a card and ten in its `details`. An entry is an event resource, or one occurrence of
+a feed (`id` is then the feed's ID and `uri` the occurrence's own page, else the feed's; a feed
+read from a service's API is named by that service's page, never the API endpoint).
+
+Two events are possibly the same when all of these hold:
+
+- they start within 300 seconds of each other; when either is an all-day event, they start on
+  the same local date (each in its own zone);
+- when both are located, within 500 m of each other; when one or both have no coordinates,
+  they name the same venue (its resource or OSM object) or the same organizer URL. So one
+  organizer's meetups in two cities are not the same when both are located, but an event without
+  coordinates pairs with the organizer's other event at that time and under a similar name,
+  wherever that one is;
+- their names are at least 0.5 alike (pg_trgm similarity) once both are normalised: lower case;
+  without dates, times and years (`21.10.2026`, `2026-10-21`, `6.11.`, `21.`, `19:00`, `7pm`,
+  `2026`, a month name with its day such as `Oct 21` or `6th November`, in English, German,
+  French and Italian); without punctuation, symbols and emoji; without weekday names and filler
+  words (`meetup`, `event`, `edition`, `session`, `monthly`, `weekly`, `stammtisch`, `treffen`,
+  `rencontre`, `incontro`); a name with nothing left never matches;
+- other numbers stay in the name (`#50`, `Nr. 30`, `Room 101`), and when both names keep
+  numbers, they are the same numbers: "Meetup #50" and "Meetup #51" are not the same event;
+- they are on different pages: two occurrences of one feed never match.
+
+An event without coordinates, a venue or an organizer URL is therefore never listed: for
+example a calendar entry without `GEO` whose `LOCATION` is one line of text (only a structured
+street address is geocoded).
+
+`score` is the name similarity, from 0.5 to 1. A member of the card's own group, an alias and a
+gone occurrence are never listed.
+It is a hint, like a group, and less: nothing is merged, counted or ranked by it, and each event
+keeps its own card.
+
+A background pass computes the pairs for events starting from a day ago to a year ahead, again
+whenever an event's start, place or name changes; a request only reads them. A new or changed
+event is paired within about five seconds of its save, once the events before it in the queue
+are read (the events already stored when the hint is installed are queued at once). Search
+pages change their `ETag` when a hint on them changes. `[event] same_event_hint = "off"`
+([operations](operations.md#calendars-and-events)) removes the field from cards, details and the
+OpenAPI document and stops the pass.
 
 ## Cards and resolvers
 

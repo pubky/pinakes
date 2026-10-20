@@ -219,6 +219,24 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
         return true;
       }, timeout, signal);
       report.assertions.push(`group hints, members and collapse (${samples.filter(s => s.group_with).map(s => `${s.kind}~${s.group_with}`).join(', ') || 'no pairs'})`);
+      // Samples naming `maybe_same_with` are one event on two pages: each card names the other
+      // as possibly the same event, a hint that is never a group.
+      const twins = samples.filter(s => s.maybe_same_with).map(s => [s.kind, s.maybe_same_with]);
+      await waitFor('same-event hints', async () => {
+        for (const [kind, other] of twins) {
+          const [a, b] = [docs.get(kind).id, docs.get(other).id];
+          const card = await json(`${pinakes}/v1/resources/${a}`);
+          if (!card.maybe_same?.some(entry => entry.id === b)) return false;
+          if (!(await json(`${pinakes}/v1/resources/${b}`)).maybe_same?.some(entry => entry.id === a)) return false;
+          assert(card.maybe_same.length <= 3 && card.details.maybe_same.length <= 10);
+          for (const entry of card.maybe_same) {
+            assert(entry.uri && entry.start && entry.score >= 0.5 && entry.score <= 1, 'a same-event entry is {id, uri, site, start, score}');
+          }
+          assert(!card.group?.members.some(member => member.id === b), 'a same-event hint is never a group');
+        }
+        return true;
+      }, timeout, signal);
+      report.assertions.push(`same-event hints (${twins.map(([a, b]) => `${a}~${b}`).join(', ') || 'no pairs'})`);
       if (docs.has('isbn') && docs.has('isbn_page')) report.assertions.push('a book and its edition page keep their own cards');
     }, report, journal);
     assert(report.cleanup.every(c => c.deleted), 'Tag cleanup failed; retry using journal');
