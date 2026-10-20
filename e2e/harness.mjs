@@ -212,7 +212,9 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
           const page = await json(`${pinakes}/v1/resources/${docs.get('isbn_page').id}`);
           if (!book.also_on.some(entry => entry.id === page.id)) return false;
           assert.equal(book.type, 'Book');
-          assert.notEqual(page.type, 'Book');
+          // An Open Library edition page is a book too (typed by its link), with its own card.
+          assert.equal(page.type, 'Book');
+          assert.notEqual(page.id, book.id);
         }
         const collapsed = await search({ collapse: 'group', limit: '500' });
         if (!collapsed.items.length) return false;

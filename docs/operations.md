@@ -509,7 +509,7 @@ Sources reach their services through the egress policy and its per-host budgets,
 at a time per host. A hub's published limit lowers its host's default pace like a source's own
 (`limits.host_rates` names a host's rate outright): MusicBrainz 1 request/s, Deezer 10/s,
 Wikimedia (`www.wikidata.org`, `*.wikipedia.org`, `commons.wikimedia.org`) 200/min, Open
-Library 3/s, iTunes about 20/min, TVmaze 2/s, crates.io 1/s, Crossref 10/s, Software Heritage
+Library 3/s, iTunes about 20/min, TVmaze 20 per 10 s, crates.io 1/s, Crossref 10/s, Software Heritage
 120/h; a limit above `limits.host_requests_per_second` (1/s) leaves the default.
 
 ## Groups

@@ -56,6 +56,11 @@ does instead of its share text: a track's `Queen · A Night At The Opera (Deluxe
 (artist, album, length), an album's `Tame Impala & JENNIE · 2025` (artist, year); the
 `service` source adds `artist`, `album` and `duration` (seconds) to `details.facts`.
 
+A media link is typed the same way: a TMDB, Letterboxd or Trakt movie is a `Movie`; a TMDB,
+Trakt or TVmaze series a `TVSeries`; an Open Library work or edition a `Book`; an Apple Podcasts,
+Podcast Index, Pocket Casts, Castro or Fountain show a `PodcastSeries` and its episode a
+`PodcastEpisode`. An IMDb title keeps the type its page gives (it can be either).
+
 ### Card
 
 | Field | Meaning |

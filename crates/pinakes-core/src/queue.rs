@@ -318,6 +318,11 @@ async fn guarded_finish_job(
         }
         other => other,
     };
+    // So is a book, podcast or film link.
+    let result = result.map(|mut doc| {
+        crate::also_on::media::type_card(&job.uri, &mut doc);
+        doc
+    });
     match std::panic::AssertUnwindSafe(finish_job(pool, resolver, cfg, refresh, job, result))
         .catch_unwind()
         .await

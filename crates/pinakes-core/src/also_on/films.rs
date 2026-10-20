@@ -7,7 +7,7 @@
 //! `lookup/shows?imdb=` its show (TVmaze's data is CC BY-SA: its links say `via: "tvmaze"`);
 //! each is asked only when the item has no link there.
 use super::{
-    media::{self, digits, property, slug, Property},
+    media::{self, digits, property, slug, Deferred, Property},
     Context, Found, Key, Link, Source, Subject,
 };
 use crate::{
@@ -77,6 +77,28 @@ fn site(film: &Film) -> &'static str {
         Film::Tmdb { .. } => "TMDB",
         Film::Letterboxd(_) => "Letterboxd",
         Film::Tvmaze(_) => "TVmaze",
+    }
+}
+
+/// Whether a film link is the title's own page (not a season, cast or review page under it).
+pub fn exact_page(uri: &str) -> bool {
+    let Ok(url) = url::Url::parse(uri) else {
+        return false;
+    };
+    let s: Vec<&str> = url
+        .path_segments()
+        .map(|s| s.filter(|s| !s.is_empty()).collect())
+        .unwrap_or_default();
+    match (
+        url.host_str().map(|h| h.strip_prefix("www.").unwrap_or(h)),
+        s.as_slice(),
+    ) {
+        // TVmaze's show page carries its slug; its subpages have fixed names.
+        (Some("tvmaze.com"), [_, _, sub]) => !matches!(
+            *sub,
+            "episodes" | "seasons" | "cast" | "crew" | "characters" | "gallery" | "news" | "akas"
+        ),
+        (_, s) => s.len() == 2,
     }
 }
 
@@ -311,16 +333,21 @@ impl Source for Films {
             return Ok(Found::default());
         };
         let mut found = Found::default();
+        // A failing secondary service leaves what the link's own record said.
+        let mut deferred = Deferred::default();
         // The title's IMDb ID, and its item.
         let (tt, item) = match &film {
-            Film::Imdb(tt) => (Some(tt.clone()), Self::item(cx, "P345", tt).await?),
+            Film::Imdb(tt) => (
+                Some(tt.clone()),
+                deferred.take("wikidata", Self::item(cx, "P345", tt).await),
+            ),
             Film::Tvmaze(id) => {
                 let show = Self::tvmaze(cx, &tvmaze_show(*id))
                     .await?
                     .filter(|s| s.id == *id);
                 match show.and_then(|s| s.imdb) {
                     Some(tt) => {
-                        let item = Self::item(cx, "P345", &tt).await?;
+                        let item = deferred.take("wikidata", Self::item(cx, "P345", &tt).await);
                         (Some(tt), item)
                     }
                     None => (None, None),
@@ -356,23 +383,24 @@ impl Source for Films {
         }
         let Some(tt) = tt else {
             found.links.retain(|l| l.site != site(&film));
-            return Ok(found);
+            return deferred.finish(found);
         };
         // A link's own service is the card itself.
         let own = site(&film);
         found.links.retain(|l| l.site != own);
         let wanted = |found: &Found, s: &str| s != own && !found.links.iter().any(|l| l.site == s);
         if wanted(&found, "Letterboxd") {
-            found.links.extend(Self::letterboxd(cx, &tt).await?);
+            found
+                .links
+                .extend(deferred.take("letterboxd", Self::letterboxd(cx, &tt).await));
         }
         if wanted(&found, "TVmaze") {
-            if let Some(show) = Self::tvmaze(cx, &tvmaze_lookup(&tt)).await? {
-                if show.imdb.as_deref() == Some(tt.as_str()) {
-                    found.links.push(tvmaze_link(show.id));
-                }
+            let show = deferred.take("tvmaze", Self::tvmaze(cx, &tvmaze_lookup(&tt)).await);
+            if let Some(show) = show.filter(|s| s.imdb.as_deref() == Some(tt.as_str())) {
+                found.links.push(tvmaze_link(show.id));
             }
         }
-        Ok(found)
+        deferred.finish(found)
     }
 }
 

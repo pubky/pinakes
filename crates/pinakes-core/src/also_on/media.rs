@@ -39,17 +39,24 @@ const VALUE: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'~')
     .remove(b'/');
 
-/// The links an item has for these properties: one per property whose best-rank values hold
-/// exactly one valid value (several are ambiguous and add nothing), and one per service (the
-/// first property in the table wins).
+/// The links an item has for these properties: one per property whose best-rank values are
+/// exactly one value, and a valid one (several are ambiguous and add nothing, even when only one
+/// of them is well-formed), and one per service (the first property in the table wins). A value
+/// with a `.` or `..` path segment is refused: it would name another page.
 pub fn links(item: &Item, table: &[Property]) -> Vec<Link> {
     let mut out: Vec<Link> = Vec::new();
     for p in table {
         if out.iter().any(|l| l.site == p.site) {
             continue;
         }
-        let mut values: Vec<&String> = item.id(p.pid).iter().filter(|v| (p.valid)(v)).collect();
+        let mut values: Vec<&String> = item.id(p.pid).iter().collect();
         values.dedup();
+        let values: Vec<&String> = match values.as_slice() {
+            [one] if (p.valid)(one) && !one.split('/').any(|seg| seg == "." || seg == "..") => {
+                vec![*one]
+            }
+            _ => Vec::new(),
+        };
         if let [value] = values.as_slice() {
             let uri = p
                 .template
@@ -122,6 +129,63 @@ impl Deferred {
     }
 }
 
+/// The type a media link names, whatever its page calls itself: a TMDB, Letterboxd or Trakt
+/// movie is a `Movie`; a TMDB, Trakt or TVmaze series a `TVSeries`; an Open Library work or
+/// edition (or an ISBN) a `Book`; an Apple Podcasts, Podcast Index, Pocket Casts, Castro or
+/// Fountain show a `PodcastSeries` and its episode a `PodcastEpisode`.
+pub fn link_type(uri: &str) -> Option<&'static str> {
+    use super::{books, films, podcasts};
+    if let Some(film) = films::film(uri) {
+        return match film {
+            films::Film::Tmdb { tv: false, .. } | films::Film::Letterboxd(_) => Some("Movie"),
+            films::Film::Tmdb { tv: true, .. } | films::Film::Tvmaze(_) => Some("TVSeries"),
+            // An IMDb title can be either.
+            films::Film::Imdb(_) => None,
+        }
+        .filter(|_| films::exact_page(uri));
+    }
+    if books::book(uri).is_some() {
+        return Some("Book");
+    }
+    let episode = |e: Option<u64>| {
+        if e.is_some() {
+            "PodcastEpisode"
+        } else {
+            "PodcastSeries"
+        }
+    };
+    if let Some((_, e)) = podcasts::apple(uri) {
+        return Some(episode(e));
+    }
+    if let Some((_, e)) = podcasts::index_page(uri) {
+        return Some(episode(e));
+    }
+    if podcasts::player(uri).is_some() {
+        return Some("PodcastSeries");
+    }
+    let url = url::Url::parse(uri).ok()?;
+    let host = url.host_str()?;
+    let s: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
+    match (host.strip_prefix("www.").unwrap_or(host), s.as_slice()) {
+        ("trakt.tv", ["movies", name]) if slug(name) => Some("Movie"),
+        ("trakt.tv", ["shows", name]) if slug(name) => Some("TVSeries"),
+        ("fountain.fm", ["show", id]) if slug(id) => Some("PodcastSeries"),
+        ("fountain.fm", ["episode", id]) if slug(id) => Some("PodcastEpisode"),
+        _ => None,
+    }
+}
+
+/// Type a resolved card by what its media link is ([`link_type`]); a card that did not resolve,
+/// or a link that names no type, is left alone.
+pub fn type_card(uri: &str, doc: &mut crate::model::ResourceMeta) {
+    if doc.status != crate::model::Status::Ok {
+        return;
+    }
+    if let Some(kind) = link_type(uri) {
+        doc.set_type(kind);
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod fixture {
     //! Recorded answers in `tests/fixtures/media/<family>/` (see each `provenance.json`).
@@ -187,7 +251,7 @@ mod tests {
                 ("P1", &["12"]),
                 ("P2", &["34"]),
                 ("P3", &["x y"]),
-                ("P4", &["1", "2"]),
+                ("P4", &["1", "x"]),
                 ("P5", &["movies/the film"]),
             ]),
             TABLE,
@@ -204,6 +268,76 @@ mod tests {
             ]
         );
         assert!(links.iter().all(|l| l.via == "wikidata"));
+        // A value that walks out of its path names another page.
+        const SLUGS: &[Property] = &[property("P1", "A", "https://a.example/film/$1/", |v| {
+            v.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'/')
+        })];
+        for v in ["..", ".", "m/../x"] {
+            assert!(
+                super::links(&item(&[("P1", &[v])]), SLUGS).is_empty(),
+                "{v}"
+            );
+        }
+        assert_eq!(super::links(&item(&[("P1", &["a.b"])]), SLUGS).len(), 1);
+    }
+
+    #[test]
+    fn media_links_are_typed_by_what_they_are() {
+        for (uri, kind) in [
+            (
+                "https://www.themoviedb.org/movie/603-the-matrix",
+                Some("Movie"),
+            ),
+            ("https://www.themoviedb.org/tv/1396", Some("TVSeries")),
+            ("https://www.themoviedb.org/tv/1396/season/1", None),
+            ("https://letterboxd.com/film/the-matrix/", Some("Movie")),
+            ("https://trakt.tv/shows/breaking-bad", Some("TVSeries")),
+            ("https://trakt.tv/movies/the-matrix-1999", Some("Movie")),
+            ("https://trakt.tv/shows/breaking-bad/seasons/1", None),
+            (
+                "https://www.tvmaze.com/shows/169/breaking-bad",
+                Some("TVSeries"),
+            ),
+            ("https://www.tvmaze.com/shows/169/episodes", None),
+            ("https://www.imdb.com/title/tt0133093/", None),
+            (
+                "https://openlibrary.org/works/OL27482W/The_Hobbit",
+                Some("Book"),
+            ),
+            ("https://openlibrary.org/books/OL7353617M", Some("Book")),
+            (
+                "https://podcastindex.org/podcast/577105",
+                Some("PodcastSeries"),
+            ),
+            (
+                "https://podcastindex.org/podcast/743229?episode=61953304662",
+                Some("PodcastEpisode"),
+            ),
+            (
+                "https://podcasts.apple.com/us/podcast/darknet-diaries/id1296350485",
+                Some("PodcastSeries"),
+            ),
+            (
+                "https://podcasts.apple.com/us/podcast/x/id1296350485?i=1000600000000",
+                Some("PodcastEpisode"),
+            ),
+            ("https://pca.st/itunes/1296350485", Some("PodcastSeries")),
+            ("https://fountain.fm/show/abc123", Some("PodcastSeries")),
+            ("https://fountain.fm/episode/abc123", Some("PodcastEpisode")),
+            ("https://example.org/", None),
+        ] {
+            assert_eq!(link_type(uri), kind, "{uri}");
+        }
+        let mut doc =
+            crate::model::ResourceMeta::new("https://www.themoviedb.org/tv/1396", "web", 60);
+        doc.set_type("WebSite");
+        type_card("https://www.themoviedb.org/tv/1396", &mut doc);
+        assert_eq!(doc.type_name, "TVSeries");
+        doc.status = crate::model::Status::Missing;
+        doc.set_type("WebPage");
+        type_card("https://www.themoviedb.org/tv/1396", &mut doc);
+        assert_eq!(doc.type_name, "WebPage", "a card that did not resolve");
     }
 
     #[test]

@@ -8,7 +8,7 @@
   {"kind": "doi", "uri": "doi:10.1038/nature12373", "type": "ScholarlyArticle", "status": "ok"},
   {"kind": "doi_page", "uri": "https://www.nature.com/articles/nature12373", "type": "ScholarlyArticle", "status": "ok"},
   {"kind": "isbn", "uri": "isbn:9780140328721", "type": "Book", "status": "ok", "derived": ["Open Library", "Amazon"]},
-  {"kind": "isbn_page", "uri": "https://openlibrary.org/books/OL7353617M", "type": "CreativeWork", "status": "ok"},
+  {"kind": "isbn_page", "uri": "https://openlibrary.org/books/OL7353617M", "type": "Book", "status": "ok"},
   {"kind": "youtube", "uri": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "type": "VideoObject", "status": "ok"},
   {"kind": "vimeo", "uri": "https://vimeo.com/76979871", "type": "VideoObject", "status": "ok"},
   {"kind": "podcast", "uri": "https://open.spotify.com/show/4rOoJ6Egrf8K2IrywzwOMk", "type": "PodcastSeries", "status": "ok"},
