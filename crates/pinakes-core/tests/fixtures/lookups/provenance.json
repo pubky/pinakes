@@ -27,6 +27,26 @@
     "status": 200,
     "url": "https://crates.io/api/v1/crates/serde?include=default_version"
   },
+  "crossref-lmcs-20-1-8": {
+    "bytes": 3262,
+    "content_type": "application/json",
+    "file": "crossref-lmcs-20-1-8.json",
+    "note": "The publisher's record names arXiv 2302.04668 as its preprint (has-preprint).",
+    "recorded_at": "2026-10-20T18:15:05+00:00",
+    "sha256": "2afac1900708ae0bc27b7b18ed5a0a7dd8b82020cb4dca81e1fb995e10292339",
+    "status": 200,
+    "url": "https://api.crossref.org/works/10.46298/lmcs-20%281%3A8%292024"
+  },
+  "crossref-nature12373": {
+    "bytes": 13647,
+    "content_type": "application/json",
+    "file": "crossref-nature12373.json",
+    "note": "The publisher's record names no preprint.",
+    "recorded_at": "2026-10-20T18:15:06+00:00",
+    "sha256": "d79ef08d614c01b287219296a7002a8b9de052c6e9a573755093aa1a713a170d",
+    "status": 200,
+    "url": "https://api.crossref.org/works/10.1038/nature12373"
+  },
   "datacite-arxiv-1304.1068": {
     "bytes": 10564,
     "content_type": "application/json; charset=utf-8",
@@ -36,6 +56,25 @@
     "sha256": "991c9714f0bcc8f02b1a6edd79497a75eb94482315c05d62449cf8b2573175d1",
     "status": 200,
     "url": "https://api.datacite.org/dois/10.48550/arXiv.1304.1068"
+  },
+  "datacite-arxiv-2302.04668": {
+    "bytes": 9855,
+    "content_type": "application/json",
+    "file": "datacite-arxiv-2302.04668.json",
+    "note": "An arXiv record whose journal version's publisher names it back.",
+    "recorded_at": "2026-10-20T18:15:02+00:00",
+    "sha256": "918f29aa54fbabd96836c6f47949514531da12ac9a152598ddeeb8fd62139524",
+    "status": 200,
+    "url": "https://api.datacite.org/dois/10.48550/arXiv.2302.04668"
+  },
+  "datacite-versions-lmcs-20-1-8": {
+    "bytes": 4530,
+    "content_type": "application/json",
+    "file": "datacite-versions-lmcs-20-1-8.json",
+    "recorded_at": "2026-10-20T18:15:04+00:00",
+    "sha256": "faebb407fec4a20ddf363675614d0638e696df8401e230f842b63317ed1f68c0",
+    "status": 200,
+    "url": "https://api.datacite.org/dois?query=relatedIdentifiers.relatedIdentifier%3A%2210.46298%2Flmcs-20%281%3A8%292024%22%20AND%20relatedIdentifiers.relationType%3AIsVersionOf&client-id=arxiv.content&page%5Bsize%5D=25"
   },
   "datacite-versions-nature12373": {
     "bytes": 4620,

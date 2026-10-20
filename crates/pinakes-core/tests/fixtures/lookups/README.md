@@ -7,5 +7,5 @@ the time of recording, the size and SHA-256 of the body as served, and the file 
 Bodies over 64 KB are stored gzip-compressed (`.gz`). A redirect is recorded as its status and
 `Location` only. Some 404 answers are HTML pages and are stored as `.html`.
 
-Licences of the recorded data: Wikidata and DataCite CC0; OpenStreetMap (through Nominatim)
+Licences of the recorded data: Wikidata, DataCite and Crossref CC0; OpenStreetMap (through Nominatim)
 © OpenStreetMap contributors, ODbL 1.0; ProtonDB ODbL. Other responses are public API metadata, kept solely as private test fixtures.

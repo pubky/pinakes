@@ -519,7 +519,9 @@ Podcast Index only when one item of it with audio or video is that page; each fi
 Wikidata requests (a TVmaze show first its TVmaze record), and a Letterboxd and a TVmaze request
 when the item has no link there; each TMDB, Trakt, Netflix, Goodreads, Letterboxd or IMDb page
 (`titles`) the item's search and read (usually cached already) and one request for its English
-label; each DOI one request each to Unpaywall, the NCBI ID Converter and DataCite; each package
+label; each DOI one request each to Unpaywall, the NCBI ID Converter and DataCite, and one to
+Crossref when DataCite names its preprint (an arXiv paper one to DataCite, and one to Crossref when
+DataCite names its journal version); each package
 one or two registry requests (and deps.dev when the registry names no provenance); each Steam game
 up to four (ProtonDB, PCGamingWiki, GOG GamesDB, GOG); each store link two Wikidata requests; each
 gone page one Wayback CDX request; each Discogs release one Discogs request (the one its card

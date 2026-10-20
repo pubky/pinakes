@@ -513,8 +513,19 @@ impl Source for Ncbi {
 }
 
 /// The arXiv preprint and its journal version, which DataCite names exactly in both directions;
-/// an arXiv paper also gets its arXiv and alphaXiv pages.
+/// an arXiv paper also gets its arXiv and alphaXiv pages. DataCite records what arXiv's
+/// submitter entered, so the two share keys only when the journal's publisher names the
+/// preprint back in its Crossref record.
 pub struct Datacite;
+impl Datacite {
+    async fn publisher_names(cx: &Context, doi: &str, arxiv: &str) -> Result<bool> {
+        let Some(request) = super::papers::crossref_request(doi) else {
+            return Ok(false);
+        };
+        let f = send(cx, &request, "crossref_busy").await?;
+        super::papers::parse_crossref_preprint(f.status, &f.body, doi, arxiv)
+    }
+}
 #[async_trait]
 impl Source for Datacite {
     fn id(&self) -> &'static str {
@@ -530,7 +541,12 @@ impl Source for Datacite {
                 return Ok(also_on::Found::default());
             };
             let f = send(cx, &request, "datacite_busy").await?;
-            let mut found = papers::parse_datacite_arxiv(f.status, &f.body, &id)?;
+            let (mut found, journal) = papers::parse_datacite_arxiv(f.status, &f.body, &id)?;
+            if let Some(journal) = journal {
+                if Self::publisher_names(cx, &journal, &id).await? {
+                    found.push_key(papers::doi_key(&journal));
+                }
+            }
             for link in papers::arxiv_links(&id, "datacite") {
                 found.push_link(link);
             }
@@ -543,7 +559,13 @@ impl Source for Datacite {
             return Ok(also_on::Found::default());
         };
         let f = send(cx, &request, "datacite_busy").await?;
-        Ok(papers::parse_datacite_versions(f.status, &f.body, &doi)?.into_also_on("datacite"))
+        let (mut found, preprint) = papers::parse_datacite_versions(f.status, &f.body, &doi)?;
+        if let Some(id) = preprint {
+            if Self::publisher_names(cx, &doi, &id).await? {
+                found.push_key(papers::arxiv_key(&id));
+            }
+        }
+        Ok(found.into_also_on("datacite"))
     }
 }
 
@@ -1147,24 +1169,36 @@ mod tests {
         assert!(sites(&ncbi)
             .iter()
             .any(|s| s.starts_with("PubMed https://pubmed.ncbi.nlm.nih.gov/")));
+        // arXiv 1304.1068's submitter named this DOI; Nature's own record names no preprint, so
+        // the preprint is a link and the two never join.
         let preprint = Datacite.lookup(&cx, &doi).await.unwrap();
-        assert_eq!(keys(&preprint), ["arxiv:1304.1068"]);
+        assert!(keys(&preprint).is_empty());
         assert!(sites(&preprint).contains(&"arXiv https://arxiv.org/abs/1304.1068".to_owned()));
-
-        // The arXiv side names the journal version: the two share `arxiv:…`.
         let arxiv = at("https://arxiv.org/abs/1304.1068v2");
         assert!(!Unpaywall.applies(&arxiv) && Datacite.applies(&arxiv));
         let journal = Datacite.lookup(&cx, &arxiv).await.unwrap();
-        assert_eq!(
-            keys(&journal),
-            ["arxiv:1304.1068", "doi:10.1038/nature12373"]
-        );
+        assert_eq!(keys(&journal), ["arxiv:1304.1068"]);
         let journal_sites = sites(&journal);
         assert!(
             journal_sites.contains(&"alphaXiv https://www.alphaxiv.org/abs/1304.1068".to_owned())
         );
         assert!(journal_sites
             .contains(&"Journal version https://doi.org/10.1038/nature12373".to_owned()));
+
+        // LMCS names arXiv 2302.04668 as its preprint (has-preprint): both sides share the keys.
+        let lmcs = Datacite
+            .lookup(&cx, &at("doi:10.46298/lmcs-20(1:8)2024"))
+            .await
+            .unwrap();
+        assert_eq!(keys(&lmcs), ["arxiv:2302.04668"]);
+        let preprint = Datacite
+            .lookup(&cx, &at("https://arxiv.org/abs/2302.04668"))
+            .await
+            .unwrap();
+        assert_eq!(
+            keys(&preprint),
+            ["arxiv:2302.04668", "doi:10.46298/lmcs-20(1:8)2024"]
+        );
         // Hugging Face only when its API knows the paper.
         assert!(HuggingFacePapers
             .lookup(&cx, &arxiv)

@@ -973,8 +973,13 @@ looked up itself; it joins as one of a title's links, by the title's IMDb ID.
 - `ncbi`: its PubMed and PubMed Central pages from the NCBI ID Converter, with `pmid:` and
   `pmcid:` keys.
 - `datacite`: the arXiv preprint and its journal version where DataCite names them exactly
-  (`IsVersionOf`, only when there is one); both get the `arxiv:{id}` key and join, the arXiv side
-  also `doi:{journal DOI}`, and an arXiv paper its arXiv and alphaXiv pages.
+  (`IsVersionOf`, only when the record names one journal version): the journal card gets the
+  arXiv and alphaXiv pages, the arXiv paper its own pages and the journal version, as links.
+  An arXiv paper's own `arxiv:{id}` is its key. DataCite records what arXiv's submitter
+  entered, so the two join (the journal card gets `arxiv:{id}`, the arXiv paper also
+  `doi:{journal DOI}`) only when the journal's publisher names the preprint in its own Crossref
+  record (`relation.has-preprint`, asserted by the publisher, by arXiv id or arXiv DOI). A
+  preprint that names someone else's article stays a link and joins nothing.
 - `huggingface`: an arXiv paper's Hugging Face Papers page, only when its API knows the paper.
 
 `unpaywall` and `ncbi` send the operator's contact (`[http] contact`) as their APIs ask; without

@@ -249,11 +249,17 @@ fn version_of(record: &Value) -> Vec<String> {
     dois
 }
 
-/// The arXiv id and, when the record names exactly one, the journal version's DOI.
-pub fn parse_datacite_arxiv(status: u16, raw: &[u8], arxiv: &str) -> Result<Found> {
+/// The arXiv id as key and, when the record names exactly one journal version, that version as
+/// a link and its DOI. The DOI is arXiv's submitter's claim: it becomes a key only when the
+/// journal's publisher names the preprint back (`parse_crossref_preprint`).
+pub fn parse_datacite_arxiv(
+    status: u16,
+    raw: &[u8],
+    arxiv: &str,
+) -> Result<(Found, Option<String>)> {
     let mut found = Found::default();
     let Some(raw) = body(status, raw, &[404])? else {
-        return Ok(found);
+        return Ok((found, None));
     };
     let id = arxiv_id(arxiv).context("not an arXiv id")?;
     let response: Value = serde_json::from_slice(raw)?;
@@ -266,8 +272,11 @@ pub fn parse_datacite_arxiv(status: u16, raw: &[u8], arxiv: &str) -> Result<Foun
         "datacite answered for another DOI"
     );
     found.push_key(arxiv_key(&id));
-    if let [journal] = version_of(record).as_slice() {
-        found.push_key(doi_key(journal));
+    let journal = match version_of(record).as_slice() {
+        [journal] => Some(journal.clone()),
+        _ => None,
+    };
+    if let Some(journal) = &journal {
         found.push_link(
             Link::new(
                 "Journal version",
@@ -277,7 +286,7 @@ pub fn parse_datacite_arxiv(status: u16, raw: &[u8], arxiv: &str) -> Result<Foun
             .kind("published"),
         );
     }
-    Ok(found)
+    Ok((found, journal))
 }
 
 /// arXiv records that say they are a version of `doi` (the reverse of the above).
@@ -294,15 +303,21 @@ pub fn datacite_versions_request(doi: &str) -> Option<Request> {
     ))
 }
 
-/// The arXiv preprint of `doi`, when exactly one arXiv record names it as its journal version.
-pub fn parse_datacite_versions(status: u16, raw: &[u8], doi: &str) -> Result<Found> {
+/// The arXiv preprint of `doi`, when exactly one arXiv record names it, and nothing else, as its
+/// journal version: its arXiv and alphaXiv pages as links, and its id. The id becomes a key only
+/// when the journal's publisher names the preprint back (`parse_crossref_preprint`).
+pub fn parse_datacite_versions(
+    status: u16,
+    raw: &[u8],
+    doi: &str,
+) -> Result<(Found, Option<String>)> {
     let raw = body(status, raw, &[])?.context("no body")?;
     let response: Value = serde_json::from_slice(raw)?;
     let mut ids: Vec<String> = response["data"]
         .as_array()
         .context("no data")?
         .iter()
-        .filter(|r| version_of(r).iter().any(|d| d.eq_ignore_ascii_case(doi)))
+        .filter(|r| matches!(version_of(r).as_slice(), [only] if only.eq_ignore_ascii_case(doi)))
         .filter_map(|r| {
             let id = r["id"].as_str()?.to_lowercase();
             arxiv_id(id.strip_prefix(ARXIV_PREFIX)?)
@@ -311,13 +326,53 @@ pub fn parse_datacite_versions(status: u16, raw: &[u8], doi: &str) -> Result<Fou
     ids.sort();
     ids.dedup();
     let mut found = Found::default();
-    if let [id] = ids.as_slice() {
-        found.push_key(arxiv_key(id));
-        for link in arxiv_links(id, "datacite") {
-            found.push_link(link.kind("submitted"));
-        }
+    let [id] = ids.as_slice() else {
+        return Ok((found, None));
+    };
+    for link in arxiv_links(id, "datacite") {
+        found.push_link(link.kind("submitted"));
     }
-    Ok(found)
+    Ok((found, Some(id.clone())))
+}
+
+/// Crossref's record of a journal DOI, as its publisher deposited it.
+pub fn crossref_request(doi: &str) -> Option<Request> {
+    Request::get(&format!(
+        "https://api.crossref.org/works/{}",
+        encode_path(doi)
+    ))
+}
+
+/// Whether the publisher's Crossref record of `doi` names arXiv paper `arxiv` as its preprint: a
+/// `has-preprint` relation the publisher asserted itself (`asserted-by: subject`), by arXiv id (any
+/// version) or arXiv DOI (`10.48550/arXiv.{id}`). A DOI Crossref does not know (404) names none.
+pub fn parse_crossref_preprint(status: u16, raw: &[u8], doi: &str, arxiv: &str) -> Result<bool> {
+    let Some(raw) = body(status, raw, &[404])? else {
+        return Ok(false);
+    };
+    let id = arxiv_id(arxiv).context("not an arXiv id")?;
+    let response: Value = serde_json::from_slice(raw)?;
+    let record = &response["message"];
+    anyhow::ensure!(
+        record["DOI"]
+            .as_str()
+            .is_some_and(|got| got.eq_ignore_ascii_case(doi)),
+        "crossref answered for another DOI"
+    );
+    let arxiv_doi = format!("{ARXIV_PREFIX}{id}");
+    Ok(record["relation"]["has-preprint"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["asserted-by"] == "subject")
+        .any(|r| {
+            let named = r["id"].as_str().unwrap_or_default();
+            match r["id-type"].as_str() {
+                Some("arxiv") => arxiv_id(named).is_some_and(|n| n == id),
+                Some("doi") => named.eq_ignore_ascii_case(&arxiv_doi),
+                _ => false,
+            }
+        }))
 }
 
 /// Whether Hugging Face has a page for an arXiv paper.
@@ -464,7 +519,8 @@ mod tests {
             datacite_arxiv_request("1304.1068v3").unwrap().url.as_str(),
             "https://api.datacite.org/dois/10.48550/arXiv.1304.1068"
         );
-        let found = parse_datacite_arxiv(
+        // The record names one journal version: a link and a candidate DOI, never a key here.
+        let (found, journal) = parse_datacite_arxiv(
             200,
             &fixture::read("datacite-arxiv-1304.1068.json"),
             "1304.1068",
@@ -472,8 +528,9 @@ mod tests {
         .unwrap();
         assert_eq!(
             found.keys.iter().map(Key::as_str).collect::<Vec<_>>(),
-            ["arxiv:1304.1068", "doi:10.1038/nature12373"]
+            ["arxiv:1304.1068"]
         );
+        assert_eq!(journal.as_deref(), Some(NATURE));
         assert_eq!(found.links[0].uri, "https://doi.org/10.1038/nature12373");
         assert!(parse_datacite_arxiv(
             200,
@@ -483,7 +540,7 @@ mod tests {
         .is_err());
         assert_eq!(
             parse_datacite_arxiv(404, b"", "1304.1068").unwrap(),
-            Found::default()
+            (Found::default(), None)
         );
 
         let r = datacite_versions_request(NATURE).unwrap();
@@ -491,13 +548,14 @@ mod tests {
             "https://api.datacite.org/dois?query=relatedIdentifiers.relatedIdentifier%3A%2210.1038%2Fnature12373%22%20AND"
         ));
         assert!(datacite_versions_request("10.1/\"x").is_none());
-        let found = parse_datacite_versions(
+        let (found, preprint) = parse_datacite_versions(
             200,
             &fixture::read("datacite-versions-nature12373.json"),
             NATURE,
         )
         .unwrap();
-        assert_eq!(found.keys, [arxiv_key("1304.1068")]);
+        assert!(found.keys.is_empty());
+        assert_eq!(preprint.as_deref(), Some("1304.1068"));
         assert_eq!(
             found
                 .links
@@ -515,7 +573,47 @@ mod tests {
             &fixture::read("datacite-versions-nature12373.json"),
             "10.1038/nature1237",
         );
-        assert_eq!(other.unwrap(), Found::default());
+        assert_eq!(other.unwrap(), (Found::default(), None));
+        // A record naming two journal versions names neither.
+        let two = serde_json::json!({"data": [{"id": "10.48550/arxiv.1304.1068", "attributes": {
+        "relatedIdentifiers": [
+            {"relationType": "IsVersionOf", "relatedIdentifierType": "DOI", "relatedIdentifier": NATURE},
+            {"relationType": "IsVersionOf", "relatedIdentifierType": "DOI", "relatedIdentifier": "10.1000/other"}
+        ]}}]});
+        let two = serde_json::to_vec(&two).unwrap();
+        assert_eq!(
+            parse_datacite_versions(200, &two, NATURE).unwrap(),
+            (Found::default(), None)
+        );
+    }
+
+    /// The pair joins only when the journal's publisher names the preprint in its own record.
+    #[test]
+    fn crossref_names_the_preprint() {
+        const LMCS: &str = "10.46298/lmcs-20(1:8)2024";
+        assert_eq!(
+            crossref_request(LMCS).unwrap().url.as_str(),
+            "https://api.crossref.org/works/10.46298/lmcs-20%281%3A8%292024"
+        );
+        let lmcs = fixture::read("crossref-lmcs-20-1-8.json");
+        // By arXiv id (its versions `2302.04668v1`, `v2`), asserted by the publisher.
+        assert!(parse_crossref_preprint(200, &lmcs, LMCS, "2302.04668").unwrap());
+        assert!(parse_crossref_preprint(200, &lmcs, LMCS, "2302.04668v1").unwrap());
+        assert!(!parse_crossref_preprint(200, &lmcs, LMCS, "2302.04669").unwrap());
+        assert!(parse_crossref_preprint(200, &lmcs, NATURE, "2302.04668").is_err());
+        // Nature's record names no preprint, so arXiv's claim of 10.1038/nature12373 stays a link.
+        let nature = fixture::read("crossref-nature12373.json");
+        assert!(!parse_crossref_preprint(200, &nature, NATURE, "1304.1068").unwrap());
+        assert!(!parse_crossref_preprint(404, b"", NATURE, "1304.1068").unwrap());
+        // By arXiv DOI; a relation the preprint's side asserted does not count.
+        let record = |asserted: &str| {
+            serde_json::to_vec(&serde_json::json!({"message": {"DOI": NATURE, "relation": {
+                "has-preprint": [{"id-type": "doi", "id": "10.48550/arXiv.1304.1068", "asserted-by": asserted}]
+            }}}))
+            .unwrap()
+        };
+        assert!(parse_crossref_preprint(200, &record("subject"), NATURE, "1304.1068").unwrap());
+        assert!(!parse_crossref_preprint(200, &record("object"), NATURE, "1304.1068").unwrap());
     }
 
     #[test]
