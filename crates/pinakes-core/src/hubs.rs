@@ -310,20 +310,26 @@ pub mod musicbrainz {
     pub const URL_BATCH: usize = 50;
     /// Ask MusicBrainz about many links at once and cache each link's answer as its own lookup's
     /// (`url` then asks nothing). An answer applies only to the URL MusicBrainz echoes, byte for
-    /// byte; a link left out is unknown (its 404 cached) only when every echo matched a link
-    /// asked. Best effort: a failed batch caches nothing, and each link asks alone.
+    /// byte; a link left out is unknown (its 404 cached) only when the answer is whole
+    /// (`url-count` answers) and every echo matched a link asked. Best effort: a failed batch
+    /// caches nothing, and its links ask alone; a busy MusicBrainz stops the batches.
     pub async fn prefetch_urls(egress: &Egress, base: &str, links: &[String]) -> Result<usize> {
         let mut seeded = 0;
         for chunk in links.chunks(URL_BATCH) {
-            let Some(v) = get(egress, &urls_lookup(base, chunk), "musicbrainz").await? else {
-                continue;
+            let v = match get(egress, &urls_lookup(base, chunk), "musicbrainz").await {
+                Ok(Some(v)) => v,
+                Ok(None) => continue,
+                Err(e) if e.downcast_ref::<RetryLater>().is_some() => return Err(e),
+                Err(_) => continue,
             };
             let answers: Vec<&Value> = v["urls"].as_array().into_iter().flatten().collect();
-            let exact = answers.iter().all(|a| {
-                a["resource"]
-                    .as_str()
-                    .is_some_and(|r| chunk.iter().any(|l| l == r))
-            });
+            let whole = v["url-count"].as_u64() == Some(answers.len() as u64);
+            let exact = whole
+                && answers.iter().all(|a| {
+                    a["resource"]
+                        .as_str()
+                        .is_some_and(|r| chunk.iter().any(|l| l == r))
+                });
             for link in chunk {
                 let answer = answers
                     .iter()
