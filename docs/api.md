@@ -768,7 +768,10 @@ from a known music service's own record of its own object; another host's claim 
   recording ID, no work ID): a song item is a work that its studio, live and remastered
   recordings share, so a track takes neither its Q-id nor its tracks.
 
-**Wikipedia.** `wikipedia`: the article's own Wikipedia names its Wikidata item (following
+**Wikipedia.** An article's card comes from its Wikipedia's REST summary (`Article`, the title,
+the first paragraph up to 600 characters, the thumbnail, `site` `Wikipedia ({lang})`), so a long
+article whose page exceeds the page cap still gets one; a page the summary does not cover (a
+special page) is read as a web page. `wikipedia`: the article's own Wikipedia names its Wikidata item (following
 redirects); the item's other language editions are listed as `Wikipedia ({lang})`, the major
 languages first, with its Britannica, Stanford Encyclopedia of Philosophy, Internet Encyclopedia
 of Philosophy, Scholarpedia and Namuwiki entries, and its Q-id is the key, so two editions of one

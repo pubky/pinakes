@@ -82,6 +82,34 @@ impl Resolver for WebResolver {
     }
 }
 impl WebResolver {
+    /// A Wikipedia article's card from its REST summary; `None` falls back to the page (a
+    /// missing article, a page outside the article namespace, a failed request).
+    async fn wikipedia_card(
+        &self,
+        uri: &str,
+        article: &crate::wikipedia::Article,
+    ) -> Option<ResourceMeta> {
+        let options = super::egress::FetchOptions {
+            accept: Some("application/json".into()),
+            ..Default::default()
+        };
+        let fetched = match self
+            .egress
+            .fetch_with(&crate::wikipedia::summary_url(article), &options)
+            .await
+        {
+            Ok(fetched) if fetched.status == 200 => fetched,
+            Ok(_) => return None,
+            Err(error) => {
+                tracing::debug!(error = %format!("{error:#}"), "Wikipedia summary failed; reading the page");
+                return None;
+            }
+        };
+        let v: Value = serde_json::from_slice(&fetched.body).ok()?;
+        crate::wikipedia::summary_card(uri, article, &v, self.config.ttl_secs)?
+            .bounded(ATTRIBUTES)
+            .ok()
+    }
     pub async fn resolve_with_policy(
         &self,
         uri: &str,
@@ -100,6 +128,11 @@ impl WebResolver {
             && crate::event::adapters::detect(uri).is_none()
         {
             return Err(super::ErrorClass("policy").into());
+        }
+        if let Some(article) = crate::wikipedia::parse(uri) {
+            if let Some(doc) = self.wikipedia_card(uri, &article).await {
+                return Ok(doc);
+            }
         }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         tokio::time::timeout_at(deadline, async {

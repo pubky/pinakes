@@ -5,6 +5,9 @@
 //! (also a revision with `oldid`), spaces and percent-encoding fold into
 //! `https://{lang}.wikipedia.org/wiki/{Title}`, an alias (`alias::root`).
 //!
+//! An article's card comes from its REST summary ([`summary_card`]), so a long article whose page
+//! exceeds the page cap still gets its title, first paragraph and image.
+//!
 //! [`WikipediaSource`] asks the article's own Wikipedia for its Wikidata item (following
 //! redirects), then lists that item's other Wikipedia editions and its Britannica, Stanford
 //! Encyclopedia of Philosophy, Internet Encyclopedia of Philosophy, Scholarpedia and Namuwiki
@@ -12,6 +15,7 @@
 use crate::{
     also_on::{Context, Found, Key, Link, Source, Subject},
     hubs::{self, wikidata},
+    model::ResourceMeta,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -75,6 +79,51 @@ pub fn parse(uri: &str) -> Option<Article> {
         title,
         canonical,
     })
+}
+
+/// The article's REST summary: its title, short description, first paragraph and thumbnail, a
+/// few kilobytes however long the article is (a long article's page exceeds the page cap
+/// before its JSON-LD).
+pub fn summary_url(article: &Article) -> String {
+    let title =
+        percent_encoding::utf8_percent_encode(&article.title, percent_encoding::NON_ALPHANUMERIC);
+    format!(
+        "https://{}.wikipedia.org/api/rest_v1/page/summary/{title}",
+        article.lang
+    )
+}
+/// An article's card from its REST summary: an `Article` named by its title, described by its
+/// first paragraph (or its short description), with its thumbnail, on `Wikipedia ({lang})`.
+pub fn summary_card(uri: &str, article: &Article, v: &Value, ttl: u64) -> Option<ResourceMeta> {
+    let title = v["title"]
+        .as_str()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())?;
+    let mut doc = ResourceMeta::new(uri, "wikipedia", ttl);
+    doc.set_type("Article");
+    doc.name = Some(title.to_owned());
+    let text = |field: &str| {
+        v[field]
+            .as_str()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned)
+    };
+    doc.description = text("extract").or_else(|| text("description")).map(|d| {
+        if d.chars().count() > 600 {
+            format!("{}…", d.chars().take(599).collect::<String>().trim_end())
+        } else {
+            d
+        }
+    });
+    doc.image = v["thumbnail"]["source"]
+        .as_str()
+        .filter(|s| s.starts_with("https://"))
+        .map(str::to_owned);
+    doc.site = format!("Wikipedia ({})", article.lang);
+    doc.attributes
+        .insert("language".into(), article.lang.clone());
+    Some(doc)
 }
 
 /// One of Wikidata's other encyclopedias: the property, the service name, the URL of a value,
@@ -340,6 +389,38 @@ mod tests {
     fn fixture(name: &str) -> Value {
         let path = format!("{}/tests/fixtures/hubs/{name}", env!("CARGO_MANIFEST_DIR"));
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    /// A long article (Signal's page is over the page cap) gets its card from the summary.
+    #[test]
+    fn an_article_card_comes_from_its_summary() {
+        let uri = "https://en.m.wikipedia.org/wiki/Signal_(software)";
+        let article = parse(uri).unwrap();
+        assert_eq!(
+            summary_url(&article),
+            "https://en.wikipedia.org/api/rest_v1/page/summary/Signal%5F%28software%29"
+        );
+        let doc = summary_card(uri, &article, &fixture("enwiki-summary-signal.json"), 3600)
+            .unwrap()
+            .bounded(crate::resolver::web::ATTRIBUTES)
+            .unwrap();
+        assert_eq!(
+            (
+                doc.type_name.as_str(),
+                doc.name.as_deref(),
+                doc.site.as_str()
+            ),
+            ("Article", Some("Signal (software)"), "Wikipedia (en)")
+        );
+        assert!(doc
+            .description
+            .as_deref()
+            .is_some_and(|d| d.starts_with("Signal is an open-source, encrypted messaging")));
+        assert!(doc
+            .image
+            .as_deref()
+            .is_some_and(|i| i.starts_with("https://")));
+        assert!(summary_card(uri, &article, &serde_json::json!({"title": " "}), 3600).is_none());
     }
 
     #[test]
