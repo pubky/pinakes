@@ -273,6 +273,7 @@ async fn send(
             "application/vnd.pypi.integrity.v1+json",
             "application/vnd.api+json",
         ],
+        keep_redirect: !request.follow_redirects,
         ..Default::default()
     };
     let f = cx
@@ -778,12 +779,18 @@ impl Source for Steam {
             }
         }
         if let Some(request) = games::pcgamingwiki_request(appid) {
-            // Egress follows the redirect; where it ended is the page the appid names.
-            let f = send(cx, &request, "pcgamingwiki_busy").await?;
-            let moved = (f.url.as_str() != request.url.as_str()).then(|| f.url.to_string());
-            let status = if moved.is_some() { 302 } else { f.status };
-            if let Some(link) = games::parse_pcgamingwiki(status, moved.as_deref())? {
-                found.push_link(link);
+            // Where the lookup redirects is the page the appid names. A wiki that fails (a bot
+            // wall, busy) costs only its own link.
+            let link = match send(cx, &request, "pcgamingwiki_busy").await {
+                Ok(f) => games::parse_pcgamingwiki(f.status, f.location.as_deref()),
+                Err(error) => Err(error),
+            };
+            match link {
+                Ok(Some(link)) => found.push_link(link),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::debug!(appid, error = %format!("{error:#}"), "PCGamingWiki lookup failed");
+                }
             }
         }
         if let Some(request) = games::gog_gamesdb_request(appid) {
@@ -1092,6 +1099,10 @@ mod tests {
     /// Every recorded lookup answer, by its request URL (a redirect's body is its `Location`),
     /// plus `extra` routes for requests made differently from the recording.
     fn recorded(extra: Vec<(String, &str)>) -> Context {
+        recorded_but_busy(extra, &[])
+    }
+    /// As `recorded`, with `busy` URLs answering 503.
+    fn recorded_but_busy(extra: Vec<(String, &str)>, busy: &[&str]) -> Context {
         let provenance: Value =
             serde_json::from_slice(&read("provenance.json")).expect("provenance");
         let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
@@ -1125,6 +1136,9 @@ mod tests {
                 kind,
                 read(entry["file"].as_str().unwrap()),
             ));
+        }
+        for url in busy {
+            routes.push((url.to_string(), 503, "text/html", vec![]));
         }
         context(
             routes
@@ -1312,6 +1326,17 @@ mod tests {
             s.contains(&"PCGamingWiki https://www.pcgamingwiki.com/wiki/Portal_2".to_owned()),
             "{s:?}"
         );
+        // A busy wiki costs only its own link.
+        let busy = recorded_but_busy(
+            vec![],
+            &["https://www.pcgamingwiki.com/api/appid.php?appid=620"],
+        );
+        let without = sites(&Steam.lookup(&busy, &portal).await.unwrap());
+        assert!(
+            without.iter().any(|s| s.starts_with("ProtonDB ")),
+            "{without:?}"
+        );
+        assert!(!without.iter().any(|s| s.starts_with("PCGamingWiki ")));
         // An appid nobody knows: the templates only.
         let none = Steam
             .lookup(&cx, &at("https://store.steampowered.com/app/1/"))

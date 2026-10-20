@@ -27,7 +27,8 @@ pub struct Request {
     pub url: Url,
     /// The `Accept` header, when the API needs a specific one.
     pub accept: Option<&'static str>,
-    /// Whether the caller follows redirects. `false` where the redirect target is the answer.
+    /// Whether the request follows redirects; `false` answers the redirect itself (its status
+    /// and `location`), where the redirect target is the answer.
     pub follow_redirects: bool,
 }
 impl Request {

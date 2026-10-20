@@ -167,6 +167,9 @@ pub struct FetchOptions {
     /// above it).
     pub body_cap: Option<usize>,
     pub feed_hint: bool,
+    /// Answer a redirect as it came (its status and `location`) instead of following it: where
+    /// a lookup redirects is the answer (PCGamingWiki's appid lookup).
+    pub keep_redirect: bool,
     /// Content types this fetch also admits, within the page cap (`""`: no content type). The
     /// caller parses them: Pubky objects (`pubky::OBJECT_TYPES`), PKARR relay payloads
     /// (`pkarr_relays::PAYLOAD_TYPES`).
@@ -653,6 +656,9 @@ impl Egress {
                 options.feed_cap.unwrap_or(0)
             ));
         }
+        if options.keep_redirect {
+            key.push_str("|redirect");
+        }
         Ok(key)
     }
     /// Put an answer in the discovery cache as the answer to `uri` (when it holds none): a batched
@@ -874,6 +880,9 @@ impl Egress {
             observation.status(response.status);
             drop(observation);
             if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+                if options.keep_redirect {
+                    return Ok(response);
+                }
                 if options.sensitive
                     || options.json_body.is_some()
                     || options.form_body.is_some()
@@ -1275,6 +1284,27 @@ mod tests {
             .discover("https://slow.example/page", &options, 3600)
             .await
             .is_ok());
+
+        // A lookup whose redirect is the answer keeps it, and caches it apart from a followed one.
+        let keep = FetchOptions {
+            keep_redirect: true,
+            ..Default::default()
+        };
+        tokio::time::advance(Duration::from_secs(13)).await;
+        let kept = egress
+            .discover("https://slow.example/old", &keep, 3600)
+            .await
+            .unwrap();
+        assert_eq!(
+            (kept.status, kept.url.path(), kept.location.as_deref()),
+            (301, "/old", Some("/new"))
+        );
+        tokio::time::advance(Duration::from_secs(13)).await;
+        let followed = egress
+            .discover("https://slow.example/old", &options, 3600)
+            .await
+            .unwrap();
+        assert_eq!((followed.status, followed.url.path()), (200, "/new"));
     }
     #[tokio::test]
     async fn body_cap_refuses_any_type_html_too() {
