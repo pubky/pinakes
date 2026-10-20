@@ -112,6 +112,38 @@ impl WebResolver {
             .bounded(ATTRIBUTES)
             .ok()
     }
+    /// A MusicBrainz page's card from the entity MusicBrainz serves (`None`: not such a page, or
+    /// an entity MusicBrainz doesn't know, so the page is read). A busy MusicBrainz retries later.
+    async fn musicbrainz_card(&self, uri: &str) -> Result<Option<ResourceMeta>> {
+        use crate::hubs::musicbrainz;
+        let base = Some(self.config.musicbrainz_base.as_str())
+            .filter(|b| !b.is_empty())
+            .unwrap_or(musicbrainz::BASE);
+        let ttl = self.config.ttl_secs;
+        let card = if let Some((kind, mbid, _)) = musicbrainz::entity_link(uri) {
+            match musicbrainz::entity(&self.egress, base, kind, &mbid).await? {
+                Some(entity) => {
+                    crate::music_sources::musicbrainz_card(uri, Some(&entity), None, ttl)
+                }
+                None => return Ok(None),
+            }
+        } else if let Some((isrc, _)) = musicbrainz::isrc_link(uri) {
+            let recordings = musicbrainz::isrc(&self.egress, base, &isrc)
+                .await?
+                .unwrap_or_default();
+            let entity = match recordings.as_slice() {
+                [one] => {
+                    musicbrainz::entity(&self.egress, base, crate::hubs::MbKind::Recording, one)
+                        .await?
+                }
+                _ => None,
+            };
+            crate::music_sources::musicbrainz_card(uri, entity.as_ref(), Some(&isrc), ttl)
+        } else {
+            return Ok(None);
+        };
+        Ok(Some(card.bounded(ATTRIBUTES)?))
+    }
     pub async fn resolve_with_policy(
         &self,
         uri: &str,
@@ -135,6 +167,9 @@ impl WebResolver {
             if let Some(doc) = self.wikipedia_card(uri, &article).await {
                 return Ok(doc);
             }
+        }
+        if let Some(doc) = self.musicbrainz_card(uri).await? {
+            return Ok(doc);
         }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         tokio::time::timeout_at(deadline, async {

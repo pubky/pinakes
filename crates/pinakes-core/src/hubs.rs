@@ -157,6 +157,57 @@ pub mod musicbrainz {
     /// The public web service; `[also_on.sources.musicbrainz] base_url` names a mirror instead.
     pub const BASE: &str = "https://musicbrainz.org/ws/2";
 
+    /// A MusicBrainz page's path segments after `/ws/2/` when it has one (`musicbrainz.org`,
+    /// `www.` and `beta.`, http or https, a trailing slash and parameters dropped).
+    fn page_segments(uri: &str) -> Option<Vec<String>> {
+        let url = url::Url::parse(uri).ok()?;
+        if !matches!(url.scheme(), "http" | "https")
+            || !matches!(
+                url.host_str()?,
+                "musicbrainz.org" | "www.musicbrainz.org" | "beta.musicbrainz.org"
+            )
+        {
+            return None;
+        }
+        let mut segments: Vec<String> = url
+            .path_segments()?
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if segments.get(..2) == Some(&["ws".to_owned(), "2".to_owned()]) {
+            segments.drain(..2);
+        }
+        Some(segments)
+    }
+    /// A link to a recording, release, release group or artist (its page or its web service
+    /// record): the entity, its MBID and its page `https://musicbrainz.org/{kind}/{mbid}`.
+    pub fn entity_link(uri: &str) -> Option<(MbKind, String, String)> {
+        let segments = page_segments(uri)?;
+        let [kind, id] = segments.as_slice() else {
+            return None;
+        };
+        let kind = match kind.as_str() {
+            "recording" => MbKind::Recording,
+            "release" => MbKind::Release,
+            "release-group" => MbKind::ReleaseGroup,
+            "artist" => MbKind::Artist,
+            _ => return None,
+        };
+        let mbid = mbid(id)?;
+        let page = format!("https://musicbrainz.org/{}/{mbid}", kind.as_str());
+        Some((kind, mbid, page))
+    }
+    /// A link to an ISRC's page (`/isrc/{ISRC}`): the ISRC as keys store it and its page.
+    pub fn isrc_link(uri: &str) -> Option<(String, String)> {
+        let segments = page_segments(uri)?;
+        let ["isrc", code] = segments.iter().map(String::as_str).collect::<Vec<_>>()[..] else {
+            return None;
+        };
+        let isrc = crate::music::isrc(code)?;
+        let page = format!("https://musicbrainz.org/isrc/{isrc}");
+        Some((isrc, page))
+    }
+
     /// One URL relation of an entity: the relation type (`free streaming`, `streaming`,
     /// `purchase for download`, `discogs`, …) and the URL.
     #[derive(Clone, Debug, PartialEq)]
@@ -279,7 +330,8 @@ pub mod musicbrainz {
         match kind {
             MbKind::Recording => "url-rels+isrcs+artist-credits",
             MbKind::Release => "url-rels+release-groups+artist-credits",
-            MbKind::ReleaseGroup | MbKind::Artist => "url-rels",
+            MbKind::ReleaseGroup => "url-rels+artist-credits",
+            MbKind::Artist => "url-rels",
         }
     }
     /// The URL lookup for `link` at the web service `base` (exact; MusicBrainz stores URLs as
@@ -678,6 +730,55 @@ mod tests {
     fn fixture(name: &str) -> Value {
         let path = format!("{}/tests/fixtures/hubs/{name}", env!("CARGO_MANIFEST_DIR"));
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    /// Every spelling of a MusicBrainz entity or ISRC page is one link; other pages are not.
+    #[test]
+    fn musicbrainz_links_name_their_entity() {
+        let recording = "b1a9c0e9-d987-4042-ae91-78d6a3267d69";
+        for uri in [
+            "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+            "http://musicbrainz.org/recording/B1A9C0E9-D987-4042-AE91-78D6A3267D69/",
+            "https://beta.musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+            "https://www.musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69?x=1",
+            "https://musicbrainz.org/ws/2/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69?inc=isrcs&fmt=json",
+        ] {
+            assert_eq!(
+                musicbrainz::entity_link(uri),
+                Some((
+                    MbKind::Recording,
+                    recording.to_owned(),
+                    format!("https://musicbrainz.org/recording/{recording}")
+                )),
+                "{uri}"
+            );
+        }
+        let group = "https://musicbrainz.org/release-group/1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9";
+        assert_eq!(
+            musicbrainz::entity_link(group).map(|(kind, ..)| kind),
+            Some(MbKind::ReleaseGroup)
+        );
+        assert_eq!(
+            musicbrainz::isrc_link("https://musicbrainz.org/isrc/gbum71029604"),
+            Some((
+                "GBUM71029604".to_owned(),
+                "https://musicbrainz.org/isrc/GBUM71029604".to_owned()
+            ))
+        );
+        for other in [
+            "https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711/releases",
+            "https://musicbrainz.org/work/a74b1b7f-71a5-4011-9441-d0b5e4122711",
+            "https://musicbrainz.org/recording/not-an-mbid",
+            "https://musicbrainz.org.evil.example/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+            "https://musicbrainz.org/isrc/NOTANISRC",
+            "ftp://musicbrainz.org/isrc/GBUM71029604",
+        ] {
+            assert!(
+                musicbrainz::entity_link(other).is_none()
+                    && musicbrainz::isrc_link(other).is_none(),
+                "{other}"
+            );
+        }
     }
 
     /// Wikidata sends a rate limit as a 200 with an `error`: busy, never "no item".

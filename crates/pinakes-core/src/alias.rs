@@ -49,6 +49,10 @@ pub fn root(uri: &str) -> Option<Alias> {
         Some((article.canonical, "service"))
     } else if let Some((_, item)) = crate::hubs::wikidata::item_link(&uri) {
         Some((item, "service"))
+    } else if let Some((_, _, page)) = crate::hubs::musicbrainz::entity_link(&uri) {
+        Some((page, "service"))
+    } else if let Some((_, page)) = crate::hubs::musicbrainz::isrc_link(&uri) {
+        Some((page, "service"))
     } else {
         untracked(&uri).map(|root| (root, "tracking"))
     }?;
@@ -315,6 +319,20 @@ mod tests {
             Some(("https://www.openstreetmap.org/node/240109189".into(), "osm"))
         );
         assert_eq!(r("https://www.openstreetmap.org/node/240109189"), None);
+        // A MusicBrainz page in any spelling, its web service record too.
+        let recording = "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69";
+        assert_eq!(
+            r("https://beta.musicbrainz.org/ws/2/recording/B1A9C0E9-D987-4042-AE91-78D6A3267D69?fmt=json"),
+            Some((recording.into(), "service"))
+        );
+        assert_eq!(r(recording), None);
+        assert_eq!(
+            r("http://musicbrainz.org/isrc/gbum71029604/"),
+            Some((
+                "https://musicbrainz.org/isrc/GBUM71029604".into(),
+                "service"
+            ))
+        );
         assert_eq!(
             r("isbn:0140328726"),
             Some(("isbn:9780140328721".into(), "identifier"))

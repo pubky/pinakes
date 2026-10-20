@@ -535,6 +535,10 @@ root, and a read, lookup, change query or occurrence read of the alias answers w
 - **Wikipedia articles**: the mobile host, `index.php?title=…` (a revision with `oldid` too),
   spaces and percent-encoding are aliases of `https://{lang}.wikipedia.org/wiki/{Title}`. A
   redirect's title stays its own link.
+- **MusicBrainz pages**: a recording, release, release group or artist page, or an ISRC's page,
+  on `musicbrainz.org`, `www.` or `beta.`, over http or https, its web service record
+  (`/ws/2/…`), the MBID in any letter case, a trailing slash and parameters are aliases of
+  `https://musicbrainz.org/{kind}/{mbid}` or `https://musicbrainz.org/isrc/{ISRC}`.
 - **The page's own canonical**: after a fetch, a page whose head canonical link or
   all-permanent redirect chain names a URL that differs from it only by a trailing slash and tracking
   parameters becomes an alias of that URL. A canonical to another path (a homepage, a sibling
@@ -818,6 +822,18 @@ article join. Titles are never matched across languages.
 its own hub. Its card lists the item's encyclopedia entries, the music services its best-rank
 IDs name, and all its Wikipedia editions (the major languages first), with the Q-id as key. Only
 the item's own claims and sitelinks count, never a search.
+
+**MusicBrainz pages.** `musicbrainz_entity`: a MusicBrainz recording, release, release group or
+artist page ([its spellings](#aliases)) is its own hub, read as `musicbrainz` reads the entity a
+service link is related to: its MBIDs, the recording's ISRCs and the release's barcode as keys
+(so it joins the links MusicBrainz relates to it), its facts, and its current links on music
+services at its level, each keyed by the entity. An ISRC's page (`/isrc/{ISRC}`) is the ISRC's
+key, and with exactly one recording MusicBrainz gives the ISRC to, that recording's keys, facts
+and links. An ISRC several recordings have names none of them: its page keeps it as a fact only.
+The page's card comes from the same answer of MusicBrainz's web service, not from the page: the
+title, `MusicRecording`, `MusicAlbum`, `MusicGroup` or `Person` (an artist MusicBrainz calls a
+person), the artist credit and a recording's length as its description, `site` `MusicBrainz`; an
+ISRC's page is its one recording's card, else named `ISRC {code}`.
 
 **Books.** `books`: an ISBN (`isbn:…`, `openlibrary.org/isbn/{isbn}`), an Open Library edition
 page (`openlibrary.org/books/OL…M`) or work page (`openlibrary.org/works/OL…W`) is looked up

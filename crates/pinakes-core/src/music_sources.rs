@@ -194,96 +194,200 @@ impl Source for MusicBrainzSource {
         {
             return Ok(Found::default());
         }
-        let mut entities = vec![];
-        for id in ids {
-            let Some(entity) = musicbrainz::entity(&cx.egress, base, kind, &id).await? else {
-                return Ok(Found::default());
+        entities_found(cx, base, kind, &ids, level).await
+    }
+}
+
+/// A MusicBrainz page as its own hub: a recording's, release's, release group's or artist's page
+/// carries that entity's keys and facts and lists its links on music services at its level, as
+/// the `musicbrainz` source does for a service link MusicBrainz relates to the entity. An ISRC's
+/// page keys the ISRC and the one recording MusicBrainz gives it to; an ISRC several recordings
+/// have names none of them (as a service's page ISRC), so its page keeps it as a fact only.
+pub struct MusicBrainzEntitySource;
+#[async_trait]
+impl Source for MusicBrainzEntitySource {
+    fn id(&self) -> &'static str {
+        "musicbrainz_entity"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        musicbrainz::entity_link(&subject.uri).is_some()
+            || musicbrainz::isrc_link(&subject.uri).is_some()
+    }
+    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
+        let base = cx.config.also_on.musicbrainz_base();
+        if let Some((kind, mbid, _)) = musicbrainz::entity_link(&subject.uri) {
+            let level = match kind {
+                MbKind::Recording => Level::Track,
+                MbKind::Release | MbKind::ReleaseGroup => Level::Album,
+                MbKind::Artist => Level::Artist,
             };
-            entities.push(entity);
+            return entities_found(cx, base, kind, &[mbid], level).await;
         }
-        let mut found = Found::default();
-        let mut key = |kind: MbKind, id: &str| {
-            if let Some(key) = hubs::key::mb(kind, id) {
-                found.keys.push(Key {
-                    key,
+        let Some((isrc, _)) = musicbrainz::isrc_link(&subject.uri) else {
+            return Ok(Found::default());
+        };
+        let mut found = match musicbrainz::isrc(&cx.egress, base, &isrc).await? {
+            Some(recordings) if recordings.len() == 1 => {
+                entities_found(cx, base, MbKind::Recording, &recordings, Level::Track).await?
+            }
+            Some(recordings) if recordings.len() > 1 => Found::default(),
+            // An ISRC MusicBrainz doesn't know is still its own key.
+            _ => Found {
+                keys: vec![Key {
+                    key: format!("isrc:{isrc}"),
                     via: "musicbrainz".into(),
-                });
-            }
+                }],
+                ..Default::default()
+            },
         };
-        let entity = &entities[0];
-        // Several releases: the release group's key alone, so editions stay apart.
-        if entities.len() == 1 {
-            key(kind, &entity.mbid);
-        }
-        match &entity.release_group {
-            Some(group)
-                if entities
-                    .iter()
-                    .all(|e| e.release_group.as_ref() == Some(group)) =>
-            {
-                key(MbKind::ReleaseGroup, group)
-            }
-            _ if entities.len() > 1 => return Ok(Found::default()),
-            _ => {}
-        }
-        for isrc in entity.isrcs.iter().take(MAX_ISRC_KEYS) {
-            found.keys.push(Key {
-                key: format!("isrc:{isrc}"),
-                via: "musicbrainz".into(),
-            });
-        }
-        // What every entity has (one entity: all of it).
-        found.facts = facts(entity);
-        // A recording's original album ranks the card's links of one service (the track there).
-        if kind == MbKind::Recording {
-            if let Some(album) = musicbrainz::original_album(&cx.egress, base, &entity.mbid).await?
-            {
-                found
-                    .facts
-                    .push(crate::also_on::Fact::new("original_album", album));
-            }
-        }
-        found
-            .facts
-            .retain(|f| entities[1..].iter().all(|e| facts(e).contains(f)));
-        let links = |e: &musicbrainz::Entity| -> Vec<Link> {
-            e.urls
-                .iter()
-                .filter_map(|u| derived(&u.url, level, "musicbrainz"))
-                .collect()
-        };
-        found.links = links(entity);
-        found.links.retain(|l| {
-            entities[1..]
-                .iter()
-                .all(|e| links(e).iter().any(|o| o.uri == l.uri))
-        });
-        // Each link is keyed by the entity MusicBrainz names it on (the release group for
-        // editions), so a tagged link that is it joins even when its own lookup is ambiguous.
-        let named = if entities.len() == 1 {
-            hubs::key::mb(kind, &entity.mbid)
-        } else {
-            entity
-                .release_group
-                .as_deref()
-                .and_then(|g| hubs::key::mb(MbKind::ReleaseGroup, g))
-        };
-        for link in &mut found.links {
-            link.key.clone_from(&named);
-        }
-        let barcode = entity
-            .barcode
-            .as_ref()
-            .filter(|b| entities.iter().all(|e| e.barcode.as_ref() == Some(*b)));
-        // A barcode is a key (the services that look albums up by it start from it).
-        if let Some(upc) = barcode.and_then(|b| music::gtin13(b)) {
-            found.keys.push(Key {
-                key: format!("upc:{upc}"),
-                via: "musicbrainz".into(),
-            });
+        let fact = crate::also_on::Fact::new("isrc", &isrc);
+        if !found.facts.contains(&fact) {
+            found.facts.push(fact);
         }
         Ok(found)
     }
+}
+
+/// A MusicBrainz page's card, from the entity MusicBrainz serves (`musicbrainz_entity` reads the
+/// same answer): its title, its type (a recording, an album, an artist that is a person or a
+/// group), the artist credit and a recording's length. An ISRC's page is its one recording's card
+/// under the ISRC's own link, or the ISRC's when several recordings or none have it.
+pub fn musicbrainz_card(
+    uri: &str,
+    entity: Option<&musicbrainz::Entity>,
+    isrc: Option<&str>,
+    ttl: u64,
+) -> crate::model::ResourceMeta {
+    let mut doc = crate::model::ResourceMeta::new(uri, "musicbrainz", ttl);
+    doc.site = "MusicBrainz".into();
+    let Some(entity) = entity else {
+        doc.set_type("MusicRecording");
+        doc.name = isrc.map(|i| format!("ISRC {i}"));
+        return doc;
+    };
+    match entity.kind {
+        MbKind::Recording => doc.set_type("MusicRecording"),
+        MbKind::Release | MbKind::ReleaseGroup => doc.set_type("MusicAlbum"),
+        MbKind::Artist if entity.artist_type.as_deref() == Some("Person") => doc.set_type("Person"),
+        MbKind::Artist => doc.set_type("MusicGroup"),
+    }
+    doc.name.clone_from(&entity.title);
+    let mut about: Vec<String> = entity.artist.iter().cloned().collect();
+    if let Some(ms) = entity.length_ms {
+        let secs = (ms + 500) / 1000;
+        about.push(if secs >= 3600 {
+            format!("{}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
+        } else {
+            format!("{}:{:02}", secs / 60, secs % 60)
+        });
+    }
+    doc.description = (!about.is_empty()).then(|| about.join(" · "));
+    if let Some(artist) = &entity.artist {
+        doc.attributes.insert("artist".into(), artist.clone());
+    }
+    doc
+}
+
+/// What MusicBrainz says about one entity, or about up to four releases of one release group
+/// (`kind`, `ids`): their MBIDs (the release group's alone for several releases), the recording's
+/// ISRCs and the release's barcode as keys, their facts, and their current links on music
+/// services at `level`, each keyed by the entity MusicBrainz names it on. Nothing when an entity
+/// is unknown, or when several releases are of different release groups.
+async fn entities_found(
+    cx: &Context,
+    base: &str,
+    kind: MbKind,
+    ids: &[String],
+    level: Level,
+) -> Result<Found> {
+    let mut entities = vec![];
+    for id in ids {
+        let Some(entity) = musicbrainz::entity(&cx.egress, base, kind, id).await? else {
+            return Ok(Found::default());
+        };
+        entities.push(entity);
+    }
+    let mut found = Found::default();
+    let mut key = |kind: MbKind, id: &str| {
+        if let Some(key) = hubs::key::mb(kind, id) {
+            found.keys.push(Key {
+                key,
+                via: "musicbrainz".into(),
+            });
+        }
+    };
+    let entity = &entities[0];
+    // Several releases: the release group's key alone, so editions stay apart.
+    if entities.len() == 1 {
+        key(kind, &entity.mbid);
+    }
+    match &entity.release_group {
+        Some(group)
+            if entities
+                .iter()
+                .all(|e| e.release_group.as_ref() == Some(group)) =>
+        {
+            key(MbKind::ReleaseGroup, group)
+        }
+        _ if entities.len() > 1 => return Ok(Found::default()),
+        _ => {}
+    }
+    for isrc in entity.isrcs.iter().take(MAX_ISRC_KEYS) {
+        found.keys.push(Key {
+            key: format!("isrc:{isrc}"),
+            via: "musicbrainz".into(),
+        });
+    }
+    // What every entity has (one entity: all of it).
+    found.facts = facts(entity);
+    // A recording's original album ranks the card's links of one service (the track there).
+    if kind == MbKind::Recording {
+        if let Some(album) = musicbrainz::original_album(&cx.egress, base, &entity.mbid).await? {
+            found
+                .facts
+                .push(crate::also_on::Fact::new("original_album", album));
+        }
+    }
+    found
+        .facts
+        .retain(|f| entities[1..].iter().all(|e| facts(e).contains(f)));
+    let links = |e: &musicbrainz::Entity| -> Vec<Link> {
+        e.urls
+            .iter()
+            .filter_map(|u| derived(&u.url, level, "musicbrainz"))
+            .collect()
+    };
+    found.links = links(entity);
+    found.links.retain(|l| {
+        entities[1..]
+            .iter()
+            .all(|e| links(e).iter().any(|o| o.uri == l.uri))
+    });
+    // Each link is keyed by the entity MusicBrainz names it on (the release group for
+    // editions), so a tagged link that is it joins even when its own lookup is ambiguous.
+    let named = if entities.len() == 1 {
+        hubs::key::mb(kind, &entity.mbid)
+    } else {
+        entity
+            .release_group
+            .as_deref()
+            .and_then(|g| hubs::key::mb(MbKind::ReleaseGroup, g))
+    };
+    for link in &mut found.links {
+        link.key.clone_from(&named);
+    }
+    let barcode = entity
+        .barcode
+        .as_ref()
+        .filter(|b| entities.iter().all(|e| e.barcode.as_ref() == Some(*b)));
+    // A barcode is a key (the services that look albums up by it start from it).
+    if let Some(upc) = barcode.and_then(|b| music::gtin13(b)) {
+        found.keys.push(Key {
+            key: format!("upc:{upc}"),
+            via: "musicbrainz".into(),
+        });
+    }
+    Ok(found)
 }
 
 /// Deezer's public API: its own record of a Deezer link, and its lookups by ISRC and barcode.

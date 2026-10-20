@@ -64,8 +64,9 @@ as a derived link, found through MusicBrainz, and the Wikidata item for Paris it
 English Wikipedia editions. The owner's music cases join (`group_with`): TIDAL's `/u` share
 link of Bohemian Rhapsody with the seed's recording through its own ISRC, Cut to the Feeling's
 Spotify and Deezer albums through their MusicBrainz release, Dracula's TIDAL, Apple and Deezer
-albums through their one release group; a TIDAL track whose ISRC nobody else knows keeps it in
-its `facts`. Canaries and unrelated backlog
+albums through their one release group, MusicBrainz's recording and ISRC pages with TIDAL's
+share link and its artist page with TIDAL's artist; a TIDAL track whose ISRC nobody else knows
+keeps it in its `facts`. Canaries and unrelated backlog
 fetching are off. Use this mode for a scoped live smoke test. Run `scripts/e2e` without a mode
 to use an already configured dev stack
 at `PINAKES_E2E_PINAKES` (default `http://127.0.0.1:8090`).
