@@ -104,6 +104,11 @@ async fn main() -> Result<()> {
             tokio::select! {_=group_shutdown.changed()=>break,_=tokio::time::sleep(Duration::from_secs(2))=>{}}
         }
     });
+    let same_event_task = tokio::spawn(pinakes_core::same_event::run(
+        pool.clone(),
+        config.clone(),
+        shutdown_rx.clone(),
+    ));
     let maintenance_task = tokio::spawn(pinakes_core::maintenance::run(
         pool.clone(),
         config.grace_days,
@@ -146,6 +151,7 @@ async fn main() -> Result<()> {
     maintenance_task.await?;
     dump_task.await?;
     group_task.await?;
+    same_event_task.await?;
     while let Some(result) = workers.join_next().await {
         result?;
     }

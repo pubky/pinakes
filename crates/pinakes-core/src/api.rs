@@ -540,6 +540,24 @@ pub struct Card {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<crate::event::storage::ReferenceEvent>)]
     pub event: Option<Value>,
+    /// On an event card: up to three other events that are possibly the same one, best first
+    /// (the rule: "Possibly the same event" in docs/api.md). A hint only: never a group, never counted, and never a member of this card's own group.
+    /// Absent on other cards, and everywhere when `[event] same_event_hint = "off"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maybe_same: Option<Vec<SameEvent>>,
+}
+/// Another event that is possibly the same one: it starts together with this one, at the same
+/// place, under a similar name, on another page.
+#[derive(Clone, Serialize, ToSchema)]
+pub struct SameEvent {
+    /// Its card's ID (a feed's, for an occurrence).
+    pub id: String,
+    /// Its page: the occurrence's URL, or the feed's or event's link.
+    pub uri: String,
+    pub site: Option<String>,
+    pub start: Option<DateTime<Utc>>,
+    /// How alike the two names are, from 0.5 to 1 (pg_trgm similarity of the normalised names).
+    pub score: f64,
 }
 /// A hint that the same thing is also elsewhere: the group this card is in. Nothing is merged;
 /// every member keeps its own card.
@@ -593,6 +611,10 @@ pub struct Details {
     /// listed.
     pub aliases: Vec<String>,
     pub updated_at: Option<DateTime<Utc>>,
+    /// On an event card: up to ten events that are possibly the same one, best first (the card's
+    /// `maybe_same` is the first three).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maybe_same: Option<Vec<SameEvent>>,
 }
 #[derive(Serialize, ToSchema)]
 pub struct OrganizerRef {
@@ -802,7 +824,32 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
         ),
         occurrence,
         event: row.get("event").filter(|v| !v.is_null()).cloned(),
+        maybe_same: same_events(row).map(|all| all.into_iter().take(3).collect()),
     })
+}
+/// Whether event cards carry the same-event hint.
+pub(crate) fn same_event(config: &Config) -> bool {
+    config.event.same_event_hint == crate::config::SameEventHint::On
+}
+/// The same-event hint a row carries (`same_event_hint` in SQL): absent for a card that is no
+/// event, or when the hint is off.
+fn same_events(row: &Value) -> Option<Vec<SameEvent>> {
+    let entries = row.get("maybe_same")?.as_array()?;
+    Some(
+        entries
+            .iter()
+            .map(|m| {
+                let uri = m["uri"].as_str().unwrap_or_default().to_owned();
+                SameEvent {
+                    id: m["id"].as_str().unwrap_or_default().into(),
+                    site: site(&uri, m["site"].as_str(), m["host"].as_str()),
+                    uri,
+                    start: m["start"].as_str().and_then(|s| s.parse().ok()),
+                    score: m["score"].as_f64().unwrap_or_default(),
+                }
+            })
+            .collect(),
+    )
 }
 /// Every credit a card owes, once each, joined with "; ".
 fn credits(place: Option<String>, zone: Option<String>) -> Option<String> {
@@ -846,6 +893,7 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
             facts: crate::sources::facts(d),
             aliases: aliases.clone(),
             updated_at: row["resolved_at"].as_str().and_then(|s| s.parse().ok()),
+            maybe_same: same_events(row),
         },
         None => Details {
             category: None,
@@ -861,6 +909,7 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
             facts: None,
             aliases,
             updated_at: None,
+            maybe_same: None,
         },
     };
     Ok(ResourceDetail {
@@ -1117,6 +1166,9 @@ pub async fn search(
         if state.config.groups.enabled {
             sql.push(" || CASE WHEN p.kind='point' THEN jsonb_build_object('item',p.item||jsonb_build_object('group',group_hint(p.unit_id))) ELSE '{}'::jsonb END");
         }
+        if same_event(&state.config) {
+            sql.push(" || CASE WHEN p.kind='point' THEN jsonb_build_object('item',p.item||jsonb_build_object('maybe_same',same_event_hint(p.unit_id,ARRAY(SELECT jsonb_array_elements_text(p.item->'type_path')),3))) ELSE '{}'::jsonb END");
+        }
         sql.push(" ORDER BY rank DESC,unit_id DESC) FROM page p),'[]') AS items, (SELECT count(*) FROM filtered) AS total, (SELECT count(*) FROM groups) AS cell_count, ");
     } else {
         sql.push("), page AS (SELECT * FROM filtered");
@@ -1132,6 +1184,11 @@ pub async fn search(
             .push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p)");
         if state.config.groups.enabled {
             sql.push(" || jsonb_build_object('group',group_hint(p.unit_id))");
+        }
+        if same_event(&state.config) {
+            sql.push(
+                " || jsonb_build_object('maybe_same',same_event_hint(p.unit_id,p.type_path,3))",
+            );
         }
         sql.push(" ORDER BY rank DESC,unit_id DESC) FROM page p),'[]') AS items, ");
     }
@@ -1290,11 +1347,16 @@ pub enum SearchResult {
     Cluster(ClusterResponse),
 }
 
-async fn read(pool: &PgPool, id: &str, groups: bool) -> Result<Option<ResourceDetail>, ApiError> {
+async fn read(
+    pool: &PgPool,
+    id: &str,
+    config: &Config,
+) -> Result<Option<ResourceDetail>, ApiError> {
     let value: Option<Value> =
-        sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'aliases',coalesce((SELECT jsonb_agg(uri ORDER BY uri) FROM (SELECT x.uri FROM resource_alias a JOIN resource x ON x.id=a.alias_id WHERE a.root_id=r.id ORDER BY x.uri LIMIT 50) s),'[]')) FROM resource_document r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)")
+        sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',CASE WHEN $3 THEN same_event_hint(r.id,r.type_path,10) END,'aliases',coalesce((SELECT jsonb_agg(uri ORDER BY uri) FROM (SELECT x.uri FROM resource_alias a JOIN resource x ON x.id=a.alias_id WHERE a.root_id=r.id ORDER BY x.uri LIMIT 50) s),'[]')) FROM resource_document r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)")
             .bind(id)
-            .bind(groups)
+            .bind(config.groups.enabled)
+            .bind(same_event(config))
             .fetch_optional(pool)
             .await?;
     value.as_ref().map(detail).transpose()
@@ -1337,7 +1399,7 @@ pub async fn resource(
     if !model::valid_id(&id) {
         return Err(ApiError::bad("invalid resource ID"));
     }
-    let detail = read(&state.pool, &id, state.config.groups.enabled)
+    let detail = read(&state.pool, &id, &state.config)
         .await?
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "resource not found".into()))?;
     tagged(&headers, &detail)
@@ -1359,7 +1421,7 @@ pub async fn by_uri(
     let id = model::identity(&q.uri)
         .map_err(|e| ApiError::bad(e.to_string()))?
         .0;
-    let detail = read(&state.pool, &id, state.config.groups.enabled)
+    let detail = read(&state.pool, &id, &state.config)
         .await?
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "link not known".into()))?;
     tagged(&headers, &detail)
@@ -1392,7 +1454,7 @@ pub async fn lookup(
     let roots: Vec<String> = sqlx::query_scalar("SELECT coalesce(a.root_id,w.id) FROM unnest($1::text[]) w(id) LEFT JOIN resource_alias a ON a.alias_id=w.id").bind(&ids).fetch_all(&state.pool).await?;
     store::expedite(&state.pool, &roots).await?;
     state.wake.notify_waiters();
-    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END) FROM unnest($1::text[]) WITH ORDINALITY AS wanted(id,n) LEFT JOIN resource_alias a ON a.alias_id=wanted.id JOIN resource_document r ON r.id=coalesce(a.root_id,wanted.id) ORDER BY wanted.n").bind(ids).bind(state.config.groups.enabled).fetch_all(&state.pool).await?;
+    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',CASE WHEN $3 THEN same_event_hint(r.id,r.type_path,3) END) FROM unnest($1::text[]) WITH ORDINALITY AS wanted(id,n) LEFT JOIN resource_alias a ON a.alias_id=wanted.id JOIN resource_document r ON r.id=coalesce(a.root_id,wanted.id) ORDER BY wanted.n").bind(ids).bind(state.config.groups.enabled).bind(same_event(&state.config)).fetch_all(&state.pool).await?;
     Ok(Json(rows.iter().map(card).collect::<Result<_, _>>()?))
 }
 #[utoipa::path(post,tag="Previews",path="/v1/resolve",request_body=ResolveRequest,responses((status=200,body=ResourceDetail),(status=202,body=ResourceDetail,description="Queued; poll resource by ID"),(status=400,description="Unsupported URI or disabled resolver"),(status=429,description="Preview rate limit")))]
@@ -1424,7 +1486,7 @@ pub async fn resolve(
     state.wake.notify_waiters();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     loop {
-        let resource = read(&state.pool, &id, state.config.groups.enabled)
+        let resource = read(&state.pool, &id, &state.config)
             .await?
             .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "resource expired".into()))?;
         if resource.card.status != "pending" {
@@ -1630,12 +1692,52 @@ static PUBLIC_DOCUMENT: std::sync::LazyLock<Value> = std::sync::LazyLock::new(||
     crate::recipes::apply(&mut doc);
     doc
 });
+/// The document with `[event] same_event_hint = "off"`: no `maybe_same` field and no example
+/// of it.
+static PUBLIC_DOCUMENT_WITHOUT_SAME_EVENT: std::sync::LazyLock<Value> =
+    std::sync::LazyLock::new(|| {
+        let mut doc = PUBLIC_DOCUMENT.clone();
+        without_same_event(&mut doc);
+        doc
+    });
+fn without_same_event(doc: &mut Value) {
+    if let Some(schemas) = doc["components"]["schemas"].as_object_mut() {
+        schemas.remove("SameEvent");
+        for schema in schemas.values_mut() {
+            if let Some(properties) = schema["properties"].as_object_mut() {
+                properties.remove("maybe_same");
+            }
+        }
+    }
+    // Examples are keyed by recipe name; the hint's are `same-event-…`.
+    fn examples(v: &mut Value) {
+        match v {
+            Value::Object(map) => {
+                if let Some(Value::Object(named)) = map.get_mut("examples") {
+                    named.retain(|name, _| !name.starts_with("same-event-"));
+                }
+                map.values_mut().for_each(examples);
+            }
+            Value::Array(items) => items.iter_mut().for_each(examples),
+            _ => {}
+        }
+    }
+    examples(&mut doc["paths"]);
+}
+/// The public document as an instance with `config` serves it.
+pub fn openapi_document_for(config: &Config) -> &'static Value {
+    if same_event(config) {
+        &PUBLIC_DOCUMENT
+    } else {
+        &PUBLIC_DOCUMENT_WITHOUT_SAME_EVENT
+    }
+}
 pub fn openapi_document() -> Value {
     PUBLIC_DOCUMENT.clone()
 }
 #[utoipa::path(get,tag="Service",path="/v1/openapi.json",responses((status=200,body=Value)))]
-async fn openapi() -> Json<&'static Value> {
-    Json(&PUBLIC_DOCUMENT)
+async fn openapi(State(state): State<AppState>) -> Json<&'static Value> {
+    Json(openapi_document_for(&state.config))
 }
 
 /// First line of the OSM dump: the ODbL notice.
@@ -1959,12 +2061,16 @@ pub async fn group(
     if !model::valid_id(&id) || !state.config.groups.enabled {
         return Err(ApiError::bad("invalid or disabled group"));
     }
-    group_detail(&state.pool, &id)
+    group_detail(&state.pool, &id, same_event(&state.config))
         .await?
         .map(Json)
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "group not found".into()))
 }
-async fn group_detail(pool: &PgPool, id: &str) -> Result<Option<GroupDetail>, ApiError> {
+async fn group_detail(
+    pool: &PgPool,
+    id: &str,
+    same: bool,
+) -> Result<Option<GroupDetail>, ApiError> {
     let curated: Option<bool> = sqlx::query_scalar("SELECT curated FROM \"group\" WHERE id=$1")
         .bind(id)
         .fetch_optional(pool)
@@ -1979,9 +2085,10 @@ async fn group_detail(pool: &PgPool, id: &str) -> Result<Option<GroupDetail>, Ap
     .fetch_all(pool)
     .await?;
     let rows: Vec<Value> = sqlx::query_scalar(
-        "SELECT to_jsonb(d)||jsonb_build_object('group',group_hint(d.unit_id)) FROM group_unit u CROSS JOIN LATERAL (SELECT * FROM group_member_document WHERE unit_id=u.unit_id OFFSET 0) d WHERE u.group_id=$1 ORDER BY d.id,d.unit_id",
+        "SELECT to_jsonb(d)||jsonb_build_object('group',group_hint(d.unit_id),'maybe_same',CASE WHEN $2 THEN same_event_hint(d.unit_id,d.type_path,3) END) FROM group_unit u CROSS JOIN LATERAL (SELECT * FROM group_member_document WHERE unit_id=u.unit_id OFFSET 0) d WHERE u.group_id=$1 ORDER BY d.id,d.unit_id",
     )
     .bind(id)
+    .bind(same)
     .fetch_all(pool)
     .await?;
     let members = rows.iter().map(card).collect::<Result<Vec<_>, _>>()?;
@@ -2025,7 +2132,7 @@ pub async fn curate_group(
                 ApiError::bad("invalid group curation")
             }
         })?;
-    group_detail(&state.pool, &id)
+    group_detail(&state.pool, &id, same_event(&state.config))
         .await?
         .map(Json)
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "group not found".into()))

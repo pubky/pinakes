@@ -517,6 +517,9 @@ async fn run(pool: sqlx::PgPool, f: Fixture) -> Result<()> {
             if let Err(e) = pinakes_core::groups::drain(&pool, &cfg.queue.groups, 25).await {
                 eprintln!("mock grouping: {e}");
             }
+            if let Err(e) = pinakes_core::same_event::drain(&pool, &cfg, 200).await {
+                eprintln!("mock same-event pass: {e}");
+            }
             wake.notify_waiters();
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -643,6 +646,9 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
             }
             if let Err(e) = pinakes_core::groups::drain(&pool, &cfg.queue.groups, 25).await {
                 eprintln!("live grouping: {e}");
+            }
+            if let Err(e) = pinakes_core::same_event::drain(&pool, &cfg, 200).await {
+                eprintln!("live same-event pass: {e}");
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }

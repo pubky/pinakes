@@ -138,6 +138,13 @@ DELETE FROM group_input;
 INSERT INTO group_dirty(resource_id) SELECT DISTINCT resource_id FROM group_unit ON CONFLICT DO NOTHING;
 ```
 
+**Same-event hint rebuild.** The hourly sweep reads again any event in the window whose start,
+place or name changed unseen; to recompute every pair at once:
+
+```sql
+DELETE FROM same_event_unit;
+```
+
 ## Deployment and egress
 
 Web fetches bypass environment proxies, validate every DNS answer, pin the checked addresses and
@@ -359,6 +366,15 @@ Page coordinates win over geocoding, and online events are not geocoded. A struc
 search is accepted only for one sufficiently matching address (`limits.geocode_score`); an OSM
 venue link also needs the name and full address to match. Geocoded facts stay in `osm_place`;
 documents store versioned references and compose coordinates at read time.
+
+`event.same_event_hint` (default `"on"`; `"off"`) puts `maybe_same` on event cards: other events
+that are possibly the same one ([the rule](api.md#possibly-the-same-event)). A background pass
+in the daemon computes it for events starting from a day ago to a year ahead: up to 200 new or
+changed events per pass, at once while more is due and every five seconds otherwise, each
+matched through the start and location indexes; an hourly sweep drops events that started over a day ago and reads the
+ones that entered the window. Requests only read the stored pairs. `"off"` stops the pass and
+removes the field from cards, details and `/v1/openapi.json`; the stored pairs stay, and changes
+made meanwhile are read when it is turned back on.
 
 ### Event platforms
 

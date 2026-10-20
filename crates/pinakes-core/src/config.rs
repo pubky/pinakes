@@ -167,6 +167,14 @@ pub enum UtcSeriesWallClock {
     /// Never: UTC series always expand in UTC.
     Never,
 }
+/// The same-event hint (`maybe_same` on event cards): `on` or `off`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SameEventHint {
+    #[default]
+    On,
+    Off,
+}
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EventConfig {
@@ -182,6 +190,8 @@ pub struct EventConfig {
     pub geocoding: bool,
     /// Wall-clock expansion of UTC-DTSTART series (see `UtcSeriesWallClock`).
     pub utc_series_wall_clock: UtcSeriesWallClock,
+    /// Event cards name other events that are possibly the same one (`maybe_same`).
+    pub same_event_hint: SameEventHint,
     #[serde(skip)]
     pub feed_body_bytes: usize,
     #[serde(skip)]
@@ -219,6 +229,7 @@ impl Default for EventConfig {
             calendars: true,
             geocoding: true,
             utc_series_wall_clock: UtcSeriesWallClock::XWrTimezone,
+            same_event_hint: SameEventHint::On,
             feed_body_bytes: 32 * 1024 * 1024,
             max_occurrences_per_series: 50,
             max_occurrences_per_feed: 10000,
@@ -1051,6 +1062,10 @@ mod tests {
             UtcSeriesWallClock::XWrTimezone
         );
         assert!(toml::from_str::<Config>("[event]\nutc_series_wall_clock = \"always\"\n").is_err());
+        assert_eq!(config.event.same_event_hint, SameEventHint::On);
+        let off: Config = toml::from_str("[event]\nsame_event_hint = \"off\"\n").unwrap();
+        assert_eq!(off.event.same_event_hint, SameEventHint::Off);
+        assert!(toml::from_str::<Config>("[event]\nsame_event_hint = true\n").is_err());
     }
     #[test]
     fn reach_and_ingest_limits_have_safe_defaults_and_config_bounds() {

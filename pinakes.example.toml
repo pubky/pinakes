@@ -151,6 +151,8 @@ geocoding = true
 # "never".
 utc_series_wall_clock = "x_wr_timezone"
 # default_timezone = "Europe/Zurich" # For floating ICS times only.
+# Event cards name other events that are possibly the same one (maybe_same): "on" or "off".
+same_event_hint = "on"
 
 # Event platforms (data/event-adapters.json); effective policies: /v1/info.
 [event.adapters]

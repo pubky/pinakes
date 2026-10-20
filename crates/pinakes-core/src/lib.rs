@@ -19,6 +19,7 @@ pub mod osm_dump;
 pub mod queue;
 pub mod recipes;
 pub mod resolver;
+pub mod same_event;
 pub mod scheduler;
 pub mod source;
 pub mod sources;

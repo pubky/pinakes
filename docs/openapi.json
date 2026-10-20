@@ -55,6 +55,16 @@
               "null"
             ]
           },
+          "maybe_same": {
+            "description": "On an event card: up to three other events that are possibly the same one, best first\n(the rule: \"Possibly the same event\" in docs/api.md). A hint only: never a group, never counted, and never a member of this card's own group.\nAbsent on other cards, and everywhere when `[event] same_event_hint = \"off\"`.",
+            "items": {
+              "$ref": "#/components/schemas/SameEvent"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "name": {
             "description": "Plain text, entity-decoded: escape it before rendering it as HTML.",
             "type": [
@@ -402,6 +412,16 @@
             "description": "Where the card's metadata came from when it is not the page itself: the official API\nthat answered (docs/sources).",
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "maybe_same": {
+            "description": "On an event card: up to ten events that are possibly the same one, best first (the card's\n`maybe_same` is the first three).",
+            "items": {
+              "$ref": "#/components/schemas/SameEvent"
+            },
+            "type": [
+              "array",
               "null"
             ]
           },
@@ -1040,6 +1060,43 @@
           }
         ],
         "description": "`GET /v1/resources/{id}` and `/v1/resolve`: the card plus the resource's details."
+      },
+      "SameEvent": {
+        "description": "Another event that is possibly the same one: it starts together with this one, at the same\nplace, under a similar name, on another page.",
+        "properties": {
+          "id": {
+            "description": "Its card's ID (a feed's, for an occurrence).",
+            "type": "string"
+          },
+          "score": {
+            "description": "How alike the two names are, from 0.5 to 1 (pg_trgm similarity of the normalised names).",
+            "format": "double",
+            "type": "number"
+          },
+          "site": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "start": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "uri": {
+            "description": "Its page: the occurrence's URL, or the feed's or event's link.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "uri",
+          "score"
+        ],
+        "type": "object"
       },
       "SearchResponse": {
         "properties": {
