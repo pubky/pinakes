@@ -506,6 +506,12 @@ async fn answers_are_checked_and_bounded(pool: PgPool) {
     assert!(also_on::valid_key("mb:release-group:1f2e"));
     assert!(also_on::valid_key("wikidata:Q42"));
     assert!(!also_on::valid_key("MB:x"));
+    // A value may hold `:` (a DOI); the namespace before it is still checked.
+    assert!(also_on::valid_key("doi:10.46298/lmcs-20(1:8)2024"));
+    assert!(!also_on::valid_key("Doi:10.46298/lmcs-20(1:8)2024"));
+    assert!(!also_on::valid_key("doi:"));
+    assert!(!also_on::valid_key(":10.1000/x"));
+    assert!(!also_on::valid_key("doi:10.1000/a b"));
 }
 
 /// A saved document makes its sources due; an unchanged refetch does not; an alias never runs;

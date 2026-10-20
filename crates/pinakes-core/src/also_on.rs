@@ -289,9 +289,13 @@ fn token(s: &str) -> bool {
 }
 /// A key as stored: a lower-case namespace (letters, digits, `-`, `_`, and `:` between its
 /// parts, e.g. `mb:recording`), then `:` and a value of printable characters without spaces;
-/// 3–512 bytes.
+/// 3–512 bytes. A DOI's value may hold `:` itself (`doi:10.46298/lmcs-20(1:8)2024`).
 pub fn valid_key(key: &str) -> bool {
-    let Some((namespace, value)) = key.rsplit_once(':') else {
+    let split = match key.split_once(':') {
+        Some(("doi", value)) => Some(("doi", value)),
+        _ => key.rsplit_once(':'),
+    };
+    let Some((namespace, value)) = split else {
         return false;
     };
     (3..=512).contains(&key.len())
