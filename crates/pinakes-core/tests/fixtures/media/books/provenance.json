@@ -70,5 +70,32 @@
     "sha256": "4524fe0f82f9b2ebb16df2c3f42795dbb08be6c663c692f5ebecce0e59480eec",
     "status": 404,
     "url": "https://openlibrary.org/isbn/9798999999993.json"
+  },
+  "ol-work-OL27482W": {
+    "bytes": 5311,
+    "content_type": "application/json",
+    "file": "ol-work-OL27482W.json",
+    "recorded_at": "2026-10-20T00:15:30+00:00",
+    "sha256": "0465c2894c07cf8e165062b263d81083d13b4d3ed64ed2421ce269867aab501c",
+    "status": 200,
+    "url": "https://openlibrary.org/works/OL27482W.json"
+  },
+  "ol-work-OL893414W": {
+    "bytes": 3369,
+    "content_type": "application/json",
+    "file": "ol-work-OL893414W.json",
+    "recorded_at": "2026-10-20T00:15:31+00:00",
+    "sha256": "fad6e15ca7d7ed562eebbc759e845ccdeeb0b661cd301edfc91a0924d4855cea",
+    "status": 200,
+    "url": "https://openlibrary.org/works/OL893414W.json"
+  },
+  "ol-work-OL893415W": {
+    "bytes": 295,
+    "content_type": "application/json",
+    "file": "ol-work-OL893415W.json",
+    "recorded_at": "2026-10-20T00:15:31+00:00",
+    "sha256": "094c8a366b5d9dd8d7b38778cb071aff2fbb71f874335cbb91d8d7348dc3202a",
+    "status": 200,
+    "url": "https://openlibrary.org/works/OL893415W.json"
   }
 }

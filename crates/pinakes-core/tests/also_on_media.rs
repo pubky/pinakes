@@ -252,10 +252,12 @@ async fn a_printed_book_and_its_work() {
         keys(&found),
         [
             "openlibrary:edition:OL23109860M",
-            "openlibrary:work:OL468431W",
-            "wikidata:Q214371"
+            "openlibrary:work:OL468431W"
         ]
     );
+    // The work's Q-id is a fact: an edition reaches the item one way only, and the Open
+    // Library work key already joins the editions.
+    assert!(found.facts.contains(&Fact::new("wikidata", "Q214371")));
     assert_eq!(
         links(&found),
         [
@@ -313,6 +315,60 @@ async fn a_printed_book_and_its_work() {
     assert!(
         !recorded.seen().iter().any(|u| u.contains("itunes")),
         "a printed ISBN is never asked of iTunes"
+    );
+}
+
+#[tokio::test]
+async fn a_work_link() {
+    let cx = cx(Recorded::new(), Config::default());
+    let hobbit = Books
+        .lookup(
+            &cx,
+            &subject(
+                "https://openlibrary.org/works/OL27482W/The_Hobbit",
+                None,
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(keys(&hobbit), ["openlibrary:work:OL27482W"]);
+    assert_eq!(hobbit.facts, [Fact::new("wikidata", "Q74287")]);
+    assert!(links(&hobbit).contains(&(
+        "Goodreads",
+        "https://www.goodreads.com/work/editions/1540236",
+        "wikidata"
+    )));
+    assert!(
+        hobbit.links.iter().all(|l| l.kind.is_none()),
+        "the work itself"
+    );
+    // Dune's work has no Wikidata item naming it (the item names merged and wrong IDs): the key
+    // only. A merged ID is followed to the work it is now.
+    let dune = Books
+        .lookup(
+            &cx,
+            &subject("https://openlibrary.org/works/OL893414W", None, None),
+        )
+        .await
+        .unwrap();
+    assert_eq!(keys(&dune), ["openlibrary:work:OL893414W"]);
+    assert!(dune.links.is_empty() && dune.facts.is_empty());
+    let merged = Books
+        .lookup(
+            &cx,
+            &subject("https://openlibrary.org/works/OL893415W", None, None),
+        )
+        .await
+        .unwrap();
+    assert_eq!(keys(&merged), ["openlibrary:work:OL893414W"]);
+    assert_eq!(
+        links(&merged),
+        [(
+            "Open Library",
+            "https://openlibrary.org/works/OL893414W",
+            "openlibrary"
+        )]
     );
 }
 

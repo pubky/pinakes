@@ -17,7 +17,7 @@
 //! `podcast:apple_episode:{id}` and `podcast:item:{show GUID}:{SHA-256 of the item GUID}`, which
 //! every link to the episode shares; and the show's `wikidata:Q…`.
 use super::{
-    media::{self, digits, property, slug, Property},
+    media::{self, digits, property, slug, Deferred, Property},
     Context, Fact, Found, Key, Link, Source, Subject,
 };
 use crate::{
@@ -570,34 +570,6 @@ pub fn apple_episode(found: &mut Found, show: u64, track: u64, storefront: &str)
             "itunes",
         ),
     );
-}
-
-/// What a failed secondary request leaves: a retry to pass on when nothing else was found.
-#[derive(Default)]
-struct Deferred(Option<anyhow::Error>);
-impl Deferred {
-    /// The answer, or `None` after counting the failure; a retry is kept for later.
-    fn take<T>(&mut self, service: &'static str, result: Result<Option<T>>) -> Option<T> {
-        match result {
-            Ok(v) => v,
-            Err(error) => {
-                let class = crate::resolver::error_class(&error);
-                crate::telemetry::also_on_service_error(service, class);
-                tracing::debug!(service, class, "also-on service failed; the lookup goes on");
-                if error.is::<RetryLater>() && self.0.is_none() {
-                    self.0 = Some(error);
-                }
-                None
-            }
-        }
-    }
-    /// The lookup's answer: what was found, or the retry when nothing was.
-    fn finish(self, found: Found) -> Result<Found> {
-        match self.0 {
-            Some(retry) if found == Found::default() => Err(retry),
-            _ => Ok(found),
-        }
-    }
 }
 
 /// The source: iTunes, Podcast Index, the feed and Wikidata.

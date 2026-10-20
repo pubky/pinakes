@@ -1,4 +1,5 @@
-//! Books: an edition by ISBN (or its Open Library page) and where else it is.
+//! Books: an edition by ISBN (or its Open Library page), or a work by its Open Library page, and
+//! where else it is.
 //!
 //! Open Library's edition record is the authority: the edition must list the ISBN asked. Its
 //! work joins the editions of one work as a group (a hint, like every group). Links come only
@@ -8,11 +9,11 @@
 //! knows exactly, and the work's Wikidata item. Goodreads' own `book/isbn/{isbn}` redirect is
 //! never used: it answers an unknown ISBN with an unrelated book.
 use super::{
-    media::{self, digits, property, slug, uuid, Property},
+    media::{self, digits, property, slug, uuid, Deferred, Property},
     Context, Fact, Found, Key, Link, Source, Subject,
 };
 use crate::{
-    hubs::{self, wikidata},
+    hubs::wikidata,
     resolver::{cards, egress::FetchOptions},
 };
 use anyhow::{Context as _, Result};
@@ -21,11 +22,13 @@ use serde_json::Value;
 
 const OPEN_LIBRARY: &str = "https://openlibrary.org";
 
-/// What a link names: an edition by ISBN-13, or by its Open Library edition ID.
+/// What a link names: an edition by ISBN-13, or by its Open Library edition ID, or a work by
+/// its Open Library work ID.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Book {
     Isbn(String),
     Edition(String),
+    Work(String),
 }
 
 /// An Open Library ID of one kind: `OL`, digits, then `M` (edition) or `W` (work).
@@ -34,8 +37,8 @@ fn ol_id(value: &str, kind: char) -> Option<String> {
     media::digits(digits).then(|| value.to_owned())
 }
 
-/// The book a link names: `isbn:…`, `openlibrary.org/isbn/{isbn}` or
-/// `openlibrary.org/books/{OL…M}` (any title slug after it).
+/// The book a link names: `isbn:…`, `openlibrary.org/isbn/{isbn}`,
+/// `openlibrary.org/books/{OL…M}` or `openlibrary.org/works/{OL…W}` (any title slug after it).
 pub fn book(uri: &str) -> Option<Book> {
     if uri.starts_with("isbn:") {
         return cards::isbn(uri).map(|n| Book::Isbn(cards::isbn13(&n)));
@@ -45,6 +48,7 @@ pub fn book(uri: &str) -> Option<Book> {
         || !matches!(url.host_str()?, "openlibrary.org" | "www.openlibrary.org")
         || url.port().is_some()
         || !url.username().is_empty()
+        || url.password().is_some()
     {
         return None;
     }
@@ -55,8 +59,50 @@ pub fn book(uri: &str) -> Option<Book> {
             cards::isbn(&format!("isbn:{n}")).map(|n| Book::Isbn(cards::isbn13(&n)))
         }
         ["books", id, ..] => ol_id(id.strip_suffix(".json").unwrap_or(id), 'M').map(Book::Edition),
+        ["works", id, ..] => ol_id(id.strip_suffix(".json").unwrap_or(id), 'W').map(Book::Work),
         _ => None,
     }
+}
+
+/// A work's Open Library record.
+pub fn work_request(id: &str) -> String {
+    format!("{OPEN_LIBRARY}/works/{id}.json")
+}
+/// What Open Library's record of a work ID says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkRecord {
+    /// The work, under the ID asked.
+    Work,
+    /// The ID was merged into this work.
+    Redirect(String),
+    /// No such work (unknown or deleted).
+    Gone,
+}
+/// The record of work `id`: it must be that work, or a redirect to another work.
+pub fn parse_work(status: u16, raw: &[u8], id: &str) -> Result<WorkRecord> {
+    let Some(v) = media::json(status, raw, &[404])? else {
+        return Ok(WorkRecord::Gone);
+    };
+    let key = |field: &str| {
+        v[field]
+            .as_str()
+            .and_then(|k| k.strip_prefix("/works/"))
+            .and_then(|k| ol_id(k, 'W'))
+    };
+    Ok(match v["type"]["key"].as_str() {
+        Some("/type/work") => {
+            anyhow::ensure!(
+                key("key").as_deref() == Some(id),
+                "Open Library answered for another work"
+            );
+            WorkRecord::Work
+        }
+        Some("/type/redirect") => {
+            WorkRecord::Redirect(key("location").context("no redirect target")?)
+        }
+        Some("/type/delete") => WorkRecord::Gone,
+        other => anyhow::bail!("unexpected work record type {other:?}"),
+    })
 }
 
 /// The edition's Open Library record (a by-ISBN request redirects to it).
@@ -64,6 +110,7 @@ pub fn edition_request(book: &Book) -> String {
     match book {
         Book::Isbn(isbn) => format!("{OPEN_LIBRARY}/isbn/{isbn}.json"),
         Book::Edition(id) => format!("{OPEN_LIBRARY}/books/{id}.json"),
+        Book::Work(id) => work_request(id),
     }
 }
 
@@ -137,6 +184,7 @@ pub fn parse_edition(status: u16, raw: &[u8], book: &Book) -> Result<Option<Edit
     let theirs = match book {
         Book::Isbn(isbn) => isbns.contains(isbn),
         Book::Edition(asked) => *asked == id,
+        Book::Work(_) => false,
     };
     anyhow::ensure!(theirs, "Open Library answered for another edition");
     let works: Vec<String> = v["works"]
@@ -229,10 +277,13 @@ pub fn found(edition: &Edition, isbn: Option<&str>) -> Found {
         ));
     }
     if let Some(id) = &edition.librarything {
-        found.links.push(link(
+        // LibraryThing's IDs are its works'.
+        let mut work = link(
             format!("https://www.librarything.com/work/{id}"),
             "LibraryThing",
-        ));
+        );
+        work.kind = Some("work".into());
+        found.links.push(work);
     }
     if let Some(id) = &edition.google {
         found.links.push(link(
@@ -321,63 +372,125 @@ impl Source for Books {
         book(&subject.uri).is_some()
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
-        let Some(book) = book(&subject.uri) else {
-            return Ok(Found::default());
-        };
-        let options = FetchOptions {
+        match book(&subject.uri) {
+            Some(Book::Work(id)) => Self::work(cx, &id).await,
+            Some(book) => Self::edition(cx, &book).await,
+            None => Ok(Found::default()),
+        }
+    }
+}
+
+impl Books {
+    fn options() -> FetchOptions {
+        FetchOptions {
             accept: Some("application/json".into()),
             ..Default::default()
+        }
+    }
+    /// The work's Wikidata item (the one carrying its Open Library ID): its Q-id as a fact (the
+    /// Open Library work key already joins the work's editions) and its pages.
+    async fn wikidata(cx: &Context, work: &str, kind: Option<&str>) -> Result<Option<Found>> {
+        let wikidata::Found::One(item) = wikidata::item_with(&cx.egress, "P648", work).await?
+        else {
+            return Ok(None);
         };
+        let mut found = Found::default();
+        found.facts.push(Fact::new("wikidata", item.qid.as_str()));
+        for mut l in media::links(&item, WIKIDATA) {
+            l.kind = kind.map(str::to_owned);
+            found.links.push(l);
+        }
+        Ok(Some(found))
+    }
+    fn merge(found: &mut Found, more: Found) {
+        found.facts.extend(more.facts);
+        for l in more.links {
+            if !found.links.iter().any(|f| f.uri == l.uri) {
+                found.links.push(l);
+            }
+        }
+    }
+    /// An edition: Open Library first, then Apple Books and the work's Wikidata item.
+    async fn edition(cx: &Context, book: &Book) -> Result<Found> {
         let f = cx
             .egress
-            .discover(&edition_request(&book), &options, 3600)
+            .discover(&edition_request(book), &Self::options(), 3600)
             .await?;
-        let Some(edition) = parse_edition(f.status, &f.body, &book)? else {
+        let Some(edition) = parse_edition(f.status, &f.body, book)? else {
             return Ok(Found::default());
         };
-        let isbn = match &book {
+        let isbn = match book {
             Book::Isbn(isbn) => Some(isbn.clone()),
             // An edition page names its ISBN only when the edition has exactly one.
-            Book::Edition(_) => match edition.isbns.as_slice() {
+            _ => match edition.isbns.as_slice() {
                 [one] => Some(one.clone()),
                 _ => None,
             },
         };
         let mut found = found(&edition, isbn.as_deref());
+        // A failing secondary service leaves what Open Library said.
+        let mut deferred = Deferred::default();
         if let (true, Some(isbn)) = (edition.ebook, &isbn) {
             let itunes = FetchOptions {
                 extra_types: &["text/javascript"],
-                ..options.clone()
+                ..Self::options()
             };
             let storefront = &cx.config.also_on.apple_storefront;
-            let f = cx
-                .egress
-                .discover(&itunes_request(isbn, storefront), &itunes, 3600)
-                .await?;
-            found
-                .links
-                .extend(parse_itunes(f.status, &f.body, storefront)?);
+            let apple = async {
+                let f = cx
+                    .egress
+                    .discover(&itunes_request(isbn, storefront), &itunes, 3600)
+                    .await?;
+                parse_itunes(f.status, &f.body, storefront)
+            };
+            found.links.extend(deferred.take("itunes", apple.await));
         }
         if let Some(work) = &edition.work {
-            if let wikidata::Found::One(item) =
-                wikidata::item_with(&cx.egress, "P648", work).await?
+            // The item is the work's: its pages are the work's too.
+            if let Some(more) =
+                deferred.take("wikidata", Self::wikidata(cx, work, Some("work")).await)
             {
-                found
-                    .keys
-                    .extend(hubs::key::wikidata(&item.qid).map(|key| Key {
-                        key,
-                        via: "wikidata".into(),
-                    }));
-                // The item is the work's: its pages are the work's too.
-                for mut l in media::links(&item, WIKIDATA) {
-                    l.kind = Some("work".into());
-                    if !found.links.iter().any(|f| f.uri == l.uri) {
-                        found.links.push(l);
-                    }
-                }
+                Self::merge(&mut found, more);
             }
         }
-        Ok(found)
+        deferred.finish(found)
+    }
+    /// A work: its Open Library record (following merges to the work it is now), then its
+    /// Wikidata item.
+    async fn work(cx: &Context, asked: &str) -> Result<Found> {
+        let mut id = asked.to_owned();
+        for _ in 0..3 {
+            let f = cx
+                .egress
+                .discover(&work_request(&id), &Self::options(), 3600)
+                .await?;
+            match parse_work(f.status, &f.body, &id)? {
+                WorkRecord::Work => {
+                    let mut found = Found::default();
+                    found.keys.push(Key {
+                        key: format!("openlibrary:work:{id}"),
+                        via: "openlibrary".into(),
+                    });
+                    if id != asked {
+                        found.links.push(Link::new(
+                            format!("{OPEN_LIBRARY}/works/{id}"),
+                            "Open Library",
+                            "openlibrary",
+                        ));
+                    }
+                    let mut deferred = Deferred::default();
+                    if let Some(more) =
+                        deferred.take("wikidata", Self::wikidata(cx, &id, None).await)
+                    {
+                        Self::merge(&mut found, more);
+                    }
+                    return deferred.finish(found);
+                }
+                WorkRecord::Redirect(to) => id = to,
+                WorkRecord::Gone => break,
+            }
+        }
+        Ok(Found::default())
     }
 }
 
@@ -420,7 +533,6 @@ mod tests {
         );
         for uri in [
             "isbn:9780743273566",
-            "https://openlibrary.org/works/OL468431W",
             "https://openlibrary.org/books/OL23109860W",
             "https://openlibrary.org:8080/isbn/9780743273565",
             "https://example.org/isbn/9780743273565",
@@ -551,6 +663,35 @@ mod tests {
             None
         );
         assert!(parse_edition(429, b"", &Book::Isbn("9780743273565".into())).is_err());
+    }
+
+    #[test]
+    fn work_links_and_records() {
+        assert_eq!(
+            book("https://openlibrary.org/works/OL27482W/The_Hobbit"),
+            Some(Book::Work("OL27482W".into()))
+        );
+        assert_eq!(
+            book("https://openlibrary.org/works/OL27482W.json"),
+            Some(Book::Work("OL27482W".into()))
+        );
+        assert_eq!(book("https://openlibrary.org/works/OL27482M"), None);
+        assert_eq!(book("https://user:pw@openlibrary.org/works/OL27482W"), None);
+        assert_eq!(
+            work_request("OL27482W"),
+            "https://openlibrary.org/works/OL27482W.json"
+        );
+        assert_eq!(
+            parse_work(200, &read("ol-work-OL27482W.json"), "OL27482W").unwrap(),
+            WorkRecord::Work
+        );
+        assert!(parse_work(200, &read("ol-work-OL27482W.json"), "OL893414W").is_err());
+        // Wikidata's Dune item names OL893415W, which Open Library merged into OL893414W.
+        assert_eq!(
+            parse_work(200, &read("ol-work-OL893415W.json"), "OL893415W").unwrap(),
+            WorkRecord::Redirect("OL893414W".into())
+        );
+        assert_eq!(parse_work(404, b"{}", "OL1W").unwrap(), WorkRecord::Gone);
     }
 
     #[test]

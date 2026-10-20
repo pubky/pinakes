@@ -1,6 +1,6 @@
 //! What the book, podcast and film sources share: Wikidata property tables (how one external ID
 //! becomes a derived link), the answer statuses of the services they read, and small checks.
-use super::Link;
+use super::{Found, Link};
 use crate::{hubs::wikidata::Item, resolver::RetryLater};
 use anyhow::{bail, Result};
 use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
@@ -87,6 +87,38 @@ pub(crate) fn json(status: u16, raw: &[u8], missing: &[u16]) -> Result<Option<Va
         }
         .into()),
         s => bail!("unexpected status {s}"),
+    }
+}
+
+/// What a failed secondary request leaves: a retry to pass on when nothing else was found.
+#[derive(Default)]
+pub(crate) struct Deferred(Option<anyhow::Error>);
+impl Deferred {
+    /// The answer, or `None` after counting the failure; a retry is kept for later.
+    pub(crate) fn take<T>(
+        &mut self,
+        service: &'static str,
+        result: Result<Option<T>>,
+    ) -> Option<T> {
+        match result {
+            Ok(v) => v,
+            Err(error) => {
+                let class = crate::resolver::error_class(&error);
+                crate::telemetry::also_on_service_error(service, class);
+                tracing::debug!(service, class, "also-on service failed; the lookup goes on");
+                if error.is::<crate::resolver::RetryLater>() && self.0.is_none() {
+                    self.0 = Some(error);
+                }
+                None
+            }
+        }
+    }
+    /// The lookup's answer: what was found, or the retry when nothing was.
+    pub(crate) fn finish(self, found: Found) -> Result<Found> {
+        match self.0 {
+            Some(retry) if found == Found::default() => Err(retry),
+            _ => Ok(found),
+        }
     }
 }
 
