@@ -36,6 +36,12 @@ impl Service {
             Self::Bandcamp => "Bandcamp",
         }
     }
+    /// Whether the ISRC its own track page states (JSON-LD `isrcCode`) is a key: only a service
+    /// whose catalogue comes from labels and whose page was checked to state it (TIDAL). On
+    /// Bandcamp and SoundCloud an uploader types it; elsewhere it is a fact.
+    pub fn vouches_isrc(self) -> bool {
+        matches!(self, Self::Tidal)
+    }
     /// The service as a row's `via` (`apple_music`).
     pub fn token(self) -> &'static str {
         match self {

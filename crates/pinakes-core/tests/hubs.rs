@@ -722,6 +722,15 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
     let mut d = ResourceMeta::new(other, "jsonld", 86400);
     d.attributes.insert("isrc".into(), "GBUM71029604".into());
     store::save_document(&pool, &other_id, 0, &d).await.unwrap();
+    // So is a music service's whose uploaders type the ISRC (Bandcamp, SoundCloud).
+    let uploaded = "https://someone.bandcamp.com/track/bohemian-rhapsody";
+    let uploaded_id = store::ensure_resource(&pool, uploaded).await.unwrap();
+    let mut d = ResourceMeta::new(uploaded, "jsonld", 86400);
+    d.set_type("MusicRecording");
+    d.attributes.insert("isrc".into(), "GBUM71029604".into());
+    store::save_document(&pool, &uploaded_id, 0, &d)
+        .await
+        .unwrap();
     let t = Arc::new(Recorded {
         seen: Mutex::default(),
     });
@@ -766,6 +775,15 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
         ["isrc:GBUM72103841 service tidal"]
     );
     assert!(rows(keys, other_id).await.is_empty());
+    assert!(rows(keys, uploaded_id.clone()).await.is_empty());
+    assert_eq!(
+        rows(
+            "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1",
+            uploaded_id.clone()
+        )
+        .await,
+        ["isrc GBUM71029604"]
+    );
     assert_eq!(
         rows(
             "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 AND source='service' ORDER BY name",
@@ -785,6 +803,7 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
     assert_eq!(rows(group, ids[1].clone()).await, seed);
     assert_eq!(rows(group, ids[2].clone()).await, ["-"]);
     assert_eq!(rows(group, spotify_id.clone()).await, seed);
+    assert_eq!(rows(group, uploaded_id).await, ["-"]);
     assert_eq!(
         rows(
             "SELECT value FROM resource_fact WHERE resource_id=$1 AND name='original_album'",
@@ -818,11 +837,11 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
         "{links:?}"
     );
     let seen = t.seen.lock().unwrap().clone();
-    // The four music links' URL lookups: one batched request, then each from the cache (the
+    // The five music links' URL lookups: one batched request, then each from the cache (the
     // unknown links' 404s too).
     let lookups: Vec<&String> = seen.iter().filter(|s| s.contains("/ws/2/url?")).collect();
     assert_eq!(lookups.len(), 1, "{lookups:?}");
-    assert_eq!(lookups[0].matches("resource=").count(), 4, "{lookups:?}");
+    assert_eq!(lookups[0].matches("resource=").count(), 5, "{lookups:?}");
     assert!(
         seen.iter().any(|s| s.contains("/ws/2/isrc/GBUM71029604")),
         "{seen:?}"

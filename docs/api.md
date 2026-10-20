@@ -635,7 +635,7 @@ one thing, only on evidence that cannot be spoofed:
   located within 500 m, starting within 300 s, with a name similarity of at least 0.5.
 - **An exact key a source vouches for** ([Also on](#also-on)): two links a hub names as the same
   recording, release or Wikidata item, by its own identifier (`mb:recording:{mbid}`,
-  `wikidata:Q…`), or a known music service's own record of its own object (the ISRC on its
+  `wikidata:Q…`), or a known music service's own record of its own object (the ISRC on a TIDAL
   track page). Any other page's claims are never such a key. A group holds at most one
   MusicBrainz recording, release, release group and artist, one Wikidata item and one Discogs
   artist, master and release: a join that would bring a second (a wrong ID on a hub) is refused,
@@ -746,8 +746,10 @@ after its aliases) takes it too and joins the group, even when its own lookup fi
 is looked up exactly, never by title or name. A key comes from a hub (MusicBrainz, Wikidata) or
 from a known music service's own record of its own object; another host's claim (its JSON-LD
 `isrcCode`, `sameAs`, a canonical link) is a fact at most.
-- `service`: the ISRC a music service's own track page states (TIDAL's JSON-LD `isrcCode`), as
-  the key `isrc:…` (`via` the service). A track whose ISRC nobody else knows (not MusicBrainz,
+- `service`: the ISRC a music service's own track page states (its JSON-LD `isrcCode`), as the
+  key `isrc:…` (`via` the service) only from a service whose catalogue comes from labels and whose
+  pages were checked to state it: TIDAL. Elsewhere it is the fact `isrc` (on Bandcamp and
+  SoundCloud an uploader types it). A track whose ISRC nobody else knows (not MusicBrainz,
   not another link) stays alone with its key, and joins as soon as another link or MusicBrainz
   carries the same ISRC.
 - `musicbrainz`: what MusicBrainz relates the link to (one recording, release or release group,

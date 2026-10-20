@@ -4,8 +4,9 @@
 //! Who may vouch for a key: a hub (MusicBrainz, Wikidata) or a known music service's own record
 //! of its own object. Any other page's claim is a fact at most.
 //!
-//! - [`ServiceSource`]: the ISRC a music service's own track page states (TIDAL's JSON-LD
-//!   `isrcCode`) as the key `isrc:…`, and its artist, album and length as facts.
+//! - [`ServiceSource`]: the ISRC a music service's own track page states (its JSON-LD
+//!   `isrcCode`) as the key `isrc:…` when the service vouches for it (TIDAL,
+//!   `Service::vouches_isrc`), and as a fact with its artist, album and length.
 //! - [`MusicBrainzSource`]: what MusicBrainz relates the tagged link to (one recording, release
 //!   or artist; for a track it does not relate, the one recording its page's own ISRC is on),
 //!   that entity's current links on music services at the same level, and its MBIDs, ISRCs and
@@ -52,15 +53,23 @@ const MAX_EDITIONS: usize = 4;
 /// At most this many of a recording's ISRCs become keys (the MBID key always fits).
 const MAX_ISRC_KEYS: usize = 8;
 
-/// The ISRC a music service's own track page states (its JSON-LD `isrcCode`), never another
-/// host's claim.
-fn own_isrc(subject: &Subject) -> Option<String> {
+/// The ISRC a music service's track page states (its JSON-LD `isrcCode`), never another host's
+/// claim: a fact.
+fn page_isrc(subject: &Subject) -> Option<(Service, String)> {
     let link = music::parse(&subject.uri)?;
     (join_level(&link)? == Level::Track && link.level == Level::Track).then_some(())?;
-    music::isrc(subject.doc.as_ref()?.attributes.get("isrc")?)
+    let isrc = music::isrc(subject.doc.as_ref()?.attributes.get("isrc")?)?;
+    Some((link.service, isrc))
+}
+/// The page's ISRC when its service vouches for it (`Service::vouches_isrc`): a key.
+fn own_isrc(subject: &Subject) -> Option<String> {
+    page_isrc(subject)
+        .filter(|(service, _)| service.vouches_isrc())
+        .map(|(_, isrc)| isrc)
 }
 
-/// A music service's own record of its own object: the ISRC on its track page.
+/// A music service's own record of its own object: the ISRC on its track page (a key only from
+/// a service that vouches for it), its artist, album and length.
 pub struct ServiceSource;
 #[async_trait]
 impl Source for ServiceSource {
@@ -75,11 +84,13 @@ impl Source for ServiceSource {
             return Ok(Found::default());
         };
         let mut found = Found::default();
-        if let Some(isrc) = own_isrc(subject) {
-            found.keys.push(Key {
-                key: format!("isrc:{isrc}"),
-                via: link.service.token().into(),
-            });
+        if let Some((service, isrc)) = page_isrc(subject) {
+            if service.vouches_isrc() {
+                found.keys.push(Key {
+                    key: format!("isrc:{isrc}"),
+                    via: service.token().into(),
+                });
+            }
             found.facts.push(crate::also_on::Fact::new("isrc", isrc));
         }
         // What its page says: the artist, a track's album and length (seconds).
