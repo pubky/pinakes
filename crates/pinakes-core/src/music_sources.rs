@@ -248,6 +248,46 @@ impl Source for MusicBrainzEntitySource {
     }
 }
 
+/// A MusicBrainz page's card, from the entity MusicBrainz serves (`musicbrainz_entity` reads the
+/// same answer): its title, its type (a recording, an album, an artist that is a person or a
+/// group), the artist credit and a recording's length. An ISRC's page is its one recording's card
+/// under the ISRC's own link, or the ISRC's when several recordings or none have it.
+pub fn musicbrainz_card(
+    uri: &str,
+    entity: Option<&musicbrainz::Entity>,
+    isrc: Option<&str>,
+    ttl: u64,
+) -> crate::model::ResourceMeta {
+    let mut doc = crate::model::ResourceMeta::new(uri, "musicbrainz", ttl);
+    doc.site = "MusicBrainz".into();
+    let Some(entity) = entity else {
+        doc.set_type("MusicRecording");
+        doc.name = isrc.map(|i| format!("ISRC {i}"));
+        return doc;
+    };
+    match entity.kind {
+        MbKind::Recording => doc.set_type("MusicRecording"),
+        MbKind::Release | MbKind::ReleaseGroup => doc.set_type("MusicAlbum"),
+        MbKind::Artist if entity.artist_type.as_deref() == Some("Person") => doc.set_type("Person"),
+        MbKind::Artist => doc.set_type("MusicGroup"),
+    }
+    doc.name.clone_from(&entity.title);
+    let mut about: Vec<String> = entity.artist.iter().cloned().collect();
+    if let Some(ms) = entity.length_ms {
+        let secs = (ms + 500) / 1000;
+        about.push(if secs >= 3600 {
+            format!("{}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
+        } else {
+            format!("{}:{:02}", secs / 60, secs % 60)
+        });
+    }
+    doc.description = (!about.is_empty()).then(|| about.join(" · "));
+    if let Some(artist) = &entity.artist {
+        doc.attributes.insert("artist".into(), artist.clone());
+    }
+    doc
+}
+
 /// What MusicBrainz says about one entity, or about up to four releases of one release group
 /// (`kind`, `ids`): their MBIDs (the release group's alone for several releases), the recording's
 /// ISRCs and the release's barcode as keys, their facts, and their current links on music

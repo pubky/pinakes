@@ -1116,3 +1116,54 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         .count();
     assert_eq!(reads, 1, "{seen:?}");
 }
+
+/// A MusicBrainz page's card comes from the entity MusicBrainz serves, the same read the hub's
+/// source makes: the recording's title, artist credit and length; an artist's type; an ISRC's
+/// page is its one recording's card, or the ISRC's own when two recordings have it.
+#[tokio::test]
+async fn a_musicbrainz_page_card_comes_from_the_entity() {
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let web = pinakes_core::resolver::web::WebResolver {
+        oembed_policy: Default::default(),
+        cards: None,
+        events: None,
+        egress: egress(t.clone()),
+        config: Default::default(),
+    };
+    let card = |uri: &'static str| {
+        let web = &web;
+        async move {
+            web.resolve_with_policy(uri, Default::default())
+                .await
+                .unwrap()
+        }
+    };
+    let song = card("https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69").await;
+    assert_eq!(
+        (
+            song.type_name.as_str(),
+            song.name.as_deref(),
+            song.site.as_str()
+        ),
+        ("MusicRecording", Some("Bohemian Rhapsody"), "MusicBrainz")
+    );
+    assert_eq!(song.description.as_deref(), Some("Queen · 5:55"));
+    let band = card("https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711").await;
+    assert_eq!(
+        (band.type_name.as_str(), band.name.as_deref()),
+        ("MusicGroup", Some("Radiohead"))
+    );
+    let isrc = card("https://musicbrainz.org/isrc/GBUM71029604").await;
+    assert_eq!(isrc.name.as_deref(), Some("Bohemian Rhapsody"));
+    assert_eq!(isrc.url, "https://musicbrainz.org/isrc/GBUM71029604");
+    let shared = card("https://musicbrainz.org/isrc/GBCEE0100112").await;
+    assert_eq!(shared.name.as_deref(), Some("ISRC GBCEE0100112"));
+    // No page was read: MusicBrainz's web service only.
+    let seen = t.seen.lock().unwrap().clone();
+    assert!(
+        seen.iter().all(|s| s.starts_with("musicbrainz.org/ws/2/")),
+        "{seen:?}"
+    );
+}

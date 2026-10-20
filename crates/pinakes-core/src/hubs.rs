@@ -330,7 +330,8 @@ pub mod musicbrainz {
         match kind {
             MbKind::Recording => "url-rels+isrcs+artist-credits",
             MbKind::Release => "url-rels+release-groups+artist-credits",
-            MbKind::ReleaseGroup | MbKind::Artist => "url-rels",
+            MbKind::ReleaseGroup => "url-rels+artist-credits",
+            MbKind::Artist => "url-rels",
         }
     }
     /// The URL lookup for `link` at the web service `base` (exact; MusicBrainz stores URLs as

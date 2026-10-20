@@ -360,6 +360,10 @@ pub struct ResolverConfig {
     pub requests_per_second: f64,
     #[serde(skip)]
     pub ttl_secs: u64,
+    /// `web` only: the MusicBrainz web service its pages' cards are read from, the also-on
+    /// sources' (`[also_on.sources.musicbrainz] base_url`); empty is the public one.
+    #[serde(skip)]
+    pub musicbrainz_base: String,
 }
 impl Default for ResolverConfig {
     fn default() -> Self {
@@ -370,6 +374,7 @@ impl Default for ResolverConfig {
             concurrency: 2,
             requests_per_second: 2.0,
             ttl_secs: 86400,
+            musicbrainz_base: String::new(),
         }
     }
 }
@@ -602,6 +607,7 @@ impl Config {
     fn share_contact(&mut self) {
         self.egress.contact = self.http.contact.trim().to_owned();
         self.osm.contact = self.egress.contact.clone();
+        self.web.musicbrainz_base = self.also_on.musicbrainz_base().to_owned();
         // A source's published limits, for hosts the operator does not rate.
         self.egress.source_rates = crate::sources::budgets()
             .map(|(host, rate)| (host.to_owned(), rate))
