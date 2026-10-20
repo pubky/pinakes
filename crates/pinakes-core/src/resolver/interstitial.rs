@@ -108,15 +108,16 @@ pub fn inspect(requested: &Url, f: &Fetched) -> Page {
     {
         return Page::Blocked;
     }
-    // "Accepted" with nothing in it is a challenge (AWS WAF answers bots so), never a page.
-    if f.status == 202 && f.body.iter().all(u8::is_ascii_whitespace) {
-        return Page::Blocked;
-    }
     if !f.content_type.contains("html")
         && !(matches!(f.status, 403 | 429 | 503)
             && matches!(f.content_type.as_str(), "text/plain" | ""))
     {
         return Page::Content;
+    }
+    // "Accepted" with nothing in it is a challenge (AWS WAF answers bots so), never a page; an
+    // API's empty 202 (not HTML) is its own answer.
+    if f.status == 202 && f.body.iter().all(u8::is_ascii_whitespace) {
+        return Page::Blocked;
     }
     let text = String::from_utf8_lossy(&f.body);
     let html = Html::parse_document(&text);
@@ -283,6 +284,9 @@ mod tests {
             Page::Content
         );
         assert_eq!(inspect(&url, &fetched(200, b"")), Page::Content);
+        let mut api = fetched(202, b"");
+        api.content_type = "application/json".into();
+        assert_eq!(inspect(&url, &api), Page::Content, "an API's empty 202");
     }
     #[test]
     fn refresh_parsing_survives_multi_byte_content() {

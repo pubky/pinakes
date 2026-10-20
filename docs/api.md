@@ -67,7 +67,11 @@ Such a card is named after its object, not its page: where a TMDB, Trakt, Netfli
 Letterboxd, Open Library, TVmaze or Podcast Index page names its site, another language's title
 or nothing, the name (and, where the page's text is not the object's, the description) comes
 from the object's exact record: the Wikidata item that carries the page's own ID, or the
-service's own record ([media records](sources/media_records.md)).
+service's own record ([media records](sources/media_records.md)). That record is read while the
+page is, within a few seconds; when Wikidata is slower, the card keeps the page's name at first.
+The `titles` source then reads the same item without that limit and, when the card bears another
+name, has the link read again: its card then takes the item's label (and description where the
+page's is not the object's), usually within minutes.
 An IMDb title keeps the type its page gives (it can be either).
 
 ### Card

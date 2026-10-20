@@ -1588,6 +1588,41 @@ async fn pruned_keys_and_facts_change_the_search_revision(pool: PgPool) {
     assert!(revision().await > before);
 }
 
+/// A source that found what changes the card itself (`reread`) makes the resource due again at
+/// once; one that did not leaves its refresh where it was.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_found_title_reads_the_card_again(pool: PgPool) {
+    let named = "https://www.themoviedb.org/tv/1396";
+    let plain = "https://www.themoviedb.org/movie/603";
+    let a = page(&pool, named, "The Movie Database").await;
+    let b = page(&pool, plain, "The Matrix").await;
+    let fake = Fake::new("titles");
+    fake.answer(
+        named,
+        Ok(Found {
+            facts: vec![also_on::Fact::new("title", "Breaking Bad")],
+            reread: true,
+            ..Default::default()
+        }),
+    );
+    fake.answer(plain, Ok(Found::default()));
+    let cx = cx(Config::default());
+    let sources: Vec<Arc<dyn Source>> = vec![fake];
+    drain(&pool, &cx, &sources).await;
+    let due = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>("SELECT next_attempt_at<=now() AND priority_at IS NOT NULL FROM resource WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    assert!(due(a).await, "read again now");
+    assert!(!due(b).await, "left for its refresh");
+}
+
 /// A source that saves the resource's card while it reads it, as a resolve finishing meanwhile.
 struct SavesMeanwhile(PgPool);
 #[async_trait]

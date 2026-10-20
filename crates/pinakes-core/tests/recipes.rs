@@ -461,6 +461,7 @@ async fn fixture(pool: &PgPool) {
                 "isbn:9780140328721",
                 "books",
                 Found {
+                    reread: false,
                     keys: vec![
                         key("openlibrary:edition:OL7353617M", "openlibrary"),
                         key("openlibrary:work:OL45804W", "openlibrary"),
@@ -480,6 +481,7 @@ async fn fixture(pool: &PgPool) {
                 apple,
                 "podcasts",
                 Found {
+                    reread: false,
                     keys: vec![
                         key("podcast:apple:1200361736", "itunes"),
                         key(
@@ -505,6 +507,7 @@ async fn fixture(pool: &PgPool) {
                 imdb,
                 "films",
                 Found {
+                    reread: false,
                     keys: vec![key("imdb:tt0111161", "imdb")],
                     facts: vec![
                         Fact::new("wikidata", "Q172241"),

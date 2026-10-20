@@ -186,6 +186,10 @@ pub fn link_type(uri: &str) -> Option<&'static str> {
 pub struct TypeHints {
     pub episode: bool,
     pub title_type: Option<String>,
+    /// The object's title and description the `titles` source found (a page the hook did not
+    /// name).
+    pub title: Option<String>,
+    pub title_description: Option<String>,
 }
 /// The hints of these resources (live rows only).
 pub async fn type_hints(
@@ -211,6 +215,20 @@ pub async fn type_hints(
     for (id, kind) in types {
         out.entry(id).or_default().title_type = Some(kind);
     }
+    let titles: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT DISTINCT ON (resource_id,name) resource_id,name,value FROM resource_fact WHERE resource_id=ANY($1) AND source='titles' AND name IN ('title','title_description') AND expires_at>now() ORDER BY resource_id,name,value",
+    )
+    .bind(ids)
+    .fetch_all(pool)
+    .await?;
+    for (id, name, value) in titles {
+        let hints = out.entry(id).or_default();
+        if name == "title" {
+            hints.title = Some(value);
+        } else {
+            hints.title_description = Some(value);
+        }
+    }
     Ok(out)
 }
 
@@ -234,6 +252,14 @@ pub fn type_card(uri: &str, hints: &TypeHints, doc: &mut crate::model::ResourceM
     let own = ["Movie", "TVSeries"]
         .into_iter()
         .find(|k| *k == doc.type_name);
+    if let Some(title) = &hints.title {
+        crate::sources::media_records::apply_title(
+            uri,
+            title,
+            hints.title_description.as_deref(),
+            doc,
+        );
+    }
     match link_type(uri) {
         Some("CreativeWork") => doc.set_type(hinted.or(own).unwrap_or("CreativeWork")),
         Some(kind) => doc.set_type(kind),
@@ -410,7 +436,7 @@ mod tests {
         };
         let episode = TypeHints {
             episode: true,
-            title_type: None,
+            ..Default::default()
         };
         assert_eq!(
             typed("https://darknetdiaries.com/episode/180/", episode.clone()),
@@ -424,8 +450,8 @@ mod tests {
             "Article"
         );
         let series = TypeHints {
-            episode: false,
             title_type: Some("TVSeries".into()),
+            ..Default::default()
         };
         assert_eq!(
             typed("https://www.netflix.com/title/70143836", series.clone()),
@@ -470,6 +496,34 @@ mod tests {
             &mut doc,
         );
         assert_eq!(doc.type_name, "TVSeries");
+        // A page the hook did not name takes the title the `titles` source found since.
+        let named = TypeHints {
+            title_type: Some("TVSeries".into()),
+            title: Some("Breaking Bad".into()),
+            title_description: Some("American crime drama television series".into()),
+            ..Default::default()
+        };
+        let mut doc =
+            crate::model::ResourceMeta::new("https://www.themoviedb.org/tv/1396", "jsonld", 60);
+        doc.set_type("WebSite");
+        doc.name = Some("The Movie Database".into());
+        doc.description = Some("Parhaan miespuolisen draamanäyttelijän".into());
+        type_card("https://www.themoviedb.org/tv/1396", &named, &mut doc);
+        assert_eq!(doc.name.as_deref(), Some("Breaking Bad"));
+        assert_eq!(
+            doc.description.as_deref(),
+            Some("American crime drama television series")
+        );
+        assert_eq!(doc.type_name, "TVSeries");
+        // One the hook named keeps the hook's card.
+        let mut hooked = crate::model::ResourceMeta::new(
+            "https://www.themoviedb.org/tv/1396",
+            "media_records",
+            60,
+        );
+        hooked.name = Some("Breaking Bad (series)".into());
+        type_card("https://www.themoviedb.org/tv/1396", &named, &mut hooked);
+        assert_eq!(hooked.name.as_deref(), Some("Breaking Bad (series)"));
     }
 
     #[test]

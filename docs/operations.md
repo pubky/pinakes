@@ -320,8 +320,9 @@ only for calendars, where they commit with the parsed snapshot.
 ## Web pages and access walls
 
 Generic web resolution reads JSON-LD, microformats, OpenGraph, oEmbed and the title, then the
-page hooks of switched-on sources (WordPress and Ghost records a page names on its own origin;
-see [docs/sources](sources/README.md)). Canonical, alternate and oEmbed links come from the
+page hooks of switched-on sources (WordPress and Ghost records a page names on its own origin, a
+media page's object by its exact record; see [docs/sources](sources/README.md)). A hook that
+fails or runs out of its three seconds leaves the page's card and logs its source at debug. Canonical, alternate and oEmbed links come from the
 document head only. Media pages use the pinned 390-provider oEmbed registry (`data/`, with
 SoundCloud, TikTok, Facebook and Instagram skipped; `scripts/oembed-providers` updates it):
 `media.oembed = "when_needed"` (default) asks path-specific providers first and broad patterns
@@ -335,15 +336,18 @@ in `pinakes_discovery_decisions_total{kind,decision}`.
 A challenge page (a bot wall, captcha or sign-in redirect) is a failed fetch: the resource turns
 `unreachable` and is retried with the normal backoff, dead-lettering after
 `limits.max_failures`, unless the site's own feed lists the exact link (the
-[`feed`](sources/feed.md) wall hook, also for plain 401 and 403 answers); then that item is the
-card. Its last accepted document, event dates and feed occurrences stay, and a wall never counts
+[`feed`](sources/feed.md) wall hook, also for plain 401 and 403 answers) or a source's wall hook
+names it (an IMDb title by its Wikidata item, [`media_records`](sources/media_records.md)); then
+that is the card. Its last accepted document, event dates and feed occurrences stay, and a wall never counts
 toward a disappearance. Fetches that hit one count as outcome `blocked` in
 `pinakes_fetch_total`.
 
 The markers are the built-in `data/interstitial-markers.json` (text markers, captcha selectors,
 wall host prefixes, sign-in paths). Visible text excludes `script`, `style`, `noscript` and
 `template`. Title, heading and captcha markers count only on short pages (under 2,000 visible
-bytes) or challenge statuses (403, 429, 503). A redirect of the requested path to a listed
+bytes) or challenge statuses (403, 429, 503). An HTML answer with status 202 that is empty or
+has no visible text is a challenge (AWS WAF answers bots so); an empty 202 of another type is
+content. A redirect of the requested path to a listed
 sign-in path (`/login`, `/authwall`, `/signin`, `/checkpoint`, …) is a wall unless the
 requested path is itself one. A meta refresh without a URL is content; a refresh slower than ten
 seconds is a hop only on a short page that does not refresh itself.
@@ -471,7 +475,7 @@ that is off by default (an unknown ID stops startup). Sources run in a fixed ord
 sees the keys the ones before it found in the same run (a barcode MusicBrainz names, then the
 services looked up by it); a source that no longer applies (its key is gone) drops its rows.
 The sources, in the order they run, are `service`, `musicbrainz`, `wikidata`, `deezer` and
-`itunes` (music), `wikipedia`, `wikidata_item`, `books`, `podcasts` and `films`
+`itunes` (music), `wikipedia`, `wikidata_item`, `books`, `films`, `podcasts` and `titles`
 ([the API](api.md#also-on) says what each reads); `[also_on] apple_storefront` (`us`, a
 two-letter country code) is the Apple Music, Apple Books and Apple Podcasts storefront of the
 Apple links they build. `[also_on.sources.musicbrainz] base_url`
@@ -492,7 +496,9 @@ each episode up to three Podcast Index requests, two iTunes lookups and, for an 
 feed; each page whose head names an RSS feed that feed (cached for an hour, read up to 8 MiB), and
 Podcast Index only when one item of it with audio or video is that page; each film or series two
 Wikidata requests (a TVmaze show first its TVmaze record), and a Letterboxd and a TVmaze request
-when the item has no link there. `deezer` is off by default: Deezer's API terms allow
+when the item has no link there; each TMDB, Trakt, Netflix, Goodreads, Letterboxd or IMDb page
+(`titles`) the item's search and read (usually cached already) and one request for its English
+label. `deezer` is off by default: Deezer's API terms allow
 non-commercial use only, so turn it on
 (`[also_on.sources.deezer] enabled = true`) only where they do; it costs one request per Deezer
 link and up to two per other track or album with an ISRC or barcode.

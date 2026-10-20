@@ -17,6 +17,7 @@ refused request, or an ID no record carries, leaves the page's own card.
 | Netflix `netflix.com/title/{id}` | The item with that Netflix ID (P1874) |
 | Goodreads `goodreads.com/work/editions/{id}` | The item with that Goodreads work ID (P8383) |
 | Letterboxd `letterboxd.com/film/{slug}` | The item with that Letterboxd ID (P6127) |
+| IMDb `imdb.com/title/tt…` (a page with nothing in it) | The item with that IMDb ID (P345) |
 | Open Library `openlibrary.org/works/OL…W`, `/books/OL…M` | Open Library's own record (`{path}.json`) |
 | TVmaze `tvmaze.com/shows/{id}` | TVmaze's record (`api.tvmaze.com/shows/{id}`; CC BY-SA) |
 | Podcast Index `podcastindex.org/podcast/{id}` | The page's own title, without the site's name |
@@ -28,6 +29,12 @@ Walled pages:
   item with that IMDb ID (P345);
 - a Pocket Casts or Castro page of an Apple podcast (`pca.st/itunes/{id}`,
   `castro.fm/itunes/{id}`) gets one from iTunes' record of the show (`itunes.apple.com/lookup`).
+
+When the item's requests do not answer within the hook's time (Wikidata busy or slow), the page
+keeps its own card at first. The also-on source `titles` then reads the same item without a time
+limit, records its English label and description as the facts `title` and `title_description`,
+and when the card bears another name has the link read again: the finished card takes them by
+the same rule as the hook (a card the hook named keeps the hook's).
 
 ## What it reads
 

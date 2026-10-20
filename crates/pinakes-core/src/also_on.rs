@@ -18,6 +18,7 @@ pub mod books;
 pub mod films;
 pub mod media;
 pub mod podcasts;
+pub mod titles;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -126,6 +127,9 @@ pub struct Found {
     pub links: Vec<Link>,
     /// Facts about the object (`isrc`, `upc`, `artist`, …): shown and searchable, never joined.
     pub facts: Vec<Fact>,
+    /// What was found changes the card itself (a media page's title): the resource is read again
+    /// now, and its finished card takes it.
+    pub reread: bool,
 }
 /// A fact a source reads for a resource: a lower-case `name` (`[a-z][a-z0-9_]`, at most 32
 /// bytes) and a printable `value` (at most 512 bytes). Several values of one name are kept.
@@ -229,6 +233,7 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         Arc::new(books::Books),
         Arc::new(films::Films),
         Arc::new(podcasts::Podcasts),
+        Arc::new(titles::Titles),
     ]
 }
 /// The source IDs `[also_on.sources]` may name.
@@ -563,6 +568,7 @@ async fn one(
     let cfg = &cx.config.also_on;
     let mut next: Option<Duration> = None;
     let mut failed = None;
+    let mut reread = false;
     // In registry order: each source sees the keys the ones before it found in this run (a
     // barcode MusicBrainz names, then the services looked up by it).
     for source in sources.iter().filter(|s| cfg.source_enabled(s.as_ref())) {
@@ -582,6 +588,7 @@ async fn one(
         }
         match source.lookup(cx, &subject).await {
             Ok(found) => {
+                reread |= found.reread;
                 record(pool, id, source.id(), found, source.ttl(), cfg)
                     .await
                     .with_context(|| format!("record {}", source.id()))?;
@@ -593,6 +600,12 @@ async fn one(
             }
             Err(error) => failed = Some(error.context(format!("source {}", source.id()))),
         }
+    }
+    if reread {
+        sqlx::query("UPDATE resource SET next_attempt_at=now(),refresh_at=now(),priority_at=coalesce(priority_at,now()) WHERE id=$1 AND NOT final AND NOT dead_letter")
+            .bind(id)
+            .execute(pool)
+            .await?;
     }
     if let Some(error) = failed {
         return Err(error);

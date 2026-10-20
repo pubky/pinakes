@@ -211,7 +211,14 @@ pub async fn wall_hooks(
                 return doc.bounded(attributes()).ok();
             }
             Ok(Ok(None)) => crate::telemetry::discovery("wall_hook", "none"),
-            Ok(Err(_)) | Err(_) => crate::telemetry::discovery("wall_hook", "failed"),
+            Ok(Err(error)) => {
+                tracing::debug!(source = hook.name(), uri, error = %format!("{error:#}"), "wall hook failed");
+                crate::telemetry::discovery("wall_hook", "failed");
+            }
+            Err(_) => {
+                tracing::debug!(source = hook.name(), uri, "wall hook timed out");
+                crate::telemetry::discovery("wall_hook", "failed");
+            }
         }
     }
     None
@@ -266,7 +273,14 @@ pub(crate) async fn page_hooks_with(
                 return improved;
             }
             Ok(Ok(None)) => {}
-            Ok(Err(_)) | Err(_) => crate::telemetry::discovery("page_hook", "failed"),
+            Ok(Err(error)) => {
+                tracing::debug!(source = hook.name(), uri, error = %format!("{error:#}"), "page hook failed");
+                crate::telemetry::discovery("page_hook", "failed");
+            }
+            Err(_) => {
+                tracing::debug!(source = hook.name(), uri, "page hook timed out");
+                crate::telemetry::discovery("page_hook", "failed");
+            }
         }
     }
     doc

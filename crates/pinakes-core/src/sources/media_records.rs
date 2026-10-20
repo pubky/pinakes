@@ -11,7 +11,7 @@ use crate::{
     model::{ResourceMeta, Status},
     resolver::egress::{FetchOptions, Fetched},
 };
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -19,7 +19,7 @@ pub struct MediaRecords;
 
 /// What a page's own text is worth once the record names its object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Text {
+pub enum Text {
     /// The page describes its object: keep its description and image.
     Own,
     /// The page's description is not the object's (another language, an edition list): the
@@ -105,7 +105,11 @@ fn record(uri: &str) -> Option<Record> {
             }
             Record::OpenLibrary(format!("{kind}/{id}"))
         }
-        ("tvmaze.com", ["shows", id, ..]) if digits(id) && s.len() <= 3 => {
+        // The show's own page (`/shows/{id}`, `/shows/{id}/{slug}`), never its episodes, cast or
+        // other sub-pages.
+        ("tvmaze.com", ["shows", id, ..])
+            if digits(id) && s.len() <= 3 && films::exact_page(uri) =>
+        {
             Record::Tvmaze(id.parse().ok()?)
         }
         ("podcastindex.org", ["podcast", id]) if digits(id) && url.query().is_none() => {
@@ -160,23 +164,79 @@ fn json() -> FetchOptions {
     }
 }
 
+/// The Wikidata ID a page's object is found by, and what the page's own text is worth: for the
+/// pages whose record is a Wikidata item (the also-on `titles` source reads the same).
+pub fn wikidata_page(uri: &str) -> Option<(&'static str, String, Text)> {
+    match record(uri) {
+        Some(Record::Wikidata {
+            property,
+            value,
+            text,
+        }) => Some((property, value, text)),
+        _ => None,
+    }
+}
+
 /// The item carrying `property` = `value`, and its English label and description.
-async fn item(
-    cx: &Context<'_>,
+pub async fn item(
+    egress: &crate::resolver::egress::Egress,
     property: &str,
     value: &str,
 ) -> Result<Option<(wikidata::Item, String, Option<String>)>> {
-    let wikidata::Found::One(item) = wikidata::item_with(cx.egress, property, value).await? else {
+    let wikidata::Found::One(item) = wikidata::item_with(egress, property, value).await? else {
         return Ok(None);
     };
-    let f = cx
-        .egress
+    let f = egress
         .discover(&labels_lookup(&item.qid), &json(), 86400)
         .await?;
+    // A busy Wikidata (an HTTP error, or an API error sent with 200) is asked again later, never
+    // taken for "no label".
+    super::retry(&f)?;
     if f.status != 200 {
         return Ok(None);
     }
+    let error = serde_json::from_slice::<Value>(&f.body)
+        .ok()
+        .and_then(|v| v["error"]["code"].as_str().map(str::to_owned));
+    if let Some(code) = error {
+        egress
+            .shorten_discovery(&labels_lookup(&item.qid), &json(), 1)
+            .await?;
+        return Err(crate::resolver::RetryLater {
+            class: "wikidata_busy",
+            seconds: f.retry_after_secs.clamp(60, 3600),
+        })
+        .with_context(|| format!("Wikidata labels: {code}"));
+    }
     Ok(parse_labels(&f.body, &item.qid).map(|(label, description)| (*item, label, description)))
+}
+
+/// A card's name (and, per `text`, its description and image) from its item's label.
+fn titled(doc: &mut ResourceMeta, label: String, description: Option<String>, text: Text) {
+    doc.name = Some(label);
+    if text != Text::Own {
+        doc.description = description;
+    }
+    if text == Text::Shell {
+        doc.image = None;
+    }
+}
+/// A finished card of a Wikidata page that the hook did not name (its request timed out, say)
+/// named from the title the also-on `titles` source found since. Whether it applied.
+pub fn apply_title(
+    uri: &str,
+    title: &str,
+    description: Option<&str>,
+    doc: &mut ResourceMeta,
+) -> bool {
+    let Some((_, _, text)) = wikidata_page(uri) else {
+        return false;
+    };
+    if doc.source == "media_records" || doc.name.as_deref() == Some(title) {
+        return false;
+    }
+    titled(doc, title.to_owned(), description.map(str::to_owned), text);
+    true
 }
 
 /// A page's card named by its Wikidata item: the label, the item as a fact, and for a film or
@@ -189,13 +249,7 @@ fn named_by_item(
     text: Text,
 ) -> ResourceMeta {
     let mut doc = doc.clone();
-    doc.name = Some(label);
-    if text != Text::Own {
-        doc.description = description;
-    }
-    if text == Text::Shell {
-        doc.image = None;
-    }
+    titled(&mut doc, label, description, text);
     if let Some(kind) = films::title_type(item) {
         doc.set_type(kind);
     }
@@ -367,7 +421,7 @@ impl Source for MediaRecords {
                 property,
                 value,
                 text,
-            } => item(cx, property, &value)
+            } => item(cx.egress, property, &value)
                 .await?
                 .map(|(item, label, description)| {
                     named_by_item(doc, &item, label, description, text)
@@ -381,6 +435,7 @@ impl Source for MediaRecords {
                         3600,
                     )
                     .await?;
+                super::retry(&f)?;
                 (f.status == 200)
                     .then(|| named_by_open_library(doc, &path, &f.body))
                     .flatten()
@@ -390,6 +445,7 @@ impl Source for MediaRecords {
                     .egress
                     .discover(&format!("https://api.tvmaze.com/shows/{id}"), &json(), 3600)
                     .await?;
+                super::retry(&f)?;
                 (f.status == 200)
                     .then(|| named_by_tvmaze(doc, id, &f.body))
                     .flatten()
@@ -400,7 +456,7 @@ impl Source for MediaRecords {
     async fn walled(&self, cx: &Context<'_>, uri: &str) -> Result<Option<ResourceMeta>> {
         Ok(match walled(uri) {
             Some(Walled::Imdb(tt)) => {
-                item(cx, "P345", &tt)
+                item(cx.egress, "P345", &tt)
                     .await?
                     .map(|(item, label, description)| {
                         let mut doc = cx.card(uri, self);
@@ -426,6 +482,7 @@ impl Source for MediaRecords {
                         3600,
                     )
                     .await?;
+                super::retry(&f)?;
                 (f.status == 200)
                     .then(|| itunes_card(cx, uri, show, &f.body))
                     .flatten()
@@ -512,6 +569,16 @@ mod tests {
             ),
             ("https://openlibrary.org/authors/OL26320A", None),
             ("https://www.goodreads.com/book/show/5907", None),
+            (
+                "https://www.tvmaze.com/shows/169",
+                Some(Record::Tvmaze(169)),
+            ),
+            ("https://www.tvmaze.com/shows/169/episodes", None),
+            ("https://www.tvmaze.com/shows/169/cast", None),
+            (
+                "https://www.tvmaze.com/shows/169/breaking-bad/seasons",
+                None,
+            ),
             (
                 "https://www.imdb.com/title/tt0133093/",
                 wd("P345", "tt0133093", Text::Record),
