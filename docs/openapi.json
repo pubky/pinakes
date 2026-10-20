@@ -1087,7 +1087,7 @@
             ]
           },
           "uri": {
-            "description": "Its page: the occurrence's URL, or the feed's or event's link.",
+            "description": "Its page: the occurrence's own page, or the feed's or event's link (for a feed read from a\nservice's API, that service's page).",
             "type": "string"
           }
         },

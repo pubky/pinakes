@@ -670,6 +670,28 @@ async fn an_event_that_becomes_an_alias_leaves_the_hint(pool: PgPool) {
     assert_eq!(named(&card(&pool, &c).await), [a.as_str()]);
 }
 
+#[test]
+fn an_api_feed_is_named_by_a_page_a_person_can_open() {
+    use pinakes_core::event::adapters::cursor::human_page;
+    for (feed, page) in [
+        (
+            "https://portal.einundzwanzig.space/api/changes",
+            Some("https://portal.einundzwanzig.space/"),
+        ),
+        (
+            "https://api.btcmap.org/v4/events",
+            Some("https://btcmap.org/"),
+        ),
+        (
+            "https://www.googleapis.com/calendar/v3/calendars/a%40group.calendar.google.com/events",
+            Some("https://calendar.google.com/calendar/embed?src=a%40group.calendar.google.com"),
+        ),
+        ("https://example.org/meetups.ics", None),
+    ] {
+        assert_eq!(human_page(feed).as_deref(), page, "{feed}");
+    }
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn events_stored_before_the_hint_are_read_at_once(pool: PgPool) {
     let start = soon();

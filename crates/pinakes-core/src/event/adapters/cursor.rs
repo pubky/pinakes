@@ -27,6 +27,27 @@ pub fn canonical_root(uri: &str) -> Option<String> {
     }
 }
 
+/// The page a person opens for a cursor feed's API root (`canonical_root`): the service's own
+/// calendar page or home, never the API endpoint itself.
+pub fn human_page(uri: &str) -> Option<String> {
+    let u = Url::parse(uri).ok()?;
+    match (u.host_str()?, u.path()) {
+        ("api.btcmap.org", "/v4/events") => Some("https://btcmap.org/".into()),
+        ("portal.einundzwanzig.space", path) if path.starts_with("/api/") => {
+            Some("https://portal.einundzwanzig.space/".into())
+        }
+        ("www.googleapis.com", path) => {
+            let id = path
+                .strip_prefix("/calendar/v3/calendars/")?
+                .strip_suffix("/events")?;
+            Some(format!(
+                "https://calendar.google.com/calendar/embed?src={id}"
+            ))
+        }
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Checkpoint {
     pub source: String,
@@ -69,6 +90,21 @@ pub fn rows(v: &Value) -> Option<&Vec<Value>> {
             .iter()
             .find_map(|k| v[*k].as_array())
     })
+}
+/// `{meetup's portal page}/event/{id}` for a portal row.
+fn portal_page(v: &Value) -> Option<String> {
+    let link = v["meetup.portalLink"]
+        .as_str()
+        .or_else(|| v.pointer("/meetup/portalLink").and_then(Value::as_str))?;
+    let u = Url::parse(link).ok()?;
+    let id = v["id"].as_u64()?;
+    let meetup = matches!(u.path_segments()?.collect::<Vec<_>>().as_slice(), [_, "meetup", slug] if !slug.is_empty());
+    (u.scheme() == "https"
+        && u.host_str() == Some("portal.einundzwanzig.space")
+        && meetup
+        && u.query().is_none()
+        && u.fragment().is_none())
+    .then(|| format!("{}/event/{id}", link.trim_end_matches('/')))
 }
 fn uid(v: &Value) -> Option<String> {
     v["id"]
@@ -166,6 +202,14 @@ fn append_row(doc: &mut ResourceMeta, adapter: &str, v: &Value) -> Result<()> {
         if let Ok(t) = super::nostr::Target::coordinate(a) {
             event.aliases.push(t.uri()?);
         }
+    }
+    // A portal event's own page, which a person can open: not the API row, and not the meetup's
+    // site (`link`), which every event of the meetup names.
+    if let Some(page) = (adapter == "einundzwanzig")
+        .then(|| portal_page(v))
+        .flatten()
+    {
+        event.url = page;
     }
     crate::event::page::finalize(&mut event, true);
     let at = event.start.context("missing start")?;

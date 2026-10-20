@@ -614,7 +614,8 @@ One meetup is often listed on several sites (Meetup, Luma, its organiser's page)
 share no identifier, so they never [group](#groups). Instead an event's card names other events
 that are possibly the same one, in `maybe_same`: `{id, uri, site, start, score}`, best first, up
 to three on a card and ten in its `details`. An entry is an event resource, or one occurrence of
-a feed (`id` is then the feed's ID and `uri` the occurrence's URL, else the feed's).
+a feed (`id` is then the feed's ID and `uri` the occurrence's own page, else the feed's; a feed
+read from a service's API is named by that service's page, never the API endpoint).
 
 Two events are possibly the same when all of these hold:
 

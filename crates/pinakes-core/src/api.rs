@@ -553,7 +553,8 @@ pub struct Card {
 pub struct SameEvent {
     /// Its card's ID (a feed's, for an occurrence).
     pub id: String,
-    /// Its page: the occurrence's URL, or the feed's or event's link.
+    /// Its page: the occurrence's own page, or the feed's or event's link (for a feed read from a
+    /// service's API, that service's page).
     pub uri: String,
     pub site: Option<String>,
     pub start: Option<DateTime<Utc>>,
@@ -840,7 +841,11 @@ fn same_events(row: &Value) -> Option<Vec<SameEvent>> {
         entries
             .iter()
             .map(|m| {
-                let uri = m["uri"].as_str().unwrap_or_default().to_owned();
+                // An occurrence without a page of its own names its feed: a person's page for it,
+                // never an API endpoint.
+                let uri = m["uri"].as_str().unwrap_or_default();
+                let uri = crate::event::adapters::cursor::human_page(uri)
+                    .unwrap_or_else(|| uri.to_owned());
                 SameEvent {
                     id: m["id"].as_str().unwrap_or_default().into(),
                     site: site(&uri, m["site"].as_str(), m["host"].as_str()),
