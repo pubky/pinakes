@@ -149,4 +149,5 @@ fail without them, and a bare `cargo test` skips that check with a message.
   revision, row).
   The `write_load` test runs eight writers and an ingest (tags added and removed) against one
   database and fails if one waits on the search revision or deadlocks; `WRITE_LOAD_ROUNDS`
-  (default 15) scales it.
+  (default 15) scales it. The `daemon` test runs the `pinakesd` binary on a database of its
+  own: it saves a resolved link while it holds the instance lock, then a re-extraction returns.
