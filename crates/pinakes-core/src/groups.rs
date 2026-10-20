@@ -957,7 +957,21 @@ async fn fence(
     tx: &mut Transaction<'_, Postgres>,
     revisions: &BTreeMap<String, Option<i64>>,
 ) -> Result<()> {
-    crate::store::lock_writers(tx, crate::store::WriteOrder::Shared).await?;
+    // An exclusive writer (the hourly orphan cleanup, a re-extraction) may hold the write order
+    // for a whole batch, past the run's statement timeout: that is contention too.
+    crate::store::lock_writers(tx, crate::store::WriteOrder::Shared)
+        .await
+        .map_err(|e| {
+            let timed_out = e
+                .downcast_ref::<sqlx::Error>()
+                .and_then(|e| e.as_database_error())
+                .is_some_and(|d| d.code().as_deref() == Some("57014"));
+            if timed_out {
+                anyhow::Error::new(LockBusy)
+            } else {
+                e
+            }
+        })?;
     sqlx::query("SELECT 1 FROM resource WHERE id=ANY($1) ORDER BY id FOR SHARE NOWAIT")
         .bind(revisions.keys().collect::<Vec<_>>())
         .execute(&mut **tx)
