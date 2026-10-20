@@ -477,7 +477,7 @@ mod tests {
             Some(Film::Netflix("70143836".into()))
         );
         for uri in [
-            // Trakt's IDs are paths, which the Wikidata search does not take: typed only.
+            // A Trakt link is typed, not looked up; it joins as one of a title's links.
             "https://trakt.tv/shows/breaking-bad",
             "https://www.netflix.com/browse",
             "https://www.imdb.com/name/nm0000151/",

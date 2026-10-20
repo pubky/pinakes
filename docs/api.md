@@ -891,8 +891,8 @@ Letterboxd film, a TVmaze show or a Netflix title is looked up exactly, never by
 - Every link of a title with an IMDb ID carries `imdb:{tt…}`, so a tagged Netflix, Trakt or
   Letterboxd link joins the title.
 
-A title never lists its own service. A Trakt link is typed but not looked up: Trakt's IDs are
-paths, which the Wikidata search does not take. It joins as one of a title's links.
+A title never lists its own service. A Trakt link is typed (a `Movie` or a `TVSeries`) but not
+looked up itself; it joins as one of a title's links, by the title's IMDb ID.
 
 The level is exact: a track lists tracks and videos of the recording, an album lists albums and
 YouTube's album playlists, an artist lists artist pages and channels. Album links group by
