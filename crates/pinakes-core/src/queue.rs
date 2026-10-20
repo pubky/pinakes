@@ -59,27 +59,68 @@ pub async fn claim_sources(
 /// re-extracts instead of answering 304 or reading the cache. A row entering or leaving the OSM
 /// route swaps its identity envelope and becomes pending, as does an OSM-host URL moving to web
 /// (which may hold no facts there); other rows keep their document until the fetch replaces it.
-/// Leases are fenced by the generation bump. The daemon must not be running (the caller holds
-/// the instance lock).
-/// `reextract`'s arguments: `all` or route and card-kind names.
+/// Leases are fenced by the generation bump. The re-queued rows' also-on lookups are queued too:
+/// a card that comes back unchanged would not run them, and their results may predate a source
+/// or a key the upgrade added. `also-on` queues every resource's also-on lookups, without a
+/// fetch. The daemon must not be running (the caller holds the instance lock).
+/// `reextract`'s arguments: `all`, `also-on`, or route and card-kind names.
 pub fn check_routes(routes: &[String]) -> Result<()> {
-    anyhow::ensure!(!routes.is_empty(), "reextract needs a route or `all`");
+    anyhow::ensure!(
+        !routes.is_empty(),
+        "reextract needs a route, `all` or `also-on`"
+    );
     let known: Vec<&str> = crate::resolver::ROUTES
         .iter()
         .chain(crate::resolver::cards::KINDS.iter())
         .copied()
         .collect();
-    for route in routes.iter().filter(|r| *r != "all") {
+    for route in routes.iter().filter(|r| *r != "all" && *r != "also-on") {
         anyhow::ensure!(
             known.contains(&route.as_str()),
-            "unknown route {route}; routes are {} or all",
+            "unknown route {route}; routes are {}, all or also-on",
             known.join(", ")
         );
     }
     Ok(())
 }
+/// Queue these resources' also-on lookups now (a fresh run of every source).
+async fn queue_also_on(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ids: &[String],
+) -> Result<()> {
+    sqlx::query("INSERT INTO also_on_dirty(resource_id) SELECT unnest($1::text[]) ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=now(),attempts=0,last_error=NULL")
+        .bind(ids)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
 pub async fn reextract(pool: &PgPool, routes: &[String]) -> Result<u64> {
     check_routes(routes)?;
+    if routes.iter().any(|r| r == "also-on") {
+        // Every resource but an alias (whose root holds its results), in batches of 1000.
+        let mut last = String::new();
+        let mut queued = 0;
+        loop {
+            let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM resource r WHERE id>$1 AND NOT EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id) ORDER BY id LIMIT 1000")
+                .bind(&last)
+                .fetch_all(pool)
+                .await?;
+            let Some(end) = ids.last().cloned() else {
+                break;
+            };
+            let mut tx = pool.begin().await?;
+            queue_also_on(&mut tx, &ids).await?;
+            tx.commit().await?;
+            queued += ids.len() as u64;
+            last = end;
+        }
+        let rest: Vec<String> = routes.iter().filter(|r| *r != "also-on").cloned().collect();
+        return Ok(if rest.is_empty() {
+            queued
+        } else {
+            Box::pin(reextract(pool, &rest)).await?
+        });
+    }
     let all = routes.iter().any(|r| r == "all");
     let (mut last, mut total) = (String::new(), 0u64);
     loop {
@@ -178,6 +219,7 @@ pub async fn reextract(pool: &PgPool, routes: &[String]) -> Result<u64> {
                 lease_until=NULL,priority_at=NULL,generation=r.generation+1,next_attempt_at=now()
                 FROM v WHERE r.id=v.id"#)
                 .bind(&ids).bind(&new_routes).bind(&types).bind(&osm_ids).execute(&mut *tx).await?.rows_affected();
+            queue_also_on(&mut tx, &ids).await?;
             tx.commit().await?;
         }
         last = end;
