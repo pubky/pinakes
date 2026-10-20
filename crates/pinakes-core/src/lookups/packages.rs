@@ -173,7 +173,9 @@ impl Repo {
         (depth_ok
             && parts.iter().all(|p| {
                 plain(p, 100, |c| c.is_ascii_alphanumeric() || "-_.".contains(c))
-                    && !matches!(*p, "." | "..")
+                    // `-` starts GitLab's pages under a project (`group/project/-/issues/12`):
+                    // such a page is not the repository.
+                    && !matches!(*p, "." | ".." | "-")
             }))
         .then(|| Self {
             host,
@@ -455,25 +457,47 @@ pub fn parse_pypi_provenance(status: u16, raw: &[u8]) -> Result<Option<Repo>> {
 
 /// deps.dev's record of one release.
 pub fn depsdev_request(package: &Package, version: &str) -> Option<Request> {
-    let system = match package.registry {
-        Registry::Crates => "cargo",
-        Registry::Npm => "npm",
-        Registry::PyPI => "pypi",
-    };
     Request::get(&format!(
-        "https://api.deps.dev/v3/systems/{system}/packages/{}/versions/{}",
+        "https://api.deps.dev/v3/systems/{}/packages/{}/versions/{}",
+        depsdev_system(package.registry),
         encode(&package.name),
         encode(version)
     ))
 }
+fn depsdev_system(registry: Registry) -> &'static str {
+    match registry {
+        Registry::Crates => "cargo",
+        Registry::Npm => "npm",
+        Registry::PyPI => "pypi",
+    }
+}
 
 /// The source repository deps.dev links through a verified SLSA attestation, when there is
-/// exactly one.
-pub fn parse_depsdev(status: u16, raw: &[u8]) -> Result<Option<Repo>> {
+/// exactly one, from its answer for exactly this package and version.
+pub fn parse_depsdev(
+    status: u16,
+    raw: &[u8],
+    package: &Package,
+    version: &str,
+) -> Result<Option<Repo>> {
     let Some(raw) = body(status, raw, &[404])? else {
         return Ok(None);
     };
     let response: Value = serde_json::from_slice(raw)?;
+    let answered = &response["versionKey"];
+    let same = answered["system"]
+        .as_str()
+        .is_some_and(|s| s.eq_ignore_ascii_case(depsdev_system(package.registry)))
+        && answered["name"].as_str().is_some_and(|name| {
+            Package {
+                registry: package.registry,
+                name: name.to_owned(),
+            }
+            .key()
+                == package.key()
+        })
+        && answered["version"] == version;
+    anyhow::ensure!(same, "deps.dev answered for another package or version");
     let mut repos: Vec<Repo> = response["relatedProjects"]
         .as_array()
         .into_iter()
@@ -491,6 +515,17 @@ pub fn parse_depsdev(status: u16, raw: &[u8]) -> Result<Option<Repo>> {
         [one] => Some(one.clone()),
         _ => None,
     })
+}
+
+/// The repository the provenance of a release's files names, when they agree: files that name
+/// two repositories name none.
+pub fn one_repository(mut named: Vec<Repo>) -> Option<Repo> {
+    named.sort_by_key(Repo::key);
+    named.dedup();
+    match named.as_slice() {
+        [one] => Some(one.clone()),
+        _ => None,
+    }
 }
 
 /// Whether Software Heritage archives a repository.
@@ -745,15 +780,44 @@ mod tests {
                 .as_str()
                 .contains("/packages/%40sigstore%2Fsign/")
         );
-        let repo = parse_depsdev(200, &fixture::read("depsdev-npm-semver.json"))
-            .unwrap()
-            .unwrap();
+        let semver = fixture::read("depsdev-npm-semver.json");
+        let npm = pkg(Registry::Npm, "semver");
+        let repo = parse_depsdev(200, &semver, &npm, "7.8.5").unwrap().unwrap();
         assert_eq!(repo.url(), "https://github.com/npm/node-semver");
+        // Only the answer for the package and version asked counts.
+        assert!(parse_depsdev(200, &semver, &npm, "7.8.4").is_err());
+        assert!(parse_depsdev(200, &semver, &pkg(Registry::Npm, "semver2"), "7.8.5").is_err());
+        assert!(parse_depsdev(200, &semver, &pkg(Registry::PyPI, "semver"), "7.8.5").is_err());
         // rand's repository is unverified metadata there.
         assert_eq!(
-            parse_depsdev(200, &fixture::read("depsdev-cargo-rand.json")).unwrap(),
+            parse_depsdev(
+                200,
+                &fixture::read("depsdev-cargo-rand.json"),
+                &pkg(Registry::Crates, "rand"),
+                "0.10.3"
+            )
+            .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn a_page_under_a_gitlab_project_is_not_its_repository() {
+        assert_eq!(Repo::new("gitlab.com", "group/project/-/issues/12"), None);
+        assert_eq!(Repo::new("gitlab.com", "group/sub/project/-"), None);
+        assert!(Repo::new("gitlab.com", "group/sub/project").is_some());
+        assert!(Repo::new("gitlab.com", "group/my-project").is_some());
+    }
+
+    #[test]
+    fn files_that_name_two_repositories_name_none() {
+        let repo = |path: &str| Repo::new("github.com", path).unwrap();
+        assert_eq!(one_repository(vec![]), None);
+        assert_eq!(
+            one_repository(vec![repo("a/b"), repo("a/b")]),
+            Some(repo("a/b"))
+        );
+        assert_eq!(one_repository(vec![repo("a/b"), repo("a/c")]), None);
     }
 
     #[test]

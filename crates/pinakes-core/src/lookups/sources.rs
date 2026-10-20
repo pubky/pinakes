@@ -627,7 +627,7 @@ impl Packages {
             return Ok(None);
         };
         let f = send(cx, &request, "depsdev_busy").await?;
-        super::packages::parse_depsdev(f.status, &f.body)
+        super::packages::parse_depsdev(f.status, &f.body, package, version)
     }
 }
 #[async_trait]
@@ -691,18 +691,17 @@ impl Source for Packages {
                 match p::parse_pypi(f.status, &f.body, &package)? {
                     None => None,
                     Some(latest) => {
-                        let mut repository = None;
-                        // The first file with provenance names the publisher.
+                        // The files' provenance names the publisher; files that name two
+                        // repositories name none.
+                        let mut named = vec![];
                         for file in latest.files.iter().take(2) {
                             let Some(request) = p::pypi_provenance_request(&latest, file) else {
                                 continue;
                             };
                             let f = send(cx, &request, "pypi_busy").await?;
-                            if let Some(repo) = p::parse_pypi_provenance(f.status, &f.body)? {
-                                repository = Some(repo);
-                                break;
-                            }
+                            named.extend(p::parse_pypi_provenance(f.status, &f.body)?);
                         }
+                        let repository = p::one_repository(named);
                         Some(p::Release {
                             package: latest.package.clone(),
                             version: latest.version,
