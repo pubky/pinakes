@@ -19,7 +19,7 @@ use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tokio::sync::watch;
 
@@ -377,8 +377,10 @@ pub async fn record(
     let expires = Utc::now()
         + chrono::Duration::from_std(ttl.saturating_mul(2)).unwrap_or(chrono::Duration::days(60));
     let mut tx = pool.begin().await?;
-    // The resource rows this run's triggers update (its own, and those its keyed links name, now
-    // and before), locked first and in ID order, so two runs naming each other never deadlock.
+    // The write order first, then the resource rows this run's triggers update (its own, and
+    // those its keyed links name, now and before) in ID order, so neither a save nor two runs
+    // naming each other deadlock.
+    lock_writers(&mut tx).await?;
     let named: Vec<&str> = std::iter::once(resource_id)
         .chain(
             links
@@ -423,10 +425,19 @@ pub async fn record(
     Ok(())
 }
 
+/// The write order (`store::lock_writers`) shared, as saves take it, and the alias lock: a run
+/// locks rows of several resources in an order of its own (ID order), which a shared writer may
+/// meet the other way round.
+async fn lock_writers(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+    crate::store::lock_writers(tx, crate::store::WriteOrder::Shared).await?;
+    crate::alias::lock(tx).await
+}
+
 /// Delete keys and links nobody refreshed in time (their deletion regroups as a change would).
 pub async fn prune(pool: &PgPool) -> Result<u64> {
-    // Each deletion locks the resource rows its triggers update first, in ID order (`record`).
+    // Each deletion takes the write order, then locks what its triggers update, as `record` does.
     let mut tx = pool.begin().await?;
+    lock_writers(&mut tx).await?;
     sqlx::query("SELECT 1 FROM resource WHERE id IN (SELECT resource_id FROM resource_key WHERE expires_at<=now()) ORDER BY id FOR NO KEY UPDATE")
         .execute(&mut *tx)
         .await?;
@@ -436,6 +447,7 @@ pub async fn prune(pool: &PgPool) -> Result<u64> {
         .rows_affected();
     tx.commit().await?;
     let mut tx = pool.begin().await?;
+    lock_writers(&mut tx).await?;
     sqlx::query("SELECT 1 FROM resource WHERE id IN (SELECT link_id FROM derived_link WHERE expires_at<=now() AND key IS NOT NULL) ORDER BY id FOR NO KEY UPDATE")
         .execute(&mut *tx)
         .await?;
@@ -543,11 +555,16 @@ async fn one(
     for source in sources.iter().filter(|s| cfg.source_enabled(s.as_ref())) {
         if !source.applies(&subject) {
             // It read the resource before (a key it starts from is gone): its rows go too.
-            sqlx::query("WITH k AS (DELETE FROM resource_key WHERE resource_id=$1 AND source=$2), l AS (DELETE FROM derived_link WHERE resource_id=$1 AND source=$2) DELETE FROM resource_fact WHERE resource_id=$1 AND source=$2")
+            let had: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource_key WHERE resource_id=$1 AND source=$2) OR EXISTS(SELECT 1 FROM derived_link WHERE resource_id=$1 AND source=$2) OR EXISTS(SELECT 1 FROM resource_fact WHERE resource_id=$1 AND source=$2)")
                 .bind(id)
                 .bind(source.id())
-                .execute(pool)
+                .fetch_one(pool)
                 .await?;
+            if had {
+                record(pool, id, source.id(), Found::default(), source.ttl(), cfg)
+                    .await
+                    .with_context(|| format!("clear {}", source.id()))?;
+            }
             continue;
         }
         match source.lookup(cx, &subject).await {

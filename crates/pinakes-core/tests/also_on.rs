@@ -1384,3 +1384,140 @@ async fn a_card_shows_no_other_page_of_its_own_service(pool: PgPool) {
     assert_eq!(uris(&read["also_on"]), [spotify], "{read}");
     assert_eq!(uris(&read["details"]["also_on"]), [earlier, spotify]);
 }
+
+/// A run takes the write order before the resource rows, as saves do: a save holding its
+/// resource never deadlocks with a run recording it, and an exclusive writer (a re-extraction)
+/// runs alone.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_run_takes_the_write_order_as_saves_do(pool: PgPool) {
+    let id = page(&pool, "https://open.spotify.com/track/lock", "Track").await;
+    let run = |pool: PgPool, id: String| {
+        tokio::spawn(async move {
+            let found = Found {
+                keys: vec![key("wikidata:Q1")],
+                links: vec![Link::new("https://www.deezer.com/track/1", "Deezer", "x")],
+                ..Default::default()
+            };
+            also_on::record(
+                &pool,
+                &id,
+                "music",
+                found,
+                Duration::from_secs(60),
+                &Config::default().also_on,
+            )
+            .await
+        })
+    };
+    // A save's order: the write order shared, then its resource.
+    let mut save = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
+        .bind(pinakes_core::locks::WRITE_ORDER)
+        .execute(&mut *save)
+        .await
+        .unwrap();
+    sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR NO KEY UPDATE")
+        .bind(&id)
+        .execute(&mut *save)
+        .await
+        .unwrap();
+    let recording = run(pool.clone(), id.clone());
+    // Long enough for the run to reach the resource's row.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    sqlx::query("UPDATE resource SET doc=jsonb_set(doc,'{fetched_at}','1') WHERE id=$1")
+        .bind(&id)
+        .execute(&mut *save)
+        .await
+        .unwrap();
+    save.commit().await.unwrap();
+    recording
+        .await
+        .unwrap()
+        .expect("the run records after the save");
+    // An exclusive writer holds the write order: the run waits for it.
+    let mut exclusive = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(pinakes_core::locks::WRITE_ORDER)
+        .execute(&mut *exclusive)
+        .await
+        .unwrap();
+    let recording = run(pool.clone(), id.clone());
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !recording.is_finished(),
+        "the run waits for the exclusive writer"
+    );
+    exclusive.commit().await.unwrap();
+    recording.await.unwrap().unwrap();
+    let keys: i64 = sqlx::query_scalar("SELECT count(*) FROM resource_key WHERE resource_id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(keys, 1);
+}
+
+/// A run locks its resource and the ones its keyed links name in ID order; an ingested batch,
+/// holding the write order shared and the alias lock, locks its lines in feed order, the other
+/// way round. The run takes the alias lock too, so it waits for the batch instead of deadlocking.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_run_naming_another_resource_waits_for_an_ingested_batch(pool: PgPool) {
+    let mut pages = vec![];
+    for uri in [
+        "https://open.spotify.com/track/order-a",
+        "https://www.deezer.com/track/12345",
+    ] {
+        pages.push((page(&pool, uri, "Track").await, uri));
+    }
+    pages.sort();
+    // The run is for the lower ID, and its keyed link names the higher.
+    let ((a, _), (b, b_uri)) = (pages[0].clone(), pages[1].clone());
+    let mut batch = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock_shared($1), pg_advisory_xact_lock($2)")
+        .bind(pinakes_core::locks::WRITE_ORDER)
+        .bind(pinakes_core::locks::ALIAS)
+        .execute(&mut *batch)
+        .await
+        .unwrap();
+    sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR NO KEY UPDATE")
+        .bind(&b)
+        .execute(&mut *batch)
+        .await
+        .unwrap();
+    let run = tokio::spawn({
+        let (pool, a) = (pool.clone(), a.clone());
+        async move {
+            let found = Found {
+                keys: vec![key("wikidata:Q1")],
+                links: vec![Link::new(b_uri, "Deezer", "x").keyed("wikidata:Q1")],
+                ..Default::default()
+            };
+            also_on::record(
+                &pool,
+                &a,
+                "music",
+                found,
+                Duration::from_secs(60),
+                &Config::default().also_on,
+            )
+            .await
+        }
+    });
+    // Long enough for the run to reach its first lock.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR NO KEY UPDATE")
+        .bind(&a)
+        .execute(&mut *batch)
+        .await
+        .expect("the batch takes its second line");
+    batch.commit().await.unwrap();
+    run.await.unwrap().expect("the run records after the batch");
+    let named: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM derived_link WHERE resource_id=$1 AND link_id=$2")
+            .bind(&a)
+            .bind(&b)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(named, 1);
+}
