@@ -322,6 +322,20 @@ impl Source for WikidataItemSource {
     fn applies(&self, subject: &Subject) -> bool {
         wikidata::item_link(&subject.uri).is_some()
     }
+    async fn prefetch(&self, cx: &Context, uris: &[String]) {
+        let qids: Vec<String> = uris
+            .iter()
+            .filter_map(|u| wikidata::item_link(u))
+            .map(|(qid, _)| qid)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if qids.len() > 1 {
+            if let Err(error) = wikidata::prefetch_items(&cx.egress, &qids).await {
+                tracing::debug!(error = %format!("{error:#}"), "batched Wikidata read failed; items read alone");
+            }
+        }
+    }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
         let Some((qid, _)) = wikidata::item_link(&subject.uri) else {
             return Ok(Found::default());

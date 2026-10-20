@@ -468,12 +468,14 @@ storefront of the Apple links they build. `[also_on.sources.musicbrainz] base_ur
 (`https://musicbrainz.org/ws/2`) points the `musicbrainz` source at a MusicBrainz mirror's web
 service instead, an http(s) URL without a trailing slash and reached through the egress policy;
 every instance on one public address shares MusicBrainz's 1 request/s, which a mirror does not
-limit. Each music link costs two MusicBrainz requests (the URL, then the entity; up to five when
-the URL names several releases; one more for a track found by its ISRC, and one for a track's
-original album), up to two iTunes
-lookups for an album with barcodes, and two Wikidata requests;
-each Wikipedia article one request to its Wikipedia and one to Wikidata, each Wikidata item link
-one request to Wikidata. `deezer` is off by default: Deezer's API terms allow non-commercial use
+limit. The worker takes up to 100 due resources at a time and asks MusicBrainz about their links'
+URLs together (50 to a request; MusicBrainz echoes each URL, and an answer applies only to the
+URL it names) and Wikidata for their item links' items together (10 to a request). Each music
+link then costs one MusicBrainz request for its entity (up to four when the URL names several
+releases; one more for a track found by its ISRC, and one for a track's original album), up to
+two iTunes lookups for an album with barcodes, and two Wikidata requests (a search by its
+service ID cannot batch); each Wikipedia article one request to its Wikipedia and one to
+Wikidata. `deezer` is off by default: Deezer's API terms allow non-commercial use
 only, so turn it on (`[also_on.sources.deezer] enabled = true`) only where they do; it costs one
 request per Deezer link and up to two per other track or album with an ISRC or barcode.
 

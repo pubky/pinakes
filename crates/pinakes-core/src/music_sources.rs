@@ -118,6 +118,22 @@ impl Source for MusicBrainzSource {
     fn applies(&self, subject: &Subject) -> bool {
         music::parse(&subject.uri).is_some_and(|l| join_level(&l).is_some())
     }
+    async fn prefetch(&self, cx: &Context, uris: &[String]) {
+        let links: Vec<String> = uris
+            .iter()
+            .filter_map(|u| music::parse(u))
+            .filter(|l| join_level(l).is_some())
+            .map(|l| l.canonical)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if links.len() > 1 {
+            let base = cx.config.also_on.musicbrainz_base();
+            if let Err(error) = musicbrainz::prefetch_urls(&cx.egress, base, &links).await {
+                tracing::debug!(error = %format!("{error:#}"), "batched MusicBrainz lookup failed; links ask alone");
+            }
+        }
+    }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
         let Some(link) = music::parse(&subject.uri) else {
             return Ok(Found::default());

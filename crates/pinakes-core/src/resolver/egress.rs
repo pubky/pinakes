@@ -548,6 +548,20 @@ impl Egress {
         }
         Ok(key)
     }
+    /// Put an answer in the discovery cache as the answer to `uri` (when it holds none): a batched
+    /// request's answer for one of the URLs it covered, so that URL's own lookup asks nothing.
+    pub async fn seed(
+        &self,
+        uri: &str,
+        options: &FetchOptions,
+        ttl: u64,
+        fetched: Fetched,
+    ) -> Result<()> {
+        let key = Self::discovery_key(uri, options)?;
+        self.cached(key, ttl, std::future::ready(Ok(fetched)))
+            .await
+            .map(|_| ())
+    }
     /// A successful HTTP response can still contain a transient application error.
     /// Shorten only its existing cache entry, without extending older expiration times.
     pub async fn shorten_discovery(

@@ -36,6 +36,22 @@ fn fixture(name: &str) -> Vec<u8> {
     ))
     .unwrap()
 }
+/// MusicBrainz's answer to one URL lookup.
+fn mb_url(resource: &str) -> (u16, Vec<u8>) {
+    match resource {
+        "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq" => {
+            (200, fixture("mb-url-spotify-track.json"))
+        }
+        "https://busy.example/x" => (503, fixture("mb-503.json")),
+        "https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE" => {
+            (200, fixture("mb-url-spotify-album.json"))
+        }
+        "https://tidal.com/track/567396540" => (200, fixture("mb-url-tidal-567396540.json")),
+        // Dracula: two releases ("Dracula", "Dracula (remix)") of one release group.
+        "https://tidal.com/album/495402659" => (200, fixture("mb-url-tidal-495402659.json")),
+        _ => (404, fixture("mb-url-unknown.json")),
+    }
+}
 #[async_trait::async_trait]
 impl Transport for Recorded {
     async fn get(&self, url: &url::Url, addresses: &[SocketAddr]) -> anyhow::Result<Fetched> {
@@ -70,23 +86,22 @@ impl Transport for Recorded {
                 .unwrap_or_default()
         };
         let (status, body) = match url.path() {
-            "/ws/2/url" => match query("resource").as_str() {
-                "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq" => {
-                    (200, fixture("mb-url-spotify-track.json"))
-                }
-                "https://busy.example/x" => (503, fixture("mb-503.json")),
-                "https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE" => {
-                    (200, fixture("mb-url-spotify-album.json"))
-                }
-                "https://tidal.com/track/567396540" => {
-                    (200, fixture("mb-url-tidal-567396540.json"))
-                }
-                // Dracula: two releases ("Dracula", "Dracula (remix)") of one release group.
-                "https://tidal.com/album/495402659" => {
-                    (200, fixture("mb-url-tidal-495402659.json"))
-                }
-                _ => (404, fixture("mb-url-unknown.json")),
-            },
+            // A batch (several `resource`s): MusicBrainz's `urls` list of the links it knows,
+            // each as its single lookup answers.
+            "/ws/2/url" if url.query_pairs().filter(|(k, _)| k == "resource").count() > 1 => {
+                let urls: Vec<serde_json::Value> = url
+                    .query_pairs()
+                    .filter(|(k, _)| k == "resource")
+                    .filter_map(|(_, r)| match mb_url(&r) {
+                        (200, body) => serde_json::from_slice(&body).ok(),
+                        _ => None,
+                    })
+                    .collect();
+                let body =
+                    serde_json::json!({"url-offset": 0, "url-count": urls.len(), "urls": urls});
+                (200, serde_json::to_vec(&body).unwrap())
+            }
+            "/ws/2/url" => mb_url(&query("resource")),
             "/ws/2/recording/9f9cf187-d6f9-437f-9d98-d59cdbd52757" => {
                 (200, fixture("mb-recording.json"))
             }
@@ -803,6 +818,11 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
         "{links:?}"
     );
     let seen = t.seen.lock().unwrap().clone();
+    // The four music links' URL lookups: one batched request, then each from the cache (the
+    // unknown links' 404s too).
+    let lookups: Vec<&String> = seen.iter().filter(|s| s.contains("/ws/2/url?")).collect();
+    assert_eq!(lookups.len(), 1, "{lookups:?}");
+    assert_eq!(lookups[0].matches("resource=").count(), 4, "{lookups:?}");
     assert!(
         seen.iter().any(|s| s.contains("/ws/2/isrc/GBUM71029604")),
         "{seen:?}"
@@ -918,4 +938,43 @@ async fn a_deezer_barcode_names_the_apple_album_that_joins(pool: sqlx::PgPool) {
         .await,
         ["https://www.deezer.com/track/3541552051 deezer isrc:GBUM71029604"]
     );
+}
+
+/// Two Wikidata item links in one batch: one read for both, each item's own read from the cache.
+#[sqlx::test(migrations = "../../migrations")]
+async fn item_links_are_read_in_one_request(pool: sqlx::PgPool) {
+    for q in ["Q202996", "Q33328630"] {
+        let uri = format!("https://www.wikidata.org/wiki/{q}");
+        let id = store::ensure_resource(&pool, &uri).await.unwrap();
+        let d = ResourceMeta::new(&uri, "web", 86400);
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+    }
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let cx = also_on::Context {
+        egress: egress(t.clone()),
+        config: Arc::new(Config::default()),
+    };
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    let seen = t.seen.lock().unwrap().clone();
+    let reads: Vec<&String> = seen
+        .iter()
+        .filter(|s| s.contains("action=wbgetentities"))
+        .collect();
+    assert_eq!(reads.len(), 1, "{reads:?}");
+    assert!(reads[0].contains("ids=Q202996%7CQ33328630"), "{reads:?}");
+    let keys: Vec<String> = sqlx::query_scalar(
+        "SELECT key FROM resource_key WHERE source='wikidata_item' ORDER BY key",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(keys, ["wikidata:Q202996", "wikidata:Q33328630"]);
 }

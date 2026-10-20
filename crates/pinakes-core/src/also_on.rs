@@ -198,6 +198,9 @@ pub trait Source: Send + Sync {
     fn ttl(&self) -> Duration {
         Duration::from_secs(30 * 86_400)
     }
+    /// Before a batch of resources (their URIs): ask the service, in as few requests as it
+    /// allows, what this source will ask for each, so their lookups find it cached. Best effort.
+    async fn prefetch(&self, _cx: &Context, _uris: &[String]) {}
     /// Whether it runs without `[also_on.sources.<id>] enabled = true` (a service whose terms
     /// the operator should accept first is off by default).
     fn enabled_by_default(&self) -> bool {
@@ -483,6 +486,14 @@ pub async fn drain(
         .fetch_all(pool)
         .await?;
     let handled = due.len();
+    // Batched hub lookups for the whole batch first (MusicBrainz URLs, Wikidata items).
+    let uris: Vec<String> = sqlx::query_scalar("SELECT uri FROM resource WHERE id=ANY($1)")
+        .bind(&due)
+        .fetch_all(pool)
+        .await?;
+    for source in sources.iter().filter(|s| cfg.source_enabled(s.as_ref())) {
+        source.prefetch(cx, &uris).await;
+    }
     let work = due.into_iter().map(|id| async move {
         let result = one(pool, cx, sources, &id).await;
         (id, result)
@@ -570,9 +581,10 @@ pub async fn run(
         return;
     }
     loop {
-        let handled = tokio::select! { _=shutdown.changed()=>break, result=drain(&pool,&cx,&sources,16)=>result };
+        // Up to 100 resources a tick, so their hub lookups batch.
+        let handled = tokio::select! { _=shutdown.changed()=>break, result=drain(&pool,&cx,&sources,100)=>result };
         match handled {
-            Ok(16) => continue,
+            Ok(100) => continue,
             Ok(_) => {}
             Err(error) => tracing::warn!(error=%format!("{error:#}"), "also-on worker will retry"),
         }

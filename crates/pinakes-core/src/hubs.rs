@@ -101,15 +101,32 @@ fn json(fetched: &Fetched, hub: &'static str) -> Result<Option<Value>> {
 /// The body cap for Wikidata entities: a much-edited item carries megabytes of claims (Signal's
 /// is 2.6 MB), above the egress default of 1 MB.
 pub const WIKIDATA_CAP: usize = 8 * 1024 * 1024;
-async fn get(egress: &Egress, url: &str, hub: &'static str) -> Result<Option<Value>> {
-    let options = FetchOptions {
+fn options(hub: &str) -> FetchOptions {
+    FetchOptions {
         accept: Some("application/json".into()),
         body_cap: (hub == "wikidata").then_some(WIKIDATA_CAP),
         ..Default::default()
-    };
+    }
+}
+async fn get(egress: &Egress, url: &str, hub: &'static str) -> Result<Option<Value>> {
     // Shared flights and a short cache: two sources asking the same thing ask once.
-    let fetched = egress.discover(url, &options, 3600).await?;
+    let fetched = egress.discover(url, &options(hub), 3600).await?;
     json(&fetched, hub)
+}
+/// Cache `body` (status 200, JSON) or a 404 as the answer to `url`, a lookup a batch covered.
+async fn seed(egress: &Egress, url: &str, hub: &str, answer: Option<&Value>) -> Result<()> {
+    let fetched = Fetched {
+        permanent_redirect: false,
+        truncated: false,
+        validators: Default::default(),
+        url: url::Url::parse(url)?,
+        status: if answer.is_some() { 200 } else { 404 },
+        retry_after_secs: 60,
+        location: None,
+        content_type: "application/json".into(),
+        body: serde_json::to_vec(answer.unwrap_or(&serde_json::json!({"error": "Not Found"})))?,
+    };
+    egress.seed(url, &options(hub), 3600, fetched).await
 }
 
 pub mod musicbrainz {
@@ -260,6 +277,61 @@ pub mod musicbrainz {
     }
     pub fn entity_lookup(base: &str, kind: MbKind, mbid: &str) -> String {
         format!("{base}/{}/{mbid}?inc={}&fmt=json", kind.as_str(), inc(kind))
+    }
+    /// The batched URL lookup: what each of `links` is linked to, in one request.
+    pub fn urls_lookup(base: &str, links: &[String]) -> String {
+        let mut url = url::Url::parse(&format!("{base}/url")).expect("a checked base URL");
+        {
+            let mut query = url.query_pairs_mut();
+            for link in links {
+                query.append_pair("resource", link);
+            }
+            query
+                .append_pair(
+                    "inc",
+                    "recording-rels+release-rels+release-group-rels+artist-rels",
+                )
+                .append_pair("fmt", "json");
+        }
+        url.into()
+    }
+    /// At most this many links per batched URL lookup (MusicBrainz takes 100; the request line
+    /// stays short).
+    pub const URL_BATCH: usize = 50;
+    /// Ask MusicBrainz about many links at once and cache each link's answer as its own lookup's
+    /// (`url` then asks nothing). An answer applies only to the URL MusicBrainz echoes, byte for
+    /// byte; a link left out is unknown (its 404 cached) only when every echo matched a link
+    /// asked. Best effort: a failed batch caches nothing, and each link asks alone.
+    pub async fn prefetch_urls(egress: &Egress, base: &str, links: &[String]) -> Result<usize> {
+        let mut seeded = 0;
+        for chunk in links.chunks(URL_BATCH) {
+            let Some(v) = get(egress, &urls_lookup(base, chunk), "musicbrainz").await? else {
+                continue;
+            };
+            let answers: Vec<&Value> = v["urls"].as_array().into_iter().flatten().collect();
+            let exact = answers.iter().all(|a| {
+                a["resource"]
+                    .as_str()
+                    .is_some_and(|r| chunk.iter().any(|l| l == r))
+            });
+            for link in chunk {
+                let answer = answers
+                    .iter()
+                    .find(|a| a["resource"].as_str() == Some(link.as_str()));
+                if answer.is_none() && !exact {
+                    continue;
+                }
+                seed(
+                    egress,
+                    &url_lookup(base, link),
+                    "musicbrainz",
+                    answer.copied(),
+                )
+                .await?;
+                seeded += 1;
+            }
+        }
+        Ok(seeded)
     }
     /// What `link` is linked to; `None` when MusicBrainz does not know the URL. `base` is the
     /// web service ([`BASE`] or a mirror).
@@ -455,6 +527,32 @@ pub mod wikidata {
             .flatten()
             .filter_map(|h| qid(h["title"].as_str()?))
             .collect()
+    }
+    /// At most this many items per batched read (Wikidata takes 50; an item can be megabytes).
+    pub const ITEM_BATCH: usize = 10;
+    /// Read many items at once and cache each one as its own read's answer (`items` with one
+    /// Q-id then asks nothing). Best effort: a batch past the body cap caches nothing.
+    pub async fn prefetch_items(egress: &Egress, qids: &[String]) -> Result<usize> {
+        let mut seeded = 0;
+        for chunk in qids.chunks(ITEM_BATCH) {
+            let Ok(Some(v)) = get(egress, &entities_lookup(chunk), "wikidata").await else {
+                continue;
+            };
+            for qid in chunk {
+                if let Some(entity) = v["entities"].get(qid) {
+                    let one = serde_json::json!({"entities": {qid.as_str(): entity}});
+                    seed(
+                        egress,
+                        &entities_lookup(std::slice::from_ref(qid)),
+                        "wikidata",
+                        Some(&one),
+                    )
+                    .await?;
+                    seeded += 1;
+                }
+            }
+        }
+        Ok(seeded)
     }
     pub fn entities_lookup(qids: &[String]) -> String {
         format!(
