@@ -1169,11 +1169,16 @@ pub async fn search(
             .push("), page AS (SELECT * FROM entries ORDER BY rank DESC,unit_id DESC LIMIT ")
             .push_bind((q.limit.unwrap_or(50)+1) as i64)
             .push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p)");
-        if state.config.groups.enabled {
-            sql.push(" || CASE WHEN p.kind='point' THEN jsonb_build_object('item',p.item||jsonb_build_object('group',group_hint(p.unit_id))) ELSE '{}'::jsonb END");
-        }
-        if same_event(&state.config) {
-            sql.push(" || CASE WHEN p.kind='point' THEN jsonb_build_object('item',p.item||jsonb_build_object('maybe_same',same_event_hint(p.unit_id,ARRAY(SELECT jsonb_array_elements_text(p.item->'type_path')),3))) ELSE '{}'::jsonb END");
+        // A point's card is its `item`, built once: `||` replaces a key, it never merges two items.
+        if state.config.groups.enabled || same_event(&state.config) {
+            sql.push(" || CASE WHEN p.kind='point' THEN jsonb_build_object('item',p.item");
+            if state.config.groups.enabled {
+                sql.push("||jsonb_build_object('group',group_hint(p.unit_id))");
+            }
+            if same_event(&state.config) {
+                sql.push("||jsonb_build_object('maybe_same',same_event_hint(p.unit_id,ARRAY(SELECT jsonb_array_elements_text(p.item->'type_path')),3))");
+            }
+            sql.push(") ELSE '{}'::jsonb END");
         }
         sql.push(" ORDER BY rank DESC,unit_id DESC) FROM page p),'[]') AS items, (SELECT count(*) FROM filtered) AS total, (SELECT count(*) FROM groups) AS cell_count, ");
     } else {

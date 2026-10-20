@@ -746,3 +746,58 @@ async fn a_search_page_changes_its_etag_when_its_hint_does(pool: PgPool) {
     pass(&pool, &Config::default()).await;
     assert_ne!(etag().await, before);
 }
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn map_points_keep_their_group_with_the_hint_on_or_off(pool: PgPool) {
+    let start = soon();
+    let a = event(
+        &pool,
+        "https://example.org/a",
+        "Bitcoin Meetup Wattwil",
+        start,
+        Some(WATTWIL),
+    )
+    .await;
+    let b = event(
+        &pool,
+        "https://example.org/b",
+        "Bitcoin Meetup Wattwil",
+        start,
+        Some(WATTWIL),
+    )
+    .await;
+    pass(&pool, &Config::default()).await;
+    let group = "0123456789abcdef0123456789abcdef";
+    sqlx::query("INSERT INTO \"group\"(id,curated) VALUES($1,true)")
+        .bind(group)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE group_unit SET group_id=$1 WHERE unit_id=ANY($2)")
+        .bind(group)
+        .bind(vec![a.clone(), b.clone()])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut off = Config::default();
+    off.event.same_event_hint = SameEventHint::Off;
+    for config in [Config::default(), off] {
+        let map = get(
+            &config,
+            &pool,
+            "/v1/search?bbox=9.0,47.2,9.2,47.4&cluster=12",
+        )
+        .await;
+        let points = map["points"].as_array().unwrap();
+        assert_eq!(points.len(), 2, "{map}");
+        for p in points {
+            assert_eq!(p["group"]["id"], group, "{p}");
+            let on = config.event.same_event_hint == SameEventHint::On;
+            // On: the hint is there, and never names a member of the point's own group.
+            assert_eq!(p.get("maybe_same").is_some(), on, "{p}");
+            if on {
+                assert!(named(p).is_empty(), "{p}");
+            }
+        }
+    }
+}
