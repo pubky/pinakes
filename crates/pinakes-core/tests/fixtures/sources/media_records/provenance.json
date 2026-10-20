@@ -1,0 +1,42 @@
+{
+  "entities-Q1079": {
+    "bytes": 284072,
+    "content_type": "application/json",
+    "file": "entities-Q1079.json.gz",
+    "note": "Breaking Bad's item (claims and sitelinks), as the hub reads it.",
+    "recorded_at": "2026-10-20T18:10:17+00:00",
+    "sha256": "e5524aef803c44fdd49ca206177c314b317d5ed1d22ba7cb3c7136985fa058a7",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q1079&props=claims%7Csitelinks%2Furls&format=json"
+  },
+  "labels-Q1079": {
+    "bytes": 226,
+    "content_type": "application/json",
+    "file": "labels-Q1079.json",
+    "note": "Breaking Bad's English label and description.",
+    "recorded_at": "2026-10-20T18:10:17+00:00",
+    "sha256": "7f5fbf40d196f6d583c790a42d115212fcba9407a77e6c5e53858a4a1704f008",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q1079&props=labels%7Cdescriptions&languages=en&languagefallback=1&format=json"
+  },
+  "search-P4983-1396": {
+    "bytes": 504,
+    "content_type": "application/json",
+    "file": "search-P4983-1396.json",
+    "note": "Wikidata search for the item carrying TMDB TV ID 1396 (Breaking Bad).",
+    "recorded_at": "2026-10-20T18:10:16+00:00",
+    "sha256": "9b34bd4c75ca3212c92178defe07db77054e33b65cd5516e239aeddbb806c008",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP4983%3D1396&srlimit=5&format=json"
+  },
+  "tvmaze-show-169": {
+    "bytes": 1705,
+    "content_type": "application/json",
+    "file": "tvmaze-show-169.json",
+    "note": "TVmaze's record of Breaking Bad (CC BY-SA).",
+    "recorded_at": "2026-10-20T18:10:17+00:00",
+    "sha256": "b4bd2b87bc61ffb7d4f82358cdca2ed221d6838b17180fbdd95c85fa9b7dca32",
+    "status": 200,
+    "url": "https://api.tvmaze.com/shows/169"
+  }
+}

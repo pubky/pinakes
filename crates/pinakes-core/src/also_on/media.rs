@@ -230,8 +230,12 @@ pub fn type_card(uri: &str, hints: &TypeHints, doc: &mut crate::model::ResourceM
         .title_type
         .as_deref()
         .and_then(|t| ["Movie", "TVSeries"].into_iter().find(|k| *k == t));
+    // A Netflix card its Wikidata item already typed (`media_records`) keeps that type.
+    let own = ["Movie", "TVSeries"]
+        .into_iter()
+        .find(|k| *k == doc.type_name);
     match link_type(uri) {
-        Some("CreativeWork") => doc.set_type(hinted.unwrap_or("CreativeWork")),
+        Some("CreativeWork") => doc.set_type(hinted.or(own).unwrap_or("CreativeWork")),
         Some(kind) => doc.set_type(kind),
         None if hints.episode => doc.set_type("PodcastEpisode"),
         None => {}
@@ -456,6 +460,16 @@ mod tests {
             &mut doc,
         );
         assert_eq!(doc.type_name, "WebPage", "a card that did not resolve");
+        // A Netflix card its Wikidata item typed keeps that type without a hint.
+        let mut doc =
+            crate::model::ResourceMeta::new("https://www.netflix.com/title/70143836", "web", 60);
+        doc.set_type("TVSeries");
+        type_card(
+            "https://www.netflix.com/title/70143836",
+            &TypeHints::default(),
+            &mut doc,
+        );
+        assert_eq!(doc.type_name, "TVSeries");
     }
 
     #[test]

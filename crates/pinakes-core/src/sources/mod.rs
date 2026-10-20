@@ -49,6 +49,7 @@ pub mod kit;
 pub mod legislation_gov_uk;
 pub mod lobsters;
 pub mod mastodon;
+pub mod media_records;
 pub mod mempool;
 pub mod met;
 pub mod pdb;
@@ -95,6 +96,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &legislation_gov_uk::LegislationGovUk,
     &lobsters::Lobsters,
     &mastodon::Mastodon,
+    &media_records::MediaRecords,
     &mempool::Mempool,
     &met::Met,
     &pdb::Pdb,

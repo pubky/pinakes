@@ -107,6 +107,8 @@ enabled = true
 enabled = true
 [sources.mastodon]
 enabled = true
+[sources.media_records]
+enabled = true
 [sources.mempool]
 enabled = true
 [sources.met]

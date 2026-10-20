@@ -59,9 +59,15 @@ does instead of its share text: a track's `Queen · A Night At The Opera (Deluxe
 A media link is typed the same way: a TMDB, Letterboxd or Trakt movie is a `Movie`; a TMDB,
 Trakt or TVmaze series a `TVSeries`; an Open Library work or edition and a Goodreads work or book
 a `Book`; an Apple Podcasts, Podcast Index, Pocket Casts, Castro or Fountain show a
-`PodcastSeries` and its episode a `PodcastEpisode`. A Netflix title is a `CreativeWork`, and a
-`Movie` or `TVSeries` from its next refresh when its Wikidata item says which. A page that is a
-podcast episode by its feed ([also on](#also-on)) is a `PodcastEpisode` from its next refresh.
+`PodcastSeries` and its episode a `PodcastEpisode`. A Netflix title is a `Movie` or `TVSeries`
+when its Wikidata item says which, else a `CreativeWork`. A page that is a podcast episode by its
+feed ([also on](#also-on)) is a `PodcastEpisode` from its next refresh.
+
+Such a card is named after its object, not its page: where a TMDB, Trakt, Netflix, Goodreads,
+Letterboxd, Open Library, TVmaze or Podcast Index page names its site, another language's title
+or nothing, the name (and, where the page's text is not the object's, the description) comes
+from the object's exact record: the Wikidata item that carries the page's own ID, or the
+service's own record ([media records](sources/media_records.md)).
 An IMDb title keeps the type its page gives (it can be either).
 
 ### Card
