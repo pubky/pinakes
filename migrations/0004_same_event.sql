@@ -59,7 +59,10 @@ BEGIN
   END IF;
   target:=NEW.id;
  ELSIF TG_OP='DELETE' THEN
-  IF NOT EXISTS (SELECT 1 FROM resource WHERE id=OLD.resource_id) THEN RETURN NULL; END IF;
+  -- A removed occurrence locks its feed's row before marking it, as a save does (its row, then
+  -- the mark) and as an inserted occurrence's foreign key does.
+  PERFORM 1 FROM resource WHERE id=OLD.resource_id FOR KEY SHARE;
+  IF NOT FOUND THEN RETURN NULL; END IF;
   target:=OLD.resource_id;
  ELSE
   IF TG_OP='UPDATE' AND (NEW.name,NEW.start_at,NEW.point,NEW.venue_id,NEW.status,NEW.url) IS NOT DISTINCT FROM (OLD.name,OLD.start_at,OLD.point,OLD.venue_id,OLD.status,OLD.url) THEN
