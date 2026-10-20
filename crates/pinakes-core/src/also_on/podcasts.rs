@@ -67,6 +67,8 @@ pub enum Podcast {
         item: Option<String>,
         page: String,
     },
+    /// Any other page whose own head names a feed (`feed`): perhaps one of its items.
+    Page { feed: String, page: String },
 }
 
 /// An http(s) URL on a default port, without credentials, on one of `hosts`.
@@ -138,8 +140,9 @@ fn number(v: &str) -> Option<u64> {
     digits(v).then(|| v.parse().ok()).flatten()
 }
 
-/// What a subject names: an Apple Podcasts, player or Podcast Index link, or a resolved feed
-/// card (`PodcastSeries`, or a `PodcastEpisode` with its item's GUID) and its feed.
+/// What a subject names: an Apple Podcasts, player or Podcast Index link, a resolved feed card
+/// (`PodcastSeries`, or a `PodcastEpisode` with its item's GUID) and its feed, or a page whose
+/// head names its RSS feed (the card's `feed`).
 pub fn podcast(subject: &Subject) -> Option<Podcast> {
     if let Some((show, episode)) = apple(&subject.uri) {
         return Some(Podcast::Apple {
@@ -159,32 +162,35 @@ pub fn podcast(subject: &Subject) -> Option<Podcast> {
         return Some(Podcast::Index { feed, episode });
     }
     let doc = subject.doc.as_ref().filter(|_| subject.status == "ok")?;
-    let url = doc
-        .attributes
-        .get("podcast_feed")
-        .filter(|u| feed_name(u).is_some())?
-        .clone();
     let page = subject.uri.clone();
-    match subject.type_name.as_deref()? {
-        "PodcastSeries" => Some(Podcast::Feed {
-            url,
-            item: None,
-            page,
-        }),
-        "PodcastEpisode" => {
-            let item = doc
-                .attributes
-                .get("podcast_guid")
-                .map(|g| g.trim())
-                .filter(|g| !g.is_empty())?;
-            Some(Podcast::Feed {
+    let attribute = |name: &str| {
+        doc.attributes
+            .get(name)
+            .filter(|u| feed_name(u).is_some())
+            .cloned()
+    };
+    let kind = subject.type_name.as_deref();
+    if let (Some(url), Some("PodcastSeries" | "PodcastEpisode")) = (attribute("podcast_feed"), kind)
+    {
+        if kind == Some("PodcastSeries") {
+            return Some(Podcast::Feed {
                 url,
-                item: Some(item.to_owned()),
+                item: None,
                 page,
-            })
+            });
         }
-        _ => None,
+        let item = doc
+            .attributes
+            .get("podcast_guid")
+            .map(|g| g.trim())
+            .filter(|g| !g.is_empty())?;
+        return Some(Podcast::Feed {
+            url,
+            item: Some(item.to_owned()),
+            page,
+        });
     }
+    attribute("feed").map(|feed| Podcast::Page { feed, page })
 }
 
 /// A feed URL as the podcast namespace names it: without its scheme and trailing slashes, the
@@ -257,16 +263,23 @@ pub fn item_key(show_guid: &str, item_guid: &str) -> Option<String> {
     Some(format!("podcast:item:{}:{hex}", guid(show_guid)?))
 }
 
-/// What a podcast feed says: its own `podcast:guid`, and the `<link>` of the item with a given
-/// GUID.
+/// Which item of a feed is wanted: the one with this GUID, or the one whose `<link>` is this page
+/// (compared as resource identities, so spellings of one page match).
+#[derive(Clone, Copy, Debug)]
+pub enum ItemBy<'a> {
+    Guid(&'a str),
+    Link(&'a str),
+}
+/// What a podcast feed says: its own `podcast:guid`, and the one wanted item's `<link>` and GUID.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FeedRead {
     pub guid: Option<String>,
     pub item_link: Option<String>,
+    pub item_guid: Option<String>,
 }
 /// Read an RSS feed (any encoding is read as UTF-8, invalid bytes replaced: the GUIDs and links
 /// are ASCII). `Err` when the body is no RSS channel at all.
-pub fn read_feed(body: &[u8], item: Option<&str>) -> Result<FeedRead> {
+pub fn read_feed(body: &[u8], item: Option<ItemBy<'_>>) -> Result<FeedRead> {
     const NAMESPACES: &[&str] = &[
         "https://podcastindex.org/namespace/1.0",
         "http://podcastindex.org/namespace/1.0",
@@ -298,19 +311,33 @@ pub fn read_feed(body: &[u8], item: Option<&str>) -> Result<FeedRead> {
             .and_then(|c| c.text())
             .map(|t| t.trim().to_owned())
     };
-    // The one item with this GUID (several are ambiguous).
-    let item_link = item.and_then(|wanted| {
-        let mut items = channel
-            .children()
-            .filter(|n| n.has_tag_name("item") && field(*n, "guid").as_deref() == Some(wanted));
+    let identity = |u: &str| crate::model::identity(u).ok().map(|v| v.0);
+    // The one item wanted (several are ambiguous).
+    let wanted = item.and_then(|by| {
+        let page = match by {
+            ItemBy::Link(page) => identity(page),
+            ItemBy::Guid(_) => None,
+        };
+        let mut items = channel.children().filter(|n| {
+            n.has_tag_name("item")
+                && match by {
+                    ItemBy::Guid(g) => field(*n, "guid").as_deref() == Some(g),
+                    ItemBy::Link(_) => {
+                        page.is_some() && field(*n, "link").and_then(|l| identity(&l)) == page
+                    }
+                }
+        });
         match (items.next(), items.next()) {
-            (Some(one), None) => field(one, "link"),
+            (Some(one), None) => Some(one),
             _ => None,
         }
     });
     Ok(FeedRead {
         guid: own,
-        item_link,
+        item_link: wanted.and_then(|n| field(n, "link")),
+        item_guid: wanted
+            .and_then(|n| field(n, "guid"))
+            .filter(|g| !g.is_empty()),
     })
 }
 
@@ -541,8 +568,8 @@ pub fn apple_show(found: &mut Found, show: u64, storefront: &str) {
         add(found, Link::new(uri, site, "itunes"));
     }
 }
-/// A show's Podcast Index feed: its page, and the GUID Podcast Index vouches for as a key.
-fn index_show(found: &mut Found, feed: &IndexFeed) {
+/// A show's Podcast Index feed: its page, and the GUID Podcast Index vouches for, as a key.
+fn index_show(found: &mut Found, feed: &IndexFeed, vouched: Option<&str>) {
     add(
         found,
         Link::new(
@@ -551,11 +578,19 @@ fn index_show(found: &mut Found, feed: &IndexFeed) {
             "podcastindex",
         ),
     );
-    if let Some(guid) = &feed.guid {
+    if let Some(guid) = vouched {
         found
             .keys
             .push(key(format!("podcast:guid:{guid}"), "podcastindex"));
     }
+}
+/// The GUID Podcast Index vouches for: the feed's GUID, when Podcast Index's feed for that GUID
+/// (`byguid`) is this same feed. A copy of a show's feed carries the show's GUID too, but the
+/// GUID is not its own.
+pub fn vouched<'a>(feed: &'a IndexFeed, owner: Option<&IndexFeed>) -> Option<&'a str> {
+    feed.guid
+        .as_deref()
+        .filter(|_| owner.is_some_and(|o| o.id == feed.id))
 }
 /// An episode's Apple track: its key and page.
 pub fn apple_episode(found: &mut Found, show: u64, track: u64, storefront: &str) {
@@ -628,6 +663,18 @@ impl Podcasts {
     /// The feed read at exactly this URL (a redirect may be another publisher's feed). `None`
     /// when it can't be read as one (e.g. a body over the page cap); a retry is passed on.
     async fn feed(cx: &Context, url: &str, item: Option<&str>) -> Result<Option<FeedRead>> {
+        Self::read(cx, url, item.map(ItemBy::Guid), true)
+            .await
+            .map(|r| r.map(|(read, _)| read))
+    }
+    /// A feed read with what is wanted of it, and the URL it was read at. `exact`: only at this
+    /// URL, never through a redirect.
+    async fn read(
+        cx: &Context,
+        url: &str,
+        item: Option<ItemBy<'_>>,
+        exact: bool,
+    ) -> Result<Option<(FeedRead, String)>> {
         let f = match cx.egress.discover(url, &Default::default(), 3600).await {
             Ok(f) => f,
             Err(e) if e.is::<RetryLater>() => return Err(e),
@@ -636,15 +683,33 @@ impl Podcasts {
                 return Ok(None);
             }
         };
-        if f.status != 200 || !same_feed(f.url.as_str(), url) {
+        if f.status != 200 || (exact && !same_feed(f.url.as_str(), url)) {
             return Ok(None);
         }
-        let (body, item) = (f.body.clone(), item.map(str::to_owned));
-        Ok(
-            tokio::task::spawn_blocking(move || read_feed(&body, item.as_deref()))
-                .await?
-                .ok(),
-        )
+        let body = f.body.clone();
+        let owned = item.map(|by| match by {
+            ItemBy::Guid(g) => (true, g.to_owned()),
+            ItemBy::Link(l) => (false, l.to_owned()),
+        });
+        let read = tokio::task::spawn_blocking(move || {
+            let by = owned.as_ref().map(|(guid, v)| {
+                if *guid {
+                    ItemBy::Guid(v)
+                } else {
+                    ItemBy::Link(v)
+                }
+            });
+            read_feed(&body, by)
+        })
+        .await?
+        .ok();
+        Ok(read.map(|r| (r, f.url.to_string())))
+    }
+    /// The GUID Podcast Index vouches for this feed (asking `byguid` who owns it).
+    async fn vouch(cx: &Context, deferred: &mut Deferred, feed: &IndexFeed) -> Option<String> {
+        let g = feed.guid.as_deref()?;
+        let owner = deferred.take("podcastindex", Self::index(cx, Ask::Guid(g)).await);
+        vouched(feed, owner.as_ref()).map(str::to_owned)
     }
     /// The show's Wikidata item, by its Apple ID.
     async fn wikidata(cx: &Context, found: &mut Found, show: u64) -> Result<Option<()>> {
@@ -661,24 +726,27 @@ impl Podcasts {
         Ok(Some(()))
     }
     /// Everything a show confirmed by iTunes gets: its Apple ID, Podcast Index's feed (the one
-    /// that names the Apple ID, unless given) and its Wikidata item. Returns the vouched GUID.
+    /// that names the Apple ID, unless given) and its Wikidata item. Returns Podcast Index's GUID
+    /// for the show, and whether Podcast Index vouches for it.
     async fn show(
         cx: &Context,
         found: &mut Found,
         deferred: &mut Deferred,
         show: u64,
         indexed: Option<IndexFeed>,
-    ) -> Result<Option<String>> {
+    ) -> Result<(Option<String>, bool)> {
         apple_show(found, show, &cx.config.also_on.apple_storefront);
         let indexed = match indexed {
             Some(feed) => Some(feed),
             None => deferred.take("podcastindex", Self::index(cx, Ask::Apple(show)).await),
         };
+        let mut vouched = None;
         if let Some(feed) = &indexed {
-            index_show(found, feed);
+            vouched = Self::vouch(cx, deferred, feed).await;
+            index_show(found, feed, vouched.as_deref());
         }
         deferred.take("wikidata", Self::wikidata(cx, found, show).await);
-        Ok(indexed.and_then(|f| f.guid))
+        Ok((indexed.and_then(|f| f.guid), vouched.is_some()))
     }
     /// An episode's keys from its show's vouched GUID and its item GUID, and its Apple track
     /// (found by track ID or by item GUID among the show's latest episodes).
@@ -750,7 +818,8 @@ impl Source for Podcasts {
                 }
                 match episode {
                     None => {
-                        let guid = Self::show(cx, &mut found, &mut deferred, *show, None).await?;
+                        let (guid, _) =
+                            Self::show(cx, &mut found, &mut deferred, *show, None).await?;
                         if let Some(g) = guid {
                             found.facts.push(Fact::new("podcast_guid", g));
                         }
@@ -758,7 +827,10 @@ impl Source for Podcasts {
                     Some(track) => {
                         let indexed =
                             deferred.take("podcastindex", Self::index(cx, Ask::Apple(*show)).await);
-                        let show_guid = indexed.and_then(|f| f.guid);
+                        let show_guid = match &indexed {
+                            Some(feed) => Self::vouch(cx, &mut deferred, feed).await,
+                            None => None,
+                        };
                         Self::episode(
                             cx,
                             &mut found,
@@ -787,6 +859,7 @@ impl Source for Podcasts {
                         .map(|_| show),
                     None => None,
                 };
+                let vouched = Self::vouch(cx, &mut deferred, &indexed).await;
                 match episode {
                     None => {
                         let guid = indexed.guid.clone();
@@ -801,7 +874,7 @@ impl Source for Podcasts {
                                 Self::show(cx, &mut found, &mut deferred, show, Some(indexed))
                                     .await?;
                             }
-                            None => index_show(&mut found, &indexed),
+                            None => index_show(&mut found, &indexed, vouched.as_deref()),
                         }
                         if let Some(g) = guid {
                             found.facts.push(Fact::new("podcast_guid", g));
@@ -816,7 +889,7 @@ impl Source for Podcasts {
                                 &mut found,
                                 &mut deferred,
                                 apple,
-                                indexed.guid.as_deref(),
+                                vouched.as_deref(),
                                 Some(&e.guid),
                                 None,
                             )
@@ -835,7 +908,11 @@ impl Source for Podcasts {
                         .map(|_| show),
                     None => None,
                 };
-                let vouched = indexed.as_ref().and_then(|f| f.guid.clone());
+                let vouched = match &indexed {
+                    Some(feed) => Self::vouch(cx, &mut deferred, feed).await,
+                    None => None,
+                };
+                let pi_guid = indexed.as_ref().and_then(|f| f.guid.clone());
                 match item {
                     None => {
                         let own = deferred
@@ -845,11 +922,11 @@ impl Source for Podcasts {
                             (Some(show), Some(feed)) => {
                                 Self::show(cx, &mut found, &mut deferred, show, Some(feed)).await?;
                             }
-                            (None, Some(feed)) => index_show(&mut found, &feed),
+                            (None, Some(feed)) => index_show(&mut found, &feed, vouched.as_deref()),
                             _ => {}
                         }
                         // The fact: the feed's own GUID, then Podcast Index's, then the derived one.
-                        if let Some(g) = own.or(vouched).or_else(|| derived_guid(url)) {
+                        if let Some(g) = own.or(pi_guid).or_else(|| derived_guid(url)) {
                             found.facts.push(Fact::new("podcast_guid", g));
                         }
                     }
@@ -881,6 +958,42 @@ impl Source for Podcasts {
                     }
                 }
             }
+            Podcast::Page { feed, page } => {
+                // The page's own head names its feed, so the feed is read where that leads; the
+                // one item whose `<link>` is this page makes it an episode of a vouched show.
+                let read = deferred.take(
+                    "feed",
+                    Self::read(cx, feed, Some(ItemBy::Link(page)), false).await,
+                );
+                let Some((read, at)) = read else {
+                    return deferred.finish(found);
+                };
+                let Some(item) = read.item_guid else {
+                    return deferred.finish(found);
+                };
+                let indexed = deferred.take("podcastindex", Self::index(cx, Ask::Feed(&at)).await);
+                let Some(indexed) = indexed else {
+                    return deferred.finish(found);
+                };
+                let vouched = Self::vouch(cx, &mut deferred, &indexed).await;
+                let apple = match indexed.apple {
+                    Some(show) => deferred
+                        .take("itunes", Self::show_known(cx, show).await.map(Some))
+                        .filter(|known| *known)
+                        .map(|_| show),
+                    None => None,
+                };
+                Self::episode(
+                    cx,
+                    &mut found,
+                    &mut deferred,
+                    apple,
+                    vouched.as_deref(),
+                    Some(&item),
+                    None,
+                )
+                .await;
+            }
         }
         deferred.finish(found)
     }
@@ -895,6 +1008,7 @@ mod tests {
         fixture::read("podcasts", name)
     }
     const DAILY: u64 = 1200361736;
+    const GUID_DAILY: &str = "304b84f0-07b0-5265-b6b7-da5cf5aeb56e";
 
     #[test]
     fn links_that_name_a_show_or_an_episode() {
@@ -1039,13 +1153,37 @@ mod tests {
         assert_ne!(derived_guid("https://feeds.podcastindex.org/pc20.xml"), own);
         // An item's own page, by its GUID.
         assert_eq!(
-            read_feed(&pc20, Some("PC20-275"))
+            read_feed(&pc20, Some(ItemBy::Guid("PC20-275")))
                 .unwrap()
                 .item_link
                 .as_deref(),
             Some("https://www.podpage.com/podcasting-20/off-the-rails/")
         );
-        assert_eq!(read_feed(&pc20, Some("PC20-0")).unwrap().item_link, None);
+        assert_eq!(
+            read_feed(&pc20, Some(ItemBy::Guid("PC20-0")))
+                .unwrap()
+                .item_link,
+            None
+        );
+        // An item by its page.
+        let dd = read("feed-darknetdiaries.xml.gz");
+        assert_eq!(
+            read_feed(
+                &dd,
+                Some(ItemBy::Link("https://darknetdiaries.com/episode/180/"))
+            )
+            .unwrap()
+            .item_guid
+            .as_deref(),
+            Some("prx_7057_141e0c43-f935-41de-be94-708448052c4d"),
+            "the page"
+        );
+        assert_eq!(
+            read_feed(&dd, Some(ItemBy::Link("https://darknetdiaries.com/")))
+                .unwrap()
+                .item_guid,
+            None
+        );
         let plain = br#"<rss version="2.0"><channel><title>T</title><item><guid>a</guid></item></channel></rss>"#;
         assert_eq!(read_feed(plain, None).unwrap().guid, None);
         let other = br#"<rss xmlns:x="https://example.org/ns"><channel><x:guid>917393e3-1b1e-5cef-ace4-edaa54e1f810</x:guid></channel></rss>"#;
@@ -1225,6 +1363,51 @@ mod tests {
             )
             .unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn podcast_index_vouches_only_for_a_guids_own_feed() {
+        let daily = parse_pi(
+            200,
+            &read("pi-byfeedurl-54nAGcIl.json"),
+            Ask::Feed("https://feeds.simplecast.com/54nAGcIl"),
+        )
+        .unwrap()
+        .unwrap();
+        let guid = Ask::Guid("304b84f0-07b0-5265-b6b7-da5cf5aeb56e");
+        let owner = parse_pi(200, &read("pi-byguid-304b84f0.json"), guid).unwrap();
+        assert_eq!(vouched(&daily, owner.as_ref()), Some(GUID_DAILY));
+        // A copy Podcast Index indexed carries The Daily's GUID; the GUID's own feed is The
+        // Daily's, so the copy is not vouched for (and The Daily is not, seen from the copy).
+        let copy_owner = parse_pi(200, &read("pi-byguid-304b84f0-copy.json"), guid).unwrap();
+        assert_eq!(vouched(&daily, copy_owner.as_ref()), None);
+        assert_eq!(vouched(&daily, None), None, "no owner, no vouch");
+    }
+
+    #[test]
+    fn a_page_that_names_its_feed() {
+        let mut doc = ResourceMeta::new("https://darknetdiaries.com/episode/180/", "web", 60);
+        doc.set_type("Article");
+        doc.attributes.insert(
+            "feed".into(),
+            "https://feeds.megaphone.fm/darknetdiaries".into(),
+        );
+        let s = Subject {
+            id: "r".into(),
+            uri: "https://darknetdiaries.com/episode/180/".into(),
+            status: "ok".into(),
+            type_name: Some("Article".into()),
+            doc: Some(doc),
+            keys: Vec::new(),
+            first_seen_at: None,
+        };
+        assert_eq!(
+            podcast(&s),
+            Some(Podcast::Page {
+                feed: "https://feeds.megaphone.fm/darknetdiaries".into(),
+                page: "https://darknetdiaries.com/episode/180/".into(),
+            })
         );
     }
 

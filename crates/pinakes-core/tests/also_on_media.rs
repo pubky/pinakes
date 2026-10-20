@@ -70,8 +70,9 @@ impl Recorded {
                 serde_json::from_slice(&read(family, "provenance.json")).unwrap();
             let entries = provenance.as_object().unwrap();
             for (name, p) in entries {
-                // A refusal is served only where a test asks for it (`with_recorded`).
-                if name.ends_with("-401") {
+                // A refusal or a synthetic answer is served only where a test asks for it
+                // (`with_recorded`).
+                if name.ends_with("-401") || name.ends_with("-copy") {
                     continue;
                 }
                 let mut url = p["url"].as_str().unwrap().to_owned();
@@ -486,10 +487,80 @@ async fn an_apple_show_with_podcast_index() {
         "podcastindex"
     )));
     assert_eq!(found.facts, [Fact::new("podcast_guid", GUID_DAILY)]);
+    // Asked by Apple ID, then who owns the GUID.
     assert_eq!(
         *recorded.signed_with.lock().unwrap(),
-        [Some("KEY".to_string())]
+        [Some("KEY".to_string()), Some("KEY".to_string())]
     );
+}
+
+#[tokio::test]
+async fn a_copy_of_a_shows_feed_is_not_vouched_for() {
+    // Podcast Index's feed for The Daily's GUID is another one (a copy it indexed under that
+    // GUID owns it here): The Daily's lookup keeps the GUID as a fact, never as a key.
+    let recorded = Recorded::with_recorded(&[("podcasts", "pi-byguid-304b84f0-copy")]);
+    let cx = cx(recorded.clone(), indexed());
+    let found = Podcasts
+        .lookup(&cx, &subject(DAILY, None, None))
+        .await
+        .unwrap();
+    assert!(!keys(&found).iter().any(|k| k.starts_with("podcast:guid:")));
+    assert_eq!(found.facts, [Fact::new("podcast_guid", GUID_DAILY)]);
+    // Its episodes get no item key either.
+    let episode = Podcasts
+        .lookup(
+            &cx,
+            &subject(&format!("{DAILY}?i=1000797051580"), None, None),
+        )
+        .await
+        .unwrap();
+    assert_eq!(keys(&episode), ["podcast:apple_episode:1000797051580"]);
+}
+
+#[tokio::test]
+async fn an_episode_page_that_names_its_feed() {
+    // darknetdiaries.com/episode/180/ names its feed in its head; that URL redirects to the
+    // show's own feed, whose item "180: Conti" has this page as its `<link>`.
+    let page = "https://darknetdiaries.com/episode/180/";
+    let recorded = Recorded::with(&[(
+        "https://feeds.megaphone.fm/darknetdiaries",
+        301,
+        "https://podcast.darknetdiaries.com/",
+    )]);
+    let cx = cx(recorded.clone(), indexed());
+    let mut doc = ResourceMeta::new(page, "web", 3600);
+    doc.set_type("Article");
+    doc.attributes.insert(
+        "feed".into(),
+        "https://feeds.megaphone.fm/darknetdiaries".into(),
+    );
+    let card = subject(page, Some("Article"), Some(doc.clone()));
+    assert!(Podcasts.applies(&card));
+    let found = Podcasts.lookup(&cx, &card).await.unwrap();
+    let item = item_key(
+        "ac631a54-a629-5367-a1a5-c2e2f7c25054",
+        "prx_7057_141e0c43-f935-41de-be94-708448052c4d",
+    )
+    .unwrap();
+    assert_eq!(keys(&found), [item.as_str()]);
+    // Another page of the site names the same feed but is no item of it: nothing, and no
+    // Podcast Index request.
+    let before = recorded.signed_with.lock().unwrap().len();
+    let other = "https://darknetdiaries.com/about/";
+    let mut about = doc;
+    about.url = other.into();
+    let found = Podcasts
+        .lookup(&cx, &subject(other, Some("Article"), Some(about)))
+        .await
+        .unwrap();
+    assert_eq!(found, Found::default());
+    assert_eq!(recorded.signed_with.lock().unwrap().len(), before);
+    // Without Podcast Index nothing vouches for the show: nothing.
+    let found = Podcasts
+        .lookup(&crate::cx(recorded.clone(), Config::default()), &card)
+        .await
+        .unwrap();
+    assert_eq!(found, Found::default());
 }
 
 #[tokio::test]
@@ -767,8 +838,10 @@ async fn a_film_by_its_imdb_link() {
     let s = subject("https://www.imdb.com/title/tt0111161/", None, None);
     assert!(Films.applies(&s));
     let found = Films.lookup(&cx, &s).await.unwrap();
-    assert_eq!(keys(&found), ["imdb:tt0111161", "wikidata:Q172241"]);
+    assert_eq!(keys(&found), ["imdb:tt0111161"]);
     assert_eq!(found.keys[0].via, "imdb");
+    assert!(found.facts.contains(&Fact::new("wikidata", "Q172241")));
+    assert!(found.facts.contains(&Fact::new("title_type", "Movie")));
     assert_eq!(
         sites(&found),
         [
@@ -808,10 +881,20 @@ async fn a_film_by_its_tmdb_link_reaches_its_imdb_id_through_wikidata() {
         )
         .await
         .unwrap();
-    assert_eq!(keys(&found), ["imdb:tt0111161", "wikidata:Q172241"]);
+    assert_eq!(keys(&found), ["imdb:tt0111161"]);
     assert_eq!(found.keys[0].via, "wikidata");
     assert!(sites(&found).contains(&"IMDb"));
     assert!(!sites(&found).contains(&"TMDB"));
+}
+
+#[tokio::test]
+async fn a_netflix_link_reaches_its_title_through_wikidata() {
+    let cx = cx(Recorded::new(), Config::default());
+    let uri = "https://www.netflix.com/title/70143836";
+    let found = Films.lookup(&cx, &subject(uri, None, None)).await.unwrap();
+    assert_eq!(keys(&found), ["imdb:tt0903747"], "{uri}");
+    assert_eq!(found.keys[0].via, "wikidata");
+    assert!(found.facts.contains(&Fact::new("title_type", "TVSeries")));
 }
 
 #[tokio::test]
@@ -825,7 +908,7 @@ async fn a_series_by_its_tvmaze_link() {
         )
         .await
         .unwrap();
-    assert_eq!(keys(&found), ["imdb:tt0903747", "wikidata:Q1079"]);
+    assert_eq!(keys(&found), ["imdb:tt0903747"]);
     assert_eq!(found.keys[0].via, "tvmaze");
     assert!(!sites(&found).contains(&"TVmaze"));
     assert!(sites(&found).contains(&"IMDb"));

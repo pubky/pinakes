@@ -1,0 +1,10 @@
+
+
+
+{
+ "resultCount":1,
+ "results": [
+{"wrapperType":"track", "kind":"podcast", "collectionId":1296350485, "trackId":1296350485, "artistName":"Jack Rhysider", "collectionName":"Darknet Diaries", "trackName":"Darknet Diaries", "collectionCensoredName":"Darknet Diaries", "trackCensoredName":"Darknet Diaries", "collectionViewUrl":"https://podcasts.apple.com/us/podcast/darknet-diaries/id1296350485?uo=4", "feedUrl":"https://podcast.darknetdiaries.com", "trackViewUrl":"https://podcasts.apple.com/us/podcast/darknet-diaries/id1296350485?uo=4", "artworkUrl30":"https://is1-ssl.mzstatic.com/image/thumb/Podcasts122/v4/3a/80/a7/3a80a7db-5620-f77b-9935-016e61cc2fbc/mza_9399859904175514567.jpg/30x30bb.jpg", "artworkUrl60":"https://is1-ssl.mzstatic.com/image/thumb/Podcasts122/v4/3a/80/a7/3a80a7db-5620-f77b-9935-016e61cc2fbc/mza_9399859904175514567.jpg/60x60bb.jpg", "artworkUrl100":"https://is1-ssl.mzstatic.com/image/thumb/Podcasts122/v4/3a/80/a7/3a80a7db-5620-f77b-9935-016e61cc2fbc/mza_9399859904175514567.jpg/100x100bb.jpg", "collectionPrice":0.00, "trackPrice":0.00, "collectionHdPrice":0, "releaseDate":"2026-10-06T07:00:00Z", "collectionExplicitness":"notExplicit", "trackExplicitness":"cleaned", "trackCount":195, "trackTimeMillis":3557, "country":"USA", "currency":"USD", "primaryGenreName":"Technology", "contentAdvisoryRating":"Clean", "artworkUrl600":"https://is1-ssl.mzstatic.com/image/thumb/Podcasts122/v4/3a/80/a7/3a80a7db-5620-f77b-9935-016e61cc2fbc/mza_9399859904175514567.jpg/600x600bb.jpg", "genreIds":["1318", "26"], "genres":["Technology", "Podcasts"]}]
+}
+
+

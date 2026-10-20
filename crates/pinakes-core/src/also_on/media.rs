@@ -139,6 +139,8 @@ pub fn link_type(uri: &str) -> Option<&'static str> {
         return match film {
             films::Film::Tmdb { tv: false, .. } | films::Film::Letterboxd(_) => Some("Movie"),
             films::Film::Tmdb { tv: true, .. } | films::Film::Tvmaze(_) => Some("TVSeries"),
+            // A Netflix title is a movie or a series: its Wikidata item may say which.
+            films::Film::Netflix(_) => Some("CreativeWork"),
             // An IMDb title can be either.
             films::Film::Imdb(_) => None,
         }
@@ -169,20 +171,70 @@ pub fn link_type(uri: &str) -> Option<&'static str> {
     match (host.strip_prefix("www.").unwrap_or(host), s.as_slice()) {
         ("trakt.tv", ["movies", name]) if slug(name) => Some("Movie"),
         ("trakt.tv", ["shows", name]) if slug(name) => Some("TVSeries"),
+        ("goodreads.com", ["work", "editions", id]) if work_id(id) => Some("Book"),
+        ("goodreads.com", ["book", "show", id]) if work_id(id) => Some("Book"),
         ("fountain.fm", ["show", id]) if slug(id) => Some("PodcastSeries"),
         ("fountain.fm", ["episode", id]) if slug(id) => Some("PodcastEpisode"),
         _ => None,
     }
 }
 
-/// Type a resolved card by what its media link is ([`link_type`]); a card that did not resolve,
-/// or a link that names no type, is left alone.
-pub fn type_card(uri: &str, doc: &mut crate::model::ResourceMeta) {
+/// What the media sources found about a resource that types its card from its next refresh:
+/// an episode key (a page that is one of a show's episodes), and a title's type (a Netflix title
+/// is a movie or a series as its Wikidata item says).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TypeHints {
+    pub episode: bool,
+    pub title_type: Option<String>,
+}
+/// The hints of these resources (live rows only).
+pub async fn type_hints(
+    pool: &sqlx::PgPool,
+    ids: &[String],
+) -> Result<std::collections::HashMap<String, TypeHints>> {
+    let mut out: std::collections::HashMap<String, TypeHints> = Default::default();
+    let episodes: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT resource_id FROM resource_key WHERE resource_id=ANY($1) AND source='podcasts' AND key LIKE 'podcast:item:%' AND expires_at>now()",
+    )
+    .bind(ids)
+    .fetch_all(pool)
+    .await?;
+    for id in episodes {
+        out.entry(id).or_default().episode = true;
+    }
+    let types: Vec<(String, String)> = sqlx::query_as(
+        "SELECT resource_id, min(value) FROM resource_fact WHERE resource_id=ANY($1) AND source='films' AND name='title_type' AND expires_at>now() GROUP BY resource_id",
+    )
+    .bind(ids)
+    .fetch_all(pool)
+    .await?;
+    for (id, kind) in types {
+        out.entry(id).or_default().title_type = Some(kind);
+    }
+    Ok(out)
+}
+
+/// A Goodreads ID: digits, then an optional title slug (`1540236.The_Hobbit`, `4671-the-great-gatsby`).
+fn work_id(v: &str) -> bool {
+    let n = v.split(['.', '-']).next().unwrap_or("");
+    digits(n)
+}
+
+/// Type a resolved card by what its media link is ([`link_type`]), or by what the media sources
+/// found ([`TypeHints`]); a card that did not resolve, or a link nothing types, is left alone.
+pub fn type_card(uri: &str, hints: &TypeHints, doc: &mut crate::model::ResourceMeta) {
     if doc.status != crate::model::Status::Ok {
         return;
     }
-    if let Some(kind) = link_type(uri) {
-        doc.set_type(kind);
+    let hinted = hints
+        .title_type
+        .as_deref()
+        .and_then(|t| ["Movie", "TVSeries"].into_iter().find(|k| *k == t));
+    match link_type(uri) {
+        Some("CreativeWork") => doc.set_type(hinted.unwrap_or("CreativeWork")),
+        Some(kind) => doc.set_type(kind),
+        None if hints.episode => doc.set_type("PodcastEpisode"),
+        None => {}
     }
 }
 
@@ -326,17 +378,83 @@ mod tests {
             ("https://fountain.fm/show/abc123", Some("PodcastSeries")),
             ("https://fountain.fm/episode/abc123", Some("PodcastEpisode")),
             ("https://example.org/", None),
+            (
+                "https://www.goodreads.com/work/editions/1540236",
+                Some("Book"),
+            ),
+            (
+                "https://www.goodreads.com/book/show/4671.The_Great_Gatsby",
+                Some("Book"),
+            ),
+            (
+                "https://www.netflix.com/title/70143836",
+                Some("CreativeWork"),
+            ),
+            (
+                "https://www.netflix.com/gb/title/70143836",
+                Some("CreativeWork"),
+            ),
         ] {
             assert_eq!(link_type(uri), kind, "{uri}");
         }
+        // What the sources found types the card from its next refresh.
+        let typed = |uri: &str, hints: TypeHints| {
+            let mut doc = crate::model::ResourceMeta::new(uri, "web", 60);
+            doc.set_type("Article");
+            type_card(uri, &hints, &mut doc);
+            doc.type_name
+        };
+        let episode = TypeHints {
+            episode: true,
+            title_type: None,
+        };
+        assert_eq!(
+            typed("https://darknetdiaries.com/episode/180/", episode.clone()),
+            "PodcastEpisode"
+        );
+        assert_eq!(
+            typed(
+                "https://darknetdiaries.com/episode/180/",
+                TypeHints::default()
+            ),
+            "Article"
+        );
+        let series = TypeHints {
+            episode: false,
+            title_type: Some("TVSeries".into()),
+        };
+        assert_eq!(
+            typed("https://www.netflix.com/title/70143836", series.clone()),
+            "TVSeries"
+        );
+        assert_eq!(
+            typed(
+                "https://www.netflix.com/title/70143836",
+                TypeHints::default()
+            ),
+            "CreativeWork"
+        );
+        assert_eq!(
+            typed("https://www.themoviedb.org/movie/603", series),
+            "Movie",
+            "the link wins"
+        );
         let mut doc =
             crate::model::ResourceMeta::new("https://www.themoviedb.org/tv/1396", "web", 60);
         doc.set_type("WebSite");
-        type_card("https://www.themoviedb.org/tv/1396", &mut doc);
+        type_card(
+            "https://www.themoviedb.org/tv/1396",
+            &TypeHints::default(),
+            &mut doc,
+        );
         assert_eq!(doc.type_name, "TVSeries");
         doc.status = crate::model::Status::Missing;
         doc.set_type("WebPage");
-        type_card("https://www.themoviedb.org/tv/1396", &mut doc);
+        type_card(
+            "https://www.themoviedb.org/tv/1396",
+            &TypeHints::default(),
+            &mut doc,
+        );
         assert_eq!(doc.type_name, "WebPage", "a card that did not resolve");
     }
 

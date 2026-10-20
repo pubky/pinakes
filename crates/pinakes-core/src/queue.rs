@@ -318,11 +318,19 @@ async fn guarded_finish_job(
         }
         other => other,
     };
-    // So is a book, podcast or film link.
-    let result = result.map(|mut doc| {
-        crate::also_on::media::type_card(&job.uri, &mut doc);
-        doc
-    });
+    // So is a book, podcast or film link, by what the media sources found (an episode, a title's
+    // type).
+    let result = match result {
+        Ok(mut doc) => {
+            let hints = crate::also_on::media::type_hints(pool, std::slice::from_ref(&job.id))
+                .await?
+                .remove(&job.id)
+                .unwrap_or_default();
+            crate::also_on::media::type_card(&job.uri, &hints, &mut doc);
+            Ok(doc)
+        }
+        other => other,
+    };
     match std::panic::AssertUnwindSafe(finish_job(pool, resolver, cfg, refresh, job, result))
         .catch_unwind()
         .await

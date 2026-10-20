@@ -8,12 +8,9 @@
 //! each is asked only when the item has no link there.
 use super::{
     media::{self, digits, property, slug, Deferred, Property},
-    Context, Found, Key, Link, Source, Subject,
+    Context, Fact, Found, Key, Link, Source, Subject,
 };
-use crate::{
-    hubs::{self, wikidata},
-    resolver::egress::FetchOptions,
-};
+use crate::{hubs::wikidata, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 
@@ -28,6 +25,8 @@ pub enum Film {
     Letterboxd(String),
     /// A TVmaze show.
     Tvmaze(u64),
+    /// A Netflix title (a movie or a series).
+    Netflix(String),
 }
 
 /// An IMDb title ID.
@@ -66,6 +65,9 @@ pub fn film(uri: &str) -> Option<Film> {
             Some(Film::Letterboxd((*name).to_owned()))
         }
         ("tvmaze.com", ["shows", id, ..]) if digits(id) => id.parse().ok().map(Film::Tvmaze),
+        ("netflix.com", ["title", id] | [_, "title", id]) if digits(id) => {
+            Some(Film::Netflix((*id).to_owned()))
+        }
         _ => None,
     }
 }
@@ -77,6 +79,7 @@ fn site(film: &Film) -> &'static str {
         Film::Tmdb { .. } => "TMDB",
         Film::Letterboxd(_) => "Letterboxd",
         Film::Tvmaze(_) => "TVmaze",
+        Film::Netflix(_) => "Netflix",
     }
 }
 
@@ -98,6 +101,8 @@ pub fn exact_page(uri: &str) -> bool {
             *sub,
             "episodes" | "seasons" | "cast" | "crew" | "characters" | "gallery" | "news" | "akas"
         ),
+        // A Netflix title, localized or not.
+        (Some("netflix.com"), [_, "title", _]) => true,
         (_, s) => s.len() == 2,
     }
 }
@@ -110,6 +115,22 @@ fn property_of(film: &Film) -> (&'static str, String) {
         Film::Tmdb { tv: true, id } => ("P4983", id.clone()),
         Film::Letterboxd(name) => ("P6127", name.clone()),
         Film::Tvmaze(id) => ("P8600", id.to_string()),
+        Film::Netflix(id) => ("P1874", id.clone()),
+    }
+}
+
+/// What a title's Wikidata item says it is, by the kind of IDs it holds: a movie (TMDB movie,
+/// TheTVDB movie, Apple TV movie, Trakt film) or a series (TMDB TV, TheTVDB series, Apple TV
+/// show, TVmaze show). Both or neither: nothing.
+pub fn title_type(item: &wikidata::Item) -> Option<&'static str> {
+    let any = |ps: &[&str]| ps.iter().any(|p| !item.id(p).is_empty());
+    match (
+        any(&["P4947", "P12196", "P9586", "P12492"]),
+        any(&["P4983", "P4835", "P9751", "P8600"]),
+    ) {
+        (true, false) => Some("Movie"),
+        (false, true) => Some("TVSeries"),
+        _ => None,
     }
 }
 
@@ -373,12 +394,11 @@ impl Source for Films {
             });
         }
         if let Some(item) = &item {
+            // The Q-id is a fact: a link reaches the item one way only (the IMDb ID joins).
+            found.facts.push(Fact::new("wikidata", item.qid.as_str()));
             found
-                .keys
-                .extend(hubs::key::wikidata(&item.qid).map(|key| Key {
-                    key,
-                    via: "wikidata".into(),
-                }));
+                .facts
+                .extend(title_type(item).map(|t| Fact::new("title_type", t)));
             found.links = media::links(item, WIKIDATA);
         }
         let Some(tt) = tt else {
@@ -445,7 +465,18 @@ mod tests {
             film("https://www.tvmaze.com/shows/169/breaking-bad"),
             Some(Film::Tvmaze(169))
         );
+        assert_eq!(
+            film("https://www.netflix.com/title/70143836"),
+            Some(Film::Netflix("70143836".into()))
+        );
+        assert_eq!(
+            film("https://www.netflix.com/gb/title/70143836"),
+            Some(Film::Netflix("70143836".into()))
+        );
         for uri in [
+            // Trakt's IDs are paths, which the Wikidata search does not take: typed only.
+            "https://trakt.tv/shows/breaking-bad",
+            "https://www.netflix.com/browse",
             "https://www.imdb.com/name/nm0000151/",
             "https://www.imdb.com/title/tt011116/",
             "https://www.imdb.com:8443/title/tt0111161/",
@@ -568,6 +599,9 @@ mod tests {
         assert!(anime.contains(&s("MyAnimeList", "https://myanimelist.net/anime/1")));
         assert!(anime.contains(&s("AniList", "https://anilist.co/anime/1")));
         assert!(trakt("shows/breaking-bad") && !trakt("people/x") && !trakt("movies/"));
+        // What an item's IDs say it is.
+        assert_eq!(title_type(&fixture::item("Q172241")), Some("Movie"));
+        assert_eq!(title_type(&fixture::item("Q1079")), Some("TVSeries"));
         assert!(rotten("m/shawshank_redemption") && !rotten("celebrity/x"));
     }
 }

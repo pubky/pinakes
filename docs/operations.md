@@ -486,14 +486,15 @@ more for a track found by its ISRC, and one for a track's original album), up to
 for an album with barcodes, and two Wikidata requests (a search by its service ID cannot batch);
 each Wikipedia article one request to its Wikipedia and one to Wikidata; each book one Open Library
 request, one iTunes lookup for an ebook edition, and two Wikidata requests when Open Library names
-its work; each podcast show one iTunes lookup, one or two Podcast Index requests, its feed (usually
-still cached from its card) and two Wikidata requests; each episode up to two Podcast Index
-requests, two iTunes lookups and, for a feed item's page, its feed; each film or series two
-Wikidata requests (a TVmaze show first its TVmaze record), and a Letterboxd and a TVmaze request
-when the item has no link there. `deezer` is off by default: Deezer's API terms allow
-non-commercial use only, so turn it on (`[also_on.sources.deezer] enabled = true`) only where they
-do; it costs one request per Deezer link and up to two per other track or album with an ISRC or
-barcode.
+its work; each podcast show one iTunes lookup, two or three Podcast Index requests (the last asks
+who owns the show's GUID), its feed (usually still cached from its card) and two Wikidata requests;
+each episode up to three Podcast Index requests, two iTunes lookups and, for an episode's page, its
+feed; each page whose head names an RSS feed that feed (cached for an hour), and Podcast Index only
+when one item of it is that page; each film or series two Wikidata requests (a TVmaze show first
+its TVmaze record), and a Letterboxd and a TVmaze request when the item has no link there. `deezer`
+is off by default: Deezer's API terms allow non-commercial use only, so turn it on
+(`[also_on.sources.deezer] enabled = true`) only where they do; it costs one request per Deezer
+link and up to two per other track or album with an ISRC or barcode.
 
 Podcast Index is asked only with a key and secret: `[podcast_index] key` and `secret`, or
 `PINAKES__PODCAST_INDEX__KEY` and `PINAKES__PODCAST_INDEX__SECRET` (free from

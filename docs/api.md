@@ -57,9 +57,12 @@ does instead of its share text: a track's `Queen · A Night At The Opera (Deluxe
 `service` source adds `artist`, `album` and `duration` (seconds) to `details.facts`.
 
 A media link is typed the same way: a TMDB, Letterboxd or Trakt movie is a `Movie`; a TMDB,
-Trakt or TVmaze series a `TVSeries`; an Open Library work or edition a `Book`; an Apple Podcasts,
-Podcast Index, Pocket Casts, Castro or Fountain show a `PodcastSeries` and its episode a
-`PodcastEpisode`. An IMDb title keeps the type its page gives (it can be either).
+Trakt or TVmaze series a `TVSeries`; an Open Library work or edition and a Goodreads work or book
+a `Book`; an Apple Podcasts, Podcast Index, Pocket Casts, Castro or Fountain show a
+`PodcastSeries` and its episode a `PodcastEpisode`. A Netflix title is a `CreativeWork`, and a
+`Movie` or `TVSeries` from its next refresh when its Wikidata item says which. A page that is a
+podcast episode by its feed ([also on](#also-on)) is a `PodcastEpisode` from its next refresh.
+An IMDb title keeps the type its page gives (it can be either).
 
 ### Card
 
@@ -838,9 +841,10 @@ in any spelling, an episode with `?i={n}`), a player link that opens a show by i
 - iTunes must know an Apple ID as a show. The show's key is `podcast:apple:{id}` (a player link
   has it from its URL alone), and it links Apple Podcasts, Pocket Casts and Castro.
 - A show's GUID is a key, `podcast:guid:{uuid}`, only when Podcast Index vouches for it: its
-  answer for this feed URL, Apple ID or feed ID names that GUID (and an Apple ID it names counts
-  only once iTunes knows it). This needs an operator's Podcast Index key
-  ([operations](operations.md#also-on)).
+  answer for this feed URL, Apple ID or feed ID names that GUID (an Apple ID it names counts only
+  once iTunes knows it), and its feed for that GUID (`byguid`) is this same feed. A copy of a
+  show's feed carries the show's GUID too, but Podcast Index names the show's own feed for it.
+  This needs an operator's Podcast Index key ([operations](operations.md#also-on)).
 - The show's `podcast_guid` fact is the GUID its feed names (read at the card's own feed URL,
   never through a redirect), else Podcast Index's, else the one derived from the feed's URL as
   the podcast namespace says. A GUID nobody vouches for is never a key: a copied feed can name
@@ -848,28 +852,33 @@ in any spelling, an episode with `?i={n}`), a player link that opens a show by i
 - An episode's keys are its Apple track, `podcast:apple_episode:{id}`, and
   `podcast:item:{show GUID}:{SHA-256 of the item GUID}` from its show's vouched GUID. An Apple
   episode takes the item GUID from iTunes, a Podcast Index episode from Podcast Index, and a
-  feed item's page only when the vouched feed names that page as the item's `<link>`. A feed
-  item finds its Apple track among the show's latest 200 episodes by its GUID.
+  page only when the feed (its feed card's, or the RSS feed its own head names, followed through
+  redirects) is vouched and has one item whose `<link>` is that page. Such a page is typed
+  `PodcastEpisode` from its next refresh. A feed item finds its Apple track among the show's
+  latest 200 episodes by its GUID.
 - A Podcast Index page links the show's feed and its Apple, Pocket Casts and Castro pages.
 - The show's Wikidata item (by its Apple ID) gives its Q-id as a key and its Spotify, Podcast
   Index, Podchaser, Pocket Casts and Castbox pages.
 - A link never lists its own service. A Podcast Index failure (a refused key, an outage) never
   fails the lookup: what the other services answered still counts.
+- A Pocket Casts short link (`pca.st/{slug}`) carries no Apple ID and is not looked up.
 
 **Films and series.** `films`: an IMDb title (`imdb.com/title/tt…`), a TMDB movie or series, a
-Letterboxd film or a TVmaze show is looked up exactly, never by title:
+Letterboxd film, a TVmaze show or a Netflix title is looked up exactly, never by title:
 - The IMDb title ID is the join, as the key `imdb:{tt…}`. An IMDb link names it, TVmaze's record
-  of a show names it, and a TMDB or Letterboxd link reaches it through the one Wikidata item
-  with that link's ID.
-- The title's Wikidata item (by its IMDb ID) gives its Q-id as a key and its IMDb, TMDB,
-  Letterboxd, Trakt, Rotten Tomatoes, TheTVDB, Apple TV, Netflix, MUBI, TVmaze, MyAnimeList and
-  AniList pages.
+  of a show names it, and a TMDB, Letterboxd or Netflix link reaches it through the one Wikidata
+  item with that link's ID.
+- The title's Wikidata item (by its IMDb ID) gives its IMDb, TMDB, Letterboxd, Trakt, Rotten
+  Tomatoes, TheTVDB, Apple TV, Netflix, MUBI, TVmaze, MyAnimeList and AniList pages, its Q-id as
+  the `wikidata` fact, and `title_type` (`Movie` or `TVSeries`) when its IDs are a movie's or a
+  series' only.
 - Letterboxd and TVmaze are asked by IMDb ID only when the item has no link there: Letterboxd's
   `imdb/{tt}/` redirects to its film (an unknown ID answers a page, not a redirect), and
   TVmaze's `lookup/shows?imdb=` to its show, whose record must name the same IMDb ID. TVmaze's
   data is CC BY-SA; its links say `via: "tvmaze"`.
 
-A title never lists its own service.
+A title never lists its own service. A Trakt link is typed but not looked up: Trakt's IDs are
+paths, which the Wikidata search does not take.
 
 The level is exact: a track lists tracks and videos of the recording, an album lists albums and
 YouTube's album playlists, an artist lists artist pages and channels. Album links group by

@@ -505,9 +505,10 @@ async fn fixture(pool: &PgPool) {
                 imdb,
                 "films",
                 Found {
-                    keys: vec![
-                        key("imdb:tt0111161", "imdb"),
-                        key("wikidata:Q172241", "wikidata"),
+                    keys: vec![key("imdb:tt0111161", "imdb")],
+                    facts: vec![
+                        Fact::new("wikidata", "Q172241"),
+                        Fact::new("title_type", "Movie"),
                     ],
                     links: vec![
                         Link::new("https://www.themoviedb.org/movie/278", "TMDB", "wikidata"),
@@ -517,7 +518,6 @@ async fn fixture(pool: &PgPool) {
                             "wikidata",
                         ),
                     ],
-                    ..Default::default()
                 },
             ),
         ] {

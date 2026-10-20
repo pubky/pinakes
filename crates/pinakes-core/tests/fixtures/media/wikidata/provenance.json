@@ -8,6 +8,15 @@
     "status": 200,
     "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&format=json&props=claims&ids=Q172241%7CQ1079%7CQ101244908%7CQ214371%7CQ48741148%7CQ74287"
   },
+  "search-P1874-70143836": {
+    "bytes": 504,
+    "content_type": "application/json",
+    "file": "search-P1874-70143836.json",
+    "recorded_at": "2026-10-20T02:11:35+00:00",
+    "sha256": "9b34bd4c75ca3212c92178defe07db77054e33b65cd5516e239aeddbb806c008",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP1874%3D70143836&srlimit=5&format=json"
+  },
   "search-P345-missing": {
     "bytes": 71,
     "content_type": "application/json",
