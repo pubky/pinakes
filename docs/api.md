@@ -622,8 +622,10 @@ Two events are possibly the same when all of these hold:
 - they start within 300 seconds of each other; when either is an all-day event, they start on
   the same local date (each in its own zone);
 - when both are located, within 500 m of each other; when one or both have no coordinates,
-  they name the same venue (its resource or OSM object) or the same organizer URL (one
-  organizer's meetups in two cities are never the same);
+  they name the same venue (its resource or OSM object) or the same organizer URL. So one
+  organizer's meetups in two cities are not the same when both are located, but an event without
+  coordinates pairs with the organizer's other event at that time and under a similar name,
+  wherever that one is;
 - their names are at least 0.5 alike (pg_trgm similarity) once both are normalised: lower case;
   without dates, times and years (`21.10.2026`, `2026-10-21`, `6.11.`, `21.`, `19:00`, `7pm`,
   `2026`, a month name with its day such as `Oct 21` or `6th November`, in English, German,
