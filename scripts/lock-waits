@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# lock-waits COMMAND...: run COMMAND while sampling the Postgres server of $DATABASE_URL every
+# 50 ms for backends waiting on a lock, then print how many samples saw a wait and which locks
+# were waited for. Locks are named in that database (other databases' rows count as "row").
+# For example, around a re-index:
+#   DATABASE_URL=... scripts/lock-waits pinakesd reextract web
+set -uo pipefail
+: "${DATABASE_URL:?set DATABASE_URL}"
+[[ $# -gt 0 ]] || { echo "usage: scripts/lock-waits COMMAND..." >&2; exit 2; }
+out=$(mktemp)
+trap 'rm -f "$out"' EXIT
+query="SELECT 'sample '||count(*) FILTER (WHERE wait_event_type='Lock') FROM pg_stat_activity WHERE pid<>pg_backend_pid();
+SELECT 'lock '||CASE
+  WHEN l.locktype='advisory' THEN CASE l.objid WHEN 73822917 THEN 'write order' WHEN 73822919 THEN 'alias' WHEN 73822918 THEN 'change sequence' WHEN 73491620 THEN 'group' WHEN 73822916 THEN 'ingest' ELSE 'advisory (adapter or parent)' END
+  WHEN a.query LIKE '%search_revision%' OR EXISTS(SELECT 1 FROM pg_locks t WHERE t.pid=a.pid AND t.locktype='tuple' AND t.relation=to_regclass('search_revision')) THEN 'search revision'
+  WHEN l.locktype IN ('transactionid','tuple') THEN 'row'
+  ELSE l.locktype END
+FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid WHERE NOT l.granted AND a.pid<>pg_backend_pid();"
+(while :; do echo "$query"; sleep 0.05; done) | psql -XAtq "$DATABASE_URL" > "$out" 2>/dev/null &
+sampler=$!
+start=$(date +%s%N)
+"$@"
+status=$?
+end=$(date +%s%N)
+kill "$sampler" 2>/dev/null
+wait "$sampler" 2>/dev/null
+awk -v secs="$(( (end - start) / 1000000 ))" '
+  /^sample / { samples++; if ($2 > 0) waiting++ }
+  /^lock / { sub(/^lock /, ""); by[$0]++ }
+  END {
+    printf "%.1f s, %d samples, %d with a lock wait\n", secs / 1000, samples, waiting
+    for (k in by) printf "  %6d  %s\n", by[k], k
+  }' "$out" >&2
+exit "$status"
