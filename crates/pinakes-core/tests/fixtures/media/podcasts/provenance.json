@@ -90,6 +90,16 @@
     "status": 200,
     "url": "https://api.podcastindex.org/api/1.0/podcasts/byfeedid?id=743229"
   },
+  "pi-byfeedid-920666": {
+    "bytes": 2085,
+    "content_type": "application/json",
+    "file": "pi-byfeedid-920666.json",
+    "note": "Podcast Index API, signed with the operator's key (not recorded).",
+    "recorded_at": "2026-10-20T04:31:48+00:00",
+    "sha256": "d9576367daed8e07d4109fbef2e76ba525371e23bc6a0e2959dca3bff2552b7f",
+    "status": 200,
+    "url": "https://api.podcastindex.org/api/1.0/podcasts/byfeedid?id=920666"
+  },
   "pi-byfeedid-missing": {
     "bytes": 94,
     "content_type": "application/json",
@@ -187,6 +197,13 @@
     "status": 200,
     "url": "https://api.podcastindex.org/api/1.0/podcasts/byguid?guid=ac631a54-a629-5367-a1a5-c2e2f7c25054"
   },
+  "pi-byguid-ac631a54-copy": {
+    "content_type": "application/json",
+    "file": "pi-byguid-ac631a54-copy.json",
+    "note": "Synthetic: pi-byguid-ac631a54.json with the feed's id, url and itunesId changed, as Podcast Index would answer when another feed (a copy) owns the GUID. Served only where a test asks for it.",
+    "status": 200,
+    "url": "https://api.podcastindex.org/api/1.0/podcasts/byguid?guid=ac631a54-a629-5367-a1a5-c2e2f7c25054"
+  },
   "pi-byguid-missing": {
     "bytes": 125,
     "content_type": "application/json",
@@ -207,6 +224,26 @@
     "status": 200,
     "url": "https://api.podcastindex.org/api/1.0/podcasts/byitunesid?id=1200361736"
   },
+  "pi-byitunesid-1296350485": {
+    "bytes": 1818,
+    "content_type": "application/json",
+    "file": "pi-byitunesid-1296350485.json",
+    "note": "Podcast Index API, signed with the operator's key (not recorded).",
+    "recorded_at": "2026-10-20T04:31:48+00:00",
+    "sha256": "34665c20a5ba22bb08dceb66a7d9b4847a385ea0f4323fc54a6785dc44160281",
+    "status": 200,
+    "url": "https://api.podcastindex.org/api/1.0/podcasts/byitunesid?id=1296350485"
+  },
+  "pi-byitunesid-1584274529": {
+    "bytes": 2207,
+    "content_type": "application/json",
+    "file": "pi-byitunesid-1584274529.json",
+    "note": "Podcast Index API, signed with the operator's key (not recorded).",
+    "recorded_at": "2026-10-20T04:31:48+00:00",
+    "sha256": "db5bbb2d71c7fd889e4ee36733ab9296c6230f96a09fbc3737c542b809ffb72b",
+    "status": 200,
+    "url": "https://api.podcastindex.org/api/1.0/podcasts/byitunesid?id=1584274529"
+  },
   "pi-byitunesid-401": {
     "bytes": 141,
     "content_type": "application/json",
@@ -226,6 +263,16 @@
     "sha256": "413499c0b4e33b894f95ed9fb57ce11286bda2310f4a475a447c3da0463b7765",
     "status": 200,
     "url": "https://api.podcastindex.org/api/1.0/podcasts/byitunesid?id=1"
+  },
+  "pi-episode-61842097688": {
+    "bytes": 3471,
+    "content_type": "application/json",
+    "file": "pi-episode-61842097688.json",
+    "note": "Podcast Index API, signed with the operator's key (not recorded).",
+    "recorded_at": "2026-10-20T04:31:49+00:00",
+    "sha256": "02bd7dee7672c9f6fcdedc99739ca96e3349875d48e884730efb440f8cf28798",
+    "status": 200,
+    "url": "https://api.podcastindex.org/api/1.0/episodes/byid?id=61842097688"
   },
   "pi-episode-61953304662": {
     "bytes": 2068,

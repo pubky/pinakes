@@ -251,6 +251,15 @@ pub fn guid(v: &str) -> Option<String> {
     let v = v.trim().to_ascii_lowercase();
     media::uuid(&v).then_some(v)
 }
+/// The largest podcast feed this source reads (a show's whole back catalogue; the page cap is
+/// 1 MiB).
+pub const PODCAST_FEED_CAP: usize = 8 * 1024 * 1024;
+
+/// Whether iTunes' feed for a show (`itunes`) is one of `feeds`.
+fn apple_feed(itunes: Option<&str>, feeds: &[Option<&str>]) -> bool {
+    itunes.is_some_and(|it| feeds.iter().flatten().any(|f| same_feed(f, it)))
+}
+
 /// An episode's key: its show's GUID and its item's GUID (hashed: item GUIDs are free text).
 pub fn item_key(show_guid: &str, item_guid: &str) -> Option<String> {
     use sha2::Digest as _;
@@ -276,6 +285,8 @@ pub struct FeedRead {
     pub guid: Option<String>,
     pub item_link: Option<String>,
     pub item_guid: Option<String>,
+    /// Whether the wanted item has an audio or video enclosure (an episode, not a post).
+    pub item_media: bool,
 }
 /// Read an RSS feed (any encoding is read as UTF-8, invalid bytes replaced: the GUIDs and links
 /// are ASCII). `Err` when the body is no RSS channel at all.
@@ -338,6 +349,13 @@ pub fn read_feed(body: &[u8], item: Option<ItemBy<'_>>) -> Result<FeedRead> {
         item_guid: wanted
             .and_then(|n| field(n, "guid"))
             .filter(|g| !g.is_empty()),
+        item_media: wanted.is_some_and(|n| {
+            n.children().any(|c| {
+                c.has_tag_name("enclosure")
+                    && c.attribute("type")
+                        .is_some_and(|t| t.starts_with("audio/") || t.starts_with("video/"))
+            })
+        }),
     })
 }
 
@@ -351,14 +369,28 @@ pub fn episodes_request(show: u64, storefront: &str) -> String {
         "https://itunes.apple.com/lookup?id={show}&entity=podcastEpisode&limit=200&country={storefront}"
     )
 }
-/// Whether iTunes knows `show` as a podcast (its one result, of kind `podcast`).
-pub fn parse_show(status: u16, raw: &[u8], show: u64) -> Result<bool> {
+/// iTunes' record of `show` when it knows it as a podcast (its one result, of kind `podcast`).
+pub fn parse_show(status: u16, raw: &[u8], show: u64) -> Result<Option<ItunesShow>> {
     let Some(v) = media::json(status, raw, &[404])? else {
-        return Ok(false);
+        return Ok(None);
     };
     let results = v["results"].as_array().context("no results")?;
-    Ok(matches!(results.as_slice(),
-        [one] if one["kind"] == "podcast" && one["collectionId"].as_u64() == Some(show)))
+    Ok(match results.as_slice() {
+        [one] if one["kind"] == "podcast" && one["collectionId"].as_u64() == Some(show) => {
+            Some(ItunesShow {
+                feed: one["feedUrl"]
+                    .as_str()
+                    .filter(|u| feed_name(u).is_some())
+                    .map(str::to_owned),
+            })
+        }
+        _ => None,
+    })
+}
+/// A show as iTunes knows it: Apple's word for which feed its Apple ID is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ItunesShow {
+    pub feed: Option<String>,
 }
 /// An episode iTunes lists: its track ID and its feed item's GUID.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -619,11 +651,24 @@ impl Podcasts {
         };
         cx.egress.discover(url, &options, 3600).await
     }
-    /// Whether iTunes knows the show.
-    async fn show_known(cx: &Context, show: u64) -> Result<bool> {
+    /// iTunes' record of the show, if it knows it.
+    async fn itunes_show(cx: &Context, show: u64) -> Result<Option<ItunesShow>> {
         let sf = &cx.config.also_on.apple_storefront;
         let f = Self::itunes(cx, &show_request(show, sf)).await?;
         parse_show(f.status, &f.body, show)
+    }
+    /// The Apple ID Podcast Index names for a feed, when iTunes' own record of that show names
+    /// one of `feeds` as its feed. Podcast Index takes any feed's claim to an Apple ID; Apple is
+    /// the authority for its own IDs.
+    async fn apple_of(
+        cx: &Context,
+        deferred: &mut Deferred,
+        claimed: Option<u64>,
+        feeds: &[Option<&str>],
+    ) -> Option<u64> {
+        let show = claimed?;
+        let record = deferred.take("itunes", Self::itunes_show(cx, show).await)?;
+        apple_feed(record.feed.as_deref(), feeds).then_some(show)
     }
     async fn episodes(cx: &Context, show: u64) -> Result<Vec<Episode>> {
         let sf = &cx.config.also_on.apple_storefront;
@@ -667,15 +712,19 @@ impl Podcasts {
             .await
             .map(|r| r.map(|(read, _)| read))
     }
-    /// A feed read with what is wanted of it, and the URL it was read at. `exact`: only at this
-    /// URL, never through a redirect.
+    /// A feed read with what is wanted of it, and the URL it was read at (bodies up to
+    /// `PODCAST_FEED_CAP`). `exact`: only at this URL, never through a redirect.
     async fn read(
         cx: &Context,
         url: &str,
         item: Option<ItemBy<'_>>,
         exact: bool,
     ) -> Result<Option<(FeedRead, String)>> {
-        let f = match cx.egress.discover(url, &Default::default(), 3600).await {
+        let options = FetchOptions {
+            feed_cap: Some(PODCAST_FEED_CAP),
+            ..Default::default()
+        };
+        let f = match cx.egress.discover(url, &options, 3600).await {
             Ok(f) => f,
             Err(e) if e.is::<RetryLater>() => return Err(e),
             Err(e) => {
@@ -725,28 +774,41 @@ impl Podcasts {
         }
         Ok(Some(()))
     }
+    /// Podcast Index's feed for an Apple ID, when it is the feed iTunes names for that ID
+    /// (`itunes_feed`), with the GUID Podcast Index vouches for it.
+    async fn index_for_apple(
+        cx: &Context,
+        deferred: &mut Deferred,
+        show: u64,
+        itunes_feed: Option<&str>,
+    ) -> Option<(IndexFeed, Option<String>)> {
+        let feed = deferred
+            .take("podcastindex", Self::index(cx, Ask::Apple(show)).await)
+            .filter(|f| apple_feed(itunes_feed, &[f.url.as_deref()]))?;
+        let vouched = Self::vouch(cx, deferred, &feed).await;
+        Some((feed, vouched))
+    }
     /// Everything a show confirmed by iTunes gets: its Apple ID, Podcast Index's feed (the one
-    /// that names the Apple ID, unless given) and its Wikidata item. Returns Podcast Index's GUID
-    /// for the show, and whether Podcast Index vouches for it.
+    /// for the Apple ID that is iTunes' feed, unless given) and its Wikidata item. Returns
+    /// Podcast Index's GUID for the show (a fact).
     async fn show(
         cx: &Context,
         found: &mut Found,
         deferred: &mut Deferred,
         show: u64,
-        indexed: Option<IndexFeed>,
-    ) -> Result<(Option<String>, bool)> {
+        itunes_feed: Option<&str>,
+        indexed: Option<(IndexFeed, Option<String>)>,
+    ) -> Result<Option<String>> {
         apple_show(found, show, &cx.config.also_on.apple_storefront);
         let indexed = match indexed {
-            Some(feed) => Some(feed),
-            None => deferred.take("podcastindex", Self::index(cx, Ask::Apple(show)).await),
+            Some(given) => Some(given),
+            None => Self::index_for_apple(cx, deferred, show, itunes_feed).await,
         };
-        let mut vouched = None;
-        if let Some(feed) = &indexed {
-            vouched = Self::vouch(cx, deferred, feed).await;
+        if let Some((feed, vouched)) = &indexed {
             index_show(found, feed, vouched.as_deref());
         }
         deferred.take("wikidata", Self::wikidata(cx, found, show).await);
-        Ok((indexed.and_then(|f| f.guid), vouched.is_some()))
+        Ok(indexed.and_then(|(f, _)| f.guid))
     }
     /// An episode's keys from its show's vouched GUID and its item GUID, and its Apple track
     /// (found by track ID or by item GUID among the show's latest episodes).
@@ -807,30 +869,29 @@ impl Source for Podcasts {
                 episode,
                 site,
             } => {
-                if deferred.take("itunes", Self::show_known(cx, *show).await.map(Some))
-                    != Some(true)
-                {
+                let Some(record) = deferred.take("itunes", Self::itunes_show(cx, *show).await)
+                else {
                     // A player link names its Apple ID in the URL itself.
                     if *site != "Apple Podcasts" {
                         found.keys.push(key(format!("podcast:apple:{show}"), "url"));
                     }
                     return deferred.finish(found);
-                }
+                };
+                let itunes_feed = record.feed.as_deref();
                 match episode {
                     None => {
-                        let (guid, _) =
-                            Self::show(cx, &mut found, &mut deferred, *show, None).await?;
+                        let guid =
+                            Self::show(cx, &mut found, &mut deferred, *show, itunes_feed, None)
+                                .await?;
                         if let Some(g) = guid {
                             found.facts.push(Fact::new("podcast_guid", g));
                         }
                     }
                     Some(track) => {
-                        let indexed =
-                            deferred.take("podcastindex", Self::index(cx, Ask::Apple(*show)).await);
-                        let show_guid = match &indexed {
-                            Some(feed) => Self::vouch(cx, &mut deferred, feed).await,
-                            None => None,
-                        };
+                        let show_guid =
+                            Self::index_for_apple(cx, &mut deferred, *show, itunes_feed)
+                                .await
+                                .and_then(|(_, vouched)| vouched);
                         Self::episode(
                             cx,
                             &mut found,
@@ -852,13 +913,9 @@ impl Source for Podcasts {
                 let Some(indexed) = indexed else {
                     return deferred.finish(found);
                 };
-                let apple = match indexed.apple {
-                    Some(show) => deferred
-                        .take("itunes", Self::show_known(cx, show).await.map(Some))
-                        .filter(|known| *known)
-                        .map(|_| show),
-                    None => None,
-                };
+                let apple =
+                    Self::apple_of(cx, &mut deferred, indexed.apple, &[indexed.url.as_deref()])
+                        .await;
                 let vouched = Self::vouch(cx, &mut deferred, &indexed).await;
                 match episode {
                     None => {
@@ -871,7 +928,8 @@ impl Source for Podcasts {
                         }
                         match apple {
                             Some(show) => {
-                                Self::show(cx, &mut found, &mut deferred, show, Some(indexed))
+                                let given = Some((indexed.clone(), vouched.clone()));
+                                Self::show(cx, &mut found, &mut deferred, show, None, given)
                                     .await?;
                             }
                             None => index_show(&mut found, &indexed, vouched.as_deref()),
@@ -900,14 +958,14 @@ impl Source for Podcasts {
             }
             Podcast::Feed { url, item, page } => {
                 let indexed = deferred.take("podcastindex", Self::index(cx, Ask::Feed(url)).await);
-                // An Apple ID Podcast Index names counts once iTunes knows it.
-                let apple = match indexed.as_ref().and_then(|f| f.apple) {
-                    Some(show) => deferred
-                        .take("itunes", Self::show_known(cx, show).await.map(Some))
-                        .filter(|known| *known)
-                        .map(|_| show),
-                    None => None,
-                };
+                // An Apple ID Podcast Index names counts only when iTunes names this feed for it.
+                let apple = Self::apple_of(
+                    cx,
+                    &mut deferred,
+                    indexed.as_ref().and_then(|f| f.apple),
+                    &[Some(url), indexed.as_ref().and_then(|f| f.url.as_deref())],
+                )
+                .await;
                 let vouched = match &indexed {
                     Some(feed) => Self::vouch(cx, &mut deferred, feed).await,
                     None => None,
@@ -920,7 +978,9 @@ impl Source for Podcasts {
                             .and_then(|r| r.guid);
                         match (apple, indexed) {
                             (Some(show), Some(feed)) => {
-                                Self::show(cx, &mut found, &mut deferred, show, Some(feed)).await?;
+                                let given = Some((feed, vouched.clone()));
+                                Self::show(cx, &mut found, &mut deferred, show, None, given)
+                                    .await?;
                             }
                             (None, Some(feed)) => index_show(&mut found, &feed, vouched.as_deref()),
                             _ => {}
@@ -968,7 +1028,8 @@ impl Source for Podcasts {
                 let Some((read, at)) = read else {
                     return deferred.finish(found);
                 };
-                let Some(item) = read.item_guid else {
+                // Only an episode (an item with audio or video) is worth asking Podcast Index.
+                let Some(item) = read.item_guid.filter(|_| read.item_media) else {
                     return deferred.finish(found);
                 };
                 let indexed = deferred.take("podcastindex", Self::index(cx, Ask::Feed(&at)).await);
@@ -976,13 +1037,13 @@ impl Source for Podcasts {
                     return deferred.finish(found);
                 };
                 let vouched = Self::vouch(cx, &mut deferred, &indexed).await;
-                let apple = match indexed.apple {
-                    Some(show) => deferred
-                        .take("itunes", Self::show_known(cx, show).await.map(Some))
-                        .filter(|known| *known)
-                        .map(|_| show),
-                    None => None,
-                };
+                let apple = Self::apple_of(
+                    cx,
+                    &mut deferred,
+                    indexed.apple,
+                    &[Some(&at), indexed.url.as_deref()],
+                )
+                .await;
                 Self::episode(
                     cx,
                     &mut found,
@@ -1211,9 +1272,33 @@ mod tests {
             episodes_request(DAILY, "us"),
             "https://itunes.apple.com/lookup?id=1200361736&entity=podcastEpisode&limit=200&country=us"
         );
-        assert!(parse_show(200, &read("itunes-podcast-1200361736.json"), DAILY).unwrap());
-        assert!(!parse_show(200, &read("itunes-podcast-1200361736.json"), 1).unwrap());
-        assert!(!parse_show(200, &read("itunes-podcast-missing.json"), 1).unwrap());
+        assert_eq!(
+            parse_show(200, &read("itunes-podcast-1200361736.json"), DAILY).unwrap(),
+            Some(ItunesShow {
+                feed: Some("https://feeds.simplecast.com/Sl5CSM3S".into())
+            }),
+            "Apple's feed for The Daily is not the one Podcast Index reads"
+        );
+        assert_eq!(
+            parse_show(200, &read("itunes-podcast-1200361736.json"), 1).unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_show(200, &read("itunes-podcast-missing.json"), 1).unwrap(),
+            None
+        );
+        assert!(apple_feed(
+            Some("https://podcast.darknetdiaries.com"),
+            &[None, Some("https://podcast.darknetdiaries.com/")]
+        ));
+        assert!(!apple_feed(
+            Some("https://feeds.simplecast.com/Sl5CSM3S"),
+            &[Some("https://feeds.simplecast.com/54nAGcIl")]
+        ));
+        assert!(!apple_feed(
+            None,
+            &[Some("https://feeds.simplecast.com/54nAGcIl")]
+        ));
         assert!(parse_show(503, b"", DAILY).is_err());
         let episodes =
             parse_episodes(200, &read("itunes-episodes-1200361736.json.gz"), DAILY).unwrap();

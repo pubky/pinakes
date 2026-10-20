@@ -489,10 +489,11 @@ request, one iTunes lookup for an ebook edition, and two Wikidata requests when 
 its work; each podcast show one iTunes lookup, two or three Podcast Index requests (the last asks
 who owns the show's GUID), its feed (usually still cached from its card) and two Wikidata requests;
 each episode up to three Podcast Index requests, two iTunes lookups and, for an episode's page, its
-feed; each page whose head names an RSS feed that feed (cached for an hour), and Podcast Index only
-when one item of it is that page; each film or series two Wikidata requests (a TVmaze show first
-its TVmaze record), and a Letterboxd and a TVmaze request when the item has no link there. `deezer`
-is off by default: Deezer's API terms allow non-commercial use only, so turn it on
+feed; each page whose head names an RSS feed that feed (cached for an hour, read up to 8 MiB), and
+Podcast Index only when one item of it with audio or video is that page; each film or series two
+Wikidata requests (a TVmaze show first its TVmaze record), and a Letterboxd and a TVmaze request
+when the item has no link there. `deezer` is off by default: Deezer's API terms allow
+non-commercial use only, so turn it on
 (`[also_on.sources.deezer] enabled = true`) only where they do; it costs one request per Deezer
 link and up to two per other track or album with an ISRC or barcode.
 

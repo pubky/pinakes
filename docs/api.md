@@ -840,6 +840,12 @@ in any spelling, an episode with `?i={n}`), a player link that opens a show by i
 (a `PodcastSeries`, or a `PodcastEpisode` with its item's GUID) is looked up exactly:
 - iTunes must know an Apple ID as a show. The show's key is `podcast:apple:{id}` (a player link
   has it from its URL alone), and it links Apple Podcasts, Pocket Casts and Castro.
+- Apple is the authority for its own IDs. An Apple ID that Podcast Index names for a feed counts
+  only when iTunes' own record of that show names this feed (`feedUrl`, compared without scheme
+  and trailing slash); and an Apple show link takes Podcast Index's feed for its ID only when
+  that feed is iTunes' feed. Otherwise there is no Apple key, Apple link or Apple episode for
+  the feed, and no Podcast Index feed for the show. (The Daily is such a show: iTunes and
+  Podcast Index read different feeds of it.)
 - A show's GUID is a key, `podcast:guid:{uuid}`, only when Podcast Index vouches for it: its
   answer for this feed URL, Apple ID or feed ID names that GUID (an Apple ID it names counts only
   once iTunes knows it), and its feed for that GUID (`byguid`) is this same feed. A copy of a
@@ -853,8 +859,8 @@ in any spelling, an episode with `?i={n}`), a player link that opens a show by i
   `podcast:item:{show GUID}:{SHA-256 of the item GUID}` from its show's vouched GUID. An Apple
   episode takes the item GUID from iTunes, a Podcast Index episode from Podcast Index, and a
   page only when the feed (its feed card's, or the RSS feed its own head names, followed through
-  redirects) is vouched and has one item whose `<link>` is that page. Such a page is typed
-  `PodcastEpisode` from its next refresh. A feed item finds its Apple track among the show's
+  redirects, read up to 8 MiB) is vouched and has one item with audio or video whose `<link>` is
+  that page. Such a page is typed `PodcastEpisode` from its next refresh. A feed item finds its Apple track among the show's
   latest 200 episodes by its GUID.
 - A Podcast Index page links the show's feed and its Apple, Pocket Casts and Castro pages.
 - The show's Wikidata item (by its Apple ID) gives its Q-id as a key and its Spotify, Podcast
