@@ -888,3 +888,106 @@ async fn retention_preserves_normalized_current_and_cached_osm_versions(pool: Pg
         .values()
         .any(|v| v == &changes::normalize(&fetched)));
 }
+
+/// Retention holds the change sequence while it deletes old lines. A save of a post whose author
+/// opted out deletes that post's whole history (old lines too) and takes the sequence afterwards
+/// to append its own line. Retention skips the lines such a save holds instead of waiting for
+/// them, so the two never deadlock; the skipped lines go with the save, or at the next run.
+#[sqlx::test(migrations = "../../migrations")]
+async fn retention_and_an_opted_out_save_of_the_same_post_never_deadlock(pool: PgPool) {
+    use pinakes_core::sources::mastodon;
+    let uri = "https://mastodon.social/@Gargron/1";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let target = mastodon::Target {
+        host: "mastodon.social".into(),
+        id: "1".into(),
+    };
+    let card = |file: &str, at: i64| {
+        let body = std::fs::read(format!(
+            "{}/tests/fixtures/sources/mastodon/{file}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let mut doc = ResourceMeta::new(uri, "mastodon", 3600);
+        doc.fetched_at = at;
+        mastodon::card(doc, &target, 200, &body).unwrap().unwrap()
+    };
+    store::save_document(&pool, &id, 0, &card("status-1.json", 1000))
+        .await
+        .unwrap();
+    // A spelling that became an alias of the post: the opted-out save clears its row too.
+    let spelling = "https://mastodon.social/@Gargron/1/";
+    let alias_id = store::ensure_resource(&pool, spelling).await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let line = pinakes_core::alias::assign(
+        &mut tx,
+        &alias_id,
+        &pinakes_core::alias::Alias {
+            root: uri.into(),
+            basis: "identifier",
+        },
+    )
+    .await
+    .unwrap();
+    pinakes_core::alias::record(&mut tx, line.into_iter().collect())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    sqlx::query("UPDATE resource SET doc='{}'::jsonb WHERE id=$1")
+        .bind(&alias_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The post's lines are past retention.
+    sqlx::query("UPDATE resource_change SET at=now()-interval '200 days' WHERE resource_id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Holding the alias's row stops the save between deleting the post's lines and appending.
+    let mut hold = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR UPDATE")
+        .bind(&alias_id)
+        .execute(&mut *hold)
+        .await
+        .unwrap();
+    let save = tokio::spawn({
+        let (pool, id) = (pool.clone(), id.clone());
+        let opted = card("status-1-opted-out.json", 2000);
+        async move { store::save_document(&pool, &id, 0, &opted).await }
+    });
+    let held = || async {
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'UPDATE resource SET name=NULL%')")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !held().await {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the save has deleted the post's lines and waits for the alias");
+    // Retention runs while the save holds the post's old lines.
+    let retained = tokio::spawn({
+        let pool = pool.clone();
+        async move { changes::retain(&pool, 90).await }
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    hold.commit().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        save.await.unwrap().expect("the save commits");
+        retained.await.unwrap().expect("retention commits");
+    })
+    .await
+    .expect("neither waits forever");
+    let (lines, with_documents): (i64, i64) = sqlx::query_as(
+        "SELECT count(*), count(*) FILTER (WHERE before IS NOT NULL OR after IS NOT NULL) FROM resource_change WHERE resource_id=$1",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((lines, with_documents), (1, 0));
+}

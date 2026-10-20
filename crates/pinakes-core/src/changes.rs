@@ -393,7 +393,10 @@ pub async fn retain(pool: &PgPool, days: u32) -> Result<()> {
     let occurrences = retain_occurrences(pool).await;
     let mut tx = pool.begin().await?;
     lock_sequence(&mut tx).await?;
-    sqlx::query("DELETE FROM resource_change WHERE at<now()-$1*interval '1 day'")
+    // The sequence is the last lock a writer takes, so holding it this never waits for a line a
+    // writer holds (an opted-out post deleting its history before it appends): those lines go
+    // with that writer, or at the next run.
+    sqlx::query("DELETE FROM resource_change WHERE seq IN (SELECT seq FROM resource_change WHERE at<now()-$1*interval '1 day' FOR UPDATE SKIP LOCKED)")
         .bind(days as f64)
         .execute(&mut *tx)
         .await?;
