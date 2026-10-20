@@ -56,11 +56,16 @@ CARGO_PROFILE_DEV_DEBUG=0 scripts/e2e --isolated-live
 
 `--isolated-live` uses the real SDK, homeserver, Nexus and public upstreams. Its
 private Pinakes driver reads the Nexus feed but resolves only the selected sample IDs
-(seventeen by default, at most twenty), through the production queue path (batched completion,
-leases and resolver policy), and runs the also-on sources for them. Music samples must be typed
-and named by what they are (Spotify, Apple Music, TIDAL, Bandcamp, SoundCloud); the Spotify
-track sample must show Deezer as a derived link, found through MusicBrainz, and the Wikidata
-item for Paris its French and English Wikipedia editions. Canaries and unrelated backlog
+(twenty-six by default, at most thirty-two), through the production queue path (batched
+completion, leases and resolver policy), and runs the also-on sources for them. Music samples
+must be typed and named by what they are (Spotify, Apple Music, TIDAL, Bandcamp, SoundCloud;
+`name` checks a card's name, Daft Punk's TIDAL page); the Spotify track sample must show Deezer
+as a derived link, found through MusicBrainz, and the Wikidata item for Paris its French and
+English Wikipedia editions. The owner's music cases join (`group_with`): TIDAL's `/u` share
+link of Bohemian Rhapsody with the seed's recording through its own ISRC, Cut to the Feeling's
+Spotify and Deezer albums through their MusicBrainz release, Dracula's TIDAL, Apple and Deezer
+albums through their one release group; a TIDAL track whose ISRC nobody else knows keeps it in
+its `facts`. Canaries and unrelated backlog
 fetching are off. Use this mode for a scoped live smoke test. Run `scripts/e2e` without a mode
 to use an already configured dev stack
 at `PINAKES_E2E_PINAKES` (default `http://127.0.0.1:8090`).
@@ -89,7 +94,8 @@ Google’s published Swiss holiday calendar, public by design with no capability
 token. `PINAKES_E2E_ICS_URL` optionally selects another public feed; never commit
 Outlook/iCloud/Nextcloud/Proton share URLs or capability tokens.
 `PINAKES_E2E_TIMEOUT_MS`
-sets the per-stage polling deadline (default 120,000 ms). Terminal missing/error/
+sets the per-stage polling deadline (default 120,000 ms; 600,000 ms live, where the music samples
+wait for MusicBrainz at one request a second). Terminal missing/error/
 unreachable samples fail immediately; live mode never substitutes fixture data. A live event
 with an accepted venue must produce a positive `venue=` match; an unresolved venue
 may produce zero matches. Facet counts, each bbox/window row, fixture recurrence

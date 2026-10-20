@@ -99,6 +99,7 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
         // A music link is typed and named by what it is, whatever its page says.
         if (tag.site) assert.equal(d.site, tag.site, `Pinakes ${tag.kind} site`);
         if (tag.site) assert.equal(d.type, tag.type, `Pinakes ${tag.kind} type`);
+        if (tag.name) assert.equal(d.name, tag.name, `Pinakes ${tag.kind} name`);
       }
       // The type filter matches ancestors, so a MusicEvent sample is found under type=Event.
       for (const type of new Set(tags.map(tag => tag.type))) {
@@ -250,6 +251,16 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
         }, timeout, signal);
         assert(card.also_on.every(e => !e.derived || (e.via && e.uri !== card.uri)), 'a derived link names its hub and is never the card');
         report.assertions.push(`also on: ${sample.kind} derived ${sample.derived.join(', ')} (${card.also_on.filter(e => e.derived).length} derived links)`);
+      }
+      // A sample naming `facts` shows each in its details (a TIDAL track's own ISRC, also when no
+      // other link shares it).
+      for (const sample of samples.filter(s => s.facts)) {
+        await waitFor(`facts for ${sample.kind}`, async () => {
+          const card = await json(`${pinakes}/v1/resources/${docs.get(sample.kind).id}`);
+          const facts = card.details?.facts || {};
+          return Object.entries(sample.facts).every(([name, value]) => String(facts[name] || '').split('; ').includes(value));
+        }, timeout, signal);
+        report.assertions.push(`facts: ${sample.kind} ${Object.entries(sample.facts).map(([k, v]) => `${k}=${v}`).join(', ')}`);
       }
       if (docs.has('isbn') && docs.has('isbn_page')) report.assertions.push('a book and its edition page keep their own cards');
     }, report, journal);

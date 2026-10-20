@@ -597,11 +597,12 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("samples must be an array"))?
     {
-        let (id, uri, _) = identity(
-            sample["uri"]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("sample URI"))?,
-        )?;
+        let uri = sample["uri"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("sample URI"))?;
+        // A spelling (a TIDAL `/u` share link) is resolved as its root.
+        let root = pinakes_core::alias::root(uri).map_or_else(|| uri.to_owned(), |a| a.root);
+        let (id, uri, _) = identity(&root)?;
         let kind = pinakes_core::resolver::classify(&uri)
             .ok_or_else(|| anyhow::anyhow!("unclassified sample"))?;
         let resolver = resolvers
@@ -613,8 +614,8 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
     }
     // The scope stays small and explicit: only listed samples are ever fetched.
     ensure!(
-        (1..=20).contains(&selected.len()),
-        "live driver requires one to twenty sample resources"
+        (1..=32).contains(&selected.len()),
+        "live driver requires one to thirty-two sample resources"
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);
