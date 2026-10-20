@@ -808,7 +808,9 @@ the event platform adapters, worker status and the effective limits.
 - **Media**: oEmbed (`media.oembed`) and page JSON-LD, which wins when healthy. An oEmbed answer
   survives a failed or truncated page. Podcast types need a namespace or an audio/video
   enclosure; plain RSS is a DataFeed. Direct podcast feeds are PodcastSeries; `?guid=` or the
-  episode page's RSS link selects an episode. No embed HTML or media bytes are served.
+  episode page's RSS link selects an episode. A feed longer than the page cap is read up to its
+  last whole item within the first megabyte (the newest come first), so an episode past that is
+  never marked missing. No embed HTML or media bytes are served.
 - **Event platforms**: the adapters in `data/event-adapters.json`. Each has an `enabled` switch
   and, where the platform needs one, a `key`; a missing key disables only that adapter and no key
   is ever returned. Its manifest lists the mode, cadence floor, identity, cancellation rule,

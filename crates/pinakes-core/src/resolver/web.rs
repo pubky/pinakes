@@ -167,7 +167,8 @@ impl WebResolver {
                 if let Some(doc) = events.container(uri, &fetched, deadline).await? {
                     return Ok(doc);
                 }
-                let feed = crate::event::service::feed_like(&fetched);
+                // A cut-off body never confirms that an established feed emptied.
+                let feed = crate::event::service::feed_like(&fetched) && !fetched.truncated;
                 if let Some(doc) = events.disappeared(uri, fetched.status, feed).await? {
                     return Ok(doc);
                 }

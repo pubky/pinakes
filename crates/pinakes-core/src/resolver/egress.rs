@@ -288,9 +288,15 @@ pub async fn read_response_with(
             return Err(refused("content type is not allowed"));
         }
         let html = matches!(content_type.as_str(), "text/html" | "application/xhtml+xml");
+        // An RSS or Atom feed read without a feed cap keeps its first megabyte like a page: its
+        // channel and newest items come first (`cards::feed_prefix` completes the cut).
+        let xml_feed = matches!(
+            content_type.as_str(),
+            "text/xml" | "application/xml" | "application/rss+xml" | "application/atom+xml"
+        ) && options.feed_cap.is_none();
         let (max, refuse) = match options.body_cap {
             Some(cap) => (cap, true),
-            None if html => (BODY_CAP, false),
+            None if html || xml_feed => (BODY_CAP, false),
             None => (options.feed_cap.unwrap_or(BODY_CAP), true),
         };
         if refuse && response.content_length().is_some_and(|n| n > max as u64) {
@@ -1207,6 +1213,38 @@ mod tests {
                 .unwrap();
             assert_eq!(transport.0.lock().unwrap()[0].as_deref(), sent);
         }
+    }
+    /// An RSS or Atom feed past the page cap keeps its first megabyte, marked truncated, unless
+    /// the fetch set a feed cap (calendars), which refuses what exceeds it.
+    #[tokio::test]
+    async fn a_long_xml_feed_keeps_its_first_megabyte() {
+        use axum::{routing::get, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/",
+            get(|| async {
+                let body = format!("<rss><channel>{}", "<item/>".repeat(2 * BODY_CAP / 7));
+                ([("content-type", "application/rss+xml")], body)
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let url: Url = format!("http://{addr}/").parse().unwrap();
+        let client = reqwest::Client::new();
+        let read = |options: FetchOptions| {
+            let (url, request) = (url.clone(), client.get(url.clone()));
+            async move { read_response_with(url, request.send().await.unwrap(), &options).await }
+        };
+        let fetched = read(Default::default()).await.unwrap();
+        assert!(fetched.truncated);
+        assert_eq!(fetched.body.len(), BODY_CAP);
+        let capped = FetchOptions {
+            feed_cap: Some(BODY_CAP),
+            ..Default::default()
+        };
+        let error = read(capped).await.unwrap_err();
+        assert!(error.downcast_ref::<BodyTooLarge>().is_some(), "{error:#}");
+        server.abort();
     }
     /// A cap above the default admits a larger JSON body (a much-edited Wikidata item).
     #[tokio::test]

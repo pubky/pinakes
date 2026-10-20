@@ -364,6 +364,59 @@ fn podcast_selection_and_schema_media_keys() {
         assert_eq!(d.attributes["isrc"], "US-S1Z-99-00001");
     }
 }
+/// A feed cut off at the page cap (a long show's feed is 2–5 MB) still gets its card: the read
+/// stops after the last whole item, and the elements still open are closed.
+#[test]
+fn a_feed_cut_off_at_the_cap_reads_to_its_last_whole_item() {
+    let head = r#"<?xml version="1.0"?><rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>Long Show</title>"#;
+    let item = |n: usize| {
+        format!("<item><title>Episode {n}</title><guid>e{n}</guid><description><![CDATA[<p>Notes {n}</p>]]></description><enclosure url=\"https://cdn.example/{n}.mp3\" type=\"audio/mpeg\"/></item>")
+    };
+    let whole: String = (1..=3).map(item).collect();
+    // Cut inside the fourth item's CDATA section.
+    let cut = format!("{head}{whole}{}", &item(4)[..60]);
+    let completed = cards::feed_prefix(&cut, 1000).unwrap();
+    assert_eq!(completed, format!("{head}{whole}</channel></rss>"));
+    assert_eq!(
+        cards::feed_prefix(&cut, 2).unwrap(),
+        format!("{head}{}{}</channel></rss>", item(1), item(2))
+    );
+    assert!(cards::feed_prefix(&format!("{head}{}", &item(1)[..30]), 1000).is_none());
+    // Atom entries too.
+    let atom = r#"<feed xmlns="http://www.w3.org/2005/Atom"><title>A</title><entry><id>1</id></entry><entry><id>2"#;
+    assert_eq!(
+        cards::feed_prefix(atom, 1000).unwrap(),
+        r#"<feed xmlns="http://www.w3.org/2005/Atom"><title>A</title><entry><id>1</id></entry></feed>"#
+    );
+    let f = Fetched {
+        permanent_redirect: false,
+        truncated: true,
+        url: "https://podcast.example/feed".parse().unwrap(),
+        body: cut.into_bytes(),
+        content_type: "application/rss+xml".into(),
+        status: 200,
+        location: None,
+        retry_after_secs: 60,
+        validators: Default::default(),
+    };
+    let series = cards::podcast("https://podcast.example/feed", &f, 3600, 1000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (series.type_name.as_str(), series.name.as_deref()),
+        ("PodcastSeries", Some("Long Show"))
+    );
+    let episode = cards::podcast("https://podcast.example/feed?guid=e2", &f, 3600, 1000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(episode.name.as_deref(), Some("Episode 2"));
+    // An episode past the part that was read is not missing.
+    assert!(
+        cards::podcast("https://podcast.example/feed?guid=e900", &f, 3600, 1000)
+            .unwrap()
+            .is_none()
+    );
+}
 #[test]
 fn generic_nostr_signed_profile_note_and_nip52_routing() {
     use nostr::prelude::*;
