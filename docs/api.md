@@ -535,6 +535,10 @@ root, and a read, lookup, change query or occurrence read of the alias answers w
 - **Wikipedia articles**: the mobile host, `index.php?title=…` (a revision with `oldid` too),
   spaces and percent-encoding are aliases of `https://{lang}.wikipedia.org/wiki/{Title}`. A
   redirect's title stays its own link.
+- **MusicBrainz pages**: a recording, release, release group or artist page, or an ISRC's page,
+  on `musicbrainz.org`, `www.` or `beta.`, over http or https, its web service record
+  (`/ws/2/…`), the MBID in any letter case, a trailing slash and parameters are aliases of
+  `https://musicbrainz.org/{kind}/{mbid}` or `https://musicbrainz.org/isrc/{ISRC}`.
 - **The page's own canonical**: after a fetch, a page whose head canonical link or
   all-permanent redirect chain names a URL that differs from it only by a trailing slash and tracking
   parameters becomes an alias of that URL. A canonical to another path (a homepage, a sibling
