@@ -43,8 +43,9 @@ CREATE INDEX resource_fact_value_idx ON resource_fact USING btree (name, value);
 -- Links to the same thing that nobody tagged, found by a source: shown in the card's
 -- `also_on` with `derived: true`, never fetched, never counted as references, never ranked.
 -- `link_id` is the link's resource ID, so a derived link and a tagged member that are the
--- same URL are shown once. `key` is the exact key that named the link (an iTunes or Deezer
--- lookup by barcode or ISRC): a tagged resource with that ID joins it (`groups::evidence`).
+-- same URL are shown once. `key` is the exact key that named the link (the hub entity or item it
+-- is a relation or claim of, or a lookup by barcode or ISRC): a tagged resource with that ID
+-- joins it (`groups::evidence`).
 CREATE TABLE derived_link (
     resource_id text NOT NULL REFERENCES resource(id) ON DELETE CASCADE,
     link_id text NOT NULL,

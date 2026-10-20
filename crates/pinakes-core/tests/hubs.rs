@@ -485,6 +485,14 @@ async fn wikipedia_editions_join_through_their_item(pool: sqlx::PgPool) {
     assert!(also_on[1..]
         .iter()
         .any(|e| e["uri"] == "https://en.wikipedia.org/wiki/Immanuel_Kant"));
+    // The two editions' runs name each other's resources (keyed links) at once, and neither
+    // fails: each locks the rows it touches in order.
+    let failed: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM also_on_dirty WHERE last_error IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(failed, 0);
 }
 
 /// A Wikidata item link is its own hub: any spelling is the item's canonical link, and its card
@@ -662,6 +670,15 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
         store::save_document(&pool, &id, 0, &d).await.unwrap();
         ids.push(id);
     }
+    // A tagged Spotify track MusicBrainz names only on the recording (its own URL lookup knows
+    // nothing): the derived link's key joins it.
+    let spotify = "https://open.spotify.com/track/2OBofMJx94NryV2SK8p8Zf";
+    let spotify_id = store::ensure_resource(&pool, spotify).await.unwrap();
+    let mut d = ResourceMeta::new(spotify, "jsonld", 86400);
+    d.set_type("MusicRecording");
+    store::save_document(&pool, &spotify_id, 0, &d)
+        .await
+        .unwrap();
     // Another host's isrcCode is a fact at most, never a key.
     let other = "https://example.org/bohemian-rhapsody";
     let other_id = store::ensure_resource(&pool, other).await.unwrap();
@@ -717,6 +734,7 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
     assert_ne!(seed, ["-"]);
     assert_eq!(rows(group, ids[1].clone()).await, seed);
     assert_eq!(rows(group, ids[2].clone()).await, ["-"]);
+    assert_eq!(rows(group, spotify_id).await, seed);
     // The recording's other links, found through the ISRC.
     let links = rows(
         "SELECT uri FROM derived_link WHERE resource_id=$1 ORDER BY uri",

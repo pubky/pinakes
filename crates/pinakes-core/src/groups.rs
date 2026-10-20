@@ -155,12 +155,23 @@ fn evidence(row: &Value) -> Vec<String> {
 }
 /// A hub key's namespace and value when the namespace names one object, so a group holds at most
 /// one of its values: a MusicBrainz recording, release, release group or artist, a Wikidata item,
-/// a Discogs artist, master or release. ISRCs and UPCs may be several (one recording has many).
+/// a Discogs artist, master or release, an IMDb title, an Open Library edition or work, a
+/// podcast's GUID or Apple Podcasts ID. ISRCs, UPCs and ISBNs may be several (one recording has
+/// many ISRCs, one book several ISBNs).
 fn single_object(key: &str) -> Option<(&str, &str)> {
     let (namespace, value) = key.strip_prefix("hub:")?.rsplit_once(':')?;
     (matches!(
         namespace,
-        "mb:recording" | "mb:release" | "mb:release-group" | "mb:artist" | "wikidata"
+        "mb:recording"
+            | "mb:release"
+            | "mb:release-group"
+            | "mb:artist"
+            | "wikidata"
+            | "imdb"
+            | "openlibrary:edition"
+            | "openlibrary:work"
+            | "podcast:guid"
+            | "podcast:apple"
     ) || namespace.starts_with("discogs:"))
     .then_some((namespace, value))
 }
@@ -1272,6 +1283,14 @@ mod tests {
             Some(("discogs:master", "21491"))
         );
         assert_eq!(single_object("hub:upc:0602557656527"), None);
+        assert_eq!(
+            single_object("hub:imdb:tt0133093"),
+            Some(("imdb", "tt0133093"))
+        );
+        assert_eq!(
+            single_object("hub:podcast:guid:ead4c236-bf58-58c6-a2c6-a6b28d128cb6"),
+            Some(("podcast:guid", "ead4c236-bf58-58c6-a2c6-a6b28d128cb6"))
+        );
         assert_eq!(single_object("mb:recording:a"), None);
     }
     /// A run that stops on the budget resumes at its stop key and wraps around, so every key of a

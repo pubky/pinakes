@@ -724,9 +724,10 @@ A derived link is a hint: it is never fetched, never counted as a reference and 
 anything. Sources read a resource after it is saved and again when their results age (each
 source's lifetime, typically 30 days); a source's links and keys live twice that, so one failed
 refresh keeps them, and they go when the source stops returning them. A source's exact keys
-(an MBID, a Q-id) also [group](#groups) the links that share them. When a service answers a
-lookup by an exact key (a barcode or an ISRC) with exactly one link, a tagged resource that is
-that link takes the key too and joins the group.
+(an MBID, a Q-id) also [group](#groups) the links that share them. A derived link found through
+an exact ID (a MusicBrainz relation, a Wikidata item's claim or sitelink, a service's answer to
+a lookup by barcode or ISRC) carries that ID: a tagged resource that is that link (the same URL
+after its aliases) takes it too and joins the group, even when its own lookup finds nothing.
 
 **Music.** A track, album or artist link on a music service ([music service links](#aliases))
 is looked up exactly, never by title or name. A key comes from a hub (MusicBrainz, Wikidata) or

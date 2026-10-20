@@ -193,7 +193,15 @@ fn item_key(item: &wikidata::Item) -> Vec<Key> {
         .into_iter()
         .collect()
 }
-/// An item's entries in the other encyclopedias.
+/// A link an item's own claim or sitelink names: keyed by the item, so a tagged link that is it
+/// joins the item's group.
+fn named(item: &wikidata::Item, link: Link) -> Link {
+    match hubs::key::wikidata(&item.qid) {
+        Some(key) => link.keyed(key),
+        None => link,
+    }
+}
+/// An item's entries in the other encyclopedias, keyed by the item.
 pub fn encyclopedias(item: &wikidata::Item) -> Vec<Link> {
     let mut links = vec![];
     for e in ENCYCLOPEDIAS {
@@ -204,16 +212,16 @@ pub fn encyclopedias(item: &wikidata::Item) -> Vec<Link> {
             } else {
                 value.clone()
             };
-            links.push(Link::new(
-                e.template.replace("{}", &value),
-                e.site,
-                "wikidata",
+            links.push(named(
+                item,
+                Link::new(e.template.replace("{}", &value), e.site, "wikidata"),
             ));
         }
     }
     links
 }
-/// An item's Wikipedia editions (its sitelinks), the major languages first, without `skip`.
+/// An item's Wikipedia editions (its sitelinks), the major languages first, without `skip`,
+/// keyed by the item.
 pub fn editions(item: &wikidata::Item, skip: Option<&str>) -> Vec<Link> {
     let mut editions: Vec<Article> = item
         .sitelinks
@@ -230,12 +238,18 @@ pub fn editions(item: &wikidata::Item, skip: Option<&str>) -> Vec<Link> {
     editions.sort_by(|a, b| (rank(&a.lang), &a.lang).cmp(&(rank(&b.lang), &b.lang)));
     editions
         .into_iter()
-        .map(|a| Link::new(a.canonical, format!("Wikipedia ({})", a.lang), "wikidata"))
+        .map(|a| {
+            named(
+                item,
+                Link::new(a.canonical, format!("Wikipedia ({})", a.lang), "wikidata"),
+            )
+        })
         .collect()
 }
 /// What a Wikidata item link lists: its Q-id as key; its encyclopedia entries, the music
-/// services its best-rank IDs name (every level: the item is the thing itself) and its
-/// Wikipedia editions. Only the item's own claims and sitelinks, never a search.
+/// services its best-rank IDs name (every level: the item is the thing itself, so these carry
+/// no key: a song item's track is one of several recordings) and its Wikipedia editions. Only
+/// the item's own claims and sitelinks, never a search.
 pub fn item_found(item: &wikidata::Item, storefront: &str) -> Found {
     let mut found = Found {
         keys: item_key(item),

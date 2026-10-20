@@ -147,9 +147,11 @@ pub struct Key {
 /// A derived link: `site` is the service's name as a card shows it ("Apple Music"), `via` the
 /// hub or service it came through (`musicbrainz`, `wikidata`, `itunes`), `kind` a qualifier
 /// such as `archived`, `at` a time that belongs to the link (an archived copy's capture).
-/// `key` is the exact key that named it, when a service answered a lookup by that key with
-/// exactly this link (iTunes or Deezer by barcode or ISRC): a tagged resource that is this link
-/// takes the key and joins the group (never for a hub's relations, which can be ambiguous).
+/// `key` is the exact key that named it: the hub entity or item it is a relation or claim of
+/// (`mb:recording:…`, `wikidata:Q…`), or the barcode or ISRC a service's lookup answered with
+/// exactly this link. A tagged resource that is this link takes the key and joins the group
+/// (the single-object rule keeps a link two entities name in one group only). Set it only for
+/// an exact derivation, never for a search or a name match.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Link {
     pub uri: String,
@@ -372,6 +374,22 @@ pub async fn record(
     let expires = Utc::now()
         + chrono::Duration::from_std(ttl.saturating_mul(2)).unwrap_or(chrono::Duration::days(60));
     let mut tx = pool.begin().await?;
+    // The resource rows this run's triggers update (its own, and those its keyed links name, now
+    // and before), locked first and in ID order, so two runs naming each other never deadlock.
+    let named: Vec<&str> = std::iter::once(resource_id)
+        .chain(
+            links
+                .iter()
+                .filter(|(_, _, l)| l.key.is_some())
+                .map(|(id, ..)| id.as_str()),
+        )
+        .collect();
+    sqlx::query("SELECT 1 FROM resource WHERE id=ANY($1::text[] || ARRAY(SELECT link_id FROM derived_link WHERE resource_id=$2 AND source=$3 AND key IS NOT NULL)) ORDER BY id FOR NO KEY UPDATE")
+        .bind(&named)
+        .bind(resource_id)
+        .bind(source)
+        .execute(&mut *tx)
+        .await?;
     let key_rows: Vec<Value> = keys
         .iter()
         .map(|k| serde_json::json!({"key": k.key, "via": k.via}))
@@ -404,14 +422,25 @@ pub async fn record(
 
 /// Delete keys and links nobody refreshed in time (their deletion regroups as a change would).
 pub async fn prune(pool: &PgPool) -> Result<u64> {
+    // Each deletion locks the resource rows its triggers update first, in ID order (`record`).
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT 1 FROM resource WHERE id IN (SELECT resource_id FROM resource_key WHERE expires_at<=now()) ORDER BY id FOR NO KEY UPDATE")
+        .execute(&mut *tx)
+        .await?;
     let keys = sqlx::query("DELETE FROM resource_key WHERE expires_at<=now()")
-        .execute(pool)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
+    tx.commit().await?;
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT 1 FROM resource WHERE id IN (SELECT link_id FROM derived_link WHERE expires_at<=now() AND key IS NOT NULL) ORDER BY id FOR NO KEY UPDATE")
+        .execute(&mut *tx)
+        .await?;
     let links = sqlx::query("DELETE FROM derived_link WHERE expires_at<=now()")
-        .execute(pool)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
+    tx.commit().await?;
     let facts = sqlx::query("DELETE FROM resource_fact WHERE expires_at<=now()")
         .execute(pool)
         .await?

@@ -194,6 +194,19 @@ impl Source for MusicBrainzSource {
                 .iter()
                 .all(|e| links(e).iter().any(|o| o.uri == l.uri))
         });
+        // Each link is keyed by the entity MusicBrainz names it on (the release group for
+        // editions), so a tagged link that is it joins even when its own lookup is ambiguous.
+        let named = if entities.len() == 1 {
+            hubs::key::mb(kind, &entity.mbid)
+        } else {
+            entity
+                .release_group
+                .as_deref()
+                .and_then(|g| hubs::key::mb(MbKind::ReleaseGroup, g))
+        };
+        for link in &mut found.links {
+            link.key.clone_from(&named);
+        }
         let barcode = entity
             .barcode
             .as_ref()
@@ -629,13 +642,16 @@ pub fn found(item: &wikidata::Item, level: Level, storefront: &str) -> Found {
             });
         }
     }
+    // Keyed by the item (one recording at track level), so a tagged link that is one joins.
+    let named = hubs::key::wikidata(&item.qid);
     for (property, _, _, template) in PROPERTIES {
         for value in item.id(property).iter().take(4) {
-            if let Some(link) = derived(
+            if let Some(mut link) = derived(
                 &property_url(template, value, storefront),
                 level,
                 "wikidata",
             ) {
+                link.key.clone_from(&named);
                 found.links.push(link);
             }
         }
