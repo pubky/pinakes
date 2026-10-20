@@ -359,6 +359,8 @@ static BTCMAP: std::sync::LazyLock<tokio::sync::Mutex<BtcmapIndex>> =
     std::sync::LazyLock::new(Default::default);
 /// Rows per sync page (each about 200 bytes, so a page stays under the body limit).
 const BTCMAP_PAGE: u32 = 2000;
+/// Rows per page when a full page's places all changed at one instant.
+const BTCMAP_PAGE_MAX: u32 = 4000;
 /// Pages per lookup; a longer first sync continues on the next lookup.
 const BTCMAP_PAGES: usize = 25;
 const BTCMAP_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
@@ -368,12 +370,13 @@ impl BtcmapIndex {
         if self.synced.is_some_and(|at| at.elapsed() < BTCMAP_EVERY) {
             return Ok(());
         }
+        let mut limit = BTCMAP_PAGE;
         for _ in 0..BTCMAP_PAGES {
             let since = self
                 .since
                 .clone()
                 .unwrap_or_else(|| "2010-01-01T00:00:00Z".to_owned());
-            let request = places::btcmap_sync_request(&since, BTCMAP_PAGE)
+            let request = places::btcmap_sync_request(&since, limit)
                 .ok_or_else(|| anyhow::anyhow!("invalid sync time {since}"))?;
             let f = send(cx, &request, "btcmap_busy").await?;
             let page = places::parse_btcmap_places(f.status, &f.body)?;
@@ -387,14 +390,25 @@ impl BtcmapIndex {
                 }
             }
             let next = places::btcmap_next_since(&page).map(str::to_owned);
-            let last = page.len() < BTCMAP_PAGE as usize || next == self.since;
-            if next.is_some() {
-                self.since = next;
-            }
-            if last {
+            // A short page is the last; a full one never is, more may follow.
+            if page.len() < limit as usize {
+                self.since = next.or(self.since.take());
                 self.synced = Some(std::time::Instant::now());
                 return Ok(());
             }
+            if next.is_some() && next == self.since {
+                // Every place on the page changed at that instant: a larger page, then past it.
+                if limit < BTCMAP_PAGE_MAX {
+                    limit = BTCMAP_PAGE_MAX;
+                    continue;
+                }
+                let past = places::btcmap_after(&since)
+                    .ok_or_else(|| anyhow::anyhow!("invalid sync time {since}"))?;
+                tracing::warn!(%since, "more BTC Map places changed at one instant than a page holds; some are skipped");
+                self.since = Some(past);
+                continue;
+            }
+            self.since = next;
         }
         Ok(())
     }
@@ -1622,5 +1636,52 @@ mod tests {
         assert!(!only_value(&two, "P1733", "400"));
         assert!(!only_value(&two, "P1733", "620"));
         assert!(!only_value(&one, "P1733", "620"));
+    }
+
+    /// A full page is never the last: places that changed at one instant past a page come on a
+    /// larger page, and the sync then goes past that instant.
+    #[tokio::test(start_paused = true)]
+    async fn btcmap_sync_reads_past_a_full_page_of_one_instant() {
+        let at = "2026-10-10T00:00:00.000Z";
+        let rows = |ids: std::ops::Range<u64>, at: &str| {
+            serde_json::to_vec(
+                &ids.map(|id| serde_json::json!({"id": id, "osm_id": format!("node:{id}"), "updated_at": at}))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+        };
+        let url = |since: &str, limit: u32| {
+            places::btcmap_sync_request(since, limit)
+                .unwrap()
+                .url
+                .to_string()
+        };
+        let routes = [
+            (url("2010-01-01T00:00:00Z", BTCMAP_PAGE), rows(1..2001, at)),
+            // From that instant: the same full page, then a larger one, still all at it.
+            (url(at, BTCMAP_PAGE), rows(1..2001, at)),
+            (url(at, BTCMAP_PAGE_MAX), rows(1..4001, at)),
+            (
+                url("2026-10-10T00:00:00.001Z", BTCMAP_PAGE_MAX),
+                rows(5000..5001, "2026-10-10T00:00:01.000Z"),
+            ),
+        ];
+        let (egress, asked) = crate::sources::fixture::egress(
+            routes
+                .iter()
+                .map(|(u, b)| (u.as_str(), 200, JSON, b.clone()))
+                .collect(),
+        );
+        let cx = Context {
+            egress,
+            config: Default::default(),
+        };
+        let mut index = BtcmapIndex::default();
+        let synced = index.sync(&cx).await;
+        assert!(synced.is_ok(), "{synced:?} {:?}", asked.asked());
+        assert!(index.synced.is_some());
+        assert_eq!(index.places.len(), 4001);
+        assert!(index.places.contains("node/5000"));
+        assert_eq!(index.since.as_deref(), Some("2026-10-10T00:00:01.000Z"));
     }
 }

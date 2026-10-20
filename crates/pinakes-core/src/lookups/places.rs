@@ -160,6 +160,15 @@ pub fn btcmap_next_since(places: &[BtcmapPlace]) -> Option<&str> {
         .map(|(_, p)| p.updated_at.as_str())
 }
 
+/// The sync time just past `since` (one millisecond, BTC Map's resolution).
+pub fn btcmap_after(since: &str) -> Option<String> {
+    let at = chrono::DateTime::parse_from_rfc3339(since).ok()? + chrono::Duration::milliseconds(1);
+    Some(
+        at.to_utc()
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
