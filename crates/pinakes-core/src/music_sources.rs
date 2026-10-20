@@ -314,16 +314,16 @@ impl Source for DeezerSource {
             Level::Album => ("album", "upc", "upc"),
             _ => return Ok(Found::default()),
         };
+        let normal = if kind == "track" {
+            music::isrc
+        } else {
+            music::gtin13
+        };
         let mut found = Found::default();
         if link.service == Service::Deezer {
             // Its own record of its own object.
             let Some(v) = deezer(cx, &format!("{kind}/{}", link.id)).await? else {
                 return Ok(found);
-            };
-            let normal = if kind == "track" {
-                music::isrc
-            } else {
-                music::gtin13
             };
             if let Some(value) = v[field].as_str().and_then(normal) {
                 found.keys.push(Key {
@@ -353,6 +353,10 @@ impl Source for DeezerSource {
             let Some(v) = deezer(cx, &format!("{kind}/{namespace}:{asked}")).await? else {
                 continue;
             };
+            // Only the object that has the value asked.
+            if v[field].as_str().and_then(normal).as_deref() != Some(value) {
+                continue;
+            }
             let url = format!(
                 "https://www.deezer.com/{kind}/{}",
                 v["id"].as_u64().unwrap_or(0)
