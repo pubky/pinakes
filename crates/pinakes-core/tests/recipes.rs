@@ -90,7 +90,20 @@ async fn fixture(pool: &PgPool) {
         lat: 47.3769,
         lon: 8.5417,
     });
+    // The same meetup on its organiser's site: possibly the same event (`maybe_same`).
+    let mut organiser = card(
+        "https://bitcoinmeetup.ch/events/zurich/",
+        "web",
+        "Event",
+        "Bitcoin Meetup Zürich 🍻 21.10.",
+    );
+    organiser.start = meetup.start.map(|s| s + chrono::Duration::minutes(2));
+    organiser.location = Some(Point {
+        lat: 47.3772,
+        lon: 8.5420,
+    });
     docs.push(meetup);
+    docs.push(organiser);
     let mut post = card(
         "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G",
         "pubky",
@@ -392,6 +405,11 @@ async fn fixture(pool: &PgPool) {
             tag(pool, &id, label).await;
         }
     }
+    while pinakes_core::same_event::drain(pool, &Config::default(), 200)
+        .await
+        .unwrap()
+        > 0
+    {}
 }
 
 /// One tag by the seed identity, with the resource's score.
@@ -575,6 +593,7 @@ async fn every_named_example_returns_data(pool: PgPool) {
             "items" => count(&response).max(count(&response["items"])),
             "map" => count(&response["clusters"]) + count(&response["points"]),
             "group" => usize::from(count(&response["members"]) >= 2),
+            "same_event" => count(&response["maybe_same"]),
             "lines" => count(&response["lines"]),
             state @ ("missing" | "unreachable" | "pending") => {
                 usize::from(response["status"] == state)

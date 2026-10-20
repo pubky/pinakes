@@ -2688,6 +2688,10 @@
               "read-www-youtube-com-watch-v-dqw4w9wgxcq": {
                 "summary": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
                 "value": "0f3820de1c3532e8805674cc996978f9"
+              },
+              "same-event-www-meetup-com-bitcoin-meetup-switzerland-events-316894744": {
+                "summary": "https://www.meetup.com/bitcoin-meetup-switzerland/events/316894744/",
+                "value": "586d741bd42f9a0dde1c946b58db20ae"
               }
             },
             "in": "path",

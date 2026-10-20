@@ -292,6 +292,7 @@ GET /v1/resources/2dea92aa8c3cf8ae1cffad92cf3ca718
 GET /v1/resources/5bccc93f427b6fd44115fdd02618392f
 GET /v1/resources/0f3820de1c3532e8805674cc996978f9
 GET /v1/resources/fe358c60c13f6a97b50899c4240f27bf
+GET /v1/resources/586d741bd42f9a0dde1c946b58db20ae
 ```
 
 ### GET /v1/resources/by-uri

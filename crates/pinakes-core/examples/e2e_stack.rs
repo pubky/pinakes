@@ -79,6 +79,7 @@ impl Fixture {
             {"kind":"osm_short","uri":"https://osm.org/go/0GAjIv8h?node=501","type":"Place","group_with":"osm"},
             {"kind":"marker","uri":"https://www.openstreetmap.org/?mlat=47.0&mlon=8.0","type":"Place"},
             {"kind":"event","uri":"https://events.example/e2e","type":"Event"},
+            {"kind":"event_elsewhere","uri":"https://events.example/e2e/elsewhere","type":"Event","maybe_same_with":"event"},
             {"kind":"ics","uri":"https://calendar.example/e2e.ics","type":"DataFeed","expectedOccurrences":2},
             {"kind":"naddr","uri":naddr,"type":"Event"},
             {"kind":"doi","uri":"doi:10.1234/pinakes","type":"ScholarlyArticle"},
