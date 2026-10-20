@@ -859,6 +859,27 @@ async fn trending_counts_references_inside_the_window(pool: PgPool) {
         rows("/v1/search?sort=trending&collapse=group").await.len(),
         1
     );
+    // A collapsed row ranks by its group's references, not by its member's: three more on Deezer
+    // today make the song 3 + 4 in the window, above a lone link with 5 (Deezer, with the most
+    // references overall, is the row).
+    let lone = page(&pool, "https://tidal.com/track/2", "Lone song").await;
+    for (id, count) in [(&ids[1], 3), (&lone, 5)] {
+        sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) SELECT $1,repeat(chr(97+n%20),52),'tag','/pub/test/tags/'||$1||'/today/'||n,'pop',now() FROM generate_series(1,$2) n")
+            .bind(id)
+            .bind(count)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        rows("/v1/search?sort=trending&collapse=group").await,
+        [ids[1].clone(), lone.clone()]
+    );
+    // Uncollapsed, each link keeps its own count.
+    assert_eq!(
+        rows("/v1/search?sort=trending").await,
+        [lone, ids[1].clone(), ids[0].clone()]
+    );
     for bad in [
         "sort=trending&window=0h",
         "sort=trending&window=91d",
