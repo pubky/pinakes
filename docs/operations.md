@@ -24,7 +24,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `resolver_requests_per_second` | `2.0` | Jobs per second per pubky or card resolver. |
 | `resolver_ttl_secs` | `86400` | Default document lifetime (seconds) for web, pubky and card resolvers. |
 | `host_requests_per_second` | `1.0` | Requests per second to any one upstream host. |
-| `host_rates` | `{}` | Per-host overrides of `host_requests_per_second`; a host's published limit stays its ceiling. |
+| `host_rates` | `{}` | Per-host overrides of `host_requests_per_second`. |
 | `max_failures` | `5` | Failures before a resource dead-letters. |
 | `timeout_grace` | `3` | Timeouts tolerated before they count as failures. |
 | `backoff_secs` | `30` | First retry backoff (seconds). |
@@ -480,10 +480,11 @@ only, so turn it on (`[also_on.sources.deezer] enabled = true`) only where they 
 request per Deezer link and up to two per other track or album with an ISRC or barcode.
 
 Sources reach their services through the egress policy and its per-host budgets, one request
-at a time per host. A service's published limit is its host's default pace and its ceiling
-(`limits.host_rates` can only slow it): MusicBrainz 1 request/s, Deezer 10/s, Wikimedia (`www.wikidata.org`,
-`*.wikipedia.org`, `commons.wikimedia.org`) 200/min, Open Library 3/s, iTunes about 20/min,
-crates.io 1/s, Crossref 10/s, Software Heritage 120/h.
+at a time per host. A hub's published limit lowers its host's default pace like a source's own
+(`limits.host_rates` names a host's rate outright): MusicBrainz 1 request/s, Deezer 10/s,
+Wikimedia (`www.wikidata.org`, `*.wikipedia.org`, `commons.wikimedia.org`) 200/min, Open
+Library 3/s, iTunes about 20/min, crates.io 1/s, Crossref 10/s, Software Heritage 120/h; a
+limit above `limits.host_requests_per_second` (1/s) leaves the default.
 
 ## Groups
 
