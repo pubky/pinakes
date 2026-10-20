@@ -829,7 +829,8 @@ service link is related to: its MBIDs, the recording's ISRCs and the release's b
 (so it joins the links MusicBrainz relates to it), its facts, and its current links on music
 services at its level, each keyed by the entity. An ISRC's page (`/isrc/{ISRC}`) is the ISRC's
 key, and with exactly one recording MusicBrainz gives the ISRC to, that recording's keys, facts
-and links. An ISRC several recordings have names none of them: its page keeps it as a fact only.
+and links. An ISRC several recordings have names none of them: its page keeps it as a fact only
+(keyed, it would join whichever of their groups took it first, the other refused).
 The page's card comes from the same answer of MusicBrainz's web service, not from the page: the
 title, `MusicRecording`, `MusicAlbum`, `MusicGroup` or `Person` (an artist MusicBrainz calls a
 person), the artist credit and a recording's length as its description, `site` `MusicBrainz`; an

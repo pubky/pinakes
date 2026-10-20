@@ -487,8 +487,8 @@ The sources, in the order they run, are `service`, `musicbrainz`, `musicbrainz_e
 ([the API](api.md#also-on) says what each reads); `[also_on] apple_storefront` (`us`, a
 two-letter country code) is the Apple Music, Apple Books and Apple Podcasts storefront of the
 Apple links they build. `[also_on.sources.musicbrainz] base_url`
-(`https://musicbrainz.org/ws/2`) points the `musicbrainz` source at a MusicBrainz mirror's web
-service instead, an http(s) URL without a trailing slash and reached through the egress policy;
+(`https://musicbrainz.org/ws/2`) points every MusicBrainz read at a mirror's web service instead
+(the `musicbrainz` and `musicbrainz_entity` sources, and the cards of MusicBrainz pages), an http(s) URL without a trailing slash and reached through the egress policy;
 every instance on one public address shares MusicBrainz's 1 request/s, which a mirror does not
 limit. The worker takes up to 100 due resources at a time and asks MusicBrainz about their links'
 URLs together (50 to a request; MusicBrainz echoes each URL, and an answer applies only to the URL
