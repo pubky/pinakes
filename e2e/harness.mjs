@@ -96,6 +96,10 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
         }, timeout, signal);
         docs.set(tag.kind, d);
         report.samples.push({ kind: tag.kind, uri: tag.uri, resource_id: d.id, type: d.type, status: d.status, site: d.site });
+        // A music link is typed and named by what it is, whatever its page says.
+        if (tag.site) assert.equal(d.site, tag.site, `Pinakes ${tag.kind} site`);
+        if (tag.site) assert.equal(d.type, tag.type, `Pinakes ${tag.kind} type`);
+        if (tag.name) assert.equal(d.name, tag.name, `Pinakes ${tag.kind} name`);
       }
       // The type filter matches ancestors, so a MusicEvent sample is found under type=Event.
       for (const type of new Set(tags.map(tag => tag.type))) {
@@ -195,7 +199,8 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
           // An alias (another spelling) reads as its root: one resource, no group needed.
           if (ids[0] === ids[1]) continue;
           const card = await json(`${pinakes}/v1/resources/${ids[0]}`);
-          if (!card.group?.members.some(member => member.id === ids[1])) return false;
+          // Every member is in `details.also_on` (the card shows one per music service).
+          if (!card.details.also_on.some(entry => entry.id === ids[1])) return false;
           const detail = await json(`${pinakes}/v1/groups/${card.group.id}`);
           assert(!('best' in detail), 'a group has no best card');
           assert(ids.every(id => detail.members.some(member => member.id === id)), 'the group lists both members');
@@ -205,7 +210,7 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
         if (docs.has('isbn') && docs.has('isbn_page')) {
           const book = await json(`${pinakes}/v1/resources/${docs.get('isbn').id}`);
           const page = await json(`${pinakes}/v1/resources/${docs.get('isbn_page').id}`);
-          if (!book.group?.members.some(member => member.id === page.id)) return false;
+          if (!book.also_on.some(entry => entry.id === page.id)) return false;
           assert.equal(book.type, 'Book');
           assert.notEqual(page.type, 'Book');
         }
@@ -213,8 +218,9 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
         if (!collapsed.items.length) return false;
         if (pairs.length) assert(collapsed.items.length < results.items.length, 'grouped samples must collapse');
         for (const row of collapsed.items) if (row.group) {
-          assert(row.group.members.length > 0 && row.group.members.length <= Math.min(row.group.size - 1, 8));
-          assert(!row.group.members.some(member => member.id === row.id && member.uri === row.uri), 'a hint names the other members');
+          const members = row.also_on.filter(entry => entry.id);
+          assert(members.length > 0 && members.length <= Math.min(row.group.size - 1, 8) && row.also_on.length <= 8);
+          assert(!row.also_on.some(entry => entry.id === row.id && entry.uri === row.uri), 'a hint names the other members');
         }
         return true;
       }, timeout, signal);
@@ -237,6 +243,26 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
         return true;
       }, timeout, signal);
       report.assertions.push(`same-event hints (${twins.map(([a, b]) => `${a}~${b}`).join(', ') || 'no pairs'})`);
+      // A sample naming `derived` services shows each as a derived link: the same thing on a
+      // service nobody tagged, found by an exact hub lookup.
+      for (const sample of samples.filter(s => s.derived)) {
+        const card = await waitFor(`also on for ${sample.kind}`, async () => {
+          const card = await json(`${pinakes}/v1/resources/${docs.get(sample.kind).id}`);
+          return sample.derived.every(site => card.also_on.some(e => e.derived && e.site === site)) && card;
+        }, timeout, signal);
+        assert(card.also_on.every(e => !e.derived || (e.via && e.uri !== card.uri)), 'a derived link names its hub and is never the card');
+        report.assertions.push(`also on: ${sample.kind} derived ${sample.derived.join(', ')} (${card.also_on.filter(e => e.derived).length} derived links)`);
+      }
+      // A sample naming `facts` shows each in its details (a TIDAL track's own ISRC, also when no
+      // other link shares it).
+      for (const sample of samples.filter(s => s.facts)) {
+        await waitFor(`facts for ${sample.kind}`, async () => {
+          const card = await json(`${pinakes}/v1/resources/${docs.get(sample.kind).id}`);
+          const facts = card.details?.facts || {};
+          return Object.entries(sample.facts).every(([name, value]) => String(facts[name] || '').split('; ').includes(value));
+        }, timeout, signal);
+        report.assertions.push(`facts: ${sample.kind} ${Object.entries(sample.facts).map(([k, v]) => `${k}=${v}`).join(', ')}`);
+      }
       if (docs.has('isbn') && docs.has('isbn_page')) report.assertions.push('a book and its edition page keep their own cards');
     }, report, journal);
     assert(report.cleanup.every(c => c.deleted), 'Tag cleanup failed; retry using journal');

@@ -143,8 +143,9 @@ pub struct FetchOptions {
     pub accept: Option<String>,
     pub user_agent: Option<String>,
     pub feed_cap: Option<usize>,
-    /// A cap for every body whatever its type, HTML too: a larger body is refused, never
-    /// truncated (PKARR relay payloads).
+    /// A cap for every body whatever its type, HTML too, in place of the default: a larger body
+    /// is refused, never truncated (PKARR relay payloads below the default, Wikidata entities
+    /// above it).
     pub body_cap: Option<usize>,
     pub feed_hint: bool,
     /// Content types this fetch also admits, within the page cap (`""`: no content type). The
@@ -287,9 +288,15 @@ pub async fn read_response_with(
             return Err(refused("content type is not allowed"));
         }
         let html = matches!(content_type.as_str(), "text/html" | "application/xhtml+xml");
+        // An RSS or Atom feed read without a feed cap keeps its first megabyte like a page: its
+        // channel and newest items come first (`cards::feed_prefix` completes the cut).
+        let xml_feed = matches!(
+            content_type.as_str(),
+            "text/xml" | "application/xml" | "application/rss+xml" | "application/atom+xml"
+        ) && options.feed_cap.is_none();
         let (max, refuse) = match options.body_cap {
             Some(cap) => (cap, true),
-            None if html => (BODY_CAP, false),
+            None if html || xml_feed => (BODY_CAP, false),
             None => (options.feed_cap.unwrap_or(BODY_CAP), true),
         };
         if refuse && response.content_length().is_some_and(|n| n > max as u64) {
@@ -308,7 +315,8 @@ pub async fn read_response_with(
             let sniff = String::from_utf8_lossy(&body[..body.len().min(256)])
                 .trim_start_matches(['\u{feff}', ' ', '\r', '\n'])
                 .starts_with("BEGIN:VCALENDAR");
-            if body.len() > BODY_CAP
+            if options.body_cap.is_none()
+                && body.len() > BODY_CAP
                 && !(options.feed_cap.is_some() && (feed_type || options.feed_hint || sniff))
             {
                 return Err(BodyTooLarge.into());
@@ -539,6 +547,20 @@ impl Egress {
             key.push_str(&format!("|request:{}", blake3::hash(&identity).to_hex()));
         }
         Ok(key)
+    }
+    /// Put an answer in the discovery cache as the answer to `uri` (when it holds none): a batched
+    /// request's answer for one of the URLs it covered, so that URL's own lookup asks nothing.
+    pub async fn seed(
+        &self,
+        uri: &str,
+        options: &FetchOptions,
+        ttl: u64,
+        fetched: Fetched,
+    ) -> Result<()> {
+        let key = Self::discovery_key(uri, options)?;
+        self.cached(key, ttl, std::future::ready(Ok(fetched)))
+            .await
+            .map(|_| ())
     }
     /// A successful HTTP response can still contain a transient application error.
     /// Shorten only its existing cache entry, without extending older expiration times.
@@ -810,13 +832,18 @@ impl Egress {
     }
     fn host_rate(&self, host: &str) -> f64 {
         let default = self.cfg.host_requests_per_second;
+        // A source's limit (`source_rates`) or a service's published one (`PUBLISHED_RATES`)
+        // lowers the default, never raises it.
         let mut rate = match self.cfg.host_rates.get(host) {
             Some(rate) => *rate,
             None => self
                 .cfg
                 .source_rates
                 .get(host)
-                .map_or(default, |rate| rate.min(default)),
+                .copied()
+                .into_iter()
+                .chain(published_rate(host))
+                .fold(default, f64::min),
         };
         if matches!(host, "api.nostr.wine" | "portal.einundzwanzig.space") {
             rate = rate.min(1.0);
@@ -826,6 +853,38 @@ impl Egress {
         }
         rate
     }
+}
+/// Requests per second the hub services the also-on sources read publish as their limit (one
+/// request at a time per host is the rule for every host); it lowers a host's default pace,
+/// beside the sources' own limits (`sources::budgets`). A rule `*.example.org` covers the
+/// subdomains.
+pub const PUBLISHED_RATES: &[(&str, f64)] = &[
+    // MusicBrainz: 1 request/s per IP, 503 above that.
+    ("musicbrainz.org", 1.0),
+    // Wikimedia: 200 requests/min with a User-Agent naming a contact (at most 3 at once).
+    ("www.wikidata.org", 200.0 / 60.0),
+    ("*.wikipedia.org", 200.0 / 60.0),
+    ("commons.wikimedia.org", 200.0 / 60.0),
+    // Open Library: 3 requests/s with a User-Agent and a contact.
+    ("openlibrary.org", 3.0),
+    // Deezer's public API: 50 requests per 5 seconds.
+    ("api.deezer.com", 10.0),
+    // iTunes Search and Lookup: about 20 requests/min.
+    ("itunes.apple.com", 20.0 / 60.0),
+    // crates.io: 1 request/s.
+    ("crates.io", 1.0),
+    // Crossref: 10 requests/s on the polite pool.
+    ("api.crossref.org", 10.0),
+    // Software Heritage: 120 requests/hour anonymous.
+    ("archive.softwareheritage.org", 120.0 / 3600.0),
+];
+/// The published rate of `host`, if it has one (the most specific rule).
+pub fn published_rate(host: &str) -> Option<f64> {
+    PUBLISHED_RATES
+        .iter()
+        .filter(|(rule, _)| host_matches(host, rule))
+        .max_by_key(|(rule, _)| rule.len())
+        .map(|(_, rate)| *rate)
 }
 fn host_matches(host: &str, rule: &str) -> bool {
     let rule = rule.to_ascii_lowercase();
@@ -1169,6 +1228,67 @@ mod tests {
             assert_eq!(transport.0.lock().unwrap()[0].as_deref(), sent);
         }
     }
+    /// An RSS or Atom feed past the page cap keeps its first megabyte, marked truncated, unless
+    /// the fetch set a feed cap (calendars), which refuses what exceeds it.
+    #[tokio::test]
+    async fn a_long_xml_feed_keeps_its_first_megabyte() {
+        use axum::{routing::get, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/",
+            get(|| async {
+                let body = format!("<rss><channel>{}", "<item/>".repeat(2 * BODY_CAP / 7));
+                ([("content-type", "application/rss+xml")], body)
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let url: Url = format!("http://{addr}/").parse().unwrap();
+        let client = reqwest::Client::new();
+        let read = |options: FetchOptions| {
+            let (url, request) = (url.clone(), client.get(url.clone()));
+            async move { read_response_with(url, request.send().await.unwrap(), &options).await }
+        };
+        let fetched = read(Default::default()).await.unwrap();
+        assert!(fetched.truncated);
+        assert_eq!(fetched.body.len(), BODY_CAP);
+        let capped = FetchOptions {
+            feed_cap: Some(BODY_CAP),
+            ..Default::default()
+        };
+        let error = read(capped).await.unwrap_err();
+        assert!(error.downcast_ref::<BodyTooLarge>().is_some(), "{error:#}");
+        server.abort();
+    }
+    /// A cap above the default admits a larger JSON body (a much-edited Wikidata item).
+    #[tokio::test]
+    async fn a_body_cap_above_the_default_admits_larger_json() {
+        use axum::{routing::get, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/",
+            get(|| async {
+                let body = format!("{{\"x\":\"{}\"}}", "x".repeat(3 * BODY_CAP));
+                ([("content-type", "application/json")], body)
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let url: Url = format!("http://{addr}/").parse().unwrap();
+        let client = reqwest::Client::new();
+        let read = |options: FetchOptions| {
+            let (url, request) = (url.clone(), client.get(url.clone()));
+            async move { read_response_with(url, request.send().await.unwrap(), &options).await }
+        };
+        let large = FetchOptions {
+            body_cap: Some(8 * BODY_CAP),
+            ..Default::default()
+        };
+        assert_eq!(read(large).await.unwrap().body.len(), 3 * BODY_CAP + 8);
+        let error = read(Default::default()).await.unwrap_err();
+        assert!(error.downcast_ref::<BodyTooLarge>().is_some(), "{error:#}");
+        server.abort();
+    }
     #[tokio::test(start_paused = true)]
     async fn graphql_error_expires_before_the_next_retry() {
         struct Graphql(AtomicUsize);
@@ -1335,6 +1455,32 @@ mod tests {
                 .sum::<usize>(),
             20 * 1024 * 1024
         );
+    }
+    /// A hub's published limit lowers its host's default pace; an operator's entry sets it.
+    #[tokio::test(start_paused = true)]
+    async fn a_published_limit_paces_its_host() {
+        assert_eq!(published_rate("musicbrainz.org"), Some(1.0));
+        assert_eq!(published_rate("de.wikipedia.org"), Some(200.0 / 60.0));
+        assert_eq!(published_rate("wikipedia.org"), Some(200.0 / 60.0));
+        assert_eq!(published_rate("evilwikipedia.org"), None);
+        assert_eq!(published_rate("example.org"), None);
+        let gap = |cfg: EgressConfig, host: &'static str| async move {
+            let egress = Egress::new(cfg);
+            drop(egress.host_permit(host).await.unwrap());
+            let start = Instant::now();
+            drop(egress.host_permit(host).await.unwrap());
+            start.elapsed()
+        };
+        // iTunes allows about 20 requests a minute: three seconds apart, not the default one.
+        let itunes = gap(EgressConfig::default(), "itunes.apple.com").await;
+        assert!(itunes >= Duration::from_secs(3), "{itunes:?}");
+        // A published limit above the default never raises it.
+        let crossref = gap(EgressConfig::default(), "api.crossref.org").await;
+        assert!(crossref >= Duration::from_secs(1), "{crossref:?}");
+        let mut slow = EgressConfig::default();
+        slow.host_rates.insert("www.wikidata.org".into(), 0.5);
+        let wd = gap(slow, "www.wikidata.org").await;
+        assert!(wd >= Duration::from_secs(2), "{wd:?}");
     }
     #[test]
     fn rejects_every_special_range() {

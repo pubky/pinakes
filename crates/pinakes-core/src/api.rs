@@ -435,6 +435,10 @@ pub struct SearchQuery {
     pub type_name: Option<String>,
     pub category: Option<String>,
     pub host: Option<String>,
+    /// Links carrying one exact identifier, on any service and in any spelling:
+    /// `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist),
+    /// `wikidata:{Q-id}`, `isrc:{code}` or `upc:{barcode}`.
+    pub key: Option<String>,
     pub tags: Option<String>,
     #[serde(rename = "match")]
     pub match_mode: Option<String>,
@@ -442,6 +446,9 @@ pub struct SearchQuery {
     pub reach: Option<String>,
     pub viewer: Option<String>,
     pub sort: Option<String>,
+    /// With `sort=trending`: how far back references count, `1h`–`90d` (`{n}h` or `{n}d`),
+    /// default `7d`.
+    pub window: Option<String>,
     #[param(minimum = 1, maximum = 500)]
     pub limit: Option<usize>,
     /// Authenticated opaque keyset cursor from this daemon; invalid after restart. Restart pagination on HTTP 400.
@@ -529,6 +536,11 @@ pub struct Card {
     pub start: Option<DateTime<Utc>>,
     pub end: Option<DateTime<Utc>>,
     pub group: Option<GroupRef>,
+    /// The same thing elsewhere: the other members of its group (tagged links, with their ID),
+    /// then derived links nobody tagged (`derived: true`), by service name; one per music service
+    /// and at most 8 on a card, up to 256 on `GET /v1/resources/{id}`, whose `details.also_on`
+    /// lists every link. A hint: every member keeps its own card.
+    pub also_on: Vec<AlsoOn>,
     /// OpenStreetMap cards, events placed at an OSM venue and events whose zone was derived from
     /// coordinates: the ODbL attribution to display with the card.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -561,15 +573,35 @@ pub struct SameEvent {
     /// How alike the two names are, from 0.5 to 1 (pg_trgm similarity of the normalised names).
     pub score: f64,
 }
-/// A hint that the same thing is also elsewhere: the group this card is in. Nothing is merged;
-/// every member keeps its own card.
+/// The group this card is in (its other members are in `also_on`). Nothing is merged; every
+/// member keeps its own card.
 #[derive(Serialize, ToSchema)]
 pub struct GroupRef {
     pub id: String,
     /// Members in the group, this one included.
     pub size: i64,
-    /// Up to eight other members, by ID and URI; `GET /v1/groups/{id}` lists them all.
-    pub members: Vec<GroupMember>,
+}
+/// One entry of a card's `also_on`: a tagged member of its group (with `id`) or a derived link.
+#[derive(Serialize, ToSchema)]
+pub struct AlsoOn {
+    /// A tagged member's resource ID; absent on a derived link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub uri: String,
+    /// The service: a member's site as its card names it, a derived link's service name.
+    pub site: Option<String>,
+    /// A link nobody tagged, found by a source: never fetched, counted or ranked.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub derived: bool,
+    /// For a derived link: the hub or service it came through (`musicbrainz`, `wikidata`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+    /// For a derived link, a qualifier (`archived`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// For a derived link, a time that belongs to it (an archived copy's capture).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at: Option<DateTime<Utc>>,
 }
 #[derive(Serialize, ToSchema)]
 pub struct OccurrenceKey {
@@ -605,9 +637,14 @@ pub struct Details {
     /// Where the card's metadata came from when it is not the page itself: the official API
     /// that answered (docs/sources).
     pub from: Option<String>,
-    /// The fields that API names for the object, by name; lists are joined with "; ".
+    /// The fields that API names for the object, and the facts the also-on sources read for it
+    /// (`isrc`, `upc`, `mbid`, `artist`, `duration`), by name; several values are joined with
+    /// "; ". Absent when there are none.
     #[schema(value_type = Option<Object>)]
     pub facts: Option<std::collections::BTreeMap<String, String>>,
+    /// Every link of `also_on`, all of them: each tagged member and each derived link, several of
+    /// one music service too (the card's `also_on` shows one per music service).
+    pub also_on: Vec<AlsoOn>,
     /// Other spellings of this link that resolve to it (its aliases), by URI, at most 50. A
     /// page's own claims (`url`, `@id`, `sameAs`, canonical links) are not aliases and are not
     /// listed.
@@ -801,20 +838,8 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
             .map(|(id, g)| GroupRef {
                 id: id.into(),
                 size: g["size"].as_i64().unwrap_or(1),
-                members: g["members"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|m| {
-                        let uri = m["uri"].as_str().unwrap_or_default().to_owned();
-                        GroupMember {
-                            id: m["id"].as_str().unwrap_or_default().into(),
-                            site: site(&uri, m["site"].as_str(), m["host"].as_str()),
-                            uri,
-                        }
-                    })
-                    .collect(),
             }),
+        also_on: also_on_entries(&row["also_on"]),
         attribution: credits(
             row["osm_id"]
                 .as_i64()
@@ -870,6 +895,55 @@ fn label<T: Serialize>(v: &Option<T>) -> Option<String> {
         .and_then(|v| serde_json::to_value(v).ok())
         .and_then(|v| v.as_str().map(str::to_owned))
 }
+/// A card's facts: its official API's fields first, then the also-on sources'; a name both
+/// give keeps each value once.
+fn merge_facts(
+    document: Option<std::collections::BTreeMap<String, String>>,
+    sources: Option<std::collections::BTreeMap<String, String>>,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    let mut merged = document.unwrap_or_default();
+    for (name, values) in sources.into_iter().flatten() {
+        let joined = match merged.remove(&name) {
+            Some(first) => {
+                let mut all: Vec<&str> = first.split("; ").collect();
+                for value in values.split("; ") {
+                    if !all.contains(&value) {
+                        all.push(value);
+                    }
+                }
+                all.join("; ")
+            }
+            None => values,
+        };
+        merged.insert(name, joined);
+    }
+    (!merged.is_empty()).then_some(merged)
+}
+/// A card's `also_on` entries from the `also_on()` rows: a member's site as its card names it, a
+/// derived link's service name.
+fn also_on_entries(rows: &Value) -> Vec<AlsoOn> {
+    rows.as_array()
+        .into_iter()
+        .flatten()
+        .map(|e| {
+            let uri = e["uri"].as_str().unwrap_or_default().to_owned();
+            let derived = e["derived"] == true;
+            AlsoOn {
+                id: e["id"].as_str().map(str::to_owned),
+                site: if derived {
+                    e["site"].as_str().map(str::to_owned)
+                } else {
+                    site(&uri, e["site"].as_str(), e["host"].as_str())
+                },
+                uri,
+                derived,
+                via: e["via"].as_str().map(str::to_owned),
+                kind: e["kind"].as_str().map(str::to_owned),
+                at: e["at"].as_str().and_then(|s| s.parse().ok()),
+            }
+        })
+        .collect()
+}
 fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
     let doc: Option<ResourceMeta> = if row["doc"].get("type").is_some() {
         Some(serde_json::from_value(row["doc"].clone())?)
@@ -878,6 +952,8 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
     };
     // The alias rows `read` joins in, not the document's claims.
     let aliases: Vec<String> = serde_json::from_value(row["aliases"].clone()).unwrap_or_default();
+    let facts: Option<std::collections::BTreeMap<String, String>> =
+        serde_json::from_value(row["facts"].clone()).ok().flatten();
     let details = match &doc {
         Some(d) => Details {
             category: present(d.category.as_deref()),
@@ -896,7 +972,8 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
                 (name.is_some() || url.is_some()).then_some(OrganizerRef { name, url })
             }),
             from: crate::sources::from(d).map(str::to_owned),
-            facts: crate::sources::facts(d),
+            facts: merge_facts(crate::sources::facts(d), facts.clone()),
+            also_on: also_on_entries(&row["also_on_all"]),
             aliases: aliases.clone(),
             updated_at: row["resolved_at"].as_str().and_then(|s| s.parse().ok()),
             maybe_same: same_events(row),
@@ -912,7 +989,8 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
             venue: None,
             organizer: None,
             from: None,
-            facts: None,
+            facts,
+            also_on: also_on_entries(&row["also_on_all"]),
             aliases,
             updated_at: None,
             maybe_same: None,
@@ -935,12 +1013,16 @@ fn validate_search(q: &SearchQuery) -> Result<Vec<String>, ApiError> {
     }
     if !matches!(
         q.sort.as_deref(),
-        None | Some("activity" | "recent" | "distance" | "start")
+        None | Some("activity" | "recent" | "distance" | "start" | "trending")
     ) {
         return Err(ApiError::bad(
-            "sort must be activity, recent, distance or start",
+            "sort must be activity, recent, distance, start or trending",
         ));
     }
+    if q.window.is_some() && q.sort.as_deref() != Some("trending") {
+        return Err(ApiError::bad("window applies to sort=trending only"));
+    }
+    trend_window(q.window.as_deref())?;
     if !matches!(q.match_mode.as_deref(), None | Some("any" | "all")) {
         return Err(ApiError::bad("match must be any or all"));
     }
@@ -988,6 +1070,68 @@ fn validate_search(q: &SearchQuery) -> Result<Vec<String>, ApiError> {
     }
     Ok(tags)
 }
+/// The trending window: `{n}h` or `{n}d` between one hour and 90 days, default seven days.
+pub(crate) fn trend_window(window: Option<&str>) -> Result<chrono::Duration, ApiError> {
+    let Some(window) = window else {
+        return Ok(chrono::Duration::days(7));
+    };
+    let bad = || ApiError::bad("window is {n}h or {n}d, from 1h to 90d");
+    let (number, unit) = window.split_at(window.len().saturating_sub(1));
+    if number.is_empty() || number.len() > 4 || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(bad());
+    }
+    let n: i64 = number.parse().map_err(|_| bad())?;
+    let span = match unit {
+        "h" => chrono::Duration::hours(n),
+        "d" => chrono::Duration::days(n),
+        _ => return Err(bad()),
+    };
+    if span < chrono::Duration::hours(1) || span > chrono::Duration::days(90) {
+        return Err(bad());
+    }
+    Ok(span)
+}
+/// What `key` matches: resources with one of these join keys (their own, or one an exact lookup
+/// named them by), or with this fact.
+#[derive(Debug, PartialEq)]
+pub(crate) struct KeyFilter {
+    keys: Vec<String>,
+    fact: Option<(&'static str, String)>,
+}
+pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
+    let bad = || {
+        ApiError::bad("key is mbid:{uuid}, wikidata:{Q-id}, isrc:{ISRC} or upc:{UPC, EAN or GTIN with its check digit}")
+    };
+    let (kind, value) = key.split_once(':').ok_or_else(bad)?;
+    let keys = |keys: Vec<String>| KeyFilter { keys, fact: None };
+    // ISRCs and barcodes are keys and facts alike.
+    let both = |name: &'static str, value: String| KeyFilter {
+        keys: vec![format!("{name}:{value}")],
+        fact: Some((name, value)),
+    };
+    match kind {
+        "mbid" => {
+            let id = crate::hubs::mbid(value).ok_or_else(bad)?;
+            Ok(keys(
+                [
+                    crate::hubs::MbKind::Recording,
+                    crate::hubs::MbKind::Release,
+                    crate::hubs::MbKind::ReleaseGroup,
+                    crate::hubs::MbKind::Artist,
+                ]
+                .into_iter()
+                .filter_map(|k| crate::hubs::key::mb(k, &id))
+                .collect(),
+            ))
+        }
+        "wikidata" => Ok(keys(vec![
+            crate::hubs::key::wikidata(value).ok_or_else(bad)?
+        ])),
+        "isrc" => Ok(both("isrc", crate::music::isrc(value).ok_or_else(bad)?)),
+        "upc" => Ok(both("upc", crate::music::gtin13(value).ok_or_else(bad)?)),
+        _ => Err(bad()),
+    }
+}
 fn scope(
     sql: &mut QueryBuilder<'_, Postgres>,
     q: &SearchQuery,
@@ -1009,6 +1153,7 @@ pub async fn search(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let tags = validate_search(&q)?;
+    let key = q.key.as_deref().map(key_filter).transpose()?;
     if q.collapse.is_some() && !state.config.groups.enabled {
         return Err(ApiError::bad("groups are disabled"));
     }
@@ -1061,12 +1206,27 @@ pub async fn search(
             return Err(ApiError::bad("cursor does not match this search"));
         }
     }
-    let mut sql = QueryBuilder::<Postgres>::new(if q.collapse.is_some() {
-        "WITH eligible AS (SELECT r.*, "
+    let trending = q.sort.as_deref() == Some("trending");
+    let mut sql = QueryBuilder::<Postgres>::new("WITH ");
+    if trending {
+        // References made inside the window, counted once for all rows (in the same reach),
+        // relative to the instant the first page pinned.
+        let since = at - trend_window(q.window.as_deref())?;
+        sql.push("trend AS (SELECT f.resource_id,count(*) AS n FROM effective_reference f WHERE f.created_at>=")
+            .push_bind(since)
+            .push(" AND f.created_at<=")
+            .push_bind(at);
+        scope(&mut sql, &q, &reach);
+        sql.push(" GROUP BY f.resource_id), ");
+    }
+    sql.push(if q.collapse.is_some() {
+        "eligible AS (SELECT r.*, "
     } else {
-        "WITH filtered AS (SELECT r.*, "
+        "filtered AS (SELECT r.*, "
     });
-    if q.sort.as_deref() == Some("distance") {
+    if trending {
+        sql.push("t.n::double precision");
+    } else if q.sort.as_deref() == Some("distance") {
         sql.push("-");
         spatial.distance(&mut sql);
     } else if q.sort.as_deref() == Some("start") {
@@ -1078,9 +1238,11 @@ pub async fn search(
             .push_bind(at)
             .push("::timestamptz-s.updated_at)))/2592000.0),0)::double precision");
     }
-    sql.push(
-        " AS rank FROM search_unit r LEFT JOIN resource_score s ON s.resource_id=r.id WHERE true",
-    );
+    sql.push(" AS rank FROM search_unit r LEFT JOIN resource_score s ON s.resource_id=r.id");
+    if trending {
+        sql.push(" JOIN trend t ON t.resource_id=r.id");
+    }
+    sql.push(" WHERE true");
     spatial.apply(&mut sql);
     if let Some(venue) = &q.venue {
         sql.push(" AND r.venue_id=").push_bind(venue.clone());
@@ -1109,6 +1271,23 @@ pub async fn search(
                 .push("=")
                 .push_bind(value.clone());
         }
+    }
+    // Exact identifiers: a source's live keys or facts on the resource, or a key an exact lookup
+    // named it by (aliases read as roots).
+    if let Some(KeyFilter { keys, fact }) = &key {
+        sql.push(" AND r.id IN (SELECT resource_id FROM resource_key WHERE key=ANY(")
+            .push_bind(keys.clone())
+            .push(") AND expires_at>now() UNION SELECT link_id FROM derived_link WHERE key=ANY(")
+            .push_bind(keys.clone())
+            .push(") AND expires_at>now()");
+        if let Some((name, value)) = fact {
+            sql.push(" UNION SELECT resource_id FROM resource_fact WHERE name=")
+                .push_bind(*name)
+                .push(" AND value=")
+                .push_bind(value.clone())
+                .push(" AND expires_at>now()");
+        }
+        sql.push(")");
     }
     if let Some(text) = q.q.as_ref().filter(|s| !s.is_empty()) {
         let prefix = format!(
@@ -1170,16 +1349,16 @@ pub async fn search(
             .push_bind((q.limit.unwrap_or(50)+1) as i64)
             .push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p)");
         // A point's card is its `item`, built once: `||` replaces a key, it never merges two items.
-        if state.config.groups.enabled || same_event(&state.config) {
-            sql.push(" || CASE WHEN p.kind='point' THEN jsonb_build_object('item',p.item");
-            if state.config.groups.enabled {
-                sql.push("||jsonb_build_object('group',group_hint(p.unit_id))");
-            }
-            if same_event(&state.config) {
-                sql.push("||jsonb_build_object('maybe_same',same_event_hint(p.unit_id,ARRAY(SELECT jsonb_array_elements_text(p.item->'type_path')),3))");
-            }
-            sql.push(") ELSE '{}'::jsonb END");
+        sql.push(" || CASE WHEN p.kind='point' THEN jsonb_build_object('item',p.item");
+        if state.config.groups.enabled {
+            sql.push("||jsonb_build_object('group',group_hint(p.unit_id),'also_on',also_on(p.unit_id,p.unit_id,8,true))");
+        } else {
+            sql.push("||jsonb_build_object('also_on',also_on(p.unit_id,p.unit_id,8,false))");
         }
+        if same_event(&state.config) {
+            sql.push("||jsonb_build_object('maybe_same',same_event_hint(p.unit_id,ARRAY(SELECT jsonb_array_elements_text(p.item->'type_path')),3))");
+        }
+        sql.push(") ELSE '{}'::jsonb END");
         sql.push(" ORDER BY rank DESC,unit_id DESC) FROM page p),'[]') AS items, (SELECT count(*) FROM filtered) AS total, (SELECT count(*) FROM groups) AS cell_count, ");
     } else {
         sql.push("), page AS (SELECT * FROM filtered");
@@ -1194,7 +1373,9 @@ pub async fn search(
             .push_bind((q.limit.unwrap_or(50) + 1) as i64)
             .push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p)");
         if state.config.groups.enabled {
-            sql.push(" || jsonb_build_object('group',group_hint(p.unit_id))");
+            sql.push(" || jsonb_build_object('group',group_hint(p.unit_id),'also_on',also_on(p.unit_id,p.unit_id,8,true))");
+        } else {
+            sql.push(" || jsonb_build_object('also_on',also_on(p.unit_id,p.unit_id,8,false))");
         }
         if same_event(&state.config) {
             sql.push(
@@ -1364,7 +1545,7 @@ async fn read(
     config: &Config,
 ) -> Result<Option<ResourceDetail>, ApiError> {
     let value: Option<Value> =
-        sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',CASE WHEN $3 THEN same_event_hint(r.id,r.type_path,10) END,'aliases',coalesce((SELECT jsonb_agg(uri ORDER BY uri) FROM (SELECT x.uri FROM resource_alias a JOIN resource x ON x.id=a.alias_id WHERE a.root_id=r.id ORDER BY x.uri LIMIT 50) s),'[]')) FROM resource_document r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)")
+        sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',CASE WHEN $3 THEN same_event_hint(r.id,r.type_path,10) END,'also_on',also_on(r.id,r.id,256,$2),'also_on_all',also_on(r.id,r.id,256,$2,false),'aliases',coalesce((SELECT jsonb_agg(uri ORDER BY uri) FROM (SELECT x.uri FROM resource_alias a JOIN resource x ON x.id=a.alias_id WHERE a.root_id=r.id ORDER BY x.uri LIMIT 50) s),'[]'),'facts',(SELECT jsonb_object_agg(name,vals) FROM (SELECT name,string_agg(value,'; ' ORDER BY value) AS vals FROM resource_fact WHERE resource_id=r.id AND expires_at>now() GROUP BY name) f)) FROM resource_document r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)")
             .bind(id)
             .bind(config.groups.enabled)
             .bind(same_event(config))
@@ -1465,7 +1646,7 @@ pub async fn lookup(
     let roots: Vec<String> = sqlx::query_scalar("SELECT coalesce(a.root_id,w.id) FROM unnest($1::text[]) w(id) LEFT JOIN resource_alias a ON a.alias_id=w.id").bind(&ids).fetch_all(&state.pool).await?;
     store::expedite(&state.pool, &roots).await?;
     state.wake.notify_waiters();
-    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',CASE WHEN $3 THEN same_event_hint(r.id,r.type_path,3) END) FROM unnest($1::text[]) WITH ORDINALITY AS wanted(id,n) LEFT JOIN resource_alias a ON a.alias_id=wanted.id JOIN resource_document r ON r.id=coalesce(a.root_id,wanted.id) ORDER BY wanted.n").bind(ids).bind(state.config.groups.enabled).bind(same_event(&state.config)).fetch_all(&state.pool).await?;
+    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',CASE WHEN $3 THEN same_event_hint(r.id,r.type_path,3) END,'also_on',also_on(r.id,r.id,8,$2)) FROM unnest($1::text[]) WITH ORDINALITY AS wanted(id,n) LEFT JOIN resource_alias a ON a.alias_id=wanted.id JOIN resource_document r ON r.id=coalesce(a.root_id,wanted.id) ORDER BY wanted.n").bind(ids).bind(state.config.groups.enabled).bind(same_event(&state.config)).fetch_all(&state.pool).await?;
     Ok(Json(rows.iter().map(card).collect::<Result<_, _>>()?))
 }
 #[utoipa::path(post,tag="Previews",path="/v1/resolve",request_body=ResolveRequest,responses((status=200,body=ResourceDetail),(status=202,body=ResourceDetail,description="Queued; poll resource by ID"),(status=400,description="Unsupported URI or disabled resolver"),(status=429,description="Preview rate limit")))]
@@ -1662,7 +1843,7 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         ResourceDetail,
         Details,
         GroupDetail,
-        GroupMember,
+        AlsoOn,
         VenueRef,
         SearchResponse,
         SearchResult,
@@ -2057,13 +2238,6 @@ pub struct GroupDetail {
     /// Every member's card, by ID and then member key.
     pub members: Vec<Card>,
 }
-/// A group member named on a card: enough to link to it.
-#[derive(Serialize, ToSchema)]
-pub struct GroupMember {
-    pub id: String,
-    pub uri: String,
-    pub site: Option<String>,
-}
 #[utoipa::path(get,tag="Groups",path="/v1/groups/{id}",params(("id"=String,Path)),responses((status=200,body=GroupDetail),(status=400,description="Invalid ID or disabled module"),(status=404,description="Unknown group")))]
 pub async fn group(
     State(state): State<AppState>,
@@ -2096,7 +2270,7 @@ async fn group_detail(
     .fetch_all(pool)
     .await?;
     let rows: Vec<Value> = sqlx::query_scalar(
-        "SELECT to_jsonb(d)||jsonb_build_object('group',group_hint(d.unit_id),'maybe_same',CASE WHEN $2 THEN same_event_hint(d.unit_id,d.type_path,3) END) FROM group_unit u CROSS JOIN LATERAL (SELECT * FROM group_member_document WHERE unit_id=u.unit_id OFFSET 0) d WHERE u.group_id=$1 ORDER BY d.id,d.unit_id",
+        "SELECT to_jsonb(d)||jsonb_build_object('group',group_hint(d.unit_id),'maybe_same',CASE WHEN $2 THEN same_event_hint(d.unit_id,d.type_path,3) END,'also_on',also_on(d.unit_id,d.unit_id,8,true)) FROM group_unit u CROSS JOIN LATERAL (SELECT * FROM group_member_document WHERE unit_id=u.unit_id OFFSET 0) d WHERE u.group_id=$1 ORDER BY d.id,d.unit_id",
     )
     .bind(id)
     .bind(same)
@@ -2151,6 +2325,26 @@ pub async fn curate_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A card's facts: its official API's fields, then the also-on sources', each value once.
+    #[test]
+    fn document_and_source_facts_merge() {
+        let map = |pairs: &[(&str, &str)]| {
+            Some(
+                pairs
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+            )
+        };
+        assert_eq!(
+            merge_facts(
+                map(&[("citation", "1 CFR 2"), ("isrc", "A")]),
+                map(&[("isrc", "A; B"), ("mbid", "m")])
+            ),
+            map(&[("citation", "1 CFR 2"), ("isrc", "A; B"), ("mbid", "m")])
+        );
+        assert_eq!(merge_facts(None, None), None);
+    }
     /// A range header is read without overflow: the largest last byte means "to the end".
     #[test]
     fn byte_ranges_never_overflow() {

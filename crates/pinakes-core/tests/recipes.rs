@@ -368,6 +368,77 @@ async fn fixture(pool: &PgPool) {
         doc.fetched_at += 1000;
         save(pool, &doc).await;
     }
+    // What the also-on sources would record: one recording on Spotify and Deezer (its MBID and
+    // ISRC), the album's barcode, and one Wikidata item for two Wikipedia editions. The shared
+    // keys join each pair, as the hubs' answers do.
+    {
+        use pinakes_core::also_on::{self, AlsoOnConfig, Fact, Found, Key};
+        let key = |k: &str, via: &str| Key {
+            key: k.into(),
+            via: via.into(),
+        };
+        for (uri, found) in [
+            (
+                "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq",
+                Found {
+                    keys: vec![key(
+                        "mb:recording:9f9cf187-d6f9-437f-9d98-d59cdbd52757",
+                        "musicbrainz",
+                    )],
+                    facts: vec![Fact::new("isrc", "GBAYE9701376")],
+                    ..Default::default()
+                },
+            ),
+            (
+                "https://www.deezer.com/track/138539973",
+                Found {
+                    keys: vec![key(
+                        "mb:recording:9f9cf187-d6f9-437f-9d98-d59cdbd52757",
+                        "musicbrainz",
+                    )],
+                    facts: vec![Fact::new("isrc", "GBAYE9701376")],
+                    ..Default::default()
+                },
+            ),
+            (
+                "https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE",
+                Found {
+                    facts: vec![Fact::new("upc", "634904078164")],
+                    ..Default::default()
+                },
+            ),
+            (
+                "https://en.wikipedia.org/wiki/Immanuel_Kant",
+                Found {
+                    keys: vec![key("wikidata:Q9312", "wikidata")],
+                    ..Default::default()
+                },
+            ),
+            (
+                "https://de.wikipedia.org/wiki/Immanuel_Kant",
+                Found {
+                    keys: vec![key("wikidata:Q9312", "wikidata")],
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let id = identity(uri).unwrap().0;
+            also_on::record(
+                pool,
+                &id,
+                "musicbrainz",
+                found,
+                std::time::Duration::from_secs(30 * 86400),
+                &AlsoOnConfig::default(),
+            )
+            .await
+            .unwrap();
+            pinakes_core::groups::reconcile(pool, &id, &Default::default()).await;
+        }
+        pinakes_core::groups::drain(pool, &Default::default(), 100)
+            .await
+            .unwrap();
+    }
     // Seed labels, by the seed identity.
     for (uri, labels) in [
         (

@@ -102,7 +102,8 @@ impl EventService {
         fetched: &Fetched,
         deadline: tokio::time::Instant,
     ) -> Result<Option<ResourceMeta>> {
-        if !self.config.calendars || !(200..300).contains(&fetched.status) {
+        // A body cut off at the page cap is never a snapshot: its missing events are unread.
+        if !self.config.calendars || !(200..300).contains(&fetched.status) || fetched.truncated {
             return Ok(None);
         }
         let bytes = &fetched.body;

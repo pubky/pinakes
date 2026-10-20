@@ -44,6 +44,18 @@ Absent values are `null`, never `""`. Text fields (`name`, `description`, `site`
 text in `details`) are plain text, decoded from the source's HTML entities once: escape them
 before rendering them as HTML.
 
+A music link is typed by what it is, whatever the service's page or player calls it: a track is a
+`MusicRecording`, an album a `MusicAlbum`, an artist a `MusicGroup` (a `Person` from the next
+refresh after MusicBrainz says the artist is one) and a playlist a `MusicPlaylist`, on every
+service ([music service links](#aliases)). A video stays a `VideoObject`. The card's `site` is the
+service's name (`Spotify`, `Apple Music`, `TIDAL`, `YouTube`, …), as derived links show it, in
+any page language. A Bandcamp root or `/music` page features an album but is the artist's page: a
+`MusicGroup` named after the artist, without the album's description. When the service's own
+page names the artist (JSON-LD `byArtist`, as TIDAL's do), the description says what the page
+does instead of its share text: a track's `Queen · A Night At The Opera (Deluxe Edition) · 5:55`
+(artist, album, length), an album's `Tame Impala & JENNIE · 2025` (artist, year); the
+`service` source adds `artist`, `album` and `duration` (seconds) to `details.facts`.
+
 ### Card
 
 | Field | Meaning |
@@ -56,7 +68,8 @@ before rendering them as HTML.
 | `site` | The publishing host; for `pubky://` objects the app path segment (`mapky.app`), not the public key; for a card read from an official API without a host of its own, the service's name (`Federal Register`) |
 | `point` | `{lat, lon}` |
 | `start`, `end` | RFC 3339 instants for events and occurrences |
-| `group` | When the resource or occurrence is in a [group](#groups): `{id, size, members}`, `members` naming up to eight others as `{id, uri, site}`: other resources first (one entry each, by ID), then other occurrences of its own feed; else `null`. A hint only: every member keeps its own card |
+| `group` | `{id, size}` when the resource or occurrence is in a [group](#groups), else `null` |
+| `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; one per music service, at most 8 on a card and 256 on `GET /v1/resources/{id}`, whose `details.also_on` lists every link. A hint only: every member keeps its own card |
 | `attribution` | Present on OSM cards, events placed at an OSM venue and events whose zone came from coordinates; display it with the card |
 | `occurrence` | Occurrence cards only: `{feed_id, feed_uri, uid, recurrence_id, status}`; `feed_uri` is the feed's URI, the link people tagged |
 | `event` | Pubky event references only: `{author, object_path, recurrence_id, start, end, status}` |
@@ -83,7 +96,8 @@ body, and answer `If-None-Match` with 304.
 | `venue` | `{name, id}`: the venue's name and, when it resolved to a resource, its ID |
 | `organizer` | `{name, url}` |
 | `from` | Where the card's metadata came from when it is not the page itself: the [source](#sources) whose official API answered, e.g. `federal_register` |
-| `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …); lists are joined with `; `. Each source's page lists its facts |
+| `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …), then the facts the [also-on](#also-on) sources read for it (`isrc`, `upc`, `mbid`, `artist`, `artist_type`, `duration` in seconds); several values of one name are joined with `; `. Each source's page lists its facts. `null` when there are none. Facts never join anything |
+| `also_on` | Every link of the card's [also on](#also-on), several of one music service too (the card shows one per music service) |
 | `aliases` | Other spellings of this link that resolve to it ([aliases](#aliases)), at most 50; a page's own `url`, `@id`, `sameAs` or canonical claims are not aliases and are not listed |
 | `updated_at` | When the current metadata was accepted |
 | `maybe_same` | An event's card only: up to ten events that are [possibly the same event](#possibly-the-same-event), best first (the card's `maybe_same` is the first three) |
@@ -198,11 +212,24 @@ of the same URIs and checks that this list matches.
 | `POST /v1/resolve {"uri":"geo:47.3769,8.5417"}` | Place |
 | `POST /v1/resolve {"uri":"https://en.wikipedia.org/wiki/Bitcoin"}` | Article |
 | `POST /v1/resolve {"uri":"https://en.wikipedia.org/wiki/Lugano"}` | Article |
+| `POST /v1/resolve {"uri":"https://en.wikipedia.org/wiki/Immanuel_Kant"}` | Article |
+| `POST /v1/resolve {"uri":"https://de.wikipedia.org/wiki/Immanuel_Kant"}` | Article |
 | `POST /v1/resolve {"uri":"https://www.wikidata.org/wiki/Q90"}` | Place |
 | `POST /v1/resolve {"uri":"https://n26.com/"}` | WebPage |
 | `POST /v1/resolve {"uri":"https://pubky.org/"}` | CreativeWork |
 | `POST /v1/resolve {"uri":"https://casa.io/"}` | WebPage |
 | `POST /v1/resolve {"uri":"https://example.org/"}` | WebPage |
+| `POST /v1/resolve {"uri":"https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq"}` | MusicRecording |
+| `POST /v1/resolve {"uri":"https://music.apple.com/gb/song/1097861770"}` | MusicRecording |
+| `POST /v1/resolve {"uri":"https://www.deezer.com/track/138539973"}` | MusicRecording |
+| `POST /v1/resolve {"uri":"https://tidal.com/track/58990512"}` | MusicRecording |
+| `POST /v1/resolve {"uri":"https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE"}` | MusicAlbum |
+| `POST /v1/resolve {"uri":"https://music.apple.com/gb/album/ok-computer/1097861387"}` | MusicAlbum |
+| `POST /v1/resolve {"uri":"https://www.deezer.com/album/14879699"}` | MusicAlbum |
+| `POST /v1/resolve {"uri":"https://radiohead.bandcamp.com/album/ok-computer"}` | MusicAlbum |
+| `POST /v1/resolve {"uri":"https://open.qobuz.com/album/0634904078164"}` | MusicAlbum |
+| `POST /v1/resolve {"uri":"https://music.youtube.com/playlist?list=OLAK5uy_nc6afxSnmK8OFML8dF9q_0D1MBMXsGnL4"}` | MusicPlaylist |
+| `POST /v1/resolve {"uri":"https://open.spotify.com/artist/4Z8W4fKeB5YxbusRsdQVPb"}` | MusicGroup |
 | `POST /v1/resolve {"uri":"https://www.youtube.com/watch?v=dQw4w9WgXcQ"}` | VideoObject |
 | `POST /v1/resolve {"uri":"https://www.youtube.com/watch?v=Up2i2Z4m-Kg"}` | VideoObject |
 | `POST /v1/resolve {"uri":"https://vimeo.com/76979871"}` | VideoObject |
@@ -274,6 +301,13 @@ GET /v1/search?from=now+7d&to=now+30d
 GET /v1/search?sort=start
 GET /v1/search?sort=recent
 GET /v1/search?sort=activity
+GET /v1/search?sort=trending&window=24h
+GET /v1/search?sort=trending&window=7d
+GET /v1/search?sort=trending&window=30d
+GET /v1/search?key=mbid:9f9cf187-d6f9-437f-9d98-d59cdbd52757
+GET /v1/search?key=isrc:GBAYE9701376
+GET /v1/search?key=upc:634904078164
+GET /v1/search?key=wikidata:Q9312
 GET /v1/search?collapse=group&type=Book
 GET /v1/search?collapse=group&type=ScholarlyArticle
 GET /v1/search?bbox=8.90,45.98,9.00,46.03&cluster=12
@@ -311,6 +345,8 @@ GET /v1/resources/by-uri?uri=pubky:%2F%2F47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e
 ```text
 GET /v1/groups/d1b4a3fefc115a5b7ea5bed6fb231011
 GET /v1/groups/3089a188a2893b2477e80be72b8fdb8c
+GET /v1/groups/722489247ea3402853880aea5ba198e0
+GET /v1/groups/ca608de60e30acbafbdf80065b3dad2d
 ```
 
 ### GET /v1/resources/{id}/occurrences
@@ -346,12 +382,14 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 | `q` | Full-text name/description search with a trigram/partial-name fallback; at most 256 bytes. A post whose author opted out of search indexing (`details.facts.opted_out`: Mastodon's `indexable: false` or `noindex`, Bluesky's `!no-unauthenticated`) never matches |
 | `type` | A schema.org type, ancestors included (`Event` matches `MusicEvent`; `Place` matches cafés and other `LocalBusiness` types) |
 | `category`, `host` | Exact filters |
+| `key` | Links carrying one exact identifier, on any service and in any spelling: `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist), `wikidata:{Q-id}`, `isrc:{code}` (any letter case, hyphens allowed) or `upc:{barcode}` (a UPC, EAN or GTIN in any of its lengths, check digit verified), as the [also-on](#also-on) sources found them as keys or facts, or as an exact lookup by that key named the link; anything else is 400 |
 | `tags` | Comma-separated labels; at most 5, each 1–128 bytes |
 | `match` | `any` (default) or `all` (at most 3 tags) |
 | `author` | Resources referenced by this 52-character z-base-32 public key |
 | `reach`, `viewer` | `following` or `friends` of the Nexus user `viewer`: only their references and tags count |
 | `venue` | Events at this venue resource ID |
-| `sort` | `activity` (default), `recent`, `distance` (requires `near`) or `start` |
+| `sort` | `activity` (default), `recent`, `distance` (requires `near`), `start` or `trending` (by the references made inside `window`; only links referenced in it; with `collapse=group` one song across services is one row) |
+| `window` | With `sort=trending`: `{n}h` or `{n}d`, from `1h` to `90d`, default `7d`, counted back from the first page's instant |
 | `limit` | 1–500, default 50 |
 | `cursor` | The signed next-page token of the previous page |
 | `facet` | `tags`, `type` or both (`type,tags`): counts over the whole filtered set, in `facets.tags` (`{label, count}` per label) and `facets.type` (`{type, count}` per card type), most frequent first |
@@ -456,6 +494,24 @@ root, and a read, lookup, change query or occurrence read of the alias answers w
   alias of that root after its first fetch.
 - **Cursor feed variants** (BTC Map's delta feed with parameters, the portal's endpoints) are
   aliases of their feed.
+- **Music service links**: every spelling of one track, album, artist or playlist on one service
+  is an alias of its canonical URL: Spotify (`intl-xx` paths, `spotify:{kind}:{id}`, the old
+  `user/…/playlist/…` form) → `https://open.spotify.com/{kind}/{id}`; Apple Music →
+  `https://music.apple.com/{country}/{kind}/{id}` without the name slug, an album URL with
+  `?i={id}` naming that track (`/song/{id}`), the iTunes Store's `itunes.apple.com/…/id{N}` too; YouTube and YouTube Music (`youtu.be`,
+  `m.`/`music.youtube.com`, `/shorts/`, `/embed/`) → `https://www.youtube.com/watch?v={id}` and
+  `…/playlist?list={id}`; Deezer without the language path → `https://www.deezer.com/{kind}/{id}`;
+  TIDAL (`/browse/`, `listen.tidal.com`, the `/u` share suffix; tracks, albums, artists, videos) →
+  `https://tidal.com/{kind}/{id}`; Qobuz store album
+  pages → `https://open.qobuz.com/{kind}/{id}`; SoundCloud (`m.`, any letter case, parameters) →
+  `https://soundcloud.com/{user}/{track}`; Amazon Music (`albums/{id}?trackAsin=` naming that
+  track; Amazon's own hosts only, `music.amazon.com`, `.co.uk`, `.de`, `.fr`, `.it`, `.es`, `.ca`,
+  `.com.au`, `.co.jp`, `.in`, `.com.br`, `.com.mx`) → `https://music.amazon.{tld}/{kind}/{id}`; Bandcamp without parameters. Short links
+  that need a request to expand (`spotify.link`, `deezer.page.link`, `on.soundcloud.com`) are not
+  folded.
+- **Wikipedia articles**: the mobile host, `index.php?title=…` (a revision with `oldid` too),
+  spaces and percent-encoding are aliases of `https://{lang}.wikipedia.org/wiki/{Title}`. A
+  redirect's title stays its own link.
 - **The page's own canonical**: after a fetch, a page whose head canonical link or
   all-permanent redirect chain names a URL that differs from it only by a trailing slash and tracking
   parameters becomes an alias of that URL. A canonical to another path (a homepage, a sibling
@@ -577,6 +633,15 @@ one thing, only on evidence that cannot be spoofed:
 - **One ICS UID within one feed**, between dated instances that start within five minutes of
   each other. The UID is hashed into the key, so no UID text names another feed. Across feeds only with `groups.cross_container_occurrences = "corroborated"`: both
   located within 500 m, starting within 300 s, with a name similarity of at least 0.5.
+- **An exact key a source vouches for** ([Also on](#also-on)): two links a hub names as the same
+  recording, release or Wikidata item, by its own identifier (`mb:recording:{mbid}`,
+  `wikidata:Q…`), or a known music service's own record of its own object (the ISRC on a TIDAL
+  track page). Any other page's claims are never such a key. A group holds at most one value of
+  each single-object namespace: MusicBrainz recording, release, release group and artist
+  (`mb:…`), Wikidata item (`wikidata`), Discogs artist, master and release (`discogs:…`), IMDb
+  title (`imdb`), Open Library edition and work (`openlibrary:…`), podcast GUID and Apple podcast
+  ID (`podcast:guid`, `podcast:apple`): a join that would bring a second (a wrong ID on a hub) is
+  refused, so one bad claim never chains two groups. ISRCs and barcodes may be several.
 - **Curation** on the admin listener.
 
 `sameAs`, canonical and other URL claims, and other identifiers, never group. Two located
@@ -653,6 +718,89 @@ pages change their `ETag` when a hint on them changes. `[event] same_event_hint 
 ([operations](operations.md#calendars-and-events)) removes the field from cards, details and the
 OpenAPI document and stops the pass.
 
+## Also on
+
+A card's `also_on` says where else the same thing is: first the other members of its
+[group](#groups) (links someone tagged, each with its resource `id`), by ID and URI, then
+**derived links**: the same thing on services nobody tagged, found by a source, with
+`derived: true`, the service's name in `site`, the hub or service it came through in `via`
+(`musicbrainz`, `wikidata`), and for some a `kind` (`archived`) and a time `at`. Derived links
+are ordered by service name; each URL appears once (a tagged member wins) and never the card
+itself. A card carries at most 8 entries, and one link per service (by `site`): for a music
+service a tagged member first, because someone used that link (of several, the one on the
+recording's original album, the `original_album` fact), then the derived link most group members
+name; none on the card's own service (an artist's card never shows another page of its service,
+such as the band's earlier name, which Wikidata may list as a second ID). Tagged members that are
+not music always show. `GET /v1/resources/{id}` shows the same, up to 256 entries, and
+lists every link in `details.also_on` (several of one service too). A derived link can be unavailable in some
+countries (a regional release on a streaming service); nothing public says where, so prefer a
+tagged member.
+
+A derived link is a hint: it is never fetched, never counted as a reference and never ranks
+anything. Sources read a resource after it is saved and again when their results age (each
+source's lifetime, typically 30 days); a source's links and keys live twice that, so one failed
+refresh keeps them, and they go when the source stops returning them. A source's exact keys
+(an MBID, a Q-id) also [group](#groups) the links that share them. A derived link found through
+an exact ID (a MusicBrainz relation, a Wikidata item's claim or sitelink, a service's answer to
+a lookup by barcode or ISRC) carries that ID: a tagged resource that is that link (the same URL
+after its aliases) takes it too and joins the group, even when its own lookup finds nothing.
+
+**Music.** A track, album or artist link on a music service ([music service links](#aliases))
+is looked up exactly, never by title or name. A key comes from a hub (MusicBrainz, Wikidata) or
+from a known music service's own record of its own object; another host's claim (its JSON-LD
+`isrcCode`, `sameAs`, a canonical link) is a fact at most.
+- `service`: the ISRC a music service's own track page states (its JSON-LD `isrcCode`), as the
+  key `isrc:…` (`via` the service) only from a service whose catalogue comes from labels and whose
+  pages were checked to state it: TIDAL. Elsewhere it is the fact `isrc` (on Bandcamp and
+  SoundCloud an uploader types it), and not when MusicBrainz gives that ISRC to several recordings
+  (it names none of them). A track whose ISRC nobody else knows (not MusicBrainz,
+  not another link) stays alone with its key, and joins as soon as another link or MusicBrainz
+  carries the same ISRC.
+- `musicbrainz`: what MusicBrainz relates the link to (one recording, release or release group,
+  or artist; several are ambiguous and give nothing), that entity's current links on music
+  services, and its MBIDs, the recording's ISRCs (up to eight) and the release's barcode as keys
+  (`mb:recording:…`, `mb:release:…`, `mb:release-group:…`, `mb:artist:…`, `isrc:…`,
+  `upc:…`). A track MusicBrainz does not relate by URL takes the recording its page's own ISRC
+  is on, when MusicBrainz knows exactly one. An album link related to up to four releases of one
+  release group (editions MusicBrainz keeps apart) takes the release group's key alone, and the
+  links, facts and barcode every one of those releases has. Its facts: `mbid`, the recording's
+  `isrc`s, the release's barcode as `upc`, the `artist` credit, the recording's `duration` and
+  `original_album` (the earliest official album that is no compilation, live or remix album),
+  and an artist's `artist_type` (`Person`, `Group`, …). ISRCs are stored in upper case and barcodes as
+  GTIN-13 (a 12-digit UPC gains a leading zero), by every source.
+- `deezer` (off unless the operator turns it on: Deezer's API terms allow non-commercial use
+  only): a Deezer track's or album's own ISRC or barcode from Deezer's API as a key, and for
+  another service's track or album with an ISRC or barcode key, the one Deezer track or album
+  the API names for it, keyed by it.
+- `itunes`: for an album with a barcode key, the Apple Music album iTunes' `lookup?upc=` names
+  when exactly one album answers, keyed by that barcode (so a tagged link to that album joins).
+- `wikidata`: the one item carrying the link's own service ID (Spotify, Apple Music, Deezer,
+  TIDAL, Qobuz, YouTube, SoundCloud, Amazon Music, Bandcamp), read back and compared exactly
+  (two items are ambiguous and give nothing); its other music-service IDs as links and its Q-id
+  and MusicBrainz ID as keys. A track takes only an item that is one recording (one MusicBrainz
+  recording ID, no work ID): a song item is a work that its studio, live and remastered
+  recordings share, so a track takes neither its Q-id nor its tracks.
+
+**Wikipedia.** An article's card comes from its Wikipedia's REST summary (`Article`, the title,
+the first paragraph up to 600 characters, the thumbnail, `site` `Wikipedia ({lang})`), so a long
+article whose page exceeds the page cap still gets one; a page the summary does not cover (a
+special page) is read as a web page. `wikipedia`: the article's own Wikipedia names its Wikidata item (following
+redirects); the item's other language editions are listed as `Wikipedia ({lang})`, the major
+languages first, with its Britannica, Stanford Encyclopedia of Philosophy, Internet Encyclopedia
+of Philosophy, Scholarpedia and Namuwiki entries, and its Q-id is the key, so two editions of one
+article join. Titles are never matched across languages.
+
+**Wikidata items.** `wikidata_item`: a Wikidata item link (`/wiki/Q…`, `/entity/Q…`,
+`Special:EntityPage`, the mobile host: all aliases of `https://www.wikidata.org/wiki/{Q-id}`) is
+its own hub. Its card lists the item's encyclopedia entries, the music services its best-rank
+IDs name, and all its Wikipedia editions (the major languages first), with the Q-id as key. Only
+the item's own claims and sitelinks count, never a search.
+
+The level is exact: a track lists tracks and videos of the recording, an album lists albums and
+YouTube's album playlists, an artist lists artist pages and channels. Album links group by
+their release group, while two editions (two MusicBrainz releases) stay apart. Apple Music links use the storefront
+`[also_on] apple_storefront` (`us`).
+
 ## Cards and resolvers
 
 Public `/v1/info` names the kinds this instance resolves in `resolves`; the admin `/v1/info`
@@ -673,7 +821,9 @@ the event platform adapters, worker status and the effective limits.
 - **Media**: oEmbed (`media.oembed`) and page JSON-LD, which wins when healthy. An oEmbed answer
   survives a failed or truncated page. Podcast types need a namespace or an audio/video
   enclosure; plain RSS is a DataFeed. Direct podcast feeds are PodcastSeries; `?guid=` or the
-  episode page's RSS link selects an episode. No embed HTML or media bytes are served.
+  episode page's RSS link selects an episode. A feed longer than the page cap is read up to its
+  last whole item within the first megabyte (the newest come first), so an episode past that is
+  never marked missing. No embed HTML or media bytes are served.
 - **Event platforms**: the adapters in `data/event-adapters.json`. Each has an `enabled` switch
   and, where the platform needs one, a `key`; a missing key disables only that adapter and no key
   is ever returned. Its manifest lists the mode, cadence floor, identity, cancellation rule,

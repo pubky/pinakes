@@ -597,11 +597,12 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("samples must be an array"))?
     {
-        let (id, uri, _) = identity(
-            sample["uri"]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("sample URI"))?,
-        )?;
+        let uri = sample["uri"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("sample URI"))?;
+        // A spelling (a TIDAL `/u` share link) is resolved as its root.
+        let root = pinakes_core::alias::root(uri).map_or_else(|| uri.to_owned(), |a| a.root);
+        let (id, uri, _) = identity(&root)?;
         let kind = pinakes_core::resolver::classify(&uri)
             .ok_or_else(|| anyhow::anyhow!("unclassified sample"))?;
         let resolver = resolvers
@@ -613,8 +614,8 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
     }
     // The scope stays small and explicit: only listed samples are ever fetched.
     ensure!(
-        (1..=12).contains(&selected.len()),
-        "live driver requires one to twelve sample resources"
+        (1..=32).contains(&selected.len()),
+        "live driver requires one to thirty-two sample resources"
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);
@@ -623,6 +624,11 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
     let app = api::router(state);
     let nexus = Nexus::new(&cfg.nexus_url)?;
     let ready = json!({"pinakes":base,"nexus":cfg.nexus_url,"mock":false});
+    let also_on = pinakes_core::also_on::Context {
+        egress: egress.clone(),
+        config: cfg.clone(),
+    };
+    let sources = pinakes_core::also_on::registry();
     let polling = tokio::spawn(async move {
         loop {
             if let Err(e) =
@@ -634,8 +640,14 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
                 let job=sqlx::query_as::<_,queue::Job>("UPDATE resource SET lease_until=now()+interval '60 seconds',generation=generation+1 WHERE id=$1 AND NOT dead_letter AND NOT final AND next_attempt_at<=now() AND (lease_until IS NULL OR lease_until<now()) RETURNING id,uri,attempts,generation").bind(id).fetch_optional(&pool).await;
                 match job {
                     Ok(Some(job)) => {
-                        if let Err(e) =
-                            queue::run_job(&pool, resolver.as_ref(), &cfg.queue, &job).await
+                        // The production path: the workers finish every job through a batch.
+                        if let Err(e) = queue::run_batch(
+                            &pool,
+                            resolver.as_ref(),
+                            &cfg.queue,
+                            std::slice::from_ref(&job),
+                        )
+                        .await
                         {
                             eprintln!("live sample completion: {e}");
                         }
@@ -650,6 +662,10 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
             }
             if let Err(e) = pinakes_core::same_event::drain(&pool, &cfg, 200).await {
                 eprintln!("live same-event pass: {e}");
+            }
+            // The samples' also-on sources (their hubs, live): derived links and hub keys.
+            if let Err(e) = pinakes_core::also_on::drain(&pool, &also_on, &sources, 16).await {
+                eprintln!("live also-on: {e}");
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }

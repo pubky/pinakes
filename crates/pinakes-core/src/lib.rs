@@ -1,6 +1,7 @@
 //! Pinakes indexes resource facts; Nexus remains the social source of truth.
 pub mod adapter;
 pub mod alias;
+pub mod also_on;
 pub mod api;
 pub mod canary;
 pub mod change_api;
@@ -9,11 +10,14 @@ pub mod config;
 pub mod event;
 pub mod group_keys;
 pub mod groups;
+pub mod hubs;
 pub mod identity;
 pub mod ingest;
 pub mod locks;
 pub mod maintenance;
 pub mod model;
+pub mod music;
+pub mod music_sources;
 pub mod nexus;
 pub mod osm_dump;
 pub mod queue;
@@ -26,6 +30,7 @@ pub mod sources;
 pub mod spatial;
 pub mod store;
 pub mod telemetry;
+pub mod wikipedia;
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 

@@ -8,7 +8,7 @@ use crate::{
     config::{Config, ResolverConfig},
     model::{ResourceMeta, Status},
 };
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, ensure, Context as _, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -918,6 +918,44 @@ pub async fn enrich(
     }
     doc.bounded(web::ATTRIBUTES)
 }
+/// An RSS or Atom body cut off at the fetch cap (`Fetched::truncated`), completed so an XML
+/// parser reads it: up to the end of its last whole `item` or `entry` (at most `cap` of them),
+/// then the elements still open there closed. `None` when no item is whole. Streams the prefix,
+/// so a feed of any length costs the cap and no more.
+pub fn feed_prefix(body: &str, cap: usize) -> Option<String> {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_str(body);
+    let mut open: Vec<String> = vec![];
+    let mut last: Option<(usize, Vec<String>)> = None;
+    let mut items = 0;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) => open.push(String::from_utf8_lossy(e.name().as_ref()).into()),
+            Ok(Event::End(e)) => {
+                open.pop();
+                if matches!(e.local_name().as_ref(), b"item" | b"entry") {
+                    items += 1;
+                    let end = usize::try_from(reader.buffer_position()).ok()?;
+                    last = Some((end, open.clone()));
+                    if items == cap {
+                        break;
+                    }
+                }
+            }
+            // The cut, wherever it fell (inside a tag, a text, a CDATA section).
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+    let (end, open) = last?;
+    let mut completed = body.get(..end)?.to_owned();
+    for name in open.iter().rev() {
+        completed.push_str("</");
+        completed.push_str(name);
+        completed.push('>');
+    }
+    Some(completed)
+}
 pub fn podcast(uri: &str, f: &Fetched, ttl: u64, cap: usize) -> Result<Option<ResourceMeta>> {
     let direct = crate::model::identity(uri).ok().map(|v| v.0)
         == crate::model::identity(f.url.as_str()).ok().map(|v| v.0);
@@ -930,7 +968,22 @@ fn podcast_body(
     cap: usize,
     direct: bool,
 ) -> Result<Option<ResourceMeta>> {
-    let body = std::str::from_utf8(&f.body)?;
+    let body = match std::str::from_utf8(&f.body) {
+        Ok(body) => body,
+        // Cut off inside a character: the whole characters before it.
+        Err(e) if f.truncated && e.error_len().is_none() => {
+            std::str::from_utf8(&f.body[..e.valid_up_to()])?
+        }
+        Err(e) => return Err(e.into()),
+    };
+    // A feed cut off at the page cap reads up to its last whole item.
+    let completed;
+    let body = if f.truncated {
+        completed = feed_prefix(body, cap).context("a feed cut off before its first item")?;
+        completed.as_str()
+    } else {
+        body
+    };
     let xml = roxmltree::Document::parse(body)?;
     let items: Vec<_> = xml
         .descendants()
@@ -1015,6 +1068,10 @@ fn podcast_body(
             .and_then(|s| web::origin_url(&f.url, s));
     } else {
         if guid.is_some() {
+            // An episode past the part of the feed that was read is not missing.
+            if f.truncated {
+                return Ok(None);
+            }
             return Ok(Some(missing(uri, "media", ttl)));
         }
         d.set_type("PodcastSeries");

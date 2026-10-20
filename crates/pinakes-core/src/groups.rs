@@ -80,6 +80,11 @@ pub struct Curation {
 ///   an event page for its own calendar file's UID; it joins across feeds only in the
 ///   corroborated mode (`plan`).
 ///
+/// - `hub:{key}`: an exact key a source vouches for (`also_on`: a MusicBrainz MBID, a Wikidata
+///   Q-id), or that named this resource in another's exact lookup (a keyed derived link). Two
+///   links with the same key are one thing on two services. A group never holds two
+///   values of a single-object namespace ([`single_object`]): a join that would is refused.
+///
 /// A point (`geo:` or a map link) never groups.
 fn evidence(row: &Value) -> Vec<String> {
     let id = row["resource_id"].as_str().unwrap_or("");
@@ -98,6 +103,11 @@ fn evidence(row: &Value) -> Vec<String> {
     }
     if !row["event"].is_null() || row["source"] == "geo" {
         return vec![];
+    }
+    for key in row["hub_keys"].as_array().into_iter().flatten() {
+        if let Some(key) = key.as_str().filter(|k| crate::also_on::valid_key(k)) {
+            keys.insert(format!("hub:{key}"));
+        }
     }
     for k in stored.iter().filter(|k| k.basis == "ics_uid") {
         if let Some(uid) = k.key.strip_prefix("ics_uid:") {
@@ -143,6 +153,28 @@ fn evidence(row: &Value) -> Vec<String> {
     }
     keys.into_iter().collect()
 }
+/// A hub key's namespace and value when the namespace names one object, so a group holds at most
+/// one of its values: a MusicBrainz recording, release, release group or artist, a Wikidata item,
+/// a Discogs artist, master or release, an IMDb title, an Open Library edition or work, a
+/// podcast's GUID or Apple Podcasts ID. ISRCs, UPCs and ISBNs may be several (one recording has
+/// many ISRCs, one book several ISBNs).
+fn single_object(key: &str) -> Option<(&str, &str)> {
+    let (namespace, value) = key.strip_prefix("hub:")?.rsplit_once(':')?;
+    (matches!(
+        namespace,
+        "mb:recording"
+            | "mb:release"
+            | "mb:release-group"
+            | "mb:artist"
+            | "wikidata"
+            | "imdb"
+            | "openlibrary:edition"
+            | "openlibrary:work"
+            | "podcast:guid"
+            | "podcast:apple"
+    ) || namespace.starts_with("discogs:"))
+    .then_some((namespace, value))
+}
 /// An ICS UID as a key segment: free text (NIP-52 coordinates, URNs, URLs) never decides the
 /// key's kind or names another feed.
 fn uid_hash(uid: &str) -> String {
@@ -177,7 +209,7 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
     .bind(id)
     .fetch_all(&mut **tx)
     .await?;
-    let rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('unit_id',unit_id,'resource_id',id,'uri',uri,'keys',coalesce(doc->'group_keys','[]'),'occurrence',occurrence,'event',event,'source',doc->>'source','lat',ST_Y(point),'lon',ST_X(point),'start',start_at,'trigrams',show_trgm(array_to_string(tsvector_to_array(to_tsvector('simple',coalesce(name,''))),' '))) FROM search_unit WHERE id=$1 LIMIT $2")
+    let rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('unit_id',unit_id,'resource_id',id,'uri',uri,'keys',coalesce(doc->'group_keys','[]'),'hub_keys',coalesce((SELECT jsonb_agg(h.key ORDER BY h.key) FROM (SELECT k.key FROM resource_key k WHERE k.resource_id=search_unit.id AND k.expires_at>now() UNION SELECT l.key FROM derived_link l WHERE l.link_id=search_unit.id AND l.key IS NOT NULL AND l.expires_at>now()) h),'[]'),'occurrence',occurrence,'event',event,'source',doc->>'source','lat',ST_Y(point),'lon',ST_X(point),'start',start_at,'trigrams',show_trgm(array_to_string(tsvector_to_array(to_tsvector('simple',coalesce(name,''))),' '))) FROM search_unit WHERE id=$1 LIMIT $2")
         .bind(id)
         .bind((cfg.max_graph_units + 1) as i64)
         .fetch_all(&mut **tx)
@@ -295,6 +327,7 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
         .collect();
     sqlx::query("DELETE FROM resource_group k WHERE resource_id=$1 AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements($2) v WHERE v->>0=k.unit_id AND v->>1=k.key)").bind(id).bind(json!(retained)).execute(&mut **tx).await?;
     let (resume, parked) = (plan.resume.clone(), plan.parked as i32);
+    let conflicts = i32::try_from(plan.conflicts).unwrap_or(i32::MAX);
     apply(tx, plan).await?;
     if let Some(resume) = resume {
         // Stopped runs on unchanged input in a row.
@@ -317,7 +350,7 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
         }
         // Too large for any run, and its input does not change: settle until it does, with the
         // groups the last run left (`settled_stopped`, counted in metrics).
-        sqlx::query("INSERT INTO group_input(resource_id,fingerprint,parked_keys,settled_stopped) VALUES($1,$2,$3,true) ON CONFLICT(resource_id) DO UPDATE SET fingerprint=excluded.fingerprint,parked_keys=excluded.parked_keys,settled_stopped=true").bind(id).bind(&fingerprint).bind(parked).execute(&mut **tx).await?;
+        sqlx::query("INSERT INTO group_input(resource_id,fingerprint,parked_keys,settled_stopped,key_conflicts) VALUES($1,$2,$3,true,$4) ON CONFLICT(resource_id) DO UPDATE SET fingerprint=excluded.fingerprint,parked_keys=excluded.parked_keys,settled_stopped=true,key_conflicts=excluded.key_conflicts").bind(id).bind(&fingerprint).bind(parked).bind(conflicts).execute(&mut **tx).await?;
         sqlx::query("DELETE FROM group_dirty WHERE resource_id=$1")
             .bind(id)
             .execute(&mut **tx)
@@ -325,7 +358,7 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
         return Ok(());
     }
     // Parked keys alone settle the run: planning the same input again parks them again.
-    sqlx::query("INSERT INTO group_input(resource_id,fingerprint,parked_keys,settled_stopped) VALUES($1,$2,$3,false) ON CONFLICT(resource_id) DO UPDATE SET fingerprint=excluded.fingerprint,parked_keys=excluded.parked_keys,settled_stopped=false").bind(id).bind(fingerprint).bind(parked).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO group_input(resource_id,fingerprint,parked_keys,settled_stopped,key_conflicts) VALUES($1,$2,$3,false,$4) ON CONFLICT(resource_id) DO UPDATE SET fingerprint=excluded.fingerprint,parked_keys=excluded.parked_keys,settled_stopped=false,key_conflicts=excluded.key_conflicts").bind(id).bind(fingerprint).bind(parked).bind(conflicts).execute(&mut **tx).await?;
     sqlx::query("DELETE FROM group_dirty WHERE resource_id=$1")
         .bind(id)
         .execute(&mut **tx)
@@ -420,6 +453,8 @@ struct Facts<'a> {
     occurrences: &'a [bool],
     trigrams: &'a [Vec<String>],
     overrides: &'a [Option<String>],
+    /// Per unit, its single-object hub keys as (namespace, value) ([`single_object`]).
+    singles: &'a [Vec<(String, String)>],
 }
 /// The unions one run made, and the keys it did not finish.
 struct Joined {
@@ -434,6 +469,8 @@ struct Joined {
     /// depends on key order, which a resumed run rotates (`plan` freezes their sets in a stopped
     /// run). One flag per unit, however many pairs were refused.
     capped: Vec<bool>,
+    /// Joins refused because the two sets hold different values of one single-object namespace.
+    conflicts: usize,
 }
 /// One step of a key's unions, undone in reverse when the key is parked.
 enum Undo {
@@ -485,6 +522,7 @@ fn join(
     let mut evaluations = 0usize;
     let mut log = Vec::new();
     let mut capped = vec![false; facts.names.len()];
+    let mut conflicts = 0;
     'keys: for (n, (key, entries)) in keys.iter_mut().enumerate() {
         let curated = key.starts_with("curated:");
         entries.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
@@ -556,12 +594,28 @@ fn join(
                 stopped = Some(n);
                 break 'keys;
             }
-            let (points, starts, occurrences, trigrams) = (
+            let (points, starts, occurrences, trigrams, singles) = (
                 facts.points,
                 facts.starts,
                 facts.occurrences,
                 facts.trigrams,
+                facts.singles,
             );
+            // One recording, item or artist per group: a wrong ID on a hub never chains two.
+            let clash = !curated
+                && sets[a].iter().any(|x| {
+                    sets[b].iter().any(|y| {
+                        singles[*x].iter().any(|(namespace, value)| {
+                            singles[*y]
+                                .iter()
+                                .any(|(n, v)| n == namespace && v != value)
+                        })
+                    })
+                });
+            if clash {
+                conflicts += 1;
+                continue;
+            }
             let compatible = curated
                 || sets[a].iter().all(|x| {
                     sets[b].iter().all(|y| {
@@ -618,6 +672,7 @@ fn join(
         parked,
         resume,
         capped,
+        conflicts,
     }
 }
 struct Plan {
@@ -626,6 +681,8 @@ struct Plan {
     /// The key where the run's budget ran out (`join`): the run is applied but not settled, and
     /// the next one starts there.
     resume: Option<String>,
+    /// Joins refused for conflicting single-object keys (`join`).
+    conflicts: usize,
     assignments: Vec<Value>,
     groups: Vec<String>,
     old: Vec<String>,
@@ -657,6 +714,7 @@ async fn plan(
     let mut occurrences = vec![false; names.len()];
     let mut trigrams = vec![Vec::new(); names.len()];
     let mut overrides = vec![None; names.len()];
+    let mut singles: Vec<Vec<(String, String)>> = vec![Vec::new(); names.len()];
     // The automatic group each unit is in now, so a group keeps its ID as it grows or merges.
     let mut current: Vec<Option<String>> = vec![None; names.len()];
     let mut bykey: BTreeMap<String, Vec<(usize, chrono::DateTime<chrono::Utc>)>> = BTreeMap::new();
@@ -674,6 +732,9 @@ async fn plan(
             current[i] = e.group_id.clone().or(current[i].take());
         }
         old.extend(e.group_id.clone());
+        if let Some((namespace, value)) = single_object(&e.key) {
+            singles[i].push((namespace.to_owned(), value.to_owned()));
+        }
         if !e.key.starts_with("unit:") {
             bykey
                 .entry(e.key.clone())
@@ -697,6 +758,7 @@ async fn plan(
         parked,
         resume,
         capped,
+        conflicts,
     } = {
         let owned = (
             names.clone(),
@@ -705,11 +767,13 @@ async fn plan(
             occurrences.clone(),
             trigrams.clone(),
             overrides.clone(),
+            singles,
             cfg.clone(),
             resume.map(str::to_owned),
         );
         tokio::task::spawn_blocking(move || {
-            let (names, points, starts, occurrences, trigrams, overrides, cfg, resume) = owned;
+            let (names, points, starts, occurrences, trigrams, overrides, singles, cfg, resume) =
+                owned;
             let facts = Facts {
                 names: &names,
                 points: &points,
@@ -717,6 +781,7 @@ async fn plan(
                 occurrences: &occurrences,
                 trigrams: &trigrams,
                 overrides: &overrides,
+                singles: &singles,
             };
             join(&facts, bykey, &cfg, resume.as_deref())
         })
@@ -850,6 +915,7 @@ async fn plan(
     Ok(Plan {
         parked,
         resume,
+        conflicts,
         assignments,
         groups,
         old: old.into_iter().collect(),
@@ -1138,6 +1204,15 @@ mod tests {
             vec![Vec::new(); units],
             vec![None; units],
         );
+        // Each unit's single-object keys, from the keys it is listed under.
+        let mut singles = vec![Vec::new(); units];
+        for (key, members) in keys {
+            if let Some((namespace, value)) = single_object(key) {
+                for i in *members {
+                    singles[*i].push((namespace.to_owned(), value.to_owned()));
+                }
+            }
+        }
         let facts = Facts {
             names: &names,
             points: &points,
@@ -1145,6 +1220,7 @@ mod tests {
             occurrences: &occurrences,
             trigrams: &trigrams,
             overrides: &overrides,
+            singles: &singles,
         };
         let bykey = keys
             .iter()
@@ -1182,6 +1258,41 @@ mod tests {
         assert_eq!(sizes.iter().sum::<usize>(), 6);
     }
 
+    /// A wrong Q-id never chains two recordings: a group holds one value of each single-object
+    /// namespace, while ISRCs may be several.
+    #[test]
+    fn a_shared_key_never_joins_two_recordings() {
+        let mut joined = run(
+            4,
+            &[
+                ("hub:isrc:GBUM71029604", &[0, 3]),
+                ("hub:isrc:USIR20400274", &[0]),
+                ("hub:mb:recording:a", &[0]),
+                ("hub:mb:recording:b", &[1]),
+                ("hub:wikidata:Q1", &[0, 1, 2]),
+            ],
+            &GroupConfig::default(),
+            None,
+        );
+        assert!(!same(&mut joined, 0, 1));
+        assert!(same(&mut joined, 0, 2) && same(&mut joined, 0, 3));
+        // Q1 refused 1 with 0, then 1 with {0, 2}.
+        assert_eq!(joined.conflicts, 2);
+        assert_eq!(
+            single_object("hub:discogs:master:21491"),
+            Some(("discogs:master", "21491"))
+        );
+        assert_eq!(single_object("hub:upc:0602557656527"), None);
+        assert_eq!(
+            single_object("hub:imdb:tt0133093"),
+            Some(("imdb", "tt0133093"))
+        );
+        assert_eq!(
+            single_object("hub:podcast:guid:ead4c236-bf58-58c6-a2c6-a6b28d128cb6"),
+            Some(("podcast:guid", "ead4c236-bf58-58c6-a2c6-a6b28d128cb6"))
+        );
+        assert_eq!(single_object("mb:recording:a"), None);
+    }
     /// A run that stops on the budget resumes at its stop key and wraps around, so every key of a
     /// component too large for one run is reached in turn.
     #[test]

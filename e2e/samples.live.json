@@ -270,5 +270,109 @@
     "kind": "pubky",
     "uri": "pubky://{author}/pub/pinakes.e2e/objects/sample",
     "type": "CreativeWork"
+  },
+  {
+    "kind": "music",
+    "uri": "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq",
+    "type": "MusicRecording",
+    "derived": [
+      "Deezer"
+    ],
+    "site": "Spotify"
+  },
+  {
+    "kind": "wikidata",
+    "uri": "https://www.wikidata.org/wiki/Q90",
+    "type": "Place",
+    "derived": [
+      "Wikipedia (fr)",
+      "Wikipedia (en)"
+    ]
+  },
+  {
+    "kind": "apple_song",
+    "uri": "https://music.apple.com/gb/song/1440717826",
+    "type": "MusicRecording",
+    "site": "Apple Music"
+  },
+  {
+    "kind": "tidal_artist",
+    "uri": "https://tidal.com/artist/64518",
+    "type": "MusicGroup",
+    "site": "TIDAL"
+  },
+  {
+    "kind": "bandcamp_artist",
+    "uri": "https://radiohead.bandcamp.com/",
+    "type": "MusicGroup",
+    "site": "Bandcamp"
+  },
+  {
+    "kind": "soundcloud_artist",
+    "uri": "https://soundcloud.com/radiohead",
+    "type": "MusicGroup",
+    "site": "SoundCloud"
+  },
+  {
+    "kind": "tidal_seed",
+    "uri": "https://tidal.com/track/567396540",
+    "type": "MusicRecording",
+    "site": "TIDAL"
+  },
+  {
+    "kind": "tidal_share",
+    "uri": "https://tidal.com/track/534050211/u",
+    "type": "MusicRecording",
+    "site": "TIDAL",
+    "group_with": "tidal_seed"
+  },
+  {
+    "kind": "tidal_own_isrc",
+    "uri": "https://tidal.com/track/551040646",
+    "type": "MusicRecording",
+    "site": "TIDAL",
+    "facts": {
+      "isrc": "GBUM72103841"
+    }
+  },
+  {
+    "kind": "tidal_daft_punk",
+    "uri": "https://tidal.com/artist/8847",
+    "type": "MusicGroup",
+    "site": "TIDAL",
+    "name": "Daft Punk"
+  },
+  {
+    "kind": "cut_deezer",
+    "uri": "https://www.deezer.com/album/41839661",
+    "type": "MusicAlbum",
+    "site": "Deezer"
+  },
+  {
+    "kind": "cut_spotify",
+    "uri": "https://open.spotify.com/album/0tGPJ0bkWOUmH7MEOR77qc",
+    "type": "MusicAlbum",
+    "site": "Spotify",
+    "group_with": "cut_deezer"
+  },
+  {
+    "kind": "dracula_tidal",
+    "uri": "https://tidal.com/album/495402659",
+    "type": "MusicAlbum",
+    "site": "TIDAL"
+  },
+  {
+    "kind": "dracula_apple",
+    "uri": "https://music.apple.com/au/album/1874125260",
+    "type": "MusicAlbum",
+    "site": "Apple Music",
+    "group_with": "dracula_tidal"
+  },
+  {
+    "kind": "dracula_deezer",
+    "uri": "https://www.deezer.com/album/910510411",
+    "type": "MusicAlbum",
+    "site": "Deezer",
+    "group_with": "dracula_tidal"
   }
 ]

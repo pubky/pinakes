@@ -44,6 +44,8 @@ pub struct Metrics {
     /// Resources whose last grouping run parked a key over the budget, stopped on it, or settled
     /// after stopping repeatedly on unchanged input.
     pub group_budget: IntGaugeVec,
+    /// Resources whose last grouping run refused a join for conflicting single-object keys.
+    pub group_key_conflicts: IntGauge,
     /// API handler panics (either listener) answered 500 by the backstop layer.
     pub api_panics: IntCounter,
     pub ingest_lag: IntGauge,
@@ -78,6 +80,11 @@ impl Metrics {
             "Last successful Nexus projection update",
         )?;
         registry.register(Box::new(ingest_success.clone()))?;
+        let group_key_conflicts = IntGauge::new(
+            "pinakes_group_key_conflict_resources",
+            "Resources whose last grouping run refused a join that would put two MBIDs, Q-ids or Discogs IDs of one kind in a group",
+        )?;
+        registry.register(Box::new(group_key_conflicts.clone()))?;
         let ingest_resets = IntCounter::new(
             "pinakes_ingest_epoch_resets_total",
             "Nexus projection resets",
@@ -180,6 +187,7 @@ impl Metrics {
                 "Resources whose last grouping run parked a key over the budget, stopped on it, or settled after repeated stops",
                 &["state"]
             ),
+            group_key_conflicts,
             registry,
             refresh_lock: Arc::default(),
             ingest_lag,
@@ -242,7 +250,8 @@ impl Metrics {
         }
         for row in sqlx::query("SELECT resolver,status,count(*) AS n FROM resource WHERE resolver IS NOT NULL GROUP BY resolver,status").fetch_all(pool).await? {self.resources.with_label_values(&[&row.try_get::<String,_>("resolver")?,&row.try_get::<String,_>("status")?]).set(row.try_get("n")?);}
         for row in sqlx::query("SELECT resolver,count(*) FILTER(WHERE dead_letter) AS dead,count(*) FILTER(WHERE NOT dead_letter AND lease_until>now()) AS leased,count(*) FILTER(WHERE NOT dead_letter AND NOT final AND next_attempt_at<=now() AND (lease_until IS NULL OR lease_until<=now())) AS pending,count(*) FILTER(WHERE NOT final AND NOT dead_letter AND refresh_at<now()) AS overdue FROM resource WHERE resolver IS NOT NULL GROUP BY resolver").fetch_all(pool).await? {let resolver:String=row.try_get("resolver")?;for state in ["pending","leased","dead"] {self.queue.with_label_values(&[&resolver,state]).set(row.try_get(state)?);}self.overdue.with_label_values(&[&resolver]).set(row.try_get("overdue")?);}
-        let row=sqlx::query("SELECT (SELECT count(*) FROM group_input WHERE parked_keys>0 AND NOT settled_stopped) AS parked,(SELECT count(*) FROM group_dirty WHERE last_error='work_budget') AS stopped,(SELECT count(*) FROM group_input WHERE settled_stopped) AS settled").fetch_one(pool).await?;
+        let row=sqlx::query("SELECT (SELECT count(*) FROM group_input WHERE parked_keys>0 AND NOT settled_stopped) AS parked,(SELECT count(*) FROM group_dirty WHERE last_error='work_budget') AS stopped,(SELECT count(*) FROM group_input WHERE settled_stopped) AS settled,(SELECT count(*) FROM group_input WHERE key_conflicts>0) AS conflicts").fetch_one(pool).await?;
+        self.group_key_conflicts.set(row.try_get("conflicts")?);
         for state in ["parked", "stopped", "settled"] {
             self.group_budget
                 .with_label_values(&[state])

@@ -552,6 +552,28 @@
       "card_type": "Article"
     },
     {
+      "name": "resolve-en-wikipedia-org-wiki-immanuel-kant",
+      "summary": "https://en.wikipedia.org/wiki/Immanuel_Kant",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://en.wikipedia.org/wiki/Immanuel_Kant"
+      },
+      "expect": "card",
+      "card_type": "Article"
+    },
+    {
+      "name": "resolve-de-wikipedia-org-wiki-immanuel-kant",
+      "summary": "https://de.wikipedia.org/wiki/Immanuel_Kant",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://de.wikipedia.org/wiki/Immanuel_Kant"
+      },
+      "expect": "card",
+      "card_type": "Article"
+    },
+    {
       "name": "resolve-www-wikidata-org-wiki-q90",
       "summary": "https://www.wikidata.org/wiki/Q90",
       "method": "POST",
@@ -605,6 +627,127 @@
       },
       "expect": "card",
       "card_type": "WebPage"
+    },
+    {
+      "name": "resolve-open-spotify-com-track-6lgjvl0xdtc73rj1mmpotq",
+      "summary": "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq"
+      },
+      "expect": "card",
+      "card_type": "MusicRecording"
+    },
+    {
+      "name": "resolve-music-apple-com-gb-song-1097861770",
+      "summary": "https://music.apple.com/gb/song/1097861770",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://music.apple.com/gb/song/1097861770"
+      },
+      "expect": "card",
+      "card_type": "MusicRecording"
+    },
+    {
+      "name": "resolve-www-deezer-com-track-138539973",
+      "summary": "https://www.deezer.com/track/138539973",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://www.deezer.com/track/138539973"
+      },
+      "expect": "card",
+      "card_type": "MusicRecording"
+    },
+    {
+      "name": "resolve-tidal-com-track-58990512",
+      "summary": "https://tidal.com/track/58990512",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://tidal.com/track/58990512"
+      },
+      "expect": "card",
+      "card_type": "MusicRecording"
+    },
+    {
+      "name": "resolve-open-spotify-com-album-6dviqq8qmq5gbnj9shoyge",
+      "summary": "https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE"
+      },
+      "expect": "card",
+      "card_type": "MusicAlbum"
+    },
+    {
+      "name": "resolve-music-apple-com-gb-album-ok-computer-1097861387",
+      "summary": "https://music.apple.com/gb/album/ok-computer/1097861387",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://music.apple.com/gb/album/ok-computer/1097861387"
+      },
+      "expect": "card",
+      "card_type": "MusicAlbum"
+    },
+    {
+      "name": "resolve-www-deezer-com-album-14879699",
+      "summary": "https://www.deezer.com/album/14879699",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://www.deezer.com/album/14879699"
+      },
+      "expect": "card",
+      "card_type": "MusicAlbum"
+    },
+    {
+      "name": "resolve-radiohead-bandcamp-com-album-ok-computer",
+      "summary": "https://radiohead.bandcamp.com/album/ok-computer",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://radiohead.bandcamp.com/album/ok-computer"
+      },
+      "expect": "card",
+      "card_type": "MusicAlbum"
+    },
+    {
+      "name": "resolve-open-qobuz-com-album-0634904078164",
+      "summary": "https://open.qobuz.com/album/0634904078164",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://open.qobuz.com/album/0634904078164"
+      },
+      "expect": "card",
+      "card_type": "MusicAlbum"
+    },
+    {
+      "name": "resolve-music-youtube-com-playlist-list-olak5uy-nc6afxsnmk8ofml8df9q",
+      "summary": "https://music.youtube.com/playlist?list=OLAK5uy_nc6afxSnmK8OFML8dF9q_0D1MBMXsGnL4",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://music.youtube.com/playlist?list=OLAK5uy_nc6afxSnmK8OFML8dF9q_0D1MBMXsGnL4"
+      },
+      "expect": "card",
+      "card_type": "MusicPlaylist"
+    },
+    {
+      "name": "resolve-open-spotify-com-artist-4z8w4fkeb5yxbusrsdqvpb",
+      "summary": "https://open.spotify.com/artist/4Z8W4fKeB5YxbusRsdQVPb",
+      "method": "POST",
+      "path": "/v1/resolve",
+      "body": {
+        "uri": "https://open.spotify.com/artist/4Z8W4fKeB5YxbusRsdQVPb"
+      },
+      "expect": "card",
+      "card_type": "MusicGroup"
     },
     {
       "name": "resolve-www-youtube-com-watch-v-dqw4w9wgxcq",
@@ -1277,6 +1420,88 @@
       "expect": "items"
     },
     {
+      "name": "trending-24h",
+      "summary": "sort=trending&window=24h",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "sort": "trending",
+        "window": "24h"
+      },
+      "expect": "items",
+      "labels": {
+        "sort": "trending, window=24h"
+      }
+    },
+    {
+      "name": "trending-7d",
+      "summary": "sort=trending&window=7d",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "sort": "trending",
+        "window": "7d"
+      },
+      "expect": "items",
+      "labels": {
+        "sort": "trending, window=7d"
+      }
+    },
+    {
+      "name": "trending-30d",
+      "summary": "sort=trending&window=30d",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "sort": "trending",
+        "window": "30d"
+      },
+      "expect": "items",
+      "labels": {
+        "sort": "trending, window=30d"
+      }
+    },
+    {
+      "name": "key-9f9cf187-d6f9-437f-9d98-d59cdbd52757",
+      "summary": "key=mbid:9f9cf187-d6f9-437f-9d98-d59cdbd52757",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "key": "mbid:9f9cf187-d6f9-437f-9d98-d59cdbd52757"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "key-gbaye9701376",
+      "summary": "key=isrc:GBAYE9701376",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "key": "isrc:GBAYE9701376"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "key-634904078164",
+      "summary": "key=upc:634904078164",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "key": "upc:634904078164"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "key-q9312",
+      "summary": "key=wikidata:Q9312",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "key": "wikidata:Q9312"
+      },
+      "expect": "items"
+    },
+    {
       "name": "collapse-book",
       "summary": "type=Book&collapse=group",
       "method": "GET",
@@ -1541,6 +1766,32 @@
       },
       "labels": {
         "id": "isbn:9780140328721, https://openlibrary.org/books/OL7353617M"
+      },
+      "expect": "group"
+    },
+    {
+      "name": "group-open-spotify-com-track-6lgjvl0xdtc73rj1mmpotq",
+      "summary": "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq, https://www.deezer.com/track/138539973",
+      "method": "GET",
+      "path": "/v1/groups/{id}",
+      "params": {
+        "id": "group(https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq,https://www.deezer.com/track/138539973)"
+      },
+      "labels": {
+        "id": "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq, https://www.deezer.com/track/138539973"
+      },
+      "expect": "group"
+    },
+    {
+      "name": "group-en-wikipedia-org-wiki-immanuel-kant",
+      "summary": "https://en.wikipedia.org/wiki/Immanuel_Kant, https://de.wikipedia.org/wiki/Immanuel_Kant",
+      "method": "GET",
+      "path": "/v1/groups/{id}",
+      "params": {
+        "id": "group(https://en.wikipedia.org/wiki/Immanuel_Kant,https://de.wikipedia.org/wiki/Immanuel_Kant)"
+      },
+      "labels": {
+        "id": "https://en.wikipedia.org/wiki/Immanuel_Kant, https://de.wikipedia.org/wiki/Immanuel_Kant"
       },
       "expect": "group"
     },

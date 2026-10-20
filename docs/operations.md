@@ -51,6 +51,11 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `group_max_distance_m` | `500.0` | Farthest two located members of one group (metres). |
 | `group_max_graph_units` | `20000` | Units one grouping pass may read. |
 | `group_max_graph_bytes` | `33554432` | Bytes one grouping pass may read. |
+| `also_on_links_per_source` | `32` | Derived links one source keeps per resource. |
+| `also_on_keys_per_source` | `16` | Join keys one source keeps per resource. |
+| `also_on_facts_per_source` | `32` | Facts one source keeps per resource. |
+| `also_on_concurrency` | `2` | Resources whose sources run at once. |
+| `also_on_retry_secs` | `300` | First retry of a failed source run (seconds); doubles up to an hour. |
 | `event_max_line_bytes` | `65536` | Longest calendar content line (bytes). |
 | `event_max_date_values` | `4096` | Most date values in one calendar property. |
 | `event_feed_body_bytes` | `33554432` | Largest calendar or feed body (bytes). |
@@ -153,7 +158,10 @@ Web fetches bypass environment proxies, validate every DNS answer, pin the check
 repeat the policy at every redirect (three hops; HTML meta refresh and literal JavaScript
 redirects count). `egress.allow_hosts` and `egress.deny_hosts` take exact names or
 `*.example.org`; they never override the IP policy, and deny wins. Pages are capped at 1 MB of
-decoded body; an oversized page keeps its head metadata with a `truncated` warning. Requests
+decoded body; an oversized page keeps its head metadata with a `truncated` warning. An RSS or
+Atom feed read without a calendar's feed cap is cut there too (a long show's feed is 2–5 MB):
+its channel and newest items come first, and its card reads up to the last whole item. Wikidata
+entity reads may take 8 MB, since a much-edited item carries megabytes of claims. Requests
 time out after ten seconds. Images stay origin URLs and are never fetched.
 
 Every request introduces itself as `pinakes/<version> (+https://pubky.app; <contact>)`, with
@@ -437,13 +445,61 @@ profiles, statuses, hashes and parser output; secrets are refused. `PINAKES_PROB
 replays captures without network access. Recorded responses for the keyless probes run in
 `scripts/test`.
 
+## Also on
+
+The upgrade that adds the worker queues every stored resource once. Run
+`pinakesd --config <path> reextract all` after it as well: music and Wikipedia links already
+stored in another spelling become aliases of their canonical link, and music links are typed.
+
+The also-on worker runs every enabled source that applies to a resource ([the API](api.md#also-on))
+after a save that changed its document or status, and again when the shortest lifetime among
+them has passed. Its queue is `also_on_dirty`; `limits.also_on_concurrency` (2) resources run at
+once, and a failed run keeps the previous rows and retries after `limits.also_on_retry_secs`
+(300 s), doubling up to an hour. Each run replaces its source's rows (`resource_key`,
+`derived_link`, `resource_fact`); rows live twice the source's lifetime and the hourly maintenance deletes the
+expired ones (a deleted key regroups its resource). A source keeps at most
+`limits.also_on_links_per_source` (32) links, `limits.also_on_keys_per_source` (16) keys and
+`limits.also_on_facts_per_source` (32) facts per resource. `[also_on] enabled = false` stops the
+worker; stored keys keep grouping and stored links stay on cards until they expire (up to twice
+the sources' lifetimes). `derive_links = false` keeps keys and facts only: no derived links on
+cards, so a tagged link an exact derivation names no longer joins by it either;
+`[also_on.sources.<id>] enabled = false` turns one source off and `enabled = true` turns on one
+that is off by default (an unknown ID stops startup). Sources run in a fixed order, and each
+sees the keys the ones before it found in the same run (a barcode MusicBrainz names, then the
+services looked up by it); a source that no longer applies (its key is gone) drops its rows.
+The sources, in the order they run, are `service`, `musicbrainz`, `wikidata`, `deezer` and
+`itunes` (music), `wikipedia` and `wikidata_item`
+([the API](api.md#also-on) says what each reads); `[also_on] apple_storefront` (`us`, a two-letter country code) is the Apple Music
+storefront of the Apple links they build. `[also_on.sources.musicbrainz] base_url`
+(`https://musicbrainz.org/ws/2`) points the `musicbrainz` source at a MusicBrainz mirror's web
+service instead, an http(s) URL without a trailing slash and reached through the egress policy;
+every instance on one public address shares MusicBrainz's 1 request/s, which a mirror does not
+limit. The worker takes up to 100 due resources at a time and asks MusicBrainz about their links'
+URLs together (50 to a request; MusicBrainz echoes each URL, and an answer applies only to the
+URL it names) and Wikidata for their item links' items together (10 to a request). Each music
+link then costs one MusicBrainz request for its entity (up to four when the URL names several
+releases; one more for a track found by its ISRC, and one for a track's original album), up to
+two iTunes lookups for an album with barcodes, and two Wikidata requests (a search by its
+service ID cannot batch); each Wikipedia article one request to its Wikipedia and one to
+Wikidata. `deezer` is off by default: Deezer's API terms allow non-commercial use
+only, so turn it on (`[also_on.sources.deezer] enabled = true`) only where they do; it costs one
+request per Deezer link and up to two per other track or album with an ISRC or barcode.
+
+Sources reach their services through the egress policy and its per-host budgets, one request
+at a time per host. A hub's published limit lowers its host's default pace like a source's own
+(`limits.host_rates` names a host's rate outright): MusicBrainz 1 request/s, Deezer 10/s,
+Wikimedia (`www.wikidata.org`, `*.wikipedia.org`, `commons.wikimedia.org`) 200/min, Open
+Library 3/s, iTunes about 20/min, crates.io 1/s, Crossref 10/s, Software Heritage 120/h; a
+limit above `limits.host_requests_per_second` (1/s) leaves the default.
+
 ## Groups
 
 Grouping runs after a document commits, from its own dirty queue with its own backoff (5–10
 seconds of jitter, growing to an hour), so a grouping failure never blocks a save. A document
 records its evidence as group keys: an identifier card's `doi`/`isbn` and the landing pages its
 registry names (`registry`), a page's head citations (`cites_doi`, `cites_isbn`) and ICS UIDs
-(`ics_uid`). Groups form only from those (see [the API](api.md#groups)): an identifier card with
+(`ics_uid`); the exact keys also-on sources vouch for join too (`hub:{key}`, below). Groups form
+only from those (see [the API](api.md#groups)): an identifier card with
 a named landing page that cites it, one UID within one feed, and curation. A group stores
 membership only; cards read it when they are served. Each key of a run may
 make a capped number of compatibility checks (`limits.group_max_members`² × 2, between 100,000
@@ -453,6 +509,9 @@ keys still run; the run settles and counts it
 the hour with `last_error = 'work_budget'` (`state="stopped"`), starting at the key it stopped
 at, so a component too large for one run is covered in turn; after 24 stopped runs on unchanged
 input it settles with the groups the last run left until its input changes (`state="settled"`).
+A join that would put two values of a single-object hub key in one group (two recordings, two
+Q-ids) is refused; `pinakes_group_key_conflict_resources` counts the resources whose last run
+refused one, which points at a wrong ID on a hub.
 Parked keys' checks count against the run. Past either limit, every set of units holding one the
 run did not finish keeps each member's group, and no other set takes that group's ID; in a
 stopped run so does every set that `limits.group_max_members` kept from joining another, since a

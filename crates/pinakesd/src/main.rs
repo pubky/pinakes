@@ -52,13 +52,25 @@ async fn main() -> Result<()> {
     let api_pool = api::pool_options().connect(&config.database_url).await?;
     let state = AppState::new(api_pool, config.clone())?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let mut workers = queue::spawn(
+    // One Egress for the resolvers and the also-on sources: the per-host budgets are shared.
+    let egress = pinakes_core::resolver::egress::Egress::new(config.egress.clone());
+    let mut workers = queue::spawn_with_egress(
         pool.clone(),
         config.clone(),
         state.wake.clone(),
         shutdown_rx.clone(),
         state.metrics.clone(),
+        egress.clone(),
     )?;
+    let also_on_task = tokio::spawn(pinakes_core::also_on::run(
+        pool.clone(),
+        pinakes_core::also_on::Context {
+            egress,
+            config: std::sync::Arc::new(config.clone()),
+        },
+        pinakes_core::also_on::registry(),
+        shutdown_rx.clone(),
+    ));
     let ingest_state = state.clone();
     let ingest_pool = pool.clone();
     let mut ingest_shutdown = shutdown_rx.clone();
@@ -149,6 +161,7 @@ async fn main() -> Result<()> {
     admin_task.await??;
     ingest_task.await?;
     maintenance_task.await?;
+    also_on_task.await?;
     dump_task.await?;
     group_task.await?;
     same_event_task.await?;

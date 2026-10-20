@@ -28,6 +28,8 @@ pub const ATTRIBUTES: &[&str] = &[
     "podcast_feed",
     "duration",
     "isrc",
+    "artist",
+    "album",
 ];
 pub struct WebResolver {
     pub oembed_policy: super::cards::OembedPolicy,
@@ -80,6 +82,34 @@ impl Resolver for WebResolver {
     }
 }
 impl WebResolver {
+    /// A Wikipedia article's card from its REST summary; `None` falls back to the page (a
+    /// missing article, a page outside the article namespace, a failed request).
+    async fn wikipedia_card(
+        &self,
+        uri: &str,
+        article: &crate::wikipedia::Article,
+    ) -> Option<ResourceMeta> {
+        let options = super::egress::FetchOptions {
+            accept: Some("application/json".into()),
+            ..Default::default()
+        };
+        let fetched = match self
+            .egress
+            .fetch_with(&crate::wikipedia::summary_url(article), &options)
+            .await
+        {
+            Ok(fetched) if fetched.status == 200 => fetched,
+            Ok(_) => return None,
+            Err(error) => {
+                tracing::debug!(error = %format!("{error:#}"), "Wikipedia summary failed; reading the page");
+                return None;
+            }
+        };
+        let v: Value = serde_json::from_slice(&fetched.body).ok()?;
+        crate::wikipedia::summary_card(uri, article, &v, self.config.ttl_secs)?
+            .bounded(ATTRIBUTES)
+            .ok()
+    }
     pub async fn resolve_with_policy(
         &self,
         uri: &str,
@@ -98,6 +128,11 @@ impl WebResolver {
             && crate::event::adapters::detect(uri).is_none()
         {
             return Err(super::ErrorClass("policy").into());
+        }
+        if let Some(article) = crate::wikipedia::parse(uri) {
+            if let Some(doc) = self.wikipedia_card(uri, &article).await {
+                return Ok(doc);
+            }
         }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         tokio::time::timeout_at(deadline, async {
@@ -132,7 +167,8 @@ impl WebResolver {
                 if let Some(doc) = events.container(uri, &fetched, deadline).await? {
                     return Ok(doc);
                 }
-                let feed = crate::event::service::feed_like(&fetched);
+                // A cut-off body never confirms that an established feed emptied.
+                let feed = crate::event::service::feed_like(&fetched) && !fetched.truncated;
                 if let Some(doc) = events.disappeared(uri, fetched.status, feed).await? {
                     return Ok(doc);
                 }
@@ -354,18 +390,34 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
             })
         })
         .collect();
+    let page: Vec<String> = [uri.to_owned(), fetched.url.to_string()]
+        .into_iter()
+        .chain(
+            html.select(&selector("head link[rel~=canonical][href]"))
+                .filter_map(|l| origin_url(&fetched.url, l.value().attr("href")?)),
+        )
+        .filter_map(|u| entity_identity(&u))
+        .collect();
+    // An organization or person whose own url/@id is this (non-root) page is the page's subject
+    // (an artist page, a profile), not a publisher helper: it outranks a site-wide app node.
+    let subject = |v: &Value| {
+        let named = || {
+            ["url", "@id"]
+                .into_iter()
+                .filter_map(|f| v.get(f).and_then(Value::as_str))
+                .filter_map(|u| origin_url(&fetched.url, u).and_then(|u| entity_identity(&u)))
+                .any(|id| page.contains(&id))
+        };
+        if v.is_object() && type_priority(v) == 20 && fetched.url.path() != "/" && named() {
+            100
+        } else {
+            entity_priority(v)
+        }
+    };
     if let Some(best) = (1..scripts.len()).fold((!scripts.is_empty()).then_some(0), |best, i| {
-        best.filter(|b| entity_priority(&scripts[i].0) <= entity_priority(&scripts[*b].0))
+        best.filter(|b| subject(&scripts[i].0) <= subject(&scripts[*b].0))
             .or(Some(i))
     }) {
-        let page: Vec<String> = [uri.to_owned(), fetched.url.to_string()]
-            .into_iter()
-            .chain(
-                html.select(&selector("head link[rel~=canonical][href]"))
-                    .filter_map(|l| origin_url(&fetched.url, l.value().attr("href")?)),
-            )
-            .filter_map(|u| entity_identity(&u))
-            .collect();
         let (entity, head) = &scripts[best];
         let named = entity_urls(entity)
             .filter_map(|u| origin_url(&fetched.url, u).and_then(|u| entity_identity(&u)))
@@ -855,6 +907,32 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url, claims: bool) {
                 .or_insert_with(|| value.into());
         }
     }
+    // A recording's or album's artists and album, as music pages state them.
+    let names = |value: &Value| -> Option<String> {
+        fn one(v: &Value) -> Option<&str> {
+            v.as_str().or_else(|| v["name"].as_str()).map(str::trim)
+        }
+        let names: Vec<&str> = match value {
+            Value::Array(all) => all.iter().filter_map(one).collect(),
+            v => one(v).into_iter().collect(),
+        };
+        let names: Vec<&str> = names
+            .into_iter()
+            .filter(|n| !n.is_empty())
+            .take(8)
+            .collect();
+        (!names.is_empty()).then(|| names.join(" & "))
+    };
+    for (field, attribute) in [("byArtist", "artist"), ("inAlbum", "album")] {
+        if let Some(value) = v.get(field).and_then(names) {
+            doc.attributes.entry(attribute.into()).or_insert(value);
+        }
+    }
+    if let Some(date) = v.get("datePublished").and_then(Value::as_str) {
+        doc.attributes
+            .entry("published".into())
+            .or_insert_with(|| date.trim().into());
+    }
     for field in ["author", "creator"] {
         if !doc.attributes.contains_key("author") {
             if let Some(value) = v.get(field) {
@@ -1144,6 +1222,73 @@ mod tests {
             .aliases
             .contains(&"https://example.org/canonical".into()));
     }
+    #[test]
+    fn the_pages_own_artist_outranks_a_site_wide_app_node() {
+        let fetch = |url: &str, body: Vec<u8>| Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            url: Url::parse(url).unwrap(),
+            body,
+            content_type: "text/html".into(),
+            status: 200,
+            location: None,
+            retry_after_secs: 60,
+            validators: Default::default(),
+        };
+        // TIDAL's artist page: its own MusicGroup, and a graph with the site's Organization,
+        // WebSite and WebApplication (all named "TIDAL").
+        let path = format!(
+            "{}/tests/fixtures/web/tidal-artist-64518.html",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let url = "https://tidal.com/artist/64518";
+        let out = extract(url, &fetch(url, std::fs::read(path).unwrap()), 100);
+        assert_eq!(
+            (out.doc.type_name.as_str(), out.doc.name.as_deref()),
+            ("MusicGroup", Some("Radiohead"))
+        );
+        // A card says what TIDAL's own JSON-LD says, not its share text.
+        let mut artist = out.doc.clone();
+        artist.status = crate::model::Status::Ok;
+        crate::music::type_card(url, None, &mut artist);
+        assert_eq!(artist.description, None);
+        for (url, file, description) in [
+            (
+                "https://tidal.com/track/534050211",
+                "tidal-track-534050211.html",
+                "Queen · A Night At The Opera (Deluxe Edition) · 5:55",
+            ),
+            (
+                "https://tidal.com/album/495402659",
+                "tidal-album-495402659.html",
+                "Tame Impala & JENNIE · 2025",
+            ),
+        ] {
+            let path = format!("{}/tests/fixtures/web/{file}", env!("CARGO_MANIFEST_DIR"));
+            let mut doc = extract(url, &fetch(url, std::fs::read(path).unwrap()), 100).doc;
+            doc.status = crate::model::Status::Ok;
+            crate::music::type_card(url, None, &mut doc);
+            assert_eq!(doc.description.as_deref(), Some(description), "{url}");
+            assert_eq!(doc.site, "TIDAL");
+        }
+        // A homepage's Organization naming the site root is its publisher, not its subject.
+        let home = r#"<head><script type="application/ld+json">{"@type":"Organization","@id":"https://shop.example/","url":"https://shop.example/","name":"Shop Ltd"}</script><script type="application/ld+json">{"@type":"WebPage","url":"https://shop.example/","name":"Welcome"}</script></head>"#;
+        let out = extract(
+            "https://shop.example/",
+            &fetch("https://shop.example/", home.as_bytes().to_vec()),
+            100,
+        );
+        assert_eq!(out.doc.type_name, "WebPage");
+        // An organization naming another page stays a helper.
+        let other = r#"<head><script type="application/ld+json">{"@type":"Organization","url":"https://shop.example/","name":"Shop Ltd"}</script><script type="application/ld+json">{"@type":"WebApplication","name":"App"}</script></head>"#;
+        let out = extract(
+            "https://shop.example/about",
+            &fetch("https://shop.example/about", other.as_bytes().to_vec()),
+            100,
+        );
+        assert_eq!(out.doc.type_name, "WebApplication");
+    }
+
     #[test]
     fn pages_cite_their_own_identifiers_from_meta() {
         let keys = |head: &str| {

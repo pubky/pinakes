@@ -65,7 +65,7 @@ try {
     }
   }
   const journal = (tags, cleanup) => writeFile(journalFile, JSON.stringify({ author, tags, cleanup }, null, 2), { mode: 0o600 });
-  report = await runFlow({ storage, author, samples, pinakes, nexus, positiveVenue, journal, signal: control.signal, timeout: Number(process.env.PINAKES_E2E_TIMEOUT_MS ?? 120000) });
+  report = await runFlow({ storage, author, samples, pinakes, nexus, positiveVenue, journal, signal: control.signal, timeout: Number(process.env.PINAKES_E2E_TIMEOUT_MS ?? (mock ? 120000 : 600000)) });
   report.mode = mock ? 'mock' : 'live'; report.journal = journalFile;
 } catch (error) {
   report = { ok: false, mode: mock ? 'mock' : 'live', error: error.message ?? String(error), journal: journalFile };

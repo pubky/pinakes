@@ -1513,7 +1513,7 @@ impl Transport for XmlTransport {
     }
 }
 #[sqlx::test(migrations = "../../migrations")]
-async fn non_feed_xml_is_refused_at_the_page_cap(pool: PgPool) {
+async fn xml_past_the_page_cap_is_cut_and_never_a_container(pool: PgPool) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = Router::new().route(
@@ -1539,12 +1539,19 @@ async fn non_feed_xml_is_refused_at_the_page_cap(pool: PgPool) {
         config: Default::default(),
         osm: Arc::new(OsmResolver::new(pool, OsmConfig::default()).unwrap()),
     };
-    assert!(service
+    // Bounded like a page, and never read as a calendar snapshot.
+    let fetched = service
         .fetch(&egress, "https://example.org/page")
         .await
-        .unwrap_err()
-        .to_string()
-        .contains("cap"));
+        .unwrap();
+    assert!(fetched.truncated);
+    assert_eq!(fetched.body.len(), 1024 * 1024);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    assert!(service
+        .container("https://example.org/page", &fetched, deadline)
+        .await
+        .unwrap()
+        .is_none());
     server.abort();
 }
 

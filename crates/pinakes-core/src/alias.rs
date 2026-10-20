@@ -23,7 +23,8 @@ const PLATFORM_TRACKING: &[(&[&str], &[&str])] = &[
 #[derive(Debug, PartialEq)]
 pub struct Alias {
     pub root: String,
-    /// `cursor`, `osm`, `identifier`, `tracking` or `canonical`.
+    /// `cursor`, `osm`, `identifier`, `service` (a music service's, Wikipedia's or a Wikidata
+    /// item's URL forms), `tracking` or `canonical`.
     pub basis: &'static str,
 }
 /// The root of a URI known from the URI alone, when it differs from the URI itself.
@@ -42,6 +43,12 @@ pub fn root(uri: &str) -> Option<Alias> {
         Some((format!("doi:{doi}"), "identifier"))
     } else if let Some(root) = crate::sources::alias_root(&uri) {
         Some((root, "identifier"))
+    } else if let Some(music) = crate::music::parse(&uri) {
+        Some((music.canonical, "service"))
+    } else if let Some(article) = crate::wikipedia::parse(&uri) {
+        Some((article.canonical, "service"))
+    } else if let Some((_, item)) = crate::hubs::wikidata::item_link(&uri) {
+        Some((item, "service"))
     } else {
         untracked(&uri).map(|root| (root, "tracking"))
     }?;

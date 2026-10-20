@@ -1,0 +1,10 @@
+
+
+
+{
+"resultCount":1,
+"results": [
+{"wrapperType":"collection", "collectionType":"Album", "artistId":284363062, "collectionId":1445304934, "amgArtistId":1185382, "artistName":"Carly Rae Jepsen", "collectionName":"Cut To The Feeling - Single", "collectionCensoredName":"Cut To The Feeling - Single", "artistViewUrl":"https://music.apple.com/us/artist/carly-rae-jepsen/284363062?uo=4", "collectionViewUrl":"https://music.apple.com/us/album/cut-to-the-feeling-single/1445304934?uo=4", "artworkUrl60":"https://is1-ssl.mzstatic.com/image/thumb/Music118/v4/06/71/e6/0671e633-5aae-aa0b-9a63-29e6f593d285/00602557656527.rgb.jpg/60x60bb.jpg", "artworkUrl100":"https://is1-ssl.mzstatic.com/image/thumb/Music118/v4/06/71/e6/0671e633-5aae-aa0b-9a63-29e6f593d285/00602557656527.rgb.jpg/100x100bb.jpg", "collectionPrice":1.29, "collectionExplicitness":"notExplicit", "trackCount":1, "copyright":"℗ 2017 School Boy/Interscope Records", "country":"USA", "currency":"USD", "releaseDate":"2017-05-26T07:00:00Z", "primaryGenreName":"Pop"}]
+}
+
+
