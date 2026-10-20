@@ -864,8 +864,9 @@ impl std::fmt::Display for SnapshotChanged {
 }
 impl std::error::Error for SnapshotChanged {}
 async fn group_lock(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
-    // This lock must precede the final search revision lock, including in curation.
-    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(73491620)")
+    // This lock precedes the write-order lock and the inputs' row locks, including in curation.
+    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+        .bind(crate::locks::GROUP)
         .fetch_one(&mut **tx)
         .await?;
     if !acquired {
@@ -882,11 +883,28 @@ impl std::fmt::Display for LockBusy {
     }
 }
 impl std::error::Error for LockBusy {}
+/// Hold the inputs' rows as checked until this run commits: a writer that changes one waits.
+/// A row a writer holds now means its change is coming, so the run retries shortly instead of
+/// waiting while it holds rows (an ingested batch locks its rows in feed order, never by ID).
+/// Everything before the fence only reads.
 async fn fence(
     tx: &mut Transaction<'_, Postgres>,
     revisions: &BTreeMap<String, Option<i64>>,
 ) -> Result<()> {
-    crate::store::lock_search_revision(tx).await?;
+    crate::store::lock_writers(tx, crate::store::WriteOrder::Shared).await?;
+    sqlx::query("SELECT 1 FROM resource WHERE id=ANY($1) ORDER BY id FOR SHARE NOWAIT")
+        .bind(revisions.keys().collect::<Vec<_>>())
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| {
+            if e.as_database_error()
+                .is_some_and(|d| d.code().as_deref() == Some("55P03"))
+            {
+                anyhow::Error::new(LockBusy)
+            } else {
+                e.into()
+            }
+        })?;
     check_revisions(tx, revisions).await
 }
 async fn check_revisions(
@@ -1023,7 +1041,8 @@ pub async fn curate(pool: &PgPool, id: &str, body: Curation, cfg: &GroupConfig) 
         .execute(&mut *tx)
         .await?;
     // Curation waits for the active writer within the transaction's two-second limit.
-    sqlx::query("SELECT pg_advisory_xact_lock(73491620)")
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(crate::locks::GROUP)
         .execute(&mut *tx)
         .await
         .map_err(|e| {
@@ -1035,7 +1054,7 @@ pub async fn curate(pool: &PgPool, id: &str, body: Curation, cfg: &GroupConfig) 
                 e.into()
             }
         })?;
-    crate::store::lock_search_revision(&mut tx).await?;
+    crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
     let mut units = vec![];
     let mut previous: Vec<String> =
         sqlx::query_scalar("SELECT group_id FROM group_override WHERE group_id=$1")

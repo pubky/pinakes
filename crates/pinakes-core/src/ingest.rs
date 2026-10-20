@@ -90,10 +90,10 @@ pub async fn apply(
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
     // Reference state is a projection of one configured Nexus; serialize rebuilds with batches.
-    sqlx::query("SELECT pg_advisory_xact_lock(73822916)")
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(crate::locks::INGEST)
         .execute(&mut *tx)
         .await?;
-    store::lock_search_revision(&mut tx).await?;
     let saved: Cursor =
         sqlx::query_as("SELECT cursor, epoch FROM feed_cursor WHERE nexus=$1 FOR UPDATE")
             .bind(nexus)
@@ -104,7 +104,17 @@ pub async fn apply(
     }
     let changed = matches!((&saved.epoch, &feed.epoch), (Some(a),Some(b)) if a != b);
     let epoch = feed.epoch.as_ref().or(saved.epoch.as_ref());
-    if changed || requested.cursor > feed.length {
+    let reset = changed || requested.cursor > feed.length;
+    // A batch locks its lines' resources in feed order, and may assign aliases: it runs
+    // alongside other writers but not other alias assignments. A reset touches every resource.
+    let order = if reset {
+        store::WriteOrder::Exclusive
+    } else {
+        store::WriteOrder::Shared
+    };
+    store::lock_writers(&mut tx, order).await?;
+    crate::alias::lock(&mut tx).await?;
+    if reset {
         sqlx::query("TRUNCATE reference, resource_score")
             .execute(&mut *tx)
             .await?;
@@ -124,17 +134,25 @@ pub async fn apply(
         bail!("invalid Nexus cursor progression");
     }
     let mut affected = BTreeSet::new();
+    let mut aliased = vec![];
     let mut rejected = BTreeMap::<&'static str, u64>::new();
     for (i, line) in feed.page.lines.iter().enumerate() {
         let mut savepoint = sqlx::Connection::begin(&mut *tx).await?;
         let mut touched = BTreeSet::new();
-        let work =
-            std::panic::AssertUnwindSafe(apply_line(&mut savepoint, line, limits, &mut touched));
+        let mut alias = None;
+        let work = std::panic::AssertUnwindSafe(apply_line(
+            &mut savepoint,
+            line,
+            limits,
+            &mut touched,
+            &mut alias,
+        ));
         match work.catch_unwind().await {
             Ok(outcome) => {
                 let reason = outcome?;
                 savepoint.commit().await?;
                 affected.extend(touched);
+                aliased.extend(alias);
                 if let Some(reason) = reason {
                     *rejected.entry(reason).or_default() += 1;
                 }
@@ -164,6 +182,7 @@ pub async fn apply(
         anyhow::anyhow!("a Nexus batch's work after its lines panicked; the cursor holds")
     })?;
     finished?;
+    crate::alias::record(&mut tx, aliased).await?;
     tx.commit().await?;
     // Count only after cursor commit: rollbacks and losing concurrent pollers
     // must not count the same rejected line on each retry.
@@ -182,6 +201,7 @@ async fn apply_line(
     line: &Change,
     limits: &IngestConfig,
     affected: &mut BTreeSet<String>,
+    alias: &mut Option<crate::alias::Line>,
 ) -> Result<Option<&'static str>> {
     if let Some(reason) = rejection_reason(line, limits) {
         return Ok(Some(reason));
@@ -208,7 +228,7 @@ async fn apply_line(
     }
     match line.op {
         Op::Put => {
-            store::insert_resource(tx, &id, &uri).await?;
+            *alias = store::insert_resource(tx, &id, &uri).await?;
             #[cfg(test)]
             tests::maybe_panic(line);
             if old.as_deref() != Some(&id) {

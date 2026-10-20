@@ -151,9 +151,11 @@ async fn group_fence_ignores_unrelated_saves_and_retries_changed_inputs(pool: Pg
     let (a, b) = pair(&pool, "fence", None).await;
     let (other, _) = save(&pool, "unrelated", &[], None).await;
     for changed in [&other, &b] {
-        // Holding the publication lock lets the sync compute evidence, then pauses its fence.
+        // An exclusive writer (`store::WriteOrder`) lets the sync compute evidence, then pauses
+        // its fence.
         let mut writer = pool.begin().await.unwrap();
-        sqlx::query("SELECT revision FROM search_revision WHERE id=1 FOR UPDATE")
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(pinakes_core::locks::WRITE_ORDER)
             .execute(&mut *writer)
             .await
             .unwrap();
@@ -168,7 +170,7 @@ async fn group_fence_ignores_unrelated_saves_and_retries_changed_inputs(pool: Pg
             tokio::spawn(async move { groups::reconcile(&pool2, &id, &Default::default()).await });
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query='SELECT revision FROM search_revision WHERE id=1 FOR UPDATE')")
+                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query='SELECT pg_advisory_xact_lock_shared($1)')")
                     .fetch_one(&pool).await.unwrap();
                 if waiting { break; }
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -915,7 +917,8 @@ async fn populated_collapse_and_hints_build_only_page_cards(pool: PgPool) {
 async fn curation_waits_for_writer_and_policy_changes_redirty(pool: PgPool) {
     let (a, _) = save(&pool, "operator", &[], None).await;
     let mut lock = pool.begin().await.unwrap();
-    sqlx::query("SELECT pg_advisory_xact_lock(73491620)")
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(pinakes_core::locks::GROUP)
         .execute(&mut *lock)
         .await
         .unwrap();
@@ -1247,7 +1250,8 @@ async fn lock_contention_retries_shortly_without_charging(pool: PgPool) {
     assert_eq!(gid(&pool, &a).await, gid(&pool, &b).await);
     // While another writer holds the group lock, retries stay short and uncharged.
     let mut holder = pool.acquire().await.unwrap();
-    sqlx::query("SELECT pg_advisory_lock(73491620)")
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(pinakes_core::locks::GROUP)
         .execute(&mut *holder)
         .await
         .unwrap();
@@ -1259,7 +1263,8 @@ async fn lock_contention_retries_shortly_without_charging(pool: PgPool) {
         assert_eq!((fence, attempts, error.as_str()), (0, 0, "lock_busy"));
         assert!((0.5..=3.1).contains(&delay), "{delay}");
     }
-    sqlx::query("SELECT pg_advisory_unlock(73491620)")
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(pinakes_core::locks::GROUP)
         .execute(&mut *holder)
         .await
         .unwrap();
@@ -1839,4 +1844,119 @@ async fn an_expired_member_leaves_its_group(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(left, 0);
+}
+
+/// Removing a resource's child row (here a tag) marks the resource dirty and bumps its revision;
+/// a save holds the resource's row, then marks it dirty. The removal locks the resource's row
+/// before marking it, as a save does, so the two never deadlock.
+#[sqlx::test(migrations = "../../migrations")]
+async fn removing_a_tag_and_saving_its_resource_take_locks_in_one_order(pool: PgPool) {
+    let (id, _) = save(&pool, "child-order", &[], None).await;
+    tag(&pool, &id, &"y".repeat(52), "first").await;
+    sqlx::query("DELETE FROM group_dirty")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // A save: the resource's row first.
+    let mut saving = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR UPDATE")
+        .bind(&id)
+        .execute(&mut *saving)
+        .await
+        .unwrap();
+    let removal = tokio::spawn({
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query("DELETE FROM reference WHERE resource_id=$1")
+                .bind(&id)
+                .execute(&pool)
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'DELETE FROM reference%')")
+                .fetch_one(&pool).await.unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // The save's new document marks the resource dirty.
+    sqlx::query("UPDATE resource SET doc=jsonb_set(doc,'{name}','\"Saved\"') WHERE id=$1")
+        .bind(&id)
+        .execute(&mut *saving)
+        .await
+        .unwrap();
+    saving.commit().await.unwrap();
+    removal.await.unwrap().unwrap();
+    let dirty: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM group_dirty WHERE resource_id=$1)")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(dirty);
+}
+
+/// Removing a unit from a group marks every member dirty; a save holds its member's row, then
+/// marks it dirty. The removal locks the members' rows before marking them, as a save does, so
+/// the two never deadlock.
+#[sqlx::test(migrations = "../../migrations")]
+async fn removing_a_group_unit_and_saving_a_member_take_locks_in_one_order(pool: PgPool) {
+    let (card, page) = pair(&pool, "member-order", None).await;
+    assert_eq!(gid(&pool, &card).await, gid(&pool, &page).await);
+    sqlx::query("DELETE FROM group_dirty")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // A save of the page: its row first.
+    let mut saving = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR UPDATE")
+        .bind(&page)
+        .execute(&mut *saving)
+        .await
+        .unwrap();
+    // A group run takes the card out of the group, which marks the page dirty too.
+    let removal = tokio::spawn({
+        let pool = pool.clone();
+        let card = card.clone();
+        async move {
+            sqlx::query("DELETE FROM group_unit WHERE resource_id=$1")
+                .bind(&card)
+                .execute(&pool)
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'DELETE FROM group_unit%')")
+                .fetch_one(&pool).await.unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    sqlx::query("UPDATE resource SET doc=jsonb_set(doc,'{name}','\"Saved\"') WHERE id=$1")
+        .bind(&page)
+        .execute(&mut *saving)
+        .await
+        .unwrap();
+    saving.commit().await.unwrap();
+    removal.await.unwrap().unwrap();
+    // The member left behind is regrouped.
+    let dirty: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM group_dirty WHERE resource_id=$1)")
+            .bind(&page)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(dirty);
 }

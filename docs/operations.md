@@ -90,7 +90,10 @@ extension in a database, because `CREATE EXTENSION IF NOT EXISTS` keeps the inst
 run `ALTER EXTENSION h3 UPDATE;` (and `ALTER EXTENSION h3_postgis UPDATE;` if installed).
 
 `pinakesd --config <path> --migrate` applies the migrations in `migrations/` and exits; the
-daemon applies them at startup too. Pinakes rebuilds everything from the Nexus feed, so a
+daemon applies them at startup too, and so does `reextract`. Stop a running daemon before a newer
+binary migrates its database. Its writes would otherwise fail once a migration changes what they
+use: after `0003_search_write.sql` the search revision is a view, so an older daemon's writes
+fail until it runs the new binary. Pinakes rebuilds everything from the Nexus feed, so a
 database can also be recreated:
 
 ```sh
@@ -98,8 +101,11 @@ dropdb pinakes && createdb pinakes
 pinakesd --config pinakes.toml --migrate
 ```
 
-A database advisory lock allows one daemon per database. Resolver, host, author, reach-cache and
-IP budgets are process-local, and the lock keeps their guarantees.
+A database advisory lock, the instance lock, allows one daemon per database. The daemon holds it on
+a connection of its own for its whole life. Resolver, host, author, reach-cache and IP budgets are
+process-local, and the lock keeps their guarantees. Every daemon version takes the same key: while
+an older daemon runs, a newer one applies its migrations, then refuses to start. No other lock uses
+that key (`pinakes_core::locks`).
 
 **Re-extraction.** A parser or routing change reaches stored documents through one command, run
 while the daemon is stopped (it takes the instance lock):

@@ -731,7 +731,8 @@ async fn new_preview_is_prioritized_and_change_time_follows_lock(pool: PgPool) {
         .unwrap();
     assert_eq!(job.id, id);
     let mut lock = pool.begin().await.unwrap();
-    sqlx::query("SELECT pg_advisory_xact_lock(73822918)")
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(pinakes_core::locks::CHANGE_SEQUENCE)
         .execute(&mut *lock)
         .await
         .unwrap();

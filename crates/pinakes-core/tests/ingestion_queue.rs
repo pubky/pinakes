@@ -999,6 +999,35 @@ async fn reextract_requeues_the_selected_routes_without_validators(pool: PgPool)
     assert!(queue::reextract(&pool, &[]).await.is_err());
 }
 
+/// `pinakesd` holds the instance lock for its whole life, `reextract` included: no writer waits
+/// on it, shared or exclusive, and a second daemon is refused.
+#[sqlx::test(migrations = "../../migrations")]
+async fn writers_never_wait_on_the_instance_lock(pool: PgPool) {
+    let _instance = pinakes_core::locks::own_database(&pool).await.unwrap();
+    let refused = pinakes_core::locks::own_database(&pool).await.unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "another pinakesd already owns this database"
+    );
+    let within = Duration::from_secs(10);
+    let parent = "https://example.org/page";
+    store::ensure_resource(&pool, parent).await.unwrap();
+    // A derived link takes the write order shared, a re-extraction exclusive.
+    let child = tokio::time::timeout(
+        within,
+        store::derive_resource(&pool, parent, "https://example.org/child", "test", 10),
+    )
+    .await
+    .expect("a shared writer waited")
+    .unwrap();
+    assert!(child.is_some());
+    let requeued = tokio::time::timeout(within, queue::reextract(&pool, &["all".into()]))
+        .await
+        .expect("a re-extraction waited")
+        .unwrap();
+    assert_eq!(requeued, 2);
+}
+
 /// A page promoted to the media or activitypub route by its own card keeps that route through
 /// `reextract`, and is re-queued there; an ordinary page is re-classified.
 #[sqlx::test(migrations = "../../migrations")]
@@ -1064,22 +1093,26 @@ async fn aliases_never_chain_and_fence_running_jobs(pool: PgPool) {
         .unwrap();
     let before = generation(first.clone()).await;
     let mut tx = pool.begin().await.unwrap();
+    let mut lines = vec![];
     for (id, root) in [
         (&first, "https://example.org/a"),
         // Named after its old root, which is an alias now.
         (&second, "https://example.org/a/"),
     ] {
-        pinakes_core::alias::assign(
-            &mut tx,
-            id,
-            &pinakes_core::alias::Alias {
-                root: root.into(),
-                basis: "canonical",
-            },
-        )
-        .await
-        .unwrap();
+        lines.extend(
+            pinakes_core::alias::assign(
+                &mut tx,
+                id,
+                &pinakes_core::alias::Alias {
+                    root: root.into(),
+                    basis: "canonical",
+                },
+            )
+            .await
+            .unwrap(),
+        );
     }
+    pinakes_core::alias::record(&mut tx, lines).await.unwrap();
     tx.commit().await.unwrap();
     let roots: Vec<(String, String)> =
         sqlx::query_as("SELECT alias_id,root_id FROM resource_alias ORDER BY alias_id")

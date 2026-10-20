@@ -72,7 +72,8 @@ pub fn diff(before: Option<&Value>, after: Option<&Value>) -> Option<Diff> {
 }
 async fn lock_sequence(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
     // Commit order must equal sequence order, or a cursor could skip an uncommitted lower seq.
-    sqlx::query("SELECT pg_advisory_xact_lock(73822918)")
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(crate::locks::CHANGE_SEQUENCE)
         .execute(&mut **tx)
         .await?;
     Ok(())
@@ -149,8 +150,15 @@ pub async fn save(
     if let (Some(plan), Some(source)) = (&mut prepared, adapter_source) {
         plan.source = source.into();
     }
+    // A post whose author opted out of indexing keeps no text in its history: what was kept
+    // before goes now, and its lines carry only their kind, fields and time.
+    let opted_out = doc.attributes.get("opted_out").is_some_and(|v| v == "true");
     let mut tx = pool.begin().await?;
-    crate::store::lock_search_revision(&mut tx).await?;
+    crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+    if opted_out {
+        // It also clears its aliases' rows, after its own.
+        crate::alias::lock(&mut tx).await?;
+    }
     let row=sqlx::query("SELECT r.*,CASE WHEN r.osm_id IS NULL THEN r.doc ELSE o.versions->r.osm_version END AS accepted FROM resource r LEFT JOIN osm_place o ON r.osm_type=o.osm_type AND r.osm_id=o.osm_id WHERE r.id=$1 AND r.generation=$2 FOR UPDATE OF r")
         .bind(id).bind(generation).fetch_optional(&mut *tx).await?;
     let Some(row) = row else { return Ok(()) };
@@ -204,9 +212,6 @@ pub async fn save(
                 .as_ref()
                 .is_some_and(crate::resolver::cards::social)
         });
-    // A post whose author opted out of indexing keeps no text in its history: what was kept
-    // before goes now, and its lines carry only their kind, fields and time.
-    let opted_out = doc.attributes.get("opted_out").is_some_and(|v| v == "true");
     if social_missing || opted_out {
         sqlx::query("DELETE FROM resource_change WHERE resource_id=$1")
             .bind(id)
@@ -349,7 +354,9 @@ pub async fn save(
 /// past its cap) keeps its child, and its row for a later revival, through the same grace.
 pub async fn delete_orphans(pool: &PgPool, grace_days: u32) -> Result<u64> {
     let mut tx = pool.begin().await?;
-    crate::store::lock_search_revision(&mut tx).await?;
+    // Orphans are many resources' rows, and deleting them reaches their references, aliases and
+    // links.
+    crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Exclusive).await?;
     let rows=sqlx::query("SELECT r.id,r.resolver,r.ever_existed,d.doc FROM resource r JOIN resource_document d ON d.id=r.id WHERE r.orphaned_at<now()-$1*interval '1 day' AND NOT EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id) AND NOT EXISTS(SELECT 1 FROM resource_derivation d JOIN resource p ON p.id=d.parent_id WHERE (d.child_id=r.id OR d.child_id IN(SELECT alias_id FROM resource_alias WHERE root_id=r.id)) AND (d.expires_at IS NULL OR d.expires_at>now()-$1*interval '1 day') AND (p.orphaned_at IS NULL OR p.orphaned_at>=now()-$1*interval '1 day' OR EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=p.id))) AND NOT EXISTS(SELECT 1 FROM resource v WHERE v.venue_id=r.id) AND NOT EXISTS(SELECT 1 FROM occurrence o WHERE o.venue_id=r.id) AND (r.lease_until IS NULL OR r.lease_until<now()) FOR UPDATE OF r SKIP LOCKED LIMIT 1000")
         .bind(grace_days as f64).fetch_all(&mut *tx).await?;
     for row in &rows {
@@ -382,7 +389,8 @@ pub async fn delete_orphans(pool: &PgPool, grace_days: u32) -> Result<u64> {
     Ok(rows.len() as u64)
 }
 pub async fn retain(pool: &PgPool, days: u32) -> Result<()> {
-    sqlx::query("DELETE FROM occurrence o USING event_fetch e WHERE o.resource_id=e.resource_id AND (o.status IN ('cancelled','superseded') OR o.start_at<e.horizon_start) AND coalesce(o.end_at,o.start_at)<now()-e.retention_days*interval '1 day'").execute(pool).await?;
+    // The change history is kept to its days even when an occurrence step fails.
+    let occurrences = retain_occurrences(pool).await;
     let mut tx = pool.begin().await?;
     lock_sequence(&mut tx).await?;
     sqlx::query("DELETE FROM resource_change WHERE at<now()-$1*interval '1 day'")
@@ -405,7 +413,34 @@ pub async fn retain(pool: &PgPool, days: u32) -> Result<()> {
         sqlx::query("WITH kept AS (SELECT coalesce(jsonb_object_agg(v.key,v.value),'{}'::jsonb) AS versions FROM osm_place o CROSS JOIN LATERAL jsonb_each(o.versions) v WHERE o.osm_type=$1 AND o.osm_id=$2 AND (v.key=md5($3::jsonb::text) OR v.key=md5($4::jsonb::text) OR EXISTS(SELECT 1 FROM resource r WHERE r.osm_type=o.osm_type AND r.osm_id=o.osm_id AND r.osm_version=v.key) OR EXISTS(SELECT 1 FROM resource r WHERE r.doc#>>'{venue,osm_id}'=o.osm_type||'/'||o.osm_id AND r.doc#>>'{venue,osm_version}'=v.key) OR EXISTS(SELECT 1 FROM occurrence x WHERE x.doc#>>'{venue,osm_id}'=o.osm_type||'/'||o.osm_id AND x.doc#>>'{venue,osm_version}'=v.key) OR EXISTS(SELECT 1 FROM resource_change c WHERE (c.before#>>'{venue,osm_id}'=o.osm_type||'/'||o.osm_id AND c.before#>>'{venue,osm_version}'=v.key) OR (c.after#>>'{venue,osm_id}'=o.osm_type||'/'||o.osm_id AND c.after#>>'{venue,osm_version}'=v.key)) OR EXISTS(SELECT 1 FROM resource_change c WHERE c.osm_type=o.osm_type AND c.osm_id=o.osm_id AND (c.before->>'version'=v.key OR c.after->>'version'=v.key)))) UPDATE osm_place o SET versions=k.versions FROM kept k WHERE o.osm_type=$1 AND o.osm_id=$2 AND o.versions IS DISTINCT FROM k.versions").bind(kind).bind(id).bind(current).bind(fetched).execute(&mut *tx).await?;
     }
     tx.commit().await?;
-    Ok(())
+    occurrences.map(|_| ())
+}
+/// Delete expired occurrences one resource at a time, in a save's order: the write order shared,
+/// the resource's row, then its occurrences. Their triggers lock the owning resource's row, so
+/// one statement over every resource would lock many resources' rows in an order of its own.
+async fn retain_occurrences(pool: &PgPool) -> Result<u64> {
+    let owners: Vec<String> = sqlx::query_scalar("SELECT DISTINCT o.resource_id FROM occurrence o JOIN event_fetch e ON e.resource_id=o.resource_id WHERE (o.status IN ('cancelled','superseded') OR o.start_at<e.horizon_start) AND coalesce(o.end_at,o.start_at)<now()-e.retention_days*interval '1 day' ORDER BY 1")
+        .fetch_all(pool)
+        .await?;
+    let mut deleted = 0;
+    for id in owners {
+        let mut tx = pool.begin().await?;
+        crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+        let found = sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR UPDATE")
+            .bind(&id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if found.is_none() {
+            continue;
+        }
+        deleted += sqlx::query("DELETE FROM occurrence o USING event_fetch e WHERE o.resource_id=$1 AND e.resource_id=$1 AND (o.status IN ('cancelled','superseded') OR o.start_at<e.horizon_start) AND coalesce(o.end_at,o.start_at)<now()-e.retention_days*interval '1 day'")
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        tx.commit().await?;
+    }
+    Ok(deleted)
 }
 #[cfg(test)]
 mod tests {

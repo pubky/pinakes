@@ -104,7 +104,8 @@ never commit real keys, tokens or passwords.
 
 ## Schema
 
-The schema is in `migrations/` (`0001_extensions.sql`, `0002_schema.sql`);
+The schema is in `migrations/` (`0001_extensions.sql`, `0002_schema.sql` and the numbered
+changes after it);
 `pinakesd --config <path> --migrate` builds or migrates a database. A parser or routing change
 reaches stored documents through `pinakesd --config <path> reextract <route…|all>`.
 
@@ -142,3 +143,11 @@ fail without them, and a bare `cargo test` skips that check with a message.
 - `scripts/verify-osm-boundary [out.sql]` checks a resolved database keeps OSM-derived facts
   only in `osm_place`, and can export that table.
 - `scripts/openapi` regenerates the OpenAPI snapshots in `docs/`.
+- `scripts/lock-waits COMMAND...` runs a command while it samples the `DATABASE_URL` server
+  every 50 ms, then prints how many samples saw a backend waiting on a lock and which locks
+  they waited for (instance, write order, alias, change sequence, group, ingest, search
+  revision, row).
+  The `write_load` test runs eight writers and an ingest (tags added and removed) against one
+  database and fails if one waits on the search revision or deadlocks; `WRITE_LOAD_ROUNDS`
+  (default 15) scales it. The `daemon` test runs the `pinakesd` binary on a database of its
+  own: it saves a resolved link while it holds the instance lock, then a re-extraction returns.

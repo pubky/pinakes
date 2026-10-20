@@ -821,6 +821,82 @@ async fn cursors_reject_payload_tampering_unsigned_forgery_and_another_daemon_ke
     );
 }
 
+/// The search ETag follows exactly what a reader can see. A write in flight changes neither the
+/// results nor the ETag; its commit changes both. Two writers that commit in the other order
+/// than they began each change it, and folding the counted writes changes nothing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_in_flight_writer_changes_the_etag_only_when_it_commits(pool: PgPool) {
+    let ids = seed(&pool).await;
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let search = |etag: Option<String>| {
+        let app = app.clone();
+        async move {
+            let mut request = Request::builder().uri("/v1/search?tags=rust");
+            if let Some(etag) = etag {
+                request = request.header("if-none-match", etag);
+            }
+            let mut request = request.body(Body::empty()).unwrap();
+            request.extensions_mut().insert(axum::extract::ConnectInfo(
+                "127.0.0.1:1".parse::<std::net::SocketAddr>().unwrap(),
+            ));
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let etag = response.headers()["etag"].to_str().unwrap().to_owned();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            (status, etag, String::from_utf8_lossy(&body).into_owned())
+        }
+    };
+    let revision = || async {
+        sqlx::query_scalar::<_, i64>("SELECT revision FROM search_revision")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let (_, first, _) = search(None).await;
+    let start = revision().await;
+    // The first writer to begin commits last.
+    let mut early = pool.begin().await.unwrap();
+    sqlx::query("UPDATE resource SET name='Early rename' WHERE id=$1")
+        .bind(&ids[0])
+        .execute(&mut *early)
+        .await
+        .unwrap();
+    let mut late = pool.begin().await.unwrap();
+    sqlx::query("UPDATE resource SET name='Late rename' WHERE id=$1")
+        .bind(&ids[1])
+        .execute(&mut *late)
+        .await
+        .unwrap();
+    assert_eq!(
+        search(Some(first.clone())).await.0,
+        304,
+        "nothing visible changed"
+    );
+    assert_eq!(revision().await, start);
+    late.commit().await.unwrap();
+    let (status, second, body) = search(Some(first.clone())).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("Late rename") && !body.contains("Early rename"));
+    assert_eq!(revision().await, start + 1);
+    early.commit().await.unwrap();
+    let (status, third, body) = search(Some(second.clone())).await;
+    assert_eq!(status, 200, "the earlier writer's commit is a change too");
+    assert!(body.contains("Early rename"));
+    assert!(third != first && third != second);
+    assert_eq!(revision().await, start + 2);
+    // A fold keeps every reader's revision.
+    store::compact_search_writes(&pool).await.unwrap();
+    assert_eq!(revision().await, start + 2);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM search_write")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(search(Some(third)).await.0, 304);
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn reach_membership_changes_invalidate_etags_without_resource_writes(pool: PgPool) {
     seed(&pool).await;
@@ -2154,7 +2230,7 @@ async fn an_opted_out_post_is_not_searched_and_keeps_no_history_text(pool: PgPoo
         .await
         .unwrap();
     let mut tx = pool.begin().await.unwrap();
-    pinakes_core::alias::assign(
+    let line = pinakes_core::alias::assign(
         &mut tx,
         &alias_id,
         &pinakes_core::alias::Alias {
@@ -2164,6 +2240,9 @@ async fn an_opted_out_post_is_not_searched_and_keeps_no_history_text(pool: PgPoo
     )
     .await
     .unwrap();
+    pinakes_core::alias::record(&mut tx, line.into_iter().collect())
+        .await
+        .unwrap();
     tx.commit().await.unwrap();
     sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','hello','/pub/app/tags/h',now())")
         .bind(&id)
