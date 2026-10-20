@@ -496,5 +496,16 @@
     "uri": "https://open.spotify.com/artist/4Z8W4fKeB5YxbusRsdQVPb",
     "type": "MusicGroup",
     "group_with": "discogs_artist"
+  },
+  {
+    "kind": "btcmap_way",
+    "uri": "https://www.openstreetmap.org/way/259338174",
+    "type": "Place"
+  },
+  {
+    "kind": "btcmap_merchant",
+    "uri": "https://btcmap.org/merchant/way:259338174",
+    "type": "WebPage",
+    "group_with": "btcmap_way"
   }
 ]

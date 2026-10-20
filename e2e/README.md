@@ -63,7 +63,8 @@ must be typed and named by what they are (Spotify, Apple Music, TIDAL, Bandcamp,
 as a derived link, found through MusicBrainz, the Wikidata item for Paris its French and
 English Wikipedia editions, and the Berlin node (tagged `wikidata=Q64`, which names it back) its
 Wikidata page and English Wikipedia article, and Discogs' OK Computer master its Apple Music
-album, through the Wikidata item MusicBrainz relates its release group to. The owner's music cases join (`group_with`): TIDAL's `/u` share
+album, through the Wikidata item MusicBrainz relates its release group to. A tagged BTC Map
+merchant page joins the OSM way it names (LAC Lugano). The owner's music cases join (`group_with`): TIDAL's `/u` share
 link of Bohemian Rhapsody with the seed's recording through its own ISRC, Cut to the Feeling's
 Spotify and Deezer albums through their MusicBrainz release, Dracula's TIDAL, Apple and Deezer
 albums through their one release group, MusicBrainz's recording and ISRC pages with TIDAL's
