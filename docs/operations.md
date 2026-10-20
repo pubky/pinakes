@@ -96,9 +96,12 @@ run `ALTER EXTENSION h3 UPDATE;` (and `ALTER EXTENSION h3_postgis UPDATE;` if in
 
 `pinakesd --config <path> --migrate` applies the migrations in `migrations/` and exits; the
 daemon applies them at startup too, and so does `reextract`. Stop a running daemon before a newer
-binary migrates its database. Its writes would otherwise fail once a migration changes what they
-use: after `0003_search_write.sql` the search revision is a view, so an older daemon's writes
-fail until it runs the new binary. Pinakes rebuilds everything from the Nexus feed, so a
+binary migrates its database: it keeps running code written for the older schema. With
+`0003_search_write.sql`, for example, its writes waiting while the migration replaces the search
+revision fail once and are retried, and its later writes run the new revision trigger and are
+counted; but it never folds the counted writes (the newer daemon's hourly `compact_search_writes`),
+so `search_write` gains a row for each of its write transactions until the newer binary runs.
+Pinakes rebuilds everything from the Nexus feed, so a
 database can also be recreated:
 
 ```sh
