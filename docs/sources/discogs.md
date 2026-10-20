@@ -2,10 +2,12 @@
 
 Artists, masters and releases in the Discogs music database, read from its API
 (`api.discogs.com`): Discogs answers requests for its web pages with a bot wall. No key; 25
-requests a minute, the pace Pinakes keeps. Discogs' images need authentication: with a personal
-access token (`[also_on.sources.discogs] token`, or `PINAKES__ALSO_ON__SOURCES__DISCOGS__TOKEN`)
-the cards show them. The token is sent only to `api.discogs.com` and never appears in logs or
-errors. Release data is CC0.
+requests a minute, the pace Pinakes keeps by default. Discogs' images need authentication: with a
+personal access token (`[also_on.sources.discogs] token`, or
+`PINAKES__ALSO_ON__SOURCES__DISCOGS__TOKEN`) the cards show them. With a token Discogs allows 60
+requests a minute; an operator's `limits.host_rates` entry sets the pace outright
+(`"api.discogs.com" = 1.0` under `[limits.host_rates]`). The token is sent only to
+`api.discogs.com` and never appears in logs or errors. Release data is CC0.
 
 ## Links
 
