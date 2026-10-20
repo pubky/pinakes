@@ -810,13 +810,18 @@ impl Egress {
     }
     fn host_rate(&self, host: &str) -> f64 {
         let default = self.cfg.host_requests_per_second;
+        // A source's limit (`source_rates`) or a service's published one (`PUBLISHED_RATES`)
+        // lowers the default, never raises it.
         let mut rate = match self.cfg.host_rates.get(host) {
             Some(rate) => *rate,
             None => self
                 .cfg
                 .source_rates
                 .get(host)
-                .map_or(default, |rate| rate.min(default)),
+                .copied()
+                .into_iter()
+                .chain(published_rate(host))
+                .fold(default, f64::min),
         };
         if matches!(host, "api.nostr.wine" | "portal.einundzwanzig.space") {
             rate = rate.min(1.0);
@@ -826,6 +831,36 @@ impl Egress {
         }
         rate
     }
+}
+/// Requests per second the hub services the also-on sources read publish as their limit (one
+/// request at a time per host is the rule for every host); it lowers a host's default pace,
+/// beside the sources' own limits (`sources::budgets`). A rule `*.example.org` covers the
+/// subdomains.
+pub const PUBLISHED_RATES: &[(&str, f64)] = &[
+    // MusicBrainz: 1 request/s per IP, 503 above that.
+    ("musicbrainz.org", 1.0),
+    // Wikimedia: 200 requests/min with a User-Agent naming a contact (at most 3 at once).
+    ("www.wikidata.org", 200.0 / 60.0),
+    ("*.wikipedia.org", 200.0 / 60.0),
+    ("commons.wikimedia.org", 200.0 / 60.0),
+    // Open Library: 3 requests/s with a User-Agent and a contact.
+    ("openlibrary.org", 3.0),
+    // iTunes Search and Lookup: about 20 requests/min.
+    ("itunes.apple.com", 20.0 / 60.0),
+    // crates.io: 1 request/s.
+    ("crates.io", 1.0),
+    // Crossref: 10 requests/s on the polite pool.
+    ("api.crossref.org", 10.0),
+    // Software Heritage: 120 requests/hour anonymous.
+    ("archive.softwareheritage.org", 120.0 / 3600.0),
+];
+/// The published rate of `host`, if it has one (the most specific rule).
+pub fn published_rate(host: &str) -> Option<f64> {
+    PUBLISHED_RATES
+        .iter()
+        .filter(|(rule, _)| host_matches(host, rule))
+        .max_by_key(|(rule, _)| rule.len())
+        .map(|(_, rate)| *rate)
 }
 fn host_matches(host: &str, rule: &str) -> bool {
     let rule = rule.to_ascii_lowercase();
@@ -1335,6 +1370,32 @@ mod tests {
                 .sum::<usize>(),
             20 * 1024 * 1024
         );
+    }
+    /// A hub's published limit lowers its host's default pace; an operator's entry sets it.
+    #[tokio::test(start_paused = true)]
+    async fn a_published_limit_paces_its_host() {
+        assert_eq!(published_rate("musicbrainz.org"), Some(1.0));
+        assert_eq!(published_rate("de.wikipedia.org"), Some(200.0 / 60.0));
+        assert_eq!(published_rate("wikipedia.org"), Some(200.0 / 60.0));
+        assert_eq!(published_rate("evilwikipedia.org"), None);
+        assert_eq!(published_rate("example.org"), None);
+        let gap = |cfg: EgressConfig, host: &'static str| async move {
+            let egress = Egress::new(cfg);
+            drop(egress.host_permit(host).await.unwrap());
+            let start = Instant::now();
+            drop(egress.host_permit(host).await.unwrap());
+            start.elapsed()
+        };
+        // iTunes allows about 20 requests a minute: three seconds apart, not the default one.
+        let itunes = gap(EgressConfig::default(), "itunes.apple.com").await;
+        assert!(itunes >= Duration::from_secs(3), "{itunes:?}");
+        // A published limit above the default never raises it.
+        let crossref = gap(EgressConfig::default(), "api.crossref.org").await;
+        assert!(crossref >= Duration::from_secs(1), "{crossref:?}");
+        let mut slow = EgressConfig::default();
+        slow.host_rates.insert("www.wikidata.org".into(), 0.5);
+        let wd = gap(slow, "www.wikidata.org").await;
+        assert!(wd >= Duration::from_secs(2), "{wd:?}");
     }
     #[test]
     fn rejects_every_special_range() {
