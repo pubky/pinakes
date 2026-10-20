@@ -266,13 +266,13 @@ pub fn parse(uri: &str) -> Option<Link> {
             _ => None,
         },
         "soundcloud.com" | "m.soundcloud.com" => match segments.as_slice() {
-            [user] if soundcloud_name(user) => link(
+            [user] if soundcloud_user(user) => link(
                 Service::SoundCloud,
                 Level::Artist,
                 &user.to_ascii_lowercase(),
                 format!("https://soundcloud.com/{}", user.to_ascii_lowercase()),
             ),
-            [user, "sets", set] if soundcloud_name(user) && soundcloud_name(set) => {
+            [user, "sets", set] if soundcloud_user(user) && soundcloud_name(set) => {
                 let id = format!(
                     "{}/sets/{}",
                     user.to_ascii_lowercase(),
@@ -286,7 +286,7 @@ pub fn parse(uri: &str) -> Option<Link> {
                 )
             }
             [user, track]
-                if soundcloud_name(user)
+                if soundcloud_user(user)
                     && soundcloud_name(track)
                     && !SOUNDCLOUD_PAGES.contains(track) =>
             {
@@ -455,6 +455,35 @@ const SOUNDCLOUD_PAGES: &[&str] = &[
     "spotlight",
 ];
 
+/// SoundCloud's own pages at the root, never a user.
+const SOUNDCLOUD_ROOTS: &[&str] = &[
+    "search",
+    "charts",
+    "discover",
+    "upload",
+    "stream",
+    "you",
+    "settings",
+    "messages",
+    "notifications",
+    "people",
+    "pages",
+    "tags",
+    "stations",
+    "feed",
+    "signin",
+    "logout",
+    "connect",
+    "pro",
+    "jobs",
+    "imprint",
+    "terms-of-use",
+    "mobile",
+    "popular",
+    "artists",
+    "creators",
+];
+
 fn level(kind: &str) -> Option<Level> {
     Some(match kind {
         "track" | "song" => Level::Track,
@@ -477,6 +506,10 @@ fn uuid(s: &str) -> bool {
 }
 fn soundcloud_name(s: &str) -> bool {
     token(s, 1, 128)
+}
+/// A SoundCloud user name: not one of the site's own pages.
+fn soundcloud_user(s: &str) -> bool {
+    soundcloud_name(s) && !SOUNDCLOUD_ROOTS.contains(&s.to_ascii_lowercase().as_str())
 }
 /// Deezer's `/{lang}/track/…`: the language segment goes.
 fn strip_locale<'a, 'b>(segments: &'a [&'b str]) -> &'a [&'b str] {
@@ -875,6 +908,10 @@ mod tests {
             "https://on.soundcloud.com/abc",
             "https://soundcloud.com/radiohead/likes",
             "https://soundcloud.com/radiohead/a/b/c",
+            "https://soundcloud.com/search/sounds?q=radiohead",
+            "https://soundcloud.com/charts/top",
+            "https://soundcloud.com/discover",
+            "https://soundcloud.com/Upload",
             "https://evil.bandcamp.com.example/album/x",
             "https://a.b.bandcamp.com/album/x",
             "https://music.amazon.com/search/x",
