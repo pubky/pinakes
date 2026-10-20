@@ -32,9 +32,10 @@ the text it hides), with its first attachment's preview unless it is marked sens
 author's avatar).
 
 An author who opted out of search indexing (the account's `indexable: false` or `noindex: true`,
-the flag behind the profile's `robots` `noindex` tag) gets a card without their text, image or
-name: a `SocialMediaPosting` named "Post on {server}", with only the `activitypub_id` fact. The
-link still resolves, groups with the post's other addresses, and its references count.
+the flag behind the profile's `robots` `noindex` tag) keeps a normal card, the link preview
+Mastodon itself shows, with the `opted_out` fact. Its text is never found by search (`q=`), and
+its change history keeps no text: what was kept before the opt-out goes, and its change lines
+carry only their kind, fields and time.
 
 | Fact | Meaning |
 | --- | --- |

@@ -91,18 +91,6 @@ pub fn card(
     anyhow::ensure!(id == target.id, "the instance answered for another post");
     let ap = web_url(&ap).context("no ActivityPub id")?;
     let account = &v["account"];
-    // An author who opted out of search indexing: the post resolves and groups, but its card
-    // shows no text, image or name.
-    if opted_out(account) {
-        doc.set_type("SocialMediaPosting");
-        doc.name = Some(format!("Post on {}", target.host));
-        doc.attributes
-            .insert("activitypub_id".into(), ap.to_string());
-        if same_host(&ap, &target.host) {
-            doc.source_root = Some(ap.to_string());
-        }
-        return Ok(Some(doc));
-    }
     let content = text(&v["content"]).map(|c| plain(&c)).unwrap_or_default();
     let warning = text(&v["spoiler_text"]);
     doc.set_type("SocialMediaPosting");
@@ -138,6 +126,9 @@ pub fn card(
             v["favourites_count"].as_u64().map(|n| n.to_string()),
         ),
         ("content_warning", warning),
+        // An author who opted out of search indexing: the card stays a link preview, as
+        // Mastodon shows one, but its text is never searchable nor kept in the change history.
+        ("opted_out", opted_out(account).then(|| "true".into())),
         ("activitypub_id", Some(ap.to_string())),
         (
             "page_url",
@@ -163,9 +154,16 @@ fn opted_out(account: &Value) -> bool {
     account["indexable"] == false || account["noindex"] == true
 }
 
+/// Whether `url` is on the link's server: the same host, the default HTTPS port and no user
+/// part.
 fn same_host(url: &url::Url, host: &str) -> bool {
-    url.host_str()
-        .is_some_and(|h| h.trim_end_matches('.').eq_ignore_ascii_case(host))
+    url.scheme() == "https"
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url
+            .host_str()
+            .is_some_and(|h| h.trim_end_matches('.').eq_ignore_ascii_case(host))
 }
 
 #[async_trait]
@@ -187,6 +185,7 @@ impl Source for Mastodon {
             "content_warning",
             "activitypub_id",
             "page_url",
+            "opted_out",
         ]
     }
     fn social(&self, doc: &ResourceMeta) -> bool {
@@ -314,27 +313,41 @@ mod tests {
     }
 
     #[test]
-    fn an_author_who_opted_out_shows_nothing_of_theirs() {
+    fn an_author_who_opted_out_keeps_a_card_marked_opted_out() {
         let target = Target {
             host: "mastodon.social".into(),
             id: "1".into(),
         };
         let base = ResourceMeta::new("https://mastodon.social/@Gargron/1", "mastodon", 3600);
-        let doc = card(base, &target, 200, &read("status-1-opted-out.json"))
+        let doc = card(base.clone(), &target, 200, &read("status-1-opted-out.json"))
             .unwrap()
             .unwrap();
-        assert_eq!(doc.type_name, "SocialMediaPosting");
-        assert_eq!(doc.name.as_deref(), Some("Post on mastodon.social"));
-        assert_eq!((doc.description, doc.image), (None, None));
-        assert_eq!(
-            doc.attributes.keys().collect::<Vec<_>>(),
-            ["activitypub_id"]
-        );
-        // It still resolves and groups: the same root as the post itself.
+        // A link preview, as Mastodon shows one; search and history read the mark.
+        assert_eq!(doc.name.as_deref(), Some("Hello world"));
+        assert!(doc.image.is_some());
+        assert_eq!(doc.attributes["opted_out"], "true");
         assert_eq!(
             doc.source_root.as_deref(),
             Some("https://mastodon.social/users/Gargron/statuses/1")
         );
+        let doc = card(base, &target, 200, &read("status-1.json"))
+            .unwrap()
+            .unwrap();
+        assert!(!doc.attributes.contains_key("opted_out"));
+    }
+
+    #[test]
+    fn a_user_part_or_port_is_another_server() {
+        for id in [
+            "https://someone@mastodon.social/users/Gargron/statuses/1",
+            "https://mastodon.social:8443/users/Gargron/statuses/1",
+            "http://mastodon.social/users/Gargron/statuses/1",
+        ] {
+            let url = url::Url::parse(id).unwrap();
+            assert!(!same_host(&url, "mastodon.social"), "{id}");
+        }
+        let url = url::Url::parse("https://Mastodon.Social./users/a/statuses/1").unwrap();
+        assert!(same_host(&url, "mastodon.social"));
     }
 
     #[test]

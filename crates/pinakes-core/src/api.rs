@@ -1068,7 +1068,8 @@ pub async fn search(
             .push_bind(prefix)
             .push(" OR r.name % ")
             .push_bind(text.clone())
-            .push(")");
+            // A post whose author opted out of search indexing is never found by its text.
+            .push(") AND coalesce(r.doc->'attributes'->>'opted_out','') <> 'true'");
     }
     sql.push(" AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id");
     scope(&mut sql, &q, &reach);

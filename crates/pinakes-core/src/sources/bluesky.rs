@@ -158,6 +158,7 @@ pub fn post_card(
     if no_unauthenticated(&author["labels"]) {
         doc.name = Some("Post on bsky.app".into());
         doc.attributes.insert("at_uri".into(), at_uri.to_owned());
+        doc.attributes.insert("opted_out".into(), "true".into());
         return Ok(Some(doc));
     }
     let body_text = text(&post["record"]["text"]).unwrap_or_default();
@@ -220,6 +221,7 @@ pub fn profile_card(
     if no_unauthenticated(&v["labels"]) {
         doc.name = Some("Profile on bsky.app".into());
         doc.attributes.insert("did".into(), did_.to_owned());
+        doc.attributes.insert("opted_out".into(), "true".into());
         return Ok(Some(doc));
     }
     doc.name = text(&v["displayName"]).or_else(|| text(&v["handle"]));
@@ -272,6 +274,7 @@ impl Source for Bluesky {
             "did",
             "followers",
             "posts",
+            "opted_out",
         ]
     }
     fn social(&self, doc: &ResourceMeta) -> bool {
@@ -403,7 +406,10 @@ mod tests {
         assert_eq!(doc.type_name, "SocialMediaPosting");
         assert_eq!(doc.name.as_deref(), Some("Post on bsky.app"));
         assert_eq!((doc.description, doc.image), (None, None));
-        assert_eq!(doc.attributes.keys().collect::<Vec<_>>(), ["at_uri"]);
+        assert_eq!(
+            doc.attributes.keys().collect::<Vec<_>>(),
+            ["at_uri", "opted_out"]
+        );
         let mut profile: Value =
             serde_json::from_slice(&read("bsky-profile-bsky-app.json")).unwrap();
         profile["labels"] = serde_json::json!([{"val": "!no-unauthenticated"}]);

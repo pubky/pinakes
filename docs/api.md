@@ -340,7 +340,7 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 
 | Parameter | Meaning |
 | --- | --- |
-| `q` | Full-text name/description search with a trigram/partial-name fallback; at most 256 bytes |
+| `q` | Full-text name/description search with a trigram/partial-name fallback; at most 256 bytes. A post whose author opted out of search indexing (`details.facts.opted_out`: Mastodon's `indexable: false` or `noindex`, Bluesky's `!no-unauthenticated`) never matches |
 | `type` | A schema.org type, ancestors included (`Event` matches `MusicEvent`; `Place` matches cafés and other `LocalBusiness` types) |
 | `category`, `host` | Exact filters |
 | `tags` | Comma-separated labels; at most 5, each 1–128 bytes |
