@@ -43,7 +43,8 @@ CREATE INDEX resource_fact_value_idx ON resource_fact USING btree (name, value);
 -- Links to the same thing that nobody tagged, found by a source: shown in the card's
 -- `also_on` with `derived: true`, never fetched, never counted as references, never ranked.
 -- `link_id` is the link's resource ID, so a derived link and a tagged member that are the
--- same URL are shown once.
+-- same URL are shown once. `key` is the exact key that named the link (an iTunes or Deezer
+-- lookup by barcode or ISRC): a tagged resource with that ID joins it (`groups::evidence`).
 CREATE TABLE derived_link (
     resource_id text NOT NULL REFERENCES resource(id) ON DELETE CASCADE,
     link_id text NOT NULL,
@@ -53,6 +54,7 @@ CREATE TABLE derived_link (
     via text NOT NULL,
     kind text,
     at timestamp with time zone,
+    key text,
     seen_at timestamp with time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone NOT NULL,
     PRIMARY KEY (resource_id, link_id),
@@ -61,8 +63,11 @@ CREATE TABLE derived_link (
     CONSTRAINT derived_link_site_check CHECK ((octet_length(site) BETWEEN 1 AND 128)),
     CONSTRAINT derived_link_source_check CHECK ((source ~ '^[a-z0-9_]{1,32}$')),
     CONSTRAINT derived_link_via_check CHECK ((via ~ '^[a-z0-9_]{1,32}$')),
-    CONSTRAINT derived_link_kind_check CHECK ((kind IS NULL OR kind ~ '^[a-z_]{1,32}$'))
+    CONSTRAINT derived_link_kind_check CHECK ((kind IS NULL OR kind ~ '^[a-z_]{1,32}$')),
+    CONSTRAINT derived_link_key_check CHECK ((key IS NULL OR octet_length(key) BETWEEN 3 AND 512))
 );
+CREATE INDEX derived_link_named_idx ON derived_link USING btree (link_id) WHERE key IS NOT NULL;
+CREATE INDEX derived_link_key_idx ON derived_link USING btree (key) WHERE key IS NOT NULL;
 
 -- Resources whose sources are due: after a save that changed the document, and when the
 -- shortest source lifetime has passed. Failures back off like grouping's.
@@ -89,6 +94,19 @@ CREATE TRIGGER also_on_resource_dirty AFTER INSERT OR UPDATE OF doc, status ON r
 CREATE TRIGGER resource_key_group_dirty AFTER INSERT OR DELETE OR UPDATE OF key ON resource_key FOR EACH ROW EXECUTE FUNCTION mark_group_dirty();
 CREATE TRIGGER resource_key_group_revision AFTER INSERT OR DELETE OR UPDATE OF key ON resource_key FOR EACH ROW EXECUTE FUNCTION bump_group_child_revision();
 CREATE TRIGGER derived_link_revision BEFORE INSERT OR DELETE OR UPDATE ON derived_link FOR EACH STATEMENT EXECUTE FUNCTION bump_search_revision();
+-- A keyed derived link is evidence for the tagged resource it names: a change regroups it.
+CREATE FUNCTION mark_named_group_dirty() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$ DECLARE named text[];
+BEGIN
+ IF TG_OP='UPDATE' AND OLD.key IS NOT DISTINCT FROM NEW.key AND OLD.link_id=NEW.link_id THEN RETURN NULL; END IF;
+ named := ARRAY[CASE WHEN TG_OP<>'INSERT' AND OLD.key IS NOT NULL THEN OLD.link_id END,
+                CASE WHEN TG_OP<>'DELETE' AND NEW.key IS NOT NULL THEN NEW.link_id END];
+ INSERT INTO group_dirty(resource_id) SELECT id FROM resource WHERE id=ANY(named) ON CONFLICT DO NOTHING;
+ UPDATE resource SET group_revision=group_revision+1 WHERE id=ANY(named);
+ RETURN NULL;
+END $$;
+CREATE TRIGGER derived_link_named_group_dirty AFTER INSERT OR DELETE OR UPDATE ON derived_link FOR EACH ROW EXECUTE FUNCTION mark_named_group_dirty();
 
 -- The group hint on a card: the group's ID and size. The members it names, with the derived
 -- links, are the card's `also_on` list (below).

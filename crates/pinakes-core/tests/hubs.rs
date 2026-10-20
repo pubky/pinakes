@@ -593,7 +593,7 @@ async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
     // Facts both releases share: the barcode, not either MBID or the differing credits.
     assert_eq!(
         rows("SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name").await,
-        ["upc 196874054246"]
+        ["upc 0196874054246"]
     );
     let seen = t.seen.lock().unwrap().clone();
     let mb: Vec<_> = seen.iter().filter(|s| s.contains("/ws/2/")).collect();

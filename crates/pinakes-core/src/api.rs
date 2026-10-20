@@ -1081,21 +1081,28 @@ pub(crate) fn trend_window(window: Option<&str>) -> Result<chrono::Duration, Api
     }
     Ok(span)
 }
-/// What `key` matches: join keys, or one fact.
+/// What `key` matches: resources with one of these join keys (their own, or one an exact lookup
+/// named them by), or with this fact.
 #[derive(Debug, PartialEq)]
-pub(crate) enum KeyFilter {
-    Keys(Vec<String>),
-    Fact(&'static str, String),
+pub(crate) struct KeyFilter {
+    keys: Vec<String>,
+    fact: Option<(&'static str, String)>,
 }
 pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
     let bad = || {
-        ApiError::bad("key is mbid:{uuid}, wikidata:{Q-id}, isrc:{12 letters and digits} or upc:{8–14 digits}")
+        ApiError::bad("key is mbid:{uuid}, wikidata:{Q-id}, isrc:{ISRC} or upc:{UPC, EAN or GTIN with its check digit}")
     };
     let (kind, value) = key.split_once(':').ok_or_else(bad)?;
+    let keys = |keys: Vec<String>| KeyFilter { keys, fact: None };
+    // ISRCs and barcodes are keys and facts alike.
+    let both = |name: &'static str, value: String| KeyFilter {
+        keys: vec![format!("{name}:{value}")],
+        fact: Some((name, value)),
+    };
     match kind {
         "mbid" => {
             let id = crate::hubs::mbid(value).ok_or_else(bad)?;
-            Ok(KeyFilter::Keys(
+            Ok(keys(
                 [
                     crate::hubs::MbKind::Recording,
                     crate::hubs::MbKind::Release,
@@ -1107,15 +1114,11 @@ pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
                 .collect(),
             ))
         }
-        "wikidata" => Ok(KeyFilter::Keys(vec![
+        "wikidata" => Ok(keys(vec![
             crate::hubs::key::wikidata(value).ok_or_else(bad)?
         ])),
-        "isrc" if value.len() == 12 && value.bytes().all(|b| b.is_ascii_alphanumeric()) => {
-            Ok(KeyFilter::Fact("isrc", value.to_ascii_uppercase()))
-        }
-        "upc" if (8..=14).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_digit()) => {
-            Ok(KeyFilter::Fact("upc", value.to_owned()))
-        }
+        "isrc" => Ok(both("isrc", crate::music::isrc(value).ok_or_else(bad)?)),
+        "upc" => Ok(both("upc", crate::music::gtin13(value).ok_or_else(bad)?)),
         _ => Err(bad()),
     }
 }
@@ -1259,21 +1262,22 @@ pub async fn search(
                 .push_bind(value.clone());
         }
     }
-    // Exact identifiers: a source's live keys or facts on the resource (aliases read as roots).
-    match &key {
-        Some(KeyFilter::Keys(keys)) => {
-            sql.push(" AND r.id IN (SELECT resource_id FROM resource_key WHERE key=ANY(")
-                .push_bind(keys.clone())
-                .push(") AND expires_at>now())");
-        }
-        Some(KeyFilter::Fact(name, value)) => {
-            sql.push(" AND r.id IN (SELECT resource_id FROM resource_fact WHERE name=")
+    // Exact identifiers: a source's live keys or facts on the resource, or a key an exact lookup
+    // named it by (aliases read as roots).
+    if let Some(KeyFilter { keys, fact }) = &key {
+        sql.push(" AND r.id IN (SELECT resource_id FROM resource_key WHERE key=ANY(")
+            .push_bind(keys.clone())
+            .push(") AND expires_at>now() UNION SELECT link_id FROM derived_link WHERE key=ANY(")
+            .push_bind(keys.clone())
+            .push(") AND expires_at>now()");
+        if let Some((name, value)) = fact {
+            sql.push(" UNION SELECT resource_id FROM resource_fact WHERE name=")
                 .push_bind(*name)
                 .push(" AND value=")
                 .push_bind(value.clone())
-                .push(" AND expires_at>now())");
+                .push(" AND expires_at>now()");
         }
-        None => {}
+        sql.push(")");
     }
     if let Some(text) = q.q.as_ref().filter(|s| !s.is_empty()) {
         let prefix = format!(

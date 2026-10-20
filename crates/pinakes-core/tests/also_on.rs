@@ -1131,3 +1131,131 @@ async fn a_shared_q_id_never_joins_two_recordings(pool: PgPool) {
     metrics.refresh(&pool).await.unwrap();
     assert!(metrics.group_key_conflicts.get() > 0);
 }
+
+/// Looks up the barcodes the sources before it found, like iTunes: one keyed link each. Off by
+/// default.
+struct ByBarcode {
+    named: &'static str,
+}
+#[async_trait]
+impl Source for ByBarcode {
+    fn id(&self) -> &'static str {
+        "by_barcode"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        subject.keys_in("upc").next().is_some()
+    }
+    fn enabled_by_default(&self) -> bool {
+        false
+    }
+    async fn lookup(&self, _: &Context, subject: &Subject) -> anyhow::Result<Found> {
+        let upc = subject.keys_in("upc").next().unwrap();
+        Ok(Found {
+            links: vec![
+                Link::new(self.named, "Apple Music", "itunes").keyed(format!("upc:{upc}")),
+                // A malformed key is dropped; its link stays.
+                Link::new("https://tidal.com/album/1", "TIDAL", "itunes").keyed("UPC 1"),
+            ],
+            ..Default::default()
+        })
+    }
+}
+
+/// A later source sees the keys an earlier one found in the same run, and the tagged link an
+/// exact lookup names takes the lookup's key: it joins the group and `key=` finds it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_link_an_exact_lookup_names_joins_by_its_key(pool: PgPool) {
+    let deezer = "https://www.deezer.com/album/41839661";
+    let apple = "https://music.apple.com/gb/album/1445304934";
+    let x = page(&pool, deezer, "Cut to the Feeling").await;
+    let y = page(&pool, apple, "Cut to the Feeling").await;
+    let hub = Fake::new("music");
+    hub.answer(
+        deezer,
+        Ok(Found {
+            keys: vec![key("upc:0602557656527")],
+            ..Default::default()
+        }),
+    );
+    let sources: Vec<Arc<dyn Source>> = vec![hub.clone(), Arc::new(ByBarcode { named: apple })];
+    // Off by default: nothing is named.
+    drain(&pool, &cx(Config::default()), &sources).await;
+    let named = || async {
+        sqlx::query_scalar::<_, String>(
+            "SELECT uri||' '||coalesce(key,'-') FROM derived_link ORDER BY uri",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    assert!(named().await.is_empty());
+    let mut on = Config::default();
+    on.also_on.sources.insert(
+        "by_barcode".into(),
+        also_on::SourceOptions {
+            enabled: Some(true),
+            ..Default::default()
+        },
+    );
+    sqlx::query("INSERT INTO also_on_dirty(resource_id) VALUES($1) ON CONFLICT DO NOTHING")
+        .bind(&x)
+        .execute(&pool)
+        .await
+        .unwrap();
+    drain(&pool, &cx(on.clone()), &sources).await;
+    assert_eq!(
+        named().await,
+        [
+            format!("{apple} upc:0602557656527"),
+            "https://tidal.com/album/1 -".to_owned()
+        ]
+    );
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let group = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT group_id FROM group_unit WHERE resource_id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert!(group(x.clone()).await.is_some());
+    assert_eq!(group(x.clone()).await, group(y.clone()).await);
+    // Search lists tagged resources.
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) SELECT id,repeat('a',52),'tag','/pub/test/tags/'||id,'music',now() FROM unnest($1::text[]) id")
+        .bind([x.clone(), y.clone()])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), on.clone()).unwrap());
+    // Any spelling of the barcode finds both.
+    let mut found: Vec<String> = get(&app, "/v1/search?key=upc:602557656527").await["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_owned())
+        .collect();
+    found.sort();
+    let mut both = vec![x.clone(), y.clone()];
+    both.sort();
+    assert_eq!(found, both);
+    // The lookup stops naming it: the named resource regroups and leaves.
+    hub.answer(deezer, Ok(Found::default()));
+    sqlx::query("INSERT INTO also_on_dirty(resource_id) VALUES($1) ON CONFLICT DO NOTHING")
+        .bind(&x)
+        .execute(&pool)
+        .await
+        .unwrap();
+    drain(&pool, &cx(on), &sources).await;
+    assert!(named().await.is_empty());
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    assert_eq!(group(y).await, None);
+}

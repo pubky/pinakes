@@ -62,8 +62,13 @@ impl Default for AlsoOnConfig {
     }
 }
 impl AlsoOnConfig {
-    pub fn source_enabled(&self, id: &str) -> bool {
-        self.enabled && self.sources.get(id).and_then(|s| s.enabled).unwrap_or(true)
+    pub fn source_enabled(&self, source: &dyn Source) -> bool {
+        self.enabled
+            && self
+                .sources
+                .get(source.id())
+                .and_then(|s| s.enabled)
+                .unwrap_or(source.enabled_by_default())
     }
     /// The MusicBrainz web service: `[also_on.sources.musicbrainz] base_url`, or the public one.
     pub fn musicbrainz_base(&self) -> &str {
@@ -142,6 +147,9 @@ pub struct Key {
 /// A derived link: `site` is the service's name as a card shows it ("Apple Music"), `via` the
 /// hub or service it came through (`musicbrainz`, `wikidata`, `itunes`), `kind` a qualifier
 /// such as `archived`, `at` a time that belongs to the link (an archived copy's capture).
+/// `key` is the exact key that named it, when a service answered a lookup by that key with
+/// exactly this link (iTunes or Deezer by barcode or ISRC): a tagged resource that is this link
+/// takes the key and joins the group (never for a hub's relations, which can be ambiguous).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Link {
     pub uri: String,
@@ -149,6 +157,7 @@ pub struct Link {
     pub via: String,
     pub kind: Option<String>,
     pub at: Option<DateTime<Utc>>,
+    pub key: Option<String>,
 }
 impl Link {
     pub fn new(uri: impl Into<String>, site: impl Into<String>, via: impl Into<String>) -> Self {
@@ -158,7 +167,13 @@ impl Link {
             via: via.into(),
             kind: None,
             at: None,
+            key: None,
         }
+    }
+    /// This link, named by an exact lookup of `key`.
+    pub fn keyed(mut self, key: impl Into<String>) -> Self {
+        self.key = Some(key.into());
+        self
     }
 }
 
@@ -180,6 +195,11 @@ pub trait Source: Send + Sync {
     /// failed refresh keeps them).
     fn ttl(&self) -> Duration {
         Duration::from_secs(30 * 86_400)
+    }
+    /// Whether it runs without `[also_on.sources.<id>] enabled = true` (a service whose terms
+    /// the operator should accept first is off by default).
+    fn enabled_by_default(&self) -> bool {
+        true
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found>;
 }
@@ -244,13 +264,27 @@ fn checked(
     found: Found,
     cfg: &AlsoOnConfig,
 ) -> (Vec<Key>, Vec<CheckedLink>, Vec<Fact>) {
-    let mut facts: Vec<Fact> = found.facts.into_iter().filter(valid_fact).collect();
+    let mut facts: Vec<Fact> = found
+        .facts
+        .into_iter()
+        .filter_map(|mut f| {
+            if let Some(normal) = identifier(&f.name) {
+                f.value = normal(&f.value)?;
+            }
+            Some(f)
+        })
+        .filter(valid_fact)
+        .collect();
     facts.sort();
     facts.dedup();
     facts.truncate(cfg.facts_per_source);
     let mut keys: Vec<Key> = found
         .keys
         .into_iter()
+        .filter_map(|mut k| {
+            k.key = normal_key(&k.key)?;
+            Some(k)
+        })
         .filter(|k| valid_key(&k.key) && token(&k.via))
         .collect();
     keys.sort();
@@ -286,6 +320,12 @@ fn checked(
             {
                 continue;
             }
+            // A key that is not a valid key is dropped; the link stays.
+            link.key = link
+                .key
+                .as_deref()
+                .and_then(normal_key)
+                .filter(|k| valid_key(k));
             if seen.insert(id.clone()) {
                 link.site = site;
                 links.push((id, uri, link));
@@ -295,6 +335,24 @@ fn checked(
     (keys, links, facts)
 }
 
+/// ISRCs and barcodes have one stored form (`music::isrc`, `music::gtin13`), as keys and facts.
+fn identifier(namespace: &str) -> Option<fn(&str) -> Option<String>> {
+    match namespace {
+        "isrc" => Some(crate::music::isrc),
+        "upc" => Some(crate::music::gtin13),
+        _ => None,
+    }
+}
+/// A key in its stored form; a malformed ISRC or barcode is no key.
+fn normal_key(key: &str) -> Option<String> {
+    match key.split_once(':') {
+        Some((namespace, value)) => match identifier(namespace) {
+            Some(normal) => Some(format!("{namespace}:{}", normal(value)?)),
+            None => Some(key.to_owned()),
+        },
+        None => Some(key.to_owned()),
+    }
+}
 /// Replace `source`'s keys and links for `resource_id` with `found` (checked and bounded); they
 /// live for twice `ttl`.
 pub async fn record(
@@ -321,11 +379,11 @@ pub async fn record(
         .bind(resource_id).bind(source).bind(Value::from(key_rows)).bind(expires).execute(&mut *tx).await?;
     let link_rows: Vec<Value> = links
         .iter()
-        .map(|(id, uri, l)| serde_json::json!({"id": id, "uri": uri, "site": l.site, "via": l.via, "kind": l.kind, "at": l.at}))
+        .map(|(id, uri, l)| serde_json::json!({"id": id, "uri": uri, "site": l.site, "via": l.via, "kind": l.kind, "at": l.at, "key": l.key}))
         .collect();
     sqlx::query("DELETE FROM derived_link WHERE resource_id=$1 AND source=$2 AND NOT link_id=ANY(SELECT v->>'id' FROM jsonb_array_elements($3) v)")
         .bind(resource_id).bind(source).bind(Value::from(link_rows.clone())).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO derived_link(resource_id,link_id,uri,site,source,via,kind,at,expires_at) SELECT $1,v->>'id',v->>'uri',v->>'site',$2,v->>'via',v->>'kind',(v->>'at')::timestamptz,$4 FROM jsonb_array_elements($3) v ON CONFLICT(resource_id,link_id) DO UPDATE SET uri=excluded.uri,site=excluded.site,via=excluded.via,kind=excluded.kind,at=excluded.at,seen_at=now(),expires_at=excluded.expires_at WHERE derived_link.source=excluded.source")
+    sqlx::query("INSERT INTO derived_link(resource_id,link_id,uri,site,source,via,kind,at,key,expires_at) SELECT $1,v->>'id',v->>'uri',v->>'site',$2,v->>'via',v->>'kind',(v->>'at')::timestamptz,v->>'key',$4 FROM jsonb_array_elements($3) v ON CONFLICT(resource_id,link_id) DO UPDATE SET uri=excluded.uri,site=excluded.site,via=excluded.via,kind=excluded.kind,at=excluded.at,key=excluded.key,seen_at=now(),expires_at=excluded.expires_at WHERE derived_link.source=excluded.source")
         .bind(resource_id).bind(source).bind(Value::from(link_rows)).bind(expires).execute(&mut *tx).await?;
     let fact_rows: Vec<Value> = facts
         .iter()
@@ -430,22 +488,34 @@ async fn one(
     sources: &[Arc<dyn Source>],
     id: &str,
 ) -> Result<Option<chrono::Duration>> {
-    let Some(subject) = subject(pool, id).await? else {
+    let Some(mut subject) = subject(pool, id).await? else {
         return Ok(None);
     };
     let cfg = &cx.config.also_on;
     let mut next: Option<Duration> = None;
     let mut failed = None;
-    for source in sources
-        .iter()
-        .filter(|s| cfg.source_enabled(s.id()) && s.applies(&subject))
-    {
+    // In registry order: each source sees the keys the ones before it found in this run (a
+    // barcode MusicBrainz names, then the services looked up by it).
+    for source in sources.iter().filter(|s| cfg.source_enabled(s.as_ref())) {
+        if !source.applies(&subject) {
+            // It read the resource before (a key it starts from is gone): its rows go too.
+            sqlx::query("WITH k AS (DELETE FROM resource_key WHERE resource_id=$1 AND source=$2), l AS (DELETE FROM derived_link WHERE resource_id=$1 AND source=$2) DELETE FROM resource_fact WHERE resource_id=$1 AND source=$2")
+                .bind(id)
+                .bind(source.id())
+                .execute(pool)
+                .await?;
+            continue;
+        }
         match source.lookup(cx, &subject).await {
             Ok(found) => {
                 record(pool, id, source.id(), found, source.ttl(), cfg)
                     .await
                     .with_context(|| format!("record {}", source.id()))?;
                 next = Some(next.map_or(source.ttl(), |n| n.min(source.ttl())));
+                subject.keys = sqlx::query_as("SELECT key,source FROM resource_key WHERE resource_id=$1 AND expires_at>now() ORDER BY key")
+                    .bind(id)
+                    .fetch_all(pool)
+                    .await?;
             }
             Err(error) => failed = Some(error.context(format!("source {}", source.id()))),
         }

@@ -377,7 +377,7 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 | `q` | Full-text name/description search with a trigram/partial-name fallback; at most 256 bytes. A post whose author opted out of search indexing (`details.facts.opted_out`: Mastodon's `indexable: false` or `noindex`, Bluesky's `!no-unauthenticated`) never matches |
 | `type` | A schema.org type, ancestors included (`Event` matches `MusicEvent`; `Place` matches cafés and other `LocalBusiness` types) |
 | `category`, `host` | Exact filters |
-| `key` | Links carrying one exact identifier, on any service and in any spelling: `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist), `wikidata:{Q-id}`, `isrc:{code}` (any letter case) or `upc:{barcode}`, as the [also-on](#also-on) sources found them; anything else is 400 |
+| `key` | Links carrying one exact identifier, on any service and in any spelling: `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist), `wikidata:{Q-id}`, `isrc:{code}` (any letter case, hyphens allowed) or `upc:{barcode}` (a UPC, EAN or GTIN in any of its lengths, check digit verified), as the [also-on](#also-on) sources found them as keys or facts, or as an exact lookup by that key named the link; anything else is 400 |
 | `tags` | Comma-separated labels; at most 5, each 1–128 bytes |
 | `match` | `any` (default) or `all` (at most 3 tags) |
 | `author` | Resources referenced by this 52-character z-base-32 public key |
@@ -723,7 +723,9 @@ A derived link is a hint: it is never fetched, never counted as a reference and 
 anything. Sources read a resource after it is saved and again when their results age (each
 source's lifetime, typically 30 days); a source's links and keys live twice that, so one failed
 refresh keeps them, and they go when the source stops returning them. A source's exact keys
-(an MBID, a Q-id) also [group](#groups) the links that share them.
+(an MBID, a Q-id) also [group](#groups) the links that share them. When a service answers a
+lookup by an exact key (a barcode or an ISRC) with exactly one link, a tagged resource that is
+that link takes the key too and joins the group.
 
 **Music.** A track, album or artist link on a music service ([music service links](#aliases))
 is looked up exactly, never by title or name:
@@ -732,7 +734,8 @@ is looked up exactly, never by title or name:
   services, and its MBIDs as keys. An album link related to up to four releases of one release
   group (editions MusicBrainz keeps apart) takes the release group's key alone, and the links
   and facts every one of those releases has. The keys are `mb:recording:…`, `mb:release:…`, `mb:release-group:…`
-  and `mb:artist:…`. Its facts: `mbid`, the recording's `isrc`s, the release's barcode as `upc`,
+  and `mb:artist:…`. Its facts: `mbid`, the recording's `isrc`s, the release's barcode as `upc` (as GTIN-13: a 12-digit UPC gains a leading zero; every
+  source stores ISRCs and barcodes in one form),
   the `artist` credit, the recording's `duration` and an artist's `artist_type` (`Person`,
 `Group`, …). A release with a barcode also gets its
   Apple Music album from iTunes (`via: "itunes"`) when exactly one album answers.

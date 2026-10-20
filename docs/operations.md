@@ -455,7 +455,10 @@ expired ones (a deleted key regroups its resource). A source keeps at most
 `limits.also_on_links_per_source` (32) links, `limits.also_on_keys_per_source` (16) keys and
 `limits.also_on_facts_per_source` (32) facts per resource. `[also_on] enabled = false` stops the
 worker; `derive_links = false` keeps keys and facts only;
-`[also_on.sources.<id>] enabled = false` turns one source off (an unknown ID stops startup).
+`[also_on.sources.<id>] enabled = false` turns one source off and `enabled = true` turns on one
+that is off by default (an unknown ID stops startup). Sources run in a fixed order, and each
+sees the keys the ones before it found in the same run (a barcode MusicBrainz names, then the
+services looked up by it); a source that no longer applies (its key is gone) drops its rows.
 The sources are `musicbrainz` and `wikidata` (music), `wikipedia` and `wikidata_item`
 ([the API](api.md#also-on) says what each reads); `[also_on] apple_storefront` (`us`, a two-letter country code) is the Apple Music
 storefront of the Apple links they build. `[also_on.sources.musicbrainz] base_url`

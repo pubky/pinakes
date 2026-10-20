@@ -81,7 +81,8 @@ pub struct Curation {
 ///   corroborated mode (`plan`).
 ///
 /// - `hub:{key}`: an exact key a source vouches for (`also_on`: a MusicBrainz MBID, a Wikidata
-///   Q-id). Two links with the same key are one thing on two services. A group never holds two
+///   Q-id), or that named this resource in another's exact lookup (a keyed derived link). Two
+///   links with the same key are one thing on two services. A group never holds two
 ///   values of a single-object namespace ([`single_object`]): a join that would is refused.
 ///
 /// A point (`geo:` or a map link) never groups.
@@ -197,7 +198,7 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
     .bind(id)
     .fetch_all(&mut **tx)
     .await?;
-    let rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('unit_id',unit_id,'resource_id',id,'uri',uri,'keys',coalesce(doc->'group_keys','[]'),'hub_keys',coalesce((SELECT jsonb_agg(k.key ORDER BY k.key) FROM resource_key k WHERE k.resource_id=search_unit.id AND k.expires_at>now()),'[]'),'occurrence',occurrence,'event',event,'source',doc->>'source','lat',ST_Y(point),'lon',ST_X(point),'start',start_at,'trigrams',show_trgm(array_to_string(tsvector_to_array(to_tsvector('simple',coalesce(name,''))),' '))) FROM search_unit WHERE id=$1 LIMIT $2")
+    let rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('unit_id',unit_id,'resource_id',id,'uri',uri,'keys',coalesce(doc->'group_keys','[]'),'hub_keys',coalesce((SELECT jsonb_agg(h.key ORDER BY h.key) FROM (SELECT k.key FROM resource_key k WHERE k.resource_id=search_unit.id AND k.expires_at>now() UNION SELECT l.key FROM derived_link l WHERE l.link_id=search_unit.id AND l.key IS NOT NULL AND l.expires_at>now()) h),'[]'),'occurrence',occurrence,'event',event,'source',doc->>'source','lat',ST_Y(point),'lon',ST_X(point),'start',start_at,'trigrams',show_trgm(array_to_string(tsvector_to_array(to_tsvector('simple',coalesce(name,''))),' '))) FROM search_unit WHERE id=$1 LIMIT $2")
         .bind(id)
         .bind((cfg.max_graph_units + 1) as i64)
         .fetch_all(&mut **tx)
