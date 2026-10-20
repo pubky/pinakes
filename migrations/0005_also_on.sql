@@ -79,6 +79,9 @@ CREATE TABLE also_on_dirty (
     last_error text
 );
 CREATE INDEX also_on_dirty_due_idx ON also_on_dirty USING btree (next_attempt_at, resource_id);
+-- Resources stored before the sources existed are read once; the worker drops those no source
+-- applies to.
+INSERT INTO also_on_dirty(resource_id) SELECT r.id FROM resource r WHERE NOT EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id);
 
 -- A saved document (not a refetch that changed nothing) makes its sources due.
 CREATE FUNCTION mark_also_on_dirty() RETURNS trigger

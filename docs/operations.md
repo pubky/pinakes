@@ -447,6 +447,10 @@ replays captures without network access. Recorded responses for the keyless prob
 
 ## Also on
 
+The upgrade that adds the worker queues every stored resource once. Run
+`pinakesd --config <path> reextract all` after it as well: music and Wikipedia links already
+stored in another spelling become aliases of their canonical link, and music links are typed.
+
 The also-on worker runs every enabled source that applies to a resource ([the API](api.md#also-on))
 after a save that changed its document or status, and again when the shortest lifetime among
 them has passed. Its queue is `also_on_dirty`; `limits.also_on_concurrency` (2) resources run at
