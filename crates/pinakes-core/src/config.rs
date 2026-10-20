@@ -73,17 +73,39 @@ const ENV_MAPS: &[&[&str]] = &[
 const HOST_RATES: &[&str] = &["limits", "host_rates"];
 /// Secrets read from a variable of their own (`PINAKES_NAME`, one underscore): a build that has no
 /// such setting ignores the variable, where a `PINAKES__SECTION__KEY` it does not know stops it.
-const NAMED_ENV: &[(&str, &[&str])] = &[
-    ("PINAKES_TIDAL_CLIENT_ID", &["tidal", "client_id"]),
-    ("PINAKES_TIDAL_CLIENT_SECRET", &["tidal", "client_secret"]),
+const NAMED_ENV: &[(&str, &[&str], Named)] = &[
+    (
+        "PINAKES_TIDAL_CLIENT_ID",
+        &["tidal", "client_id"],
+        Named::Sets,
+    ),
+    (
+        "PINAKES_TIDAL_CLIENT_SECRET",
+        &["tidal", "client_secret"],
+        Named::Sets,
+    ),
+    (
+        "PINAKES_GITHUB_TOKEN",
+        &["sources", "github", "token"],
+        Named::Fills,
+    ),
 ];
+/// How a named variable meets the file form.
+#[derive(Clone, Copy, PartialEq)]
+enum Named {
+    /// It replaces what the file and the `PINAKES__…` form say.
+    Sets,
+    /// It fills the value only when the file and the `PINAKES__…` form leave it unset (a source's
+    /// entry is created for it).
+    Fills,
+}
 /// Apply the `NAMED_ENV` variables that are set (and not empty) onto the file form.
 fn apply_named_env(
     value: &mut serde_json::Value,
     vars: impl IntoIterator<Item = (String, String)>,
 ) -> Result<()> {
     for (key, val) in vars {
-        let Some((_, path)) = NAMED_ENV.iter().find(|(name, _)| *name == key) else {
+        let Some((_, path, named)) = NAMED_ENV.iter().find(|(name, _, _)| *name == key) else {
             continue;
         };
         if val.trim().is_empty() {
@@ -91,12 +113,27 @@ fn apply_named_env(
         }
         let (last, sections) = path.split_last().expect("a path");
         let mut node = &mut *value;
-        for part in sections {
-            node = node.get_mut(*part).context("unknown config section")?;
+        for (depth, part) in sections.iter().enumerate() {
+            node = if *named == Named::Fills && depth > 0 {
+                // A source's entry under `sources` may be absent: a filling variable creates it.
+                let entry = node
+                    .as_object_mut()
+                    .context("unknown config section")?
+                    .entry(part.to_string())
+                    .or_insert(serde_json::Value::Null);
+                if entry.is_null() {
+                    *entry = serde_json::json!({});
+                }
+                entry
+            } else {
+                node.get_mut(*part).context("unknown config section")?
+            };
         }
-        node.as_object_mut()
-            .context("unknown config section")?
-            .insert(last.to_string(), serde_json::Value::String(val));
+        let node = node.as_object_mut().context("unknown config section")?;
+        if *named == Named::Fills && node.get(*last).is_some_and(|v| !v.is_null()) {
+            continue;
+        }
+        node.insert(last.to_string(), serde_json::Value::String(val));
     }
     Ok(())
 }
@@ -953,6 +990,27 @@ mod tests {
             assert!(text.contains(&format!("| `{key}` |")), "{key}");
         }
     }
+    #[test]
+    fn the_github_token_has_a_short_name_the_file_overrides() {
+        let vars = |token: &str| vec![("PINAKES_GITHUB_TOKEN".to_owned(), token.to_owned())];
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        apply_named_env(&mut value, vars("from-env")).unwrap();
+        let cfg = Config::from_value(value).unwrap();
+        assert_eq!(cfg.sources.token("github"), Some("from-env"));
+        assert!(cfg.sources.enabled("github"));
+        // A token in the file (or the `PINAKES__…` form) wins; an empty one is none.
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        value["sources"]["github"] = serde_json::json!({"token": "from-file"});
+        apply_named_env(&mut value, vars("from-env")).unwrap();
+        assert_eq!(
+            Config::from_value(value).unwrap().sources.token("github"),
+            Some("from-file")
+        );
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        apply_named_env(&mut value, vars("")).unwrap();
+        assert!(!Config::from_value(value).unwrap().sources.enabled("github"));
+    }
+
     #[test]
     fn env_overrides_create_platform_and_host_rate_entries() {
         let load = |vars: &[(&str, &str)]| {

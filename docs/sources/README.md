@@ -71,6 +71,7 @@ or got plain web cards before are read by their source.
 - [`forgejo`](forgejo.md): repositories, branches, tags, releases and files on Forgejo and Gitea instances (Codeberg, gitea.com, others)
 - [`gbif`](gbif.md): GBIF species and occurrence records by key.
 - [`ghost`](ghost.md): page hook: a Ghost post's title, excerpt, image, dates, authors and tags from the Content API
+- [`github`](github.md): repositories on github.com, with the operator's token (off without one)
 - [`gitlab`](gitlab.md): projects, branches, tags, releases and files on gitlab.com and other GitLab instances
 - [`gleif`](gleif.md): Legal Entity Identifier records.
 - [`govinfo`](govinfo.md): US public laws, bills, US Code sections and the Statutes at Large.

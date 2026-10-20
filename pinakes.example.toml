@@ -89,6 +89,9 @@ enabled = true
 enabled = true
 [sources.ghost]
 enabled = true
+[sources.github]
+enabled = true
+# token = "" # A fine-grained token (public repositories, read-only): off without one.
 [sources.gitlab]
 enabled = true
 [sources.gleif]

@@ -1972,6 +1972,12 @@
                     "uri": "https://www.privacyguides.org/news/2026/10/19/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/"
                   }
                 },
+                "resolve-github-1": {
+                  "summary": "https://github.com/BurntSushi/ripgrep",
+                  "value": {
+                    "uri": "https://github.com/BurntSushi/ripgrep"
+                  }
+                },
                 "resolve-github-com-pubky-pubky-core-releases-atom": {
                   "summary": "https://github.com/pubky/pubky-core/releases.atom",
                   "value": {

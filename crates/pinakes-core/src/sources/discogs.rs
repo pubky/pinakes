@@ -119,6 +119,7 @@ pub async fn record(
     let mut f = fetch(egress, kind, id, token).await?;
     let mut authenticated = token.is_some();
     if authenticated && matches!(f.status, 401 | 403) {
+        super::token_refused("discogs");
         if !TOKEN_REFUSED.swap(true, std::sync::atomic::Ordering::Relaxed) {
             tracing::warn!(
                 status = f.status,

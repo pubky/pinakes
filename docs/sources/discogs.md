@@ -9,7 +9,8 @@ requests a minute; an operator's `limits.host_rates` entry sets the pace outrigh
 (`"api.discogs.com" = 1.0` under `[limits.host_rates]`). The token is sent only to
 `api.discogs.com` and never appears in logs or errors. A token Discogs refuses (401 or 403: expired
 or mistyped) is dropped for that request, with one warning per daemon start, and the cards are read
-without it (no images). Release data is CC0.
+without it (no images); `pinakes_source_token_refusals_total{source="discogs"}` counts each
+refusal. Release data is CC0.
 
 ## Links
 

@@ -187,6 +187,10 @@ The official-API sources ([docs/sources](sources/README.md)) run on the `officia
 (`[cards.official]`), each with its own switch, `[sources.<name>] enabled` (on by default;
 `PINAKES__SOURCES__<NAME>__ENABLED=false`); a switched-off source's links get ordinary web cards
 and its address rules no longer merge new links (links it merged before stay merged). A source
+that reads with the operator's token (`github`: `[sources.github] token` or `PINAKES_GITHUB_TOKEN`)
+is on only with one. Its token is a secret, sent only to its service's API and never through a
+redirect. A token the service refuses (401) switches the source off until restart, and
+`pinakes_source_token_refusals_total{source}` counts each refusal (Discogs' token too). A source
 lowers its service's host to the service's published rate (never above
 `limits.host_requests_per_second`) unless `limits.host_rates` names the host, and a request that
 would wait more than five seconds for its host (its slot, or the request ahead of it) is retried
