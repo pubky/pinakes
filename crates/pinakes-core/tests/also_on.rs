@@ -1542,3 +1542,48 @@ async fn a_run_naming_another_resource_waits_for_an_ingested_batch(pool: PgPool)
             .unwrap();
     assert_eq!(named, 1);
 }
+
+/// A source's keys and facts are searched (`key=`), so their changes change the search revision
+/// (and every search ETag), as derived links do: pruning an expired fact alone too.
+#[sqlx::test(migrations = "../../migrations")]
+async fn pruned_keys_and_facts_change_the_search_revision(pool: PgPool) {
+    let id = page(&pool, "https://open.spotify.com/track/rev", "Track").await;
+    let revision = || async {
+        sqlx::query_scalar::<_, i64>("SELECT revision FROM search_revision")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    for (table, row) in [
+        ("resource_fact", "name,value,source"),
+        ("resource_key", "key,source,via"),
+    ] {
+        let values = if table == "resource_fact" {
+            "'isrc','GBAYE9701376','music'"
+        } else {
+            "'isrc:GBAYE9701376','music','music'"
+        };
+        sqlx::query(&format!("INSERT INTO {table}(resource_id,{row},expires_at) VALUES($1,{values},now()-interval '1 second')"))
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let before = revision().await;
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query(&format!("DELETE FROM {table} WHERE expires_at<=now()"))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert!(revision().await > before, "{table}");
+    }
+    // prune's own fact deletion is one of them.
+    sqlx::query("INSERT INTO resource_fact(resource_id,name,value,source,expires_at) VALUES($1,'upc','0602557656527','music',now()-interval '1 second')")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before = revision().await;
+    assert_eq!(also_on::prune(&pool).await.unwrap(), 1);
+    assert!(revision().await > before);
+}
