@@ -20,58 +20,96 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::OnceLock};
 
+pub mod artic;
 pub mod bluesky;
+pub mod cleveland;
+pub mod clinicaltrials;
+pub mod commons;
 pub mod courtlistener;
 pub mod discourse;
+pub mod docker_hub;
 pub mod ecfr;
+pub mod esplora;
 pub mod eur_lex;
 pub mod federal_register;
 pub mod fedlex;
 pub mod feed;
+pub mod figshare;
 pub mod forgejo;
+pub mod gbif;
 pub mod ghost;
 pub mod gitlab;
 pub mod gleif;
 pub mod govinfo;
 pub mod hacker_news;
+pub mod huggingface;
+pub mod inaturalist;
+pub mod internet_archive;
+pub mod kit;
 pub mod legislation_gov_uk;
 pub mod lobsters;
 pub mod mastodon;
+pub mod mempool;
+pub mod met;
+pub mod pdb;
+pub mod pubchem;
 pub mod public_inbox;
+pub mod ror;
 pub mod sec;
 pub mod stacker_news;
 pub mod swiss_parliament;
 pub mod uk_parliament_bills;
+pub mod uniprot;
+pub mod usgs;
 pub mod wordpress;
 pub mod zefix;
+pub mod zenodo;
 
 /// Every source, one line each, in alphabetical order of name.
 #[rustfmt::skip]
 pub static REGISTRY: &[&dyn Source] = &[
+    &artic::Artic,
     &bluesky::Bluesky,
+    &cleveland::Cleveland,
+    &clinicaltrials::ClinicalTrials,
+    &commons::Commons,
     &courtlistener::Courtlistener,
     &discourse::Discourse,
+    &docker_hub::DockerHub,
     &ecfr::Ecfr,
     &eur_lex::EurLex,
     &federal_register::FederalRegister,
     &fedlex::Fedlex,
     &feed::Feed,
+    &figshare::Figshare,
     &forgejo::Forgejo,
+    &gbif::Gbif,
     &ghost::Ghost,
     &gitlab::Gitlab,
     &gleif::Gleif,
     &govinfo::Govinfo,
     &hacker_news::HackerNews,
+    &huggingface::HuggingFace,
+    &inaturalist::Inaturalist,
+    &internet_archive::InternetArchive,
     &legislation_gov_uk::LegislationGovUk,
     &lobsters::Lobsters,
     &mastodon::Mastodon,
+    &mempool::Mempool,
+    &met::Met,
+    &pdb::Pdb,
+    &pubchem::Pubchem,
     &public_inbox::PublicInbox,
+    &ror::Ror,
     &sec::Sec,
     &stacker_news::StackerNews,
     &swiss_parliament::SwissParliament,
     &uk_parliament_bills::UkParliamentBills,
+    &uniprot::Uniprot,
+    &usgs::Usgs,
     &wordpress::Wordpress,
     &zefix::Zefix,
+    &zenodo::Zenodo,
 ];
 
 /// One official API.
@@ -474,16 +512,19 @@ pub async fn resolve(
     Ok(Some(doc.bounded(attributes())?))
 }
 
-/// Rate limits and server errors: retry later, after at least a minute.
+/// Rate limits and timeouts (408, 429: class `rate_limited`) and server errors (class `upstream`):
+/// retry later, after at least a minute.
 pub(crate) fn retry(f: &Fetched) -> Result<()> {
-    if f.status >= 500 || matches!(f.status, 408 | 429) {
-        return Err(crate::resolver::RetryLater {
-            class: "upstream",
-            seconds: f.retry_after_secs.max(60),
-        }
-        .into());
+    let class = match f.status {
+        408 | 429 => "rate_limited",
+        s if s >= 500 => "upstream",
+        _ => return Ok(()),
+    };
+    Err(crate::resolver::RetryLater {
+        class,
+        seconds: f.retry_after_secs.max(60),
     }
-    Ok(())
+    .into())
 }
 
 /// Text with every e-mail address removed (`name@host.tld`, also in `<…>` or after

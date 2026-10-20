@@ -1,0 +1,51 @@
+{
+  "article-1018700": {
+    "bytes": 2608,
+    "content_type": "application/json",
+    "file": "article-1018700.json",
+    "note": "a dataset, CC BY 4.0, no thumbnail",
+    "recorded_at": "2026-10-19T16:25:42+00:00",
+    "sha256": "156152786222b51a465803ea16e7597554ef311d5e6e921bc17a209af5e5b0b3",
+    "status": 200,
+    "url": "https://api.figshare.com/v2/articles/1018700"
+  },
+  "article-34700883": {
+    "bytes": 16000,
+    "content_type": "application/json",
+    "file": "article-34700883.json",
+    "note": "an institutional portal (frontiersin.figshare.com) article with the publisher's DOI",
+    "recorded_at": "2026-10-19T16:25:52+00:00",
+    "sha256": "a9aea91c1ecfa2cba3c608173de38b3c2fb8a9d6315389fcf775c3618dd82b92",
+    "status": 200,
+    "url": "https://api.figshare.com/v2/articles/34700883"
+  },
+  "article-5616445": {
+    "bytes": 4655,
+    "content_type": "application/json",
+    "file": "article-5616445.json",
+    "note": "a presentation in its second version, with a thumbnail",
+    "recorded_at": "2026-10-19T16:25:45+00:00",
+    "sha256": "2effe5680626317a10e6e542e1c100aea598b8ee82363b1fe2fcfc920e660428",
+    "status": 200,
+    "url": "https://api.figshare.com/v2/articles/5616445"
+  },
+  "article-5616445-v1": {
+    "bytes": 4488,
+    "content_type": "application/json",
+    "file": "article-5616445-v1.json",
+    "note": "the first version of the same article",
+    "recorded_at": "2026-10-19T16:25:49+00:00",
+    "sha256": "18116d3ff54fc192c13b37aac1c705e4945284e71ed585d19b28ffd895c049e8",
+    "status": 200,
+    "url": "https://api.figshare.com/v2/articles/5616445/versions/1"
+  },
+  "article-missing": {
+    "bytes": 73,
+    "content_type": "application/json",
+    "file": "article-missing.json",
+    "recorded_at": "2026-10-19T16:25:55+00:00",
+    "sha256": "f7e6bb0b4b710635b66a37138ed96a4908b4779256389a982a9462b0f6c4bde2",
+    "status": 404,
+    "url": "https://api.figshare.com/v2/articles/999999999"
+  }
+}

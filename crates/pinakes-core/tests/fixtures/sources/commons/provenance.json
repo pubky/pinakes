@@ -1,0 +1,59 @@
+{
+  "bitcoin-svg": {
+    "bytes": 2182,
+    "content_type": "application/json",
+    "file": "bitcoin-svg.json",
+    "recorded_at": "2026-10-19T16:24:39+00:00",
+    "sha256": "41846f5f5fdc0b0290a641fab68c3ff19431df54ae440a9ed513b2c0ad029334",
+    "status": 200,
+    "url": "https://commons.wikimedia.org/w/api.php?action=query&format=json&formatversion=2&redirects=1&prop=imageinfo%7Ccoordinates&iiprop=url%7Csize%7Cmime%7Cextmetadata%7Ctimestamp&iiurlwidth=1280&iiextmetadatafilter=ObjectName%7CImageDescription%7CArtist%7CCredit%7CAttribution%7CLicenseShortName%7CLicenseUrl%7CUsageTerms%7CAttributionRequired%7CDateTimeOriginal&iiextmetadatalanguage=en&titles=File%3ABitcoin.svg"
+  },
+  "curid-30202095": {
+    "bytes": 2182,
+    "content_type": "application/json",
+    "file": "curid-30202095.json",
+    "note": "a ?curid= link: the same request by page id",
+    "recorded_at": "2026-10-19T16:24:48+00:00",
+    "sha256": "41846f5f5fdc0b0290a641fab68c3ff19431df54ae440a9ed513b2c0ad029334",
+    "status": 200,
+    "url": "https://commons.wikimedia.org/w/api.php?action=query&format=json&formatversion=2&redirects=1&prop=imageinfo%7Ccoordinates&iiprop=url%7Csize%7Cmime%7Cextmetadata%7Ctimestamp&iiurlwidth=1280&iiextmetadatafilter=ObjectName%7CImageDescription%7CArtist%7CCredit%7CAttribution%7CLicenseShortName%7CLicenseUrl%7CUsageTerms%7CAttributionRequired%7CDateTimeOriginal&iiextmetadatalanguage=en&pageids=30202095"
+  },
+  "curid-missing": {
+    "bytes": 78,
+    "content_type": "application/json",
+    "file": "curid-missing.json",
+    "note": "an unknown page id",
+    "recorded_at": "2026-10-19T16:24:50+00:00",
+    "sha256": "50aec28c1c2d0d074bdbabbcdeb5e11bbbf4febe6cdaffad4c9af99eea55ee24",
+    "status": 200,
+    "url": "https://commons.wikimedia.org/w/api.php?action=query&format=json&formatversion=2&redirects=1&prop=imageinfo%7Ccoordinates&iiprop=url%7Csize%7Cmime%7Cextmetadata%7Ctimestamp&iiurlwidth=1280&iiextmetadatafilter=ObjectName%7CImageDescription%7CArtist%7CCredit%7CAttribution%7CLicenseShortName%7CLicenseUrl%7CUsageTerms%7CAttributionRequired%7CDateTimeOriginal&iiextmetadatalanguage=en&pageids=999999999"
+  },
+  "golden-gate": {
+    "bytes": 3106,
+    "content_type": "application/json",
+    "file": "golden-gate.json",
+    "recorded_at": "2026-10-19T16:24:41+00:00",
+    "sha256": "6a668c74881b93dc440430347daafce27bad734118e181962573fe4f50804f2d",
+    "status": 200,
+    "url": "https://commons.wikimedia.org/w/api.php?action=query&format=json&formatversion=2&redirects=1&prop=imageinfo%7Ccoordinates&iiprop=url%7Csize%7Cmime%7Cextmetadata%7Ctimestamp&iiurlwidth=1280&iiextmetadatafilter=ObjectName%7CImageDescription%7CArtist%7CCredit%7CAttribution%7CLicenseShortName%7CLicenseUrl%7CUsageTerms%7CAttributionRequired%7CDateTimeOriginal&iiextmetadatalanguage=en&titles=File%3AGolden+Gate+Bridge+as+seen+from+Battery+East.jpg"
+  },
+  "missing": {
+    "bytes": 134,
+    "content_type": "application/json",
+    "file": "missing.json",
+    "recorded_at": "2026-10-19T16:24:43+00:00",
+    "sha256": "d5c26b0b6febf64f4581bba9a9d15343f3f337e7adccbc95607d49b04e840f12",
+    "status": 200,
+    "url": "https://commons.wikimedia.org/w/api.php?action=query&format=json&formatversion=2&redirects=1&prop=imageinfo%7Ccoordinates&iiprop=url%7Csize%7Cmime%7Cextmetadata%7Ctimestamp&iiurlwidth=1280&iiextmetadatafilter=ObjectName%7CImageDescription%7CArtist%7CCredit%7CAttribution%7CLicenseShortName%7CLicenseUrl%7CUsageTerms%7CAttributionRequired%7CDateTimeOriginal&iiextmetadatalanguage=en&titles=File%3APinakes+does+not+exist+0000.jpg"
+  },
+  "redirect": {
+    "bytes": 2261,
+    "content_type": "application/json",
+    "file": "redirect.json",
+    "note": "a renamed file: File:Bitcoin BTC symbol.svg redirects to File:BitcoinSign.svg",
+    "recorded_at": "2026-10-19T16:24:46+00:00",
+    "sha256": "fc709e0ca706acd5d18729ff8b82f27c9bb96a29b80acf724c8e045104db5321",
+    "status": 200,
+    "url": "https://commons.wikimedia.org/w/api.php?action=query&format=json&formatversion=2&redirects=1&prop=imageinfo%7Ccoordinates&iiprop=url%7Csize%7Cmime%7Cextmetadata%7Ctimestamp&iiurlwidth=1280&iiextmetadatafilter=ObjectName%7CImageDescription%7CArtist%7CCredit%7CAttribution%7CLicenseShortName%7CLicenseUrl%7CUsageTerms%7CAttributionRequired%7CDateTimeOriginal&iiextmetadatalanguage=en&titles=File%3ABitcoin+BTC+symbol.svg"
+  }
+}

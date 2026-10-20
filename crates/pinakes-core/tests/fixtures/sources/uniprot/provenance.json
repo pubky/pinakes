@@ -1,0 +1,84 @@
+{
+  "name-hba-human": {
+    "bytes": 163,
+    "content_type": "application/json",
+    "file": "name-hba-human.json",
+    "recorded_at": "2026-10-19T16:22:30+00:00",
+    "sha256": "e063f544b7b87f1008bbabcd28dc07752e012805a236ca0ed689210c08212634",
+    "status": 200,
+    "url": "https://rest.uniprot.org/uniprotkb/search?query=id%3AHBA_HUMAN%20AND%20active%3Atrue&fields=accession%2Cid&format=json&size=2"
+  },
+  "name-missing": {
+    "bytes": 77,
+    "content_type": "application/json",
+    "file": "name-missing.json",
+    "recorded_at": "2026-10-19T16:22:54+00:00",
+    "sha256": "4c4c1486f5a22ee8dff96f9429c6a6f76cdc502bf000234a9936ad2b882e862d",
+    "status": 200,
+    "url": "https://rest.uniprot.org/uniprotkb/search?query=id%3AZZZQ9_HUMAN%20AND%20active%3Atrue&fields=accession%2Cid&format=json&size=2"
+  },
+  "name-nope-human-former": {
+    "bytes": 165,
+    "content_type": "application/json",
+    "file": "name-nope-human-former.json",
+    "note": "NOPE_HUMAN is a former entry name: the search finds IGDC4_HUMAN (Q8TDY8)",
+    "recorded_at": "2026-10-19T16:22:32+00:00",
+    "sha256": "d9257309b2feb2967fe8265742f1f40723811f9df9ad3b239bdefc3eec864ff6",
+    "status": 200,
+    "url": "https://rest.uniprot.org/uniprotkb/search?query=id%3ANOPE_HUMAN%20AND%20active%3Atrue&fields=accession%2Cid&format=json&size=2"
+  },
+  "search-o51290": {
+    "bytes": 191,
+    "content_type": "application/json",
+    "file": "search-o51290.json",
+    "recorded_at": "2026-10-19T18:36:58+00:00",
+    "sha256": "5e4076b83ad097e4cdb03110c1bd458b9f188d2080d4e043446acb72750d033f",
+    "status": 200,
+    "url": "https://rest.uniprot.org/uniprotkb/search?query=accession:O51290&fields=accession,id,protein_name,gene_primary,organism_name,organism_id,length,cc_function,xref_alphafolddb,xref_pdb,date_created,date_modified,sequence_version&format=json"
+  },
+  "search-p00001": {
+    "bytes": 228,
+    "content_type": "application/json",
+    "file": "search-p00001.json",
+    "recorded_at": "2026-10-19T18:36:56+00:00",
+    "sha256": "3043637f0c9ff6411f86a7829719f36e5562e053a7ccb4adb89a3abde7cab7cd",
+    "status": 200,
+    "url": "https://rest.uniprot.org/uniprotkb/search?query=accession:P00001&fields=accession,id,protein_name,gene_primary,organism_name,organism_id,length,cc_function,xref_alphafolddb,xref_pdb,date_created,date_modified,sequence_version&format=json"
+  },
+  "search-p04637": {
+    "bytes": 52889,
+    "content_type": "application/json",
+    "file": "search-p04637.json",
+    "recorded_at": "2026-10-19T18:37:38+00:00",
+    "sha256": "d2f3bf4f4f052fc19518e1e2e2e0407c3115f0bb45a45782a96ac569f04f05eb",
+    "status": 200,
+    "url": "https://rest.uniprot.org/uniprotkb/search?query=accession:P04637&fields=accession,id,protein_name,gene_primary,organism_name,organism_id,length,cc_function,xref_alphafolddb,xref_pdb,date_created,date_modified,sequence_version&format=json"
+  },
+  "search-p0dzz9": {
+    "bytes": 220,
+    "content_type": "application/json",
+    "file": "search-p0dzz9.json",
+    "recorded_at": "2026-10-19T18:36:59+00:00",
+    "sha256": "891e29993ce49d7cab5d16f1029be32bd1d6c9684f736419f7dbb109da47de73",
+    "status": 200,
+    "url": "https://rest.uniprot.org/uniprotkb/search?query=accession:P0DZZ9&fields=accession,id,protein_name,gene_primary,organism_name,organism_id,length,cc_function,xref_alphafolddb,xref_pdb,date_created,date_modified,sequence_version&format=json"
+  },
+  "search-p69905": {
+    "bytes": 56151,
+    "content_type": "application/json",
+    "file": "search-p69905.json",
+    "recorded_at": "2026-10-19T18:36:52+00:00",
+    "sha256": "399b5f4f4217be4a0a8c7aa42c5bafc847716ed5ae01e7f1e3b00deef5adeabb",
+    "status": 200,
+    "url": "https://rest.uniprot.org/uniprotkb/search?query=accession:P69905&fields=accession,id,protein_name,gene_primary,organism_name,organism_id,length,cc_function,xref_alphafolddb,xref_pdb,date_created,date_modified,sequence_version&format=json"
+  },
+  "search-q15086": {
+    "bytes": 214,
+    "content_type": "application/json",
+    "file": "search-q15086.json",
+    "recorded_at": "2026-10-19T18:36:54+00:00",
+    "sha256": "f9c9736e7a59f2fbab46abc404234fed2c5c020d52366a667a91e8683acc0dda",
+    "status": 200,
+    "url": "https://rest.uniprot.org/uniprotkb/search?query=accession:Q15086&fields=accession,id,protein_name,gene_primary,organism_name,organism_id,length,cc_function,xref_alphafolddb,xref_pdb,date_created,date_modified,sequence_version&format=json"
+  }
+}

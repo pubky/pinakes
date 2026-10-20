@@ -1,0 +1,14 @@
+Error 404: Not Found
+
+Not Found
+
+Usage details are available from https://earthquake.usgs.gov/fdsnws/event/1
+
+Request:
+/fdsnws/event/1/query?eventid=us0000zzzzzz&amp;format=geojson
+
+Request Submitted:
+2026-10-19T16:20:48+00:00
+
+Service version:
+2.8.1

@@ -1,0 +1,62 @@
+{
+  "concept-7790294": {
+    "bytes": 227,
+    "content_type": "text/html",
+    "file": "concept-7790294.html",
+    "location": null,
+    "note": "a concept record id: 302 to the latest version",
+    "recorded_at": "2026-10-19T16:25:30+00:00",
+    "sha256": "f8c09889d2f17837d5abda4aff96c5d1fd0283591693dce4ec11b801dbe95793",
+    "status": 302,
+    "url": "https://zenodo.org/api/records/7790294"
+  },
+  "concept-7790294-followed": {
+    "bytes": 3514,
+    "content_type": "application/json",
+    "file": "concept-7790294-followed.json",
+    "note": "the concept id with the redirect followed: the latest version's record",
+    "recorded_at": "2026-10-19T16:25:32+00:00",
+    "sha256": "82d7de7b7c0b77371dd18912092f92ae2770dcc195318c2a7f1d385acce75098",
+    "status": 200,
+    "url": "https://zenodo.org/api/records/7790294"
+  },
+  "record-1234567": {
+    "bytes": 5783,
+    "content_type": "application/json",
+    "file": "record-1234567.json",
+    "note": "a journal article with the publisher's DOI",
+    "recorded_at": "2026-10-19T16:25:24+00:00",
+    "sha256": "bc6403428ad3ca55d133800b778fdf55b588adbb47c16dde2e8dc52337791a1a",
+    "status": 200,
+    "url": "https://zenodo.org/api/records/1234567"
+  },
+  "record-13882307": {
+    "bytes": 16042,
+    "content_type": "application/json",
+    "file": "record-13882307.json",
+    "note": "images, CC BY 4.0, in a community, HTML description",
+    "recorded_at": "2026-10-19T16:25:28+00:00",
+    "sha256": "6532f3ad042fec57cc67f684837ba6ef0152353ff95ab88a799118d3dc6b6c37",
+    "status": 200,
+    "url": "https://zenodo.org/api/records/13882307"
+  },
+  "record-7790295": {
+    "bytes": 3514,
+    "content_type": "application/json",
+    "file": "record-7790295.json",
+    "note": "software with a Zenodo DOI and a concept DOI",
+    "recorded_at": "2026-10-19T16:25:26+00:00",
+    "sha256": "82d7de7b7c0b77371dd18912092f92ae2770dcc195318c2a7f1d385acce75098",
+    "status": 200,
+    "url": "https://zenodo.org/api/records/7790295"
+  },
+  "record-missing": {
+    "bytes": 71,
+    "content_type": "application/json",
+    "file": "record-missing.json",
+    "recorded_at": "2026-10-19T16:25:34+00:00",
+    "sha256": "1920b32f1f4904c3302d3bf4a68ad56c6d57d507f87021eefb212921218ce531",
+    "status": 404,
+    "url": "https://zenodo.org/api/records/99999999999"
+  }
+}

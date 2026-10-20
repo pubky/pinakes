@@ -1,0 +1,47 @@
+{
+  "search-NCT01278719": {
+    "bytes": 11410,
+    "content_type": "application/json",
+    "file": "search-NCT01278719.json",
+    "recorded_at": "2026-10-19T21:07:16+00:00",
+    "sha256": "3cb6d1d06a184344284dc6b9614f3fedd0bb224a1091b4836181b6f93e954e55",
+    "status": 200,
+    "url": "https://clinicaltrials.gov/api/v2/studies?filter.ids=NCT01278719&fields=protocolSection,hasResults&pageSize=2"
+  },
+  "search-NCT04368728": {
+    "bytes": 120059,
+    "content_type": "application/json",
+    "file": "search-NCT04368728.json.gz",
+    "recorded_at": "2026-10-19T21:07:20+00:00",
+    "sha256": "dde3d997cbd6fed6ba872dc4a5a3fb805fc882efc94b46d8d923e2c96715c4de",
+    "status": 200,
+    "url": "https://clinicaltrials.gov/api/v2/studies?filter.ids=NCT04368728&fields=protocolSection,hasResults&pageSize=2"
+  },
+  "search-NCT04470427": {
+    "bytes": 50096,
+    "content_type": "application/json",
+    "file": "search-NCT04470427.json.gz",
+    "recorded_at": "2026-10-19T21:07:22+00:00",
+    "sha256": "9a70ca6e9cc9e55d876415daf0a41edad0eedb5ee29777e9192f5a0cb53985b1",
+    "status": 200,
+    "url": "https://clinicaltrials.gov/api/v2/studies?filter.ids=NCT04470427&fields=protocolSection,hasResults&pageSize=2"
+  },
+  "search-NCT04482322": {
+    "bytes": 9146,
+    "content_type": "application/json",
+    "file": "search-NCT04482322.json.gz",
+    "recorded_at": "2026-10-19T21:07:23+00:00",
+    "sha256": "c0c8f67cc5daa78f7e245be072f2c90dd38e420a4969157a961d7e631de44871",
+    "status": 200,
+    "url": "https://clinicaltrials.gov/api/v2/studies?filter.ids=NCT04482322&fields=protocolSection,hasResults&pageSize=2"
+  },
+  "search-NCT99999999": {
+    "bytes": 16,
+    "content_type": "application/json",
+    "file": "search-NCT99999999.json",
+    "recorded_at": "2026-10-19T21:07:18+00:00",
+    "sha256": "e5660ca1fb1bc482c0112c159084af7c325461ac1624b4de41dd67edef2981b9",
+    "status": 200,
+    "url": "https://clinicaltrials.gov/api/v2/studies?filter.ids=NCT99999999&fields=protocolSection,hasResults&pageSize=2"
+  }
+}

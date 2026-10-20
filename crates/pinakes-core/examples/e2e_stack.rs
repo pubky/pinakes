@@ -1,6 +1,8 @@
 //! Isolated e2e stack with real migrations, ingestion, resolver parsers, storage and API.
 //! Default mode mocks external boundaries with no public network; --live scopes real fetches
 //! to the (at most twelve) sample IDs.
+// The mock's sample list is one `json!` literal, deeper than the default macro recursion limit.
+#![recursion_limit = "256"]
 use anyhow::{bail, ensure, Result};
 use async_trait::async_trait;
 use axum::{
@@ -110,7 +112,25 @@ impl Fixture {
             {"kind":"wordpress","uri":"https://bitcoinmagazine.com/markets/no-uptober-yet-as-bitcoin-slips","type":"Article"},
             {"kind":"ghost","uri":"https://www.privacyguides.org/news/2026/10/19/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/","type":"Article"},
             {"kind":"public_inbox","uri":"https://gnusha.org/pi/bitcoindev/atCSAVprBE-tAnN3@erisian.com.au/","type":"EmailMessage"},
-            {"kind":"feed","uri":"https://www.theblock.co/news/business/2026-10-19-mesh-visa-partner-spend-crypto-stablecoins-421058","type":"Article"}
+            {"kind":"feed","uri":"https://www.theblock.co/news/business/2026-10-19-mesh-visa-partner-spend-crypto-stablecoins-421058","type":"Article"},
+            {"kind":"mempool","uri":"https://mempool.space/lightning/node/03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f","type":"LightningNode"},
+            {"kind":"figshare","uri":"https://figshare.com/articles/dataset/Garden_data_set/1018700","type":"Dataset"},
+            {"kind":"huggingface","uri":"https://huggingface.co/datasets/openai/gsm8k","type":"Dataset"},
+            {"kind":"zenodo","uri":"https://zenodo.org/records/1234567","type":"ScholarlyArticle"},
+            {"kind":"artic","uri":"https://www.artic.edu/artworks/27992","type":"VisualArtwork"},
+            {"kind":"cleveland","uri":"https://www.clevelandart.org/art/1958.39","type":"VisualArtwork"},
+            {"kind":"met","uri":"https://www.metmuseum.org/art/collection/search/436535","type":"VisualArtwork"},
+            {"kind":"commons","uri":"https://commons.wikimedia.org/wiki/File:Golden_Gate_Bridge_as_seen_from_Battery_East.jpg","type":"ImageObject"},
+            {"kind":"internet_archive","uri":"https://archive.org/details/bitcoin-whitepaper","type":"Book"},
+            {"kind":"pdb","uri":"https://www.rcsb.org/structure/4HHB","type":"Dataset"},
+            {"kind":"pubchem","uri":"https://pubchem.ncbi.nlm.nih.gov/compound/2244","type":"MolecularEntity"},
+            {"kind":"uniprot","uri":"https://www.uniprot.org/uniprotkb/P69905/entry","type":"Protein"},
+            {"kind":"clinicaltrials","uri":"https://clinicaltrials.gov/study/NCT04368728","type":"MedicalTrial"},
+            {"kind":"gbif","uri":"https://www.gbif.org/species/1341976","type":"Taxon"},
+            {"kind":"inaturalist","uri":"https://www.inaturalist.org/observations/333069440","type":"Observation"},
+            {"kind":"docker_hub","uri":"https://hub.docker.com/_/nginx","type":"SoftwareApplication"},
+            {"kind":"ror","uri":"https://ror.org/03yrm5c26","type":"ArchiveOrganization"},
+            {"kind":"usgs","uri":"https://earthquake.usgs.gov/earthquakes/eventpage/official20110311054624120_30","type":"Event"}
         ]);
         Ok(Self {
             boundary: Arc::default(),
@@ -162,6 +182,24 @@ impl Dns for FixtureDns {
                 | "www.federalregister.gov"
                 | "www.sec.gov"
                 | "www.ecfr.gov"
+                | "mempool.space"
+                | "zenodo.org"
+                | "huggingface.co"
+                | "api.figshare.com"
+                | "collectionapi.metmuseum.org"
+                | "openaccess-api.clevelandart.org"
+                | "api.artic.edu"
+                | "commons.wikimedia.org"
+                | "archive.org"
+                | "rest.uniprot.org"
+                | "pubchem.ncbi.nlm.nih.gov"
+                | "data.rcsb.org"
+                | "clinicaltrials.gov"
+                | "api.inaturalist.org"
+                | "api.gbif.org"
+                | "earthquake.usgs.gov"
+                | "api.ror.org"
+                | "hub.docker.com"
         ) {
             "93.184.216.34"
         } else {
@@ -214,6 +252,24 @@ impl Transport for Fixture {
             "www.ecfr.gov" if u.path()=="/api/versioner/v1/ancestry/current/title-17.json"=>("application/json",include_str!("../tests/fixtures/sources/ecfr/ancestry_current_title-17_section-240.10b-5.json").into()),
             "www.sec.gov" if u.path()=="/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959.hdr.sgml"=>("text/sgml",include_str!("../tests/fixtures/sources/sec/sec-hdr-ms-s1.sgml").into()),
             "www.federalregister.gov" if u.path()=="/api/v1/documents/2026-18291.json"=>("application/json",include_str!("../tests/fixtures/sources/federal_register/fr-2026-18291.json").into()),
+            "mempool.space" if u.path()=="/api/v1/lightning/nodes/03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f"=>("application/json",include_str!("../tests/fixtures/sources/mempool/node-acinq.json").into()),
+            "api.figshare.com" if u.path()=="/v2/articles/1018700"=>("application/json",include_str!("../tests/fixtures/sources/figshare/article-1018700.json").into()),
+            "huggingface.co" if u.path()=="/api/datasets/openai/gsm8k"=>("application/json",include_str!("../tests/fixtures/sources/huggingface/dataset-gsm8k.json").into()),
+            "zenodo.org" if u.path()=="/api/records/1234567"=>("application/json",include_str!("../tests/fixtures/sources/zenodo/record-1234567.json").into()),
+            "api.artic.edu" if u.path()=="/api/v1/artworks/27992"=>{ensure!(o.headers.iter().any(|(k,_)|*k=="AIC-User-Agent"),"missing AIC-User-Agent");("application/json",include_str!("../tests/fixtures/sources/artic/artwork-27992.json").into())},
+            "openaccess-api.clevelandart.org" if u.path()=="/api/artworks/1958.39"=>("application/json",include_str!("../tests/fixtures/sources/cleveland/artwork-1958.39.json").into()),
+            "collectionapi.metmuseum.org" if u.path()=="/public/collection/v1/objects/436535"=>("application/json",include_str!("../tests/fixtures/sources/met/object-436535.json").into()),
+            "archive.org" if u.path()=="/metadata/bitcoin-whitepaper/metadata"=>("application/json",include_str!("../tests/fixtures/sources/internet_archive/bitcoin-whitepaper.json").into()),
+            "commons.wikimedia.org" if u.path()=="/w/api.php" && u.query_pairs().any(|(k,v)| k=="titles" && v=="File:Golden Gate Bridge as seen from Battery East.jpg")=>("application/json",include_str!("../tests/fixtures/sources/commons/golden-gate.json").into()),
+            "data.rcsb.org" if u.path()=="/rest/v1/core/entry/4HHB"=>("application/json",include_str!("../tests/fixtures/sources/pdb/entry-4hhb.json").into()),
+            "pubchem.ncbi.nlm.nih.gov" if u.path().starts_with("/rest/pug/compound/cid/2244/property/")=>("application/json",include_str!("../tests/fixtures/sources/pubchem/compound-2244.json").into()),
+            "rest.uniprot.org" if u.path()=="/uniprotkb/search" && u.query_pairs().any(|(k,v)| k=="query" && v=="accession:P69905")=>("application/json",include_str!("../tests/fixtures/sources/uniprot/search-p69905.json").into()),
+            "api.gbif.org" if u.path()=="/v1/species/1341976"=>("application/json",include_str!("../tests/fixtures/sources/gbif/species-1341976.json").into()),
+            "api.inaturalist.org" if u.path()=="/v1/observations/333069440"=>("application/json",gunzip(include_bytes!("../tests/fixtures/sources/inaturalist/observation-333069440.json.gz"))),
+            "clinicaltrials.gov" if u.path()=="/api/v2/studies" && u.query_pairs().any(|(k,v)| k=="filter.ids" && v=="NCT04368728")=>("application/json",gunzip(include_bytes!("../tests/fixtures/sources/clinicaltrials/search-NCT04368728.json.gz"))),
+            "hub.docker.com" if u.path()=="/v2/repositories/library/nginx/"=>("application/json",include_str!("../tests/fixtures/sources/docker_hub/repo-library-nginx.json").into()),
+            "api.ror.org" if u.path()=="/v2/organizations/03yrm5c26"=>("application/json",include_str!("../tests/fixtures/sources/ror/org-03yrm5c26.json").into()),
+            "earthquake.usgs.gov" if u.path()=="/fdsnws/event/1/query" && u.query()==Some("eventid=official20110311054624120_30&format=geojson")=>("application/json",gunzip(include_bytes!("../tests/fixtures/sources/usgs/event-tohoku.json.gz"))),
             _=>bail!("no fixture for upstream host {}",u.host_str().unwrap_or("")),
         };
         Ok(Fetched {

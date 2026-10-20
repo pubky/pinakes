@@ -172,6 +172,96 @@
     "type": "Article"
   },
   {
+    "kind": "mempool",
+    "uri": "https://mempool.space/tx/a1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d",
+    "type": "BitcoinTransaction"
+  },
+  {
+    "kind": "figshare",
+    "uri": "https://figshare.com/articles/dataset/Garden_data_set/1018700",
+    "type": "Dataset"
+  },
+  {
+    "kind": "huggingface",
+    "uri": "https://huggingface.co/datasets/openai/gsm8k",
+    "type": "Dataset"
+  },
+  {
+    "kind": "zenodo",
+    "uri": "https://zenodo.org/records/1234567",
+    "type": "ScholarlyArticle"
+  },
+  {
+    "kind": "artic",
+    "uri": "https://www.artic.edu/artworks/27992",
+    "type": "VisualArtwork"
+  },
+  {
+    "kind": "cleveland",
+    "uri": "https://www.clevelandart.org/art/1958.39",
+    "type": "VisualArtwork"
+  },
+  {
+    "kind": "met",
+    "uri": "https://www.metmuseum.org/art/collection/search/436535",
+    "type": "VisualArtwork"
+  },
+  {
+    "kind": "commons",
+    "uri": "https://commons.wikimedia.org/wiki/File:Golden_Gate_Bridge_as_seen_from_Battery_East.jpg",
+    "type": "ImageObject"
+  },
+  {
+    "kind": "internet_archive",
+    "uri": "https://archive.org/details/bitcoin-whitepaper",
+    "type": "Book"
+  },
+  {
+    "kind": "pdb",
+    "uri": "https://www.rcsb.org/structure/4HHB",
+    "type": "Dataset"
+  },
+  {
+    "kind": "pubchem",
+    "uri": "https://pubchem.ncbi.nlm.nih.gov/compound/2244",
+    "type": "MolecularEntity"
+  },
+  {
+    "kind": "uniprot",
+    "uri": "https://www.uniprot.org/uniprotkb/P69905/entry",
+    "type": "Protein"
+  },
+  {
+    "kind": "clinicaltrials",
+    "uri": "https://clinicaltrials.gov/study/NCT04368728",
+    "type": "MedicalTrial"
+  },
+  {
+    "kind": "gbif",
+    "uri": "https://www.gbif.org/species/1341976",
+    "type": "Taxon"
+  },
+  {
+    "kind": "inaturalist",
+    "uri": "https://www.inaturalist.org/observations/333069440",
+    "type": "Observation"
+  },
+  {
+    "kind": "docker_hub",
+    "uri": "https://hub.docker.com/_/nginx",
+    "type": "SoftwareApplication"
+  },
+  {
+    "kind": "ror",
+    "uri": "https://ror.org/042nb2s44",
+    "type": "EducationalOrganization"
+  },
+  {
+    "kind": "usgs",
+    "uri": "https://earthquake.usgs.gov/earthquakes/eventpage/ci38457511/executive",
+    "type": "Event"
+  },
+  {
     "kind": "web",
     "uri": "https://example.org/",
     "type": "WebPage"

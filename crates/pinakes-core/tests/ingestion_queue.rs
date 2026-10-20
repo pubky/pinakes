@@ -1191,3 +1191,37 @@ async fn our_own_rate_limit_is_its_own_class_and_no_failure(pool: PgPool) {
     assert_eq!((attempts, dead, error.as_str()), (0, false, "rate_limited"));
     assert!(delay > 58.0 && delay <= 60.0, "{delay}");
 }
+
+/// A source that answers `RetryLater` with a class other than `timeout` (a server error, a rate
+/// limit) is rescheduled and never counts toward dead letter, however often it happens.
+#[sqlx::test(migrations = "../../migrations")]
+async fn upstream_retries_never_count_toward_dead_letter(pool: PgPool) {
+    let cfg = QueueConfig {
+        timeout_grace: 1,
+        max_failures: 2,
+        backoff_secs: 30,
+        max_backoff_secs: 240,
+        ..Default::default()
+    };
+    let id = store::ensure_resource(&pool, "https://example.org/slow-upstream")
+        .await
+        .unwrap();
+    for _ in 0..6 {
+        sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+        queue::run_job(&pool, &DeferredResolver("upstream"), &cfg, &job)
+            .await
+            .unwrap();
+        let row: (i32, i32, bool, f64) = sqlx::query_as("SELECT timeout_streak,attempts,dead_letter,extract(epoch FROM next_attempt_at-now())::float8 FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!((row.0, row.1, row.2), (0, 0, false), "{row:?}");
+        assert!(row.3 <= 60.0 && row.3 > 58.0, "{row:?}");
+    }
+}

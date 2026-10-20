@@ -1,0 +1,29 @@
+{
+  "org-03yrm5c26": {
+    "bytes": 1144,
+    "content_type": "application/json",
+    "file": "org-03yrm5c26.json",
+    "recorded_at": "2026-10-19T16:24:01+00:00",
+    "sha256": "5cc45006b75a968eda42529eff296cfef299d7cac173a663d3b7076e614960ce",
+    "status": 200,
+    "url": "https://api.ror.org/v2/organizations/03yrm5c26"
+  },
+  "org-042nb2s44": {
+    "bytes": 3675,
+    "content_type": "application/json",
+    "file": "org-042nb2s44.json",
+    "recorded_at": "2026-10-19T16:24:03+00:00",
+    "sha256": "d857d83fec310fbe306869a20a82a1c8c69aa7f91c48eb8f51c5798e7f4dadb7",
+    "status": 200,
+    "url": "https://api.ror.org/v2/organizations/042nb2s44"
+  },
+  "org-missing": {
+    "bytes": 64,
+    "content_type": "application/json",
+    "file": "org-missing.json",
+    "recorded_at": "2026-10-19T16:24:06+00:00",
+    "sha256": "1e984a933ea909db01b47be6236a10d78d30dc298d234bb98b2ac42288252295",
+    "status": 404,
+    "url": "https://api.ror.org/v2/organizations/0zzzzzz02"
+  }
+}

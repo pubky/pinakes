@@ -1,0 +1,57 @@
+{
+  "occurrence-4993788366-obscured": {
+    "bytes": 7110,
+    "content_type": "application/json",
+    "file": "occurrence-4993788366-obscured.json",
+    "note": "iNaturalist observation 195404405, geoprivacy obscured",
+    "recorded_at": "2026-10-19T16:21:07+00:00",
+    "sha256": "f61fabe89fbd1797f37a72554ddd8027298b056bb4f69a6b009460a3c2b4e6f9",
+    "status": 200,
+    "url": "https://api.gbif.org/v1/occurrence/4993788366"
+  },
+  "occurrence-5938027305": {
+    "bytes": 6592,
+    "content_type": "application/json",
+    "file": "occurrence-5938027305.json",
+    "recorded_at": "2026-10-19T16:19:04+00:00",
+    "sha256": "6ef8b8abe5689f2f7970db20f9efa29b87cd2a06aff6fd4088878bca49e8667b",
+    "status": 200,
+    "url": "https://api.gbif.org/v1/occurrence/5938027305"
+  },
+  "occurrence-missing": {
+    "bytes": 27,
+    "content_type": "text/plain",
+    "file": "occurrence-missing.txt",
+    "recorded_at": "2026-10-19T16:19:08+00:00",
+    "sha256": "dee6b953279beaa8e524baaa1cf528a8ac97fffc600da97d56c2adf55d9b7fe1",
+    "status": 404,
+    "url": "https://api.gbif.org/v1/occurrence/999999999999"
+  },
+  "species-10951632-synonym": {
+    "bytes": 957,
+    "content_type": "application/json",
+    "file": "species-10951632-synonym.json",
+    "recorded_at": "2026-10-19T16:21:05+00:00",
+    "sha256": "ce6ce8f4ad8485ae9cd18a55b36bb140656712ea80d423c293c6319d62628bd2",
+    "status": 200,
+    "url": "https://api.gbif.org/v1/species/10951632"
+  },
+  "species-1341976": {
+    "bytes": 1164,
+    "content_type": "application/json",
+    "file": "species-1341976.json",
+    "recorded_at": "2026-10-19T16:19:03+00:00",
+    "sha256": "f709387853693f310750d85183349cc1cda2dd24206ae7e56b53a2edb370de0a",
+    "status": 200,
+    "url": "https://api.gbif.org/v1/species/1341976"
+  },
+  "species-missing": {
+    "bytes": 126,
+    "content_type": "application/json",
+    "file": "species-missing.json",
+    "recorded_at": "2026-10-19T16:19:06+00:00",
+    "sha256": "2d078e8e016d6fb8050523015272a0fab41cc10478d80da34228156b3ea65f58",
+    "status": 404,
+    "url": "https://api.gbif.org/v1/species/999999999"
+  }
+}

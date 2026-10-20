@@ -1,0 +1,100 @@
+{
+  "aside-cardiovascular-319": {
+    "bytes": 1291,
+    "content_type": "application/json",
+    "file": "aside-cardiovascular-319.json",
+    "note": "an item with a DOI",
+    "recorded_at": "2026-10-19T16:23:58+00:00",
+    "sha256": "10d8f7849bac5d09d18c7c71195d9ebce5ddc6c937509eb108738ac2bfe1273b",
+    "status": 200,
+    "url": "https://archive.org/metadata/aside-cardiovascular-319/metadata"
+  },
+  "bitcoin-whitepaper": {
+    "bytes": 898,
+    "content_type": "application/json",
+    "file": "bitcoin-whitepaper.json",
+    "recorded_at": "2026-10-19T16:23:46+00:00",
+    "sha256": "e588b955bd220e1ef4abedd288124bffda725e78310529e8f03f427405459ab1",
+    "status": 200,
+    "url": "https://archive.org/metadata/bitcoin-whitepaper/metadata"
+  },
+  "case-variant": {
+    "bytes": 53,
+    "content_type": "application/json",
+    "file": "case-variant.json",
+    "note": "identifiers are case-sensitive: Bitcoin-Whitepaper is not bitcoin-whitepaper",
+    "recorded_at": "2026-10-19T16:24:12+00:00",
+    "sha256": "4795d0e68c96ef619f172030333ca39459f722644d63f596c9a24ae5dc5452bb",
+    "status": 200,
+    "url": "https://archive.org/metadata/Bitcoin-Whitepaper/metadata"
+  },
+  "crimepunishment00dost_0": {
+    "bytes": 12704,
+    "content_type": "application/json",
+    "file": "crimepunishment00dost_0.json",
+    "note": "an ISBN-10 and ISBN-13 of one edition",
+    "recorded_at": "2026-10-19T16:23:49+00:00",
+    "sha256": "18f56e14da82a8dc017356ee2c1a5b01fdfa09255ca36759969ae42933430da1",
+    "status": 200,
+    "url": "https://archive.org/metadata/crimepunishment00dost_0/metadata"
+  },
+  "dark": {
+    "bytes": 132,
+    "content_type": "application/json",
+    "file": "dark.json",
+    "note": "a darked (taken down) item",
+    "recorded_at": "2026-10-19T16:24:15+00:00",
+    "sha256": "63532c0b17a21473eb5e5fe6aad7455240b4b1f49676deeeec2a9734e4a556ea",
+    "status": 200,
+    "url": "https://archive.org/metadata/afewsuggestionsastothebestwayofmakingandutilizingindianmanuscriptsburnella.c.1870_191_g/metadata"
+  },
+  "dark-full": {
+    "bytes": 329,
+    "content_type": "application/json",
+    "file": "dark-full.json",
+    "note": "a darked item, full record: is_dark and no metadata",
+    "recorded_at": "2026-10-19T16:24:19+00:00",
+    "sha256": "e8892eefe15e073771c2eb5ee6a6bd26387e6e7ea5570b11d1a959d5b8331021",
+    "status": 200,
+    "url": "https://archive.org/metadata/afewsuggestionsastothebestwayofmakingandutilizingindianmanuscriptsburnella.c.1870_191_g"
+  },
+  "goodytwoshoes00newyiala": {
+    "bytes": 2074,
+    "content_type": "application/json",
+    "file": "goodytwoshoes00newyiala.json",
+    "recorded_at": "2026-10-19T16:23:43+00:00",
+    "sha256": "4099f86309a933e7dd51832588e33f99cd4e9dd60de3993305b1621d2a6c2fd2",
+    "status": 200,
+    "url": "https://archive.org/metadata/goodytwoshoes00newyiala/metadata"
+  },
+  "introductiontoal0000unse_t3a6": {
+    "bytes": 2172,
+    "content_type": "application/json",
+    "file": "introductiontoal0000unse_t3a6.json",
+    "note": "ISBNs of two editions: no isbn key",
+    "recorded_at": "2026-10-19T16:23:54+00:00",
+    "sha256": "dc8240f422449974a72f9164a9e9a018c8df8bcd610743a3c5ed1dbcf5a9eab7",
+    "status": 200,
+    "url": "https://archive.org/metadata/introductiontoal0000unse_t3a6/metadata"
+  },
+  "missing": {
+    "bytes": 63,
+    "content_type": "application/json",
+    "file": "missing.json",
+    "note": "unknown identifier",
+    "recorded_at": "2026-10-19T16:24:04+00:00",
+    "sha256": "a337391612a9c1a41a00375a940e8cc3022d898e2d4069002f3de3788a096fc5",
+    "status": 200,
+    "url": "https://archive.org/metadata/thisdoesnotexist-pinakes-xyz/metadata"
+  },
+  "missing-full": {
+    "bytes": 2,
+    "content_type": "application/json",
+    "file": "missing-full.json",
+    "note": "unknown identifier, full record: {}",
+    "recorded_at": "2026-10-19T16:24:07+00:00",
+    "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    "status": 200,
+    "url": "https://archive.org/metadata/thisdoesnotexist-pinakes-xyz"
+  }
+}

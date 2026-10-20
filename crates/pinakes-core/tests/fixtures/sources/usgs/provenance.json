@@ -1,0 +1,38 @@
+{
+  "event-ci38457511": {
+    "bytes": 155866,
+    "content_type": "application/json",
+    "file": "event-ci38457511.json.gz",
+    "recorded_at": "2026-10-19T16:21:10+00:00",
+    "sha256": "cda32302c297eb2832410c70b9500f47613f753c7f454e2b37d7b0048b82b6f1",
+    "status": 200,
+    "url": "https://earthquake.usgs.gov/fdsnws/event/1/query?eventid=ci38457511&format=geojson"
+  },
+  "event-missing": {
+    "bytes": 250,
+    "content_type": "text/plain",
+    "file": "event-missing.txt",
+    "recorded_at": "2026-10-19T16:20:48+00:00",
+    "sha256": "6e47aaad30b0172efa55d1855963019bd3135875f3ea8b2161294ae3f1e92a58",
+    "status": 404,
+    "url": "https://earthquake.usgs.gov/fdsnws/event/1/query?eventid=us0000zzzzzz&format=geojson"
+  },
+  "event-tohoku": {
+    "bytes": 113445,
+    "content_type": "application/json",
+    "file": "event-tohoku.json.gz",
+    "recorded_at": "2026-10-19T16:21:25+00:00",
+    "sha256": "d9cf0301f748786d5ff881edba71e1b19c5b5008b3abeb893e8e88240433ba4a",
+    "status": 200,
+    "url": "https://earthquake.usgs.gov/fdsnws/event/1/query?eventid=official20110311054624120_30&format=geojson"
+  },
+  "event-tohoku-usp000hvnu": {
+    "bytes": 113445,
+    "content_type": "application/json",
+    "file": "event-tohoku-usp000hvnu.json.gz",
+    "recorded_at": "2026-10-19T16:21:45+00:00",
+    "sha256": "d9cf0301f748786d5ff881edba71e1b19c5b5008b3abeb893e8e88240433ba4a",
+    "status": 200,
+    "url": "https://earthquake.usgs.gov/fdsnws/event/1/query?eventid=usp000hvnu&format=geojson"
+  }
+}

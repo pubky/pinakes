@@ -1,0 +1,49 @@
+{
+  "artwork-135382": {
+    "bytes": 32138,
+    "content_type": "application/json",
+    "file": "artwork-135382.json",
+    "note": "the numeric id of 1958.39",
+    "recorded_at": "2026-10-19T16:21:49+00:00",
+    "sha256": "0ace9b2c1ee1bb986dfbccaad7d660b17608b8ca7f8b82638921c5fee6be5f0f",
+    "status": 200,
+    "url": "https://openaccess-api.clevelandart.org/api/artworks/135382"
+  },
+  "artwork-1958.31": {
+    "bytes": 31022,
+    "content_type": "application/json",
+    "file": "artwork-1958.31.json",
+    "recorded_at": "2026-10-19T16:19:53+00:00",
+    "sha256": "4a860bf4f07ae51522a5633995b17ef85128de45d7e13fc76fcd65c085c331b5",
+    "status": 200,
+    "url": "https://openaccess-api.clevelandart.org/api/artworks/1958.31"
+  },
+  "artwork-1958.39": {
+    "bytes": 32138,
+    "content_type": "application/json",
+    "file": "artwork-1958.39.json",
+    "recorded_at": "2026-10-19T16:19:50+00:00",
+    "sha256": "0ace9b2c1ee1bb986dfbccaad7d660b17608b8ca7f8b82638921c5fee6be5f0f",
+    "status": 200,
+    "url": "https://openaccess-api.clevelandart.org/api/artworks/1958.39"
+  },
+  "artwork-1997.246": {
+    "bytes": 8122,
+    "content_type": "application/json",
+    "file": "artwork-1997.246.json",
+    "note": "copyrighted: no image",
+    "recorded_at": "2026-10-19T16:24:03+00:00",
+    "sha256": "1a45d6c7bcf1267d53047734493ee8bbc804d11f47ee67ab2c8f565e4c8dd663",
+    "status": 200,
+    "url": "https://openaccess-api.clevelandart.org/api/artworks/1997.246"
+  },
+  "artwork-missing": {
+    "bytes": 30,
+    "content_type": "application/json",
+    "file": "artwork-missing.json",
+    "recorded_at": "2026-10-19T16:19:55+00:00",
+    "sha256": "31d8c6e1b1ea76ba6bae3790da81223e1b4db8cae281eec1699527643c701ed8",
+    "status": 404,
+    "url": "https://openaccess-api.clevelandart.org/api/artworks/1800.99999"
+  }
+}

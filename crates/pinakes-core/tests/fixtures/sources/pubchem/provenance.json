@@ -1,0 +1,67 @@
+{
+  "compound-2244": {
+    "bytes": 456,
+    "content_type": "application/json",
+    "file": "compound-2244.json",
+    "recorded_at": "2026-10-19T16:23:32+00:00",
+    "sha256": "0d2a463d79d57f5668d0466546fb381a61377a1adec5a011411384b31eeec993",
+    "status": 200,
+    "url": "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/2244/property/Title,IUPACName,MolecularFormula,MolecularWeight,InChIKey,SMILES,ConnectivitySMILES,XLogP,ExactMass/JSON"
+  },
+  "compound-2519": {
+    "bytes": 477,
+    "content_type": "application/json",
+    "file": "compound-2519.json",
+    "recorded_at": "2026-10-19T16:23:35+00:00",
+    "sha256": "9203dfb68cbbde964a80085fe072ffd5c8bdbec08d83a5754db68bf7a71ce89c",
+    "status": 200,
+    "url": "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/2519/property/Title,IUPACName,MolecularFormula,MolecularWeight,InChIKey,SMILES,ConnectivitySMILES,XLogP,ExactMass/JSON"
+  },
+  "compound-missing": {
+    "bytes": 96,
+    "content_type": "application/json",
+    "file": "compound-missing.json",
+    "note": "a CID never assigned",
+    "recorded_at": "2026-10-19T16:23:37+00:00",
+    "sha256": "1ef23b8c54e7fb8f9f1fdc9b490293631afa1474b8e6375acf897734027aa851",
+    "status": 200,
+    "url": "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/999999999/property/Title,IUPACName,MolecularFormula,MolecularWeight,InChIKey,SMILES,ConnectivitySMILES,XLogP,ExactMass/JSON"
+  },
+  "name-aspirin": {
+    "bytes": 60,
+    "content_type": "application/json",
+    "file": "name-aspirin.json",
+    "recorded_at": "2026-10-19T16:23:39+00:00",
+    "sha256": "217350bd27003581a1cc36eefabfb1c9037b1f672f0e3d6c1c819f85de05da16",
+    "status": 200,
+    "url": "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/aspirin/cids/JSON"
+  },
+  "name-glucose": {
+    "bytes": 60,
+    "content_type": "application/json",
+    "file": "name-glucose.json",
+    "recorded_at": "2026-10-19T16:23:43+00:00",
+    "sha256": "17a6de743e46a7310470e1d23c1533c5423fe8bd723c3afdb6613e882de0efab",
+    "status": 200,
+    "url": "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/glucose/cids/JSON"
+  },
+  "name-missing": {
+    "bytes": 156,
+    "content_type": "application/json",
+    "file": "name-missing.json",
+    "recorded_at": "2026-10-19T16:23:41+00:00",
+    "sha256": "fbfc1748cfbb386bfb21964a4b487153d17c908ce3bd58db1ff68f55de4dd691",
+    "status": 404,
+    "url": "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/notacompoundxyz/cids/JSON"
+  },
+  "record-missing": {
+    "bytes": 152,
+    "content_type": "application/json",
+    "file": "record-missing.json",
+    "note": "the full record of a CID never assigned: 404 with a PUG-REST Fault",
+    "recorded_at": "2026-10-19T16:24:11+00:00",
+    "sha256": "648e80caf8e3b5e2bb91988745ffa125d52619dbe299eba0e34519ae389c9a53",
+    "status": 404,
+    "url": "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/999999999/JSON"
+  }
+}

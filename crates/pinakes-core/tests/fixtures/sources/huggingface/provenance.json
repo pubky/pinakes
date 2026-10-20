@@ -1,0 +1,83 @@
+{
+  "dataset-gsm8k": {
+    "bytes": 2912,
+    "content_type": "application/json",
+    "file": "dataset-gsm8k.json",
+    "recorded_at": "2026-10-19T16:25:08+00:00",
+    "sha256": "a4cdf5f76a5cb57940754fe1904bde14da2f50bad9943f10866c3969daad19b6",
+    "status": 200,
+    "url": "https://huggingface.co/api/datasets/openai/gsm8k"
+  },
+  "dataset-gsm8k-legacy": {
+    "bytes": 61,
+    "content_type": "text/plain",
+    "file": "dataset-gsm8k-legacy.txt",
+    "location": "/api/datasets/openai/gsm8k",
+    "note": "legacy dataset id: 307 to openai/gsm8k",
+    "recorded_at": "2026-10-19T16:25:15+00:00",
+    "sha256": "1f2757fe84223d9077f2b1917b3b705a1ca3d1fa1cc27e3c0bddb70d697c6aea",
+    "status": 307,
+    "url": "https://huggingface.co/api/datasets/gsm8k"
+  },
+  "model-case-redirect": {
+    "bytes": 71,
+    "content_type": "text/plain",
+    "file": "model-case-redirect.txt",
+    "location": "/api/models/meta-llama/Llama-2-7b-hf",
+    "note": "repo ids are case-insensitive: 307 to the canonical case",
+    "recorded_at": "2026-10-19T16:25:13+00:00",
+    "sha256": "0493ee7354b5ecffcacfce7fd72e49bcf5e83c278ffa232e9c91d16759e221bd",
+    "status": 307,
+    "url": "https://huggingface.co/api/models/META-LLAMA/llama-2-7b-hf"
+  },
+  "model-gpt2": {
+    "bytes": 4957,
+    "content_type": "application/json",
+    "file": "model-gpt2.json",
+    "note": "carries the Hub's own doi: tag",
+    "recorded_at": "2026-10-19T16:25:10+00:00",
+    "sha256": "2c15908a028bf143f3329b1635e8ff1d6c30aa6f0941ea12071b58f9a1e40eac",
+    "status": 200,
+    "url": "https://huggingface.co/api/models/openai-community/gpt2"
+  },
+  "model-gpt2-legacy": {
+    "bytes": 68,
+    "content_type": "text/plain",
+    "file": "model-gpt2-legacy.txt",
+    "location": "/api/models/openai-community/gpt2",
+    "note": "legacy single-segment id: 307 to the namespaced repo",
+    "recorded_at": "2026-10-19T16:25:12+00:00",
+    "sha256": "e551606dd78c5376c4eea92dd9ff7ffb0f6d65315d85e9171068e892b3eb20fb",
+    "status": 307,
+    "url": "https://huggingface.co/api/models/gpt2"
+  },
+  "model-llama-2-7b-hf": {
+    "bytes": 17730,
+    "content_type": "application/json",
+    "file": "model-llama-2-7b-hf.json",
+    "note": "gated (manual): the API still answers",
+    "recorded_at": "2026-10-19T16:25:06+00:00",
+    "sha256": "ba167e42e15141d5ad1bc9df60e3a80d8ce1a84f148cd75721125933c344148f",
+    "status": 200,
+    "url": "https://huggingface.co/api/models/meta-llama/Llama-2-7b-hf"
+  },
+  "model-missing": {
+    "bytes": 41,
+    "content_type": "application/json",
+    "file": "model-missing.json",
+    "note": "missing or private: the Hub answers 401 to anonymous requests",
+    "recorded_at": "2026-10-19T16:25:16+00:00",
+    "sha256": "65842e3d84e6b7f62a470c85204e80b953bb8f944e9b69813130a9d7f3eaa1d8",
+    "status": 401,
+    "url": "https://huggingface.co/api/models/openai-community/no-such-repo-pinakes"
+  },
+  "space-llama-2-7b-chat": {
+    "bytes": 1423,
+    "content_type": "application/json",
+    "file": "space-llama-2-7b-chat.json",
+    "recorded_at": "2026-10-19T16:25:09+00:00",
+    "sha256": "9e3cf269721c3740982cfa71bf881d46d2df609c33e6d781e80bea89b059e913",
+    "status": 200,
+    "url": "https://huggingface.co/api/spaces/huggingface-projects/llama-2-7b-chat"
+  }
+}

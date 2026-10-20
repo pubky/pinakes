@@ -3,7 +3,10 @@
 Some services answer exactly from their own API where their page is walled, thin or has moved.
 For their links, Pinakes reads that API instead of the page. Every source here:
 
-- reads one object by an identifier taken from the link (never a search by title or name);
+- reads one object by an identifier taken from the link, never a search by title. A UniProt
+  entry name is UniProt's own identifier. A PubChem compound name gets the compound's card when
+  PubChem names exactly one compound for it, but is never an alias of it (nothing merges on a
+  name); a name with several compounds gets an ordinary web card;
 - needs no key;
 - makes every address of the same object one resource: the other addresses are
   [aliases](../api.md#aliases) of one root;
@@ -50,27 +53,46 @@ or got plain web cards before are read by their source.
 
 ## Sources
 
+- [`artic`](artic.md): Art Institute of Chicago artworks by id.
 - [`bluesky`](bluesky.md): Bluesky posts and profiles.
+- [`cleveland`](cleveland.md): Cleveland Museum of Art artworks by accession number.
+- [`clinicaltrials`](clinicaltrials.md): ClinicalTrials.gov clinical studies by NCT number.
+- [`commons`](commons.md): Wikimedia Commons files (images, video, audio) by file name.
 - [`courtlistener`](courtlistener.md): US court opinions by cluster id.
 - [`discourse`](discourse.md): Topics and posts on any Discourse forum.
+- [`docker_hub`](docker_hub.md): Docker Hub image repositories by namespace and name.
 - [`ecfr`](ecfr.md): sections and parts of the Code of Federal Regulations.
 - [`eur_lex`](eur_lex.md): EU law by CELEX number, ELI or Official Journal id.
 - [`federal_register`](federal_register.md): Federal Register documents by document number.
 - [`fedlex`](fedlex.md): Swiss federal law in the classified compilation, by ELI.
 - [`feed`](feed.md): wall hook: a walled page's card from the exact item in its site's RSS/Atom feed or news sitemap
+- [`figshare`](figshare.md): Figshare articles (datasets, figures, papers) by article id.
 - [`forgejo`](forgejo.md): repositories, branches, tags, releases and files on Forgejo and Gitea instances (Codeberg, gitea.com, others)
+- [`gbif`](gbif.md): GBIF species and occurrence records by key.
 - [`ghost`](ghost.md): page hook: a Ghost post's title, excerpt, image, dates, authors and tags from the Content API
 - [`gitlab`](gitlab.md): projects, branches, tags, releases and files on gitlab.com and other GitLab instances
 - [`gleif`](gleif.md): Legal Entity Identifier records.
 - [`govinfo`](govinfo.md): US public laws, bills, US Code sections and the Statutes at Large.
 - [`hacker_news`](hacker_news.md): Hacker News items by id (and hnsignals.com pages).
+- [`huggingface`](huggingface.md): Hugging Face models, datasets and Spaces by repo id.
+- [`inaturalist`](inaturalist.md): iNaturalist observations and taxa by id.
+- [`internet_archive`](internet_archive.md): Internet Archive items (books, films, audio, software…) by identifier.
 - [`legislation_gov_uk`](legislation_gov_uk.md): UK Acts, statutory instruments and retained EU law.
 - [`lobsters`](lobsters.md): Lobsters stories by short id.
 - [`mastodon`](mastodon.md): Mastodon posts on any server.
+- [`mempool`](mempool.md): Bitcoin blocks, transactions and addresses, and Lightning nodes and
+  channels, from mempool.space (Esplora as fallback).
+- [`met`](met.md): The Metropolitan Museum of Art's works by object id.
+- [`pdb`](pdb.md): Protein Data Bank structures by PDB id.
+- [`pubchem`](pubchem.md): PubChem compounds by compound id.
 - [`public_inbox`](public_inbox.md): mailing-list messages in public-inbox archives (gnusha.org, lore.kernel.org, others), and old bitcoin-dev pipermail addresses
+- [`ror`](ror.md): research organizations by ROR id.
 - [`sec`](sec.md): SEC EDGAR filings, their documents and companies.
 - [`stacker_news`](stacker_news.md): Stacker News posts and comments by item id.
 - [`swiss_parliament`](swiss_parliament.md): Swiss Parliament business items (Curia Vista) by affair id.
 - [`uk_parliament_bills`](uk_parliament_bills.md): UK Parliament bills and Acts by bill id.
+- [`uniprot`](uniprot.md): UniProtKB proteins by accession.
+- [`usgs`](usgs.md): USGS earthquakes and other seismic events by event id.
 - [`wordpress`](wordpress.md): page hook: a WordPress post's editorial title, excerpt, dates and featured image from its REST record
 - [`zefix`](zefix.md): Swiss companies in the commercial register, by register id.
+- [`zenodo`](zenodo.md): Zenodo records (datasets, software, papers) by record id.

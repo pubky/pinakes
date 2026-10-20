@@ -53,11 +53,21 @@ enabled = true
 enabled = true
 
 # Official-API sources, in alphabetical order (docs/sources/README.md).
+[sources.artic]
+enabled = true
 [sources.bluesky]
+enabled = true
+[sources.cleveland]
+enabled = true
+[sources.clinicaltrials]
+enabled = true
+[sources.commons]
 enabled = true
 [sources.courtlistener]
 enabled = true
 [sources.discourse]
+enabled = true
+[sources.docker_hub]
 enabled = true
 [sources.ecfr]
 enabled = true
@@ -69,7 +79,11 @@ enabled = true
 enabled = true
 [sources.feed]
 enabled = true
+[sources.figshare]
+enabled = true
 [sources.forgejo]
+enabled = true
+[sources.gbif]
 enabled = true
 [sources.ghost]
 enabled = true
@@ -81,13 +95,29 @@ enabled = true
 enabled = true
 [sources.hacker_news]
 enabled = true
+[sources.huggingface]
+enabled = true
+[sources.inaturalist]
+enabled = true
+[sources.internet_archive]
+enabled = true
 [sources.legislation_gov_uk]
 enabled = true
 [sources.lobsters]
 enabled = true
 [sources.mastodon]
 enabled = true
+[sources.mempool]
+enabled = true
+[sources.met]
+enabled = true
+[sources.pdb]
+enabled = true
+[sources.pubchem]
+enabled = true
 [sources.public_inbox]
+enabled = true
+[sources.ror]
 enabled = true
 [sources.sec]
 enabled = true
@@ -97,9 +127,15 @@ enabled = true
 enabled = true
 [sources.uk_parliament_bills]
 enabled = true
+[sources.uniprot]
+enabled = true
+[sources.usgs]
+enabled = true
 [sources.wordpress]
 enabled = true
 [sources.zefix]
+enabled = true
+[sources.zenodo]
 enabled = true
 
 [media]

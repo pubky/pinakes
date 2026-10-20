@@ -1545,6 +1545,12 @@
                     "uri": "https://api.weezevent.com/sites/view/live/E1114506.ics"
                   }
                 },
+                "resolve-artic-1": {
+                  "summary": "https://www.artic.edu/artworks/27992",
+                  "value": {
+                    "uri": "https://www.artic.edu/artworks/27992"
+                  }
+                },
                 "resolve-bitcoinops-org-feed-xml": {
                   "summary": "https://bitcoinops.org/feed.xml",
                   "value": {
@@ -1599,6 +1605,30 @@
                     "uri": "https://casa.io/"
                   }
                 },
+                "resolve-cleveland-1": {
+                  "summary": "https://www.clevelandart.org/art/1958.39",
+                  "value": {
+                    "uri": "https://www.clevelandart.org/art/1958.39"
+                  }
+                },
+                "resolve-clinicaltrials-1": {
+                  "summary": "https://clinicaltrials.gov/study/NCT04368728",
+                  "value": {
+                    "uri": "https://clinicaltrials.gov/study/NCT04368728"
+                  }
+                },
+                "resolve-commons-1": {
+                  "summary": "https://commons.wikimedia.org/wiki/File:Golden_Gate_Bridge_as_seen_from_Battery_East.jpg",
+                  "value": {
+                    "uri": "https://commons.wikimedia.org/wiki/File:Golden_Gate_Bridge_as_seen_from_Battery_East.jpg"
+                  }
+                },
+                "resolve-commons-2": {
+                  "summary": "https://commons.wikimedia.org/wiki/File:Bitcoin.svg",
+                  "value": {
+                    "uri": "https://commons.wikimedia.org/wiki/File:Bitcoin.svg"
+                  }
+                },
                 "resolve-courtlistener-1": {
                   "summary": "https://www.courtlistener.com/opinion/2812209/obergefell-v-hodges/",
                   "value": {
@@ -1621,6 +1651,24 @@
                   "summary": "https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304/2",
                   "value": {
                     "uri": "https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304/2"
+                  }
+                },
+                "resolve-docker-hub-1": {
+                  "summary": "https://hub.docker.com/_/nginx",
+                  "value": {
+                    "uri": "https://hub.docker.com/_/nginx"
+                  }
+                },
+                "resolve-docker-hub-2": {
+                  "summary": "https://hub.docker.com/r/btcpayserver/btcpayserver",
+                  "value": {
+                    "uri": "https://hub.docker.com/r/btcpayserver/btcpayserver"
+                  }
+                },
+                "resolve-docker-hub-3": {
+                  "summary": "https://hub.docker.com/r/lncm/bitcoind/tags",
+                  "value": {
+                    "uri": "https://hub.docker.com/r/lncm/bitcoind/tags"
                   }
                 },
                 "resolve-doi-org-10-1038-nature12373": {
@@ -1737,6 +1785,18 @@
                     "uri": "https://www.theblock.co/news/business/2026-10-19-mesh-visa-partner-spend-crypto-stablecoins-421058"
                   }
                 },
+                "resolve-figshare-1": {
+                  "summary": "https://figshare.com/articles/dataset/Garden_data_set/1018700",
+                  "value": {
+                    "uri": "https://figshare.com/articles/dataset/Garden_data_set/1018700"
+                  }
+                },
+                "resolve-figshare-2": {
+                  "summary": "https://figshare.com/articles/presentation/Using_APIs_to_customise_repositories_and_engage_audiences/5616445",
+                  "value": {
+                    "uri": "https://figshare.com/articles/presentation/Using_APIs_to_customise_repositories_and_engage_audiences/5616445"
+                  }
+                },
                 "resolve-fixr-co-event-halloween-2026-welcome-to-the-haunted-hotel-ti": {
                   "summary": "https://fixr.co/event/halloween-2026-welcome-to-the-haunted-hotel-tickets-404456056",
                   "value": {
@@ -1759,6 +1819,18 @@
                   "summary": "https://codeberg.org/forgejo/forgejo/releases/tag/v11.0.1",
                   "value": {
                     "uri": "https://codeberg.org/forgejo/forgejo/releases/tag/v11.0.1"
+                  }
+                },
+                "resolve-gbif-1": {
+                  "summary": "https://www.gbif.org/species/1341976",
+                  "value": {
+                    "uri": "https://www.gbif.org/species/1341976"
+                  }
+                },
+                "resolve-gbif-2": {
+                  "summary": "https://www.gbif.org/occurrence/5938027305",
+                  "value": {
+                    "uri": "https://www.gbif.org/occurrence/5938027305"
                   }
                 },
                 "resolve-ghost-1": {
@@ -1833,10 +1905,46 @@
                     "uri": "https://hnsignals.com/signal/2921983"
                   }
                 },
+                "resolve-huggingface-1": {
+                  "summary": "https://huggingface.co/meta-llama/Llama-2-7b-hf",
+                  "value": {
+                    "uri": "https://huggingface.co/meta-llama/Llama-2-7b-hf"
+                  }
+                },
+                "resolve-huggingface-2": {
+                  "summary": "https://huggingface.co/datasets/openai/gsm8k",
+                  "value": {
+                    "uri": "https://huggingface.co/datasets/openai/gsm8k"
+                  }
+                },
+                "resolve-huggingface-3": {
+                  "summary": "https://huggingface.co/spaces/huggingface-projects/llama-2-7b-chat",
+                  "value": {
+                    "uri": "https://huggingface.co/spaces/huggingface-projects/llama-2-7b-chat"
+                  }
+                },
+                "resolve-inaturalist-1": {
+                  "summary": "https://www.inaturalist.org/observations/333069440",
+                  "value": {
+                    "uri": "https://www.inaturalist.org/observations/333069440"
+                  }
+                },
+                "resolve-inaturalist-2": {
+                  "summary": "https://www.inaturalist.org/taxa/47219-Apis-mellifera",
+                  "value": {
+                    "uri": "https://www.inaturalist.org/taxa/47219-Apis-mellifera"
+                  }
+                },
                 "resolve-infomaniak-events-en-ch-conferences-seminaire-des-autorites": {
                   "summary": "https://infomaniak.events/en-ch/conferences/seminaire-des-autorites-2026/92392f2a-6711-4917-b9e9-60c88e8c550a/events/396911",
                   "value": {
                     "uri": "https://infomaniak.events/en-ch/conferences/seminaire-des-autorites-2026/92392f2a-6711-4917-b9e9-60c88e8c550a/events/396911"
+                  }
+                },
+                "resolve-internet-archive-1": {
+                  "summary": "https://archive.org/details/bitcoin-whitepaper",
+                  "value": {
+                    "uri": "https://archive.org/details/bitcoin-whitepaper"
                   }
                 },
                 "resolve-legislation-gov-uk-1": {
@@ -1873,6 +1981,30 @@
                   "summary": "https://mastodon.social/@Gargron/1",
                   "value": {
                     "uri": "https://mastodon.social/@Gargron/1"
+                  }
+                },
+                "resolve-mempool-1": {
+                  "summary": "https://mempool.space/tx/a1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d",
+                  "value": {
+                    "uri": "https://mempool.space/tx/a1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d"
+                  }
+                },
+                "resolve-mempool-2": {
+                  "summary": "https://mempool.space/block/481824",
+                  "value": {
+                    "uri": "https://mempool.space/block/481824"
+                  }
+                },
+                "resolve-mempool-3": {
+                  "summary": "https://mempool.space/lightning/node/03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f",
+                  "value": {
+                    "uri": "https://mempool.space/lightning/node/03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f"
+                  }
+                },
+                "resolve-met-1": {
+                  "summary": "https://www.metmuseum.org/art/collection/search/436535",
+                  "value": {
+                    "uri": "https://www.metmuseum.org/art/collection/search/436535"
                   }
                 },
                 "resolve-mobilizon-fr-events-86a665ae-e495-4e4f-88d4-4cffd44a82f1": {
@@ -1935,6 +2067,18 @@
                     "uri": "https://partiful.com/e/AK0FMV5lu2PmfSyxuXwY"
                   }
                 },
+                "resolve-pdb-1": {
+                  "summary": "https://www.rcsb.org/structure/4HHB",
+                  "value": {
+                    "uri": "https://www.rcsb.org/structure/4HHB"
+                  }
+                },
+                "resolve-pdb-2": {
+                  "summary": "https://www.rcsb.org/structure/6VXX",
+                  "value": {
+                    "uri": "https://www.rcsb.org/structure/6VXX"
+                  }
+                },
                 "resolve-posh-vip-e-halloween-2026-eden": {
                   "summary": "https://posh.vip/e/halloween-2026-eden",
                   "value": {
@@ -1945,6 +2089,18 @@
                   "summary": "https://pretix.eu/demo/democon/ical/",
                   "value": {
                     "uri": "https://pretix.eu/demo/democon/ical/"
+                  }
+                },
+                "resolve-pubchem-1": {
+                  "summary": "https://pubchem.ncbi.nlm.nih.gov/compound/2244",
+                  "value": {
+                    "uri": "https://pubchem.ncbi.nlm.nih.gov/compound/2244"
+                  }
+                },
+                "resolve-pubchem-2": {
+                  "summary": "https://pubchem.ncbi.nlm.nih.gov/compound/2519",
+                  "value": {
+                    "uri": "https://pubchem.ncbi.nlm.nih.gov/compound/2519"
                   }
                 },
                 "resolve-pubky-org": {
@@ -1963,6 +2119,18 @@
                   "summary": "https://lore.kernel.org/git/pull.2458.git.git.1792437798463.gitgitgadget@gmail.com/",
                   "value": {
                     "uri": "https://lore.kernel.org/git/pull.2458.git.git.1792437798463.gitgitgadget@gmail.com/"
+                  }
+                },
+                "resolve-ror-1": {
+                  "summary": "https://ror.org/03yrm5c26",
+                  "value": {
+                    "uri": "https://ror.org/03yrm5c26"
+                  }
+                },
+                "resolve-ror-2": {
+                  "summary": "https://ror.org/042nb2s44",
+                  "value": {
+                    "uri": "https://ror.org/042nb2s44"
                   }
                 },
                 "resolve-s3-eu-west-1-amazonaws-com-starticket-wwwroot-ticketing-feed": {
@@ -2029,6 +2197,30 @@
                   "summary": "https://bills.parliament.uk/bills/3737",
                   "value": {
                     "uri": "https://bills.parliament.uk/bills/3737"
+                  }
+                },
+                "resolve-uniprot-1": {
+                  "summary": "https://www.uniprot.org/uniprotkb/P69905/entry",
+                  "value": {
+                    "uri": "https://www.uniprot.org/uniprotkb/P69905/entry"
+                  }
+                },
+                "resolve-uniprot-2": {
+                  "summary": "https://www.uniprot.org/uniprotkb/P04637/entry",
+                  "value": {
+                    "uri": "https://www.uniprot.org/uniprotkb/P04637/entry"
+                  }
+                },
+                "resolve-usgs-1": {
+                  "summary": "https://earthquake.usgs.gov/earthquakes/eventpage/official20110311054624120_30",
+                  "value": {
+                    "uri": "https://earthquake.usgs.gov/earthquakes/eventpage/official20110311054624120_30"
+                  }
+                },
+                "resolve-usgs-2": {
+                  "summary": "https://earthquake.usgs.gov/earthquakes/eventpage/ci38457511/executive",
+                  "value": {
+                    "uri": "https://earthquake.usgs.gov/earthquakes/eventpage/ci38457511/executive"
                   }
                 },
                 "resolve-v4-wegow-com-es-conciertos-konzert-von-yasi-hofer-band-in-bo": {
@@ -2197,6 +2389,12 @@
                   "summary": "https://register.ld.admin.ch/zefix/company/126286",
                   "value": {
                     "uri": "https://register.ld.admin.ch/zefix/company/126286"
+                  }
+                },
+                "resolve-zenodo-1": {
+                  "summary": "https://zenodo.org/records/1234567",
+                  "value": {
+                    "uri": "https://zenodo.org/records/1234567"
                   }
                 }
               },
