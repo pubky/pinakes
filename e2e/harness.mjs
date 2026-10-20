@@ -199,7 +199,8 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
           // An alias (another spelling) reads as its root: one resource, no group needed.
           if (ids[0] === ids[1]) continue;
           const card = await json(`${pinakes}/v1/resources/${ids[0]}`);
-          if (!card.also_on.some(entry => entry.id === ids[1])) return false;
+          // Every member is in `details.also_on` (the card shows one per music service).
+          if (!card.details.also_on.some(entry => entry.id === ids[1])) return false;
           const detail = await json(`${pinakes}/v1/groups/${card.group.id}`);
           assert(!('best' in detail), 'a group has no best card');
           assert(ids.every(id => detail.members.some(member => member.id === id)), 'the group lists both members');

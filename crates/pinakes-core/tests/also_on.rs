@@ -1339,7 +1339,9 @@ async fn a_card_shows_one_link_per_service(pool: PgPool) {
         of(&card["also_on"], "Spotify"),
         ["https://open.spotify.com/track/b"]
     );
-    let details = get(&app, &format!("/v1/resources/{}", ids[0])).await;
-    assert_eq!(of(&details["also_on"], "TIDAL"), [tagged, regional]);
-    assert_eq!(of(&details["also_on"], "Spotify").len(), 2);
+    // The read shows the card's view; its details list every link.
+    let read = get(&app, &format!("/v1/resources/{}", ids[0])).await;
+    assert_eq!(of(&read["also_on"], "TIDAL"), [tagged]);
+    assert_eq!(of(&read["details"]["also_on"], "TIDAL"), [tagged, regional]);
+    assert_eq!(of(&read["details"]["also_on"], "Spotify").len(), 2);
 }

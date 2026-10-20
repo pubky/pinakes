@@ -537,8 +537,9 @@ pub struct Card {
     pub end: Option<DateTime<Utc>>,
     pub group: Option<GroupRef>,
     /// The same thing elsewhere: the other members of its group (tagged links, with their ID),
-    /// then derived links nobody tagged (`derived: true`), by service name; at most 8 on a card,
-    /// all of them on `GET /v1/resources/{id}`. A hint: every member keeps its own card.
+    /// then derived links nobody tagged (`derived: true`), by service name; one per music service
+    /// and at most 8 on a card, up to 256 on `GET /v1/resources/{id}`, whose `details.also_on`
+    /// lists every link. A hint: every member keeps its own card.
     pub also_on: Vec<AlsoOn>,
     /// OpenStreetMap cards, events placed at an OSM venue and events whose zone was derived from
     /// coordinates: the ODbL attribution to display with the card.
@@ -641,6 +642,9 @@ pub struct Details {
     /// "; ". Absent when there are none.
     #[schema(value_type = Option<Object>)]
     pub facts: Option<std::collections::BTreeMap<String, String>>,
+    /// Every link of `also_on`, all of them: each tagged member and each derived link, several of
+    /// one music service too (the card's `also_on` shows one per music service).
+    pub also_on: Vec<AlsoOn>,
     /// Other spellings of this link that resolve to it (its aliases), by URI, at most 50. A
     /// page's own claims (`url`, `@id`, `sameAs`, canonical links) are not aliases and are not
     /// listed.
@@ -835,28 +839,7 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
                 id: id.into(),
                 size: g["size"].as_i64().unwrap_or(1),
             }),
-        also_on: row["also_on"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|e| {
-                let uri = e["uri"].as_str().unwrap_or_default().to_owned();
-                let derived = e["derived"] == true;
-                AlsoOn {
-                    id: e["id"].as_str().map(str::to_owned),
-                    site: if derived {
-                        e["site"].as_str().map(str::to_owned)
-                    } else {
-                        site(&uri, e["site"].as_str(), e["host"].as_str())
-                    },
-                    uri,
-                    derived,
-                    via: e["via"].as_str().map(str::to_owned),
-                    kind: e["kind"].as_str().map(str::to_owned),
-                    at: e["at"].as_str().and_then(|s| s.parse().ok()),
-                }
-            })
-            .collect(),
+        also_on: also_on_entries(&row["also_on"]),
         attribution: credits(
             row["osm_id"]
                 .as_i64()
@@ -936,6 +919,31 @@ fn merge_facts(
     }
     (!merged.is_empty()).then_some(merged)
 }
+/// A card's `also_on` entries from the `also_on()` rows: a member's site as its card names it, a
+/// derived link's service name.
+fn also_on_entries(rows: &Value) -> Vec<AlsoOn> {
+    rows.as_array()
+        .into_iter()
+        .flatten()
+        .map(|e| {
+            let uri = e["uri"].as_str().unwrap_or_default().to_owned();
+            let derived = e["derived"] == true;
+            AlsoOn {
+                id: e["id"].as_str().map(str::to_owned),
+                site: if derived {
+                    e["site"].as_str().map(str::to_owned)
+                } else {
+                    site(&uri, e["site"].as_str(), e["host"].as_str())
+                },
+                uri,
+                derived,
+                via: e["via"].as_str().map(str::to_owned),
+                kind: e["kind"].as_str().map(str::to_owned),
+                at: e["at"].as_str().and_then(|s| s.parse().ok()),
+            }
+        })
+        .collect()
+}
 fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
     let doc: Option<ResourceMeta> = if row["doc"].get("type").is_some() {
         Some(serde_json::from_value(row["doc"].clone())?)
@@ -965,6 +973,7 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
             }),
             from: crate::sources::from(d).map(str::to_owned),
             facts: merge_facts(crate::sources::facts(d), facts.clone()),
+            also_on: also_on_entries(&row["also_on_all"]),
             aliases: aliases.clone(),
             updated_at: row["resolved_at"].as_str().and_then(|s| s.parse().ok()),
             maybe_same: same_events(row),
@@ -981,6 +990,7 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
             organizer: None,
             from: None,
             facts,
+            also_on: also_on_entries(&row["also_on_all"]),
             aliases,
             updated_at: None,
             maybe_same: None,
@@ -1535,7 +1545,7 @@ async fn read(
     config: &Config,
 ) -> Result<Option<ResourceDetail>, ApiError> {
     let value: Option<Value> =
-        sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',CASE WHEN $3 THEN same_event_hint(r.id,r.type_path,10) END,'also_on',also_on(r.id,r.id,256,$2,false),'aliases',coalesce((SELECT jsonb_agg(uri ORDER BY uri) FROM (SELECT x.uri FROM resource_alias a JOIN resource x ON x.id=a.alias_id WHERE a.root_id=r.id ORDER BY x.uri LIMIT 50) s),'[]'),'facts',(SELECT jsonb_object_agg(name,vals) FROM (SELECT name,string_agg(value,'; ' ORDER BY value) AS vals FROM resource_fact WHERE resource_id=r.id AND expires_at>now() GROUP BY name) f)) FROM resource_document r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)")
+        sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',CASE WHEN $3 THEN same_event_hint(r.id,r.type_path,10) END,'also_on',also_on(r.id,r.id,256,$2),'also_on_all',also_on(r.id,r.id,256,$2,false),'aliases',coalesce((SELECT jsonb_agg(uri ORDER BY uri) FROM (SELECT x.uri FROM resource_alias a JOIN resource x ON x.id=a.alias_id WHERE a.root_id=r.id ORDER BY x.uri LIMIT 50) s),'[]'),'facts',(SELECT jsonb_object_agg(name,vals) FROM (SELECT name,string_agg(value,'; ' ORDER BY value) AS vals FROM resource_fact WHERE resource_id=r.id AND expires_at>now() GROUP BY name) f)) FROM resource_document r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)")
             .bind(id)
             .bind(config.groups.enabled)
             .bind(same_event(config))

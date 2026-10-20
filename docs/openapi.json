@@ -57,7 +57,7 @@
         "description": "The one card every route returns for a resource, occurrence or reference event. Absent\nvalues are null, never \"\".",
         "properties": {
           "also_on": {
-            "description": "The same thing elsewhere: the other members of its group (tagged links, with their ID),\nthen derived links nobody tagged (`derived: true`), by service name; at most 8 on a card,\nall of them on `GET /v1/resources/{id}`. A hint: every member keeps its own card.",
+            "description": "The same thing elsewhere: the other members of its group (tagged links, with their ID),\nthen derived links nobody tagged (`derived: true`), by service name; one per music service\nand at most 8 on a card, up to 256 on `GET /v1/resources/{id}`, whose `details.also_on`\nlists every link. A hint: every member keeps its own card.",
             "items": {
               "$ref": "#/components/schemas/AlsoOn"
             },
@@ -433,6 +433,13 @@
               "null"
             ]
           },
+          "also_on": {
+            "description": "Every link of `also_on`, all of them: each tagged member and each derived link, several of\none music service too (the card's `also_on` shows one per music service).",
+            "items": {
+              "$ref": "#/components/schemas/AlsoOn"
+            },
+            "type": "array"
+          },
           "attendance": {
             "type": [
               "string",
@@ -520,6 +527,7 @@
           }
         },
         "required": [
+          "also_on",
           "aliases"
         ],
         "type": "object"

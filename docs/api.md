@@ -69,7 +69,7 @@ does instead of its share text: a track's `Queen · A Night At The Opera (Deluxe
 | `point` | `{lat, lon}` |
 | `start`, `end` | RFC 3339 instants for events and occurrences |
 | `group` | `{id, size}` when the resource or occurrence is in a [group](#groups), else `null` |
-| `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; at most 8 on a card, all on `GET /v1/resources/{id}`. A hint only: every member keeps its own card |
+| `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; one per music service, at most 8 on a card and 256 on `GET /v1/resources/{id}`, whose `details.also_on` lists every link. A hint only: every member keeps its own card |
 | `attribution` | Present on OSM cards, events placed at an OSM venue and events whose zone came from coordinates; display it with the card |
 | `occurrence` | Occurrence cards only: `{feed_id, feed_uri, uid, recurrence_id, status}`; `feed_uri` is the feed's URI, the link people tagged |
 | `event` | Pubky event references only: `{author, object_path, recurrence_id, start, end, status}` |
@@ -97,6 +97,7 @@ body, and answer `If-None-Match` with 304.
 | `organizer` | `{name, url}` |
 | `from` | Where the card's metadata came from when it is not the page itself: the [source](#sources) whose official API answered, e.g. `federal_register` |
 | `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …), then the facts the [also-on](#also-on) sources read for it (`isrc`, `upc`, `mbid`, `artist`, `artist_type`, `duration` in seconds); several values of one name are joined with `; `. Each source's page lists its facts. `null` when there are none. Facts never join anything |
+| `also_on` | Every link of the card's [also on](#also-on), several of one music service too (the card shows one per music service) |
 | `aliases` | Other spellings of this link that resolve to it ([aliases](#aliases)), at most 50; a page's own `url`, `@id`, `sameAs` or canonical claims are not aliases and are not listed |
 | `updated_at` | When the current metadata was accepted |
 | `maybe_same` | An event's card only: up to ten events that are [possibly the same event](#possibly-the-same-event), best first (the card's `maybe_same` is the first three) |
@@ -725,8 +726,8 @@ are ordered by service name; each URL appears once (a tagged member wins) and ne
 itself. A card carries at most 8 entries, and one link per music service (by `site`): a tagged
 member first, because someone used that link (of several, the one on the recording's original
 album, the `original_album` fact), then the derived link most group members name. Members that
-are not music always show.
-`GET /v1/resources/{id}` carries all of them. A derived link can be unavailable in some
+are not music always show. `GET /v1/resources/{id}` shows the same, up to 256 entries, and
+lists every link in `details.also_on` (several of one service too). A derived link can be unavailable in some
 countries (a regional release on a streaming service); nothing public says where, so prefer a
 tagged member.
 
