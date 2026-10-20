@@ -145,7 +145,8 @@ fail without them, and a bare `cargo test` skips that check with a message.
 - `scripts/openapi` regenerates the OpenAPI snapshots in `docs/`.
 - `scripts/lock-waits COMMAND...` runs a command while it samples the `DATABASE_URL` server
   every 50 ms, then prints how many samples saw a backend waiting on a lock and which locks
-  they waited for (write order, alias, change sequence, group, ingest, search revision, row).
+  they waited for (instance, write order, alias, change sequence, group, ingest, search
+  revision, row).
   The `write_load` test runs eight writers and an ingest (tags added and removed) against one
   database and fails if one waits on the search revision or deadlocks; `WRITE_LOAD_ROUNDS`
   (default 15) scales it.

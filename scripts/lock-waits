@@ -11,7 +11,7 @@ out=$(mktemp)
 trap 'rm -f "$out"' EXIT
 query="SELECT 'sample '||count(*) FILTER (WHERE wait_event_type='Lock') FROM pg_stat_activity WHERE pid<>pg_backend_pid();
 SELECT 'lock '||CASE
-  WHEN l.locktype='advisory' THEN CASE l.objid WHEN 73822917 THEN 'write order' WHEN 73822919 THEN 'alias' WHEN 73822918 THEN 'change sequence' WHEN 73491620 THEN 'group' WHEN 73822916 THEN 'ingest' ELSE 'advisory (adapter or parent)' END
+  WHEN l.locktype='advisory' THEN CASE l.objid WHEN 73822920 THEN 'write order' WHEN 73822917 THEN 'instance' WHEN 73822919 THEN 'alias' WHEN 73822918 THEN 'change sequence' WHEN 73491620 THEN 'group' WHEN 73822916 THEN 'ingest' ELSE 'advisory (adapter or parent)' END
   WHEN a.query LIKE '%search_revision%' OR EXISTS(SELECT 1 FROM pg_locks t WHERE t.pid=a.pid AND t.locktype='tuple' AND t.relation=to_regclass('search_revision')) THEN 'search revision'
   WHEN l.locktype IN ('transactionid','tuple') THEN 'row'
   ELSE l.locktype END

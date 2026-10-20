@@ -42,14 +42,7 @@ async fn main() -> Result<()> {
     // Build the public document now, so a malformed recipe file stops startup before workers,
     // ingestion and the listeners start.
     let _ = api::openapi_document();
-    // Host, author and IP budgets are process-local; one daemon owns this database.
-    let mut instance_lock = pool.acquire().await?;
-    let owns_database: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(73822917)")
-        .fetch_one(&mut *instance_lock)
-        .await?;
-    if !owns_database {
-        bail!("another pinakesd already owns this database");
-    }
+    let instance_lock = pinakes_core::locks::own_database(&pool).await?;
     if let Some(routes) = reextract {
         let requeued = queue::reextract(&pool, &routes).await?;
         println!("re-queued {requeued} resources");

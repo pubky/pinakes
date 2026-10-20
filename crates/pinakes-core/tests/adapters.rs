@@ -191,7 +191,8 @@ async fn a_derived_link_and_a_feed_apply_take_locks_in_one_order(pool: PgPool) {
         .unwrap();
     // A feed apply (`changes::save`): the write order shared, the parent's row, then the adapter.
     let mut apply = pool.begin().await.unwrap();
-    sqlx::query("SELECT pg_advisory_xact_lock_shared(73822917)")
+    sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
+        .bind(pinakes_core::locks::WRITE_ORDER)
         .execute(&mut *apply)
         .await
         .unwrap();

@@ -101,8 +101,11 @@ dropdb pinakes && createdb pinakes
 pinakesd --config pinakes.toml --migrate
 ```
 
-A database advisory lock allows one daemon per database. Resolver, host, author, reach-cache and
-IP budgets are process-local, and the lock keeps their guarantees.
+A database advisory lock, the instance lock, allows one daemon per database. The daemon holds it on
+a connection of its own for its whole life. Resolver, host, author, reach-cache and IP budgets are
+process-local, and the lock keeps their guarantees. Every daemon version takes the same key: while
+an older daemon runs, a newer one applies its migrations, then refuses to start. No other lock uses
+that key (`pinakes_core::locks`).
 
 **Re-extraction.** A parser or routing change reaches stored documents through one command, run
 while the daemon is stopped (it takes the instance lock):

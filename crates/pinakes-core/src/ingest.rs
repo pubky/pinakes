@@ -90,7 +90,8 @@ pub async fn apply(
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
     // Reference state is a projection of one configured Nexus; serialize rebuilds with batches.
-    sqlx::query("SELECT pg_advisory_xact_lock(73822916)")
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(crate::locks::INGEST)
         .execute(&mut *tx)
         .await?;
     let saved: Cursor =

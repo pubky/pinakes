@@ -72,7 +72,8 @@ pub fn diff(before: Option<&Value>, after: Option<&Value>) -> Option<Diff> {
 }
 async fn lock_sequence(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
     // Commit order must equal sequence order, or a cursor could skip an uncommitted lower seq.
-    sqlx::query("SELECT pg_advisory_xact_lock(73822918)")
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(crate::locks::CHANGE_SEQUENCE)
         .execute(&mut **tx)
         .await?;
     Ok(())

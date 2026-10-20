@@ -865,7 +865,8 @@ impl std::fmt::Display for SnapshotChanged {
 impl std::error::Error for SnapshotChanged {}
 async fn group_lock(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
     // This lock precedes the write-order lock and the inputs' row locks, including in curation.
-    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(73491620)")
+    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+        .bind(crate::locks::GROUP)
         .fetch_one(&mut **tx)
         .await?;
     if !acquired {
@@ -1040,7 +1041,8 @@ pub async fn curate(pool: &PgPool, id: &str, body: Curation, cfg: &GroupConfig) 
         .execute(&mut *tx)
         .await?;
     // Curation waits for the active writer within the transaction's two-second limit.
-    sqlx::query("SELECT pg_advisory_xact_lock(73491620)")
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(crate::locks::GROUP)
         .execute(&mut *tx)
         .await
         .map_err(|e| {

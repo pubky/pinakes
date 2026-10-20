@@ -439,6 +439,8 @@ async fn main() -> Result<()> {
 }
 async fn run(pool: sqlx::PgPool, f: Fixture) -> Result<()> {
     pinakes_core::migrate(&pool).await?;
+    // As `pinakesd` does: every write below runs while this connection holds the instance lock.
+    let _instance = pinakes_core::locks::own_database(&pool).await?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let base = format!("http://{address}");
@@ -549,6 +551,7 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
         web::WebResolver, Resolver,
     };
     pinakes_core::migrate(&pool).await?;
+    let _instance = pinakes_core::locks::own_database(&pool).await?;
     let mut cfg = Config::default();
     cfg.canary.enabled = false;
     // Services that need a contact (SEC EDGAR) wait without one.

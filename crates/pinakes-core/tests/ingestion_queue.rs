@@ -999,6 +999,35 @@ async fn reextract_requeues_the_selected_routes_without_validators(pool: PgPool)
     assert!(queue::reextract(&pool, &[]).await.is_err());
 }
 
+/// `pinakesd` holds the instance lock for its whole life, `reextract` included: no writer waits
+/// on it, shared or exclusive, and a second daemon is refused.
+#[sqlx::test(migrations = "../../migrations")]
+async fn writers_never_wait_on_the_instance_lock(pool: PgPool) {
+    let _instance = pinakes_core::locks::own_database(&pool).await.unwrap();
+    let refused = pinakes_core::locks::own_database(&pool).await.unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "another pinakesd already owns this database"
+    );
+    let within = Duration::from_secs(10);
+    let parent = "https://example.org/page";
+    store::ensure_resource(&pool, parent).await.unwrap();
+    // A derived link takes the write order shared, a re-extraction exclusive.
+    let child = tokio::time::timeout(
+        within,
+        store::derive_resource(&pool, parent, "https://example.org/child", "test", 10),
+    )
+    .await
+    .expect("a shared writer waited")
+    .unwrap();
+    assert!(child.is_some());
+    let requeued = tokio::time::timeout(within, queue::reextract(&pool, &["all".into()]))
+        .await
+        .expect("a re-extraction waited")
+        .unwrap();
+    assert_eq!(requeued, 2);
+}
+
 /// A page promoted to the media or activitypub route by its own card keeps that route through
 /// `reextract`, and is re-queued there; an ordinary page is re-classified.
 #[sqlx::test(migrations = "../../migrations")]

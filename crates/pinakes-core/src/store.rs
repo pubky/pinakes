@@ -398,9 +398,10 @@ pub(crate) async fn lock_writers(
     order: WriteOrder,
 ) -> Result<()> {
     sqlx::query(match order {
-        WriteOrder::Shared => "SELECT pg_advisory_xact_lock_shared(73822917)",
-        WriteOrder::Exclusive => "SELECT pg_advisory_xact_lock(73822917)",
+        WriteOrder::Shared => "SELECT pg_advisory_xact_lock_shared($1)",
+        WriteOrder::Exclusive => "SELECT pg_advisory_xact_lock($1)",
     })
+    .bind(crate::locks::WRITE_ORDER)
     .execute(&mut **tx)
     .await?;
     Ok(())

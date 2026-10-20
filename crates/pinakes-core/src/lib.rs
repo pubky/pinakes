@@ -11,6 +11,7 @@ pub mod group_keys;
 pub mod groups;
 pub mod identity;
 pub mod ingest;
+pub mod locks;
 pub mod maintenance;
 pub mod model;
 pub mod nexus;

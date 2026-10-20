@@ -122,7 +122,8 @@ pub fn source(uri: &str, root: &str) -> Option<Alias> {
 /// in an order of its own (an ingested batch, an opt-out clearing its aliases), takes this lock
 /// after the write order (`store::lock_writers`) and before its first row lock.
 pub async fn lock(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
-    sqlx::query("SELECT pg_advisory_xact_lock(73822919)")
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(crate::locks::ALIAS)
         .execute(&mut **tx)
         .await?;
     Ok(())
