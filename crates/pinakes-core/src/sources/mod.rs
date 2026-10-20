@@ -26,6 +26,7 @@ pub mod cleveland;
 pub mod clinicaltrials;
 pub mod commons;
 pub mod courtlistener;
+pub mod discogs;
 pub mod discourse;
 pub mod docker_hub;
 pub mod ecfr;
@@ -75,6 +76,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &clinicaltrials::ClinicalTrials,
     &commons::Commons,
     &courtlistener::Courtlistener,
+    &discogs::Discogs,
     &discourse::Discourse,
     &docker_hub::DockerHub,
     &ecfr::Ecfr,

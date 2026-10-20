@@ -59,6 +59,7 @@ or got plain web cards before are read by their source.
 - [`clinicaltrials`](clinicaltrials.md): ClinicalTrials.gov clinical studies by NCT number.
 - [`commons`](commons.md): Wikimedia Commons files (images, video, audio) by file name.
 - [`courtlistener`](courtlistener.md): US court opinions by cluster id.
+- [`discogs`](discogs.md): Discogs artists, masters and releases by ID.
 - [`discourse`](discourse.md): Topics and posts on any Discourse forum.
 - [`docker_hub`](docker_hub.md): Docker Hub image repositories by namespace and name.
 - [`ecfr`](ecfr.md): sections and parts of the Code of Federal Regulations.

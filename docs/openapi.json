@@ -1750,6 +1750,24 @@
                     "uri": "pubky://dir8gnjfnhdn5cpo8gxmfxfpqm9kffkoqpmsefcjkdpkxo15d5ey/pub/pinakes.e2e/none.json"
                   }
                 },
+                "resolve-discogs-1": {
+                  "summary": "https://www.discogs.com/master/21491-Radiohead-OK-Computer",
+                  "value": {
+                    "uri": "https://www.discogs.com/master/21491-Radiohead-OK-Computer"
+                  }
+                },
+                "resolve-discogs-2": {
+                  "summary": "https://www.discogs.com/release/83182-Radiohead-OK-Computer",
+                  "value": {
+                    "uri": "https://www.discogs.com/release/83182-Radiohead-OK-Computer"
+                  }
+                },
+                "resolve-discogs-3": {
+                  "summary": "https://www.discogs.com/artist/3840-Radiohead",
+                  "value": {
+                    "uri": "https://www.discogs.com/artist/3840-Radiohead"
+                  }
+                },
                 "resolve-discourse-1": {
                   "summary": "https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304",
                   "value": {

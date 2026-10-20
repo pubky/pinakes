@@ -65,6 +65,8 @@ enabled = true
 enabled = true
 [sources.courtlistener]
 enabled = true
+[sources.discogs]
+enabled = true
 [sources.discourse]
 enabled = true
 [sources.docker_hub]
