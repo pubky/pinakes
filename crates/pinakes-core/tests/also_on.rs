@@ -155,7 +155,7 @@ async fn hub_keys_join_and_derived_links_reach_the_cards(pool: PgPool) {
     let also: Vec<Value> = card["also_on"].as_array().unwrap().clone();
     assert_eq!(
         also[0],
-        json!({"id": b, "uri": deezer, "site": "www.deezer.com"}),
+        json!({"id": b, "uri": deezer, "site": "Deezer"}),
         "the tagged member first: {card}"
     );
     let derived: Vec<(&str, &str, &str)> = also[1..]
