@@ -1587,3 +1587,87 @@ async fn pruned_keys_and_facts_change_the_search_revision(pool: PgPool) {
     assert_eq!(also_on::prune(&pool).await.unwrap(), 1);
     assert!(revision().await > before);
 }
+
+/// A source that found what changes the card itself (`reread`) makes the resource due again at
+/// once; one that did not leaves its refresh where it was.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_found_title_reads_the_card_again(pool: PgPool) {
+    let named = "https://www.themoviedb.org/tv/1396";
+    let plain = "https://www.themoviedb.org/movie/603";
+    let a = page(&pool, named, "The Movie Database").await;
+    let b = page(&pool, plain, "The Matrix").await;
+    let fake = Fake::new("titles");
+    fake.answer(
+        named,
+        Ok(Found {
+            facts: vec![also_on::Fact::new("title", "Breaking Bad")],
+            reread: true,
+            ..Default::default()
+        }),
+    );
+    fake.answer(plain, Ok(Found::default()));
+    let cx = cx(Config::default());
+    let sources: Vec<Arc<dyn Source>> = vec![fake];
+    drain(&pool, &cx, &sources).await;
+    let due = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>("SELECT next_attempt_at<=now() AND priority_at IS NOT NULL FROM resource WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    assert!(due(a).await, "read again now");
+    assert!(!due(b).await, "left for its refresh");
+}
+
+/// A source that saves the resource's card while it reads it, as a resolve finishing meanwhile.
+struct SavesMeanwhile(PgPool);
+#[async_trait]
+impl Source for SavesMeanwhile {
+    fn id(&self) -> &'static str {
+        "meanwhile"
+    }
+    fn applies(&self, _: &Subject) -> bool {
+        true
+    }
+    async fn lookup(&self, _: &Context, subject: &Subject) -> anyhow::Result<Found> {
+        sqlx::query("UPDATE resource SET doc=doc||'{\"name\":\"Saved meanwhile\"}' WHERE id=$1")
+            .bind(&subject.id)
+            .execute(&self.0)
+            .await?;
+        Ok(Found::default())
+    }
+}
+
+/// A card saved while the sources read its resource is read too: the run does not push the
+/// mark the save made 30 days out.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_change_saved_during_a_run_is_read_again(pool: PgPool) {
+    let id = page(&pool, "https://example.org/meanwhile", "Pending").await;
+    let sources: Vec<Arc<dyn Source>> = vec![Arc::new(SavesMeanwhile(pool.clone()))];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    let due: bool =
+        sqlx::query_scalar("SELECT next_attempt_at<=now() FROM also_on_dirty WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(due, "the save's mark stands");
+    // A run with nothing saved meanwhile schedules the next one as before.
+    let quiet = Fake::new("quiet");
+    quiet.answer("https://example.org/quiet", Ok(Found::default()));
+    let other = page(&pool, "https://example.org/quiet", "Quiet").await;
+    let sources: Vec<Arc<dyn Source>> = vec![quiet];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    let later: bool = sqlx::query_scalar(
+        "SELECT next_attempt_at>now()+interval '1 hour' FROM also_on_dirty WHERE resource_id=$1",
+    )
+    .bind(&other)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(later);
+}

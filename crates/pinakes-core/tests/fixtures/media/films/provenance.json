@@ -1,0 +1,67 @@
+{
+  "letterboxd-imdb-missing": {
+    "bytes": 77949,
+    "content_type": "text/html",
+    "file": "letterboxd-imdb-missing.html.gz",
+    "recorded_at": "2026-10-19T20:00:12+00:00",
+    "sha256": "9e3897848285ec9f8de21cabab5fc956f75ff700bc3867c5517f06ca8b6a758c",
+    "status": 200,
+    "url": "https://letterboxd.com/imdb/tt9999999/"
+  },
+  "letterboxd-imdb-tt0111161": {
+    "bytes": 0,
+    "content_type": "",
+    "file": "letterboxd-imdb-tt0111161.html",
+    "location": "/film/the-shawshank-redemption/",
+    "recorded_at": "2026-10-19T20:00:10+00:00",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "status": 302,
+    "url": "https://letterboxd.com/imdb/tt0111161/"
+  },
+  "letterboxd-imdb-tt0903747": {
+    "bytes": 77949,
+    "content_type": "text/html",
+    "file": "letterboxd-imdb-tt0903747.html.gz",
+    "recorded_at": "2026-10-19T22:24:36+00:00",
+    "sha256": "b1644e2398a8b55e574ad3a870f23cc2dbfb178f1877fe684e6235a7f09b318f",
+    "status": 200,
+    "url": "https://letterboxd.com/imdb/tt0903747/"
+  },
+  "tvmaze-imdb-missing": {
+    "bytes": 4,
+    "content_type": "application/json",
+    "file": "tvmaze-imdb-missing.json",
+    "recorded_at": "2026-10-19T20:00:08+00:00",
+    "sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+    "status": 404,
+    "url": "https://api.tvmaze.com/lookup/shows?imdb=tt0111161"
+  },
+  "tvmaze-imdb-tt0903747": {
+    "bytes": 4,
+    "content_type": "application/json",
+    "file": "tvmaze-imdb-tt0903747.json",
+    "location": "https://api.tvmaze.com/shows/169",
+    "recorded_at": "2026-10-19T20:00:06+00:00",
+    "sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+    "status": 301,
+    "url": "https://api.tvmaze.com/lookup/shows?imdb=tt0903747"
+  },
+  "tvmaze-imdb-tt0903747-followed": {
+    "bytes": 1705,
+    "content_type": "application/json",
+    "file": "tvmaze-imdb-tt0903747-followed.json",
+    "recorded_at": "2026-10-19T20:00:07+00:00",
+    "sha256": "b4bd2b87bc61ffb7d4f82358cdca2ed221d6838b17180fbdd95c85fa9b7dca32",
+    "status": 200,
+    "url": "https://api.tvmaze.com/lookup/shows?imdb=tt0903747"
+  },
+  "tvmaze-imdb-tt9999999": {
+    "bytes": 4,
+    "content_type": "application/json",
+    "file": "tvmaze-imdb-tt9999999.json",
+    "recorded_at": "2026-10-19T22:24:24+00:00",
+    "sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+    "status": 404,
+    "url": "https://api.tvmaze.com/lookup/shows?imdb=tt9999999"
+  }
+}

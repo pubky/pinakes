@@ -374,5 +374,47 @@
     "type": "MusicAlbum",
     "site": "Deezer",
     "group_with": "dracula_tidal"
+  },
+  {
+    "kind": "tmdb_movie",
+    "uri": "https://www.themoviedb.org/movie/603",
+    "type": "Movie",
+    "name": "The Matrix"
+  },
+  {
+    "kind": "tmdb_tv",
+    "uri": "https://www.themoviedb.org/tv/1396",
+    "type": "TVSeries",
+    "name": "Breaking Bad"
+  },
+  {
+    "kind": "trakt_show",
+    "uri": "https://trakt.tv/shows/breaking-bad",
+    "type": "TVSeries",
+    "name": "Breaking Bad"
+  },
+  {
+    "kind": "netflix_title",
+    "uri": "https://www.netflix.com/title/70143836",
+    "type": "TVSeries",
+    "name": "Breaking Bad"
+  },
+  {
+    "kind": "openlibrary_work",
+    "uri": "https://openlibrary.org/works/OL27482W",
+    "type": "Book",
+    "name": "The Hobbit"
+  },
+  {
+    "kind": "goodreads_work",
+    "uri": "https://www.goodreads.com/work/editions/1540236",
+    "type": "Book",
+    "name": "The Hobbit"
+  },
+  {
+    "kind": "podcastindex_page",
+    "uri": "https://podcastindex.org/podcast/577105",
+    "type": "PodcastSeries",
+    "name": "Darknet Diaries"
   }
 ]

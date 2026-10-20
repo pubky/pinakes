@@ -99,7 +99,17 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
         // A music link is typed and named by what it is, whatever its page says.
         if (tag.site) assert.equal(d.site, tag.site, `Pinakes ${tag.kind} site`);
         if (tag.site) assert.equal(d.type, tag.type, `Pinakes ${tag.kind} type`);
-        if (tag.name) assert.equal(d.name, tag.name, `Pinakes ${tag.kind} name`);
+        // A media page is named after its object: by the page hook at once, or, when its record
+        // was slow, once the also-on title reads the card again.
+        if (tag.name) {
+          const named = await waitFor(`Pinakes ${tag.kind} name`, async () => {
+            const r = await fetch(`${pinakes}/v1/resources/by-uri?${new URLSearchParams({ uri: tag.uri })}`, { signal: AbortSignal.timeout(15000) });
+            const v = r.ok && await r.json();
+            return v && v.name === tag.name && v;
+          }, timeout, signal).catch(error => { if (signal?.aborted) throw error; return d; });
+          assert.equal(named.name, tag.name, `Pinakes ${tag.kind} name`);
+          assert.equal(named.type, tag.type, `Pinakes ${tag.kind} type`);
+        }
       }
       // The type filter matches ancestors, so a MusicEvent sample is found under type=Event.
       for (const type of new Set(tags.map(tag => tag.type))) {
@@ -212,7 +222,9 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
           const page = await json(`${pinakes}/v1/resources/${docs.get('isbn_page').id}`);
           if (!book.also_on.some(entry => entry.id === page.id)) return false;
           assert.equal(book.type, 'Book');
-          assert.notEqual(page.type, 'Book');
+          // An Open Library edition page is a book too (typed by its link), with its own card.
+          assert.equal(page.type, 'Book');
+          assert.notEqual(page.id, book.id);
         }
         const collapsed = await search({ collapse: 'group', limit: '500' });
         if (!collapsed.items.length) return false;

@@ -26,6 +26,8 @@ pub const ATTRIBUTES: &[&str] = &[
     "doi",
     "podcast_guid",
     "podcast_feed",
+    // The RSS feed a page's own head names (`rel="alternate"`), on any host.
+    "feed",
     "duration",
     "isrc",
     "artist",
@@ -547,6 +549,21 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
                     }
                 }
             }
+            let alternate = link
+                .value()
+                .attr("rel")
+                .is_some_and(|s| s.split_whitespace().any(|r| r == "alternate"));
+            if alternate
+                && !out.doc.attributes.contains_key("feed")
+                && link
+                    .value()
+                    .attr("type")
+                    .is_some_and(|t| t.trim().eq_ignore_ascii_case("application/rss+xml"))
+            {
+                if let Some(feed) = origin_url(&fetched.url, href) {
+                    out.doc.attributes.insert("feed".into(), feed);
+                }
+            }
             if out.oembed.is_none()
                 && link.value().attr("type") == Some("application/json+oembed")
                 && link
@@ -1030,6 +1047,51 @@ pub fn apply_oembed(doc: &mut ResourceMeta, v: &Value, base: &Url) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_page_names_its_feed_in_its_head() {
+        let page = |body: &str| Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            validators: Default::default(),
+            url: Url::parse("https://darknetdiaries.com/episode/180/").unwrap(),
+            status: 200,
+            retry_after_secs: 60,
+            location: None,
+            content_type: "text/html".into(),
+            body: body.as_bytes().to_vec(),
+        };
+        let feed = |body: &str| {
+            extract("https://darknetdiaries.com/episode/180/", &page(body), 3600)
+                .doc
+                .attributes
+                .get("feed")
+                .cloned()
+        };
+        // On any host; the first RSS alternate only.
+        assert_eq!(
+            feed(r#"<head><link type="application/rss+xml" rel="alternate" title="Darknet Diaries" href="https://feeds.megaphone.fm/darknetdiaries"><link rel="alternate" type="application/rss+xml" href="/comments/feed/"></head><title>180: Conti</title>"#).as_deref(),
+            Some("https://feeds.megaphone.fm/darknetdiaries")
+        );
+        assert_eq!(
+            feed(r#"<head><link rel="alternate" type="application/rss+xml" href="/feed/"></head>"#)
+                .as_deref(),
+            Some("https://darknetdiaries.com/feed/")
+        );
+        // A body link is user content; other types and relations are not feeds.
+        assert_eq!(
+            feed(
+                r#"<head><title>T</title></head><body><link rel="alternate" type="application/rss+xml" href="https://x.example/feed"></body>"#
+            ),
+            None
+        );
+        assert_eq!(
+            feed(
+                r#"<head><link rel="alternate" type="application/atom+xml" href="/atom"><link rel="stylesheet" type="application/rss+xml" href="/x"></head>"#
+            ),
+            None
+        );
+    }
+
     #[test]
     fn only_head_canonicals_and_permanent_redirects_are_alias_candidates() {
         let page = |url: &str, permanent: bool, body: &str| Fetched {

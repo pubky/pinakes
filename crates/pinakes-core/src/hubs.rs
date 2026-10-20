@@ -121,7 +121,17 @@ fn options(hub: &str) -> FetchOptions {
 async fn get(egress: &Egress, url: &str, hub: &'static str) -> Result<Option<Value>> {
     // Shared flights and a short cache: two sources asking the same thing ask once.
     let fetched = egress.discover(url, &options(hub), 3600).await?;
-    json(&fetched, hub)
+    let answer = json(&fetched, hub);
+    // A busy answer (Wikidata's `maxlag` comes with 200) is no answer to keep for an hour: the
+    // next ask fetches again.
+    if answer
+        .as_ref()
+        .err()
+        .is_some_and(|e| e.downcast_ref::<RetryLater>().is_some())
+    {
+        egress.shorten_discovery(url, &options(hub), 1).await?;
+    }
+    answer
 }
 /// Cache `body` (status 200, JSON) or a 404 as the answer to `url`, a lookup a batch covered.
 async fn seed(egress: &Egress, url: &str, hub: &str, answer: Option<&Value>) -> Result<()> {
@@ -644,6 +654,27 @@ pub mod wikidata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Wikidata's `maxlag` comes with 200: the answer is busy, and the next ask fetches again
+    /// instead of reading it from the cache for an hour.
+    #[tokio::test(start_paused = true)]
+    async fn a_busy_answer_is_asked_again() {
+        let url = wikidata::search_lookup("P4983", "1396").unwrap();
+        let (egress, recorded) = crate::sources::fixture::egress(vec![(
+            &url,
+            200,
+            "application/json",
+            br#"{"error":{"code":"maxlag","info":"Waiting for a database server"}}"#.to_vec(),
+        )]);
+        for _ in 0..2 {
+            let error = wikidata::item_with(&egress, "P4983", "1396")
+                .await
+                .unwrap_err();
+            assert!(error.downcast_ref::<RetryLater>().is_some(), "{error:#}");
+            tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        }
+        assert_eq!(recorded.asked().len(), 2);
+    }
     fn fixture(name: &str) -> Value {
         let path = format!("{}/tests/fixtures/hubs/{name}", env!("CARGO_MANIFEST_DIR"));
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()

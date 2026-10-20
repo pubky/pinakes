@@ -2098,6 +2098,54 @@
                     "uri": "https://mastodon.social/@Gargron/1"
                   }
                 },
+                "resolve-media-records-1": {
+                  "summary": "https://www.themoviedb.org/movie/603",
+                  "value": {
+                    "uri": "https://www.themoviedb.org/movie/603"
+                  }
+                },
+                "resolve-media-records-2": {
+                  "summary": "https://www.themoviedb.org/tv/1396",
+                  "value": {
+                    "uri": "https://www.themoviedb.org/tv/1396"
+                  }
+                },
+                "resolve-media-records-3": {
+                  "summary": "https://trakt.tv/shows/breaking-bad",
+                  "value": {
+                    "uri": "https://trakt.tv/shows/breaking-bad"
+                  }
+                },
+                "resolve-media-records-4": {
+                  "summary": "https://www.netflix.com/title/70143836",
+                  "value": {
+                    "uri": "https://www.netflix.com/title/70143836"
+                  }
+                },
+                "resolve-media-records-5": {
+                  "summary": "https://openlibrary.org/works/OL27482W",
+                  "value": {
+                    "uri": "https://openlibrary.org/works/OL27482W"
+                  }
+                },
+                "resolve-media-records-6": {
+                  "summary": "https://www.goodreads.com/work/editions/1540236",
+                  "value": {
+                    "uri": "https://www.goodreads.com/work/editions/1540236"
+                  }
+                },
+                "resolve-media-records-7": {
+                  "summary": "https://www.tvmaze.com/shows/169/breaking-bad",
+                  "value": {
+                    "uri": "https://www.tvmaze.com/shows/169/breaking-bad"
+                  }
+                },
+                "resolve-media-records-8": {
+                  "summary": "https://podcastindex.org/podcast/577105",
+                  "value": {
+                    "uri": "https://podcastindex.org/podcast/577105"
+                  }
+                },
                 "resolve-mempool-1": {
                   "summary": "https://mempool.space/tx/a1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d",
                   "value": {
@@ -2805,6 +2853,14 @@
                 "summary": "https://luma.com/376whqyw",
                 "value": "7f8f0e5f5b301b55a06d51df5d54281c"
               },
+              "read-podcasts-apple-com-us-podcast-the-daily-id1200361736": {
+                "summary": "https://podcasts.apple.com/us/podcast/the-daily/id1200361736",
+                "value": "448cc746b24c989629ff12bff641f5ac"
+              },
+              "read-www-imdb-com-title-tt0111161": {
+                "summary": "https://www.imdb.com/title/tt0111161/",
+                "value": "4de689cf91b85eee5e7a5b6a16d719cb"
+              },
               "read-www-openstreetmap-org-node-240109189": {
                 "summary": "https://www.openstreetmap.org/node/240109189",
                 "value": "81cefcae5a6a468cfc27ff1c1b420fce"
@@ -3089,15 +3145,23 @@
             }
           },
           {
-            "description": "Links carrying one exact identifier, on any service and in any spelling:\n`mbid:{uuid}` (a MusicBrainz recording, release, release group or artist),\n`wikidata:{Q-id}`, `isrc:{code}` or `upc:{barcode}`.",
+            "description": "Links carrying one exact identifier, on any service and in any spelling:\n`mbid:{uuid}` (a MusicBrainz recording, release, release group or artist),\n`wikidata:{Q-id}`, `isrc:{code}`, `upc:{barcode}`, `isbn:{ISBN-10 or ISBN-13}`,\n`imdb:{tt…}` (an IMDb title) or `podcast:{GUID}` (a podcast's `podcast:guid`).",
             "examples": {
               "(none)": {
                 "summary": "(none)",
                 "value": ""
               },
+              "key-304b84f0-07b0-5265-b6b7-da5cf5aeb56e": {
+                "summary": "podcast:304b84f0-07b0-5265-b6b7-da5cf5aeb56e",
+                "value": "podcast:304b84f0-07b0-5265-b6b7-da5cf5aeb56e"
+              },
               "key-634904078164": {
                 "summary": "upc:634904078164",
                 "value": "upc:634904078164"
+              },
+              "key-9780140328721": {
+                "summary": "isbn:9780140328721",
+                "value": "isbn:9780140328721"
               },
               "key-9f9cf187-d6f9-437f-9d98-d59cdbd52757": {
                 "summary": "mbid:9f9cf187-d6f9-437f-9d98-d59cdbd52757",
@@ -3110,6 +3174,10 @@
               "key-q9312": {
                 "summary": "wikidata:Q9312",
                 "value": "wikidata:Q9312"
+              },
+              "key-tt0111161": {
+                "summary": "imdb:tt0111161",
+                "value": "imdb:tt0111161"
               }
             },
             "in": "query",

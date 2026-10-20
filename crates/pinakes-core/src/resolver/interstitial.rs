@@ -114,6 +114,11 @@ pub fn inspect(requested: &Url, f: &Fetched) -> Page {
     {
         return Page::Content;
     }
+    // "Accepted" with nothing in it is a challenge (AWS WAF answers bots so), never a page; an
+    // API's empty 202 (not HTML) is its own answer.
+    if f.status == 202 && f.body.iter().all(u8::is_ascii_whitespace) {
+        return Page::Blocked;
+    }
     let text = String::from_utf8_lossy(&f.body);
     let html = Html::parse_document(&text);
     let title = html
@@ -146,6 +151,11 @@ pub fn inspect(requested: &Url, f: &Fetched) -> Page {
         .next()
         .map(|v| v.text().collect::<String>())
         .unwrap_or_default();
+    // "Accepted" with nothing to read is a challenge (AWS WAF answers bots so: a script that
+    // reloads the page), never the page.
+    if f.status == 202 && visible.trim().is_empty() {
+        return Page::Blocked;
+    }
     let challenge = matches!(f.status, 403 | 429 | 503);
     let short = visible.trim().len() < 2000;
     // Titles and headings are only evidence on short or challenge pages: a film called
@@ -243,6 +253,40 @@ mod tests {
         for s in &w.captcha_selectors {
             assert!(Selector::parse(s).is_ok(), "{s}");
         }
+    }
+    #[test]
+    fn an_empty_accepted_answer_is_a_challenge() {
+        let url = Url::parse("https://www.imdb.com/title/tt0133093/").unwrap();
+        let fetched = |status: u16, body: &[u8]| Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            url: url.clone(),
+            body: body.to_vec(),
+            content_type: "text/html".into(),
+            status,
+            location: None,
+            retry_after_secs: 60,
+            validators: Default::default(),
+        };
+        assert_eq!(inspect(&url, &fetched(202, b"")), Page::Blocked);
+        assert_eq!(inspect(&url, &fetched(202, b" \n")), Page::Blocked);
+        // AWS WAF's challenge page: scripts and a <noscript> notice, nothing to read.
+        let waf = b"<html><head><title></title><script>window.awsWafCookieDomainList = ['imdb.com'];</script><script src=\"https://x.token.awswaf.com/challenge.js\"></script></head><body><div id=\"challenge-container\"></div><noscript><h1>JavaScript is disabled</h1>In order to continue, we need to verify that you're not a robot.</noscript></body></html>";
+        assert_eq!(inspect(&url, &fetched(202, waf)), Page::Blocked);
+        assert_eq!(
+            inspect(
+                &url,
+                &fetched(
+                    202,
+                    b"<title>Queued</title><p>Your export is being prepared.</p>"
+                )
+            ),
+            Page::Content
+        );
+        assert_eq!(inspect(&url, &fetched(200, b"")), Page::Content);
+        let mut api = fetched(202, b"");
+        api.content_type = "application/json".into();
+        assert_eq!(inspect(&url, &api), Page::Content, "an API's empty 202");
     }
     #[test]
     fn refresh_parsing_survives_multi_byte_content() {

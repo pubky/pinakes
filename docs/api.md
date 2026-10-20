@@ -56,6 +56,24 @@ does instead of its share text: a track's `Queen · A Night At The Opera (Deluxe
 (artist, album, length), an album's `Tame Impala & JENNIE · 2025` (artist, year); the
 `service` source adds `artist`, `album` and `duration` (seconds) to `details.facts`.
 
+A media link is typed the same way: a TMDB, Letterboxd or Trakt movie is a `Movie`; a TMDB,
+Trakt or TVmaze series a `TVSeries`; an Open Library work or edition and a Goodreads work or book
+a `Book`; an Apple Podcasts, Podcast Index, Pocket Casts, Castro or Fountain show a
+`PodcastSeries` and its episode a `PodcastEpisode`. A Netflix title is a `Movie` or `TVSeries`
+when its Wikidata item says which, else a `CreativeWork`. A page that is a podcast episode by its
+feed ([also on](#also-on)) is a `PodcastEpisode` from its next refresh.
+
+Such a card is named after its object, not its page: where a TMDB, Trakt, Netflix, Goodreads,
+Letterboxd, Open Library, TVmaze or Podcast Index page names its site, another language's title
+or nothing, the name (and, where the page's text is not the object's, the description) comes
+from the object's exact record: the Wikidata item that carries the page's own ID, or the
+service's own record ([media records](sources/media_records.md)). That record is read while the
+page is, within a few seconds; when Wikidata is slower, the card keeps the page's name at first.
+The `titles` source then reads the same item without that limit and, when the card bears another
+name, has the link read again: its card then takes the item's label (and description where the
+page's is not the object's), usually within minutes.
+An IMDb title keeps the type its page gives (it can be either).
+
 ### Card
 
 | Field | Meaning |
@@ -308,6 +326,9 @@ GET /v1/search?key=mbid:9f9cf187-d6f9-437f-9d98-d59cdbd52757
 GET /v1/search?key=isrc:GBAYE9701376
 GET /v1/search?key=upc:634904078164
 GET /v1/search?key=wikidata:Q9312
+GET /v1/search?key=isbn:9780140328721
+GET /v1/search?key=imdb:tt0111161
+GET /v1/search?key=podcast:304b84f0-07b0-5265-b6b7-da5cf5aeb56e
 GET /v1/search?collapse=group&type=Book
 GET /v1/search?collapse=group&type=ScholarlyArticle
 GET /v1/search?bbox=8.90,45.98,9.00,46.03&cluster=12
@@ -327,6 +348,8 @@ GET /v1/resources/5bccc93f427b6fd44115fdd02618392f
 GET /v1/resources/0f3820de1c3532e8805674cc996978f9
 GET /v1/resources/fe358c60c13f6a97b50899c4240f27bf
 GET /v1/resources/586d741bd42f9a0dde1c946b58db20ae
+GET /v1/resources/448cc746b24c989629ff12bff641f5ac
+GET /v1/resources/4de689cf91b85eee5e7a5b6a16d719cb
 ```
 
 ### GET /v1/resources/by-uri
@@ -382,7 +405,7 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 | `q` | Full-text name/description search with a trigram/partial-name fallback; at most 256 bytes. A post whose author opted out of search indexing (`details.facts.opted_out`: Mastodon's `indexable: false` or `noindex`, Bluesky's `!no-unauthenticated`) never matches |
 | `type` | A schema.org type, ancestors included (`Event` matches `MusicEvent`; `Place` matches cafés and other `LocalBusiness` types) |
 | `category`, `host` | Exact filters |
-| `key` | Links carrying one exact identifier, on any service and in any spelling: `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist), `wikidata:{Q-id}`, `isrc:{code}` (any letter case, hyphens allowed) or `upc:{barcode}` (a UPC, EAN or GTIN in any of its lengths, check digit verified), as the [also-on](#also-on) sources found them as keys or facts, or as an exact lookup by that key named the link; anything else is 400 |
+| `key` | Links carrying one exact identifier, on any service and in any spelling: `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist), `wikidata:{Q-id}`, `isrc:{code}` (any letter case, hyphens allowed), `upc:{barcode}` (a UPC, EAN or GTIN in any of its lengths, check digit verified), `isbn:{ISBN-10 or ISBN-13}` (an edition), `imdb:{tt…}` (a film or series) or `podcast:{GUID}` (a show), as the [also-on](#also-on) sources found them as keys or facts, or as an exact lookup by that key named the link; anything else is 400 |
 | `tags` | Comma-separated labels; at most 5, each 1–128 bytes |
 | `match` | `any` (default) or `all` (at most 3 tags) |
 | `author` | Resources referenced by this 52-character z-base-32 public key |
@@ -796,9 +819,94 @@ its own hub. Its card lists the item's encyclopedia entries, the music services 
 IDs name, and all its Wikipedia editions (the major languages first), with the Q-id as key. Only
 the item's own claims and sitelinks count, never a search.
 
+**Books.** `books`: an ISBN (`isbn:…`, `openlibrary.org/isbn/{isbn}`), an Open Library edition
+page (`openlibrary.org/books/OL…M`) or work page (`openlibrary.org/works/OL…W`) is looked up
+exactly, never by title:
+- Open Library's edition record must list the ISBN asked. Its edition and work IDs are keys
+  (`openlibrary:edition:…`, `openlibrary:work:…`, so the editions of one work join, a hint like
+  every group), its ISBN-13s are `isbn` facts, and it links the edition, its work
+  (`kind: "work"`), its Internet Archive copy (`ocaid`), and its Goodreads edition, LibraryThing
+  work (`kind: "work"`) and Google Books pages when it holds exactly one ID for each.
+- A work page's key is `openlibrary:work:…`. Open Library's record must be that work; an ID it
+  merged into another work is followed to that work, which it then links.
+- A printed edition's 978 ISBN gives its Amazon page (`amazon.com/dp/{ISBN-10}`, `via: "isbn"`).
+- An ebook edition's ISBN gives its Apple Books page when iTunes lists exactly one ebook for it.
+  iTunes' answer carries no ISBN, so Open Library's format field ("Ebook", "Epub", …) is the
+  guard. A printed edition's ISBN is never asked: iTunes answers it with loose matches, such as
+  an edition in another language.
+- The work's Wikidata item (the one carrying its Open Library work ID) gives its Q-id as the
+  `wikidata` fact and its LibraryThing, Goodreads (the work's editions), Google Books, Project
+  Gutenberg and BookBrainz pages, each with `kind: "work"` on an edition's card. A book can
+  therefore list two Goodreads pages: its edition and its work's editions.
+- A failing iTunes or Wikidata request leaves what Open Library said.
+- Each link carries the key it was found through: the edition's pages (Amazon and Apple Books
+  too) its edition key, the work's pages its work key. A tagged Goodreads or LibraryThing link
+  therefore joins its edition or work.
+
+Goodreads' `book/isbn/{isbn}` redirect is never used: it answers an unknown ISBN with an
+unrelated book.
+
+**Podcasts.** `podcasts`: an Apple Podcasts link (`podcasts.apple.com/{cc}/podcast/{slug}/id{n}`
+in any spelling, an episode with `?i={n}`), a player link that opens a show by its Apple ID
+(`pca.st/itunes/{n}`, `castro.fm/itunes/{n}`), a Podcast Index page
+(`podcastindex.org/podcast/{feed id}`, an episode with `?episode={id}`) or a podcast feed's card
+(a `PodcastSeries`, or a `PodcastEpisode` with its item's GUID) is looked up exactly:
+- iTunes must know an Apple ID as a show. The show's key is `podcast:apple:{id}` (a player link
+  has it from its URL alone), and it links Apple Podcasts, Pocket Casts and Castro.
+- Apple is the authority for its own IDs. An Apple ID that Podcast Index names for a feed counts
+  only when iTunes' own record of that show names this feed (`feedUrl`, compared without scheme
+  and trailing slash); and an Apple show link takes Podcast Index's feed for its ID only when
+  that feed is iTunes' feed. Otherwise there is no Apple key, Apple link or Apple episode for
+  the feed, and no Podcast Index feed for the show. (The Daily is such a show: iTunes and
+  Podcast Index read different feeds of it.)
+- A show's GUID is a key, `podcast:guid:{uuid}`, only when Podcast Index vouches for it: its
+  answer for this feed URL, Apple ID or feed ID names that GUID (an Apple ID it names counts only
+  once iTunes knows it), and its feed for that GUID (`byguid`) is this same feed. A copy of a
+  show's feed carries the show's GUID too, but Podcast Index names the show's own feed for it.
+  This needs an operator's Podcast Index key ([operations](operations.md#also-on)).
+- The show's `podcast_guid` fact is the GUID its feed names (read at the card's own feed URL,
+  never through a redirect), else Podcast Index's, else the one derived from the feed's URL as
+  the podcast namespace says. A GUID nobody vouches for is never a key: a copied feed can name
+  any show's GUID, and a derived one changes with the feed's URL.
+- An episode's keys are its Apple track, `podcast:apple_episode:{id}`, and
+  `podcast:item:{show GUID}:{SHA-256 of the item GUID}` from its show's vouched GUID. An Apple
+  episode takes the item GUID from iTunes, a Podcast Index episode from Podcast Index, and a
+  page only when the feed (its feed card's, or the RSS feed its own head names, followed through
+  redirects, read up to 8 MiB) is vouched and has one item with audio or video whose `<link>` is
+  that page. Such a page is typed `PodcastEpisode` from its next refresh. A feed item finds its Apple track among the show's
+  latest 200 episodes by its GUID.
+- A Podcast Index page links the show's feed and its Apple, Pocket Casts and Castro pages.
+- The show's Wikidata item (by its Apple ID) gives its Q-id as a key and its Spotify, Podcast
+  Index, Podchaser, Pocket Casts and Castbox pages.
+- Each link carries the key it was found through: the Apple, player and Wikidata item pages the
+  Apple ID, a Podcast Index page or feed the GUID Podcast Index vouches for (else the Apple ID),
+  an episode's Apple page its track. A tagged Spotify show link therefore joins its show.
+- A link never lists its own service. A Podcast Index failure (a refused key, an outage) never
+  fails the lookup: what the other services answered still counts.
+- A Pocket Casts short link (`pca.st/{slug}`) carries no Apple ID and is not looked up.
+
+**Films and series.** `films`: an IMDb title (`imdb.com/title/tt…`), a TMDB movie or series, a
+Letterboxd film, a TVmaze show or a Netflix title is looked up exactly, never by title:
+- The IMDb title ID is the join, as the key `imdb:{tt…}`. An IMDb link names it, TVmaze's record
+  of a show names it, and a TMDB, Letterboxd or Netflix link reaches it through the one Wikidata
+  item with that link's ID.
+- The title's Wikidata item (by its IMDb ID) gives its IMDb, TMDB, Letterboxd, Trakt, Rotten
+  Tomatoes, TheTVDB, Apple TV, Netflix, MUBI, TVmaze, MyAnimeList and AniList pages, its Q-id as
+  the `wikidata` fact, and `title_type` (`Movie` or `TVSeries`) when its IDs are a movie's or a
+  series' only.
+- Letterboxd and TVmaze are asked by IMDb ID only when the item has no link there: Letterboxd's
+  `imdb/{tt}/` redirects to its film (an unknown ID answers a page, not a redirect), and
+  TVmaze's `lookup/shows?imdb=` to its show, whose record must name the same IMDb ID. TVmaze's
+  data is CC BY-SA; its links say `via: "tvmaze"`.
+- Every link of a title with an IMDb ID carries `imdb:{tt…}`, so a tagged Netflix, Trakt or
+  Letterboxd link joins the title.
+
+A title never lists its own service. A Trakt link is typed (a `Movie` or a `TVSeries`) but not
+looked up itself; it joins as one of a title's links, by the title's IMDb ID.
+
 The level is exact: a track lists tracks and videos of the recording, an album lists albums and
 YouTube's album playlists, an artist lists artist pages and channels. Album links group by
-their release group, while two editions (two MusicBrainz releases) stay apart. Apple Music links use the storefront
+their release group, while two editions (two MusicBrainz releases) stay apart. Apple Music, Apple Books and Apple Podcasts links use the storefront
 `[also_on] apple_storefront` (`us`).
 
 ## Cards and resolvers

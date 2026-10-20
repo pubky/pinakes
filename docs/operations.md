@@ -320,8 +320,9 @@ only for calendars, where they commit with the parsed snapshot.
 ## Web pages and access walls
 
 Generic web resolution reads JSON-LD, microformats, OpenGraph, oEmbed and the title, then the
-page hooks of switched-on sources (WordPress and Ghost records a page names on its own origin;
-see [docs/sources](sources/README.md)). Canonical, alternate and oEmbed links come from the
+page hooks of switched-on sources (WordPress and Ghost records a page names on its own origin, a
+media page's object by its exact record; see [docs/sources](sources/README.md)). A hook that
+fails or runs out of its three seconds leaves the page's card and logs its source at debug. Canonical, alternate and oEmbed links come from the
 document head only. Media pages use the pinned 390-provider oEmbed registry (`data/`, with
 SoundCloud, TikTok, Facebook and Instagram skipped; `scripts/oembed-providers` updates it):
 `media.oembed = "when_needed"` (default) asks path-specific providers first and broad patterns
@@ -335,15 +336,18 @@ in `pinakes_discovery_decisions_total{kind,decision}`.
 A challenge page (a bot wall, captcha or sign-in redirect) is a failed fetch: the resource turns
 `unreachable` and is retried with the normal backoff, dead-lettering after
 `limits.max_failures`, unless the site's own feed lists the exact link (the
-[`feed`](sources/feed.md) wall hook, also for plain 401 and 403 answers); then that item is the
-card. Its last accepted document, event dates and feed occurrences stay, and a wall never counts
+[`feed`](sources/feed.md) wall hook, also for plain 401 and 403 answers) or a source's wall hook
+names it (an IMDb title by its Wikidata item, [`media_records`](sources/media_records.md)); then
+that is the card. Its last accepted document, event dates and feed occurrences stay, and a wall never counts
 toward a disappearance. Fetches that hit one count as outcome `blocked` in
 `pinakes_fetch_total`.
 
 The markers are the built-in `data/interstitial-markers.json` (text markers, captcha selectors,
 wall host prefixes, sign-in paths). Visible text excludes `script`, `style`, `noscript` and
 `template`. Title, heading and captcha markers count only on short pages (under 2,000 visible
-bytes) or challenge statuses (403, 429, 503). A redirect of the requested path to a listed
+bytes) or challenge statuses (403, 429, 503). An HTML answer with status 202 that is empty or
+has no visible text is a challenge (AWS WAF answers bots so); an empty 202 of another type is
+content. A redirect of the requested path to a listed
 sign-in path (`/login`, `/authwall`, `/signin`, `/checkpoint`, …) is a wall unless the
 requested path is itself one. A meta refresh without a URL is content; a refresh slower than ten
 seconds is a hop only on a short page that does not refresh itself.
@@ -471,29 +475,50 @@ that is off by default (an unknown ID stops startup). Sources run in a fixed ord
 sees the keys the ones before it found in the same run (a barcode MusicBrainz names, then the
 services looked up by it); a source that no longer applies (its key is gone) drops its rows.
 The sources, in the order they run, are `service`, `musicbrainz`, `wikidata`, `deezer` and
-`itunes` (music), `wikipedia` and `wikidata_item`
-([the API](api.md#also-on) says what each reads); `[also_on] apple_storefront` (`us`, a two-letter country code) is the Apple Music
-storefront of the Apple links they build. `[also_on.sources.musicbrainz] base_url`
+`itunes` (music), `wikipedia`, `wikidata_item`, `books`, `films`, `podcasts` and `titles`
+([the API](api.md#also-on) says what each reads); `[also_on] apple_storefront` (`us`, a
+two-letter country code) is the Apple Music, Apple Books and Apple Podcasts storefront of the
+Apple links they build. `[also_on.sources.musicbrainz] base_url`
 (`https://musicbrainz.org/ws/2`) points the `musicbrainz` source at a MusicBrainz mirror's web
 service instead, an http(s) URL without a trailing slash and reached through the egress policy;
 every instance on one public address shares MusicBrainz's 1 request/s, which a mirror does not
 limit. The worker takes up to 100 due resources at a time and asks MusicBrainz about their links'
-URLs together (50 to a request; MusicBrainz echoes each URL, and an answer applies only to the
-URL it names) and Wikidata for their item links' items together (10 to a request). Each music
-link then costs one MusicBrainz request for its entity (up to four when the URL names several
-releases; one more for a track found by its ISRC, and one for a track's original album), up to
-two iTunes lookups for an album with barcodes, and two Wikidata requests (a search by its
-service ID cannot batch); each Wikipedia article one request to its Wikipedia and one to
-Wikidata. `deezer` is off by default: Deezer's API terms allow non-commercial use
-only, so turn it on (`[also_on.sources.deezer] enabled = true`) only where they do; it costs one
-request per Deezer link and up to two per other track or album with an ISRC or barcode.
+URLs together (50 to a request; MusicBrainz echoes each URL, and an answer applies only to the URL
+it names) and Wikidata for their item links' items together (10 to a request). Each music link then
+costs one MusicBrainz request for its entity (up to four when the URL names several releases; one
+more for a track found by its ISRC, and one for a track's original album), up to two iTunes lookups
+for an album with barcodes, and two Wikidata requests (a search by its service ID cannot batch);
+each Wikipedia article one request to its Wikipedia and one to Wikidata; each book one Open Library
+request, one iTunes lookup for an ebook edition, and two Wikidata requests when Open Library names
+its work; each podcast show one iTunes lookup, two or three Podcast Index requests (the last asks
+who owns the show's GUID), its feed (usually still cached from its card) and two Wikidata requests;
+each episode up to three Podcast Index requests, two iTunes lookups and, for an episode's page, its
+feed; each page whose head names an RSS feed that feed (cached for an hour, read up to 8 MiB), and
+Podcast Index only when one item of it with audio or video is that page; each film or series two
+Wikidata requests (a TVmaze show first its TVmaze record), and a Letterboxd and a TVmaze request
+when the item has no link there; each TMDB, Trakt, Netflix, Goodreads, Letterboxd or IMDb page
+(`titles`) the item's search and read (usually cached already) and one request for its English
+label. `deezer` is off by default: Deezer's API terms allow
+non-commercial use only, so turn it on
+(`[also_on.sources.deezer] enabled = true`) only where they do; it costs one request per Deezer
+link and up to two per other track or album with an ISRC or barcode.
+
+Podcast Index is asked only with a key and secret: `[podcast_index] key` and `secret`, or
+`PINAKES__PODCAST_INDEX__KEY` and `PINAKES__PODCAST_INDEX__SECRET` (free from
+api.podcastindex.org). Without them a show joins through its Apple ID only: no GUID is a key, a
+feed gets no Apple ID, a Podcast Index page has nothing to read, and episodes join only by their
+Apple track. The key and secret never appear in logs, the operator info or errors. A refused key
+or a Podcast Index outage fails no lookup: the source keeps what the other services answered,
+and asks again later only when nothing at all was found. Such failures of a secondary service
+(Podcast Index, iTunes, Wikidata, the feed) are counted in
+`pinakes_also_on_service_errors_total{service,class}`.
 
 Sources reach their services through the egress policy and its per-host budgets, one request
 at a time per host. A hub's published limit lowers its host's default pace like a source's own
 (`limits.host_rates` names a host's rate outright): MusicBrainz 1 request/s, Deezer 10/s,
 Wikimedia (`www.wikidata.org`, `*.wikipedia.org`, `commons.wikimedia.org`) 200/min, Open
-Library 3/s, iTunes about 20/min, crates.io 1/s, Crossref 10/s, Software Heritage 120/h; a
-limit above `limits.host_requests_per_second` (1/s) leaves the default.
+Library 3/s, iTunes about 20/min, TVmaze 20 per 10 s, crates.io 1/s, Crossref 10/s, Software Heritage
+120/h; a limit above `limits.host_requests_per_second` (1/s) leaves the default.
 
 ## Groups
 

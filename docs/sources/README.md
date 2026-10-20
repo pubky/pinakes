@@ -13,7 +13,7 @@ For their links, Pinakes reads that API instead of the page. Every source here:
 - records itself on the card: `details.from` names the source and `details.facts` holds the
   fields its API names for the object, by name (lists joined with `; `).
 
-A few sources are page hooks instead (WordPress, Ghost): they claim no links. The web route
+A few sources are page hooks instead (WordPress, Ghost, media records): they claim no links. The web route
 fetches the page as usual, and when the page names its own record on its service (a header or
 head tag on the page's own origin), the source reads that record and improves the page's card,
 within the web fetch's deadline and at most 3 seconds. The card then names the source in
@@ -80,6 +80,7 @@ or got plain web cards before are read by their source.
 - [`legislation_gov_uk`](legislation_gov_uk.md): UK Acts, statutory instruments and retained EU law.
 - [`lobsters`](lobsters.md): Lobsters stories by short id.
 - [`mastodon`](mastodon.md): Mastodon posts on any server.
+- [`media_records`](media_records.md): page and wall hook: a film's, series', book's or podcast's page named after its object, from its exact record (Wikidata by the page's ID, Open Library, TVmaze, iTunes)
 - [`mempool`](mempool.md): Bitcoin blocks, transactions and addresses, and Lightning nodes and
   channels, from mempool.space (Esplora as fallback).
 - [`met`](met.md): The Metropolitan Museum of Art's works by object id.

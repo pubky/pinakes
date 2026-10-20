@@ -86,7 +86,7 @@ impl Fixture {
             {"kind":"doi_page","uri":"https://publisher.example/articles/pinakes","type":"CreativeWork","group_with":"doi"},
             {"kind":"isbn","uri":"isbn:9780140328721","type":"Book"},
             {"kind":"isbn_twin","uri":"isbn:0140328726","type":"Book","group_with":"isbn"},
-            {"kind":"isbn_page","uri":"https://openlibrary.org/books/OL7353617M","type":"CreativeWork","group_with":"isbn"},
+            {"kind":"isbn_page","uri":"https://openlibrary.org/books/OL7353617M","type":"Book","group_with":"isbn"},
             {"kind":"media","uri":"https://www.youtube.com/watch?v=fixture","type":"VideoObject"},
             {"kind":"web","uri":"https://web.example/e2e","type":"WebPage"},
             {"kind":"federal_register","uri":"fr:2026-18291","type":"Legislation"},

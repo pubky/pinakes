@@ -92,7 +92,8 @@ refuse requests without it; links to them (SEC EDGAR) wait until it is set. An a
 github is refused, since some services block such User-Agents.
 
 [`.env.example`](.env.example) lists every variable this version reads for secrets (the database
-URL with its password, the admin token, the platform keys) with fake values. Copy it to `.env`,
+URL with its password, the admin token, the platform keys, the Podcast Index key and secret)
+with fake values. Copy it to `.env`,
 fill in what you use and load it:
 
 - a shell: `set -a; . ./.env; set +a`, then start `pinakesd`;
@@ -139,7 +140,9 @@ fail without them, and a bare `cargo test` skips that check with a message.
 - `scripts/demo-lookup [--base URL] [--file e2e/samples.lookup.json]` previews a curated list of
   public URIs through `POST /v1/resolve` against any running daemon, prints kind, URI, type,
   site, status and group, and exits 1 when one fails, stays pending or misses its expected type
-  (an ancestor matches) or status. It is read-only and paced under the preview budget.
+  (an ancestor matches) or status. An entry's `derived` lists services its also-on links must
+  reach (read until they appear or the timeout passes). It is read-only and paced under the
+  preview budget.
 - `scripts/verify-osm-boundary [out.sql]` checks a resolved database keeps OSM-derived facts
   only in `osm_place`, and can export that table.
 - `scripts/openapi` regenerates the OpenAPI snapshots in `docs/`.

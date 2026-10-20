@@ -304,6 +304,27 @@ async fn guarded_finish_job(
     job: &Job,
     result: Result<crate::model::ResourceMeta>,
 ) -> Result<()> {
+    // An unchanged page is its accepted document, typed again like a new one (what the also-on
+    // sources found since may name or type it).
+    let result = match result {
+        Err(error) if error.is::<crate::resolver::NotModified>() => {
+            let value: Option<serde_json::Value> =
+                sqlx::query_scalar("SELECT doc FROM resource_document WHERE id=$1")
+                    .bind(&job.id)
+                    .fetch_optional(pool)
+                    .await?;
+            value
+                .ok_or_else(|| anyhow::anyhow!("304 without an accepted document"))
+                .and_then(|v| {
+                    serde_json::from_value::<crate::model::ResourceMeta>(v).map_err(Into::into)
+                })
+                .map(|mut doc| {
+                    doc.fetched_at = chrono::Utc::now().timestamp_millis();
+                    doc
+                })
+        }
+        other => other,
+    };
     // Every finished job, single or batched: a music link's card is typed and named by what it
     // is, whatever its page said.
     let result = match result {
@@ -314,6 +335,19 @@ async fn guarded_finish_job(
                 .fetch_optional(pool)
                 .await?;
             crate::music::type_card(&job.uri, artist_type.as_deref(), &mut doc);
+            Ok(doc)
+        }
+        other => other,
+    };
+    // So is a book, podcast or film link, by what the media sources found (an episode, a title's
+    // type).
+    let result = match result {
+        Ok(mut doc) => {
+            let hints = crate::also_on::media::type_hints(pool, std::slice::from_ref(&job.id))
+                .await?
+                .remove(&job.id)
+                .unwrap_or_default();
+            crate::also_on::media::type_card(&job.uri, &hints, &mut doc);
             Ok(doc)
         }
         other => other,
@@ -350,25 +384,6 @@ async fn finish_job(
         &slow_cfg
     } else {
         cfg
-    };
-    let result = match result {
-        Err(error) if error.is::<crate::resolver::NotModified>() => {
-            let value: Option<serde_json::Value> =
-                sqlx::query_scalar("SELECT doc FROM resource_document WHERE id=$1")
-                    .bind(&job.id)
-                    .fetch_optional(pool)
-                    .await?;
-            value
-                .ok_or_else(|| anyhow::anyhow!("304 without an accepted document"))
-                .and_then(|v| {
-                    serde_json::from_value::<crate::model::ResourceMeta>(v).map_err(Into::into)
-                })
-                .map(|mut doc| {
-                    doc.fetched_at = chrono::Utc::now().timestamp_millis();
-                    doc
-                })
-        }
-        other => other,
     };
     let result = async {
         let mut doc = result?;

@@ -871,6 +871,8 @@ pub const PUBLISHED_RATES: &[(&str, f64)] = &[
     ("api.deezer.com", 10.0),
     // iTunes Search and Lookup: about 20 requests/min.
     ("itunes.apple.com", 20.0 / 60.0),
+    // TVmaze: at least 20 calls every 10 seconds per IP.
+    ("api.tvmaze.com", 2.0),
     // crates.io: 1 request/s.
     ("crates.io", 1.0),
     // Crossref: 10 requests/s on the polite pool.

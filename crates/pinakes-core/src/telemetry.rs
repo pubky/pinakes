@@ -100,6 +100,7 @@ impl Metrics {
             "API requests (public or admin listener) whose handler panicked (answered 500)",
         )?;
         registry.register(Box::new(api_panics.clone()))?;
+        registry.register(Box::new(ALSO_ON_SERVICE_ERRORS.clone()))?;
         let out = Self {
             api_panics,
             ingest_rejected: metric!(
@@ -280,6 +281,26 @@ fn sync_counter(counter: &IntCounter, value: i64) {
 pub struct Observation {
     pub outcome: &'static str,
     pub seconds: f64,
+}
+/// Requests to a service an also-on source asks besides its own (Podcast Index, iTunes, Wikidata,
+/// …) that failed, by service and error class: the lookup went on without them. No URL or
+/// credential is a label.
+static ALSO_ON_SERVICE_ERRORS: std::sync::LazyLock<IntCounterVec> = std::sync::LazyLock::new(
+    || {
+        IntCounterVec::new(
+        Opts::new(
+            "pinakes_also_on_service_errors_total",
+            "Failed also-on requests to a secondary service, by service and class (the lookup went on)",
+        ),
+        &["service", "class"],
+    )
+    .expect("static metric")
+    },
+);
+pub fn also_on_service_error(service: &'static str, class: &'static str) {
+    ALSO_ON_SERVICE_ERRORS
+        .with_label_values(&[service, class])
+        .inc();
 }
 tokio::task_local! {static FETCHES: Arc<Mutex<Vec<Observation>>>; static DISCOVERY: IntCounterVec;}
 pub fn discovery(kind: &'static str, decision: &'static str) {
