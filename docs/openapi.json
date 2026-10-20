@@ -3163,7 +3163,7 @@
             }
           },
           {
-            "description": "Links carrying one exact identifier, on any service and in any spelling:\n`mbid:{uuid}` (a MusicBrainz recording, release, release group or artist, or the MBID a\nMusicBrainz page was merged from),\n`wikidata:{Q-id}`, `isrc:{code}`, `upc:{barcode}`, `isbn:{ISBN-10 or ISBN-13}`,\n`imdb:{tt…}` (an IMDb title), `podcast:{GUID}` (a podcast's `podcast:guid`),\n`osm:{type}/{id}`, `doi:{DOI}`, `arxiv:{id}`, `pmid:{n}`, `pmcid:PMC{n}`, `crate:{name}`,\n`npm:{name}`, `pypi:{name}`, `repo:{host}/{path}`, `steam:{appid}`, `gog:{id}` or\n`fr:{document number}`.",
+            "description": "Links carrying one exact identifier, on any service and in any spelling:\n`mbid:{uuid}` (a MusicBrainz recording, release, release group or artist, or the MBID a\nMusicBrainz page was merged from),\n`wikidata:{Q-id}`, `isrc:{code}`, `upc:{barcode}`, `isbn:{ISBN-10 or ISBN-13}`,\n`imdb:{tt…}` (an IMDb title), `podcast:{GUID}` (a podcast's `podcast:guid`),\n`osm:{type}/{id}`, `doi:{DOI}`, `arxiv:{id}`, `pmid:{n}`, `pmcid:PMC{n}`, `crate:{name}`,\n`npm:{name}`, `pypi:{name}`, `repo:{host}/{path}`, `steam:{appid}`, `gog:{id}`,\n`fr:{document number}` or `discogs:{artist|master|release}:{id}`.",
             "examples": {
               "(none)": {
                 "summary": "(none)",

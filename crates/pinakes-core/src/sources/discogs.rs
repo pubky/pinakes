@@ -1,6 +1,7 @@
 //! Discogs artists, masters (an album across its editions) and releases (one edition), read from
 //! its API (`api.discogs.com`): its web pages answer bots with a wall. No key: 25 requests a
-//! minute. Images need a token, so cards have none.
+//! minute. An optional personal token (`[also_on.sources.discogs] token`) adds images to the
+//! cards; it never reaches a log or an error.
 use super::{text, web_url, Budget, Context, Example, Source};
 use crate::{
     model::ResourceMeta,
@@ -12,6 +13,7 @@ use crate::{
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
+use std::sync::RwLock;
 
 pub struct Discogs;
 
@@ -78,6 +80,30 @@ pub fn of_uri(uri: &str) -> Option<(Kind, u64)> {
 /// The one address of a Discogs object.
 pub fn root(kind: Kind, id: u64) -> String {
     format!("https://www.discogs.com/{}/{id}", kind.as_str())
+}
+
+/// The kind and ID of a music link on Discogs.
+pub fn of_link(link: &crate::music::Link) -> Option<(Kind, u64)> {
+    (link.service == crate::music::Service::Discogs)
+        .then(|| of_uri(&link.canonical))
+        .flatten()
+}
+
+/// The personal token the daemon started with (`configure`).
+static TOKEN: RwLock<Option<crate::event::adapters::SecretKey>> = RwLock::new(None);
+
+/// Record `[also_on.sources.discogs] token` for the card route.
+pub fn configure(config: &crate::config::Config) {
+    *TOKEN.write().unwrap_or_else(|e| e.into_inner()) = token(config);
+}
+/// The configured token, if any.
+pub fn token(config: &crate::config::Config) -> Option<crate::event::adapters::SecretKey> {
+    config
+        .also_on
+        .sources
+        .get("discogs")
+        .and_then(|s| s.token.clone())
+        .filter(|t| !t.is_empty())
 }
 
 /// Discogs' record of one object, `None` when it has none. The answer is shared for an hour,
@@ -275,9 +301,10 @@ impl Source for Discogs {
     }
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let (kind, id) = of_uri(uri).ok_or_else(|| anyhow::anyhow!("not a Discogs link"))?;
-        let record = record(cx.egress, kind, id, None).await?;
+        let token = TOKEN.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let record = record(cx.egress, kind, id, token.as_deref()).await?;
         Ok(record
-            .and_then(|v| card(cx.card(uri, self), kind, &v, false))
+            .and_then(|v| card(cx.card(uri, self), kind, &v, token.is_some()))
             .unwrap_or_else(|| cx.missing(uri, self)))
     }
 }
@@ -310,6 +337,10 @@ mod tests {
             ),
         ] {
             assert_eq!(Discogs.alias_root(uri).as_deref(), Some(root), "{uri}");
+            assert_eq!(
+                crate::music::parse(uri).map(|l| l.canonical).as_deref(),
+                Some(root)
+            );
         }
         assert_eq!(
             Discogs.alias_root("https://www.discogs.com/artist/3840"),
@@ -326,6 +357,12 @@ mod tests {
         ] {
             assert!(!Discogs.reads(uri), "{uri}");
         }
+        let link = crate::music::parse("https://www.discogs.com/master/21491").unwrap();
+        assert_eq!(
+            (link.level, link.id.as_str()),
+            (crate::music::Level::Album, "master/21491")
+        );
+        assert_eq!(of_link(&link), Some((Kind::Master, 21491)));
     }
 
     #[test]

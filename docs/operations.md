@@ -488,7 +488,7 @@ that is off by default (an unknown ID stops startup). Sources run in a fixed ord
 sees the keys the ones before it found in the same run (a barcode MusicBrainz names, then the
 services looked up by it); a source that no longer applies (its key is gone) drops its rows.
 The sources, in the order they run, are `service`, `tidal`, `musicbrainz`, `musicbrainz_entity`,
-`wikidata`, `deezer` and `itunes` (music), `wikipedia`, `wikidata_item`, `books`, `films`, `podcasts` and `titles`,
+`wikidata`, `discogs`, `deezer` and `itunes` (music), `wikipedia`, `wikidata_item`, `books`, `films`, `podcasts` and `titles`,
 `osm_wikidata`, `wikidata_osm` and `btcmap` (places), `unpaywall`, `ncbi`, `datacite` and
 `huggingface` (papers), `crates`, `npm`, `pypi` and `software_heritage` (software), `steam` and
 `wikidata_stores` (games and apps), `wayback` (archived copies) and `federal_register`
@@ -522,7 +522,8 @@ when the item has no link there; each TMDB, Trakt, Netflix, Goodreads, Letterbox
 label; each DOI one request each to Unpaywall, the NCBI ID Converter and DataCite; each package
 one or two registry requests (and deps.dev when the registry names no provenance); each Steam game
 up to four (ProtonDB, PCGamingWiki, GOG GamesDB, GOG); each store link two Wikidata requests; each
-gone page one Wayback CDX request. Requests that several sources make (an item, a record) are
+gone page one Wayback CDX request; each Discogs release one Discogs request (the one its card
+makes). Requests that several sources make (an item, a record) are
 shared through the discovery cache. `btcmap` keeps BTC Map's place list in memory, brought up to
 date at most hourly from its sync (`updated_since`, 2,000 places a page); after a restart the
 first lookup reads it again. `unpaywall` and `ncbi` need the contact setting (`[http] contact`)

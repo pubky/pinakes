@@ -135,6 +135,11 @@ pub fn search_key(namespace: &str, value: &str) -> Option<String> {
             "fr",
             &crate::sources::federal_register::document_number(value)?,
         ),
+        "discogs" => {
+            let (kind, id) = value.split_once(':')?;
+            (matches!(kind, "artist" | "master" | "release") && digits(id))
+                .then(|| Key::new("discogs", value))?
+        }
         _ => return None,
     };
     Some(key.0)
@@ -263,6 +268,7 @@ mod tests {
             ),
             ("steam", "620", "steam:620"),
             ("fr", "2026-18291", "fr:2026-18291"),
+            ("discogs", "master:21491", "discogs:master:21491"),
         ] {
             assert_eq!(
                 search_key(namespace, value).as_deref(),
@@ -277,6 +283,8 @@ mod tests {
             ("steam", "x"),
             ("isbn", "1"),
             ("repo", "example.org/a/b"),
+            ("discogs", "label:1"),
+            ("discogs", "release:083182"),
         ] {
             assert_eq!(search_key(namespace, value), None, "{namespace}:{value}");
         }

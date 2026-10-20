@@ -20,6 +20,8 @@ pub enum Service {
     SoundCloud,
     AmazonMusic,
     Bandcamp,
+    /// The Discogs database (`sources::discogs`): an artist, a master or a release.
+    Discogs,
 }
 impl Service {
     /// The service's name as a card shows it.
@@ -34,6 +36,7 @@ impl Service {
             Self::SoundCloud => "SoundCloud",
             Self::AmazonMusic => "Amazon Music",
             Self::Bandcamp => "Bandcamp",
+            Self::Discogs => "Discogs",
         }
     }
     /// Whether the ISRC its own track page states (JSON-LD `isrcCode`) is a key: only a service
@@ -54,6 +57,7 @@ impl Service {
             Self::SoundCloud => "soundcloud",
             Self::AmazonMusic => "amazon_music",
             Self::Bandcamp => "bandcamp",
+            Self::Discogs => "discogs",
         }
     }
 }
@@ -153,6 +157,19 @@ pub fn parse(uri: &str) -> Option<Link> {
             .map(|(_, v)| v.into_owned())
     };
     match host {
+        "discogs.com" => {
+            let (kind, id) = crate::sources::discogs::of_uri(uri)?;
+            let level = match kind {
+                crate::sources::discogs::Kind::Artist => Level::Artist,
+                _ => Level::Album,
+            };
+            link(
+                Service::Discogs,
+                level,
+                &format!("{}/{id}", kind.as_str()),
+                crate::sources::discogs::root(kind, id),
+            )
+        }
         "open.spotify.com" | "play.spotify.com" => {
             // `intl-xx` and the old `user/{name}/playlist/{id}` forms.
             let s: Vec<&str> = segments

@@ -407,7 +407,7 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 | `q` | Full-text name/description search with a trigram/partial-name fallback; at most 256 bytes. A post whose author opted out of search indexing (`details.facts.opted_out`: Mastodon's `indexable: false` or `noindex`, Bluesky's `!no-unauthenticated`) never matches |
 | `type` | A schema.org type, ancestors included (`Event` matches `MusicEvent`; `Place` matches cafés and other `LocalBusiness` types) |
 | `category`, `host` | Exact filters |
-| `key` | Links carrying one exact identifier, on any service and in any spelling: `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist), `wikidata:{Q-id}`, `isrc:{code}` (any letter case, hyphens allowed), `upc:{barcode}` (a UPC, EAN or GTIN in any of its lengths, check digit verified), `isbn:{ISBN-10 or ISBN-13}` (an edition), `imdb:{tt…}` (a film or series), `podcast:{GUID}` (a show), `osm:{node|way|relation}/{id}`, `doi:{DOI}`, `arxiv:{id}`, `pmid:{n}`, `pmcid:PMC{n}`, `crate:{name}`, `npm:{name}`, `pypi:{name}` (each normalized as its registry does), `repo:{github.com|gitlab.com}/{path}`, `steam:{appid}`, `gog:{id}` or `fr:{document number}`, as the [also-on](#also-on) sources found them as keys or facts (`mbid:` also the MBID a MusicBrainz page was merged from, its `mbid_was` fact), or as an exact lookup by that key named the link; anything else is 400 |
+| `key` | Links carrying one exact identifier, on any service and in any spelling: `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist), `wikidata:{Q-id}`, `isrc:{code}` (any letter case, hyphens allowed), `upc:{barcode}` (a UPC, EAN or GTIN in any of its lengths, check digit verified), `isbn:{ISBN-10 or ISBN-13}` (an edition), `imdb:{tt…}` (a film or series), `podcast:{GUID}` (a show), `osm:{node|way|relation}/{id}`, `doi:{DOI}`, `arxiv:{id}`, `pmid:{n}`, `pmcid:PMC{n}`, `crate:{name}`, `npm:{name}`, `pypi:{name}` (each normalized as its registry does), `repo:{github.com|gitlab.com}/{path}`, `steam:{appid}`, `gog:{id}`, `fr:{document number}` or `discogs:{artist|master|release}:{id}`, as the [also-on](#also-on) sources found them as keys or facts (`mbid:` also the MBID a MusicBrainz page was merged from, its `mbid_was` fact), or as an exact lookup by that key named the link; anything else is 400 |
 | `tags` | Comma-separated labels; at most 5, each 1–128 bytes |
 | `match` | `any` (default) or `all` (at most 3 tags) |
 | `author` | Resources referenced by this 52-character z-base-32 public key |
@@ -531,7 +531,9 @@ root, and a read, lookup, change query or occurrence read of the alias answers w
   pages → `https://open.qobuz.com/{kind}/{id}`; SoundCloud (`m.`, any letter case, parameters) →
   `https://soundcloud.com/{user}/{track}`; Amazon Music (`albums/{id}?trackAsin=` naming that
   track; Amazon's own hosts only, `music.amazon.com`, `.co.uk`, `.de`, `.fr`, `.it`, `.es`, `.ca`,
-  `.com.au`, `.co.jp`, `.in`, `.com.br`, `.com.mx`) → `https://music.amazon.{tld}/{kind}/{id}`; Bandcamp without parameters. Short links
+  `.com.au`, `.co.jp`, `.in`, `.com.br`, `.com.mx`) → `https://music.amazon.{tld}/{kind}/{id}`;
+  Bandcamp without parameters; Discogs (the name after the ID, a language path, no `www`) →
+  `https://www.discogs.com/{kind}/{id}`. Short links
   that need a request to expand (`spotify.link`, `deezer.page.link`, `on.soundcloud.com`) are not
   folded.
 - **Wikipedia articles**: the mobile host, `index.php?title=…` (a revision with `oldid` too),
@@ -809,6 +811,9 @@ from a known music service's own record of its own object; another host's claim 
   `original_album` (the earliest official album that is no compilation, live or remix album),
   and an artist's `artist_type` (`Person`, `Group`, …). ISRCs are stored in upper case and barcodes as
   GTIN-13 (a 12-digit UPC gains a leading zero), by every source.
+  Discogs pages are taken at their level only: a Discogs master is a release group, a Discogs
+  release one release and never its release group (an edition is not the album), a Discogs
+  artist an artist.
 - `deezer` (off unless the operator turns it on: Deezer's API terms allow non-commercial use
   only): a Deezer track's or album's own ISRC or barcode from Deezer's API as a key, and for
   another service's track or album with an ISRC or barcode key, the one Deezer track or album
@@ -816,11 +821,15 @@ from a known music service's own record of its own object; another host's claim 
 - `itunes`: for an album with a barcode key, the Apple Music album iTunes' `lookup?upc=` names
   when exactly one album answers, keyed by that barcode (so a tagged link to that album joins).
 - `wikidata`: the one item carrying the link's own service ID (Spotify, Apple Music, Deezer,
-  TIDAL, Qobuz, YouTube, SoundCloud, Amazon Music, Bandcamp), read back and compared exactly
-  (two items are ambiguous and give nothing); its other music-service IDs as links and its Q-id
-  and MusicBrainz ID as keys. A track takes only an item that is one recording (one MusicBrainz
+  TIDAL, Qobuz, YouTube, SoundCloud, Amazon Music, Bandcamp, Discogs), read back and compared
+  exactly (two items are ambiguous and give nothing); its other music-service IDs as links and
+  its Q-id and MusicBrainz ID as keys. An album item lists its Discogs master; a Discogs release
+  ID names an item only when the item is not an album's (no master, no release group). A track takes only an item that is one recording (one MusicBrainz
   recording ID, no work ID): a song item is a work that its studio, live and remastered
   recordings share, so a track takes neither its Q-id nor its tracks.
+- `discogs`: a Discogs artist, master or release gets `discogs:{kind}:{id}` as key, and a release
+  its barcodes as `upc:` keys and facts, from the record its [card](sources/discogs.md) reads
+  (shared). Never by title or catalogue number.
 
 **Wikipedia.** An article's card comes from its Wikipedia's REST summary (`Article`, the title,
 the first paragraph up to 600 characters, the thumbnail, `site` `Wikipedia ({lang})`), so a long

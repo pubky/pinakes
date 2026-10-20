@@ -91,6 +91,8 @@ pub struct SourceOptions {
     pub enabled: Option<bool>,
     /// The web service a hub source asks (`musicbrainz` only: a mirror's `…/ws/2`).
     pub base_url: Option<String>,
+    /// A service's personal token (`discogs` only); never shown or logged.
+    pub token: Option<crate::event::adapters::SecretKey>,
 }
 
 /// One resource as a source sees it.
@@ -242,6 +244,8 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         Arc::new(crate::music_sources::MusicBrainzSource),
         Arc::new(crate::music_sources::MusicBrainzEntitySource),
         Arc::new(crate::music_sources::WikidataSource),
+        // Before the barcode lookups: a Discogs release's barcodes are keys.
+        Arc::new(crate::lookups::sources::Discogs),
         Arc::new(crate::music_sources::DeezerSource),
         Arc::new(crate::music_sources::ItunesSource),
         Arc::new(crate::wikipedia::WikipediaSource),

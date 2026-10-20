@@ -29,6 +29,7 @@ async fn main() -> Result<()> {
     };
     let config = Config::load(config.as_deref())?;
     pinakes_core::sources::configure(&config.sources);
+    pinakes_core::sources::discogs::configure(&config);
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(20)
         .connect(&config.database_url)

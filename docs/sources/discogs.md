@@ -2,8 +2,10 @@
 
 Artists, masters and releases in the Discogs music database, read from its API
 (`api.discogs.com`): Discogs answers requests for its web pages with a bot wall. No key; 25
-requests a minute, the pace Pinakes keeps. Discogs' images need authentication, so the cards
-have none. Release data is CC0.
+requests a minute, the pace Pinakes keeps. Discogs' images need authentication: with a personal
+access token (`[also_on.sources.discogs] token`, or `PINAKES__ALSO_ON__SOURCES__DISCOGS__TOKEN`)
+the cards show them. The token is sent only to `api.discogs.com` and never appears in logs or
+errors. Release data is CC0.
 
 ## Links
 
@@ -18,14 +20,16 @@ read.
 ## What it reads
 
 `GET https://api.discogs.com/{artists,masters,releases}/{id}` (2 to 50 KB). An ID Discogs does not
-have is `missing`.
+have is `missing`. The answer is shared for an hour with the also-on lookup of the same link.
 
 ## Card
 
 An artist is a `MusicGroup` named without Discogs' number for namesakes (`Radiohead (2)` →
-`Radiohead`). A master or release is a `MusicAlbum` named by its title. A master is described
-by its artist credit and year (`Radiohead · 1997`), a release also by its format and country
-(`Radiohead · CD, Album, Stereo · Europe · 1997`).
+`Radiohead`); a `Person` when MusicBrainz says the artist is one. A master or release is a
+`MusicAlbum` named by its title. A master is described by its artist credit and year
+(`Radiohead · 1997`), a release also by its format and country
+(`Radiohead · CD, Album, Stereo · Europe · 1997`). The image is Discogs' primary image, only with
+a token.
 
 | Fact | Meaning |
 | --- | --- |
@@ -34,6 +38,22 @@ by its artist credit and year (`Radiohead · 1997`), a release also by its forma
 | `format`, `country` | A release's format and its descriptions; where it was released |
 | `upc` | A release's barcodes, as 13 digits with a verified check digit |
 | `master` | A release's master |
+
+## Also on
+
+A Discogs link joins other services' pages exactly, never by title or catalogue number:
+
+- MusicBrainz names Discogs pages in its URL relations, at one level each: an artist's
+  artist, a release group's master, a release's release. A master joins its release group, a
+  release its one release (never the release group: an edition is not the album), an artist the
+  artist.
+- Wikidata's Discogs artist ID (P1953) and master ID (P1954) name the item of an artist or
+  album; a release ID (P2206) names an item only when it is not an album's (it has no master and
+  no MusicBrainz release group).
+- A release's own barcodes are `upc:` keys.
+
+Pages of other services list the Discogs artist, master or release that MusicBrainz or Wikidata
+names for them at their level.
 
 ## Examples
 

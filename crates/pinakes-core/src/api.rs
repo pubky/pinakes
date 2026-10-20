@@ -441,8 +441,8 @@ pub struct SearchQuery {
     /// `wikidata:{Q-id}`, `isrc:{code}`, `upc:{barcode}`, `isbn:{ISBN-10 or ISBN-13}`,
     /// `imdb:{tt…}` (an IMDb title), `podcast:{GUID}` (a podcast's `podcast:guid`),
     /// `osm:{type}/{id}`, `doi:{DOI}`, `arxiv:{id}`, `pmid:{n}`, `pmcid:PMC{n}`, `crate:{name}`,
-    /// `npm:{name}`, `pypi:{name}`, `repo:{host}/{path}`, `steam:{appid}`, `gog:{id}` or
-    /// `fr:{document number}`.
+    /// `npm:{name}`, `pypi:{name}`, `repo:{host}/{path}`, `steam:{appid}`, `gog:{id}`,
+    /// `fr:{document number}` or `discogs:{artist|master|release}:{id}`.
     pub key: Option<String>,
     pub tags: Option<String>,
     #[serde(rename = "match")]
@@ -1151,7 +1151,7 @@ pub(crate) struct KeyFilter {
 }
 pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
     let bad = || {
-        ApiError::bad("key is mbid:{uuid}, wikidata:{Q-id}, isrc:{ISRC}, upc:{UPC, EAN or GTIN with its check digit}, isbn:{ISBN-10 or ISBN-13}, imdb:{tt and 7–8 digits}, podcast:{GUID}, osm:{type}/{id}, doi:{DOI}, arxiv:{id}, pmid:{n}, pmcid:PMC{n}, crate:{name}, npm:{name}, pypi:{name}, repo:{github.com|gitlab.com}/{path}, steam:{appid}, gog:{id} or fr:{document number}")
+        ApiError::bad("key is mbid:{uuid}, wikidata:{Q-id}, isrc:{ISRC}, upc:{UPC, EAN or GTIN with its check digit}, isbn:{ISBN-10 or ISBN-13}, imdb:{tt and 7–8 digits}, podcast:{GUID}, osm:{type}/{id}, doi:{DOI}, arxiv:{id}, pmid:{n}, pmcid:PMC{n}, crate:{name}, npm:{name}, pypi:{name}, repo:{github.com|gitlab.com}/{path}, steam:{appid}, gog:{id}, fr:{document number} or discogs:{artist|master|release}:{id}")
     };
     let (kind, value) = key.split_once(':').ok_or_else(bad)?;
     let keys = |keys: Vec<String>| KeyFilter { keys, fact: None };

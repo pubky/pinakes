@@ -46,6 +46,14 @@ fn mb_url(resource: &str) -> (u16, Vec<u8>) {
         "https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE" => {
             (200, fixture("mb-url-spotify-album.json"))
         }
+        "https://www.discogs.com/master/21491" => {
+            (200, fixture("mb-url-discogs-master-21491.json"))
+        }
+        "https://www.discogs.com/artist/3840" => (200, fixture("mb-url-discogs-artist-3840.json")),
+        "https://www.discogs.com/release/83182" => {
+            (200, fixture("mb-url-discogs-release-83182.json"))
+        }
+        "https://tidal.com/artist/64518" => (200, fixture("mb-url-tidal-artist-64518.json")),
         "https://tidal.com/track/567396540" => (200, fixture("mb-url-tidal-567396540.json")),
         // Dracula: two releases ("Dracula", "Dracula (remix)") of one release group.
         "https://tidal.com/album/495402659" => (200, fixture("mb-url-tidal-495402659.json")),
@@ -134,6 +142,21 @@ impl Transport for Recorded {
             }
             "/ws/2/release/30702389-5c67-4438-9ea0-2351c8de0f1d" => {
                 (200, fixture("mb-release.json"))
+            }
+            "/ws/2/release-group/b1392450-e666-3926-a536-22c65f834433" => {
+                (200, fixture("mb-release-group-b1392450.json"))
+            }
+            "/ws/2/release/425d8db9-88a3-31e2-bd23-b1a967626dd5" => {
+                (200, fixture("mb-release-425d8db9.json"))
+            }
+            // Discogs' API (`/{kind}s/{id}`), recorded for the Discogs source.
+            path if url.host_str() == Some("api.discogs.com") => {
+                let (kind, id) = path.trim_start_matches('/').split_once("s/").unwrap();
+                let file = format!(
+                    "{}/tests/fixtures/sources/discogs/{kind}-{id}.json",
+                    env!("CARGO_MANIFEST_DIR")
+                );
+                (200, std::fs::read(file).unwrap())
             }
             "/ws/2/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69" => {
                 (200, fixture("mb-recording-b1a9c0e9.json"))
@@ -1517,4 +1540,123 @@ async fn musicbrainz_s_own_barcode_never_re_finds_its_release(pool: sqlx::PgPool
     .await
     .unwrap();
     assert!(keys.is_empty(), "{keys:?}");
+}
+
+/// Discogs joins exactly and at its level: master 21491 is OK Computer's release group (so it
+/// joins the Spotify album), artist 3840 is Radiohead (as is the TIDAL artist page), and release
+/// 83182 is one edition: its own release and barcode, never the release group.
+#[sqlx::test(migrations = "../../migrations")]
+async fn discogs_joins_at_its_level(pool: sqlx::PgPool) {
+    let links = [
+        (
+            "https://www.discogs.com/master/21491-Radiohead-OK-Computer",
+            "MusicAlbum",
+        ),
+        (
+            "https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE",
+            "MusicAlbum",
+        ),
+        (
+            "https://www.discogs.com/artist/3840-Radiohead",
+            "MusicGroup",
+        ),
+        ("https://tidal.com/artist/64518", "MusicGroup"),
+        ("https://www.discogs.com/release/83182", "MusicAlbum"),
+    ];
+    let mut ids = vec![];
+    for (uri, kind) in links {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "discogs", 86400);
+        d.set_type(kind);
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        // A slugged spelling is an alias of the canonical link.
+        let root: Option<String> =
+            sqlx::query_scalar("SELECT root_id FROM resource_alias WHERE alias_id=$1")
+                .bind(&id)
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        ids.push(root.unwrap_or(id));
+    }
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let cx = also_on::Context {
+        egress: egress(t.clone()),
+        config: Arc::new(Config::default()),
+    };
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let rows = |sql: &'static str, id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(sql)
+                .bind(id)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let keys = "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key";
+    assert_eq!(
+        rows(keys, ids[0].clone()).await,
+        [
+            "discogs:master:21491 discogs",
+            "mb:release-group:b1392450-e666-3926-a536-22c65f834433 musicbrainz"
+        ]
+    );
+    assert_eq!(
+        rows(keys, ids[2].clone()).await,
+        [
+            "discogs:artist:3840 discogs",
+            "mb:artist:a74b1b7f-71a5-4011-9441-d0b5e4122711 musicbrainz"
+        ]
+    );
+    assert_eq!(
+        rows(keys, ids[4].clone()).await,
+        [
+            "discogs:release:83182 discogs",
+            "mb:release:425d8db9-88a3-31e2-bd23-b1a967626dd5 musicbrainz",
+            // MusicBrainz names the barcode first; Discogs' own record agrees.
+            "upc:0724385522925 musicbrainz"
+        ]
+    );
+    let group = "SELECT coalesce(group_id,'-') FROM group_unit WHERE resource_id=$1";
+    let album = rows(group, ids[0].clone()).await;
+    assert_ne!(album, ["-"]);
+    assert_eq!(rows(group, ids[1].clone()).await, album);
+    let artist = rows(group, ids[2].clone()).await;
+    assert_ne!(artist, ["-"]);
+    assert_eq!(rows(group, ids[3].clone()).await, artist);
+    assert_ne!(
+        rows(group, ids[4].clone()).await,
+        album,
+        "an edition is not the album"
+    );
+    // The Spotify album's MusicBrainz release names its own Discogs release (release ↔ release),
+    // the TIDAL artist's MusicBrainz artist the Discogs artist.
+    let derived = "SELECT uri FROM derived_link WHERE resource_id=$1 AND uri LIKE '%discogs%'";
+    assert_eq!(
+        rows(derived, ids[1].clone()).await,
+        ["https://www.discogs.com/release/11993641"]
+    );
+    assert_eq!(
+        rows(derived, ids[3].clone()).await,
+        ["https://www.discogs.com/artist/3840"]
+    );
+    // A master and an artist need no request to Discogs; the release one.
+    let asked: Vec<String> = t.seen.lock().unwrap().clone();
+    let discogs: Vec<&String> = asked
+        .iter()
+        .filter(|a| a.starts_with("api.discogs.com/"))
+        .collect();
+    assert_eq!(discogs, ["api.discogs.com/releases/83182?"]);
 }

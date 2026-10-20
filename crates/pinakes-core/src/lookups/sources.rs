@@ -6,6 +6,7 @@ use crate::{
     also_on::{self, Context, Source, Subject},
     hubs,
     resolver::{egress::FetchOptions, RetryLater},
+    sources::discogs,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -873,6 +874,42 @@ impl Source for Wayback {
     }
 }
 
+/// A Discogs link's own ID as the key `discogs:{kind}:{id}`, and a release's barcodes from its
+/// record (the card's request, shared) as `upc:` keys and facts.
+pub struct Discogs;
+#[async_trait]
+impl Source for Discogs {
+    fn id(&self) -> &'static str {
+        "discogs"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        discogs::of_uri(&subject.uri).is_some()
+    }
+    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<also_on::Found> {
+        let Some((kind, id)) = discogs::of_uri(&subject.uri) else {
+            return Ok(also_on::Found::default());
+        };
+        let key = |key: String| also_on::Key {
+            key,
+            via: "discogs".into(),
+        };
+        let mut found = also_on::Found {
+            keys: vec![key(format!("discogs:{}:{id}", kind.as_str()))],
+            ..Default::default()
+        };
+        if kind == discogs::Kind::Release {
+            let token = discogs::token(&cx.config);
+            if let Some(v) = discogs::record(&cx.egress, kind, id, token.as_deref()).await? {
+                for upc in discogs::barcodes(&v).into_iter().take(4) {
+                    found.keys.push(key(format!("upc:{upc}")));
+                    found.facts.push(also_on::Fact::new("upc", upc));
+                }
+            }
+        }
+        Ok(found)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1438,5 +1475,33 @@ mod tests {
             None
         );
         assert_eq!(wikidata_item("https://www.wikidata.org/wiki/Q090"), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn discogs_keys_its_id_and_a_releases_barcodes() {
+        let release = crate::sources::fixture::read("discogs", "release-83182.json");
+        let cx = context(vec![(
+            "https://api.discogs.com/releases/83182",
+            200,
+            JSON,
+            release,
+        )]);
+        let keys = |found: also_on::Found| -> Vec<String> {
+            found.keys.into_iter().map(|k| k.key).collect()
+        };
+        let mut s = subject("https://www.discogs.com/release/83182", None);
+        assert!(Discogs.applies(&s));
+        assert_eq!(
+            keys(Discogs.lookup(&cx, &s).await.unwrap()),
+            ["discogs:release:83182", "upc:0724385522925"]
+        );
+        // A master's or artist's key needs no request.
+        s.uri = "https://www.discogs.com/master/21491".into();
+        assert_eq!(
+            keys(Discogs.lookup(&cx, &s).await.unwrap()),
+            ["discogs:master:21491"]
+        );
+        s.uri = "https://www.discogs.com/label/1".into();
+        assert!(!Discogs.applies(&s));
     }
 }

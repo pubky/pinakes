@@ -747,20 +747,27 @@ impl Config {
             bail!("unknown also_on source {unknown}");
         }
         for (id, options) in &self.also_on.sources {
-            let Some(base) = &options.base_url else {
-                continue;
-            };
-            let parsed = url::Url::parse(base).ok().filter(|u| {
-                matches!(u.scheme(), "http" | "https")
-                    && u.host_str().is_some()
-                    && u.username().is_empty()
-                    && u.password().is_none()
-                    && u.query().is_none()
-                    && u.fragment().is_none()
-                    && !base.ends_with('/')
-            });
-            if id != "musicbrainz" || parsed.is_none() {
-                bail!("also_on.sources.{id}.base_url must be an http(s) URL without a trailing slash, and only musicbrainz takes one");
+            if let Some(base) = &options.base_url {
+                let parsed = url::Url::parse(base).ok().filter(|u| {
+                    matches!(u.scheme(), "http" | "https")
+                        && u.host_str().is_some()
+                        && u.username().is_empty()
+                        && u.password().is_none()
+                        && u.query().is_none()
+                        && u.fragment().is_none()
+                        && !base.ends_with('/')
+                });
+                if id != "musicbrainz" || parsed.is_none() {
+                    bail!("also_on.sources.{id}.base_url must be an http(s) URL without a trailing slash, and only musicbrainz takes one");
+                }
+            }
+            if let Some(token) = options.token.as_deref().filter(|t| !t.is_empty()) {
+                if id != "discogs"
+                    || token.len() > 256
+                    || !token.bytes().all(|b| b.is_ascii_graphic())
+                {
+                    bail!("also_on.sources.{id}.token must be at most 256 printable characters, and only discogs takes one");
+                }
             }
         }
         let a = &self.also_on;
