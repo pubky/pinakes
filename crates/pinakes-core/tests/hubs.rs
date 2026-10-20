@@ -670,7 +670,7 @@ async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
 
 /// The owner's Bohemian Rhapsody on TIDAL: a TIDAL track page states its own ISRC, a key. One
 /// MusicBrainz does not relate by URL joins the one recording its ISRC is on; an ISRC nobody else
-/// knows keeps its key and stays alone.
+/// knows keeps its key and stays alone; one MusicBrainz gives to two recordings is no key.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
     let tracks = [
@@ -846,11 +846,14 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
         seen.iter().any(|s| s.contains("/ws/2/isrc/GBUM71029604")),
         "{seen:?}"
     );
-    // The seed's own URL relation answers; its ambiguous ISRC is never asked.
+    // The seed's ISRC is on two recordings: not its key (its own URL relation joins it).
     assert!(
-        !seen.iter().any(|s| s.contains("/ws/2/isrc/GBCEE0100112")),
+        seen.iter().any(|s| s.contains("/ws/2/isrc/GBCEE0100112")),
         "{seen:?}"
     );
+    assert!(!rows(keys, ids[0].clone())
+        .await
+        .contains(&"isrc:GBCEE0100112 service tidal".to_owned()));
 }
 
 /// With Deezer's API on: a Deezer album's own barcode is a key, iTunes names the one Apple album

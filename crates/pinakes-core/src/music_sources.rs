@@ -79,13 +79,18 @@ impl Source for ServiceSource {
     fn applies(&self, subject: &Subject) -> bool {
         music::parse(&subject.uri).is_some()
     }
-    async fn lookup(&self, _: &Context, subject: &Subject) -> Result<Found> {
+    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
         let Some(link) = music::parse(&subject.uri) else {
             return Ok(Found::default());
         };
         let mut found = Found::default();
         if let Some((service, isrc)) = page_isrc(subject) {
-            if service.vouches_isrc() {
+            // An ISRC MusicBrainz gives to several recordings names none of them.
+            let shared = service.vouches_isrc()
+                && musicbrainz::isrc(&cx.egress, cx.config.also_on.musicbrainz_base(), &isrc)
+                    .await?
+                    .is_some_and(|recordings| recordings.len() > 1);
+            if service.vouches_isrc() && !shared {
                 found.keys.push(Key {
                     key: format!("isrc:{isrc}"),
                     via: service.token().into(),
