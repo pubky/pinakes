@@ -185,7 +185,7 @@ cross_container_occurrences = "off" # Or "corroborated": the cross-feed ICS UID 
 # "Also on": the same thing on other services, from hubs and exact lookups (docs/api.md).
 [also_on]
 enabled = true
-derive_links = true # Off: keys only (links still group), no derived links on cards.
+derive_links = true # Off: keys and facts only; no derived links on cards, nor joins by them.
 # [also_on.sources.<id>]
 # enabled = false # Turn one source off.
 

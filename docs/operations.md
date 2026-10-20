@@ -456,7 +456,9 @@ once, and a failed run keeps the previous rows and retries after `limits.also_on
 expired ones (a deleted key regroups its resource). A source keeps at most
 `limits.also_on_links_per_source` (32) links, `limits.also_on_keys_per_source` (16) keys and
 `limits.also_on_facts_per_source` (32) facts per resource. `[also_on] enabled = false` stops the
-worker; `derive_links = false` keeps keys and facts only;
+worker; stored keys keep grouping and stored links stay on cards until they expire (up to twice
+the sources' lifetimes). `derive_links = false` keeps keys and facts only: no derived links on
+cards, so a tagged link an exact derivation names no longer joins by it either;
 `[also_on.sources.<id>] enabled = false` turns one source off and `enabled = true` turns on one
 that is off by default (an unknown ID stops startup). Sources run in a fixed order, and each
 sees the keys the ones before it found in the same run (a barcode MusicBrainz names, then the

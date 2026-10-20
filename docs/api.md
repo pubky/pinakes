@@ -636,10 +636,12 @@ one thing, only on evidence that cannot be spoofed:
 - **An exact key a source vouches for** ([Also on](#also-on)): two links a hub names as the same
   recording, release or Wikidata item, by its own identifier (`mb:recording:{mbid}`,
   `wikidata:Q…`), or a known music service's own record of its own object (the ISRC on a TIDAL
-  track page). Any other page's claims are never such a key. A group holds at most one
-  MusicBrainz recording, release, release group and artist, one Wikidata item and one Discogs
-  artist, master and release: a join that would bring a second (a wrong ID on a hub) is refused,
-  so one bad claim never chains two groups. ISRCs and barcodes may be several.
+  track page). Any other page's claims are never such a key. A group holds at most one value of
+  each single-object namespace: MusicBrainz recording, release, release group and artist
+  (`mb:…`), Wikidata item (`wikidata`), Discogs artist, master and release (`discogs:…`), IMDb
+  title (`imdb`), Open Library edition and work (`openlibrary:…`), podcast GUID and Apple podcast
+  ID (`podcast:guid`, `podcast:apple`): a join that would bring a second (a wrong ID on a hub) is
+  refused, so one bad claim never chains two groups. ISRCs and barcodes may be several.
 - **Curation** on the admin listener.
 
 `sameAs`, canonical and other URL claims, and other identifiers, never group. Two located
@@ -724,11 +726,12 @@ A card's `also_on` says where else the same thing is: first the other members of
 `derived: true`, the service's name in `site`, the hub or service it came through in `via`
 (`musicbrainz`, `wikidata`), and for some a `kind` (`archived`) and a time `at`. Derived links
 are ordered by service name; each URL appears once (a tagged member wins) and never the card
-itself. A card carries at most 8 entries, and one link per music service (by `site`): a tagged
-member first, because someone used that link (of several, the one on the recording's original
-album, the `original_album` fact), then the derived link most group members name, and none on the
-card's own service (a Discogs artist's card never shows another Discogs page, such as the band's
-earlier name). Members that are not music always show. `GET /v1/resources/{id}` shows the same, up to 256 entries, and
+itself. A card carries at most 8 entries, and one link per service (by `site`): for a music
+service a tagged member first, because someone used that link (of several, the one on the
+recording's original album, the `original_album` fact), then the derived link most group members
+name; none on the card's own service (an artist's card never shows another page of its service,
+such as the band's earlier name, which Wikidata may list as a second ID). Tagged members that are
+not music always show. `GET /v1/resources/{id}` shows the same, up to 256 entries, and
 lists every link in `details.also_on` (several of one service too). A derived link can be unavailable in some
 countries (a regional release on a streaming service); nothing public says where, so prefer a
 tagged member.
