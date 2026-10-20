@@ -65,13 +65,16 @@ impl Transport for Recorded {
         options: &FetchOptions,
     ) -> anyhow::Result<Fetched> {
         assert_eq!(options.accept.as_deref(), Some("application/json"));
-        // Much-edited Wikidata items exceed the default cap; their reads may be larger.
-        let wikidata = url.host_str() == Some("www.wikidata.org");
-        assert_eq!(
-            options.body_cap,
-            wikidata.then_some(pinakes_core::hubs::WIKIDATA_CAP),
-            "{url}"
-        );
+        // Much-edited Wikidata items and MusicBrainz entities with many links exceed the default
+        // cap; their reads may be larger.
+        let cap = match url.host_str() {
+            Some("www.wikidata.org") => Some(pinakes_core::hubs::WIKIDATA_CAP),
+            Some("musicbrainz.org" | "mb-mirror.example") => {
+                Some(pinakes_core::hubs::MUSICBRAINZ_CAP)
+            }
+            _ => None,
+        };
+        assert_eq!(options.body_cap, cap, "{url}");
         let target = format!(
             "{}{}?{}",
             url.host_str().unwrap_or(""),

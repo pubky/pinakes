@@ -111,10 +111,17 @@ fn json(fetched: &Fetched, hub: &'static str) -> Result<Option<Value>> {
 /// The body cap for Wikidata entities: a much-edited item carries megabytes of claims (Signal's
 /// is 2.6 MB), above the egress default of 1 MB.
 pub const WIKIDATA_CAP: usize = 8 * 1024 * 1024;
+/// The body cap for MusicBrainz answers: an artist or release with very many URL relations
+/// exceeds the egress default too.
+pub const MUSICBRAINZ_CAP: usize = 8 * 1024 * 1024;
 fn options(hub: &str) -> FetchOptions {
     FetchOptions {
         accept: Some("application/json".into()),
-        body_cap: (hub == "wikidata").then_some(WIKIDATA_CAP),
+        body_cap: match hub {
+            "wikidata" => Some(WIKIDATA_CAP),
+            "musicbrainz" => Some(MUSICBRAINZ_CAP),
+            _ => None,
+        },
         ..Default::default()
     }
 }
