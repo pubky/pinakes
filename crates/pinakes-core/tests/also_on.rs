@@ -1166,6 +1166,73 @@ async fn a_shared_q_id_never_joins_two_recordings(pool: PgPool) {
     assert!(metrics.group_key_conflicts.get() > 0);
 }
 
+/// The lookups' own namespaces name one object each too: an OSM object, a crate, a Steam game.
+/// Two of them sharing a second key (an item naming a node and a relation, one repository behind
+/// two crates, an item with two appids) never share a group.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_shared_key_never_joins_two_places_crates_or_games(pool: PgPool) {
+    let hub = Fake::new("lookups");
+    let cases = [
+        [
+            (
+                "https://example.org/node",
+                vec!["osm:node/240109189", "wikidata:Q64"],
+            ),
+            (
+                "https://example.org/relation",
+                vec!["osm:relation/62422", "wikidata:Q64"],
+            ),
+        ],
+        [
+            (
+                "https://example.org/rand",
+                vec!["crate:rand", "repo:github.com/rust-random/rand"],
+            ),
+            (
+                "https://example.org/rand-core",
+                vec!["crate:rand-core", "repo:github.com/rust-random/rand"],
+            ),
+        ],
+        [
+            ("https://example.org/app-1", vec!["steam:1", "wikidata:Q2"]),
+            ("https://example.org/app-2", vec!["steam:2", "wikidata:Q2"]),
+        ],
+    ];
+    let mut pairs = vec![];
+    for pair in &cases {
+        let mut ids = vec![];
+        for (uri, keys) in pair {
+            ids.push(page(&pool, uri, "Thing").await);
+            hub.answer(
+                uri,
+                Ok(Found {
+                    keys: keys.iter().map(|k| key(k)).collect(),
+                    ..Default::default()
+                }),
+            );
+        }
+        pairs.push(ids);
+    }
+    let sources: Vec<Arc<dyn Source>> = vec![hub];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    for ids in pairs {
+        let groups: Vec<Option<String>> = sqlx::query_scalar(
+            "SELECT g.group_id FROM unnest($1::text[]) i(id) LEFT JOIN group_unit g ON g.resource_id=i.id",
+        )
+        .bind(&ids)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(
+            groups[0].is_none() || groups[0] != groups[1],
+            "{ids:?} share {groups:?}"
+        );
+    }
+}
+
 /// Looks up the barcodes the sources before it found, like iTunes: one keyed link each. Off by
 /// default.
 struct ByBarcode {

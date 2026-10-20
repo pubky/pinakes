@@ -216,7 +216,9 @@ pub struct Release {
     pub repository: Option<Repo>,
 }
 impl Release {
-    /// Keys and links for the package card.
+    /// Keys and links for the package card: the package's own key, and its repository as a
+    /// link only. Several packages come from one repository (a workspace, a monorepo), so the
+    /// repository is never a key that would join them.
     pub fn found(&self) -> Found {
         let mut found = Found::default();
         found.push_key(self.package.key());
@@ -224,7 +226,6 @@ impl Release {
             found.push_link(link);
         }
         if let Some(repo) = &self.repository {
-            found.push_key(repo.key());
             found.push_link(repo.link(match self.package.registry {
                 Registry::Crates => "crates",
                 Registry::Npm => "npm",
@@ -641,7 +642,7 @@ mod tests {
         let found = release.found();
         assert_eq!(
             found.keys.iter().map(Key::as_str).collect::<Vec<_>>(),
-            ["crate:rand", "repo:github.com/rust-random/rand"]
+            ["crate:rand"]
         );
         let repo = found.links.last().unwrap();
         assert_eq!(

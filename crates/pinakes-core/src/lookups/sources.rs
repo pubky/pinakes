@@ -807,9 +807,18 @@ pub fn store_property(uri: &str) -> Option<(&'static str, String, &'static [item
         .then_some((pid, value, set))
 }
 
+/// Whether `value` is the item's only best-rank value of `pid`: an item with two appids is not
+/// one Steam page's.
+fn only_value(item: &Value, pid: &str, value: &str) -> bool {
+    let mut values = items::best_values(item, pid);
+    values.sort_unstable();
+    values.dedup();
+    values == [value]
+}
+
 /// An app or game on a store: the one Wikidata item carrying that store's ID (read back and
 /// compared exactly; several are ambiguous and give nothing), its other stores and game
-/// databases, and its Q-id as key.
+/// databases, and its Q-id as key when the item carries no other ID on that store.
 pub struct WikidataStores;
 #[async_trait]
 impl Source for WikidataStores {
@@ -837,7 +846,9 @@ impl Source for WikidataStores {
             return Ok(also_on::Found::default());
         };
         let mut found = super::Found::default();
-        found.push_key(items::key(&hub.qid));
+        if only_value(&raw, pid, &value) {
+            found.push_key(items::key(&hub.qid));
+        }
         for link in items::links(&raw, set) {
             found.push_link(link);
         }
@@ -1189,11 +1200,13 @@ mod tests {
         let found = crates.lookup(&cx, &rand).await.unwrap();
         assert!(keys(&found).contains(&"crate:rand"), "{:?}", keys(&found));
         assert!(sites(&found).contains(&"Docs.rs https://docs.rs/rand".to_owned()));
-        // rand's provenance (trusted publishing, or deps.dev's SLSA attestation) names its repository.
+        // rand's provenance (trusted publishing, or deps.dev's SLSA attestation) names its
+        // repository: a link, never a key (rand_core and rand_chacha come from it too).
+        assert_eq!(keys(&found), ["crate:rand"]);
         assert!(
-            keys(&found).contains(&"repo:github.com/rust-random/rand"),
+            sites(&found).contains(&"GitHub https://github.com/rust-random/rand".to_owned()),
             "{:?}",
-            keys(&found)
+            sites(&found)
         );
         assert!(found.links.iter().all(|l| l.via == "crates"));
 
@@ -1201,11 +1214,11 @@ mod tests {
             .lookup(&cx, &at("https://www.npmjs.com/package/semver"))
             .await
             .unwrap();
-        assert!(keys(&semver).contains(&"npm:semver"));
+        assert_eq!(keys(&semver), ["npm:semver"]);
         assert!(
-            keys(&semver).contains(&"repo:github.com/npm/node-semver"),
+            sites(&semver).contains(&"GitHub https://github.com/npm/node-semver".to_owned()),
             "{:?}",
-            keys(&semver)
+            sites(&semver)
         );
         // left-pad publishes no provenance: no repository.
         let left_pad = Packages(Registry::Npm)
@@ -1218,11 +1231,11 @@ mod tests {
             .lookup(&cx, &at("https://pypi.org/project/urllib3/"))
             .await
             .unwrap();
-        assert!(keys(&urllib3).contains(&"pypi:urllib3"));
+        assert_eq!(keys(&urllib3), ["pypi:urllib3"]);
         assert!(
-            keys(&urllib3).contains(&"repo:github.com/urllib3/urllib3"),
+            sites(&urllib3).contains(&"GitHub https://github.com/urllib3/urllib3".to_owned()),
             "{:?}",
-            keys(&urllib3)
+            sites(&urllib3)
         );
 
         // The repository itself, on Software Heritage (120 requests an hour: one every 30 s).
@@ -1504,5 +1517,17 @@ mod tests {
         );
         s.uri = "https://www.discogs.com/label/1".into();
         assert!(!Discogs.applies(&s));
+    }
+
+    #[test]
+    fn an_item_with_two_appids_is_neither_page() {
+        use serde_json::json;
+        let claim = |v: &str| json!({"rank": "normal", "mainsnak": {"snaktype": "value", "datavalue": {"value": v}}});
+        let one = json!({"claims": {"P1733": [claim("400"), claim("400")]}});
+        let two = json!({"claims": {"P1733": [claim("400"), claim("620")]}});
+        assert!(only_value(&one, "P1733", "400"));
+        assert!(!only_value(&two, "P1733", "400"));
+        assert!(!only_value(&two, "P1733", "620"));
+        assert!(!only_value(&one, "P1733", "620"));
     }
 }

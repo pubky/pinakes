@@ -671,8 +671,11 @@ one thing, only on evidence that cannot be spoofed:
   each single-object namespace: MusicBrainz recording, release, release group and artist
   (`mb:…`), Wikidata item (`wikidata`), Discogs artist, master and release (`discogs:…`), IMDb
   title (`imdb`), Open Library edition and work (`openlibrary:…`), podcast GUID and Apple podcast
-  ID (`podcast:guid`, `podcast:apple`): a join that would bring a second (a wrong ID on a hub) is
-  refused, so one bad claim never chains two groups. ISRCs and barcodes may be several.
+  ID (`podcast:guid`, `podcast:apple`), OSM object (`osm`), DOI, arXiv paper, PubMed and PubMed
+  Central record (`doi`, `arxiv`, `pmid`, `pmcid`), crate, npm and PyPI package, source
+  repository (`crate`, `npm`, `pypi`, `repo`), Steam and GOG game (`steam`, `gog`) and Federal
+  Register document (`fr`): a join that would bring a second (a wrong ID on a hub) is refused,
+  so one bad claim never chains two groups. ISRCs and barcodes may be several.
 - **Curation** on the admin listener.
 
 `sameAs`, canonical and other URL claims, and other identifiers, never group. Two located
@@ -981,10 +984,11 @@ one they find nothing.
 - `crates`, `npm`, `pypi`: the package's pages on its registry and documentation sites, its name
   as key (`crate:`, `npm:`, `pypi:`, normalized as each registry does), and its source repository
   only when signed build provenance names it (crates.io trusted publishing, npm SLSA provenance,
-  PyPI trusted publishers, else deps.dev's `SLSA_ATTESTATION`), with a `repo:` key. A package's
-  own `repository` field is the publisher's claim and joins nothing.
+  PyPI trusted publishers, else deps.dev's `SLSA_ATTESTATION`), as a link only: one repository
+  often publishes several packages (a workspace, a monorepo), so it joins none of them. A
+  package's own `repository` field is the publisher's claim and is never shown.
 - `software_heritage`: a GitHub or GitLab repository's Software Heritage archive page, when it
-  archives it, and the same `repo:` key, so the repository and its packages join.
+  archives it, with the repository's `repo:` key (`key=repo:github.com/{owner}/{name}`).
 
 **Games and apps.**
 - `steam`: a Steam game (store, community, SteamDB, ProtonDB or PCGamingWiki appid link) gets its
@@ -995,7 +999,8 @@ one they find nothing.
   Store gets the one Wikidata item carrying that store's ID (read back and compared exactly;
   several are ambiguous and give nothing), its other stores and game databases (Epic Games
   Store, itch.io, IGDB, MobyGames, PCGamingWiki, HowLongToBeat, Homebrew) with one value each,
-  and its Q-id as key.
+  and its Q-id as key when the item carries no other ID on that store (an item with two Steam
+  appids is neither page's).
 
 **Archived copies.** `wayback`: a page that is `missing` or `unreachable` gets its Wayback
 Machine capture closest to when it was first referenced (captures that answered 200 only), with
