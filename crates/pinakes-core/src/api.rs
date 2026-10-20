@@ -546,8 +546,9 @@ pub struct Card {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub maybe_same: Option<Vec<SameEvent>>,
 }
-/// Another event that is possibly the same one: it starts together with this one, at the same
-/// place, under a similar name, on another page.
+/// Another event that is possibly the same one: it starts together with this one, near it (or,
+/// when either has no place, at the same venue or under the same organizer), under a similar
+/// name, on another page.
 #[derive(Clone, Serialize, ToSchema)]
 pub struct SameEvent {
     /// Its card's ID (a feed's, for an occurrence).
@@ -1218,7 +1219,7 @@ pub async fn search(
     } else {
         sql.push("NULL");
     }
-    sql.push(") AS facets, jsonb_build_array((SELECT jsonb_agg(jsonb_build_array(cursor,epoch) ORDER BY nexus) FROM feed_cursor),(SELECT revision FROM search_revision WHERE id=1)) AS revision");
+    sql.push(") AS facets, jsonb_build_array((SELECT jsonb_agg(jsonb_build_array(cursor,epoch) ORDER BY nexus) FROM feed_cursor),(SELECT revision FROM search_revision WHERE id=1),(SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM same_event_revision)) AS revision");
     let row = sql.build().fetch_one(&state.pool).await?;
     if spatial.resolution.is_some()
         && row.try_get::<i64, _>("cell_count")? > state.config.search.max_cluster_cells as i64

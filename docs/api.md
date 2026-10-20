@@ -620,26 +620,33 @@ Two events are possibly the same when all of these hold:
 
 - they start within 300 seconds of each other; when either is an all-day event, they start on
   the same local date (each in its own zone);
-- both are located within 500 m of each other, or they name the same venue (its resource or
-  OSM object) or the same organizer URL;
-- their names are at least 0.5 alike (pg_trgm similarity) once both are normalised: lower case,
-  without punctuation, symbols and emoji, without dates (any word with a digit, and month and
-  weekday names in English, German, French and Italian) and without filler words (`meetup`,
-  `event`, `edition`, `session`, `monthly`, `weekly`, `stammtisch`, `treffen`, `rencontre`,
-  `incontro`); a name with nothing left never matches;
+- when both are located, within 500 m of each other; when one or both have no coordinates,
+  they name the same venue (its resource or OSM object) or the same organizer URL (one
+  organizer's meetups in two cities are never the same);
+- their names are at least 0.5 alike (pg_trgm similarity) once both are normalised: lower case;
+  without dates, times and years (`21.10.2026`, `2026-10-21`, `6.11.`, `21.`, `19:00`, `7pm`,
+  `2026`, a month name with its day such as `Oct 21` or `6th November`, in English, German,
+  French and Italian); without punctuation, symbols and emoji; without weekday names and filler
+  words (`meetup`, `event`, `edition`, `session`, `monthly`, `weekly`, `stammtisch`, `treffen`,
+  `rencontre`, `incontro`); a name with nothing left never matches;
+- other numbers stay in the name (`#50`, `Nr. 30`, `Room 101`), and when both names keep
+  numbers, they are the same numbers: "Meetup #50" and "Meetup #51" are not the same event;
 - they are on different pages: two occurrences of one feed never match.
 
 An event without coordinates, a venue or an organizer URL is therefore never listed: for
 example a calendar entry without `GEO` whose `LOCATION` is one line of text (only a structured
 street address is geocoded).
 
-`score` is the name similarity, from 0.5 to 1. A member of the card's own group is never listed.
+`score` is the name similarity, from 0.5 to 1. A member of the card's own group, an alias and a
+gone occurrence are never listed.
 It is a hint, like a group, and less: nothing is merged, counted or ranked by it, and each event
 keeps its own card.
 
 A background pass computes the pairs for events starting from a day ago to a year ahead, again
 whenever an event's start, place or name changes; a request only reads them. A new or changed
-event is listed within seconds of its save on a quiet instance. `[event] same_event_hint = "off"`
+event is paired within about five seconds of its save, once the events before it in the queue
+are read (the events already stored when the hint is installed are queued at once). Search
+pages change their `ETag` when a hint on them changes. `[event] same_event_hint = "off"`
 ([operations](operations.md#calendars-and-events)) removes the field from cards, details and the
 OpenAPI document and stops the pass.
 

@@ -465,7 +465,7 @@ async fn a_change_or_the_window_moves_the_hint(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    same_event::sweep(&pool, 1000).await.unwrap();
+    same_event::sweep(&pool).await.unwrap();
     assert!(named(&card(&pool, &a).await).is_empty());
     // The sweep marks the event it no longer holds (b, still in the window), and the pass reads
     // it again.
@@ -528,10 +528,13 @@ async fn names_are_compared_without_dates_filler_and_symbols(pool: PgPool) {
         ),
         (
             "Bitcoin Meetup Zürich 🍻 #42 — 21.10.2026",
-            "bitcoin zürich",
+            "bitcoin zürich 42",
         ),
         ("Bitcoin-Stammtisch Zürich, Oktober", "bitcoin zürich"),
         ("Monthly Event: Nostr Night (Nov 6)", "nostr night"),
+        ("Bitcoin Meetup Zürich (Oct 21), 19:00", "bitcoin zürich"),
+        ("Meetup 2026-11-06 at 7pm", "at"),
+        ("Bitcoin Weesen Nr. 30", "bitcoin weesen nr 30"),
         ("Meetup", ""),
     ] {
         let got: String = sqlx::query_scalar("SELECT same_event_name($1)")
@@ -541,4 +544,183 @@ async fn names_are_compared_without_dates_filler_and_symbols(pool: PgPool) {
             .unwrap();
         assert_eq!(got, want, "{name}");
     }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn names_that_keep_different_numbers_are_not_the_same(pool: PgPool) {
+    let start = soon();
+    let fifty = event(
+        &pool,
+        "https://example.org/50",
+        "Bitcoin Meetup Wattwil #50",
+        start,
+        Some(WATTWIL),
+    )
+    .await;
+    event(
+        &pool,
+        "https://example.org/51",
+        "Bitcoin Meetup Wattwil #51",
+        start,
+        Some(WATTWIL),
+    )
+    .await;
+    // A listing without the number may still be the same.
+    let plain = event(
+        &pool,
+        "https://example.org/plain",
+        "Bitcoin Meetup Wattwil (6.11.)",
+        start,
+        Some(WATTWIL),
+    )
+    .await;
+    pass(&pool, &Config::default()).await;
+    assert_eq!(named(&card(&pool, &fifty).await), [plain.as_str()]);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn one_organizers_meetups_in_two_cities_are_not_the_same(pool: PgPool) {
+    let start = soon();
+    let city = |uri: &str, name: &str, at: Point| {
+        let mut doc = ResourceMeta::new(uri, "event_platform", 86400);
+        doc.set_type("Event");
+        doc.name = Some(name.into());
+        doc.start = Some(start);
+        doc.location = Some(at);
+        doc.event.organizer = Some(Organizer {
+            name: "Einundzwanzig Schweiz".into(),
+            url: Some("https://www.meetup.com/einundzwanzig-bitcoin-meetup-schweiz/".into()),
+        });
+        doc
+    };
+    let zurich = save(
+        &pool,
+        &city(
+            "https://www.meetup.com/einundzwanzig-bitcoin-meetup-schweiz/events/1/",
+            "EINUNDZWANZIG Bitcoin Meetup Zürich",
+            Point {
+                lat: 47.3769,
+                lon: 8.5417,
+            },
+        ),
+    )
+    .await;
+    let bern = save(
+        &pool,
+        &city(
+            "https://www.meetup.com/einundzwanzig-bitcoin-meetup-schweiz/events/2/",
+            "EINUNDZWANZIG Bitcoin Meetup Bern",
+            Point {
+                lat: 46.948,
+                lon: 7.4474,
+            },
+        ),
+    )
+    .await;
+    pass(&pool, &Config::default()).await;
+    assert!(named(&card(&pool, &zurich).await).is_empty());
+    assert!(named(&card(&pool, &bern).await).is_empty());
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_event_that_becomes_an_alias_leaves_the_hint(pool: PgPool) {
+    let start = soon();
+    let b = event(
+        &pool,
+        "https://example.org/b",
+        "Bitcoin Meetup Wattwil",
+        start,
+        Some(WATTWIL),
+    )
+    .await;
+    let c = event(
+        &pool,
+        "https://example.org/c",
+        "Bitcoin Meetup Wattwil",
+        start,
+        Some(WATTWIL),
+    )
+    .await;
+    pass(&pool, &Config::default()).await;
+    assert_eq!(named(&card(&pool, &c).await), [b.as_str()]);
+    // B turns out to be a spelling of A: C stops naming it at once, and the sweep drops its unit.
+    let a = event(
+        &pool,
+        "https://example.org/a",
+        "Bitcoin Meetup Wattwil",
+        start,
+        Some(WATTWIL),
+    )
+    .await;
+    sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'canonical')")
+        .bind(&b)
+        .bind(&a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(!named(&card(&pool, &c).await).contains(&b.as_str()));
+    same_event::sweep(&pool).await.unwrap();
+    pass(&pool, &Config::default()).await;
+    let held: i64 = sqlx::query_scalar("SELECT count(*) FROM same_event_unit WHERE resource_id=$1")
+        .bind(&b)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(held, 0);
+    assert_eq!(named(&card(&pool, &c).await), [a.as_str()]);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn events_stored_before_the_hint_are_read_at_once(pool: PgPool) {
+    let start = soon();
+    let mut ids = vec![];
+    for n in 0..3 {
+        ids.push(
+            event(
+                &pool,
+                &format!("https://example.org/{n}"),
+                "Bitcoin Meetup Wattwil",
+                start,
+                Some(WATTWIL),
+            )
+            .await,
+        );
+    }
+    // As if they predate the migration: nothing marks them.
+    sqlx::query("DELETE FROM same_event_dirty")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(same_event::sweep(&pool).await.unwrap(), 3);
+    pass(&pool, &Config::default()).await;
+    assert_eq!(named(&card(&pool, &ids[0]).await).len(), 2);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_search_page_changes_its_etag_when_its_hint_does(pool: PgPool) {
+    let start = soon();
+    for n in 0..2 {
+        event(
+            &pool,
+            &format!("https://example.org/{n}"),
+            "Bitcoin Meetup Wattwil",
+            start,
+            Some(WATTWIL),
+        )
+        .await;
+    }
+    let etag = || async {
+        let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+        let mut request = Request::get("/v1/search?type=Event")
+            .body(Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(ConnectInfo(
+            "127.0.0.1:4000".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        let response = app.oneshot(request).await.unwrap();
+        response.headers()["etag"].to_str().unwrap().to_owned()
+    };
+    let before = etag().await;
+    pass(&pool, &Config::default()).await;
+    assert_ne!(etag().await, before);
 }

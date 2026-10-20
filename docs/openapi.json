@@ -1062,7 +1062,7 @@
         "description": "`GET /v1/resources/{id}` and `/v1/resolve`: the card plus the resource's details."
       },
       "SameEvent": {
-        "description": "Another event that is possibly the same one: it starts together with this one, at the same\nplace, under a similar name, on another page.",
+        "description": "Another event that is possibly the same one: it starts together with this one, near it (or,\nwhen either has no place, at the same venue or under the same organizer), under a similar\nname, on another page.",
         "properties": {
           "id": {
             "description": "Its card's ID (a feed's, for an occurrence).",

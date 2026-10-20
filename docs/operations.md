@@ -139,10 +139,12 @@ INSERT INTO group_dirty(resource_id) SELECT DISTINCT resource_id FROM group_unit
 ```
 
 **Same-event hint rebuild.** The hourly sweep reads again any event in the window whose start,
-place or name changed unseen; to recompute every pair at once:
+place or name changed unseen. To recompute every pair (cards keep their current pairs until each
+event is read again):
 
 ```sql
-DELETE FROM same_event_unit;
+UPDATE same_event_unit SET fingerprint='';
+INSERT INTO same_event_dirty(resource_id) SELECT DISTINCT resource_id FROM same_event_unit ON CONFLICT DO NOTHING;
 ```
 
 ## Deployment and egress
@@ -369,10 +371,15 @@ documents store versioned references and compose coordinates at read time.
 
 `event.same_event_hint` (default `"on"`; `"off"`) puts `maybe_same` on event cards: other events
 that are possibly the same one ([the rule](api.md#possibly-the-same-event)). A background pass
-in the daemon computes it for events starting from a day ago to a year ahead: up to 200 new or
-changed events per pass, at once while more is due and every five seconds otherwise, each
-matched through the start and location indexes; an hourly sweep drops events that started over a day ago and reads the
-ones that entered the window. Requests only read the stored pairs. `"off"` stops the pass and
+in the daemon computes it for events starting from a day ago to a year ahead. Triggers queue an
+event resource (or a feed) when an event's start, place, name or document changes; the
+migration queues the events already stored. Each pass takes up to 25 queued resources and up to
+200 of their new or changed events, and the next pass follows at once while there was work, else
+after five seconds. An event's normalised name, place and identifiers are stored once read, and
+its pairs are matched among the events already read through their start and geography indexes.
+An hourly sweep drops events that started over a day ago and queues those that entered the window,
+changed unseen, or are no longer events (an alias, a missing feed, a gone occurrence). Requests
+only read the stored pairs. `"off"` stops the pass and
 removes the field from cards, details and `/v1/openapi.json`; the stored pairs stay, and changes
 made meanwhile are read when it is turned back on.
 
