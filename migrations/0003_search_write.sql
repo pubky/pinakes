@@ -32,3 +32,20 @@ DROP TABLE search_revision;
 
 CREATE VIEW search_revision AS
     SELECT 1 AS id, coalesce(sum(writes), 0)::bigint AS revision FROM search_write;
+
+-- A writer of a resource's child rows locks the resource's row before marking it dirty, as a save
+-- does (its row, then the mark) and as an inserted child's foreign key does. A removed child takes
+-- no lock on the resource before this trigger runs, and the revision trigger that follows updates
+-- the resource's row: without this, a removal and a save of the same resource could deadlock.
+CREATE OR REPLACE FUNCTION mark_group_dirty() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$ BEGIN
+ IF TG_TABLE_NAME='resource' THEN
+  IF TG_OP='UPDATE' AND (NEW.doc-'fetched_at'-'ttl_secs'-'warnings') IS NOT DISTINCT FROM (OLD.doc-'fetched_at'-'ttl_secs'-'warnings') THEN RETURN NULL; END IF;
+  INSERT INTO group_dirty(resource_id) VALUES(NEW.id) ON CONFLICT DO NOTHING;
+ ELSE
+  PERFORM 1 FROM resource WHERE id=CASE WHEN TG_OP='DELETE' THEN OLD.resource_id ELSE NEW.resource_id END FOR KEY SHARE;
+  INSERT INTO group_dirty(resource_id) SELECT id FROM resource WHERE id=CASE WHEN TG_OP='DELETE' THEN OLD.resource_id ELSE NEW.resource_id END ON CONFLICT DO NOTHING;
+ END IF;
+ RETURN NULL;
+END $$;

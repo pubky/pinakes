@@ -116,12 +116,55 @@ pub fn source(uri: &str, root: &str) -> Option<Alias> {
         basis: "identifier",
     })
 }
+/// The lock every alias assignment takes, so an alias never commits against a root that has
+/// meanwhile become an alias itself (reads follow one hop). An assignment locks the alias's row,
+/// then its root's: a transaction that may assign one, or that locks rows of several resources
+/// in an order of its own (an ingested batch, an opt-out clearing its aliases), takes this lock
+/// after the write order (`store::lock_writers`) and before its first row lock.
+pub async fn lock(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(73822919)")
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+/// The change line of a new alias, written by `record` just before its transaction commits:
+/// the change sequence is the last lock a transaction takes (`changes::append`).
+#[derive(Debug)]
+pub struct Line {
+    id: String,
+    root: String,
+    type_path: Vec<String>,
+}
+/// Write the change lines of a transaction's new aliases.
+pub async fn record(tx: &mut Transaction<'_, Postgres>, lines: Vec<Line>) -> Result<()> {
+    for line in lines {
+        // Clients that cached the resource learn which root answers for it now. The line carries
+        // the root's type (or the alias's own while the root is unfetched) for `?type=` filters.
+        crate::changes::append(
+            tx,
+            &line.id,
+            "alias",
+            None,
+            Some(serde_json::json!({ "root": line.root, "type_path": line.type_path })),
+            crate::changes::Diff {
+                class: "aliased",
+                fields: vec!["root".into()],
+            },
+            None,
+        )
+        .await?;
+    }
+    Ok(())
+}
 /// Make `id` an alias of `alias.root`: the root row exists and is queued, the alias row is
-/// never fetched again. An ID that is itself a root keeps its own aliases pointing at it.
-pub async fn assign(tx: &mut Transaction<'_, Postgres>, id: &str, alias: &Alias) -> Result<()> {
-    // Every assignment takes the same lock, so an alias never commits against a root that has
-    // meanwhile become an alias itself (reads follow one hop).
-    crate::store::lock_writers(tx).await?;
+/// never fetched again. An ID that is itself a root keeps its own aliases pointing at it. It
+/// takes `lock`; the caller passes the returned line to `record` before committing.
+pub async fn assign(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+    alias: &Alias,
+) -> Result<Option<Line>> {
+    lock(tx).await?;
     let (named, root_uri, _) = crate::model::identity(&alias.root)?;
     // A root is never itself an alias: one that became one passes the alias to its own root.
     let hop: Option<String> =
@@ -131,7 +174,7 @@ pub async fn assign(tx: &mut Transaction<'_, Postgres>, id: &str, alias: &Alias)
             .await?;
     let root_id = hop.clone().unwrap_or(named);
     if root_id == id {
-        return Ok(());
+        return Ok(None);
     }
     if hop.is_none() {
         crate::store::insert_plain(tx, &root_id, &root_uri).await?;
@@ -143,9 +186,7 @@ pub async fn assign(tx: &mut Transaction<'_, Postgres>, id: &str, alias: &Alias)
             .await?;
     sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,$3) ON CONFLICT(alias_id) DO UPDATE SET root_id=excluded.root_id,basis=excluded.basis")
         .bind(id).bind(&root_id).bind(alias.basis).execute(&mut **tx).await?;
-    if previous.as_deref() != Some(root_id.as_str()) {
-        // Clients that cached the resource learn which root answers for it now. The line carries
-        // the root's type (or the alias's own while the root is unfetched) for `?type=` filters.
+    let line = if previous.as_deref() != Some(root_id.as_str()) {
         let type_path: Vec<String> = sqlx::query_scalar(
             "SELECT coalesce((SELECT nullif(type_path,'{}') FROM resource WHERE id=$1),(SELECT type_path FROM resource WHERE id=$2),'{}')",
         )
@@ -153,20 +194,14 @@ pub async fn assign(tx: &mut Transaction<'_, Postgres>, id: &str, alias: &Alias)
         .bind(id)
         .fetch_one(&mut **tx)
         .await?;
-        crate::changes::append(
-            tx,
-            id,
-            "alias",
-            None,
-            Some(serde_json::json!({ "root": root_id, "type_path": type_path })),
-            crate::changes::Diff {
-                class: "aliased",
-                fields: vec!["root".into()],
-            },
-            None,
-        )
-        .await?;
-    }
+        Some(Line {
+            id: id.to_owned(),
+            root: root_id.clone(),
+            type_path,
+        })
+    } else {
+        None
+    };
     // Aliases of the alias follow it to the root.
     sqlx::query("UPDATE resource_alias SET root_id=$2 WHERE root_id=$1")
         .bind(id)
@@ -203,7 +238,8 @@ pub async fn assign(tx: &mut Transaction<'_, Postgres>, id: &str, alias: &Alias)
         .bind(id)
         .execute(&mut **tx)
         .await?;
-    crate::store::recompute_scores(tx, &[id.to_owned(), root_id]).await
+    crate::store::recompute_scores(tx, &[id.to_owned(), root_id]).await?;
+    Ok(line)
 }
 /// The root of a resource ID, or the ID itself.
 pub async fn resolve_id(pool: &PgPool, id: &str) -> Result<String> {

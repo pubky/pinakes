@@ -2230,7 +2230,7 @@ async fn an_opted_out_post_is_not_searched_and_keeps_no_history_text(pool: PgPoo
         .await
         .unwrap();
     let mut tx = pool.begin().await.unwrap();
-    pinakes_core::alias::assign(
+    let line = pinakes_core::alias::assign(
         &mut tx,
         &alias_id,
         &pinakes_core::alias::Alias {
@@ -2240,6 +2240,9 @@ async fn an_opted_out_post_is_not_searched_and_keeps_no_history_text(pool: PgPoo
     )
     .await
     .unwrap();
+    pinakes_core::alias::record(&mut tx, line.into_iter().collect())
+        .await
+        .unwrap();
     tx.commit().await.unwrap();
     sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','hello','/pub/app/tags/h',now())")
         .bind(&id)

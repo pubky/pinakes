@@ -1064,22 +1064,26 @@ async fn aliases_never_chain_and_fence_running_jobs(pool: PgPool) {
         .unwrap();
     let before = generation(first.clone()).await;
     let mut tx = pool.begin().await.unwrap();
+    let mut lines = vec![];
     for (id, root) in [
         (&first, "https://example.org/a"),
         // Named after its old root, which is an alias now.
         (&second, "https://example.org/a/"),
     ] {
-        pinakes_core::alias::assign(
-            &mut tx,
-            id,
-            &pinakes_core::alias::Alias {
-                root: root.into(),
-                basis: "canonical",
-            },
-        )
-        .await
-        .unwrap();
+        lines.extend(
+            pinakes_core::alias::assign(
+                &mut tx,
+                id,
+                &pinakes_core::alias::Alias {
+                    root: root.into(),
+                    basis: "canonical",
+                },
+            )
+            .await
+            .unwrap(),
+        );
     }
+    pinakes_core::alias::record(&mut tx, lines).await.unwrap();
     tx.commit().await.unwrap();
     let roots: Vec<(String, String)> =
         sqlx::query_as("SELECT alias_id,root_id FROM resource_alias ORDER BY alias_id")

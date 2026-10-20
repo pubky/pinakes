@@ -8,11 +8,12 @@ use sqlx::{PgPool, Postgres, Transaction};
 pub async fn ensure_resource(pool: &PgPool, uri: &str) -> Result<String> {
     let (id, uri, _) = identity(uri)?;
     let mut tx = pool.begin().await?;
-    // An alias is assigned under the lock every alias assignment takes (`alias::assign`).
     if crate::alias::root(&uri).is_some() {
-        lock_writers(&mut tx).await?;
+        lock_writers(&mut tx, WriteOrder::Shared).await?;
+        crate::alias::lock(&mut tx).await?;
     }
-    insert_resource(&mut tx, &id, &uri).await?;
+    let line = insert_resource(&mut tx, &id, &uri).await?;
+    crate::alias::record(&mut tx, line.into_iter().collect()).await?;
     tx.commit().await?;
     Ok(id)
 }
@@ -164,9 +165,26 @@ pub async fn derive_resource_within(
         return Ok(None);
     }
     let mut tx = pool.begin().await?;
-    // Lock order: the write lock, then the adapter, then the parent, as a feed apply takes them
-    // (`EXTEND_PARENT_DERIVATIONS`).
-    lock_writers(&mut tx).await?;
+    // A child with an alias root becomes an alias (`insert_resource`): it then locks the root's
+    // row while holding the adapter lock, which a feed apply takes after its own row.
+    let order = if crate::alias::root(&uri).is_some() {
+        WriteOrder::Exclusive
+    } else {
+        WriteOrder::Shared
+    };
+    lock_writers(&mut tx, order).await?;
+    // Lock order: the parent's row, then the adapter, then the parent, as a feed apply takes them
+    // (its parent row `FOR UPDATE`, then `LOCK_PARENT_ADAPTER`). The row lock (the one the link's
+    // foreign key takes anyway) also keeps the parent until the link commits. A resolver probe
+    // or a removed parent must never create background work.
+    let exists = sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR KEY SHARE")
+        .bind(&parent_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_some();
+    if !exists {
+        return Ok(None);
+    }
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,17614))")
         .bind(adapter)
         .execute(&mut *tx)
@@ -175,14 +193,6 @@ pub async fn derive_resource_within(
         .bind(&parent_id)
         .execute(&mut *tx)
         .await?;
-    // A resolver probe or a removed parent must never create background work.
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource WHERE id=$1)")
-        .bind(&parent_id)
-        .fetch_one(&mut *tx)
-        .await?;
-    if !exists {
-        return Ok(None);
-    }
     let known: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM resource_derivation WHERE parent_id=$1 AND child_id=$2 AND (expires_at IS NULL OR expires_at>now()))",
     )
@@ -204,7 +214,7 @@ pub async fn derive_resource_within(
         if count >= cap as i64 || total >= global_cap as i64 {
             return Ok(None);
         }
-        insert_resource(&mut tx, &id, &uri).await?;
+        let line = insert_resource(&mut tx, &id, &uri).await?;
         sqlx::query("INSERT INTO resource_derivation(parent_id,child_id,adapter,expires_at,until) VALUES($1,$2,$3,$4,$5) ON CONFLICT(parent_id,child_id) DO UPDATE SET expires_at=excluded.expires_at,until=excluded.until")
             .bind(&parent_id)
             .bind(&id)
@@ -213,6 +223,7 @@ pub async fn derive_resource_within(
             .bind(until)
             .execute(&mut *tx)
             .await?;
+        crate::alias::record(&mut tx, line.into_iter().collect()).await?;
     }
     if known {
         // A shared link keeps the farthest instant any row asked for: another row's nearer edit
@@ -232,12 +243,13 @@ pub async fn derive_resource_within(
     Ok(Some(id))
 }
 /// Insert a resource row once; a URI with a static alias root (`alias::root`) becomes an alias
-/// of that root, which is inserted and queued in its place.
+/// of that root, which is inserted and queued in its place. The caller then holds the alias
+/// lock and records the returned line (`alias::record`) before committing.
 pub async fn insert_resource(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
     uri: &str,
-) -> Result<()> {
+) -> Result<Option<crate::alias::Line>> {
     insert_plain(tx, id, uri).await?;
     if let Some(alias) = crate::alias::root(uri) {
         let known: bool =
@@ -246,10 +258,10 @@ pub async fn insert_resource(
                 .fetch_one(&mut **tx)
                 .await?;
         if !known {
-            crate::alias::assign(tx, id, &alias).await?;
+            return crate::alias::assign(tx, id, &alias).await;
         }
     }
-    Ok(())
+    Ok(None)
 }
 /// `insert_resource` without the alias check, for roots.
 pub(crate) async fn insert_plain(
@@ -362,13 +374,35 @@ pub(crate) async fn write_document(
     Ok(())
 }
 
-/// The write lock, taken before a transaction's first explicit row lock: writers that lock rows
-/// in an order of their own run one at a time. The search revision itself takes no lock
-/// (`search_write`).
-pub(crate) async fn lock_writers(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
-    sqlx::query("SELECT pg_advisory_xact_lock(73822917)")
-        .execute(&mut **tx)
-        .await?;
+/// How a transaction takes the write-order lock (`lock_writers`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WriteOrder {
+    /// The transaction locks one resource's rows, then only locks every writer takes in the same
+    /// order: the resource row, its event fetch and occurrences, its adapters, its derived links,
+    /// the change sequence (`changes::append`, always last). One that locks several resources'
+    /// rows in an order of its own also takes the alias lock (`alias::lock`), or checks without
+    /// waiting (a group run's fence).
+    Shared,
+    /// The transaction locks several resources' rows in an order a shared writer may meet the
+    /// other way round (orphans and what deleting them reaches, a reset of every reference, a
+    /// re-extraction, a derived link that becomes an alias), so it runs while no other ordered
+    /// writer does.
+    Exclusive,
+}
+/// The write-order lock, taken before a transaction's first row lock. Shared holders run
+/// together; an exclusive holder runs alone among them, so no lock cycle can form. A transaction
+/// that locks one row and nothing else needs none. The search revision takes no lock
+/// (`search_write`): writers never wait on each other for it.
+pub(crate) async fn lock_writers(
+    tx: &mut Transaction<'_, Postgres>,
+    order: WriteOrder,
+) -> Result<()> {
+    sqlx::query(match order {
+        WriteOrder::Shared => "SELECT pg_advisory_xact_lock_shared(73822917)",
+        WriteOrder::Exclusive => "SELECT pg_advisory_xact_lock(73822917)",
+    })
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 /// Fold the counted write transactions into one row, so reading the revision stays one short

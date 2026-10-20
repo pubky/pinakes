@@ -132,15 +132,20 @@ pub async fn reextract(pool: &PgPool, routes: &[String]) -> Result<u64> {
         }
         if !aliases.is_empty() {
             let mut tx = pool.begin().await?;
-            crate::store::lock_writers(&mut tx).await?;
+            crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+            crate::alias::lock(&mut tx).await?;
+            let mut lines = vec![];
             for (id, alias) in &aliases {
-                crate::alias::assign(&mut tx, id, alias).await?;
+                lines.extend(crate::alias::assign(&mut tx, id, alias).await?);
             }
+            crate::alias::record(&mut tx, lines).await?;
             tx.commit().await?;
             total += aliases.len() as u64;
         }
         if !ids.is_empty() {
             let mut tx = pool.begin().await?;
+            // Many resources' rows, in no particular order.
+            crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Exclusive).await?;
             sqlx::query("UPDATE event_fetch SET validators='{}' WHERE resource_id=ANY($1) AND validators<>'{}'")
                 .bind(&ids)
                 .execute(&mut *tx)
@@ -205,7 +210,6 @@ async fn failed_as(
 }
 async fn timed_out(pool: &PgPool, job: &Job, cfg: &QueueConfig, seconds: u64) -> Result<()> {
     let mut tx = pool.begin().await?;
-    crate::store::lock_writers(&mut tx).await?;
     let row: Option<(i32, i32)> = sqlx::query_as("SELECT CASE WHEN last_error='timeout' THEN timeout_streak ELSE 0 END,attempts FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE")
         .bind(&job.id).bind(job.generation).fetch_optional(&mut *tx).await?;
     if let Some((streak, attempts)) = row {
@@ -232,7 +236,6 @@ async fn denied(
     retry: &crate::resolver::RetryLater,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
-    crate::store::lock_writers(&mut tx).await?;
     let row: Option<(i32,i32,bool)> = sqlx::query_as("SELECT denial_streak,attempts,coalesce(denied_since<=now()-interval '3 days',false) FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE")
         .bind(&job.id).bind(job.generation).fetch_optional(&mut *tx).await?;
     if let Some((streak, attempts, expired)) = row {
@@ -477,7 +480,8 @@ async fn finish_job(
                 })
             {
                 let mut tx = pool.begin().await?;
-                crate::store::lock_writers(&mut tx).await?;
+                crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+                crate::alias::lock(&mut tx).await?;
                 // The generation fence covers the alias too: a stale job writes nothing.
                 let current: Option<String> = sqlx::query_scalar(
                     "SELECT id FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE",
@@ -487,7 +491,8 @@ async fn finish_job(
                 .fetch_optional(&mut *tx)
                 .await?;
                 if current.is_some() {
-                    crate::alias::assign(&mut tx, &job.id, &alias).await?;
+                    let line = crate::alias::assign(&mut tx, &job.id, &alias).await?;
+                    crate::alias::record(&mut tx, line.into_iter().collect()).await?;
                 }
                 tx.commit().await?;
             }
