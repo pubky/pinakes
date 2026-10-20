@@ -55,7 +55,9 @@ A Discogs link joins other services' pages exactly, never by title or catalogue 
 - A release's own barcodes are `upc:` keys.
 
 Pages of other services list the Discogs artist, master or release that MusicBrainz or Wikidata
-names for them at their level.
+names for them at their level. A master's card lists the album's pages on other services: MusicBrainz
+names none for a release group (its editions have them), so they come from the one Wikidata item
+MusicBrainz relates the release group to, when that item names the release group back.
 
 ## Examples
 

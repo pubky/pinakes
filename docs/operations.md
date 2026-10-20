@@ -525,7 +525,8 @@ DataCite names its journal version); each package
 one or two registry requests (and deps.dev when the registry names no provenance); each Steam game
 up to four (ProtonDB, PCGamingWiki, GOG GamesDB, GOG); each store link two Wikidata requests; each
 gone page one Wayback CDX request; each Discogs release one Discogs request (the one its card
-makes). Requests that several sources make (an item, a record) are
+makes), and a Discogs master one Wikidata request (the item MusicBrainz relates its release group
+to). Requests that several sources make (an item, a record) are
 shared through the discovery cache. `btcmap` keeps BTC Map's place list in memory, brought up to
 date at most hourly from its sync (`updated_since`, 2,000 places a page); after a restart the
 first lookup reads it again. `unpaywall` and `ncbi` need the contact setting (`[http] contact`)

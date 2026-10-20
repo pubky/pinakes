@@ -238,7 +238,7 @@ impl MusicBrainzSource {
         {
             return Ok(Found::default());
         }
-        entities_found(
+        let mut found = entities_found(
             cx,
             base,
             kind,
@@ -246,7 +246,25 @@ impl MusicBrainzSource {
             level,
             discogs == Some(discogs::Kind::Release),
         )
-        .await
+        .await?;
+        // A Discogs master is a release group, whose MusicBrainz entry names no service pages
+        // (its editions have them): the one Wikidata item MusicBrainz relates it to names the
+        // album's, when the item names this release group back. The entity is the read above.
+        if let ([group], Some(discogs::Kind::Master), false) =
+            (ids.as_slice(), discogs, found.keys.is_empty())
+        {
+            if let Some(entity) = musicbrainz::entity(&cx.egress, base, kind, group).await? {
+                let named = hubs::key::mb(MbKind::ReleaseGroup, &entity.mbid);
+                let storefront = &cx.config.also_on.apple_storefront;
+                for mut link in album_item_links(cx, &entity, storefront).await? {
+                    if !found.links.iter().any(|l| l.uri == link.uri) {
+                        link.key.clone_from(&named);
+                        found.links.push(link);
+                    }
+                }
+            }
+        }
+        Ok(found)
     }
 }
 
@@ -494,6 +512,33 @@ async fn entities_found(
         });
     }
     Ok(found)
+}
+
+/// The album pages of the one Wikidata item a release group's MusicBrainz entry relates it to,
+/// when that item names the release group back (P436) and no other.
+async fn album_item_links(
+    cx: &Context,
+    group: &musicbrainz::Entity,
+    storefront: &str,
+) -> Result<Vec<Link>> {
+    let mut qids: Vec<String> = group
+        .urls
+        .iter()
+        .filter_map(|u| crate::lookups::sources::wikidata_item(&u.url))
+        .collect();
+    qids.sort();
+    qids.dedup();
+    let [qid] = qids.as_slice() else {
+        return Ok(vec![]);
+    };
+    let items = wikidata::items(&cx.egress, std::slice::from_ref(qid)).await?;
+    let Some(item) = items.iter().find(|i| &i.qid == qid) else {
+        return Ok(vec![]);
+    };
+    if !matches!(item.id("P436"), [mbid] if *mbid == group.mbid) {
+        return Ok(vec![]);
+    }
+    Ok(found(item, Level::Album, storefront).links)
 }
 
 /// Deezer's public API: its own record of a Deezer link, and its lookups by ISRC and barcode.

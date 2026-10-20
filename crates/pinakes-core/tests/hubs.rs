@@ -1641,6 +1641,23 @@ async fn discogs_joins_at_its_level(pool: sqlx::PgPool) {
         album,
         "an edition is not the album"
     );
+    // The master's release group names no service pages; the one Wikidata item MusicBrainz
+    // relates it to (Q202996, naming this release group back) names the album's, keyed by the
+    // release group so a tagged one joins.
+    let album_pages =
+        "SELECT site||' '||uri||' '||coalesce(key,'-') FROM derived_link WHERE resource_id=$1 AND source='musicbrainz' ORDER BY site";
+    assert_eq!(
+        rows(album_pages, ids[0].clone()).await,
+        [
+            "Apple Music https://music.apple.com/us/album/1097861387",
+            "Deezer https://www.deezer.com/album/14879699",
+            "Qobuz https://open.qobuz.com/album/0634904078164",
+            "Spotify https://open.spotify.com/album/2fGCAYUMssLKiUAoNdxGLx",
+            "TIDAL https://tidal.com/album/58990510",
+            "YouTube https://www.youtube.com/playlist?list=OLAK5uy_nEGbRK3IZ018QZqnVmZtq-0k-vtJdysnA"
+        ]
+        .map(|l| format!("{l} mb:release-group:b1392450-e666-3926-a536-22c65f834433"))
+    );
     // The Spotify album's MusicBrainz release names its own Discogs release (release ↔ release),
     // the TIDAL artist's MusicBrainz artist the Discogs artist.
     let derived = "SELECT uri FROM derived_link WHERE resource_id=$1 AND uri LIKE '%discogs%'";

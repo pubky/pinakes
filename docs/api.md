@@ -816,7 +816,10 @@ from a known music service's own record of its own object; another host's claim 
   GTIN-13 (a 12-digit UPC gains a leading zero), by every source.
   Discogs pages are taken at their level only: a Discogs master is a release group, a Discogs
   release one release and never its release group (an edition is not the album), a Discogs
-  artist an artist.
+  artist an artist. Each lists its entity's service pages; a release group's MusicBrainz entry
+  names none (its editions have them), so a master lists the album pages of the one Wikidata
+  item MusicBrainz relates the release group to, when that item names the release group back
+  (P436), keyed by the release group.
 - `deezer` (off unless the operator turns it on: Deezer's API terms allow non-commercial use
   only): a Deezer track's or album's own ISRC or barcode from Deezer's API as a key, and for
   another service's track or album with an ISRC or barcode key, the one Deezer track or album

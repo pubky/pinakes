@@ -472,7 +472,10 @@
   {
     "kind": "discogs_master",
     "uri": "https://www.discogs.com/master/21491-Radiohead-OK-Computer",
-    "type": "MusicAlbum"
+    "type": "MusicAlbum",
+    "derived": [
+      "Apple Music"
+    ]
   },
   {
     "kind": "discogs_album",
