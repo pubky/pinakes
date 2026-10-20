@@ -1,10 +1,18 @@
 //! The book, podcast and film sources through Egress, against the answers recorded in
 //! `tests/fixtures/media` (each family's `provenance.json` names the URL of every file).
 use pinakes_core::{
-    also_on::{books::Books, films::Films, podcasts::Podcasts, Context, Found, Source, Subject},
+    also_on::{
+        books::Books,
+        films::Films,
+        podcasts::{derived_guid, item_key, Podcasts},
+        Context, Fact, Found, Source, Subject,
+    },
     config::{Config, EgressConfig},
     model::ResourceMeta,
-    resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+    resolver::{
+        egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+        RetryLater,
+    },
 };
 use std::{
     collections::BTreeMap,
@@ -62,6 +70,10 @@ impl Recorded {
                 serde_json::from_slice(&read(family, "provenance.json")).unwrap();
             let entries = provenance.as_object().unwrap();
             for (name, p) in entries {
+                // A refusal is served only where a test asks for it (`with_recorded`).
+                if name.ends_with("-401") {
+                    continue;
+                }
                 let mut url = p["url"].as_str().unwrap().to_owned();
                 // A followed redirect's answer is served at its target.
                 if let Some(first) = name.strip_suffix("-followed") {
@@ -83,6 +95,25 @@ impl Recorded {
             seen: Mutex::new(Vec::new()),
             signed_with: Mutex::new(Vec::new()),
         })
+    }
+    /// The same, with recorded answers not served by default, each in place of its URL's.
+    fn with_recorded(more: &[(&str, &str)]) -> Arc<Self> {
+        let mut recorded = Arc::into_inner(Self::new()).unwrap();
+        for (family, name) in more {
+            let provenance: serde_json::Value =
+                serde_json::from_slice(&read(family, "provenance.json")).unwrap();
+            let p = &provenance[*name];
+            recorded.answers.insert(
+                p["url"].as_str().unwrap().into(),
+                Answer {
+                    status: p["status"].as_u64().unwrap() as u16,
+                    location: None,
+                    content_type: p["content_type"].as_str().unwrap_or("").to_owned(),
+                    body: read(family, p["file"].as_str().unwrap()),
+                },
+            );
+        }
+        Arc::new(recorded)
     }
     /// The same, with more answers: a URL and its status, and its `Location` or HTML body.
     fn with(more: &[(&str, u16, &str)]) -> Arc<Self> {
@@ -334,6 +365,7 @@ fn feed_card(uri: &str, feed: &str, item: Option<&str>) -> Subject {
     subject(uri, Some(kind), Some(doc))
 }
 const DAILY: &str = "https://podcasts.apple.com/us/podcast/the-daily/id1200361736";
+const GUID_DAILY: &str = "304b84f0-07b0-5265-b6b7-da5cf5aeb56e";
 
 #[tokio::test]
 async fn an_apple_show_without_podcast_index() {
@@ -350,11 +382,6 @@ async fn an_apple_show_without_podcast_index() {
     assert_eq!(
         links(&found),
         [
-            (
-                "Apple Podcasts",
-                "https://podcasts.apple.com/us/podcast/id1200361736",
-                "itunes"
-            ),
             ("Pocket Casts", "https://pca.st/itunes/1200361736", "itunes"),
             ("Castro", "https://castro.fm/itunes/1200361736", "itunes"),
             (
@@ -373,8 +400,10 @@ async fn an_apple_show_without_podcast_index() {
                 "wikidata"
             ),
             ("Castbox", "https://castbox.fm/channel/id463650", "wikidata"),
-        ]
+        ],
+        "never the card's own service"
     );
+    assert!(found.facts.is_empty(), "no GUID without Podcast Index");
     assert!(!recorded.seen().iter().any(|u| u.contains("podcastindex")));
 }
 
@@ -394,16 +423,42 @@ async fn an_apple_show_with_podcast_index() {
             "wikidata:Q48741148"
         ]
     );
+    assert_eq!(found.keys[1].via, "podcastindex");
     assert!(links(&found).contains(&(
         "Podcast Index",
         "https://podcastindex.org/podcast/743229",
         "podcastindex"
     )));
-    assert_eq!(found.facts.len(), 1);
+    assert_eq!(found.facts, [Fact::new("podcast_guid", GUID_DAILY)]);
     assert_eq!(
         *recorded.signed_with.lock().unwrap(),
         [Some("KEY".to_string())]
     );
+}
+
+#[tokio::test]
+async fn a_refused_podcast_index_key_fails_nothing() {
+    // Podcast Index refuses the key (401): everything else still counts.
+    let recorded = Recorded::with_recorded(&[("podcasts", "pi-byitunesid-401")]);
+    let cx = cx(recorded.clone(), indexed());
+    let found = Podcasts
+        .lookup(&cx, &subject(DAILY, None, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        keys(&found),
+        ["podcast:apple:1200361736", "wikidata:Q48741148"]
+    );
+    assert!(sites(&found).contains(&"Pocket Casts"));
+    assert!(found.facts.is_empty());
+    // When nothing at all could be read (iTunes answering 503), the retry is passed on.
+    let show = "https://itunes.apple.com/lookup?id=1200361736&entity=podcast&country=us";
+    let busy = Recorded::with(&[(show, 503, "")]);
+    let error = Podcasts
+        .lookup(&crate::cx(busy, indexed()), &subject(DAILY, None, None))
+        .await
+        .unwrap_err();
+    assert!(error.is::<RetryLater>(), "{error:#}");
 }
 
 #[tokio::test]
@@ -422,25 +477,115 @@ async fn an_unknown_apple_id_asks_nobody_else() {
 }
 
 #[tokio::test]
-async fn an_apple_episode() {
-    let recorded = Recorded::new();
-    let cx = cx(recorded.clone(), Config::default());
+async fn players_name_a_show_by_its_apple_id() {
+    let cx = cx(Recorded::new(), Config::default());
     let found = Podcasts
+        .lookup(
+            &cx,
+            &subject("https://pca.st/itunes/1200361736", None, None),
+        )
+        .await
+        .unwrap();
+    assert_eq!(found.keys[0].key, "podcast:apple:1200361736");
+    assert!(sites(&found).contains(&"Castro"));
+    assert!(!sites(&found).contains(&"Pocket Casts"), "the card itself");
+    // An ID iTunes doesn't know still names itself: the key, from the URL alone.
+    let found = Podcasts
+        .lookup(&cx, &subject("https://castro.fm/itunes/1", None, None))
+        .await
+        .unwrap();
+    assert_eq!(keys(&found), ["podcast:apple:1"]);
+    assert_eq!(found.keys[0].via, "url");
+    assert!(found.links.is_empty());
+}
+
+#[tokio::test]
+async fn a_podcast_index_page() {
+    let recorded = Recorded::new();
+    let cx = cx(recorded.clone(), indexed());
+    let found = Podcasts
+        .lookup(
+            &cx,
+            &subject("https://podcastindex.org/podcast/743229", None, None),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        keys(&found),
+        [
+            "podcast:apple:1200361736",
+            "podcast:guid:304b84f0-07b0-5265-b6b7-da5cf5aeb56e",
+            "wikidata:Q48741148"
+        ]
+    );
+    assert!(links(&found).contains(&(
+        "Podcast feed",
+        "https://feeds.simplecast.com/54nAGcIl",
+        "podcastindex"
+    )));
+    assert!(sites(&found).contains(&"Apple Podcasts"));
+    assert!(!sites(&found).contains(&"Podcast Index"), "the card itself");
+    assert_eq!(found.facts, [Fact::new("podcast_guid", GUID_DAILY)]);
+    // Without a key a Podcast Index page has nothing to read.
+    let found = Podcasts
+        .lookup(
+            &crate::cx(Recorded::new(), Config::default()),
+            &subject("https://podcastindex.org/podcast/743229", None, None),
+        )
+        .await
+        .unwrap();
+    assert_eq!(found, Found::default());
+}
+
+#[tokio::test]
+async fn an_episode_has_one_key_on_apple_and_podcast_index() {
+    let cx = cx(Recorded::new(), indexed());
+    let apple = Podcasts
         .lookup(
             &cx,
             &subject(&format!("{DAILY}?i=1000797051580"), None, None),
         )
         .await
         .unwrap();
-    assert_eq!(keys(&found), ["podcast:apple_episode:1000797051580"]);
+    let item = item_key(GUID_DAILY, "1897475d-9b60-447d-ba9b-79aa09f59551").unwrap();
     assert_eq!(
-        links(&found),
+        keys(&apple),
+        ["podcast:apple_episode:1000797051580", item.as_str()]
+    );
+    assert!(apple.links.is_empty(), "its own Apple page is the card");
+    let index = Podcasts
+        .lookup(
+            &cx,
+            &subject(
+                "https://podcastindex.org/podcast/743229?episode=61953304662",
+                None,
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        keys(&index),
+        ["podcast:apple_episode:1000797051580", item.as_str()]
+    );
+    assert_eq!(
+        links(&index),
         [(
             "Apple Podcasts",
             "https://podcasts.apple.com/us/podcast/id1200361736?i=1000797051580",
             "itunes"
         )]
     );
+    // Without Podcast Index the Apple episode has its track only; a gone episode has nothing.
+    let cx = crate::cx(Recorded::new(), Config::default());
+    let alone = Podcasts
+        .lookup(
+            &cx,
+            &subject(&format!("{DAILY}?i=1000797051580"), None, None),
+        )
+        .await
+        .unwrap();
+    assert_eq!(keys(&alone), ["podcast:apple_episode:1000797051580"]);
     let gone = Podcasts
         .lookup(&cx, &subject(&format!("{DAILY}?i=1"), None, None))
         .await
@@ -449,19 +594,22 @@ async fn an_apple_episode() {
 }
 
 #[tokio::test]
-async fn a_feed_names_its_guid() {
-    let recorded = Recorded::new();
-    let cx = cx(recorded.clone(), Config::default());
+async fn a_feed_names_its_guid_as_a_fact() {
+    // Without Podcast Index's word, the feed's own GUID is a fact, never a key.
+    let cx = cx(Recorded::new(), Config::default());
     let feed = "https://feeds.podcastindex.org/pc20.xml";
     let found = Podcasts
         .lookup(&cx, &feed_card(feed, feed, None))
         .await
         .unwrap();
+    assert!(found.keys.is_empty());
     assert_eq!(
-        keys(&found),
-        ["podcast:guid:917393e3-1b1e-5cef-ace4-edaa54e1f810"]
+        found.facts,
+        [Fact::new(
+            "podcast_guid",
+            "917393e3-1b1e-5cef-ace4-edaa54e1f810"
+        )]
     );
-    assert_eq!(found.keys[0].via, "feed");
     assert!(found.links.is_empty(), "no Apple ID without Podcast Index");
 }
 
@@ -479,35 +627,57 @@ async fn a_moved_feed_through_podcast_index() {
     assert_eq!(
         keys(&found),
         [
-            "podcast:guid:917393e3-1b1e-5cef-ace4-edaa54e1f810",
-            "podcast:apple:1584274529"
+            "podcast:apple:1584274529",
+            "podcast:guid:917393e3-1b1e-5cef-ace4-edaa54e1f810"
         ]
     );
-    assert_eq!(found.keys[0].via, "podcastindex");
+    assert_eq!(found.keys[1].via, "podcastindex");
     assert_eq!(
-        links(&found),
-        [
-            (
-                "Podcast Index",
-                "https://podcastindex.org/podcast/920666",
-                "podcastindex"
-            ),
-            (
-                "Apple Podcasts",
-                "https://podcasts.apple.com/us/podcast/id1584274529",
-                "itunes"
-            ),
-            ("Pocket Casts", "https://pca.st/itunes/1584274529", "itunes"),
-            ("Castro", "https://castro.fm/itunes/1584274529", "itunes"),
-        ]
+        found.facts,
+        [Fact::new(
+            "podcast_guid",
+            "917393e3-1b1e-5cef-ace4-edaa54e1f810"
+        )]
+    );
+    assert_eq!(
+        sites(&found),
+        ["Apple Podcasts", "Pocket Casts", "Castro", "Podcast Index"]
     );
 }
 
 #[tokio::test]
+async fn a_feed_item_page_joins_its_episode() {
+    // Podcasting 2.0's item PC20-275 names its page as `<link>`; Podcast Index vouches for the
+    // feed's GUID, and iTunes lists the item as track 1000796718231.
+    let feed = "https://feeds.podcastindex.org/pc20.xml";
+    let page = "https://www.podpage.com/podcasting-20/off-the-rails/";
+    let cx = cx(Recorded::new(), indexed());
+    let found = Podcasts
+        .lookup(&cx, &feed_card(page, feed, Some("PC20-275")))
+        .await
+        .unwrap();
+    let item = item_key("917393e3-1b1e-5cef-ace4-edaa54e1f810", "PC20-275").unwrap();
+    assert_eq!(
+        keys(&found),
+        ["podcast:apple_episode:1000796718231", item.as_str()]
+    );
+    // Another page claiming the item gets its Apple track (by the item GUID) but not the key.
+    let other = Podcasts
+        .lookup(
+            &cx,
+            &feed_card("https://example.org/copy/", feed, Some("PC20-275")),
+        )
+        .await
+        .unwrap();
+    assert_eq!(keys(&other), ["podcast:apple_episode:1000796718231"]);
+}
+
+#[tokio::test]
 async fn a_feed_episode_on_apple_podcasts() {
-    let recorded = Recorded::new();
-    let cx = cx(recorded.clone(), indexed());
     let feed = "https://feeds.simplecast.com/54nAGcIl";
+    // The Daily's feed (not recorded: too large) is unreadable here.
+    let recorded = Recorded::with(&[(feed, 404, "")]);
+    let cx = cx(recorded.clone(), indexed());
     let card = feed_card(
         "https://www.nytimes.com/2026/10/19/podcasts/the-daily/putin-ukraine.html",
         feed,
@@ -655,5 +825,10 @@ async fn an_unreadable_feed_has_no_guid_and_fails_nothing() {
         )
         .await
         .unwrap();
-    assert_eq!(found, Found::default());
+    assert!(found.keys.is_empty() && found.links.is_empty());
+    assert_eq!(
+        found.facts,
+        [Fact::new("podcast_guid", derived_guid(feed).unwrap(),)],
+        "the derived GUID, a fact only"
+    );
 }

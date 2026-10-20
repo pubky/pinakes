@@ -472,8 +472,9 @@ sees the keys the ones before it found in the same run (a barcode MusicBrainz na
 services looked up by it); a source that no longer applies (its key is gone) drops its rows.
 The sources, in the order they run, are `service`, `musicbrainz`, `wikidata`, `deezer` and
 `itunes` (music), `wikipedia`, `wikidata_item`, `books`, `podcasts` and `films`
-([the API](api.md#also-on) says what each reads); `[also_on] apple_storefront` (`us`, a two-letter country code) is the Apple Music,
-Apple Books and Apple Podcasts storefront of the Apple links they build. `[also_on.sources.musicbrainz] base_url`
+([the API](api.md#also-on) says what each reads); `[also_on] apple_storefront` (`us`, a
+two-letter country code) is the Apple Music, Apple Books and Apple Podcasts storefront of the
+Apple links they build. `[also_on.sources.musicbrainz] base_url`
 (`https://musicbrainz.org/ws/2`) points the `musicbrainz` source at a MusicBrainz mirror's web
 service instead, an http(s) URL without a trailing slash and reached through the egress policy;
 every instance on one public address shares MusicBrainz's 1 request/s, which a mirror does not
@@ -485,19 +486,24 @@ more for a track found by its ISRC, and one for a track's original album), up to
 for an album with barcodes, and two Wikidata requests (a search by its service ID cannot batch);
 each Wikipedia article one request to its Wikipedia and one to Wikidata; each book one Open Library
 request, one iTunes lookup for an ebook edition, and two Wikidata requests when Open Library names
-its work; each podcast show one or two iTunes lookups, its feed (usually still cached from its
-card) or one Podcast Index request, and two Wikidata requests; each episode one Podcast Index
-request and two iTunes lookups; each film or series two Wikidata requests (a TVmaze show first its
-TVmaze record), and a Letterboxd and a TVmaze request when the item has no link there. `deezer` is
-off by default: Deezer's API terms allow non-commercial use
-only, so turn it on (`[also_on.sources.deezer] enabled = true`) only where they do; it costs one
-request per Deezer link and up to two per other track or album with an ISRC or barcode.
+its work; each podcast show one iTunes lookup, one or two Podcast Index requests, its feed (usually
+still cached from its card) and two Wikidata requests; each episode up to two Podcast Index
+requests, two iTunes lookups and, for a feed item's page, its feed; each film or series two
+Wikidata requests (a TVmaze show first its TVmaze record), and a Letterboxd and a TVmaze request
+when the item has no link there. `deezer` is off by default: Deezer's API terms allow
+non-commercial use only, so turn it on (`[also_on.sources.deezer] enabled = true`) only where they
+do; it costs one request per Deezer link and up to two per other track or album with an ISRC or
+barcode.
 
 Podcast Index is asked only with a key and secret: `[podcast_index] key` and `secret`, or
 `PINAKES__PODCAST_INDEX__KEY` and `PINAKES__PODCAST_INDEX__SECRET` (free from
-api.podcastindex.org). Without them a show joins through its Apple ID and its feed's GUID only,
-and a feed's episodes get no Apple Podcasts link. The key and secret never appear in logs, the
-operator info or errors.
+api.podcastindex.org). Without them a show joins through its Apple ID only: no GUID is a key, a
+feed gets no Apple ID, a Podcast Index page has nothing to read, and episodes join only by their
+Apple track. The key and secret never appear in logs, the operator info or errors. A refused key
+or a Podcast Index outage fails no lookup: the source keeps what the other services answered,
+and asks again later only when nothing at all was found. Such failures of a secondary service
+(Podcast Index, iTunes, Wikidata, the feed) are counted in
+`pinakes_also_on_service_errors_total{service,class}`.
 
 Sources reach their services through the egress policy and its per-host budgets, one request
 at a time per host. A hub's published limit lowers its host's default pace like a source's own

@@ -820,20 +820,30 @@ Goodreads' `book/isbn/{isbn}` redirect is never used: it answers an unknown ISBN
 unrelated book.
 
 **Podcasts.** `podcasts`: an Apple Podcasts link (`podcasts.apple.com/{cc}/podcast/{slug}/id{n}`
-in any spelling, an episode with `?i={n}`) or a podcast feed's card (a `PodcastSeries`, or a
-`PodcastEpisode` with its item's GUID) is looked up exactly:
-- iTunes must know an Apple ID as a show. The show's key is `podcast:apple:{id}`, and it links
-  Apple Podcasts and the players that open a show by its Apple ID (Pocket Casts, Castro).
-- A show's GUID is its `podcast:guid:{uuid}` key and its `podcast_guid` fact. A feed card takes
-  the GUID its feed names (read at the card's feed URL, never through a redirect); a feed that
-  names none gets the GUID derived from its URL, as the podcast namespace says.
-- With an operator's Podcast Index key ([operations](operations.md#also-on)), Podcast Index joins
-  an Apple ID to its feed and a feed to its Apple ID, and links the show there. Its answer must
-  name the ID or feed URL asked, and an Apple ID it names counts only once iTunes knows it.
-- An episode's key is its Apple track, `podcast:apple_episode:{id}`, with its Apple Podcasts
-  page: a feed item is found among the show's latest 200 episodes on iTunes by its GUID.
+in any spelling, an episode with `?i={n}`), a player link that opens a show by its Apple ID
+(`pca.st/itunes/{n}`, `castro.fm/itunes/{n}`), a Podcast Index page
+(`podcastindex.org/podcast/{feed id}`, an episode with `?episode={id}`) or a podcast feed's card
+(a `PodcastSeries`, or a `PodcastEpisode` with its item's GUID) is looked up exactly:
+- iTunes must know an Apple ID as a show. The show's key is `podcast:apple:{id}` (a player link
+  has it from its URL alone), and it links Apple Podcasts, Pocket Casts and Castro.
+- A show's GUID is a key, `podcast:guid:{uuid}`, only when Podcast Index vouches for it: its
+  answer for this feed URL, Apple ID or feed ID names that GUID (and an Apple ID it names counts
+  only once iTunes knows it). This needs an operator's Podcast Index key
+  ([operations](operations.md#also-on)).
+- The show's `podcast_guid` fact is the GUID its feed names (read at the card's own feed URL,
+  never through a redirect), else Podcast Index's, else the one derived from the feed's URL as
+  the podcast namespace says. A GUID nobody vouches for is never a key: a copied feed can name
+  any show's GUID, and a derived one changes with the feed's URL.
+- An episode's keys are its Apple track, `podcast:apple_episode:{id}`, and
+  `podcast:item:{show GUID}:{SHA-256 of the item GUID}` from its show's vouched GUID. An Apple
+  episode takes the item GUID from iTunes, a Podcast Index episode from Podcast Index, and a
+  feed item's page only when the vouched feed names that page as the item's `<link>`. A feed
+  item finds its Apple track among the show's latest 200 episodes by its GUID.
+- A Podcast Index page links the show's feed and its Apple, Pocket Casts and Castro pages.
 - The show's Wikidata item (by its Apple ID) gives its Q-id as a key and its Spotify, Podcast
   Index, Podchaser, Pocket Casts and Castbox pages.
+- A link never lists its own service. A Podcast Index failure (a refused key, an outage) never
+  fails the lookup: what the other services answered still counts.
 
 **Films and series.** `films`: an IMDb title (`imdb.com/title/tt…`), a TMDB movie or series, a
 Letterboxd film or a TVmaze show is looked up exactly, never by title:
