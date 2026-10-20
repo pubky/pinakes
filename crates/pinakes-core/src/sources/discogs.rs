@@ -106,14 +106,47 @@ pub fn token(config: &crate::config::Config) -> Option<crate::event::adapters::S
         .filter(|t| !t.is_empty())
 }
 
-/// Discogs' record of one object, `None` when it has none. The answer is shared for an hour,
-/// so the card and the also-on lookup ask once.
+/// Discogs' record of one object, `None` when it has none, and whether the token was used. The
+/// answer is shared for an hour, so the card and the also-on lookup ask once. A token Discogs
+/// refuses (401, 403: expired or mistyped) is dropped for the request, with one warning per
+/// process, so cards still work without images.
 pub async fn record(
     egress: &Egress,
     kind: Kind,
     id: u64,
     token: Option<&str>,
-) -> Result<Option<Value>> {
+) -> Result<(Option<Value>, bool)> {
+    let mut f = fetch(egress, kind, id, token).await?;
+    let mut authenticated = token.is_some();
+    if authenticated && matches!(f.status, 401 | 403) {
+        if !TOKEN_REFUSED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(
+                status = f.status,
+                "Discogs refused the configured token; reading without it (no images)"
+            );
+        }
+        f = fetch(egress, kind, id, None).await?;
+        authenticated = false;
+    }
+    match f.status {
+        200 => Ok((Some(serde_json::from_slice(&f.body)?), authenticated)),
+        404 => Ok((None, authenticated)),
+        408 | 429 | 500..=599 => Err(RetryLater {
+            class: "upstream",
+            seconds: f.retry_after_secs.clamp(60, 3600),
+        }
+        .into()),
+        status => anyhow::bail!("Discogs answered {status}"),
+    }
+}
+/// Whether Discogs has refused the configured token since the daemon started.
+static TOKEN_REFUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+async fn fetch(
+    egress: &Egress,
+    kind: Kind,
+    id: u64,
+    token: Option<&str>,
+) -> Result<crate::resolver::egress::Fetched> {
     let options = FetchOptions {
         accept: Some("application/json".into()),
         headers: token
@@ -123,17 +156,7 @@ pub async fn record(
         ..Default::default()
     };
     let url = format!("{API}/{}s/{id}", kind.as_str());
-    let f = egress.discover(&url, &options, 3600).await?;
-    match f.status {
-        200 => Ok(Some(serde_json::from_slice(&f.body)?)),
-        404 => Ok(None),
-        408 | 429 | 500..=599 => Err(RetryLater {
-            class: "upstream",
-            seconds: f.retry_after_secs.clamp(60, 3600),
-        }
-        .into()),
-        status => anyhow::bail!("Discogs answered {status}"),
-    }
+    egress.discover(&url, &options, 3600).await
 }
 
 /// A name without Discogs' number for namesakes (`Radiohead (2)`).
@@ -302,9 +325,9 @@ impl Source for Discogs {
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let (kind, id) = of_uri(uri).ok_or_else(|| anyhow::anyhow!("not a Discogs link"))?;
         let token = TOKEN.read().unwrap_or_else(|e| e.into_inner()).clone();
-        let record = record(cx.egress, kind, id, token.as_deref()).await?;
+        let (record, authenticated) = record(cx.egress, kind, id, token.as_deref()).await?;
         Ok(record
-            .and_then(|v| card(cx.card(uri, self), kind, &v, token.is_some()))
+            .and_then(|v| card(cx.card(uri, self), kind, &v, authenticated))
             .unwrap_or_else(|| cx.missing(uri, self)))
     }
 }
@@ -467,13 +490,68 @@ mod tests {
             .await
             .unwrap_err();
         assert!(!format!("{error:?}").contains("s3cret"), "{error:?}");
+        // Refused with the token, then without it.
         assert_eq!(
             recorded.asked(),
             [
                 "https://api.discogs.com/masters/21491",
                 "https://api.discogs.com/masters/999999999",
                 "https://api.discogs.com/artists/1",
+                "https://api.discogs.com/artists/1",
             ]
         );
+    }
+
+    /// A token Discogs refuses (expired, mistyped) is dropped: the record comes without it.
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_token_falls_back_to_reading_without_it() {
+        struct Refusing;
+        #[async_trait::async_trait]
+        impl crate::resolver::egress::Transport for Refusing {
+            async fn get(
+                &self,
+                url: &url::Url,
+                addresses: &[std::net::SocketAddr],
+            ) -> Result<crate::resolver::egress::Fetched> {
+                self.get_with(url, addresses, &FetchOptions::default())
+                    .await
+            }
+            async fn get_with(
+                &self,
+                url: &url::Url,
+                _: &[std::net::SocketAddr],
+                options: &FetchOptions,
+            ) -> Result<crate::resolver::egress::Fetched> {
+                let authorized = options
+                    .headers
+                    .iter()
+                    .any(|(name, _)| *name == "authorization");
+                Ok(crate::resolver::egress::Fetched {
+                    permanent_redirect: false,
+                    truncated: false,
+                    validators: Default::default(),
+                    url: url.clone(),
+                    content_type: "application/json".into(),
+                    status: if authorized { 401 } else { 200 },
+                    retry_after_secs: 60,
+                    location: None,
+                    body: if authorized {
+                        br#"{"message": "You must authenticate to access this resource."}"#.to_vec()
+                    } else {
+                        crate::sources::fixture::read("discogs", "master-21491.json")
+                    },
+                })
+            }
+        }
+        let egress = Egress::with_backends(
+            Default::default(),
+            std::sync::Arc::new(crate::sources::fixture::PublicDns),
+            std::sync::Arc::new(Refusing),
+        );
+        let (record, authenticated) = record(&egress, Kind::Master, 21491, Some("expired"))
+            .await
+            .unwrap();
+        assert_eq!(record.unwrap()["title"], "OK Computer");
+        assert!(!authenticated);
     }
 }

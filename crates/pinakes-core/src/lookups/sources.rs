@@ -949,7 +949,7 @@ impl Source for Discogs {
         };
         if kind == discogs::Kind::Release {
             let token = discogs::token(&cx.config);
-            if let Some(v) = discogs::record(&cx.egress, kind, id, token.as_deref()).await? {
+            if let (Some(v), _) = discogs::record(&cx.egress, kind, id, token.as_deref()).await? {
                 let barcodes = discogs::barcodes(&v);
                 // A box set lists each disc's barcode: only a release with one barcode keys it.
                 if let [upc] = barcodes.as_slice() {

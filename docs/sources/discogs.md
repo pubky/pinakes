@@ -7,7 +7,9 @@ personal access token (`[also_on.sources.discogs] token`, or
 `PINAKES__ALSO_ON__SOURCES__DISCOGS__TOKEN`) the cards show them. With a token Discogs allows 60
 requests a minute; an operator's `limits.host_rates` entry sets the pace outright
 (`"api.discogs.com" = 1.0` under `[limits.host_rates]`). The token is sent only to
-`api.discogs.com` and never appears in logs or errors. Release data is CC0.
+`api.discogs.com` and never appears in logs or errors. A token Discogs refuses (401 or 403: expired
+or mistyped) is dropped for that request, with one warning per daemon start, and the cards are read
+without it (no images). Release data is CC0.
 
 ## Links
 

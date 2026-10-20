@@ -793,7 +793,7 @@ pub(crate) mod fixture {
             serde_json::from_slice(&read(source, "provenance.json")).unwrap();
         provenance[name]["link"].as_str().unwrap().to_owned()
     }
-    struct PublicDns;
+    pub struct PublicDns;
     #[async_trait::async_trait]
     impl crate::resolver::egress::Dns for PublicDns {
         async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<std::net::SocketAddr>> {
