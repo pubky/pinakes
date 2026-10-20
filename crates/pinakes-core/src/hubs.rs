@@ -268,6 +268,31 @@ pub mod musicbrainz {
             .await?
             .map(|v| parse_url(&v)))
     }
+    /// The recordings an ISRC is on; `None` when MusicBrainz does not know the ISRC.
+    pub async fn isrc(egress: &Egress, base: &str, isrc: &str) -> Result<Option<Vec<String>>> {
+        let Some(isrc) = crate::music::isrc(isrc) else {
+            return Ok(None);
+        };
+        Ok(get(
+            egress,
+            &format!("{base}/isrc/{isrc}?fmt=json"),
+            "musicbrainz",
+        )
+        .await?
+        .map(|v| parse_isrc(&v)))
+    }
+    /// `GET /isrc/{ISRC}`: the recordings' MBIDs, each once.
+    pub fn parse_isrc(v: &Value) -> Vec<String> {
+        let mut ids: Vec<String> = v["recordings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| mbid(r["id"].as_str()?))
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
     /// One entity with its URL relations; `None` when the MBID is unknown.
     pub async fn entity(
         egress: &Egress,

@@ -36,6 +36,20 @@ impl Service {
             Self::Bandcamp => "Bandcamp",
         }
     }
+    /// The service as a row's `via` (`apple_music`).
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Spotify => "spotify",
+            Self::AppleMusic => "apple_music",
+            Self::YouTube => "youtube",
+            Self::Deezer => "deezer",
+            Self::Tidal => "tidal",
+            Self::Qobuz => "qobuz",
+            Self::SoundCloud => "soundcloud",
+            Self::AmazonMusic => "amazon_music",
+            Self::Bandcamp => "bandcamp",
+        }
+    }
 }
 /// What a link names. A video on YouTube is a `Track` only when a hub says it is a recording;
 /// the URL alone makes it a `Video`.

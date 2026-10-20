@@ -459,14 +459,16 @@ worker; `derive_links = false` keeps keys and facts only;
 that is off by default (an unknown ID stops startup). Sources run in a fixed order, and each
 sees the keys the ones before it found in the same run (a barcode MusicBrainz names, then the
 services looked up by it); a source that no longer applies (its key is gone) drops its rows.
-The sources are `musicbrainz` and `wikidata` (music), `wikipedia` and `wikidata_item`
+The sources, in the order they run, are `service`, `musicbrainz`, `wikidata` and `itunes`
+(music), `wikipedia` and `wikidata_item`
 ([the API](api.md#also-on) says what each reads); `[also_on] apple_storefront` (`us`, a two-letter country code) is the Apple Music
 storefront of the Apple links they build. `[also_on.sources.musicbrainz] base_url`
 (`https://musicbrainz.org/ws/2`) points the `musicbrainz` source at a MusicBrainz mirror's web
 service instead, an http(s) URL without a trailing slash and reached through the egress policy;
 every instance on one public address shares MusicBrainz's 1 request/s, which a mirror does not
 limit. Each music link costs two MusicBrainz requests (the URL, then the entity; up to five when
-the URL names several releases), one iTunes lookup for a release with a barcode, and two Wikidata requests;
+the URL names several releases; one more for a track found by its ISRC), up to two iTunes
+lookups for an album with barcodes, and two Wikidata requests;
 each Wikipedia article one request to its Wikipedia and one to Wikidata, each Wikidata item link
 one request to Wikidata.
 

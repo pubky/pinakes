@@ -78,6 +78,9 @@ impl Transport for Recorded {
                 "https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE" => {
                     (200, fixture("mb-url-spotify-album.json"))
                 }
+                "https://tidal.com/track/567396540" => {
+                    (200, fixture("mb-url-tidal-567396540.json"))
+                }
                 // Dracula: two releases ("Dracula", "Dracula (remix)") of one release group.
                 "https://tidal.com/album/495402659" => {
                     (200, fixture("mb-url-tidal-495402659.json"))
@@ -90,13 +93,19 @@ impl Transport for Recorded {
             "/ws/2/release/30702389-5c67-4438-9ea0-2351c8de0f1d" => {
                 (200, fixture("mb-release.json"))
             }
+            "/ws/2/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69" => {
+                (200, fixture("mb-recording-b1a9c0e9.json"))
+            }
+            "/ws/2/isrc/GBUM71029604" => (200, fixture("mb-isrc-GBUM71029604.json")),
+            "/ws/2/isrc/GBCEE0100112" => (200, fixture("mb-isrc-GBCEE0100112.json")),
+            "/ws/2/isrc/GBUM72103841" => (404, fixture("mb-isrc-GBUM72103841.json")),
             "/ws/2/release/19fc791d-01d1-460d-960a-edb19cad0ee8" => {
                 (200, fixture("mb-release-19fc791d.json"))
             }
             "/ws/2/release/132919b9-60a8-4835-884f-3a943ba587bf" => {
                 (200, fixture("mb-release-132919b9.json"))
             }
-            "/lookup" if query("upc") == "634904078164" => (200, fixture("itunes-upc.json")),
+            "/lookup" if query("upc") == "0634904078164" => (200, fixture("itunes-upc.json")),
             "/lookup" => (200, fixture("itunes-upc-many.json")),
             // A Wikipedia's own API: the article's Wikidata item.
             "/w/api.php" if url.host_str() != Some("www.wikidata.org") => {
@@ -285,7 +294,8 @@ async fn music_links_join_through_the_hubs_and_list_each_other(pool: sqlx::PgPoo
         keys(ids[0].clone()).await,
         [
             "mb:release-group:b1392450-e666-3926-a536-22c65f834433 musicbrainz",
-            "mb:release:30702389-5c67-4438-9ea0-2351c8de0f1d musicbrainz"
+            "mb:release:30702389-5c67-4438-9ea0-2351c8de0f1d musicbrainz",
+            "upc:0634904078164 musicbrainz"
         ]
     );
     // The first album's Spotify ID is not the one Wikidata records: no item, no key.
@@ -350,13 +360,18 @@ async fn music_links_join_through_the_hubs_and_list_each_other(pool: sqlx::PgPoo
     let mut once = uris.clone();
     once.dedup();
     assert_eq!(uris.len(), once.len());
-    let itunes: String =
-        sqlx::query_scalar("SELECT uri FROM derived_link WHERE resource_id=$1 AND via='itunes'")
-            .bind(&ids[0])
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(itunes, "https://music.apple.com/us/album/1097861387");
+    // iTunes answers the barcode MusicBrainz named: one album, keyed by the barcode.
+    let itunes: String = sqlx::query_scalar(
+        "SELECT uri||' '||key FROM derived_link WHERE resource_id=$1 AND via='itunes'",
+    )
+    .bind(&ids[0])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        itunes,
+        "https://music.apple.com/us/album/1097861387 upc:0634904078164"
+    );
     // Album level only: no track, no artist, and never a non-music page.
     for (_, uri, _) in &derived {
         let link = pinakes_core::music::parse(uri).unwrap();
@@ -579,7 +594,10 @@ async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
     };
     assert_eq!(
         rows("SELECT key FROM resource_key WHERE resource_id=$1 ORDER BY key").await,
-        ["mb:release-group:86b6aeeb-f305-45f6-a9c0-76bd6235227e"]
+        [
+            "mb:release-group:86b6aeeb-f305-45f6-a9c0-76bd6235227e",
+            "upc:0196874054246"
+        ]
     );
     assert_eq!(
         rows("SELECT site||' '||uri FROM derived_link WHERE resource_id=$1 AND source='musicbrainz' ORDER BY site").await,
@@ -600,6 +618,106 @@ async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
     assert_eq!(mb.len(), 3, "{seen:?}");
     assert!(
         mb.iter().all(|s| s.starts_with("mb-mirror.example/ws/2/")),
+        "{seen:?}"
+    );
+}
+
+/// The owner's Bohemian Rhapsody on TIDAL: a TIDAL track page states its own ISRC, a key. One
+/// MusicBrainz does not relate by URL joins the one recording its ISRC is on; an ISRC nobody else
+/// knows keeps its key and stays alone.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
+    let tracks = [
+        // The seed: MusicBrainz relates the URL to recording b1a9c0e9.
+        ("https://tidal.com/track/567396540", "GBCEE0100112"),
+        // Not related by URL; its ISRC is on b1a9c0e9 alone.
+        ("https://tidal.com/track/534050211", "GBUM71029604"),
+        // An ISRC MusicBrainz does not know.
+        ("https://tidal.com/track/551040646", "GBUM72103841"),
+    ];
+    let mut ids = vec![];
+    for (uri, isrc) in tracks {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "jsonld", 86400);
+        d.set_type("MusicRecording");
+        d.name = Some("Bohemian Rhapsody".into());
+        d.attributes.insert("isrc".into(), isrc.into());
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.push(id);
+    }
+    // Another host's isrcCode is a fact at most, never a key.
+    let other = "https://example.org/bohemian-rhapsody";
+    let other_id = store::ensure_resource(&pool, other).await.unwrap();
+    let mut d = ResourceMeta::new(other, "jsonld", 86400);
+    d.attributes.insert("isrc".into(), "GBUM71029604".into());
+    store::save_document(&pool, &other_id, 0, &d).await.unwrap();
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let cx = also_on::Context {
+        egress: egress(t.clone()),
+        config: Arc::new(Config::default()),
+    };
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let rows = |sql: &'static str, id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(sql)
+                .bind(id)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let keys = "SELECT key||' '||source||' '||via FROM resource_key WHERE resource_id=$1 ORDER BY key,source";
+    let joined = rows(keys, ids[1].clone()).await;
+    assert!(
+        joined.contains(&"isrc:GBUM71029604 service tidal".to_owned()),
+        "{joined:?}"
+    );
+    assert!(
+        joined.contains(
+            &"mb:recording:b1a9c0e9-d987-4042-ae91-78d6a3267d69 musicbrainz musicbrainz".to_owned()
+        ),
+        "{joined:?}"
+    );
+    assert_eq!(
+        rows(keys, ids[2].clone()).await,
+        ["isrc:GBUM72103841 service tidal"]
+    );
+    assert!(rows(keys, other_id).await.is_empty());
+    let group = "SELECT coalesce(group_id,'-') FROM group_unit WHERE resource_id=$1";
+    let seed = rows(group, ids[0].clone()).await;
+    assert_ne!(seed, ["-"]);
+    assert_eq!(rows(group, ids[1].clone()).await, seed);
+    assert_eq!(rows(group, ids[2].clone()).await, ["-"]);
+    // The recording's other links, found through the ISRC.
+    let links = rows(
+        "SELECT uri FROM derived_link WHERE resource_id=$1 ORDER BY uri",
+        ids[1].clone(),
+    )
+    .await;
+    assert!(
+        links.contains(&"https://www.deezer.com/track/4329888262".to_owned()),
+        "{links:?}"
+    );
+    let seen = t.seen.lock().unwrap().clone();
+    assert!(
+        seen.iter().any(|s| s.contains("/ws/2/isrc/GBUM71029604")),
+        "{seen:?}"
+    );
+    // The seed's own URL relation answers; its ambiguous ISRC is never asked.
+    assert!(
+        !seen.iter().any(|s| s.contains("/ws/2/isrc/GBCEE0100112")),
         "{seen:?}"
     );
 }

@@ -629,7 +629,8 @@ one thing, only on evidence that cannot be spoofed:
   located within 500 m, starting within 300 s, with a name similarity of at least 0.5.
 - **An exact key a source vouches for** ([Also on](#also-on)): two links a hub names as the same
   recording, release or Wikidata item, by its own identifier (`mb:recording:{mbid}`,
-  `wikidata:Q…`). A page's own claims are never such a key. A group holds at most one
+  `wikidata:Q…`), or a known music service's own record of its own object (the ISRC on its
+  track page). Any other page's claims are never such a key. A group holds at most one
   MusicBrainz recording, release, release group and artist, one Wikidata item and one Discogs
   artist, master and release: a join that would bring a second (a wrong ID on a hub) is refused,
   so one bad claim never chains two groups. ISRCs and barcodes may be several.
@@ -728,17 +729,24 @@ lookup by an exact key (a barcode or an ISRC) with exactly one link, a tagged re
 that link takes the key too and joins the group.
 
 **Music.** A track, album or artist link on a music service ([music service links](#aliases))
-is looked up exactly, never by title or name:
+is looked up exactly, never by title or name. A key comes from a hub (MusicBrainz, Wikidata) or
+from a known music service's own record of its own object; another host's claim (its JSON-LD
+`isrcCode`, `sameAs`, a canonical link) is a fact at most.
+- `service`: the ISRC a music service's own track page states (TIDAL's JSON-LD `isrcCode`), as
+  the key `isrc:…` (`via` the service).
 - `musicbrainz`: what MusicBrainz relates the link to (one recording, release or release group,
   or artist; several are ambiguous and give nothing), that entity's current links on music
-  services, and its MBIDs as keys. An album link related to up to four releases of one release
-  group (editions MusicBrainz keeps apart) takes the release group's key alone, and the links
-  and facts every one of those releases has. The keys are `mb:recording:…`, `mb:release:…`, `mb:release-group:…`
-  and `mb:artist:…`. Its facts: `mbid`, the recording's `isrc`s, the release's barcode as `upc` (as GTIN-13: a 12-digit UPC gains a leading zero; every
-  source stores ISRCs and barcodes in one form),
-  the `artist` credit, the recording's `duration` and an artist's `artist_type` (`Person`,
-`Group`, …). A release with a barcode also gets its
-  Apple Music album from iTunes (`via: "itunes"`) when exactly one album answers.
+  services, and its MBIDs, the recording's ISRCs (up to eight) and the release's barcode as keys
+  (`mb:recording:…`, `mb:release:…`, `mb:release-group:…`, `mb:artist:…`, `isrc:…`,
+  `upc:…`). A track MusicBrainz does not relate by URL takes the recording its page's own ISRC
+  is on, when MusicBrainz knows exactly one. An album link related to up to four releases of one
+  release group (editions MusicBrainz keeps apart) takes the release group's key alone, and the
+  links, facts and barcode every one of those releases has. Its facts: `mbid`, the recording's
+  `isrc`s, the release's barcode as `upc`, the `artist` credit, the recording's `duration` and an
+  artist's `artist_type` (`Person`, `Group`, …). ISRCs are stored in upper case and barcodes as
+  GTIN-13 (a 12-digit UPC gains a leading zero), by every source.
+- `itunes`: for an album with a barcode key, the Apple Music album iTunes' `lookup?upc=` names
+  when exactly one album answers, keyed by that barcode (so a tagged link to that album joins).
 - `wikidata`: the one item carrying the link's own service ID (Spotify, Apple Music, Deezer,
   TIDAL, Qobuz, YouTube, SoundCloud, Amazon Music, Bandcamp), read back and compared exactly
   (two items are ambiguous and give nothing); its other music-service IDs as links and its Q-id
