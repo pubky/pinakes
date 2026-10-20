@@ -105,6 +105,41 @@ impl Found {
     }
 }
 
+/// The join key a search names (`key={namespace}:{value}`), normalized as the sources record
+/// it, or `None` when it is not one of these lookups' keys.
+pub fn search_key(namespace: &str, value: &str) -> Option<String> {
+    let digits = |v: &str| plain(v, 20, |c| c.is_ascii_digit()) && !v.starts_with('0');
+    let key = match namespace {
+        "osm" => {
+            let (kind, id) = value.split_once('/')?;
+            (matches!(kind, "node" | "way" | "relation") && digits(id))
+                .then(|| Key::new("osm", value))?
+        }
+        "doi" => papers::doi_key(&crate::resolver::cards::doi(&format!("doi:{value}"))?),
+        "arxiv" => papers::arxiv_key(&papers::arxiv_id(value)?),
+        "pmid" => digits(value).then(|| Key::new("pmid", value))?,
+        "pmcid" => {
+            let n = value.strip_prefix("PMC")?;
+            digits(n).then(|| Key::new("pmcid", value))?
+        }
+        "crate" => packages::Package::new(packages::Registry::Crates, value)?.key(),
+        "npm" => packages::Package::new(packages::Registry::Npm, value)?.key(),
+        "pypi" => packages::Package::new(packages::Registry::PyPI, value)?.key(),
+        "repo" => {
+            let (host, path) = value.split_once('/')?;
+            packages::Repo::new(host, path)?.key()
+        }
+        "steam" => games::steam_key(games::appid(value)?),
+        "gog" => games::gog_key(value.parse().ok().filter(|_| digits(value))?),
+        "fr" => Key::new(
+            "fr",
+            &crate::sources::federal_register::document_number(value)?,
+        ),
+        _ => return None,
+    };
+    Some(key.0)
+}
+
 /// The body of a response, `None` for a status that means "no such object", or an error.
 fn body<'a>(status: u16, body: &'a [u8], missing: &[u16]) -> Result<Option<&'a [u8]>> {
     match status {
@@ -208,6 +243,42 @@ mod tests {
                     archive::wayback_request(&s, chrono::Utc::now());
                 }
             }
+        }
+    }
+
+    #[test]
+    fn search_keys() {
+        for (namespace, value, key) in [
+            ("osm", "node/240109189", "osm:node/240109189"),
+            ("doi", "10.1038/NATURE12373", "doi:10.1038/nature12373"),
+            ("arxiv", "1304.1068v2", "arxiv:1304.1068"),
+            ("pmcid", "PMC3672233", "pmcid:PMC3672233"),
+            ("crate", "Serde_JSON", "crate:serde-json"),
+            ("npm", "@sigstore/sign", "npm:@sigstore/sign"),
+            ("pypi", "Zope.Interface", "pypi:zope-interface"),
+            (
+                "repo",
+                "github.com/Rust-Random/rand",
+                "repo:github.com/rust-random/rand",
+            ),
+            ("steam", "620", "steam:620"),
+            ("fr", "2026-18291", "fr:2026-18291"),
+        ] {
+            assert_eq!(
+                search_key(namespace, value).as_deref(),
+                Some(key),
+                "{namespace}:{value}"
+            );
+        }
+        for (namespace, value) in [
+            ("osm", "area/1"),
+            ("osm", "node/01"),
+            ("pmcid", "123"),
+            ("steam", "x"),
+            ("isbn", "1"),
+            ("repo", "example.org/a/b"),
+        ] {
+            assert_eq!(search_key(namespace, value), None, "{namespace}:{value}");
         }
     }
 

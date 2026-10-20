@@ -439,7 +439,10 @@ pub struct SearchQuery {
     /// `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist, or the MBID a
     /// MusicBrainz page was merged from),
     /// `wikidata:{Q-id}`, `isrc:{code}`, `upc:{barcode}`, `isbn:{ISBN-10 or ISBN-13}`,
-    /// `imdb:{tt…}` (an IMDb title) or `podcast:{GUID}` (a podcast's `podcast:guid`).
+    /// `imdb:{tt…}` (an IMDb title), `podcast:{GUID}` (a podcast's `podcast:guid`),
+    /// `osm:{type}/{id}`, `doi:{DOI}`, `arxiv:{id}`, `pmid:{n}`, `pmcid:PMC{n}`, `crate:{name}`,
+    /// `npm:{name}`, `pypi:{name}`, `repo:{host}/{path}`, `steam:{appid}`, `gog:{id}` or
+    /// `fr:{document number}`.
     pub key: Option<String>,
     pub tags: Option<String>,
     #[serde(rename = "match")]
@@ -1148,7 +1151,7 @@ pub(crate) struct KeyFilter {
 }
 pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
     let bad = || {
-        ApiError::bad("key is mbid:{uuid}, wikidata:{Q-id}, isrc:{ISRC}, upc:{UPC, EAN or GTIN with its check digit}, isbn:{ISBN-10 or ISBN-13}, imdb:{tt and 7–8 digits} or podcast:{GUID}")
+        ApiError::bad("key is mbid:{uuid}, wikidata:{Q-id}, isrc:{ISRC}, upc:{UPC, EAN or GTIN with its check digit}, isbn:{ISBN-10 or ISBN-13}, imdb:{tt and 7–8 digits}, podcast:{GUID}, osm:{type}/{id}, doi:{DOI}, arxiv:{id}, pmid:{n}, pmcid:PMC{n}, crate:{name}, npm:{name}, pypi:{name}, repo:{github.com|gitlab.com}/{path}, steam:{appid}, gog:{id} or fr:{document number}")
     };
     let (kind, value) = key.split_once(':').ok_or_else(bad)?;
     let keys = |keys: Vec<String>| KeyFilter { keys, fact: None };
@@ -1187,7 +1190,10 @@ pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
         "podcast" => crate::also_on::podcasts::guid(value)
             .map(|g| keys(vec![format!("podcast:guid:{g}")]))
             .ok_or_else(bad),
-        _ => Err(bad()),
+        // The lookups' keys: places, papers, packages, repositories, games, documents.
+        _ => crate::lookups::search_key(kind, value)
+            .map(|key| keys(vec![key]))
+            .ok_or_else(bad),
     }
 }
 fn scope(

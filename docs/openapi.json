@@ -3145,7 +3145,7 @@
             }
           },
           {
-            "description": "Links carrying one exact identifier, on any service and in any spelling:\n`mbid:{uuid}` (a MusicBrainz recording, release, release group or artist, or the MBID a\nMusicBrainz page was merged from),\n`wikidata:{Q-id}`, `isrc:{code}`, `upc:{barcode}`, `isbn:{ISBN-10 or ISBN-13}`,\n`imdb:{tt…}` (an IMDb title) or `podcast:{GUID}` (a podcast's `podcast:guid`).",
+            "description": "Links carrying one exact identifier, on any service and in any spelling:\n`mbid:{uuid}` (a MusicBrainz recording, release, release group or artist, or the MBID a\nMusicBrainz page was merged from),\n`wikidata:{Q-id}`, `isrc:{code}`, `upc:{barcode}`, `isbn:{ISBN-10 or ISBN-13}`,\n`imdb:{tt…}` (an IMDb title), `podcast:{GUID}` (a podcast's `podcast:guid`),\n`osm:{type}/{id}`, `doi:{DOI}`, `arxiv:{id}`, `pmid:{n}`, `pmcid:PMC{n}`, `crate:{name}`,\n`npm:{name}`, `pypi:{name}`, `repo:{host}/{path}`, `steam:{appid}`, `gog:{id}` or\n`fr:{document number}`.",
             "examples": {
               "(none)": {
                 "summary": "(none)",
@@ -3167,9 +3167,17 @@
                 "summary": "mbid:9f9cf187-d6f9-437f-9d98-d59cdbd52757",
                 "value": "mbid:9f9cf187-d6f9-437f-9d98-d59cdbd52757"
               },
+              "key-fr-2026-18291": {
+                "summary": "fr:2026-18291",
+                "value": "fr:2026-18291"
+              },
               "key-gbaye9701376": {
                 "summary": "isrc:GBAYE9701376",
                 "value": "isrc:GBAYE9701376"
+              },
+              "key-osm-node-240109189": {
+                "summary": "osm:node/240109189",
+                "value": "osm:node/240109189"
               },
               "key-q9312": {
                 "summary": "wikidata:Q9312",
