@@ -3802,3 +3802,77 @@ async fn occurrence_cards_report_their_lifecycle_beside_the_feed_status(pool: Pg
     assert_eq!(code, 200, "{found}");
     assert_eq!(lifecycle(&found["items"]), expected, "{found}");
 }
+
+/// Retention deletes a resource's expired occurrences in a save's order and holds no other
+/// resource's row while it waits for one: a writer that holds one feed and then locks another
+/// (an ingested batch, a save of each) never waits on it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn retention_waits_for_a_writer_holding_nothing_else(pool: PgPool) {
+    let mut feeds = vec![];
+    for name in ["first", "second"] {
+        let uri = format!("https://example.org/{name}.ics");
+        let id = store::ensure_resource(&pool, &uri).await.unwrap();
+        let d = dynamic_parse(&uri, &future_calendar(2));
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        feeds.push(id);
+    }
+    sqlx::query(
+        "UPDATE occurrence SET status='cancelled',start_at=now()-interval '50 days',end_at=now()-interval '49 days'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    // The writer holds each feed's row in turn; retention runs between the two.
+    for (held, next) in [(&feeds[0], &feeds[1]), (&feeds[1], &feeds[0])] {
+        let mut writer = pool.begin().await.unwrap();
+        sqlx::query("SET LOCAL lock_timeout='3s'")
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE resource SET group_revision=group_revision+1 WHERE id=$1")
+            .bind(held)
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        let retention = tokio::spawn({
+            let pool = pool.clone();
+            async move { pinakes_core::changes::retain(&pool, 90).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock')")
+                    .fetch_one(&pool).await.unwrap();
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        sqlx::query("UPDATE resource SET group_revision=group_revision+1 WHERE id=$1")
+            .bind(next)
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        writer.commit().await.unwrap();
+        retention.await.unwrap().unwrap();
+        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM occurrence")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0);
+        // The second round needs expired occurrences again.
+        for (id, uri) in [(&feeds[0], "first"), (&feeds[1], "second")] {
+            let uri = format!("https://example.org/{uri}.ics");
+            let d = dynamic_parse(&uri, &future_calendar(2));
+            store::save_document(&pool, id, 0, &fresh(&d))
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE occurrence SET status='cancelled',start_at=now()-interval '50 days',end_at=now()-interval '49 days'")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+}

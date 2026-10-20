@@ -1,8 +1,12 @@
 //! Concurrent writers against one database: resource saves (each followed by its group refresh),
-//! derived links, ingested batches that add and remove tags, and new alias spellings. None waits
-//! on another for the search revision, none deadlocks, and every write succeeds.
+//! derived links, ingested batches that add and remove tags, new alias spellings, and change
+//! retention deleting calendar feeds' expired occurrences while those feeds are tagged and saved.
+//! None waits on another for the search revision, none deadlocks, and every write succeeds.
 //! `WRITE_LOAD_ROUNDS` scales the run; the numbers go to standard error.
 use pinakes_core::{
+    changes,
+    config::EventConfig,
+    event::calendar,
     group_keys, ingest,
     model::ResourceMeta,
     nexus::{Change, Changes, FeedPage, Kind, Op},
@@ -18,6 +22,7 @@ use std::{
 };
 
 const WRITERS: usize = 8;
+const FEEDS: usize = 4;
 
 /// Lock waits seen by polling `pg_stat_activity`: all of them, and those on the search revision
 /// (a statement naming it, or a tuple lock on its relation).
@@ -78,6 +83,31 @@ fn author(n: usize) -> String {
     String::from_utf8(v).unwrap()
 }
 
+/// Calendar feed `f` with two events ahead, fetched at `at` (milliseconds; a later save needs a
+/// later fetch).
+fn feed(f: usize, at: i64) -> ResourceMeta {
+    let uri = format!("https://load.example/feed{f}.ics");
+    let start = chrono::Utc::now() + chrono::Duration::days(2);
+    let events: String = (0..2)
+        .map(|i| {
+            format!(
+                "BEGIN:VEVENT\nUID:load{f}-{i}\nDTSTART:{}Z\nDURATION:PT1H\nSUMMARY:Load {i}\nEND:VEVENT\n",
+                (start + chrono::Duration::days(i)).format("%Y%m%dT%H%M%S")
+            )
+        })
+        .collect();
+    let text = format!("BEGIN:VCALENDAR\nVERSION:2.0\n{events}END:VCALENDAR\n");
+    let mut d = calendar::parse(
+        &uri,
+        text.as_bytes(),
+        &EventConfig::default(),
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    d.fetched_at = at;
+    d
+}
+
 async fn deadlocks(pool: &PgPool) -> i64 {
     sqlx::query_scalar("SELECT deadlocks FROM pg_stat_database WHERE datname=current_database()")
         .fetch_one(pool)
@@ -104,6 +134,16 @@ async fn concurrent_writers_never_wait_on_the_search_revision(pool: PgPool) {
             .await
             .unwrap();
         ids.push((id, uri));
+    }
+    let mut feeds = vec![];
+    let fetched = chrono::Utc::now().timestamp_millis();
+    for f in 0..FEEDS {
+        let uri = format!("https://load.example/feed{f}.ics");
+        let id = store::ensure_resource(&pool, &uri).await.unwrap();
+        store::save_document(&pool, &id, 0, &feed(f, fetched))
+            .await
+            .unwrap();
+        feeds.push((id, uri));
     }
     let before = deadlocks(&pool).await;
     let writes = Arc::new(AtomicU64::new(0));
@@ -151,7 +191,11 @@ async fn concurrent_writers_never_wait_on_the_search_revision(pool: PgPool) {
     tasks.push(tokio::spawn({
         let pool = pool.clone();
         let writes = writes.clone();
-        let uris: Vec<String> = ids.iter().map(|(_, uri)| uri.clone()).collect();
+        let uris: Vec<String> = ids
+            .iter()
+            .chain(&feeds)
+            .map(|(_, uri)| uri.clone())
+            .collect();
         async move {
             for r in 0..rounds {
                 let saved = ingest::cursor(&pool, "load").await.unwrap();
@@ -200,6 +244,38 @@ async fn concurrent_writers_never_wait_on_the_search_revision(pool: PgPool) {
                 .await
                 .unwrap());
                 writes.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }));
+    // Change retention: each round the feeds' occurrences expire (one feed at a time, as a save
+    // would change them), retention deletes them, and the feeds are fetched again.
+    tasks.push(tokio::spawn({
+        let pool = pool.clone();
+        let writes = writes.clone();
+        let feeds = feeds.clone();
+        async move {
+            for r in 0..rounds {
+                for (id, _) in &feeds {
+                    let mut tx = pool.begin().await.unwrap();
+                    sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR UPDATE")
+                        .bind(id)
+                        .execute(&mut *tx)
+                        .await
+                        .unwrap();
+                    sqlx::query("UPDATE occurrence SET status='cancelled',start_at=now()-interval '50 days',end_at=now()-interval '49 days' WHERE resource_id=$1")
+                        .bind(id)
+                        .execute(&mut *tx)
+                        .await
+                        .unwrap();
+                    tx.commit().await.unwrap();
+                }
+                changes::retain(&pool, 90).await.unwrap();
+                for (f, (id, _)) in feeds.iter().enumerate() {
+                    store::save_document(&pool, id, 0, &feed(f, fetched + 1 + r as i64))
+                        .await
+                        .unwrap();
+                }
+                writes.fetch_add(2 * FEEDS as u64 + 1, Ordering::SeqCst);
             }
         }
     }));

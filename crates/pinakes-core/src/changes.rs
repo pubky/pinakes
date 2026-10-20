@@ -388,7 +388,8 @@ pub async fn delete_orphans(pool: &PgPool, grace_days: u32) -> Result<u64> {
     Ok(rows.len() as u64)
 }
 pub async fn retain(pool: &PgPool, days: u32) -> Result<()> {
-    sqlx::query("DELETE FROM occurrence o USING event_fetch e WHERE o.resource_id=e.resource_id AND (o.status IN ('cancelled','superseded') OR o.start_at<e.horizon_start) AND coalesce(o.end_at,o.start_at)<now()-e.retention_days*interval '1 day'").execute(pool).await?;
+    // The change history is kept to its days even when an occurrence step fails.
+    let occurrences = retain_occurrences(pool).await;
     let mut tx = pool.begin().await?;
     lock_sequence(&mut tx).await?;
     sqlx::query("DELETE FROM resource_change WHERE at<now()-$1*interval '1 day'")
@@ -411,7 +412,34 @@ pub async fn retain(pool: &PgPool, days: u32) -> Result<()> {
         sqlx::query("WITH kept AS (SELECT coalesce(jsonb_object_agg(v.key,v.value),'{}'::jsonb) AS versions FROM osm_place o CROSS JOIN LATERAL jsonb_each(o.versions) v WHERE o.osm_type=$1 AND o.osm_id=$2 AND (v.key=md5($3::jsonb::text) OR v.key=md5($4::jsonb::text) OR EXISTS(SELECT 1 FROM resource r WHERE r.osm_type=o.osm_type AND r.osm_id=o.osm_id AND r.osm_version=v.key) OR EXISTS(SELECT 1 FROM resource r WHERE r.doc#>>'{venue,osm_id}'=o.osm_type||'/'||o.osm_id AND r.doc#>>'{venue,osm_version}'=v.key) OR EXISTS(SELECT 1 FROM occurrence x WHERE x.doc#>>'{venue,osm_id}'=o.osm_type||'/'||o.osm_id AND x.doc#>>'{venue,osm_version}'=v.key) OR EXISTS(SELECT 1 FROM resource_change c WHERE (c.before#>>'{venue,osm_id}'=o.osm_type||'/'||o.osm_id AND c.before#>>'{venue,osm_version}'=v.key) OR (c.after#>>'{venue,osm_id}'=o.osm_type||'/'||o.osm_id AND c.after#>>'{venue,osm_version}'=v.key)) OR EXISTS(SELECT 1 FROM resource_change c WHERE c.osm_type=o.osm_type AND c.osm_id=o.osm_id AND (c.before->>'version'=v.key OR c.after->>'version'=v.key)))) UPDATE osm_place o SET versions=k.versions FROM kept k WHERE o.osm_type=$1 AND o.osm_id=$2 AND o.versions IS DISTINCT FROM k.versions").bind(kind).bind(id).bind(current).bind(fetched).execute(&mut *tx).await?;
     }
     tx.commit().await?;
-    Ok(())
+    occurrences.map(|_| ())
+}
+/// Delete expired occurrences one resource at a time, in a save's order: the write order shared,
+/// the resource's row, then its occurrences. Their triggers lock the owning resource's row, so
+/// one statement over every resource would lock many resources' rows in an order of its own.
+async fn retain_occurrences(pool: &PgPool) -> Result<u64> {
+    let owners: Vec<String> = sqlx::query_scalar("SELECT DISTINCT o.resource_id FROM occurrence o JOIN event_fetch e ON e.resource_id=o.resource_id WHERE (o.status IN ('cancelled','superseded') OR o.start_at<e.horizon_start) AND coalesce(o.end_at,o.start_at)<now()-e.retention_days*interval '1 day' ORDER BY 1")
+        .fetch_all(pool)
+        .await?;
+    let mut deleted = 0;
+    for id in owners {
+        let mut tx = pool.begin().await?;
+        crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+        let found = sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR UPDATE")
+            .bind(&id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if found.is_none() {
+            continue;
+        }
+        deleted += sqlx::query("DELETE FROM occurrence o USING event_fetch e WHERE o.resource_id=$1 AND e.resource_id=$1 AND (o.status IN ('cancelled','superseded') OR o.start_at<e.horizon_start) AND coalesce(o.end_at,o.start_at)<now()-e.retention_days*interval '1 day'")
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        tx.commit().await?;
+    }
+    Ok(deleted)
 }
 #[cfg(test)]
 mod tests {
