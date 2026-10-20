@@ -105,6 +105,53 @@ impl Found {
     }
 }
 
+/// The plain name of a service these lookups read or link to, by its link: the name their derived
+/// links carry ("OpenStreetMap", "Google Play", "crates.io", "DOI"), so a tagged member of a
+/// group and a derived link to the same service read as one service.
+pub fn service_name(uri: &str) -> Option<&'static str> {
+    if uri.get(..4).is_some_and(|s| s.eq_ignore_ascii_case("doi:")) {
+        return Some("DOI");
+    }
+    let url = web_url(uri)?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    Some(match host {
+        "openstreetmap.org" | "osm.org" if crate::resolver::osm::parse_id(uri).is_some() => {
+            "OpenStreetMap"
+        }
+        "wikidata.org" | "m.wikidata.org" if sources::wikidata_item(uri).is_some() => "Wikidata",
+        "doi.org" | "dx.doi.org" => "DOI",
+        "store.steampowered.com" | "steamcommunity.com" => "Steam",
+        "steamdb.info" => "SteamDB",
+        "protondb.com" => "ProtonDB",
+        "pcgamingwiki.com" => "PCGamingWiki",
+        "gog.com" => "GOG",
+        "apps.apple.com" => "App Store",
+        "play.google.com" => "Google Play",
+        "f-droid.org" => "F-Droid",
+        "flathub.org" => "Flathub",
+        "snapcraft.io" => "Snap Store",
+        "crates.io" => "crates.io",
+        "docs.rs" => "Docs.rs",
+        "lib.rs" => "lib.rs",
+        "npmjs.com" => "npm",
+        "jsdelivr.com" => "jsDelivr",
+        "unpkg.com" => "unpkg",
+        "pypi.org" => "PyPI",
+        "github.com" => "GitHub",
+        "gitlab.com" => "GitLab",
+        "archive.softwareheritage.org" => "Software Heritage",
+        "arxiv.org" => "arXiv",
+        "alphaxiv.org" => "alphaXiv",
+        "pubmed.ncbi.nlm.nih.gov" => "PubMed",
+        "pmc.ncbi.nlm.nih.gov" => "PubMed Central",
+        "huggingface.co" if url.path().starts_with("/papers/") => "Hugging Face Papers",
+        "btcmap.org" => "BTC Map",
+        "web.archive.org" => "Wayback Machine",
+        _ => return None,
+    })
+}
+
 /// The join key a search names (`key={namespace}:{value}`), normalized as the sources record
 /// it, or `None` when it is not one of these lookups' keys.
 pub fn search_key(namespace: &str, value: &str) -> Option<String> {
@@ -323,5 +370,36 @@ mod tests {
         f.push_link(Link::new("B", "https://a/", "y"));
         assert_eq!((f.keys.len(), f.links.len()), (1, 1));
         assert_eq!(f.keys[0].to_string(), "doi:10.1/x");
+    }
+
+    #[test]
+    fn a_service_card_has_its_plain_name() {
+        for (uri, name) in [
+            (
+                "https://www.openstreetmap.org/node/240109189",
+                Some("OpenStreetMap"),
+            ),
+            ("https://www.openstreetmap.org/about", None),
+            ("https://www.wikidata.org/wiki/Q64", Some("Wikidata")),
+            (
+                "https://play.google.com/store/apps/details?id=io.anuke.mindustry",
+                Some("Google Play"),
+            ),
+            (
+                "https://f-droid.org/en/packages/io.anuke.mindustry/",
+                Some("F-Droid"),
+            ),
+            ("https://store.steampowered.com/app/1127400/", Some("Steam")),
+            ("https://crates.io/crates/rand", Some("crates.io")),
+            ("https://github.com/rust-random/rand", Some("GitHub")),
+            ("https://arxiv.org/abs/1706.03762", Some("arXiv")),
+            ("doi:10.1038/nature12373", Some("DOI")),
+            ("https://doi.org/10.1038/nature12373", Some("DOI")),
+            ("https://btcmap.org/merchant/way:259338174", Some("BTC Map")),
+            ("https://huggingface.co/models", None),
+            ("https://example.org/", None),
+        ] {
+            assert_eq!(service_name(uri), name, "{uri}");
+        }
     }
 }

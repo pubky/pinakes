@@ -1272,6 +1272,87 @@ async fn a_tagged_btc_map_link_joins_its_osm_object(pool: PgPool) {
     assert_eq!(groups[0], groups[1]);
 }
 
+/// One entry per service on any card: a tagged member named after a service a derived link
+/// names takes that service's place; a tagged member of another site still shows.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_tagged_member_and_a_derived_link_of_one_service_show_once(pool: PgPool) {
+    let app_page = |uri: &'static str, site: &'static str| {
+        let pool = pool.clone();
+        async move {
+            let id = store::ensure_resource(&pool, uri).await.unwrap();
+            let mut d = ResourceMeta::new(uri, "web", 86400);
+            d.name = Some("Mindustry".into());
+            d.site = site.into();
+            d.set_type("SoftwareApplication");
+            store::save_document(&pool, &id, 0, &d).await.unwrap();
+            id
+        }
+    };
+    let play = "https://play.google.com/store/apps/details?id=io.anuke.mindustry";
+    let fdroid = "https://f-droid.org/en/packages/io.anuke.mindustry/";
+    let blog = "https://example.org/mindustry";
+    let card = app_page(play, "Google Play").await;
+    app_page(fdroid, "F-Droid").await;
+    app_page(blog, "Example").await;
+    let hub = Fake::new("stores");
+    for uri in [play, fdroid, blog] {
+        hub.answer(
+            uri,
+            Ok(Found {
+                keys: vec![key("wikidata:Q1")],
+                links: if uri == play {
+                    vec![
+                        Link::new(
+                            "https://f-droid.org/packages/io.anuke.mindustry",
+                            "F-Droid",
+                            "wikidata",
+                        ),
+                        Link::new(
+                            "https://store.steampowered.com/app/1127400/",
+                            "Steam",
+                            "wikidata",
+                        ),
+                    ]
+                } else {
+                    vec![]
+                },
+                ..Default::default()
+            }),
+        );
+    }
+    let sources: Vec<Arc<dyn Source>> = vec![hub];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let read = get(&app, &format!("/v1/resources/{card}")).await;
+    let mut shown: Vec<String> = read["also_on"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            format!(
+                "{} {} {}",
+                e["site"].as_str().unwrap(),
+                e["uri"].as_str().unwrap(),
+                e["derived"] == true
+            )
+        })
+        .collect();
+    shown.sort();
+    assert_eq!(
+        shown,
+        [
+            format!("Example {blog} false"),
+            format!("F-Droid {fdroid} false"),
+            "Steam https://store.steampowered.com/app/1127400/ true".to_owned(),
+        ]
+    );
+    // The details list both F-Droid pages.
+    assert_eq!(read["details"]["also_on"].as_array().unwrap().len(), 4);
+}
+
 /// Looks up the barcodes the sources before it found, like iTunes: one keyed link each. Off by
 /// default.
 struct ByBarcode {

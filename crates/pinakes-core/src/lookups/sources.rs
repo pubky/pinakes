@@ -1192,8 +1192,7 @@ mod tests {
         assert!(
             journal_sites.contains(&"alphaXiv https://www.alphaxiv.org/abs/1304.1068".to_owned())
         );
-        assert!(journal_sites
-            .contains(&"Journal version https://doi.org/10.1038/nature12373".to_owned()));
+        assert!(journal_sites.contains(&"DOI https://doi.org/10.1038/nature12373".to_owned()));
 
         // LMCS names arXiv 2302.04668 as its preprint (has-preprint): both sides share the keys.
         let lmcs = Datacite

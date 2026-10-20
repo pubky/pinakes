@@ -278,12 +278,7 @@ pub fn parse_datacite_arxiv(
     };
     if let Some(journal) = &journal {
         found.push_link(
-            Link::new(
-                "Journal version",
-                format!("https://doi.org/{journal}"),
-                "datacite",
-            )
-            .kind("published"),
+            Link::new("DOI", format!("https://doi.org/{journal}"), "datacite").kind("published"),
         );
     }
     Ok((found, journal))

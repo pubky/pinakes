@@ -368,7 +368,7 @@ async fn guarded_finish_job(
         other => other,
     };
     // Every finished job, single or batched: a music link's card is typed and named by what it
-    // is, whatever its page said.
+    // is, whatever its page said, and other services' cards are named after the service.
     let result = match result {
         Ok(mut doc) if crate::music::parse(&job.uri).is_some() => {
             // What the also-on sources said about the artist (a person or a group), if anything.
@@ -377,6 +377,13 @@ async fn guarded_finish_job(
                 .fetch_optional(pool)
                 .await?;
             crate::music::type_card(&job.uri, artist_type.as_deref(), &mut doc);
+            Ok(doc)
+        }
+        // A card of a service the lookups know is named after it, as its derived links are.
+        Ok(mut doc) if doc.status == crate::model::Status::Ok => {
+            if let Some(name) = crate::lookups::service_name(&job.uri) {
+                doc.site = name.into();
+            }
             Ok(doc)
         }
         other => other,
