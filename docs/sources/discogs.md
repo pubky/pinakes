@@ -52,7 +52,8 @@ A Discogs link joins other services' pages exactly, never by title or catalogue 
 - Wikidata's Discogs artist ID (P1953) and master ID (P1954) name the item of an artist or
   album; a release ID (P2206) names an item only when it is not an album's (it has no master and
   no MusicBrainz release group).
-- A release's own barcodes are `upc:` keys.
+- A release's own barcode is a `upc:` key when it lists one; a box set lists each disc's, so
+  several stay facts.
 
 Pages of other services list the Discogs artist, master or release that MusicBrainz or Wikidata
 names for them at their level. A master's card lists the album's pages on other services: MusicBrainz

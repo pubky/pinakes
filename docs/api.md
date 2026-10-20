@@ -838,8 +838,9 @@ from a known music service's own record of its own object; another host's claim 
   recording ID, no work ID): a song item is a work that its studio, live and remastered
   recordings share, so a track takes neither its Q-id nor its tracks.
 - `discogs`: a Discogs artist, master or release gets `discogs:{kind}:{id}` as key, and a release
-  its barcodes as `upc:` keys and facts, from the record its [card](sources/discogs.md) reads
-  (shared). Never by title or catalogue number.
+  its barcodes as facts, from the record its [card](sources/discogs.md) reads (shared); a
+  release that lists one barcode also gets it as a `upc:` key (a box set lists each disc's).
+  Never by title or catalogue number.
 
 **Wikipedia.** An article's card comes from its Wikipedia's REST summary (`Article`, the title,
 the first paragraph up to 600 characters, the thumbnail, `site` `Wikipedia ({lang})`), so a long

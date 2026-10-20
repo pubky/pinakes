@@ -943,8 +943,12 @@ impl Source for Discogs {
         if kind == discogs::Kind::Release {
             let token = discogs::token(&cx.config);
             if let Some(v) = discogs::record(&cx.egress, kind, id, token.as_deref()).await? {
-                for upc in discogs::barcodes(&v).into_iter().take(4) {
+                let barcodes = discogs::barcodes(&v);
+                // A box set lists each disc's barcode: only a release with one barcode keys it.
+                if let [upc] = barcodes.as_slice() {
                     found.keys.push(key(format!("upc:{upc}")));
+                }
+                for upc in barcodes.into_iter().take(4) {
                     found.facts.push(also_on::Fact::new("upc", upc));
                 }
             }
@@ -1544,12 +1548,22 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn discogs_keys_its_id_and_a_releases_barcodes() {
         let release = crate::sources::fixture::read("discogs", "release-83182.json");
-        let cx = context(vec![(
-            "https://api.discogs.com/releases/83182",
-            200,
-            JSON,
-            release,
-        )]);
+        // The same release listing a second disc's barcode, as a box set does.
+        let mut boxed: Value = serde_json::from_slice(&release).unwrap();
+        boxed["id"] = 1.into();
+        boxed["identifiers"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"type": "Barcode", "value": "0724384260521"}));
+        let cx = context(vec![
+            ("https://api.discogs.com/releases/83182", 200, JSON, release),
+            (
+                "https://api.discogs.com/releases/1",
+                200,
+                JSON,
+                serde_json::to_vec(&boxed).unwrap(),
+            ),
+        ]);
         let keys = |found: also_on::Found| -> Vec<String> {
             found.keys.into_iter().map(|k| k.key).collect()
         };
@@ -1559,6 +1573,11 @@ mod tests {
             keys(Discogs.lookup(&cx, &s).await.unwrap()),
             ["discogs:release:83182", "upc:0724385522925"]
         );
+        // Two barcodes: facts, no key, so a box set never joins its discs' albums.
+        s.uri = "https://www.discogs.com/release/1".into();
+        let found = Discogs.lookup(&cx, &s).await.unwrap();
+        assert_eq!(found.facts.len(), 2);
+        assert_eq!(keys(found), ["discogs:release:1"]);
         // A master's or artist's key needs no request.
         s.uri = "https://www.discogs.com/master/21491".into();
         assert_eq!(
