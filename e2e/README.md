@@ -55,10 +55,9 @@ CARGO_PROFILE_DEV_DEBUG=0 scripts/e2e --isolated-live
 ```
 
 `--isolated-live` uses the real SDK, homeserver, Nexus and public upstreams. Its
-private Pinakes driver reads the Nexus feed but resolves only the samples it is given, one to
-thirty-two of them, through the production queue path (batched completion, leases and resolver
-policy), and runs the also-on sources for them. `samples.live.json` holds more than thirty-two, so
-point `PINAKES_E2E_SAMPLES` at a file with the ones to run. Music samples
+private Pinakes driver reads the Nexus feed but resolves only the samples it is given (those in
+`samples.live.json` by default, at most 128, one at a time), through the production queue path
+(batched completion, leases and resolver policy), and runs the also-on sources for them. Music samples
 must be typed and named by what they are (Spotify, Apple Music, TIDAL, Bandcamp, SoundCloud;
 `name` checks a card's name, Daft Punk's TIDAL page); the Spotify track sample must show Deezer
 as a derived link, found through MusicBrainz, the Wikidata item for Paris its French and

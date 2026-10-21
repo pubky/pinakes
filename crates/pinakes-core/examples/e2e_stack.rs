@@ -294,6 +294,9 @@ struct Write {
     path: String,
     tag: Value,
 }
+/// The most sample resources one live run fetches.
+const MAX_LIVE_SAMPLES: usize = 128;
+
 async fn write(State(f): State<Fixture>, Json(w): Json<Write>) -> axum::http::StatusCode {
     if !w.path.starts_with("/pub/pinakes.e2e/tags/") {
         return axum::http::StatusCode::BAD_REQUEST;
@@ -627,10 +630,12 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
             .clone();
         selected.push((id, resolver));
     }
-    // The scope stays small and explicit: only listed samples are ever fetched.
+    // The scope stays small and explicit: only listed samples are ever fetched, one at a time
+    // with a second between them, so the cap bounds a run's fetching (some minutes at most).
     ensure!(
-        (1..=32).contains(&selected.len()),
-        "live driver requires one to thirty-two sample resources"
+        (1..=MAX_LIVE_SAMPLES).contains(&selected.len()),
+        "live driver requires one to {MAX_LIVE_SAMPLES} sample resources, got {}",
+        selected.len()
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);
