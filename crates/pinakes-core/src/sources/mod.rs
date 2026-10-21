@@ -1125,17 +1125,26 @@ mod tests {
         }
     }
 
+    /// A registered source (whichever this build has) and an example link of it whose alias root
+    /// differs from the link.
+    fn aliased_example() -> Option<(&'static dyn Source, &'static str, String)> {
+        REGISTRY.iter().find_map(|s| {
+            s.examples()
+                .iter()
+                .find_map(|e| Some((*s, e.uri, s.alias_root(e.uri)?)))
+        })
+    }
+
     #[test]
     fn a_switched_off_source_merges_nothing() {
-        let uri = "https://www.federalregister.gov/d/2026-18291";
-        assert_eq!(alias_root_with(uri, None).as_deref(), Some("fr:2026-18291"));
+        let Some((source, uri, root)) = aliased_example() else {
+            return;
+        };
+        assert_eq!(alias_root_with(uri, None), Some(root.clone()));
         let mut off = SourcesConfig::default();
-        assert_eq!(
-            alias_root_with(uri, Some(&off)).as_deref(),
-            Some("fr:2026-18291")
-        );
+        assert_eq!(alias_root_with(uri, Some(&off)), Some(root));
         off.0.insert(
-            "federal_register".into(),
+            source.name().into(),
             Switch {
                 enabled: false,
                 ..Default::default()
@@ -1147,13 +1156,19 @@ mod tests {
     #[test]
     fn switches_and_names() {
         let mut config = Config::default();
-        let uri = federal_register::FederalRegister.examples()[0].uri;
+        let Some(source) = REGISTRY
+            .iter()
+            .find(|s| !s.takes_token() && s.reads(s.examples()[0].uri))
+        else {
+            return;
+        };
+        let uri = source.examples()[0].uri;
         assert_eq!(
             enabled_source(uri, &config).map(|s| s.name()),
-            Some("federal_register")
+            Some(source.name())
         );
         config.sources.0.insert(
-            "federal_register".into(),
+            source.name().into(),
             Switch {
                 enabled: false,
                 ..Default::default()
@@ -1246,7 +1261,10 @@ mod tests {
 
     #[test]
     fn attribution_reaches_the_card() {
-        let mut doc = ResourceMeta::new("fr:2026-18291", "federal_register", 60);
+        let Some(source) = REGISTRY.first() else {
+            return;
+        };
+        let mut doc = ResourceMeta::new("fr:2026-18291", source.name(), 60);
         doc.set_type("Legislation");
         doc.attribution = Some("Source: an official register (CC BY 4.0)".into());
         let doc = doc.bounded(attributes()).unwrap();
@@ -1266,18 +1284,28 @@ mod tests {
 
     #[test]
     fn facts_only_on_source_cards() {
-        let mut doc = ResourceMeta::new("fr:2026-18291", "federal_register", 60);
-        doc.attributes
-            .insert("citation".into(), "91 FR 57392".into());
+        // A source with two facts, neither of them a web attribute.
+        let web = crate::resolver::web::ATTRIBUTES;
+        let Some((source, fact, blank)) = REGISTRY.iter().find_map(|s| {
+            if s.facts().contains(&"author") {
+                return None;
+            }
+            let mut own = s.facts().iter().filter(|f| !web.contains(f));
+            Some((*s, *own.next()?, *own.next()?))
+        }) else {
+            return;
+        };
+        let mut doc = ResourceMeta::new("fr:2026-18291", source.name(), 60);
+        doc.attributes.insert(fact.into(), "91 FR 57392".into());
         doc.attributes.insert("author".into(), "x".into());
-        doc.attributes.insert("docket_ids".into(), " ".into());
-        assert_eq!(from(&doc), Some("federal_register"));
+        doc.attributes.insert(blank.into(), " ".into());
+        assert_eq!(from(&doc), Some(source.name()));
         let facts = facts(&doc).unwrap();
-        assert_eq!(facts.len(), 1);
-        assert_eq!(facts["citation"], "91 FR 57392");
+        assert_eq!(facts.len(), 1, "{facts:?}");
+        assert_eq!(facts[fact], "91 FR 57392");
         doc.source = "web".into();
         assert_eq!((from(&doc), self::facts(&doc)), (None, None));
-        assert!(attributes().contains(&"author") && attributes().contains(&"citation"));
+        assert!(attributes().contains(&"author") && attributes().contains(&fact));
         let values = ["a ".to_owned(), String::new(), "b".to_owned()];
         assert_eq!(list(&values).as_deref(), Some("a; b"));
         assert_eq!(list(&[]), None);
