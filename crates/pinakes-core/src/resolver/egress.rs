@@ -167,6 +167,10 @@ pub struct FetchOptions {
     /// above it).
     pub body_cap: Option<usize>,
     pub feed_hint: bool,
+    /// How far an HTML page is read while its head is still open at the page cap, so a title
+    /// after a long head (a megabyte of inline styles) is read. The egress sets it from
+    /// `limits.html_head_bytes`.
+    pub head_cap: Option<usize>,
     /// Answer a redirect as it came (its status and `location`) instead of following it: where
     /// a lookup redirects is the answer (PCGamingWiki's appid lookup).
     pub keep_redirect: bool,
@@ -222,6 +226,7 @@ impl std::fmt::Debug for FetchOptions {
             .field("feed_cap", &self.feed_cap)
             .field("body_cap", &self.body_cap)
             .field("feed_hint", &self.feed_hint)
+            .field("head_cap", &self.head_cap)
             .field("extra_types", &self.extra_types)
             .field("validators", &self.validators)
             .finish()
@@ -300,6 +305,16 @@ impl Transport for PinnedTransport {
         }
         read_response_with(url.clone(), request.send().await?, options).await
     }
+}
+/// Where the head closes in `body` (the end of `</head>`, in any letter case), searching from
+/// `from` (less the tag's length, so a tag split across two chunks is found).
+fn head_end(body: &[u8], from: usize) -> Option<usize> {
+    const TAG: &[u8] = b"</head>";
+    let start = from.saturating_sub(TAG.len());
+    body[start..]
+        .windows(TAG.len())
+        .position(|w| w.eq_ignore_ascii_case(TAG))
+        .map(|at| start + at + TAG.len())
 }
 pub async fn read_response(url: Url, response: reqwest::Response) -> Result<Fetched> {
     read_response_with(url, response, &FetchOptions::default()).await
@@ -382,11 +397,15 @@ pub async fn read_response_with(
             content_type.as_str(),
             "text/xml" | "application/xml" | "application/rss+xml" | "application/atom+xml"
         ) && options.feed_cap.is_none();
-        let (max, refuse) = match options.body_cap {
+        let (mut max, refuse) = match options.body_cap {
             Some(cap) => (cap, true),
             None if html || xml_feed => (BODY_CAP, false),
             None => (options.feed_cap.unwrap_or(BODY_CAP), true),
         };
+        // A page whose head is still open at the page cap is read on until the head closes.
+        let head_cap = options
+            .head_cap
+            .filter(|cap| html && options.body_cap.is_none() && *cap > BODY_CAP);
         if refuse && response.content_length().is_some_and(|n| n > max as u64) {
             return Err(BodyTooLarge { cap: max }.into());
         }
@@ -395,16 +414,33 @@ pub async fn read_response_with(
                 if refuse {
                     return Err(BodyTooLarge { cap: max }.into());
                 }
+                match head_cap {
+                    Some(cap) if max < cap && head_end(&body, 0).is_none() => max = cap,
+                    _ => {}
+                }
+            }
+            if body.len().saturating_add(chunk.len()) > max {
                 body.extend_from_slice(&chunk[..max.saturating_sub(body.len())]);
                 truncated = true;
                 break;
             }
+            let from = body.len();
             body.extend_from_slice(&chunk);
+            // Past the page cap, reading stops where the head closes.
+            if body.len() > BODY_CAP && max > BODY_CAP {
+                if let Some(end) = head_end(&body, from) {
+                    // Never less than the page cap a short head would have kept.
+                    body.truncate(end.max(BODY_CAP));
+                    truncated = true;
+                    break;
+                }
+            }
             let sniff = String::from_utf8_lossy(&body[..body.len().min(256)])
                 .trim_start_matches(['\u{feff}', ' ', '\r', '\n'])
                 .starts_with("BEGIN:VCALENDAR");
             if options.body_cap.is_none()
                 && body.len() > BODY_CAP
+                && max <= BODY_CAP
                 && !(options.feed_cap.is_some() && (feed_type || options.feed_hint || sniff))
             {
                 return Err(BodyTooLarge { cap: BODY_CAP }.into());
@@ -873,20 +909,20 @@ impl Egress {
                 }
             }
             let mut observation = crate::telemetry::FetchGuard::start();
-            let with_agent;
             let default_agent = options
                 .user_agent
                 .as_deref()
                 .is_none_or(|ua| ua == USER_AGENT);
-            let options = if default_agent && !self.cfg.contact.is_empty() {
-                with_agent = FetchOptions {
-                    user_agent: Some(user_agent(&self.cfg.contact)),
-                    ..options.clone()
-                };
-                &with_agent
-            } else {
-                options
+            let with_agent = FetchOptions {
+                user_agent: if default_agent && !self.cfg.contact.is_empty() {
+                    Some(user_agent(&self.cfg.contact))
+                } else {
+                    options.user_agent.clone()
+                },
+                head_cap: options.head_cap.or(Some(self.cfg.html_head_bytes)),
+                ..options.clone()
             };
+            let options = &with_agent;
             let mut response = self.transport.get_with(&url, &addresses, options).await?;
             observation.status(response.status);
             drop(observation);
@@ -1424,6 +1460,79 @@ mod tests {
                 .unwrap();
             assert_eq!(transport.0.lock().unwrap()[0].as_deref(), sent);
         }
+    }
+    /// A page whose head is still open at the page cap (a megabyte of inline styles before the
+    /// title, as Google Play's app pages have) is read on until the head closes, up to the head
+    /// cap; a page with a short head is cut at the page cap as before, and a head that never
+    /// closes stops at the head cap.
+    #[tokio::test]
+    async fn a_long_head_is_read_until_it_closes() {
+        use axum::{routing::get, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let html = |body: String| ([("content-type", "text/html; charset=utf-8")], body);
+        let app = Router::new()
+            .route(
+                "/long-head",
+                get(move || async move {
+                    html(format!(
+                        "<html><head><style>{}</style><title>Long head</title></HEAD><body>{}</body></html>",
+                        "x".repeat(BODY_CAP + 50_000),
+                        "y".repeat(500_000)
+                    ))
+                }),
+            )
+            .route(
+                "/short-head",
+                get(move || async move {
+                    html(format!(
+                        "<html><head><title>Short</title></head><body>{}</body></html>",
+                        "y".repeat(2 * BODY_CAP)
+                    ))
+                }),
+            )
+            .route(
+                "/open-head",
+                get(move || async move {
+                    html(format!("<html><head><style>{}", "x".repeat(3 * BODY_CAP)))
+                }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        let read = |path: &str, head_cap: Option<usize>| {
+            let url: Url = format!("http://{addr}{path}").parse().unwrap();
+            let request = client.get(url.clone());
+            let options = FetchOptions {
+                head_cap,
+                ..Default::default()
+            };
+            async move { read_response_with(url, request.send().await.unwrap(), &options).await }
+        };
+        let head_cap = Some(2 * BODY_CAP);
+        let long = read("/long-head", head_cap).await.unwrap();
+        let text = String::from_utf8_lossy(&long.body);
+        assert!(long.truncated);
+        assert!(text.contains("<title>Long head</title>"));
+        assert!(text.ends_with("</HEAD>"), "{}", &text[text.len() - 40..]);
+        // Without a head cap, the page is cut at the page cap and the title is lost.
+        let cut = read("/long-head", None).await.unwrap();
+        assert_eq!(cut.body.len(), BODY_CAP);
+        assert!(!String::from_utf8_lossy(&cut.body).contains("<title>"));
+        let short = read("/short-head", head_cap).await.unwrap();
+        assert!(short.truncated);
+        assert_eq!(short.body.len(), BODY_CAP);
+        let open = read("/open-head", head_cap).await.unwrap();
+        assert!(open.truncated);
+        assert_eq!(open.body.len(), 2 * BODY_CAP);
+        server.abort();
+        // A closing tag split across two chunks is found.
+        let body = b"<html><head><title>t</title></he".to_vec();
+        let mut whole = body.clone();
+        whole.extend_from_slice(b"ad><body>");
+        assert_eq!(
+            head_end(&whole, body.len()),
+            Some(whole.len() - "<body>".len())
+        );
     }
     /// An RSS or Atom feed past the page cap keeps its first megabyte, marked truncated, unless
     /// the fetch set a feed cap (calendars), which refuses what exceeds it.

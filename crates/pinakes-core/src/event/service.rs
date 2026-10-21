@@ -175,8 +175,9 @@ impl EventService {
         if !(200..300).contains(&fetched.status) {
             return Ok(card);
         }
+        // A page past the cap is cut (at most where a long head closes), never whole.
         anyhow::ensure!(
-            fetched.body.len() <= crate::resolver::egress::BODY_CAP,
+            fetched.body.len() <= crate::resolver::egress::BODY_CAP || fetched.truncated,
             "non-calendar page exceeds 1 MB"
         );
         let input_uri = uri.to_owned();

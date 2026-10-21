@@ -2908,6 +2908,48 @@ async fn wikipedia_primary_item_and_plain_web_fallback(pool: PgPool) {
     assert_eq!(doc.name.as_deref(), Some("Plain article"));
 }
 
+/// A page whose head ran past the page cap arrives cut at `</head>`, over 1 MB: the web route,
+/// event path included, reads its title (Google Play's app pages put a megabyte of styles first).
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_cut_page_past_the_cap_gets_its_title(pool: PgPool) {
+    use pinakes_core::resolver::Resolver;
+    let uri = "https://apps.example.org/app?id=org.example.app";
+    let body = format!(
+        "<html><head><style>{}</style><meta property='og:title' content='Example App'><title>Example App</title></head>",
+        "x".repeat(pinakes_core::resolver::egress::BODY_CAP + 50_000)
+    );
+    let map = [(
+        format!("{uri}:"),
+        Ok(Fetched {
+            permanent_redirect: false,
+            truncated: true,
+            url: uri.parse().unwrap(),
+            body: body.into_bytes(),
+            content_type: "text/html".into(),
+            status: 200,
+            retry_after_secs: 60,
+            location: None,
+            validators: Default::default(),
+        }),
+    )]
+    .into_iter()
+    .collect();
+    let egress = Egress::with_backends(
+        pinakes_core::config::EgressConfig {
+            host_requests_per_second: 1000.,
+            ..Default::default()
+        },
+        Arc::new(AdapterDns),
+        Arc::new(RecordedResponses(map)),
+    );
+    let cfg = EventConfig {
+        geocoding: false,
+        ..Default::default()
+    };
+    let doc = platform(&pool, cfg, egress).web.resolve(uri).await.unwrap();
+    assert_eq!(doc.name.as_deref(), Some("Example App"));
+}
+
 /// A transport that answers one large record as the real one does: refused at the default 1 MB
 /// cap, served when the request allows more.
 struct LargeRecord {

@@ -476,6 +476,9 @@ pub struct EgressConfig {
     /// where `host_rates` names no rate.
     #[serde(skip)]
     pub source_rates: BTreeMap<String, f64>,
+    /// How far an HTML page is read while its head is still open at the 1 MB page cap.
+    #[serde(skip)]
+    pub html_head_bytes: usize,
 }
 impl Default for EgressConfig {
     fn default() -> Self {
@@ -486,6 +489,7 @@ impl Default for EgressConfig {
             deny_hosts: vec![],
             host_rates: BTreeMap::new(),
             source_rates: BTreeMap::new(),
+            html_head_bytes: 4 * 1024 * 1024,
         }
     }
 }
@@ -856,6 +860,9 @@ impl Config {
             || !a.apple_storefront.bytes().all(|b| b.is_ascii_lowercase())
         {
             bail!("also_on.apple_storefront must be a two-letter country code in lower case");
+        }
+        if !(1024 * 1024..=16 * 1024 * 1024).contains(&self.egress.html_head_bytes) {
+            bail!("limits.html_head_bytes must be 1–16 MB");
         }
         let e = &self.event;
         let c = &e.container;
@@ -1481,6 +1488,8 @@ limits! {
     host_requests_per_second: f64 = |c| c.egress.host_requests_per_second => [|c, v| c.egress.host_requests_per_second = v],
     /// Per-host overrides of `host_requests_per_second`.
     host_rates: BTreeMap<String, f64> = |c| c.egress.host_rates.clone() => [|c, v| c.egress.host_rates = v],
+    /// How far an HTML page is read while its head is still open at the 1 MB page cap (bytes).
+    html_head_bytes: usize = |c| c.egress.html_head_bytes => [|c, v| c.egress.html_head_bytes = v],
     /// Failures before a resource dead-letters.
     max_failures: u32 = |c| c.queue.max_failures => [|c, v| c.queue.max_failures = v],
     /// Timeouts tolerated before they count as failures.

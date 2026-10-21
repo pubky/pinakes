@@ -25,6 +25,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `resolver_ttl_secs` | `86400` | Default document lifetime (seconds) for web, pubky and card resolvers. |
 | `host_requests_per_second` | `1.0` | Requests per second to any one upstream host. |
 | `host_rates` | `{}` | Per-host overrides of `host_requests_per_second`. |
+| `html_head_bytes` | `4194304` | How far an HTML page is read while its head is still open at the 1 MB page cap (bytes). |
 | `max_failures` | `5` | Failures before a resource dead-letters. |
 | `timeout_grace` | `3` | Timeouts tolerated before they count as failures. |
 | `backoff_secs` | `30` | First retry backoff (seconds). |
@@ -175,7 +176,8 @@ Web fetches bypass environment proxies, validate every DNS answer, pin the check
 repeat the policy at every redirect (three hops; HTML meta refresh and literal JavaScript
 redirects count). `egress.allow_hosts` and `egress.deny_hosts` take exact names or
 `*.example.org`; they never override the IP policy, and deny wins. Pages are capped at 1 MB of
-decoded body; an oversized page keeps its head metadata with a `truncated` warning. An RSS or
+decoded body; an oversized page keeps its head metadata with a `truncated` warning, its whole
+head when the head runs past the cap (up to `limits.html_head_bytes`). An RSS or
 Atom feed read without a calendar's feed cap is cut there too (a long show's feed is 2–5 MB):
 its channel and newest items come first, and its card reads up to the last whole item. Wikidata
 entity reads may take 8 MB, since a much-edited item carries megabytes of claims, and so may
