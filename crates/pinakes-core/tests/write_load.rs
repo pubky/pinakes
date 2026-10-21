@@ -40,8 +40,9 @@ struct Waits {
 const REVISION: &str = "search revision";
 
 /// Each backend of this database (the caller's aside) waiting for a lock, with what it waits for:
-/// [`REVISION`] for a row or relation lock of `search_write`, or while it holds a row lock there
-/// and waits for that row's transaction; else the advisory key, or the lock type and relation (a
+/// [`REVISION`] for a row or relation lock of `search_write` or its sequence (an insert's `nextval`
+/// waits for one that is being altered), or while it holds a row lock of `search_write` and waits
+/// for that row's transaction (relations of this database only); else the advisory key, or the lock type and relation (a
 /// relation extension, `extend search_write`, lasts microseconds, not a transaction). One
 /// `pg_locks` snapshot, and no statement text: `pg_stat_activity` reads a backend's statement
 /// from a snapshot but its wait live, so a statement that named `search_write` (this sampler's
@@ -49,10 +50,13 @@ const REVISION: &str = "search revision";
 async fn waiting(conn: &mut PgConnection) -> Vec<(i32, String)> {
     sqlx::query_as(
         "WITH l AS MATERIALIZED (SELECT * FROM pg_locks),
+           db AS (SELECT oid FROM pg_database WHERE datname=current_database()),
            here AS (SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid())
          SELECT w.pid, CASE
-           WHEN (w.locktype IN ('relation','page','tuple') AND w.relation=to_regclass('search_write'))
-             OR EXISTS(SELECT 1 FROM l t WHERE t.pid=w.pid AND t.granted AND t.locktype='tuple' AND t.relation=to_regclass('search_write'))
+           WHEN (w.locktype IN ('relation','page','tuple') AND w.database=(SELECT oid FROM db)
+                 AND w.relation IN (to_regclass('search_write'), to_regclass('search_write_id_seq')))
+             OR EXISTS(SELECT 1 FROM l t WHERE t.pid=w.pid AND t.granted AND t.locktype='tuple'
+                 AND t.database=(SELECT oid FROM db) AND t.relation=to_regclass('search_write'))
              THEN 'search revision'
            WHEN w.locktype='advisory' THEN 'advisory '||w.objid||' '||w.mode
            ELSE w.locktype||coalesce(' '||w.relation::regclass::text,'') END
@@ -321,7 +325,8 @@ async fn concurrent_writers_never_wait_on_the_search_revision(pool: PgPool) {
 }
 
 /// The sampler counts a wait on a `search_write` row (the transaction holding it, and the row
-/// lock), and not an advisory wait by a backend whose last statement named `search_write`.
+/// lock) and on its sequence, and not an advisory wait by a backend whose last statement named
+/// `search_write`.
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_sampler_counts_waits_on_the_search_revision_and_nothing_else(pool: PgPool) {
     let connect = || async {
@@ -385,4 +390,28 @@ async fn the_sampler_counts_waits_on_the_search_revision_and_nothing_else(pool: 
     for task in blocked {
         task.await.unwrap();
     }
+    // An insert whose nextval waits for the sequence being altered waits on the revision too.
+    sqlx::query("BEGIN").execute(&mut a).await.unwrap();
+    sqlx::query("ALTER SEQUENCE search_write_id_seq RESTART WITH 1000000")
+        .execute(&mut a)
+        .await
+        .unwrap();
+    let mut e = connect().await;
+    let insert = tokio::spawn(async move {
+        sqlx::query("INSERT INTO search_write DEFAULT VALUES")
+            .execute(&mut e)
+            .await
+            .unwrap();
+    });
+    let locks = loop {
+        let locks = waiting(&mut probe).await;
+        if !locks.is_empty() {
+            break locks;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(locks.len(), 1, "{locks:?}");
+    assert_eq!(locks[0].1, REVISION, "{locks:?}");
+    sqlx::query("ROLLBACK").execute(&mut a).await.unwrap();
+    insert.await.unwrap();
 }
