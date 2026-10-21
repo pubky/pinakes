@@ -95,6 +95,38 @@ export async function ownTags(hydrated, uris, label, author, tagsOf) {
   }
   return confirmed;
 }
+/** The fields the report keeps of a sample's card. */
+const reported = card => ({ resource_id: card.id, type: card.type, status: card.status, site: card.site });
+/** A sample's card meets the sample's expectations: a music link is typed and named by what it is,
+ * whatever its page says, and a media page is named after its object (by the page hook at once,
+ * or, when its record was slow, once the also-on title reads the card again). Returns the card to
+ * keep. */
+export async function expectCard(tag, card, readByUri, timeout, signal) {
+  if (tag.site) assert.equal(card.site, tag.site, `Pinakes ${tag.kind} site`);
+  if (tag.site) assert.equal(card.type, tag.type, `Pinakes ${tag.kind} type`);
+  if (!tag.name) return card;
+  const named = card.name === tag.name ? card : await waitFor(`Pinakes ${tag.kind} name`, async () => {
+    const v = await readByUri(tag.uri);
+    return v && v.name === tag.name && v;
+  }, timeout, signal).catch(error => { if (signal?.aborted) throw error; return card; });
+  assert.equal(named.name, tag.name, `Pinakes ${tag.kind} name`);
+  assert.equal(named.type, tag.type, `Pinakes ${tag.kind} type`);
+  return named;
+}
+/** A card read by its URI can be read once more under another ID: a fetch can show the link to be
+ * a spelling of another (a Mastodon @-link of its /users/…/statuses/ form), and its card is then
+ * the root's, the only one search lists. Each sample search does not list is read again by its
+ * URI; a card under another ID must meet the sample's expectations again (`check`) before it
+ * replaces the first, in `docs` and in every reported field. */
+export async function rereadMoved(tags, docs, report, readByUri, check) {
+  for (const tag of tags) {
+    const card = await readByUri(tag.uri);
+    if (!card || card.status !== 'ok' || card.id === docs.get(tag.kind).id) continue;
+    const kept = await check(tag, card);
+    docs.set(tag.kind, kept);
+    Object.assign(report.samples.find(s => s.kind === tag.kind), reported(kept));
+  }
+}
 export async function runFlow({ storage, author, samples, pinakes, nexus, positiveVenue = false, timeout = 120000, journal, signal }) {
   const report = { at: new Date().toISOString(), run: randomUUID(), author, samples: [], assertions: [], cleanup: [] };
   const label = `e2e-${report.run.replaceAll("-", "").slice(0, 16)}`;
@@ -121,6 +153,11 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
     await withTags(storage, tags, async () => {
       await waitFor('Nexus puts', async () => { await poll(); return tags.every(tag => feed.get(tag.path)?.op === 'put'); }, timeout, signal);
       const docs = new Map();
+      const readByUri = async uri => {
+        const r = await fetch(`${pinakes}/v1/resources/by-uri?${new URLSearchParams({ uri })}`, { signal: AbortSignal.timeout(15000) });
+        return r.ok ? r.json() : null;
+      };
+      const check = (tag, card) => expectCard(tag, card, readByUri, timeout, signal);
       for (const tag of tags) {
         // Pinakes is read by the tagged URI: its IDs are its own, never Nexus's.
         const d = await waitFor(`Pinakes ${tag.kind}`, async () => {
@@ -131,37 +168,13 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
           assert(!['missing','error','unreachable'].includes(d.status), `Pinakes ${tag.kind} finalized ${d.status}`);
           return d.status === 'ok' && d;
         }, timeout, signal);
-        docs.set(tag.kind, d);
-        report.samples.push({ kind: tag.kind, uri: tag.uri, resource_id: d.id, type: d.type, status: d.status, site: d.site });
-        // A music link is typed and named by what it is, whatever its page says.
-        if (tag.site) assert.equal(d.site, tag.site, `Pinakes ${tag.kind} site`);
-        if (tag.site) assert.equal(d.type, tag.type, `Pinakes ${tag.kind} type`);
-        // A media page is named after its object: by the page hook at once, or, when its record
-        // was slow, once the also-on title reads the card again.
-        if (tag.name) {
-          const named = await waitFor(`Pinakes ${tag.kind} name`, async () => {
-            const r = await fetch(`${pinakes}/v1/resources/by-uri?${new URLSearchParams({ uri: tag.uri })}`, { signal: AbortSignal.timeout(15000) });
-            const v = r.ok && await r.json();
-            return v && v.name === tag.name && v;
-          }, timeout, signal).catch(error => { if (signal?.aborted) throw error; return d; });
-          assert.equal(named.name, tag.name, `Pinakes ${tag.kind} name`);
-          assert.equal(named.type, tag.type, `Pinakes ${tag.kind} type`);
-        }
+        report.samples.push({ kind: tag.kind, uri: tag.uri, ...reported(d) });
+        const kept = await check(tag, d);
+        docs.set(tag.kind, kept);
+        Object.assign(report.samples.at(-1), reported(kept));
       }
+      const reread = missing => rereadMoved(missing, docs, report, readByUri, check);
       // The type filter matches ancestors, so a MusicEvent sample is found under type=Event.
-      // A card read by its URI can be read once more under another ID: a fetch can show the link
-      // to be a spelling of another (a Mastodon @-link of its /users/…/statuses/ form), and its
-      // card is then the root's, the only one search lists. A sample search does not list is
-      // read again by its URI, and the ID it answers with is kept.
-      const reread = async tags => {
-        for (const tag of tags) {
-          const r = await fetch(`${pinakes}/v1/resources/by-uri?${new URLSearchParams({ uri: tag.uri })}`, { signal: AbortSignal.timeout(15000) });
-          const d = r.ok && await r.json();
-          if (!d || d.status !== 'ok' || d.id === docs.get(tag.kind).id) continue;
-          docs.set(tag.kind, d);
-          report.samples.find(s => s.kind === tag.kind).resource_id = d.id;
-        }
-      };
       for (const type of new Set(tags.map(tag => tag.type))) {
         await waitFor(`Pinakes type ${type}`, async () => {
           const found = await search({ type, limit: '500' });

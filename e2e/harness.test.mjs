@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { dropRefusedPages, freshen, newestLink, ownTags, withTags } from './harness.mjs';
+import { dropRefusedPages, expectCard, freshen, newestLink, ownTags, rereadMoved, withTags } from './harness.mjs';
 test('a PUT that commits then times out is included in cleanup', async () => {
   const stored = new Set(), report = {}, journal = [];
   const storage = { exists: async p => stored.has(p), putJson: async p => { stored.add(p); if (p === 'second') throw new Error('timeout'); }, delete: async p => stored.delete(p) };
@@ -50,4 +50,30 @@ test('a needs_page sample whose site refuses this host is left out with the reas
   assert.deepEqual(kept.skipped, [{ kind: 'index', uri: 'https://index.example/p/1', reason: "index.example refuses this host's page fetches (HTTP 403)" }]);
   // A sample another one joins is never left out.
   await assert.rejects(dropRefusedPages([...samples, { kind: 'pair', uri: 'https://x.example/', group_with: 'index' }], async url => status[url] ?? 200), /joined by another/);
+});
+test('a card that moved to another ID must meet the sample again, and replaces every reported field', async () => {
+  const tag = { kind: 'podcast', uri: 'https://index.example/p/1', type: 'PodcastSeries', site: 'Index', name: 'Darknet Diaries' };
+  const first = { id: 'a', status: 'ok', type: 'PodcastSeries', site: 'Index', name: 'Darknet Diaries' };
+  const fresh = () => ({ docs: new Map([['podcast', first]]), report: { samples: [{ kind: 'podcast', uri: tag.uri, resource_id: 'a', type: 'PodcastSeries', status: 'ok', site: 'Index' }] } });
+  const check = root => (t, card) => expectCard(t, card, async () => root, 50);
+  // The root names something else: refused, and nothing is replaced.
+  const wrong = { id: 'b', status: 'ok', type: 'PodcastSeries', site: 'Index', name: 'Another show' };
+  let { docs, report } = fresh();
+  await assert.rejects(rereadMoved([tag], docs, report, async () => wrong, check(wrong)), /name/);
+  assert.equal(docs.get('podcast').id, 'a'); assert.equal(report.samples[0].resource_id, 'a');
+  // Its site differs: refused too.
+  ({ docs, report } = fresh());
+  const elsewhere = { ...first, id: 'b', site: 'Other' };
+  await assert.rejects(rereadMoved([tag], docs, report, async () => elsewhere, check(elsewhere)), /site/);
+  // A root that meets the sample replaces the card and every reported field.
+  ({ docs, report } = fresh());
+  const root = { id: 'b', status: 'ok', type: 'PodcastSeries', site: 'Index', name: 'Darknet Diaries' };
+  await rereadMoved([tag], docs, report, async () => root, check(root));
+  assert.equal(docs.get('podcast'), root);
+  assert.deepEqual(report.samples[0], { kind: 'podcast', uri: tag.uri, resource_id: 'b', type: 'PodcastSeries', status: 'ok', site: 'Index' });
+  // The same ID, or a card not yet ok, changes nothing.
+  ({ docs, report } = fresh());
+  await rereadMoved([tag], docs, report, async () => first, check(first));
+  await rereadMoved([tag], docs, report, async () => ({ ...root, status: 'pending' }), check(root));
+  assert.equal(docs.get('podcast').id, 'a');
 });
