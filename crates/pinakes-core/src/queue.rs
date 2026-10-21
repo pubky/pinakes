@@ -6,7 +6,7 @@ use crate::{
         Resolver,
     },
 };
-use anyhow::{bail, Result};
+use anyhow::Result;
 use futures_util::FutureExt;
 use sqlx::{FromRow, PgPool};
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -453,7 +453,13 @@ async fn finish_job(
     let result = async {
         let mut doc = result?;
         if doc.status == Status::Error {
-            bail!("upstream returned a transient HTTP error");
+            // Recorded by the answer's status, not as a parser failure.
+            let class = match doc.http_status {
+                Some(status) if status < 500 => "http_4xx",
+                _ => "http_5xx",
+            };
+            return Err(anyhow::Error::new(crate::resolver::ErrorClass(class))
+                .context("upstream returned a transient HTTP error"));
         }
         let invalid_identifier =
             doc.status == Status::Missing && crate::resolver::cards::invalid_identifier(&job.uri);

@@ -200,6 +200,13 @@ pub fn error_class(error: &anyhow::Error) -> &'static str {
     if error.is::<tokio::time::error::Elapsed>() {
         return "timeout";
     }
+    // An answer past its size cap: the page is readable, only too large.
+    if error
+        .chain()
+        .any(|cause| cause.is::<egress::BodyTooLarge>())
+    {
+        return "too_large";
+    }
     for cause in error.chain() {
         if let Some(request) = cause.downcast_ref::<reqwest::Error>() {
             if request.is_timeout() {
@@ -222,6 +229,23 @@ pub fn error_class(error: &anyhow::Error) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    /// A body past its cap is `too_large`, however deep in the error chain (an adapter adds
+    /// context), never `parse`, which would hide the cause.
+    #[test]
+    fn an_answer_past_its_cap_is_too_large() {
+        let bare = anyhow::Error::new(egress::BodyTooLarge {
+            cap: egress::BODY_CAP,
+        });
+        assert_eq!(error_class(&bare), "too_large");
+        let wrapped = anyhow::Error::new(egress::BodyTooLarge {
+            cap: egress::BODY_CAP,
+        })
+        .context("Wikidata item")
+        .context("event adapter");
+        assert_eq!(error_class(&wrapped), "too_large");
+        assert_eq!(error_class(&anyhow::anyhow!("no title")), "parse");
+    }
+
     use super::*;
 
     #[test]

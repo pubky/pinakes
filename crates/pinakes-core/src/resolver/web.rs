@@ -394,6 +394,7 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
         200..=299 => {}
         _ => {
             out.doc.status = Status::Error;
+            out.doc.http_status = Some(fetched.status);
             return out;
         }
     }

@@ -635,6 +635,49 @@ async fn missing_responses_get_short_refresh_without_losing_references(pool: PgP
     assert!(seconds > 3590.0 && seconds <= 3600.0);
     assert_eq!(refs(&pool).await, 1);
 }
+/// A resolver that answers an upstream failure with the given HTTP status, as the web resolver
+/// does for a 5xx, a 429 or another error status.
+struct FailingResolver(u16);
+#[async_trait::async_trait]
+impl Resolver for FailingResolver {
+    fn name(&self) -> &'static str {
+        "web"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, uri: &str) -> anyhow::Result<ResourceMeta> {
+        let mut doc = ResourceMeta::new(uri, "web", 86400);
+        doc.status = Status::Error;
+        doc.http_status = Some(self.0);
+        Ok(doc)
+    }
+    fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+        Duration::from_secs(86400)
+    }
+}
+/// An upstream failure is recorded by its HTTP status (`http_5xx`, `http_4xx`), never as a parser
+/// failure: on stable, three sites that answered errors for ten minutes were dead-lettered as
+/// `parse`.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_upstream_failure_is_recorded_by_its_status(pool: PgPool) {
+    let a = change("https://example.org/flaky", "a", "/pub/app/tags/a");
+    batch(&pool, vec![a], Some("one")).await;
+    let cfg = QueueConfig::default();
+    for (status, class) in [(503, "http_5xx"), (429, "http_4xx")] {
+        sqlx::query("UPDATE resource SET next_attempt_at=now()")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+        let _ = queue::run_job(&pool, &FailingResolver(status), &cfg, &job).await;
+        let error: Option<String> = sqlx::query_scalar("SELECT last_error FROM resource")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(error.as_deref(), Some(class), "{status}");
+    }
+}
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn author_budgets_defer_without_counting_a_failure(pool: PgPool) {
     let a = change("https://example.org/one", "a", "/pub/app/tags/a");

@@ -101,6 +101,10 @@ pub struct ResourceMeta {
     /// redirect chain. The only alias candidates (`alias::canonical`); never stored.
     #[serde(skip)]
     pub alias_candidates: Vec<String>,
+    /// The HTTP status of an answer that failed (`status` is `Error`), so the queue records which
+    /// kind of failure it was; never stored.
+    #[serde(skip)]
+    pub http_status: Option<u16>,
     /// The root an official API names for this object (a filing under its primary filer): the
     /// URI becomes an alias of it after the fetch (`alias::source`). Never stored.
     #[serde(skip)]
