@@ -1,7 +1,8 @@
 //! Concurrent writers against one database: resource saves (each followed by its group refresh),
 //! derived links, ingested batches that add and remove tags, new alias spellings, and change
 //! retention deleting calendar feeds' expired occurrences while those feeds are tagged and saved.
-//! None waits on another for the search revision, none deadlocks, and every write succeeds.
+//! None waits on another for the search revision, none deadlocks, and every write succeeds
+//! (waits are sampled from `pg_locks` on a connection of the sampler's own).
 //! `WRITE_LOAD_ROUNDS` scales the run; the numbers go to standard error.
 use pinakes_core::{
     changes,
@@ -12,7 +13,7 @@ use pinakes_core::{
     nexus::{Change, Changes, FeedPage, Kind, Op},
     store,
 };
-use sqlx::{postgres::PgPoolOptions, PgPool};
+use sqlx::{postgres::PgPoolOptions, Connection, PgConnection, PgPool};
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -24,8 +25,7 @@ use std::{
 const WRITERS: usize = 8;
 const FEEDS: usize = 4;
 
-/// Lock waits seen by polling `pg_stat_activity`: all of them, and those on the search revision
-/// (a statement naming it, or a tuple lock on its relation).
+/// Lock waits seen by polling `pg_locks`: all of them, and those on the search revision.
 #[derive(Default, Debug)]
 struct Waits {
     samples: u64,
@@ -36,30 +36,47 @@ struct Waits {
     by_lock: std::collections::BTreeMap<String, u64>,
 }
 
-async fn sample(pool: &PgPool, done: Arc<AtomicBool>) -> Waits {
+/// What a backend waits for when it waits on the search revision.
+const REVISION: &str = "search revision";
+
+/// Each backend of this database (the caller's aside) waiting for a lock, with what it waits for:
+/// [`REVISION`] for a row or relation lock of `search_write`, or while it holds a row lock there
+/// and waits for that row's transaction; else the advisory key, or the lock type and relation (a
+/// relation extension, `extend search_write`, lasts microseconds, not a transaction). One
+/// `pg_locks` snapshot, and no statement text: `pg_stat_activity` reads a backend's statement
+/// from a snapshot but its wait live, so a statement that named `search_write` (this sampler's
+/// own, on a connection a writer took over) could stand beside an unrelated wait.
+async fn waiting(conn: &mut PgConnection) -> Vec<(i32, String)> {
+    sqlx::query_as(
+        "WITH l AS MATERIALIZED (SELECT * FROM pg_locks),
+           here AS (SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid())
+         SELECT w.pid, CASE
+           WHEN (w.locktype IN ('relation','page','tuple') AND w.relation=to_regclass('search_write'))
+             OR EXISTS(SELECT 1 FROM l t WHERE t.pid=w.pid AND t.granted AND t.locktype='tuple' AND t.relation=to_regclass('search_write'))
+             THEN 'search revision'
+           WHEN w.locktype='advisory' THEN 'advisory '||w.objid||' '||w.mode
+           ELSE w.locktype||coalesce(' '||w.relation::regclass::text,'') END
+         FROM l w WHERE NOT w.granted AND w.pid IN (SELECT pid FROM here) ORDER BY w.pid",
+    )
+    .fetch_all(conn)
+    .await
+    .unwrap()
+}
+
+async fn sample(mut conn: PgConnection, done: Arc<AtomicBool>) -> Waits {
     let mut waits = Waits::default();
     while !done.load(Ordering::SeqCst) {
-        let (waiting, revision): (i64, i64) = sqlx::query_as(
-            "SELECT count(*) FILTER (WHERE a.wait_event_type='Lock'),
-               count(*) FILTER (WHERE a.wait_event_type='Lock' AND (a.query LIKE '%search_write%'
-                 OR EXISTS(SELECT 1 FROM pg_locks l WHERE l.pid=a.pid AND l.locktype='tuple' AND l.relation=to_regclass('search_write'))))
-             FROM pg_stat_activity a WHERE a.datname=current_database() AND a.pid<>pg_backend_pid()",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap();
+        let locks = waiting(&mut conn).await;
+        let backends = locks
+            .iter()
+            .map(|(pid, _)| pid)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len() as i64;
         waits.samples += 1;
-        waits.waiting += u64::from(waiting > 0);
-        waits.revision += u64::from(revision > 0);
-        waits.peak = waits.peak.max(waiting);
-        let locks: Vec<String> = sqlx::query_scalar(
-            "SELECT CASE WHEN l.locktype='advisory' THEN 'advisory '||l.objid||' '||l.mode WHEN a.query LIKE '%search_write%' OR EXISTS(SELECT 1 FROM pg_locks t WHERE t.pid=a.pid AND t.locktype='tuple' AND t.relation=to_regclass('search_write')) THEN 'search revision' ELSE l.locktype||coalesce(' '||l.relation::regclass::text,'') END
-             FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid WHERE NOT l.granted AND a.datname=current_database()",
-        )
-        .fetch_all(pool)
-        .await
-        .unwrap();
-        for lock in locks {
+        waits.waiting += u64::from(backends > 0);
+        waits.revision += u64::from(locks.iter().any(|(_, lock)| lock == REVISION));
+        waits.peak = waits.peak.max(backends);
+        for (_, lock) in locks {
             *waits.by_lock.entry(lock).or_default() += 1;
         }
         tokio::time::sleep(Duration::from_millis(2)).await;
@@ -148,11 +165,13 @@ async fn concurrent_writers_never_wait_on_the_search_revision(pool: PgPool) {
     let before = deadlocks(&pool).await;
     let writes = Arc::new(AtomicU64::new(0));
     let done = Arc::new(AtomicBool::new(false));
-    let sampler = tokio::spawn({
-        let pool = pool.clone();
-        let done = done.clone();
-        async move { sample(&pool, done).await }
-    });
+    // The sampler has its own connection: the writers' pool never runs its statements.
+    let sampler = tokio::spawn(sample(
+        PgConnection::connect_with(&pool.connect_options())
+            .await
+            .unwrap(),
+        done.clone(),
+    ));
     let started = Instant::now();
     let mut tasks = vec![];
     for (w, (id, uri)) in ids.iter().cloned().enumerate() {
@@ -299,4 +318,71 @@ async fn concurrent_writers_never_wait_on_the_search_revision(pool: PgPool) {
     );
     assert_eq!(waits.revision, 0, "{waits:?}");
     assert_eq!(deadlocks(&pool).await, before, "no deadlock");
+}
+
+/// The sampler counts a wait on a `search_write` row (the transaction holding it, and the row
+/// lock), and not an advisory wait by a backend whose last statement named `search_write`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_sampler_counts_waits_on_the_search_revision_and_nothing_else(pool: PgPool) {
+    let connect = || async {
+        PgConnection::connect_with(&pool.connect_options())
+            .await
+            .unwrap()
+    };
+    let row = "SELECT id FROM search_write ORDER BY id LIMIT 1 FOR UPDATE";
+    // A holds a search_write row and the advisory key 42.
+    let mut a = connect().await;
+    sqlx::query("BEGIN").execute(&mut a).await.unwrap();
+    sqlx::query(row).execute(&mut a).await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(42)")
+        .execute(&mut a)
+        .await
+        .unwrap();
+    // B and C wait for the row (B for A's transaction, holding the row lock; C for the row
+    // lock); D names search_write, then waits for the advisory key.
+    let mut d = connect().await;
+    sqlx::query("SELECT 'search_write'")
+        .execute(&mut d)
+        .await
+        .unwrap();
+    let mut blocked = vec![];
+    for sql in [row, row] {
+        let mut c = connect().await;
+        blocked.push(tokio::spawn(async move {
+            sqlx::query("BEGIN").execute(&mut c).await.unwrap();
+            sqlx::query(sql).execute(&mut c).await.unwrap();
+            sqlx::query("COMMIT").execute(&mut c).await.unwrap();
+        }));
+        // In order: the first waiter takes the row lock.
+        let mut probe = connect().await;
+        let n = blocked.len();
+        while waiting(&mut probe).await.len() < n {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    blocked.push(tokio::spawn(async move {
+        sqlx::query("SELECT pg_advisory_lock(42)")
+            .execute(&mut d)
+            .await
+            .unwrap();
+    }));
+    let mut probe = connect().await;
+    let locks = loop {
+        let locks = waiting(&mut probe).await;
+        if locks.len() == 3 {
+            break locks;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    let mut kinds: Vec<&str> = locks.iter().map(|(_, lock)| lock.as_str()).collect();
+    kinds.sort();
+    assert_eq!(
+        kinds,
+        ["advisory 42 ExclusiveLock", REVISION, REVISION],
+        "{locks:?}"
+    );
+    sqlx::query("COMMIT").execute(&mut a).await.unwrap();
+    for task in blocked {
+        task.await.unwrap();
+    }
 }
