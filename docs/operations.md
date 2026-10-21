@@ -530,13 +530,15 @@ TIDAL is asked only with a TIDAL developer app's client ID and secret (developer
 underscore: a build without the source ignores them, where `PINAKES__TIDAL__CLIENT_ID` stops it),
 or `[tidal] client_id` and `client_secret`. Without both the `tidal` source does not run;
 credentials removed later leave the rows it stored until they expire, as `enabled = false` does.
-`[tidal] country` (`US`, two upper-case letters) is the country whose catalogue is read. The pair
+`[tidal] country` (`US`, an ISO 3166-1 alpha-2 code in upper case; another value stops startup)
+is the country whose catalogue is read. The pair
 and the token never appear in logs, the operator info, errors or debug output. Refused
 credentials (the token endpoint refuses them, the API answers 403, or it rejects a token under a
 minute old) are logged (`TIDAL refused the client credentials`) and counted in
 `pinakes_also_on_service_errors_total{service="tidal"}` (class `refused`, `forbidden` or
 `rejected`); the TIDAL links read meanwhile keep what TIDAL gave them before and retry later
-(`tidal_auth`, backing off to hourly), and TIDAL is asked again after five minutes. A rate limit
+(`tidal_auth`, after the five-minute hold, then backing off to hourly), and TIDAL is asked again
+when the hold ends. A rate limit
 or an outage (429, 5xx) is waited out: no TIDAL request, batched or single, before the time it
 asked for (`Retry-After`, a minute to an hour) has passed, and the links retry after it
 (`tidal_busy`; a failure the cache replays meanwhile reports the same). TIDAL's answers are

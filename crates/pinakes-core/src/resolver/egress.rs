@@ -612,7 +612,8 @@ impl Egress {
     }
 
     /// Concurrent references share a flight. Successful responses use the requested TTL;
-    /// failures use five minutes. The LRU cache retains at most 10,000 entries / 32 MiB.
+    /// failures use five minutes, or the wait a `RetryLater` answer names when that is shorter.
+    /// The LRU cache retains at most 10,000 entries / 32 MiB.
     /// Capacity eviction can shorten a TTL; host budgets still apply to every fetch.
     pub async fn discover(&self, uri: &str, options: &FetchOptions, ttl: u64) -> Result<Fetched> {
         self.cached(
@@ -775,6 +776,13 @@ impl Egress {
         }
         let ttl = if retained.is_some_and(|f| (200..400).contains(&f.status)) {
             ttl.clamp(3600, 31536000)
+        } else if let Some(asked) = result
+            .as_ref()
+            .err()
+            .and_then(|e| e.downcast_ref::<super::RetryLater>())
+        {
+            // A server that said how long to wait is asked again then, within five minutes.
+            asked.seconds.clamp(1, 300)
         } else {
             300
         };
@@ -1520,6 +1528,53 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(transport.0.load(Ordering::SeqCst), 2);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_failure_that_names_its_wait_is_cached_that_long() {
+        let egress = Egress::new(Default::default());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let ask = |seconds: u64| {
+            let calls = calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<Fetched, _>(anyhow::Error::new(super::super::RetryLater {
+                    class: "http_4xx",
+                    seconds,
+                }))
+            }
+        };
+        // A 429 that asked for a minute: replayed within it, asked again after it.
+        assert!(egress
+            .cached("busy".into(), 3600, &[], ask(60))
+            .await
+            .is_err());
+        let replay = egress
+            .cached("busy".into(), 3600, &[], async { panic!("replayed") })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            replay
+                .downcast_ref::<super::super::RetryLater>()
+                .map(|r| r.class),
+            Some("discovery_cached")
+        );
+        tokio::time::advance(Duration::from_secs(61)).await;
+        assert!(egress
+            .cached("busy".into(), 3600, &[], ask(60))
+            .await
+            .is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        // One that asked for an hour is still held to five minutes.
+        assert!(egress
+            .cached("long".into(), 3600, &[], ask(3600))
+            .await
+            .is_err());
+        tokio::time::advance(Duration::from_secs(301)).await;
+        assert!(egress
+            .cached("long".into(), 3600, &[], ask(3600))
+            .await
+            .is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
     }
     #[tokio::test(start_paused = true)]
     async fn discovery_capacity_evicts_lru_and_failures_expire_after_five_minutes() {

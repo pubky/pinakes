@@ -611,6 +611,26 @@ impl Default for CanaryConfig {
         }
     }
 }
+/// The ISO 3166-1 alpha-2 codes in use (tzdata's `iso3166.tab`): a TIDAL country must be one,
+/// so a typo stops startup instead of failing every request.
+const COUNTRIES: &[&str] = &[
+    "AD", "AE", "AF", "AG", "AI", "AL", "AM", "AO", "AQ", "AR", "AS", "AT", "AU", "AW", "AX", "AZ",
+    "BA", "BB", "BD", "BE", "BF", "BG", "BH", "BI", "BJ", "BL", "BM", "BN", "BO", "BQ", "BR", "BS",
+    "BT", "BV", "BW", "BY", "BZ", "CA", "CC", "CD", "CF", "CG", "CH", "CI", "CK", "CL", "CM", "CN",
+    "CO", "CR", "CU", "CV", "CW", "CX", "CY", "CZ", "DE", "DJ", "DK", "DM", "DO", "DZ", "EC", "EE",
+    "EG", "EH", "ER", "ES", "ET", "FI", "FJ", "FK", "FM", "FO", "FR", "GA", "GB", "GD", "GE", "GF",
+    "GG", "GH", "GI", "GL", "GM", "GN", "GP", "GQ", "GR", "GS", "GT", "GU", "GW", "GY", "HK", "HM",
+    "HN", "HR", "HT", "HU", "ID", "IE", "IL", "IM", "IN", "IO", "IQ", "IR", "IS", "IT", "JE", "JM",
+    "JO", "JP", "KE", "KG", "KH", "KI", "KM", "KN", "KP", "KR", "KW", "KY", "KZ", "LA", "LB", "LC",
+    "LI", "LK", "LR", "LS", "LT", "LU", "LV", "LY", "MA", "MC", "MD", "ME", "MF", "MG", "MH", "MK",
+    "ML", "MM", "MN", "MO", "MP", "MQ", "MR", "MS", "MT", "MU", "MV", "MW", "MX", "MY", "MZ", "NA",
+    "NC", "NE", "NF", "NG", "NI", "NL", "NO", "NP", "NR", "NU", "NZ", "OM", "PA", "PE", "PF", "PG",
+    "PH", "PK", "PL", "PM", "PN", "PR", "PS", "PT", "PW", "PY", "QA", "RE", "RO", "RS", "RU", "RW",
+    "SA", "SB", "SC", "SD", "SE", "SG", "SH", "SI", "SJ", "SK", "SL", "SM", "SN", "SO", "SR", "SS",
+    "ST", "SV", "SX", "SY", "SZ", "TC", "TD", "TF", "TG", "TH", "TJ", "TK", "TL", "TM", "TN", "TO",
+    "TR", "TT", "TV", "TW", "TZ", "UA", "UG", "UM", "US", "UY", "UZ", "VA", "VC", "VE", "VG", "VI",
+    "VN", "VU", "WF", "WS", "YE", "YT", "ZA", "ZM", "ZW",
+];
 impl Config {
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let mut value = serde_json::to_value(Self::default())?;
@@ -753,8 +773,10 @@ impl Config {
             bail!("invalid also_on limits");
         }
         let country = &self.tidal.country;
-        if country.len() != 2 || !country.bytes().all(|b| b.is_ascii_uppercase()) {
-            bail!("tidal.country must be a two-letter country code in upper case");
+        if !COUNTRIES.contains(&country.as_str()) {
+            bail!(
+                "tidal.country must be an ISO 3166-1 alpha-2 country code in upper case, like US"
+            );
         }
         if a.apple_storefront.len() != 2
             || !a.apple_storefront.bytes().all(|b| b.is_ascii_lowercase())
@@ -999,7 +1021,8 @@ mod tests {
         value["tidal"]["client_id"] = "FROMFILE".into();
         apply_named_env(&mut value, [("PINAKES_TIDAL_CLIENT_ID".into(), "".into())]).unwrap();
         assert_eq!(value["tidal"]["client_id"], "FROMFILE");
-        for country in ["us", "USA", ""] {
+        assert_eq!(COUNTRIES.len(), 249);
+        for country in ["us", "USA", "", "UX", "EU"] {
             assert!(with(serde_json::json!({"tidal":{"country":country}})).is_err());
         }
         assert_eq!(

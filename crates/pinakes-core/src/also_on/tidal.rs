@@ -183,7 +183,7 @@ fn api_options(token: &str, slot: &[u8; 32]) -> FetchOptions {
         headers: vec![("authorization", format!("Bearer {token}"))],
         // Answers are cached by the credential pair, not the token: a new token keeps them; an
         // authentication failure is the token's, never cached.
-        cache_tag: Some(blake3::Hash::from(*slot).to_hex().to_string()),
+        cache_tag: Some(cache_tag(slot)),
         uncached: &[401, 403],
         sensitive: true,
         ..Default::default()
@@ -194,10 +194,13 @@ fn api_options(token: &str, slot: &[u8; 32]) -> FetchOptions {
 fn refused() -> anyhow::Error {
     RetryLater {
         class: "tidal_auth",
-        seconds: 3600,
+        seconds: REFUSAL_HOLD,
     }
     .into()
 }
+/// How long refused credentials are held before TIDAL is asked again, and the wait a refused
+/// lookup reports: one value, so the retry comes when the hold ends.
+const REFUSAL_HOLD: u64 = 300;
 /// TIDAL asked to wait `seconds` (held to a minute to an hour).
 fn busy(seconds: u64) -> anyhow::Error {
     RetryLater {
@@ -237,7 +240,7 @@ impl Slot {
         tracing::warn!(status, class, "TIDAL refused the client credentials");
         crate::telemetry::also_on_service_error("tidal", class);
         self.token = None;
-        self.refused_until = Some(Instant::now() + Duration::from_secs(300));
+        self.refused_until = Some(Instant::now() + Duration::from_secs(REFUSAL_HOLD));
     }
     /// TIDAL asked to wait: no request before, and a shorter wait never cuts a longer one.
     fn cool_down(&mut self, seconds: u64) {
@@ -381,6 +384,17 @@ impl Drop for Pending {
 async fn slots(slot: &[u8; 32]) -> tokio::sync::MutexGuard<'static, HashMap<[u8; 32], Slot>> {
     let _pending = Pending::new(slot);
     SLOTS.lock().await
+}
+/// A key of this process's own, so a cache tag is never the pair's plain hash (an offline check
+/// of a guessed secret).
+static TAG_KEY: LazyLock<[u8; 32]> = LazyLock::new(|| {
+    let mut key = [0; 32];
+    getrandom::fill(&mut key).expect("entropy for the TIDAL cache tag");
+    key
+});
+/// The cache tag of a credential pair's slot: keyed by `TAG_KEY`, stable for the process.
+fn cache_tag(slot: &[u8; 32]) -> String {
+    blake3::keyed_hash(&TAG_KEY, slot).to_hex().to_string()
 }
 fn slot_key(id: &str, secret: &str) -> [u8; 32] {
     *blake3::hash(format!("{id}\n{secret}").as_bytes()).as_bytes()
@@ -602,7 +616,7 @@ mod tests {
         SLOTS.lock().await.get_mut(&slot).unwrap().token = Some(issued("fresh", now));
         assert_eq!(
             class_and_seconds(&reject(&slot, "fresh").await),
-            ("tidal_auth", 3600)
+            ("tidal_auth", REFUSAL_HOLD)
         );
         let slots = SLOTS.lock().await;
         let s = &slots[&slot];
@@ -736,6 +750,20 @@ mod tests {
         assert_eq!(
             *transport.items.lock().unwrap(),
             ["Bearer old", "Bearer new"]
+        );
+    }
+    #[test]
+    fn a_cache_tag_is_keyed_and_stable() {
+        let slot = slot_key("tag-id", "tag-secret");
+        let tag = cache_tag(&slot);
+        assert_eq!(tag, cache_tag(&slot));
+        assert_ne!(tag, blake3::Hash::from(slot).to_hex().to_string());
+        assert_ne!(tag, cache_tag(&slot_key("tag-id", "other-secret")));
+        // The refusal's reported wait is the hold.
+        let error = refused();
+        assert_eq!(
+            error.downcast_ref::<RetryLater>().map(|r| r.seconds),
+            Some(REFUSAL_HOLD)
         );
     }
     #[test]
