@@ -499,7 +499,8 @@ limit. The worker takes up to 100 due resources at a time and asks MusicBrainz a
 URLs together (50 to a request; MusicBrainz echoes each URL, and an answer applies only to the URL
 it names) and Wikidata for their item links' items together (10 to a request). Each music link then
 costs one MusicBrainz request for its entity (up to four when the URL names several releases; one
-more for a track found by its ISRC, one for an album found by its barcode key, and one for a
+more for a track found by its ISRC, up to two barcode searches for an album found by its barcode keys (only those another source
+found) and up to four release reads for what they name, and one for a
 track's original album), up to two iTunes lookups
 for an album with barcodes, and two Wikidata requests (a search by its service ID cannot batch);
 each Wikipedia article one request to its Wikipedia and one to Wikidata; each MusicBrainz page

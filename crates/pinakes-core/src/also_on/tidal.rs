@@ -181,8 +181,10 @@ fn api_options(token: &str, slot: &[u8; 32]) -> FetchOptions {
         accept: Some(JSON_API.into()),
         extra_types: &[JSON_API],
         headers: vec![("authorization", format!("Bearer {token}"))],
-        // Answers are cached by the credential pair, not the token: a new token keeps them.
+        // Answers are cached by the credential pair, not the token: a new token keeps them; an
+        // authentication failure is the token's, never cached.
         cache_tag: Some(blake3::Hash::from(*slot).to_hex().to_string()),
+        uncached: &[401, 403],
         sensitive: true,
         ..Default::default()
     }
@@ -423,13 +425,10 @@ async fn item(cx: &Context, kind: Kind, id: &str) -> Result<Option<Value>> {
     let shorten = |seconds: u64| cx.egress.shorten_discovery(&url, &options, seconds);
     match fetched.status {
         200 => {}
-        401 => {
-            shorten(1).await?;
-            return Err(s.reject(&token));
-        }
+        // Never cached (`api_options`): the next request asks with its own token.
+        401 => return Err(s.reject(&token)),
         // No catalogue scope, a restricted app: the credentials, not the item.
         403 => {
-            shorten(300).await?;
             s.refuse("forbidden", 403);
             return Err(refused());
         }
@@ -639,6 +638,105 @@ mod tests {
         }
         .into();
         assert_eq!(asked_wait(&limited), Some(900));
+    }
+    /// A token TIDAL rejects (401) is dropped, and the next lookup asks TIDAL again with a new
+    /// one: the 401 was never cached for the pair.
+    #[tokio::test]
+    async fn a_new_token_after_a_401_asks_again() {
+        use crate::resolver::egress::{Dns, Egress, Transport};
+        use std::net::SocketAddr;
+        struct Public;
+        #[async_trait]
+        impl Dns for Public {
+            async fn lookup(&self, _: &str, port: u16) -> Result<Vec<SocketAddr>> {
+                Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
+            }
+        }
+        #[derive(Default)]
+        struct Tidal {
+            items: std::sync::Mutex<Vec<String>>,
+        }
+        #[async_trait]
+        impl Transport for Tidal {
+            async fn get(&self, url: &url::Url, a: &[SocketAddr]) -> Result<Fetched> {
+                self.get_with(url, a, &FetchOptions::default()).await
+            }
+            async fn get_with(
+                &self,
+                url: &url::Url,
+                _: &[SocketAddr],
+                options: &FetchOptions,
+            ) -> Result<Fetched> {
+                let reply = |status: u16, body: &str| Fetched {
+                    permanent_redirect: false,
+                    truncated: false,
+                    validators: Default::default(),
+                    url: url.clone(),
+                    content_type: JSON_API.into(),
+                    status,
+                    retry_after_secs: 60,
+                    location: None,
+                    body: body.as_bytes().to_vec(),
+                };
+                if url.host_str() == Some("auth.tidal.com") {
+                    return Ok(reply(200, r#"{"access_token":"new","expires_in":14400}"#));
+                }
+                let bearer = options
+                    .headers
+                    .iter()
+                    .find(|(k, _)| *k == "authorization")
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default();
+                self.items.lock().unwrap().push(bearer.clone());
+                Ok(if bearer == "Bearer old" {
+                    reply(401, "{}")
+                } else {
+                    reply(
+                        200,
+                        r#"{"data":{"id":"7","type":"tracks","attributes":{"isrc":"DEQ121641300"}}}"#,
+                    )
+                })
+            }
+        }
+        let transport = std::sync::Arc::new(Tidal::default());
+        let mut config = crate::config::Config::default();
+        config.tidal.client_id = Some(SecretKey::from("rotate-id".to_owned()));
+        config.tidal.client_secret = Some(SecretKey::from("rotate-secret".to_owned()));
+        let cx = Context {
+            egress: Egress::with_backends(
+                Default::default(),
+                std::sync::Arc::new(Public),
+                transport.clone(),
+            ),
+            config: std::sync::Arc::new(config),
+        };
+        // A token issued two minutes ago, which TIDAL now rejects.
+        let slot = slot_key("rotate-id", "rotate-secret");
+        let now = Instant::now();
+        SLOTS.lock().await.insert(
+            slot,
+            Slot {
+                token: Some(Issued {
+                    token: "old".into(),
+                    at: now.checked_sub(Duration::from_secs(120)).unwrap_or(now),
+                    until: now + Duration::from_secs(3600),
+                }),
+                ..Default::default()
+            },
+        );
+        let error = item(&cx, Kind::Track, "7").await.unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<RetryLater>()
+                .map(|r| (r.class, r.seconds)),
+            Some(("tidal_auth", 60))
+        );
+        let attributes = item(&cx, Kind::Track, "7").await.unwrap().unwrap();
+        assert_eq!(attributes["isrc"], "DEQ121641300");
+        assert_eq!(
+            *transport.items.lock().unwrap(),
+            ["Bearer old", "Bearer new"]
+        );
     }
     #[test]
     fn only_tidal_albums_and_tracks_apply() {

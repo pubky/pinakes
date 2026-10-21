@@ -1467,3 +1467,54 @@ async fn an_album_s_barcode_key_finds_its_musicbrainz_release(pool: sqlx::PgPool
     let dracula = keys(ids[1].clone()).await;
     assert_eq!(dracula, ["upc:0196874054246 tidal"], "{dracula:?}");
 }
+
+/// A barcode the `musicbrainz` source keyed itself (from a release it once found by URL) never
+/// finds that release again once the URL relation is gone: an editor's removal stands.
+#[sqlx::test(migrations = "../../migrations")]
+async fn musicbrainz_s_own_barcode_never_re_finds_its_release(pool: sqlx::PgPool) {
+    let uri = "https://tidal.com/album/199574241";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut d = ResourceMeta::new(uri, "jsonld", 86400);
+    d.set_type("MusicAlbum");
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    // The only barcode is the one MusicBrainz's earlier run stored, with its release key.
+    for key in [
+        "upc:4018939306052",
+        "mb:release:70477949-9da4-4fb3-ba60-268ff6f3a62c",
+    ] {
+        sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) VALUES($1,$2,'musicbrainz','musicbrainz',now()+interval '30 days')")
+            .bind(&id)
+            .bind(key)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let cx = also_on::Context {
+        egress: egress(t.clone()),
+        config: Arc::new(Config::default()),
+    };
+    sqlx::query("INSERT INTO also_on_dirty(resource_id) VALUES($1) ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=now()")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    let seen = t.seen.lock().unwrap().clone();
+    assert!(
+        !seen.iter().any(|s| s.contains("barcode")),
+        "no barcode search: {seen:?}"
+    );
+    let keys: Vec<String> = sqlx::query_scalar(
+        "SELECT key FROM resource_key WHERE resource_id=$1 AND source='musicbrainz'",
+    )
+    .bind(&id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(keys.is_empty(), "{keys:?}");
+}

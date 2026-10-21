@@ -204,17 +204,25 @@ impl MusicBrainzSource {
                 }
             }
         }
-        // An album MusicBrainz does not relate the URL to: the releases carrying its barcode key
+        // An album MusicBrainz does not relate the URL to: the releases carrying its barcode keys
         // (TIDAL's own record, or a service's from an earlier run), one or editions of one
-        // release group, as a related URL would name them.
+        // release group, as a related URL would name them. Never a barcode this source keyed
+        // itself: that would re-find a release after an editor removed its URL relation.
         if level == Level::Album && ids.is_empty() {
-            for upc in subject.keys_in("upc").take(2) {
-                let releases = musicbrainz::barcode(&cx.egress, base, upc).await?;
-                if !releases.is_empty() {
-                    kind = MbKind::Release;
-                    ids = releases;
-                    break;
-                }
+            let barcodes: Vec<&str> = subject
+                .keys
+                .iter()
+                .filter(|(_, source)| !source.starts_with("musicbrainz"))
+                .filter_map(|(key, _)| key.strip_prefix("upc:"))
+                .take(2)
+                .collect();
+            let mut releases = std::collections::BTreeSet::new();
+            for upc in barcodes {
+                releases.extend(musicbrainz::barcode(&cx.egress, base, upc).await?);
+            }
+            if !releases.is_empty() {
+                kind = MbKind::Release;
+                ids = releases.into_iter().collect();
             }
         }
         if ids.is_empty() || ids.len() > 1 && (kind != MbKind::Release || ids.len() > MAX_EDITIONS)
