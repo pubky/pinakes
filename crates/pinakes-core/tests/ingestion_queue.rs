@@ -678,25 +678,23 @@ async fn an_upstream_failure_is_recorded_by_its_status(pool: PgPool) {
         assert_eq!(error.as_deref(), Some(class), "{status}");
     }
 }
-/// A failed resolve is logged with its resource id, its URL's host and the kind of failure, the
-/// class stored in `last_error`: the line can be found by site or by kind.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
-async fn a_failed_resolve_is_logged_with_its_host_and_kind(pool: PgPool) {
-    #[derive(Clone, Default)]
-    struct Lines(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-    impl std::io::Write for Lines {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
+#[derive(Clone, Default)]
+struct Lines(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+impl std::io::Write for Lines {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
     }
-    // A process-wide subscriber: a thread-local one misses events while other tests run (the
-    // callsites' interest is cached for the whole process). The line is found by its resource.
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+/// The JSON log lines at warn, from a process-wide subscriber: a thread-local one misses events
+/// while other tests run (the callsites' interest is cached for the whole process). A test finds
+/// its lines by its resource.
+fn log_lines() -> Lines {
     static LINES: std::sync::OnceLock<Lines> = std::sync::OnceLock::new();
-    let lines = LINES
+    LINES
         .get_or_init(|| {
             let lines = Lines::default();
             let writer = lines.clone();
@@ -708,7 +706,60 @@ async fn a_failed_resolve_is_logged_with_its_host_and_kind(pool: PgPool) {
             tracing::subscriber::set_global_default(subscriber).unwrap();
             lines
         })
-        .clone();
+        .clone()
+}
+/// A resolver whose fetch fails as reqwest reports it outside the egress: the error names the
+/// URL, query and all.
+struct UnreachableResolver;
+#[async_trait::async_trait]
+impl Resolver for UnreachableResolver {
+    fn name(&self) -> &'static str {
+        "web"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, _: &str) -> anyhow::Result<ResourceMeta> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let error = reqwest::get(format!("http://127.0.0.1:{port}/calendar.ics?token=CANARY"))
+            .await
+            .unwrap_err();
+        Err(error.into())
+    }
+    fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+        Duration::from_secs(86400)
+    }
+}
+/// A failure's logged error never carries a URL's query: the canary token of a refused
+/// connection stays out of the line.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_failure_log_keeps_no_query_secret(pool: PgPool) {
+    let lines = log_lines();
+    let a = change(
+        "https://cal.example.org/share?token=CANARY",
+        "a",
+        "/pub/app/tags/a",
+    );
+    batch(&pool, vec![a], Some("one")).await;
+    let cfg = QueueConfig::default();
+    let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    let _ = queue::run_job(&pool, &UnreachableResolver, &cfg, &job).await;
+    let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+    let line = text
+        .lines()
+        .find(|l| l.contains("resolution failed") && l.contains(job.id.as_str()))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(line.contains("connect"), "{line}");
+    assert!(!line.contains("CANARY"), "{line}");
+}
+
+/// A failed resolve is logged with its resource id, its URL's host and the kind of failure, the
+/// class stored in `last_error`: the line can be found by site or by kind.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_failed_resolve_is_logged_with_its_host_and_kind(pool: PgPool) {
+    let lines = log_lines();
     let a = change(
         "https://flaky.example.org/page?token=x",
         "a",

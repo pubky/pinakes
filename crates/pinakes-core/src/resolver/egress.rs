@@ -303,7 +303,9 @@ impl Transport for PinnedTransport {
         if let Some(v) = &options.validators.last_modified {
             request = request.header("if-modified-since", v);
         }
-        read_response_with(url.clone(), request.send().await?, options).await
+        // A reqwest error names its URL, query and all (a calendar's token): never in an error.
+        let response = request.send().await.map_err(reqwest::Error::without_url)?;
+        read_response_with(url.clone(), response, options).await
     }
 }
 /// Where the head closes in `body` (the end of `</head>`, in any letter case), searching from
@@ -412,7 +414,11 @@ pub async fn read_response_with(
         if refuse && response.content_length().is_some_and(|n| n > max as u64) {
             return Err(BodyTooLarge { cap: max }.into());
         }
-        while let Some(chunk) = response.chunk().await? {
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(reqwest::Error::without_url)?
+        {
             if body.len().saturating_add(chunk.len()) > max {
                 if refuse {
                     return Err(BodyTooLarge { cap: max }.into());
@@ -464,7 +470,11 @@ pub async fn read_response_with(
         // An error page keeps a bounded prefix of its body, so the interstitial classifier sees a
         // challenge; the status is preserved.
         const ERROR_BODY_CAP: usize = 64 * 1024;
-        while let Some(chunk) = response.chunk().await? {
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(reqwest::Error::without_url)?
+        {
             let remaining = ERROR_BODY_CAP.saturating_sub(body.len());
             body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
             if chunk.len() >= remaining {
@@ -1536,6 +1546,25 @@ mod tests {
             head_end(&whole, body.len()),
             Some(whole.len() - "<body>".len())
         );
+    }
+    /// A failed request's error never names its URL: a calendar's token in the query stays out of
+    /// every error and log. The error keeps its kind.
+    #[tokio::test]
+    async fn a_failed_request_does_not_name_its_url() {
+        // A closed port: the connection is refused.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let url: Url = format!("http://127.0.0.1:{}/calendar.ics?token=CANARY", addr.port())
+            .parse()
+            .unwrap();
+        let error = PinnedTransport
+            .get_with(&url, &[addr], &FetchOptions::default())
+            .await
+            .unwrap_err();
+        let text = format!("{error:#} {error:?}");
+        assert!(!text.contains("CANARY"), "{text}");
+        assert_eq!(super::super::error_class(&error), "connect");
     }
     /// A PDF or an image past the page cap is cut there, not refused: its card comes from its
     /// URL. Any other file past the cap is still refused.

@@ -188,6 +188,38 @@ impl std::fmt::Display for ErrorClass {
     }
 }
 impl std::error::Error for ErrorClass {}
+/// `text` with every web URL in it reduced to its scheme, host, port and path: no query,
+/// fragment or user info, which may hold what a link's owner keeps private (a calendar's token).
+/// For error text that goes to a log.
+pub fn redact(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = ["http://", "https://"]
+        .iter()
+        .filter_map(|scheme| rest.find(scheme))
+        .min()
+    {
+        out.push_str(&rest[..at]);
+        let end = rest[at..]
+            .find(|c: char| c.is_whitespace() || matches!(c, ')' | '"' | '\'' | '<' | '>' | ','))
+            .map_or(rest.len(), |n| at + n);
+        let found = &rest[at..end];
+        match url::Url::parse(found) {
+            Ok(mut url) => {
+                url.set_query(None);
+                url.set_fragment(None);
+                let _ = url.set_username("");
+                let _ = url.set_password(None);
+                out.push_str(url.as_str());
+            }
+            Err(_) => out.push_str(found.split(['?', '#']).next().unwrap_or("")),
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 pub fn error_class(error: &anyhow::Error) -> &'static str {
     if error.is::<interstitial::Blocked>() {
         return "wall";
@@ -230,6 +262,24 @@ pub fn error_class(error: &anyhow::Error) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    /// A logged error never carries what a URL's query, fragment or user info holds.
+    #[test]
+    fn redact_keeps_no_query_fragment_or_user_info() {
+        assert_eq!(
+            redact("error sending request for url (https://cal.example.org/calendar.ics?token=CANARY#x)"),
+            "error sending request for url (https://cal.example.org/calendar.ics)"
+        );
+        assert_eq!(
+            redact("from https://user:pass@example.org/a?b=1, then http://example.org/c?d=2"),
+            "from https://example.org/a, then http://example.org/c"
+        );
+        assert_eq!(redact("no link here"), "no link here");
+        assert_eq!(
+            redact("https://example.org/plain"),
+            "https://example.org/plain"
+        );
+    }
+
     /// A body past its cap is `too_large`, however deep in the error chain (an adapter adds
     /// context), never `parse`, which would hide the cause.
     #[test]
