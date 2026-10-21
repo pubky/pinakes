@@ -4,7 +4,7 @@ The harness builds tags with `pubky-app-specs` and, in live mode, writes them wi
 `@synonymdev/pubky`. The samples cover an OSM node, geo pin, event page,
 ICS feed (the mock exercises recurrence), NIP-52 naddr, DOI with its publisher page, ISBN, oEmbed
 video, ordinary web page, official-API sources (a Federal Register document by number with one of
-its page addresses, an alias, an SEC EDGAR filing, an eCFR section and a GLEIF LEI record, a UK Parliament bill, a Swiss Parliament business item, a CourtListener opinion, a UK Act on legislation.gov.uk, an EUR-Lex act, a Fedlex act, a Zefix company, a GovInfo public law, a Stacker News post, a Hacker News story, a Lobsters story, a Bluesky post, a Mastodon post, a Discourse topic, a Codeberg file, a GitLab file, a WordPress post, a Ghost post, a mailing-list message, a walled article found in its feed; and one link per data source: a Lightning node and the pizza transaction on mempool.space, an earthquake, Docker Hub images, ROR organisations, Hugging Face, Zenodo and Figshare records, Met, Cleveland and Art Institute of Chicago artworks, an Internet Archive item, a Commons file, a PDB structure, UniProt proteins, PubChem compounds, GBIF and iNaturalist records and a ClinicalTrials.gov study; film, series, book and podcast pages whose cards must carry the object's name, not the page's), and live a Pubky object of another app. It checks the
+its page addresses, an alias, an SEC EDGAR filing, an eCFR section and a GLEIF LEI record, a UK Parliament bill, a Swiss Parliament business item, a CourtListener opinion, a UK Act on legislation.gov.uk, an EUR-Lex act, a Fedlex act, a Zefix company, a GovInfo public law, a Stacker News post, a Hacker News story, a Discogs master, a Lobsters story, a Bluesky post, a Mastodon post, a Discourse topic, a Codeberg file, a GitLab file, a WordPress post, a Ghost post, a mailing-list message, a walled article found in its feed; and one link per data source: a Lightning node and the pizza transaction on mempool.space, an earthquake, Docker Hub images, ROR organisations, Hugging Face, Zenodo and Figshare records, Met, Cleveland and Art Institute of Chicago artworks, an Internet Archive item, a Commons file, a PDB structure, UniProt proteins, PubChem compounds, GBIF and iNaturalist records and a ClinicalTrials.gov study; film, series, book and podcast pages whose cards must carry the object's name, not the page's), and live a Pubky object of another app. It checks the
 Nexus reference feed, Pinakes typed documents, facets, bbox/Event/venue search,
 occurrences, changes, group membership, same-event hints and Nexus hydration by URI (`by_ids` with `uris`: the
 cards' own `uri` and `details.aliases`, and an occurrence's `occurrence.feed_uri`, matched by
@@ -55,20 +55,24 @@ CARGO_PROFILE_DEV_DEBUG=0 scripts/e2e --isolated-live
 ```
 
 `--isolated-live` uses the real SDK, homeserver, Nexus and public upstreams. Its
-private Pinakes driver reads the Nexus feed but resolves only the selected sample IDs
-(twenty-six by default, at most thirty-two), through the production queue path (batched
-completion, leases and resolver policy), and runs the also-on sources for them. Music samples
+private Pinakes driver reads the Nexus feed but resolves only the samples it is given, one to
+thirty-two of them, through the production queue path (batched completion, leases and resolver
+policy), and runs the also-on sources for them. `samples.live.json` holds more than thirty-two, so
+point `PINAKES_E2E_SAMPLES` at a file with the ones to run. Music samples
 must be typed and named by what they are (Spotify, Apple Music, TIDAL, Bandcamp, SoundCloud;
 `name` checks a card's name, Daft Punk's TIDAL page); the Spotify track sample must show Deezer
 as a derived link, found through MusicBrainz, the Wikidata item for Paris its French and
 English Wikipedia editions, and the Berlin node (tagged `wikidata=Q64`, which names it back) its
 Wikidata page and English Wikipedia article, and Discogs' OK Computer master its Apple Music
-album, through the Wikidata item MusicBrainz relates its release group to. A tagged BTC Map
-merchant page joins the OSM way it names (LAC Lugano). The owner's music cases join (`group_with`): TIDAL's `/u` share
+album, through the Wikidata item MusicBrainz relates its release group to, and Discogs' Radiohead
+its Deezer page. A tagged BTC Map
+merchant page joins the OSM way it names (LAC Lugano). The music cases join (`group_with`): TIDAL's `/u` share
 link of Bohemian Rhapsody with the seed's recording through its own ISRC, Cut to the Feeling's
 Spotify and Deezer albums through their MusicBrainz release, Dracula's TIDAL, Apple and Deezer
 albums through their one release group, MusicBrainz's recording and ISRC pages with TIDAL's
-share link and its artist page with TIDAL's artist; a TIDAL track whose ISRC nobody else knows
+share link and its artist page with TIDAL's artist, a TIDAL album with Apple Music's through
+their barcode, and Discogs' OK Computer master and Radiohead artist with their Spotify pages; a
+TIDAL track whose ISRC nobody else knows
 keeps it in its `facts`. Canaries and unrelated backlog
 fetching are off. Use this mode for a scoped live smoke test. Run `scripts/e2e` without a mode
 to use an already configured dev stack

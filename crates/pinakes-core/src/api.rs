@@ -534,18 +534,20 @@ pub struct Card {
     /// Plain text, entity-decoded: escape it before rendering it as HTML.
     pub description: Option<String>,
     pub image: Option<String>,
-    /// The publishing site: the host, the app for `pubky://` objects (e.g. `mapky.app`), or the
-    /// service a link's URL names (`Apple Music`, `Wikipedia (de)`, `MusicBrainz`, `Wikidata`).
-    /// Plain text, like every text field.
+    /// The publishing site: the app for `pubky://` objects (e.g. `mapky.app`); the service a
+    /// link's URL names (`Apple Music`, `Wikipedia (de)`, `MusicBrainz`, `Wikidata`,
+    /// `OpenStreetMap`); else the site name the document gives, else the host. Plain text, like
+    /// every text field.
     pub site: Option<String>,
     pub point: Option<model::Point>,
     pub start: Option<DateTime<Utc>>,
     pub end: Option<DateTime<Utc>>,
     pub group: Option<GroupRef>,
     /// The same thing elsewhere: the other members of its group (tagged links, with their ID),
-    /// then derived links nobody tagged (`derived: true`), by service name; one per music service
-    /// and at most 8 on a card, up to 256 on `GET /v1/resources/{id}`, whose `details.also_on`
-    /// lists every link. A hint: every member keeps its own card.
+    /// then derived links nobody tagged (`derived: true`), by service name; one per service, at
+    /// most 8 on a search or lookup card and up to 256 on a resource read
+    /// (`GET /v1/resources/{id}`, `GET /v1/resources/by-uri`, `POST /v1/resolve`), whose
+    /// `details.also_on` lists every link, up to 256. A hint: every member keeps its own card.
     pub also_on: Vec<AlsoOn>,
     /// OpenStreetMap cards, events placed at an OSM venue and events whose zone was derived from
     /// coordinates: the ODbL attribution to display with the card.
@@ -602,7 +604,8 @@ pub struct AlsoOn {
     /// For a derived link: the hub or service it came through (`musicbrainz`, `wikidata`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub via: Option<String>,
-    /// For a derived link, a qualifier (`archived`).
+    /// For a derived link, a qualifier (`archived`, `work`, `source`, `submitted`, `published`,
+    /// `pdf`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     /// For a derived link, a time that belongs to it (an archived copy's capture).
@@ -644,12 +647,12 @@ pub struct Details {
     /// that answered (docs/sources).
     pub from: Option<String>,
     /// The fields that API names for the object, and the facts the also-on sources read for it
-    /// (`isrc`, `upc`, `mbid`, `mbid_was`, `artist`, `duration`), by name; several values are joined with
-    /// "; ". Absent when there are none.
+    /// (`isrc`, `upc`, `mbid`, `mbid_was`, `artist`, `artist_type`, `duration`, …), by name;
+    /// several values are joined with "; ". `null` when there are none.
     #[schema(value_type = Option<Object>)]
     pub facts: Option<std::collections::BTreeMap<String, String>>,
-    /// Every link of `also_on`, all of them: each tagged member and each derived link, several of
-    /// one music service too (the card's `also_on` shows one per music service).
+    /// Every link of `also_on`, up to 256: each tagged member and each derived link, several of
+    /// one service too (the card's `also_on` shows one per service).
     pub also_on: Vec<AlsoOn>,
     /// Other spellings of this link that resolve to it (its aliases), by URI, at most 50. A
     /// page's own claims (`url`, `@id`, `sameAs`, canonical links) are not aliases and are not

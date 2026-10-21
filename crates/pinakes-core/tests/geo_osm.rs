@@ -1489,8 +1489,8 @@ async fn reextract_makes_object_shortlinks_aliases_and_refuses_osm_host_pages(po
     for uri in [canonical, short, changeset, note] {
         ids.insert(uri, store::ensure_resource(&pool, uri).await.unwrap());
     }
-    // Rows the geo route stored: final `ok` points at the shortlink's map centre (a rule
-    // change re-extraction applies; the object shortlink is an alias from the start today).
+    // Rows the geo route stored: final `ok` points at the shortlink's map centre. Re-extraction
+    // applies the current rule; a new object shortlink is an alias from the start.
     for uri in [short, changeset, note] {
         sqlx::query("DELETE FROM resource_alias WHERE alias_id=$1")
             .bind(&ids[uri])

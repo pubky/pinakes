@@ -238,7 +238,7 @@ pub fn unless_over_cap(found: Result<Found>, fallback: impl FnOnce() -> Found) -
         found => found,
     }
 }
-/// Every source this build has. A source added by a later change is listed here.
+/// Every also-on source. A new source is listed here, in the order it must run.
 pub fn registry() -> Vec<Arc<dyn Source>> {
     // In this order: each source sees the keys the ones before it found.
     vec![

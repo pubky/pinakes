@@ -175,6 +175,16 @@ don't retry it; Wikidata items verified together that are over it together are r
 a MusicBrainz page's card is read from the page. Requests
 time out after ten seconds. Images stay origin URLs and are never fetched.
 
+Discovery reads (`Egress::discover`: the also-on sources and hubs, oEmbed endpoints, feed and
+calendar discovery, and a few page hooks and sources such as `feed`, `media_records`, Discogs and
+GitHub; not the page fetch of web resolution or most official-API reads) share one in-process
+cache (10,000 entries, 32 MiB), and concurrent readers of one request share one fetch. A success
+is kept for the lifetime the reader asks for, raised to at least an hour; a failure for five
+minutes, or, when the service named its wait (a 429's `Retry-After`), for that wait held between 1
+and 300 seconds. Eviction of the least recently used entries can end any entry sooner. An
+authentication failure (TIDAL's 401 and 403) is never kept, so a new token asks again, and a wait
+for Pinakes's own host budget is not a failure.
+
 Every request introduces itself as `pinakes/<version> (+https://pubky.app; <contact>)`, with
 `http.contact` as the contact (`info@synonym.to` in the example configuration; without one,
 `pinakes/<version> (+https://pubky.app)`). Set it to an address the services you read can reach:
@@ -465,19 +475,12 @@ replays captures without network access. Recorded responses for the keyless prob
 
 ## Also on
 
-The upgrade that adds the worker queues every stored resource once. Run
-`pinakesd --config <path> reextract all` after it as well: music and Wikipedia links already
-stored in another spelling become aliases of their canonical link, and music links are typed.
-After an upgrade that adds also-on sources (the media sources brought `books`, `films`,
-`podcasts` and `titles`), or after setting a source's key (`[podcast_index]`, TIDAL's pair), run
-`pinakesd --config <path> reextract also-on` (or `reextract all`, which includes it): until then
-links already stored keep the results of their last run, without the new source's, for up to its
-lifetime (30 days).
-After the upgrade that names cards after their service (the places, papers, software, games and
-archives sources: `Wikidata`, `OpenStreetMap`, `Google Play`, `DOI`, …), run `reextract all`:
-cards stored before keep the raw host as their `site` (`www.wikidata.org`, `f-droid.org`) and
-record no service, so a tagged member and a derived link of one service can both show, until each
-card is fetched again.
+After setting a source's key (`[podcast_index]`, TIDAL's pair, a Discogs token), or after an
+upgrade that adds or changes also-on sources, run `pinakesd --config <path> reextract also-on`
+(or `reextract all`, which includes it): until then links already stored keep the results of
+their last run for up to the source's lifetime (30 days). After an upgrade that changes how links
+are spelled, typed or named (aliases of a canonical link, a card's service in `site`), run
+`reextract all`: stored cards keep what the older build gave them until each is fetched again.
 
 The also-on worker runs every enabled source that applies to a resource ([the API](api.md#also-on))
 after a save that changed its document or status, and again when the shortest lifetime among
@@ -552,7 +555,7 @@ and find nothing without it. `deezer` is off by default: Deezer's API terms allo
 non-commercial use only, so turn it on
 (`[also_on.sources.deezer] enabled = true`) only where they do; it costs one request per Deezer
 link and up to two per other track or album with an ISRC or barcode. `tidal` costs a token
-request when its token expires (TIDAL's `expires_in`, four hours today), and per TIDAL album or
+request when its token expires (a minute before TIDAL's `expires_in`), and per TIDAL album or
 track one request, or a share of one: a batch
 of links asks for up to 20 albums or 20 tracks at once (`filter[id]`); a track's ISRC also asks
 MusicBrainz whether several recordings have it (usually cached from `service`).

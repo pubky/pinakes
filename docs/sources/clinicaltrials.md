@@ -1,8 +1,8 @@
 # ClinicalTrials.gov
 
 Clinical studies registered at ClinicalTrials.gov (U.S. National Library of Medicine), read from
-its API (v2) by NCT number. Public domain; no key; no published rate limit (about 50 requests a
-minute, so 0.8 a second).
+its API (v2) by NCT number. Public domain; no key; no published rate limit (Pinakes keeps to
+about 50 requests a minute, 0.8 a second).
 
 ## Links
 

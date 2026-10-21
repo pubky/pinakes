@@ -2,7 +2,7 @@
 
 > **Πίνακες** (Pinakes, PIN-a-keez) is the plural of *pinax*, a tablet or board, and the name of the catalogue Callimachus made of the Library of Alexandria: tables of what the library held, by subject, each entry saying what a work was and where to find it, pointing at scrolls the catalogue did not contain. It was one of the first attempts to index everything a library held. The singular covered whatever was recorded on such a tablet: a list, a register, a map of the known world. Anaximander's early world map was a pinax.
 >
-> The name brings together the two things this service does: keeping a record of things and showing where they are. The singular was the first choice; Pinax is also a web3 company that indexes blockchains, so the catalogue, not the tablet, gives the name.
+> The name brings together the two things this service does: keeping a record of things and showing where they are.
 
 This page is the overview: what Pinakes is, what it needs from Nexus and what it decides. Choices marked **(arbitrary)** are defaults nothing constrains; change them freely.
 
@@ -18,7 +18,7 @@ This page is the overview: what Pinakes is, what it needs from Nexus and what it
 
 Every external thing people reference is a `Resource` in Nexus: an id and a URI, nothing else. That is the right scope for a social indexer, and it gives a card and nothing more. "Cafés tagged cappuccino in this map area by people I follow" or "events next week" need an indexer that knows what the resource is, and filtering after Nexus's list caps gives silently wrong answers.
 
-Maps and Events each built a private indexer for this. One shared one does the work once and makes cross-kind queries possible.
+Maps and Events both need such an indexer. One shared indexer does the work once and makes cross-kind queries possible.
 
 
 ## 2. Shape {#shape}
@@ -56,7 +56,7 @@ Reach uses the existing `following` and `friends` lists (pages of 200 ids).
 Not needed: webhooks, a plug-in trait, a point index, metadata on `Resource`, place endpoints, any `geo:` handling. Nexus does not know that a resource has a location.
 
 
-## 5. How Pinakes works {#pinax}
+## 5. How Pinakes works {#how}
 
 ### 5.1 Ingestion {#ingestion}
 
@@ -82,7 +82,7 @@ B's one real advantage is independence from Nexus. It costs a second implementat
 A resolver turns a URI into one small typed document, on demand and never inline with ingestion: a queue with per-resolver rate limits, backoff, dead-letter and a refresh past TTL. Four stages:
 
 - **Classify by scheme**, no network: `geo:`, `webcal:`, `nostr:`, `doi:`, and `pubky://` objects of other apps, which get a card from conventional JSON members.
-- **Host adapters**, only where an API or a feed beats the page: OpenStreetMap through cached Nominatim lookups, oEmbed providers, Wikidata, DOI, Luma and Meetup.
+- **Host adapters**, only where an API or a feed beats the page: OpenStreetMap through cached Nominatim lookups, oEmbed providers, Wikidata, DOI, event platforms such as Luma and Meetup, and the official APIs in [sources](sources/README.md).
 - **Generic web**: one fetch, then JSON-LD, microformats, OpenGraph, oEmbed, title, in that order; ActivityPub when advertised; ICS and RSS by content type.
 - **Chains**: an event's venue to a place from the page's own coordinates, else geocoding above a confidence threshold, else nothing. Never a guessed OSM URL.
 
@@ -96,7 +96,7 @@ moves toward it while a year-9999 event never holds a slot past the horizon. Cal
 stays bounded across polls. Portal coordinates remain page-sourced venue facts,
 with no writes to the OSM cache and no implicit OSM fetch.
 
-Egress policy (every fetch a reference can steer; Pubky objects included, fetched from the homeserver's public HTTPS domain; the operator-configured Nominatim and Nexus are trusted): private ranges refused and redirects re-checked; a 10 s timeout, a 1 MB page cap and at most 3 redirects **(arbitrary)**; one fetch per URI per TTL no matter who asks; per-host limits with allow and deny lists; every upstream URL and rate limit in config, so a small development run can use the public Nominatim and Photon under slow limits while production uses its own planet instances. Images are never re-hosted; clients proxy.
+Egress policy (every fetch a reference can steer; Pubky objects included, fetched from the homeserver's public HTTPS domain; the operator-configured Nominatim and Nexus are trusted): private ranges refused and redirects re-checked; a 10 s timeout, a 1 MB page cap (8 MB for MusicBrainz and Wikidata answers) and at most 3 redirects **(arbitrary)**; one fetch per URI per TTL no matter who asks; per-host limits with allow and deny lists; every upstream URL and rate limit in config, so a small development run can use the public Nominatim and Photon under slow limits while production uses its own planet instances. Images are never re-hosted; clients proxy.
 
 Refresh follows the time to an event's start and stops after its end; a change is a difference in the typed document, confirmed twice before a cancellation, and becomes a line in Pinakes's own change journal. Every source is one adapter manifest (mode, cadence, identity, cancellation signal, expected fields, canary), and the same manifest drives the Prometheus metrics and Grafana alerts, so a platform that changes its markup or puts up a wall is an alert before it is a blank card.
 
@@ -110,7 +110,7 @@ Refresh follows the time to an event's start and stops after its end; a change i
 - A calendar feed is one resource and a container. Its events are occurrence rows keyed by `(feed, UID, RECURRENCE-ID)`, since nothing in a feed URL names one event. An event that has its own page is a resource of its own once referenced, and its occurrence rows link to it.
 - Caps: 32 attributes and 8 KB per document **(arbitrary)**.
 
-**Aliases and groups.** One thing often lives at several URIs. Nexus sees as many resources as URIs, which is right: each is what someone referenced. Pinakes tells two cases apart. An **alias** is the same object under another spelling, resolved deterministically: tracking parameters, the spellings and shortlinks of one OSM object, ISBN-10 and DOI URL forms, and a page's own canonical when it differs only by a trailing slash or tracking parameters. An alias keeps its id and references but is never fetched; its references count for its root and reads answer with the root. A **group** joins resources that are one thing, only on evidence that cannot be spoofed: a DOI or ISBN card and the landing page its registry names, when that page cites the identifier in its head; one ICS UID within one feed; and links an operator curates. Claims a publisher makes about itself (sameAs, a canonical to another page, a shared homepage canonical) are not evidence: anyone can make them. A group is a hint, never a merge: every member keeps its own id, card, references, score and ranking, and each card's `also_on` lists the other members and the derived links sources found (the same thing on services nobody tagged), so a client can say "also on …" without a second request. Exact keys from hubs (a MusicBrainz MBID, a Wikidata Q-id) group too; derived links are never fetched, counted or ranked. Facets and clusters count links, not groups. Search shows one row per group only on request (`collapse=group`, a list view): the member that passed the filters with the most references, as its own card.
+**Aliases and groups.** One thing often lives at several URIs. Nexus sees as many resources as URIs, which is right: each is what someone referenced. Pinakes tells two cases apart. An **alias** is the same object under another spelling, resolved deterministically: tracking parameters, the spellings and shortlinks of one OSM object, ISBN-10 and DOI URL forms, and a page's own canonical when it differs only by a trailing slash or tracking parameters. An alias keeps its id and references but is never fetched; its references count for its root and reads answer with the root. A **group** joins resources that are one thing, only on evidence that cannot be spoofed: a DOI or ISBN card and the landing page its registry names, when that page cites the identifier in its head; one ICS UID within one feed; and links an operator curates. Claims a publisher makes about itself (sameAs, a canonical to another page, a shared homepage canonical) are not evidence: anyone can make them. A group is a hint, never a merge: every member keeps its own id, card, references, score and ranking, and each card's `also_on` lists the other members and the derived links sources found (the same thing on services nobody tagged), so a client can say "also on …" without a second request. Exact keys group too: from a hub (a MusicBrainz MBID, a Wikidata Q-id) or from a service's own record of its own object (TIDAL's ISRC of a track); a page's claim about itself is at most a fact; derived links are never fetched, counted or ranked. Facets and clusters count links, not groups. Search shows one row per group only on request (`collapse=group`, a list view): the member that passed the filters with the most references, as its own card.
 
 Cross-feed ICS UID matching is off by default (`groups.cross_container_occurrences = "off"`). The opt-in `"corroborated"` mode requires two points within 500 m, starts within 300 s, and pg_trgm similarity of normalized names ≥ 0.5; it joins one event on two platforms at the price of being copyable by a determined publisher.
 
@@ -124,7 +124,7 @@ Postgres with PostGIS and full-text search **(arbitrary)**; any database with sp
 
 ### 5.5 API {#api}
 
-Every `/v1` route returns one card, `{id, uri, status, type, name, description, image, site, point, start, end, group}`, and lists carry an opaque cursor; limit default 50, maximum 500 **(arbitrary)**. Score stays internal to ranking, pagination and cluster `top` selection.
+Every `/v1` route returns one card, `{id, uri, status, type, name, description, image, site, point, start, end, group, also_on}` (events add `event` and `maybe_same`, occurrences `occurrence`; [api.md](api.md#card) has the full shape), and lists carry an opaque cursor; limit default 50, maximum 500 **(arbitrary)**. Score stays internal to ranking, pagination and cluster `top` selection.
 
 | Route | What it does |
 |---|---|
@@ -162,7 +162,7 @@ Pinakes ranks, Nexus hydrates. A filtered or sorted question goes to Pinakes; th
 | Ingest from a Nexus reference feed, not the homeservers and not the raw event log | one component understands the social specs; same pattern as the event log; a third party runs Nexus light in front of Pinakes |
 | URIs are the contract with Nexus; each service keeps its own ids, no shared crate | a client already holds the URIs; nothing to keep in step between services; the specs fix the wire form and leave identity to indexers |
 | No folding and no `geo:` rounding in identity; a spelling is an alias and the same thing at several URIs a group, both in Pinakes | ids stay what people referenced; a fold list has no end and each change is a backfill; an alias or a group is a view that changes without one |
-| Groups only from evidence that cannot be spoofed (an identifier card and the landing page that cites it, one ICS UID within a feed, curation) | publisher claims (sameAs, cross-path canonicals) cost nothing to make and merge unrelated pages; ranking or demotion rules cannot contain them |
+| Groups only from evidence that cannot be spoofed (an identifier card and the landing page that cites it, one ICS UID within a feed, exact keys from a hub or a service's own record, curation) | publisher claims (sameAs, cross-path canonicals) cost nothing to make and merge unrelated pages; ranking or demotion rules cannot contain them |
 | Reach from the existing follow lists, truncation flagged | no new Nexus work |
 | schema.org types as they are, not a closed list | an existing vocabulary with a hierarchy beats an invented enum |
 | Feed events as occurrence rows | a feed is a container, nothing in its URL names one event; an event with its own page is a resource of its own |

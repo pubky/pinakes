@@ -1,7 +1,7 @@
 # GitHub
 
 Repositories on github.com, read from GitHub's REST API with the operator's token. The source is
-off without a token: GitHub links then get ordinary web cards, as before.
+off without a token: GitHub links then get ordinary web cards.
 
 ## Token
 

@@ -5,7 +5,7 @@ Usage: scripts/oembed-providers [FILE]
 Without FILE it downloads https://oembed.com/providers.json. It checks the shape, prints which
 providers were added and removed, writes the file byte for byte, and updates the date, count and
 SHA-256 in data/README.md. Review the diff, then run scripts/test: the registry is compiled in, and
-providers skipped in code (cards::SKIPPED_PROVIDERS) stay skipped.
+providers skipped in code (resolver::cards::SKIPPED_PROVIDERS) stay skipped.
 """
 import datetime, hashlib, json, pathlib, re, sys, urllib.request
 

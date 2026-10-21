@@ -1,6 +1,6 @@
 //! Isolated e2e stack with the real schema, ingestion, resolver parsers, storage and API.
 //! Default mode mocks external boundaries with no public network; --live scopes real fetches
-//! to the (at most twelve) sample IDs.
+//! to the sample IDs (at most thirty-two).
 // The mock's sample list is one `json!` literal, deeper than the default macro recursion limit.
 #![recursion_limit = "256"]
 use anyhow::{bail, ensure, Result};

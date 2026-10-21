@@ -460,7 +460,7 @@ mod tests {
         assert_eq!(seen.len(), 4, "{seen:?}");
     }
 
-    /// Without a token the source is off: its links get ordinary web cards, as today.
+    /// Without a token the source is off: its links get ordinary web cards.
     #[test]
     fn the_source_is_on_only_with_a_token() {
         use crate::sources::{SourcesConfig, Switch};
