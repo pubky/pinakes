@@ -585,6 +585,9 @@ impl Source for Datacite {
         };
         let f = send(cx, &request, "datacite_busy").await?;
         let (mut found, preprint) = papers::parse_datacite_versions(f.status, &f.body, &doi)?;
+        // The card's own DOI is its key (`key=doi:` finds it); only the publisher's record gives
+        // it to the preprint.
+        found.push_key(papers::doi_key(&doi));
         if let Some(id) = preprint {
             if Self::publisher_names(cx, &doi, &id).await? {
                 found.push_key(papers::arxiv_key(&id));
@@ -1216,7 +1219,7 @@ mod tests {
         // arXiv 1304.1068's submitter named this DOI; Nature's own record names no preprint, so
         // the preprint is a link and the two never join.
         let preprint = Datacite.lookup(&cx, &doi).await.unwrap();
-        assert!(keys(&preprint).is_empty());
+        assert_eq!(keys(&preprint), ["doi:10.1038/nature12373"]);
         assert!(sites(&preprint).contains(&"arXiv https://arxiv.org/abs/1304.1068".to_owned()));
         let arxiv = at("https://arxiv.org/abs/1304.1068v2");
         assert!(!Unpaywall.applies(&arxiv) && Datacite.applies(&arxiv));
@@ -1233,7 +1236,10 @@ mod tests {
             .lookup(&cx, &at("doi:10.46298/lmcs-20(1:8)2024"))
             .await
             .unwrap();
-        assert_eq!(keys(&lmcs), ["arxiv:2302.04668"]);
+        assert_eq!(
+            keys(&lmcs),
+            ["doi:10.46298/lmcs-20(1:8)2024", "arxiv:2302.04668"]
+        );
         let preprint = Datacite
             .lookup(&cx, &at("https://arxiv.org/abs/2302.04668"))
             .await

@@ -1353,6 +1353,81 @@ async fn a_tagged_member_and_a_derived_link_of_one_service_show_once(pool: PgPoo
     assert_eq!(read["details"]["also_on"].as_array().unwrap().len(), 4);
 }
 
+/// `key=doi:` finds the DOI card by its own DOI, and the preprint its publisher names, as the
+/// `datacite` source keys them (the card: its DOI and the preprint's arXiv ID; the preprint: its
+/// arXiv ID and the corroborated journal DOI). A DOI holding `:` and any letter case.
+#[sqlx::test(migrations = "../../migrations")]
+async fn search_by_doi_finds_the_card_and_its_preprint(pool: PgPool) {
+    let journal = "doi:10.46298/lmcs-20(1:8)2024";
+    let preprint = "https://arxiv.org/abs/2302.04668";
+    let other = "doi:10.1038/nature12373";
+    let datacite = Fake::new("datacite");
+    let mut ids = vec![];
+    for (uri, keys) in [
+        (
+            journal,
+            vec!["doi:10.46298/lmcs-20(1:8)2024", "arxiv:2302.04668"],
+        ),
+        (
+            preprint,
+            vec!["arxiv:2302.04668", "doi:10.46298/lmcs-20(1:8)2024"],
+        ),
+        (other, vec!["doi:10.1038/nature12373"]),
+    ] {
+        ids.push(page(&pool, uri, "Paper").await);
+        datacite.answer(
+            uri,
+            Ok(Found {
+                keys: keys
+                    .into_iter()
+                    .map(|k| Key {
+                        key: k.into(),
+                        via: "datacite".into(),
+                    })
+                    .collect(),
+                ..Default::default()
+            }),
+        );
+    }
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) SELECT id,repeat('a',52),'tag','/pub/test/tags/'||id,'paper',now() FROM unnest($1::text[]) id")
+        .bind(&ids)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let sources: Vec<Arc<dyn Source>> = vec![datacite];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let found = |key: &str| {
+        let app = app.clone();
+        let path = format!("/v1/search?key={}", urlencoding(key));
+        async move {
+            let mut rows: Vec<String> = get(&app, &path).await["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["id"].as_str().unwrap().to_owned())
+                .collect();
+            rows.sort();
+            rows
+        }
+    };
+    let mut pair = ids[..2].to_vec();
+    pair.sort();
+    assert_eq!(found("doi:10.46298/LMCS-20(1:8)2024").await, pair);
+    assert_eq!(found("doi:10.1038/nature12373").await, [ids[2].clone()]);
+}
+fn urlencoding(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 /// A source that panics on every lookup, as a parser meeting an unexpected shape would.
 struct Panics;
 #[async_trait]
