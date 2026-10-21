@@ -207,7 +207,8 @@ refused, never cut, and remembered as such for five minutes. The also-on sources
 what the link's URL proves (a MusicBrainz page its MBID or ISRC, a Wikidata item its Q-id) and
 don't retry it; Wikidata items verified together that are over it together are read one by one;
 a MusicBrainz page's card is read from the page. Requests
-time out after ten seconds. Images stay origin URLs and are never fetched.
+time out after ten seconds. Card images stay origin URLs and are never fetched; a link that is
+itself an image resolves to an ImageObject card.
 
 Discovery reads (`Egress::discover`: the also-on sources and hubs, oEmbed endpoints, feed and
 calendar discovery, and a few page hooks and sources such as `feed`, `media_records`, Discogs and

@@ -93,8 +93,9 @@ public HTTP(S) only, every DNS answer checked and pinned, private and metadata a
 at most three redirects (each checked again), a 10-second timeout and a 1 MB body cap (8 MB for
 MusicBrainz and Wikidata answers). Requests to one host go one at a time, paced to
 `limits.host_requests_per_second` or the host's published rate. Discovery reads (also-on
-lookups, oEmbed, feed discovery) are cached and shared between concurrent readers. Images are never fetched. Nominatim and Nexus are trusted upstreams
-outside this policy.
+lookups, oEmbed, feed discovery) are cached and shared between concurrent readers. Card images
+stay origin URLs and are never fetched; a link that is itself an image resolves to an ImageObject
+card. Nominatim and Nexus are trusted upstreams outside this policy.
 
 ## Run locally
 
