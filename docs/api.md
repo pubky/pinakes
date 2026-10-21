@@ -915,7 +915,9 @@ stores: Songkick and Bandsintown artists by number) to exactly one artist; that 
 fact `performer_mbid`; a performer without one keeps its first such link as the fact
 `performer_link`. A name alone is never a
 key, and nothing is searched by name; a performer without a MusicBrainz identity (a service link
-MusicBrainz doesn't relate, or a name alone) is facts only, found by text search, not by `key=`.
+MusicBrainz doesn't relate, or a name alone) is facts only (`details.facts`), not found by `key=`.
+Text search (`q=`) matches an event's name and description, not its performers: an act the page
+names only in `performer` (a festival's support act) is not found by it.
 Performers are read from the page's own event node only: one whose `url` (else its `@id`) names
 the page, tracking parameters and fragments aside, or one naming no page in a head script or as
 the main entity of the page's own node; never from another event the page describes, and never
