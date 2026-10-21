@@ -175,13 +175,16 @@ fn item_url(cx: &Context, kind: Kind, id: &str) -> String {
         cx.config.tidal.country
     )
 }
-/// How the API is asked: with the client-credentials token. The token's hash keys the cache, so
-/// a new token asks again.
-fn api_options(token: &str) -> FetchOptions {
+/// How the API is asked: with the client-credentials token, its answers cached by the pair.
+fn api_options(token: &str, slot: &[u8; 32]) -> FetchOptions {
     FetchOptions {
         accept: Some(JSON_API.into()),
         extra_types: &[JSON_API],
         headers: vec![("authorization", format!("Bearer {token}"))],
+        // Answers are cached by the credential pair, not the token: a new token keeps them; an
+        // authentication failure is the token's, never cached.
+        cache_tag: Some(blake3::Hash::from(*slot).to_hex().to_string()),
+        uncached: &[401, 403],
         sensitive: true,
         ..Default::default()
     }
@@ -255,6 +258,13 @@ impl Slot {
             Some(seconds) => {
                 self.cool_down(seconds);
                 busy(seconds)
+            }
+            // A failure the cache replays, while TIDAL's wait holds, is that wait.
+            None if error
+                .downcast_ref::<RetryLater>()
+                .is_some_and(|r| r.class == "discovery_cached") =>
+            {
+                self.unless_busy().err().unwrap_or(error)
             }
             None => error,
         }
@@ -347,12 +357,30 @@ pub fn lookups_waiting(id: &str, secret: &str) -> usize {
         .copied()
         .unwrap_or(0)
 }
+/// A lookup counted as pending at a slot for as long as it lives, whether its turn comes or its
+/// future is dropped while it waits.
+struct Pending([u8; 32]);
+impl Pending {
+    fn new(slot: &[u8; 32]) -> Self {
+        *WAITING.lock().unwrap().entry(*slot).or_default() += 1;
+        Self(*slot)
+    }
+}
+impl Drop for Pending {
+    fn drop(&mut self) {
+        let mut waiting = WAITING.lock().unwrap();
+        if let Some(n) = waiting.get_mut(&self.0) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                waiting.remove(&self.0);
+            }
+        }
+    }
+}
 /// The slots, once this lookup's turn at `slot` comes.
 async fn slots(slot: &[u8; 32]) -> tokio::sync::MutexGuard<'static, HashMap<[u8; 32], Slot>> {
-    *WAITING.lock().unwrap().entry(*slot).or_default() += 1;
-    let slots = SLOTS.lock().await;
-    *WAITING.lock().unwrap().entry(*slot).or_default() -= 1;
-    slots
+    let _pending = Pending::new(slot);
+    SLOTS.lock().await
 }
 fn slot_key(id: &str, secret: &str) -> [u8; 32] {
     *blake3::hash(format!("{id}\n{secret}").as_bytes()).as_bytes()
@@ -389,7 +417,7 @@ async fn item(cx: &Context, kind: Kind, id: &str) -> Result<Option<Value>> {
     s.unless_busy()?;
     let token = s.token(cx, client_id, secret).await?;
     let url = item_url(cx, kind, id);
-    let options = api_options(&token);
+    let options = api_options(&token, &slot);
     let fetched = match cx.egress.discover(&url, &options, 3600).await {
         Ok(fetched) => fetched,
         Err(error) => return Err(s.answered(error)),
@@ -397,13 +425,10 @@ async fn item(cx: &Context, kind: Kind, id: &str) -> Result<Option<Value>> {
     let shorten = |seconds: u64| cx.egress.shorten_discovery(&url, &options, seconds);
     match fetched.status {
         200 => {}
-        401 => {
-            shorten(1).await?;
-            return Err(s.reject(&token));
-        }
+        // Never cached (`api_options`): the next request asks with its own token.
+        401 => return Err(s.reject(&token)),
         // No catalogue scope, a restricted app: the credentials, not the item.
         403 => {
-            shorten(300).await?;
             s.refuse("forbidden", 403);
             return Err(refused());
         }
@@ -436,6 +461,20 @@ async fn prefetch(cx: &Context, kind: Kind, ids: &[&str]) -> Result<()> {
     let s = slots.entry(slot).or_default();
     s.unless_busy()?;
     let token = s.token(cx, client_id, secret).await?;
+    // A batch asks only for what its items don't have cached (a retry's, within the hour).
+    let mut ids: Vec<&str> = ids.to_vec();
+    for id in ids.clone() {
+        if cx
+            .egress
+            .discovered(&item_url(cx, kind, id), &api_options(&token, &slot))
+            .await?
+        {
+            ids.retain(|i| *i != id);
+        }
+    }
+    if ids.len() < 2 {
+        return Ok(());
+    }
     let filter: String = ids
         .iter()
         .map(|id| format!("&filter%5Bid%5D={id}"))
@@ -445,7 +484,7 @@ async fn prefetch(cx: &Context, kind: Kind, ids: &[&str]) -> Result<()> {
         kind.collection(),
         cx.config.tidal.country
     );
-    let options = api_options(&token);
+    let options = api_options(&token, &slot);
     let fetched = match cx.egress.fetch_with(&url, &options).await {
         Ok(fetched) => fetched,
         Err(error) => return Err(s.answered(error)),
@@ -468,7 +507,7 @@ async fn prefetch(cx: &Context, kind: Kind, ids: &[&str]) -> Result<()> {
     let items = v["data"].as_array().context("TIDAL batch without data")?;
     // A paged answer may hold the missing items on a later page.
     let whole = v["links"]["next"].is_null();
-    for id in ids {
+    for id in &ids {
         let answer = items.iter().find(|i| {
             i["id"].as_str() == Some(*id) && i["type"].as_str() == Some(kind.collection())
         });
@@ -599,6 +638,105 @@ mod tests {
         }
         .into();
         assert_eq!(asked_wait(&limited), Some(900));
+    }
+    /// A token TIDAL rejects (401) is dropped, and the next lookup asks TIDAL again with a new
+    /// one: the 401 was never cached for the pair.
+    #[tokio::test]
+    async fn a_new_token_after_a_401_asks_again() {
+        use crate::resolver::egress::{Dns, Egress, Transport};
+        use std::net::SocketAddr;
+        struct Public;
+        #[async_trait]
+        impl Dns for Public {
+            async fn lookup(&self, _: &str, port: u16) -> Result<Vec<SocketAddr>> {
+                Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
+            }
+        }
+        #[derive(Default)]
+        struct Tidal {
+            items: std::sync::Mutex<Vec<String>>,
+        }
+        #[async_trait]
+        impl Transport for Tidal {
+            async fn get(&self, url: &url::Url, a: &[SocketAddr]) -> Result<Fetched> {
+                self.get_with(url, a, &FetchOptions::default()).await
+            }
+            async fn get_with(
+                &self,
+                url: &url::Url,
+                _: &[SocketAddr],
+                options: &FetchOptions,
+            ) -> Result<Fetched> {
+                let reply = |status: u16, body: &str| Fetched {
+                    permanent_redirect: false,
+                    truncated: false,
+                    validators: Default::default(),
+                    url: url.clone(),
+                    content_type: JSON_API.into(),
+                    status,
+                    retry_after_secs: 60,
+                    location: None,
+                    body: body.as_bytes().to_vec(),
+                };
+                if url.host_str() == Some("auth.tidal.com") {
+                    return Ok(reply(200, r#"{"access_token":"new","expires_in":14400}"#));
+                }
+                let bearer = options
+                    .headers
+                    .iter()
+                    .find(|(k, _)| *k == "authorization")
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default();
+                self.items.lock().unwrap().push(bearer.clone());
+                Ok(if bearer == "Bearer old" {
+                    reply(401, "{}")
+                } else {
+                    reply(
+                        200,
+                        r#"{"data":{"id":"7","type":"tracks","attributes":{"isrc":"DEQ121641300"}}}"#,
+                    )
+                })
+            }
+        }
+        let transport = std::sync::Arc::new(Tidal::default());
+        let mut config = crate::config::Config::default();
+        config.tidal.client_id = Some(SecretKey::from("rotate-id".to_owned()));
+        config.tidal.client_secret = Some(SecretKey::from("rotate-secret".to_owned()));
+        let cx = Context {
+            egress: Egress::with_backends(
+                Default::default(),
+                std::sync::Arc::new(Public),
+                transport.clone(),
+            ),
+            config: std::sync::Arc::new(config),
+        };
+        // A token issued two minutes ago, which TIDAL now rejects.
+        let slot = slot_key("rotate-id", "rotate-secret");
+        let now = Instant::now();
+        SLOTS.lock().await.insert(
+            slot,
+            Slot {
+                token: Some(Issued {
+                    token: "old".into(),
+                    at: now.checked_sub(Duration::from_secs(120)).unwrap_or(now),
+                    until: now + Duration::from_secs(3600),
+                }),
+                ..Default::default()
+            },
+        );
+        let error = item(&cx, Kind::Track, "7").await.unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<RetryLater>()
+                .map(|r| (r.class, r.seconds)),
+            Some(("tidal_auth", 60))
+        );
+        let attributes = item(&cx, Kind::Track, "7").await.unwrap().unwrap();
+        assert_eq!(attributes["isrc"], "DEQ121641300");
+        assert_eq!(
+            *transport.items.lock().unwrap(),
+            ["Bearer old", "Bearer new"]
+        );
     }
     #[test]
     fn only_tidal_albums_and_tracks_apply() {

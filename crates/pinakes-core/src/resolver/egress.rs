@@ -114,7 +114,7 @@ pub fn public_ip(ip: IpAddr) -> bool {
     };
     !denied.iter().any(|net| net.contains(&ip))
 }
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Fetched {
     /// True only when every redirect from the requested URI was HTTP 301/308.
     pub permanent_redirect: bool,
@@ -152,6 +152,12 @@ pub struct FetchOptions {
     pub json_body: Option<serde_json::Value>,
     /// A form-encoded POST body (an OAuth token request), by literal field name.
     pub form_body: Option<Vec<(&'static str, String)>>,
+    /// Keys the discovery cache in place of the headers when set (a credential pair's hash, so a
+    /// rotated bearer token keeps the answers cached under the old one). Never sent.
+    pub cache_tag: Option<String>,
+    /// Statuses the discovery cache never keeps: an authentication failure belongs to the
+    /// credentials sent, not to the URL, and a later request may carry others.
+    pub uncached: &'static [u16],
     pub sensitive: bool,
     pub accept: Option<String>,
     pub user_agent: Option<String>,
@@ -166,6 +172,22 @@ pub struct FetchOptions {
     /// (`pkarr_relays::PAYLOAD_TYPES`).
     pub extra_types: &'static [&'static str],
     pub validators: Validators,
+}
+impl std::fmt::Debug for Fetched {
+    /// The body's length, never the body: a token endpoint's answer holds the token.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Fetched")
+            .field("url", &self.url.as_str())
+            .field("status", &self.status)
+            .field("content_type", &self.content_type)
+            .field("retry_after_secs", &self.retry_after_secs)
+            .field("location", &self.location)
+            .field("permanent_redirect", &self.permanent_redirect)
+            .field("truncated", &self.truncated)
+            .field("validators", &self.validators)
+            .field("body", &format_args!("<{} bytes>", self.body.len()))
+            .finish()
+    }
 }
 impl std::fmt::Debug for FetchOptions {
     /// A sensitive request's header and form values are its credentials: never printed.
@@ -189,6 +211,8 @@ impl std::fmt::Debug for FetchOptions {
             .field("headers", &redact(&self.headers))
             .field("json_body", &self.json_body)
             .field("form_body", &self.form_body.as_deref().map(redact))
+            .field("cache_tag", &self.cache_tag.as_ref().map(|_| "[REDACTED]"))
+            .field("uncached", &self.uncached)
             .field("sensitive", &self.sensitive)
             .field("accept", &self.accept)
             .field("user_agent", &self.user_agent)
@@ -447,7 +471,7 @@ impl Egress {
             blake3::hash(&serde_json::to_vec(&filter)?).to_hex()
         );
         let fetched = self
-            .cached(key, 3600, async {
+            .cached(key, 3600, &[], async {
                 let values = self.nostr_request_inner(uri, filter, deadline_ms).await?;
                 Ok(Fetched {
                     permanent_redirect: false,
@@ -594,19 +618,30 @@ impl Egress {
         self.cached(
             Self::discovery_key(uri, options)?,
             ttl,
+            options.uncached,
             self.fetch_with(uri, options),
         )
         .await
     }
+    /// The cache key of a request: its URL and a hash of what else identifies it (its body, and
+    /// its headers or else its `cache_tag`). A key holds the URL, which may carry credentials in
+    /// its query: never log one.
     fn discovery_key(uri: &str, options: &FetchOptions) -> Result<String> {
         options.one_body()?;
         let mut url = Url::parse(uri)?;
         url.set_fragment(None);
         let mut key = url.to_string();
-        if options.json_body.is_some() || options.form_body.is_some() || !options.headers.is_empty()
+        if options.json_body.is_some()
+            || options.form_body.is_some()
+            || options.cache_tag.is_some()
+            || !options.headers.is_empty()
         {
-            let identity =
-                serde_json::to_vec(&(&options.json_body, &options.form_body, &options.headers))?;
+            let identity = match &options.cache_tag {
+                Some(tag) => serde_json::to_vec(&(&options.json_body, &options.form_body, tag))?,
+                None => {
+                    serde_json::to_vec(&(&options.json_body, &options.form_body, &options.headers))?
+                }
+            };
             key.push_str(&format!("|request:{}", blake3::hash(&identity).to_hex()));
         }
         // A read with another cap gets another answer (a refusal is replayed only to its cap).
@@ -629,9 +664,21 @@ impl Egress {
         fetched: Fetched,
     ) -> Result<()> {
         let key = Self::discovery_key(uri, options)?;
-        self.cached(key, ttl, std::future::ready(Ok(fetched)))
+        self.cached(key, ttl, &[], std::future::ready(Ok(fetched)))
             .await
             .map(|_| ())
+    }
+    /// Whether the discovery cache holds a live answer for `uri` (a batch may skip what its
+    /// items already have).
+    pub async fn discovered(&self, uri: &str, options: &FetchOptions) -> Result<bool> {
+        let key = Self::discovery_key(uri, options)?;
+        let now = Instant::now();
+        Ok(self
+            .discovered
+            .lock()
+            .await
+            .get(&key)
+            .is_some_and(|entry| entry.expires > now && entry.value.is_some()))
     }
     /// A successful HTTP response can still contain a transient application error.
     /// Shorten only its existing cache entry, without extending older expiration times.
@@ -653,6 +700,7 @@ impl Egress {
         &self,
         key: String,
         ttl: u64,
+        uncached: &[u16],
         fetch: impl std::future::Future<Output = Result<Fetched>>,
     ) -> Result<Fetched> {
         let lock = {
@@ -691,6 +739,10 @@ impl Egress {
             .and_then(|e| e.downcast_ref::<super::RetryLater>())
             .is_some_and(|r| r.class == "rate_limited")
         {
+            return result;
+        }
+        // An answer the request says is not the URL's (an authentication failure) is never kept.
+        if result.as_ref().is_ok_and(|f| uncached.contains(&f.status)) {
             return result;
         }
         let mut cache = self.discovered.lock().await;
@@ -1488,7 +1540,7 @@ mod tests {
             }
         }
         assert!(egress
-            .cached("0".into(), 86400, async { panic!("cached") })
+            .cached("0".into(), 86400, &[], async { panic!("cached") })
             .await
             .is_err());
         let response = Fetched {
@@ -1503,7 +1555,7 @@ mod tests {
             body: vec![1],
         };
         egress
-            .cached("fresh".into(), 86400, async { Ok(response.clone()) })
+            .cached("fresh".into(), 86400, &[], async { Ok(response.clone()) })
             .await
             .unwrap();
         {
@@ -1513,12 +1565,14 @@ mod tests {
             assert!(!cache.contains_key("1"));
         }
         egress
-            .cached("failure".into(), 86400, async { bail!("transport") })
+            .cached("failure".into(), 86400, &[], async { bail!("transport") })
             .await
             .unwrap_err();
         tokio::time::advance(Duration::from_secs(299)).await;
         let error = egress
-            .cached("failure".into(), 86400, async { panic!("negative cache") })
+            .cached("failure".into(), 86400, &[], async {
+                panic!("negative cache")
+            })
             .await
             .unwrap_err();
         assert_eq!(
@@ -1530,11 +1584,11 @@ mod tests {
         );
         tokio::time::advance(Duration::from_secs(2)).await;
         egress
-            .cached("failure".into(), 86400, async { Ok(response.clone()) })
+            .cached("failure".into(), 86400, &[], async { Ok(response.clone()) })
             .await
             .unwrap();
         egress
-            .cached("fresh".into(), 86400, async {
+            .cached("fresh".into(), 86400, &[], async {
                 panic!("positive TTL remains")
             })
             .await
@@ -1543,17 +1597,17 @@ mod tests {
         let mut failure = response.clone();
         failure.status = 503;
         egress
-            .cached("http-error".into(), 86400, async { Ok(failure) })
+            .cached("http-error".into(), 86400, &[], async { Ok(failure) })
             .await
             .unwrap();
         tokio::time::advance(Duration::from_secs(301)).await;
         egress
-            .cached("http-error".into(), 86400, async { Ok(response) })
+            .cached("http-error".into(), 86400, &[], async { Ok(response) })
             .await
             .unwrap();
         for key in ["large-a", "large-b"] {
             egress
-                .cached(key.into(), 3600, async {
+                .cached(key.into(), 3600, &[], async {
                     Ok(Fetched {
                         permanent_redirect: false,
                         truncated: false,
@@ -1839,6 +1893,34 @@ mod tests {
             ..Default::default()
         };
         assert!(format!("{plain:?}").contains("abc"));
+        // A cache tag keys the cache in place of the headers, and is never printed.
+        let tagged = |token: &str, tag: &str| FetchOptions {
+            headers: vec![("authorization", format!("Bearer {token}"))],
+            cache_tag: Some(tag.into()),
+            sensitive: true,
+            ..Default::default()
+        };
+        let key = |o: &FetchOptions| Egress::discovery_key("https://example.org/a", o).unwrap();
+        assert_eq!(key(&tagged("old", "pair")), key(&tagged("new", "pair")));
+        assert_ne!(key(&tagged("old", "pair")), key(&tagged("old", "other")));
+        assert!(!format!("{:?}", tagged("TOKEN", "PAIRTAG")).contains("PAIRTAG"));
+        // A fetched answer's Debug never shows its body.
+        let fetched = Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            validators: Default::default(),
+            url: Url::parse("https://auth.example/token").unwrap(),
+            content_type: "application/json".into(),
+            status: 200,
+            retry_after_secs: 60,
+            location: None,
+            body: br#"{"access_token":"SECRETTOKEN"}"#.to_vec(),
+        };
+        let shown = format!("{fetched:?}");
+        assert!(
+            !shown.contains("SECRETTOKEN") && shown.contains("<30 bytes>"),
+            "{shown}"
+        );
         let both = FetchOptions {
             json_body: Some(serde_json::json!({})),
             form_body: Some(vec![]),
@@ -1846,6 +1928,52 @@ mod tests {
         };
         let error = Egress::discovery_key("https://example.org/", &both).unwrap_err();
         assert_eq!(super::super::error_class(&error), "policy");
+    }
+    #[tokio::test]
+    async fn an_uncached_status_is_never_kept() {
+        struct Counting(AtomicUsize);
+        #[async_trait]
+        impl Transport for Counting {
+            async fn get(&self, url: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+                let n = self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(Fetched {
+                    permanent_redirect: false,
+                    truncated: false,
+                    url: url.clone(),
+                    // A 401, then a 200.
+                    status: if n == 0 { 401 } else { 200 },
+                    content_type: "application/json".into(),
+                    validators: Default::default(),
+                    location: None,
+                    retry_after_secs: 60,
+                    body: b"{}".to_vec(),
+                })
+            }
+        }
+        let transport = Arc::new(Counting(AtomicUsize::new(0)));
+        let egress =
+            Egress::with_backends(Default::default(), Arc::new(FakeDns), transport.clone());
+        let options = FetchOptions {
+            cache_tag: Some("pair".into()),
+            uncached: &[401, 403],
+            ..Default::default()
+        };
+        let uri = "https://public.example/item";
+        assert_eq!(
+            egress.discover(uri, &options, 3600).await.unwrap().status,
+            401
+        );
+        assert!(!egress.discovered(uri, &options).await.unwrap());
+        // Asked again, and the 200 is kept.
+        assert_eq!(
+            egress.discover(uri, &options, 3600).await.unwrap().status,
+            200
+        );
+        assert_eq!(
+            egress.discover(uri, &options, 3600).await.unwrap().status,
+            200
+        );
+        assert_eq!(transport.0.load(Ordering::SeqCst), 2);
     }
     #[tokio::test]
     async fn a_form_body_is_posted_form_encoded() {

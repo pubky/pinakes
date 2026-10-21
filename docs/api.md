@@ -798,7 +798,9 @@ from a known music service's own record of its own object; another host's claim 
   services, and its MBIDs, the recording's ISRCs (up to eight) and the release's barcode as keys
   (`mb:recording:…`, `mb:release:…`, `mb:release-group:…`, `mb:artist:…`, `isrc:…`,
   `upc:…`). A track MusicBrainz does not relate by URL takes the recording its page's own ISRC
-  is on when that ISRC is a key (TIDAL, `service` above) and MusicBrainz knows exactly one. An album link related to up to four releases of one
+  is on when that ISRC is a key (TIDAL, `service` above) and MusicBrainz knows exactly one. An album it does not relate by URL takes the releases carrying the album's barcode keys (TIDAL's
+  own record, or a service's from an earlier run, never its own; a search on the exact barcode field, checked
+  against the answer): one release, or editions of one release group, as below. An album link related to up to four releases of one
   release group (editions MusicBrainz keeps apart) takes the release group's key alone, and the
   links, facts and barcode every one of those releases has. Its facts: `mbid`, the recording's
   `isrc`s, the release's barcode as `upc`, the `artist` credit, the recording's `duration` and

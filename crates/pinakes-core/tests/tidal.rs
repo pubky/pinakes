@@ -48,12 +48,23 @@ struct Answers {
     /// A single item's 429 is released only once this pair has a second lookup pending at its
     /// slot; the test fails when none is within five seconds.
     await_pending: Option<(&'static str, &'static str)>,
+    /// MusicBrainz's ISRC lookup answers this status (its shared limit: 503).
+    musicbrainz_status: Option<u16>,
 }
 /// Answers TIDAL (its token and API), MusicBrainz's ISRC lookup, iTunes and Deezer from the
 /// recordings, or as `answers` says; records each request.
 struct Recorded {
     seen: Mutex<Vec<String>>,
-    answers: Answers,
+    answers: Mutex<Answers>,
+}
+impl Recorded {
+    /// The recordings again (MusicBrainz answers, TIDAL answers), for a later run.
+    fn answers_reset(&self) {
+        *self.answers.lock().unwrap() = Answers::default();
+    }
+    fn answers(&self) -> Answers {
+        self.answers.lock().unwrap().clone()
+    }
 }
 #[async_trait::async_trait]
 impl Transport for Recorded {
@@ -97,7 +108,7 @@ impl Transport for Recorded {
                 );
                 let basic = header("authorization").unwrap();
                 assert!(basic.starts_with("Basic "), "{basic}");
-                if self.answers.refuse {
+                if self.answers().refuse {
                     json(
                         401,
                         br#"{"error":"invalid_client"}"#.to_vec(),
@@ -125,14 +136,14 @@ impl Transport for Recorded {
                     .map(|(_, v)| v.into_owned())
                     .collect();
                 let told = match path {
-                    "/v2/albums" | "/v2/tracks" => self.answers.batch_status,
-                    _ => self.answers.item_status,
+                    "/v2/albums" | "/v2/tracks" => self.answers().batch_status,
+                    _ => self.answers().item_status,
                 };
                 if let Some(status) = told {
                     // The test's own second lookup must be pending at the pair's slot before its
                     // 429 is released (on code without the slot none ever is): a timeout fails
                     // the test rather than letting the answer through.
-                    if let Some((id, secret)) = self.answers.await_pending {
+                    if let Some((id, secret)) = self.answers().await_pending {
                         let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
                         while also_on::tidal::lookups_waiting(id, secret) == 0 {
                             assert!(
@@ -152,7 +163,8 @@ impl Transport for Recorded {
                     "/v2/albums" if filters == ["199574241", "495402659"] => {
                         Some(fixture("tidal-albums-199574241-495402659.json"))
                     }
-                    "/v2/tracks" if filters == ["199574242"] => {
+                    // HYDRA 3D's title track, in a batch of any size (the others TIDAL lacks).
+                    "/v2/tracks" if filters.iter().any(|f| f == "199574242") => {
                         Some(fixture("tidal-tracks-199574242.json"))
                     }
                     "/v2/tracks/199574242" => {
@@ -177,7 +189,7 @@ impl Transport for Recorded {
             }
             // HYDRA 3D's title track: MusicBrainz knows no recording with its ISRC.
             ("musicbrainz.org", "/ws/2/isrc/DEQ121641300") => json(
-                404,
+                self.answers().musicbrainz_status.unwrap_or(404),
                 br#"{"error":"Not Found"}"#.to_vec(),
                 "application/json",
             ),
@@ -244,14 +256,26 @@ async fn save(pool: &sqlx::PgPool, uri: &str, kind: &str) -> String {
     store::save_document(pool, &id, 0, &doc).await.unwrap();
     id
 }
-/// Every resource's sources, once; the requests made.
+/// Every resource's sources, once, on a fresh egress; the requests made.
 async fn run(pool: &sqlx::PgPool, config: Config, answers: Answers) -> Vec<String> {
     let t = Arc::new(Recorded {
         seen: Mutex::default(),
-        answers,
+        answers: Mutex::new(answers),
     });
+    let egress = Egress::with_backends(EgressConfig::default(), Arc::new(PublicDns), t.clone());
+    run_with(pool, config, &t, &egress).await
+}
+/// Every resource's sources, once, on `egress` (kept across runs: its cache is the daemon's);
+/// the requests made in this run.
+async fn run_with(
+    pool: &sqlx::PgPool,
+    config: Config,
+    t: &Arc<Recorded>,
+    egress: &Egress,
+) -> Vec<String> {
+    let before = t.seen.lock().unwrap().len();
     let cx = also_on::Context {
-        egress: Egress::with_backends(EgressConfig::default(), Arc::new(PublicDns), t.clone()),
+        egress: egress.clone(),
         config: Arc::new(config),
     };
     sqlx::query("INSERT INTO also_on_dirty(resource_id) SELECT id FROM resource ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=now()")
@@ -261,7 +285,7 @@ async fn run(pool: &sqlx::PgPool, config: Config, answers: Answers) -> Vec<Strin
     also_on::drain(pool, &cx, &also_on::registry(), 100)
         .await
         .unwrap();
-    let seen = t.seen.lock().unwrap().clone();
+    let seen = t.seen.lock().unwrap()[before..].to_vec();
     seen
 }
 async fn rows(pool: &sqlx::PgPool, sql: &str, id: &str) -> Vec<String> {
@@ -472,4 +496,55 @@ async fn two_concurrent_lookups_send_one_request_after_a_429(pool: sqlx::PgPool)
         assert_eq!(error.as_deref(), Some("tidal_busy"));
         assert!((3500.0..=3600.0).contains(&seconds), "{seconds}");
     }
+}
+
+/// A retry within the hour asks TIDAL nothing: a busy MusicBrainz fails both tracks' lookups
+/// after their batch, and on the retry the batch skips what the items have cached.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_retry_s_batch_skips_cached_items(pool: sqlx::PgPool) {
+    let track = save(&pool, "https://tidal.com/track/199574242", "MusicRecording").await;
+    save(&pool, "https://tidal.com/track/199574243", "MusicRecording").await;
+    let config = config(Some(("cached-id", "cached-secret")));
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+        answers: Mutex::new(Answers {
+            musicbrainz_status: Some(503),
+            ..Default::default()
+        }),
+    });
+    let egress = Egress::with_backends(EgressConfig::default(), Arc::new(PublicDns), t.clone());
+    let seen = run_with(&pool, config.clone(), &t, &egress).await;
+    // One batch for both tracks, and no single request: the batch seeded both answers.
+    let tidal: Vec<&String> = seen
+        .iter()
+        .filter(|s| s.starts_with("openapi.tidal.com"))
+        .collect();
+    assert_eq!(tidal.len(), 1, "{seen:?}");
+    assert!(
+        tidal[0].starts_with("openapi.tidal.com/v2/tracks?"),
+        "{seen:?}"
+    );
+    assert_eq!(
+        due(&pool, &track).await.0.as_deref(),
+        Some("musicbrainz_busy")
+    );
+    assert!(rows(&pool, KEYS, &track).await.is_empty());
+    // MusicBrainz answers on the retry (its failure's cache entry expired by hand: the retry is
+    // later than that in the daemon): no TIDAL request at all, and the key follows.
+    t.answers_reset();
+    egress
+        .shorten_discovery(
+            "https://musicbrainz.org/ws/2/isrc/DEQ121641300?fmt=json",
+            &FetchOptions {
+                accept: Some("application/json".into()),
+                ..Default::default()
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    let seen = run_with(&pool, config, &t, &egress).await;
+    assert!(!seen.iter().any(|s| s.contains("tidal.com")), "{seen:?}");
+    assert_eq!(rows(&pool, KEYS, &track).await, ["isrc:DEQ121641300 tidal"]);
 }

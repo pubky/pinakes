@@ -175,6 +175,14 @@ impl Transport for Recorded {
             "/ws/2/release" if query("recording") == "b1a9c0e9-d987-4042-ae91-78d6a3267d69" => {
                 (200, fixture("mb-browse-releases-b1a9c0e9.json"))
             }
+            // A search by barcode: HYDRA 3D's, else nothing.
+            "/ws/2/release" if query("query").starts_with("barcode:") => {
+                if query("query").contains("4018939306052") {
+                    (200, fixture("mb-barcode-4018939306052.json"))
+                } else {
+                    (200, br#"{"count":0,"offset":0,"releases":[]}"#.to_vec())
+                }
+            }
             "/ws/2/release" => (200, br#"{"release-count":0,"releases":[]}"#.to_vec()),
             "/ws/2/isrc/GBUM71029604" => (200, fixture("mb-isrc-GBUM71029604.json")),
             "/ws/2/isrc/GBCEE0100112" => (200, fixture("mb-isrc-GBCEE0100112.json")),
@@ -184,6 +192,9 @@ impl Transport for Recorded {
             }
             "/ws/2/release/132919b9-60a8-4835-884f-3a943ba587bf" => {
                 (200, fixture("mb-release-132919b9.json"))
+            }
+            "/ws/2/release/70477949-9da4-4fb3-ba60-268ff6f3a62c" => {
+                (200, fixture("mb-release-70477949.json"))
             }
             "/lookup" if query("upc") == "0634904078164" => (200, fixture("itunes-upc.json")),
             "/lookup" if query("upc") == "0602557656527" => {
@@ -1371,4 +1382,139 @@ async fn an_entity_over_the_cap_is_no_answer(pool: sqlx::PgPool) {
         .filter(|s| s.starts_with("musicbrainz.org/ws/2/artist/"))
         .count();
     assert_eq!(asked, 1, "{seen:?}");
+}
+
+/// An album MusicBrainz does not relate by URL (HYDRA 3D on TIDAL) takes the release carrying
+/// its barcode key (TIDAL's own, stored by an earlier run): the release's keys, facts and links.
+/// A barcode MusicBrainz has no release for (Dracula's, on an album URL it does not know
+/// either) asks once, in both spellings, and finds nothing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_album_s_barcode_key_finds_its_musicbrainz_release(pool: sqlx::PgPool) {
+    let mut ids = vec![];
+    for (uri, upc) in [
+        ("https://tidal.com/album/199574241", "4018939306052"),
+        ("https://tidal.com/album/1", "0196874054246"),
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "jsonld", 86400);
+        d.set_type("MusicAlbum");
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) VALUES($1,$2,'tidal','tidal',now()+interval '30 days')")
+            .bind(&id)
+            .bind(format!("upc:{upc}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        ids.push(id);
+    }
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let cx = also_on::Context {
+        egress: egress(t.clone()),
+        config: Arc::new(Config::default()),
+    };
+    sqlx::query("INSERT INTO also_on_dirty(resource_id) SELECT id FROM resource ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    let seen = t.seen.lock().unwrap().clone();
+    let searches: Vec<&String> = seen
+        .iter()
+        .filter(|s| s.contains("/ws/2/release?") && s.contains("barcode"))
+        .collect();
+    assert_eq!(searches.len(), 2, "{seen:?}");
+    assert!(
+        searches
+            .iter()
+            .any(|s| s.contains("0196874054246") && s.contains("196874054246")),
+        "a UPC-A is asked for in both spellings: {searches:?}"
+    );
+    let keys = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(
+                "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key",
+            )
+            .bind(id)
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let hydra = keys(ids[0].clone()).await;
+    assert!(
+        hydra.contains(&"mb:release:70477949-9da4-4fb3-ba60-268ff6f3a62c musicbrainz".to_owned()),
+        "{hydra:?}"
+    );
+    let links: Vec<String> = sqlx::query_scalar(
+        "SELECT uri||' '||via FROM derived_link WHERE resource_id=$1 AND source='musicbrainz' ORDER BY uri",
+    )
+    .bind(&ids[0])
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        links,
+        [
+            "https://open.spotify.com/album/1H53Pttq5tlzNKlASwhHVE musicbrainz",
+            "https://www.deezer.com/album/14301054 musicbrainz",
+        ]
+    );
+    let dracula = keys(ids[1].clone()).await;
+    assert_eq!(dracula, ["upc:0196874054246 tidal"], "{dracula:?}");
+}
+
+/// A barcode the `musicbrainz` source keyed itself (from a release it once found by URL) never
+/// finds that release again once the URL relation is gone: an editor's removal stands.
+#[sqlx::test(migrations = "../../migrations")]
+async fn musicbrainz_s_own_barcode_never_re_finds_its_release(pool: sqlx::PgPool) {
+    let uri = "https://tidal.com/album/199574241";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut d = ResourceMeta::new(uri, "jsonld", 86400);
+    d.set_type("MusicAlbum");
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    // The only barcode is the one MusicBrainz's earlier run stored, with its release key.
+    for key in [
+        "upc:4018939306052",
+        "mb:release:70477949-9da4-4fb3-ba60-268ff6f3a62c",
+    ] {
+        sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) VALUES($1,$2,'musicbrainz','musicbrainz',now()+interval '30 days')")
+            .bind(&id)
+            .bind(key)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let cx = also_on::Context {
+        egress: egress(t.clone()),
+        config: Arc::new(Config::default()),
+    };
+    sqlx::query("INSERT INTO also_on_dirty(resource_id) VALUES($1) ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=now()")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    let seen = t.seen.lock().unwrap().clone();
+    assert!(
+        !seen.iter().any(|s| s.contains("barcode")),
+        "no barcode search: {seen:?}"
+    );
+    let keys: Vec<String> = sqlx::query_scalar(
+        "SELECT key FROM resource_key WHERE resource_id=$1 AND source='musicbrainz'",
+    )
+    .bind(&id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(keys.is_empty(), "{keys:?}");
 }

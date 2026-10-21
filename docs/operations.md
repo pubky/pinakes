@@ -499,7 +499,9 @@ limit. The worker takes up to 100 due resources at a time and asks MusicBrainz a
 URLs together (50 to a request; MusicBrainz echoes each URL, and an answer applies only to the URL
 it names) and Wikidata for their item links' items together (10 to a request). Each music link then
 costs one MusicBrainz request for its entity (up to four when the URL names several releases; one
-more for a track found by its ISRC, and one for a track's original album), up to two iTunes lookups
+more for a track found by its ISRC, up to two barcode searches for an album found by its barcode keys (only those another source
+found) and up to four release reads for what they name, and one for a
+track's original album), up to two iTunes lookups
 for an album with barcodes, and two Wikidata requests (a search by its service ID cannot batch);
 each Wikipedia article one request to its Wikipedia and one to Wikidata; each MusicBrainz page
 one request for its entity (an ISRC's page one more for the ISRC; MusicBrainz has no lookup of
@@ -537,7 +539,9 @@ minute old) are logged (`TIDAL refused the client credentials`) and counted in
 (`tidal_auth`, backing off to hourly), and TIDAL is asked again after five minutes. A rate limit
 or an outage (429, 5xx) is waited out: no TIDAL request, batched or single, before the time it
 asked for (`Retry-After`, a minute to an hour) has passed, and the links retry after it
-(`tidal_busy`).
+(`tidal_busy`; a failure the cache replays meanwhile reports the same). TIDAL's answers are
+cached by the credential pair, not the token, so a new token keeps them, and a batch asks only
+for the items that have no cached answer.
 
 Podcast Index is asked only with a key and secret: `[podcast_index] key` and `secret`, or
 `PINAKES__PODCAST_INDEX__KEY` and `PINAKES__PODCAST_INDEX__SECRET` (free from
