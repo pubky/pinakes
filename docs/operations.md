@@ -474,6 +474,10 @@ After an upgrade that adds also-on sources (the media sources brought `books`, `
 `pinakesd --config <path> reextract also-on` (or `reextract all`, which includes it): until then
 links already stored keep the results of their last run, without the new source's, for up to its
 lifetime (30 days).
+After the upgrade that names cards after their service (the places, papers, software, games and
+archives sources: `Wikidata`, `OpenStreetMap`, `Google Play`, `DOI`, …), run `reextract all`:
+cards stored before keep the raw host as their `site` (`www.wikidata.org`, `f-droid.org`), so a
+tagged member and a derived link of one service can both show, until each card is fetched again.
 
 The also-on worker runs every enabled source that applies to a resource ([the API](api.md#also-on))
 after a save that changed its document or status, and again when the shortest lifetime among
@@ -493,11 +497,11 @@ sees the keys the ones before it found in the same run (a barcode MusicBrainz na
 services looked up by it); a source that no longer applies (its key is gone) drops its rows. A
 source that fails or panics keeps its earlier rows and retries with backoff; the others' results
 stand and the worker goes on (a panic is logged as an error).
-The sources, in the order they run, are `service`, `tidal`, `musicbrainz`, `musicbrainz_entity`,
-`wikidata`, `discogs`, `deezer` and `itunes` (music), `wikipedia`, `wikidata_item`, `books`, `films`, `podcasts` and `titles`,
-`osm_wikidata`, `wikidata_osm` and `btcmap` (places), `unpaywall`, `ncbi`, `datacite` and
-`huggingface` (papers), `crates`, `npm`, `pypi` and `software_heritage` (software), `steam` and
-`wikidata_stores` (games and apps), `wayback` (archived copies) and `federal_register`
+The sources, in the order they run, are `service`, `tidal`, `musicbrainz`, `musicbrainz_entity`, `wikidata`,
+`discogs`, `deezer` and `itunes` (music), `wikipedia`, `wikidata_item`, `books`, `films`, `podcasts`
+and `titles`, `osm_wikidata`, `wikidata_osm` and `btcmap` (places), `federal_register`, `unpaywall`,
+`ncbi`, `datacite` and `huggingface` (papers), `crates`, `npm`, `pypi` and `software_heritage`
+(software), `steam` and `wikidata_stores` (games and apps) and `wayback` (archived copies)
 ([the API](api.md#also-on) says what each reads); `[also_on] apple_storefront` (`us`, a
 two-letter country code) is the Apple Music, Apple Books and Apple Podcasts storefront of the
 Apple links they build. `[also_on.sources.musicbrainz] base_url`

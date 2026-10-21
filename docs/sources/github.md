@@ -6,7 +6,8 @@ off without a token: GitHub links then get ordinary web cards, as before.
 ## Token
 
 `[sources.github] token`, or the environment variable `PINAKES_GITHUB_TOKEN` (also
-`PINAKES__SOURCES__GITHUB__TOKEN`; the config file wins, then the long form). Use a fine-grained
+`PINAKES__SOURCES__GITHUB__TOKEN`, which wins over the config file, which wins over the short
+name). Use a fine-grained
 personal access token for public repositories, read-only, with no permissions. It is a secret:
 it is sent only to `api.github.com`, as `Authorization: Bearer …`, never through a redirect, and
 never appears in logs, errors, metrics, `Debug` output or cards.
