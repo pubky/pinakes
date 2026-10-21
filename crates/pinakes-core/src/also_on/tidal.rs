@@ -241,24 +241,113 @@ impl Slot {
         let until = Instant::now() + Duration::from_secs(seconds.clamp(60, 3600));
         self.busy_until = Some(self.busy_until.map_or(until, |b| b.max(until)));
     }
+    /// `Err` while a wait TIDAL asked for holds.
+    fn unless_busy(&self) -> Result<()> {
+        let now = Instant::now();
+        match self.busy_until {
+            Some(until) if until > now => Err(busy(until.saturating_duration_since(now).as_secs())),
+            _ => Ok(()),
+        }
+    }
+    /// An error a TIDAL request answered with: a wait TIDAL asked for is kept for every request.
+    fn answered(&mut self, error: anyhow::Error) -> anyhow::Error {
+        match asked_wait(&error) {
+            Some(seconds) => {
+                self.cool_down(seconds);
+                busy(seconds)
+            }
+            None => error,
+        }
+    }
+    /// TIDAL rejected `token` (401). It is dropped when it is still the one in hand (a lookup
+    /// that held an older one changes nothing), and the credentials count as refused when it was
+    /// issued under a minute ago, so a token TIDAL keeps rejecting costs no request per lookup.
+    fn reject(&mut self, token: &str) -> anyhow::Error {
+        if let Some(issued) = &self.token {
+            if issued.token == token {
+                let fresh = issued.at.elapsed() < Duration::from_secs(60);
+                self.token = None;
+                if fresh {
+                    self.refuse("rejected", 401);
+                    return refused();
+                }
+            }
+        }
+        RetryLater {
+            class: "tidal_auth",
+            seconds: 60,
+        }
+        .into()
+    }
+    /// The token in hand until a minute before it expires (TIDAL's `expires_in`), else a new one.
+    async fn token(&mut self, cx: &Context, id: &str, secret: &str) -> Result<String> {
+        let now = Instant::now();
+        if self.refused_until.is_some_and(|until| until > now) {
+            return Err(refused());
+        }
+        if let Some(issued) = &self.token {
+            if issued.until > now {
+                return Ok(issued.token.clone());
+            }
+        }
+        let basic = base64::engine::general_purpose::STANDARD.encode(format!("{id}:{secret}"));
+        let options = FetchOptions {
+            accept: Some("application/json".into()),
+            headers: vec![("authorization", format!("Basic {basic}"))],
+            form_body: Some(vec![("grant_type", "client_credentials".into())]),
+            sensitive: true,
+            ..Default::default()
+        };
+        let fetched = match cx.egress.fetch_with(AUTH, &options).await {
+            Ok(fetched) => fetched,
+            Err(error) => return Err(self.answered(error)),
+        };
+        match fetched.status {
+            200 => {
+                let v: Value = serde_json::from_slice(&fetched.body).context("TIDAL token")?;
+                let token = v["access_token"]
+                    .as_str()
+                    .filter(|t| !t.is_empty())
+                    .context("TIDAL token without access_token")?
+                    .to_owned();
+                let lifetime = v["expires_in"].as_u64().unwrap_or(3600).saturating_sub(60);
+                self.token = Some(Issued {
+                    token: token.clone(),
+                    at: now,
+                    until: now + Duration::from_secs(lifetime.max(60)),
+                });
+                Ok(token)
+            }
+            429 | 500..=599 => {
+                self.cool_down(fetched.retry_after_secs);
+                Err(busy(fetched.retry_after_secs))
+            }
+            status => {
+                self.refuse("refused", status);
+                Err(refused())
+            }
+        }
+    }
 }
+/// One slot per credential pair, and one TIDAL request at a time per pair: a lookup holds its
+/// slot from the cooldown check to the answer, so one admitted before a 429 lands waits here and
+/// then sees the wait, instead of sending under host pacing alone.
 static SLOTS: LazyLock<tokio::sync::Mutex<HashMap<[u8; 32], Slot>>> =
     LazyLock::new(Default::default);
 fn slot_key(id: &str, secret: &str) -> [u8; 32] {
     *blake3::hash(format!("{id}\n{secret}").as_bytes()).as_bytes()
 }
-fn slot_of(cx: &Context) -> Result<[u8; 32]> {
+/// The configured pair and its slot key.
+fn pair_of(cx: &Context) -> Result<(&str, &str, [u8; 32])> {
     let (id, secret) = cx.config.tidal.pair().context("no TIDAL credentials")?;
-    Ok(slot_key(id, secret))
+    Ok((id, secret, slot_key(id, secret)))
 }
-/// `Err` while a wait TIDAL asked for holds.
+// The slot rules on their own, for the unit tests.
+#[cfg(test)]
 async fn unless_busy(slot: &[u8; 32]) -> Result<()> {
-    let now = Instant::now();
-    match SLOTS.lock().await.get(slot).and_then(|s| s.busy_until) {
-        Some(until) if until > now => Err(busy(until.saturating_duration_since(now).as_secs())),
-        _ => Ok(()),
-    }
+    SLOTS.lock().await.entry(*slot).or_default().unless_busy()
 }
+#[cfg(test)]
 async fn cool_down(slot: &[u8; 32], seconds: u64) {
     SLOTS
         .lock()
@@ -267,76 +356,41 @@ async fn cool_down(slot: &[u8; 32], seconds: u64) {
         .or_default()
         .cool_down(seconds);
 }
-async fn refuse(slot: &[u8; 32], class: &'static str, status: u16) {
-    SLOTS
-        .lock()
-        .await
-        .entry(*slot)
-        .or_default()
-        .refuse(class, status);
-}
-/// An error a TIDAL request answered with: a wait TIDAL asked for is kept for every request.
-async fn answered(slot: &[u8; 32], error: anyhow::Error) -> anyhow::Error {
-    match asked_wait(&error) {
-        Some(seconds) => {
-            cool_down(slot, seconds).await;
-            busy(seconds)
-        }
-        None => error,
-    }
-}
-/// TIDAL rejected `token` (401). It is dropped when it is still the one in hand (a lookup that
-/// held an older one changes nothing), and the credentials count as refused when it was issued
-/// under a minute ago, so a token TIDAL keeps rejecting costs no request per lookup.
+#[cfg(test)]
 async fn reject(slot: &[u8; 32], token: &str) -> anyhow::Error {
-    let mut slots = SLOTS.lock().await;
-    let s = slots.entry(*slot).or_default();
-    match &s.token {
-        Some(issued) if issued.token == token => {
-            let fresh = issued.at.elapsed() < Duration::from_secs(60);
-            s.token = None;
-            if fresh {
-                s.refuse("rejected", 401);
-                return refused();
-            }
-        }
-        _ => {}
-    }
-    RetryLater {
-        class: "tidal_auth",
-        seconds: 60,
-    }
-    .into()
+    SLOTS.lock().await.entry(*slot).or_default().reject(token)
 }
 
 /// The attributes of one album or track; `None` when TIDAL has no such item in the country.
 async fn item(cx: &Context, kind: Kind, id: &str) -> Result<Option<Value>> {
-    let slot = slot_of(cx)?;
-    unless_busy(&slot).await?;
-    let token = token(cx, &slot).await?;
+    let (client_id, secret, slot) = pair_of(cx)?;
+    let mut slots = SLOTS.lock().await;
+    let s = slots.entry(slot).or_default();
+    s.unless_busy()?;
+    let token = s.token(cx, client_id, secret).await?;
     let url = item_url(cx, kind, id);
     let options = api_options(&token);
     let fetched = match cx.egress.discover(&url, &options, 3600).await {
         Ok(fetched) => fetched,
-        Err(error) => return Err(answered(&slot, error).await),
+        Err(error) => return Err(s.answered(error)),
     };
     let shorten = |seconds: u64| cx.egress.shorten_discovery(&url, &options, seconds);
     match fetched.status {
         200 => {}
         401 => {
             shorten(1).await?;
-            return Err(reject(&slot, &token).await);
+            return Err(s.reject(&token));
         }
         // No catalogue scope, a restricted app: the credentials, not the item.
         403 => {
             shorten(300).await?;
-            refuse(&slot, "forbidden", 403).await;
+            s.refuse("forbidden", 403);
             return Err(refused());
         }
         404 => return Ok(None),
         429 | 500..=599 => {
             shorten(fetched.retry_after_secs.clamp(60, 3600)).await?;
-            cool_down(&slot, fetched.retry_after_secs).await;
+            s.cool_down(fetched.retry_after_secs);
             return Err(busy(fetched.retry_after_secs));
         }
         status => {
@@ -344,6 +398,7 @@ async fn item(cx: &Context, kind: Kind, id: &str) -> Result<Option<Value>> {
             anyhow::bail!("TIDAL answered {status}");
         }
     }
+    drop(slots);
     let v: Value = serde_json::from_slice(&fetched.body).context("TIDAL answer")?;
     let data = &v["data"];
     // Only the item asked for.
@@ -356,9 +411,11 @@ async fn item(cx: &Context, kind: Kind, id: &str) -> Result<Option<Value>> {
 /// Up to 20 albums or tracks in one request: each item's own request finds its answer cached,
 /// and one TIDAL leaves out finds that it has none.
 async fn prefetch(cx: &Context, kind: Kind, ids: &[&str]) -> Result<()> {
-    let slot = slot_of(cx)?;
-    unless_busy(&slot).await?;
-    let token = token(cx, &slot).await?;
+    let (client_id, secret, slot) = pair_of(cx)?;
+    let mut slots = SLOTS.lock().await;
+    let s = slots.entry(slot).or_default();
+    s.unless_busy()?;
+    let token = s.token(cx, client_id, secret).await?;
     let filter: String = ids
         .iter()
         .map(|id| format!("&filter%5Bid%5D={id}"))
@@ -371,21 +428,22 @@ async fn prefetch(cx: &Context, kind: Kind, ids: &[&str]) -> Result<()> {
     let options = api_options(&token);
     let fetched = match cx.egress.fetch_with(&url, &options).await {
         Ok(fetched) => fetched,
-        Err(error) => return Err(answered(&slot, error).await),
+        Err(error) => return Err(s.answered(error)),
     };
     match fetched.status {
         200 => {}
-        401 => return Err(reject(&slot, &token).await),
+        401 => return Err(s.reject(&token)),
         403 => {
-            refuse(&slot, "forbidden", 403).await;
+            s.refuse("forbidden", 403);
             return Err(refused());
         }
         429 | 500..=599 => {
-            cool_down(&slot, fetched.retry_after_secs).await;
+            s.cool_down(fetched.retry_after_secs);
             return Err(busy(fetched.retry_after_secs));
         }
         status => anyhow::bail!("TIDAL batch answered {status}"),
     }
+    drop(slots);
     let v: Value = serde_json::from_slice(&fetched.body).context("TIDAL batch")?;
     let items = v["data"].as_array().context("TIDAL batch without data")?;
     // A paged answer may hold the missing items on a later page.
@@ -416,69 +474,6 @@ async fn prefetch(cx: &Context, kind: Kind, ids: &[&str]) -> Result<()> {
         cx.egress.seed(&one, &options, 3600, seeded).await?;
     }
     Ok(())
-}
-
-/// The token for the configured credentials: the one in hand until a minute before it expires
-/// (TIDAL's `expires_in`), else a new one, asked for by one lookup at a time.
-async fn token(cx: &Context, slot: &[u8; 32]) -> Result<String> {
-    let (id, secret) = cx.config.tidal.pair().context("no TIDAL credentials")?;
-    // Held while asking.
-    let mut slots = SLOTS.lock().await;
-    let s = slots.entry(*slot).or_default();
-    let now = Instant::now();
-    if s.refused_until.is_some_and(|until| until > now) {
-        return Err(refused());
-    }
-    if let Some(issued) = &s.token {
-        if issued.until > now {
-            return Ok(issued.token.clone());
-        }
-    }
-    let basic = base64::engine::general_purpose::STANDARD.encode(format!("{id}:{secret}"));
-    let options = FetchOptions {
-        accept: Some("application/json".into()),
-        headers: vec![("authorization", format!("Basic {basic}"))],
-        form_body: Some(vec![("grant_type", "client_credentials".into())]),
-        sensitive: true,
-        ..Default::default()
-    };
-    let fetched = match cx.egress.fetch_with(AUTH, &options).await {
-        Ok(fetched) => fetched,
-        Err(error) => {
-            return Err(match asked_wait(&error) {
-                Some(seconds) => {
-                    s.cool_down(seconds);
-                    busy(seconds)
-                }
-                None => error,
-            })
-        }
-    };
-    match fetched.status {
-        200 => {
-            let v: Value = serde_json::from_slice(&fetched.body).context("TIDAL token")?;
-            let token = v["access_token"]
-                .as_str()
-                .filter(|t| !t.is_empty())
-                .context("TIDAL token without access_token")?
-                .to_owned();
-            let lifetime = v["expires_in"].as_u64().unwrap_or(3600).saturating_sub(60);
-            s.token = Some(Issued {
-                token: token.clone(),
-                at: now,
-                until: now + Duration::from_secs(lifetime.max(60)),
-            });
-            Ok(token)
-        }
-        429 | 500..=599 => {
-            s.cool_down(fetched.retry_after_secs);
-            Err(busy(fetched.retry_after_secs))
-        }
-        status => {
-            s.refuse("refused", status);
-            Err(refused())
-        }
-    }
 }
 
 #[cfg(test)]

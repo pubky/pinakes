@@ -27,6 +27,8 @@ mod common;
 struct Fake {
     id: &'static str,
     answers: Mutex<BTreeMap<String, anyhow::Result<Found>>>,
+    /// A service asked to wait this long (`RetryLater`), per URI.
+    waits: Mutex<BTreeMap<String, u64>>,
     calls: Mutex<Vec<String>>,
 }
 impl Fake {
@@ -38,6 +40,10 @@ impl Fake {
     }
     fn answer(&self, uri: &str, found: anyhow::Result<Found>) {
         self.answers.lock().unwrap().insert(uri.into(), found);
+    }
+    fn busy(&self, uri: &str, seconds: u64) {
+        self.answer(uri, Ok(Found::default()));
+        self.waits.lock().unwrap().insert(uri.into(), seconds);
     }
 }
 #[async_trait]
@@ -53,6 +59,13 @@ impl Source for Fake {
     }
     async fn lookup(&self, _: &Context, subject: &Subject) -> anyhow::Result<Found> {
         self.calls.lock().unwrap().push(subject.uri.clone());
+        if let Some(seconds) = self.waits.lock().unwrap().get(&subject.uri) {
+            return Err(pinakes_core::resolver::RetryLater {
+                class: "fake_busy",
+                seconds: *seconds,
+            }
+            .into());
+        }
         match self.answers.lock().unwrap().get(&subject.uri) {
             Some(Ok(found)) => Ok(found.clone()),
             Some(Err(e)) => Err(anyhow::anyhow!("{e}")),
@@ -1863,4 +1876,30 @@ async fn the_facts_caps_floor_keeps_a_recordings_single_valued_facts(pool: PgPoo
         assert!(stored.contains(&name.to_owned()), "{name}: {stored:?}");
     }
     assert_eq!(stored.iter().filter(|n| *n == "isrc").count(), 5);
+}
+
+/// Two sources fail, the first asking for an hour, the second for five minutes: the resource is
+/// due again after the hour, whichever failed last.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_longest_wait_among_failing_sources_sets_the_retry(pool: PgPool) {
+    let uri = "https://open.spotify.com/track/waits";
+    let id = page(&pool, uri, "Waits").await;
+    for order in [["slow", "quick"], ["quick", "slow"]] {
+        let sources: Vec<Arc<dyn Source>> = order
+            .iter()
+            .map(|name| {
+                let fake = Fake::new(if *name == "slow" { "slow" } else { "quick" });
+                fake.busy(uri, if *name == "slow" { 3600 } else { 300 });
+                fake as Arc<dyn Source>
+            })
+            .collect();
+        drain(&pool, &cx(Config::default()), &sources).await;
+        let (error, seconds): (Option<String>, f64) = sqlx::query_as("SELECT last_error, extract(epoch FROM next_attempt_at-now())::float8 FROM also_on_dirty WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(error.as_deref(), Some("fake_busy"), "{order:?}");
+        assert!((3500.0..=3600.0).contains(&seconds), "{order:?}: {seconds}");
+    }
 }

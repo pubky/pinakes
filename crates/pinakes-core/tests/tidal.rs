@@ -126,6 +126,8 @@ impl Transport for Recorded {
                     _ => self.answers.item_status,
                 };
                 if let Some(status) = told {
+                    // Slow enough for a second lookup to be waiting on the host permit.
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
                     return Ok(json(
                         status,
                         br#"{"errors":[{"code":"TOLD"}]}"#.to_vec(),
@@ -429,4 +431,29 @@ async fn a_forbidden_answer_is_a_refusal_of_the_credentials(pool: sqlx::PgPool) 
     // Within the five minutes the refusal holds, nothing asks TIDAL, not even for a token.
     let seen = run(&pool, config, forbidden).await;
     assert!(!seen.iter().any(|s| s.contains("tidal.com")), "{seen:?}");
+}
+/// Two lookups at once (the worker's concurrency) and a 429 on the first: the second waits for
+/// the pair's slot, then sees the wait TIDAL asked for; exactly one request reaches TIDAL.
+#[sqlx::test(migrations = "../../migrations")]
+async fn two_concurrent_lookups_send_one_request_after_a_429(pool: sqlx::PgPool) {
+    // An album and a track: one of each kind, so neither is batched and both ask alone.
+    let album = save(&pool, "https://tidal.com/album/199574241", "MusicAlbum").await;
+    let track = save(&pool, "https://tidal.com/track/199574242", "MusicRecording").await;
+    let mut config = config(Some(("race-id", "race-secret")));
+    config.also_on.concurrency = 2;
+    let busy = Answers {
+        item_status: Some(429),
+        ..Default::default()
+    };
+    let seen = run(&pool, config, busy).await;
+    let api: Vec<&String> = seen
+        .iter()
+        .filter(|s| s.starts_with("openapi.tidal.com"))
+        .collect();
+    assert_eq!(api.len(), 1, "{seen:?}");
+    for id in [&album, &track] {
+        let (error, seconds) = due(&pool, id).await;
+        assert_eq!(error.as_deref(), Some("tidal_busy"));
+        assert!((3500.0..=3600.0).contains(&seconds), "{seconds}");
+    }
 }

@@ -632,7 +632,18 @@ async fn one(
                     .fetch_all(pool)
                     .await?;
             }
-            Err(error) => failed = Some(error.context(format!("source {}", source.id()))),
+            Err(error) => {
+                // The longest wait any failing source asked for sets the retry.
+                let wait = |e: &anyhow::Error| {
+                    e.downcast_ref::<crate::resolver::RetryLater>()
+                        .map_or(0, |r| r.seconds)
+                };
+                let error = error.context(format!("source {}", source.id()));
+                failed = match failed.take() {
+                    Some(prev) if wait(&prev) > wait(&error) => Some(prev),
+                    _ => Some(error),
+                };
+            }
         }
     }
     if reread {
