@@ -1235,10 +1235,12 @@ async fn swagger_ui_and_the_openapi_document_are_on_the_public_listener_only(poo
     );
     assert_eq!(rendered, allowed);
 
-    // The document matches its snapshot and every $ref resolves.
+    // The document matches its snapshot (without the sources' own examples) and every $ref
+    // resolves.
     let docs = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/");
     let public_doc = serde_json::to_value(api::openapi_document()).unwrap();
-    for (doc, file) in [(&public_doc, "openapi.json")] {
+    let snapshot_doc = api::openapi_snapshot();
+    for (doc, file) in [(&snapshot_doc, "openapi.json")] {
         let snapshot: Value =
             serde_json::from_str(&std::fs::read_to_string(format!("{docs}{file}")).unwrap())
                 .unwrap();

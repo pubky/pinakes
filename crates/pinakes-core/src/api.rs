@@ -2289,6 +2289,31 @@ pub fn openapi_document_for(config: &Config) -> &'static Value {
 pub fn openapi_document() -> Value {
     PUBLIC_DOCUMENT.clone()
 }
+/// The document as `docs/openapi.json` keeps it: without each official-API source's examples
+/// (`resolve-{source}-{n}`), which its page in docs/sources lists, so adding or removing a
+/// source leaves the snapshot as it is.
+pub fn openapi_snapshot() -> Value {
+    let own: std::collections::BTreeSet<String> = crate::recipes::recipes()
+        .into_iter()
+        .filter(|r| r.source.is_some())
+        .map(|r| r.name)
+        .collect();
+    fn examples(v: &mut Value, own: &std::collections::BTreeSet<String>) {
+        match v {
+            Value::Object(map) => {
+                if let Some(Value::Object(named)) = map.get_mut("examples") {
+                    named.retain(|name, _| !own.contains(name));
+                }
+                map.values_mut().for_each(|v| examples(v, own));
+            }
+            Value::Array(items) => items.iter_mut().for_each(|v| examples(v, own)),
+            _ => {}
+        }
+    }
+    let mut doc = openapi_document();
+    examples(&mut doc["paths"], &own);
+    doc
+}
 #[utoipa::path(get,tag="Service",path="/v1/openapi.json",responses((status=200,body=Value)))]
 async fn openapi(State(state): State<AppState>) -> Json<&'static Value> {
     Json(openapi_document_for(&state.config))
