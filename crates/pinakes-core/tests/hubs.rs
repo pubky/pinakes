@@ -458,7 +458,7 @@ async fn music_links_join_through_the_hubs_and_list_each_other(pool: sqlx::PgPoo
         let pool = pool.clone();
         async move {
             sqlx::query_scalar::<_, String>(
-                "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key",
+                "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\"",
             )
             .bind(id)
             .fetch_all(&pool)
@@ -778,7 +778,7 @@ async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
         }
     };
     assert_eq!(
-        rows("SELECT key FROM resource_key WHERE resource_id=$1 ORDER BY key").await,
+        rows("SELECT key FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\"").await,
         [
             "mb:release-group:86b6aeeb-f305-45f6-a9c0-76bd6235227e",
             "upc:0196874054246"
@@ -897,7 +897,7 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
                 .unwrap()
         }
     };
-    let keys = "SELECT key||' '||source||' '||via FROM resource_key WHERE resource_id=$1 ORDER BY key,source";
+    let keys = "SELECT key||' '||source||' '||via FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\",source";
     let joined = rows(keys, ids[1].clone()).await;
     assert!(
         joined.contains(&"isrc:GBUM71029604 service tidal".to_owned()),
@@ -1073,7 +1073,7 @@ async fn a_deezer_barcode_names_the_apple_album_that_joins(pool: sqlx::PgPool) {
     };
     assert_eq!(
         rows(
-            "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key",
+            "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\"",
             ids[0].clone()
         )
         .await,
@@ -1132,7 +1132,7 @@ async fn item_links_are_read_in_one_request(pool: sqlx::PgPool) {
     assert_eq!(reads.len(), 1, "{reads:?}");
     assert!(reads[0].contains("ids=Q202996%7CQ33328630"), "{reads:?}");
     let keys: Vec<String> = sqlx::query_scalar(
-        "SELECT key FROM resource_key WHERE source='wikidata_item' ORDER BY key",
+        "SELECT key FROM resource_key WHERE source='wikidata_item' ORDER BY key COLLATE \"C\"",
     )
     .fetch_all(&pool)
     .await
@@ -1395,7 +1395,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
                 .unwrap()
         }
     };
-    let keys = "SELECT key FROM resource_key WHERE resource_id=$1 AND source='musicbrainz_entity' ORDER BY key";
+    let keys = "SELECT key FROM resource_key WHERE resource_id=$1 AND source='musicbrainz_entity' ORDER BY key COLLATE \"C\"";
     let mbid = "mb:recording:b1a9c0e9-d987-4042-ae91-78d6a3267d69".to_owned();
     assert!(rows(keys, ids[recording].clone()).await.contains(&mbid));
     let isrc_keys = rows(keys, ids[single].clone()).await;
@@ -1819,12 +1819,13 @@ async fn an_entity_over_the_cap_is_no_answer(pool: sqlx::PgPool) {
         // The article's own Wikipedia named the item: that key stays.
         (&ids[2], "wikidata:Q999999999".to_owned()),
     ] {
-        let keys: Vec<String> =
-            sqlx::query_scalar("SELECT key FROM resource_key WHERE resource_id=$1 ORDER BY key")
-                .bind(id)
-                .fetch_all(&pool)
-                .await
-                .unwrap();
+        let keys: Vec<String> = sqlx::query_scalar(
+            "SELECT key FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\"",
+        )
+        .bind(id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
         assert_eq!(keys, [own]);
         let retrying: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM also_on_dirty WHERE resource_id=$1 AND attempts>0",
@@ -1897,7 +1898,7 @@ async fn an_album_s_barcode_key_finds_its_musicbrainz_release(pool: sqlx::PgPool
         let pool = pool.clone();
         async move {
             sqlx::query_scalar::<_, String>(
-                "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key",
+                "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\"",
             )
             .bind(id)
             .fetch_all(&pool)
@@ -2042,7 +2043,8 @@ async fn discogs_joins_at_its_level(pool: sqlx::PgPool) {
                 .unwrap()
         }
     };
-    let keys = "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key";
+    let keys =
+        "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\"";
     assert_eq!(
         rows(keys, ids[0].clone()).await,
         [

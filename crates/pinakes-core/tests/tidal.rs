@@ -295,7 +295,8 @@ async fn rows(pool: &sqlx::PgPool, sql: &str, id: &str) -> Vec<String> {
         .await
         .unwrap()
 }
-const KEYS: &str = "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key";
+const KEYS: &str =
+    "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\"";
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_tidal_barcode_joins_apple_music_and_deezer(pool: sqlx::PgPool) {
