@@ -124,6 +124,19 @@ impl Source for ServiceSource {
     }
 }
 
+/// A MusicBrainz answer over its cap is no answer: asking again would read the same megabytes.
+fn unless_over_cap(found: Result<Found>) -> Result<Found> {
+    match found {
+        Err(e)
+            if e.chain()
+                .any(|c| c.is::<crate::resolver::egress::BodyTooLarge>()) =>
+        {
+            Ok(Found::default())
+        }
+        found => found,
+    }
+}
+
 /// MusicBrainz relations of an exact link.
 pub struct MusicBrainzSource;
 #[async_trait]
@@ -151,6 +164,11 @@ impl Source for MusicBrainzSource {
         }
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
+        unless_over_cap(self.read(cx, subject).await)
+    }
+}
+impl MusicBrainzSource {
+    async fn read(&self, cx: &Context, subject: &Subject) -> Result<Found> {
         let Some(link) = music::parse(&subject.uri) else {
             return Ok(Found::default());
         };
@@ -214,6 +232,11 @@ impl Source for MusicBrainzEntitySource {
             || musicbrainz::isrc_link(&subject.uri).is_some()
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
+        unless_over_cap(self.read(cx, subject).await)
+    }
+}
+impl MusicBrainzEntitySource {
+    async fn read(&self, cx: &Context, subject: &Subject) -> Result<Found> {
         let base = cx.config.also_on.musicbrainz_base();
         if let Some((kind, mbid, _)) = musicbrainz::entity_link(&subject.uri) {
             let level = match kind {

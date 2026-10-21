@@ -64,6 +64,30 @@ impl Transport for Recorded {
         _: &[SocketAddr],
         options: &FetchOptions,
     ) -> anyhow::Result<Fetched> {
+        // An artist whose record is over MusicBrainz's cap, and its page (the card's fallback).
+        if url.host_str() == Some("musicbrainz.org") && url.path().ends_with(BIG_BAND) {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(format!("musicbrainz.org{}", url.path()));
+            if url.path().starts_with("/ws/2/") {
+                return Err(pinakes_core::resolver::egress::BodyTooLarge {
+                    cap: pinakes_core::hubs::MUSICBRAINZ_CAP,
+                }
+                .into());
+            }
+            return Ok(Fetched {
+                permanent_redirect: false,
+                truncated: false,
+                validators: Default::default(),
+                url: url.clone(),
+                status: 200,
+                retry_after_secs: 60,
+                location: None,
+                content_type: "text/html".into(),
+                body: b"<html><head><title>Big Band</title></head><body></body></html>".to_vec(),
+            });
+        }
         assert_eq!(options.accept.as_deref(), Some("application/json"));
         // Much-edited Wikidata items and MusicBrainz entities with many links exceed the default
         // cap; their reads may be larger.
@@ -205,6 +229,8 @@ impl Transport for Recorded {
         })
     }
 }
+/// An artist whose MusicBrainz record is over the cap.
+const BIG_BAND: &str = "00000000-0000-4000-8000-00000000000b";
 fn egress(transport: Arc<Recorded>) -> Egress {
     Egress::with_backends(EgressConfig::default(), Arc::new(PublicDns), transport)
 }
@@ -1190,4 +1216,56 @@ async fn a_musicbrainz_page_card_comes_from_the_entity() {
         seen.iter().all(|s| s.starts_with("musicbrainz.org/ws/2/")),
         "{seen:?}"
     );
+}
+
+/// An entity over MusicBrainz's cap is no answer: its page's sources record nothing and don't
+/// retry (asking again would read the same megabytes), and its card is read from the page, the
+/// second time too, from the failure cache.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_entity_over_the_cap_is_no_answer(pool: sqlx::PgPool) {
+    let uri = format!("https://musicbrainz.org/artist/{BIG_BAND}");
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let e = egress(t.clone());
+    let web = pinakes_core::resolver::web::WebResolver {
+        oembed_policy: Default::default(),
+        cards: None,
+        events: None,
+        egress: e.clone(),
+        config: Default::default(),
+    };
+    for _ in 0..2 {
+        let card = web
+            .resolve_with_policy(&uri, Default::default())
+            .await
+            .expect("the page is read instead");
+        assert_eq!(card.name.as_deref(), Some("Big Band"));
+    }
+    let id = store::ensure_resource(&pool, &uri).await.unwrap();
+    let mut d = ResourceMeta::new(&uri, "web", 86400);
+    d.set_type("MusicGroup");
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let cx = also_on::Context {
+        egress: e,
+        config: Arc::new(Config::default()),
+    };
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    let (keys, retrying): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM resource_key WHERE resource_id=$1),(SELECT count(*) FROM also_on_dirty WHERE resource_id=$1 AND attempts>0)",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((keys, retrying), (0, 0));
+    // The record was asked once: the card's second read and the source's came from the cache.
+    let seen = t.seen.lock().unwrap().clone();
+    let asked = seen
+        .iter()
+        .filter(|s| s.starts_with("musicbrainz.org/ws/2/artist/"))
+        .count();
+    assert_eq!(asked, 1, "{seen:?}");
 }
