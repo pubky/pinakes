@@ -436,7 +436,8 @@ pub struct SearchQuery {
     pub category: Option<String>,
     pub host: Option<String>,
     /// Links carrying one exact identifier, on any service and in any spelling:
-    /// `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist),
+    /// `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist, or the MBID a
+    /// MusicBrainz page was merged from),
     /// `wikidata:{Q-id}`, `isrc:{code}`, `upc:{barcode}`, `isbn:{ISBN-10 or ISBN-13}`,
     /// `imdb:{tt…}` (an IMDb title) or `podcast:{GUID}` (a podcast's `podcast:guid`).
     pub key: Option<String>,
@@ -640,7 +641,7 @@ pub struct Details {
     /// that answered (docs/sources).
     pub from: Option<String>,
     /// The fields that API names for the object, and the facts the also-on sources read for it
-    /// (`isrc`, `upc`, `mbid`, `artist`, `duration`), by name; several values are joined with
+    /// (`isrc`, `upc`, `mbid`, `mbid_was`, `artist`, `duration`), by name; several values are joined with
     /// "; ". Absent when there are none.
     #[schema(value_type = Option<Object>)]
     pub facts: Option<std::collections::BTreeMap<String, String>>,
@@ -1132,8 +1133,9 @@ pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
     match kind {
         "mbid" => {
             let id = crate::hubs::mbid(value).ok_or_else(bad)?;
-            Ok(keys(
-                [
+            // A merged MusicBrainz page keeps the MBID it was merged from as `mbid_was`.
+            Ok(KeyFilter {
+                keys: [
                     crate::hubs::MbKind::Recording,
                     crate::hubs::MbKind::Release,
                     crate::hubs::MbKind::ReleaseGroup,
@@ -1142,7 +1144,8 @@ pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
                 .into_iter()
                 .filter_map(|k| crate::hubs::key::mb(k, &id))
                 .collect(),
-            ))
+                fact: Some(("mbid_was", id)),
+            })
         }
         "wikidata" => Ok(keys(vec![
             crate::hubs::key::wikidata(value).ok_or_else(bad)?

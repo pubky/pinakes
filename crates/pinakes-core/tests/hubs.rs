@@ -138,6 +138,10 @@ impl Transport for Recorded {
             "/ws/2/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69" => {
                 (200, fixture("mb-recording-b1a9c0e9.json"))
             }
+            // An MBID merged into b1a9c0e9: MusicBrainz answers with that recording.
+            "/ws/2/recording/00000000-0000-4000-8000-00000000000d" => {
+                (200, fixture("mb-recording-b1a9c0e9.json"))
+            }
             // A recording with nine ISRCs, the page's own sorting last.
             "/ws/2/isrc/ZZAAA2600010" => (
                 200,
@@ -1071,6 +1075,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     let shared = "https://musicbrainz.org/isrc/GBCEE0100112";
     let artist = "https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711";
     let many = "https://musicbrainz.org/isrc/ZZAAA2600010";
+    let merged = "https://musicbrainz.org/recording/00000000-0000-4000-8000-00000000000d";
     let tidal = "https://tidal.com/track/534050211";
     let tidal_artist = "https://tidal.com/artist/64518";
     let mut ids = std::collections::BTreeMap::new();
@@ -1079,6 +1084,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         (single, "MusicRecording"),
         (shared, "MusicRecording"),
         (many, "MusicRecording"),
+        (merged, "MusicRecording"),
         (artist, "MusicGroup"),
         (tidal, "MusicRecording"),
         (tidal_artist, "MusicGroup"),
@@ -1129,6 +1135,47 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         "{isrc_keys:?}"
     );
     assert!(rows(keys, ids[shared].clone()).await.is_empty());
+    // A page whose MBID was merged into the recording keys the recording, keeps the old MBID as a
+    // fact, joins, and is found by the old MBID.
+    assert!(rows(keys, ids[merged].clone()).await.contains(&mbid));
+    assert_eq!(
+        rows(
+            "SELECT value FROM resource_fact WHERE resource_id=$1 AND name='mbid_was'",
+            ids[merged].clone()
+        )
+        .await,
+        ["00000000-0000-4000-8000-00000000000d"]
+    );
+    {
+        use tower::ServiceExt;
+        // Search lists tagged links only.
+        sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) VALUES($1,repeat('a',52),'tag','/pub/test/tags/'||$1,'music',now())")
+            .bind(&ids[merged])
+            .execute(&pool)
+            .await
+            .unwrap();
+        let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+        let mut request = axum::http::Request::builder()
+            .uri("/v1/search?key=mbid:00000000-0000-4000-8000-00000000000d")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
+        ));
+        let response = app.oneshot(request).await.unwrap();
+        let bytes = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let found: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let hits: Vec<&str> = found["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(hits, [ids[merged].as_str()], "{found}");
+    }
     // An ISRC page keys its own ISRC even when its recording has more than the eight that fit.
     assert!(rows(keys, ids[many].clone())
         .await
@@ -1164,6 +1211,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     let song = rows(group, ids[recording].clone()).await;
     assert_ne!(song, ["-"]);
     assert_eq!(rows(group, ids[single].clone()).await, song);
+    assert_eq!(rows(group, ids[merged].clone()).await, song);
     assert_eq!(rows(group, ids[tidal].clone()).await, song);
     assert_ne!(rows(group, ids[shared].clone()).await, song);
     // The artist's page joins the TIDAL artist MusicBrainz lists.
