@@ -507,8 +507,8 @@ gave when that service fails: the link's own key is recorded, the failure is cou
 `pinakes_also_on_service_errors_total{service,class}`, and the run asks again after the
 service's retry time (fifteen minutes unless it said otherwise) instead of after the source's
 lifetime.
-The sources, in the order they run, are `service`, `tidal`, `musicbrainz`, `musicbrainz_entity`, `wikidata`,
-`discogs`, `deezer` and `itunes` (music), `wikipedia`, `wikidata_item`, `books`, `films`, `podcasts`
+The sources, in the order they run, are `service`, `tidal`, `musicbrainz`, `musicbrainz_entity`,
+`performers`, `wikidata`, `discogs`, `deezer` and `itunes` (music), `wikipedia`, `wikidata_item`, `books`, `films`, `podcasts`
 and `titles`, `osm_wikidata`, `wikidata_osm` and `btcmap` (places), `federal_register`, `unpaywall`,
 `ncbi`, `datacite` and `huggingface` (papers), `crates`, `npm`, `pypi` and `software_heritage`
 (software), `steam` and `wikidata_stores` (games and apps) and `wayback` (archived copies)
