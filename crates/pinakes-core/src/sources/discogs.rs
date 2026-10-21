@@ -108,19 +108,21 @@ pub fn token(config: &crate::config::Config) -> Option<crate::event::adapters::S
 
 /// Discogs' record of one object, `None` when it has none, and whether the token was used. The
 /// answer is shared for an hour, so the card and the also-on lookup ask once. A token Discogs
-/// refuses (401, 403: expired or mistyped) is dropped for the request, with one warning per
-/// process, so cards still work without images.
+/// refuses (401, 403: expired or mistyped) is dropped, with one warning: that request is asked
+/// again without it, and later ones go without it from the start, so cards still work without
+/// images.
 pub async fn record(
     egress: &Egress,
     kind: Kind,
     id: u64,
     token: Option<&str>,
 ) -> Result<(Option<Value>, bool)> {
+    let token = token.filter(|t| !refused(t));
     let mut f = fetch(egress, kind, id, token).await?;
     let mut authenticated = token.is_some();
-    if authenticated && matches!(f.status, 401 | 403) {
+    if let (Some(token), 401 | 403) = (token, f.status) {
         super::token_refused("discogs");
-        if !TOKEN_REFUSED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        if refuse(token) {
             tracing::warn!(
                 status = f.status,
                 "Discogs refused the configured token; reading without it (no images)"
@@ -140,8 +142,24 @@ pub async fn record(
         status => anyhow::bail!("Discogs answered {status}"),
     }
 }
-/// Whether Discogs has refused the configured token since the daemon started.
-static TOKEN_REFUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The tokens Discogs has refused since the daemon started, by hash (never the token itself).
+static REFUSED: std::sync::Mutex<Vec<[u8; 32]>> = std::sync::Mutex::new(Vec::new());
+fn refused(token: &str) -> bool {
+    let hash = *blake3::hash(token.as_bytes()).as_bytes();
+    REFUSED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&hash)
+}
+/// Remember a refused token; true the first time.
+fn refuse(token: &str) -> bool {
+    let hash = *blake3::hash(token.as_bytes()).as_bytes();
+    let mut refused = REFUSED.lock().unwrap_or_else(|e| e.into_inner());
+    !refused.contains(&hash) && {
+        refused.push(hash);
+        true
+    }
+}
 async fn fetch(
     egress: &Egress,
     kind: Kind,
@@ -506,7 +524,10 @@ mod tests {
     /// A token Discogs refuses (expired, mistyped) is dropped: the record comes without it.
     #[tokio::test(start_paused = true)]
     async fn a_refused_token_falls_back_to_reading_without_it() {
-        struct Refusing;
+        #[derive(Default)]
+        struct Refusing {
+            authorized: std::sync::atomic::AtomicUsize,
+        }
         #[async_trait::async_trait]
         impl crate::resolver::egress::Transport for Refusing {
             async fn get(
@@ -527,6 +548,10 @@ mod tests {
                     .headers
                     .iter()
                     .any(|(name, _)| *name == "authorization");
+                if authorized {
+                    self.authorized
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 Ok(crate::resolver::egress::Fetched {
                     permanent_redirect: false,
                     truncated: false,
@@ -544,15 +569,22 @@ mod tests {
                 })
             }
         }
+        let api = std::sync::Arc::new(Refusing::default());
         let egress = Egress::with_backends(
             Default::default(),
             std::sync::Arc::new(crate::sources::fixture::PublicDns),
-            std::sync::Arc::new(Refusing),
+            api.clone(),
         );
-        let (record, authenticated) = record(&egress, Kind::Master, 21491, Some("expired"))
+        let (master, authenticated) = record(&egress, Kind::Master, 21491, Some("expired"))
             .await
             .unwrap();
-        assert_eq!(record.unwrap()["title"], "OK Computer");
+        assert_eq!(master.unwrap()["title"], "OK Computer");
         assert!(!authenticated);
+        // Once refused, the token is not sent again.
+        let (_, authenticated) = record(&egress, Kind::Master, 21492, Some("expired"))
+            .await
+            .unwrap();
+        assert!(!authenticated);
+        assert_eq!(api.authorized.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 }
