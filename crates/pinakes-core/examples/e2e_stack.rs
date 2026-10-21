@@ -574,7 +574,9 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
     };
     pinakes_core::migrate(&pool).await?;
     let _instance = pinakes_core::locks::own_database(&pool).await?;
-    let mut cfg = Config::default();
+    // Settings and secrets come from the environment as the daemon reads them (the TIDAL
+    // credentials, `PINAKES__…`); there is no file.
+    let mut cfg = Config::load(None)?;
     cfg.canary.enabled = false;
     // Services that need a contact (SEC EDGAR) wait without one.
     cfg.egress.contact = "info@synonym.to".into();
@@ -610,6 +612,27 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
             web: web(),
         }));
     }
+    // A sample whose expectations come from one also-on source (`needs`: a TIDAL album's own
+    // barcode) is refused at once when that source cannot run, rather than timing out later.
+    let sources = pinakes_core::also_on::registry();
+    let unmet: Vec<String> = samples
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|sample| {
+            let need = sample["needs"].as_str()?;
+            let ready = sources
+                .iter()
+                .any(|s| s.id() == need && cfg.also_on.source_enabled(s.as_ref()) && s.ready(&cfg));
+            (!ready).then(|| format!("{} needs {need}", sample["kind"].as_str().unwrap_or("?")))
+        })
+        .collect();
+    ensure!(
+        unmet.is_empty(),
+        "live samples need an also-on source this stack cannot run ({}); for tidal, set \
+         PINAKES_TIDAL_CLIENT_ID and PINAKES_TIDAL_CLIENT_SECRET",
+        unmet.join(", ")
+    );
     let mut selected = vec![];
     for sample in samples
         .as_array()
@@ -649,7 +672,6 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
         egress: egress.clone(),
         config: cfg.clone(),
     };
-    let sources = pinakes_core::also_on::registry();
     let polling = tokio::spawn(async move {
         loop {
             if let Err(e) =

@@ -337,14 +337,16 @@
     "site": "TIDAL",
     "facts": {
       "upc": "4018939306052"
-    }
+    },
+    "needs": "tidal"
   },
   {
     "kind": "apple_barcode",
     "uri": "https://music.apple.com/us/album/1680053261",
     "type": "MusicAlbum",
     "site": "Apple Music",
-    "group_with": "tidal_barcode"
+    "group_with": "tidal_barcode",
+    "needs": "tidal"
   },
   {
     "kind": "tidal_own_isrc",
@@ -353,7 +355,8 @@
     "site": "TIDAL",
     "facts": {
       "isrc": "GBUM72103841"
-    }
+    },
+    "needs": "tidal"
   },
   {
     "kind": "tidal_daft_punk",
