@@ -8,6 +8,25 @@ export async function json(url, body, method = body === undefined ? 'GET' : 'POS
   assert(response.ok, `${method} ${new URL(url).pathname}: HTTP ${response.status}`);
   return response.status === 204 ? null : response.json();
 }
+/** The newest item's link in an RSS feed: the first `<item>`'s `<link>`. */
+export function newestLink(rss) {
+  const item = /<item\b[\s\S]*?<\/item>/.exec(rss)?.[0];
+  return item && /<link>\s*(?:<!\[CDATA\[)?\s*(https?:\/\/[^\s<\]]+)/.exec(item)?.[1];
+}
+/** A sample naming `latest_in` (a walled site's RSS feed) takes that feed's newest item as its
+ * link: feeds list recent items only, so a fixed article drops out of them within days. */
+export async function freshen(samples, fetchText = async url => {
+  const response = await fetch(url, { headers: { 'user-agent': 'pinakes/0.1.0 (+https://pubky.app; info@synonym.to)' }, signal: AbortSignal.timeout(15000) });
+  assert(response.ok, `${url}: HTTP ${response.status}`);
+  return response.text();
+}) {
+  for (const sample of samples.filter(s => s.latest_in)) {
+    const link = newestLink(await fetchText(sample.latest_in));
+    assert(link, `No item in ${sample.latest_in} for the ${sample.kind} sample`);
+    sample.uri = link;
+  }
+  return samples;
+}
 export async function waitFor(label, action, timeout, signal) {
   const end = Date.now() + timeout;
   while (Date.now() < end) {

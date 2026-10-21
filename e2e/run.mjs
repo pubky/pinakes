@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { json, runFlow } from './harness.mjs';
+import { freshen, json, runFlow } from './harness.mjs';
 
 const mock = process.argv.includes('--mock');
 let child, session, liveSamples;
@@ -28,6 +28,7 @@ try {
     // A pubky:// sample names an object of the test identity: `{author}` is its public key.
     samples = JSON.parse((await readFile(process.env.PINAKES_E2E_SAMPLES ?? 'e2e/samples.live.json', 'utf8')).replaceAll('{author}', author));
     for (const sample of samples) if (sample.kind === 'ics' && process.env.PINAKES_E2E_ICS_URL) sample.uri = process.env.PINAKES_E2E_ICS_URL;
+    await freshen(samples);
     liveSamples = `.runtime/e2e-samples-${randomUUID()}.json`;
     await writeFile(liveSamples, JSON.stringify(samples, null, 2));
   }
