@@ -1290,6 +1290,8 @@ async fn a_tagged_member_and_a_derived_link_of_one_service_show_once(pool: PgPoo
             let mut d = ResourceMeta::new(uri, "web", 86400);
             d.name = Some("Mindustry".into());
             d.site = site.into();
+            // As the save path records it: the service its URL is on, if any.
+            d.service = (!uri.starts_with("https://example.org/")).then(|| site.to_owned());
             d.set_type("SoftwareApplication");
             store::save_document(&pool, &id, 0, &d).await.unwrap();
             id
@@ -1446,6 +1448,8 @@ async fn two_tagged_spellings_of_a_derived_link_show_once(pool: PgPool) {
             let mut d = ResourceMeta::new(uri, "web", 86400);
             d.name = Some("Mindustry".into());
             d.site = site.into();
+            // As the save path records it: the service its URL is on, if any.
+            d.service = (!uri.starts_with("https://example.org/")).then(|| site.to_owned());
             d.set_type("SoftwareApplication");
             store::save_document(&pool, &id, 0, &d).await.unwrap();
             id
@@ -1486,6 +1490,72 @@ async fn two_tagged_spellings_of_a_derived_link_show_once(pool: PgPool) {
         .map(|e| e["site"].as_str().unwrap())
         .collect();
     assert_eq!(sites, ["F-Droid"]);
+}
+
+/// A page that only names itself after a service (its own `og:site_name`) takes no service's
+/// place: the derived link to the real service still shows.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_page_naming_itself_after_a_service_takes_no_slot(pool: PgPool) {
+    let save = |uri: &'static str, site: &'static str, service: Option<&'static str>| {
+        let pool = pool.clone();
+        async move {
+            let id = store::ensure_resource(&pool, uri).await.unwrap();
+            let mut d = ResourceMeta::new(uri, "web", 86400);
+            d.name = Some("Mindustry".into());
+            d.site = site.into();
+            d.service = service.map(str::to_owned);
+            d.set_type("SoftwareApplication");
+            store::save_document(&pool, &id, 0, &d).await.unwrap();
+            id
+        }
+    };
+    let play = "https://play.google.com/store/apps/details?id=io.anuke.mindustry";
+    let impostor = "https://example.org/mindustry-on-fdroid";
+    let card = save(play, "Google Play", Some("Google Play")).await;
+    save(impostor, "F-Droid", None).await;
+    let hub = Fake::new("stores");
+    for uri in [play, impostor] {
+        hub.answer(
+            uri,
+            Ok(Found {
+                keys: vec![key("wikidata:Q1")],
+                links: if uri == play {
+                    vec![Link::new(
+                        "https://f-droid.org/packages/io.anuke.mindustry",
+                        "F-Droid",
+                        "wikidata",
+                    )]
+                } else {
+                    vec![]
+                },
+                ..Default::default()
+            }),
+        );
+    }
+    let sources: Vec<Arc<dyn Source>> = vec![hub];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let read = get(&app, &format!("/v1/resources/{card}")).await;
+    let entries: Vec<(String, bool)> = read["also_on"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| (e["uri"].as_str().unwrap().to_owned(), e["derived"] == true))
+        .collect();
+    assert!(
+        entries.contains(&(impostor.to_owned(), false)),
+        "{entries:?}"
+    );
+    assert!(
+        entries.contains(&(
+            "https://f-droid.org/packages/io.anuke.mindustry".to_owned(),
+            true
+        )),
+        "{entries:?}"
+    );
 }
 
 /// A source that panics on every lookup, as a parser meeting an unexpected shape would.

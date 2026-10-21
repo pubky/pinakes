@@ -83,7 +83,7 @@ An IMDb title keeps the type its page gives (it can be either).
 | `status` | Fetch health: `ok`, `pending`, `missing`, `unreachable` or `error` |
 | `type` | schema.org type (`MusicEvent`, `Book`, `Place`, …), or one of Pinakes's own types for what schema.org has no class for: `BitcoinBlock`, `BitcoinTransaction`, `BitcoinAddress`, `LightningNode` and `LightningChannel` (not schema.org; each a child of `Thing`) |
 | `name`, `description`, `image` | Display metadata; images point to the origin and are never proxied |
-| `site` | The publishing host; for `pubky://` objects the app path segment (`mapky.app`), not the public key; for a link whose URL names a known service (a music service, a Wikipedia edition, MusicBrainz, Wikidata), that service's name (`Apple Music`, `Wikipedia (de)`), even before its card is read; for a card read from an official API without a host of its own, the service's name (`Federal Register`) |
+| `site` | The publishing host; for `pubky://` objects the app path segment (`mapky.app`), not the public key; for a link whose URL names a known service (a music service, a Wikipedia edition, MusicBrainz, Wikidata, a service the also-on lookups know), that service's name (`Apple Music`, `Wikipedia (de)`, `OpenStreetMap`), even before its card is read; for a card read from an official API without a host of its own, the service's name (`Federal Register`) |
 | `point` | `{lat, lon}` |
 | `start`, `end` | RFC 3339 instants for events and occurrences |
 | `group` | `{id, size}` when the resource or occurrence is in a [group](#groups), else `null` |
@@ -769,9 +769,9 @@ card is not read yet counts by the service its URL names, against derived links 
 derived links on that service off the card, is not deduplicated against other tagged members (two
 such members on one service both show until their cards are read), and counts within the entry
 cap. Any other tagged member
-whose card names a service a derived link names (a tagged `f-droid.org` page is "F-Droid", as
-Wikidata's F-Droid link is) takes that service's place the same way; other tagged members always
-show. A card of a service the sources know is named after it (`site`): Wikidata,
+whose URL is on a service a derived link names (a tagged `f-droid.org` page is on F-Droid, as
+Wikidata's F-Droid link is) takes that service's place the same way; a page that only names
+itself after a service does not, and other tagged members always show. A card of a service the sources know is named after it (`site`): Wikidata,
 OpenStreetMap, Steam, GOG, the App Store, Google Play, F-Droid, crates.io, npm, PyPI, GitHub,
 arXiv, DOI and the others the derived links name. `GET /v1/resources/{id}` shows the same, up to 256 entries, and
 lists every link in `details.also_on` (several of one service too). A derived link can be unavailable in some

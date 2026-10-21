@@ -476,8 +476,9 @@ links already stored keep the results of their last run, without the new source'
 lifetime (30 days).
 After the upgrade that names cards after their service (the places, papers, software, games and
 archives sources: `Wikidata`, `OpenStreetMap`, `Google Play`, `DOI`, …), run `reextract all`:
-cards stored before keep the raw host as their `site` (`www.wikidata.org`, `f-droid.org`), so a
-tagged member and a derived link of one service can both show, until each card is fetched again.
+cards stored before keep the raw host as their `site` (`www.wikidata.org`, `f-droid.org`) and
+record no service, so a tagged member and a derived link of one service can both show, until each
+card is fetched again.
 
 The also-on worker runs every enabled source that applies to a resource ([the API](api.md#also-on))
 after a save that changed its document or status, and again when the shortest lifetime among

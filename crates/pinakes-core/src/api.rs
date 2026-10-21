@@ -785,8 +785,9 @@ fn present(s: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 /// The site a card names: the app path segment of a `pubky://` object, else the service a link
-/// is on when its URL alone says (a music service, a Wikipedia edition, MusicBrainz, Wikidata),
-/// so a card not read yet never shows a raw host for it, else the document's site or the host.
+/// is on when its URL alone says (a music service, a Wikipedia edition, MusicBrainz, Wikidata, a
+/// service the lookups know), so a card not read yet never shows a raw host for it, else the
+/// document's site or the host.
 pub fn site(uri: &str, doc_site: Option<&str>, host: Option<&str>) -> Option<String> {
     if let Some(path) = uri.strip_prefix("pubky://") {
         let mut parts = path.split('/').skip(1);
@@ -801,7 +802,7 @@ pub fn site(uri: &str, doc_site: Option<&str>, host: Option<&str>) -> Option<Str
         .or_else(|| present(host))
 }
 /// The service a link is on, by its URL alone.
-fn service_site(uri: &str) -> Option<String> {
+pub(crate) fn service_site(uri: &str) -> Option<String> {
     if let Some(link) = crate::music::parse(uri) {
         return Some(link.service.name().to_owned());
     }
@@ -813,7 +814,10 @@ fn service_site(uri: &str) -> Option<String> {
     {
         return Some("MusicBrainz".into());
     }
-    crate::hubs::wikidata::item_link(uri).map(|_| "Wikidata".into())
+    if crate::hubs::wikidata::item_link(uri).is_some() {
+        return Some("Wikidata".into());
+    }
+    crate::lookups::service_name(uri).map(Into::into)
 }
 /// A card from a row of `search_unit` (or a row shaped like one).
 pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {

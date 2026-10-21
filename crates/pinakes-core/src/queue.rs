@@ -388,6 +388,13 @@ async fn guarded_finish_job(
         }
         other => other,
     };
+    // The service its URL names, which alone lets it take a service's place on a card.
+    let result = result.map(|mut doc| {
+        if doc.status == crate::model::Status::Ok {
+            doc.service = crate::api::service_site(&job.uri);
+        }
+        doc
+    });
     // So is a book, podcast or film link, by what the media sources found (an episode, a title's
     // type).
     let result = match result {

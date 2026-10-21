@@ -1,8 +1,8 @@
--- One entry per service on every card: a tagged member whose card names the same service as a
--- derived link (a tagged F-Droid page and Wikidata's F-Droid link, both "F-Droid") takes that
--- service's one place, ahead of the derived link, as a music service's tagged member always did,
--- also when the derived link is one of the tagged members. Other tagged members stay one entry
--- each.
+-- One entry per service on every card: a tagged member whose URL is on the service a derived link
+-- names (`doc.service`: a tagged F-Droid page and Wikidata's F-Droid link) takes that service's
+-- one place, ahead of the derived link, as a music service's tagged member always did, also when
+-- the derived link is one of the tagged members. A page that only calls itself after a service
+-- (its own `site`) takes no service's place. Other tagged members stay one entry each.
 CREATE OR REPLACE FUNCTION also_on(unit text, resource text, cap integer, members boolean, per_site boolean DEFAULT true) RETURNS jsonb
     LANGUAGE sql STABLE
     AS $$
@@ -16,12 +16,17 @@ CREATE OR REPLACE FUNCTION also_on(unit text, resource text, cap integer, member
    WHERE u.unit_id<>unit ORDER BY u.unit_id LIMIT cap),
  picked AS (SELECT unit_id FROM others UNION SELECT unit_id FROM siblings UNION SELECT unit FROM grp),
  m AS (SELECT d.id,CASE WHEN d.occurrence IS NULL THEN d.uri ELSE coalesce(nullif(d.doc->>'url',''),d.uri) END AS uri,
-   d.host,d.doc->>'site' AS site,d.unit_id=unit AS own,d.id=(SELECT resource_id FROM grp) AS mine,
+   d.host,d.doc->>'site' AS site,d.doc->>'service' AS service,d.osm_type IS NOT NULL AS osm,d.unit_id=unit AS own,d.id=(SELECT resource_id FROM grp) AS mine,
    d.type IN ('MusicRecording','MusicAlbum','MusicGroup','MusicPlaylist') AS music,
    (SELECT f.value FROM resource_fact f WHERE f.resource_id=d.id AND f.name='album' AND f.expires_at>now() ORDER BY f.value LIMIT 1) AS album
    FROM picked p
    CROSS JOIN LATERAL (SELECT * FROM group_member_document WHERE unit_id=p.unit_id OFFSET 0) d),
- tagged AS (SELECT id,uri,min(host) AS host,min(site) AS site,bool_or(mine) AS mine,bool_or(music) AS music,min(album) AS album FROM m GROUP BY id,uri HAVING NOT bool_or(own)),
+ -- The service a member's URL is on: the one its save recorded (`doc.service`), an OSM object's
+ -- OpenStreetMap, or a music card's own name (typed and named from its URL). Never a page's own
+ -- name for itself.
+ tagged AS (SELECT id,uri,min(host) AS host,min(site) AS site,
+     coalesce(min(service),CASE WHEN bool_or(osm) THEN 'OpenStreetMap' END,CASE WHEN bool_or(music) THEN min(site) END) AS service,
+     bool_or(mine) AS mine,bool_or(music) AS music,min(album) AS album FROM m GROUP BY id,uri HAVING NOT bool_or(own)),
  owners AS (SELECT resource AS resource_id UNION SELECT u.resource_id FROM grp JOIN group_unit u USING(group_id)),
  original AS (SELECT lower(min(f.value)) AS title FROM resource_fact f JOIN owners o USING(resource_id) WHERE f.name='original_album' AND f.expires_at>now()),
  -- The services the live derived links name, before those already tagged members are dropped:
@@ -36,7 +41,7 @@ CREATE OR REPLACE FUNCTION also_on(unit text, resource text, cap integer, member
    ORDER BY l.link_id,l.seen_at DESC,l.via),
  entries AS (SELECT CASE WHEN mine THEN 1 ELSE 0 END AS o,id AS k1,uri AS k2,
      CASE WHEN starts_with(lower(album),(SELECT title FROM original)) THEN -1 ELSE 0 END::bigint AS rank,
-     CASE WHEN site IS NOT NULL AND (music OR lower(site) IN (SELECT service FROM services)) THEN lower(site) ELSE 'member:'||id END AS service,
+     CASE WHEN service IS NOT NULL AND (music OR lower(service) IN (SELECT service FROM services)) THEN lower(service) ELSE 'member:'||id END AS service,
      jsonb_build_object('id',id,'uri',uri,'host',host,'site',site) AS e FROM tagged
    UNION ALL SELECT 2,lower(site),uri,-named,lower(site),jsonb_strip_nulls(jsonb_build_object('uri',uri,'site',site,'derived',true,'via',via,'kind',kind,'at',at)) FROM derived),
  own AS (SELECT lower(r.doc->>'site') AS service FROM resource r WHERE r.id=also_on.resource),
