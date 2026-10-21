@@ -325,7 +325,7 @@ pub fn parse(id: &str, uri: &str, body: &[u8]) -> Option<ResourceMeta> {
         Err(_) => true,
     };
     if from_scripts {
-        let html = scraper::Html::parse_document(&text);
+        let html = crate::resolver::html::document(&text);
         for node in html.select(&scraper::Selector::parse("script").unwrap()) {
             if roots.len() >= 256 || std::time::Instant::now() >= deadline {
                 break;

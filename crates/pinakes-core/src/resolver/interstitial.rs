@@ -1,6 +1,6 @@
 //! Interstitials are observations of access failure, never publisher identity evidence.
 use super::egress::Fetched;
-use scraper::{Html, Selector};
+use scraper::Selector;
 use serde::Deserialize;
 use std::sync::LazyLock;
 use url::Url;
@@ -120,7 +120,7 @@ pub fn inspect(requested: &Url, f: &Fetched) -> Page {
         return Page::Blocked;
     }
     let text = String::from_utf8_lossy(&f.body);
-    let html = Html::parse_document(&text);
+    let html = crate::resolver::html::document(&text);
     let title = html
         .select(&select("title"))
         .next()

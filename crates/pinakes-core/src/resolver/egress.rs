@@ -955,7 +955,7 @@ impl Egress {
             let page = if response.content_type.contains("html") {
                 let input = response.clone();
                 let original = requested.clone();
-                tokio::task::spawn_blocking(move || super::interstitial::inspect(&original, &input))
+                super::html::blocking(move || super::interstitial::inspect(&original, &input))
                     .await?
             } else {
                 super::interstitial::inspect(&requested, &response)

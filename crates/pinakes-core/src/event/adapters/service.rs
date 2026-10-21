@@ -456,7 +456,7 @@ async fn extract_blocking(
         "non-feed page exceeds cap"
     );
     let (uri, f) = (uri.to_owned(), f.clone());
-    Ok(tokio::task::spawn_blocking(move || crate::resolver::web::extract(&uri, &f, ttl)).await?)
+    crate::resolver::html::blocking(move || crate::resolver::web::extract(&uri, &f, ttl)).await
 }
 async fn calendar_blocking(
     uri: &str,
@@ -465,7 +465,7 @@ async fn calendar_blocking(
     cfg: &EventConfig,
 ) -> Result<Option<ResourceMeta>> {
     let (uri, id, f, cfg) = (uri.to_owned(), d.id.clone(), f.clone(), cfg.clone());
-    tokio::task::spawn_blocking(move || {
+    crate::resolver::html::blocking(move || {
         let d = super::definition(&id).expect("registered adapter");
         if let Some(doc) = calendar_document(&uri, d, &f, &cfg)? {
             return Ok(Some(doc));
@@ -496,7 +496,7 @@ pub(crate) async fn enrichment_blocking(
         "non-feed enrichment exceeds cap"
     );
     let (uri, id, body) = (uri.to_owned(), d.id.clone(), f.body.clone());
-    let mut doc = tokio::task::spawn_blocking(move || state::parse(&id, &uri, &body)).await?;
+    let mut doc = crate::resolver::html::blocking(move || state::parse(&id, &uri, &body)).await?;
     // The performers came from this fetch, not from the address the parser was handed.
     if let Some(doc) = &mut doc {
         doc.event.read_from(f);
@@ -761,7 +761,7 @@ pub fn endpoint(
     Ok(result)
 }
 pub fn ics_link(_id: &str, base: &Url, text: &str) -> Option<String> {
-    let html = scraper::Html::parse_document(text);
+    let html = crate::resolver::html::document(text);
     html.select(&scraper::Selector::parse("a[href],link[href]").unwrap())
         .filter_map(|e| e.value().attr("href"))
         .filter(|s| {
@@ -832,7 +832,7 @@ pub fn wikipedia_item(text: &str) -> Option<String> {
                 .and_then(|(_, s)| valid(s))
         })
         .or_else(|| {
-            let html = scraper::Html::parse_document(text);
+            let html = crate::resolver::html::document(text);
             html.select(&scraper::Selector::parse("script[type='application/ld+json']").unwrap())
                 .find_map(|node| {
                     let v: Value = serde_json::from_str(&node.text().collect::<String>()).ok()?;
@@ -848,7 +848,7 @@ pub fn wikipedia_item(text: &str) -> Option<String> {
 }
 fn wikipedia_candidate(f: &Fetched) -> bool {
     let text = String::from_utf8_lossy(&f.body);
-    let html = scraper::Html::parse_document(&text);
+    let html = crate::resolver::html::document(&text);
     let selector=scraper::Selector::parse(".infobox.vevent, .infobox.geography, .infobox .geo, meta[property='place:location:latitude']").unwrap();
     if html.select(&selector).next().is_some() {
         return true;
@@ -869,7 +869,7 @@ pub async fn wikipedia(uri: &str, f: &Fetched, egress: &Egress) -> Result<Option
         return Ok(None);
     }
     let input = f.clone();
-    if !tokio::task::spawn_blocking(move || wikipedia_candidate(&input)).await? {
+    if !crate::resolver::html::blocking(move || wikipedia_candidate(&input)).await? {
         return Ok(None);
     }
     let doc = match wiki(uri, f, egress).await {

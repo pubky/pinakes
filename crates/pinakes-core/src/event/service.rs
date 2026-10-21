@@ -185,7 +185,7 @@ impl EventService {
         let config = self.config.clone();
         let ttl = card.ttl_secs;
         let (mut event, calendar_link, advertised, event_candidate, platform_extra) =
-            tokio::task::spawn_blocking(move || {
+            crate::resolver::html::blocking(move || {
                 let uri = input_uri.as_str();
                 let fetched = &fetched;
                 let mut event = ResourceMeta::new(uri, "web", ttl);
@@ -199,7 +199,7 @@ impl EventService {
                         page::jsonld(&mut event, &v, &fetched.url);
                         page::activity(&mut event, &v, &fetched.url);
                     }
-                    let html = scraper::Html::parse_document(&text);
+                    let html = crate::resolver::html::document(&text);
                     event_candidate = text.contains("startDate")
                         || text.contains("dtstart")
                         || text.contains("dt-start");

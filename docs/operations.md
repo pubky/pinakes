@@ -178,7 +178,10 @@ redirects count). `egress.allow_hosts` and `egress.deny_hosts` take exact names 
 `*.example.org`; they never override the IP policy, and deny wins. Pages are capped at 1 MB of
 decoded body; an oversized page keeps its head metadata with a `truncated` warning, its whole
 head when the head runs past the cap (up to `limits.html_head_bytes`). An image or PDF past the
-cap is cut too, never refused: its card comes from its URL. An RSS or
+cap is cut too, never refused: its card comes from its URL. A page is read only up to a tag with more than 256 attributes
+(none occurs in real pages; tens of thousands make the parser work for minutes), and at most as
+many pages are parsed at once as the machine has cores: a parse holds its slot until it ends,
+even after its request timed out. An RSS or
 Atom feed read without a calendar's feed cap is cut there too (a long show's feed is 2–5 MB):
 its channel and newest items come first, and its card reads up to the last whole item. Wikidata
 entity reads may take 8 MB, since a much-edited item carries megabytes of claims, and so may

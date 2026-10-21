@@ -2950,6 +2950,60 @@ async fn a_cut_page_past_the_cap_gets_its_title(pool: PgPool) {
     assert_eq!(doc.name.as_deref(), Some("Example App"));
 }
 
+/// A page built to make the parser work for minutes (a megabyte of styles, then a tag with 60,000
+/// distinct attributes, all inside the head) resolves in bounded time: the page is read up to that
+/// tag.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_hostile_page_is_parsed_in_bounded_time(pool: PgPool) {
+    use pinakes_core::resolver::Resolver;
+    let uri = "https://hostile.example.org/page";
+    let mut body = format!(
+        "<html><head><title>Kept</title><style>{}</style><meta",
+        "x".repeat(1024 * 1024)
+    );
+    for n in 0..60_000 {
+        body.push_str(&format!(" a{n}=\"v\""));
+    }
+    body.push_str("></head><body></body></html>");
+    let map = [(
+        format!("{uri}:"),
+        Ok(Fetched {
+            permanent_redirect: false,
+            // The egress stops at `</head>`, past the page cap: a cut page.
+            truncated: true,
+            url: uri.parse().unwrap(),
+            body: body.into_bytes(),
+            content_type: "text/html".into(),
+            status: 200,
+            retry_after_secs: 60,
+            location: None,
+            validators: Default::default(),
+        }),
+    )]
+    .into_iter()
+    .collect();
+    let egress = Egress::with_backends(
+        pinakes_core::config::EgressConfig {
+            host_requests_per_second: 1000.,
+            ..Default::default()
+        },
+        Arc::new(AdapterDns),
+        Arc::new(RecordedResponses(map)),
+    );
+    let cfg = EventConfig {
+        geocoding: false,
+        ..Default::default()
+    };
+    let started = std::time::Instant::now();
+    let doc = platform(&pool, cfg, egress).web.resolve(uri).await.unwrap();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(doc.name.as_deref(), Some("Kept"));
+}
+
 /// A transport that answers one large record as the real one does: refused at the default 1 MB
 /// cap, served when the request allows more.
 struct LargeRecord {

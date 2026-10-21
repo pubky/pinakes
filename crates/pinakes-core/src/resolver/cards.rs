@@ -803,8 +803,8 @@ pub async fn enrich(
     }
     // One bounded parse for advertised metadata endpoints. Never follow arbitrary links.
     let (body, base) = (f.body.clone(), f.url.clone());
-    let (ap, rss) = tokio::task::spawn_blocking(move || {
-        let html = scraper::Html::parse_document(&String::from_utf8_lossy(&body));
+    let (ap, rss) = super::html::blocking(move || {
+        let html = crate::resolver::html::document(&String::from_utf8_lossy(&body));
         let (mut ap, mut rss) = (None, None);
         for el in html
             .select(&scraper::Selector::parse("head link[rel='alternate']").unwrap())

@@ -41,7 +41,7 @@ impl Site {
         if !body.contains("data-key") || !body.contains("content=\"Ghost") {
             return None;
         }
-        let html = scraper::Html::parse_document(&body);
+        let html = crate::resolver::html::document(&body);
         let generator = scraper::Selector::parse("head meta[name='generator']").ok()?;
         let ghost = html
             .select(&generator)
@@ -168,7 +168,8 @@ impl Source for Ghost {
         doc: &ResourceMeta,
     ) -> Result<Option<ResourceMeta>> {
         let found = page.clone();
-        let Some(site) = tokio::task::spawn_blocking(move || Site::of_page(&found)).await? else {
+        let Some(site) = crate::resolver::html::blocking(move || Site::of_page(&found)).await?
+        else {
             return Ok(None);
         };
         let f = cx

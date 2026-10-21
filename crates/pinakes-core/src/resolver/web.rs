@@ -8,7 +8,7 @@ use crate::{
 };
 use anyhow::Result;
 use async_trait::async_trait;
-use scraper::{ElementRef, Html, Selector};
+use scraper::{ElementRef, Selector};
 use serde_json::Value;
 use std::{sync::OnceLock, time::Duration};
 use url::Url;
@@ -230,7 +230,7 @@ impl WebResolver {
             let input = fetched.clone();
             let ttl = self.config.ttl_secs;
             let mut extracted =
-                tokio::task::spawn_blocking(move || extract(&input_uri, &input, ttl)).await?;
+                super::html::blocking(move || extract(&input_uri, &input, ttl)).await?;
             if extracted.doc.status == Status::Unreachable {
                 if let Some(doc) =
                     crate::sources::wall_hooks(&self.egress, uri, ttl, deadline).await
@@ -419,7 +419,7 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
         out.doc.event.read_from(fetched);
         return out;
     }
-    let html = Html::parse_document(&text);
+    let html = crate::resolver::html::document(&text);
     // JSON-LD stays document-wide (plugins put it in the body), but only the chosen entity
     // may carry claims (url/@id, sameAs, identifiers): from a head script, as with head meta
     // and links (its main-entity url is the publisher's canonical declaration), or from a

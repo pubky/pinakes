@@ -71,7 +71,7 @@ pub fn post_api(page: &Fetched) -> Option<(Url, u64)> {
     if !body.contains("wp-json") && !body.contains("?p=") {
         return None;
     }
-    let html = scraper::Html::parse_document(&body);
+    let html = crate::resolver::html::document(&body);
     let links = scraper::Selector::parse("head link[href]").ok()?;
     let mut shortlink = None;
     for link in html.select(&links).take(64) {
@@ -222,7 +222,8 @@ impl Source for Wordpress {
         doc: &ResourceMeta,
     ) -> Result<Option<ResourceMeta>> {
         let found = page.clone();
-        let Some((api, id)) = tokio::task::spawn_blocking(move || post_api(&found)).await? else {
+        let Some((api, id)) = crate::resolver::html::blocking(move || post_api(&found)).await?
+        else {
             return Ok(None);
         };
         let f = cx
