@@ -114,7 +114,7 @@ body, and answer `If-None-Match` with 304.
 | `venue` | `{name, id}`: the venue's name and, when it resolved to a resource, its ID |
 | `organizer` | `{name, url}` |
 | `from` | Where the card's metadata came from when it is not the page itself: the [source](#sources) whose official API answered, e.g. `federal_register` |
-| `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …), then the facts the [also-on](#also-on) sources read for it (`isrc`, `upc`, `mbid`, `mbid_was`, `artist`, `artist_type`, `duration` in seconds); several values of one name are joined with `; `. Each source keeps at most `limits.also_on_facts_per_source` (32, at least 8) facts per resource, cutting the many values of one name (a recording's ISRCs) before a name's one value (its MBID, artist). Each source's page lists its facts. `null` when there are none. Facts never join anything |
+| `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …), then the facts the [also-on](#also-on) sources read for it (`isrc`, `upc`, `mbid`, `mbid_was`, `artist`, `artist_type`, `duration` in seconds, an event's `performer`, `performer_mbid` and `performer_link`); several values of one name are joined with `; `. Each source keeps at most `limits.also_on_facts_per_source` (32, at least 8) facts per resource, cutting the many values of one name (a recording's ISRCs) before a name's one value (its MBID, artist). Each source's page lists its facts. `null` when there are none. Facts never join anything |
 | `also_on` | Every link of the card's [also on](#also-on), up to 256, several of one service too (the card shows one per service) |
 | `aliases` | Other spellings of this link that resolve to it ([aliases](#aliases)), at most 50; a page's own `url`, `@id`, `sameAs` or canonical claims are not aliases and are not listed |
 | `updated_at` | When the current metadata was accepted |
@@ -407,7 +407,7 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 | `q` | Full-text name/description search with a trigram/partial-name fallback; at most 256 bytes. A post whose author opted out of search indexing (`details.facts.opted_out`: Mastodon's `indexable: false` or `noindex`, Bluesky's `!no-unauthenticated`) never matches |
 | `type` | A schema.org type, ancestors included (`Event` matches `MusicEvent`; `Place` matches cafés and other `LocalBusiness` types) |
 | `category`, `host` | Exact filters |
-| `key` | Links carrying one exact identifier, on any service and in any spelling: `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist), `wikidata:{Q-id}`, `isrc:{code}` (any letter case, hyphens allowed), `upc:{barcode}` (a UPC, EAN or GTIN in any of its lengths, check digit verified), `isbn:{ISBN-10 or ISBN-13}` (an edition), `imdb:{tt…}` (a film or series), `podcast:{GUID}` (a show), `osm:{node|way|relation}/{id}`, `doi:{DOI}`, `arxiv:{id}`, `pmid:{n}`, `pmcid:PMC{n}`, `crate:{name}`, `npm:{name}`, `pypi:{name}` (each normalized as its registry does), `repo:{github.com|gitlab.com}/{path}`, `steam:{appid}`, `gog:{id}`, `fr:{document number}` or `discogs:{artist|master|release}:{id}`, as the [also-on](#also-on) sources found them as keys or facts (`mbid:` also the MBID a MusicBrainz page was merged from, its `mbid_was` fact), or as an exact lookup by that key named the link; anything else is 400 |
+| `key` | Links carrying one exact identifier, on any service and in any spelling: `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist), `wikidata:{Q-id}`, `isrc:{code}` (any letter case, hyphens allowed), `upc:{barcode}` (a UPC, EAN or GTIN in any of its lengths, check digit verified), `isbn:{ISBN-10 or ISBN-13}` (an edition), `imdb:{tt…}` (a film or series), `podcast:{GUID}` (a show), `osm:{node|way|relation}/{id}`, `doi:{DOI}`, `arxiv:{id}`, `pmid:{n}`, `pmcid:PMC{n}`, `crate:{name}`, `npm:{name}`, `pypi:{name}` (each normalized as its registry does), `repo:{github.com|gitlab.com}/{path}`, `steam:{appid}`, `gog:{id}`, `fr:{document number}` or `discogs:{artist|master|release}:{id}`, as the [also-on](#also-on) sources found them as keys or facts (`mbid:` also the MBID a MusicBrainz page was merged from, its `mbid_was` fact, and with `type=MusicEvent` an artist's events, by their performers), or as an exact lookup by that key named the link; anything else is 400 |
 | `tags` | Comma-separated labels; at most 5, each 1–128 bytes |
 | `match` | `any` (default) or `all` (at most 3 tags) |
 | `author` | Resources referenced by this 52-character z-base-32 public key |
@@ -905,6 +905,17 @@ record only what its URL proves, the MBID or the ISRC): the
 title, `MusicRecording`, `MusicAlbum`, `MusicGroup` or `Person` (an artist MusicBrainz calls a
 person), the artist credit and a recording's length as its description, `site` `MusicBrainz`; an
 ISRC's page is its one recording's card, else named `ISRC {code}`.
+
+**Performers.** `performers`: an event page (`MusicEvent`, or any event) that names its performers
+in its own structured data (schema.org `performer`) has each performer's name as the fact
+`performer`, and the artist's identity as the key `mb:artist:…` when the page's links for the
+performer (`url`, `sameAs`) name a MusicBrainz artist page, or when MusicBrainz relates one of
+them (an artist's page on a music service, Songkick or Bandsintown, in the spelling MusicBrainz
+stores: Songkick and Bandsintown artists by number) to exactly one artist; that MBID is also the
+fact `performer_mbid`, and the first such link the fact `performer_link`. A name alone is never a
+key, and nothing is searched by name. Events [group](#groups) only with events, so the key never
+joins a concert to the artist's pages; it makes the concert the artist's event:
+`GET /v1/search?key=mbid:{artist}&type=MusicEvent&from=now` lists an artist's upcoming concerts.
 
 **Books.** `books`: an ISBN (`isbn:…`, `openlibrary.org/isbn/{isbn}`), an Open Library edition
 page (`openlibrary.org/books/OL…M`) or work page (`openlibrary.org/works/OL…W`) is looked up

@@ -408,6 +408,127 @@ pub fn musicbrainz_card(
     doc
 }
 
+/// What a performer's link says about the artist: a MusicBrainz artist page names the MBID
+/// outright; an artist's page on a known music service, on Songkick or on Bandsintown is looked
+/// up on MusicBrainz by URL, as MusicBrainz stores it (Songkick and Bandsintown artists by
+/// number, without the slug and parameters).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ArtistLink {
+    Mbid(String),
+    Lookup(String),
+}
+pub fn artist_link(url: &str) -> Option<ArtistLink> {
+    if let Some((MbKind::Artist, mbid, _)) = musicbrainz::entity_link(url) {
+        return Some(ArtistLink::Mbid(mbid));
+    }
+    if let Some(link) = music::parse(url) {
+        return (link.level == Level::Artist).then_some(ArtistLink::Lookup(link.canonical));
+    }
+    let u = url::Url::parse(url).ok()?;
+    if !matches!(u.scheme(), "http" | "https") {
+        return None;
+    }
+    let segments: Vec<&str> = u.path_segments()?.filter(|s| !s.is_empty()).collect();
+    let number = |s: &str| {
+        s.split('-')
+            .next()
+            .filter(|n| (1..=12).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_digit()))
+            .map(str::to_owned)
+    };
+    match (u.host_str()?, segments.as_slice()) {
+        ("www.songkick.com" | "songkick.com", ["artists", id]) => {
+            number(id).map(|n| ArtistLink::Lookup(format!("https://www.songkick.com/artists/{n}")))
+        }
+        ("www.bandsintown.com" | "bandsintown.com", ["a", id]) => {
+            number(id).map(|n| ArtistLink::Lookup(format!("https://www.bandsintown.com/a/{n}")))
+        }
+        _ => None,
+    }
+}
+
+/// The performers an event page names in its own structured data: each one's name is a fact,
+/// and its artist identity a key (`mb:artist:…`) when a MusicBrainz artist page is among the
+/// page's links for it, or when MusicBrainz relates one of those links (a music service, Songkick
+/// or Bandsintown artist page) to exactly one artist. A name alone is never a key. Events group only
+/// with events, so the key lists the artist's events (`key=mbid:…&type=MusicEvent`) and never
+/// joins a concert to the artist's own pages.
+pub struct PerformersSource;
+#[async_trait]
+impl Source for PerformersSource {
+    fn id(&self) -> &'static str {
+        "performers"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        subject.doc.as_ref().is_some_and(|d| {
+            !d.event.performers.is_empty() && d.type_path.iter().any(|t| t == "Event")
+        })
+    }
+    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
+        crate::also_on::unless_over_cap(self.read(cx, subject).await, Found::default)
+    }
+}
+impl PerformersSource {
+    async fn read(&self, cx: &Context, subject: &Subject) -> Result<Found> {
+        let Some(doc) = &subject.doc else {
+            return Ok(Found::default());
+        };
+        let base = cx.config.also_on.musicbrainz_base();
+        let mut found = Found::default();
+        let mut keyed = std::collections::BTreeSet::new();
+        for performer in doc.event.performers.iter().take(16) {
+            found
+                .facts
+                .push(crate::also_on::Fact::new("performer", &performer.name));
+            let mut mbid: Option<(String, &str)> = None;
+            let mut link = None;
+            for l in &performer.links {
+                match artist_link(l) {
+                    Some(ArtistLink::Mbid(id)) => {
+                        mbid.get_or_insert((id, "page"));
+                    }
+                    Some(ArtistLink::Lookup(url)) => {
+                        if mbid.is_none() {
+                            let targets = musicbrainz::url(&cx.egress, base, &url)
+                                .await?
+                                .map(|t| t.targets)
+                                .unwrap_or_default();
+                            let artists: Vec<&String> = targets
+                                .iter()
+                                .filter(|(k, _)| *k == MbKind::Artist)
+                                .map(|(_, id)| id)
+                                .collect();
+                            if artists.len() == 1 {
+                                mbid = Some((artists[0].clone(), "musicbrainz"));
+                            }
+                        }
+                        link.get_or_insert(url);
+                    }
+                    None => {}
+                }
+            }
+            if let Some((id, via)) = mbid {
+                if let Some(key) = hubs::key::mb(MbKind::Artist, &id) {
+                    if keyed.insert(key.clone()) {
+                        found.keys.push(Key {
+                            key,
+                            via: via.into(),
+                        });
+                    }
+                }
+                found
+                    .facts
+                    .push(crate::also_on::Fact::new("performer_mbid", id));
+            }
+            if let Some(url) = link {
+                found
+                    .facts
+                    .push(crate::also_on::Fact::new("performer_link", url));
+            }
+        }
+        Ok(found)
+    }
+}
+
 /// What MusicBrainz says about one entity, or about up to four releases of one release group
 /// (`kind`, `ids`): their MBIDs (the release group's alone for several releases), the recording's
 /// ISRCs and the release's barcode as keys, their facts, and their current links on music
@@ -1162,6 +1283,40 @@ mod tests {
         server.abort();
     }
 
+    /// A performer's links name the artist only where a hub or MusicBrainz can: a MusicBrainz
+    /// artist page outright; a music service's, Songkick's or Bandsintown's artist page as the
+    /// URL MusicBrainz stores (no slug, no parameters); nothing else.
+    #[test]
+    fn performer_links_name_the_artist_as_musicbrainz_stores_them() {
+        let lookup = |u: &str| Some(ArtistLink::Lookup(u.to_owned()));
+        assert_eq!(
+            artist_link("https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711"),
+            Some(ArtistLink::Mbid(
+                "a74b1b7f-71a5-4011-9441-d0b5e4122711".into()
+            ))
+        );
+        assert_eq!(
+            artist_link("https://www.songkick.com/artists/253846-radiohead?utm_medium=organic&utm_source=microformat"),
+            lookup("https://www.songkick.com/artists/253846")
+        );
+        assert_eq!(
+            artist_link("https://www.bandsintown.com/a/25874-radiohead"),
+            lookup("https://www.bandsintown.com/a/25874")
+        );
+        assert_eq!(
+            artist_link("https://open.spotify.com/intl-de/artist/4Z8W4fKeB5YxbusRsdQVPb?si=x"),
+            lookup("https://open.spotify.com/artist/4Z8W4fKeB5YxbusRsdQVPb")
+        );
+        for other in [
+            "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq",
+            "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+            "https://www.songkick.com/concerts/43402127-radiohead-at-rac-arena",
+            "https://www.songkick.com/artists/radiohead",
+            "https://example.org/artists/253846",
+        ] {
+            assert_eq!(artist_link(other), None, "{other}");
+        }
+    }
     #[test]
     fn itunes_counts_only_one_album() {
         let link = itunes_parse(&fixture("itunes-upc.json")).unwrap();

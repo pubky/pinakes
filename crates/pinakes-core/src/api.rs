@@ -647,8 +647,9 @@ pub struct Details {
     /// that answered (docs/sources).
     pub from: Option<String>,
     /// The fields that API names for the object, and the facts the also-on sources read for it
-    /// (`isrc`, `upc`, `mbid`, `mbid_was`, `artist`, `artist_type`, `duration`, …), by name;
-    /// several values are joined with "; ". `null` when there are none.
+    /// (`isrc`, `upc`, `mbid`, `mbid_was`, `artist`, `artist_type`, `duration`, `performer`,
+    /// `performer_mbid`, …), by name; several values are joined with "; ". `null` when there are
+    /// none.
     #[schema(value_type = Option<Object>)]
     pub facts: Option<std::collections::BTreeMap<String, String>>,
     /// Every link of `also_on`, up to 256: each tagged member and each derived link, several of

@@ -66,6 +66,8 @@ fn mb_url(resource: &str) -> (u16, Vec<u8>) {
         }
         "https://tidal.com/artist/64518" => (200, fixture("mb-url-tidal-artist-64518.json")),
         "https://tidal.com/track/567396540" => (200, fixture("mb-url-tidal-567396540.json")),
+        // Radiohead's Songkick artist page, as MusicBrainz stores it.
+        "https://www.songkick.com/artists/253846" => (200, fixture("mb-url-songkick-253846.json")),
         // Dracula: two releases ("Dracula", "Dracula (remix)") of one release group.
         "https://tidal.com/album/495402659" => (200, fixture("mb-url-tidal-495402659.json")),
         _ => (404, fixture("mb-url-unknown.json")),
@@ -1133,6 +1135,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     let many = "https://musicbrainz.org/isrc/ZZAAA2600010";
     let merged = "https://musicbrainz.org/recording/00000000-0000-4000-8000-00000000000d";
     let merged_many = "https://musicbrainz.org/recording/00000000-0000-4000-8000-00000000000e";
+    let concert = "https://www.songkick.com/concerts/43402127-radiohead-at-rac-arena";
     let tidal = "https://tidal.com/track/534050211";
     let tidal_artist = "https://tidal.com/artist/64518";
     let mut ids = std::collections::BTreeMap::new();
@@ -1143,6 +1146,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         (many, "MusicRecording"),
         (merged, "MusicRecording"),
         (merged_many, "MusicRecording"),
+        (concert, "MusicEvent"),
         (artist, "MusicGroup"),
         (tidal, "MusicRecording"),
         (tidal_artist, "MusicGroup"),
@@ -1153,6 +1157,14 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         if uri == tidal {
             // TIDAL's own page states its ISRC (a key).
             d.attributes.insert("isrc".into(), "GBUM71029604".into());
+        }
+        if uri == concert {
+            // As Songkick's JSON-LD names the performer: its own artist page, with tracking.
+            d.start = Some("2027-05-03T19:30:00Z".parse().unwrap());
+            d.event.performers = vec![pinakes_core::event::Performer {
+                name: "Radiohead".into(),
+                links: vec!["https://www.songkick.com/artists/253846-radiohead?utm_medium=organic&utm_source=microformat".into()],
+            }];
         }
         store::save_document(&pool, &id, 0, &d).await.unwrap();
         ids.insert(uri, id);
@@ -1285,6 +1297,61 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     let band = rows(group, ids[artist].clone()).await;
     assert_ne!(band, ["-"]);
     assert_eq!(rows(group, ids[tidal_artist].clone()).await, band);
+    // The concert keys the artist MusicBrainz relates its performer's Songkick page to (the
+    // page's own structured data; a name alone is a fact), never joins the artist's group, and
+    // is the artist's event by key.
+    assert_eq!(
+        rows(
+            "SELECT key||' '||source||' '||via FROM resource_key WHERE resource_id=$1",
+            ids[concert].clone()
+        )
+        .await,
+        ["mb:artist:a74b1b7f-71a5-4011-9441-d0b5e4122711 performers musicbrainz"]
+    );
+    assert_eq!(
+        rows(
+            "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name",
+            ids[concert].clone()
+        )
+        .await,
+        [
+            "performer Radiohead",
+            "performer_link https://www.songkick.com/artists/253846",
+            "performer_mbid a74b1b7f-71a5-4011-9441-d0b5e4122711"
+        ]
+    );
+    assert_eq!(rows(group, ids[concert].clone()).await, ["-"]);
+    {
+        use tower::ServiceExt;
+        sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) VALUES($1,repeat('b',52),'tag','/pub/test/tags/'||$1,'gig',now())")
+            .bind(&ids[concert])
+            .execute(&pool)
+            .await
+            .unwrap();
+        let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+        let mut request = axum::http::Request::builder()
+            .uri(
+                "/v1/search?key=mbid:a74b1b7f-71a5-4011-9441-d0b5e4122711&type=MusicEvent&from=now",
+            )
+            .body(axum::body::Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
+        ));
+        let response = app.oneshot(request).await.unwrap();
+        let bytes = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let found: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let hits: Vec<&str> = found["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(hits, [ids[concert].as_str()], "{found}");
+    }
     // One read of the recording serves its page and the ISRC's.
     let seen = t.seen.lock().unwrap().clone();
     let reads = seen

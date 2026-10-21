@@ -469,7 +469,7 @@
             ]
           },
           "facts": {
-            "description": "The fields that API names for the object, and the facts the also-on sources read for it\n(`isrc`, `upc`, `mbid`, `mbid_was`, `artist`, `artist_type`, `duration`, …), by name;\nseveral values are joined with \"; \". `null` when there are none.",
+            "description": "The fields that API names for the object, and the facts the also-on sources read for it\n(`isrc`, `upc`, `mbid`, `mbid_was`, `artist`, `artist_type`, `duration`, `performer`,\n`performer_mbid`, …), by name; several values are joined with \"; \". `null` when there are\nnone.",
             "type": [
               "object",
               "null"

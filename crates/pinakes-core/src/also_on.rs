@@ -246,6 +246,7 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         Arc::new(tidal::Tidal),
         Arc::new(crate::music_sources::MusicBrainzSource),
         Arc::new(crate::music_sources::MusicBrainzEntitySource),
+        Arc::new(crate::music_sources::PerformersSource),
         Arc::new(crate::music_sources::WikidataSource),
         // Before the barcode lookups: a Discogs release's barcodes are keys.
         Arc::new(crate::lookups::sources::Discogs),
