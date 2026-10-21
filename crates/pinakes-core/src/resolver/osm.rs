@@ -347,9 +347,11 @@ impl OsmResolver {
                 })?;
         observation.status(response.status().as_u16());
         let status = response.status();
+        // The path of our own OSM API request (`/api/0.6/node/{id}`): no query, no user's link.
+        let api_path = url.path();
         tracing::info!(
             source = "osm",
-            path = url.path(),
+            path = api_path,
             status = status.as_u16(),
             "OSM upstream request"
         );

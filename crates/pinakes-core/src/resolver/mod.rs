@@ -188,35 +188,45 @@ impl std::fmt::Display for ErrorClass {
     }
 }
 impl std::error::Error for ErrorClass {}
-/// `text` with every web URL in it reduced to its scheme, host, port and path: no query,
-/// fragment or user info, which may hold what a link's owner keeps private (a calendar's token).
-/// For error text that goes to a log.
+/// The part of a link a log names: its host, or its scheme for a link without one (`pubky`,
+/// `doi`, `isbn`). Never its path or query, which may carry what the link's owner keeps private.
+pub fn log_host(uri: &str) -> String {
+    url::Url::parse(uri)
+        .map(|u| u.host_str().unwrap_or(u.scheme()).to_owned())
+        .unwrap_or_default()
+}
+
+/// `text` with every web URL in it cut before its query or fragment (from the first `?` or `#`
+/// to the next white space) and without user info, in any letter case. The last guard for error
+/// text that goes to a log; no code puts a URL in an error on purpose.
 pub fn redact(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(at) = ["http://", "https://"]
+    let mut at = 0;
+    while let Some((start, scheme)) = ["http://", "https://"]
         .iter()
-        .filter_map(|scheme| rest.find(scheme))
+        .filter_map(|scheme| lower[at..].find(scheme).map(|i| (at + i, scheme.len())))
         .min()
     {
-        out.push_str(&rest[..at]);
-        let end = rest[at..]
-            .find(|c: char| c.is_whitespace() || matches!(c, ')' | '"' | '\'' | '<' | '>' | ','))
-            .map_or(rest.len(), |n| at + n);
-        let found = &rest[at..end];
-        match url::Url::parse(found) {
-            Ok(mut url) => {
-                url.set_query(None);
-                url.set_fragment(None);
-                let _ = url.set_username("");
-                let _ = url.set_password(None);
-                out.push_str(url.as_str());
-            }
-            Err(_) => out.push_str(found.split(['?', '#']).next().unwrap_or("")),
-        }
-        rest = &rest[end..];
+        out.push_str(&text[at..start]);
+        let end = text[start..]
+            .find(char::is_whitespace)
+            .map_or(text.len(), |n| start + n);
+        let link = &text[start..end];
+        // Up to the first `?` or `#`: no query, no fragment.
+        let cut = link.find(['?', '#']).unwrap_or(link.len());
+        let (head, rest) = link[..cut].split_at(scheme);
+        // No user info: what precedes an `@` in the authority.
+        let authority = rest.find('/').unwrap_or(rest.len());
+        let rest = match rest[..authority].rfind('@') {
+            Some(i) => &rest[i + 1..],
+            None => rest,
+        };
+        out.push_str(head);
+        out.push_str(rest);
+        at = end;
     }
-    out.push_str(rest);
+    out.push_str(&text[at..]);
     out
 }
 
@@ -262,22 +272,139 @@ pub fn error_class(error: &anyhow::Error) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    /// A logged error never carries what a URL's query, fragment or user info holds.
+    /// A logged error never carries what a URL's query, fragment or user info holds, whatever
+    /// punctuation follows the URL and whatever the scheme's letter case.
     #[test]
     fn redact_keeps_no_query_fragment_or_user_info() {
+        for (text, want) in [
+            (
+                "error sending request for url (https://cal.example.org/calendar.ics?token=CANARY#x)",
+                "error sending request for url (https://cal.example.org/calendar.ics",
+            ),
+            (
+                "https://example.org/cal?x=1,token=CANARY#FRAGMENT then more",
+                "https://example.org/cal then more",
+            ),
+            ("HTTPS://Example.org/a?token=CANARY", "HTTPS://Example.org/a"),
+            ("at https://user:CANARY@example.org/a, ok", "at https://example.org/a, ok"),
+            ("from http://example.org/c#CANARY", "from http://example.org/c"),
+            ("no link here", "no link here"),
+            ("https://example.org/plain", "https://example.org/plain"),
+        ] {
+            assert_eq!(redact(text), want, "{text}");
+            assert!(!redact(text).contains("CANARY"));
+        }
         assert_eq!(
-            redact("error sending request for url (https://cal.example.org/calendar.ics?token=CANARY#x)"),
-            "error sending request for url (https://cal.example.org/calendar.ics)"
+            log_host("https://user:CANARY@cal.example.org/a?token=CANARY"),
+            "cal.example.org"
         );
-        assert_eq!(
-            redact("from https://user:pass@example.org/a?b=1, then http://example.org/c?d=2"),
-            "from https://example.org/a, then http://example.org/c"
-        );
-        assert_eq!(redact("no link here"), "no link here");
-        assert_eq!(
-            redact("https://example.org/plain"),
-            "https://example.org/plain"
-        );
+        assert_eq!(log_host("doi:10.1000/x?token=CANARY"), "doi");
+    }
+
+    /// No log line in `src` names a link: a logging macro mentions `uri`, `url` or `link` only
+    /// inside `log_host(…)` or `redact(…)`.
+    #[test]
+    fn no_log_line_names_a_link() {
+        fn strip_strings(text: &str) -> String {
+            let mut out = String::new();
+            let mut chars = text.chars();
+            while let Some(c) = chars.next() {
+                if c == '"' {
+                    let mut escaped = false;
+                    for d in chars.by_ref() {
+                        if escaped {
+                            escaped = false;
+                        } else if d == '\\' {
+                            escaped = true;
+                        } else if d == '"' {
+                            break;
+                        }
+                    }
+                    out.push_str("\"\"");
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        }
+        /// `text` without the calls to `name(…)`, parentheses balanced.
+        fn strip_calls(text: &str, name: &str) -> String {
+            let mut out = String::new();
+            let mut rest = text;
+            while let Some(i) = rest.find(name) {
+                out.push_str(&rest[..i]);
+                let mut depth = 0usize;
+                let mut end = rest.len();
+                for (j, c) in rest[i + name.len() - 1..].char_indices() {
+                    match c {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = i + name.len() - 1 + j + 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                rest = &rest[end..];
+            }
+            out.push_str(rest);
+            out
+        }
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![src];
+        let mut found = vec![];
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).unwrap() {
+                let path = e.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|x| x != "rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                let code = text.split("#[cfg(test)]").next().unwrap_or("");
+                let mut rest = code;
+                while let Some(i) = rest.find("tracing::") {
+                    let after = &rest[i..];
+                    let Some(open) = after.find("!(") else { break };
+                    let mut depth = 0usize;
+                    let mut end = after.len();
+                    for (j, c) in after[open + 1..].char_indices() {
+                        match c {
+                            '(' => depth += 1,
+                            ')' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    end = open + 1 + j + 1;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    let call = &after[..end];
+                    let plain =
+                        strip_calls(&strip_calls(&strip_strings(call), "log_host("), "redact(");
+                    let words: Vec<&str> = plain
+                        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                        .collect();
+                    if words.iter().any(|w| matches!(*w, "uri" | "url" | "link")) {
+                        found.push(format!(
+                            "{}: {}",
+                            path.display(),
+                            call.lines().next().unwrap_or("")
+                        ));
+                    }
+                    rest = &after[end.max(1)..];
+                }
+            }
+        }
+        assert!(found.is_empty(), "{found:#?}");
     }
 
     /// A body past its cap is `too_large`, however deep in the error chain (an adapter adds

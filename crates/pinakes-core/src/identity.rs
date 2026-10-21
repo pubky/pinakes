@@ -40,13 +40,15 @@ pub fn normalize_uri(uri: &str) -> Result<(String, String), String> {
                         .bytes()
                         .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'.')
                 {
-                    return Err(format!("Invalid URI scheme: {uri}"));
+                    // The reason, never the input: a link may carry what its owner keeps
+                    // private.
+                    return Err("Invalid URI scheme".into());
                 }
                 let scheme_lower = scheme.to_ascii_lowercase();
                 let remainder = &uri[colon_pos + 1..];
                 Ok((format!("{scheme_lower}:{remainder}"), scheme_lower))
             } else {
-                Err(format!("Invalid URI: {uri}"))
+                Err("Invalid URI: no scheme".into())
             }
         }
     }

@@ -603,6 +603,17 @@ async fn preview_pending_cached_completion_and_per_ip_uri_budgets(pool: PgPool) 
             .0,
         400
     );
+    // A link pasted with its quotes is refused with the reason, never the input: its user info,
+    // query and fragment stay out of the answer.
+    let (code, answer) = call(
+        &app,
+        "POST",
+        "/v1/resolve",
+        Some(json!({"uri":"\"https://user:CANARY@example.org/p?token=CANARY#CANARY\""})),
+    )
+    .await;
+    assert_eq!(code, 400);
+    assert!(!answer.to_string().contains("CANARY"), "{answer}");
     let mut request = Request::builder()
         .method("POST")
         .uri("/v1/resolve")

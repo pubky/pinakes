@@ -223,11 +223,11 @@ pub async fn wall_hooks(
             }
             Ok(Ok(None)) => crate::telemetry::discovery("wall_hook", "none"),
             Ok(Err(error)) => {
-                tracing::debug!(source = hook.name(), uri = %crate::resolver::redact(uri), error = %crate::resolver::redact(&format!("{error:#}")), "wall hook failed");
+                tracing::debug!(source = hook.name(), host = %crate::resolver::log_host(uri), error = %crate::resolver::redact(&format!("{error:#}")), "wall hook failed");
                 crate::telemetry::discovery("wall_hook", "failed");
             }
             Err(_) => {
-                tracing::debug!(source = hook.name(), uri, "wall hook timed out");
+                tracing::debug!(source = hook.name(), host = %crate::resolver::log_host(uri), "wall hook timed out");
                 crate::telemetry::discovery("wall_hook", "failed");
             }
         }
@@ -285,11 +285,11 @@ pub(crate) async fn page_hooks_with(
             }
             Ok(Ok(None)) => {}
             Ok(Err(error)) => {
-                tracing::debug!(source = hook.name(), uri = %crate::resolver::redact(uri), error = %crate::resolver::redact(&format!("{error:#}")), "page hook failed");
+                tracing::debug!(source = hook.name(), host = %crate::resolver::log_host(uri), error = %crate::resolver::redact(&format!("{error:#}")), "page hook failed");
                 crate::telemetry::discovery("page_hook", "failed");
             }
             Err(_) => {
-                tracing::debug!(source = hook.name(), uri, "page hook timed out");
+                tracing::debug!(source = hook.name(), host = %crate::resolver::log_host(uri), "page hook timed out");
                 crate::telemetry::discovery("page_hook", "failed");
             }
         }

@@ -689,7 +689,7 @@ impl std::io::Write for Lines {
         Ok(())
     }
 }
-/// The JSON log lines at warn, from a process-wide subscriber: a thread-local one misses events
+/// The JSON log lines down to debug, from a process-wide subscriber: a thread-local one misses events
 /// while other tests run (the callsites' interest is cached for the whole process). A test finds
 /// its lines by its resource.
 fn log_lines() -> Lines {
@@ -700,7 +700,7 @@ fn log_lines() -> Lines {
             let writer = lines.clone();
             let subscriber = tracing_subscriber::fmt()
                 .json()
-                .with_max_level(tracing::Level::WARN)
+                .with_max_level(tracing::Level::DEBUG)
                 .with_writer(move || writer.clone())
                 .finish();
             tracing::subscriber::set_global_default(subscriber).unwrap();
@@ -753,6 +753,25 @@ async fn a_failure_log_keeps_no_query_secret(pool: PgPool) {
         .unwrap_or_else(|| panic!("{text}"));
     assert!(line.contains("connect"), "{line}");
     assert!(!line.contains("CANARY"), "{line}");
+}
+
+/// A hook that runs out of time is logged by the link's host, never the link: a canary token in
+/// the query stays out of the line.
+#[tokio::test]
+async fn a_hook_timeout_names_no_link() {
+    let lines = log_lines();
+    let egress = pinakes_core::resolver::egress::Egress::new(Default::default());
+    // A deadline already passed: every wall hook times out at once.
+    let uri = "https://hooks.example.org/page?token=CANARY";
+    let _ =
+        pinakes_core::sources::wall_hooks(&egress, uri, 3600, tokio::time::Instant::now()).await;
+    let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+    let timed_out: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("wall hook timed out") && l.contains("hooks.example.org"))
+        .collect();
+    assert!(!timed_out.is_empty(), "{text}");
+    assert!(!text.contains("CANARY"), "{text}");
 }
 
 /// A failed resolve is logged with its resource id, its URL's host and the kind of failure, the
