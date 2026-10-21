@@ -294,7 +294,7 @@ fn fields(doc: &mut ResourceMeta, v: &Value, base: &Url, ap: bool) {
             name,
         }),
     );
-    if doc.event.performers.is_empty() {
+    if doc.event.performers.is_empty() && owns_page(v, base) {
         doc.event.performers = performers(v, base);
     }
     if let Some(offer) = v.get("offers") {
@@ -325,6 +325,26 @@ fn fields(doc: &mut ResourceMeta, v: &Value, base: &Url, ap: bool) {
 }
 /// Set the start or end from a page value, trimmed at both ends first (a padded date-only value
 /// is still recognised as a date by its length).
+/// Whether an event node is the page's own: its `url` or `@id` names the page (tracking
+/// parameters and fragments aside). Another event a page describes beside its own (a venue's
+/// next show, a related date) never donates to the page's event.
+pub fn owns_page(v: &Value, base: &Url) -> bool {
+    fn identity(u: &str) -> Option<String> {
+        let mut u = Url::parse(u).ok()?;
+        u.set_fragment(None);
+        let u = crate::alias::root(u.as_str()).map_or_else(|| u.to_string(), |a| a.root);
+        crate::model::identity(&u).ok().map(|v| v.0)
+    }
+    let Some(page) = identity(base.as_str()) else {
+        return false;
+    };
+    ["url", "@id"]
+        .into_iter()
+        .filter_map(|f| v.get(f).and_then(Value::as_str))
+        .filter_map(|u| origin_url(base, u))
+        .filter_map(|u| identity(&u))
+        .any(|id| id == page)
+}
 /// An event node's performers (`performer`, one or several): a name each, with the links the
 /// page gives for it (`url`, `sameAs`); a bare name is a performer without links, a nameless
 /// entry nothing.
@@ -509,4 +529,29 @@ pub fn merge_missing(doc: &mut ResourceMeta, fallback: &ResourceMeta) -> anyhow:
         doc.location_source = fallback.location_source.clone();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod performer_tests {
+    use super::*;
+    /// The event service reads performers from the page's own node only: a node whose URL is
+    /// the page (tracking parameters aside), never another event the page describes.
+    #[test]
+    fn performers_come_from_the_pages_own_node() {
+        let base = Url::parse("https://www.songkick.com/concerts/43402127-radiohead-at-rac-arena")
+            .unwrap();
+        let performer = serde_json::json!([{"@type":"MusicGroup","name":"Radiohead","sameAs":"https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711"}]);
+        let own = serde_json::json!({"@type":"MusicEvent","name":"Radiohead @ RAC Arena","url":"https://www.songkick.com/concerts/43402127-radiohead-at-rac-arena?utm_medium=organic&utm_source=microformat","startDate":"2027-05-03T19:30:00","performer":performer});
+        let other = serde_json::json!({"@type":"MusicEvent","name":"Next","url":"https://www.songkick.com/concerts/43402211-radiohead-at-rac-arena","startDate":"2027-05-04T19:30:00","performer":performer});
+        let anonymous = serde_json::json!({"@type":"MusicEvent","name":"Anonymous","startDate":"2027-05-04T19:30:00","performer":performer});
+        assert!(owns_page(&own, &base));
+        assert!(!owns_page(&other, &base));
+        assert!(!owns_page(&anonymous, &base));
+        let mut doc = ResourceMeta::new(base.as_str(), "web", 3600);
+        jsonld(&mut doc, &other, &base);
+        assert!(doc.event.performers.is_empty());
+        jsonld(&mut doc, &own, &base);
+        assert_eq!(doc.event.performers.len(), 1);
+        assert_eq!(doc.event.performers[0].name, "Radiohead");
+    }
 }
