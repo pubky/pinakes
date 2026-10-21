@@ -137,18 +137,31 @@ impl Transport for Recorded {
         let (status, body) = match url.path() {
             // A batch (several `resource`s): MusicBrainz's `urls` list of the links it knows,
             // each as its single lookup answers.
+            // Busy as a whole when it is on one of them, or on the batch (777777: busy when the
+            // batch asks, not a second later when the link would ask alone). 666666's batch is
+            // incomplete: MusicBrainz counts one more than it lists.
             "/ws/2/url" if url.query_pairs().filter(|(k, _)| k == "resource").count() > 1 => {
-                let urls: Vec<serde_json::Value> = url
+                let resources: Vec<String> = url
                     .query_pairs()
                     .filter(|(k, _)| k == "resource")
-                    .filter_map(|(_, r)| match mb_url(&r) {
-                        (200, body) => serde_json::from_slice(&body).ok(),
-                        _ => None,
-                    })
+                    .map(|(_, r)| r.into_owned())
                     .collect();
-                let body =
-                    serde_json::json!({"url-offset": 0, "url-count": urls.len(), "urls": urls});
-                (200, serde_json::to_vec(&body).unwrap())
+                let has = |n: &str| resources.iter().any(|r| r.ends_with(n));
+                if has("/777777") || resources.iter().any(|r| mb_url(r).0 == 503) {
+                    (503, fixture("mb-503.json"))
+                } else {
+                    let urls: Vec<serde_json::Value> = resources
+                        .iter()
+                        .filter_map(|r| match mb_url(r) {
+                            (200, body) => serde_json::from_slice(&body).ok(),
+                            _ => None,
+                        })
+                        .collect();
+                    let count = urls.len() + usize::from(has("/666666"));
+                    let body =
+                        serde_json::json!({"url-offset": 0, "url-count": count, "urls": urls});
+                    (200, serde_json::to_vec(&body).unwrap())
+                }
             }
             "/ws/2/url" => mb_url(&query("resource")),
             "/ws/2/recording/9f9cf187-d6f9-437f-9d98-d59cdbd52757" => {
@@ -1141,6 +1154,8 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     let busy = "https://www.songkick.com/concerts/2-busy-lookup-alone";
     let lineup = "https://www.songkick.com/concerts/3-three-acts";
     let festival = "https://www.songkick.com/concerts/4-one-keyed-one-busy";
+    let busy_batch = "https://www.songkick.com/concerts/5-busy-batch";
+    let incomplete = "https://www.songkick.com/concerts/6-incomplete-answer";
     let tidal = "https://tidal.com/track/534050211";
     let tidal_artist = "https://tidal.com/artist/64518";
     let mut ids = std::collections::BTreeMap::new();
@@ -1156,6 +1171,8 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         (busy, "MusicEvent"),
         (lineup, "MusicEvent"),
         (festival, "MusicEvent"),
+        (busy_batch, "MusicEvent"),
+        (incomplete, "MusicEvent"),
         (artist, "MusicGroup"),
         (tidal, "MusicRecording"),
         (tidal_artist, "MusicGroup"),
@@ -1203,6 +1220,33 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
                     links: vec!["https://www.songkick.com/artists/503503-busy".into()],
                 },
             ];
+        }
+        if uri == busy_batch || uri == incomplete {
+            // busy_batch: one act the page names by its MusicBrainz page, one with two links
+            // MusicBrainz is busy on as a batch (each alone would be unknown). incomplete: the
+            // batch's answer lists Radiohead and leaves 666666 out of a larger count.
+            d.start = Some("2027-09-01T20:00:00Z".parse().unwrap());
+            let (first, second) = if uri == busy_batch {
+                (
+                    vec!["https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711"],
+                    vec![
+                        "https://www.songkick.com/artists/777777-busy-batch",
+                        "https://www.songkick.com/artists/555555-unknown",
+                    ],
+                )
+            } else {
+                (
+                    vec!["https://www.songkick.com/artists/253846-radiohead"],
+                    vec!["https://www.songkick.com/artists/666666-left-out"],
+                )
+            };
+            d.event.performers = [("First", first), ("Second", second)]
+                .into_iter()
+                .map(|(name, links)| pinakes_core::event::Performer {
+                    name: name.into(),
+                    links: links.into_iter().map(str::to_owned).collect(),
+                })
+                .collect();
         }
         if uri == vouched || uri == busy {
             d.start = Some("2027-06-01T20:00:00Z".parse().unwrap());
@@ -1398,6 +1442,40 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         );
     }
     assert!(rows(keys, ids[busy].clone()).await.is_empty());
+    // A busy batch fails the run as a single link's busy answer does, and nothing asks again
+    // link by link: the page's key waits for the retry with the others.
+    let all_keys = "SELECT key FROM resource_key WHERE resource_id=$1";
+    assert!(rows(all_keys, ids[busy_batch].clone()).await.is_empty());
+    assert!(
+        rows(retrying, ids[busy_batch].clone())
+            .await
+            .iter()
+            .any(|e| e.contains("musicbrainz_busy")),
+        "a busy batch is retried"
+    );
+    // An incomplete answer is what it says: Radiohead is keyed, 666666 is unknown this run.
+    assert_eq!(
+        rows(all_keys, ids[incomplete].clone()).await,
+        ["mb:artist:a74b1b7f-71a5-4011-9441-d0b5e4122711"]
+    );
+    assert!(rows(
+        "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1",
+        ids[incomplete].clone()
+    )
+    .await
+    .contains(&"performer_link https://www.songkick.com/artists/666666".to_owned()));
+    {
+        // One request each, the batch: no link asked alone.
+        let seen = t.seen.lock().unwrap().clone();
+        for link in ["artists%2F777777", "artists%2F555555", "artists%2F666666"] {
+            let alone: Vec<&String> = seen
+                .iter()
+                .filter(|s| s.contains("/ws/2/url?") && s.contains(link))
+                .filter(|s| s.matches("resource=").count() == 1)
+                .collect();
+            assert!(alone.is_empty(), "{link} asked alone: {alone:?}");
+        }
+    }
     // Its run failed as a whole: nothing recorded yet, the retry will.
     assert!(rows(
         "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1",

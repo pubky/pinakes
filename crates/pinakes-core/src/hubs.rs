@@ -391,32 +391,61 @@ pub mod musicbrainz {
                 Err(e) if e.downcast_ref::<RetryLater>().is_some() => return Err(e),
                 Err(_) => continue,
             };
-            let answers: Vec<&Value> = v["urls"].as_array().into_iter().flatten().collect();
-            let whole = v["url-count"].as_u64() == Some(answers.len() as u64);
-            let exact = whole
-                && answers.iter().all(|a| {
-                    a["resource"]
-                        .as_str()
-                        .is_some_and(|r| chunk.iter().any(|l| l == r))
-                });
-            for link in chunk {
-                let answer = answers
-                    .iter()
-                    .find(|a| a["resource"].as_str() == Some(link.as_str()));
-                if answer.is_none() && !exact {
-                    continue;
-                }
-                seed(
-                    egress,
-                    &url_lookup(base, link),
-                    "musicbrainz",
-                    answer.copied(),
-                )
-                .await?;
-                seeded += 1;
-            }
+            seeded += read_batch(egress, base, chunk, &v).await?.1;
         }
         Ok(seeded)
+    }
+    /// What each of `links` (at most [`URL_BATCH`]) is linked to, in one request and nothing
+    /// more: `None` for a link MusicBrainz doesn't know or leaves out of its answer. Its error
+    /// is the request's (a busy MusicBrainz's among them); no link asks again alone. Answers are
+    /// cached as each link's own lookup's, as [`prefetch_urls`] does.
+    pub async fn urls(
+        egress: &Egress,
+        base: &str,
+        links: &[String],
+    ) -> Result<Vec<Option<UrlTargets>>> {
+        anyhow::ensure!(
+            links.len() <= URL_BATCH,
+            "at most {URL_BATCH} links a request"
+        );
+        let Some(v) = get(egress, &urls_lookup(base, links), "musicbrainz").await? else {
+            return Ok(links.iter().map(|_| None).collect());
+        };
+        let (answers, _) = read_batch(egress, base, links, &v).await?;
+        Ok(answers.iter().map(|a| a.map(parse_url)).collect())
+    }
+    /// A batch answer `v` to `chunk`: each link's answer (`None` when left out), and how many
+    /// links it caches as their own lookup's: an echoed answer, and a link left out when the
+    /// answer is whole and exact (MusicBrainz doesn't know it).
+    async fn read_batch<'v>(
+        egress: &Egress,
+        base: &str,
+        chunk: &[String],
+        v: &'v Value,
+    ) -> Result<(Vec<Option<&'v Value>>, usize)> {
+        let answers: Vec<&Value> = v["urls"].as_array().into_iter().flatten().collect();
+        let whole = v["url-count"].as_u64() == Some(answers.len() as u64);
+        let exact = whole
+            && answers.iter().all(|a| {
+                a["resource"]
+                    .as_str()
+                    .is_some_and(|r| chunk.iter().any(|l| l == r))
+            });
+        let mut out = vec![];
+        let mut seeded = 0;
+        for link in chunk {
+            let answer = answers
+                .iter()
+                .find(|a| a["resource"].as_str() == Some(link.as_str()))
+                .copied();
+            out.push(answer);
+            if answer.is_none() && !exact {
+                continue;
+            }
+            seed(egress, &url_lookup(base, link), "musicbrainz", answer).await?;
+            seeded += 1;
+        }
+        Ok((out, seeded))
     }
     /// What `link` is linked to; `None` when MusicBrainz does not know the URL. `base` is the
     /// web service ([`BASE`] or a mirror).

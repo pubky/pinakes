@@ -514,8 +514,12 @@ impl PerformersSource {
                 None => lookups.push(links),
             }
         }
-        // Then MusicBrainz for the rest, all their links in one request (each link's own lookup
-        // then reads from the cache). An answer over its cap is no answer for that link.
+        // Then MusicBrainz for the rest: all their links in one request, and only that one (a
+        // link its answer leaves out is unknown this run). A failed request fails the run, a
+        // busy MusicBrainz's included: the previous rows stay and it retries in minutes,
+        // recording the page's keys and MusicBrainz's together (recording what was found would
+        // replace the rows without the busy performers' keys until the next run, a month away).
+        // An answer over its cap is no answer.
         let all: Vec<String> = lookups
             .iter()
             .flatten()
@@ -523,34 +527,37 @@ impl PerformersSource {
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
-        if all.len() > 1 {
-            if let Err(error) = musicbrainz::prefetch_urls(&cx.egress, base, &all).await {
-                tracing::debug!(error = %format!("{error:#}"), "batched MusicBrainz lookup failed; links ask alone");
-            }
-        }
-        let mut busy = None;
+        let answers = match all.as_slice() {
+            [] => Ok(vec![]),
+            [one] => musicbrainz::url(&cx.egress, base, one)
+                .await
+                .map(|t| vec![t]),
+            _ => musicbrainz::urls(&cx.egress, base, &all).await,
+        };
+        let answers: std::collections::BTreeMap<&String, musicbrainz::UrlTargets> = match answers {
+            Ok(answers) => all
+                .iter()
+                .zip(answers)
+                .filter_map(|(link, t)| Some((link, t?)))
+                .collect(),
+            Err(e) if crate::resolver::egress::over_cap(&e) => Default::default(),
+            Err(e) => return Err(e),
+        };
         for links in lookups {
-            let mut mbid = None;
-            for url in &links {
-                let targets = match musicbrainz::url(&cx.egress, base, url).await {
-                    Ok(t) => t.map(|t| t.targets).unwrap_or_default(),
-                    Err(e) if crate::resolver::egress::over_cap(&e) => continue,
-                    Err(e) if e.is::<crate::resolver::RetryLater>() => {
-                        busy.get_or_insert(e);
-                        break;
-                    }
-                    Err(e) => return Err(e),
-                };
-                let artists: Vec<&String> = targets
+            // The first link MusicBrainz relates to exactly one artist.
+            let mbid = links.iter().find_map(|url| {
+                match answers
+                    .get(url)?
+                    .targets
                     .iter()
                     .filter(|(k, _)| *k == MbKind::Artist)
                     .map(|(_, id)| id)
-                    .collect();
-                if let [id] = artists[..] {
-                    mbid = Some(id.clone());
-                    break;
+                    .collect::<Vec<_>>()[..]
+                {
+                    [id] => Some(id.clone()),
+                    _ => None,
                 }
-            }
+            });
             match mbid {
                 Some(id) => key(&mut found, &id, "musicbrainz"),
                 // Without an identity, the link itself is the fact (the only one that fits
@@ -564,13 +571,7 @@ impl PerformersSource {
                 }
             }
         }
-        // A busy MusicBrainz fails the run: its previous rows stay and it retries in minutes,
-        // recording the page's keys and MusicBrainz's together (recording what was found would
-        // replace the rows without the busy performer's key until the next run, a month away).
-        match busy {
-            Some(e) => Err(e),
-            None => Ok(found),
-        }
+        Ok(found)
     }
 }
 
