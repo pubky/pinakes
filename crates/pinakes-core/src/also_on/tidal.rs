@@ -334,6 +334,19 @@ impl Slot {
 /// then sees the wait, instead of sending under host pacing alone.
 static SLOTS: LazyLock<tokio::sync::Mutex<HashMap<[u8; 32], Slot>>> =
     LazyLock::new(Default::default);
+/// Lookups waiting for a slot right now: a test's TIDAL answers one once the next is pending.
+static WAITING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[doc(hidden)]
+pub fn lookups_waiting() -> usize {
+    WAITING.load(std::sync::atomic::Ordering::SeqCst)
+}
+/// The slots, once this lookup's turn comes.
+async fn slots() -> tokio::sync::MutexGuard<'static, HashMap<[u8; 32], Slot>> {
+    WAITING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let slots = SLOTS.lock().await;
+    WAITING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    slots
+}
 fn slot_key(id: &str, secret: &str) -> [u8; 32] {
     *blake3::hash(format!("{id}\n{secret}").as_bytes()).as_bytes()
 }
@@ -364,7 +377,7 @@ async fn reject(slot: &[u8; 32], token: &str) -> anyhow::Error {
 /// The attributes of one album or track; `None` when TIDAL has no such item in the country.
 async fn item(cx: &Context, kind: Kind, id: &str) -> Result<Option<Value>> {
     let (client_id, secret, slot) = pair_of(cx)?;
-    let mut slots = SLOTS.lock().await;
+    let mut slots = slots().await;
     let s = slots.entry(slot).or_default();
     s.unless_busy()?;
     let token = s.token(cx, client_id, secret).await?;
@@ -412,7 +425,7 @@ async fn item(cx: &Context, kind: Kind, id: &str) -> Result<Option<Value>> {
 /// and one TIDAL leaves out finds that it has none.
 async fn prefetch(cx: &Context, kind: Kind, ids: &[&str]) -> Result<()> {
     let (client_id, secret, slot) = pair_of(cx)?;
-    let mut slots = SLOTS.lock().await;
+    let mut slots = slots().await;
     let s = slots.entry(slot).or_default();
     s.unless_busy()?;
     let token = s.token(cx, client_id, secret).await?;

@@ -126,8 +126,16 @@ impl Transport for Recorded {
                     _ => self.answers.item_status,
                 };
                 if let Some(status) = told {
-                    // Slow enough for a second lookup to be waiting on the host permit.
-                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    // A 429 is released only once a second lookup is pending at the slot (on
+                    // code without the slot none ever is, and the wait runs out instead).
+                    if status == 429 {
+                        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                        while also_on::tidal::lookups_waiting() == 0
+                            && std::time::Instant::now() < until
+                        {
+                            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                        }
+                    }
                     return Ok(json(
                         status,
                         br#"{"errors":[{"code":"TOLD"}]}"#.to_vec(),
@@ -432,8 +440,9 @@ async fn a_forbidden_answer_is_a_refusal_of_the_credentials(pool: sqlx::PgPool) 
     let seen = run(&pool, config, forbidden).await;
     assert!(!seen.iter().any(|s| s.contains("tidal.com")), "{seen:?}");
 }
-/// Two lookups at once (the worker's concurrency) and a 429 on the first: the second waits for
-/// the pair's slot, then sees the wait TIDAL asked for; exactly one request reaches TIDAL.
+/// Two lookups at once (the worker's concurrency) and a 429 on the first, released only once the
+/// second is pending at the pair's slot: the second then sees the wait TIDAL asked for, and
+/// exactly one request reaches TIDAL.
 #[sqlx::test(migrations = "../../migrations")]
 async fn two_concurrent_lookups_send_one_request_after_a_429(pool: sqlx::PgPool) {
     // An album and a track: one of each kind, so neither is batched and both ask alone.
