@@ -673,7 +673,9 @@ among them), ingestion, source and canary state; public `/v1/info` shows
 only the version, what the instance resolves, the limits a client must respect and the OSM
 licence. Stored errors are sanitized classes (dns, connect, timeout, http_4xx, http_5xx, parse,
 policy, too_large for an answer past its size cap; rate_limited for a link waiting for its host's
-budget). Admin info and database metrics are cached for 15 seconds.
+budget). A failed resolve is logged at warn as `resolution failed`, with the resource
+id (`resource_id`), the link's host (`host`; its scheme for a link without one, never its path)
+and this class (`kind`). Admin info and database metrics are cached for 15 seconds.
 
 Canaries (`canary.enabled`) run every `limits.canary_interval_secs`, first one interval after
 startup, on the ordinary workers and host budgets; their state survives restarts and they never

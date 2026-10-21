@@ -235,6 +235,15 @@ pub async fn reextract(pool: &PgPool, routes: &[String]) -> Result<u64> {
     }
 }
 
+/// The host a failure is logged under: the URL's host, or its scheme for a link without one
+/// (`pubky`, `doi`, `isbn`). Never the path or query, which may carry what a link's owner keeps
+/// private.
+fn log_host(uri: &str) -> String {
+    url::Url::parse(uri)
+        .map(|u| u.host_str().unwrap_or(u.scheme()).to_owned())
+        .unwrap_or_default()
+}
+
 pub fn backoff(cfg: &QueueConfig, attempt: u32) -> u64 {
     cfg.backoff_secs
         .saturating_mul(
@@ -601,7 +610,8 @@ async fn finish_job(
     }
     .await;
     if let Err(error) = result {
-        tracing::warn!(resource_id=%job.id,resolver=resolver.name(),error=%error,"resolution failed");
+        // The host and the stored error kind, so a failure can be found by site or by kind.
+        tracing::warn!(resource_id=%job.id,host=%log_host(&job.uri),kind=crate::resolver::error_class(&error),resolver=resolver.name(),error=%error,"resolution failed");
         if error.is::<crate::resolver::interstitial::Blocked>() {
             // A challenge page: unreachable, with the normal failure backoff and dead letter.
             // The last accepted document stays; a wall never confirms disappearance.

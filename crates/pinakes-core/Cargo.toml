@@ -55,4 +55,5 @@ secp256k1 = "=0.30.0"
 serde_yaml_ng = "0.10"
 tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
+tracing-subscriber = { version = "0.3", features = ["json"] }
 http-body-util = "0.1"

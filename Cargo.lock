@@ -2110,6 +2110,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "tracing-subscriber",
  "tzf-rs",
  "url",
  "utoipa",

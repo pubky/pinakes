@@ -678,6 +678,61 @@ async fn an_upstream_failure_is_recorded_by_its_status(pool: PgPool) {
         assert_eq!(error.as_deref(), Some(class), "{status}");
     }
 }
+/// A failed resolve is logged with its resource id, its URL's host and the kind of failure, the
+/// class stored in `last_error`: the line can be found by site or by kind.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_failed_resolve_is_logged_with_its_host_and_kind(pool: PgPool) {
+    #[derive(Clone, Default)]
+    struct Lines(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Lines {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    // A process-wide subscriber: a thread-local one misses events while other tests run (the
+    // callsites' interest is cached for the whole process). The line is found by its resource.
+    static LINES: std::sync::OnceLock<Lines> = std::sync::OnceLock::new();
+    let lines = LINES
+        .get_or_init(|| {
+            let lines = Lines::default();
+            let writer = lines.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .json()
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(move || writer.clone())
+                .finish();
+            tracing::subscriber::set_global_default(subscriber).unwrap();
+            lines
+        })
+        .clone();
+    let a = change(
+        "https://flaky.example.org/page?token=x",
+        "a",
+        "/pub/app/tags/a",
+    );
+    batch(&pool, vec![a], Some("one")).await;
+    let cfg = QueueConfig::default();
+    let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    let _ = queue::run_job(&pool, &FailingResolver(503), &cfg, &job).await;
+    let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+    let line: serde_json::Value = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|l| {
+            l["fields"]["message"] == "resolution failed"
+                && l["fields"]["resource_id"] == job.id.as_str()
+        })
+        .unwrap_or_else(|| panic!("{text}"));
+    assert_eq!(line["fields"]["resource_id"], job.id.as_str());
+    assert_eq!(line["fields"]["host"], "flaky.example.org");
+    assert_eq!(line["fields"]["kind"], "http_5xx");
+    // Never the path or query.
+    assert!(!text.contains("token=x"), "{text}");
+}
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn author_budgets_defer_without_counting_a_failure(pool: PgPool) {
     let a = change("https://example.org/one", "a", "/pub/app/tags/a");
