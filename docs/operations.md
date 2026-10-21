@@ -540,7 +540,8 @@ when the item has no link there; each TMDB, Trakt, Netflix, Goodreads, Letterbox
 label; each DOI one request each to Unpaywall, the NCBI ID Converter and DataCite, and one to
 Crossref when DataCite names its preprint (an arXiv paper one to DataCite, and one to Crossref when
 DataCite names its journal version); each package
-one or two registry requests (and deps.dev when the registry names no provenance); each Steam game
+one registry request, a PyPI package up to two more for its files' provenance, an npm package one
+more for its attestations, and one to deps.dev when the registry names no provenance; each Steam game
 up to four (ProtonDB, PCGamingWiki, GOG GamesDB, GOG); each store link two Wikidata requests; each
 gone page one Wayback CDX request; each Discogs release one Discogs request (the one its card
 makes), and a Discogs master one Wikidata request (the item MusicBrainz relates its release group
