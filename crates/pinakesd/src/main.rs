@@ -210,7 +210,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                 return Ok((
                     config,
                     Command::Print(
-                        "pinakesd [--config PATH] [--migrate | --openapi | reextract ROUTE…|all]"
+                        "pinakesd [--config PATH] [--migrate | --openapi | reextract ROUTE…|all|also-on]"
                             .into(),
                     ),
                 ))
@@ -246,6 +246,8 @@ mod tests {
             assert_eq!(config.as_deref(), Some(std::path::Path::new("x.toml")));
             assert!(matches!(command, super::Command::Reextract(r) if r == ["all"]));
         }
+        let (_, command) = parse(&["reextract", "also-on"]).unwrap();
+        assert!(matches!(command, Command::Reextract(routes) if routes == ["also-on"]));
         let (_, command) = parse(&["reextract", "web", "--config", "x.toml", "osm"]).unwrap();
         assert!(matches!(command, super::Command::Reextract(r) if r == ["web", "osm"]));
         for bad in [

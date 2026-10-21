@@ -1671,3 +1671,74 @@ async fn a_change_saved_during_a_run_is_read_again(pool: PgPool) {
     .unwrap();
     assert!(later);
 }
+
+/// `reextract` queues the re-read resources' also-on lookups too: a card that comes back
+/// unchanged would not run them, and their results may predate a source the upgrade added.
+/// `reextract also-on` queues every resource's lookups without re-reading the card.
+#[sqlx::test(migrations = "../../migrations")]
+async fn reextract_runs_the_also_on_sources_again(pool: PgPool) {
+    let feed = "https://feeds.feedburner.com/dancarlin/history?format=xml";
+    let id = page(&pool, feed, "Dan Carlin's Hardcore History").await;
+    let cx = cx(Config::default());
+    // Read before the source had anything to say: an empty result, next run in a day.
+    let source = Fake::new("podcasts");
+    source.answer(feed, Ok(Found::default()));
+    let sources: Vec<Arc<dyn Source>> = vec![source.clone()];
+    drain(&pool, &cx, &sources).await;
+    let facts = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource_fact WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    assert_eq!(facts().await, 0);
+    // The upgraded source now has a fact for it; nothing reads it until it is due.
+    source.answer(
+        feed,
+        Ok(Found {
+            facts: vec![also_on::Fact::new(
+                "podcast_guid",
+                "a2d0e6a2-c2e2-5d2e-8d0e-6a6f1f3f2b55",
+            )],
+            ..Default::default()
+        }),
+    );
+    also_on::drain(&pool, &cx, &sources, 100).await.unwrap();
+    assert_eq!(facts().await, 0, "not due");
+    // `reextract all` re-reads the card and queues its lookups, unchanged or not.
+    assert!(
+        pinakes_core::queue::reextract(&pool, &["all".into()])
+            .await
+            .unwrap()
+            >= 1
+    );
+    also_on::drain(&pool, &cx, &sources, 100).await.unwrap();
+    assert_eq!(facts().await, 1);
+    // `reextract also-on` alone queues the lookups and leaves the card's fetch where it was.
+    sqlx::query("UPDATE resource SET next_attempt_at=now()+interval '7 days' WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    source.answer(feed, Ok(Found::default()));
+    assert_eq!(
+        pinakes_core::queue::reextract(&pool, &["also-on".into()])
+            .await
+            .unwrap(),
+        1
+    );
+    also_on::drain(&pool, &cx, &sources, 100).await.unwrap();
+    assert_eq!(
+        facts().await,
+        0,
+        "the fresh run's empty result replaced the fact"
+    );
+    let fetch_due: bool =
+        sqlx::query_scalar("SELECT next_attempt_at<=now() FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(!fetch_due, "no re-read of the card");
+}

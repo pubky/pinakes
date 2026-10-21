@@ -119,7 +119,7 @@ that key (`pinakes_core::locks`).
 while the daemon is stopped (it takes the instance lock):
 
 ```sh
-pinakesd --config <path> reextract <route…|all>
+pinakesd --config <path> reextract <route…|all|also-on>
 ```
 
 It re-runs the current classification on the selected rows (all rows, or those routed to or
@@ -128,7 +128,10 @@ classified as one of the named routes or card kinds) and re-queues them at once,
 next fetch re-extracts. A row entering or leaving the OSM route swaps its identity envelope and
 becomes pending, as does an OSM-host URL moving to web. Leases are fenced by a generation bump.
 Aliases have no route and are skipped; a row whose URI now has a static alias root (a new
-tracking parameter, say) becomes an alias of it.
+tracking parameter, say) becomes an alias of it. The selected rows' [also-on](#also-on) lookups are
+queued too: a card that comes back unchanged would not run them again, so results read by an
+older version would stay until they expire. `reextract also-on` queues every resource's also-on
+lookups without re-reading any card; it can be combined with routes.
 
 **Dead letters.** To retry one by hand:
 
@@ -457,6 +460,11 @@ replays captures without network access. Recorded responses for the keyless prob
 The upgrade that adds the worker queues every stored resource once. Run
 `pinakesd --config <path> reextract all` after it as well: music and Wikipedia links already
 stored in another spelling become aliases of their canonical link, and music links are typed.
+After an upgrade that adds also-on sources (the media sources brought `books`, `films`,
+`podcasts` and `titles`), or after setting a source's key (`[podcast_index]`), run
+`pinakesd --config <path> reextract also-on` (or `reextract all`, which includes it): until then
+links already stored keep the results of their last run, without the new source's, for up to its
+lifetime (30 days).
 
 The also-on worker runs every enabled source that applies to a resource ([the API](api.md#also-on))
 after a save that changed its document or status, and again when the shortest lifetime among
