@@ -176,6 +176,25 @@ impl Source for ClinicalTrials {
     fn name(&self) -> &'static str {
         "clinicaltrials"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "clinicaltrials",
+                uri: "https://clinicaltrials.gov/study/NCT04368728",
+                card_type: "MedicalTrial",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "clinicaltrials.gov",
+                path: "/api/v2/studies",
+                query: &[("filter.ids", "NCT04368728")],
+                header: None,
+                content_type: "application/json",
+                file: "search-NCT04368728.json.gz",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         target(uri).is_some()
     }

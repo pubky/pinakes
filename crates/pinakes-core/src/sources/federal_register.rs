@@ -288,6 +288,33 @@ impl Source for FederalRegister {
     fn name(&self) -> &'static str {
         "federal_register"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[
+                E2eSample {
+                    kind: "federal_register",
+                    uri: "fr:2026-18291",
+                    card_type: "Legislation",
+                    group_with: None,
+                },
+                E2eSample {
+                    kind: "federal_register_page",
+                    uri: "https://www.federalregister.gov/d/2026-18291",
+                    card_type: "Legislation",
+                    group_with: Some("federal_register"),
+                },
+            ],
+            answers: &[E2eAnswer {
+                host: "www.federalregister.gov",
+                path: "/api/v1/documents/2026-18291.json",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "fr-2026-18291.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         number(uri).is_some()
     }

@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module';
-import { readFile, writeFile, mkdir, rm } from 'node:fs/promises';
+import { readFile, readdir, writeFile, mkdir, rm } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { once } from 'node:events';
@@ -26,7 +26,11 @@ try {
     keypair = Keypair.fromSecret(secret); secret.fill(0);
     author = keypair.publicKey.z32();
     // A pubky:// sample names an object of the test identity: `{author}` is its public key.
-    samples = JSON.parse((await readFile(process.env.PINAKES_E2E_SAMPLES ?? 'e2e/samples.live.json', 'utf8')).replaceAll('{author}', author));
+    // The shared samples, then each source's own (`e2e/samples/<name>.json`, gone with the source).
+    const files = process.env.PINAKES_E2E_SAMPLES ? [process.env.PINAKES_E2E_SAMPLES]
+      : ['e2e/samples.live.json', ...(await readdir('e2e/samples')).filter(f => f.endsWith('.json')).sort().map(f => `e2e/samples/${f}`)];
+    samples = [];
+    for (const file of files) samples.push(...JSON.parse((await readFile(file, 'utf8')).replaceAll('{author}', author)));
     for (const sample of samples) if (sample.kind === 'ics' && process.env.PINAKES_E2E_ICS_URL) sample.uri = process.env.PINAKES_E2E_ICS_URL;
     // The preflight fetches go out as Pinakes' egress will: the stack this checkout builds sends
     // its version with the operator's contact, else the run's; a running instance says what it

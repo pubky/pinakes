@@ -195,6 +195,11 @@ pub trait Source: Send + Sync {
     /// Take what this source needs from the daemon's configuration at startup (a token another
     /// table holds, say).
     fn configure(&self, _config: &Config) {}
+    /// What the mock end-to-end run tags for this source and the answers its service gives there
+    /// (`examples/e2e_stack.rs`); `None` for a source that run leaves out.
+    fn e2e(&self) -> Option<E2e> {
+        None
+    }
     /// A finished card of `uri` named from the title the also-on sources found since its page
     /// was read (`also_on::media::type_card`), for a page whose card this source names: whether
     /// it applied.
@@ -340,6 +345,57 @@ pub const MAX_HEADERS: usize = 4;
 pub struct Example {
     pub uri: &'static str,
     pub card_type: &'static str,
+}
+
+/// What the mock end-to-end run tags for one source and answers for it: sample links with the
+/// card types they resolve to, and the recorded answers (files in
+/// `tests/fixtures/sources/<name>/`) its requests get.
+#[derive(Clone, Copy, Debug)]
+pub struct E2e {
+    pub samples: &'static [E2eSample],
+    pub answers: &'static [E2eAnswer],
+}
+/// A link the end-to-end run tags.
+#[derive(Clone, Copy, Debug)]
+pub struct E2eSample {
+    /// Its name in the run's report: the source's name, or another for a second link.
+    pub kind: &'static str,
+    pub uri: &'static str,
+    pub card_type: &'static str,
+    /// The kind of a sample whose resource it groups with.
+    pub group_with: Option<&'static str>,
+}
+/// A recorded answer of the mock run, for the requests it matches.
+#[derive(Clone, Copy, Debug)]
+pub struct E2eAnswer {
+    pub host: &'static str,
+    /// The request's path; with a trailing `*`, its start.
+    pub path: &'static str,
+    /// Query parameters the request carries, decoded.
+    pub query: &'static [(&'static str, &'static str)],
+    /// A request header it carries (a service's own identification header).
+    pub header: Option<&'static str>,
+    pub content_type: &'static str,
+    /// The answer's file in the source's fixture directory (`.gz` is unpacked).
+    pub file: &'static str,
+}
+impl E2eAnswer {
+    /// Whether this answers a request for `url` with `headers`.
+    pub fn matches(&self, url: &url::Url, headers: &[(&'static str, String)]) -> bool {
+        let path = match self.path.strip_suffix('*') {
+            Some(start) => url.path().starts_with(start),
+            None => url.path() == self.path,
+        };
+        url.host_str() == Some(self.host)
+            && path
+            && self
+                .query
+                .iter()
+                .all(|(k, v)| url.query_pairs().any(|(qk, qv)| qk == *k && qv == *v))
+            && self
+                .header
+                .is_none_or(|h| headers.iter().any(|(name, _)| name.eq_ignore_ascii_case(h)))
+    }
 }
 
 /// What a source's `resolve` works with.
@@ -977,6 +1033,58 @@ mod tests {
             for (host, rate, in_flight) in source.budgets() {
                 assert!(rate.is_finite() && *rate > 0.0 && !host.is_empty());
                 assert!(in_flight.is_none_or(|n| n >= 1));
+            }
+        }
+    }
+
+    /// A source's mock end-to-end samples are links it reads (or pages it improves), each named
+    /// once in the run; their answers are recorded files of its own that match a request.
+    #[test]
+    fn each_sources_e2e_samples_and_answers_are_its_own() {
+        let mut kinds = std::collections::BTreeSet::new();
+        for source in REGISTRY {
+            let Some(e2e) = source.e2e() else {
+                continue;
+            };
+            let name = source.name();
+            assert!(!e2e.samples.is_empty() && !e2e.answers.is_empty(), "{name}");
+            for sample in e2e.samples {
+                assert!(
+                    sample.kind == name || sample.kind.starts_with(&format!("{name}_")),
+                    "{name}: sample {}",
+                    sample.kind
+                );
+                assert!(kinds.insert(sample.kind), "{} twice", sample.kind);
+                assert!(
+                    source.reads(sample.uri) || source.hooks_pages() || source.hooks_walls(),
+                    "{name} does not read {}",
+                    sample.uri
+                );
+                assert!(!crate::model::type_path(sample.card_type).is_empty());
+            }
+            for answer in e2e.answers {
+                fixture::read(name, answer.file);
+                let mut url = url::Url::parse(&format!(
+                    "https://{}{}",
+                    answer.host,
+                    answer.path.trim_end_matches('*')
+                ))
+                .unwrap();
+                for (k, v) in answer.query {
+                    url.query_pairs_mut().append_pair(k, v);
+                }
+                let headers: Vec<(&'static str, String)> = answer
+                    .header
+                    .map(|h| (h, String::new()))
+                    .into_iter()
+                    .collect();
+                assert!(answer.matches(&url, &headers), "{name}: {url}");
+                if answer.header.is_some() {
+                    assert!(
+                        !answer.matches(&url, &[]),
+                        "{name}: {url} without its header"
+                    );
+                }
             }
         }
     }

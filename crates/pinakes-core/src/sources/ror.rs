@@ -217,6 +217,25 @@ impl Source for Ror {
     fn name(&self) -> &'static str {
         "ror"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "ror",
+                uri: "https://ror.org/03yrm5c26",
+                card_type: "ArchiveOrganization",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "api.ror.org",
+                path: "/v2/organizations/03yrm5c26",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "org-03yrm5c26.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         target(uri).is_some()
     }

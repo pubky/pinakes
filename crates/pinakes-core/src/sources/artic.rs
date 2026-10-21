@@ -127,6 +127,25 @@ impl Source for Artic {
     fn name(&self) -> &'static str {
         "artic"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "artic",
+                uri: "https://www.artic.edu/artworks/27992",
+                card_type: "VisualArtwork",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "api.artic.edu",
+                path: "/api/v1/artworks/27992",
+                query: &[],
+                header: Some("AIC-User-Agent"),
+                content_type: "application/json",
+                file: "artwork-27992.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         target(uri).is_some()
     }

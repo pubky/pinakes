@@ -151,6 +151,29 @@ impl Source for Usgs {
     fn name(&self) -> &'static str {
         "usgs"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "usgs",
+                uri:
+                    "https://earthquake.usgs.gov/earthquakes/eventpage/official20110311054624120_30",
+                card_type: "Event",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "earthquake.usgs.gov",
+                path: "/fdsnws/event/1/query",
+                query: &[
+                    ("eventid", "official20110311054624120_30"),
+                    ("format", "geojson"),
+                ],
+                header: None,
+                content_type: "application/json",
+                file: "event-tohoku.json.gz",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         target(uri).is_some()
     }

@@ -312,6 +312,25 @@ impl Source for Uniprot {
     fn name(&self) -> &'static str {
         "uniprot"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "uniprot",
+                uri: "https://www.uniprot.org/uniprotkb/P69905/entry",
+                card_type: "Protein",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "rest.uniprot.org",
+                path: "/uniprotkb/search",
+                query: &[("query", "accession:P69905")],
+                header: None,
+                content_type: "application/json",
+                file: "search-p69905.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         target(uri).is_some()
     }

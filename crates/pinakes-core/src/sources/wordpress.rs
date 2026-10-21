@@ -196,6 +196,35 @@ impl Source for Wordpress {
     fn name(&self) -> &'static str {
         "wordpress"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "wordpress",
+                uri: "https://bitcoinmagazine.com/markets/no-uptober-yet-as-bitcoin-slips",
+                card_type: "Article",
+                group_with: None,
+            }],
+            answers: &[
+                E2eAnswer {
+                    host: "bitcoinmagazine.com",
+                    path: "/markets/no-uptober-yet-as-bitcoin-slips",
+                    query: &[],
+                    header: None,
+                    content_type: "text/html; charset=UTF-8",
+                    file: "page-no-uptober.html.gz",
+                },
+                E2eAnswer {
+                    host: "bitcoinmagazine.com",
+                    path: "/wp-json/wp/v2/posts/55992",
+                    query: &[],
+                    header: None,
+                    content_type: "application/json",
+                    file: "post-55992.json",
+                },
+            ],
+        })
+    }
     fn reads(&self, _uri: &str) -> bool {
         false
     }

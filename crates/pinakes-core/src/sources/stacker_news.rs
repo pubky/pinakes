@@ -119,6 +119,25 @@ impl Source for StackerNews {
     fn name(&self) -> &'static str {
         "stacker_news"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "stacker_news",
+                uri: "https://stacker.news/items/1596515",
+                card_type: "DiscussionForumPosting",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "stacker.news",
+                path: "/api/graphql",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "sn-item-1596515.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         of_uri(uri).is_some()
     }

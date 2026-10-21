@@ -1,0 +1,7 @@
+[
+  {
+    "kind": "huggingface",
+    "uri": "https://huggingface.co/datasets/openai/gsm8k",
+    "type": "Dataset"
+  }
+]

@@ -130,6 +130,25 @@ impl Source for Gleif {
     fn name(&self) -> &'static str {
         "gleif"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "gleif",
+                uri: "lei:KY37LUS27QQX7BB93L28",
+                card_type: "Organization",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "api.gleif.org",
+                path: "/api/v1/lei-records/KY37LUS27QQX7BB93L28",
+                query: &[],
+                header: None,
+                content_type: "application/vnd.api+json",
+                file: "lei_KY37LUS27QQX7BB93L28_nestle.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         of_uri(uri).is_some()
     }

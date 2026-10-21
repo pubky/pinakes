@@ -96,6 +96,25 @@ impl Source for Courtlistener {
     fn name(&self) -> &'static str {
         "courtlistener"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "courtlistener",
+                uri: "https://www.courtlistener.com/opinion/2812209/obergefell-v-hodges/",
+                card_type: "CreativeWork",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "www.courtlistener.com",
+                path: "/api/rest/v4/search/",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "search_o_cluster_id_2812209_obergefell.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         of_uri(uri).is_some()
     }

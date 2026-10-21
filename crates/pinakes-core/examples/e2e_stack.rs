@@ -72,7 +72,7 @@ impl Fixture {
             keys.public_key().to_hex()
         ))?
         .uri()?;
-        let samples = json!([
+        let mut samples = json!([
             {"kind":"osm","uri":"https://www.openstreetmap.org/node/501","type":"Place"},
             {"kind":"geo","uri":"geo:47,8","type":"Place"},
             {"kind":"osm_alias","uri":"https://www.openstreetmap.org/node/501/history","type":"Place","group_with":"osm"},
@@ -89,51 +89,22 @@ impl Fixture {
             {"kind":"isbn_page","uri":"https://openlibrary.org/books/OL7353617M","type":"Book","group_with":"isbn"},
             {"kind":"media","uri":"https://www.youtube.com/watch?v=fixture","type":"VideoObject"},
             {"kind":"web","uri":"https://web.example/e2e","type":"WebPage"},
-            {"kind":"federal_register","uri":"fr:2026-18291","type":"Legislation"},
-            {"kind":"federal_register_page","uri":"https://www.federalregister.gov/d/2026-18291","type":"Legislation","group_with":"federal_register"},
-            {"kind":"sec","uri":"https://www.sec.gov/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959-index.htm","type":"Report"},
-            {"kind":"ecfr","uri":"https://www.ecfr.gov/current/title-17/section-240.10b-5","type":"Legislation"},
-            {"kind":"gleif","uri":"lei:KY37LUS27QQX7BB93L28","type":"Organization"},
-            {"kind":"uk_parliament_bills","uri":"https://bills.parliament.uk/bills/3737","type":"Legislation"},
-            {"kind":"swiss_parliament","uri":"https://www.parlament.ch/de/ratsbetrieb/suche-curia-vista/geschaeft?AffairId=20223765","type":"CreativeWork"},
-            {"kind":"courtlistener","uri":"https://www.courtlistener.com/opinion/2812209/obergefell-v-hodges/","type":"CreativeWork"},
-            {"kind":"legislation_gov_uk","uri":"https://www.legislation.gov.uk/ukpga/2018/12/contents","type":"Legislation"},
-            {"kind":"eur_lex","uri":"https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32016R0679","type":"Legislation"},
-            {"kind":"fedlex","uri":"https://www.fedlex.admin.ch/eli/cc/1999/404/de","type":"Legislation"},
-            {"kind":"zefix","uri":"https://register.ld.admin.ch/zefix/company/126286","type":"Organization"},
-            {"kind":"govinfo","uri":"https://www.govinfo.gov/app/details/PLAW-117publ58","type":"Legislation"},
-            {"kind":"stacker_news","uri":"https://stacker.news/items/1596515","type":"DiscussionForumPosting"},
-            {"kind":"hacker_news","uri":"https://news.ycombinator.com/item?id=8863","type":"DiscussionForumPosting"},
-            {"kind":"discogs","uri":"https://www.discogs.com/master/21491-Radiohead-OK-Computer","type":"MusicAlbum"},
-            {"kind":"lobsters","uri":"https://lobste.rs/s/wtthju/a5_v1_0","type":"DiscussionForumPosting"},
-            {"kind":"bluesky","uri":"https://bsky.app/profile/did:plc:z72i7hdynmk6r22z27h6tvur/post/3mxzez2m7wk2r","type":"SocialMediaPosting"},
-            {"kind":"mastodon","uri":"https://mastodon.social/@Gargron/1","type":"SocialMediaPosting"},
-            {"kind":"discourse","uri":"https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304","type":"DiscussionForumPosting"},
-            {"kind":"forgejo","uri":"https://codeberg.org/forgejo/forgejo","type":"SoftwareSourceCode"},
-            {"kind":"gitlab","uri":"https://gitlab.com/inkscape/inkscape","type":"SoftwareSourceCode"},
-            {"kind":"wordpress","uri":"https://bitcoinmagazine.com/markets/no-uptober-yet-as-bitcoin-slips","type":"Article"},
-            {"kind":"ghost","uri":"https://www.privacyguides.org/news/2026/10/19/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/","type":"Article"},
-            {"kind":"public_inbox","uri":"https://gnusha.org/pi/bitcoindev/atCSAVprBE-tAnN3@erisian.com.au/","type":"EmailMessage"},
-            {"kind":"feed","uri":"https://www.theblock.co/news/business/2026-10-19-mesh-visa-partner-spend-crypto-stablecoins-421058","type":"Article"},
-            {"kind":"mempool","uri":"https://mempool.space/lightning/node/03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f","type":"LightningNode"},
-            {"kind":"figshare","uri":"https://figshare.com/articles/dataset/Garden_data_set/1018700","type":"Dataset"},
-            {"kind":"huggingface","uri":"https://huggingface.co/datasets/openai/gsm8k","type":"Dataset"},
-            {"kind":"zenodo","uri":"https://zenodo.org/records/1234567","type":"ScholarlyArticle"},
-            {"kind":"artic","uri":"https://www.artic.edu/artworks/27992","type":"VisualArtwork"},
-            {"kind":"cleveland","uri":"https://www.clevelandart.org/art/1958.39","type":"VisualArtwork"},
-            {"kind":"met","uri":"https://www.metmuseum.org/art/collection/search/436535","type":"VisualArtwork"},
-            {"kind":"commons","uri":"https://commons.wikimedia.org/wiki/File:Golden_Gate_Bridge_as_seen_from_Battery_East.jpg","type":"ImageObject"},
-            {"kind":"internet_archive","uri":"https://archive.org/details/bitcoin-whitepaper","type":"Book"},
-            {"kind":"pdb","uri":"https://www.rcsb.org/structure/4HHB","type":"Dataset"},
-            {"kind":"pubchem","uri":"https://pubchem.ncbi.nlm.nih.gov/compound/2244","type":"MolecularEntity"},
-            {"kind":"uniprot","uri":"https://www.uniprot.org/uniprotkb/P69905/entry","type":"Protein"},
-            {"kind":"clinicaltrials","uri":"https://clinicaltrials.gov/study/NCT04368728","type":"MedicalTrial"},
-            {"kind":"gbif","uri":"https://www.gbif.org/species/1341976","type":"Taxon"},
-            {"kind":"inaturalist","uri":"https://www.inaturalist.org/observations/333069440","type":"Observation"},
-            {"kind":"docker_hub","uri":"https://hub.docker.com/_/nginx","type":"SoftwareApplication"},
-            {"kind":"ror","uri":"https://ror.org/03yrm5c26","type":"ArchiveOrganization"},
-            {"kind":"usgs","uri":"https://earthquake.usgs.gov/earthquakes/eventpage/official20110311054624120_30","type":"Event"}
         ]);
+        // Each official source's own samples (`Source::e2e`).
+        let own = samples.as_array_mut().expect("an array");
+        for e2e in pinakes_core::sources::REGISTRY
+            .iter()
+            .filter_map(|s| s.e2e())
+        {
+            for sample in e2e.samples {
+                let mut v =
+                    json!({"kind": sample.kind, "uri": sample.uri, "type": sample.card_type});
+                if let Some(other) = sample.group_with {
+                    v["group_with"] = json!(other);
+                }
+                own.push(v);
+            }
+        }
         Ok(Self {
             boundary: Arc::default(),
             samples,
@@ -149,6 +120,7 @@ struct FixtureDns;
 #[async_trait]
 impl Dns for FixtureDns {
     async fn lookup(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+        // The core services', and every official source's in its mock answers.
         let ip = if matches!(
             host,
             "events.example"
@@ -159,51 +131,9 @@ impl Dns for FixtureDns {
                 | "openlibrary.org"
                 | "publisher.example"
                 | "www.youtube.com"
-                | "api.gleif.org"
-                | "bills-api.parliament.uk"
-                | "ws.parlament.ch"
-                | "www.courtlistener.com"
-                | "www.legislation.gov.uk"
-                | "publications.europa.eu"
-                | "fedlex.data.admin.ch"
-                | "ld.admin.ch"
-                | "www.govinfo.gov"
-                | "stacker.news"
-                | "hacker-news.firebaseio.com"
-                | "api.discogs.com"
-                | "lobste.rs"
-                | "public.api.bsky.app"
-                | "mastodon.social"
-                | "delvingbitcoin.org"
-                | "codeberg.org"
-                | "gitlab.com"
-                | "bitcoinmagazine.com"
-                | "www.privacyguides.org"
-                | "gnusha.org"
-                | "www.theblock.co"
                 | "web.example"
-                | "www.federalregister.gov"
-                | "www.sec.gov"
-                | "www.ecfr.gov"
-                | "mempool.space"
-                | "zenodo.org"
-                | "huggingface.co"
-                | "api.figshare.com"
-                | "collectionapi.metmuseum.org"
-                | "openaccess-api.clevelandart.org"
-                | "api.artic.edu"
-                | "commons.wikimedia.org"
-                | "archive.org"
-                | "rest.uniprot.org"
-                | "pubchem.ncbi.nlm.nih.gov"
-                | "data.rcsb.org"
-                | "clinicaltrials.gov"
-                | "api.inaturalist.org"
-                | "api.gbif.org"
-                | "earthquake.usgs.gov"
-                | "api.ror.org"
-                | "hub.docker.com"
-        ) {
+        ) || source_answers().any(|(_, a)| a.host == host)
+        {
             "93.184.216.34"
         } else {
             "192.0.2.1"
@@ -227,54 +157,12 @@ impl Transport for Fixture {
             "openlibrary.org" if u.path().starts_with("/books/")=>("text/html","<title>Matilda | Open Library</title><link rel=\"canonical\" href=\"https://openlibrary.org/books/OL7353617M/Matilda\">".into()),
             "openlibrary.org"=>("application/json",json!({"ISBN:9780140328721":{"title":"Matilda","authors":[{"name":"Roald Dahl"}],"url":"https://openlibrary.org/books/OL7353617M/Matilda","key":"/books/OL7353617M"},"ISBN:0140328726":{"title":"Matilda","authors":[{"name":"Roald Dahl"}],"url":"https://openlibrary.org/books/OL7353617M/Matilda","key":"/books/OL7353617M"}}).to_string()),
             "www.youtube.com"=>("application/json",json!({"type":"video","title":"Fixture video","thumbnail_url":"https://image.example/a.jpg"}).to_string()),
-            "api.gleif.org" if u.path()=="/api/v1/lei-records/KY37LUS27QQX7BB93L28"=>("application/vnd.api+json",include_str!("../tests/fixtures/sources/gleif/lei_KY37LUS27QQX7BB93L28_nestle.json").into()),
-            "bills-api.parliament.uk" if u.path()=="/api/v1/Bills/3737"=>("application/json",include_str!("../tests/fixtures/sources/uk_parliament_bills/bill_3737_employment_rights_act_2025.json").into()),
-            "ws.parlament.ch" if u.path()=="/odata.svc/Business(ID=20223765,Language='DE')"=>("application/json",include_str!("../tests/fixtures/sources/swiss_parliament/business_20223765_DE_select.json").into()),
-            "www.courtlistener.com" if u.path()=="/api/rest/v4/search/"=>("application/json",include_str!("../tests/fixtures/sources/courtlistener/search_o_cluster_id_2812209_obergefell.json").into()),
-            "www.legislation.gov.uk" if u.path()=="/ukpga/2018/12/introduction/data.xml"=>("application/xml",include_str!("../tests/fixtures/sources/legislation_gov_uk/ukpga_2018_12_introduction.xml").into()),
-            "publications.europa.eu" if u.path()=="/webapi/rdf/sparql"=>("application/sparql-results+json",include_str!("../tests/fixtures/sources/eur_lex/celex_32016R0679.json").into()),
-            "fedlex.data.admin.ch" if u.path()=="/sparqlendpoint"=>("application/sparql-results+json",include_str!("../tests/fixtures/sources/fedlex/eli_cc_1999_404.json").into()),
-            "ld.admin.ch" if u.path()=="/query"=>("application/sparql-results+json",include_str!("../tests/fixtures/sources/zefix/sparql_company_126286_spo.json").into()),
-            "www.govinfo.gov" if u.path()=="/metadata/pkg/PLAW-117publ58/mods.xml"=>("application/xml",gunzip(include_bytes!("../tests/fixtures/sources/govinfo/mods_pkg_PLAW-117publ58.xml.gz"))),
-            "stacker.news" if u.path()=="/api/graphql"=>("application/json",include_str!("../tests/fixtures/sources/stacker_news/sn-item-1596515.json").into()),
-            "api.discogs.com" if u.path()=="/masters/21491"=>("application/json",include_str!("../tests/fixtures/sources/discogs/master-21491.json").into()),
-            "hacker-news.firebaseio.com" if u.path()=="/v0/item/8863.json"=>("application/json",include_str!("../tests/fixtures/sources/hacker_news/hn-item-8863.json").into()),
-            "lobste.rs" if u.path()=="/s/wtthju.json"=>("application/json",include_str!("../tests/fixtures/sources/lobsters/lobsters-wtthju.json").into()),
-            "public.api.bsky.app" if u.path()=="/xrpc/app.bsky.feed.getPostThread"=>("application/json",include_str!("../tests/fixtures/sources/bluesky/bsky-thread-3mxzez2m7wk2r.json").into()),
-            "mastodon.social" if u.path()=="/api/v1/statuses/1"=>("application/json",include_str!("../tests/fixtures/sources/mastodon/status-1.json").into()),
-            "delvingbitcoin.org" if u.path()=="/t/304.json"=>("application/json",include_str!("../tests/fixtures/sources/discourse/topic-304.json").into()),
-            "codeberg.org" if u.path()=="/api/v1/repos/forgejo/forgejo"=>("application/json",include_str!("../tests/fixtures/sources/forgejo/repo-forgejo.json").into()),
-            "gitlab.com" if u.path()=="/api/v4/projects/inkscape%2Finkscape"=>("application/json",include_str!("../tests/fixtures/sources/gitlab/project-inkscape.json").into()),
-            "bitcoinmagazine.com" if u.path()=="/markets/no-uptober-yet-as-bitcoin-slips"=>("text/html; charset=UTF-8",gunzip(include_bytes!("../tests/fixtures/sources/wordpress/page-no-uptober.html.gz"))),
-            "bitcoinmagazine.com" if u.path()=="/wp-json/wp/v2/posts/55992"=>("application/json",include_str!("../tests/fixtures/sources/wordpress/post-55992.json").into()),
-            "www.privacyguides.org" if u.path()=="/ghost/api/content/posts/slug/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/"=>("application/json",include_str!("../tests/fixtures/sources/ghost/post-cellebrite.json").into()),
-            "www.privacyguides.org" if u.path()=="/news/2026/10/19/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/"=>("text/html; charset=utf-8",include_str!("../tests/fixtures/sources/ghost/page-cellebrite.html").into()),
-            "gnusha.org" if u.path()=="/pi/bitcoindev/atCSAVprBE-tAnN3@erisian.com.au/raw"=>("application/mbox; charset=UTF-8",include_str!("../tests/fixtures/sources/public_inbox/raw-towns.mbox").into()),
-            "www.theblock.co" if u.path()=="/feed"=>("text/xml; charset=UTF-8",include_str!("../tests/fixtures/sources/feed/theblock-rss.xml").into()),
-            "www.theblock.co" if u.path()=="/news/business/2026-10-19-mesh-visa-partner-spend-crypto-stablecoins-421058"=>("text/html; charset=UTF-8",include_str!("../tests/fixtures/sources/feed/theblock-article.html").into()),
             "web.example"=>("text/html","<title>Fixture page</title>".into()),
-            "www.ecfr.gov" if u.path()=="/api/versioner/v1/ancestry/current/title-17.json"=>("application/json",include_str!("../tests/fixtures/sources/ecfr/ancestry_current_title-17_section-240.10b-5.json").into()),
-            "www.sec.gov" if u.path()=="/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959.hdr.sgml"=>("text/sgml",include_str!("../tests/fixtures/sources/sec/sec-hdr-ms-s1.sgml").into()),
-            "www.federalregister.gov" if u.path()=="/api/v1/documents/2026-18291.json"=>("application/json",include_str!("../tests/fixtures/sources/federal_register/fr-2026-18291.json").into()),
-            "mempool.space" if u.path()=="/api/v1/lightning/nodes/03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f"=>("application/json",include_str!("../tests/fixtures/sources/mempool/node-acinq.json").into()),
-            "api.figshare.com" if u.path()=="/v2/articles/1018700"=>("application/json",include_str!("../tests/fixtures/sources/figshare/article-1018700.json").into()),
-            "huggingface.co" if u.path()=="/api/datasets/openai/gsm8k"=>("application/json",include_str!("../tests/fixtures/sources/huggingface/dataset-gsm8k.json").into()),
-            "zenodo.org" if u.path()=="/api/records/1234567"=>("application/json",include_str!("../tests/fixtures/sources/zenodo/record-1234567.json").into()),
-            "api.artic.edu" if u.path()=="/api/v1/artworks/27992"=>{ensure!(o.headers.iter().any(|(k,_)|*k=="AIC-User-Agent"),"missing AIC-User-Agent");("application/json",include_str!("../tests/fixtures/sources/artic/artwork-27992.json").into())},
-            "openaccess-api.clevelandart.org" if u.path()=="/api/artworks/1958.39"=>("application/json",include_str!("../tests/fixtures/sources/cleveland/artwork-1958.39.json").into()),
-            "collectionapi.metmuseum.org" if u.path()=="/public/collection/v1/objects/436535"=>("application/json",include_str!("../tests/fixtures/sources/met/object-436535.json").into()),
-            "archive.org" if u.path()=="/metadata/bitcoin-whitepaper/metadata"=>("application/json",include_str!("../tests/fixtures/sources/internet_archive/bitcoin-whitepaper.json").into()),
-            "commons.wikimedia.org" if u.path()=="/w/api.php" && u.query_pairs().any(|(k,v)| k=="titles" && v=="File:Golden Gate Bridge as seen from Battery East.jpg")=>("application/json",include_str!("../tests/fixtures/sources/commons/golden-gate.json").into()),
-            "data.rcsb.org" if u.path()=="/rest/v1/core/entry/4HHB"=>("application/json",include_str!("../tests/fixtures/sources/pdb/entry-4hhb.json").into()),
-            "pubchem.ncbi.nlm.nih.gov" if u.path().starts_with("/rest/pug/compound/cid/2244/property/")=>("application/json",include_str!("../tests/fixtures/sources/pubchem/compound-2244.json").into()),
-            "rest.uniprot.org" if u.path()=="/uniprotkb/search" && u.query_pairs().any(|(k,v)| k=="query" && v=="accession:P69905")=>("application/json",include_str!("../tests/fixtures/sources/uniprot/search-p69905.json").into()),
-            "api.gbif.org" if u.path()=="/v1/species/1341976"=>("application/json",include_str!("../tests/fixtures/sources/gbif/species-1341976.json").into()),
-            "api.inaturalist.org" if u.path()=="/v1/observations/333069440"=>("application/json",gunzip(include_bytes!("../tests/fixtures/sources/inaturalist/observation-333069440.json.gz"))),
-            "clinicaltrials.gov" if u.path()=="/api/v2/studies" && u.query_pairs().any(|(k,v)| k=="filter.ids" && v=="NCT04368728")=>("application/json",gunzip(include_bytes!("../tests/fixtures/sources/clinicaltrials/search-NCT04368728.json.gz"))),
-            "hub.docker.com" if u.path()=="/v2/repositories/library/nginx/"=>("application/json",include_str!("../tests/fixtures/sources/docker_hub/repo-library-nginx.json").into()),
-            "api.ror.org" if u.path()=="/v2/organizations/03yrm5c26"=>("application/json",include_str!("../tests/fixtures/sources/ror/org-03yrm5c26.json").into()),
-            "earthquake.usgs.gov" if u.path()=="/fdsnws/event/1/query" && u.query()==Some("eventid=official20110311054624120_30&format=geojson")=>("application/json",gunzip(include_bytes!("../tests/fixtures/sources/usgs/event-tohoku.json.gz"))),
-            _=>bail!("no fixture for upstream host {}",u.host_str().unwrap_or("")),
+            _=>match source_answers().find(|(_,a)|a.matches(u,&o.headers)) {
+                // An official source's recorded answer (its `Source::e2e`).
+                Some((source,a))=>(a.content_type,fixture(source,a.file)?),
+                None=>bail!("no fixture for upstream host {}",u.host_str().unwrap_or("")),
+            },
         };
         Ok(Fetched {
             permanent_redirect: false,
@@ -355,6 +243,26 @@ struct Page {
     limit: usize,
 }
 /// A recorded fixture stored gzip-compressed, as text.
+/// Every official source's recorded mock answers, with the source's name.
+fn source_answers() -> impl Iterator<Item = (&'static str, pinakes_core::sources::E2eAnswer)> {
+    pinakes_core::sources::REGISTRY
+        .iter()
+        .filter_map(|s| Some((s.name(), s.e2e()?)))
+        .flat_map(|(name, e2e)| e2e.answers.iter().map(move |a| (name, *a)))
+}
+/// A recorded answer of `source` (`tests/fixtures/sources/{source}/{file}`, `.gz` unpacked).
+fn fixture(source: &str, file: &str) -> Result<String> {
+    let path = format!(
+        "{}/tests/fixtures/sources/{source}/{file}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let raw = std::fs::read(&path).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
+    Ok(if file.ends_with(".gz") {
+        gunzip(&raw)
+    } else {
+        String::from_utf8(raw)?
+    })
+}
 fn gunzip(raw: &[u8]) -> String {
     use std::io::Read;
     let mut out = String::new();

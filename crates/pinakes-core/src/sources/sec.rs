@@ -610,6 +610,29 @@ impl Source for Sec {
     fn name(&self) -> &'static str {
         "sec"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[
+                E2eSample {
+                    kind: "sec",
+                    uri: "https://www.sec.gov/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959-index.htm",
+                    card_type: "Report",
+                    group_with: None,
+                },
+            ],
+            answers: &[
+                E2eAnswer {
+                    host: "www.sec.gov",
+                    path: "/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959.hdr.sgml",
+                    query: &[],
+                    header: None,
+                    content_type: "text/sgml",
+                    file: "sec-hdr-ms-s1.sgml",
+                },
+            ],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         Target::of_uri(uri).is_some()
     }

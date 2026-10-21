@@ -168,6 +168,25 @@ impl Source for Pdb {
     fn name(&self) -> &'static str {
         "pdb"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "pdb",
+                uri: "https://www.rcsb.org/structure/4HHB",
+                card_type: "Dataset",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "data.rcsb.org",
+                path: "/rest/v1/core/entry/4HHB",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "entry-4hhb.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         target(uri).is_some()
     }

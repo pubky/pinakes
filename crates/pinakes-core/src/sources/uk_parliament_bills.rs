@@ -124,6 +124,25 @@ impl Source for UkParliamentBills {
     fn name(&self) -> &'static str {
         "uk_parliament_bills"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "uk_parliament_bills",
+                uri: "https://bills.parliament.uk/bills/3737",
+                card_type: "Legislation",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "bills-api.parliament.uk",
+                path: "/api/v1/Bills/3737",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "bill_3737_employment_rights_act_2025.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         of_uri(uri).is_some()
     }

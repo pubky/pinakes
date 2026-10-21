@@ -156,6 +156,25 @@ impl Source for DockerHub {
     fn name(&self) -> &'static str {
         "docker_hub"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "docker_hub",
+                uri: "https://hub.docker.com/_/nginx",
+                card_type: "SoftwareApplication",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "hub.docker.com",
+                path: "/v2/repositories/library/nginx/",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "repo-library-nginx.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         target(uri).is_some()
     }

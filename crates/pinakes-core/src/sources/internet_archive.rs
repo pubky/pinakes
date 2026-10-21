@@ -267,6 +267,25 @@ impl Source for InternetArchive {
     fn name(&self) -> &'static str {
         "internet_archive"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "internet_archive",
+                uri: "https://archive.org/details/bitcoin-whitepaper",
+                card_type: "Book",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "archive.org",
+                path: "/metadata/bitcoin-whitepaper/metadata",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "bitcoin-whitepaper.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         target(uri).is_some()
     }

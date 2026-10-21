@@ -228,6 +228,37 @@ impl Source for Feed {
     fn name(&self) -> &'static str {
         "feed"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[
+                E2eSample {
+                    kind: "feed",
+                    uri: "https://www.theblock.co/news/business/2026-10-19-mesh-visa-partner-spend-crypto-stablecoins-421058",
+                    card_type: "Article",
+                    group_with: None,
+                },
+            ],
+            answers: &[
+                E2eAnswer {
+                    host: "www.theblock.co",
+                    path: "/feed",
+                    query: &[],
+                    header: None,
+                    content_type: "text/xml; charset=UTF-8",
+                    file: "theblock-rss.xml",
+                },
+                E2eAnswer {
+                    host: "www.theblock.co",
+                    path: "/news/business/2026-10-19-mesh-visa-partner-spend-crypto-stablecoins-421058",
+                    query: &[],
+                    header: None,
+                    content_type: "text/html; charset=UTF-8",
+                    file: "theblock-article.html",
+                },
+            ],
+        })
+    }
     fn reads(&self, _uri: &str) -> bool {
         false
     }

@@ -358,6 +358,25 @@ impl Source for HuggingFace {
     fn name(&self) -> &'static str {
         "huggingface"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "huggingface",
+                uri: "https://huggingface.co/datasets/openai/gsm8k",
+                card_type: "Dataset",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "huggingface.co",
+                path: "/api/datasets/openai/gsm8k",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "dataset-gsm8k.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         target(uri).is_some()
     }

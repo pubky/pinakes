@@ -204,6 +204,25 @@ impl Source for Ecfr {
     fn name(&self) -> &'static str {
         "ecfr"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "ecfr",
+                uri: "https://www.ecfr.gov/current/title-17/section-240.10b-5",
+                card_type: "Legislation",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "www.ecfr.gov",
+                path: "/api/versioner/v1/ancestry/current/title-17.json",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "ancestry_current_title-17_section-240.10b-5.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         Target::of_uri(uri).is_some()
     }

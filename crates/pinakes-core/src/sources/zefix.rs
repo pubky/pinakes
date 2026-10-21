@@ -167,6 +167,25 @@ impl Source for Zefix {
     fn name(&self) -> &'static str {
         "zefix"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "zefix",
+                uri: "https://register.ld.admin.ch/zefix/company/126286",
+                card_type: "Organization",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "ld.admin.ch",
+                path: "/query",
+                query: &[],
+                header: None,
+                content_type: "application/sparql-results+json",
+                file: "sparql_company_126286_spo.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         of_uri(uri).is_some()
     }

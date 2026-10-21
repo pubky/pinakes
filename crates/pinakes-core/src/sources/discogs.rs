@@ -242,6 +242,25 @@ impl Source for Discogs {
     fn name(&self) -> &'static str {
         "discogs"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "discogs",
+                uri: "https://www.discogs.com/master/21491-Radiohead-OK-Computer",
+                card_type: "MusicAlbum",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "api.discogs.com",
+                path: "/masters/21491",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "master-21491.json",
+            }],
+        })
+    }
     fn configure(&self, config: &crate::config::Config) {
         configure(config);
     }

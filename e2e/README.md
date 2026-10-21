@@ -3,8 +3,10 @@
 The harness builds tags with `pubky-app-specs` and, in live mode, writes them with
 `@synonymdev/pubky`. The samples cover an OSM node, geo pin, event page,
 ICS feed (the mock exercises recurrence), NIP-52 naddr, DOI with its publisher page, ISBN, oEmbed
-video, ordinary web page, official-API sources (a Federal Register document by number with one of
-its page addresses, an alias, an SEC EDGAR filing, an eCFR section and a GLEIF LEI record, a UK Parliament bill, a Swiss Parliament business item, a CourtListener opinion, a UK Act on legislation.gov.uk, an EUR-Lex act, a Fedlex act, a Zefix company, a GovInfo public law, a Stacker News post, a Hacker News story, a Discogs master, a Lobsters story, a Bluesky post, a Mastodon post, a Discourse topic, a Codeberg file, a GitLab file, a WordPress post, a Ghost post, a mailing-list message, a walled article found in its feed; and one link per data source: a Lightning node and the pizza transaction on mempool.space, an earthquake, Docker Hub images, ROR organisations, Hugging Face, Zenodo and Figshare records, Met, Cleveland and Art Institute of Chicago artworks, an Internet Archive item, a Commons file, a PDB structure, UniProt proteins, PubChem compounds, GBIF and iNaturalist records and a ClinicalTrials.gov study; film, series, book and podcast pages whose cards must carry the object's name, not the page's), and live a Pubky object of another app. It checks the
+video, ordinary web page, one or more links of every source this build has (each official
+source's own samples: its `Source::e2e` sample and recorded answers in the mock, and
+`e2e/samples/<name>.json` live, where the also-on sources' samples are too, such as music, film,
+book and podcast pages whose cards must carry the object's name, not the page's), and live a Pubky object of another app. It checks the
 Nexus reference feed, Pinakes typed documents, facets, bbox/Event/venue search,
 occurrences, changes, group membership, same-event hints and Nexus hydration by URI (`by_ids` with `uris`: the
 cards' own `uri` and `details.aliases`, and an occurrence's `occurrence.feed_uri`, matched by
@@ -55,8 +57,8 @@ CARGO_PROFILE_DEV_DEBUG=0 scripts/e2e --isolated-live
 ```
 
 `--isolated-live` uses the real SDK, homeserver, Nexus and public upstreams. Its private Pinakes
-driver reads the Nexus feed but resolves only the samples it is given (those in `samples.live.json`
-by default, at most 128, one at a time), through the production queue path (batched completion,
+driver reads the Nexus feed but resolves only the samples it is given (the live samples below by
+default, at most 128, one at a time), through the production queue path (batched completion,
 leases and resolver policy), and runs the also-on sources for them. Music samples must be typed and
 named by what they are (Spotify, Apple Music, TIDAL, Bandcamp, SoundCloud; `name` checks a card's
 name, Daft Punk's TIDAL page); the Spotify track sample must show Deezer as a derived link, found
@@ -108,8 +110,9 @@ and SIGINT/SIGTERM as well as success, retries deletion, and records each result
 If the process is killed or cleanup fails, use the printed journal with the same
 identity to delete only its listed paths; do not clear the whole namespace.
 
-`PINAKES_E2E_SAMPLES` may select a JSON file with the same kinds as
-`samples.live.json`; update stale public samples explicitly. The ICS default is
+The live samples are `samples.live.json` and every `samples/<name>.json` (each source's own,
+removed with the source). `PINAKES_E2E_SAMPLES` may select one JSON file of samples instead;
+update stale public samples explicitly. The ICS default is
 Google’s published Swiss holiday calendar, public by design with no capability
 token. `PINAKES_E2E_ICS_URL` optionally selects another public feed; never commit
 Outlook/iCloud/Nextcloud/Proton share URLs or capability tokens.

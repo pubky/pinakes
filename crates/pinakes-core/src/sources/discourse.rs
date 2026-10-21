@@ -240,6 +240,25 @@ impl Source for Discourse {
     fn name(&self) -> &'static str {
         "discourse"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "discourse",
+                uri: "https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304",
+                card_type: "DiscussionForumPosting",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "delvingbitcoin.org",
+                path: "/t/304.json",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "topic-304.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         Target::of_uri(uri).is_some_and(|t| FORUMS.get(t.host()) != Some(false))
     }

@@ -131,6 +131,25 @@ impl Source for Met {
     fn name(&self) -> &'static str {
         "met"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "met",
+                uri: "https://www.metmuseum.org/art/collection/search/436535",
+                card_type: "VisualArtwork",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "collectionapi.metmuseum.org",
+                path: "/public/collection/v1/objects/436535",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "object-436535.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         target(uri).is_some()
     }

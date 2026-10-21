@@ -1,0 +1,7 @@
+[
+  {
+    "kind": "docker_hub",
+    "uri": "https://hub.docker.com/_/nginx",
+    "type": "SoftwareApplication"
+  }
+]

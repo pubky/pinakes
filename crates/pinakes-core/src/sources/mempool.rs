@@ -811,6 +811,29 @@ impl Source for Mempool {
     fn name(&self) -> &'static str {
         "mempool"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[
+                E2eSample {
+                    kind: "mempool",
+                    uri: "https://mempool.space/lightning/node/03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f",
+                    card_type: "LightningNode",
+                    group_with: None,
+                },
+            ],
+            answers: &[
+                E2eAnswer {
+                    host: "mempool.space",
+                    path: "/api/v1/lightning/nodes/03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f",
+                    query: &[],
+                    header: None,
+                    content_type: "application/json",
+                    file: "node-acinq.json",
+                },
+            ],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         target(uri).is_some()
     }

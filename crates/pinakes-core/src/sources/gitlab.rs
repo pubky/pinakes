@@ -395,6 +395,25 @@ impl Source for Gitlab {
     fn name(&self) -> &'static str {
         "gitlab"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "gitlab",
+                uri: "https://gitlab.com/inkscape/inkscape",
+                card_type: "SoftwareSourceCode",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "gitlab.com",
+                path: "/api/v4/projects/inkscape%2Finkscape",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "project-inkscape.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         Target::of_uri(uri).is_some_and(|t| match INSTANCES.get(&t.host) {
             Some(known) => known,

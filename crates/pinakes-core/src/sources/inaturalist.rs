@@ -268,6 +268,25 @@ impl Source for Inaturalist {
     fn name(&self) -> &'static str {
         "inaturalist"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "inaturalist",
+                uri: "https://www.inaturalist.org/observations/333069440",
+                card_type: "Observation",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "api.inaturalist.org",
+                path: "/v1/observations/333069440",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "observation-333069440.json.gz",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         target(uri).is_some()
     }

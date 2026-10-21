@@ -82,6 +82,25 @@ impl Source for Lobsters {
     fn name(&self) -> &'static str {
         "lobsters"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "lobsters",
+                uri: "https://lobste.rs/s/wtthju/a5_v1_0",
+                card_type: "DiscussionForumPosting",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "lobste.rs",
+                path: "/s/wtthju.json",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "lobsters-wtthju.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         of_uri(uri).is_some()
     }

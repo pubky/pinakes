@@ -248,6 +248,25 @@ impl Source for Bluesky {
     fn name(&self) -> &'static str {
         "bluesky"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "bluesky",
+                uri: "https://bsky.app/profile/did:plc:z72i7hdynmk6r22z27h6tvur/post/3mxzez2m7wk2r",
+                card_type: "SocialMediaPosting",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "public.api.bsky.app",
+                path: "/xrpc/app.bsky.feed.getPostThread",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "bsky-thread-3mxzez2m7wk2r.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         Target::of_uri(uri).is_some()
     }

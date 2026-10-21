@@ -431,6 +431,25 @@ impl Source for Forgejo {
     fn name(&self) -> &'static str {
         "forgejo"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "forgejo",
+                uri: "https://codeberg.org/forgejo/forgejo",
+                card_type: "SoftwareSourceCode",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "codeberg.org",
+                path: "/api/v1/repos/forgejo/forgejo",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "repo-forgejo.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         Target::of_uri(uri).is_some_and(|t| match INSTANCES.get(&t.host) {
             Some(known) => known,

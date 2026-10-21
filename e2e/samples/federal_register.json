@@ -1,0 +1,17 @@
+[
+  {
+    "kind": "federal_register",
+    "uri": "fr:2026-18291",
+    "type": "Legislation",
+    "derived": [
+      "GovInfo",
+      "Regulations.gov"
+    ]
+  },
+  {
+    "kind": "federal_register_page",
+    "uri": "https://www.federalregister.gov/documents/2026/09/09/2026-18291/self-regulatory-organizations-nasdaq-texas-llc-notice-of-filing-and-order-granting-accelerated",
+    "type": "Legislation",
+    "group_with": "federal_register"
+  }
+]

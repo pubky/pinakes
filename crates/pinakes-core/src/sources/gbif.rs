@@ -298,6 +298,25 @@ impl Source for Gbif {
     fn name(&self) -> &'static str {
         "gbif"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "gbif",
+                uri: "https://www.gbif.org/species/1341976",
+                card_type: "Taxon",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "api.gbif.org",
+                path: "/v1/species/1341976",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "species-1341976.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         target(uri).is_some()
     }

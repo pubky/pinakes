@@ -243,6 +243,25 @@ impl Source for EurLex {
     fn name(&self) -> &'static str {
         "eur_lex"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "eur_lex",
+                uri: "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32016R0679",
+                card_type: "Legislation",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "publications.europa.eu",
+                path: "/webapi/rdf/sparql",
+                query: &[],
+                header: None,
+                content_type: "application/sparql-results+json",
+                file: "celex_32016R0679.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         Key::of_uri(uri).is_some()
     }
