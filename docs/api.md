@@ -755,8 +755,8 @@ A card's `also_on` says where else the same thing is: first the other members of
 are ordered by service name; each URL appears once (a tagged member wins) and never the card
 itself. A card carries at most 8 entries, and one link per service (by `site`): for a music
 service a tagged member first, because someone used that link (of several, the one on the
-recording's original album, the `original_album` fact), then the derived link most group members
-name; none on the card's own service (an artist's card never shows another page of its service,
+recording's original album, the `original_album` fact; a member whose card is not read yet counts
+for the service its URL names), then the derived link most group members name; none on the card's own service (an artist's card never shows another page of its service,
 such as the band's earlier name, which Wikidata may list as a second ID). Tagged members that are
 not music always show. `GET /v1/resources/{id}` shows the same, up to 256 entries, and
 lists every link in `details.also_on` (several of one service too). A derived link can be unavailable in some

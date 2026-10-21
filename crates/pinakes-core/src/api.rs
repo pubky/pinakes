@@ -836,6 +836,7 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
         (Some(_), Some(d)) => present(Some(&d.url)).unwrap_or(uri),
         _ => uri,
     };
+    let also_on = also_on_entries(&row["also_on"], Some(&uri));
     Ok(Card {
         site: site(
             &uri,
@@ -860,7 +861,7 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
                 id: id.into(),
                 size: g["size"].as_i64().unwrap_or(1),
             }),
-        also_on: also_on_entries(&row["also_on"]),
+        also_on,
         attribution: credits(
             row["osm_id"]
                 .as_i64()
@@ -941,9 +942,12 @@ fn merge_facts(
     (!merged.is_empty()).then_some(merged)
 }
 /// A card's `also_on` entries from the `also_on()` rows: a member's site as its card names it, a
-/// derived link's service name.
-fn also_on_entries(rows: &Value) -> Vec<AlsoOn> {
-    rows.as_array()
+/// derived link's service name. For a card's view (`card`, its own URI), a music member whose
+/// card is not read yet counts for the service its URL names, as the card itself does: no derived
+/// link on that service shows beside it (`also_on()` counts only what the stored cards say).
+fn also_on_entries(rows: &Value, card: Option<&str>) -> Vec<AlsoOn> {
+    let entries: Vec<AlsoOn> = rows
+        .as_array()
         .into_iter()
         .flatten()
         .map(|e| {
@@ -962,6 +966,29 @@ fn also_on_entries(rows: &Value) -> Vec<AlsoOn> {
                 kind: e["kind"].as_str().map(str::to_owned),
                 at: e["at"].as_str().and_then(|s| s.parse().ok()),
             }
+        })
+        .collect();
+    let Some(card) = card else {
+        return entries;
+    };
+    let taken: std::collections::BTreeSet<String> = std::iter::once(card)
+        .chain(
+            entries
+                .iter()
+                .filter(|e| !e.derived && crate::music::parse(&e.uri).is_some())
+                .map(|e| e.uri.as_str()),
+        )
+        .filter_map(service_site)
+        .map(|s| s.to_lowercase())
+        .collect();
+    entries
+        .into_iter()
+        .filter(|e| {
+            !e.derived
+                || !e
+                    .site
+                    .as_deref()
+                    .is_some_and(|s| taken.contains(&s.to_lowercase()))
         })
         .collect()
 }
@@ -994,7 +1021,7 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
             }),
             from: crate::sources::from(d).map(str::to_owned),
             facts: merge_facts(crate::sources::facts(d), facts.clone()),
-            also_on: also_on_entries(&row["also_on_all"]),
+            also_on: also_on_entries(&row["also_on_all"], None),
             aliases: aliases.clone(),
             updated_at: row["resolved_at"].as_str().and_then(|s| s.parse().ok()),
             maybe_same: same_events(row),
@@ -1011,7 +1038,7 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
             organizer: None,
             from: None,
             facts,
-            also_on: also_on_entries(&row["also_on_all"]),
+            also_on: also_on_entries(&row["also_on_all"], None),
             aliases,
             updated_at: None,
             maybe_same: None,

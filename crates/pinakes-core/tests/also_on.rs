@@ -1288,6 +1288,7 @@ async fn a_card_shows_one_link_per_service(pool: PgPool) {
     let deezer = "https://www.deezer.com/track/4329888262";
     let tagged = "https://tidal.com/track/534050211";
     let regional = "https://tidal.com/track/567396540";
+    let pending = "https://music.apple.com/us/song/1";
     let mut ids = vec![];
     for (uri, site) in [(deezer, "Deezer"), (tagged, "TIDAL")] {
         let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -1297,6 +1298,8 @@ async fn a_card_shows_one_link_per_service(pool: PgPool) {
         store::save_document(&pool, &id, 0, &d).await.unwrap();
         ids.push(id);
     }
+    // A tagged Apple link whose card is not read yet.
+    ids.push(store::ensure_resource(&pool, pending).await.unwrap());
     let hub = Fake::new("music");
     let recording = "mb:recording:b1a9c0e9-d987-4042-ae91-78d6a3267d69";
     hub.answer(
@@ -1307,6 +1310,13 @@ async fn a_card_shows_one_link_per_service(pool: PgPool) {
                 Link::new(regional, "TIDAL", "musicbrainz"),
                 Link::new("https://open.spotify.com/track/a", "Spotify", "musicbrainz"),
                 Link::new("https://open.spotify.com/track/b", "Spotify", "musicbrainz"),
+                // The first is tagged but not read yet: it joins by this key.
+                Link::new(pending, "Apple Music", "musicbrainz").keyed(recording),
+                Link::new(
+                    "https://music.apple.com/us/song/2",
+                    "Apple Music",
+                    "musicbrainz",
+                ),
             ],
             ..Default::default()
         }),
@@ -1360,11 +1370,16 @@ async fn a_card_shows_one_link_per_service(pool: PgPool) {
         of(&card["also_on"], "Spotify"),
         ["https://open.spotify.com/track/b"]
     );
+    // The pending member counts for Apple Music by its URL: the card shows it alone there, named
+    // by its service, not the derived Apple link beside it.
+    assert_eq!(of(&card["also_on"], "Apple Music"), [pending], "{card}");
     // The read shows the card's view; its details list every link.
     let read = get(&app, &format!("/v1/resources/{}", ids[0])).await;
     assert_eq!(of(&read["also_on"], "TIDAL"), [tagged]);
     assert_eq!(of(&read["details"]["also_on"], "TIDAL"), [tagged, regional]);
     assert_eq!(of(&read["details"]["also_on"], "Spotify").len(), 2);
+    assert_eq!(of(&read["also_on"], "Apple Music"), [pending]);
+    assert_eq!(of(&read["details"]["also_on"], "Apple Music").len(), 2);
 }
 
 /// A card's own service has its link, the card: Radiohead's Discogs artist never shows "On A
