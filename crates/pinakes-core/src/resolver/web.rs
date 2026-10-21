@@ -1343,10 +1343,12 @@ mod tests {
                 ),
                 (
                     "Support Act",
+                    // What keys the performer first: its MusicBrainz page, then a page
+                    // MusicBrainz relates, then the rest (`abc` is no Spotify ID).
                     vec![
+                        "https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711",
                         "https://www.songkick.com/artists/1-support",
-                        "https://open.spotify.com/artist/abc",
-                        "https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711"
+                        "https://open.spotify.com/artist/abc"
                     ]
                 ),
                 ("Someone Else", vec![]),
@@ -1365,6 +1367,22 @@ mod tests {
         );
         let out = extract("https://venue.example/tonight", &fetched, 100);
         assert_eq!(out.doc.name.as_deref(), Some("Tonight"));
+        assert!(
+            out.doc.event.performers.is_empty(),
+            "{:?}",
+            out.doc.event.performers
+        );
+        // The page's only event node is another event (a body script, its url not the page):
+        // the card takes it, but not its performers. (A head script counts as the page's own.)
+        let body = r#"<html><head><title>Venue</title></head><body><p>Shows</p><script type="application/ld+json">{"@type":"MusicEvent","name":"Next week","url":"https://venue.example/next-week","startDate":"2027-05-10T19:30:00","performer":[{"@type":"MusicGroup","name":"Radiohead","sameAs":"https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711"}]}</script></body></html>"#;
+        let fetched = crate::sources::fixture::page(
+            "https://venue.example/tonight",
+            "text/html",
+            body.as_bytes().to_vec(),
+            None,
+        );
+        let out = extract("https://venue.example/tonight", &fetched, 100);
+        assert_eq!(out.doc.type_name, "MusicEvent");
         assert!(
             out.doc.event.performers.is_empty(),
             "{:?}",

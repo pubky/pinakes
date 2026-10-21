@@ -377,6 +377,13 @@ pub fn performers(v: &Value, base: &Url) -> Vec<super::Performer> {
                     }
                 }
             }
+            // What keys the performer first (a MusicBrainz artist page, then a page MusicBrainz
+            // can relate), so trimming a big line-up drops the unreadable links before them.
+            links.sort_by_key(|l| match crate::music_sources::artist_link(l) {
+                Some(crate::music_sources::ArtistLink::Mbid(_)) => 0,
+                Some(crate::music_sources::ArtistLink::Lookup(_)) => 1,
+                None => 2,
+            });
             Some(super::Performer { name, links })
         })
         .collect()
@@ -553,5 +560,34 @@ mod performer_tests {
         jsonld(&mut doc, &own, &base);
         assert_eq!(doc.event.performers.len(), 1);
         assert_eq!(doc.event.performers[0].name, "Radiohead");
+    }
+    /// A performer's links come in the order that keys it: its MusicBrainz page, then a page
+    /// MusicBrainz relates, then the rest; trimming a big line-up drops from the end, so the
+    /// link that keys without a request is the last to go.
+    #[test]
+    fn a_performers_keying_link_comes_first_and_survives_trimming() {
+        let base = Url::parse("https://tickets.example/show").unwrap();
+        let node = serde_json::json!({"@type":"MusicEvent","url":"https://tickets.example/show","performer":[{"name":"Radiohead","url":"https://tickets.example/artists/radiohead","sameAs":["https://www.instagram.com/radiohead","https://www.songkick.com/artists/253846-radiohead","https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711"]}]});
+        let found = performers(&node, &base);
+        assert_eq!(
+            found[0].links,
+            [
+                "https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711",
+                "https://www.songkick.com/artists/253846-radiohead",
+                "https://tickets.example/artists/radiohead",
+                "https://www.instagram.com/radiohead",
+            ]
+        );
+        let mut fields = super::super::EventFields {
+            performers: found,
+            ..Default::default()
+        };
+        while fields.performers[0].links.len() > 1 {
+            assert!(fields.shrink_performers());
+        }
+        assert_eq!(
+            fields.performers[0].links,
+            ["https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711"]
+        );
     }
 }
