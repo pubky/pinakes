@@ -325,25 +325,29 @@ fn fields(doc: &mut ResourceMeta, v: &Value, base: &Url, ap: bool) {
 }
 /// Set the start or end from a page value, trimmed at both ends first (a padded date-only value
 /// is still recognised as a date by its length).
-/// Whether an event node is the page's own: its `url` or `@id` names the page (tracking
+/// Whether an event node is the page's own: the page it names is this page (tracking
 /// parameters and fragments aside). Another event a page describes beside its own (a venue's
 /// next show, a related date) never donates to the page's event.
 pub fn owns_page(v: &Value, base: &Url) -> bool {
+    names_page(v, base) == Some(true)
+}
+/// Whether the page an event node names (its `url`, else its `@id`) is this page; `None` when
+/// it names none. An explicit `url` decides: a local `@id` such as `#next-week` resolves to
+/// this page whatever event it is, so it never outweighs a `url` naming another.
+pub fn names_page(v: &Value, base: &Url) -> Option<bool> {
     fn identity(u: &str) -> Option<String> {
         let mut u = Url::parse(u).ok()?;
         u.set_fragment(None);
         let u = crate::alias::root(u.as_str()).map_or_else(|| u.to_string(), |a| a.root);
         crate::model::identity(&u).ok().map(|v| v.0)
     }
-    let Some(page) = identity(base.as_str()) else {
-        return false;
-    };
+    let page = identity(base.as_str())?;
     ["url", "@id"]
         .into_iter()
         .filter_map(|f| v.get(f).and_then(Value::as_str))
         .filter_map(|u| origin_url(base, u))
-        .filter_map(|u| identity(&u))
-        .any(|id| id == page)
+        .find_map(|u| identity(&u))
+        .map(|id| id == page)
 }
 /// An event node's performers (`performer`, one or several): a name each, with the links the
 /// page gives for it (`url`, `sameAs`); a bare name is a performer without links, a nameless
@@ -554,12 +558,40 @@ mod performer_tests {
         assert!(owns_page(&own, &base));
         assert!(!owns_page(&other, &base));
         assert!(!owns_page(&anonymous, &base));
+        assert_eq!(names_page(&anonymous, &base), None);
         let mut doc = ResourceMeta::new(base.as_str(), "web", 3600);
         jsonld(&mut doc, &other, &base);
         assert!(doc.event.performers.is_empty());
         jsonld(&mut doc, &own, &base);
         assert_eq!(doc.event.performers.len(), 1);
         assert_eq!(doc.event.performers[0].name, "Radiohead");
+    }
+    /// An explicit `url` decides whose event a node is: a local `@id` resolves to the page it
+    /// sits on, whichever event it names.
+    #[test]
+    fn a_fragment_id_never_outweighs_a_url_naming_another_page() {
+        let base = Url::parse("https://venue.example/tonight").unwrap();
+        let node = |fields: serde_json::Value| {
+            let mut v = serde_json::json!({"@type":"MusicEvent","name":"Next week","startDate":"2027-05-10T19:30:00","performer":[{"@type":"MusicGroup","name":"Radiohead","sameAs":"https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711"}]});
+            v.as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            v
+        };
+        let next_week = node(serde_json::json!({"url":"/next-week","@id":"#next-week"}));
+        assert!(!owns_page(&next_week, &base));
+        let mut doc = ResourceMeta::new(base.as_str(), "web", 3600);
+        jsonld(&mut doc, &next_week, &base);
+        assert!(doc.event.performers.is_empty());
+        // The page's own: its url names it, tracking aside, whatever its fragment `@id`; a
+        // fragment `@id` alone names the page too.
+        for own in [
+            serde_json::json!({"url":"/tonight?utm_source=feed","@id":"#event"}),
+            serde_json::json!({"@id":"https://venue.example/tonight#event"}),
+            serde_json::json!({"@id":"#event"}),
+        ] {
+            assert!(owns_page(&node(own.clone()), &base), "{own}");
+        }
     }
     /// A performer's links come in the order that keys it: its MusicBrainz page, then a page
     /// MusicBrainz relates, then the rest; trimming a big line-up drops from the end, so the
