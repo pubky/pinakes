@@ -175,11 +175,15 @@ don't retry it; Wikidata items verified together that are over it together are r
 a MusicBrainz page's card is read from the page. Requests
 time out after ten seconds. Images stay origin URLs and are never fetched.
 
-Reads of the same request share one in-process cache (10,000 entries, 32 MiB), and concurrent
-readers share one fetch. A success is kept for the reader's lifetime, at least an hour. A
-failure is kept for five minutes, or, when the service named its wait (a 429's `Retry-After`),
-for that wait held between 1 and 300 seconds. An authentication failure (TIDAL's 401 and 403) is
-never kept, so a new token asks again, and a wait for Pinakes's own host budget is not a failure.
+Discovery reads (`Egress::discover`: the also-on sources and hubs, oEmbed endpoints, feed and
+calendar discovery, and a few page hooks and sources such as `feed`, `media_records`, Discogs and
+GitHub; not the page fetch of web resolution or most official-API reads) share one in-process
+cache (10,000 entries, 32 MiB), and concurrent readers of one request share one fetch. A success
+is kept for the lifetime the reader asks for, raised to at least an hour; a failure for five
+minutes, or, when the service named its wait (a 429's `Retry-After`), for that wait held between 1
+and 300 seconds. Eviction of the least recently used entries can end any entry sooner. An
+authentication failure (TIDAL's 401 and 403) is never kept, so a new token asks again, and a wait
+for Pinakes's own host budget is not a failure.
 
 Every request introduces itself as `pinakes/<version> (+https://pubky.app; <contact>)`, with
 `http.contact` as the contact (`info@synonym.to` in the example configuration; without one,

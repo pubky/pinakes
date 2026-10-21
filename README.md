@@ -80,16 +80,18 @@ facets, map clusters and group collapse; cards by ID or URI; batch lookup; a com
 `reference`, `occurrence`, `resource_alias`, `resource_group`, `resource_key`, `resource_fact`,
 `derived_link` and `resource_change`. The work queues are tables too: `resource` rows for
 resolution, `group_dirty`, `also_on_dirty` and `same_event_dirty`. OpenStreetMap-derived facts
-live only in `osm_place`, which is published under ODbL as a dump file. Everything can be rebuilt
-from the Nexus feed. Until the first deployment a schema change edits `0001_schema.sql` and local
-databases are recreated ([operations](docs/operations.md#database)).
+live only in `osm_place`, which is published under ODbL as a dump file. The current index can be
+rebuilt by replaying the Nexus feed and fetching every link again; operator group curation
+(`group_override`) and the change journal (`resource_change`) cannot, so back them up. Until the
+first deployment a schema change edits `0001_schema.sql` and local databases are recreated
+([operations](docs/operations.md#database)).
 
 **Egress.** Every fetch a reference can steer goes through one client (`resolver/egress.rs`):
 public HTTP(S) only, every DNS answer checked and pinned, private and metadata addresses refused,
 at most three redirects (each checked again), a 10-second timeout and a 1 MB body cap (8 MB for
 MusicBrainz and Wikidata answers). Requests to one host go one at a time, paced to
-`limits.host_requests_per_second` or the host's published rate. Answers are cached and shared
-between concurrent readers. Images are never fetched. Nominatim and Nexus are trusted upstreams
+`limits.host_requests_per_second` or the host's published rate. Discovery reads (also-on
+lookups, oEmbed, feed discovery) are cached and shared between concurrent readers. Images are never fetched. Nominatim and Nexus are trusted upstreams
 outside this policy.
 
 ## Run locally
@@ -152,7 +154,8 @@ End-to-end checks ([e2e/README.md](e2e/README.md)) need Node 20 or newer:
 - `scripts/e2e --isolated-live` writes real tags through the Pubky SDK, checks them through a
   real Nexus and public services, and deletes them after;
 - `scripts/demo-lookup [--base URL]` resolves a curated list of public links against a running
-  daemon and fails when one misses its expected type, status or derived links. It writes nothing.
+  daemon and fails when one misses its expected type, status or derived links. It writes nothing
+  to Pubky or Nexus, but `POST /v1/resolve` creates and queues each link in that Pinakes.
 
 ## Configuration
 

@@ -21,7 +21,7 @@ export DATABASE_URL='postgresql:///postgres?host=/var/run/postgresql'
 | `npm ci --prefix e2e && npm test --prefix e2e` | The e2e harness's own unit tests. |
 | `scripts/e2e --mock` | The whole flow against fixtures, offline: migrations, ingest, queue, resolvers, groups, API. |
 | `scripts/e2e --isolated-live` | The same against a real homeserver, Nexus and public services. Needs a test identity ([e2e/README.md](e2e/README.md)). |
-| `scripts/demo-lookup [--base URL]` | Resolves the curated links in `e2e/samples.lookup.json` against a running daemon. Read-only. |
+| `scripts/demo-lookup [--base URL]` | Resolves the curated links in `e2e/samples.lookup.json` against a running daemon. Writes nothing to Pubky or Nexus; creates and queues the links in that Pinakes (`POST /v1/resolve`). |
 | `scripts/openapi` | Regenerates `docs/openapi.json`. A test fails while the snapshot differs from the code. |
 | `scripts/verify-osm-boundary [out.sql]` | OSM-derived facts are only in `osm_place` (run by the tests; needs `psql`, `pg_dump`, `rg`). |
 | `scripts/verify-no-capability-urls` | No private calendar share URL in any tracked file (run by the tests). |

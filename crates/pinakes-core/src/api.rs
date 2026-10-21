@@ -544,9 +544,10 @@ pub struct Card {
     pub end: Option<DateTime<Utc>>,
     pub group: Option<GroupRef>,
     /// The same thing elsewhere: the other members of its group (tagged links, with their ID),
-    /// then derived links nobody tagged (`derived: true`), by service name; one per service and
-    /// at most 8 on a card. `details.also_on` on `GET /v1/resources/{id}` lists every link, up to
-    /// 256. A hint: every member keeps its own card.
+    /// then derived links nobody tagged (`derived: true`), by service name; one per service, at
+    /// most 8 on a search or lookup card and up to 256 on a resource read
+    /// (`GET /v1/resources/{id}`, `GET /v1/resources/by-uri`, `POST /v1/resolve`), whose
+    /// `details.also_on` lists every link, up to 256. A hint: every member keeps its own card.
     pub also_on: Vec<AlsoOn>,
     /// OpenStreetMap cards, events placed at an OSM venue and events whose zone was derived from
     /// coordinates: the ODbL attribution to display with the card.
