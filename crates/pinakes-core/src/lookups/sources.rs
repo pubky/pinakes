@@ -547,7 +547,13 @@ impl Datacite {
         let Some(request) = super::papers::crossref_request(doi) else {
             return Ok(false);
         };
-        let f = send(cx, &request, "crossref_busy").await?;
+        let f = match send(cx, &request, "crossref_busy").await {
+            Ok(f) => f,
+            // A record past the body cap (a very long reference list) confirms nothing; the
+            // run keeps its other answers.
+            Err(error) if crate::resolver::egress::over_cap(&error) => return Ok(false),
+            Err(error) => return Err(error),
+        };
         super::papers::parse_crossref_preprint(f.status, &f.body, doi, arxiv)
     }
 }
@@ -1711,5 +1717,49 @@ mod tests {
         assert_eq!(index.places.len(), 4001);
         assert!(index.places.contains("node/5000"));
         assert_eq!(index.since.as_deref(), Some("2026-10-10T00:00:01.000Z"));
+    }
+
+    /// A Crossref record past the body cap confirms nothing: the preprint keeps its own key and
+    /// links, without the journal's DOI, and the source doesn't fail.
+    #[tokio::test(start_paused = true)]
+    async fn an_oversized_crossref_record_confirms_nothing() {
+        struct TooLarge(std::sync::Arc<crate::sources::fixture::Recorded>);
+        #[async_trait]
+        impl crate::resolver::egress::Transport for TooLarge {
+            async fn get(
+                &self,
+                url: &url::Url,
+                addresses: &[std::net::SocketAddr],
+            ) -> Result<crate::resolver::egress::Fetched> {
+                if url.host_str() == Some("api.crossref.org") {
+                    return Err(crate::resolver::egress::BodyTooLarge {
+                        cap: crate::resolver::egress::BODY_CAP,
+                    }
+                    .into());
+                }
+                self.0.get(url, addresses).await
+            }
+        }
+        let arxiv = "https://api.datacite.org/dois/10.48550/arXiv.2302.04668";
+        let (_, recorded) = crate::sources::fixture::egress(vec![(
+            arxiv,
+            200,
+            JSON,
+            read("datacite-arxiv-2302.04668.json"),
+        )]);
+        let cx = Context {
+            egress: crate::resolver::egress::Egress::with_backends(
+                Default::default(),
+                std::sync::Arc::new(crate::sources::fixture::PublicDns),
+                std::sync::Arc::new(TooLarge(recorded)),
+            ),
+            config: Default::default(),
+        };
+        let found = Datacite
+            .lookup(&cx, &at("https://arxiv.org/abs/2302.04668"))
+            .await
+            .unwrap();
+        assert_eq!(keys(&found), ["arxiv:2302.04668"]);
+        assert!(sites(&found).contains(&"DOI https://doi.org/10.46298/lmcs-20(1:8)2024".to_owned()));
     }
 }

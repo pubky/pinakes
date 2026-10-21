@@ -989,7 +989,8 @@ looked up itself; it joins as one of a title's links, by the title's IMDb ID.
   entered, so the two join (the journal card gets `arxiv:{id}`, the arXiv paper also
   `doi:{journal DOI}`) only when the journal's publisher names the preprint in its own Crossref
   record (`relation.has-preprint`, asserted by the publisher, by arXiv id or arXiv DOI). A
-  preprint that names someone else's article stays a link and joins nothing.
+  preprint that names someone else's article stays a link and joins nothing, and so does one
+  whose journal's Crossref record is too long to read (over 1 MB).
 - `huggingface`: an arXiv paper's Hugging Face Papers page, only when its API knows the paper.
 
 `unpaywall` and `ncbi` send the operator's contact (`[http] contact`) as their APIs ask; without
