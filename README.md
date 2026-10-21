@@ -1,49 +1,104 @@
 # Pinakes
 
-A Pubky index of external resources: the web pages, places, coordinates, event pages, feeds and
-media that people reference on Pubky.
+A Pubky index of external resources: the web pages, places, events, feeds, media and records
+that people reference on Pubky.
 
-Nexus records references and never fetches. Pinakes reads Nexus's reference feed, resolves each
-URI into one small typed document through a resolver per kind, keeps the facts a query needs
-beside the public references, and answers one search: text, type, map area, time, tags and
-reach. The rule for clients is **Pinakes ranks, Nexus hydrates**: clients pass the URIs of the
+Nexus records references to external links and never fetches them. Pinakes reads each link into
+a small typed card, joins the same thing across services, and answers one search: text, type,
+map area, time, tags and reach.
+
+Clients combine the two by URI: **Pinakes ranks, Nexus hydrates.** A client sends the URIs of the
 cards Pinakes returns (`uri`, and `details.aliases` for other spellings; for an occurrence,
-`occurrence.feed_uri`, since its own URL was never tagged) to Nexus
-`/v0/stream/resources/by_ids` as `uris` (batches of 100) for social state. Pinakes IDs are its
-own: the two combine by URI, never by ID.
+`occurrence.feed_uri`) to Nexus `/v0/stream/resources/by_ids` as `uris` (batches of 100) for
+counts and tags. Pinakes IDs are its own and never match Nexus IDs.
 
-- [docs/design.md](docs/design.md): what Pinakes is and the decisions behind it.
-- [docs/api.md](docs/api.md): the `/v1` API, response shapes and a catalogue of example requests.
-- [docs/operations.md](docs/operations.md): configuration, limits, deployment and maintenance.
-- [ops/README.md](ops/README.md): metrics, alerts and the Grafana dashboard.
-- [data/README.md](data/README.md): pinned data sets and their licences.
+## How it works
 
-## What it resolves
+```
+Nexus  GET /v0/resources/changes          reference feed: tag, reply, embed, collection
+  │
+  ▼
+ingest     resource row per URI, reference row per Pubky object    ingest.rs, identity.rs
+  │
+  ▼
+queue      one job per resource: route, lease, backoff, refresh     queue.rs, scheduler.rs
+  │
+  ▼
+resolvers  web, pubky, geo, osm, event, event_platform, cards       resolver/, event/
+  │        official APIs (the "official" card route)                sources/
+  ▼
+card       typed document, change journal                           store.rs, changes.rs
+  │
+  ├── aliases     one object under several URIs                     alias.rs
+  ├── groups      one thing under several URIs, from exact keys     groups.rs, group_keys.rs
+  ├── also-on     keys, facts and links from hubs and services      also_on.rs, also_on/,
+  │                                                                 lookups/, music_sources.rs,
+  │                                                                 hubs.rs
+  └── same-event  events that are possibly the same one             same_event.rs
+  ▼
+/v1 API    search, cards, lookup, resolve, changes                  api.rs, change_api.rs
+```
 
-- **Web pages**: JSON-LD, microformats, OpenGraph, oEmbed and title, with access-wall detection.
-- **Pubky objects** of other apps, from conventional JSON members.
-- **Places**: `geo:` URIs and map links offline; OpenStreetMap objects through batched Nominatim
-  lookups, kept in an ODbL derivative table.
-- **Events**: event pages, ICS/RSS/Atom/JSON calendar feeds with recurrence, event platforms
-  (Luma, Meetup, BTC Map and others in `data/event-adapters.json`) and NIP-52 calendars.
-- **Cards**: media (oEmbed, podcasts), ISBN (Open Library), DOI (CSL), Nostr and ActivityPub.
-- **Official APIs**: keyless APIs that answer exactly where a page is walled or thin, such as
-  Federal Register documents by number ([docs/sources](docs/sources/README.md)).
-- **Aliases and groups**: spellings of one object (tracking parameters, OSM URL forms, ISBN-10)
-  are one resource; a DOI or ISBN and the landing page that cites it, or one ICS UID within a
-  feed, form a group: a hint on each member's card, never a merge (search shows one row per
-  group only with `collapse=group`).
+Paths are under `crates/pinakes-core/src/`. `crates/pinakesd` is the daemon: it parses the
+command line, creates the schema, and starts the listeners and the background tasks (ingest,
+resolver workers, also-on, grouping, same-event, maintenance, the ODbL dump).
 
-It also keeps a change journal, so clients can ask what changed for the links they cached.
+**Ingest.** `pinakesd` polls the Nexus reference feed. Each line names a URI; Pinakes normalizes
+it and hashes it into its own resource ID (`identity.rs`), stores one reference row per Pubky
+object path, and queues a resource it has not seen. Nexus decides which references exist;
+Pinakes never parses the social specs.
 
-## Running locally
+**Resolve.** `resolver::classify` routes each URI by scheme and host, without network. The queue
+leases rows per route and runs that route's resolver under its own concurrency and rate limits. The
+web resolver reads JSON-LD, microformats, OpenGraph, oEmbed and the title. The other routes read
+`pubky://` objects of other apps, `geo:` URIs and map links, OpenStreetMap objects (through
+Nominatim), event pages and calendar feeds, event platforms (`data/event-adapters.json`), and media,
+ISBN, DOI, Nostr and ActivityPub cards. Over forty services with their own API (Federal Register,
+SEC EDGAR, Bluesky, GitHub, Discogs, Zenodo, …) are read from that API instead of their pages; each
+has a page in [docs/sources](docs/sources/README.md). The result is one document per resource: a
+schema.org type, name, description, image, site, point, start and end, and details. A change to a
+stored document becomes a line in the change journal.
 
-Requires Rust 1.89 or newer, PostgreSQL **16–18** with PostGIS **3.4+**, `pg_trgm` and h3
-**4.2.3+** (`pinakesd` refuses to start without `h3_latlng_to_cell(point, integer)`). Docker is
-not required. On Ubuntu, install
+**Join.** An alias is the same object under another spelling (tracking parameters, OSM URL forms,
+ISBN-10); it reads as its root resource. A group joins resources that are one thing, only on
+evidence a page cannot fake: a DOI or ISBN card and the landing page its registry names, one ICS UID
+within a feed, an operator's curation, and exact keys from the also-on sources. The also-on worker
+asks hubs (MusicBrainz, Wikidata) and services about their own records (TIDAL, Discogs, iTunes, Open
+Library, Podcast Index, crates.io, Steam, the Wayback Machine, …) for music, books, films, podcasts,
+places, papers, software, games and apps, and stores keys (`isrc:…`, `mb:recording:…`,
+`wikidata:Q…`, `doi:…`), facts and derived links. Only a hub, or a service's own record of its own
+ID, makes a key; what a page says about itself is at most a fact. A group is a hint on each card,
+never a merge.
+
+**Serve.** The public listener (`listen`, port 8090) serves `/v1`: one search with filters,
+facets, map clusters and group collapse; cards by ID or URI; batch lookup; a compose-time
+`resolve`; feed occurrences; and changes since a time. The admin listener (`admin_listen`, port
+9090) serves `/metrics`, operator info, stored documents and group curation.
+
+**Database.** PostgreSQL with PostGIS, `pg_trgm` and h3. The schema is one file,
+`migrations/0001_schema.sql`. The main tables are `resource` (the document and its indexed facts),
+`reference`, `occurrence`, `resource_alias`, `resource_group`, `resource_key`, `resource_fact`,
+`derived_link` and `resource_change`. The work queues are tables too: `resource` rows for
+resolution, `group_dirty`, `also_on_dirty` and `same_event_dirty`. OpenStreetMap-derived facts
+live only in `osm_place`, which is published under ODbL as a dump file. Everything can be rebuilt
+from the Nexus feed. Until the first deployment a schema change edits `0001_schema.sql` and local
+databases are recreated ([operations](docs/operations.md#database)).
+
+**Egress.** Every fetch a reference can steer goes through one client (`resolver/egress.rs`):
+public HTTP(S) only, every DNS answer checked and pinned, private and metadata addresses refused,
+at most three redirects (each checked again), a 10-second timeout and a 1 MB body cap (8 MB for
+MusicBrainz and Wikidata answers). Requests to one host go one at a time, paced to
+`limits.host_requests_per_second` or the host's published rate. Answers are cached and shared
+between concurrent readers. Images are never fetched. Nominatim and Nexus are trusted upstreams
+outside this policy.
+
+## Run locally
+
+Requires Rust 1.89 or newer, PostgreSQL 16–18 with PostGIS 3.4+, `pg_trgm` and h3 4.2.3+
+(`pinakesd` refuses to start without `h3_latlng_to_cell(point, integer)`). On Ubuntu:
 `postgresql-16 postgresql-16-postgis-3 postgresql-contrib-16 postgresql-16-h3` (from the
 [PGDG repository](https://www.postgresql.org/download/linux/ubuntu/) if the distribution lacks
-version 16).
+version 16). Docker is not required.
 
 ```sh
 sudo pg_ctlcluster 16 main start
@@ -53,9 +108,9 @@ cp pinakes.example.toml pinakes-dev.toml
 scripts/dev
 ```
 
-`scripts/dev` creates the schema, starts `pinakesd` on port 8090 (admin on 9090) and tails
-`.runtime/pinakesd.log`. Point `nexus_url` at a Nexus with the resource changes feed. The local
-superuser is only for development; a deployment uses a migration role and a restricted
+`scripts/dev` migrates the database, starts `pinakesd` on port 8090 (admin on 9090) and tails
+`.runtime/pinakesd.log`. Point `nexus_url` at a Nexus that serves the resource changes feed. The
+local superuser is for development only; a deployment uses a migration role and a restricted
 application role.
 
 ```sh
@@ -65,62 +120,19 @@ curl -H 'Content-Type: application/json' -d '{"uri":"https://example.org/"}' \
   http://127.0.0.1:8090/v1/resolve
 ```
 
-Swagger UI is at `http://127.0.0.1:8090/swagger-ui`, with examples for every kind of card and
-source, each named by its value.
+Swagger UI is at `http://127.0.0.1:8090/swagger-ui`, with an example for every kind of card and
+source.
 
-`pinakes.example.toml` lists the operator choices: addresses, credentials, one `enabled` switch
-per resolver and feature, event platform keys, egress lists and the public API's budget and
-CORS. Every cap, timeout and refresh tier has a default in an optional `[limits]` section,
-documented in [docs/operations.md](docs/operations.md).
+`pinakesd` commands:
 
-Pubky objects are fetched through the same egress policy as web pages, from the homeserver's
-public HTTPS domain; see [operations](docs/operations.md#pubky).
+- `pinakesd --config <path>` runs the daemon (and creates the schema on an empty database);
+- `pinakesd --config <path> --migrate` creates the schema on an empty database and exits;
+- `pinakesd --config <path> reextract <route…|all|also-on>` re-reads stored documents after a
+  parser or routing change, with the daemon stopped
+  ([operations](docs/operations.md#database));
+- `pinakesd --openapi` prints the OpenAPI document.
 
-## Configuration and secrets
-
-Choices live in the TOML file; secrets and per-deployment overrides live in the environment.
-Any key can be set as `PINAKES__SECTION__KEY` (`PINAKES__WEB__ENABLED=false`,
-`PINAKES__LIMITS__POLL_SECS=10`): strings are literal, numbers, booleans and arrays use JSON, and
-the environment wins over the file. A platform's key
-(`PINAKES__EVENT__ADAPTERS__PLATFORMS__TICKETMASTER__KEY`) and a host rate
-(`PINAKES__LIMITS__HOST_RATES__<HOST>`) create their entry. Unknown keys and invalid values stop
-startup, so a misspelt variable is an error, not a silent default.
-
-Set `[http] contact` (`PINAKES__HTTP__CONTACT`) to an address the services you read can reach:
-it goes into the User-Agent, `pinakes/<version> (+https://pubky.app; <contact>)`. Some services
-refuse requests without it; links to them (SEC EDGAR) wait until it is set. An address naming
-github is refused, since some services block such User-Agents.
-
-[`.env.example`](.env.example) lists every variable this version reads for secrets (the database
-URL with its password, the admin token, the platform keys, the Podcast Index key and secret)
-with fake values. Copy it to `.env`,
-fill in what you use and load it:
-
-- a shell: `set -a; . ./.env; set +a`, then start `pinakesd`;
-- systemd: `EnvironmentFile=/etc/pinakes/pinakes.env` in the unit;
-- a container: `docker run --env-file .env …`.
-
-Keep `.env` out of version control (it is in `.gitignore`) and readable by the service user only;
-never commit real keys, tokens or passwords.
-
-## Schema
-
-The schema is one file, `migrations/0001_schema.sql`; `pinakesd --config <path> --migrate`
-creates it on an empty database. Until the first deployment a schema change edits that file and
-local databases are recreated ([operations](docs/operations.md#database)). A parser or routing
-change reaches stored documents through `pinakesd --config <path> reextract <route…|all>`.
-
-## Layout
-
-- `crates/pinakes-core`: schema access, the Nexus feed client, resolvers, the queue, grouping,
-  the change journal and the API.
-- `crates/pinakesd`: the daemon: the schema, the two HTTP listeners, feed polling and workers.
-- `data/`: the pinned schema.org vocabulary, oEmbed registry, event adapter manifests, wall
-  markers, multi-tenant host rules, time zone tables and the API examples.
-- `e2e/`: the end-to-end harness and the read-only demo lookup.
-- `ops/`: Prometheus alerts and the Grafana dashboard.
-
-## Verification
+## Test
 
 ```sh
 # The role needs CREATEDB and permission to create the PostGIS extension.
@@ -128,29 +140,48 @@ export DATABASE_URL='postgresql:///postgres?host=/var/run/postgresql'
 scripts/test
 ```
 
-`scripts/test` runs fmt, clippy with warnings denied, every workspace test and
-`scripts/check-ops`. Integration tests create disposable databases on a real PostgreSQL server
-and never touch the development database. Egress tests use local servers and injected
-transports; the production IP policy has no localhost bypass. The tests that run
-`scripts/verify-osm-boundary` also need `psql`, `pg_dump` and `rg`: under `scripts/test` they
-fail without them, and a bare `cargo test` skips that check with a message.
+`scripts/test` runs `cargo fmt --check`, clippy with warnings denied, every workspace test and
+`scripts/check-ops`. Integration tests create their own disposable databases and never touch the
+development database. HTTP tests use local servers, injected transports and recorded fixtures.
+The tests that run `scripts/verify-osm-boundary` also need `psql`, `pg_dump` and `rg`.
 
-- `scripts/e2e --mock` runs the end-to-end flow against fixtures; `scripts/e2e --isolated-live`
-  writes real tags through the Pubky SDK and deletes them after. See [e2e/README.md](e2e/README.md).
-- `scripts/demo-lookup [--base URL] [--file e2e/samples.lookup.json]` previews a curated list of
-  public URIs through `POST /v1/resolve` against any running daemon, prints kind, URI, type,
-  site, status and group, and exits 1 when one fails, stays pending or misses its expected type
-  (an ancestor matches) or status. An entry's `derived` lists services its also-on links must
-  reach (read until they appear or the timeout passes). It is read-only and paced under the
-  preview budget.
-- `scripts/verify-osm-boundary [out.sql]` checks a resolved database keeps OSM-derived facts
-  only in `osm_place`, and can export that table.
-- `scripts/openapi` regenerates the OpenAPI snapshots in `docs/`.
-- `scripts/lock-waits COMMAND...` runs a command while it samples the `DATABASE_URL` server
-  every 50 ms, then prints how many samples saw a backend waiting on a lock and which locks
-  they waited for (instance, write order, alias, change sequence, group, ingest, search
-  revision, row).
-  The `write_load` test runs eight writers and an ingest (tags added and removed) against one
-  database and fails if one waits on the search revision or deadlocks; `WRITE_LOAD_ROUNDS`
-  (default 15) scales it. The `daemon` test runs the `pinakesd` binary on a database of its
-  own: it saves a resolved link while it holds the instance lock, then a re-extraction returns.
+End-to-end checks ([e2e/README.md](e2e/README.md)) need Node 20 or newer:
+
+- `scripts/e2e --mock` runs the whole flow (schema, ingest, queue, resolvers, groups, API)
+  against fixtures, offline;
+- `scripts/e2e --isolated-live` writes real tags through the Pubky SDK, checks them through a
+  real Nexus and public services, and deletes them after;
+- `scripts/demo-lookup [--base URL]` resolves a curated list of public links against a running
+  daemon and fails when one misses its expected type, status or derived links. It writes nothing.
+
+## Configuration
+
+Choices live in the TOML file ([`pinakes.example.toml`](pinakes.example.toml)): addresses, one
+`enabled` switch per resolver, source and feature, event platforms, egress allow and deny lists,
+and the public API's budget and CORS. Every cap, timeout and refresh tier has a default and can
+be set in an optional `[limits]` section; the table is in [docs/operations.md](docs/operations.md).
+
+Secrets come from the environment. Any key can be set as `PINAKES__SECTION__KEY`
+(`PINAKES__WEB__ENABLED=false`, `PINAKES__LIMITS__POLL_SECS=10`): strings are literal; numbers,
+booleans and arrays are JSON. The environment wins over the file, and unknown keys or invalid values
+stop startup. [`.env.example`](.env.example) lists the secret variables with placeholder values: the
+database URL, the admin token, event platform keys, the Podcast Index key and secret, the TIDAL
+client ID and secret, and the Discogs and GitHub tokens. Copy it to `.env`, fill in what you use,
+and load it (`set -a; . ./.env; set +a`, systemd `EnvironmentFile=`, or `docker run --env-file`).
+Keep `.env` out of version control and readable by the service user only.
+
+Set `[http] contact` to an address the services you read can reach. It goes into the User-Agent,
+`pinakes/<version> (+https://pubky.app; <contact>)`; some services (SEC EDGAR) refuse requests
+without one.
+
+## Documentation
+
+- [docs/design.md](docs/design.md): what Pinakes is, what it needs from Nexus, and why.
+- [docs/api.md](docs/api.md): the `/v1` API, response shapes and example requests.
+- [docs/operations.md](docs/operations.md): limits, database, egress, re-extraction, monitoring
+  and maintenance.
+- [docs/sources](docs/sources/README.md): one page per official-API source.
+- [ops/README.md](ops/README.md): metrics, alerts and the Grafana dashboard.
+- [data/README.md](data/README.md): pinned data sets and their licences.
+- [e2e/README.md](e2e/README.md): the end-to-end harness.
+- [AGENTS.md](AGENTS.md): how to work on the code.
