@@ -92,15 +92,9 @@ pub enum Answer {
     Moved,
 }
 
-/// A repository's card from `GET /repos/{owner}/{repo}` with `token`.
-pub async fn read(
-    cx: &Context<'_>,
-    doc: ResourceMeta,
-    owner: &str,
-    repo: &str,
-    token: &str,
-) -> Result<Answer> {
-    let options = FetchOptions {
+/// The API request for a repository with `token`.
+fn options(token: &str) -> FetchOptions {
+    FetchOptions {
         accept: Some("application/vnd.github+json".into()),
         headers: vec![
             ("authorization", format!("Bearer {token}")),
@@ -110,15 +104,31 @@ pub async fn read(
         sensitive: true,
         keep_redirect: true,
         ..Default::default()
-    };
-    let f = cx
-        .egress
-        .discover(&format!("{API}/repos/{owner}/{repo}"), &options, 3600)
-        .await?;
+    }
+}
+
+/// A repository's card from `GET /repos/{owner}/{repo}` with `token`.
+pub async fn read(
+    cx: &Context<'_>,
+    doc: ResourceMeta,
+    owner: &str,
+    repo: &str,
+    token: &str,
+) -> Result<Answer> {
+    let options = options(token);
+    let url = format!("{API}/repos/{owner}/{repo}");
+    let f = cx.egress.discover(&url, &options, 3600).await?;
     match f.status {
-        // A repository the token can read but the public can't is no public object: no card,
-        // no key, and nothing of its record is kept.
-        200 => Ok(card(doc, &f.body)?.map_or(Answer::Missing, |card| Answer::Card(Box::new(card)))),
+        200 => match card(doc, &f.body)? {
+            Some(card) => Ok(Answer::Card(Box::new(card))),
+            // A repository the token can read but the public can't is no public object: no
+            // card, no key, and its record leaves the discovery cache now instead of resting
+            // there for the hour.
+            None => {
+                cx.egress.forget_discovery(&url, &options).await?;
+                Ok(Answer::Missing)
+            }
+        },
         301 | 302 | 307 | 308 => Ok(Answer::Moved),
         401 => Ok(Answer::Refused),
         404 => Ok(Answer::Missing),
@@ -368,6 +378,16 @@ mod tests {
                 ("/repos/BurntSushi/ripgrep", _) => {
                     (200, fixture::read("github", "repo-ripgrep.json"), None)
                 }
+                // The public record marked private: what a token that reads private repositories
+                // would get.
+                ("/repos/acme/secret", _) => {
+                    let mut v: serde_json::Value =
+                        serde_json::from_slice(&fixture::read("github", "repo-ripgrep.json"))
+                            .unwrap();
+                    v["private"] = serde_json::json!(true);
+                    v["visibility"] = serde_json::json!("private");
+                    (200, serde_json::to_vec(&v).unwrap(), None)
+                }
                 ("/repos/old/name", _) => (
                     301,
                     b"{}".to_vec(),
@@ -387,6 +407,65 @@ mod tests {
                 body,
             })
         }
+    }
+
+    /// A private repository's record gives no card and leaves the discovery cache at once: the
+    /// next read asks GitHub again, where a public record is answered from the cache.
+    #[tokio::test(start_paused = true)]
+    async fn a_private_record_is_not_kept_in_the_discovery_cache() {
+        let api = std::sync::Arc::new(Api {
+            seen: Default::default(),
+        });
+        let egress = crate::resolver::egress::Egress::with_backends(
+            Default::default(),
+            std::sync::Arc::new(fixture::PublicDns),
+            api.clone(),
+        );
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = |uri: &str| cx.card(uri, &Github);
+        let asked = |path: &str| {
+            api.seen
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(url, _)| url.ends_with(path))
+                .count()
+        };
+        for _ in 0..2 {
+            let answer = read(
+                &cx,
+                doc("https://github.com/acme/secret"),
+                "acme",
+                "secret",
+                "good-token",
+            )
+            .await
+            .unwrap();
+            assert!(matches!(answer, Answer::Missing));
+            read(
+                &cx,
+                doc("https://github.com/BurntSushi/ripgrep"),
+                "BurntSushi",
+                "ripgrep",
+                "good-token",
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(asked("/repos/acme/secret"), 2);
+        assert_eq!(asked("/repos/BurntSushi/ripgrep"), 1);
+        let options = options("good-token");
+        assert!(!egress
+            .discovered(&format!("{API}/repos/acme/secret"), &options)
+            .await
+            .unwrap());
+        assert!(egress
+            .discovered(&format!("{API}/repos/BurntSushi/ripgrep"), &options)
+            .await
+            .unwrap());
     }
 
     #[tokio::test(start_paused = true)]
