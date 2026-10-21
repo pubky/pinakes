@@ -308,15 +308,43 @@ impl Transport for PinnedTransport {
         read_response_with(url.clone(), response, options).await
     }
 }
-/// Where the head closes in `body` (the end of `</head>`, in any letter case), searching from
-/// `from` (less the tag's length, so a tag split across two chunks is found).
+/// The largest `limits.html_head_bytes`: no HTML body the egress returns is longer.
+pub const MAX_HTML_HEAD_BYTES: usize = 16 * 1024 * 1024;
+
+/// Whether a fetched page is within what a page parser takes: the page cap, a page cut there
+/// (at most where a long head closes), or a whole HTML page within the head budget.
+pub fn page_fits(f: &Fetched) -> bool {
+    f.body.len() <= BODY_CAP
+        || f.truncated
+        || (matches!(
+            f.content_type.as_str(),
+            "text/html" | "application/xhtml+xml"
+        ) && f.body.len() <= MAX_HTML_HEAD_BYTES)
+}
+
+/// Where the head closes in `body`, searching from `from` (less a tag's length, so a tag split
+/// across two chunks is found): after `</head>`, or before `<body` where the body opens it
+/// implicitly, in any letter case.
 fn head_end(body: &[u8], from: usize) -> Option<usize> {
-    const TAG: &[u8] = b"</head>";
-    let start = from.saturating_sub(TAG.len());
-    body[start..]
-        .windows(TAG.len())
-        .position(|w| w.eq_ignore_ascii_case(TAG))
-        .map(|at| start + at + TAG.len())
+    const CLOSE: &[u8] = b"</head>";
+    const BODY: &[u8] = b"<body";
+    let start = from.saturating_sub(CLOSE.len());
+    let window = &body[start..];
+    let close = window
+        .windows(CLOSE.len())
+        .position(|w| w.eq_ignore_ascii_case(CLOSE))
+        .map(|at| start + at + CLOSE.len());
+    let opens = window
+        .windows(BODY.len() + 1)
+        .position(|w| {
+            w[..BODY.len()].eq_ignore_ascii_case(BODY)
+                && matches!(w[BODY.len()], b'>' | b' ' | b'\t' | b'\n' | b'\r' | b'/')
+        })
+        .map(|at| start + at);
+    match (close, opens) {
+        (Some(c), Some(o)) => Some(c.min(o)),
+        (one, other) => one.or(other),
+    }
 }
 pub async fn read_response(url: Url, response: reqwest::Response) -> Result<Fetched> {
     read_response_with(url, response, &FetchOptions::default()).await
@@ -1546,6 +1574,57 @@ mod tests {
             head_end(&whole, body.len()),
             Some(whole.len() - "<body>".len())
         );
+    }
+    /// A head the body opens implicitly (no `</head>`) ends where `<body` starts, past the page
+    /// cap too; a page that never ends its head arrives whole within the head budget, and a
+    /// page parser takes it (`page_fits`).
+    #[tokio::test]
+    async fn a_head_ends_where_the_body_opens() {
+        use axum::{routing::get, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let html = |body: String| ([("content-type", "text/html; charset=utf-8")], body);
+        let app = Router::new()
+            .route(
+                "/implicit",
+                get(move || async move {
+                    html(format!(
+                        "<html><head><title>Implicit</title><style>{}</style><BODY class=x><p>y</p></BODY></html>",
+                        "x".repeat(BODY_CAP)
+                    ))
+                }),
+            )
+            .route(
+                "/no-end",
+                get(move || async move {
+                    html(format!(
+                        "<html><head><title>Whole</title><style>{}</style>",
+                        "x".repeat(BODY_CAP)
+                    ))
+                }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        let read = |path: &str| {
+            let url: Url = format!("http://{addr}{path}").parse().unwrap();
+            let request = client.get(url.clone());
+            let options = FetchOptions {
+                head_cap: Some(2 * BODY_CAP),
+                ..Default::default()
+            };
+            async move { read_response_with(url, request.send().await.unwrap(), &options).await }
+        };
+        let implicit = read("/implicit").await.unwrap();
+        let text = String::from_utf8_lossy(&implicit.body);
+        assert!(implicit.truncated);
+        assert!(text.contains("<title>Implicit</title>"));
+        assert!(text.ends_with("</style>"), "{}", &text[text.len() - 20..]);
+        assert!(page_fits(&implicit));
+        let whole = read("/no-end").await.unwrap();
+        assert!(!whole.truncated);
+        assert!(whole.body.len() > BODY_CAP);
+        assert!(page_fits(&whole));
+        server.abort();
     }
     /// A failed request's error never names its URL: a calendar's token in the query stays out of
     /// every error and log. The error keeps its kind.

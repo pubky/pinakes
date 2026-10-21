@@ -861,7 +861,9 @@ impl Config {
         {
             bail!("also_on.apple_storefront must be a two-letter country code in lower case");
         }
-        if !(1024 * 1024..=16 * 1024 * 1024).contains(&self.egress.html_head_bytes) {
+        if !(1024 * 1024..=crate::resolver::egress::MAX_HTML_HEAD_BYTES)
+            .contains(&self.egress.html_head_bytes)
+        {
             bail!("limits.html_head_bytes must be 1–16 MB");
         }
         let e = &self.event;

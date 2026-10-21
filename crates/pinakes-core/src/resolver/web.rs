@@ -221,9 +221,10 @@ impl WebResolver {
                 return Err(super::NotModified.into());
             }
             let observation = crate::telemetry::last_fetch();
-            // A page past the cap is cut (at most where a long head closes), never whole.
+            // Past the page cap: a page cut where its long head closes, or a whole page within the
+            // head budget (`egress::page_fits`).
             anyhow::ensure!(
-                fetched.body.len() <= super::egress::BODY_CAP || fetched.truncated,
+                super::egress::page_fits(&fetched),
                 "non-feed page exceeds 1 MB"
             );
             let input_uri = uri.to_owned();

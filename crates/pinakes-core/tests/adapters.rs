@@ -2950,6 +2950,48 @@ async fn a_cut_page_past_the_cap_gets_its_title(pool: PgPool) {
     assert_eq!(doc.name.as_deref(), Some("Example App"));
 }
 
+/// A whole page over the page cap and within the head budget, whose body opens the head's end
+/// implicitly (no `</head>`), gets its card: the read did not cut it, and nothing needed to be.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_whole_page_within_the_head_budget_gets_its_card(pool: PgPool) {
+    use pinakes_core::resolver::Resolver;
+    let uri = "https://whole.example.org/page";
+    let body = format!(
+        "<html><head><title>Whole page</title><style>{}</style>",
+        "x".repeat(pinakes_core::resolver::egress::BODY_CAP + 1_000)
+    );
+    let map = [(
+        format!("{uri}:"),
+        Ok(Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            url: uri.parse().unwrap(),
+            body: body.into_bytes(),
+            content_type: "text/html".into(),
+            status: 200,
+            retry_after_secs: 60,
+            location: None,
+            validators: Default::default(),
+        }),
+    )]
+    .into_iter()
+    .collect();
+    let egress = Egress::with_backends(
+        pinakes_core::config::EgressConfig {
+            host_requests_per_second: 1000.,
+            ..Default::default()
+        },
+        Arc::new(AdapterDns),
+        Arc::new(RecordedResponses(map)),
+    );
+    let cfg = EventConfig {
+        geocoding: false,
+        ..Default::default()
+    };
+    let doc = platform(&pool, cfg, egress).web.resolve(uri).await.unwrap();
+    assert_eq!(doc.name.as_deref(), Some("Whole page"));
+}
+
 /// A page built to make the parser work for minutes (a megabyte of styles, then a tag with 60,000
 /// distinct attributes, all inside the head) resolves in bounded time: the page is read up to that
 /// tag.

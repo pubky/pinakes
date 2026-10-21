@@ -452,7 +452,7 @@ async fn extract_blocking(
     ttl: u64,
 ) -> Result<crate::resolver::web::Extracted> {
     ensure!(
-        f.body.len() <= crate::resolver::egress::BODY_CAP || f.truncated,
+        crate::resolver::egress::page_fits(f),
         "non-feed page exceeds cap"
     );
     let (uri, f) = (uri.to_owned(), f.clone());
@@ -492,7 +492,7 @@ pub(crate) async fn enrichment_blocking(
         return Ok(Some(doc));
     }
     ensure!(
-        f.body.len() <= crate::resolver::egress::BODY_CAP || f.truncated,
+        crate::resolver::egress::page_fits(f),
         "non-feed enrichment exceeds cap"
     );
     let (uri, id, body) = (uri.to_owned(), d.id.clone(), f.body.clone());
