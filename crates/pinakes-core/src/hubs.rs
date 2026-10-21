@@ -473,6 +473,49 @@ pub mod musicbrainz {
         .await?
         .map(|v| parse_isrc(&v)))
     }
+    /// `GET /release?query=barcode:…`: the releases carrying exactly `upc` (a GTIN-13; a
+    /// 12-digit UPC-A is asked for in both spellings, as MusicBrainz stores barcodes as given),
+    /// each once; empty when MusicBrainz has none. The search matches the barcode field alone,
+    /// and the answer is checked against it.
+    pub async fn barcode(egress: &Egress, base: &str, upc: &str) -> Result<Vec<String>> {
+        let Some(upc) = crate::music::gtin13(upc) else {
+            return Ok(vec![]);
+        };
+        Ok(get(egress, &barcode_lookup(base, &upc), "musicbrainz")
+            .await?
+            .map(|v| parse_barcode(&v, &upc))
+            .unwrap_or_default())
+    }
+    pub fn barcode_lookup(base: &str, upc: &str) -> String {
+        let query = match upc.strip_prefix('0').filter(|_| upc.len() == 13) {
+            Some(short) => format!("barcode:({upc} OR {short})"),
+            None => format!("barcode:{upc}"),
+        };
+        let mut url = url::Url::parse(&format!("{base}/release")).expect("a checked base URL");
+        url.query_pairs_mut()
+            .append_pair("query", &query)
+            .append_pair("fmt", "json")
+            .append_pair("limit", "10");
+        url.into()
+    }
+    /// The releases of a barcode search whose barcode is `upc` once normalised, each once.
+    pub fn parse_barcode(v: &Value, upc: &str) -> Vec<String> {
+        let mut ids: Vec<String> = v["releases"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|r| {
+                r["barcode"]
+                    .as_str()
+                    .and_then(crate::music::gtin13)
+                    .is_some_and(|b| b == upc)
+            })
+            .filter_map(|r| mbid(r["id"].as_str()?))
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
     /// `GET /isrc/{ISRC}`: the recordings' MBIDs, each once.
     pub fn parse_isrc(v: &Value) -> Vec<String> {
         let mut ids: Vec<String> = v["recordings"]
@@ -929,6 +972,23 @@ mod tests {
         let release =
             musicbrainz::parse_entity(MbKind::Release, &fixture("mb-release.json")).unwrap();
         assert_eq!(release.barcode.as_deref(), Some("634904078164"));
+        let search = serde_json::json!({"releases": [
+            {"id": "70477949-9da4-4fb3-ba60-268ff6f3a62c", "barcode": "4018939306052"},
+            {"id": "11111111-2222-4333-8444-555555555555", "barcode": "4018939306052"},
+            {"id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "barcode": "4018939306069"},
+            {"id": "99999999-8888-4777-8666-555555555555", "barcode": "018939306052"}
+        ]});
+        assert_eq!(
+            musicbrainz::parse_barcode(&search, "4018939306052"),
+            [
+                "11111111-2222-4333-8444-555555555555",
+                "70477949-9da4-4fb3-ba60-268ff6f3a62c"
+            ]
+        );
+        assert!(
+            musicbrainz::barcode_lookup("https://musicbrainz.org/ws/2", "0196874054246")
+                .contains("barcode%3A%280196874054246+OR+196874054246%29")
+        );
         assert_eq!(
             release.release_group.as_deref(),
             Some("b1392450-e666-3926-a536-22c65f834433")

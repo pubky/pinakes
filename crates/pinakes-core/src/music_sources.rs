@@ -10,7 +10,8 @@
 //! - [`crate::also_on::tidal::Tidal`] (with an operator's TIDAL client ID and secret): a TIDAL
 //!   album's barcode and a track's ISRC from TIDAL's own API, as keys.
 //! - [`MusicBrainzSource`]: what MusicBrainz relates the tagged link to (one recording, release
-//!   or artist; for a track it does not relate, the one recording its page's own ISRC is on),
+//!   or artist; for a track it does not relate, the one recording its page's own ISRC is on; for
+//!   an album it does not relate, the releases carrying the album's barcode key),
 //!   that entity's current links on music services at the same level, and its MBIDs, ISRCs and
 //!   barcode as keys. An album link related to several releases of one release group (editions
 //!   MusicBrainz keeps apart) takes that release group: its key, and the links and facts every
@@ -184,7 +185,7 @@ impl MusicBrainzSource {
         };
         // Exactly one entity at the link's level; several are ambiguous and join nothing,
         // except releases of one release group.
-        let (kind, mut ids) = match level {
+        let (mut kind, mut ids) = match level {
             Level::Track => (MbKind::Recording, at(MbKind::Recording)),
             Level::Artist => (MbKind::Artist, at(MbKind::Artist)),
             _ => match at(MbKind::Release) {
@@ -200,6 +201,19 @@ impl MusicBrainzSource {
                     if recordings.len() == 1 {
                         ids = recordings;
                     }
+                }
+            }
+        }
+        // An album MusicBrainz does not relate the URL to: the releases carrying its barcode key
+        // (TIDAL's own record, or a service's from an earlier run), one or editions of one
+        // release group, as a related URL would name them.
+        if level == Level::Album && ids.is_empty() {
+            for upc in subject.keys_in("upc").take(2) {
+                let releases = musicbrainz::barcode(&cx.egress, base, upc).await?;
+                if !releases.is_empty() {
+                    kind = MbKind::Release;
+                    ids = releases;
+                    break;
                 }
             }
         }
