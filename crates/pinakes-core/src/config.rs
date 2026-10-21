@@ -713,7 +713,7 @@ impl Config {
         let a = &self.also_on;
         if !(1..=256).contains(&a.links_per_source)
             || !(1..=64).contains(&a.keys_per_source)
-            || !(1..=256).contains(&a.facts_per_source)
+            || !(8..=256).contains(&a.facts_per_source)
             || !(1..=16).contains(&a.concurrency)
             || !(1..=86400).contains(&a.retry_secs)
         {
@@ -1053,6 +1053,15 @@ mod tests {
             crate::groups::CrossContainerOccurrences::Off
         );
         assert!(!Config::default().web.discover_feeds);
+    }
+    /// The facts cap has a floor: a recording's single-valued facts fit beside its ISRCs.
+    #[test]
+    fn the_facts_cap_is_at_least_eight() {
+        let mut c = Config::default();
+        c.also_on.facts_per_source = 7;
+        assert!(c.validate().is_err());
+        c.also_on.facts_per_source = 8;
+        assert!(c.validate().is_ok());
     }
     #[test]
     fn source_budgets_never_override_the_operator() {

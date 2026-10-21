@@ -53,7 +53,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `group_max_graph_bytes` | `33554432` | Bytes one grouping pass may read. |
 | `also_on_links_per_source` | `32` | Derived links one source keeps per resource. |
 | `also_on_keys_per_source` | `16` | Join keys one source keeps per resource. |
-| `also_on_facts_per_source` | `32` | Facts one source keeps per resource. |
+| `also_on_facts_per_source` | `32` | Facts one source keeps per resource, at least 8: the cap cuts the many values of one name (a recording's ISRCs) before a name's one value, and 8 holds a recording's single-valued facts (its MBID, the MBID it was merged from, artist, length, original album, barcode). |
 | `also_on_concurrency` | `2` | Resources whose sources run at once. |
 | `also_on_retry_secs` | `300` | First retry of a failed source run (seconds); doubles up to an hour. |
 | `event_max_line_bytes` | `65536` | Longest calendar content line (bytes). |

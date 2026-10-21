@@ -756,10 +756,12 @@ are ordered by service name; each URL appears once (a tagged member wins) and ne
 itself. A card carries at most 8 entries, and one link per service (by `site`): for a music
 service a tagged member first, because someone used that link (of several, the one on the
 recording's original album, the `original_album` fact), then the derived link most group members
-name. Tagged members always show, read or not: a member whose card is not read yet counts for the
-service its URL names, so no derived link on that service shows beside it, and two such members on
-one service both show until their cards are read; none on the card's own service (an artist's card never shows another page of its service,
-such as the band's earlier name, which Wikidata may list as a second ID). Tagged members that are
+name, and none on the card's own service (an artist's card never shows another page of its
+service, such as the band's earlier name, which Wikidata may list as a second ID). A member whose
+card is not read yet counts by the service its URL names, against derived links only: it keeps
+derived links on that service off the card, is not deduplicated against other tagged members (two
+such members on one service both show until their cards are read), and counts within the entry
+cap. Tagged members that are
 not music always show. `GET /v1/resources/{id}` shows the same, up to 256 entries, and
 lists every link in `details.also_on` (several of one service too). A derived link can be unavailable in some
 countries (a regional release on a streaming service); nothing public says where, so prefer a

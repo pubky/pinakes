@@ -1825,3 +1825,42 @@ async fn a_sources_single_valued_facts_survive_its_cap(pool: PgPool) {
     }
     assert_eq!(stored.iter().filter(|n| *n == "isrc").count(), 29);
 }
+
+/// At the cap's floor (8), a recording's single-valued facts still fit beside its ISRCs.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_facts_caps_floor_keeps_a_recordings_single_valued_facts(pool: PgPool) {
+    use pinakes_core::also_on::Fact;
+    let id = page(&pool, "https://open.spotify.com/track/floor", "Track").await;
+    let mut config = Config::default();
+    config.also_on.facts_per_source = 8;
+    let mut facts = vec![
+        Fact::new("artist", "Queen"),
+        Fact::new("mbid", "00000000-0000-4000-8000-00000000000f"),
+        Fact::new("mbid_was", "00000000-0000-4000-8000-00000000000e"),
+    ];
+    facts.extend((10..42).map(|n| Fact::new("isrc", format!("AAAAA26000{n}"))));
+    also_on::record(
+        &pool,
+        &id,
+        "music",
+        Found {
+            facts,
+            ..Default::default()
+        },
+        Duration::from_secs(60),
+        &config.also_on,
+    )
+    .await
+    .unwrap();
+    let stored: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM resource_fact WHERE resource_id=$1 ORDER BY name")
+            .bind(&id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored.len(), 8, "{stored:?}");
+    for name in ["artist", "mbid", "mbid_was"] {
+        assert!(stored.contains(&name.to_owned()), "{name}: {stored:?}");
+    }
+    assert_eq!(stored.iter().filter(|n| *n == "isrc").count(), 5);
+}
