@@ -682,7 +682,9 @@ one thing, only on evidence that cannot be spoofed:
   repository (`crate`, `npm`, `pypi`, `repo`), Steam and GOG game (`steam`, `gog`) and Federal
   Register document (`fr`): a join that would bring a second (a wrong ID on a hub) is refused,
   so one bad claim never chains two groups. ISRCs, barcodes, ISBNs and other keys may be
-  several.
+  several. An event page's keys are never such evidence: a concert's performer key
+  (`mb:artist:…`) names the artist, not another copy of the concert, so events group only with
+  events.
 - **Curation** on the admin listener.
 
 `sameAs`, canonical and other URL claims, and other identifiers, never group. Two located
