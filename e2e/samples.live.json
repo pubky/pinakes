@@ -462,7 +462,8 @@
     "kind": "podcastindex_page",
     "uri": "https://podcastindex.org/podcast/577105",
     "type": "PodcastSeries",
-    "name": "Darknet Diaries"
+    "name": "Darknet Diaries",
+    "needs_page": true
   },
   {
     "kind": "place",

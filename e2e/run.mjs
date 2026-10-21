@@ -4,10 +4,10 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { freshen, json, runFlow } from './harness.mjs';
+import { dropRefusedPages, freshen, json, runFlow } from './harness.mjs';
 
 const mock = process.argv.includes('--mock');
-let child, session, liveSamples;
+let child, session, liveSamples, skipped = [];
 const control = new AbortController();
 process.on('SIGINT', () => control.abort(new Error('Interrupted')));
 process.on('SIGTERM', () => control.abort(new Error('Interrupted')));
@@ -29,6 +29,8 @@ try {
     samples = JSON.parse((await readFile(process.env.PINAKES_E2E_SAMPLES ?? 'e2e/samples.live.json', 'utf8')).replaceAll('{author}', author));
     for (const sample of samples) if (sample.kind === 'ics' && process.env.PINAKES_E2E_ICS_URL) sample.uri = process.env.PINAKES_E2E_ICS_URL;
     await freshen(samples);
+    ({ samples, skipped } = await dropRefusedPages(samples));
+    for (const s of skipped) console.error(`left out: ${s.kind} (${s.uri}): ${s.reason}`);
     liveSamples = `.runtime/e2e-samples-${randomUUID()}.json`;
     await writeFile(liveSamples, JSON.stringify(samples, null, 2));
   }
@@ -67,7 +69,7 @@ try {
   }
   const journal = (tags, cleanup) => writeFile(journalFile, JSON.stringify({ author, tags, cleanup }, null, 2), { mode: 0o600 });
   report = await runFlow({ storage, author, samples, pinakes, nexus, positiveVenue, journal, signal: control.signal, timeout: Number(process.env.PINAKES_E2E_TIMEOUT_MS ?? (mock ? 120000 : 600000)) });
-  report.mode = mock ? 'mock' : 'live'; report.journal = journalFile;
+  report.mode = mock ? 'mock' : 'live'; report.journal = journalFile; if (skipped.length) report.skipped = skipped;
 } catch (error) {
   report = { ok: false, mode: mock ? 'mock' : 'live', error: error.message ?? String(error), journal: journalFile };
 } finally {

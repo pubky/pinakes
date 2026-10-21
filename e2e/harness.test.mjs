@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { freshen, newestLink, ownTags, withTags } from './harness.mjs';
+import { dropRefusedPages, freshen, newestLink, ownTags, withTags } from './harness.mjs';
 test('a PUT that commits then times out is included in cleanup', async () => {
   const stored = new Set(), report = {}, journal = [];
   const storage = { exists: async p => stored.has(p), putJson: async p => { stored.add(p); if (p === 'second') throw new Error('timeout'); }, delete: async p => stored.delete(p) };
@@ -39,4 +39,15 @@ test('a latest_in sample takes its feed\'s newest item', async () => {
   assert.deepEqual(asked, ['https://x.example/rss.xml']);
   assert.deepEqual(samples.map(s => s.uri), ['https://x.example/news/new', 'https://y.example/']);
   await assert.rejects(freshen([{ kind: 'feed', latest_in: 'https://x.example/rss.xml' }], async () => '<rss/>'), /No item/);
+});
+test('a needs_page sample whose site refuses this host is left out with the reason', async () => {
+  const samples = [{ kind: 'index', uri: 'https://index.example/p/1', needs_page: true }, { kind: 'open', uri: 'https://open.example/p/2', needs_page: true }, { kind: 'web', uri: 'https://web.example/' }];
+  const status = { 'https://index.example/p/1': 403, 'https://open.example/p/2': 200 };
+  const asked = [];
+  const kept = await dropRefusedPages(samples, async url => { asked.push(url); return status[url]; });
+  assert.deepEqual(asked, ['https://index.example/p/1', 'https://open.example/p/2']);
+  assert.deepEqual(kept.samples.map(s => s.kind), ['open', 'web']);
+  assert.deepEqual(kept.skipped, [{ kind: 'index', uri: 'https://index.example/p/1', reason: "index.example refuses this host's page fetches (HTTP 403)" }]);
+  // A sample another one joins is never left out.
+  await assert.rejects(dropRefusedPages([...samples, { kind: 'pair', uri: 'https://x.example/', group_with: 'index' }], async url => status[url] ?? 200), /joined by another/);
 });

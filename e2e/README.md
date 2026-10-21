@@ -79,10 +79,13 @@ secrets). A sample marked `"needs": "tidal"` (the barcode and own-ISRC cases) ne
 source, so set `PINAKES_TIDAL_CLIENT_ID` and `PINAKES_TIDAL_CLIENT_SECRET`; without them the driver
 refuses to start and names those samples. The walled article (`feed`) names its site's RSS feed
 (`latest_in`), and the harness tags that feed's newest item: the card comes from the feed, which
-lists recent items only. A full run of the default samples takes three to eight minutes; each wait
-for Pinakes has its own deadline of ten minutes (`PINAKES_E2E_TIMEOUT_MS`). Use this mode for a
-scoped live smoke test. Run `scripts/e2e` without a mode to use an already configured dev stack at
-`PINAKES_E2E_PINAKES` (default `http://127.0.0.1:8090`).
+lists recent items only. A sample marked `needs_page` (the Podcast Index page) is a card read from
+its page: when the site answers this host 401 or 403, the harness leaves it out of the run and
+reports why (`skipped` in the report); every other sample stays strict. A full run of the default
+samples takes three to eight minutes; each wait for Pinakes has its own deadline of ten minutes
+(`PINAKES_E2E_TIMEOUT_MS`). Use this mode for a scoped live smoke test. Run `scripts/e2e` without a
+mode to use an already configured dev stack at `PINAKES_E2E_PINAKES` (default
+`http://127.0.0.1:8090`).
 
 The harness creates a minimal `/pub/pubky.app/profile.json` only when missing,
 including on an existing identity; an existing profile is never overwritten. The live samples

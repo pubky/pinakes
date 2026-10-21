@@ -27,6 +27,24 @@ export async function freshen(samples, fetchText = async url => {
   }
   return samples;
 }
+/** Samples marked `needs_page` are cards read from the page itself. A site that refuses this
+ * host's page fetches (401 or 403) cannot make that card from here, whatever Pinakes does, so the
+ * sample is left out of the run and reported with the reason; every other sample stays strict.
+ * A sample another one joins (`group_with`, `maybe_same_with`) is never left out. */
+export async function dropRefusedPages(samples, fetchStatus = async url => {
+  const response = await fetch(url, { headers: { 'user-agent': 'pinakes/0.1.0 (+https://pubky.app; info@synonym.to)' }, signal: AbortSignal.timeout(15000) });
+  await response.body?.cancel();
+  return response.status;
+}) {
+  const skipped = [];
+  for (const sample of samples.filter(s => s.needs_page)) {
+    const status = await fetchStatus(sample.uri);
+    if (status !== 401 && status !== 403) continue;
+    assert(!samples.some(s => s.group_with === sample.kind || s.maybe_same_with === sample.kind), `The ${sample.kind} sample is joined by another and cannot be left out`);
+    skipped.push({ kind: sample.kind, uri: sample.uri, reason: `${new URL(sample.uri).host} refuses this host's page fetches (HTTP ${status})` });
+  }
+  return { samples: samples.filter(s => !skipped.some(k => k.kind === s.kind)), skipped };
+}
 export async function waitFor(label, action, timeout, signal) {
   const end = Date.now() + timeout;
   while (Date.now() < end) {
