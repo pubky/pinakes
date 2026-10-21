@@ -58,6 +58,12 @@ A Discogs link joins other services' pages exactly, never by title or catalogue 
 - A release's own barcode is a `upc:` key when it lists one; a box set lists each disc's, so
   several stay facts.
 
+**Trust.** Discogs is edited by its users, so a release's barcode is what its editors entered.
+Pinakes keys it on Discogs' word alone, as it keys MusicBrainz's barcodes (also edited by its
+users). A wrong barcode joins this edition to another one's pages, and the join is a hint on the
+card, not a claim. If wrong barcodes show up, the rule changes to keying a Discogs barcode only
+when a second source names the same one, and keeping it as a fact otherwise.
+
 Pages of other services list the Discogs artist, master or release that MusicBrainz or Wikidata
 names for them at their level. A master's card lists the album's pages on other services: MusicBrainz
 names none for a release group (its editions have them), so they come from the one Wikidata item
