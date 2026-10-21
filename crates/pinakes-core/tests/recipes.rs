@@ -264,15 +264,14 @@ async fn fixture(pool: &PgPool) {
     .unwrap();
     save(pool, &doi).await;
     let landing = "https://www.nature.com/articles/nature12373";
-    let page = pinakes_core::resolver::web::extract(
+    let fetched = recorded(
         landing,
-        &recorded(
-            landing,
-            "text/html",
-            include_bytes!("fixtures/registry/nature12373-head.html"),
-        ),
-        86400,
-    )
+        "text/html",
+        include_bytes!("fixtures/registry/nature12373-head.html"),
+    );
+    let page = pinakes_core::resolver::html::off_runtime(|| {
+        pinakes_core::resolver::web::extract(landing, &fetched, 86400)
+    })
     .doc;
     save(pool, &page).await;
     // The book from its recorded Open Library record.

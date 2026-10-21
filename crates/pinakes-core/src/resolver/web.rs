@@ -430,6 +430,7 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
         .filter_map(|script| {
             let head = script
                 .ancestors()
+                .take(super::html::MAX_ANCESTORS)
                 .any(|a| a.value().as_element().is_some_and(|e| e.name() == "head"));
             // The script's text as served: `inner_html` would escape it as HTML (`&` → `&amp;`).
             crate::event::page::lenient_json(&script.text().collect::<String>()).map(|mut v| {

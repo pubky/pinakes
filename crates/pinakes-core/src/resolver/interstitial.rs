@@ -135,7 +135,7 @@ pub fn inspect(requested: &Url, f: &Fetched) -> Page {
             el.descendants()
                 .filter_map(|n| n.value().as_text().map(|t| (n, t)))
                 .filter(|(n, _)| {
-                    !n.ancestors().any(|a| {
+                    !n.ancestors().take(super::html::MAX_ANCESTORS).any(|a| {
                         a.value().as_element().is_some_and(|e| {
                             matches!(e.name(), "script" | "style" | "noscript" | "template")
                         })

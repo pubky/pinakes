@@ -276,12 +276,15 @@ impl Source for Discourse {
                 },
             )
             .await?;
-        let result = match &target {
+        // The cards read posts' HTML: in a parse slot.
+        let (doc, at, read, json) = (cx.card(uri, self), host.clone(), target.clone(), f.clone());
+        let result = crate::resolver::html::blocking(move || match &read {
             Target::Topic { id, post, .. } => {
-                topic_card(cx.card(uri, self), &host, *id, *post, f.status, &f.body)
+                topic_card(doc, &at, *id, *post, json.status, &json.body)
             }
-            Target::Post { id, .. } => post_card(cx.card(uri, self), &host, *id, f.status, &f.body),
-        };
+            Target::Post { id, .. } => post_card(doc, &at, *id, json.status, &json.body),
+        })
+        .await?;
         // Only an answer that is not JSON at all says the site is not Discourse; a JSON refusal
         // (a private category) is about this topic alone.
         let json = serde_json::from_slice::<Value>(&f.body).is_ok();

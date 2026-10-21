@@ -114,7 +114,7 @@ impl EventService {
         let uri = uri.to_owned();
         let config = self.config.clone();
         let body = bytes.clone();
-        let mut result = tokio::task::spawn_blocking(move || {
+        let mut result = crate::resolver::html::blocking(move || {
             if ics {
                 calendar::parse(&uri, &body, &config, chrono::Utc::now()).map(Some)
             } else {
@@ -308,7 +308,7 @@ impl EventService {
                 .await
                 {
                     if response.status == 200 {
-                        let (parsed, matched) = tokio::task::spawn_blocking(move || {
+                        let (parsed, matched) = crate::resolver::html::blocking(move || {
                             let matched = serde_json::from_slice(&response.body)
                                 .is_ok_and(|v| page::activity(&mut event, &v, &response.url));
                             (event, matched)
@@ -345,7 +345,7 @@ impl EventService {
             {
                 if response.status == 200 {
                     let config = self.config.clone();
-                    if let Ok(Ok(mut calendar)) = tokio::task::spawn_blocking(move || {
+                    if let Ok(Ok(mut calendar)) = crate::resolver::html::blocking(move || {
                         calendar::parse(&link, &response.body, &config, chrono::Utc::now())
                     })
                     .await

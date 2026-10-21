@@ -2849,21 +2849,16 @@ async fn wikipedia_primary_item_and_plain_web_fallback(pool: PgPool) {
     use pinakes_core::resolver::Resolver;
     let uri = "https://en.wikipedia.org/wiki/Bitcoin_Conference";
     let html = include_str!("fixtures/adapters/wikipedia-item.html");
+    let item = |text: &str| {
+        pinakes_core::resolver::html::off_runtime(|| adapters::service::wikipedia_item(text))
+    };
+    assert_eq!(item(html).as_deref(), Some("Q12345"));
     assert_eq!(
-        adapters::service::wikipedia_item(html).as_deref(),
-        Some("Q12345")
-    );
-    assert_eq!(
-        adapters::service::wikipedia_item(
-            "<a href='https://www.wikidata.org/wiki/Q999'>unrelated</a>"
-        ),
+        item("<a href='https://www.wikidata.org/wiki/Q999'>unrelated</a>"),
         None
     );
     assert_eq!(
-        adapters::service::wikipedia_item(
-            "<a href='https://www.wikidata.org/wiki/Special:EntityPage/Q123'>item</a>"
-        )
-        .as_deref(),
+        item("<a href='https://www.wikidata.org/wiki/Special:EntityPage/Q123'>item</a>").as_deref(),
         Some("Q123")
     );
     let entity = "https://www.wikidata.org/wiki/Special:EntityData/Q12345.json";
@@ -3628,7 +3623,7 @@ async fn google_credential_denials_keep_occurrences_and_count_drift(pool: PgPool
     );
     for status in [401, 403, 404] {
         let mut accepted = cursor::container(uri, &cfg);
-        cursor::append(&mut accepted,"google_calendar_api",&json!({"id":"keep","summary":"Retained event","start":{"dateTime":(Utc::now()+Duration::days(1)).to_rfc3339()}}),&cfg).unwrap();
+        pinakes_core::resolver::html::off_runtime(|| cursor::append(&mut accepted,"google_calendar_api",&json!({"id":"keep","summary":"Retained event","start":{"dateTime":(Utc::now()+Duration::days(1)).to_rfc3339()}}),&cfg)).unwrap();
         accepted.fetched_at += i64::from(status) * 10000;
         store::save_document(&pool, &id, 0, &accepted)
             .await

@@ -180,9 +180,11 @@ decoded body; an oversized page keeps its head metadata with a `truncated` warni
 head when the head runs past the cap (up to `limits.html_head_bytes`; the head ends at `</head>`
 or where `<body>` opens). A whole page within that budget is read whole. A read that cuts stops as soon as it reaches its cap, so a sender
 that stalls there costs no timeout. An image or PDF past the
-cap is cut too, never refused: its card comes from its URL. A page is read only up to a tag with more than 256 attributes
-(none occurs in real pages; tens of thousands make the parser work for minutes), and at most as
-many pages are parsed at once as the machine has cores: a parse holds its slot until it ends,
+cap is cut too, never refused: its card comes from its URL. Every HTML parse (pages, and HTML inside API answers) reads its text
+only up to the first point that passes a parse cap: 50,000 start tags, 256 open elements, 64
+attributes on one tag, an attribute value of 1 MiB (real pages stay far below each: at most
+16,440, 62, 29 and 121 KB over 149 pages). Past a cap the parser would work for minutes. At most
+as many pages are parsed at once as the machine has cores: a parse holds its slot until it ends,
 even after its request timed out. An RSS or
 Atom feed read without a calendar's feed cap is cut there too (a long show's feed is 2–5 MB):
 its channel and newest items come first, and its card reads up to the last whole item. Wikidata

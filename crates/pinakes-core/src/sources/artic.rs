@@ -170,10 +170,12 @@ impl Source for Artic {
             return Ok(cx.missing(uri, self));
         };
         let f = fetch(cx, &request(id, cx.contact()).context("artwork id")?).await?;
-        Ok(match parse(f.status, &f.body, id)? {
-            Some(card) => card.into_doc(cx.card(uri, self), SITE),
-            None => cx.missing(uri, self),
-        })
+        Ok(
+            match crate::resolver::html::blocking(move || parse(f.status, &f.body, id)).await?? {
+                Some(card) => card.into_doc(cx.card(uri, self), SITE),
+                None => cx.missing(uri, self),
+            },
+        )
     }
 }
 

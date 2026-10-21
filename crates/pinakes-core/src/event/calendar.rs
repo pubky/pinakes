@@ -597,7 +597,7 @@ fn content_hash(c: &Component) -> String {
     hash(props.join("\n").as_bytes())
 }
 fn conference(s: &str) -> bool {
-    let html = scraper::Html::parse_fragment(s);
+    let html = crate::resolver::html::fragment(s);
     let hrefs: Vec<_> = html
         .select(&scraper::Selector::parse("a[href]").unwrap())
         .filter_map(|n| n.value().attr("href").map(str::to_owned))
@@ -663,7 +663,7 @@ fn document(
     doc.name = c.text("SUMMARY");
     doc.description = c.text("DESCRIPTION").or_else(|| {
         c.text("X-ALT-DESC").map(|s| {
-            scraper::Html::parse_fragment(&s)
+            crate::resolver::html::fragment(&s)
                 .root_element()
                 .text()
                 .collect()
@@ -814,7 +814,7 @@ fn document(
     });
     if doc.image.is_none() {
         if let Some(html) = c.value("X-ALT-DESC") {
-            let html = scraper::Html::parse_fragment(html);
+            let html = crate::resolver::html::fragment(html);
             doc.image = html
                 .select(&scraper::Selector::parse("img[src]").unwrap())
                 .find_map(|el| origin_url(base, el.value().attr("src")?));

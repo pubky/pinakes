@@ -979,7 +979,9 @@ async fn retention_and_an_opted_out_save_of_the_same_post_never_deadlock(pool: P
         .unwrap();
         let mut doc = ResourceMeta::new(uri, "mastodon", 3600);
         doc.fetched_at = at;
-        mastodon::card(doc, &target, 200, &body).unwrap().unwrap()
+        pinakes_core::resolver::html::off_runtime(|| mastodon::card(doc, &target, 200, &body))
+            .unwrap()
+            .unwrap()
     };
     store::save_document(&pool, &id, 0, &card("status-1.json", 1000))
         .await

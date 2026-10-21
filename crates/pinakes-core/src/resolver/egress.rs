@@ -1001,13 +1001,12 @@ impl Egress {
                 )?;
                 continue;
             }
-            let page = if response.content_type.contains("html") {
+            // The wall check parses what it reads as HTML, whatever the answer's type says.
+            let page = {
                 let input = response.clone();
                 let original = requested.clone();
                 super::html::blocking(move || super::interstitial::inspect(&original, &input))
                     .await?
-            } else {
-                super::interstitial::inspect(&requested, &response)
             };
             if page == super::interstitial::Page::Blocked {
                 crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "blocked");

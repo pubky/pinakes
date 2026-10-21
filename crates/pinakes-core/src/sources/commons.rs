@@ -402,10 +402,13 @@ impl Source for Commons {
             return Ok(cx.missing(uri, self));
         };
         let f = fetch(cx, &request(&target).context("file title")?).await?;
-        Ok(match parse(f.status, &f.body, &target)? {
-            Some(card) => card.into_doc(cx.card(uri, self), SITE),
-            None => cx.missing(uri, self),
-        })
+        let read = target.clone();
+        Ok(
+            match crate::resolver::html::blocking(move || parse(f.status, &f.body, &read)).await?? {
+                Some(card) => card.into_doc(cx.card(uri, self), SITE),
+                None => cx.missing(uri, self),
+            },
+        )
     }
 }
 

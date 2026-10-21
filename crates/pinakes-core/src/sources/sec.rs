@@ -721,7 +721,16 @@ impl Source for Sec {
                     .await
                     .ok()
                     .filter(|f| f.status == 200);
-                let row = index.and_then(|f| index_row(&String::from_utf8_lossy(&f.body), file));
+                let row = match index {
+                    Some(f) => {
+                        let file = file.clone();
+                        crate::resolver::html::blocking(move || {
+                            index_row(&String::from_utf8_lossy(&f.body), &file)
+                        })
+                        .await?
+                    }
+                    None => None,
+                };
                 Some((file.as_str(), row))
             }
             _ => None,

@@ -67,7 +67,7 @@ pub(crate) async fn discover_enrichment(
     enrichment_status(&fetched)?;
     if definition.parser == "mobilizon" && fetched.status == 200 {
         let body = fetched.body.clone();
-        let failed = tokio::task::spawn_blocking(move || {
+        let failed = crate::resolver::html::blocking(move || {
             serde_json::from_slice::<Value>(&body)
                 .ok()
                 .is_some_and(|v| v["errors"].as_array().is_some_and(|a| !a.is_empty()))
@@ -236,9 +236,16 @@ impl PlatformResolver {
                         || doc.location.is_none()
                             && doc.event.attendance != Some(crate::event::Attendance::Online))
                 {
-                    if let Some((target, mut opts)) =
-                        endpoint(d, uri, Some(&fetched), cfg).map_err(parse_error)?
-                    {
+                    // Calendar-link discovery reads the page: in a parse slot.
+                    let found = {
+                        let (d, uri, page, cfg) =
+                            (d.clone(), uri.to_owned(), fetched.clone(), cfg.clone());
+                        crate::resolver::html::blocking(move || {
+                            endpoint(&d, &uri, Some(&page), &cfg)
+                        })
+                        .await?
+                    };
+                    if let Some((target, mut opts)) = found.map_err(parse_error)? {
                         if target != fetched.url.as_str() {
                             opts.feed_hint = crate::event::service::is_feed(&target)
                                 || (d.mode == Mode::Container && feed_path(&target))
@@ -777,7 +784,7 @@ pub fn ics_link(_id: &str, base: &Url, text: &str) -> Option<String> {
 
 async fn wiki(uri: &str, f: &Fetched, egress: &Egress) -> Result<ResourceMeta> {
     let f = f.clone();
-    let (mut value, qid) = tokio::task::spawn_blocking(move || {
+    let (mut value, qid) = crate::resolver::html::blocking(move || {
         let value: Value = serde_json::from_slice(&f.body).unwrap_or(Value::Null);
         let text = String::from_utf8_lossy(&f.body);
         let qid = wikipedia_item(&text);
@@ -809,12 +816,12 @@ async fn wiki(uri: &str, f: &Fetched, egress: &Egress) -> Result<ResourceMeta> {
             }
             .into());
         }
-        value = tokio::task::spawn_blocking(move || serde_json::from_slice(&f.body))
+        value = crate::resolver::html::blocking(move || serde_json::from_slice(&f.body))
             .await?
             .map_err(parse_error)?;
     }
     let uri = uri.to_owned();
-    tokio::task::spawn_blocking(move || wiki_value(&uri, &value))
+    crate::resolver::html::blocking(move || wiki_value(&uri, &value))
         .await?
         .map_err(parse_error)
 }

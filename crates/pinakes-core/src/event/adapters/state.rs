@@ -98,7 +98,7 @@ pub fn object(id: &str, uri: &str, v: &Value) -> Option<ResourceMeta> {
     )
     .map(|mut s| {
         crate::model::truncate(&mut s, 8192);
-        scraper::Html::parse_fragment(&s)
+        crate::resolver::html::fragment(&s)
             .root_element()
             .text()
             .collect()

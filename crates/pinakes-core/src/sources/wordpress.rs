@@ -241,7 +241,8 @@ impl Source for Wordpress {
         if f.status != 200 {
             return Ok(None);
         }
-        card(doc, &page.url, id, &f.body)
+        let (doc, url) = (doc.clone(), page.url.clone());
+        crate::resolver::html::blocking(move || card(&doc, &url, id, &f.body)).await?
     }
 }
 

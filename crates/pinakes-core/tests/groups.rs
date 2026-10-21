@@ -1125,7 +1125,10 @@ async fn registry_landing_pages_need_the_page_to_cite_the_identifier(pool: PgPoo
         landing,
         include_bytes!("fixtures/registry/nature12373-head.html"),
     );
-    let mut d = pinakes_core::resolver::web::extract(landing, &html, 86400).doc;
+    let mut d = pinakes_core::resolver::html::off_runtime(|| {
+        pinakes_core::resolver::web::extract(landing, &html, 86400)
+    })
+    .doc;
     assert!(d
         .group_keys
         .iter()

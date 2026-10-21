@@ -151,8 +151,12 @@ fn fields(doc: &mut ResourceMeta, v: &Value, base: &Url, ap: bool) {
         text(&v["description"])
             .or_else(|| text(&v["summary"]))
             .or_else(|| {
-                string(&v["content"])
-                    .map(|s| Html::parse_fragment(&s).root_element().text().collect())
+                string(&v["content"]).map(|s| {
+                    crate::resolver::html::fragment(&s)
+                        .root_element()
+                        .text()
+                        .collect()
+                })
             }),
     );
     fill(

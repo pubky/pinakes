@@ -147,7 +147,10 @@ async fn real_http_error_bodies_reach_interstitial_detection_with_a_cap() {
             .await
             .unwrap();
         assert_eq!(f.status, status);
-        assert_eq!(interstitial::inspect(&uri, &f), expected);
+        assert_eq!(
+            pinakes_core::resolver::html::off_runtime(|| interstitial::inspect(&uri, &f)),
+            expected
+        );
         if path == "unavailable" {
             assert_eq!(f.body.len(), 64 * 1024);
             assert!(f.truncated);

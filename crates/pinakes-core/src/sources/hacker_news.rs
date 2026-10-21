@@ -148,8 +148,12 @@ impl Source for HackerNews {
                 },
             )
             .await?;
-        Ok(card(cx.card(uri, self), id, f.status, &f.body)?
-            .unwrap_or_else(|| cx.missing(uri, self)))
+        let doc = cx.card(uri, self);
+        Ok(
+            crate::resolver::html::blocking(move || card(doc, id, f.status, &f.body))
+                .await??
+                .unwrap_or_else(|| cx.missing(uri, self)),
+        )
     }
 }
 

@@ -178,10 +178,11 @@ impl Source for PodcastIndex {
         };
         let f = cx.egress.fetch_with(&url, &options).await?;
         super::retry(&f)?;
-        let card = match episode {
-            Some(id) => parse_episode(f.status, &f.body, feed, id)?,
-            None => parse_show(f.status, &f.body, feed)?,
-        };
+        let card = crate::resolver::html::blocking(move || match episode {
+            Some(id) => parse_episode(f.status, &f.body, feed, id),
+            None => parse_show(f.status, &f.body, feed),
+        })
+        .await??;
         Ok(match card {
             Some(card) => card.into_doc(cx.card(uri, self), SITE),
             None => cx.missing(uri, self),

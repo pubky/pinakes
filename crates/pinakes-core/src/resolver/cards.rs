@@ -413,7 +413,7 @@ impl Resolver for CardResolver {
                         .append_pair("jscmd", "data");
                     let f = self.web.egress.fetch(url.as_str()).await?;
                     let uri = uri.to_owned();
-                    tokio::task::spawn_blocking(move || parse_isbn(&uri, &number, &f, ttl)).await?
+                    crate::resolver::html::blocking(move || parse_isbn(&uri, &number, &f, ttl)).await?
                 }
                 "doi" => {
                     let Some(number) = doi(uri) else { return Ok(missing(uri,"doi",0)); };
@@ -435,7 +435,7 @@ impl Resolver for CardResolver {
                         )
                         .await?;
                     let uri = uri.to_owned();
-                    tokio::task::spawn_blocking(move || parse_doi(&uri, &f, ttl)).await?
+                    crate::resolver::html::blocking(move || parse_doi(&uri, &f, ttl)).await?
                 }
                 "nostr" => {
                     let target = crate::event::adapters::nostr::Target::decode(uri)?;
@@ -457,7 +457,7 @@ impl Resolver for CardResolver {
                             &event,);
                     }
                     let uri=uri.to_owned();
-                    tokio::task::spawn_blocking(move || parse_nostr(&uri, &event, ttl)).await?
+                    crate::resolver::html::blocking(move || parse_nostr(&uri, &event, ttl)).await?
                 }
                 "media" => self.media(uri,ttl).await,
                 "official" => match crate::sources::resolve(&self.web.egress, &self.config, uri, ttl).await? {
@@ -714,7 +714,7 @@ pub fn parse_nostr(uri: &str, e: &nostr::event::Event, ttl: u64) -> Result<Resou
     d.bounded(web::ATTRIBUTES)
 }
 pub fn plain(s: &str) -> String {
-    scraper::Html::parse_fragment(s)
+    crate::resolver::html::fragment(s)
         .root_element()
         .text()
         .collect::<Vec<_>>()
@@ -775,7 +775,7 @@ pub fn activitypub(uri: &str, v: &Value, base: &Url, ttl: u64) -> Option<Resourc
 }
 async fn parse_activitypub(uri: &str, f: &Fetched, ttl: u64) -> Result<Option<ResourceMeta>> {
     let (uri, f) = (uri.to_owned(), f.clone());
-    tokio::task::spawn_blocking(move || {
+    crate::resolver::html::blocking(move || {
         let Ok(v) = serde_json::from_slice::<Value>(&f.body) else {
             return Ok(None);
         };
@@ -896,7 +896,7 @@ pub async fn enrich(
         if let Some(f) = feed {
             let (uri, cap, ttl) = (uri.to_owned(), cfg.podcast_items, cfg.media.ttl_secs);
             let referenced = uri.clone();
-            if let Ok(Some(mut d)) = tokio::task::spawn_blocking(move || {
+            if let Ok(Some(mut d)) = crate::resolver::html::blocking(move || {
                 podcast_body(&uri, &f, ttl, cap, direct && is_feed)
             })
             .await?

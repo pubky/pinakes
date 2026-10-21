@@ -2073,7 +2073,10 @@ async fn an_alias_reads_as_its_root_everywhere(pool: PgPool) {
         location: None,
         body: page.as_bytes().into(),
     };
-    let doc = pinakes_core::resolver::web::extract(clean, &fetched, 86400).doc;
+    let doc = pinakes_core::resolver::html::off_runtime(|| {
+        pinakes_core::resolver::web::extract(clean, &fetched, 86400)
+    })
+    .doc;
     assert_eq!(doc.name.as_deref(), Some("Talk"));
     store::save_document(&pool, &root, 0, &doc).await.unwrap();
     let pool_for_checks = pool.clone();
@@ -2243,9 +2246,11 @@ async fn an_opted_out_post_is_not_searched_and_keeps_no_history_text(pool: PgPoo
     let card = |file: &str, at: i64| {
         let mut doc = ResourceMeta::new(uri, "mastodon", 3600);
         doc.fetched_at = at;
-        mastodon::card(doc, &target, 200, &fixture(file))
-            .unwrap()
-            .unwrap()
+        pinakes_core::resolver::html::off_runtime(|| {
+            mastodon::card(doc, &target, 200, &fixture(file))
+        })
+        .unwrap()
+        .unwrap()
     };
     store::save_document(&pool, &id, 0, &card("status-1.json", 1000))
         .await
