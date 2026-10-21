@@ -108,19 +108,83 @@ impl Found {
 
 /// The plain name of a service these lookups read or link to, by its link: the name their derived
 /// links carry ("OpenStreetMap", "Google Play", "crates.io", "DOI"), so a tagged member of a
-/// group and a derived link to the same service read as one service.
+/// group and a derived link to the same service read as one service. Only an object's own page
+/// is named (the forms the lookups recognize: a game, an app, a package, a repository, a paper,
+/// a place); any other page on those hosts (a topic list, a search, a user's page, a page under
+/// an object) is `None`, so it takes no service's place on a card.
 pub fn service_name(uri: &str) -> Option<&'static str> {
     if uri.get(..4).is_some_and(|s| s.eq_ignore_ascii_case("doi:")) {
-        return Some("DOI");
+        return crate::resolver::cards::doi(uri).map(|_| "DOI");
     }
     let url = web_url(uri)?;
     let host = url.host_str()?.to_ascii_lowercase();
     let host = host.strip_prefix("www.").unwrap_or(&host);
-    Some(match host {
-        "openstreetmap.org" | "osm.org" if crate::resolver::osm::parse_id(uri).is_some() => {
-            "OpenStreetMap"
+    let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
+    let digits = |s: &str| plain(s, 20, |c| c.is_ascii_digit());
+    // Only an object's own page is on the service: a topic list, a search, a user's page or a
+    // page under the object is on none (its card keeps the name it gives itself).
+    let object = match host {
+        "openstreetmap.org" | "osm.org" => crate::resolver::osm::parse_id(uri).is_some(),
+        "wikidata.org" | "m.wikidata.org" => sources::wikidata_item(uri).is_some(),
+        "doi.org" | "dx.doi.org" => crate::resolver::cards::doi(uri).is_some(),
+        "store.steampowered.com" | "steamcommunity.com" | "steamdb.info" | "protondb.com" => {
+            games::appid_from_uri(uri).is_some()
         }
-        "wikidata.org" | "m.wikidata.org" if sources::wikidata_item(uri).is_some() => "Wikidata",
+        "pcgamingwiki.com" => {
+            games::appid_from_uri(uri).is_some() || matches!(segments.as_slice(), ["wiki", _])
+        }
+        "gog.com" | "apps.apple.com" | "play.google.com" | "f-droid.org" | "flathub.org"
+        | "snapcraft.io" => sources::store_property(uri).is_some(),
+        "crates.io" | "docs.rs" | "lib.rs" | "npmjs.com" | "jsdelivr.com" | "pypi.org" => {
+            packages::Package::from_uri(uri).is_some()
+        }
+        // unpkg's page for a package: `/{name}/` or `/@scope/{name}/`, nothing under it.
+        "unpkg.com" => match segments.as_slice() {
+            [scope, name] => {
+                scope.starts_with('@')
+                    && packages::Package::new(packages::Registry::Npm, &format!("{scope}/{name}"))
+                        .is_some()
+            }
+            [name] => {
+                !name.starts_with('@')
+                    && packages::Package::new(packages::Registry::Npm, name).is_some()
+            }
+            _ => false,
+        },
+        "github.com" | "gitlab.com" => packages::Repo::from_url(uri).is_some(),
+        // An origin's archive page, `/browse/origin/?origin_url=…`.
+        "archive.softwareheritage.org" => {
+            segments == ["browse", "origin"] && url.query_pairs().any(|(k, _)| k == "origin_url")
+        }
+        "arxiv.org" | "alphaxiv.org" => papers::arxiv_from_uri(uri).is_some(),
+        "pubmed.ncbi.nlm.nih.gov" => matches!(segments.as_slice(), [pmid] if digits(pmid)),
+        "pmc.ncbi.nlm.nih.gov" => matches!(
+            segments.as_slice(),
+            ["articles", id] if id.strip_prefix("PMC").is_some_and(digits)
+        ),
+        "huggingface.co" => {
+            matches!(segments.as_slice(), ["papers", id] if papers::arxiv_id(id).is_some())
+        }
+        // A merchant page names one OSM object: `/merchant/{node|way|relation}:{id}`.
+        "btcmap.org" => matches!(
+            segments.as_slice(),
+            ["merchant", object] if object.split_once(':').is_some_and(|(kind, id)| {
+                matches!(kind, "node" | "way" | "relation") && digits(id)
+            })
+        ),
+        // An archived copy: `/web/{timestamp}/{url}`.
+        "web.archive.org" => matches!(
+            segments.as_slice(),
+            ["web", at, _, ..] if at.len() >= 4 && digits(at)
+        ),
+        _ => false,
+    };
+    if !object {
+        return None;
+    }
+    Some(match host {
+        "openstreetmap.org" | "osm.org" => "OpenStreetMap",
+        "wikidata.org" | "m.wikidata.org" => "Wikidata",
         "doi.org" | "dx.doi.org" => "DOI",
         "store.steampowered.com" | "steamcommunity.com" => "Steam",
         "steamdb.info" => "SteamDB",
@@ -146,7 +210,7 @@ pub fn service_name(uri: &str) -> Option<&'static str> {
         "alphaxiv.org" => "alphaXiv",
         "pubmed.ncbi.nlm.nih.gov" => "PubMed",
         "pmc.ncbi.nlm.nih.gov" => "PubMed Central",
-        "huggingface.co" if url.path().starts_with("/papers/") => "Hugging Face Papers",
+        "huggingface.co" => "Hugging Face Papers",
         "btcmap.org" => "BTC Map",
         "web.archive.org" => "Wayback Machine",
         _ => return None,
@@ -399,9 +463,106 @@ mod tests {
             ("https://btcmap.org/merchant/way:259338174", Some("BTC Map")),
             ("https://huggingface.co/models", None),
             ("https://example.org/", None),
+            // Every other object form the lookups name.
+            ("https://steamcommunity.com/app/620", Some("Steam")),
+            ("https://steamdb.info/app/620/", Some("SteamDB")),
+            ("https://www.protondb.com/app/620", Some("ProtonDB")),
+            ("https://www.pcgamingwiki.com/wiki/Portal_2", Some("PCGamingWiki")),
+            ("https://www.gog.com/en/game/stardew_valley", Some("GOG")),
+            ("https://apps.apple.com/us/app/vlc-media-player/id650377962", Some("App Store")),
+            ("https://flathub.org/apps/org.videolan.VLC", Some("Flathub")),
+            ("https://snapcraft.io/vlc", Some("Snap Store")),
+            ("https://docs.rs/rand/latest/rand/", Some("Docs.rs")),
+            ("https://lib.rs/crates/rand", Some("lib.rs")),
+            ("https://www.npmjs.com/package/@sigstore/sign", Some("npm")),
+            ("https://www.jsdelivr.com/package/npm/vite", Some("jsDelivr")),
+            ("https://unpkg.com/@sigstore/sign/", Some("unpkg")),
+            ("https://unpkg.com/semver/", Some("unpkg")),
+            ("https://pypi.org/project/urllib3/", Some("PyPI")),
+            ("https://gitlab.com/inkscape/inkscape", Some("GitLab")),
+            (
+                "https://archive.softwareheritage.org/browse/origin/?origin_url=https://github.com/rust-random/rand",
+                Some("Software Heritage"),
+            ),
+            ("https://www.alphaxiv.org/abs/1706.03762", Some("alphaXiv")),
+            ("https://pubmed.ncbi.nlm.nih.gov/23903748/", Some("PubMed")),
+            ("https://pmc.ncbi.nlm.nih.gov/articles/PMC3779179/", Some("PubMed Central")),
+            ("https://huggingface.co/papers/1706.03762", Some("Hugging Face Papers")),
+            (
+                "https://web.archive.org/web/20150601000827/http://example.com/",
+                Some("Wayback Machine"),
+            ),
+            // A page on those hosts that is not an object's own page names no service.
+            ("https://github.com/topics/rust", None),
+            ("https://github.com/orgs/rust-lang", None),
+            ("https://github.com/rust-random/rand/issues/1", None),
+            ("https://gitlab.com/inkscape/inkscape/-/issues", None),
+            ("https://www.npmjs.com/search?q=semver", None),
+            ("https://www.npmjs.com/package/semver/access", None),
+            ("https://www.npmjs.com/~isaacs", None),
+            ("https://unpkg.com/semver/package.json", None),
+            ("https://crates.io/categories/science", None),
+            ("https://docs.rs/rand/latest/rand/fn.random.html", None),
+            ("https://pypi.org/user/urllib3/", None),
+            ("https://steamcommunity.com/app/620/discussions/", None),
+            ("https://steamcommunity.com/id/someone", None),
+            ("https://store.steampowered.com/search/?term=portal", None),
+            ("https://steamdb.info/app/620/charts/", None),
+            ("https://www.pcgamingwiki.com/wiki/Portal_2/Talk", None),
+            ("https://www.gog.com/en/games", None),
+            ("https://play.google.com/store/apps", None),
+            ("https://play.google.com/store/apps/dev?id=1", None),
+            ("https://f-droid.org/en/docs/", None),
+            ("https://apps.apple.com/us/developer/videolan/id1234", None),
+            ("https://arxiv.org/list/cs.AI/new", None),
+            ("https://pubmed.ncbi.nlm.nih.gov/?term=x", None),
+            ("https://huggingface.co/papers", None),
+            ("https://btcmap.org/map", None),
+            ("https://web.archive.org/web/", None),
+            ("https://archive.softwareheritage.org/", None),
+            ("https://doi.org/", None),
+            ("https://www.openstreetmap.org/user/someone", None),
         ] {
             assert_eq!(service_name(uri), name, "{uri}");
         }
+    }
+
+    /// Every link the lookups derive is named, by its URL, as the link names its service: the
+    /// object-page rule never unnames a source's own links.
+    #[test]
+    fn every_derived_link_is_named_as_its_service() {
+        let release = packages::Release {
+            package: packages::Package::new(packages::Registry::Npm, "@sigstore/sign").unwrap(),
+            version: "1.0.0".into(),
+            repository: packages::Repo::from_url("https://github.com/sigstore/sigstore-js"),
+        };
+        let crate_release = packages::Release {
+            package: packages::Package::new(packages::Registry::Crates, "rand").unwrap(),
+            version: "0.8.5".into(),
+            repository: packages::Repo::from_url("https://gitlab.com/inkscape/inkscape"),
+        };
+        let pypi = packages::Release {
+            package: packages::Package::new(packages::Registry::PyPI, "urllib3").unwrap(),
+            version: "2.2.0".into(),
+            repository: None,
+        };
+        let links = games::templates(620)
+            .into_iter()
+            .chain(papers::arxiv_links("1706.03762", "datacite"))
+            .chain(release.found().links)
+            .chain(crate_release.found().links)
+            .chain(pypi.found().links);
+        let mut n = 0;
+        for link in links {
+            assert_eq!(
+                service_name(&link.uri),
+                Some(link.site.as_str()),
+                "{}",
+                link.uri
+            );
+            n += 1;
+        }
+        assert!(n >= 10, "{n}");
     }
 
     /// Every parser takes any answer: JSON of the wrong shape, other types or no JSON at all is an

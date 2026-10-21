@@ -823,10 +823,13 @@ members always show. A card of a service the sources know is named after it (`si
 Wikidata, OpenStreetMap, DOI, Steam, SteamDB, ProtonDB, PCGamingWiki, GOG, App Store, Google
 Play, F-Droid, Flathub, Snap Store, crates.io, Docs.rs, lib.rs, npm, jsDelivr, unpkg, PyPI,
 GitHub, GitLab, Software Heritage, arXiv, alphaXiv, PubMed, PubMed Central, Hugging Face
-Papers, BTC Map and Wayback Machine. `GET /v1/resources/{id}` shows the same, up to 256
-entries, and lists every link in `details.also_on` (several of one service too, up to 256). A
-derived link can be unavailable in some countries (a regional release on a streaming service);
-nothing public says where, so prefer a tagged member.
+Papers, BTC Map and Wayback Machine. Only an object's own page is on the service: a game, app,
+package, repository, paper or place page in the forms the lookups recognize. Any other page on
+those hosts (`github.com/topics/rust`, a search, a user's page, a page under an object) takes no
+service's place; its card keeps the name it gives itself, or its host. `GET /v1/resources/{id}`
+shows the same, up to 256 entries, and lists every link in `details.also_on` (several of one
+service too, up to 256). A derived link can be unavailable in some countries (a regional release
+on a streaming service); nothing public says where, so prefer a tagged member.
 
 A derived link is a hint: it is never fetched, never counted as a reference and never ranks
 anything. Sources read a resource after it is saved and again when their results age (each

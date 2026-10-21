@@ -1640,6 +1640,60 @@ async fn a_music_typed_impostor_takes_no_slot_and_hides_nothing(pool: PgPool) {
     }
 }
 
+/// A page on a service's host that is not an object's own page (GitHub's topic list) is on no
+/// service: in a group with a card that derives a GitHub repository, the topic page shows as
+/// itself and the repository keeps GitHub's place.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_non_object_page_on_a_service_host_takes_no_slot(pool: PgPool) {
+    let topics = "https://github.com/topics/rust";
+    let repo = "https://github.com/rust-random/rand";
+    let krate = "https://crates.io/crates/rand";
+    assert_eq!(ResourceMeta::new(topics, "web", 86400).service, None);
+    assert_eq!(
+        ResourceMeta::new(repo, "web", 86400).service.as_deref(),
+        Some("GitHub")
+    );
+    let mut ids = vec![];
+    for uri in [krate, topics] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "web", 86400);
+        d.name = Some("rand".into());
+        d.set_type("SoftwareSourceCode");
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.push(id);
+    }
+    let hub = Fake::new("packages");
+    for uri in [krate, topics] {
+        hub.answer(
+            uri,
+            Ok(Found {
+                keys: vec![key("wikidata:Q1")],
+                links: if uri == krate {
+                    vec![Link::new(repo, "GitHub", "crates")]
+                } else {
+                    vec![]
+                },
+                ..Default::default()
+            }),
+        );
+    }
+    let sources: Vec<Arc<dyn Source>> = vec![hub];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let read = get(&app, &format!("/v1/resources/{}", ids[0])).await;
+    let entries: Vec<(String, bool)> = read["also_on"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| (e["uri"].as_str().unwrap().to_owned(), e["derived"] == true))
+        .collect();
+    assert!(entries.contains(&(topics.to_owned(), false)), "{entries:?}");
+    assert!(entries.contains(&(repo.to_owned(), true)), "{entries:?}");
+}
+
 /// A source that panics on every lookup, as a parser meeting an unexpected shape would.
 struct Panics;
 #[async_trait]
