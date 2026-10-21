@@ -31,6 +31,8 @@ pub struct Config {
     pub also_on: crate::also_on::AlsoOnConfig,
     /// The Podcast Index API's key and secret, for the `podcasts` also-on source.
     pub podcast_index: crate::also_on::podcasts::PodcastIndexConfig,
+    /// TIDAL's developer API credentials and country, for the `tidal` also-on source.
+    pub tidal: crate::also_on::tidal::TidalConfig,
     pub api: ApiConfig,
     pub canary: CanaryConfig,
     /// Every cap, timeout, budget, backoff and refresh tier, with documented defaults
@@ -69,6 +71,35 @@ const ENV_MAPS: &[&[&str]] = &[
 ];
 /// The one map whose new entries are numbers.
 const HOST_RATES: &[&str] = &["limits", "host_rates"];
+/// Secrets read from a variable of their own (`PINAKES_NAME`, one underscore): a build that has no
+/// such setting ignores the variable, where a `PINAKES__SECTION__KEY` it does not know stops it.
+const NAMED_ENV: &[(&str, &[&str])] = &[
+    ("PINAKES_TIDAL_CLIENT_ID", &["tidal", "client_id"]),
+    ("PINAKES_TIDAL_CLIENT_SECRET", &["tidal", "client_secret"]),
+];
+/// Apply the `NAMED_ENV` variables that are set (and not empty) onto the file form.
+fn apply_named_env(
+    value: &mut serde_json::Value,
+    vars: impl IntoIterator<Item = (String, String)>,
+) -> Result<()> {
+    for (key, val) in vars {
+        let Some((_, path)) = NAMED_ENV.iter().find(|(name, _)| *name == key) else {
+            continue;
+        };
+        if val.trim().is_empty() {
+            continue;
+        }
+        let (last, sections) = path.split_last().expect("a path");
+        let mut node = &mut *value;
+        for part in sections {
+            node = node.get_mut(*part).context("unknown config section")?;
+        }
+        node.as_object_mut()
+            .context("unknown config section")?
+            .insert(last.to_string(), serde_json::Value::String(val));
+    }
+    Ok(())
+}
 /// Apply `PINAKES__SECTION__KEY` overrides onto the file form. Strings are literal; numbers,
 /// booleans and arrays are JSON. A new map entry's keys are strings except `enabled`, and a
 /// new `limits.host_rates` entry is a number.
@@ -130,6 +161,7 @@ impl Config {
             canary: CanaryConfig::default(),
             also_on: Default::default(),
             podcast_index: Default::default(),
+            tidal: Default::default(),
             nexus_url: "http://127.0.0.1:8080".into(),
             poll_secs: 5,
             ingest: IngestConfig::default(),
@@ -591,6 +623,7 @@ impl Config {
             merge(&mut value, file);
         }
         apply_env(&mut value, std::env::vars())?;
+        apply_named_env(&mut value, std::env::vars())?;
         Self::from_value(value)
     }
     /// A configuration from its file form (sections plus `[limits]`), validated.
@@ -718,6 +751,10 @@ impl Config {
             || !(1..=86400).contains(&a.retry_secs)
         {
             bail!("invalid also_on limits");
+        }
+        let country = &self.tidal.country;
+        if country.len() != 2 || !country.bytes().all(|b| b.is_ascii_uppercase()) {
+            bail!("tidal.country must be a two-letter country code in upper case");
         }
         if a.apple_storefront.len() != 2
             || !a.apple_storefront.bytes().all(|b| b.is_ascii_lowercase())
@@ -938,6 +975,40 @@ mod tests {
         assert_eq!(cfg.podcast_index.secret.as_deref(), Some("ABCDEFSECRET"));
         let shown = format!("{cfg:?} {}", serde_json::to_string(&cfg).unwrap());
         assert!(!shown.contains("ABCDEF"), "{shown}");
+    }
+    #[test]
+    fn the_tidal_pair_comes_from_its_own_variables_and_stays_secret() {
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        let vars = [
+            ("PINAKES_TIDAL_CLIENT_ID", "ABCDEFID"),
+            ("PINAKES_TIDAL_CLIENT_SECRET", "ABCDEFSECRET"),
+            ("PINAKES_OTHER", "x"),
+        ]
+        .map(|(k, v)| (k.to_string(), v.to_string()));
+        // `apply_env` reads only the double-underscore form.
+        apply_env(&mut value, vars.clone()).unwrap();
+        apply_named_env(&mut value, vars).unwrap();
+        let cfg = Config::from_value(value).unwrap();
+        assert_eq!(cfg.tidal.client_id.as_deref(), Some("ABCDEFID"));
+        assert_eq!(cfg.tidal.client_secret.as_deref(), Some("ABCDEFSECRET"));
+        assert_eq!(cfg.tidal.country, "US");
+        let shown = format!("{cfg:?} {}", serde_json::to_string(&cfg).unwrap());
+        assert!(!shown.contains("ABCDEF"), "{shown}");
+        // An empty variable leaves the file's value.
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        value["tidal"]["client_id"] = "FROMFILE".into();
+        apply_named_env(&mut value, [("PINAKES_TIDAL_CLIENT_ID".into(), "".into())]).unwrap();
+        assert_eq!(value["tidal"]["client_id"], "FROMFILE");
+        for country in ["us", "USA", ""] {
+            assert!(with(serde_json::json!({"tidal":{"country":country}})).is_err());
+        }
+        assert_eq!(
+            with(serde_json::json!({"tidal":{"country":"CH"}}))
+                .unwrap()
+                .tidal
+                .country,
+            "CH"
+        );
     }
     /// `.env.example` names only variables the config accepts (its commented examples too), and
     /// a key for every platform that needs one.

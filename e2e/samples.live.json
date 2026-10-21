@@ -327,6 +327,22 @@
     "group_with": "tidal_seed"
   },
   {
+    "kind": "tidal_barcode",
+    "uri": "https://tidal.com/album/199574241",
+    "type": "MusicAlbum",
+    "site": "TIDAL",
+    "facts": {
+      "upc": "4018939306052"
+    }
+  },
+  {
+    "kind": "apple_barcode",
+    "uri": "https://music.apple.com/us/album/1680053261",
+    "type": "MusicAlbum",
+    "site": "Apple Music",
+    "group_with": "tidal_barcode"
+  },
+  {
     "kind": "tidal_own_isrc",
     "uri": "https://tidal.com/track/551040646",
     "type": "MusicRecording",

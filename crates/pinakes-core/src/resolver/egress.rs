@@ -897,10 +897,10 @@ impl Egress {
         rate
     }
 }
-/// Requests per second the hub services the also-on sources read publish as their limit (one
-/// request at a time per host is the rule for every host); it lowers a host's default pace,
-/// beside the sources' own limits (`sources::budgets`). A rule `*.example.org` covers the
-/// subdomains.
+/// Requests per second the hub services the also-on sources read publish as their limit, or a
+/// cautious pace where none is published (one request at a time per host is the rule for every
+/// host); it lowers a host's default pace, beside the sources' own limits (`sources::budgets`).
+/// A rule `*.example.org` covers the subdomains.
 pub const PUBLISHED_RATES: &[(&str, f64)] = &[
     // MusicBrainz: 1 request/s per IP, 503 above that.
     ("musicbrainz.org", 1.0),
@@ -912,6 +912,9 @@ pub const PUBLISHED_RATES: &[(&str, f64)] = &[
     ("openlibrary.org", 3.0),
     // Deezer's public API: 50 requests per 5 seconds.
     ("api.deezer.com", 10.0),
+    // TIDAL's developer API publishes no figure and answers 429 with a time to wait: a cautious
+    // 2/s (a batch asks for 20 items).
+    ("openapi.tidal.com", 2.0),
     // iTunes Search and Lookup: about 20 requests/min.
     ("itunes.apple.com", 20.0 / 60.0),
     // TVmaze: at least 20 calls every 10 seconds per IP.

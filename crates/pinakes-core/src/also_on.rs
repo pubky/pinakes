@@ -18,6 +18,7 @@ pub mod books;
 pub mod films;
 pub mod media;
 pub mod podcasts;
+pub mod tidal;
 pub mod titles;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -216,6 +217,11 @@ pub trait Source: Send + Sync {
     fn enabled_by_default(&self) -> bool {
         true
     }
+    /// Whether the configuration lets it run (a service that needs the operator's credentials
+    /// is off without them).
+    fn ready(&self, _config: &Config) -> bool {
+        true
+    }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found>;
 }
 
@@ -232,6 +238,7 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
     // In this order: each source sees the keys the ones before it found.
     vec![
         Arc::new(crate::music_sources::ServiceSource),
+        Arc::new(tidal::Tidal),
         Arc::new(crate::music_sources::MusicBrainzSource),
         Arc::new(crate::music_sources::MusicBrainzEntitySource),
         Arc::new(crate::music_sources::WikidataSource),
@@ -534,7 +541,10 @@ pub async fn drain(
         .bind(&due)
         .fetch_all(pool)
         .await?;
-    for source in sources.iter().filter(|s| cfg.source_enabled(s.as_ref())) {
+    for source in sources
+        .iter()
+        .filter(|s| cfg.source_enabled(s.as_ref()) && s.ready(&cx.config))
+    {
         source.prefetch(cx, &uris).await;
     }
     let work = due.into_iter().map(|id| async move {
@@ -588,7 +598,10 @@ async fn one(
     let mut reread = false;
     // In registry order: each source sees the keys the ones before it found in this run (a
     // barcode MusicBrainz names, then the services looked up by it).
-    for source in sources.iter().filter(|s| cfg.source_enabled(s.as_ref())) {
+    for source in sources
+        .iter()
+        .filter(|s| cfg.source_enabled(s.as_ref()) && s.ready(&cx.config))
+    {
         if !source.applies(&subject) {
             // It read the resource before (a key it starts from is gone): its rows go too.
             let had: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource_key WHERE resource_id=$1 AND source=$2) OR EXISTS(SELECT 1 FROM derived_link WHERE resource_id=$1 AND source=$2) OR EXISTS(SELECT 1 FROM resource_fact WHERE resource_id=$1 AND source=$2)")
