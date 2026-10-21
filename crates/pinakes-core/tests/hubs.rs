@@ -194,6 +194,11 @@ impl Transport for Recorded {
                 match (url.host_str().unwrap_or(""), query("titles").as_str()) {
                     ("en.wikipedia.org", "Kant") => (200, fixture("enwiki-kant-redirect.json")),
                     ("en.wikipedia.org", "OK_Computer") => (200, fixture("enwiki-ok-computer.json")),
+                    // An article whose item is over Wikidata's cap.
+                    ("en.wikipedia.org", "Big_Country") => (
+                        200,
+                        br#"{"query":{"pages":{"2":{"pageid":2,"ns":0,"title":"Big Country","pageprops":{"wikibase_item":"Q999999999"}}}}}"#.to_vec(),
+                    ),
                     ("de.wikipedia.org", "Immanuel_Kant") => (
                         200,
                         br#"{"query":{"pages":{"1":{"pageid":1,"ns":0,"title":"Immanuel Kant","pageprops":{"wikibase_item":"Q9312"}}}}}"#.to_vec(),
@@ -1225,8 +1230,8 @@ async fn a_musicbrainz_page_card_comes_from_the_entity() {
     );
 }
 
-/// An answer over its hub's cap is no answer: a MusicBrainz page's and a Wikidata item's sources
-/// record only the key their URL proves and don't retry (asking again would read the same
+/// An answer over its hub's cap is no answer: a MusicBrainz page's, a Wikidata item's and a
+/// Wikipedia article's sources record only the key their own service proves and don't retry (asking again would read the same
 /// megabytes), and the MusicBrainz card is read from the page, the second time too, from the
 /// failure cache.
 #[sqlx::test(migrations = "../../migrations")]
@@ -1251,8 +1256,9 @@ async fn an_entity_over_the_cap_is_no_answer(pool: sqlx::PgPool) {
         assert_eq!(card.name.as_deref(), Some("Big Band"));
     }
     let item = "https://www.wikidata.org/wiki/Q999999999";
+    let article = "https://en.wikipedia.org/wiki/Big_Country";
     let mut ids = vec![];
-    for page in [uri.as_str(), item] {
+    for page in [uri.as_str(), item, article] {
         let id = store::ensure_resource(&pool, page).await.unwrap();
         let mut d = ResourceMeta::new(page, "web", 86400);
         d.set_type("MusicGroup");
@@ -1269,6 +1275,8 @@ async fn an_entity_over_the_cap_is_no_answer(pool: sqlx::PgPool) {
     for (id, own) in [
         (&ids[0], format!("mb:artist:{BIG_BAND}")),
         (&ids[1], "wikidata:Q999999999".to_owned()),
+        // The article's own Wikipedia named the item: that key stays.
+        (&ids[2], "wikidata:Q999999999".to_owned()),
     ] {
         let keys: Vec<String> =
             sqlx::query_scalar("SELECT key FROM resource_key WHERE resource_id=$1 ORDER BY key")

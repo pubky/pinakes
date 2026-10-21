@@ -415,11 +415,26 @@ impl WikipediaSource {
         let Some(qid) = parse_item(&serde_json::from_slice(&fetched.body)?) else {
             return Ok(Found::default());
         };
-        Ok(wikidata::items(&cx.egress, &[qid])
-            .await?
-            .first()
-            .map(|item| found(item, &article))
-            .unwrap_or_default())
+        // The item over the cap: the article keeps the key its own Wikipedia proved.
+        let read = wikidata::items(&cx.egress, std::slice::from_ref(&qid)).await;
+        crate::also_on::unless_over_cap(
+            read.map(|items| {
+                items
+                    .first()
+                    .map(|item| found(item, &article))
+                    .unwrap_or_default()
+            }),
+            || Found {
+                keys: hubs::key::wikidata(&qid)
+                    .map(|key| Key {
+                        key,
+                        via: "wikidata".into(),
+                    })
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+        )
     }
 }
 
