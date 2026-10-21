@@ -273,6 +273,13 @@ async fn an_alias_reads_as_its_root_and_bad_requests_are_refused(pool: PgPool) {
     assert_eq!(info["limits"]["related_window_days"], 365);
     assert_eq!(info["limits"]["related_refs_per_tagger"], 1000);
     assert_eq!(info["limits"]["related_min_shared"], 2);
+    // The search unit's columns, as the collapsed related page lists them.
+    let columns: Vec<String> = sqlx::query_scalar("SELECT column_name::text FROM information_schema.columns WHERE table_name=$1 ORDER BY ordinal_position")
+        .bind("search_unit")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(columns.join(","), api::UNIT_COLUMNS);
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -333,6 +340,33 @@ async fn each_tagger_counts_only_their_most_recent_references(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
+async fn an_opted_out_member_of_the_seed_s_group_supplies_no_taggers(pool: PgPool) {
+    let album = save(&pool, "https://example.org/album", "MusicAlbum").await;
+    let post = "https://bsky.app/profile/x/post/1";
+    let opted = store::ensure_resource(&pool, post).await.unwrap();
+    let mut doc = ResourceMeta::new(post, "bluesky", 86400);
+    doc.set_type("SocialMediaPosting");
+    doc.attributes.insert("opted_out".into(), "true".into());
+    store::save_document(&pool, &opted, 0, &doc).await.unwrap();
+    group(&pool, "0123456789abcdef0123456789abcdef", &[&album, &opted]).await;
+    let other = save(&pool, "https://example.org/other", "MusicAlbum").await;
+    tag(&pool, &album, 1, 1).await;
+    tag(&pool, &opted, 2, 1).await;
+    tag(&pool, &other, 1, 2).await;
+    tag(&pool, &other, 2, 2).await;
+    let config = Config::default();
+    // Only tagger 1 counts: the other album has one shared tagger, below the floor.
+    for seed in [&album, &opted] {
+        let v = related_with(&config, &pool, seed, "").await;
+        assert!(rows(&v).is_empty(), "{v}");
+    }
+    // Tagger 2 on the album itself counts.
+    tag(&pool, &album, 2, 1).await;
+    let v = related_with(&config, &pool, &album, "").await;
+    assert_eq!(rows(&v), std::slice::from_ref(&other), "{v}");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_group_counts_only_members_that_pass_the_filters_and_never_opted_out_posts(pool: PgPool) {
     let seed = save(&pool, "https://example.org/seed", "MusicAlbum").await;
     let album = save(&pool, "https://example.org/album", "MusicAlbum").await;
@@ -364,4 +398,42 @@ async fn a_group_counts_only_members_that_pass_the_filters_and_never_opted_out_p
     // Of the albums only, the group has one.
     let v = related_with(&config, &pool, &seed, "&collapse=group&type=MusicAlbum").await;
     assert!(rows(&v).is_empty(), "{v}");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_taggers_are_the_authors_of_the_seed_s_most_recent_tags(pool: PgPool) {
+    let seed = save(&pool, "https://example.org/seed", "MusicAlbum").await;
+    let old = save(&pool, "https://example.org/old", "MusicAlbum").await;
+    let new = save(&pool, "https://example.org/new", "MusicAlbum").await;
+    // Taggers 1 and 2 tagged the seed long ago, 3 and 4 lately; tagger 3 twice.
+    tag(&pool, &seed, 1, 30).await;
+    tag(&pool, &seed, 2, 20).await;
+    tag(&pool, &seed, 4, 2).await;
+    for days in [1, 3] {
+        sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','rock',$3,now()-$4*interval '1 day')")
+            .bind(&seed)
+            .bind(author(3))
+            .bind(format!("/pub/pubky.app/tags/seed-rock-{days}"))
+            .bind(days as f64)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    for who in [1, 2] {
+        tag(&pool, &old, who, 10).await;
+    }
+    for who in [3, 4] {
+        tag(&pool, &new, who, 10).await;
+    }
+    let mut config = Config::default();
+    assert_eq!(
+        rows(&related_with(&config, &pool, &seed, "").await),
+        [new.clone(), old.clone()]
+    );
+    // The three most recent tags are by 3, 4 and 3: two taggers, who relate the seed to `new`.
+    config.search.related_taggers = 3;
+    assert_eq!(
+        rows(&related_with(&config, &pool, &seed, "").await),
+        std::slice::from_ref(&new)
+    );
 }

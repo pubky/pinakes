@@ -681,7 +681,7 @@
             "type": "integer"
           },
           "related_taggers": {
-            "description": "`related`: the resource's taggers sampled, its most recent, at most this many…",
+            "description": "`related`: the taggers sampled, the authors of the resource's most recent tags, at most this many…",
             "minimum": 0,
             "type": "integer"
           },

@@ -38,7 +38,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `osm_dump_every_hours` | `24` | Hours between two writes of the ODbL dump file. |
 | `osm_dump_downloads_per_hour` | `6` | ODbL dump downloads per hour per client address. |
 | `reach_timeout_secs` | `5` | Nexus reach deadline per search (seconds). |
-| `related_taggers` | `200` | Taggers a related page samples (a resource's most recent). |
+| `related_taggers` | `200` | Taggers a related page samples: the authors of a resource's most recent tags, at most this many. |
 | `related_window_days` | `365` | Days a related page looks back, for those taggers and their tags. |
 | `related_refs_per_tagger` | `1000` | References a related page reads per sampled tagger (their most recent). |
 | `related_min_shared` | `2` | Shared taggers a related row needs (its group's, when collapsed). |

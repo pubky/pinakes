@@ -565,7 +565,8 @@ impl Default for OsmConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct SearchConfig {
     pub reach_timeout_secs: u64,
-    /// The taggers a related page samples (a resource's most recent).
+    /// The taggers a related page samples: the authors of a resource's most recent tags, at most
+    /// this many.
     pub related_taggers: usize,
     /// The days a related page looks back, for those taggers and their tags.
     pub related_window_days: u32,
@@ -1448,7 +1449,8 @@ limits! {
     osm_dump_downloads_per_hour: usize = |c| c.osm.dump_downloads_per_hour => [|c, v| c.osm.dump_downloads_per_hour = v],
     /// Nexus reach deadline per search (seconds).
     reach_timeout_secs: u64 = |c| c.search.reach_timeout_secs => [|c, v| c.search.reach_timeout_secs = v],
-    /// Taggers a related page samples (a resource's most recent).
+    /// Taggers a related page samples: the authors of a resource's most recent tags, at most this
+    /// many.
     related_taggers: usize = |c| c.search.related_taggers => [|c, v| c.search.related_taggers = v],
     /// Days a related page looks back, for those taggers and their tags.
     related_window_days: u32 = |c| c.search.related_window_days => [|c, v| c.search.related_window_days = v],

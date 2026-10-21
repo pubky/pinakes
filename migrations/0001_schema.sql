@@ -144,7 +144,9 @@ CREATE INDEX reference_author_created_idx ON reference USING btree (author, crea
 CREATE INDEX reference_created_idx ON reference USING btree (created_at);
 CREATE INDEX reference_event_idx ON reference USING btree (resource_id, start_at) WHERE kind = 'event';
 CREATE INDEX reference_label_idx ON reference USING btree (label, resource_id);
-CREATE INDEX reference_resource_idx ON reference USING btree (resource_id);
+-- A resource's most recent references (`related` reads its tags in a window); serves every
+-- lookup by resource too.
+CREATE INDEX reference_resource_created_idx ON reference USING btree (resource_id, created_at);
 CREATE INDEX reference_start_idx ON reference USING btree (start_at);
 
 -- References as they count: an alias's count for its root.
@@ -412,6 +414,14 @@ UNION ALL
     LEFT JOIN resource_alias a ON a.alias_id = f.resource_id
     JOIN resource_document r ON r.id = coalesce(a.root_id, f.resource_id)
     WHERE f.kind = 'event' AND f.start_at IS NOT NULL;
+
+-- A resource's own search unit: `search_unit`'s first branch, without occurrences and event
+-- references, so `related` reads each related resource's card by its ID alone.
+CREATE VIEW resource_unit AS
+    SELECT r.*, r.id AS unit_id, NULL::jsonb AS occurrence, NULL::jsonb AS event, NULL::text AS event_author
+    FROM resource_document r
+    WHERE (NOT coalesce(r.type_path @> ARRAY['Event'], false) OR r.start_at IS NOT NULL)
+        AND NOT EXISTS (SELECT 1 FROM resource_alias a WHERE a.alias_id = r.id);
 
 
 -- ── The search revision ──────────────────────────────────────────────────────────────────────

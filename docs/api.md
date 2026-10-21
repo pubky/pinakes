@@ -492,9 +492,9 @@ person (`limits.related_min_shared`, 2).
   group's members' taggers, and the group's own members are never listed. With `collapse=group`,
   each row is one group, its members' taggers counted together; without it, each resource counts
   its own.
-- **Bounds.** The taggers sampled are the resource's most recent, at most
-  `limits.related_taggers` (200), among those who tagged it within `limits.related_window_days`
-  (365, or `window`). Of each, only their most recent `limits.related_refs_per_tagger` (1,000)
+- **Bounds.** The taggers sampled are the authors of the resource's most recent tags (of each
+  member's, in a group), at most `limits.related_taggers` (200), within
+  `limits.related_window_days` (365, or `window`). Of each, only their most recent `limits.related_refs_per_tagger` (1,000)
   references within the same days count. With `collapse=group`, a group needs the shared taggers
   of its members that pass the other filters, together. `/v1/info` gives all four.
 - Only the references Pinakes copies from Nexus's feed count: the resource's taggers, and any
@@ -503,7 +503,8 @@ person (`limits.related_min_shared`, 2).
 - Each resource is listed once, as its own card: never once per occurrence of a feed or per
   event reference at a venue.
 - A post whose author opted out of indexing is never listed, as it is never found by its text,
-  and references to it count for nothing (not even toward its group).
+  and references to it count for nothing: not toward its group, and its taggers are not the
+  taggers of a group it is in.
 - An alias reads as its root; an unknown resource relates to nothing.
 
 ## Resolution and status

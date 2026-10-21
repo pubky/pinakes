@@ -4012,6 +4012,12 @@ async fn related_lists_a_feed_and_a_venue_once(pool: PgPool) {
     };
     assert_eq!(units(feed_id.clone()).await, 51);
     assert_eq!(units(venue_id.clone()).await, 51);
+    // `resource_unit` is exactly `search_unit`'s own units.
+    let differ: i64 = sqlx::query_scalar("SELECT count(*) FROM ((SELECT * FROM search_unit WHERE unit_id=id EXCEPT ALL SELECT * FROM resource_unit) UNION ALL (SELECT * FROM resource_unit EXCEPT ALL SELECT * FROM search_unit WHERE unit_id=id)) d")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(differ, 0);
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     for collapse in ["", "&collapse=group"] {
         let (code, v) = call(

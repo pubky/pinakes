@@ -1216,6 +1216,8 @@ pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
             .ok_or_else(bad),
     }
 }
+/// The columns of `search_unit` (and `resource_unit`), in order.
+pub const UNIT_COLUMNS: &str = "id,uri,host,type,type_path,name,category,point,start_at,end_at,venue_id,doc,search_text,resolver,resolved_at,refresh_at,status,osm_type,osm_id,unit_id,occurrence,event,event_author";
 /// A related row's rank from `{counts}.n` and `.at`: its shared taggers, then the newest of
 /// their references in whole seconds (below 1e10 until 2286), exact in a double up to 900,000
 /// taggers.
@@ -1312,9 +1314,10 @@ pub async fn search(
     };
     let mut sql = QueryBuilder::<Postgres>::new("WITH ");
     if let Some(seed) = &related {
-        // The resource, or its whole group (with their aliases, so the base table's index finds
-        // their references); its most recent taggers in the window (in the same reach); and the
-        // most recent references each of them made elsewhere in the window, once per resource.
+        // The resource, or its whole group; the authors of the most recent tags in the window (in
+        // the same reach) on those not opted out and their aliases, read through the base table's
+        // index; and the most recent references each of them made elsewhere in the window, once
+        // per resource.
         let search = &state.config.search;
         let since = at
             - if q.window.is_some() {
@@ -1326,20 +1329,27 @@ pub async fn search(
             .push_bind(seed.clone())
             .push("::text AS resource_id UNION SELECT u.resource_id FROM group_unit u WHERE u.group_id=(SELECT group_id FROM group_unit WHERE unit_id=")
             .push_bind(seed.clone())
-            .push(" AND group_id IS NOT NULL)), related_ids AS (SELECT resource_id FROM related_seed UNION SELECT alias_id FROM resource_alias WHERE root_id IN (SELECT resource_id FROM related_seed)), related_taggers AS (SELECT f.author,max(f.created_at) AS at FROM reference f WHERE f.kind='tag' AND f.resource_id IN (SELECT resource_id FROM related_ids) AND f.created_at>=")
+            .push(" AND group_id IS NOT NULL)), related_sources AS (SELECT s.resource_id FROM related_seed s JOIN resource d ON d.id=s.resource_id WHERE coalesce(d.doc->'attributes'->>'opted_out','')<>'true'), related_ids AS (SELECT resource_id FROM related_sources UNION SELECT alias_id FROM resource_alias WHERE root_id IN (SELECT resource_id FROM related_sources)), related_taggers AS (SELECT f.author,max(f.created_at) AS at FROM related_ids i CROSS JOIN LATERAL (SELECT f.author,f.created_at FROM reference f WHERE f.resource_id=i.resource_id AND f.kind='tag' AND f.created_at>=")
             .push_bind(since)
             .push(" AND f.created_at<=")
             .push_bind(at);
         scope(&mut sql, &q, &reach);
-        sql.push(" GROUP BY f.author ORDER BY at DESC,f.author LIMIT ")
+        sql.push(" ORDER BY f.created_at DESC LIMIT ")
             .push_bind(search.related_taggers as i64)
-            .push("), related_refs AS (SELECT coalesce(a.root_id,x.resource_id) AS resource_id,t.author,max(x.created_at) AS at FROM related_taggers t CROSS JOIN LATERAL (SELECT f.resource_id,f.created_at FROM reference f WHERE f.author=t.author AND f.created_at>=")
+            .push(") f GROUP BY f.author ORDER BY at DESC,f.author LIMIT ")
+            .push_bind(search.related_taggers as i64)
+            .push("), related_refs AS (SELECT a.root AS resource_id,t.author,max(x.created_at) AS at FROM related_taggers t CROSS JOIN LATERAL (SELECT f.resource_id,f.created_at FROM reference f WHERE f.author=t.author AND f.created_at>=")
             .push_bind(since)
             .push(" AND f.created_at<=")
             .push_bind(at)
             .push(" ORDER BY f.created_at DESC LIMIT ")
             .push_bind(search.related_refs_per_tagger as i64)
-            .push(") x LEFT JOIN resource_alias a ON a.alias_id=x.resource_id WHERE coalesce(a.root_id,x.resource_id) NOT IN (SELECT resource_id FROM related_seed) GROUP BY 1,t.author), related AS (SELECT resource_id,count(*) AS n,max(at) AS at FROM related_refs GROUP BY resource_id");
+            .push(") x CROSS JOIN LATERAL (SELECT coalesce((SELECT root_id FROM resource_alias WHERE alias_id=x.resource_id),x.resource_id) AS root) a WHERE a.root NOT IN (SELECT resource_id FROM related_seed) GROUP BY 1,t.author), related AS (SELECT resource_id,count(*) AS n,max(at) AS at");
+        if q.collapse.is_some() {
+            // Its taggers, for its group's count (`eligible`).
+            sql.push(",string_agg(author,' ') AS authors");
+        }
+        sql.push(" FROM related_refs GROUP BY resource_id");
         if q.collapse.is_none() {
             // A row needs a crowd, so it never mirrors one person's references.
             sql.push(" HAVING count(*)>=")
@@ -1364,10 +1374,11 @@ pub async fn search(
         }
     }
     // With `collapse=group`, a related group counts the shared taggers of its members that pass
-    // the filters: those rows first (`related_pass`), ranked after them.
+    // the filters: those rows first (`related_pass`, each with its taggers and group), ranked
+    // after them.
     let related_groups = related.is_some() && q.collapse.is_some();
     sql.push(if related_groups {
-        "related_pass AS (SELECT r.*"
+        "related_pass AS (SELECT r.*,rel.at AS rel_at,rel.authors AS rel_authors,gu.group_id AS rel_group"
     } else if q.collapse.is_some() {
         "eligible AS (SELECT r.*, "
     } else {
@@ -1399,18 +1410,21 @@ pub async fn search(
     if related.is_some() {
         // Each related resource once, as its own card (never once per occurrence or event
         // reference), looked up one by one: the set is bounded, and a join would read every card.
-        sql.push(" FROM related rel CROSS JOIN LATERAL (SELECT * FROM search_unit u WHERE u.id=rel.resource_id AND u.unit_id=rel.resource_id OFFSET 0) r");
+        sql.push(" FROM related rel CROSS JOIN LATERAL (SELECT * FROM resource_unit u WHERE u.id=rel.resource_id OFFSET 0) r");
     } else {
         sql.push(" FROM search_unit r");
     }
     sql.push(" LEFT JOIN resource_score s ON s.resource_id=r.id");
+    if related_groups {
+        sql.push(" LEFT JOIN group_unit gu ON gu.unit_id=r.unit_id AND gu.group_id IS NOT NULL");
+    }
     if trending {
         sql.push(" JOIN trend t ON t.resource_id=r.id");
     }
     sql.push(" WHERE true");
     if related.is_some() {
         // A post whose author opted out of indexing is never suggested, as it is never found by
-        // its text, nor counts toward its group (`group_related` reads the rows that pass).
+        // its text, nor counts toward its group (`eligible` reads the rows that pass).
         sql.push(" AND coalesce(r.doc->'attributes'->>'opted_out','') <> 'true'");
     }
     spatial.apply(&mut sql);
@@ -1502,16 +1516,21 @@ pub async fn search(
         }
     }
     if related_groups {
-        sql.push("), group_related AS (SELECT u.group_id,count(DISTINCT x.author) AS n,max(x.at) AS at FROM related_pass p JOIN group_unit u ON u.unit_id=p.unit_id AND u.group_id IS NOT NULL JOIN related_refs x ON x.resource_id=p.id GROUP BY u.group_id), eligible AS (SELECT r.*,")
-            .push(related_rank("g_or_rel"))
-            .push(" AS rank FROM related_pass r JOIN related rel ON rel.resource_id=r.id LEFT JOIN group_unit gu ON gu.unit_id=r.unit_id LEFT JOIN group_related g ON g.group_id=gu.group_id CROSS JOIN LATERAL (SELECT coalesce(g.n,rel.n) AS n,coalesce(g.at,rel.at) AS at) g_or_rel WHERE g_or_rel.n>=")
+        // Each row's group (or the row alone) over the rows that pass: its members' taggers
+        // together, counted once, and the newest of their references. A window over the rows,
+        // never a join of two of these sets, whose sizes the planner cannot know.
+        sql.push("), eligible AS (SELECT ")
+            .push(UNIT_COLUMNS)
+            .push(",")
+            .push(related_rank("g"))
+            .push(" AS rank FROM (SELECT p.*,max(p.rel_at) OVER w AS group_at,string_agg(p.rel_authors,' ') OVER w AS group_authors FROM related_pass p WINDOW w AS (PARTITION BY coalesce(p.rel_group,p.id))) p CROSS JOIN LATERAL (SELECT count(DISTINCT a) AS n,p.group_at AS at FROM unnest(string_to_array(p.group_authors,' ')) a) g WHERE g.n>=")
             .push_bind(state.config.search.related_min_shared as i64);
     }
     if q.collapse.is_some() {
         // One row per group: the member with the most references (ties by ID), as itself.
-        // The references are counted once, for the grouped rows only (a per-row count would scan
-        // the alias-resolving view once per row).
-        sql.push("), filtered AS (SELECT DISTINCT ON(coalesce(u.group_id,e.unit_id)) e.* FROM eligible e LEFT JOIN group_unit u ON u.unit_id=e.unit_id AND u.group_id IS NOT NULL LEFT JOIN (SELECT f.resource_id,count(*) AS refs FROM effective_reference f WHERE f.resource_id IN (SELECT x.id FROM eligible x JOIN group_unit g ON g.unit_id=x.unit_id AND g.group_id IS NOT NULL) GROUP BY f.resource_id) c ON c.resource_id=e.id ORDER BY coalesce(u.group_id,e.unit_id),coalesce(c.refs,0) DESC,e.id,e.unit_id");
+        // The references are counted once, for the grouped rows only, through the base table's
+        // index (their IDs and their aliases'): the alias-resolving view would be read whole.
+        sql.push("), grouped AS (SELECT DISTINCT x.id FROM eligible x JOIN group_unit g ON g.unit_id=x.unit_id AND g.group_id IS NOT NULL), grouped_refs AS (SELECT coalesce(a.root_id,f.resource_id) AS resource_id,count(*) AS refs FROM reference f LEFT JOIN resource_alias a ON a.alias_id=f.resource_id WHERE f.resource_id IN (SELECT id FROM grouped UNION SELECT alias_id FROM resource_alias WHERE root_id IN (SELECT id FROM grouped)) GROUP BY 1), filtered AS (SELECT DISTINCT ON(coalesce(u.group_id,e.unit_id)) e.* FROM eligible e LEFT JOIN group_unit u ON u.unit_id=e.unit_id AND u.group_id IS NOT NULL LEFT JOIN grouped_refs c ON c.resource_id=e.id ORDER BY coalesce(u.group_id,e.unit_id),coalesce(c.refs,0) DESC,e.id,e.unit_id");
     }
     if let Some(resolution) = spatial.resolution {
         sql.push("), cells AS (SELECT *, h3_latlng_to_cell(point(ST_X(point),ST_Y(point)),")
@@ -1895,7 +1914,7 @@ pub struct InfoLimits {
     pub occurrence_lookup: usize,
     /// The largest `limit` of one search page.
     pub search_page: usize,
-    /// `related`: the resource's taggers sampled, its most recent, at most this many…
+    /// `related`: the taggers sampled, the authors of the resource's most recent tags, at most this many…
     pub related_taggers: usize,
     /// …and how far back their references count without `window` (days)…
     pub related_window_days: u32,
