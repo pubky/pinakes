@@ -104,7 +104,17 @@ fn evidence(row: &Value) -> Vec<String> {
     if !row["event"].is_null() || row["source"] == "geo" {
         return vec![];
     }
-    for key in row["hub_keys"].as_array().into_iter().flatten() {
+    // Events group only with events: an event page's hub keys name what it is about (a concert's
+    // performer, `mb:artist:…`), never another copy of the event, so they are no evidence.
+    let event = row["type_path"]
+        .as_array()
+        .is_some_and(|path| path.iter().any(|t| t == "Event"));
+    for key in row["hub_keys"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|_| !event)
+    {
         if let Some(key) = key.as_str().filter(|k| crate::also_on::valid_key(k)) {
             keys.insert(format!("hub:{key}"));
         }
@@ -230,7 +240,7 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
     .bind(id)
     .fetch_all(&mut **tx)
     .await?;
-    let rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('unit_id',unit_id,'resource_id',id,'uri',uri,'keys',coalesce(doc->'group_keys','[]'),'hub_keys',coalesce((SELECT jsonb_agg(h.key ORDER BY h.key) FROM (SELECT k.key FROM resource_key k WHERE k.resource_id=search_unit.id AND k.expires_at>now() UNION SELECT l.key FROM derived_link l WHERE l.link_id=search_unit.id AND l.key IS NOT NULL AND l.expires_at>now()) h),'[]'),'occurrence',occurrence,'event',event,'source',doc->>'source','lat',ST_Y(point),'lon',ST_X(point),'start',start_at,'trigrams',show_trgm(array_to_string(tsvector_to_array(to_tsvector('simple',coalesce(name,''))),' '))) FROM search_unit WHERE id=$1 LIMIT $2")
+    let rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('unit_id',unit_id,'resource_id',id,'uri',uri,'keys',coalesce(doc->'group_keys','[]'),'type_path',type_path,'hub_keys',coalesce((SELECT jsonb_agg(h.key ORDER BY h.key) FROM (SELECT k.key FROM resource_key k WHERE k.resource_id=search_unit.id AND k.expires_at>now() UNION SELECT l.key FROM derived_link l WHERE l.link_id=search_unit.id AND l.key IS NOT NULL AND l.expires_at>now()) h),'[]'),'occurrence',occurrence,'event',event,'source',doc->>'source','lat',ST_Y(point),'lon',ST_X(point),'start',start_at,'trigrams',show_trgm(array_to_string(tsvector_to_array(to_tsvector('simple',coalesce(name,''))),' '))) FROM search_unit WHERE id=$1 LIMIT $2")
         .bind(id)
         .bind((cfg.max_graph_units + 1) as i64)
         .fetch_all(&mut **tx)

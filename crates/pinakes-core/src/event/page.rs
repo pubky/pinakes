@@ -38,13 +38,9 @@ fn fill<T>(dst: &mut Option<T>, src: Option<T>) {
         *dst = src;
     }
 }
-pub fn event_node(v: &Value) -> Option<&Value> {
-    if let Some(values) = v.as_array() {
-        return values.iter().find_map(event_node);
-    }
+fn is_event(v: &Value) -> bool {
     let kind = &v["@type"];
-    if kind
-        .as_str()
+    kind.as_str()
         .into_iter()
         .chain(
             kind.as_array()
@@ -53,13 +49,6 @@ pub fn event_node(v: &Value) -> Option<&Value> {
                 .filter_map(Value::as_str),
         )
         .any(|s| crate::model::type_path(s).iter().any(|s| s == "Event"))
-    {
-        return Some(v);
-    }
-    ["@graph", "mainEntity"]
-        .iter()
-        .filter_map(|k| v.get(k))
-        .find_map(event_node)
 }
 /// Repair raw control characters in strings and trailing commas only, without evaluating JS.
 pub fn lenient_json(text: &str) -> Option<Value> {
@@ -100,8 +89,31 @@ pub fn lenient_json(text: &str) -> Option<Value> {
     }
     serde_json::from_str(&out).ok()
 }
+/// Every event node in `v`, in document order (an event's own nested entities aside).
+fn event_nodes<'a>(v: &'a Value, out: &mut Vec<&'a Value>) {
+    if let Some(values) = v.as_array() {
+        values.iter().for_each(|v| event_nodes(v, out));
+    } else if is_event(v) {
+        out.push(v);
+    } else {
+        ["@graph", "mainEntity"]
+            .iter()
+            .filter_map(|k| v.get(k))
+            .for_each(|v| event_nodes(v, out));
+    }
+}
 pub fn jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url) {
-    let Some(v) = event_node(v) else { return };
+    // The page's own event (its url is the page) over another the page lists, else the first.
+    let mut nodes = vec![];
+    event_nodes(v, &mut nodes);
+    let Some(v) = nodes
+        .iter()
+        .find(|n| owns_page(n, base))
+        .or(nodes.first())
+        .copied()
+    else {
+        return;
+    };
     let kind = v["@type"]
         .as_str()
         .or_else(|| {
@@ -294,6 +306,9 @@ fn fields(doc: &mut ResourceMeta, v: &Value, base: &Url, ap: bool) {
             name,
         }),
     );
+    if doc.event.performers.is_empty() && owns_page(v, base) {
+        doc.event.performers = performers(v, base);
+    }
     if let Some(offer) = v.get("offers") {
         let values: Vec<&Value> = offer
             .as_array()
@@ -322,6 +337,87 @@ fn fields(doc: &mut ResourceMeta, v: &Value, base: &Url, ap: bool) {
 }
 /// Set the start or end from a page value, trimmed at both ends first (a padded date-only value
 /// is still recognised as a date by its length).
+/// Whether an event node is the page's own: the page it names is this page (tracking
+/// parameters and fragments aside). Another event a page describes beside its own (a venue's
+/// next show, a related date) never donates to the page's event.
+pub fn owns_page(v: &Value, base: &Url) -> bool {
+    names_page(v, base) == Some(true)
+}
+/// Whether the page an event node names (its `url`, else its `@id`) is this page; `None` when
+/// it names none. An explicit `url` decides: a local `@id` such as `#next-week` resolves to
+/// this page whatever event it is, so it never outweighs a `url` naming another.
+pub fn names_page(v: &Value, base: &Url) -> Option<bool> {
+    fn identity(u: &str) -> Option<String> {
+        let mut u = Url::parse(u).ok()?;
+        u.set_fragment(None);
+        let u = crate::alias::root(u.as_str()).map_or_else(|| u.to_string(), |a| a.root);
+        crate::model::identity(&u).ok().map(|v| v.0)
+    }
+    let page = identity(base.as_str())?;
+    ["url", "@id"]
+        .into_iter()
+        .filter_map(|f| v.get(f).and_then(Value::as_str))
+        .filter_map(|u| origin_url(base, u))
+        .find_map(|u| identity(&u))
+        .map(|id| id == page)
+}
+/// How much of a line-up a page's parse looks at, so a hostile one costs little: the first 64
+/// entries, of which 17 performers with a name, and of each the first 64 link values, of which 9
+/// links. Each is one above what an event keeps (`EventFields::bound`: 16 performers, 8 links),
+/// so trimming still has one to drop.
+const LINEUP_ENTRIES: usize = 64;
+const LINEUP_PERFORMERS: usize = 17;
+const PERFORMER_LINK_VALUES: usize = 64;
+const PERFORMER_LINKS: usize = 9;
+
+/// An event node's performers (`performer`, one or several): a name each, with the links the
+/// page gives for it (`url`, `sameAs`); a bare name is a performer without links, a nameless
+/// entry nothing.
+pub fn performers(v: &Value, base: &Url) -> Vec<super::Performer> {
+    let nodes: Vec<&Value> = match v.get("performer") {
+        Some(Value::Array(all)) => all.iter().take(LINEUP_ENTRIES).collect(),
+        Some(one) if !one.is_null() => vec![one],
+        _ => vec![],
+    };
+    nodes
+        .into_iter()
+        .filter_map(|p| {
+            let name = string(&p["name"]).or_else(|| string(p))?;
+            let name = name.trim().to_owned();
+            if name.is_empty() {
+                return None;
+            }
+            let mut links = vec![];
+            let mut seen = std::collections::HashSet::new();
+            let values = ["url", "sameAs"]
+                .into_iter()
+                .flat_map(|field| match p.get(field) {
+                    Some(Value::Array(all)) => all.iter().collect(),
+                    Some(one) => vec![one],
+                    None => vec![],
+                })
+                .take(PERFORMER_LINK_VALUES);
+            for value in values {
+                if let Some(url) = string(value).and_then(|s| origin_url(base, &s)) {
+                    if seen.insert(url.clone()) {
+                        links.push(url);
+                    }
+                }
+            }
+            // What keys the performer first (a page MusicBrainz can relate to its artist), then
+            // a MusicBrainz artist page (a fact), so trimming a big line-up drops the other links
+            // before them.
+            links.sort_by_key(|l| match crate::music_sources::artist_link(l) {
+                Some(crate::music_sources::ArtistLink::Lookup(_)) => 0,
+                Some(crate::music_sources::ArtistLink::Mbid(_)) => 1,
+                None => 2,
+            });
+            links.truncate(PERFORMER_LINKS);
+            Some(super::Performer { name, links })
+        })
+        .take(LINEUP_PERFORMERS)
+        .collect()
+}
 pub fn set_time(doc: &mut ResourceMeta, s: &str, end: bool) {
     let s = s.trim();
     if (end && doc.end.is_some()) || (!end && doc.start.is_some()) {
@@ -447,9 +543,14 @@ pub fn merge_missing(doc: &mut ResourceMeta, fallback: &ResourceMeta) -> anyhow:
             }
         }
     }
+    // A document's performers keep their own provenance; ones taken from `fallback` bring its.
+    let own = (!doc.event.performers.is_empty()).then(|| doc.event.performers_from.clone());
     let mut event = serde_json::to_value(&doc.event)?;
     fill(&mut event, &serde_json::to_value(&fallback.event)?);
     doc.event = serde_json::from_value(event)?;
+    if let Some(from) = own {
+        doc.event.performers_from = from;
+    }
     if doc.start.is_none() {
         doc.start = fallback.start;
     }
@@ -470,4 +571,179 @@ pub fn merge_missing(doc: &mut ResourceMeta, fallback: &ResourceMeta) -> anyhow:
         doc.location_source = fallback.location_source.clone();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod performer_tests {
+    use super::*;
+    /// The event service reads performers from the page's own node only: a node whose URL is
+    /// the page (tracking parameters aside), never another event the page describes.
+    #[test]
+    fn performers_come_from_the_pages_own_node() {
+        let base = Url::parse("https://www.songkick.com/concerts/43402127-radiohead-at-rac-arena")
+            .unwrap();
+        let performer = serde_json::json!([{"@type":"MusicGroup","name":"Radiohead","sameAs":"https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711"}]);
+        let own = serde_json::json!({"@type":"MusicEvent","name":"Radiohead @ RAC Arena","url":"https://www.songkick.com/concerts/43402127-radiohead-at-rac-arena?utm_medium=organic&utm_source=microformat","startDate":"2027-05-03T19:30:00","performer":performer});
+        let other = serde_json::json!({"@type":"MusicEvent","name":"Next","url":"https://www.songkick.com/concerts/43402211-radiohead-at-rac-arena","startDate":"2027-05-04T19:30:00","performer":performer});
+        let anonymous = serde_json::json!({"@type":"MusicEvent","name":"Anonymous","startDate":"2027-05-04T19:30:00","performer":performer});
+        assert!(owns_page(&own, &base));
+        assert!(!owns_page(&other, &base));
+        assert!(!owns_page(&anonymous, &base));
+        assert_eq!(names_page(&anonymous, &base), None);
+        let mut doc = ResourceMeta::new(base.as_str(), "web", 3600);
+        jsonld(&mut doc, &other, &base);
+        assert!(doc.event.performers.is_empty());
+        jsonld(&mut doc, &own, &base);
+        assert_eq!(doc.event.performers.len(), 1);
+        assert_eq!(doc.event.performers[0].name, "Radiohead");
+        // Listed after another event, the page's own is the one read.
+        let mut doc = ResourceMeta::new(base.as_str(), "web", 3600);
+        jsonld(
+            &mut doc,
+            &serde_json::json!({"@graph": [other, own]}),
+            &base,
+        );
+        assert_eq!(doc.name.as_deref(), Some("Radiohead @ RAC Arena"));
+        assert_eq!(doc.event.performers.len(), 1);
+    }
+    /// An explicit `url` decides whose event a node is: a local `@id` resolves to the page it
+    /// sits on, whichever event it names.
+    #[test]
+    fn a_fragment_id_never_outweighs_a_url_naming_another_page() {
+        let base = Url::parse("https://venue.example/tonight").unwrap();
+        let node = |fields: serde_json::Value| {
+            let mut v = serde_json::json!({"@type":"MusicEvent","name":"Next week","startDate":"2027-05-10T19:30:00","performer":[{"@type":"MusicGroup","name":"Radiohead","sameAs":"https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711"}]});
+            v.as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            v
+        };
+        let next_week = node(serde_json::json!({"url":"/next-week","@id":"#next-week"}));
+        assert!(!owns_page(&next_week, &base));
+        let mut doc = ResourceMeta::new(base.as_str(), "web", 3600);
+        jsonld(&mut doc, &next_week, &base);
+        assert!(doc.event.performers.is_empty());
+        // The page's own: its url names it, tracking aside, whatever its fragment `@id`; a
+        // fragment `@id` alone names the page too.
+        for own in [
+            serde_json::json!({"url":"/tonight?utm_source=feed","@id":"#event"}),
+            serde_json::json!({"@id":"https://venue.example/tonight#event"}),
+            serde_json::json!({"@id":"#event"}),
+        ] {
+            assert!(owns_page(&node(own.clone()), &base), "{own}");
+        }
+    }
+    /// A performer's links come in the order that keys it: a page MusicBrainz relates, then its
+    /// MusicBrainz page (a fact), then the rest; trimming a big line-up drops from the end, so
+    /// the link MusicBrainz is asked about is the last to go.
+    #[test]
+    fn a_performers_keying_link_comes_first_and_survives_trimming() {
+        let base = Url::parse("https://tickets.example/show").unwrap();
+        let node = serde_json::json!({"@type":"MusicEvent","url":"https://tickets.example/show","performer":[{"name":"Radiohead","url":"https://tickets.example/artists/radiohead","sameAs":["https://www.instagram.com/radiohead","https://www.songkick.com/artists/253846-radiohead","https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711"]}]});
+        let found = performers(&node, &base);
+        assert_eq!(
+            found[0].links,
+            [
+                "https://www.songkick.com/artists/253846-radiohead",
+                "https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711",
+                "https://tickets.example/artists/radiohead",
+                "https://www.instagram.com/radiohead",
+            ]
+        );
+        let mut fields = super::super::EventFields {
+            performers: found,
+            ..Default::default()
+        };
+        while fields.performers[0].links.len() > 1 {
+            assert!(fields.shrink_performers());
+        }
+        assert_eq!(
+            fields.performers[0].links,
+            ["https://www.songkick.com/artists/253846-radiohead"]
+        );
+    }
+
+    /// A hostile line-up costs little: the parse looks at a bounded part of it and keeps one
+    /// performer and one link more than an event stores, the keying link among them.
+    #[test]
+    fn a_hostile_line_up_is_read_in_bounds() {
+        let base = Url::parse("https://tickets.example/show").unwrap();
+        let mut same_as: Vec<String> = (0..1000)
+            .map(|n| format!("https://tickets.example/fans/{n}"))
+            .collect();
+        same_as.insert(
+            40,
+            "https://www.songkick.com/artists/253846-radiohead".into(),
+        );
+        let performer = serde_json::json!({"name":"Radiohead","sameAs":same_as});
+        let node = serde_json::json!({"@type":"MusicEvent","url":"https://tickets.example/show","performer":vec![performer; 1000]});
+        let started = std::time::Instant::now();
+        let found = performers(&node, &base);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(found.len(), 17);
+        for p in &found {
+            assert_eq!(p.links.len(), 9);
+            assert_eq!(
+                p.links[0],
+                "https://www.songkick.com/artists/253846-radiohead"
+            );
+        }
+    }
+
+    /// A merge never pairs one document's performers with another's provenance: performers keep
+    /// their own (or none), and ones taken from the fallback bring the fallback's.
+    #[test]
+    fn performers_keep_their_own_provenance_in_a_merge() {
+        let performer = super::super::Performer {
+            name: "Radiohead".into(),
+            links: vec!["https://www.songkick.com/artists/253846".into()],
+        };
+        let mut fallback = ResourceMeta::new("https://www.songkick.com/concerts/1", "web", 60);
+        fallback.event.performers = vec![performer.clone()];
+        fallback.event.performers_from = Some("https://www.songkick.com/concerts/1".into());
+        let mut own = ResourceMeta::new("https://www.songkick.com/concerts/1", "web", 60);
+        own.event.performers = vec![performer];
+        merge_missing(&mut own, &fallback).unwrap();
+        assert_eq!(own.event.performers_from(), None);
+        let mut none = ResourceMeta::new("https://www.songkick.com/concerts/1", "web", 60);
+        merge_missing(&mut none, &fallback).unwrap();
+        assert_eq!(none.event.performers.len(), 1);
+        assert_eq!(
+            none.event.performers_from(),
+            Some("https://www.songkick.com/concerts/1")
+        );
+    }
+
+    /// The provenance is stored as `performers_fetched_from`; a card stored with another key for
+    /// it (an address it was asked for, not one its fetch ended on) has none when read back.
+    #[test]
+    fn only_the_stored_provenance_of_a_fetch_is_read_back() {
+        let mut card = ResourceMeta::new("https://www.songkick.com/concerts/11-stored", "web", 60);
+        card.event.performers = vec![super::super::Performer {
+            name: "Radiohead".into(),
+            links: vec!["https://www.songkick.com/artists/253846".into()],
+        }];
+        let mut stored = serde_json::to_value(&card).unwrap();
+        stored["performers_from"] = "https://www.songkick.com/concerts/11-stored".into();
+        let doc: ResourceMeta = serde_json::from_value(stored).unwrap();
+        assert_eq!(doc.event.performers.len(), 1);
+        assert_eq!(doc.event.performers_from(), None);
+        let mut doc = doc;
+        doc.event.performers_from = Some("https://www.songkick.com/concerts/11-stored".into());
+        let json = serde_json::to_value(&doc).unwrap();
+        assert_eq!(
+            json["performers_fetched_from"],
+            "https://www.songkick.com/concerts/11-stored"
+        );
+        assert!(json.get("performers_from").is_none());
+        let back: ResourceMeta = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            back.event.performers_from(),
+            Some("https://www.songkick.com/concerts/11-stored")
+        );
+    }
 }

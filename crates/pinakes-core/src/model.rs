@@ -207,6 +207,7 @@ impl ResourceMeta {
             if self.attributes.pop_last().is_some()
                 || self.aliases.pop().is_some()
                 || self.group_keys.pop().is_some()
+                || self.event.shrink_performers()
             {
                 continue;
             }
@@ -327,6 +328,25 @@ mod tests {
         assert!(doc.validate(&[]).is_err());
         let doc = doc.bounded(&[]).unwrap();
         assert!(serde_json::to_vec(&doc).unwrap().len() < DOCUMENT_CAP);
+        // The worst line-up (sixteen performers with eight long links each) fits the document:
+        // performers are trimmed, links first, within their own share.
+        let mut doc = ResourceMeta::new("https://example.org/festival", "web", 3600);
+        doc.set_type("MusicEvent");
+        doc.event.performers = (0..16)
+            .map(|n| crate::event::Performer {
+                name: format!("Performer {n}"),
+                links: (0..8)
+                    .map(|l| format!("https://www.songkick.com/artists/{n}{l}-performer-with-a-long-slug-{l}"))
+                    .collect(),
+            })
+            .collect();
+        let doc = doc.bounded(&[]).unwrap();
+        assert!(serde_json::to_vec(&doc).unwrap().len() <= DOCUMENT_CAP);
+        assert!(!doc.event.performers.is_empty());
+        assert!(
+            serde_json::to_vec(&doc.event.performers).unwrap().len()
+                <= crate::event::PERFORMERS_CAP
+        );
         let mut doc = doc.clone();
         doc.attributes = (0..33).map(|n| (format!("x{n}"), "v".into())).collect();
         let keys: Vec<_> = doc.attributes.keys().cloned().collect();

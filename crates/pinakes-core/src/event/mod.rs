@@ -28,6 +28,20 @@ pub struct EventFields {
     pub venue: Option<Venue>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub organizer: Option<Organizer>,
+    /// Who performs, as the page's own structured data names them (`performer`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub performers: Vec<Performer>,
+    /// Where the performers were read: the address the fetch ended on, after redirects. Only a
+    /// page on the service of a performer's link keys its artist (`music_sources`). Set only from
+    /// a fetch ([`EventFields::read_from`]), never by a parser from the base it was handed. Stored
+    /// as `performers_fetched_from`: any other key a stored card holds is not read, so the card
+    /// keys nothing until its page is fetched again.
+    #[serde(
+        default,
+        rename = "performers_fetched_from",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) performers_from: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offers: Option<Offers>,
     /// A local time without a resolvable zone is retained; UTC columns are only a sort proxy.
@@ -108,13 +122,54 @@ pub struct Organizer {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 }
+/// A performer the event page names: its name and the links the page gives for it (`url`,
+/// `sameAs`), which the `performers` source reads for the artist's identity.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, ToSchema)]
+pub struct Performer {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<String>,
+}
 #[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
 pub struct Offers {
     pub low_price: Option<f64>,
     pub high_price: Option<f64>,
     pub currency: Option<String>,
 }
+/// The performers' share of a document, serialized: sixteen names and a few links; a line-up
+/// with many links each is trimmed to it, links first.
+pub const PERFORMERS_CAP: usize = 2048;
 impl EventFields {
+    /// Record that the performers were read from `fetched`: the address its fetch ended on.
+    /// Nothing when there are none.
+    pub fn read_from(&mut self, fetched: &crate::resolver::egress::Fetched) {
+        self.performers_from = (!self.performers.is_empty()).then(|| fetched.url.to_string());
+    }
+    /// Where the performers were read ([`EventFields::read_from`]), if recorded.
+    pub fn performers_from(&self) -> Option<&str> {
+        self.performers_from.as_deref()
+    }
+    fn performers_bytes(&self) -> usize {
+        serde_json::to_vec(&self.performers).map_or(0, |v| v.len())
+    }
+    /// Drop one link of the performer with the most, else the last performer: `false` when
+    /// nothing is left to drop.
+    pub fn shrink_performers(&mut self) -> bool {
+        if let Some(p) = self
+            .performers
+            .iter_mut()
+            .filter(|p| !p.links.is_empty())
+            .max_by_key(|p| p.links.len())
+        {
+            p.links.pop();
+            return true;
+        }
+        let dropped = self.performers.pop().is_some();
+        if self.performers.is_empty() {
+            self.performers_from = None;
+        }
+        dropped
+    }
     pub fn bound(&mut self) {
         use crate::model::truncate;
         for value in [&mut self.tz, &mut self.start_local, &mut self.end_local]
@@ -138,6 +193,21 @@ impl EventFields {
                 o.url = None;
             }
         }
+        self.performers.truncate(16);
+        if self.performers.is_empty()
+            || self
+                .performers_from
+                .as_ref()
+                .is_some_and(|u| u.len() > 2048)
+        {
+            self.performers_from = None;
+        }
+        for p in &mut self.performers {
+            truncate(&mut p.name, 256);
+            p.links.retain(|l| l.len() <= 2048);
+            p.links.truncate(8);
+        }
+        while self.performers_bytes() > PERFORMERS_CAP && self.shrink_performers() {}
         if let Some(o) = &mut self.offers {
             if let Some(c) = &mut o.currency {
                 truncate(c, 16);

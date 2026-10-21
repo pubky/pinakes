@@ -66,6 +66,9 @@ fn mb_url(resource: &str) -> (u16, Vec<u8>) {
         }
         "https://tidal.com/artist/64518" => (200, fixture("mb-url-tidal-artist-64518.json")),
         "https://tidal.com/track/567396540" => (200, fixture("mb-url-tidal-567396540.json")),
+        // Radiohead's Songkick artist page, as MusicBrainz stores it; one MusicBrainz is busy on.
+        "https://www.songkick.com/artists/253846" => (200, fixture("mb-url-songkick-253846.json")),
+        "https://www.songkick.com/artists/503503" => (503, fixture("mb-503.json")),
         // Dracula: two releases ("Dracula", "Dracula (remix)") of one release group.
         "https://tidal.com/album/495402659" => (200, fixture("mb-url-tidal-495402659.json")),
         _ => (404, fixture("mb-url-unknown.json")),
@@ -134,18 +137,35 @@ impl Transport for Recorded {
         let (status, body) = match url.path() {
             // A batch (several `resource`s): MusicBrainz's `urls` list of the links it knows,
             // each as its single lookup answers.
+            // Busy as a whole when it is on one of them, or on the batch (777777: busy when the
+            // batch asks, not a second later when the link would ask alone). 666666's batch is
+            // incomplete: MusicBrainz counts one more than it lists.
             "/ws/2/url" if url.query_pairs().filter(|(k, _)| k == "resource").count() > 1 => {
-                let urls: Vec<serde_json::Value> = url
+                let resources: Vec<String> = url
                     .query_pairs()
                     .filter(|(k, _)| k == "resource")
-                    .filter_map(|(_, r)| match mb_url(&r) {
-                        (200, body) => serde_json::from_slice(&body).ok(),
-                        _ => None,
-                    })
+                    .map(|(_, r)| r.into_owned())
                     .collect();
-                let body =
-                    serde_json::json!({"url-offset": 0, "url-count": urls.len(), "urls": urls});
-                (200, serde_json::to_vec(&body).unwrap())
+                let has = |n: &str| resources.iter().any(|r| r.ends_with(n));
+                // 444444's batch answer is over its read's cap.
+                if has("/444444") {
+                    return Err(pinakes_core::resolver::egress::BodyTooLarge { cap: 1 }.into());
+                }
+                if has("/777777") || resources.iter().any(|r| mb_url(r).0 == 503) {
+                    (503, fixture("mb-503.json"))
+                } else {
+                    let urls: Vec<serde_json::Value> = resources
+                        .iter()
+                        .filter_map(|r| match mb_url(r) {
+                            (200, body) => serde_json::from_slice(&body).ok(),
+                            _ => None,
+                        })
+                        .collect();
+                    let count = urls.len() + usize::from(has("/666666"));
+                    let body =
+                        serde_json::json!({"url-offset": 0, "url-count": count, "urls": urls});
+                    (200, serde_json::to_vec(&body).unwrap())
+                }
             }
             "/ws/2/url" => mb_url(&query("resource")),
             "/ws/2/recording/9f9cf187-d6f9-437f-9d98-d59cdbd52757" => {
@@ -1133,6 +1153,21 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     let many = "https://musicbrainz.org/isrc/ZZAAA2600010";
     let merged = "https://musicbrainz.org/recording/00000000-0000-4000-8000-00000000000d";
     let merged_many = "https://musicbrainz.org/recording/00000000-0000-4000-8000-00000000000e";
+    let concert = "https://www.songkick.com/concerts/43402127-radiohead-at-rac-arena";
+    let vouched = "https://www.songkick.com/concerts/1-vouched-beside-a-busy-lookup";
+    let hostile = "https://evil.example/gig";
+    let elsewhere = "https://www.bandsintown.com/e/1-radiohead-somewhere";
+    let redirected = "https://www.songkick.com/concerts/8-redirected-off-site";
+    let moved = "https://www.songkick.com/concerts/9-moved";
+    let unrecorded = "https://www.songkick.com/concerts/10-no-provenance";
+    let revoked = "https://evil.example/revoked";
+    let legacy = "https://www.songkick.com/concerts/11-stored-with-an-old-key";
+    let over_cap = "https://www.songkick.com/concerts/7-over-cap";
+    let busy = "https://www.songkick.com/concerts/2-busy-lookup-alone";
+    let lineup = "https://www.songkick.com/concerts/3-three-acts";
+    let festival = "https://www.songkick.com/concerts/4-one-keyed-one-busy";
+    let busy_batch = "https://www.songkick.com/concerts/5-busy-batch";
+    let incomplete = "https://www.songkick.com/concerts/6-incomplete-answer";
     let tidal = "https://tidal.com/track/534050211";
     let tidal_artist = "https://tidal.com/artist/64518";
     let mut ids = std::collections::BTreeMap::new();
@@ -1143,6 +1178,21 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         (many, "MusicRecording"),
         (merged, "MusicRecording"),
         (merged_many, "MusicRecording"),
+        (concert, "MusicEvent"),
+        (vouched, "MusicEvent"),
+        (hostile, "MusicEvent"),
+        (elsewhere, "MusicEvent"),
+        (redirected, "MusicEvent"),
+        (moved, "MusicEvent"),
+        (unrecorded, "MusicEvent"),
+        (revoked, "MusicEvent"),
+        (legacy, "MusicEvent"),
+        (over_cap, "MusicEvent"),
+        (busy, "MusicEvent"),
+        (lineup, "MusicEvent"),
+        (festival, "MusicEvent"),
+        (busy_batch, "MusicEvent"),
+        (incomplete, "MusicEvent"),
         (artist, "MusicGroup"),
         (tidal, "MusicRecording"),
         (tidal_artist, "MusicGroup"),
@@ -1154,8 +1204,169 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
             // TIDAL's own page states its ISRC (a key).
             d.attributes.insert("isrc".into(), "GBUM71029604".into());
         }
+        if uri == concert {
+            // As Songkick's JSON-LD names the performer: its own artist page, with tracking.
+            d.start = Some("2027-05-03T19:30:00Z".parse().unwrap());
+            d.event.performers = vec![pinakes_core::event::Performer {
+                name: "Radiohead".into(),
+                links: vec!["https://www.songkick.com/artists/253846-radiohead?utm_medium=organic&utm_source=microformat".into()],
+            }];
+        }
+        if uri == lineup {
+            // Three acts: one MusicBrainz knows, two it doesn't. One batched request for all.
+            d.start = Some("2027-07-01T20:00:00Z".parse().unwrap());
+            d.event.performers = ["253846-radiohead", "999999-unknown", "888888-also-unknown"]
+                .into_iter()
+                .map(|slug| pinakes_core::event::Performer {
+                    name: slug.to_owned(),
+                    links: vec![format!("https://www.songkick.com/artists/{slug}")],
+                })
+                .collect();
+        }
+        if uri == festival {
+            // Two acts: one the page names by its MusicBrainz page, one whose Songkick link
+            // MusicBrainz is busy on.
+            d.start = Some("2027-08-01T20:00:00Z".parse().unwrap());
+            d.event.performers = vec![
+                pinakes_core::event::Performer {
+                    name: "Radiohead".into(),
+                    links: vec![
+                        "https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711"
+                            .into(),
+                    ],
+                },
+                pinakes_core::event::Performer {
+                    name: "Busy Act".into(),
+                    links: vec!["https://www.songkick.com/artists/503503-busy".into()],
+                },
+            ];
+        }
+        if uri == busy_batch || uri == incomplete {
+            // busy_batch: one act the page names by its MusicBrainz page, one with two links
+            // MusicBrainz is busy on as a batch (each alone would be unknown). incomplete: the
+            // batch's answer lists Radiohead and leaves 666666 out of a larger count.
+            d.start = Some("2027-09-01T20:00:00Z".parse().unwrap());
+            let (first, second) = if uri == busy_batch {
+                (
+                    vec!["https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711"],
+                    vec![
+                        "https://www.songkick.com/artists/777777-busy-batch",
+                        "https://www.songkick.com/artists/555555-unknown",
+                    ],
+                )
+            } else {
+                (
+                    vec!["https://www.songkick.com/artists/253846-radiohead"],
+                    vec!["https://www.songkick.com/artists/666666-left-out"],
+                )
+            };
+            d.event.performers = [("First", first), ("Second", second)]
+                .into_iter()
+                .map(|(name, links)| pinakes_core::event::Performer {
+                    name: name.into(),
+                    links: links.into_iter().map(str::to_owned).collect(),
+                })
+                .collect();
+        }
+        if uri == over_cap {
+            // Two acts whose batched answer is over its cap.
+            d.start = Some("2027-06-03T20:00:00Z".parse().unwrap());
+            d.event.performers = ["253846-radiohead", "444444-huge"]
+                .into_iter()
+                .map(|slug| pinakes_core::event::Performer {
+                    name: slug.to_owned(),
+                    links: vec![format!("https://www.songkick.com/artists/{slug}")],
+                })
+                .collect();
+        }
+        if uri == redirected || uri == moved || uri == unrecorded || uri == legacy {
+            // A Songkick concert naming Radiohead's Songkick page, read from wherever the fetch
+            // ended (below).
+            d.start = Some("2027-06-04T20:00:00Z".parse().unwrap());
+            d.event.performers = vec![pinakes_core::event::Performer {
+                name: "Radiohead".into(),
+                links: vec!["https://www.songkick.com/artists/253846-radiohead".into()],
+            }];
+        }
+        if uri == revoked {
+            // A page on no performer's service, whose Songkick link MusicBrainz is busy on.
+            d.start = Some("2027-06-05T20:00:00Z".parse().unwrap());
+            d.event.performers = vec![pinakes_core::event::Performer {
+                name: "Someone".into(),
+                links: vec!["https://www.songkick.com/artists/503503-busy".into()],
+            }];
+        }
+        if uri == hostile || uri == elsewhere {
+            // Any page can name any artist's pages for its performer: hostile its Songkick and
+            // MusicBrainz pages, elsewhere (a Bandsintown event) its Songkick page.
+            d.start = Some("2027-06-02T20:00:00Z".parse().unwrap());
+            let mut links = vec!["https://www.songkick.com/artists/253846-radiohead".to_owned()];
+            if uri == hostile {
+                links.push(
+                    "https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711".into(),
+                );
+            }
+            d.event.performers = vec![pinakes_core::event::Performer {
+                name: "Radiohead".into(),
+                links,
+            }];
+        }
+        if uri == vouched || uri == busy {
+            d.start = Some("2027-06-01T20:00:00Z".parse().unwrap());
+            let mut links = vec!["https://www.songkick.com/artists/503503-busy".to_owned()];
+            if uri == vouched {
+                links.push(
+                    "https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711".into(),
+                );
+            }
+            d.event.performers = vec![pinakes_core::event::Performer {
+                name: "Someone".into(),
+                links,
+            }];
+        }
+        // Where the page came from, after redirects: the page itself, but off-site for the
+        // redirected one, another Songkick page for the moved one, and nothing said for one
+        // stored without it.
+        if uri != unrecorded && uri != legacy {
+            let from = if uri == redirected {
+                "https://evil.example/gig"
+            } else if uri == moved {
+                concert
+            } else {
+                uri
+            };
+            d.event.read_from(&Fetched {
+                permanent_redirect: false,
+                truncated: false,
+                validators: Default::default(),
+                url: url::Url::parse(from).unwrap(),
+                content_type: "text/html".into(),
+                status: 200,
+                retry_after_secs: 60,
+                location: None,
+                body: vec![],
+            });
+        }
         store::save_document(&pool, &id, 0, &d).await.unwrap();
         ids.insert(uri, id);
+    }
+    // A card stored with its provenance under another key (the address it was asked for, as an
+    // earlier build wrote it): that key is not read back.
+    sqlx::query(
+        "UPDATE resource SET doc=doc||jsonb_build_object('performers_from',uri) WHERE id=$1",
+    )
+    .bind(&ids[legacy])
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Keys an earlier run left: one the rule no longer allows (the revoked page owns no link),
+    // one it allows (the busy concert is Songkick's).
+    for page in [revoked, busy] {
+        sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) VALUES($1,'mb:artist:a74b1b7f-71a5-4011-9441-d0b5e4122711','performers','musicbrainz',now()+interval '30 days')")
+            .bind(&ids[page])
+            .execute(&pool)
+            .await
+            .unwrap();
     }
     let t = Arc::new(Recorded {
         seen: Mutex::default(),
@@ -1285,6 +1496,221 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     let band = rows(group, ids[artist].clone()).await;
     assert_ne!(band, ["-"]);
     assert_eq!(rows(group, ids[tidal_artist].clone()).await, band);
+    // The concert keys the artist MusicBrainz relates its performer's Songkick page to (the
+    // page's own structured data; a name alone is a fact), never joins the artist's group, and
+    // is the artist's event by key.
+    assert_eq!(
+        rows(
+            "SELECT key||' '||source||' '||via FROM resource_key WHERE resource_id=$1",
+            ids[concert].clone()
+        )
+        .await,
+        ["mb:artist:a74b1b7f-71a5-4011-9441-d0b5e4122711 performers musicbrainz"]
+    );
+    assert_eq!(
+        rows(
+            "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name",
+            ids[concert].clone()
+        )
+        .await,
+        [
+            "performer Radiohead",
+            "performer_mbid a74b1b7f-71a5-4011-9441-d0b5e4122711"
+        ]
+    );
+    assert_eq!(rows(group, ids[concert].clone()).await, ["-"]);
+    // Only a page on the service of the link it names keys the artist (the Songkick concert
+    // above): any other page chose the identity, whatever MusicBrainz relates it to, so it is a
+    // fact. A page naming an artist's Songkick and MusicBrainz pages, and a Bandsintown event
+    // naming a Songkick artist, key nothing.
+    let any_key = "SELECT key FROM resource_key WHERE resource_id=$1";
+    let retrying =
+        "SELECT coalesce(last_error,'-') FROM also_on_dirty WHERE resource_id=$1 AND attempts>0";
+    // The page that came from elsewhere, or doesn't say where it came from, is no service's
+    // either; a redirect within Songkick is still Songkick's.
+    assert_eq!(
+        rows(
+            "SELECT key||' '||via FROM resource_key WHERE resource_id=$1",
+            ids[moved].clone()
+        )
+        .await,
+        ["mb:artist:a74b1b7f-71a5-4011-9441-d0b5e4122711 musicbrainz"]
+    );
+    // A key the rule no longer allows goes even when MusicBrainz is busy: the page owns none of
+    // its performers' links, so its run records what it says without MusicBrainz; the busy
+    // concert, Songkick's own, keeps its rows until MusicBrainz answers.
+    assert!(rows(any_key, ids[revoked].clone()).await.is_empty());
+    assert_eq!(
+        rows(
+            "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name",
+            ids[revoked].clone()
+        )
+        .await,
+        [
+            "performer Someone",
+            "performer_link https://www.songkick.com/artists/503503"
+        ]
+    );
+    assert_eq!(
+        rows(any_key, ids[busy].clone()).await,
+        ["mb:artist:a74b1b7f-71a5-4011-9441-d0b5e4122711"]
+    );
+    for page in [hostile, elsewhere, redirected, unrecorded, legacy] {
+        assert!(rows(any_key, ids[page].clone()).await.is_empty(), "{page}");
+        assert_eq!(
+            rows(
+                "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name",
+                ids[page].clone()
+            )
+            .await,
+            [
+                "performer Radiohead",
+                "performer_mbid a74b1b7f-71a5-4011-9441-d0b5e4122711"
+            ],
+            "{page}"
+        );
+        assert!(rows(retrying, ids[page].clone()).await.is_empty(), "{page}");
+    }
+    assert!(rows(any_key, ids[vouched].clone()).await.is_empty());
+    // An answer over its cap fails the run as any failed request does: nothing is recorded (the
+    // previous rows would stay) and the run retries later.
+    assert!(rows(any_key, ids[over_cap].clone()).await.is_empty());
+    assert!(rows(
+        "SELECT name FROM resource_fact WHERE resource_id=$1",
+        ids[over_cap].clone()
+    )
+    .await
+    .is_empty());
+    assert!(!rows(retrying, ids[over_cap].clone()).await.is_empty());
+    assert!(
+        rows(retrying, ids[vouched].clone())
+            .await
+            .iter()
+            .any(|e| e.contains("musicbrainz_busy")),
+        "a claimed MBID waits for the busy lookup"
+    );
+    // A busy MusicBrainz fails the run whatever else was found (another act on the page keyed
+    // from it), so it retries in minutes and then records both together; recording only what
+    // was found would leave the busy act's key out until the next run, a month away.
+    for page in [busy, festival] {
+        assert!(rows(keys, ids[page].clone()).await.is_empty(), "{page}");
+        assert!(
+            rows(retrying, ids[page].clone())
+                .await
+                .iter()
+                .any(|e| e.contains("musicbrainz_busy")),
+            "{page} retries"
+        );
+    }
+    assert!(rows(keys, ids[busy].clone()).await.is_empty());
+    // A busy batch fails the run as a single link's busy answer does, and nothing asks again
+    // link by link: the page's key waits for the retry with the others.
+    let all_keys = "SELECT key FROM resource_key WHERE resource_id=$1";
+    assert!(rows(all_keys, ids[busy_batch].clone()).await.is_empty());
+    assert!(
+        rows(retrying, ids[busy_batch].clone())
+            .await
+            .iter()
+            .any(|e| e.contains("musicbrainz_busy")),
+        "a busy batch is retried"
+    );
+    // An incomplete answer is what it says: Radiohead is keyed, 666666 is unknown this run.
+    assert_eq!(
+        rows(all_keys, ids[incomplete].clone()).await,
+        ["mb:artist:a74b1b7f-71a5-4011-9441-d0b5e4122711"]
+    );
+    assert!(rows(
+        "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1",
+        ids[incomplete].clone()
+    )
+    .await
+    .contains(&"performer_link https://www.songkick.com/artists/666666".to_owned()));
+    {
+        // One request each, the batch: no link asked alone.
+        let seen = t.seen.lock().unwrap().clone();
+        for link in ["artists%2F777777", "artists%2F555555", "artists%2F666666"] {
+            let alone: Vec<&String> = seen
+                .iter()
+                .filter(|s| s.contains("/ws/2/url?") && s.contains(link))
+                .filter(|s| s.matches("resource=").count() == 1)
+                .collect();
+            assert!(alone.is_empty(), "{link} asked alone: {alone:?}");
+        }
+    }
+    // Its run failed as a whole: nothing recorded yet, the retry will.
+    assert!(rows(
+        "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1",
+        ids[busy].clone()
+    )
+    .await
+    .is_empty());
+    // The line-up's three links went in one request; only the known act is keyed, the others
+    // keep their link as a fact.
+    assert_eq!(
+        rows(
+            "SELECT key FROM resource_key WHERE resource_id=$1",
+            ids[lineup].clone()
+        )
+        .await,
+        ["mb:artist:a74b1b7f-71a5-4011-9441-d0b5e4122711"]
+    );
+    let lineup_facts = rows(
+        "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name,value",
+        ids[lineup].clone(),
+    )
+    .await;
+    assert!(
+        lineup_facts.contains(&"performer_link https://www.songkick.com/artists/999999".to_owned())
+            && !lineup_facts.iter().any(|f| f.ends_with("/253846")),
+        "{lineup_facts:?}"
+    );
+    {
+        let seen = t.seen.lock().unwrap().clone();
+        let batched: Vec<&String> = seen
+            .iter()
+            .filter(|s| s.contains("/ws/2/url?") && s.contains("artists%2F999999"))
+            .collect();
+        assert_eq!(batched.len(), 1, "{seen:?}");
+        assert_eq!(batched[0].matches("resource=").count(), 3, "{batched:?}");
+    }
+    assert!(
+        rows(retrying, ids[busy].clone())
+            .await
+            .iter()
+            .any(|e| e.contains("musicbrainz_busy")),
+        "the busy lookup is retried"
+    );
+    {
+        use tower::ServiceExt;
+        sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) VALUES($1,repeat('b',52),'tag','/pub/test/tags/'||$1,'gig',now())")
+            .bind(&ids[concert])
+            .execute(&pool)
+            .await
+            .unwrap();
+        let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+        let mut request = axum::http::Request::builder()
+            .uri(
+                "/v1/search?key=mbid:a74b1b7f-71a5-4011-9441-d0b5e4122711&type=MusicEvent&from=now",
+            )
+            .body(axum::body::Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
+        ));
+        let response = app.oneshot(request).await.unwrap();
+        let bytes = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let found: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let hits: Vec<&str> = found["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(hits, [ids[concert].as_str()], "{found}");
+    }
     // One read of the recording serves its page and the ISRC's.
     let seen = t.seen.lock().unwrap().clone();
     let reads = seen

@@ -73,8 +73,9 @@ When a change adds something operators must do, document it in `docs/operations.
 
 **Keys and facts.** Only a hub (MusicBrainz, Wikidata) or a service's own record of its own ID
 makes a join key. What a page says about itself (`sameAs`, a canonical link to another page, an
-ISRC in its markup) is a fact at most and never joins two resources. Joins never come from a
-title or name match.
+ISRC in its markup) is a fact at most and never joins two resources, and so is another service's
+ID a page names for something it lists (an event page's performer keys an artist only on the
+service whose artist page it names). Joins never come from a title or name match.
 
 **Egress.** Every request a reference can steer goes through `resolver::egress::Egress`: never
 build another HTTP client for them. The egress pins DNS, refuses private addresses, caps bodies,
