@@ -316,7 +316,10 @@ pub fn parse_npm_latest(status: u16, raw: &[u8], package: &Package) -> Result<Op
         .context("no version")?;
     let attestations = latest["dist"]["attestations"]
         .as_object()
-        .filter(|a| a["provenance"]["predicateType"] == SLSA_V1)
+        .filter(|a| {
+            a.get("provenance")
+                .is_some_and(|p| p["predicateType"] == SLSA_V1)
+        })
         .and_then(|a| a.get("url")?.as_str())
         .filter(|u| u.starts_with("https://registry.npmjs.org/-/npm/v1/attestations/"))
         .and_then(Request::get);
@@ -839,5 +842,23 @@ mod tests {
         let raw = fixture::read("swh-origin-missing.json");
         assert_eq!(parse_software_heritage(404, &raw, &missing).unwrap(), None);
         assert!(parse_software_heritage(429, b"", &repo).is_err());
+    }
+
+    /// Answers of the wrong shape are errors or absent provenance, never a panic.
+    #[test]
+    fn a_malformed_answer_never_panics() {
+        let probe = pkg(Registry::Npm, "probe");
+        for raw in [
+            &br#"{"name":"probe","version":"1.0.0","dist":{"attestations":{}}}"#[..],
+            br#"{"name":"probe","version":"1.0.0","dist":{"attestations":{"provenance":7}}}"#,
+            br#"{"name":"probe","version":"1.0.0","dist":{"attestations":[]}}"#,
+            br#"{"name":"probe","version":"1.0.0","dist":false}"#,
+        ] {
+            let latest = parse_npm_latest(200, raw, &probe).unwrap().unwrap();
+            assert!(latest.attestations.is_none());
+        }
+        for raw in [&b"[]"[..], b"false", b"{}"] {
+            assert!(parse_npm_latest(200, raw, &probe).is_err());
+        }
     }
 }

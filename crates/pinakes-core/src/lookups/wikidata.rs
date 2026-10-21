@@ -40,7 +40,10 @@ pub fn parse_entities(status: u16, raw: &[u8]) -> Result<BTreeMap<String, Value>
     if let Some(error) = value.get("error") {
         anyhow::bail!("wikidata error: {}", error["code"]);
     }
-    let entities = value["entities"].as_object_mut().context("no entities")?;
+    let entities = value
+        .get_mut("entities")
+        .and_then(Value::as_object_mut)
+        .context("no entities")?;
     Ok(std::mem::take(entities)
         .into_values()
         .filter(|e| e.get("missing").is_none())
@@ -431,5 +434,17 @@ mod tests {
             assert_eq!(qid(bad), None, "{bad}");
         }
         assert_eq!(key("Q7024").as_str(), "wikidata:Q7024");
+    }
+
+    /// An answer of the wrong shape is an error, never a panic.
+    #[test]
+    fn a_malformed_answer_is_an_error() {
+        for raw in [&b"[]"[..], b"false", b"{\"entities\": []}", b"{}"] {
+            assert!(
+                parse_entities(200, raw).is_err(),
+                "{}",
+                String::from_utf8_lossy(raw)
+            );
+        }
     }
 }

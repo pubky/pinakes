@@ -403,4 +403,64 @@ mod tests {
             assert_eq!(service_name(uri), name, "{uri}");
         }
     }
+
+    /// Every parser takes any answer: JSON of the wrong shape, other types or no JSON at all is an
+    /// error or nothing, never a panic (a panic would end the also-on run).
+    #[test]
+    fn no_parser_panics_on_a_malformed_answer() {
+        let pkg = |registry, name: &str| packages::Package {
+            registry,
+            name: name.to_owned(),
+        };
+        let repo = packages::Repo::new("github.com", "a/b").unwrap();
+        let near = chrono::Utc::now();
+        for raw in [
+            &b"[]"[..],
+            b"false",
+            b"null",
+            b"1",
+            b"\"x\"",
+            b"{}",
+            b"{\"data\": 1, \"message\": [], \"entities\": false, \"records\": {}}",
+            b"[{}]",
+            b"not json",
+        ] {
+            for status in [200, 404] {
+                let _ = places::parse_btcmap_places(status, raw);
+                let _ = games::parse_protondb(status, raw, 620);
+                let _ = games::parse_gog_gamesdb(status, raw, 620);
+                let _ = games::parse_gog_product(status, raw, 1);
+                let _ = wikidata::parse_entities(status, raw);
+                let _ = packages::parse_crates(status, raw, &pkg(packages::Registry::Crates, "a"));
+                let _ = packages::parse_npm_latest(status, raw, &pkg(packages::Registry::Npm, "a"));
+                let _ = packages::parse_npm_attestations(
+                    status,
+                    raw,
+                    &pkg(packages::Registry::Npm, "a"),
+                    "1.0.0",
+                );
+                let _ = packages::parse_pypi(status, raw, &pkg(packages::Registry::PyPI, "a"));
+                let _ = packages::parse_pypi_provenance(status, raw);
+                let _ = packages::parse_depsdev(
+                    status,
+                    raw,
+                    &pkg(packages::Registry::Npm, "a"),
+                    "1.0.0",
+                );
+                let _ = packages::parse_software_heritage(status, raw, &repo);
+                let _ = papers::parse_unpaywall(status, raw, "10.1000/x");
+                let _ = papers::parse_ncbi(status, raw);
+                let _ = papers::parse_datacite_arxiv(status, raw, "1304.1068");
+                let _ = papers::parse_datacite_versions(status, raw, "10.1000/x");
+                let _ = papers::parse_crossref_preprint(status, raw, "10.1000/x", "1304.1068");
+                let _ = papers::parse_hugging_face(status, raw, "1304.1068");
+                let _ = archive::parse_wayback(status, raw, "https://example.org/", near);
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(raw) {
+                    let _ = crate::sources::discogs::barcodes(&v);
+                    let _ = wikidata::best_values(&v, "P402");
+                    let _ = wikidata::wikipedia(&v);
+                }
+            }
+        }
+    }
 }
