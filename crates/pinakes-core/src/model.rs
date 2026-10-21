@@ -125,6 +125,9 @@ impl ResourceMeta {
                 .ok()
                 .and_then(|u| u.host_str().map(str::to_owned))
                 .unwrap_or_default(),
+            // The service the link is on, by its URL alone: what lets it take a service's place on a
+            // card, never what the page says about itself.
+            service: crate::api::service_site(uri),
             source: source.into(),
             fetched_at: Utc::now().timestamp_millis(),
             ttl_secs,

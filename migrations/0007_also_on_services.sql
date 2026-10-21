@@ -21,11 +21,10 @@ CREATE OR REPLACE FUNCTION also_on(unit text, resource text, cap integer, member
    (SELECT f.value FROM resource_fact f WHERE f.resource_id=d.id AND f.name='album' AND f.expires_at>now() ORDER BY f.value LIMIT 1) AS album
    FROM picked p
    CROSS JOIN LATERAL (SELECT * FROM group_member_document WHERE unit_id=p.unit_id OFFSET 0) d),
- -- The service a member's URL is on: the one its save recorded (`doc.service`), an OSM object's
- -- OpenStreetMap, or a music card's own name (typed and named from its URL). Never a page's own
- -- name for itself.
+ -- The service a member's URL is on: the one its save recorded (`doc.service`) or an OSM object's
+ -- OpenStreetMap. Never what a page says about itself (its `site`, its type).
  tagged AS (SELECT id,uri,min(host) AS host,min(site) AS site,
-     coalesce(min(service),CASE WHEN bool_or(osm) THEN 'OpenStreetMap' END,CASE WHEN bool_or(music) THEN min(site) END) AS service,
+     coalesce(min(service),CASE WHEN bool_or(osm) THEN 'OpenStreetMap' END) AS service,
      bool_or(mine) AS mine,bool_or(music) AS music,min(album) AS album FROM m GROUP BY id,uri HAVING NOT bool_or(own)),
  owners AS (SELECT resource AS resource_id UNION SELECT u.resource_id FROM grp JOIN group_unit u USING(group_id)),
  original AS (SELECT lower(min(f.value)) AS title FROM resource_fact f JOIN owners o USING(resource_id) WHERE f.name='original_album' AND f.expires_at>now()),
@@ -44,7 +43,8 @@ CREATE OR REPLACE FUNCTION also_on(unit text, resource text, cap integer, member
      CASE WHEN service IS NOT NULL AND (music OR lower(service) IN (SELECT service FROM services)) THEN lower(service) ELSE 'member:'||id END AS service,
      jsonb_build_object('id',id,'uri',uri,'host',host,'site',site) AS e FROM tagged
    UNION ALL SELECT 2,lower(site),uri,-named,lower(site),jsonb_strip_nulls(jsonb_build_object('uri',uri,'site',site,'derived',true,'via',via,'kind',kind,'at',at)) FROM derived),
- own AS (SELECT lower(r.doc->>'site') AS service FROM resource r WHERE r.id=also_on.resource),
+ -- The card's own service, by its URL alone, like a member's.
+ own AS (SELECT lower(coalesce(r.doc->>'service',CASE WHEN r.osm_type IS NOT NULL THEN 'OpenStreetMap' END)) AS service FROM resource r WHERE r.id=also_on.resource),
  shown AS (SELECT * FROM (SELECT *,row_number() OVER (PARTITION BY service ORDER BY o,rank,k2) AS nth FROM entries) x
    WHERE NOT per_site OR (nth=1 AND service IS DISTINCT FROM (SELECT service FROM own)))
  SELECT coalesce((SELECT jsonb_agg(e ORDER BY o,k1,k2) FROM (SELECT * FROM shown ORDER BY o,k1,k2 LIMIT cap) x),'[]'::jsonb)

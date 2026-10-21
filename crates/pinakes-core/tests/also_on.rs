@@ -1586,6 +1586,60 @@ async fn a_failed_secondary_service_brings_the_next_run_forward(pool: PgPool) {
     assert!((0.0..=125.0).contains(&due_in), "{due_in}");
 }
 
+/// A page that only types itself as music and names a service (its own JSON-LD) is on no
+/// service: it takes no service's place on the group's cards, and its own card hides no derived
+/// link of the service it names.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_music_typed_impostor_takes_no_slot_and_hides_nothing(pool: PgPool) {
+    let tidal = "https://tidal.com/track/534050211";
+    let impostor = "https://example.org/song";
+    let spotify = "https://open.spotify.com/track/2OBofMJx94NryV2SK8p8Zf";
+    let mut ids = vec![];
+    for (uri, site) in [(tidal, "TIDAL"), (impostor, "Spotify")] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "web", 86400);
+        d.name = Some("Song".into());
+        d.site = site.into();
+        d.set_type("MusicRecording");
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.push(id);
+    }
+    let hub = Fake::new("music");
+    for uri in [tidal, impostor] {
+        hub.answer(
+            uri,
+            Ok(Found {
+                keys: vec![key("wikidata:Q1")],
+                links: if uri == tidal {
+                    vec![Link::new(spotify, "Spotify", "musicbrainz")]
+                } else {
+                    vec![]
+                },
+                ..Default::default()
+            }),
+        );
+    }
+    let sources: Vec<Arc<dyn Source>> = vec![hub];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    for id in &ids {
+        let read = get(&app, &format!("/v1/resources/{id}")).await;
+        let entries: Vec<(String, bool)> = read["also_on"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| (e["uri"].as_str().unwrap().to_owned(), e["derived"] == true))
+            .collect();
+        assert!(
+            entries.contains(&(spotify.to_owned(), true)),
+            "{id}: {entries:?}"
+        );
+    }
+}
+
 /// A source that panics on every lookup, as a parser meeting an unexpected shape would.
 struct Panics;
 #[async_trait]
