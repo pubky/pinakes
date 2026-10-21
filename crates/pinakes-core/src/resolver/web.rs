@@ -112,9 +112,16 @@ impl WebResolver {
             .bounded(ATTRIBUTES)
             .ok()
     }
-    /// A MusicBrainz page's card from the entity MusicBrainz serves (`None`: not such a page, or
-    /// an entity MusicBrainz doesn't know, so the page is read). A busy MusicBrainz retries later.
+    /// A MusicBrainz page's card from the entity MusicBrainz serves (`None`: not such a page, an
+    /// entity MusicBrainz doesn't know, or an answer over its cap, so the page is read). A busy
+    /// MusicBrainz retries later.
     async fn musicbrainz_card(&self, uri: &str) -> Result<Option<ResourceMeta>> {
+        match self.musicbrainz_entity_card(uri).await {
+            Err(e) if super::egress::over_cap(&e) => Ok(None),
+            card => card,
+        }
+    }
+    async fn musicbrainz_entity_card(&self, uri: &str) -> Result<Option<ResourceMeta>> {
         use crate::hubs::musicbrainz;
         let base = Some(self.config.musicbrainz_base.as_str())
             .filter(|b| !b.is_empty())

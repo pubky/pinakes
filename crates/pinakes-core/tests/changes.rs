@@ -483,6 +483,75 @@ impl Resolver for Probe {
         Duration::from_secs(3600)
     }
 }
+/// A canary whose sample is over its cap: fetched, then refused.
+struct OverCap;
+#[async_trait::async_trait]
+impl Resolver for OverCap {
+    fn manifest(&self) -> adapter::Manifest {
+        adapter::manifest("web")
+    }
+    fn name(&self) -> &'static str {
+        "web"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, _: &str) -> anyhow::Result<ResourceMeta> {
+        let mut fetch = telemetry::FetchGuard::start();
+        fetch.status(200);
+        drop(fetch);
+        Err(
+            anyhow::Error::new(pinakes_core::resolver::egress::BodyTooLarge { cap: 1024 * 1024 })
+                .context("reading the sample"),
+        )
+    }
+    fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+        Duration::from_secs(3600)
+    }
+}
+/// An over-budget canary sample is inconclusive: no health, no outage, no parse failure and no
+/// source outcome, even when the refusal is wrapped in context.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_over_cap_canary_is_inconclusive(pool: PgPool) {
+    let config = CanaryConfig::default();
+    let manifest = adapter::manifest("web");
+    let metrics = Metrics::new().unwrap();
+    assert!(canary::claim(&pool, &manifest, &config)
+        .await
+        .unwrap()
+        .is_none());
+    sqlx::query("UPDATE source_state SET canary_due_at=now() WHERE source='web'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let generation = canary::claim(&pool, &manifest, &config)
+        .await
+        .unwrap()
+        .unwrap();
+    canary::run(&pool, &OverCap, &config, &metrics, generation)
+        .await
+        .unwrap();
+    let (ok, failures, last_error, source_failures): (Option<bool>, i32, Option<String>, i32) =
+        sqlx::query_as(
+            "SELECT canary_ok,canary_failures,last_error,consecutive_failures FROM source_state WHERE source='web'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!((ok, failures), (None, 0));
+    assert_eq!((last_error, source_failures), (None, 0));
+    metrics.refresh(&pool).await.unwrap();
+    let text = metrics.encode().unwrap();
+    // The sample's fetch counts as fetched, never as a parse error.
+    assert!(
+        text.contains("pinakes_fetch_total{mode=\"resource\",outcome=\"error\",source=\"web\"} 0"),
+        "{text}"
+    );
+    assert!(
+        text.contains("pinakes_fetch_total{mode=\"resource\",outcome=\"ok\",source=\"web\"} 1"),
+        "{text}"
+    );
+}
 #[sqlx::test(migrations = "../../migrations")]
 async fn canary_bookkeeping_metrics_and_separate_listener(pool: PgPool) {
     let config = CanaryConfig::default();

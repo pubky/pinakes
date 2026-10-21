@@ -698,7 +698,8 @@ pub(crate) mod fixture {
     }
 
     /// An egress that answers recorded responses by exact URL (anything else is a 404) and
-    /// remembers the URLs asked, in order. A redirect's body is its `Location`. Pair it with `#[tokio::test(start_paused = true)]`:
+    /// remembers the URLs asked, in order. A redirect's body is its `Location`; the content type
+    /// `!too-large` answers a body over its read's cap. Pair it with `#[tokio::test(start_paused = true)]`:
     /// the per-host spacing then costs no time.
     pub fn egress(
         routes: Vec<(&str, u16, &'static str, Vec<u8>)>,
@@ -740,6 +741,12 @@ pub(crate) mod fixture {
                 "text/html",
                 b"<html>not found</html>".to_vec(),
             ));
+            if kind == "!too-large" {
+                return Err(crate::resolver::egress::BodyTooLarge {
+                    cap: crate::hubs::WIKIDATA_CAP,
+                }
+                .into());
+            }
             let location = (300..400)
                 .contains(&status)
                 .then(|| String::from_utf8_lossy(&body).into_owned());

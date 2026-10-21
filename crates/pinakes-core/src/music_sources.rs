@@ -151,6 +151,11 @@ impl Source for MusicBrainzSource {
         }
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
+        crate::also_on::unless_over_cap(self.read(cx, subject).await, Found::default)
+    }
+}
+impl MusicBrainzSource {
+    async fn read(&self, cx: &Context, subject: &Subject) -> Result<Found> {
         let Some(link) = music::parse(&subject.uri) else {
             return Ok(Found::default());
         };
@@ -214,6 +219,30 @@ impl Source for MusicBrainzEntitySource {
             || musicbrainz::isrc_link(&subject.uri).is_some()
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
+        crate::also_on::unless_over_cap(self.read(cx, subject).await, || {
+            Self::own_keys(&subject.uri)
+        })
+    }
+}
+impl MusicBrainzEntitySource {
+    /// What the page's URL alone proves: the entity's MBID, or the ISRC (with its fact).
+    fn own_keys(uri: &str) -> Found {
+        let mut found = Found::default();
+        if let Some((kind, mbid, _)) = musicbrainz::entity_link(uri) {
+            found.keys.extend(hubs::key::mb(kind, &mbid).map(|key| Key {
+                key,
+                via: "musicbrainz".into(),
+            }));
+        } else if let Some((isrc, _)) = musicbrainz::isrc_link(uri) {
+            found.keys.push(Key {
+                key: format!("isrc:{isrc}"),
+                via: "musicbrainz".into(),
+            });
+            found.facts.push(crate::also_on::Fact::new("isrc", isrc));
+        }
+        found
+    }
+    async fn read(&self, cx: &Context, subject: &Subject) -> Result<Found> {
         let base = cx.config.also_on.musicbrainz_base();
         if let Some((kind, mbid, _)) = musicbrainz::entity_link(&subject.uri) {
             let level = match kind {
@@ -226,17 +255,23 @@ impl Source for MusicBrainzEntitySource {
         let Some((isrc, _)) = musicbrainz::isrc_link(&subject.uri) else {
             return Ok(Found::default());
         };
+        let own = Key {
+            key: format!("isrc:{isrc}"),
+            via: "musicbrainz".into(),
+        };
         let mut found = match musicbrainz::isrc(&cx.egress, base, &isrc).await? {
             Some(recordings) if recordings.len() == 1 => {
-                entities_found(cx, base, MbKind::Recording, &recordings, Level::Track).await?
+                let mut found =
+                    entities_found(cx, base, MbKind::Recording, &recordings, Level::Track).await?;
+                // Its own ISRC first: a recording's other ISRCs are keys only up to a cap.
+                found.keys.retain(|k| k.key != own.key);
+                found.keys.insert(0, own);
+                found
             }
             Some(recordings) if recordings.len() > 1 => Found::default(),
             // An ISRC MusicBrainz doesn't know is still its own key.
             _ => Found {
-                keys: vec![Key {
-                    key: format!("isrc:{isrc}"),
-                    via: "musicbrainz".into(),
-                }],
+                keys: vec![own],
                 ..Default::default()
             },
         };
@@ -768,6 +803,11 @@ impl Source for WikidataSource {
         music::parse(&subject.uri).is_some_and(|l| property_of(&l).is_some())
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
+        crate::also_on::unless_over_cap(self.read(cx, subject).await, Found::default)
+    }
+}
+impl WikidataSource {
+    async fn read(&self, cx: &Context, subject: &Subject) -> Result<Found> {
         let Some(link) = music::parse(&subject.uri) else {
             return Ok(Found::default());
         };

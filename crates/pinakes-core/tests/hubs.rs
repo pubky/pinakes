@@ -64,14 +64,41 @@ impl Transport for Recorded {
         _: &[SocketAddr],
         options: &FetchOptions,
     ) -> anyhow::Result<Fetched> {
+        // An artist whose record is over MusicBrainz's cap, and its page (the card's fallback).
+        if url.host_str() == Some("musicbrainz.org") && url.path().ends_with(BIG_BAND) {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(format!("musicbrainz.org{}", url.path()));
+            if url.path().starts_with("/ws/2/") {
+                return Err(pinakes_core::resolver::egress::BodyTooLarge {
+                    cap: pinakes_core::hubs::MUSICBRAINZ_CAP,
+                }
+                .into());
+            }
+            return Ok(Fetched {
+                permanent_redirect: false,
+                truncated: false,
+                validators: Default::default(),
+                url: url.clone(),
+                status: 200,
+                retry_after_secs: 60,
+                location: None,
+                content_type: "text/html".into(),
+                body: b"<html><head><title>Big Band</title></head><body></body></html>".to_vec(),
+            });
+        }
         assert_eq!(options.accept.as_deref(), Some("application/json"));
-        // Much-edited Wikidata items exceed the default cap; their reads may be larger.
-        let wikidata = url.host_str() == Some("www.wikidata.org");
-        assert_eq!(
-            options.body_cap,
-            wikidata.then_some(pinakes_core::hubs::WIKIDATA_CAP),
-            "{url}"
-        );
+        // Much-edited Wikidata items and MusicBrainz entities with many links exceed the default
+        // cap; their reads may be larger.
+        let cap = match url.host_str() {
+            Some("www.wikidata.org") => Some(pinakes_core::hubs::WIKIDATA_CAP),
+            Some("musicbrainz.org" | "mb-mirror.example") => {
+                Some(pinakes_core::hubs::MUSICBRAINZ_CAP)
+            }
+            _ => None,
+        };
+        assert_eq!(options.body_cap, cap, "{url}");
         let target = format!(
             "{}{}?{}",
             url.host_str().unwrap_or(""),
@@ -111,6 +138,21 @@ impl Transport for Recorded {
             "/ws/2/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69" => {
                 (200, fixture("mb-recording-b1a9c0e9.json"))
             }
+            // A recording with nine ISRCs, the page's own sorting last.
+            "/ws/2/isrc/ZZAAA2600010" => (
+                200,
+                br#"{"isrcs":"ZZAAA2600010","recordings":[{"id":"00000000-0000-4000-8000-000000000009"}]}"#.to_vec(),
+            ),
+            "/ws/2/recording/00000000-0000-4000-8000-000000000009" => (
+                200,
+                serde_json::to_vec(&serde_json::json!({
+                    "id": "00000000-0000-4000-8000-000000000009",
+                    "title": "Many codes",
+                    "isrcs": (1..=8).map(|n| format!("AAAAA260000{n}")).chain(["ZZAAA2600010".to_owned()]).collect::<Vec<_>>(),
+                    "relations": [],
+                }))
+                .unwrap(),
+            ),
             "/ws/2/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711" => {
                 (200, fixture("mb-artist-a74b1b7f.json"))
             }
@@ -160,6 +202,13 @@ impl Transport for Recorded {
                 }
             }
             "/w/api.php" if query("list") == "search" => (200, fixture("wd-search-p436.json")),
+            // An item over Wikidata's cap.
+            "/w/api.php" if query("action") == "wbgetentities" && query("ids") == "Q999999999" => {
+                return Err(pinakes_core::resolver::egress::BodyTooLarge {
+                    cap: pinakes_core::hubs::WIKIDATA_CAP,
+                }
+                .into())
+            }
             "/w/api.php" if query("action") == "wbgetentities" && query("ids") == "Q9312" => {
                 (200, fixture("wd-kant.json"))
             }
@@ -187,6 +236,8 @@ impl Transport for Recorded {
         })
     }
 }
+/// An artist whose MusicBrainz record is over the cap.
+const BIG_BAND: &str = "00000000-0000-4000-8000-00000000000b";
 fn egress(transport: Arc<Recorded>) -> Egress {
     Egress::with_backends(EgressConfig::default(), Arc::new(PublicDns), transport)
 }
@@ -1014,6 +1065,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     let single = "https://musicbrainz.org/isrc/GBUM71029604";
     let shared = "https://musicbrainz.org/isrc/GBCEE0100112";
     let artist = "https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711";
+    let many = "https://musicbrainz.org/isrc/ZZAAA2600010";
     let tidal = "https://tidal.com/track/534050211";
     let tidal_artist = "https://tidal.com/artist/64518";
     let mut ids = std::collections::BTreeMap::new();
@@ -1021,6 +1073,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         (recording, "MusicRecording"),
         (single, "MusicRecording"),
         (shared, "MusicRecording"),
+        (many, "MusicRecording"),
         (artist, "MusicGroup"),
         (tidal, "MusicRecording"),
         (tidal_artist, "MusicGroup"),
@@ -1071,6 +1124,10 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         "{isrc_keys:?}"
     );
     assert!(rows(keys, ids[shared].clone()).await.is_empty());
+    // An ISRC page keys its own ISRC even when its recording has more than the eight that fit.
+    assert!(rows(keys, ids[many].clone())
+        .await
+        .contains(&"isrc:ZZAAA2600010".to_owned()));
     assert_eq!(
         rows(
             "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1",
@@ -1166,4 +1223,74 @@ async fn a_musicbrainz_page_card_comes_from_the_entity() {
         seen.iter().all(|s| s.starts_with("musicbrainz.org/ws/2/")),
         "{seen:?}"
     );
+}
+
+/// An answer over its hub's cap is no answer: a MusicBrainz page's and a Wikidata item's sources
+/// record only the key their URL proves and don't retry (asking again would read the same
+/// megabytes), and the MusicBrainz card is read from the page, the second time too, from the
+/// failure cache.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_entity_over_the_cap_is_no_answer(pool: sqlx::PgPool) {
+    let uri = format!("https://musicbrainz.org/artist/{BIG_BAND}");
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let e = egress(t.clone());
+    let web = pinakes_core::resolver::web::WebResolver {
+        oembed_policy: Default::default(),
+        cards: None,
+        events: None,
+        egress: e.clone(),
+        config: Default::default(),
+    };
+    for _ in 0..2 {
+        let card = web
+            .resolve_with_policy(&uri, Default::default())
+            .await
+            .expect("the page is read instead");
+        assert_eq!(card.name.as_deref(), Some("Big Band"));
+    }
+    let item = "https://www.wikidata.org/wiki/Q999999999";
+    let mut ids = vec![];
+    for page in [uri.as_str(), item] {
+        let id = store::ensure_resource(&pool, page).await.unwrap();
+        let mut d = ResourceMeta::new(page, "web", 86400);
+        d.set_type("MusicGroup");
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.push(id);
+    }
+    let cx = also_on::Context {
+        egress: e,
+        config: Arc::new(Config::default()),
+    };
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    for (id, own) in [
+        (&ids[0], format!("mb:artist:{BIG_BAND}")),
+        (&ids[1], "wikidata:Q999999999".to_owned()),
+    ] {
+        let keys: Vec<String> =
+            sqlx::query_scalar("SELECT key FROM resource_key WHERE resource_id=$1 ORDER BY key")
+                .bind(id)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(keys, [own]);
+        let retrying: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM also_on_dirty WHERE resource_id=$1 AND attempts>0",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(retrying, 0);
+    }
+    // The record was asked once: the card's second read and the source's came from the cache.
+    let seen = t.seen.lock().unwrap().clone();
+    let asked = seen
+        .iter()
+        .filter(|s| s.starts_with("musicbrainz.org/ws/2/artist/"))
+        .count();
+    assert_eq!(asked, 1, "{seen:?}");
 }

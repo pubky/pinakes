@@ -83,7 +83,7 @@ An IMDb title keeps the type its page gives (it can be either).
 | `status` | Fetch health: `ok`, `pending`, `missing`, `unreachable` or `error` |
 | `type` | schema.org type (`MusicEvent`, `Book`, `Place`, …), or one of Pinakes's own types for what schema.org has no class for: `BitcoinBlock`, `BitcoinTransaction`, `BitcoinAddress`, `LightningNode` and `LightningChannel` (not schema.org; each a child of `Thing`) |
 | `name`, `description`, `image` | Display metadata; images point to the origin and are never proxied |
-| `site` | The publishing host; for `pubky://` objects the app path segment (`mapky.app`), not the public key; for a card read from an official API without a host of its own, the service's name (`Federal Register`) |
+| `site` | The publishing host; for `pubky://` objects the app path segment (`mapky.app`), not the public key; for a link whose URL names a known service (a music service, a Wikipedia edition, MusicBrainz, Wikidata), that service's name (`Apple Music`, `Wikipedia (de)`), even before its card is read; for a card read from an official API without a host of its own, the service's name (`Federal Register`) |
 | `point` | `{lat, lon}` |
 | `start`, `end` | RFC 3339 instants for events and occurrences |
 | `group` | `{id, size}` when the resource or occurrence is in a [group](#groups), else `null` |
@@ -829,8 +829,11 @@ service link is related to: its MBIDs, the recording's ISRCs and the release's b
 (so it joins the links MusicBrainz relates to it), its facts, and its current links on music
 services at its level, each keyed by the entity. An ISRC's page (`/isrc/{ISRC}`) is the ISRC's
 key, and with exactly one recording MusicBrainz gives the ISRC to, that recording's keys, facts
-and links. An ISRC several recordings have names none of them: its page keeps it as a fact only.
-The page's card comes from the same answer of MusicBrainz's web service, not from the page: the
+and links. An ISRC several recordings have names none of them: its page keeps it as a fact only
+(keyed, it would join whichever of their groups took it first, the other refused).
+The page's card comes from the same answer of MusicBrainz's web service, not from the page
+(unless that answer is over its 8 MB cap: then the page is read as any page, and the sources
+record only what its URL proves, the MBID or the ISRC): the
 title, `MusicRecording`, `MusicAlbum`, `MusicGroup` or `Person` (an artist MusicBrainz calls a
 person), the artist credit and a recording's length as its description, `site` `MusicBrainz`; an
 ISRC's page is its one recording's card, else named `ISRC {code}`.

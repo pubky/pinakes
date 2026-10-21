@@ -167,7 +167,12 @@ redirects count). `egress.allow_hosts` and `egress.deny_hosts` take exact names 
 decoded body; an oversized page keeps its head metadata with a `truncated` warning. An RSS or
 Atom feed read without a calendar's feed cap is cut there too (a long show's feed is 2–5 MB):
 its channel and newest items come first, and its card reads up to the last whole item. Wikidata
-entity reads may take 8 MB, since a much-edited item carries megabytes of claims. Requests
+entity reads may take 8 MB, since a much-edited item carries megabytes of claims, and so may
+MusicBrainz answers (an artist or release with very many links). An answer over even that is
+refused, never cut, and remembered as such for five minutes. The also-on sources then record only
+what the link's URL proves (a MusicBrainz page its MBID or ISRC, a Wikidata item its Q-id) and
+don't retry it; Wikidata items verified together that are over it together are read one by one;
+a MusicBrainz page's card is read from the page. Requests
 time out after ten seconds. Images stay origin URLs and are never fetched.
 
 Every request introduces itself as `pinakes/<version> (+https://pubky.app; <contact>)`, with
@@ -487,8 +492,8 @@ The sources, in the order they run, are `service`, `musicbrainz`, `musicbrainz_e
 ([the API](api.md#also-on) says what each reads); `[also_on] apple_storefront` (`us`, a
 two-letter country code) is the Apple Music, Apple Books and Apple Podcasts storefront of the
 Apple links they build. `[also_on.sources.musicbrainz] base_url`
-(`https://musicbrainz.org/ws/2`) points the `musicbrainz` source at a MusicBrainz mirror's web
-service instead, an http(s) URL without a trailing slash and reached through the egress policy;
+(`https://musicbrainz.org/ws/2`) points every MusicBrainz read at a mirror's web service instead
+(the `musicbrainz` and `musicbrainz_entity` sources, and the cards of MusicBrainz pages), an http(s) URL without a trailing slash and reached through the egress policy;
 every instance on one public address shares MusicBrainz's 1 request/s, which a mirror does not
 limit. The worker takes up to 100 due resources at a time and asks MusicBrainz about their links'
 URLs together (50 to a request; MusicBrainz echoes each URL, and an answer applies only to the URL

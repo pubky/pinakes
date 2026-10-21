@@ -28,10 +28,11 @@ pub async fn record(
     result: &Result<ResourceMeta>,
     interval: u64,
 ) -> Result<()> {
-    if result.as_ref().err().is_some_and(|e| {
-        e.downcast_ref::<crate::resolver::egress::BodyTooLarge>()
-            .is_some()
-    }) {
+    if result
+        .as_ref()
+        .err()
+        .is_some_and(crate::resolver::egress::over_cap)
+    {
         // An over-budget sample is inconclusive. Keep the size policy and retry the
         // next moving-window sample, without claiming either health or an outage.
         sqlx::query("UPDATE source_state SET canary_at=now(),canary_ok=NULL,canary_missing='{}',canary_failures=0,canary_due_at=now()+$3*interval '1 second',canary_lease_until=NULL WHERE source=$1 AND canary_generation=$2")
@@ -76,13 +77,22 @@ pub async fn run_manifest(
         .await
         .map_err(anyhow::Error::from)
         .and_then(|r| r);
-        if result.is_err() {
+        // An over-budget sample is inconclusive (`record`), never a parse failure.
+        if result
+            .as_ref()
+            .err()
+            .is_some_and(|e| !crate::resolver::egress::over_cap(e))
+        {
             crate::telemetry::parser_error();
         }
         result
     })
     .await;
-    if !observations.is_empty() {
+    let over_cap = result
+        .as_ref()
+        .err()
+        .is_some_and(crate::resolver::egress::over_cap);
+    if !observations.is_empty() && !over_cap {
         crate::source::outcome(
             pool,
             &manifest.source,

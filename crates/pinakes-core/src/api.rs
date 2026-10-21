@@ -530,7 +530,8 @@ pub struct Card {
     /// Plain text, entity-decoded: escape it before rendering it as HTML.
     pub description: Option<String>,
     pub image: Option<String>,
-    /// The publishing site: the host, or the app for `pubky://` objects (e.g. `mapky.app`).
+    /// The publishing site: the host, the app for `pubky://` objects (e.g. `mapky.app`), or the
+    /// service a link's URL names (`Apple Music`, `Wikipedia (de)`, `MusicBrainz`, `Wikidata`).
     /// Plain text, like every text field.
     pub site: Option<String>,
     pub point: Option<model::Point>,
@@ -779,8 +780,9 @@ fn present(s: Option<&str>) -> Option<String> {
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
 }
-/// The site a card names: the app path segment of a `pubky://` object, else the document's site
-/// or the host.
+/// The site a card names: the app path segment of a `pubky://` object, else the service a link
+/// is on when its URL alone says (a music service, a Wikipedia edition, MusicBrainz, Wikidata),
+/// so a card not read yet never shows a raw host for it, else the document's site or the host.
 pub fn site(uri: &str, doc_site: Option<&str>, host: Option<&str>) -> Option<String> {
     if let Some(path) = uri.strip_prefix("pubky://") {
         let mut parts = path.split('/').skip(1);
@@ -790,7 +792,24 @@ pub fn site(uri: &str, doc_site: Option<&str>, host: Option<&str>) -> Option<Str
             }
         }
     }
-    present(doc_site).or_else(|| present(host))
+    service_site(uri)
+        .or_else(|| present(doc_site))
+        .or_else(|| present(host))
+}
+/// The service a link is on, by its URL alone.
+fn service_site(uri: &str) -> Option<String> {
+    if let Some(link) = crate::music::parse(uri) {
+        return Some(link.service.name().to_owned());
+    }
+    if let Some(article) = crate::wikipedia::parse(uri) {
+        return Some(format!("Wikipedia ({})", article.lang));
+    }
+    if crate::hubs::musicbrainz::entity_link(uri).is_some()
+        || crate::hubs::musicbrainz::isrc_link(uri).is_some()
+    {
+        return Some("MusicBrainz".into());
+    }
+    crate::hubs::wikidata::item_link(uri).map(|_| "Wikidata".into())
 }
 /// A card from a row of `search_unit` (or a row shaped like one).
 pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
@@ -2341,6 +2360,62 @@ pub async fn curate_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A link on a known service is named by it, even before its card is read.
+    #[test]
+    fn a_known_service_is_named_before_its_card_is_read() {
+        // A member still pending: no document site, only its host.
+        let apple = "https://music.apple.com/gb/artist/657515";
+        assert_eq!(
+            site(apple, None, Some("music.apple.com")).as_deref(),
+            Some("Apple Music")
+        );
+        // A page's own site name never replaces the service's.
+        assert_eq!(
+            site(apple, Some("Web Player"), Some("music.apple.com")).as_deref(),
+            Some("Apple Music")
+        );
+        assert_eq!(
+            site(
+                "https://de.m.wikipedia.org/wiki/Paris",
+                None,
+                Some("de.m.wikipedia.org")
+            )
+            .as_deref(),
+            Some("Wikipedia (de)")
+        );
+        assert_eq!(
+            site(
+                "https://musicbrainz.org/isrc/GBUM71029604",
+                None,
+                Some("musicbrainz.org")
+            )
+            .as_deref(),
+            Some("MusicBrainz")
+        );
+        assert_eq!(
+            site(
+                "https://www.wikidata.org/wiki/Q90",
+                None,
+                Some("www.wikidata.org")
+            )
+            .as_deref(),
+            Some("Wikidata")
+        );
+        // Any other page: its document's site, else its host.
+        assert_eq!(
+            site(
+                "https://example.org/a",
+                Some("Example"),
+                Some("example.org")
+            )
+            .as_deref(),
+            Some("Example")
+        );
+        assert_eq!(
+            site("https://example.org/a", None, Some("example.org")).as_deref(),
+            Some("example.org")
+        );
+    }
     /// A card's facts: its official API's fields, then the also-on sources', each value once.
     #[test]
     fn document_and_source_facts_merge() {

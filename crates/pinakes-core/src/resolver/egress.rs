@@ -13,14 +13,25 @@ use tokio::{
 };
 use url::{Host, Url};
 
-#[derive(Debug)]
-pub struct BodyTooLarge;
+/// A body over the cap its read allows (`cap` bytes): refused, never cut.
+#[derive(Clone, Copy, Debug)]
+pub struct BodyTooLarge {
+    pub cap: usize,
+}
 impl std::fmt::Display for BodyTooLarge {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("body exceeds cap (pages 1 MB)")
+        if self.cap >= 1024 * 1024 && self.cap.is_multiple_of(1024 * 1024) {
+            write!(f, "body exceeds its cap of {} MB", self.cap / (1024 * 1024))
+        } else {
+            write!(f, "body exceeds its cap of {} bytes", self.cap)
+        }
     }
 }
 impl std::error::Error for BodyTooLarge {}
+/// Whether `error` is, or wraps, a body over its read's cap.
+pub fn over_cap(error: &anyhow::Error) -> bool {
+    error.chain().any(|c| c.is::<BodyTooLarge>())
+}
 
 pub const BODY_CAP: usize = 1024 * 1024;
 /// The longest a request waits for its host's next slot, queue included. It leaves the request
@@ -300,12 +311,12 @@ pub async fn read_response_with(
             None => (options.feed_cap.unwrap_or(BODY_CAP), true),
         };
         if refuse && response.content_length().is_some_and(|n| n > max as u64) {
-            return Err(BodyTooLarge.into());
+            return Err(BodyTooLarge { cap: max }.into());
         }
         while let Some(chunk) = response.chunk().await? {
             if body.len().saturating_add(chunk.len()) > max {
                 if refuse {
-                    return Err(BodyTooLarge.into());
+                    return Err(BodyTooLarge { cap: max }.into());
                 }
                 body.extend_from_slice(&chunk[..max.saturating_sub(body.len())]);
                 truncated = true;
@@ -319,7 +330,7 @@ pub async fn read_response_with(
                 && body.len() > BODY_CAP
                 && !(options.feed_cap.is_some() && (feed_type || options.feed_hint || sniff))
             {
-                return Err(BodyTooLarge.into());
+                return Err(BodyTooLarge { cap: BODY_CAP }.into());
             }
         }
         let sniff = String::from_utf8_lossy(&body[..body.len().min(256)])
@@ -363,6 +374,8 @@ struct DiscoveryEntry {
     expires: Instant,
     accessed: Instant,
     value: Option<Fetched>,
+    /// A failed read that was over its cap, replayed as such (a caller may fall back on it).
+    too_large: Option<BodyTooLarge>,
 }
 type DiscoveryCache = Arc<Mutex<HashMap<String, DiscoveryEntry>>>;
 #[derive(Clone)]
@@ -511,8 +524,8 @@ impl Egress {
                     // A reqwest cause can embed the complete URL, including API credentials.
                     if error.is::<super::interstitial::Blocked>() {
                         anyhow::Error::new(super::interstitial::Blocked)
-                    } else if error.is::<BodyTooLarge>() {
-                        anyhow::Error::new(BodyTooLarge)
+                    } else if let Some(too_large) = error.downcast_ref::<BodyTooLarge>() {
+                        anyhow::Error::new(*too_large)
                     } else if let Some(retry) = error.downcast_ref::<super::RetryLater>() {
                         anyhow::Error::new(super::RetryLater {
                             class: retry.class,
@@ -545,6 +558,14 @@ impl Egress {
         if options.json_body.is_some() || !options.headers.is_empty() {
             let identity = serde_json::to_vec(&(&options.json_body, &options.headers))?;
             key.push_str(&format!("|request:{}", blake3::hash(&identity).to_hex()));
+        }
+        // A read with another cap gets another answer (a refusal is replayed only to its cap).
+        if options.body_cap.is_some() || options.feed_cap.is_some() {
+            key.push_str(&format!(
+                "|cap:{}:{}",
+                options.body_cap.unwrap_or(0),
+                options.feed_cap.unwrap_or(0)
+            ));
         }
         Ok(key)
     }
@@ -596,6 +617,9 @@ impl Egress {
             cache.retain(|_, entry| entry.expires > now);
             if let Some(entry) = cache.get_mut(&key) {
                 entry.accessed = now;
+                if let Some(too_large) = entry.too_large {
+                    return Err(too_large.into());
+                }
                 return entry.value.clone().ok_or_else(|| {
                     super::RetryLater {
                         class: "discovery_cached",
@@ -658,6 +682,11 @@ impl Egress {
                 expires: now + Duration::from_secs(ttl),
                 accessed: now,
                 value: retained.cloned(),
+                too_large: result
+                    .as_ref()
+                    .err()
+                    .and_then(|e| e.chain().find_map(|c| c.downcast_ref::<BodyTooLarge>()))
+                    .copied(),
             },
         );
         result
@@ -1262,6 +1291,38 @@ mod tests {
         assert!(error.downcast_ref::<BodyTooLarge>().is_some(), "{error:#}");
         server.abort();
     }
+    /// A refusal is replayed only to reads with its cap: another cap asks again.
+    #[tokio::test(start_paused = true)]
+    async fn a_refusal_is_replayed_to_its_cap_only() {
+        let url = "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q1";
+        let (egress, recorded) =
+            crate::sources::fixture::egress(vec![(url, 200, "!too-large", vec![])]);
+        let read = |cap: usize| FetchOptions {
+            body_cap: Some(cap),
+            ..Default::default()
+        };
+        for (cap, asked) in [(8 * BODY_CAP, 1), (8 * BODY_CAP, 1), (16 * BODY_CAP, 2)] {
+            let error = egress.discover(url, &read(cap), 3600).await.unwrap_err();
+            assert!(over_cap(&error), "{error:#}");
+            assert_eq!(recorded.asked().len(), asked, "cap {cap}");
+        }
+    }
+    /// The refusal names the cap it hit.
+    #[test]
+    fn a_refused_body_names_its_cap() {
+        assert_eq!(
+            BodyTooLarge { cap: BODY_CAP }.to_string(),
+            "body exceeds its cap of 1 MB"
+        );
+        assert_eq!(
+            BodyTooLarge { cap: 8 * BODY_CAP }.to_string(),
+            "body exceeds its cap of 8 MB"
+        );
+        assert_eq!(
+            BodyTooLarge { cap: 8 * 1024 }.to_string(),
+            "body exceeds its cap of 8192 bytes"
+        );
+    }
     /// A cap above the default admits a larger JSON body (a much-edited Wikidata item).
     #[tokio::test]
     async fn a_body_cap_above_the_default_admits_larger_json() {
@@ -1360,6 +1421,7 @@ mod tests {
                         expires: now + Duration::from_secs(86400),
                         accessed: now - Duration::from_secs(10000 - i),
                         value: None,
+                        too_large: None,
                     },
                 );
             }
