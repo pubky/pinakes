@@ -178,7 +178,8 @@ redirects count). `egress.allow_hosts` and `egress.deny_hosts` take exact names 
 `*.example.org`; they never override the IP policy, and deny wins. Pages are capped at 1 MB of
 decoded body; an oversized page keeps its head metadata with a `truncated` warning, its whole
 head when the head runs past the cap (up to `limits.html_head_bytes`; the head ends at `</head>`
-or where `<body>` opens). A whole page within that budget is read whole. An image or PDF past the
+or where `<body>` opens). A whole page within that budget is read whole. A read that cuts stops as soon as it reaches its cap, so a sender
+that stalls there costs no timeout. An image or PDF past the
 cap is cut too, never refused: its card comes from its URL. A page is read only up to a tag with more than 256 attributes
 (none occurs in real pages; tens of thousands make the parser work for minutes), and at most as
 many pages are parsed at once as the machine has cores: a parse holds its slot until it ends,

@@ -482,6 +482,17 @@ pub async fn read_response_with(
             {
                 return Err(BodyTooLarge { cap: BODY_CAP }.into());
             }
+            // A cut read stops as soon as it reaches its cap: a sender that stalls there costs no
+            // timeout. At the page cap with the head still open, the head budget applies.
+            if !refuse && body.len() >= max {
+                match head_cap {
+                    Some(cap) if max < cap && head_end(&body, 0).is_none() => max = cap,
+                    _ => {
+                        truncated = true;
+                        break;
+                    }
+                }
+            }
         }
         let sniff = String::from_utf8_lossy(&body[..body.len().min(256)])
             .trim_start_matches(['\u{feff}', ' ', '\r', '\n'])
@@ -1624,6 +1635,69 @@ mod tests {
         assert!(!whole.truncated);
         assert!(whole.body.len() > BODY_CAP);
         assert!(page_fits(&whole));
+        server.abort();
+    }
+    /// A cut read stops as soon as it reaches its cap: a PDF that announces 3 MiB, sends exactly
+    /// the page cap and stalls gets its bytes at once, as does a head that reaches the head budget
+    /// exactly, instead of waiting out the fetch timeout.
+    #[tokio::test]
+    async fn a_read_stops_at_its_cap_without_another_read() {
+        use axum::{body::Body, http::header, response::Response, routing::get, Router};
+        fn stalled(content_type: &'static str, first: Vec<u8>) -> Response {
+            let stream = futures_util::StreamExt::chain(
+                futures_util::stream::iter([Ok::<_, std::io::Error>(first)]),
+                futures_util::stream::pending(),
+            );
+            Response::builder()
+                .header(header::CONTENT_TYPE, content_type)
+                .header(header::CONTENT_LENGTH, 3 * BODY_CAP)
+                .body(Body::from_stream(stream))
+                .unwrap()
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route(
+                "/paper.pdf",
+                get(|| async { stalled("application/pdf", vec![b'%'; BODY_CAP]) }),
+            )
+            .route(
+                "/open-head",
+                get(|| async {
+                    let mut page = b"<html><head><style>".to_vec();
+                    page.resize(2 * BODY_CAP, b'x');
+                    stalled("text/html", page)
+                }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        let read = |path: &str| {
+            let url: Url = format!("http://{addr}{path}").parse().unwrap();
+            let request = client.get(url.clone());
+            let options = FetchOptions {
+                head_cap: Some(2 * BODY_CAP),
+                ..Default::default()
+            };
+            async move {
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    read_response_with(url, request.send().await.unwrap(), &options),
+                )
+                .await
+            }
+        };
+        let pdf = read("/paper.pdf")
+            .await
+            .expect("no wait past the page cap")
+            .unwrap();
+        assert!(pdf.truncated);
+        assert_eq!(pdf.body.len(), BODY_CAP);
+        let head = read("/open-head")
+            .await
+            .expect("no wait past the head budget")
+            .unwrap();
+        assert!(head.truncated);
+        assert_eq!(head.body.len(), 2 * BODY_CAP);
         server.abort();
     }
     /// A failed request's error never names its URL: a calendar's token in the query stays out of
