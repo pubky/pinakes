@@ -1,4 +1,4 @@
-//! Isolated e2e stack with real migrations, ingestion, resolver parsers, storage and API.
+//! Isolated e2e stack with the real schema, ingestion, resolver parsers, storage and API.
 //! Default mode mocks external boundaries with no public network; --live scopes real fetches
 //! to the (at most twelve) sample IDs.
 // The mock's sample list is one `json!` literal, deeper than the default macro recursion limit.

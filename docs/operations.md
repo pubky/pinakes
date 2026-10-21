@@ -94,26 +94,26 @@ builds that have the function start normally. Upgrading the package does not upg
 extension in a database, because `CREATE EXTENSION IF NOT EXISTS` keeps the installed version:
 run `ALTER EXTENSION h3 UPDATE;` (and `ALTER EXTENSION h3_postgis UPDATE;` if installed).
 
-`pinakesd --config <path> --migrate` applies the migrations in `migrations/` and exits; the
-daemon applies them at startup too, and so does `reextract`. Stop a running daemon before a newer
-binary migrates its database: it keeps running code written for the older schema. With
-`0003_search_write.sql`, for example, its writes waiting while the migration replaces the search
-revision fail once and are retried, and its later writes run the new revision trigger and are
-counted; but it never folds the counted writes (the newer daemon's hourly `compact_search_writes`),
-so `search_write` gains a row for each of its write transactions until the newer binary runs.
-Pinakes rebuilds everything from the Nexus feed, so a
-database can also be recreated:
+`migrations/0001_schema.sql` is the whole schema. `pinakesd --config <path> --migrate` creates it
+on an empty database and exits; the daemon does the same at startup, and so does `reextract`. A
+database that already has it is left as it is.
+
+Until the first deployment there is this one file and no upgrade path: a schema change edits
+`0001_schema.sql`, and every local database is then recreated (Pinakes refills it from the Nexus
+feed). Tests create their own databases and need nothing. Numbered migrations come back with the
+first deployment.
 
 ```sh
 dropdb pinakes && createdb pinakes
 pinakesd --config pinakes.toml --migrate
 ```
 
+The daemon refuses a database built from another version of the file, naming this remedy.
+
 A database advisory lock, the instance lock, allows one daemon per database. The daemon holds it on
 a connection of its own for its whole life. Resolver, host, author, reach-cache and IP budgets are
-process-local, and the lock keeps their guarantees. Every daemon version takes the same key: while
-an older daemon runs, a newer one applies its migrations, then refuses to start. No other lock uses
-that key (`pinakes_core::locks`).
+process-local, and the lock keeps their guarantees. Every daemon version takes the same key, so a
+second daemon on a database refuses to start. No other lock uses that key (`pinakes_core::locks`).
 
 **Re-extraction.** A parser or routing change reaches stored documents through one command, run
 while the daemon is stopped (it takes the instance lock):
@@ -397,18 +397,17 @@ venue link also needs the name and full address to match. Geocoded facts stay in
 documents store versioned references and compose coordinates at read time.
 
 `event.same_event_hint` (default `"on"`; `"off"`) puts `maybe_same` on event cards: other events
-that are possibly the same one ([the rule](api.md#possibly-the-same-event)). A background pass
-in the daemon computes it for events starting from a day ago to a year ahead. Triggers queue an
-event resource (or a feed) when an event's start, place, name or document changes; the
-migration queues the events already stored. Each pass takes up to 25 queued resources and up to
-200 of their new or changed events, and the next pass follows at once while there was work, else
-after five seconds. An event's normalised name, place and identifiers are stored once read, and
-its pairs are matched among the events already read through their start and geography indexes.
-An hourly sweep drops events that started over a day ago and queues those that entered the window,
-changed unseen, or are no longer events (an alias, a missing feed, a gone occurrence). Requests
-only read the stored pairs. `"off"` stops the pass and
-removes the field from cards, details and `/v1/openapi.json`; the stored pairs stay, and changes
-made meanwhile are read when it is turned back on.
+that are possibly the same one ([the rule](api.md#possibly-the-same-event)). A background pass in
+the daemon computes it for events starting from a day ago to a year ahead. Triggers queue an event
+resource (or a feed) when an event's start, place, name or document changes. Each pass takes up to
+25 queued resources and up to 200 of their new or changed events, and the next pass follows at once
+while there was work, else after five seconds. An event's normalised name, place and identifiers
+are stored once read, and its pairs are matched among the events already read through their start
+and geography indexes. An hourly sweep drops events that started over a day ago and queues those
+that entered the window, changed unseen, or are no longer events (an alias, a missing feed, a gone
+occurrence). Requests only read the stored pairs. `"off"` stops the pass and removes the field from
+cards, details and `/v1/openapi.json`; the stored pairs stay, and changes made meanwhile are read
+when it is turned back on.
 
 ### Event platforms
 

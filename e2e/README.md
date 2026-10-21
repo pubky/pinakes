@@ -26,7 +26,7 @@ CARGO_PROFILE_DEV_DEBUG=0 scripts/e2e --mock
 ```
 
 Mock mode runs the same JavaScript assertions and real tag builder. A local Rust
-stack runs the actual migrations, ingestion, resolver queue, parsers, storage,
+stack runs the actual schema, ingestion, resolver queue, parsers, storage,
 groups and API; only homeserver storage, Nexus and external HTTP boundaries use
 fixtures. No identity secret or public-network access is needed after dependencies
 are installed. The fixture venue test requires a positive match. Samples with `group_with` must end as
@@ -39,7 +39,7 @@ disable direct relay sockets; unknown fixture DNS names resolve to TEST-NET.
 
 Both `--mock` and `--isolated-live` create a unique `pinakes_e2e_owned_*` database
 through `DATABASE_URL` (default `postgresql:///postgres?host=/var/run/postgresql`).
-The role needs `CREATEDB`; migrations need the extension privileges used by the test
+The role needs `CREATEDB`; the schema needs the extension privileges used by the test
 suite. Only that newly created database is dropped on exit. They never reset the
 development database. A force-killed process may leave its database for inspection.
 

@@ -9,7 +9,7 @@
 //! - they are on different pages (two occurrences of one feed never pair).
 //!
 //! The pass reads the units of resources whose events changed (`same_event_dirty`, marked by
-//! triggers and by the migration for the events already stored) and starting in the window (a
+//! triggers and by the sweep) and starting in the window (a
 //! day ago to a year ahead), bounded per pass and going on at once while more is due; an hourly
 //! sweep drops units that left the window and marks those that entered it, changed unseen or
 //! became an alias. Cards only read the stored pairs (`same_event_hint`).

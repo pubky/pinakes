@@ -1654,7 +1654,8 @@ async fn boundary_script(pool: &PgPool) -> Option<std::process::Output> {
 }
 
 /// `scripts/verify-osm-boundary` accepts the geo change lines of OSM-host location
-/// links (as migration 0038 does) and still refuses web facts on OSM hosts.
+/// links (as the schema's `change_web_osm_boundary` does) and still refuses web facts on OSM
+/// hosts.
 #[sqlx::test(migrations = "../../migrations")]
 async fn boundary_script_accepts_location_link_history(pool: PgPool) {
     let marker = "https://www.openstreetmap.org/?mlat=52.5186925&mlon=13.3996024";
