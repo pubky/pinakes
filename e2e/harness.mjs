@@ -255,6 +255,17 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
         return true;
       }, timeout, signal);
       report.assertions.push(`same-event hints (${twins.map(([a, b]) => `${a}~${b}`).join(', ') || 'no pairs'})`);
+      // One author tagged every sample with this run's label, so what a sample's taggers also
+      // referenced includes the other samples, never the sample itself or its group.
+      const [seedKind, seedDoc] = [...docs.entries()][0];
+      const related = await waitFor('related', async () => {
+        const page = await search({ related: seedDoc.id, limit: '500' });
+        return page.items.length > 0 && page;
+      }, timeout, signal);
+      const own = new Set([seedDoc.id, ...(seedDoc.group?.members ?? []).map(member => member.id)]);
+      assert(related.items.every(row => !own.has(row.id)), 'related never lists the resource or its group');
+      assert(related.items.some(row => [...docs.values()].some(d => d.id === row.id)), 'related lists another sample');
+      report.assertions.push(`related (${related.items.length} rows for ${seedKind})`);
       // A sample naming `derived` services shows each as a derived link: the same thing on a
       // service nobody tagged, found by an exact hub lookup.
       for (const sample of samples.filter(s => s.derived)) {

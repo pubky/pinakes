@@ -1682,6 +1682,19 @@
       "expect": "same_event"
     },
     {
+      "name": "related-www-meetup-com-bitcoin-meetup-switzerland-events-316894744",
+      "summary": "https://www.meetup.com/bitcoin-meetup-switzerland/events/316894744/",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "related": "id(https://www.meetup.com/bitcoin-meetup-switzerland/events/316894744/)"
+      },
+      "labels": {
+        "related": "https://www.meetup.com/bitcoin-meetup-switzerland/events/316894744/"
+      },
+      "expect": "items"
+    },
+    {
       "name": "read-calendar-google-com-calendar-ical-en-ch-23holiday-40group-v",
       "summary": "https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics",
       "method": "GET",
