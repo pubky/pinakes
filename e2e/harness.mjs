@@ -112,11 +112,25 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
         }
       }
       // The type filter matches ancestors, so a MusicEvent sample is found under type=Event.
+      // A card read by its URI can be read once more under another ID: a fetch can show the link
+      // to be a spelling of another (a Mastodon @-link of its /users/…/statuses/ form), and its
+      // card is then the root's, the only one search lists. A sample search does not list is
+      // read again by its URI, and the ID it answers with is kept.
+      const reread = async tags => {
+        for (const tag of tags) {
+          const r = await fetch(`${pinakes}/v1/resources/by-uri?${new URLSearchParams({ uri: tag.uri })}`, { signal: AbortSignal.timeout(15000) });
+          const d = r.ok && await r.json();
+          if (!d || d.status !== 'ok' || d.id === docs.get(tag.kind).id) continue;
+          docs.set(tag.kind, d);
+          report.samples.find(s => s.kind === tag.kind).resource_id = d.id;
+        }
+      };
       for (const type of new Set(tags.map(tag => tag.type))) {
-        const wanted = tags.filter(tag => tag.type === type).map(tag => docs.get(tag.kind).id);
         await waitFor(`Pinakes type ${type}`, async () => {
           const found = await search({ type, limit: '500' });
-          return wanted.every(id => found.items.some(row => row.id === id));
+          const missing = tags.filter(tag => tag.type === type && !found.items.some(row => row.id === docs.get(tag.kind).id));
+          await reread(missing);
+          return missing.length === 0;
         }, timeout, signal);
       }
       report.assertions.push(`${tags.length} SDK tags reached Nexus and resolved with expected types`);
@@ -124,7 +138,9 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
       // Pinakes is still ingesting this run's new tag. Wait for the scoped rows too.
       const results = await waitFor('Pinakes tagged search', async () => {
         const result = await search({ facet: 'tags', limit: '500' });
-        return [...docs.values()].every(d => result.items.some(row => row.id === d.id)) && result;
+        const missing = tags.filter(tag => !result.items.some(row => row.id === docs.get(tag.kind).id));
+        await reread(missing);
+        return missing.length === 0 && result;
       }, timeout, signal);
       assert(results.facets.tags.some(f => f.label === label && f.count === results.items.length));
       report.assertions.push('search and tag facets');
