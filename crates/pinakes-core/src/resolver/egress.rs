@@ -397,9 +397,12 @@ pub async fn read_response_with(
             content_type.as_str(),
             "text/xml" | "application/xml" | "application/rss+xml" | "application/atom+xml"
         ) && options.feed_cap.is_none();
+        // A file whose card comes from its URL (an image, a PDF) is cut at the page cap, never
+        // refused: its size says nothing against the card.
+        let url_card = content_type.starts_with("image/") || content_type == "application/pdf";
         let (mut max, refuse) = match options.body_cap {
             Some(cap) => (cap, true),
-            None if html || xml_feed => (BODY_CAP, false),
+            None if html || xml_feed || url_card => (BODY_CAP, false),
             None => (options.feed_cap.unwrap_or(BODY_CAP), true),
         };
         // A page whose head is still open at the page cap is read on until the head closes.
@@ -1533,6 +1536,38 @@ mod tests {
             head_end(&whole, body.len()),
             Some(whole.len() - "<body>".len())
         );
+    }
+    /// A PDF or an image past the page cap is cut there, not refused: its card comes from its
+    /// URL. Any other file past the cap is still refused.
+    #[tokio::test]
+    async fn a_large_pdf_or_image_is_cut_not_refused() {
+        use axum::{routing::get, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let file = |content_type: &'static str| {
+            move || async move { ([("content-type", content_type)], vec![b'%'; 3 * BODY_CAP]) }
+        };
+        let app = Router::new()
+            .route("/paper.pdf", get(file("application/pdf")))
+            .route("/photo.jpg", get(file("image/jpeg")))
+            .route("/data.json", get(file("application/json")));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        let read = |path: &str| {
+            let url: Url = format!("http://{addr}{path}").parse().unwrap();
+            let request = client.get(url.clone());
+            async move {
+                read_response_with(url, request.send().await.unwrap(), &Default::default()).await
+            }
+        };
+        for path in ["/paper.pdf", "/photo.jpg"] {
+            let fetched = read(path).await.unwrap();
+            assert!(fetched.truncated, "{path}");
+            assert_eq!(fetched.body.len(), BODY_CAP, "{path}");
+        }
+        let error = read("/data.json").await.unwrap_err();
+        assert!(error.downcast_ref::<BodyTooLarge>().is_some(), "{error:#}");
+        server.abort();
     }
     /// An RSS or Atom feed past the page cap keeps its first megabyte, marked truncated, unless
     /// the fetch set a feed cap (calendars), which refuses what exceeds it.

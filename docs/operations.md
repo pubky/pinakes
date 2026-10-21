@@ -177,7 +177,8 @@ repeat the policy at every redirect (three hops; HTML meta refresh and literal J
 redirects count). `egress.allow_hosts` and `egress.deny_hosts` take exact names or
 `*.example.org`; they never override the IP policy, and deny wins. Pages are capped at 1 MB of
 decoded body; an oversized page keeps its head metadata with a `truncated` warning, its whole
-head when the head runs past the cap (up to `limits.html_head_bytes`). An RSS or
+head when the head runs past the cap (up to `limits.html_head_bytes`). An image or PDF past the
+cap is cut too, never refused: its card comes from its URL. An RSS or
 Atom feed read without a calendar's feed cap is cut there too (a long show's feed is 2–5 MB):
 its channel and newest items come first, and its card reads up to the last whole item. Wikidata
 entity reads may take 8 MB, since a much-edited item carries megabytes of claims, and so may
