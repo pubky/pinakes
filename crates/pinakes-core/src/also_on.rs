@@ -133,6 +133,9 @@ pub struct Found {
     /// What was found changes the card itself (a media page's title): the resource is read again
     /// now, and its finished card takes it.
     pub reread: bool,
+    /// A secondary service the source asks failed, so its part is missing from this run: ask
+    /// again after this long instead of after the source's lifetime. What the run found stands.
+    pub retry_after: Option<Duration>,
 }
 /// A fact a source reads for a resource: a lower-case `name` (`[a-z][a-z0-9_]`, at most 32
 /// bytes) and a printable `value` (at most 512 bytes). Several values of one name are kept.
@@ -668,10 +671,15 @@ async fn one(
         match lookup {
             Ok(found) => {
                 reread |= found.reread;
+                // A secondary service failed: this run's results stand, and the source runs
+                // again after its retry time instead of after its lifetime.
+                let lifetime = found
+                    .retry_after
+                    .map_or(source.ttl(), |retry| retry.min(source.ttl()));
                 record(pool, id, source.id(), found, source.ttl(), cfg)
                     .await
                     .with_context(|| format!("record {}", source.id()))?;
-                next = Some(next.map_or(source.ttl(), |n| n.min(source.ttl())));
+                next = Some(next.map_or(lifetime, |n| n.min(lifetime)));
                 subject.keys = sqlx::query_as("SELECT key,source FROM resource_key WHERE resource_id=$1 AND expires_at>now() ORDER BY key")
                     .bind(id)
                     .fetch_all(pool)

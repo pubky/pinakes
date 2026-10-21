@@ -1558,6 +1558,34 @@ async fn a_page_naming_itself_after_a_service_takes_no_slot(pool: PgPool) {
     );
 }
 
+/// A run whose secondary service failed is recorded (its keys stand) and comes back after the
+/// retry time the source asked for, not after its lifetime.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_failed_secondary_service_brings_the_next_run_forward(pool: PgPool) {
+    let uri = "https://example.org/paper";
+    let id = page(&pool, uri, "Paper").await;
+    let hub = Fake::new("datacite");
+    hub.answer(
+        uri,
+        Ok(Found {
+            keys: vec![key("doi:10.1000/x")],
+            retry_after: Some(Duration::from_secs(120)),
+            ..Default::default()
+        }),
+    );
+    let sources: Vec<Arc<dyn Source>> = vec![hub];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    let (keys, due_in, attempts, error): (i64, f64, i32, Option<String>) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM resource_key WHERE resource_id=d.resource_id),extract(epoch FROM d.next_attempt_at-now())::float8,d.attempts,d.last_error FROM also_on_dirty d WHERE d.resource_id=$1",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((keys, attempts, error), (1, 0, None));
+    assert!((0.0..=125.0).contains(&due_in), "{due_in}");
+}
+
 /// A source that panics on every lookup, as a parser meeting an unexpected shape would.
 struct Panics;
 #[async_trait]

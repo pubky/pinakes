@@ -11,6 +11,7 @@ use crate::{
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
+use std::time::Duration;
 
 impl super::Found {
     /// As the also-on machinery records it: every key vouched for by `via`.
@@ -291,6 +292,39 @@ async fn send(
 }
 
 /// The operator's contact, for APIs that ask for an email address.
+/// How long until a run asks a secondary service again after it failed, unless the service said
+/// when (a busy one's `Retry-After`).
+const SECONDARY_RETRY: Duration = Duration::from_secs(15 * 60);
+/// A secondary service's answer, or nothing when its request failed: the lookup goes on with
+/// what the link and the other services gave, the failure is counted
+/// (`pinakes_also_on_service_errors_total{service,class}`), and `retry` is brought forward so the
+/// run asks again after the service's retry time instead of after the source's lifetime.
+fn secondary<T>(
+    service: &'static str,
+    retry: &mut Option<Duration>,
+    result: Result<T>,
+) -> Option<T> {
+    match result {
+        Ok(answer) => Some(answer),
+        Err(error) => {
+            let class = crate::resolver::error_class(&error);
+            crate::telemetry::also_on_service_error(service, class);
+            tracing::debug!(service, class, error = %format!("{error:#}"), "secondary service failed; the lookup goes on without it");
+            let after = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<RetryLater>())
+                .map_or(SECONDARY_RETRY, |r| Duration::from_secs(r.seconds.max(60)));
+            *retry = Some(retry.map_or(after, |r| r.min(after)));
+            None
+        }
+    }
+}
+/// `found` as recorded, asked again after `retry` when a secondary service failed.
+fn with_retry(mut found: also_on::Found, retry: Option<Duration>) -> also_on::Found {
+    found.retry_after = retry;
+    found
+}
+
 fn contact(cx: &Context) -> Option<&str> {
     super::contact(&cx.config.http.contact)
 }
@@ -326,8 +360,28 @@ impl Source for FederalRegister {
         let Some(url) = fr::api_url(&number) else {
             return Ok(also_on::Found::default());
         };
-        let (status, body) = get(cx, &url, "federalregister_busy").await?;
-        let Some(document) = fr::parse(status, &body, &number)? else {
+        // The document's number is its key whatever the API answers; a number the API doesn't
+        // know still names nothing.
+        let mut retry = None;
+        let answer = secondary(
+            "federalregister",
+            &mut retry,
+            async {
+                let (status, body) = get(cx, &url, "federalregister_busy").await?;
+                fr::parse(status, &body, &number)
+            }
+            .await,
+        );
+        let Some(document) = answer else {
+            return Ok(with_retry(
+                also_on::Found {
+                    keys: vec![key(&number)],
+                    ..Default::default()
+                },
+                retry,
+            ));
+        };
+        let Some(document) = document else {
             return Ok(also_on::Found::default());
         };
         let links = document
@@ -567,39 +621,70 @@ impl Source for Datacite {
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<also_on::Found> {
         use super::papers;
+        let mut retry = None;
         if let Some(id) = papers::arxiv_from_uri(&subject.uri) {
-            let Some(request) = papers::datacite_arxiv_request(&id) else {
-                return Ok(also_on::Found::default());
-            };
-            let f = send(cx, &request, "datacite_busy").await?;
-            let (mut found, journal) = papers::parse_datacite_arxiv(f.status, &f.body, &id)?;
-            if let Some(journal) = journal {
-                if Self::publisher_names(cx, &journal, &id).await? {
-                    found.push_key(papers::doi_key(&journal));
-                }
-            }
+            // The paper's own key and pages first: they never wait for DataCite or Crossref.
+            let mut found = super::Found::default();
+            found.push_key(papers::arxiv_key(&id));
             for link in papers::arxiv_links(&id, "datacite") {
                 found.push_link(link);
             }
-            return Ok(found.into_also_on("datacite"));
+            let Some(request) = papers::datacite_arxiv_request(&id) else {
+                return Ok(found.into_also_on("datacite"));
+            };
+            let record = secondary(
+                "datacite",
+                &mut retry,
+                async {
+                    let f = send(cx, &request, "datacite_busy").await?;
+                    papers::parse_datacite_arxiv(f.status, &f.body, &id)
+                }
+                .await,
+            );
+            if let Some((named, journal)) = record {
+                for link in named.links {
+                    found.push_link(link);
+                }
+                if let Some(journal) = journal {
+                    let confirmed = Self::publisher_names(cx, &journal, &id).await;
+                    if secondary("crossref", &mut retry, confirmed) == Some(true) {
+                        found.push_key(papers::doi_key(&journal));
+                    }
+                }
+            }
+            return Ok(with_retry(found.into_also_on("datacite"), retry));
         }
         let Some(doi) = journal_doi(subject) else {
             return Ok(also_on::Found::default());
         };
-        let Some(request) = papers::datacite_versions_request(&doi) else {
-            return Ok(also_on::Found::default());
-        };
-        let f = send(cx, &request, "datacite_busy").await?;
-        let (mut found, preprint) = papers::parse_datacite_versions(f.status, &f.body, &doi)?;
-        // The card's own DOI is its key (`key=doi:` finds it); only the publisher's record gives
-        // it to the preprint.
+        // The card's own DOI is its key (`key=doi:` finds it) whatever DataCite and Crossref
+        // answer; only the publisher's record gives it to the preprint.
+        let mut found = super::Found::default();
         found.push_key(papers::doi_key(&doi));
-        if let Some(id) = preprint {
-            if Self::publisher_names(cx, &doi, &id).await? {
-                found.push_key(papers::arxiv_key(&id));
+        let Some(request) = papers::datacite_versions_request(&doi) else {
+            return Ok(found.into_also_on("datacite"));
+        };
+        let record = secondary(
+            "datacite",
+            &mut retry,
+            async {
+                let f = send(cx, &request, "datacite_busy").await?;
+                papers::parse_datacite_versions(f.status, &f.body, &doi)
+            }
+            .await,
+        );
+        if let Some((named, preprint)) = record {
+            for link in named.links {
+                found.push_link(link);
+            }
+            if let Some(id) = preprint {
+                let confirmed = Self::publisher_names(cx, &doi, &id).await;
+                if secondary("crossref", &mut retry, confirmed) == Some(true) {
+                    found.push_key(papers::arxiv_key(&id));
+                }
             }
         }
-        Ok(found.into_also_on("datacite"))
+        Ok(with_retry(found.into_also_on("datacite"), retry))
     }
 }
 
@@ -670,6 +755,9 @@ impl Source for Packages {
         let Some(package) = self.package(subject) else {
             return Ok(also_on::Found::default());
         };
+        // The registry's own answer is the package (its existence and version); the provenance
+        // reads and deps.dev only add the repository, so their failure costs that alone.
+        let mut retry = None;
         let release = match self.0 {
             Registry::Crates => {
                 let Some(request) = p::crates_request(&package) else {
@@ -687,15 +775,21 @@ impl Source for Packages {
                     None => None,
                     Some(latest) => {
                         let repository = match &latest.attestations {
-                            Some(request) => {
-                                let f = send(cx, request, "npm_busy").await?;
-                                p::parse_npm_attestations(
-                                    f.status,
-                                    &f.body,
-                                    &package,
-                                    &latest.version,
-                                )?
-                            }
+                            Some(request) => secondary(
+                                "npm",
+                                &mut retry,
+                                async {
+                                    let f = send(cx, request, "npm_busy").await?;
+                                    p::parse_npm_attestations(
+                                        f.status,
+                                        &f.body,
+                                        &package,
+                                        &latest.version,
+                                    )
+                                }
+                                .await,
+                            )
+                            .flatten(),
                             None => None,
                         };
                         Some(p::Release {
@@ -721,8 +815,16 @@ impl Source for Packages {
                             let Some(request) = p::pypi_provenance_request(&latest, file) else {
                                 continue;
                             };
-                            let f = send(cx, &request, "pypi_busy").await?;
-                            named.extend(p::parse_pypi_provenance(f.status, &f.body)?);
+                            let read = secondary(
+                                "pypi",
+                                &mut retry,
+                                async {
+                                    let f = send(cx, &request, "pypi_busy").await?;
+                                    p::parse_pypi_provenance(f.status, &f.body)
+                                }
+                                .await,
+                            );
+                            named.extend(read.flatten());
                         }
                         let repository = p::one_repository(named);
                         Some(p::Release {
@@ -738,9 +840,10 @@ impl Source for Packages {
             return Ok(also_on::Found::default());
         };
         if release.repository.is_none() {
-            release.repository = Self::depsdev(cx, &release.package, &release.version).await?;
+            let named = Self::depsdev(cx, &release.package, &release.version).await;
+            release.repository = secondary("depsdev", &mut retry, named).flatten();
         }
-        Ok(release.found().into_also_on(self.id()))
+        Ok(with_retry(release.found().into_also_on(self.id()), retry))
     }
 }
 
@@ -761,15 +864,25 @@ impl Source for SoftwareHeritage {
         let Some(request) = super::packages::software_heritage_request(&repo) else {
             return Ok(also_on::Found::default());
         };
-        let f = send(cx, &request, "software_heritage_busy").await?;
-        let links = super::packages::parse_software_heritage(f.status, &f.body, &repo)?
-            .into_iter()
-            .collect();
-        Ok(super::Found {
-            keys: vec![repo.key()],
-            links,
-        }
-        .into_also_on("software_heritage"))
+        // The repository's key is its own; the archive page is Software Heritage's to answer.
+        let mut retry = None;
+        let archived = secondary(
+            "software_heritage",
+            &mut retry,
+            async {
+                let f = send(cx, &request, "software_heritage_busy").await?;
+                super::packages::parse_software_heritage(f.status, &f.body, &repo)
+            }
+            .await,
+        );
+        Ok(with_retry(
+            super::Found {
+                keys: vec![repo.key()],
+                links: archived.flatten().into_iter().collect(),
+            }
+            .into_also_on("software_heritage"),
+            retry,
+        ))
     }
 }
 
@@ -794,40 +907,67 @@ impl Source for Steam {
         for link in games::templates(appid) {
             found.push_link(link);
         }
+        // The key and the templates are the appid's own; each service below adds its page, and
+        // one that fails (busy, a bot wall) costs only that.
+        let mut retry = None;
         if let Some(request) = games::protondb_request(appid) {
-            let f = send(cx, &request, "protondb_busy").await?;
-            if let Some(link) = games::parse_protondb(f.status, &f.body, appid)? {
+            let link = secondary(
+                "protondb",
+                &mut retry,
+                async {
+                    let f = send(cx, &request, "protondb_busy").await?;
+                    games::parse_protondb(f.status, &f.body, appid)
+                }
+                .await,
+            );
+            if let Some(link) = link.flatten() {
                 found.push_link(link);
             }
         }
         if let Some(request) = games::pcgamingwiki_request(appid) {
-            // Where the lookup redirects is the page the appid names. A wiki that fails (a bot
-            // wall, busy) costs only its own link.
-            let link = match send(cx, &request, "pcgamingwiki_busy").await {
-                Ok(f) => games::parse_pcgamingwiki(f.status, f.location.as_deref()),
-                Err(error) => Err(error),
-            };
-            match link {
-                Ok(Some(link)) => found.push_link(link),
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::debug!(appid, error = %format!("{error:#}"), "PCGamingWiki lookup failed");
+            // Where the lookup redirects is the page the appid names.
+            let link = secondary(
+                "pcgamingwiki",
+                &mut retry,
+                async {
+                    let f = send(cx, &request, "pcgamingwiki_busy").await?;
+                    games::parse_pcgamingwiki(f.status, f.location.as_deref())
                 }
+                .await,
+            );
+            if let Some(link) = link.flatten() {
+                found.push_link(link);
             }
         }
         if let Some(request) = games::gog_gamesdb_request(appid) {
-            let f = send(cx, &request, "gog_busy").await?;
-            if let Some(product) = games::parse_gog_gamesdb(f.status, &f.body, appid)? {
+            let product = secondary(
+                "gog",
+                &mut retry,
+                async {
+                    let f = send(cx, &request, "gog_busy").await?;
+                    games::parse_gog_gamesdb(f.status, &f.body, appid)
+                }
+                .await,
+            );
+            if let Some(product) = product.flatten() {
                 found.push_key(games::gog_key(product));
                 if let Some(request) = games::gog_product_request(product) {
-                    let f = send(cx, &request, "gog_busy").await?;
-                    if let Some(link) = games::parse_gog_product(f.status, &f.body, product)? {
+                    let link = secondary(
+                        "gog",
+                        &mut retry,
+                        async {
+                            let f = send(cx, &request, "gog_busy").await?;
+                            games::parse_gog_product(f.status, &f.body, product)
+                        }
+                        .await,
+                    );
+                    if let Some(link) = link.flatten() {
                         found.push_link(link);
                     }
                 }
             }
         }
-        Ok(found.into_also_on("steam"))
+        Ok(with_retry(found.into_also_on("steam"), retry))
     }
 }
 
@@ -997,8 +1137,10 @@ impl Source for Discogs {
             ..Default::default()
         };
         if kind == discogs::Kind::Release {
+            // The ID is the key; the record only adds the barcodes.
             let token = discogs::token(&cx.config);
-            if let (Some(v), _) = discogs::record(&cx.egress, kind, id, token.as_deref()).await? {
+            let record = discogs::record(&cx.egress, kind, id, token.as_deref()).await;
+            if let Some((Some(v), _)) = secondary("discogs", &mut found.retry_after, record) {
                 let barcodes = discogs::barcodes(&v);
                 // A box set lists each disc's barcode: only a release with one barcode keys it.
                 if let [upc] = barcodes.as_slice() {
@@ -1840,5 +1982,56 @@ mod tests {
             .unwrap();
         assert_eq!(keys(&found), ["arxiv:2302.04668"]);
         assert!(sites(&found).contains(&"DOI https://doi.org/10.46298/lmcs-20(1:8)2024".to_owned()));
+    }
+
+    /// A secondary service that fails costs its own part only: the link's own key and the other
+    /// services' answers are recorded, and the run asks again after the service's retry time.
+    #[tokio::test(start_paused = true)]
+    async fn a_failing_secondary_service_keeps_the_links_own_key() {
+        use crate::lookups::{games, papers as p};
+        let nature = "10.1038/nature12373";
+        let versions = p::datacite_versions_request(nature)
+            .unwrap()
+            .url
+            .to_string();
+        let arxiv = "https://api.datacite.org/dois/10.48550/arXiv.1304.1068";
+        // DataCite busy: the DOI card keeps its own key, the preprint its key and pages.
+        let busy = recorded_but_busy(vec![], &[versions.as_str(), arxiv]);
+        let found = Datacite
+            .lookup(&busy, &at("doi:10.1038/nature12373"))
+            .await
+            .unwrap();
+        assert_eq!(keys(&found), ["doi:10.1038/nature12373"]);
+        assert!(found.retry_after.is_some());
+        let found = Datacite
+            .lookup(&busy, &at("https://arxiv.org/abs/1304.1068"))
+            .await
+            .unwrap();
+        assert_eq!(keys(&found), ["arxiv:1304.1068"]);
+        assert!(sites(&found).contains(&"arXiv https://arxiv.org/abs/1304.1068".to_owned()));
+        assert!(found.retry_after.is_some());
+        // Crossref busy: LMCS keeps its own key and the preprint's pages, not its key.
+        let busy = recorded_but_busy(
+            vec![],
+            &["https://api.crossref.org/works/10.46298/lmcs-20%281%3A8%292024"],
+        );
+        let found = Datacite
+            .lookup(&busy, &at("doi:10.46298/lmcs-20(1:8)2024"))
+            .await
+            .unwrap();
+        assert_eq!(keys(&found), ["doi:10.46298/lmcs-20(1:8)2024"]);
+        assert!(sites(&found).contains(&"arXiv https://arxiv.org/abs/2302.04668".to_owned()));
+        assert!(found.retry_after.is_some());
+        // GOG busy: the game keeps its key, its templates and ProtonDB.
+        let gog = games::gog_gamesdb_request(620).unwrap().url.to_string();
+        let busy = recorded_but_busy(vec![], &[gog.as_str()]);
+        let portal = at("https://store.steampowered.com/app/620/Portal_2/");
+        let found = Steam.lookup(&busy, &portal).await.unwrap();
+        assert_eq!(keys(&found), ["steam:620"]);
+        assert!(sites(&found).iter().any(|s| s.starts_with("ProtonDB ")));
+        assert!(found.retry_after.is_some());
+        // Nothing failed: the source runs again after its lifetime.
+        let found = Steam.lookup(&recorded(vec![]), &portal).await.unwrap();
+        assert!(found.retry_after.is_none());
     }
 }

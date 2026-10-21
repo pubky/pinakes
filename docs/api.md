@@ -984,8 +984,8 @@ looked up itself; it joins as one of a title's links, by the title's IMDb ID.
 - `datacite`: the arXiv preprint and its journal version where DataCite names them exactly
   (`IsVersionOf`, only when the record names one journal version): the journal card gets the
   arXiv and alphaXiv pages, the arXiv paper its own pages and the journal version, as links.
-  A DOI card's own `doi:{DOI}` and an arXiv paper's own `arxiv:{id}` are their keys, so
-  `key=doi:` finds the card. DataCite records what arXiv's submitter
+  A DOI card's own `doi:{DOI}` and an arXiv paper's own `arxiv:{id}` are their keys, recorded
+  whatever DataCite and Crossref answer, so `key=doi:` finds the card. DataCite records what arXiv's submitter
   entered, so the two join (the journal card gets `arxiv:{id}`, the arXiv paper also
   `doi:{journal DOI}`) only when the journal's publisher names the preprint in its own Crossref
   record (`relation.has-preprint`, asserted by the publisher, by arXiv id or arXiv DOI). A
