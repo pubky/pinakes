@@ -1237,6 +1237,13 @@ async fn a_shared_key_never_joins_two_places_crates_or_games(pool: PgPool) {
             "{ids:?} share {groups:?}"
         );
     }
+    // Grouping ran and refused the joins (the pairs share a key), so the check above is not
+    // vacuous.
+    let refused: i64 = sqlx::query_scalar("SELECT count(*) FROM group_input WHERE key_conflicts>0")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(refused >= 3, "{refused}");
 }
 
 /// BTC Map's merchant page names one OSM object: an object it lists carries its own `osm:` key,
