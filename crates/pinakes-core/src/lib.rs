@@ -68,7 +68,7 @@ pub fn h3_requirement(installed: Option<H3Install<'_>>) -> anyhow::Result<()> {
         ),
     }
 }
-/// Refuse to serve when the installed h3 extension lacks `H3_FUNCTION`. Migrations only run
+/// Refuse to serve when the installed h3 extension lacks `H3_FUNCTION`. The schema only runs
 /// `CREATE EXTENSION IF NOT EXISTS h3`, which never upgrades an installed extension.
 pub async fn check_extensions(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     let installed: Option<(String, bool, Option<String>)> = sqlx::query_as(
@@ -90,10 +90,20 @@ pub async fn check_extensions(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     )
 }
 
-/// Create or update the schema (`migrations/`).
+/// Create the schema (`migrations/0001_schema.sql`) on an empty database; a database that has it
+/// is left as it is. A database built from another version of the file is refused with the
+/// remedy: until the first deployment a schema change edits that file, and databases are
+/// recreated.
 pub async fn migrate(pool: &sqlx::PgPool) -> anyhow::Result<()> {
-    MIGRATOR.run(pool).await?;
-    Ok(())
+    use sqlx::migrate::MigrateError;
+    match MIGRATOR.run(pool).await {
+        Err(MigrateError::VersionMismatch(_) | MigrateError::VersionMissing(_)) => anyhow::bail!(
+            "this database was built from another version of migrations/0001_schema.sql; \
+             recreate it (dropdb, createdb, then pinakesd --migrate) as docs/operations.md \
+             describes"
+        ),
+        result => Ok(result?),
+    }
 }
 
 #[cfg(test)]
