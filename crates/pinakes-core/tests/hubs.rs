@@ -202,6 +202,13 @@ impl Transport for Recorded {
                 }
             }
             "/w/api.php" if query("list") == "search" => (200, fixture("wd-search-p436.json")),
+            // An item over Wikidata's cap.
+            "/w/api.php" if query("action") == "wbgetentities" && query("ids") == "Q999999999" => {
+                return Err(pinakes_core::resolver::egress::BodyTooLarge {
+                    cap: pinakes_core::hubs::WIKIDATA_CAP,
+                }
+                .into())
+            }
             "/w/api.php" if query("action") == "wbgetentities" && query("ids") == "Q9312" => {
                 (200, fixture("wd-kant.json"))
             }
@@ -1218,9 +1225,10 @@ async fn a_musicbrainz_page_card_comes_from_the_entity() {
     );
 }
 
-/// An entity over MusicBrainz's cap is no answer: its page's sources record nothing and don't
-/// retry (asking again would read the same megabytes), and its card is read from the page, the
-/// second time too, from the failure cache.
+/// An answer over its hub's cap is no answer: a MusicBrainz page's and a Wikidata item's sources
+/// record only the key their URL proves and don't retry (asking again would read the same
+/// megabytes), and the MusicBrainz card is read from the page, the second time too, from the
+/// failure cache.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_entity_over_the_cap_is_no_answer(pool: sqlx::PgPool) {
     let uri = format!("https://musicbrainz.org/artist/{BIG_BAND}");
@@ -1242,10 +1250,15 @@ async fn an_entity_over_the_cap_is_no_answer(pool: sqlx::PgPool) {
             .expect("the page is read instead");
         assert_eq!(card.name.as_deref(), Some("Big Band"));
     }
-    let id = store::ensure_resource(&pool, &uri).await.unwrap();
-    let mut d = ResourceMeta::new(&uri, "web", 86400);
-    d.set_type("MusicGroup");
-    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let item = "https://www.wikidata.org/wiki/Q999999999";
+    let mut ids = vec![];
+    for page in [uri.as_str(), item] {
+        let id = store::ensure_resource(&pool, page).await.unwrap();
+        let mut d = ResourceMeta::new(page, "web", 86400);
+        d.set_type("MusicGroup");
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.push(id);
+    }
     let cx = also_on::Context {
         egress: e,
         config: Arc::new(Config::default()),
@@ -1253,14 +1266,26 @@ async fn an_entity_over_the_cap_is_no_answer(pool: sqlx::PgPool) {
     also_on::drain(&pool, &cx, &also_on::registry(), 100)
         .await
         .unwrap();
-    let (keys, retrying): (i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM resource_key WHERE resource_id=$1),(SELECT count(*) FROM also_on_dirty WHERE resource_id=$1 AND attempts>0)",
-    )
-    .bind(&id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!((keys, retrying), (0, 0));
+    for (id, own) in [
+        (&ids[0], format!("mb:artist:{BIG_BAND}")),
+        (&ids[1], "wikidata:Q999999999".to_owned()),
+    ] {
+        let keys: Vec<String> =
+            sqlx::query_scalar("SELECT key FROM resource_key WHERE resource_id=$1 ORDER BY key")
+                .bind(id)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(keys, [own]);
+        let retrying: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM also_on_dirty WHERE resource_id=$1 AND attempts>0",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(retrying, 0);
+    }
     // The record was asked once: the card's second read and the source's came from the cache.
     let seen = t.seen.lock().unwrap().clone();
     let asked = seen

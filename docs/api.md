@@ -832,8 +832,8 @@ key, and with exactly one recording MusicBrainz gives the ISRC to, that recordin
 and links. An ISRC several recordings have names none of them: its page keeps it as a fact only
 (keyed, it would join whichever of their groups took it first, the other refused).
 The page's card comes from the same answer of MusicBrainz's web service, not from the page
-(unless that answer is over its 8 MB cap: then the page is read as any page, and the sources find
-nothing): the
+(unless that answer is over its 8 MB cap: then the page is read as any page, and the sources
+record only what its URL proves, the MBID or the ISRC): the
 title, `MusicRecording`, `MusicAlbum`, `MusicGroup` or `Person` (an artist MusicBrainz calls a
 person), the artist credit and a recording's length as its description, `site` `MusicBrainz`; an
 ISRC's page is its one recording's card, else named `ISRC {code}`.

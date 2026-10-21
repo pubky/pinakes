@@ -337,6 +337,27 @@ impl Source for WikidataItemSource {
         }
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
+        crate::also_on::unless_over_cap(self.read(cx, subject).await, || {
+            Self::own_key(&subject.uri)
+        })
+    }
+}
+impl WikidataItemSource {
+    /// What the item link alone proves: its Q-id.
+    fn own_key(uri: &str) -> Found {
+        Found {
+            keys: wikidata::item_link(uri)
+                .and_then(|(qid, _)| hubs::key::wikidata(&qid))
+                .map(|key| Key {
+                    key,
+                    via: "wikidata".into(),
+                })
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        }
+    }
+    async fn read(&self, cx: &Context, subject: &Subject) -> Result<Found> {
         let Some((qid, _)) = wikidata::item_link(&subject.uri) else {
             return Ok(Found::default());
         };
@@ -359,6 +380,11 @@ impl Source for WikipediaSource {
         parse(&subject.uri).is_some()
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
+        crate::also_on::unless_over_cap(self.read(cx, subject).await, Found::default)
+    }
+}
+impl WikipediaSource {
+    async fn read(&self, cx: &Context, subject: &Subject) -> Result<Found> {
         let Some(article) = parse(&subject.uri) else {
             return Ok(Found::default());
         };

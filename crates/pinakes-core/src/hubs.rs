@@ -694,7 +694,19 @@ pub mod wikidata {
             .await?
             .map(|v| parse_search(&v))
             .unwrap_or_default();
-        Ok(verified(items(egress, &hits).await?, property, value))
+        let read = match items(egress, &hits).await {
+            // Items over the cap together: each alone. One over it alone can't be verified, so
+            // the search has no answer (its refusal).
+            Err(e) if hits.len() > 1 && crate::resolver::egress::over_cap(&e) => {
+                let mut read = vec![];
+                for qid in &hits {
+                    read.extend(items(egress, std::slice::from_ref(qid)).await?);
+                }
+                read
+            }
+            read => read?,
+        };
+        Ok(verified(read, property, value))
     }
     /// The verification step of [`item_with`].
     pub fn verified(items: Vec<Item>, property: &str, value: &str) -> Found {
@@ -713,6 +725,50 @@ pub mod wikidata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Items over the cap together are read one by one, so one never sinks the other's answer;
+    /// one over it alone is no answer (its refusal).
+    #[tokio::test(start_paused = true)]
+    async fn items_over_the_cap_together_are_read_alone() {
+        let search = wikidata::search_lookup("P4983", "1396").unwrap();
+        let both = wikidata::entities_lookup(&["Q1".into(), "Q2".into()]);
+        let (one, two) = (
+            wikidata::entities_lookup(&["Q1".into()]),
+            wikidata::entities_lookup(&["Q2".into()]),
+        );
+        let item = |q: &str, v: &str| {
+            serde_json::to_vec(
+                &serde_json::json!({"entities": {q: {"type": "item", "id": q,
+                "claims": {"P4983": [{"rank": "normal", "mainsnak": {"snaktype": "value",
+                    "datatype": "external-id", "datavalue": {"value": v}}}]}}}}),
+            )
+            .unwrap()
+        };
+        let hits = br#"{"query":{"search":[{"title":"Q1"},{"title":"Q2"}]}}"#.to_vec();
+        let (egress, recorded) = crate::sources::fixture::egress(vec![
+            (&search, 200, "application/json", hits.clone()),
+            (&both, 200, "!too-large", vec![]),
+            (&one, 200, "application/json", item("Q1", "1396")),
+            (&two, 200, "application/json", item("Q2", "9999")),
+        ]);
+        let found = wikidata::item_with(&egress, "P4983", "1396").await.unwrap();
+        assert!(
+            matches!(&found, wikidata::Found::One(i) if i.qid == "Q1"),
+            "{found:?}"
+        );
+        assert!(recorded.asked().contains(&both), "{:?}", recorded.asked());
+        // Q2 over the cap alone: the search can't be verified.
+        let (egress, _) = crate::sources::fixture::egress(vec![
+            (&search, 200, "application/json", hits),
+            (&both, 200, "!too-large", vec![]),
+            (&one, 200, "application/json", item("Q1", "1396")),
+            (&two, 200, "!too-large", vec![]),
+        ]);
+        let error = wikidata::item_with(&egress, "P4983", "1396")
+            .await
+            .unwrap_err();
+        assert!(crate::resolver::egress::over_cap(&error), "{error:#}");
+    }
 
     /// Wikidata's `maxlag` comes with 200: the answer is busy, and the next ask fetches again
     /// instead of reading it from the cache for an hour.

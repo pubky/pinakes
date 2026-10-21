@@ -169,8 +169,10 @@ Atom feed read without a calendar's feed cap is cut there too (a long show's fee
 its channel and newest items come first, and its card reads up to the last whole item. Wikidata
 entity reads may take 8 MB, since a much-edited item carries megabytes of claims, and so may
 MusicBrainz answers (an artist or release with very many links). An answer over even that is
-refused, never cut, and remembered as such for five minutes: a MusicBrainz page's sources then
-record nothing (they don't retry it), and its card is read from the page. Requests
+refused, never cut, and remembered as such for five minutes. The also-on sources then record only
+what the link's URL proves (a MusicBrainz page its MBID or ISRC, a Wikidata item its Q-id) and
+don't retry it; Wikidata items verified together that are over it together are read one by one;
+a MusicBrainz page's card is read from the page. Requests
 time out after ten seconds. Images stay origin URLs and are never fetched.
 
 Every request introduces itself as `pinakes/<version> (+https://pubky.app; <contact>)`, with
