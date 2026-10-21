@@ -996,7 +996,9 @@ looked up itself; it joins as one of a title's links, by the title's IMDb ID.
 `unpaywall` and `ncbi` send the operator's contact (`[http] contact`) as their APIs ask; without
 one they find nothing.
 
-**Software.** A package page on crates.io (and docs.rs, lib.rs), npm (and jsDelivr) or PyPI:
+**Software.** A package's own page on crates.io (and docs.rs, lib.rs), npm (and jsDelivr) or
+PyPI, or its page at one version; a page under it (a function's documentation, a source file, a
+dependency list) is another object:
 - `crates`, `npm`, `pypi`: the package's pages on its registry and documentation sites, its name
   as key (`crate:`, `npm:`, `pypi:`, normalized as each registry does), and its source repository
   only when signed build provenance names it (crates.io trusted publishing, npm SLSA provenance,
@@ -1012,8 +1014,8 @@ one they find nothing.
   SteamDB page, its ProtonDB page when ProtonDB has reports, its PCGamingWiki page where the appid
   lookup leads, and its GOG page through GOG GamesDB (only GOG's and Steam's own rows), with
   `steam:` and `gog:` keys.
-- `wikidata_stores`: a link on Steam, GOG, the App Store, Google Play, F-Droid, Flathub or the Snap
-  Store gets the one Wikidata item carrying that store's ID (read back and compared exactly;
+- `wikidata_stores`: an app's or game's own page on Steam, GOG, the App Store, Google Play,
+  F-Droid, Flathub or the Snap Store (never a page under it) gets the one Wikidata item carrying that store's ID (read back and compared exactly;
   several are ambiguous and give nothing), its other stores and game databases (Epic Games
   Store, itch.io, IGDB, MobyGames, PCGamingWiki, HowLongToBeat, Homebrew) with one value each,
   and its Q-id as key when the item carries no other ID on that store (an item with two Steam

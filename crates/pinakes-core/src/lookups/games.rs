@@ -196,7 +196,10 @@ mod tests {
             "https://store.steampowered.com/bundle/620/",
             "https://example.com/app/620",
             "https://store.steampowered.com/app/12345678901/",
-            // Objects under a game are not the game.
+            // Objects under a game are not the game. The store has no child object of the shape
+            // `/app/{id}/{name}`: that is the game's page with its name; its reviews, news and
+            // age check live elsewhere (`/app/{id}/{name}/reviews`, `/news/app/{id}`,
+            // `/agecheck/app/{id}`).
             "https://steamcommunity.com/app/620/discussions/0/123456789/",
             "https://steamcommunity.com/app/620/reviews/",
             "https://steamcommunity.com/app/620/workshop/",

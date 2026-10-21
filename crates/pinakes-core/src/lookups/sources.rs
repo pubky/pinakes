@@ -832,6 +832,14 @@ impl Source for Steam {
 }
 
 /// The Wikidata property a store link names, its value, and the stores to list for the item.
+/// An F-Droid site language (`en`, `fr`, `zh_Hant`, `pt_BR`).
+fn fdroid_language(s: &str) -> bool {
+    let (lang, region) = s.split_once(['_', '-']).unwrap_or((s, "AA"));
+    (2..=3).contains(&lang.len())
+        && lang.bytes().all(|b| b.is_ascii_lowercase())
+        && (2..=4).contains(&region.len())
+        && region.bytes().all(|b| b.is_ascii_alphabetic())
+}
 pub fn store_property(uri: &str) -> Option<(&'static str, String, &'static [items::Property])> {
     let url = super::web_url(uri)?;
     let host = url.host_str()?.trim_start_matches("www.");
@@ -854,13 +862,29 @@ pub fn store_property(uri: &str) -> Option<(&'static str, String, &'static [item
             ("P2725", format!("game/{slug}"), items::GAME)
         }
         ("gog.com", ["game", slug]) => ("P2725", format!("game/{slug}"), items::GAME),
+        // The app's own page: `/{cc}/app/{name}/id{N}`, with or without the storefront and the
+        // name. Nothing under it.
         ("apps.apple.com", rest) => {
-            let id = rest.last()?.strip_prefix("id")?;
-            (super::plain(id, 20, |c| c.is_ascii_digit()) && rest.contains(&"app")).then_some(())?;
+            let country = |cc: &str| cc.len() == 2 && cc.bytes().all(|b| b.is_ascii_lowercase());
+            let name =
+                |n: &str| super::plain(n, 200, |c| c.is_ascii_alphanumeric() || "-_.%".contains(c));
+            let id = match rest {
+                [cc, "app", n, id] if country(cc) && name(n) => id,
+                [cc, "app", id] if country(cc) => id,
+                ["app", n, id] if name(n) => id,
+                ["app", id] => id,
+                _ => return None,
+            };
+            let id = id.strip_prefix("id")?;
+            super::plain(id, 20, |c| c.is_ascii_digit()).then_some(())?;
             ("P3861", id.to_owned(), items::APP)
         }
         ("play.google.com", ["store", "apps", "details"]) => ("P3418", query("id")?, items::APP),
-        ("f-droid.org", [.., "packages", id]) => ("P3597", (*id).to_owned(), items::APP),
+        // The package's page, with or without a language path (`/en/`, `/zh_Hant/`).
+        ("f-droid.org", ["packages", id]) => ("P3597", (*id).to_owned(), items::APP),
+        ("f-droid.org", [lang, "packages", id]) if fdroid_language(lang) => {
+            ("P3597", (*id).to_owned(), items::APP)
+        }
         ("flathub.org", ["apps", "details", id]) | ("flathub.org", ["apps", id]) => {
             ("P4655", (*id).to_owned(), items::APP)
         }
@@ -1639,6 +1663,61 @@ mod tests {
         );
         s.uri = "https://www.discogs.com/label/1".into();
         assert!(!Discogs.applies(&s));
+    }
+
+    #[test]
+    fn a_page_under_an_app_names_no_store_item() {
+        for (uri, want) in [
+            (
+                "https://apps.apple.com/us/app/vlc-media-player/id650377962",
+                Some("650377962"),
+            ),
+            (
+                "https://apps.apple.com/us/app/id650377962",
+                Some("650377962"),
+            ),
+            (
+                "https://apps.apple.com/app/vlc-media-player/id650377962",
+                Some("650377962"),
+            ),
+            ("https://apps.apple.com/app/id650377962", Some("650377962")),
+            (
+                "https://apps.apple.com/us/app/vlc-media-player/id650377962?see-all=reviews",
+                Some("650377962"),
+            ),
+            ("https://apps.apple.com/us/developer/videolan/id1234", None),
+            ("https://apps.apple.com/us/app/vlc/extra/id650377962", None),
+            ("https://apps.apple.com/us/story/id650377962", None),
+            (
+                "https://apps.apple.com/us/app/vlc-media-player/id650377962/reviews",
+                None,
+            ),
+            (
+                "https://f-droid.org/packages/org.videolan.vlc",
+                Some("org.videolan.vlc"),
+            ),
+            (
+                "https://f-droid.org/en/packages/org.videolan.vlc/",
+                Some("org.videolan.vlc"),
+            ),
+            (
+                "https://f-droid.org/zh_Hant/packages/org.videolan.vlc",
+                Some("org.videolan.vlc"),
+            ),
+            (
+                "https://f-droid.org/en/packages/org.videolan.vlc/screenshots",
+                None,
+            ),
+            ("https://f-droid.org/repo/packages/org.videolan.vlc", None),
+            (
+                "https://f-droid.org/en/docs/packages/org.videolan.vlc",
+                None,
+            ),
+            ("https://f-droid.org/en/categories/packages/x", None),
+        ] {
+            let got = store_property(uri).map(|(_, v, _)| v);
+            assert_eq!(got.as_deref(), want, "{uri}");
+        }
     }
 
     #[test]

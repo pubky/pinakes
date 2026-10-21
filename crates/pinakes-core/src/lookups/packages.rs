@@ -58,36 +58,74 @@ impl Package {
     /// The package of a registry or documentation page: `crates.io/crates/{n}`,
     /// `docs.rs/{n}`, `docs.rs/crate/{n}`, `lib.rs/crates/{n}`, `npmjs.com/package/{n}`,
     /// `jsdelivr.com/package/npm/{n}`, `pypi.org/project/{n}`.
+    /// The package a registry or documentation page is about: the package's own page, or its
+    /// page at one version (`/crates/rand/0.8.5`, `/package/semver/v/7.8.5`,
+    /// `/project/urllib3/2.2.0/`, docs.rs's crate root at a version). A page under the package
+    /// (a function's documentation, a source file, a dependency list) is another object and
+    /// names no package.
     pub fn from_uri(uri: &str) -> Option<Self> {
         let url = web_url(uri)?;
         let host = url.host_str()?.trim_start_matches("www.");
         let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
-        let decoded = |s: &str| {
+        fn decoded(s: &str) -> Option<String> {
             percent_encoding::percent_decode_str(s)
                 .decode_utf8()
                 .ok()
                 .map(|s| s.into_owned())
-        };
-        let npm = |rest: &[&str]| -> Option<String> {
+        }
+        // A scoped npm name takes two segments (`@scope/name`, the `@` percent-encoded or not).
+        fn npm<'a>(rest: &'a [&'a str]) -> Option<(String, &'a [&'a str])> {
             match rest {
-                [scope, name, ..] if scope.starts_with('@') || scope.starts_with("%40") => {
-                    Some(format!("{}/{}", decoded(scope)?, decoded(name)?))
+                [scope, name, after @ ..] if scope.starts_with('@') || scope.starts_with("%40") => {
+                    Some((format!("{}/{}", decoded(scope)?, decoded(name)?), after))
                 }
-                [name, ..] => decoded(name),
+                [name, after @ ..] => Some((decoded(name)?, after)),
                 [] => None,
             }
+        }
+        let at_version = |after: &[&str]| {
+            after.is_empty() || matches!(after, [v] if *v == "latest" || version_number(v))
         };
         let (registry, name) = match (host, segments.as_slice()) {
-            ("crates.io", ["crates", name, ..]) | ("lib.rs", ["crates", name, ..]) => {
+            ("crates.io", ["crates", name, after @ ..]) if at_version(after) => {
                 (Registry::Crates, (*name).to_owned())
             }
-            ("docs.rs", ["crate", name, ..]) => (Registry::Crates, (*name).to_owned()),
-            ("docs.rs", [name, ..]) if !matches!(*name, "about" | "releases" | "crate") => {
+            ("lib.rs", ["crates", name]) => (Registry::Crates, (*name).to_owned()),
+            ("docs.rs", ["crate", name, after @ ..]) if at_version(after) => {
                 (Registry::Crates, (*name).to_owned())
             }
-            ("npmjs.com", ["package", rest @ ..]) => (Registry::Npm, npm(rest)?),
-            ("jsdelivr.com", ["package", "npm", rest @ ..]) => (Registry::Npm, npm(rest)?),
-            ("pypi.org", ["project", name, ..]) => (Registry::PyPI, (*name).to_owned()),
+            // docs.rs: the crate's page, its page at a version (`latest` too), or the crate's own
+            // documentation index there (`/rand/latest/rand/`), never an item's page.
+            ("docs.rs", [name, after @ ..])
+                if !matches!(*name, "about" | "releases" | "crate" | "sitemap.xml")
+                    && match after {
+                        [] => true,
+                        [v] | [v, _] if *v == "latest" || version_number(v) => after
+                            .get(1)
+                            .is_none_or(|index| index.replace('-', "_") == name.replace('-', "_")),
+                        _ => false,
+                    } =>
+            {
+                (Registry::Crates, (*name).to_owned())
+            }
+            ("npmjs.com", ["package", rest @ ..]) => {
+                let (name, after) = npm(rest)?;
+                match after {
+                    [] => (Registry::Npm, name),
+                    ["v", v] if version_number(v) => (Registry::Npm, name),
+                    _ => return None,
+                }
+            }
+            ("jsdelivr.com", ["package", "npm", rest @ ..]) => {
+                let (name, after) = npm(rest)?;
+                if !after.is_empty() {
+                    return None;
+                }
+                (Registry::Npm, name)
+            }
+            ("pypi.org", ["project", name, after @ ..]) if at_version(after) => {
+                (Registry::PyPI, (*name).to_owned())
+            }
             _ => return None,
         };
         Self::new(registry, &name)
@@ -166,16 +204,43 @@ impl Repo {
         let path = path.strip_suffix(".git").unwrap_or(path);
         let parts: Vec<&str> = path.split('/').collect();
         let depth_ok = if host == "github.com" {
+            // GitHub's own pages (`orgs/…`, `topics/…`) are not repositories: the GitHub
+            // source's rule.
             parts.len() == 2
+                && !crate::sources::github::RESERVED
+                    .contains(&parts[0].to_ascii_lowercase().as_str())
         } else {
             (2..=10).contains(&parts.len())
         };
         (depth_ok
             && parts.iter().all(|p| {
                 plain(p, 100, |c| c.is_ascii_alphanumeric() || "-_.".contains(c))
-                    // `-` starts GitLab's pages under a project (`group/project/-/issues/12`):
-                    // such a page is not the repository.
-                    && !matches!(*p, "." | ".." | "-")
+                    // `-` starts GitLab's pages under a project (`group/project/-/issues/12`),
+                    // and these did before it: such a page is not the repository.
+                    && !matches!(
+                        *p,
+                        "." | ".."
+                            | "-"
+                            | "tree"
+                            | "blob"
+                            | "raw"
+                            | "commits"
+                            | "commit"
+                            | "issues"
+                            | "merge_requests"
+                            | "wikis"
+                            | "pipelines"
+                            | "jobs"
+                            | "tags"
+                            | "branches"
+                            | "releases"
+                            | "snippets"
+                            | "network"
+                            | "graphs"
+                            | "compare"
+                            | "activity"
+                            | "settings"
+                    )
             }))
         .then(|| Self {
             host,
@@ -240,6 +305,11 @@ impl Release {
 
 fn version(v: &str) -> bool {
     plain(v, 100, |c| c.is_ascii_alphanumeric() || "-.+_!".contains(c))
+}
+/// A version as a page names it: it starts with a digit (`0.8.5`, `7.8.5`, `2.2.0`), never a
+/// child path's word (`files`, `reviews`).
+fn version_number(v: &str) -> bool {
+    v.starts_with(|c: char| c.is_ascii_digit()) && version(v)
 }
 
 /// The crate and its default version (with its trusted-publishing record).
@@ -804,8 +874,85 @@ mod tests {
         );
     }
 
+    /// A registry or documentation page is the package only at the package's own page, or its
+    /// page at one version; a function, a source file, a dependency list or any other child
+    /// path names no package.
+    #[test]
+    fn a_page_under_a_package_names_no_package() {
+        let key = |uri: &str| Package::from_uri(uri).map(|p| p.key().as_str().to_owned());
+        for (uri, want) in [
+            ("https://crates.io/crates/rand", Some("crate:rand")),
+            ("https://crates.io/crates/rand/0.8.5", Some("crate:rand")),
+            ("https://crates.io/crates/rand/versions", None),
+            ("https://crates.io/crates/rand/0.8.5/dependencies", None),
+            ("https://lib.rs/crates/rand", Some("crate:rand")),
+            ("https://lib.rs/crates/rand/features", None),
+            ("https://docs.rs/rand", Some("crate:rand")),
+            ("https://docs.rs/rand/latest", Some("crate:rand")),
+            ("https://docs.rs/rand/0.8.5", Some("crate:rand")),
+            ("https://docs.rs/rand/latest/rand/", Some("crate:rand")),
+            (
+                "https://docs.rs/rand_core/latest/rand_core/",
+                Some("crate:rand-core"),
+            ),
+            ("https://docs.rs/crate/rand/latest", Some("crate:rand")),
+            ("https://docs.rs/rand/latest/rand/fn.random.html", None),
+            ("https://docs.rs/rand/latest/src/rand/lib.rs.html", None),
+            ("https://docs.rs/rand/latest/rand/rngs/index.html", None),
+            ("https://docs.rs/crate/rand/latest/source/", None),
+            ("https://docs.rs/crate/rand/latest/features", None),
+            ("https://docs.rs/releases", None),
+            ("https://www.npmjs.com/package/semver", Some("npm:semver")),
+            (
+                "https://www.npmjs.com/package/semver/v/7.8.5",
+                Some("npm:semver"),
+            ),
+            (
+                "https://www.npmjs.com/package/@babel/core",
+                Some("npm:@babel/core"),
+            ),
+            (
+                "https://www.npmjs.com/package/@babel/core/v/7.0.0",
+                Some("npm:@babel/core"),
+            ),
+            (
+                "https://www.npmjs.com/package/semver?activeTab=versions",
+                Some("npm:semver"),
+            ),
+            ("https://www.npmjs.com/package/semver/v/latest", None),
+            ("https://www.npmjs.com/package/semver/access", None),
+            ("https://www.npmjs.com/package/@babel/core/access", None),
+            (
+                "https://www.jsdelivr.com/package/npm/semver",
+                Some("npm:semver"),
+            ),
+            ("https://www.jsdelivr.com/package/npm/semver/files", None),
+            ("https://pypi.org/project/urllib3/", Some("pypi:urllib3")),
+            (
+                "https://pypi.org/project/urllib3/2.2.0/",
+                Some("pypi:urllib3"),
+            ),
+            ("https://pypi.org/project/urllib3/files/", None),
+            ("https://pypi.org/project/urllib3/2.2.0/files/", None),
+            ("https://pypi.org/user/urllib3/", None),
+        ] {
+            assert_eq!(key(uri).as_deref(), want, "{uri}");
+        }
+    }
+
     #[test]
     fn a_page_under_a_gitlab_project_is_not_its_repository() {
+        for uri in [
+            "https://github.com/orgs/rust-lang",
+            "https://github.com/topics/rust",
+            "https://gitlab.com/group/project/tree/master",
+            "https://gitlab.com/group/project/issues",
+            "https://gitlab.com/group/project/-/merge_requests/1",
+        ] {
+            assert_eq!(Repo::from_url(uri), None, "{uri}");
+        }
+        assert!(Repo::from_url("https://gitlab.com/inkscape/inkscape").is_some());
+        assert!(Repo::from_url("https://github.com/rust-random/rand").is_some());
         assert_eq!(Repo::new("gitlab.com", "group/project/-/issues/12"), None);
         assert_eq!(Repo::new("gitlab.com", "group/sub/project/-"), None);
         assert!(Repo::new("gitlab.com", "group/sub/project").is_some());
