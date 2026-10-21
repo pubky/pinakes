@@ -309,7 +309,15 @@ fn checked(
         .collect();
     facts.sort();
     facts.dedup();
+    // The cap cuts the many values of one name (a recording's ISRCs) before a name's one value
+    // (its MBID, the MBID it was merged from, its artist), so those always fit.
+    let mut per_name: std::collections::HashMap<String, usize> = Default::default();
+    for f in &facts {
+        *per_name.entry(f.name.clone()).or_default() += 1;
+    }
+    facts.sort_by_key(|f| per_name[&f.name] > 1);
     facts.truncate(cfg.facts_per_source);
+    facts.sort();
     let mut keys: Vec<Key> = found
         .keys
         .into_iter()

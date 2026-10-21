@@ -138,6 +138,17 @@ impl Transport for Recorded {
             "/ws/2/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69" => {
                 (200, fixture("mb-recording-b1a9c0e9.json"))
             }
+            // An MBID merged into a recording with 32 ISRCs (the facts cap).
+            "/ws/2/recording/00000000-0000-4000-8000-00000000000e" => (
+                200,
+                serde_json::to_vec(&serde_json::json!({
+                    "id": "00000000-0000-4000-8000-00000000000f",
+                    "title": "Many codes, merged",
+                    "isrcs": (10..42).map(|n| format!("AAAAA26000{n}")).collect::<Vec<_>>(),
+                    "relations": [],
+                }))
+                .unwrap(),
+            ),
             // An MBID merged into b1a9c0e9: MusicBrainz answers with that recording.
             "/ws/2/recording/00000000-0000-4000-8000-00000000000d" => {
                 (200, fixture("mb-recording-b1a9c0e9.json"))
@@ -1076,6 +1087,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     let artist = "https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711";
     let many = "https://musicbrainz.org/isrc/ZZAAA2600010";
     let merged = "https://musicbrainz.org/recording/00000000-0000-4000-8000-00000000000d";
+    let merged_many = "https://musicbrainz.org/recording/00000000-0000-4000-8000-00000000000e";
     let tidal = "https://tidal.com/track/534050211";
     let tidal_artist = "https://tidal.com/artist/64518";
     let mut ids = std::collections::BTreeMap::new();
@@ -1085,6 +1097,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         (shared, "MusicRecording"),
         (many, "MusicRecording"),
         (merged, "MusicRecording"),
+        (merged_many, "MusicRecording"),
         (artist, "MusicGroup"),
         (tidal, "MusicRecording"),
         (tidal_artist, "MusicGroup"),
@@ -1176,6 +1189,15 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
             .collect();
         assert_eq!(hits, [ids[merged].as_str()], "{found}");
     }
+    // A merged recording with 32 ISRCs (the facts cap) keeps its MBIDs: the cap cuts ISRCs first.
+    let facts = rows(
+        "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name,value",
+        ids[merged_many].clone(),
+    )
+    .await;
+    assert_eq!(facts.len(), 32, "{facts:?}");
+    assert!(facts.contains(&"mbid 00000000-0000-4000-8000-00000000000f".to_owned()));
+    assert!(facts.contains(&"mbid_was 00000000-0000-4000-8000-00000000000e".to_owned()));
     // An ISRC page keys its own ISRC even when its recording has more than the eight that fit.
     assert!(rows(keys, ids[many].clone())
         .await
