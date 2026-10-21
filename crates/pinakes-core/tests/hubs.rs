@@ -66,8 +66,9 @@ fn mb_url(resource: &str) -> (u16, Vec<u8>) {
         }
         "https://tidal.com/artist/64518" => (200, fixture("mb-url-tidal-artist-64518.json")),
         "https://tidal.com/track/567396540" => (200, fixture("mb-url-tidal-567396540.json")),
-        // Radiohead's Songkick artist page, as MusicBrainz stores it.
+        // Radiohead's Songkick artist page, as MusicBrainz stores it; one MusicBrainz is busy on.
         "https://www.songkick.com/artists/253846" => (200, fixture("mb-url-songkick-253846.json")),
+        "https://www.songkick.com/artists/503503" => (503, fixture("mb-503.json")),
         // Dracula: two releases ("Dracula", "Dracula (remix)") of one release group.
         "https://tidal.com/album/495402659" => (200, fixture("mb-url-tidal-495402659.json")),
         _ => (404, fixture("mb-url-unknown.json")),
@@ -1136,6 +1137,9 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     let merged = "https://musicbrainz.org/recording/00000000-0000-4000-8000-00000000000d";
     let merged_many = "https://musicbrainz.org/recording/00000000-0000-4000-8000-00000000000e";
     let concert = "https://www.songkick.com/concerts/43402127-radiohead-at-rac-arena";
+    let vouched = "https://www.songkick.com/concerts/1-vouched-beside-a-busy-lookup";
+    let busy = "https://www.songkick.com/concerts/2-busy-lookup-alone";
+    let lineup = "https://www.songkick.com/concerts/3-three-acts";
     let tidal = "https://tidal.com/track/534050211";
     let tidal_artist = "https://tidal.com/artist/64518";
     let mut ids = std::collections::BTreeMap::new();
@@ -1147,6 +1151,9 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         (merged, "MusicRecording"),
         (merged_many, "MusicRecording"),
         (concert, "MusicEvent"),
+        (vouched, "MusicEvent"),
+        (busy, "MusicEvent"),
+        (lineup, "MusicEvent"),
         (artist, "MusicGroup"),
         (tidal, "MusicRecording"),
         (tidal_artist, "MusicGroup"),
@@ -1164,6 +1171,30 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
             d.event.performers = vec![pinakes_core::event::Performer {
                 name: "Radiohead".into(),
                 links: vec!["https://www.songkick.com/artists/253846-radiohead?utm_medium=organic&utm_source=microformat".into()],
+            }];
+        }
+        if uri == lineup {
+            // Three acts: one MusicBrainz knows, two it doesn't. One batched request for all.
+            d.start = Some("2027-07-01T20:00:00Z".parse().unwrap());
+            d.event.performers = ["253846-radiohead", "999999-unknown", "888888-also-unknown"]
+                .into_iter()
+                .map(|slug| pinakes_core::event::Performer {
+                    name: slug.to_owned(),
+                    links: vec![format!("https://www.songkick.com/artists/{slug}")],
+                })
+                .collect();
+        }
+        if uri == vouched || uri == busy {
+            d.start = Some("2027-06-01T20:00:00Z".parse().unwrap());
+            let mut links = vec!["https://www.songkick.com/artists/503503-busy".to_owned()];
+            if uri == vouched {
+                links.push(
+                    "https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711".into(),
+                );
+            }
+            d.event.performers = vec![pinakes_core::event::Performer {
+                name: "Someone".into(),
+                links,
             }];
         }
         store::save_document(&pool, &id, 0, &d).await.unwrap();
@@ -1316,11 +1347,67 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         .await,
         [
             "performer Radiohead",
-            "performer_link https://www.songkick.com/artists/253846",
             "performer_mbid a74b1b7f-71a5-4011-9441-d0b5e4122711"
         ]
     );
     assert_eq!(rows(group, ids[concert].clone()).await, ["-"]);
+    // A page-vouched identity is kept when MusicBrainz is busy on another of the performer's
+    // links; a busy lookup that left nothing established is retried.
+    assert_eq!(
+        rows(
+            "SELECT key||' '||via FROM resource_key WHERE resource_id=$1",
+            ids[vouched].clone()
+        )
+        .await,
+        ["mb:artist:a74b1b7f-71a5-4011-9441-d0b5e4122711 page"]
+    );
+    let retrying =
+        "SELECT coalesce(last_error,'-') FROM also_on_dirty WHERE resource_id=$1 AND attempts>0";
+    assert!(rows(retrying, ids[vouched].clone()).await.is_empty());
+    assert!(rows(keys, ids[busy].clone()).await.is_empty());
+    // Its run failed as a whole: nothing recorded yet, the retry will.
+    assert!(rows(
+        "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1",
+        ids[busy].clone()
+    )
+    .await
+    .is_empty());
+    // The line-up's three links went in one request; only the known act is keyed, the others
+    // keep their link as a fact.
+    assert_eq!(
+        rows(
+            "SELECT key FROM resource_key WHERE resource_id=$1",
+            ids[lineup].clone()
+        )
+        .await,
+        ["mb:artist:a74b1b7f-71a5-4011-9441-d0b5e4122711"]
+    );
+    let lineup_facts = rows(
+        "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name,value",
+        ids[lineup].clone(),
+    )
+    .await;
+    assert!(
+        lineup_facts.contains(&"performer_link https://www.songkick.com/artists/999999".to_owned())
+            && !lineup_facts.iter().any(|f| f.ends_with("/253846")),
+        "{lineup_facts:?}"
+    );
+    {
+        let seen = t.seen.lock().unwrap().clone();
+        let batched: Vec<&String> = seen
+            .iter()
+            .filter(|s| s.contains("/ws/2/url?") && s.contains("artists%2F999999"))
+            .collect();
+        assert_eq!(batched.len(), 1, "{seen:?}");
+        assert_eq!(batched[0].matches("resource=").count(), 3, "{batched:?}");
+    }
+    assert!(
+        rows(retrying, ids[busy].clone())
+            .await
+            .iter()
+            .any(|e| e.contains("musicbrainz_busy")),
+        "the busy lookup is retried"
+    );
     {
         use tower::ServiceExt;
         sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) VALUES($1,repeat('b',52),'tag','/pub/test/tags/'||$1,'gig',now())")

@@ -411,7 +411,8 @@ pub fn musicbrainz_card(
 /// What a performer's link says about the artist: a MusicBrainz artist page names the MBID
 /// outright; an artist's page on a known music service, on Songkick or on Bandsintown is looked
 /// up on MusicBrainz by URL, as MusicBrainz stores it (Songkick and Bandsintown artists by
-/// number, without the slug and parameters).
+/// number, without the slug and parameters). The lookups of one event's performers go in one
+/// request (`prefetch_urls`), at most two links per performer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ArtistLink {
     Mbid(String),
@@ -449,7 +450,8 @@ pub fn artist_link(url: &str) -> Option<ArtistLink> {
 /// The performers an event page names in its own structured data: each one's name is a fact,
 /// and its artist identity a key (`mb:artist:…`) when a MusicBrainz artist page is among the
 /// page's links for it, or when MusicBrainz relates one of those links (a music service, Songkick
-/// or Bandsintown artist page) to exactly one artist. A name alone is never a key. Events group only
+/// or Bandsintown artist page) to exactly one artist; a performer without one keeps its first
+/// link as the fact `performer_link`. A name alone is never a key. Events group only
 /// with events, so the key lists the artist's events (`key=mbid:…&type=MusicEvent`) and never
 /// joins a concert to the artist's own pages.
 pub struct PerformersSource;
@@ -464,7 +466,7 @@ impl Source for PerformersSource {
         })
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
-        crate::also_on::unless_over_cap(self.read(cx, subject).await, Found::default)
+        self.read(cx, subject).await
     }
 }
 impl PerformersSource {
@@ -475,57 +477,98 @@ impl PerformersSource {
         let base = cx.config.also_on.musicbrainz_base();
         let mut found = Found::default();
         let mut keyed = std::collections::BTreeSet::new();
+        let mut key = |found: &mut Found, id: &str, via: &str| {
+            if let Some(key) = hubs::key::mb(MbKind::Artist, id) {
+                if keyed.insert(key.clone()) {
+                    found.keys.push(Key {
+                        key,
+                        via: via.into(),
+                    });
+                }
+            }
+            found
+                .facts
+                .push(crate::also_on::Fact::new("performer_mbid", id));
+        };
+        // What the page itself says first: names, and MusicBrainz artist pages among the links.
+        let mut lookups: Vec<Vec<String>> = vec![];
         for performer in doc.event.performers.iter().take(16) {
             found
                 .facts
                 .push(crate::also_on::Fact::new("performer", &performer.name));
-            let mut mbid: Option<(String, &str)> = None;
-            let mut link = None;
+            let mut links = vec![];
+            let mut mbid = None;
             for l in &performer.links {
                 match artist_link(l) {
                     Some(ArtistLink::Mbid(id)) => {
-                        mbid.get_or_insert((id, "page"));
+                        mbid.get_or_insert(id);
                     }
-                    Some(ArtistLink::Lookup(url)) => {
-                        if mbid.is_none() {
-                            let targets = musicbrainz::url(&cx.egress, base, &url)
-                                .await?
-                                .map(|t| t.targets)
-                                .unwrap_or_default();
-                            let artists: Vec<&String> = targets
-                                .iter()
-                                .filter(|(k, _)| *k == MbKind::Artist)
-                                .map(|(_, id)| id)
-                                .collect();
-                            if artists.len() == 1 {
-                                mbid = Some((artists[0].clone(), "musicbrainz"));
-                            }
-                        }
-                        link.get_or_insert(url);
-                    }
-                    None => {}
+                    Some(ArtistLink::Lookup(url)) if !links.contains(&url) => links.push(url),
+                    _ => {}
                 }
             }
-            if let Some((id, via)) = mbid {
-                if let Some(key) = hubs::key::mb(MbKind::Artist, &id) {
-                    if keyed.insert(key.clone()) {
-                        found.keys.push(Key {
-                            key,
-                            via: via.into(),
-                        });
-                    }
-                }
-                found
-                    .facts
-                    .push(crate::also_on::Fact::new("performer_mbid", id));
-            }
-            if let Some(url) = link {
-                found
-                    .facts
-                    .push(crate::also_on::Fact::new("performer_link", url));
+            // At most two links are asked for a performer the page doesn't identify.
+            links.truncate(2);
+            match mbid {
+                Some(id) => key(&mut found, &id, "page"),
+                None => lookups.push(links),
             }
         }
-        Ok(found)
+        // Then MusicBrainz for the rest, all their links in one request (each link's own lookup
+        // then reads from the cache). A busy MusicBrainz is retried only when it left nothing
+        // established; an answer over its cap is no answer for that link.
+        let all: Vec<String> = lookups
+            .iter()
+            .flatten()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if all.len() > 1 {
+            if let Err(error) = musicbrainz::prefetch_urls(&cx.egress, base, &all).await {
+                tracing::debug!(error = %format!("{error:#}"), "batched MusicBrainz lookup failed; links ask alone");
+            }
+        }
+        let mut busy = None;
+        for links in lookups {
+            let mut mbid = None;
+            for url in &links {
+                let targets = match musicbrainz::url(&cx.egress, base, url).await {
+                    Ok(t) => t.map(|t| t.targets).unwrap_or_default(),
+                    Err(e) if crate::resolver::egress::over_cap(&e) => continue,
+                    Err(e) if e.is::<crate::resolver::RetryLater>() => {
+                        busy.get_or_insert(e);
+                        break;
+                    }
+                    Err(e) => return Err(e),
+                };
+                let artists: Vec<&String> = targets
+                    .iter()
+                    .filter(|(k, _)| *k == MbKind::Artist)
+                    .map(|(_, id)| id)
+                    .collect();
+                if let [id] = artists[..] {
+                    mbid = Some(id.clone());
+                    break;
+                }
+            }
+            match mbid {
+                Some(id) => key(&mut found, &id, "musicbrainz"),
+                // Without an identity, the link itself is the fact (the only one that fits
+                // beside sixteen names within the facts cap).
+                None => {
+                    if let Some(url) = links.first() {
+                        found
+                            .facts
+                            .push(crate::also_on::Fact::new("performer_link", url));
+                    }
+                }
+            }
+        }
+        match busy {
+            Some(e) if found.keys.is_empty() => Err(e),
+            _ => Ok(found),
+        }
     }
 }
 
