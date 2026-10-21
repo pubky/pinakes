@@ -387,7 +387,8 @@ negotiation), `event.calendars` the calendar feeds and `event.geocoding` venue g
 calendars off, feed URLs fall back to web cards. ActivityPub is negotiated once per resolution
 for an advertised alternate, an event-looking page without an extracted Event, or an Event
 without a zone. An event page can follow a same-host link to its own ICS; discovered URLs share
-an LRU cache (10,000 entries, 32 MiB; one-hour minimum TTL, five minutes for failures).
+an LRU cache (10,000 entries, 32 MiB; one-hour minimum TTL, five minutes for failures, or the
+wait the answer named when shorter; a 429 that names none keeps five minutes).
 
 Calendar GETs follow the web policy, decompress, and are capped at `limits.event_feed_body_bytes`;
 lines are unfolded from that bounded body and parsed on a blocking worker under
