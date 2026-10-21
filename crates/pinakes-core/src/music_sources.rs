@@ -521,11 +521,18 @@ impl PerformersSource {
             links.truncate(2);
             performers.push((claimed, links));
         }
+        // A key only where the event page speaks for the link's own service: a Songkick concert
+        // naming a Songkick artist page (Bandsintown and a music service's own event pages the
+        // same). Any other page chose the identity MusicBrainz translates, so it is a fact. The
+        // page is the host its fetch ended on, after redirects; a stored page that doesn't say
+        // is no service's.
+        let page = doc.event.performers_from.as_deref().and_then(service_host);
+        let owned = |url: &str| page.is_some() && service_host(url) == page;
         // Then MusicBrainz: every performer's links in one request, and only that one (a link
-        // its answer leaves out is unknown this run). A failed request fails the run, a busy
-        // MusicBrainz's or an answer over its cap included: the previous rows stay and it
-        // retries later (recording what was found would replace the rows without those
-        // performers' keys until the next run, a month away).
+        // its answer leaves out is unknown this run). A failed request, a busy MusicBrainz's or
+        // an answer over its cap included, fails the run of a page that owns a link: the
+        // previous rows stay and it retries later (recording what was found would replace the
+        // rows without those performers' keys until the next run, a month away).
         let all: Vec<String> = performers
             .iter()
             .flat_map(|(_, links)| links)
@@ -546,15 +553,24 @@ impl PerformersSource {
                 .zip(answers)
                 .filter_map(|(link, t)| Some((link, t?)))
                 .collect(),
+            // A page that owns none of its performers' links can be keyed by no answer: what it
+            // says is recorded without MusicBrainz (a key an earlier rule gave goes now), and
+            // MusicBrainz is asked again after its retry time. A page that owns one keeps its
+            // previous rows until MusicBrainz answers.
+            Err(e)
+                if !performers
+                    .iter()
+                    .any(|(_, links)| links.iter().any(|u| owned(u))) =>
+            {
+                let wait = e
+                    .chain()
+                    .find_map(|c| c.downcast_ref::<crate::resolver::RetryLater>())
+                    .map_or(900, |r| r.seconds.max(60));
+                found.retry_after = Some(std::time::Duration::from_secs(wait));
+                Default::default()
+            }
             Err(e) => return Err(e),
         };
-        // A key only where the event page speaks for the link's own service: a Songkick concert
-        // naming a Songkick artist page (Bandsintown and a music service's own event pages the
-        // same). Any other page chose the identity MusicBrainz translates, so it is a fact.
-        // The host the page came from (after redirects); a stored page that doesn't say is no
-        // service's.
-        let page = doc.event.performers_from.as_deref().and_then(service_host);
-        let owned = |url: &str| page.is_some() && service_host(url) == page;
         for (claimed, links) in performers {
             // The artist MusicBrainz relates a link to, when exactly one.
             let artist = |url: &String| match answers

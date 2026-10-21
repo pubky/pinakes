@@ -1160,6 +1160,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     let redirected = "https://www.songkick.com/concerts/8-redirected-off-site";
     let moved = "https://www.songkick.com/concerts/9-moved";
     let unrecorded = "https://www.songkick.com/concerts/10-no-provenance";
+    let revoked = "https://evil.example/revoked";
     let over_cap = "https://www.songkick.com/concerts/7-over-cap";
     let busy = "https://www.songkick.com/concerts/2-busy-lookup-alone";
     let lineup = "https://www.songkick.com/concerts/3-three-acts";
@@ -1183,6 +1184,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         (redirected, "MusicEvent"),
         (moved, "MusicEvent"),
         (unrecorded, "MusicEvent"),
+        (revoked, "MusicEvent"),
         (over_cap, "MusicEvent"),
         (busy, "MusicEvent"),
         (lineup, "MusicEvent"),
@@ -1284,6 +1286,14 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
                 links: vec!["https://www.songkick.com/artists/253846-radiohead".into()],
             }];
         }
+        if uri == revoked {
+            // A page on no performer's service, whose Songkick link MusicBrainz is busy on.
+            d.start = Some("2027-06-05T20:00:00Z".parse().unwrap());
+            d.event.performers = vec![pinakes_core::event::Performer {
+                name: "Someone".into(),
+                links: vec!["https://www.songkick.com/artists/503503-busy".into()],
+            }];
+        }
         if uri == hostile || uri == elsewhere {
             // Any page can name any artist's pages for its performer: hostile its Songkick and
             // MusicBrainz pages, elsewhere (a Bandsintown event) its Songkick page.
@@ -1326,6 +1336,15 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         }
         store::save_document(&pool, &id, 0, &d).await.unwrap();
         ids.insert(uri, id);
+    }
+    // Keys an earlier run left: one the rule no longer allows (the revoked page owns no link),
+    // one it allows (the busy concert is Songkick's).
+    for page in [revoked, busy] {
+        sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) VALUES($1,'mb:artist:a74b1b7f-71a5-4011-9441-d0b5e4122711','performers','musicbrainz',now()+interval '30 days')")
+            .bind(&ids[page])
+            .execute(&pool)
+            .await
+            .unwrap();
     }
     let t = Arc::new(Recorded {
         seen: Mutex::default(),
@@ -1494,6 +1513,25 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         )
         .await,
         ["mb:artist:a74b1b7f-71a5-4011-9441-d0b5e4122711 musicbrainz"]
+    );
+    // A key the rule no longer allows goes even when MusicBrainz is busy: the page owns none of
+    // its performers' links, so its run records what it says without MusicBrainz; the busy
+    // concert, Songkick's own, keeps its rows until MusicBrainz answers.
+    assert!(rows(any_key, ids[revoked].clone()).await.is_empty());
+    assert_eq!(
+        rows(
+            "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name",
+            ids[revoked].clone()
+        )
+        .await,
+        [
+            "performer Someone",
+            "performer_link https://www.songkick.com/artists/503503"
+        ]
+    );
+    assert_eq!(
+        rows(any_key, ids[busy].clone()).await,
+        ["mb:artist:a74b1b7f-71a5-4011-9441-d0b5e4122711"]
     );
     for page in [hostile, elsewhere, redirected, unrecorded] {
         assert!(rows(any_key, ids[page].clone()).await.is_empty(), "{page}");

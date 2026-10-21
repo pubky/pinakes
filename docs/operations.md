@@ -534,7 +534,9 @@ recording's original album; each event page naming performers (up to 16, with 8 
 2 KB of the document) one MusicBrainz URL request for all its performers' readable links together
 and no other (an artist's page on a music service, Songkick or Bandsintown; at most two per
 performer; a link the answer leaves out is unknown until the next run, and a busy or failed request
-fails the run, which retries; answers are cached an hour, so an artist's many concerts naming only
+fails the run of a page on a performer link's service, which retries, while another page records
+what it says without MusicBrainz and asks again after MusicBrainz's retry time; answers are cached
+an hour, so an artist's many concerts naming only
 that artist, by one link, ask once), and none for a performer the page names by a MusicBrainz
 artist page alone; each tagged OSM object one Wikidata request; each book one Open Library
 request, one iTunes lookup for an ebook edition, and two Wikidata requests when Open Library names
