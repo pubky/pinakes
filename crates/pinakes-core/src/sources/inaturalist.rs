@@ -21,33 +21,7 @@ pub const SITE: &str = "iNaturalist";
 const VIA: &str = "inaturalist";
 const API: &str = "https://api.inaturalist.org/v1";
 
-/// The sites of the iNaturalist Network (`/v1/sites`), without `www.`, plus naturalista.mx,
-/// which redirects to the Mexican site.
-pub const SITES: [&str; 23] = [
-    "inaturalist.org",
-    "mexico.inaturalist.org",
-    "naturalista.mx",
-    "inaturalist.nz",
-    "inaturalist.ca",
-    "colombia.inaturalist.org",
-    "biodiversity4all.org",
-    "inaturalist.ala.org.au",
-    "panama.inaturalist.org",
-    "ecuador.inaturalist.org",
-    "israel.inaturalist.org",
-    "argentinat.org",
-    "costarica.inaturalist.org",
-    "inaturalist.mma.gob.cl",
-    "inaturalist.laji.fi",
-    "inaturalist.se",
-    "spain.inaturalist.org",
-    "greece.inaturalist.org",
-    "guatemala.inaturalist.org",
-    "uk.inaturalist.org",
-    "inaturalist.lu",
-    "taiwan.inaturalist.org",
-    "naturalista.uy",
-];
+pub use super::biodiversity::INATURALIST_SITES as SITES;
 
 /// The object a link names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -233,12 +207,14 @@ pub fn parse_observation(status: u16, raw: &[u8], id: u64) -> Result<Option<Card
     });
     // iNaturalist names the GBIF occurrence it published the observation as.
     for link in v["outlinks"].as_array().into_iter().flatten() {
-        let gbif = text(&link["url"]).and_then(|u| super::gbif::from_uri(&u));
-        if let (Some("GBIF"), Some(o @ super::gbif::Object::Occurrence(key))) =
-            (link["source"].as_str(), gbif)
-        {
+        let gbif = text(&link["url"]).and_then(|u| super::biodiversity::gbif_occurrence(&u));
+        if let (Some("GBIF"), Some(key)) = (link["source"].as_str(), gbif) {
             card.detail("gbif_occurrence", key);
-            card.link(Link::new("GBIF", super::gbif::page(o), VIA));
+            card.link(Link::new(
+                "GBIF",
+                super::biodiversity::gbif_occurrence_page(key),
+                VIA,
+            ));
         }
     }
     Ok(Some(card))

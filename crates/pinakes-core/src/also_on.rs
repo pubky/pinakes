@@ -19,7 +19,6 @@ pub mod films;
 pub mod media;
 pub mod podcasts;
 pub mod tidal;
-pub mod titles;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -259,7 +258,7 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         Arc::new(books::Books),
         Arc::new(films::Films),
         Arc::new(podcasts::Podcasts),
-        Arc::new(titles::Titles),
+        Arc::new(crate::sources::media_records::titles::Titles),
         Arc::new(crate::lookups::sources::OsmWikidata),
         Arc::new(crate::lookups::sources::WikidataOsm),
         Arc::new(crate::lookups::sources::Btcmap),

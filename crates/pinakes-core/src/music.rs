@@ -20,7 +20,7 @@ pub enum Service {
     SoundCloud,
     AmazonMusic,
     Bandcamp,
-    /// The Discogs database (`sources::discogs`): an artist, a master or a release.
+    /// The Discogs database ([`discogs`]): an artist, a master or a release.
     Discogs,
 }
 impl Service {
@@ -158,16 +158,16 @@ pub fn parse(uri: &str) -> Option<Link> {
     };
     match host {
         "discogs.com" => {
-            let (kind, id) = crate::sources::discogs::of_uri(uri)?;
+            let (kind, id) = discogs::of_uri(uri)?;
             let level = match kind {
-                crate::sources::discogs::Kind::Artist => Level::Artist,
+                discogs::Kind::Artist => Level::Artist,
                 _ => Level::Album,
             };
             link(
                 Service::Discogs,
                 level,
                 &format!("{}/{id}", kind.as_str()),
-                crate::sources::discogs::root(kind, id),
+                discogs::root(kind, id),
             )
         }
         "open.spotify.com" | "play.spotify.com" => {
@@ -611,6 +611,87 @@ fn apple(segments: &[&str], track: Option<String>) -> Option<Link> {
         id,
         format!("https://music.apple.com/{country}/{kind}/{id}"),
     )
+}
+
+/// Discogs links (artists, masters, releases), read here as every music link is: the Discogs
+/// card source and the music hubs both name them.
+pub mod discogs {
+    use url::Url;
+
+    fn web_url(value: &str) -> Option<Url> {
+        let url = Url::parse(value).ok()?;
+        (matches!(url.scheme(), "https" | "http") && url.host_str().is_some()).then_some(url)
+    }
+
+    /// What a Discogs link names.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Kind {
+        Artist,
+        /// An album: every edition of it (a MusicBrainz release group).
+        Master,
+        /// One edition (a MusicBrainz release).
+        Release,
+    }
+    impl Kind {
+        pub fn as_str(self) -> &'static str {
+            match self {
+                Self::Artist => "artist",
+                Self::Master => "master",
+                Self::Release => "release",
+            }
+        }
+    }
+
+    /// The kind and ID of `www.discogs.com/{lang/}?{artist,master,release}/{id}[-slug]`.
+    pub fn of_uri(uri: &str) -> Option<(Kind, u64)> {
+        let url = web_url(uri)?;
+        if !matches!(url.host_str()?, "www.discogs.com" | "discogs.com") {
+            return None;
+        }
+        let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
+        // A language path (`de`, `pt_BR`) before the kind.
+        let language = |s: &str| {
+            let (lang, region) = s.split_once('_').unwrap_or((s, "AA"));
+            lang.len() == 2
+                && lang.bytes().all(|b| b.is_ascii_lowercase())
+                && region.len() == 2
+                && region.bytes().all(|b| b.is_ascii_uppercase())
+        };
+        let segments = match segments.as_slice() {
+            [lang, rest @ ..] if language(lang) => rest,
+            all => all,
+        };
+        let [kind, id] = segments else {
+            return None;
+        };
+        let kind = match *kind {
+            "artist" => Kind::Artist,
+            "master" => Kind::Master,
+            "release" => Kind::Release,
+            _ => return None,
+        };
+        let id = id.split('-').next()?;
+        if id.is_empty()
+            || id.len() > 12
+            || id.starts_with('0')
+            || !id.bytes().all(|b| b.is_ascii_digit())
+        {
+            return None;
+        }
+        Some((kind, id.parse().ok()?))
+    }
+
+    /// The one address of a Discogs object.
+    pub fn root(kind: Kind, id: u64) -> String {
+        format!("https://www.discogs.com/{}/{id}", kind.as_str())
+    }
+
+    /// The kind and ID of a music link on Discogs.
+    pub fn of_link(link: &super::Link) -> Option<(Kind, u64)> {
+        (link.service == super::Service::Discogs)
+            .then(|| of_uri(&link.canonical))
+            .flatten()
+    }
 }
 
 #[cfg(test)]

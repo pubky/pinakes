@@ -29,8 +29,7 @@
 use crate::{
     also_on::{Context, Found, Key, Link, Source, Subject},
     hubs::{self, musicbrainz, wikidata, MbKind},
-    music::{self, Level, Service},
-    sources::discogs,
+    music::{self, discogs, Level, Service},
 };
 use anyhow::Result;
 use async_trait::async_trait;

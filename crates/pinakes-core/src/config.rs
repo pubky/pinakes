@@ -32,7 +32,7 @@ pub struct Config {
     /// "Also on": keys and derived links from sources (`also_on::registry`).
     pub also_on: crate::also_on::AlsoOnConfig,
     /// The Podcast Index API's key and secret, for the `podcasts` also-on source.
-    pub podcast_index: crate::also_on::podcasts::PodcastIndexConfig,
+    pub podcast_index: crate::podcast_index_api::PodcastIndexConfig,
     /// TIDAL's developer API credentials and country, for the `tidal` also-on source.
     pub tidal: crate::also_on::tidal::TidalConfig,
     pub api: ApiConfig,

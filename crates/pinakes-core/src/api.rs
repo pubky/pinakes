@@ -1284,7 +1284,7 @@ pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
         "isbn" => crate::resolver::cards::isbn(key)
             .map(|n| both("isbn", crate::resolver::cards::isbn13(&n)))
             .ok_or_else(bad),
-        "imdb" if crate::also_on::films::imdb(value) => Ok(keys(vec![format!("imdb:{value}")])),
+        "imdb" if crate::also_on::media::imdb(value) => Ok(keys(vec![format!("imdb:{value}")])),
         "podcast" => crate::also_on::podcasts::guid(value)
             .map(|g| keys(vec![format!("podcast:guid:{g}")]))
             .ok_or_else(bad),

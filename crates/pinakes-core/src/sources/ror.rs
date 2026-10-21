@@ -505,4 +505,11 @@ mod tests {
         assert!(parse(429, b"", "03yrm5c26").is_err());
         assert!(parse(502, b"", "03yrm5c26").is_err());
     }
+
+    #[test]
+    fn ror_ids_with_multibyte_characters() {
+        // Nine bytes whose seventh byte is inside `é`.
+        assert_eq!(ror_id("0abcdeé1"), None);
+        assert!(!Ror.reads("https://ror.org/0abcdeé1"));
+    }
 }

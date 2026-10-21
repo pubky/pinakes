@@ -2,7 +2,7 @@
 //! its API (`api.discogs.com`): its web pages answer bots with a wall. No key: 25 requests a
 //! minute. An optional personal token (`[also_on.sources.discogs] token`) adds images to the
 //! cards; it never reaches a log or an error.
-use super::{text, web_url, Budget, Context, Example, Source};
+use super::{text, Budget, Context, Example, Source};
 use crate::{
     model::ResourceMeta,
     resolver::{
@@ -19,81 +19,13 @@ pub struct Discogs;
 
 const API: &str = "https://api.discogs.com";
 
-/// What a Discogs link names.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
-    Artist,
-    /// An album: every edition of it (a MusicBrainz release group).
-    Master,
-    /// One edition (a MusicBrainz release).
-    Release,
-}
-impl Kind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Artist => "artist",
-            Self::Master => "master",
-            Self::Release => "release",
-        }
-    }
-}
-
-/// The kind and ID of `www.discogs.com/{lang/}?{artist,master,release}/{id}[-slug]`.
-pub fn of_uri(uri: &str) -> Option<(Kind, u64)> {
-    let url = web_url(uri)?;
-    if !matches!(url.host_str()?, "www.discogs.com" | "discogs.com") {
-        return None;
-    }
-    let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
-    // A language path (`de`, `pt_BR`) before the kind.
-    let language = |s: &str| {
-        let (lang, region) = s.split_once('_').unwrap_or((s, "AA"));
-        lang.len() == 2
-            && lang.bytes().all(|b| b.is_ascii_lowercase())
-            && region.len() == 2
-            && region.bytes().all(|b| b.is_ascii_uppercase())
-    };
-    let segments = match segments.as_slice() {
-        [lang, rest @ ..] if language(lang) => rest,
-        all => all,
-    };
-    let [kind, id] = segments else {
-        return None;
-    };
-    let kind = match *kind {
-        "artist" => Kind::Artist,
-        "master" => Kind::Master,
-        "release" => Kind::Release,
-        _ => return None,
-    };
-    let id = id.split('-').next()?;
-    if id.is_empty()
-        || id.len() > 12
-        || id.starts_with('0')
-        || !id.bytes().all(|b| b.is_ascii_digit())
-    {
-        return None;
-    }
-    Some((kind, id.parse().ok()?))
-}
-
-/// The one address of a Discogs object.
-pub fn root(kind: Kind, id: u64) -> String {
-    format!("https://www.discogs.com/{}/{id}", kind.as_str())
-}
-
-/// The kind and ID of a music link on Discogs.
-pub fn of_link(link: &crate::music::Link) -> Option<(Kind, u64)> {
-    (link.service == crate::music::Service::Discogs)
-        .then(|| of_uri(&link.canonical))
-        .flatten()
-}
+pub use crate::music::discogs::{of_link, of_uri, root, Kind};
 
 /// The personal token the daemon started with (`configure`).
 static TOKEN: RwLock<Option<crate::event::adapters::SecretKey>> = RwLock::new(None);
 
 /// Record `[also_on.sources.discogs] token` for the card route.
-pub fn configure(config: &crate::config::Config) {
+fn configure(config: &crate::config::Config) {
     *TOKEN.write().unwrap_or_else(|e| e.into_inner()) = token(config);
 }
 /// The configured token, if any.
@@ -309,6 +241,9 @@ pub fn card(mut doc: ResourceMeta, kind: Kind, v: &Value, images: bool) -> Optio
 impl Source for Discogs {
     fn name(&self) -> &'static str {
         "discogs"
+    }
+    fn configure(&self, config: &crate::config::Config) {
+        configure(config);
     }
     fn reads(&self, uri: &str) -> bool {
         of_uri(uri).is_some()

@@ -529,7 +529,7 @@ pub fn docket_document(body: &[u8], release: &str) -> Result<Option<String>> {
         .into_iter()
         .flatten()
         .filter(|d| named(d))
-        .filter_map(|d| super::federal_register::document_number(d["document_number"].as_str()?))
+        .filter_map(|d| document_number(d["document_number"].as_str()?))
         .collect();
     numbers.sort();
     numbers.dedup();
@@ -539,16 +539,37 @@ pub fn docket_document(body: &[u8], release: &str) -> Result<Option<String>> {
     })
 }
 
-/// The card of an SRO release, from the Federal Register document that publishes it.
+/// A Federal Register document number (`2026-18291`, `E9-12345`, `R1-2026-00123`), in upper
+/// case: the identifier `fr:{number}` names the document.
+fn document_number(value: &str) -> Option<String> {
+    let value = value.trim().to_ascii_uppercase();
+    let parts: Vec<&str> = value.split('-').collect();
+    let ok = (2..=3).contains(&parts.len())
+        && !parts[0].is_empty()
+        && parts[0].len() <= 4
+        && parts[0].bytes().all(|b| b.is_ascii_alphanumeric())
+        && parts[1..]
+            .iter()
+            .all(|p| !p.is_empty() && p.len() <= 6 && p.bytes().all(|b| b.is_ascii_digit()));
+    ok.then_some(value)
+}
+
+/// The card of an SRO release, from the card of the Federal Register document that publishes it
+/// (`document`, its number and card), else a plain release card.
 pub fn release_card(
     mut doc: ResourceMeta,
     release: &str,
     file: &str,
-    document: Option<super::federal_register::Document>,
+    document: Option<(String, ResourceMeta)>,
 ) -> ResourceMeta {
-    let number = document.as_ref().map(|d| d.number.clone());
+    let number = document.as_ref().map(|(n, _)| n.clone());
     match document {
-        Some(document) => doc = super::federal_register::card(doc, document),
+        Some((_, document)) => {
+            doc.set_type(&document.type_name);
+            doc.name = document.name;
+            doc.description = document.description;
+            doc.attributes.extend(document.attributes);
+        }
         None => {
             doc.set_type("Report");
             doc.name = Some(format!("Release No. {release}"));
@@ -676,12 +697,11 @@ impl Source for Sec {
             };
             let f = cx.fetch(&docket_url(release), &json).await?;
             anyhow::ensure!(f.status == 200, "Federal Register answered {}", f.status);
+            // The document's card from whichever switched-on source reads `fr:` documents.
             let document = match docket_document(&f.body, release)? {
-                Some(number) => {
-                    let url = super::federal_register::api_url(&number).context("number")?;
-                    let f = cx.fetch(&url, &json).await?;
-                    super::federal_register::parse(f.status, &f.body, &number)?
-                }
+                Some(number) => super::card_of(cx, &format!("fr:{number}"))
+                    .await?
+                    .map(|card| (number, card)),
                 None => None,
             };
             return Ok(release_card(cx.card(uri, self), release, file, document));
@@ -1017,8 +1037,13 @@ mod tests {
         assert_eq!(docket_document(&found, "34-10626").unwrap(), None);
         let none = read("fr-docket-34-999999.json");
         assert_eq!(docket_document(&none, "34-999999").unwrap(), None);
-        let fr = crate::sources::fixture::read("federal_register", "fr-2026-18291.json");
-        let document = super::super::federal_register::parse(200, &fr, "2026-18291").unwrap();
+        // The document's card, as a source reading `fr:` documents makes it.
+        let mut fr = ResourceMeta::new("fr:2026-18291", "federal_register", 3600);
+        fr.set_type("Legislation");
+        fr.name = Some("Self-Regulatory Organizations; Nasdaq Texas, LLC".into());
+        fr.attributes
+            .insert("citation".into(), "91 FR 57392".into());
+        let document = Some(("2026-18291".to_owned(), fr));
         let doc = release_card(base(uri), "34-106268", "34-106268.pdf", document);
         assert_eq!(doc.type_name, "Legislation");
         assert_eq!(doc.site, "www.sec.gov");

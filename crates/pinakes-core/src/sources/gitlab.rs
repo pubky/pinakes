@@ -3,6 +3,7 @@
 //! unauthenticated API requests per minute. Project pages are read on known instances; the
 //! `/-/` shapes on any host, which is remembered for a day once it answers (or does not answer)
 //! as GitLab.
+use super::kit::GITLAB_RESERVED as RESERVED;
 use super::{list, text, web_url, Budget, Context, Declined, Example, HostMemo, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
@@ -23,33 +24,6 @@ const KNOWN: &[&str] = &[
     "gitlab.gnome.org",
     "invent.kde.org",
     "salsa.debian.org",
-];
-
-/// First path segments that are the instance's own pages, never a namespace.
-pub const RESERVED: &[&str] = &[
-    "-",
-    ".well-known",
-    "abuse_reports",
-    "admin",
-    "api",
-    "assets",
-    "dashboard",
-    "explore",
-    "groups",
-    "help",
-    "import",
-    "jwt",
-    "oauth",
-    "profile",
-    "projects",
-    "public",
-    "s",
-    "search",
-    "sitemap",
-    "snippets",
-    "uploads",
-    "users",
-    "v2",
 ];
 
 /// How many leading segments of `/-/tree/…` or `/-/blob/…` are tried as the ref name.

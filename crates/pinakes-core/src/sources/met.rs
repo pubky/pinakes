@@ -4,12 +4,13 @@
 //! Every metmuseum.org link of one object (with or without a language prefix, the older
 //! "collection online" form, and the API's own URL) is an alias of one identifier,
 //! `met:{objectID}`. The API's data is CC0; images are shown only for public-domain works.
-use super::kit::{fetch, host_and_segments, int, json, plain, text, web_url, Card, Key, Request};
+use super::kit::{
+    fetch, host_and_segments, int, json, plain, text, web_url, wikidata_id, Card, Key, Request,
+};
 use super::{Context, Example, Source};
 use crate::model::ResourceMeta;
 use anyhow::{ensure, Context as _, Result};
 use async_trait::async_trait;
-use serde_json::Value;
 
 pub const SITE: &str = "The Met";
 
@@ -73,20 +74,6 @@ pub fn from_root(uri: &str) -> Option<u64> {
 /// The object of a root or a metmuseum.org link.
 pub fn target(uri: &str) -> Option<u64> {
     from_root(uri).or_else(|| from_uri(uri))
-}
-
-/// The Q-id of a Wikidata entity URL (`https://www.wikidata.org/wiki/Q…`), and nothing else.
-pub(crate) fn wikidata_id(v: &Value) -> Option<String> {
-    let (host, segments) = host_and_segments(v.as_str()?)?;
-    let [kind, q] = segments.as_slice() else {
-        return None;
-    };
-    let digits = q.strip_prefix('Q')?;
-    (host == "wikidata.org"
-        && matches!(kind.as_str(), "wiki" | "entity")
-        && plain(digits, 12, |c| c.is_ascii_digit())
-        && !digits.starts_with('0'))
-    .then(|| q.clone())
 }
 
 /// An object, or `None` when the API does not know the id (404 "ObjectID not found").
@@ -302,7 +289,7 @@ mod tests {
         );
         assert_eq!(card.details["public_domain"], false);
 
-        let mut v: Value = serde_json::from_slice(&read("object-488221.json")).unwrap();
+        let mut v: serde_json::Value = serde_json::from_slice(&read("object-488221.json")).unwrap();
         v["primaryImage"] = json!("https://images.metmuseum.org/x.jpg");
         let raw = serde_json::to_vec(&v).unwrap();
         assert_eq!(parse(200, &raw, 488221).unwrap().unwrap().image, None);
@@ -360,28 +347,5 @@ mod tests {
         assert!(parse(429, b"", 436535).is_err());
         assert!(parse(503, b"", 436535).is_err());
         assert!(parse(200, b"<html>", 436535).is_err());
-    }
-
-    #[test]
-    fn wikidata_ids() {
-        let q = |s: &str| wikidata_id(&json!(s));
-        assert_eq!(
-            q("https://www.wikidata.org/wiki/Q18689458").as_deref(),
-            Some("Q18689458")
-        );
-        assert_eq!(
-            q("http://www.wikidata.org/entity/Q5582").as_deref(),
-            Some("Q5582")
-        );
-        for bad in [
-            "",
-            "https://www.wikidata.org/wiki/P31",
-            "https://www.wikidata.org/wiki/Q",
-            "https://www.wikidata.org/wiki/Q01",
-            "https://www.wikidata.org/wiki/Q1/x",
-            "https://example.org/wiki/Q5582",
-        ] {
-            assert_eq!(q(bad), None, "{bad}");
-        }
     }
 }

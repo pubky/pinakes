@@ -8,11 +8,11 @@
 //! stored.
 //!
 //! The API's data is CC0; images are shown only for works the API marks CC0.
+use super::kit::wikidata_id;
 use super::kit::{
     fetch, host_and_segments, html_text, int, json, plain, text, texts, web_url, Card, Key, Link,
     Request,
 };
-use super::met::wikidata_id;
 use super::{Context, Example, Source};
 use crate::model::ResourceMeta;
 use anyhow::{ensure, Context as _, Result};

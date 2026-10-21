@@ -6,7 +6,7 @@
 //! name. A page hook (and, for walled pages, a wall hook): an error leaves the page's own card.
 use super::{Context, Example, Source};
 use crate::{
-    also_on::films,
+    also_on::media::{exact_page, imdb, title_type},
     hubs::wikidata,
     model::{ResourceMeta, Status},
     resolver::egress::{FetchOptions, Fetched},
@@ -90,7 +90,7 @@ fn record(uri: &str) -> Option<Record> {
         }
         ("letterboxd.com", ["film", name]) if slug(name) => wikidata("P6127", name, Text::Own),
         // IMDb answers bots with an empty page (or a challenge: the wall hook).
-        ("imdb.com" | "m.imdb.com", ["title", tt]) if films::imdb(tt) => {
+        ("imdb.com" | "m.imdb.com", ["title", tt]) if imdb(tt) => {
             wikidata("P345", tt, Text::Record)
         }
         ("openlibrary.org", [kind @ ("works" | "books"), id, ..]) => {
@@ -107,9 +107,7 @@ fn record(uri: &str) -> Option<Record> {
         }
         // The show's own page (`/shows/{id}`, `/shows/{id}/{slug}`), never its episodes, cast or
         // other sub-pages.
-        ("tvmaze.com", ["shows", id, ..])
-            if digits(id) && s.len() <= 3 && films::exact_page(uri) =>
-        {
+        ("tvmaze.com", ["shows", id, ..]) if digits(id) && s.len() <= 3 && exact_page(uri) => {
             Record::Tvmaze(id.parse().ok()?)
         }
         ("podcastindex.org", ["podcast", id]) if digits(id) && url.query().is_none() => {
@@ -131,7 +129,7 @@ fn walled(uri: &str) -> Option<Walled> {
     let host = url.host_str()?.to_ascii_lowercase();
     let s: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
     match (host.as_str(), s.as_slice()) {
-        ("www.imdb.com" | "imdb.com" | "m.imdb.com", ["title", tt]) if films::imdb(tt) => {
+        ("www.imdb.com" | "imdb.com" | "m.imdb.com", ["title", tt]) if imdb(tt) => {
             Some(Walled::Imdb((*tt).to_owned()))
         }
         ("pca.st" | "castro.fm", ["itunes", id]) => id.parse().ok().map(Walled::ApplePodcast),
@@ -223,12 +221,7 @@ fn titled(doc: &mut ResourceMeta, label: String, description: Option<String>, te
 }
 /// A finished card of a Wikidata page that the hook did not name (its request timed out, say)
 /// named from the title the also-on `titles` source found since. Whether it applied.
-pub fn apply_title(
-    uri: &str,
-    title: &str,
-    description: Option<&str>,
-    doc: &mut ResourceMeta,
-) -> bool {
+fn apply_title(uri: &str, title: &str, description: Option<&str>, doc: &mut ResourceMeta) -> bool {
     let Some((_, _, text)) = wikidata_page(uri) else {
         return false;
     };
@@ -250,7 +243,7 @@ fn named_by_item(
 ) -> ResourceMeta {
     let mut doc = doc.clone();
     titled(&mut doc, label, description, text);
-    if let Some(kind) = films::title_type(item) {
+    if let Some(kind) = title_type(item) {
         doc.set_type(kind);
     }
     doc.attributes.insert("wikidata".into(), item.qid.clone());
@@ -354,6 +347,15 @@ fn itunes_card(cx: &Context<'_>, uri: &str, show: u64, raw: &[u8]) -> Option<Res
 impl Source for MediaRecords {
     fn name(&self) -> &'static str {
         "media_records"
+    }
+    fn apply_title(
+        &self,
+        uri: &str,
+        title: &str,
+        description: Option<&str>,
+        doc: &mut ResourceMeta,
+    ) -> bool {
+        apply_title(uri, title, description, doc)
     }
     fn reads(&self, _uri: &str) -> bool {
         false
@@ -494,6 +496,128 @@ impl Source for MediaRecords {
             }
             None => None,
         })
+    }
+}
+
+pub mod titles {
+    //! The also-on half of this source, `titles`: the title of a media page's object, for when the
+    //! page hook could not name its card in time.
+    //! `media_records` names a TMDB, Trakt, Netflix, Goodreads, Letterboxd or IMDb page from the
+    //! Wikidata item that carries the page's ID, within the web fetch's few seconds; a slow Wikidata
+    //! leaves the page's title. This source reads the same item without that limit: the label as
+    //! the fact `title` and the description as `title_description`, and when the card still bears
+    //! another name, the resource is read again so its finished card takes them (`media::type_card`).
+    use crate::also_on::{Context, Fact, Found, Source, Subject};
+    use anyhow::Result;
+    use async_trait::async_trait;
+
+    pub struct Titles;
+
+    #[async_trait]
+    impl Source for Titles {
+        fn id(&self) -> &'static str {
+            "titles"
+        }
+        fn applies(&self, subject: &Subject) -> bool {
+            subject.status == "ok" && super::wikidata_page(&subject.uri).is_some()
+        }
+        async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
+            // The fallback of `media_records`: off with it.
+            if !cx.config.sources.enabled("media_records") {
+                return Ok(Found::default());
+            }
+            let Some((property, value, _)) = super::wikidata_page(&subject.uri) else {
+                return Ok(Found::default());
+            };
+            let Some((_, label, description)) = super::item(&cx.egress, property, &value).await?
+            else {
+                return Ok(Found::default());
+            };
+            let named = subject
+                .doc
+                .as_ref()
+                .is_some_and(|d| d.source == "media_records" || d.name.as_deref() == Some(&label));
+            let mut facts = vec![Fact::new("title", label.as_str())];
+            facts.extend(description.map(|d| Fact::new("title_description", d)));
+            Ok(Found {
+                facts,
+                reread: !named,
+                ..Default::default()
+            })
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::{hubs::wikidata, model::ResourceMeta, sources::fixture};
+
+        fn subject(uri: &str, name: &str, source: &str) -> Subject {
+            let mut doc = ResourceMeta::new(uri, source, 3600);
+            doc.name = Some(name.into());
+            Subject {
+                id: "0".repeat(32),
+                uri: uri.into(),
+                status: "ok".into(),
+                type_name: Some("TVSeries".into()),
+                doc: Some(doc),
+                keys: vec![],
+                first_seen_at: None,
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_page_the_hook_left_unnamed_gets_its_title_and_is_read_again() {
+            let read = |f: &str| fixture::read("media_records", f);
+            let (egress, _) = fixture::egress(vec![
+                (
+                    &wikidata::search_lookup("P4983", "1396").unwrap(),
+                    200,
+                    "application/json",
+                    read("search-P4983-1396.json"),
+                ),
+                (
+                    &wikidata::entities_lookup(&["Q1079".into()]),
+                    200,
+                    "application/json",
+                    read("entities-Q1079.json.gz"),
+                ),
+                (
+                    "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q1079&props=labels%7Cdescriptions&languages=en&languagefallback=1&format=json",
+                    200,
+                    "application/json",
+                    read("labels-Q1079.json"),
+                ),
+            ]);
+            let cx = Context {
+                egress,
+                config: Default::default(),
+            };
+            let uri = "https://www.themoviedb.org/tv/1396";
+            let unnamed = subject(uri, "The Movie Database", "jsonld");
+            assert!(Titles.applies(&unnamed));
+            let found = Titles.lookup(&cx, &unnamed).await.unwrap();
+            assert_eq!(
+                found.facts,
+                [
+                    Fact::new("title", "Breaking Bad"),
+                    Fact::new(
+                        "title_description",
+                        "American crime drama television series (2008–2013)"
+                    ),
+                ]
+            );
+            assert!(found.reread);
+            // A card the hook named, or that bears the title, is not read again.
+            let hooked = subject(uri, "Breaking Bad", "media_records");
+            assert!(!Titles.lookup(&cx, &hooked).await.unwrap().reread);
+            // Only Wikidata pages: Open Library and TVmaze pages are named by their own records.
+            assert!(!Titles.applies(&subject(
+                "https://openlibrary.org/works/OL27482W",
+                "x",
+                "web"
+            )));
+        }
     }
 }
 

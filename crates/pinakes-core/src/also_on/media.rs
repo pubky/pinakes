@@ -144,7 +144,7 @@ pub fn link_type(uri: &str) -> Option<&'static str> {
             // An IMDb title can be either.
             films::Film::Imdb(_) => None,
         }
-        .filter(|_| films::exact_page(uri));
+        .filter(|_| exact_page(uri));
     }
     if books::book(uri).is_some() {
         return Some("Book");
@@ -159,7 +159,7 @@ pub fn link_type(uri: &str) -> Option<&'static str> {
     if let Some((_, e)) = podcasts::apple(uri) {
         return Some(episode(e));
     }
-    if let Some((_, e)) = podcasts::index_page(uri) {
+    if let Some((_, e)) = crate::podcast_index_api::index_page(uri) {
         return Some(episode(e));
     }
     if podcasts::player(uri).is_some() {
@@ -253,18 +253,56 @@ pub fn type_card(uri: &str, hints: &TypeHints, doc: &mut crate::model::ResourceM
         .into_iter()
         .find(|k| *k == doc.type_name);
     if let Some(title) = &hints.title {
-        crate::sources::media_records::apply_title(
-            uri,
-            title,
-            hints.title_description.as_deref(),
-            doc,
-        );
+        crate::sources::apply_title(uri, title, hints.title_description.as_deref(), doc);
     }
     match link_type(uri) {
         Some("CreativeWork") => doc.set_type(hinted.or(own).unwrap_or("CreativeWork")),
         Some(kind) => doc.set_type(kind),
         None if hints.episode => doc.set_type("PodcastEpisode"),
         None => {}
+    }
+}
+
+/// An IMDb title ID.
+pub fn imdb(v: &str) -> bool {
+    v.strip_prefix("tt")
+        .is_some_and(|d| matches!(d.len(), 7 | 8) && d.bytes().all(|b| b.is_ascii_digit()))
+}
+/// Whether a film link is the title's own page (not a season, cast or review page under it).
+pub fn exact_page(uri: &str) -> bool {
+    let Ok(url) = url::Url::parse(uri) else {
+        return false;
+    };
+    let s: Vec<&str> = url
+        .path_segments()
+        .map(|s| s.filter(|s| !s.is_empty()).collect())
+        .unwrap_or_default();
+    match (
+        url.host_str().map(|h| h.strip_prefix("www.").unwrap_or(h)),
+        s.as_slice(),
+    ) {
+        // TVmaze's show page carries its slug; its subpages have fixed names.
+        (Some("tvmaze.com"), [_, _, sub]) => !matches!(
+            *sub,
+            "episodes" | "seasons" | "cast" | "crew" | "characters" | "gallery" | "news" | "akas"
+        ),
+        // A Netflix title, localized or not.
+        (Some("netflix.com"), [_, "title", _]) => true,
+        (_, s) => s.len() == 2,
+    }
+}
+/// What a title's Wikidata item says it is, by the kind of IDs it holds: a movie (TMDB movie,
+/// TheTVDB movie, Apple TV movie, Trakt film) or a series (TMDB TV, TheTVDB series, Apple TV
+/// show, TVmaze show). Both or neither: nothing.
+pub fn title_type(item: &Item) -> Option<&'static str> {
+    let any = |ps: &[&str]| ps.iter().any(|p| !item.id(p).is_empty());
+    match (
+        any(&["P4947", "P12196", "P9586", "P12492"]),
+        any(&["P4983", "P4835", "P9751", "P8600"]),
+    ) {
+        (true, false) => Some("Movie"),
+        (false, true) => Some("TVSeries"),
+        _ => None,
     }
 }
 
@@ -319,6 +357,11 @@ mod tests {
         }
     }
 
+    #[test]
+    fn what_an_items_ids_say_a_title_is() {
+        assert_eq!(title_type(&fixture::item("Q172241")), Some("Movie"));
+        assert_eq!(title_type(&fixture::item("Q1079")), Some("TVSeries"));
+    }
     #[test]
     fn one_value_one_link_one_per_site() {
         const TABLE: &[Property] = &[

@@ -7,7 +7,7 @@
 //! `lookup/shows?imdb=` its show (TVmaze's data is CC BY-SA: its links say `via: "tvmaze"`);
 //! each is asked only when the item has no link there.
 use super::{
-    media::{self, digits, property, slug, Deferred, Property},
+    media::{self, digits, imdb, property, slug, title_type, Deferred, Property},
     Context, Fact, Found, Key, Link, Source, Subject,
 };
 use crate::{hubs::wikidata, resolver::egress::FetchOptions};
@@ -27,12 +27,6 @@ pub enum Film {
     Tvmaze(u64),
     /// A Netflix title (a movie or a series).
     Netflix(String),
-}
-
-/// An IMDb title ID.
-pub fn imdb(v: &str) -> bool {
-    v.strip_prefix("tt")
-        .is_some_and(|d| matches!(d.len(), 7 | 8) && d.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// The title a link names: `imdb.com/title/{tt}`, `themoviedb.org/movie/{id}` or `/tv/{id}`
@@ -83,30 +77,6 @@ fn site(film: &Film) -> &'static str {
     }
 }
 
-/// Whether a film link is the title's own page (not a season, cast or review page under it).
-pub fn exact_page(uri: &str) -> bool {
-    let Ok(url) = url::Url::parse(uri) else {
-        return false;
-    };
-    let s: Vec<&str> = url
-        .path_segments()
-        .map(|s| s.filter(|s| !s.is_empty()).collect())
-        .unwrap_or_default();
-    match (
-        url.host_str().map(|h| h.strip_prefix("www.").unwrap_or(h)),
-        s.as_slice(),
-    ) {
-        // TVmaze's show page carries its slug; its subpages have fixed names.
-        (Some("tvmaze.com"), [_, _, sub]) => !matches!(
-            *sub,
-            "episodes" | "seasons" | "cast" | "crew" | "characters" | "gallery" | "news" | "akas"
-        ),
-        // A Netflix title, localized or not.
-        (Some("netflix.com"), [_, "title", _]) => true,
-        (_, s) => s.len() == 2,
-    }
-}
-
 /// The Wikidata property holding a link's own ID, and the ID.
 fn property_of(film: &Film) -> (&'static str, String) {
     match film {
@@ -116,21 +86,6 @@ fn property_of(film: &Film) -> (&'static str, String) {
         Film::Letterboxd(name) => ("P6127", name.clone()),
         Film::Tvmaze(id) => ("P8600", id.to_string()),
         Film::Netflix(id) => ("P1874", id.clone()),
-    }
-}
-
-/// What a title's Wikidata item says it is, by the kind of IDs it holds: a movie (TMDB movie,
-/// TheTVDB movie, Apple TV movie, Trakt film) or a series (TMDB TV, TheTVDB series, Apple TV
-/// show, TVmaze show). Both or neither: nothing.
-pub fn title_type(item: &wikidata::Item) -> Option<&'static str> {
-    let any = |ps: &[&str]| ps.iter().any(|p| !item.id(p).is_empty());
-    match (
-        any(&["P4947", "P12196", "P9586", "P12492"]),
-        any(&["P4983", "P4835", "P9751", "P8600"]),
-    ) {
-        (true, false) => Some("Movie"),
-        (false, true) => Some("TVSeries"),
-        _ => None,
     }
 }
 
@@ -605,9 +560,6 @@ mod tests {
         assert!(anime.contains(&s("MyAnimeList", "https://myanimelist.net/anime/1")));
         assert!(anime.contains(&s("AniList", "https://anilist.co/anime/1")));
         assert!(trakt("shows/breaking-bad") && !trakt("people/x") && !trakt("movies/"));
-        // What an item's IDs say it is.
-        assert_eq!(title_type(&fixture::item("Q172241")), Some("Movie"));
-        assert_eq!(title_type(&fixture::item("Q1079")), Some("TVSeries"));
         assert!(rotten("m/shawshank_redemption") && !rotten("celebrity/x"));
     }
 }

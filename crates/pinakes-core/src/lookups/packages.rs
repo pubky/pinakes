@@ -204,13 +204,13 @@ impl Repo {
         let path = path.strip_suffix(".git").unwrap_or(path);
         let parts: Vec<&str> = path.split('/').collect();
         // The forge's own pages (GitHub's `orgs/…`, `topics/…`; GitLab's `explore/…`,
-        // `groups/…`) are not repositories: each forge source's rule.
+        // `groups/…`) are not repositories.
         let first = parts[0].to_ascii_lowercase();
         let depth_ok = if host == "github.com" {
-            parts.len() == 2 && !crate::sources::github::RESERVED.contains(&first.as_str())
+            parts.len() == 2 && !crate::sources::kit::GITHUB_RESERVED.contains(&first.as_str())
         } else {
             (2..=10).contains(&parts.len())
-                && !crate::sources::gitlab::RESERVED.contains(&first.as_str())
+                && !crate::sources::kit::GITLAB_RESERVED.contains(&first.as_str())
         };
         (depth_ok
             && parts.iter().all(|p| {

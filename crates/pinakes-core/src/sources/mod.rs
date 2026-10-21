@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::OnceLock};
 
 pub mod artic;
+pub mod biodiversity;
 pub mod bluesky;
 pub mod cleveland;
 pub mod clinicaltrials;
@@ -30,7 +31,6 @@ pub mod discogs;
 pub mod discourse;
 pub mod docker_hub;
 pub mod ecfr;
-pub mod esplora;
 pub mod eur_lex;
 pub mod federal_register;
 pub mod fedlex;
@@ -191,6 +191,21 @@ pub trait Source: Send + Sync {
     /// with a short deadline; an error leaves the wall.
     async fn walled(&self, _cx: &Context<'_>, _uri: &str) -> Result<Option<ResourceMeta>> {
         Ok(None)
+    }
+    /// Take what this source needs from the daemon's configuration at startup (a token another
+    /// table holds, say).
+    fn configure(&self, _config: &Config) {}
+    /// A finished card of `uri` named from the title the also-on sources found since its page
+    /// was read (`also_on::media::type_card`), for a page whose card this source names: whether
+    /// it applied.
+    fn apply_title(
+        &self,
+        _uri: &str,
+        _title: &str,
+        _description: Option<&str>,
+        _doc: &mut ResourceMeta,
+    ) -> bool {
+        false
     }
 }
 
@@ -506,9 +521,44 @@ pub fn enabled_source(uri: &str, config: &Config) -> Option<&'static dyn Source>
 static SWITCHES: std::sync::RwLock<Option<SourcesConfig>> = std::sync::RwLock::new(None);
 
 /// Record the daemon's switches, so a switched-off source's address rules no longer merge links
-/// (its links then get ordinary web cards, as its routes do), and its sources' tokens.
-pub fn configure(config: &SourcesConfig) {
-    *SWITCHES.write().unwrap_or_else(|e| e.into_inner()) = Some(config.clone());
+/// (its links then get ordinary web cards, as its routes do), and its sources' tokens; and let
+/// every source take what it needs from the configuration (`Source::configure`).
+pub fn configure(config: &Config) {
+    *SWITCHES.write().unwrap_or_else(|e| e.into_inner()) = Some(config.sources.clone());
+    for source in REGISTRY {
+        source.configure(config);
+    }
+}
+/// A finished card named from the title the also-on sources found (`Source::apply_title`), by
+/// the first source that names that page's cards: whether one applied.
+pub fn apply_title(
+    uri: &str,
+    title: &str,
+    description: Option<&str>,
+    doc: &mut ResourceMeta,
+) -> bool {
+    REGISTRY
+        .iter()
+        .any(|s| s.apply_title(uri, title, description, doc))
+}
+/// The card the switched-on source reading `uri` makes of it, `None` when no source reads it,
+/// its source declined it or the object does not exist: for a source whose card builds on another
+/// object's (an SEC release on the Federal Register document that publishes it), by the other
+/// object's identifier alone.
+pub async fn card_of(cx: &Context<'_>, uri: &str) -> Result<Option<ResourceMeta>> {
+    let source = {
+        let switches = SWITCHES.read().unwrap_or_else(|e| e.into_inner());
+        reading(uri).filter(|s| switches.as_ref().is_none_or(|c| c.enabled(s.name())))
+    };
+    let Some(source) = source else {
+        return Ok(None);
+    };
+    match source.resolve(cx, uri).await {
+        Ok(doc) if doc.status == Status::Ok => Ok(Some(doc)),
+        Ok(_) => Ok(None),
+        Err(error) if error.is::<Declined>() => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 /// The token the daemon started with for `source` (`configure`).
 pub fn token(source: &str) -> Option<crate::event::adapters::SecretKey> {

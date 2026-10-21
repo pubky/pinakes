@@ -21,6 +21,7 @@ pub mod music;
 pub mod music_sources;
 pub mod nexus;
 pub mod osm_dump;
+pub mod podcast_index_api;
 pub mod queue;
 pub mod recipes;
 pub mod resolver;
@@ -91,12 +92,11 @@ pub async fn check_extensions(pool: &sqlx::PgPool) -> anyhow::Result<()> {
 }
 
 /// The process-wide source settings, read once at startup before any resolver or source runs: the
-/// official sources' switches and tokens (`PINAKES_GITHUB_TOKEN`), the Podcast Index pair and the
-/// Discogs token. Every process that resolves links calls it: the daemon and the e2e driver.
+/// official sources' switches, and what each source takes from the configuration (its tokens;
+/// `sources::configure`). Every process that resolves links calls it: the daemon and the e2e
+/// driver.
 pub fn configure_sources(config: &config::Config) {
-    sources::configure(&config.sources);
-    sources::podcast_index::configure(&config.podcast_index);
-    sources::discogs::configure(config);
+    sources::configure(config);
 }
 
 /// Create the schema (`migrations/0001_schema.sql`) on an empty database; a database that has it

@@ -484,38 +484,101 @@ pub fn time(v: &Value) -> Option<DateTime<Utc>> {
         })
 }
 
+/// The Q-id of a Wikidata entity URL (`https://www.wikidata.org/wiki/Q…`), and nothing else.
+pub fn wikidata_id(v: &Value) -> Option<String> {
+    let (host, segments) = host_and_segments(v.as_str()?)?;
+    let [kind, q] = segments.as_slice() else {
+        return None;
+    };
+    let digits = q.strip_prefix('Q')?;
+    (host == "wikidata.org"
+        && matches!(kind.as_str(), "wiki" | "entity")
+        && plain(digits, 12, |c| c.is_ascii_digit())
+        && !digits.starts_with('0'))
+    .then(|| q.clone())
+}
+/// First path segments that are a GitLab instance's own pages, never a namespace: whoever reads
+/// GitLab project links (the GitLab source, the package lookups) skips them.
+pub const GITLAB_RESERVED: &[&str] = &[
+    "-",
+    ".well-known",
+    "abuse_reports",
+    "admin",
+    "api",
+    "assets",
+    "dashboard",
+    "explore",
+    "groups",
+    "help",
+    "import",
+    "jwt",
+    "oauth",
+    "profile",
+    "projects",
+    "public",
+    "s",
+    "search",
+    "sitemap",
+    "snippets",
+    "uploads",
+    "users",
+    "v2",
+];
+/// First path segments that are GitHub's own pages, never an owner: whoever reads github.com
+/// repository links (the GitHub source, the package lookups) skips them.
+pub const GITHUB_RESERVED: &[&str] = &[
+    "about",
+    "apps",
+    "collections",
+    "contact",
+    "customer-stories",
+    "enterprise",
+    "events",
+    "explore",
+    "features",
+    "login",
+    "marketplace",
+    "new",
+    "notifications",
+    "orgs",
+    "organizations",
+    "pricing",
+    "pulls",
+    "issues",
+    "search",
+    "security",
+    "settings",
+    "site",
+    "sponsors",
+    "topics",
+    "trending",
+    "users",
+];
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A card of a thing (not an event) is refreshed on the official route's schedule, however
-    /// old its dates; the same card with a past `start` would be final.
     #[test]
-    fn a_thing_with_old_dates_is_refreshed() {
-        use crate::{model::ResourceMeta, resolver::cards::manifests, sources::docker_hub};
-        let manifest = manifests(&Default::default())
-            .into_iter()
-            .find(|m| m.source == "official")
-            .expect("the official route");
-        let repo = docker_hub::from_uri("https://hub.docker.com/_/nginx").unwrap();
-        let raw = fixture::read("docker_hub", "repo-library-nginx.json");
-        let card = docker_hub::parse(200, &raw, &repo).unwrap().unwrap();
-        assert_eq!(card.details["registered"], "2014-06-05T19:14:45+00:00");
-        let doc = card.into_doc(
-            ResourceMeta::new("docker:library/nginx", "docker_hub", 60),
-            "x",
-        );
-        let now = Utc::now();
-        let refresh = Default::default();
-        let next = crate::scheduler::next(&manifest, &doc, now, &refresh);
-        assert!(next.is_some_and(|at| at > now), "refreshed");
-        let mut dated = doc;
-        dated.start = Some(Utc.with_ymd_and_hms(2014, 6, 5, 19, 14, 45).unwrap());
+    fn wikidata_ids() {
+        let q = |s: &str| wikidata_id(&serde_json::json!(s));
         assert_eq!(
-            crate::scheduler::next(&manifest, &dated, now, &refresh),
-            None,
-            "final"
+            q("https://www.wikidata.org/wiki/Q18689458").as_deref(),
+            Some("Q18689458")
         );
+        assert_eq!(
+            q("http://www.wikidata.org/entity/Q5582").as_deref(),
+            Some("Q5582")
+        );
+        for bad in [
+            "",
+            "https://www.wikidata.org/wiki/P31",
+            "https://www.wikidata.org/wiki/Q",
+            "https://www.wikidata.org/wiki/Q01",
+            "https://www.wikidata.org/wiki/Q1/x",
+            "https://example.org/wiki/Q5582",
+        ] {
+            assert_eq!(q(bad), None, "{bad}");
+        }
     }
 
     /// Link and root forms beyond the sources' examples, one or more per id shape.
@@ -617,13 +680,6 @@ mod tests {
         assert!(checked > 10_000, "{checked}");
     }
 
-    #[test]
-    fn ror_ids_with_multibyte_characters() {
-        // Nine bytes whose seventh byte is inside `é`.
-        assert_eq!(crate::sources::ror::ror_id("0abcdeé1"), None);
-        use crate::sources::Source;
-        assert!(!crate::sources::ror::Ror.reads("https://ror.org/0abcdeé1"));
-    }
     use serde_json::json;
 
     #[test]
