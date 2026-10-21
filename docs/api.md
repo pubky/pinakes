@@ -493,10 +493,11 @@ person (`limits.related_min_shared`, 2).
   group's members' taggers, and the group's own members are never listed. With `collapse=group`,
   each row is one group, its members' taggers counted together; without it, each resource counts
   its own.
-- **Bounds.** The taggers are drawn from the resource's most recent `limits.related_tag_sample`
-  (2,000) tags (of each member's, in a group) within `limits.related_window_days` (365, or
-  `window`), those in reach; of their authors, the `limits.related_taggers` (200) with the newest
-  tag are sampled. Of each, only their most recent `limits.related_refs_per_tagger` (1,000)
+- **Bounds.** The taggers are drawn from a sample of the resource's most recent
+  `limits.related_tag_sample` (2,000) tags within `limits.related_window_days` (365, or
+  `window`): one sample per member of its group and per alias of each, taken before `reach`
+  applies and never filled back up when `reach` leaves fewer; of the sample's authors in reach,
+  the `limits.related_taggers` (200) with the newest tag are sampled. Of each, only their most recent `limits.related_refs_per_tagger` (1,000)
   references within the same days count. With `collapse=group`, a group needs the shared taggers
   of its members that pass the other filters, together. `/v1/info` gives every limit here.
 - Only the references Pinakes copies from Nexus's feed count: the resource's taggers, and any
