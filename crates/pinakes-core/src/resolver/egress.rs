@@ -150,6 +150,8 @@ pub struct FetchOptions {
     /// Extra request headers, by literal name.
     pub headers: Vec<(&'static str, String)>,
     pub json_body: Option<serde_json::Value>,
+    /// A form-encoded POST body (an OAuth token request), by literal field name.
+    pub form_body: Option<Vec<(&'static str, String)>>,
     pub sensitive: bool,
     pub accept: Option<String>,
     pub user_agent: Option<String>,
@@ -204,6 +206,8 @@ impl Transport for PinnedTransport {
             .build()?;
         let mut request = if let Some(body) = &options.json_body {
             client.post(url.clone()).json(body)
+        } else if let Some(form) = &options.form_body {
+            client.post(url.clone()).form(form)
         } else {
             client.get(url.clone())
         }
@@ -555,8 +559,10 @@ impl Egress {
         let mut url = Url::parse(uri)?;
         url.set_fragment(None);
         let mut key = url.to_string();
-        if options.json_body.is_some() || !options.headers.is_empty() {
-            let identity = serde_json::to_vec(&(&options.json_body, &options.headers))?;
+        if options.json_body.is_some() || options.form_body.is_some() || !options.headers.is_empty()
+        {
+            let identity =
+                serde_json::to_vec(&(&options.json_body, &options.form_body, &options.headers))?;
             key.push_str(&format!("|request:{}", blake3::hash(&identity).to_hex()));
         }
         // A read with another cap gets another answer (a refusal is replayed only to its cap).
@@ -764,7 +770,11 @@ impl Egress {
             observation.status(response.status);
             drop(observation);
             if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
-                if options.sensitive || options.json_body.is_some() || !options.headers.is_empty() {
+                if options.sensitive
+                    || options.json_body.is_some()
+                    || options.form_body.is_some()
+                    || !options.headers.is_empty()
+                {
                     return Err(refused("redirect of authenticated/API request refused"));
                 }
                 if redirects == 3 {
@@ -792,7 +802,11 @@ impl Egress {
                 return Err(super::interstitial::Blocked.into());
             }
             if let super::interstitial::Page::Redirect(target) = page {
-                if options.sensitive || options.json_body.is_some() || !options.headers.is_empty() {
+                if options.sensitive
+                    || options.json_body.is_some()
+                    || options.form_body.is_some()
+                    || !options.headers.is_empty()
+                {
                     return Err(refused("redirect of authenticated/API request refused"));
                 }
                 if redirects == 3 {
@@ -1758,6 +1772,42 @@ mod tests {
             assert!(egress.fetch(uri).await.is_err(), "{uri}");
         }
         assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+    }
+    #[tokio::test]
+    async fn a_form_body_is_posted_form_encoded() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut data = vec![0; 4096];
+            let n = socket.read(&mut data).await.unwrap();
+            let request = String::from_utf8_lossy(&data[..n]).to_string();
+            assert!(request.starts_with("POST /token HTTP/1.1"), "{request}");
+            assert!(request
+                .to_lowercase()
+                .contains("content-type: application/x-www-form-urlencoded"));
+            assert!(
+                request.ends_with("\r\n\r\ngrant_type=client_credentials"),
+                "{request}"
+            );
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
+        });
+        let url = Url::parse(&format!(
+            "http://never-resolve.invalid:{}/token",
+            addr.port()
+        ))
+        .unwrap();
+        let options = FetchOptions {
+            form_body: Some(vec![("grant_type", "client_credentials".into())]),
+            ..Default::default()
+        };
+        let response = PinnedTransport
+            .get_with(&url, &[addr], &options)
+            .await
+            .unwrap();
+        assert_eq!(response.status, 200);
+        task.await.unwrap();
     }
     #[tokio::test]
     async fn transport_pins_dns_sends_fixed_agent_and_does_not_follow_or_store_cookies() {
