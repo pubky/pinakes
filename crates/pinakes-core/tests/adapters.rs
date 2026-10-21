@@ -3014,7 +3014,7 @@ async fn public_canary_redaction_unknown_size_and_disabled_nostr(pool: PgPool) {
         &pool,
         &m,
         1,
-        &Err(pinakes_core::resolver::egress::BodyTooLarge.into()),
+        &Err(pinakes_core::resolver::egress::BodyTooLarge { cap: 1024 * 1024 }.into()),
         3600,
     )
     .await
