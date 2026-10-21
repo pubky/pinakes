@@ -708,7 +708,7 @@ async fn events_stored_before_the_hint_are_read_at_once(pool: PgPool) {
             .await,
         );
     }
-    // As if they predate the migration: nothing marks them.
+    // As if nothing had marked them: the sweep finds them.
     sqlx::query("DELETE FROM same_event_dirty")
         .execute(&pool)
         .await

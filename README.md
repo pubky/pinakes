@@ -105,16 +105,16 @@ never commit real keys, tokens or passwords.
 
 ## Schema
 
-The schema is in `migrations/` (`0001_extensions.sql`, `0002_schema.sql` and the numbered
-changes after it);
-`pinakesd --config <path> --migrate` builds or migrates a database. A parser or routing change
-reaches stored documents through `pinakesd --config <path> reextract <route…|all>`.
+The schema is one file, `migrations/0001_schema.sql`; `pinakesd --config <path> --migrate`
+creates it on an empty database. Until the first deployment a schema change edits that file and
+local databases are recreated ([operations](docs/operations.md#database)). A parser or routing
+change reaches stored documents through `pinakesd --config <path> reextract <route…|all>`.
 
 ## Layout
 
 - `crates/pinakes-core`: schema access, the Nexus feed client, resolvers, the queue, grouping,
   the change journal and the API.
-- `crates/pinakesd`: the daemon: migrations, the two HTTP listeners, feed polling and workers.
+- `crates/pinakesd`: the daemon: the schema, the two HTTP listeners, feed polling and workers.
 - `data/`: the pinned schema.org vocabulary, oEmbed registry, event adapter manifests, wall
   markers, multi-tenant host rules, time zone tables and the API examples.
 - `e2e/`: the end-to-end harness and the read-only demo lookup.

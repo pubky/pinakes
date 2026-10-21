@@ -172,5 +172,5 @@ Pinakes ranks, Nexus hydrates. A filtered or sorted question goes to Pinakes; th
 | Planet Nominatim and Photon self-hosted for production; public instances only for small development runs, under slow limits | self-hosting removes the public-instance policies and the leak of queries and coordinates to third parties |
 | Three layers, modules compiled in | a runtime plugin system is what the spec ruled out of Nexus |
 | Fetch health (`status`) apart from an event's lifecycle (`event_status`, an occurrence's `occurrence.status`) | a cancelled event is still a healthy resource; one field cannot mean both |
-| Additive migrations; re-extraction an explicit command | every instance rebuilds from the Nexus feed in minutes; no code exists only to upgrade a database that can be rebuilt |
+| One schema file until the first deployment; re-extraction an explicit command | every instance rebuilds from the Nexus feed in minutes; no code exists only to upgrade a database that can be rebuilt |
 | Postgres with PostGIS, the caps and TTLs above, route and table names | **arbitrary** |
