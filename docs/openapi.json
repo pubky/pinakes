@@ -651,6 +651,11 @@
             "minimum": 0,
             "type": "integer"
           },
+          "collapse_refs_per_member": {
+            "description": "`collapse=group`: references counted per member to pick a group's row.",
+            "minimum": 0,
+            "type": "integer"
+          },
           "lookup": {
             "description": "IDs or URIs in one `POST /v1/resources/lookup`.",
             "minimum": 0,
@@ -677,6 +682,11 @@
           },
           "related_refs_per_tagger": {
             "description": "…at most this many of each tagger's references (their most recent)…",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "related_tag_sample": {
+            "description": "`related`: the taggers are drawn from the resource's most recent tags, at most this many.",
             "minimum": 0,
             "type": "integer"
           },
@@ -711,6 +721,8 @@
           "related_window_days",
           "related_refs_per_tagger",
           "related_min_shared",
+          "related_tag_sample",
+          "collapse_refs_per_member",
           "requests_per_minute",
           "previews_per_minute",
           "previews_per_uri_per_minute"

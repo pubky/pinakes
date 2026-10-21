@@ -430,10 +430,93 @@ async fn the_taggers_are_the_authors_of_the_seed_s_most_recent_tags(pool: PgPool
         rows(&related_with(&config, &pool, &seed, "").await),
         [new.clone(), old.clone()]
     );
-    // The three most recent tags are by 3, 4 and 3: two taggers, who relate the seed to `new`.
+    // A sample of the three most recent tags, by 3, 4 and 3: two taggers, who relate the seed
+    // to `new` only.
+    config.search.related_tag_sample = 3;
+    assert_eq!(
+        rows(&related_with(&config, &pool, &seed, "").await),
+        std::slice::from_ref(&new)
+    );
+    // Three taggers of the whole sample, those with the newest tags: 3, 4 and 2, so `old` has
+    // one shared tagger, below the floor.
+    config.search.related_tag_sample = 2000;
     config.search.related_taggers = 3;
     assert_eq!(
         rows(&related_with(&config, &pool, &seed, "").await),
         std::slice::from_ref(&new)
     );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_seed_with_many_replies_and_few_tags_samples_its_taggers(pool: PgPool) {
+    let seed = save(&pool, "https://example.org/seed", "MusicAlbum").await;
+    let recent = save(&pool, "https://example.org/recent", "MusicAlbum").await;
+    let older = save(&pool, "https://example.org/older", "MusicAlbum").await;
+    // 50,000 replies to the seed in the window, by as many authors, newer than its tags.
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) SELECT $1,rpad('z'||g,52,'x'),'reply',NULL,'/pub/pubky.app/posts/z'||g,now()-g*interval '1 second' FROM generate_series(1,50000) g")
+        .bind(&seed)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Five tags: 1 and 2 the oldest, who also tag `older`; 3, 4 and 5, who also tag `recent`.
+    for who in [1, 2, 3, 4, 5] {
+        tag(&pool, &seed, who, 10 - who as i64).await;
+    }
+    for who in [1, 2] {
+        tag(&pool, &older, who, 1).await;
+    }
+    for who in [3, 4, 5] {
+        tag(&pool, &recent, who, 1).await;
+    }
+    let mut config = Config::default();
+    assert_eq!(
+        rows(&related_with(&config, &pool, &seed, "").await),
+        [recent.clone(), older.clone()]
+    );
+    // The sample is of tags, never of replies: the three most recent tags are 5, 4 and 3's.
+    config.search.related_tag_sample = 3;
+    assert_eq!(
+        rows(&related_with(&config, &pool, &seed, "").await),
+        std::slice::from_ref(&recent)
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_collapsed_group_s_row_is_the_member_with_the_most_references_up_to_the_cap(
+    pool: PgPool,
+) {
+    // One group of two albums: `few` has 3 references, `many` 10 (the lower ID is `few`'s or
+    // `many`'s, whichever: ties are checked by it).
+    let few = save(&pool, "https://example.org/few", "MusicAlbum").await;
+    let many = save(&pool, "https://example.org/many", "MusicAlbum").await;
+    group(&pool, "0123456789abcdef0123456789abcdef", &[&few, &many]).await;
+    for who in 1..=3 {
+        tag(&pool, &few, who, 1).await;
+    }
+    for who in 1..=10 {
+        tag(&pool, &many, who, 1).await;
+    }
+    let mut config = Config::default();
+    let row = |config: Config| {
+        let pool = pool.clone();
+        async move {
+            let (status, v) =
+                get_with(&config, &pool, "/v1/search?tags=music&collapse=group").await;
+            assert_eq!(status, 200, "{v}");
+            let got = rows(&v);
+            assert_eq!(got.len(), 1, "{v}");
+            got[0].clone()
+        }
+    };
+    assert_eq!(row(config.clone()).await, many);
+    // Counted up to 5 each: `many` still has more.
+    config.search.collapse_refs_per_member = 5;
+    assert_eq!(row(config.clone()).await, many);
+    // Counted up to 2 each: a tie, broken by the lower ID.
+    config.search.collapse_refs_per_member = 2;
+    let lower = if few < many { &few } else { &many };
+    assert_eq!(row(config.clone()).await, *lower);
+    let (_, info) = get_with(&config, &pool, "/v1/info").await;
+    assert_eq!(info["limits"]["collapse_refs_per_member"], 2);
+    assert_eq!(info["limits"]["related_tag_sample"], 2000);
 }

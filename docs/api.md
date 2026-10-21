@@ -464,7 +464,8 @@ viewport.
 
 **Groups.** Without `collapse`, every member of a group is a row of its own, ranked on its own
 references. `collapse=group` filters first, then keeps one row per group: the matching member
-with the most references (ties by the lower ID), as its own card, ranked as itself. Facets count
+with the most references, counted up to `limits.collapse_refs_per_member` (10,000) each (ties
+by the lower ID), as its own card, ranked as itself. Facets count
 every matching link either way; clusters always count links, so `collapse` is refused with
 `cluster`.
 
@@ -492,11 +493,12 @@ person (`limits.related_min_shared`, 2).
   group's members' taggers, and the group's own members are never listed. With `collapse=group`,
   each row is one group, its members' taggers counted together; without it, each resource counts
   its own.
-- **Bounds.** The taggers sampled are the authors of the resource's most recent tags (of each
-  member's, in a group), at most `limits.related_taggers` (200), within
-  `limits.related_window_days` (365, or `window`). Of each, only their most recent `limits.related_refs_per_tagger` (1,000)
+- **Bounds.** The taggers are drawn from the resource's most recent `limits.related_tag_sample`
+  (2,000) tags (of each member's, in a group) within `limits.related_window_days` (365, or
+  `window`), those in reach; of their authors, the `limits.related_taggers` (200) with the newest
+  tag are sampled. Of each, only their most recent `limits.related_refs_per_tagger` (1,000)
   references within the same days count. With `collapse=group`, a group needs the shared taggers
-  of its members that pass the other filters, together. `/v1/info` gives all four.
+  of its members that pass the other filters, together. `/v1/info` gives every limit here.
 - Only the references Pinakes copies from Nexus's feed count: the resource's taggers, and any
   reference of theirs (a tag, a reply, an embed, a collection, an event). With `reach`, only the
   taggers within the viewer's reach.

@@ -574,6 +574,11 @@ pub struct SearchConfig {
     pub related_refs_per_tagger: usize,
     /// The shared taggers a related row needs (its group's, when collapsed).
     pub related_min_shared: usize,
+    /// The tags a related page reads per seed link (its most recent), from which the taggers
+    /// are sampled.
+    pub related_tag_sample: usize,
+    /// The references counted per group member when `collapse=group` picks a group's row.
+    pub collapse_refs_per_member: usize,
     pub max_radius_m: f64,
     pub h3_resolutions: Vec<u8>,
     pub max_cluster_cells: usize,
@@ -586,6 +591,8 @@ impl Default for SearchConfig {
             related_window_days: 365,
             related_refs_per_tagger: 1000,
             related_min_shared: 2,
+            related_tag_sample: 2000,
+            collapse_refs_per_member: 10_000,
             max_radius_m: 200_000.0,
             h3_resolutions: (0u8..=22).map(|z| z.saturating_sub(4).min(11)).collect(),
             max_cluster_cells: 10000,
@@ -922,6 +929,8 @@ impl Config {
             || !(1..=3650).contains(&self.search.related_window_days)
             || !(1..=100_000).contains(&self.search.related_refs_per_tagger)
             || !(1..=10_000).contains(&self.search.related_min_shared)
+            || !(1..=100_000).contains(&self.search.related_tag_sample)
+            || !(1..=1_000_000).contains(&self.search.collapse_refs_per_member)
             || !self.search.max_radius_m.is_finite()
             || !(1.0..=200_000.0).contains(&self.search.max_radius_m)
             || self.search.h3_resolutions.is_empty()
@@ -1458,6 +1467,10 @@ limits! {
     related_refs_per_tagger: usize = |c| c.search.related_refs_per_tagger => [|c, v| c.search.related_refs_per_tagger = v],
     /// Shared taggers a related row needs (its group's, when collapsed).
     related_min_shared: usize = |c| c.search.related_min_shared => [|c, v| c.search.related_min_shared = v],
+    /// Tags a related page reads per seed link (its most recent), from which the taggers are sampled.
+    related_tag_sample: usize = |c| c.search.related_tag_sample => [|c, v| c.search.related_tag_sample = v],
+    /// References counted per group member when `collapse=group` picks a group's row.
+    collapse_refs_per_member: usize = |c| c.search.collapse_refs_per_member => [|c, v| c.search.collapse_refs_per_member = v],
     /// Largest `near` radius (metres).
     max_radius_m: f64 = |c| c.search.max_radius_m => [|c, v| c.search.max_radius_m = v],
     /// H3 resolution per map zoom level.

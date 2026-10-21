@@ -147,6 +147,9 @@ CREATE INDEX reference_label_idx ON reference USING btree (label, resource_id);
 -- A resource's most recent references (`related` reads its tags in a window); serves every
 -- lookup by resource too.
 CREATE INDEX reference_resource_created_idx ON reference USING btree (resource_id, created_at);
+-- `related`'s taggers are the authors of a resource's most recent tags: an index of its
+-- tags alone, so a resource with many replies or embeds and few tags reads only tags.
+CREATE INDEX reference_resource_tag_idx ON reference USING btree (resource_id, created_at) WHERE kind = 'tag';
 CREATE INDEX reference_start_idx ON reference USING btree (start_at);
 
 -- References as they count: an alias's count for its root.

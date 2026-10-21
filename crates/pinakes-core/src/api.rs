@@ -1314,10 +1314,10 @@ pub async fn search(
     };
     let mut sql = QueryBuilder::<Postgres>::new("WITH ");
     if let Some(seed) = &related {
-        // The resource, or its whole group; the authors of the most recent tags in the window (in
-        // the same reach) on those not opted out and their aliases, read through the base table's
-        // index; and the most recent references each of them made elsewhere in the window, once
-        // per resource.
+        // The resource, or its whole group; a sample of the most recent tags in the window on
+        // those not opted out and their aliases, read through the tags-only index, and of the
+        // sample's authors in reach the ones with the newest tag; and the most recent references
+        // each of them made elsewhere in the window, once per resource.
         let search = &state.config.search;
         let since = at
             - if q.window.is_some() {
@@ -1332,11 +1332,12 @@ pub async fn search(
             .push(" AND group_id IS NOT NULL)), related_sources AS (SELECT s.resource_id FROM related_seed s JOIN resource d ON d.id=s.resource_id WHERE coalesce(d.doc->'attributes'->>'opted_out','')<>'true'), related_ids AS (SELECT resource_id FROM related_sources UNION SELECT alias_id FROM resource_alias WHERE root_id IN (SELECT resource_id FROM related_sources)), related_taggers AS (SELECT f.author,max(f.created_at) AS at FROM related_ids i CROSS JOIN LATERAL (SELECT f.author,f.created_at FROM reference f WHERE f.resource_id=i.resource_id AND f.kind='tag' AND f.created_at>=")
             .push_bind(since)
             .push(" AND f.created_at<=")
-            .push_bind(at);
+            .push_bind(at)
+            .push(" ORDER BY f.created_at DESC LIMIT ")
+            .push_bind(search.related_tag_sample as i64)
+            .push(") f WHERE true");
         scope(&mut sql, &q, &reach);
-        sql.push(" ORDER BY f.created_at DESC LIMIT ")
-            .push_bind(search.related_taggers as i64)
-            .push(") f GROUP BY f.author ORDER BY at DESC,f.author LIMIT ")
+        sql.push(" GROUP BY f.author ORDER BY at DESC,f.author LIMIT ")
             .push_bind(search.related_taggers as i64)
             .push("), related_refs AS (SELECT a.root AS resource_id,t.author,max(x.created_at) AS at FROM related_taggers t CROSS JOIN LATERAL (SELECT f.resource_id,f.created_at FROM reference f WHERE f.author=t.author AND f.created_at>=")
             .push_bind(since)
@@ -1529,8 +1530,14 @@ pub async fn search(
     if q.collapse.is_some() {
         // One row per group: the member with the most references (ties by ID), as itself.
         // The references are counted once, for the grouped rows only, through the base table's
-        // index (their IDs and their aliases'): the alias-resolving view would be read whole.
-        sql.push("), grouped AS (SELECT DISTINCT x.id FROM eligible x JOIN group_unit g ON g.unit_id=x.unit_id AND g.group_id IS NOT NULL), grouped_refs AS (SELECT coalesce(a.root_id,f.resource_id) AS resource_id,count(*) AS refs FROM reference f LEFT JOIN resource_alias a ON a.alias_id=f.resource_id WHERE f.resource_id IN (SELECT id FROM grouped UNION SELECT alias_id FROM resource_alias WHERE root_id IN (SELECT id FROM grouped)) GROUP BY 1), filtered AS (SELECT DISTINCT ON(coalesce(u.group_id,e.unit_id)) e.* FROM eligible e LEFT JOIN group_unit u ON u.unit_id=e.unit_id AND u.group_id IS NOT NULL LEFT JOIN grouped_refs c ON c.resource_id=e.id ORDER BY coalesce(u.group_id,e.unit_id),coalesce(c.refs,0) DESC,e.id,e.unit_id");
+        // index (their IDs and their aliases'), at most `collapse_refs_per_member` each: a popular
+        // member costs the cap, not its history.
+        let cap = state.config.search.collapse_refs_per_member as i64;
+        sql.push("), grouped AS (SELECT DISTINCT x.id FROM eligible x JOIN group_unit g ON g.unit_id=x.unit_id AND g.group_id IS NOT NULL), grouped_ids AS (SELECT id AS root,id AS base FROM grouped UNION ALL SELECT a.root_id,a.alias_id FROM resource_alias a WHERE a.root_id IN (SELECT id FROM grouped)), grouped_refs AS (SELECT gi.root AS resource_id,least(sum(c.n),")
+            .push_bind(cap)
+            .push(") AS refs FROM grouped_ids gi CROSS JOIN LATERAL (SELECT count(*) AS n FROM (SELECT 1 FROM reference f WHERE f.resource_id=gi.base LIMIT ")
+            .push_bind(cap)
+            .push(") x) c GROUP BY gi.root), filtered AS (SELECT DISTINCT ON(coalesce(u.group_id,e.unit_id)) e.* FROM eligible e LEFT JOIN group_unit u ON u.unit_id=e.unit_id AND u.group_id IS NOT NULL LEFT JOIN grouped_refs c ON c.resource_id=e.id ORDER BY coalesce(u.group_id,e.unit_id),coalesce(c.refs,0) DESC,e.id,e.unit_id");
     }
     if let Some(resolution) = spatial.resolution {
         sql.push("), cells AS (SELECT *, h3_latlng_to_cell(point(ST_X(point),ST_Y(point)),")
@@ -1922,6 +1929,10 @@ pub struct InfoLimits {
     pub related_refs_per_tagger: usize,
     /// …and a row needs at least this many shared taggers (its group's, when collapsed).
     pub related_min_shared: usize,
+    /// `related`: the taggers are drawn from the resource's most recent tags, at most this many.
+    pub related_tag_sample: usize,
+    /// `collapse=group`: references counted per member to pick a group's row.
+    pub collapse_refs_per_member: usize,
     /// Requests per minute per client address, every public route together.
     pub requests_per_minute: usize,
     /// `POST /v1/resolve` requests per minute per client address, and per URI.
@@ -1974,6 +1985,8 @@ pub async fn info(State(state): State<AppState>) -> Json<Info> {
             related_window_days: c.search.related_window_days,
             related_refs_per_tagger: c.search.related_refs_per_tagger,
             related_min_shared: c.search.related_min_shared,
+            related_tag_sample: c.search.related_tag_sample,
+            collapse_refs_per_member: c.search.collapse_refs_per_member,
             requests_per_minute: c.api.requests_per_minute,
             previews_per_minute: c.preview.requests_per_minute,
             previews_per_uri_per_minute: c.preview.uri_requests_per_minute,
