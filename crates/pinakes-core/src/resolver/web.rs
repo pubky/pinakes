@@ -412,7 +412,7 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
     let text = String::from_utf8_lossy(&fetched.body);
     if fetched.content_type.ends_with("json") {
         if let Ok(v) = serde_json::from_str::<Value>(&text) {
-            apply_jsonld(&mut out.doc, &v, &fetched.url, true);
+            apply_jsonld(&mut out.doc, &v, &fetched.url, true, true);
         }
         return out;
     }
@@ -458,8 +458,11 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
             entity_priority(v)
         }
     };
+    // Among equals, the script holding the page's own node (an event whose url is the page
+    // over another event the page lists).
+    let rank = |v: &Value| (subject(v), has_own_node(v, &fetched.url));
     if let Some(best) = (1..scripts.len()).fold((!scripts.is_empty()).then_some(0), |best, i| {
-        best.filter(|b| subject(&scripts[i].0) <= subject(&scripts[*b].0))
+        best.filter(|b| rank(&scripts[i].0) <= rank(&scripts[*b].0))
             .or(Some(i))
     }) {
         let (entity, head) = &scripts[best];
@@ -467,7 +470,7 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
             .filter_map(|u| origin_url(&fetched.url, u).and_then(|u| entity_identity(&u)))
             .collect::<Vec<_>>();
         let claims = *head || named.iter().any(|id| page.contains(id));
-        apply_jsonld(&mut out.doc, entity, &fetched.url, claims);
+        apply_jsonld(&mut out.doc, entity, &fetched.url, claims, *head);
         // A plugin's body Article can outrank the head's WebPage for the card; the head's
         // identity claims still apply.
         if !head {
@@ -915,30 +918,49 @@ fn jsonld_claims(doc: &mut ResourceMeta, v: &Value, base: &Url) -> bool {
     }
     true
 }
-/// `claims` gates identity-bearing fields (aliases from url/@id/sameAs, typed identifiers):
-/// they come only from an entity that is the page's own.
-fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url, claims: bool) {
+/// Whether `v` holds a node whose url (else @id) is the page (`event::page::owns_page`).
+fn has_own_node(v: &Value, base: &Url) -> bool {
     if let Some(values) = v.as_array() {
-        // A page's article/event outranks its publisher or breadcrumb helper nodes.
+        return values.iter().take(16).any(|v| has_own_node(v, base));
+    }
+    crate::event::page::owns_page(v, base)
+        || ["mainEntity", "@graph"]
+            .into_iter()
+            .filter_map(|k| v.get(k))
+            .any(|v| has_own_node(v, base))
+}
+/// `claims` gates identity-bearing fields (aliases from url/@id/sameAs, typed identifiers):
+/// they come only from an entity that is the page's own. `vouched`: a node naming no page is
+/// the page's own (a head script's, or the main entity of the page's own node); performers
+/// come from such a node or one naming the page itself, never through a sibling's claims.
+fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url, claims: bool, vouched: bool) {
+    if let Some(values) = v.as_array() {
+        // A page's article/event outranks its publisher or breadcrumb helper nodes, and among
+        // equals the page's own node (its url is the page) outranks another event it lists.
         // Extract one entity so unrelated graph nodes cannot donate misleading fields.
+        let rank = |v: &Value| (entity_priority(v), crate::event::page::owns_page(v, base));
         if let Some(mut best) = values.first() {
             for value in values.iter().skip(1) {
-                if entity_priority(value) > entity_priority(best) {
+                if rank(value) > rank(best) {
                     best = value;
                 }
             }
-            apply_jsonld(doc, best, base, claims);
+            apply_jsonld(doc, best, base, claims, vouched);
         }
         return;
     }
+    let own = match crate::event::page::names_page(v, base) {
+        Some(own) => own,
+        None => vouched,
+    };
     if let Some(v) = v.get("mainEntity") {
-        apply_jsonld(doc, v, base, claims);
+        apply_jsonld(doc, v, base, claims, own);
         if doc.source != "web" {
             return;
         }
     }
     if let Some(v) = v.get("@graph") {
-        apply_jsonld(doc, v, base, claims);
+        apply_jsonld(doc, v, base, claims, vouched);
         if doc.source != "web" {
             return;
         }
@@ -993,12 +1015,9 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url, claims: bool) {
             .or_insert_with(|| date.trim().into());
     }
     // An event's performers, as the page names them (the event service parses them too): from
-    // the page's own node only (its head script, or a node whose URL is the page), never from
-    // another event the page describes.
-    if doc.event.performers.is_empty()
-        && doc.type_path.iter().any(|t| t == "Event")
-        && (claims || crate::event::page::owns_page(v, base))
-    {
+    // the page's own node only (its url, else its @id, is the page; or it names none and is
+    // vouched for), never from another event the page describes, nor through a sibling.
+    if doc.event.performers.is_empty() && doc.type_path.iter().any(|t| t == "Event") && own {
         doc.event.performers = crate::event::page::performers(v, base);
     }
     for field in ["author", "creator"] {
@@ -1373,7 +1392,7 @@ mod tests {
             out.doc.event.performers
         );
         // The page's only event node is another event (a body script, its url not the page):
-        // the card takes it, but not its performers. (A head script counts as the page's own.)
+        // the card takes it, but not its performers.
         let body = r#"<html><head><title>Venue</title></head><body><p>Shows</p><script type="application/ld+json">{"@type":"MusicEvent","name":"Next week","url":"https://venue.example/next-week","startDate":"2027-05-10T19:30:00","performer":[{"@type":"MusicGroup","name":"Radiohead","sameAs":"https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711"}]}</script></body></html>"#;
         let fetched = crate::sources::fixture::page(
             "https://venue.example/tonight",
@@ -1388,6 +1407,78 @@ mod tests {
             "{:?}",
             out.doc.event.performers
         );
+    }
+    /// Performers come from a node that is the page's own by itself, never through a sibling:
+    /// in a body script's graph listing another event before the page's own, the page's own
+    /// is the card and nothing of the other's performers is.
+    #[test]
+    fn a_sibling_never_vouches_for_another_events_performers() {
+        let radiohead = r#"[{"@type":"MusicGroup","name":"Radiohead","sameAs":"https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711"}]"#;
+        let extract_body = |graph: String| {
+            let body = format!(
+                r#"<html><head><title>Venue</title></head><body><p>Shows</p><script type="application/ld+json">{{"@context":"https://schema.org","@graph":{graph}}}</script></body></html>"#
+            );
+            let fetched = crate::sources::fixture::page(
+                "https://venue.example/tonight",
+                "text/html",
+                body.into_bytes(),
+                None,
+            );
+            extract("https://venue.example/tonight", &fetched, 100).doc
+        };
+        let names = |doc: &ResourceMeta| -> Vec<String> {
+            doc.event
+                .performers
+                .iter()
+                .map(|p| p.name.clone())
+                .collect()
+        };
+        let next_week = format!(
+            r#"{{"@type":"MusicEvent","name":"Next week","url":"https://venue.example/next-week","startDate":"2027-05-10T19:30:00","performer":{radiohead}}}"#
+        );
+        // [B (another event, performers), A (the page's own, none)]: A is the card, no performers.
+        let doc = extract_body(format!(
+            r#"[{next_week},{{"@type":"MusicEvent","name":"Tonight","url":"https://venue.example/tonight","startDate":"2027-05-03T19:30:00"}}]"#
+        ));
+        assert_eq!(doc.name.as_deref(), Some("Tonight"));
+        assert!(names(&doc).is_empty(), "{:?}", names(&doc));
+        // A's own performers, when it names them.
+        let doc = extract_body(format!(
+            r#"[{next_week},{{"@type":"MusicEvent","name":"Tonight","url":"https://venue.example/tonight","startDate":"2027-05-03T19:30:00","performer":"Support"}}]"#
+        ));
+        assert_eq!(names(&doc), ["Support"]);
+        // [B, a page node naming the page]: B is the card (an event outranks a page node), and
+        // the page node's claim doesn't make B's performers the page's.
+        let doc = extract_body(format!(
+            r#"[{next_week},{{"@type":"WebPage","url":"https://venue.example/tonight"}}]"#
+        ));
+        assert_eq!(doc.name.as_deref(), Some("Next week"));
+        assert!(names(&doc).is_empty(), "{:?}", names(&doc));
+        // A page node naming the page beside an event naming none vouches for nothing in a
+        // body script; the event as the page node's main entity is the page's.
+        let anonymous = format!(
+            r#"{{"@type":"MusicEvent","name":"Tonight","startDate":"2027-05-03T19:30:00","performer":{radiohead}}}"#
+        );
+        let doc = extract_body(format!(
+            r#"[{{"@type":"WebPage","url":"https://venue.example/tonight"}},{anonymous}]"#
+        ));
+        assert!(names(&doc).is_empty(), "{:?}", names(&doc));
+        let doc = extract_body(format!(
+            r#"[{{"@type":"WebPage","url":"https://venue.example/tonight","mainEntity":{anonymous}}}]"#
+        ));
+        assert_eq!(names(&doc), ["Radiohead"]);
+        // A head script's event naming no page is the page's.
+        let body = format!(
+            r#"<html><head><title>Venue</title><script type="application/ld+json">{anonymous}</script></head><body></body></html>"#
+        );
+        let fetched = crate::sources::fixture::page(
+            "https://venue.example/tonight",
+            "text/html",
+            body.into_bytes(),
+            None,
+        );
+        let doc = extract("https://venue.example/tonight", &fetched, 100).doc;
+        assert_eq!(names(&doc), ["Radiohead"]);
     }
     #[test]
     fn extraction_precedence_and_promoted_facets() {
@@ -1708,6 +1799,7 @@ mod tests {
                 {"@type":"BreadcrumbList","name":"Home"}
             ]}),
             &Url::parse("https://example.org/story").unwrap(),
+            true,
             true,
         );
         assert_eq!(doc.type_name, "NewsArticle");

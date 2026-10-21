@@ -38,13 +38,9 @@ fn fill<T>(dst: &mut Option<T>, src: Option<T>) {
         *dst = src;
     }
 }
-pub fn event_node(v: &Value) -> Option<&Value> {
-    if let Some(values) = v.as_array() {
-        return values.iter().find_map(event_node);
-    }
+fn is_event(v: &Value) -> bool {
     let kind = &v["@type"];
-    if kind
-        .as_str()
+    kind.as_str()
         .into_iter()
         .chain(
             kind.as_array()
@@ -53,13 +49,6 @@ pub fn event_node(v: &Value) -> Option<&Value> {
                 .filter_map(Value::as_str),
         )
         .any(|s| crate::model::type_path(s).iter().any(|s| s == "Event"))
-    {
-        return Some(v);
-    }
-    ["@graph", "mainEntity"]
-        .iter()
-        .filter_map(|k| v.get(k))
-        .find_map(event_node)
 }
 /// Repair raw control characters in strings and trailing commas only, without evaluating JS.
 pub fn lenient_json(text: &str) -> Option<Value> {
@@ -100,8 +89,31 @@ pub fn lenient_json(text: &str) -> Option<Value> {
     }
     serde_json::from_str(&out).ok()
 }
+/// Every event node in `v`, in document order (an event's own nested entities aside).
+fn event_nodes<'a>(v: &'a Value, out: &mut Vec<&'a Value>) {
+    if let Some(values) = v.as_array() {
+        values.iter().for_each(|v| event_nodes(v, out));
+    } else if is_event(v) {
+        out.push(v);
+    } else {
+        ["@graph", "mainEntity"]
+            .iter()
+            .filter_map(|k| v.get(k))
+            .for_each(|v| event_nodes(v, out));
+    }
+}
 pub fn jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url) {
-    let Some(v) = event_node(v) else { return };
+    // The page's own event (its url is the page) over another the page lists, else the first.
+    let mut nodes = vec![];
+    event_nodes(v, &mut nodes);
+    let Some(v) = nodes
+        .iter()
+        .find(|n| owns_page(n, base))
+        .or(nodes.first())
+        .copied()
+    else {
+        return;
+    };
     let kind = v["@type"]
         .as_str()
         .or_else(|| {
@@ -565,6 +577,15 @@ mod performer_tests {
         jsonld(&mut doc, &own, &base);
         assert_eq!(doc.event.performers.len(), 1);
         assert_eq!(doc.event.performers[0].name, "Radiohead");
+        // Listed after another event, the page's own is the one read.
+        let mut doc = ResourceMeta::new(base.as_str(), "web", 3600);
+        jsonld(
+            &mut doc,
+            &serde_json::json!({"@graph": [other, own]}),
+            &base,
+        );
+        assert_eq!(doc.name.as_deref(), Some("Radiohead @ RAC Arena"));
+        assert_eq!(doc.event.performers.len(), 1);
     }
     /// An explicit `url` decides whose event a node is: a local `@id` resolves to the page it
     /// sits on, whichever event it names.

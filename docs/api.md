@@ -916,9 +916,11 @@ fact `performer_mbid`; a performer without one keeps its first such link as the 
 `performer_link`. A name alone is never a
 key, and nothing is searched by name; a performer without a MusicBrainz identity (a service link
 MusicBrainz doesn't relate, or a name alone) is facts only, found by text search, not by `key=`.
-Performers are read from the page's own event node only (the one whose `url` names the page,
-tracking parameters aside, or the head script), never from another event the page describes; a
-page keeps up to 16 performers with 8 links each, within 2 KB. Events [group](#groups) only with events, so the key never
+Performers are read from the page's own event node only: one whose `url` (else its `@id`) names
+the page, tracking parameters and fragments aside, or one naming no page in a head script or as
+the main entity of the page's own node; never from another event the page describes, and never
+because a sibling node names the page (a body script's event naming no page gives none). Among
+events the page's own is read first. A page keeps up to 16 performers with 8 links each, within 2 KB. Events [group](#groups) only with events, so the key never
 joins a concert to the artist's pages; it makes the concert the artist's event:
 `GET /v1/search?key=mbid:{artist}&type=MusicEvent&from=now&sort=start` lists an artist's upcoming
 concerts, soonest first.
