@@ -145,7 +145,7 @@ pub struct Validators {
     pub etag: Option<String>,
     pub last_modified: Option<String>,
 }
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct FetchOptions {
     /// Extra request headers, by literal name.
     pub headers: Vec<(&'static str, String)>,
@@ -166,6 +166,48 @@ pub struct FetchOptions {
     /// (`pkarr_relays::PAYLOAD_TYPES`).
     pub extra_types: &'static [&'static str],
     pub validators: Validators,
+}
+impl std::fmt::Debug for FetchOptions {
+    /// A sensitive request's header and form values are its credentials: never printed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redact = |values: &[(&'static str, String)]| -> Vec<(&'static str, String)> {
+            values
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        *k,
+                        if self.sensitive {
+                            "[REDACTED]".to_owned()
+                        } else {
+                            v.clone()
+                        },
+                    )
+                })
+                .collect()
+        };
+        f.debug_struct("FetchOptions")
+            .field("headers", &redact(&self.headers))
+            .field("json_body", &self.json_body)
+            .field("form_body", &self.form_body.as_deref().map(redact))
+            .field("sensitive", &self.sensitive)
+            .field("accept", &self.accept)
+            .field("user_agent", &self.user_agent)
+            .field("feed_cap", &self.feed_cap)
+            .field("body_cap", &self.body_cap)
+            .field("feed_hint", &self.feed_hint)
+            .field("extra_types", &self.extra_types)
+            .field("validators", &self.validators)
+            .finish()
+    }
+}
+impl FetchOptions {
+    /// A request has one body: JSON or a form, never both.
+    fn one_body(&self) -> Result<()> {
+        if self.json_body.is_some() && self.form_body.is_some() {
+            return Err(refused("a request has one body: JSON or a form"));
+        }
+        Ok(())
+    }
 }
 /// A refusal by the egress policy, classed `policy`: not broken content, and not transient.
 fn refused(message: &'static str) -> anyhow::Error {
@@ -510,6 +552,7 @@ impl Egress {
             .context("web resolution exceeded 10 seconds")?
     }
     pub async fn fetch_with(&self, uri: &str, options: &FetchOptions) -> Result<Fetched> {
+        options.one_body()?;
         let result = tokio::time::timeout(
             Duration::from_secs(10),
             self.fetch_options_inner(uri, options),
@@ -556,6 +599,7 @@ impl Egress {
         .await
     }
     fn discovery_key(uri: &str, options: &FetchOptions) -> Result<String> {
+        options.one_body()?;
         let mut url = Url::parse(uri)?;
         url.set_fragment(None);
         let mut key = url.to_string();
@@ -1775,6 +1819,33 @@ mod tests {
             assert!(egress.fetch(uri).await.is_err(), "{uri}");
         }
         assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+    }
+    #[test]
+    fn a_sensitive_request_s_debug_hides_its_credentials_and_two_bodies_are_refused() {
+        let options = FetchOptions {
+            headers: vec![("authorization", "Bearer SECRETTOKEN".into())],
+            form_body: Some(vec![("client_secret", "SECRETPAIR".into())]),
+            sensitive: true,
+            ..Default::default()
+        };
+        let shown = format!("{options:?}");
+        assert!(!shown.contains("SECRET"), "{shown}");
+        assert!(
+            shown.contains("authorization") && shown.contains("client_secret"),
+            "{shown}"
+        );
+        let plain = FetchOptions {
+            headers: vec![("x-request-id", "abc".into())],
+            ..Default::default()
+        };
+        assert!(format!("{plain:?}").contains("abc"));
+        let both = FetchOptions {
+            json_body: Some(serde_json::json!({})),
+            form_body: Some(vec![]),
+            ..Default::default()
+        };
+        let error = Egress::discovery_key("https://example.org/", &both).unwrap_err();
+        assert_eq!(super::super::error_class(&error), "policy");
     }
     #[tokio::test]
     async fn a_form_body_is_posted_form_encoded() {

@@ -475,7 +475,7 @@ The also-on worker runs every enabled source that applies to a resource ([the AP
 after a save that changed its document or status, and again when the shortest lifetime among
 them has passed. Its queue is `also_on_dirty`; `limits.also_on_concurrency` (2) resources run at
 once, and a failed run keeps the previous rows and retries after `limits.also_on_retry_secs`
-(300 s), doubling up to an hour. Each run replaces its source's rows (`resource_key`,
+(300 s), doubling up to an hour, or after the wait a service asked for when that is longer. Each run replaces its source's rows (`resource_key`,
 `derived_link`, `resource_fact`); rows live twice the source's lifetime and the hourly maintenance deletes the
 expired ones (a deleted key regroups its resource). A source keeps at most
 `limits.also_on_links_per_source` (32) links, `limits.also_on_keys_per_source` (16) keys and
@@ -518,19 +518,26 @@ label. `deezer` is off by default: Deezer's API terms allow
 non-commercial use only, so turn it on
 (`[also_on.sources.deezer] enabled = true`) only where they do; it costs one request per Deezer
 link and up to two per other track or album with an ISRC or barcode. `tidal` costs a token
-request every four hours, and per TIDAL album or track one request, or a share of one: a batch
+request when its token expires (TIDAL's `expires_in`, four hours today), and per TIDAL album or
+track one request, or a share of one: a batch
 of links asks for up to 20 albums or 20 tracks at once (`filter[id]`); a track's ISRC also asks
 MusicBrainz whether several recordings have it (usually cached from `service`).
 
 TIDAL is asked only with a TIDAL developer app's client ID and secret (developer.tidal.com):
-`PINAKES_TIDAL_CLIENT_ID` and `PINAKES_TIDAL_CLIENT_SECRET` (one underscore: a build without the
-source ignores them), or `[tidal] client_id` and `client_secret`. Without both the `tidal` source
-does not run. `[tidal] country` (`US`, two upper-case letters) is the country whose catalogue is
-read. The pair and the token never appear in logs, the operator info or errors. Refused
-credentials are logged (`TIDAL refused the client credentials`) and counted in
-`pinakes_also_on_service_errors_total{service="tidal",class="refused"}`; the TIDAL links read
-meanwhile keep what TIDAL gave them before and retry later (`tidal_auth`, backing off to hourly),
-and TIDAL is asked again after five minutes. A rate limit or an outage retries later too.
+`PINAKES_TIDAL_CLIENT_ID` and `PINAKES_TIDAL_CLIENT_SECRET`, the recommended form (one
+underscore: a build without the source ignores them, where `PINAKES__TIDAL__CLIENT_ID` stops it),
+or `[tidal] client_id` and `client_secret`. Without both the `tidal` source does not run;
+credentials removed later leave the rows it stored until they expire, as `enabled = false` does.
+`[tidal] country` (`US`, two upper-case letters) is the country whose catalogue is read. The pair
+and the token never appear in logs, the operator info, errors or debug output. Refused
+credentials (the token endpoint refuses them, the API answers 403, or it rejects a token under a
+minute old) are logged (`TIDAL refused the client credentials`) and counted in
+`pinakes_also_on_service_errors_total{service="tidal"}` (class `refused`, `forbidden` or
+`rejected`); the TIDAL links read meanwhile keep what TIDAL gave them before and retry later
+(`tidal_auth`, backing off to hourly), and TIDAL is asked again after five minutes. A rate limit
+or an outage (429, 5xx) is waited out: no TIDAL request, batched or single, before the time it
+asked for (`Retry-After`, a minute to an hour) has passed, and the links retry after it
+(`tidal_busy`).
 
 Podcast Index is asked only with a key and secret: `[podcast_index] key` and `secret`, or
 `PINAKES__PODCAST_INDEX__KEY` and `PINAKES__PODCAST_INDEX__SECRET` (free from

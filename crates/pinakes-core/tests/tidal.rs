@@ -38,11 +38,19 @@ fn album(id: &str) -> Option<Vec<u8>> {
     Some(serde_json::to_vec(&serde_json::json!({ "data": item })).unwrap())
 }
 
+/// What TIDAL answers instead of the recordings: a refusal of the credentials at the token
+/// endpoint, a status for a batch, a status for a single item (with a `Retry-After` of an hour).
+#[derive(Clone, Default)]
+struct Answers {
+    refuse: bool,
+    batch_status: Option<u16>,
+    item_status: Option<u16>,
+}
 /// Answers TIDAL (its token and API), MusicBrainz's ISRC lookup, iTunes and Deezer from the
-/// recordings; records each request, and refuses the credentials when `refuse`.
+/// recordings, or as `answers` says; records each request.
 struct Recorded {
     seen: Mutex<Vec<String>>,
-    refuse: bool,
+    answers: Answers,
 }
 #[async_trait::async_trait]
 impl Transport for Recorded {
@@ -72,7 +80,7 @@ impl Transport for Recorded {
             validators: Default::default(),
             url: url.clone(),
             status,
-            retry_after_secs: 120,
+            retry_after_secs: if status == 429 { 3600 } else { 120 },
             location: None,
             content_type: content_type.into(),
             body,
@@ -86,7 +94,7 @@ impl Transport for Recorded {
                 );
                 let basic = header("authorization").unwrap();
                 assert!(basic.starts_with("Basic "), "{basic}");
-                if self.refuse {
+                if self.answers.refuse {
                     json(
                         401,
                         br#"{"error":"invalid_client"}"#.to_vec(),
@@ -113,6 +121,17 @@ impl Transport for Recorded {
                     .filter(|(k, _)| k == "filter[id]")
                     .map(|(_, v)| v.into_owned())
                     .collect();
+                let told = match path {
+                    "/v2/albums" | "/v2/tracks" => self.answers.batch_status,
+                    _ => self.answers.item_status,
+                };
+                if let Some(status) = told {
+                    return Ok(json(
+                        status,
+                        br#"{"errors":[{"code":"TOLD"}]}"#.to_vec(),
+                        "application/vnd.api+json",
+                    ));
+                }
                 let body = match path {
                     "/v2/albums" if filters == ["199574241", "495402659"] => {
                         Some(fixture("tidal-albums-199574241-495402659.json"))
@@ -210,10 +229,10 @@ async fn save(pool: &sqlx::PgPool, uri: &str, kind: &str) -> String {
     id
 }
 /// Every resource's sources, once; the requests made.
-async fn run(pool: &sqlx::PgPool, config: Config, refuse: bool) -> Vec<String> {
+async fn run(pool: &sqlx::PgPool, config: Config, answers: Answers) -> Vec<String> {
     let t = Arc::new(Recorded {
         seen: Mutex::default(),
-        refuse,
+        answers,
     });
     let cx = also_on::Context {
         egress: Egress::with_backends(EgressConfig::default(), Arc::new(PublicDns), t.clone()),
@@ -249,7 +268,12 @@ async fn a_tidal_barcode_joins_apple_music_and_deezer(pool: sqlx::PgPool) {
         "MusicAlbum",
     )
     .await;
-    let seen = run(&pool, config(Some(("hydra-id", "hydra-secret"))), false).await;
+    let seen = run(
+        &pool,
+        config(Some(("hydra-id", "hydra-secret"))),
+        Answers::default(),
+    )
+    .await;
     let tidal: Vec<&String> = seen
         .iter()
         .filter(|s| s.starts_with("openapi.tidal.com") || s.starts_with("auth.tidal.com"))
@@ -295,7 +319,7 @@ async fn a_tidal_barcode_joins_apple_music_and_deezer(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn without_credentials_nothing_asks_tidal(pool: sqlx::PgPool) {
     let hydra = save(&pool, "https://tidal.com/album/199574241", "MusicAlbum").await;
-    let seen = run(&pool, config(None), false).await;
+    let seen = run(&pool, config(None), Answers::default()).await;
     assert!(!seen.iter().any(|s| s.contains("tidal.com")), "{seen:?}");
     assert!(rows(&pool, KEYS, &hydra).await.is_empty());
 }
@@ -304,11 +328,20 @@ async fn without_credentials_nothing_asks_tidal(pool: sqlx::PgPool) {
 async fn refused_credentials_keep_what_tidal_gave_and_retry_later(pool: sqlx::PgPool) {
     let hydra = save(&pool, "https://tidal.com/album/199574241", "MusicAlbum").await;
     // A first run with credentials TIDAL accepts.
-    run(&pool, config(Some(("first-id", "first-secret"))), false).await;
+    run(
+        &pool,
+        config(Some(("first-id", "first-secret"))),
+        Answers::default(),
+    )
+    .await;
     assert_eq!(rows(&pool, KEYS, &hydra).await, ["upc:4018939306052 tidal"]);
     // Then TIDAL refuses them: one token request, no API request, the key kept, a retry queued.
     let refused = config(Some(("refused-id", "refused-secret")));
-    let seen = run(&pool, refused.clone(), true).await;
+    let refuse = Answers {
+        refuse: true,
+        ..Default::default()
+    };
+    let seen = run(&pool, refused.clone(), refuse.clone()).await;
     assert_eq!(
         seen.iter()
             .filter(|s| s.contains("tidal.com"))
@@ -325,6 +358,75 @@ async fn refused_credentials_keep_what_tidal_gave_and_retry_later(pool: sqlx::Pg
             .unwrap();
     assert_eq!(queued.as_deref(), Some("tidal_auth"));
     // The refusal is kept five minutes: the retry asks TIDAL nothing.
-    let seen = run(&pool, refused, true).await;
+    let seen = run(&pool, refused, refuse).await;
+    assert!(!seen.iter().any(|s| s.contains("tidal.com")), "{seen:?}");
+}
+
+/// The time a reference is due again, in seconds from now, with its error.
+async fn due(pool: &sqlx::PgPool, id: &str) -> (Option<String>, f64) {
+    sqlx::query_as("SELECT last_error, extract(epoch FROM next_attempt_at-now())::float8 FROM also_on_dirty WHERE resource_id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_busy_batch_holds_the_single_requests_for_the_time_tidal_asked(pool: sqlx::PgPool) {
+    let hydra = save(&pool, "https://tidal.com/album/199574241", "MusicAlbum").await;
+    let dracula = save(&pool, "https://tidal.com/album/495402659", "MusicAlbum").await;
+    let config = config(Some(("busy-id", "busy-secret")));
+    let busy = Answers {
+        batch_status: Some(429),
+        ..Default::default()
+    };
+    // The batch answers 429 with `Retry-After: 3600`: no album asks alone.
+    let seen = run(&pool, config.clone(), busy.clone()).await;
+    let tidal: Vec<&String> = seen.iter().filter(|s| s.contains("tidal.com")).collect();
+    assert_eq!(
+        tidal,
+        [
+            "auth.tidal.com/v1/oauth2/token?",
+            "openapi.tidal.com/v2/albums?countryCode=US&filter%5Bid%5D=199574241&filter%5Bid%5D=495402659",
+        ],
+        "{seen:?}"
+    );
+    // Each album retries after the hour TIDAL asked for, not the source's five minutes.
+    for id in [&hydra, &dracula] {
+        let (error, seconds) = due(&pool, id).await;
+        assert_eq!(error.as_deref(), Some("tidal_busy"));
+        assert!((3500.0..=3600.0).contains(&seconds), "{seconds}");
+        assert!(rows(&pool, KEYS, id).await.is_empty());
+    }
+    // Due again at once (a restart): still within the hour, nothing asks TIDAL.
+    let seen = run(&pool, config, busy).await;
+    assert!(!seen.iter().any(|s| s.contains("tidal.com")), "{seen:?}");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_forbidden_answer_is_a_refusal_of_the_credentials(pool: sqlx::PgPool) {
+    let hydra = save(&pool, "https://tidal.com/album/199574241", "MusicAlbum").await;
+    let config = config(Some(("forbidden-id", "forbidden-secret")));
+    let forbidden = Answers {
+        item_status: Some(403),
+        ..Default::default()
+    };
+    let seen = run(&pool, config.clone(), forbidden.clone()).await;
+    assert_eq!(
+        seen.iter()
+            .filter(|s| s.contains("tidal.com"))
+            .collect::<Vec<_>>(),
+        [
+            "auth.tidal.com/v1/oauth2/token?",
+            "openapi.tidal.com/v2/albums/199574241?countryCode=US",
+        ],
+        "{seen:?}"
+    );
+    let (error, seconds) = due(&pool, &hydra).await;
+    assert_eq!(error.as_deref(), Some("tidal_auth"));
+    assert!(seconds > 3000.0, "{seconds}");
+    assert!(rows(&pool, KEYS, &hydra).await.is_empty());
+    // Within the five minutes the refusal holds, nothing asks TIDAL, not even for a token.
+    let seen = run(&pool, config, forbidden).await;
     assert!(!seen.iter().any(|s| s.contains("tidal.com")), "{seen:?}");
 }

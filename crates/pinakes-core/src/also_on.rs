@@ -573,8 +573,12 @@ pub async fn drain(
             }
             Err(error) => {
                 tracing::warn!(resource=%id, error=%format!("{error:#}"), "also-on lookup will retry");
-                sqlx::query("UPDATE also_on_dirty SET attempts=attempts+1,last_error=$2,next_attempt_at=now()+make_interval(secs => least($3::float8*power(2,least(attempts,6)),3600)) WHERE resource_id=$1")
-                    .bind(&id).bind(crate::resolver::error_class(&error)).bind(cfg.retry_secs as f64).execute(pool).await?;
+                // A service that said how long to wait is waited for at least that long.
+                let asked = error
+                    .downcast_ref::<crate::resolver::RetryLater>()
+                    .map_or(0, |r| r.seconds.min(86_400)) as f64;
+                sqlx::query("UPDATE also_on_dirty SET attempts=attempts+1,last_error=$2,next_attempt_at=now()+make_interval(secs => greatest($4::float8,least($3::float8*power(2,least(attempts,6)),3600))) WHERE resource_id=$1")
+                    .bind(&id).bind(crate::resolver::error_class(&error)).bind(cfg.retry_secs as f64).bind(asked).execute(pool).await?;
             }
         }
     }
