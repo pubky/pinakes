@@ -167,7 +167,10 @@ redirects count). `egress.allow_hosts` and `egress.deny_hosts` take exact names 
 decoded body; an oversized page keeps its head metadata with a `truncated` warning. An RSS or
 Atom feed read without a calendar's feed cap is cut there too (a long show's feed is 2–5 MB):
 its channel and newest items come first, and its card reads up to the last whole item. Wikidata
-entity reads may take 8 MB, since a much-edited item carries megabytes of claims. Requests
+entity reads may take 8 MB, since a much-edited item carries megabytes of claims, and so may
+MusicBrainz answers (an artist or release with very many links). An answer over even that is
+refused, never cut, and remembered as such for five minutes: a MusicBrainz page's sources then
+record nothing (they don't retry it), and its card is read from the page. Requests
 time out after ten seconds. Images stay origin URLs and are never fetched.
 
 Every request introduces itself as `pinakes/<version> (+https://pubky.app; <contact>)`, with

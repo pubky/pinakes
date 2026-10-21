@@ -530,7 +530,8 @@ pub struct Card {
     /// Plain text, entity-decoded: escape it before rendering it as HTML.
     pub description: Option<String>,
     pub image: Option<String>,
-    /// The publishing site: the host, or the app for `pubky://` objects (e.g. `mapky.app`).
+    /// The publishing site: the host, the app for `pubky://` objects (e.g. `mapky.app`), or the
+    /// service a link's URL names (`Apple Music`, `Wikipedia (de)`, `MusicBrainz`, `Wikidata`).
     /// Plain text, like every text field.
     pub site: Option<String>,
     pub point: Option<model::Point>,
