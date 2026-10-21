@@ -516,9 +516,9 @@ impl PerformersSource {
         }
         // Then MusicBrainz: every performer's links in one request, and only that one (a link
         // its answer leaves out is unknown this run). A failed request fails the run, a busy
-        // MusicBrainz's included: the previous rows stay and it retries in minutes (recording
-        // what was found would replace the rows without the busy performers' keys until the
-        // next run, a month away). An answer over its cap is no answer.
+        // MusicBrainz's or an answer over its cap included: the previous rows stay and it
+        // retries later (recording what was found would replace the rows without those
+        // performers' keys until the next run, a month away).
         let all: Vec<String> = performers
             .iter()
             .flat_map(|(_, links)| links)
@@ -539,7 +539,6 @@ impl PerformersSource {
                 .zip(answers)
                 .filter_map(|(link, t)| Some((link, t?)))
                 .collect(),
-            Err(e) if crate::resolver::egress::over_cap(&e) => Default::default(),
             Err(e) => return Err(e),
         };
         for (claimed, links) in performers {

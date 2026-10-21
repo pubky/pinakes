@@ -147,6 +147,10 @@ impl Transport for Recorded {
                     .map(|(_, r)| r.into_owned())
                     .collect();
                 let has = |n: &str| resources.iter().any(|r| r.ends_with(n));
+                // 444444's batch answer is over its read's cap.
+                if has("/444444") {
+                    return Err(pinakes_core::resolver::egress::BodyTooLarge { cap: 1 }.into());
+                }
                 if has("/777777") || resources.iter().any(|r| mb_url(r).0 == 503) {
                     (503, fixture("mb-503.json"))
                 } else {
@@ -1152,6 +1156,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     let concert = "https://www.songkick.com/concerts/43402127-radiohead-at-rac-arena";
     let vouched = "https://www.songkick.com/concerts/1-vouched-beside-a-busy-lookup";
     let hostile = "https://evil.example/gig";
+    let over_cap = "https://www.songkick.com/concerts/7-over-cap";
     let busy = "https://www.songkick.com/concerts/2-busy-lookup-alone";
     let lineup = "https://www.songkick.com/concerts/3-three-acts";
     let festival = "https://www.songkick.com/concerts/4-one-keyed-one-busy";
@@ -1170,6 +1175,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         (concert, "MusicEvent"),
         (vouched, "MusicEvent"),
         (hostile, "MusicEvent"),
+        (over_cap, "MusicEvent"),
         (busy, "MusicEvent"),
         (lineup, "MusicEvent"),
         (festival, "MusicEvent"),
@@ -1247,6 +1253,17 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
                 .map(|(name, links)| pinakes_core::event::Performer {
                     name: name.into(),
                     links: links.into_iter().map(str::to_owned).collect(),
+                })
+                .collect();
+        }
+        if uri == over_cap {
+            // Two acts whose batched answer is over its cap.
+            d.start = Some("2027-06-03T20:00:00Z".parse().unwrap());
+            d.event.performers = ["253846-radiohead", "444444-huge"]
+                .into_iter()
+                .map(|slug| pinakes_core::event::Performer {
+                    name: slug.to_owned(),
+                    links: vec![format!("https://www.songkick.com/artists/{slug}")],
                 })
                 .collect();
         }
@@ -1447,6 +1464,16 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     );
     assert!(rows(retrying, ids[hostile].clone()).await.is_empty());
     assert!(rows(any_key, ids[vouched].clone()).await.is_empty());
+    // An answer over its cap fails the run as any failed request does: nothing is recorded (the
+    // previous rows would stay) and the run retries later.
+    assert!(rows(any_key, ids[over_cap].clone()).await.is_empty());
+    assert!(rows(
+        "SELECT name FROM resource_fact WHERE resource_id=$1",
+        ids[over_cap].clone()
+    )
+    .await
+    .is_empty());
+    assert!(!rows(retrying, ids[over_cap].clone()).await.is_empty());
     assert!(
         rows(retrying, ids[vouched].clone())
             .await
