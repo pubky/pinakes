@@ -908,15 +908,16 @@ ISRC's page is its one recording's card, else named `ISRC {code}`.
 
 **Performers.** `performers`: an event page (`MusicEvent`, or any event) that names its performers
 in its own structured data (schema.org `performer`) has each performer's name as the fact
-`performer`, and the artist's identity as the key `mb:artist:…` when MusicBrainz relates one of the
-page's links for the performer (`url`, `sameAs`: an artist's page on a music service, Songkick or
-Bandsintown, in the spelling MusicBrainz stores, Songkick and Bandsintown artists by number) to
-exactly one artist; that MBID is also the fact `performer_mbid`. A MusicBrainz artist page among
-those links is the page's own claim: any page can name any artist's page, so it is never a key,
-only the fact `performer_mbid` when MusicBrainz names no artist. A performer without either keeps
-its first link as the fact `performer_link`. A name alone is never a key, and nothing is searched
-by name; a performer without an identity from MusicBrainz is facts only (`details.facts`), not
-found by `key=`.
+`performer`. The artist's identity is the key `mb:artist:…` only where the page speaks for the
+service of a link it gives for the performer (`url`, `sameAs`): a Songkick concert naming a
+Songkick artist page, a Bandsintown event naming a Bandsintown artist page, a music service's own
+event page naming that service's artist page, when MusicBrainz relates the link (in the spelling
+MusicBrainz stores: Songkick and Bandsintown artists by number) to exactly one artist; that MBID is
+also the fact `performer_mbid`. Any other page chose the identity it names, so it is a fact at
+most: the artist MusicBrainz relates one of its links to, else a MusicBrainz artist page it names,
+is the fact `performer_mbid`, never a key. A performer without either keeps its first link as the
+fact `performer_link`. A name alone is never a key, and nothing is searched by name; a performer
+the page does not key is facts only (`details.facts`), not found by `key=`.
 Text search (`q=`) matches an event's name and description, not its performers: an act the page
 names only in `performer` (a festival's support act) is not found by it.
 Performers are read from the page's own event node only: one whose `url` (else its `@id`) names

@@ -1156,6 +1156,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     let concert = "https://www.songkick.com/concerts/43402127-radiohead-at-rac-arena";
     let vouched = "https://www.songkick.com/concerts/1-vouched-beside-a-busy-lookup";
     let hostile = "https://evil.example/gig";
+    let elsewhere = "https://www.bandsintown.com/e/1-radiohead-somewhere";
     let over_cap = "https://www.songkick.com/concerts/7-over-cap";
     let busy = "https://www.songkick.com/concerts/2-busy-lookup-alone";
     let lineup = "https://www.songkick.com/concerts/3-three-acts";
@@ -1175,6 +1176,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         (concert, "MusicEvent"),
         (vouched, "MusicEvent"),
         (hostile, "MusicEvent"),
+        (elsewhere, "MusicEvent"),
         (over_cap, "MusicEvent"),
         (busy, "MusicEvent"),
         (lineup, "MusicEvent"),
@@ -1267,14 +1269,19 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
                 })
                 .collect();
         }
-        if uri == hostile {
-            // Any page can name any artist's MusicBrainz page for its performer.
+        if uri == hostile || uri == elsewhere {
+            // Any page can name any artist's pages for its performer: hostile its Songkick and
+            // MusicBrainz pages, elsewhere (a Bandsintown event) its Songkick page.
             d.start = Some("2027-06-02T20:00:00Z".parse().unwrap());
+            let mut links = vec!["https://www.songkick.com/artists/253846-radiohead".to_owned()];
+            if uri == hostile {
+                links.push(
+                    "https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711".into(),
+                );
+            }
             d.event.performers = vec![pinakes_core::event::Performer {
                 name: "Radiohead".into(),
-                links: vec![
-                    "https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711".into(),
-                ],
+                links,
             }];
         }
         if uri == vouched || uri == busy {
@@ -1444,25 +1451,29 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         ]
     );
     assert_eq!(rows(group, ids[concert].clone()).await, ["-"]);
-    // A MusicBrainz artist page the event page names is the page's own claim, never a key: a page
-    // naming only that keys nothing and keeps it as a fact; one naming a link beside it that
-    // MusicBrainz is busy on waits for MusicBrainz like any other.
+    // Only a page on the service of the link it names keys the artist (the Songkick concert
+    // above): any other page chose the identity, whatever MusicBrainz relates it to, so it is a
+    // fact. A page naming an artist's Songkick and MusicBrainz pages, and a Bandsintown event
+    // naming a Songkick artist, key nothing.
     let any_key = "SELECT key FROM resource_key WHERE resource_id=$1";
     let retrying =
         "SELECT coalesce(last_error,'-') FROM also_on_dirty WHERE resource_id=$1 AND attempts>0";
-    assert!(rows(any_key, ids[hostile].clone()).await.is_empty());
-    assert_eq!(
-        rows(
-            "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name",
-            ids[hostile].clone()
-        )
-        .await,
-        [
-            "performer Radiohead",
-            "performer_mbid a74b1b7f-71a5-4011-9441-d0b5e4122711"
-        ]
-    );
-    assert!(rows(retrying, ids[hostile].clone()).await.is_empty());
+    for page in [hostile, elsewhere] {
+        assert!(rows(any_key, ids[page].clone()).await.is_empty(), "{page}");
+        assert_eq!(
+            rows(
+                "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name",
+                ids[page].clone()
+            )
+            .await,
+            [
+                "performer Radiohead",
+                "performer_mbid a74b1b7f-71a5-4011-9441-d0b5e4122711"
+            ],
+            "{page}"
+        );
+        assert!(rows(retrying, ids[page].clone()).await.is_empty(), "{page}");
+    }
     assert!(rows(any_key, ids[vouched].clone()).await.is_empty());
     // An answer over its cap fails the run as any failed request does: nothing is recorded (the
     // previous rows would stay) and the run retries later.

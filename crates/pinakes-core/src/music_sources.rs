@@ -447,12 +447,19 @@ pub fn artist_link(url: &str) -> Option<ArtistLink> {
     }
 }
 
+/// The host a link's service is known by: lower case, without `www.`.
+fn service_host(url: &str) -> Option<String> {
+    let host = url::Url::parse(url).ok()?.host_str()?.to_ascii_lowercase();
+    Some(host.strip_prefix("www.").unwrap_or(&host).to_owned())
+}
+
 /// The performers an event page names in its own structured data: each one's name is a fact,
-/// and its artist identity a key (`mb:artist:…`) when MusicBrainz relates one of the page's links
-/// for it (a music service, Songkick or Bandsintown artist page) to exactly one artist. A
-/// MusicBrainz artist page the page names is the page's own claim: the fact `performer_mbid`
-/// when MusicBrainz names none, never a key. A performer without either keeps its first link as
-/// the fact `performer_link`. A name alone is never a key. Events group only
+/// and its artist identity a key (`mb:artist:…`) when the page is on the service of one of its
+/// links for the performer (a Songkick concert naming a Songkick artist page, Bandsintown's and a
+/// music service's own event pages the same) and MusicBrainz relates that link to exactly one
+/// artist. Any other identity is the page's choice, so a fact (`performer_mbid`): the artist
+/// MusicBrainz relates another link to, or a MusicBrainz artist page the page names. A performer
+/// without one keeps its first link as the fact `performer_link`. A name alone is never a key. Events group only
 /// with events, so the key lists the artist's events (`key=mbid:…&type=MusicEvent`) and never
 /// joins a concert to the artist's own pages.
 pub struct PerformersSource;
@@ -541,24 +548,28 @@ impl PerformersSource {
                 .collect(),
             Err(e) => return Err(e),
         };
+        // A key only where the event page speaks for the link's own service: a Songkick concert
+        // naming a Songkick artist page (Bandsintown and a music service's own event pages the
+        // same). Any other page chose the identity MusicBrainz translates, so it is a fact.
+        let page = service_host(&subject.uri);
+        let owned = |url: &str| page.is_some() && service_host(url) == page;
         for (claimed, links) in performers {
-            // The first link MusicBrainz relates to exactly one artist.
-            let mbid = links.iter().find_map(|url| {
-                match answers
-                    .get(url)?
-                    .targets
-                    .iter()
-                    .filter(|(k, _)| *k == MbKind::Artist)
-                    .map(|(_, id)| id)
-                    .collect::<Vec<_>>()[..]
-                {
-                    [id] => Some(id.clone()),
-                    _ => None,
-                }
-            });
+            // The artist MusicBrainz relates a link to, when exactly one.
+            let artist = |url: &String| match answers
+                .get(url)?
+                .targets
+                .iter()
+                .filter(|(k, _)| *k == MbKind::Artist)
+                .map(|(_, id)| id)
+                .collect::<Vec<_>>()[..]
+            {
+                [id] => Some(id.clone()),
+                _ => None,
+            };
+            let keyed = links.iter().filter(|u| owned(u)).find_map(artist);
             // One fact beside the name (sixteen performers fit the facts cap): the artist
             // MusicBrainz names, else the one the page names, else the link itself.
-            match (mbid, claimed) {
+            match (keyed, links.iter().find_map(artist).or(claimed)) {
                 (Some(id), _) => key(&mut found, &id),
                 (None, Some(id)) => found
                     .facts
