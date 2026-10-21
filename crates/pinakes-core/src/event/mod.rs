@@ -33,8 +33,14 @@ pub struct EventFields {
     pub performers: Vec<Performer>,
     /// Where the performers were read: the address the fetch ended on, after redirects. Only a
     /// page on the service of a performer's link keys its artist (`music_sources`). Set only from
-    /// a fetch ([`EventFields::read_from`]), never by a parser from the base it was handed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// a fetch ([`EventFields::read_from`]), never by a parser from the base it was handed. Stored
+    /// as `performers_fetched_from`: any other key a stored card holds is not read, so the card
+    /// keys nothing until its page is fetched again.
+    #[serde(
+        default,
+        rename = "performers_fetched_from",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub(crate) performers_from: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offers: Option<Offers>,

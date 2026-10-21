@@ -1161,6 +1161,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     let moved = "https://www.songkick.com/concerts/9-moved";
     let unrecorded = "https://www.songkick.com/concerts/10-no-provenance";
     let revoked = "https://evil.example/revoked";
+    let legacy = "https://www.songkick.com/concerts/11-stored-with-an-old-key";
     let over_cap = "https://www.songkick.com/concerts/7-over-cap";
     let busy = "https://www.songkick.com/concerts/2-busy-lookup-alone";
     let lineup = "https://www.songkick.com/concerts/3-three-acts";
@@ -1185,6 +1186,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         (moved, "MusicEvent"),
         (unrecorded, "MusicEvent"),
         (revoked, "MusicEvent"),
+        (legacy, "MusicEvent"),
         (over_cap, "MusicEvent"),
         (busy, "MusicEvent"),
         (lineup, "MusicEvent"),
@@ -1277,7 +1279,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
                 })
                 .collect();
         }
-        if uri == redirected || uri == moved || uri == unrecorded {
+        if uri == redirected || uri == moved || uri == unrecorded || uri == legacy {
             // A Songkick concert naming Radiohead's Songkick page, read from wherever the fetch
             // ended (below).
             d.start = Some("2027-06-04T20:00:00Z".parse().unwrap());
@@ -1325,7 +1327,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         // Where the page came from, after redirects: the page itself, but off-site for the
         // redirected one, another Songkick page for the moved one, and nothing said for one
         // stored without it.
-        if uri != unrecorded {
+        if uri != unrecorded && uri != legacy {
             let from = if uri == redirected {
                 "https://evil.example/gig"
             } else if uri == moved {
@@ -1348,6 +1350,15 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         store::save_document(&pool, &id, 0, &d).await.unwrap();
         ids.insert(uri, id);
     }
+    // A card stored with its provenance under another key (the address it was asked for, as an
+    // earlier build wrote it): that key is not read back.
+    sqlx::query(
+        "UPDATE resource SET doc=doc||jsonb_build_object('performers_from',uri) WHERE id=$1",
+    )
+    .bind(&ids[legacy])
+    .execute(&pool)
+    .await
+    .unwrap();
     // Keys an earlier run left: one the rule no longer allows (the revoked page owns no link),
     // one it allows (the busy concert is Songkick's).
     for page in [revoked, busy] {
@@ -1544,7 +1555,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         rows(any_key, ids[busy].clone()).await,
         ["mb:artist:a74b1b7f-71a5-4011-9441-d0b5e4122711"]
     );
-    for page in [hostile, elsewhere, redirected, unrecorded] {
+    for page in [hostile, elsewhere, redirected, unrecorded, legacy] {
         assert!(rows(any_key, ids[page].clone()).await.is_empty(), "{page}");
         assert_eq!(
             rows(

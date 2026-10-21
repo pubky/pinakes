@@ -717,4 +717,33 @@ mod performer_tests {
             Some("https://www.songkick.com/concerts/1")
         );
     }
+
+    /// The provenance is stored as `performers_fetched_from`; a card stored with another key for
+    /// it (an address it was asked for, not one its fetch ended on) has none when read back.
+    #[test]
+    fn only_the_stored_provenance_of_a_fetch_is_read_back() {
+        let mut card = ResourceMeta::new("https://www.songkick.com/concerts/11-stored", "web", 60);
+        card.event.performers = vec![super::super::Performer {
+            name: "Radiohead".into(),
+            links: vec!["https://www.songkick.com/artists/253846".into()],
+        }];
+        let mut stored = serde_json::to_value(&card).unwrap();
+        stored["performers_from"] = "https://www.songkick.com/concerts/11-stored".into();
+        let doc: ResourceMeta = serde_json::from_value(stored).unwrap();
+        assert_eq!(doc.event.performers.len(), 1);
+        assert_eq!(doc.event.performers_from(), None);
+        let mut doc = doc;
+        doc.event.performers_from = Some("https://www.songkick.com/concerts/11-stored".into());
+        let json = serde_json::to_value(&doc).unwrap();
+        assert_eq!(
+            json["performers_fetched_from"],
+            "https://www.songkick.com/concerts/11-stored"
+        );
+        assert!(json.get("performers_from").is_none());
+        let back: ResourceMeta = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            back.event.performers_from(),
+            Some("https://www.songkick.com/concerts/11-stored")
+        );
+    }
 }
