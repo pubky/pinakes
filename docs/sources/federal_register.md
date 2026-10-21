@@ -42,3 +42,14 @@ A number the API does not know is `missing`.
 
 - `fr:2026-18291` (a notice)
 - `https://www.federalregister.gov/documents/2026/09/09/2026-18291/self-regulatory-organizations-nasdaq-texas-llc-notice-of-filing-and-order-granting-accelerated`
+
+## Also on
+
+`federal_register`: a document gets its GovInfo PDF (`kind: "pdf"`) and details page, its
+regulations.gov document and its public-inspection PDF (`kind: "pdf"` too) from its API record, and the key
+`fr:{number}`; a GovInfo copy of it someone tags gets the same key from its address alone, so the
+two join.
+
+### Keys
+
+`fr:{document number}`: each names one object, so a [group](../api.md#groups) holds at most one value of each, and [`key=`](../api.md#search) finds the links that carry it.

@@ -99,7 +99,8 @@ pub struct SourceOptions {
     pub enabled: Option<bool>,
     /// The web service a hub source asks (`musicbrainz` only: a mirror's `…/ws/2`).
     pub base_url: Option<String>,
-    /// A service's personal token (`discogs` only); never shown or logged.
+    /// A service's personal token, for a source that takes one (`Source::takes_token`); never
+    /// shown or logged.
     pub token: Option<crate::event::adapters::SecretKey>,
 }
 
@@ -253,6 +254,11 @@ pub trait Source: Send + Sync {
     /// object's own page in a form it recognizes; any other page on that host is on no service.
     fn service_name(&self, _host: &str, _url: &url::Url) -> Option<&'static str> {
         None
+    }
+    /// Its page in docs/sources: its own (`<id>.md`), unless it is the also-on half of an official
+    /// source of another name. A lookup family's sources share their family's page.
+    fn page(&self) -> &'static str {
+        self.id()
     }
     /// The published limits of the services only it reads, as `(host, requests_per_second)`:
     /// each lowers its host's default pace (`limits.host_rates` overrides it), as an official
@@ -844,5 +850,39 @@ pub async fn run(
             }
         }
         tokio::select! { _=shutdown.changed()=>break, _=tokio::time::sleep(Duration::from_secs(5))=>{} }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each also-on source and lookup family has its page in docs/sources, listed in the index
+    /// there: a family's sources their family's page, an official source's also-on half that
+    /// source's.
+    #[test]
+    fn each_source_and_family_has_its_page() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/sources");
+        let index = std::fs::read_to_string(dir.join("README.md")).unwrap();
+        let listed = |page: &str| {
+            assert!(
+                dir.join(format!("{page}.md")).exists(),
+                "docs/sources/{page}.md"
+            );
+            assert!(
+                index.contains(&format!("[`{page}`]({page}.md")),
+                "docs/sources/README.md lacks {page}"
+            );
+        };
+        let mut in_families = std::collections::BTreeSet::new();
+        for family in crate::lookups::FAMILIES {
+            listed(family.name());
+            in_families.extend(family.sources().iter().map(|s| s.id()));
+        }
+        for source in registry() {
+            if !in_families.contains(source.id()) {
+                listed(source.page());
+            }
+        }
     }
 }

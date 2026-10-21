@@ -498,9 +498,8 @@ pub struct SearchQuery {
     /// MusicBrainz page was merged from),
     /// `wikidata:{Q-id}`, `isrc:{code}`, `upc:{barcode}`, `isbn:{ISBN-10 or ISBN-13}`,
     /// `imdb:{tt…}` (an IMDb title), `podcast:{GUID}` (a podcast's `podcast:guid`),
-    /// `osm:{type}/{id}`, `doi:{DOI}`, `arxiv:{id}`, `pmid:{n}`, `pmcid:PMC{n}`, `crate:{name}`,
-    /// `npm:{name}`, `pypi:{name}`, `repo:{host}/{path}`, `steam:{appid}`, `gog:{id}`,
-    /// `fr:{document number}` or `discogs:{artist|master|release}:{id}`.
+    /// `osm:{type}/{id}`, `doi:{DOI}`, or another namespace a source records (its page in
+    /// docs/sources names it).
     pub key: Option<String>,
     /// Resource ID: what the people who tagged it also referenced, ranked by how many of them
     /// did, then by the newest of those references (not with `sort`). A resource in a group
@@ -712,8 +711,8 @@ pub struct Details {
     /// that answered (docs/sources).
     pub from: Option<String>,
     /// The fields that API names for the object, and the facts the also-on sources read for it
-    /// (`isrc`, `upc`, `mbid`, `mbid_was`, `artist`, `artist_type`, `duration`, `performer`,
-    /// `performer_mbid`, `performer_link`, …), by name; several values are joined with "; ".
+    /// (such as a music link's `isrc`, `upc` and `mbid`; each source's page in docs/sources lists
+    /// its own), by name; several values are joined with "; ".
     /// `null` when there are none.
     #[schema(value_type = Option<Object>)]
     pub facts: Option<std::collections::BTreeMap<String, String>>,
@@ -1249,7 +1248,7 @@ pub(crate) struct KeyFilter {
 }
 pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
     let bad = || {
-        ApiError::bad("key is mbid:{uuid}, wikidata:{Q-id}, isrc:{ISRC}, upc:{UPC, EAN or GTIN with its check digit}, isbn:{ISBN-10 or ISBN-13}, imdb:{tt and 7–8 digits}, podcast:{GUID}, osm:{type}/{id}, doi:{DOI}, arxiv:{id}, pmid:{n}, pmcid:PMC{n}, crate:{name}, npm:{name}, pypi:{name}, repo:{github.com|gitlab.com}/{path}, steam:{appid}, gog:{id}, fr:{document number} or discogs:{artist|master|release}:{id}")
+        ApiError::bad("key is mbid:{uuid}, wikidata:{Q-id}, isrc:{ISRC}, upc:{UPC, EAN or GTIN with its check digit}, isbn:{ISBN-10 or ISBN-13}, imdb:{tt and 7–8 digits}, podcast:{GUID}, osm:{type}/{id}, doi:{DOI} or another namespace a source records (docs/sources)")
     };
     let (kind, value) = key.split_once(':').ok_or_else(bad)?;
     let keys = |keys: Vec<String>| KeyFilter { keys, fact: None };

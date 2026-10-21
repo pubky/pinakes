@@ -73,3 +73,12 @@ sources reuse them.
 - `https://www.goodreads.com/work/editions/1540236`
 - `https://www.tvmaze.com/shows/169/breaking-bad`
 - `https://podcastindex.org/podcast/577105`
+
+## Also on
+
+`titles`, this source's fallback: a TMDB, Trakt, Netflix, Goodreads, Letterboxd or IMDb page whose
+card the page hook could not name in time gets the label of the Wikidata item that carries the
+page's ID as the fact `title` and its description as `title_description`, and when the card
+still bears another name, the resource is read again so its finished card takes them. It is off
+when this source is. Each such page costs the item's search and read (usually cached already)
+and one request for its English label.

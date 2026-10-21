@@ -477,7 +477,7 @@
             ]
           },
           "facts": {
-            "description": "The fields that API names for the object, and the facts the also-on sources read for it\n(`isrc`, `upc`, `mbid`, `mbid_was`, `artist`, `artist_type`, `duration`, `performer`,\n`performer_mbid`, `performer_link`, …), by name; several values are joined with \"; \".\n`null` when there are none.",
+            "description": "The fields that API names for the object, and the facts the also-on sources read for it\n(such as a music link's `isrc`, `upc` and `mbid`; each source's page in docs/sources lists\nits own), by name; several values are joined with \"; \".\n`null` when there are none.",
             "type": [
               "object",
               "null"
@@ -2754,7 +2754,7 @@
             }
           },
           {
-            "description": "Links carrying one exact identifier, on any service and in any spelling:\n`mbid:{uuid}` (a MusicBrainz recording, release, release group or artist, or the MBID a\nMusicBrainz page was merged from),\n`wikidata:{Q-id}`, `isrc:{code}`, `upc:{barcode}`, `isbn:{ISBN-10 or ISBN-13}`,\n`imdb:{tt…}` (an IMDb title), `podcast:{GUID}` (a podcast's `podcast:guid`),\n`osm:{type}/{id}`, `doi:{DOI}`, `arxiv:{id}`, `pmid:{n}`, `pmcid:PMC{n}`, `crate:{name}`,\n`npm:{name}`, `pypi:{name}`, `repo:{host}/{path}`, `steam:{appid}`, `gog:{id}`,\n`fr:{document number}` or `discogs:{artist|master|release}:{id}`.",
+            "description": "Links carrying one exact identifier, on any service and in any spelling:\n`mbid:{uuid}` (a MusicBrainz recording, release, release group or artist, or the MBID a\nMusicBrainz page was merged from),\n`wikidata:{Q-id}`, `isrc:{code}`, `upc:{barcode}`, `isbn:{ISBN-10 or ISBN-13}`,\n`imdb:{tt…}` (an IMDb title), `podcast:{GUID}` (a podcast's `podcast:guid`),\n`osm:{type}/{id}`, `doi:{DOI}`, or another namespace a source records (its page in\ndocs/sources names it).",
             "examples": {
               "(none)": {
                 "summary": "(none)",

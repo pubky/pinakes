@@ -395,8 +395,8 @@ in `pinakes_discovery_decisions_total{kind,decision}`.
 A challenge page (a bot wall, captcha or sign-in redirect) is a failed fetch: the resource turns
 `unreachable` and is retried with the normal backoff, dead-lettering after
 `limits.max_failures`, unless the site's own feed lists the exact link (the
-[`feed`](sources/feed.md) wall hook, also for plain 401 and 403 answers) or a source's wall hook
-names it (an IMDb title by its Wikidata item, [`media_records`](sources/media_records.md)); then
+`feed` wall hook, also for plain 401 and 403 answers) or a source's wall hook
+names it (an IMDb title by its Wikidata item, `media_records`; [docs/sources](sources/README.md) has each source's page); then
 that is the card. Its last accepted document, event dates and feed occurrences stay, and a wall never counts
 toward a disappearance. Fetches that hit one count as outcome `blocked` in
 `pinakes_fetch_total`.
@@ -517,8 +517,8 @@ replays captures without network access. Recorded responses for the keyless prob
 
 ## Also on
 
-After setting a source's key (`[podcast_index]`, TIDAL's pair, a Discogs token), or after an
-upgrade that adds or changes also-on sources, run `pinakesd --config <path> reextract also-on`
+After setting a source's key (its page in [docs/sources](sources/README.md#also-on) names
+it), or after an upgrade that adds or changes also-on sources, run `pinakesd --config <path> reextract also-on`
 (or `reextract all`, which includes it): until then links already stored keep the results of
 their last run for up to the source's lifetime (30 days). After an upgrade that changes how links
 are spelled, typed or named (aliases of a canonical link, a card's service in `site`), run
@@ -542,114 +542,33 @@ sees the keys the ones before it found in the same run (a barcode MusicBrainz na
 services looked up by it); a source that no longer applies (its key is gone) drops its rows. A
 source that fails or panics keeps its earlier rows and retries with backoff; the others' results
 stand and the worker goes on (a panic is logged as an error). A source that asks a secondary
-service besides its own (DataCite and Crossref for a paper, ProtonDB, PCGamingWiki and GOG for a
-game, the provenance reads and deps.dev for a package, Software Heritage for a repository, the
-Federal Register API, Discogs' record for a release) keeps what the link and the other services
-gave when that service fails: the link's own key is recorded, the failure is counted in
+service besides its own (its page names which) keeps what the link and the other services gave
+when that service fails: the link's own key is recorded, the failure is counted in
 `pinakes_also_on_service_errors_total{service,class}`, and the run comes back after a failed
 run's backoff instead of after the source's lifetime: five minutes, doubling to an hour while the
 service keeps failing, or the wait the service named when longer. A run in which every service
 answers resets it.
-The sources, in the order they run, are `service`, `tidal`, `musicbrainz`, `musicbrainz_entity`,
-`performers`, `wikidata`, `discogs`, `deezer` and `itunes` (music), `wikipedia`, `wikidata_item`, `books`, `films`, `podcasts`
-and `titles`, `osm_wikidata`, `wikidata_osm` and `btcmap` (places), `federal_register`, `unpaywall`,
-`ncbi`, `datacite` and `huggingface` (papers), `crates`, `npm`, `pypi` and `software_heritage`
-(software), `steam` and `wikidata_stores` (games and apps) and `wayback` (archived copies)
-([the API](api.md#also-on) says what each reads); `[also_on] apple_storefront` (`us`, a
+The sources run in the order [docs/sources](sources/README.md#also-on) lists them (each page says
+what its source reads and costs); `[also_on] apple_storefront` (`us`, a
 two-letter country code) is the Apple Music, Apple Books and Apple Podcasts storefront of the
 Apple links they build. `[also_on.sources.musicbrainz] base_url`
 (`https://musicbrainz.org/ws/2`) points every MusicBrainz read at a mirror's web service instead
-(the `musicbrainz`, `musicbrainz_entity` and `performers` sources, and the cards of MusicBrainz
-pages), an http(s) URL without a trailing slash and reached through the egress policy;
+(every source that reads MusicBrainz, and the cards of MusicBrainz pages), an http(s) URL without a
+trailing slash and reached through the egress policy;
 every instance on one public address shares MusicBrainz's 1 request/s, which a mirror does not
 limit. The worker takes up to 100 due resources at a time and asks MusicBrainz about their links'
 URLs together (50 to a request; MusicBrainz echoes each URL, and an answer applies only to the URL
-it names) and Wikidata for their item links' items together (10 to a request). Each music link then
-costs one MusicBrainz request for its entity (up to four when the URL names several releases; one
-more for a track found by its ISRC, up to two barcode searches for an album found by its barcode keys (only those another source
-found) and up to four release reads for what they name, and one for a
-track's original album), up to two iTunes lookups
-for an album with barcodes, and two Wikidata requests (a search by its service ID cannot batch);
-each Wikipedia article one request to its Wikipedia and one to Wikidata; each MusicBrainz page
-one request for its entity (an ISRC's page one more for the ISRC; MusicBrainz has no lookup of
-several entities at once, and a read the card already made is taken from the cache) and one for a
-recording's original album; each event page naming performers (up to 16, with 8 links each, within
-2 KB of the document) one MusicBrainz URL request for all its performers' readable links together
-and no other (an artist's page on a music service, Songkick or Bandsintown; at most two per
-performer; a link the answer leaves out is unknown until the next run, and a busy or failed request
-fails the run of a page on a performer link's service, which retries, while another page records
-what it says without MusicBrainz and asks again after MusicBrainz's retry time; answers are cached
-an hour, so an artist's many concerts naming only
-that artist, by one link, ask once), and none for a performer the page names by a MusicBrainz
-artist page alone; each tagged OSM object one Wikidata request; each book one Open Library
-request, one iTunes lookup for an ebook edition, and two Wikidata requests when Open Library names
-its work; each podcast show one iTunes lookup, two or three Podcast Index requests (the last asks
-who owns the show's GUID), its feed (usually still cached from its card) and two Wikidata requests;
-each episode up to three Podcast Index requests, two iTunes lookups and, for an episode's page, its
-feed; each page whose head names an RSS feed that feed (cached for an hour, read up to 8 MiB), and
-Podcast Index only when one item of it with audio or video is that page; each film or series two
-Wikidata requests (a TVmaze show first its TVmaze record), and a Letterboxd and a TVmaze request
-when the item has no link there; each TMDB, Trakt, Netflix, Goodreads, Letterboxd or IMDb page
-(`titles`) the item's search and read (usually cached already) and one request for its English
-label; each DOI one request each to Unpaywall, the NCBI ID Converter and DataCite, and one to
-Crossref when DataCite names its preprint (an arXiv paper one to DataCite, and one to Crossref when
-DataCite names its journal version); each package
-one registry request, a PyPI package up to two more for its files' provenance, an npm package one
-more for its attestations, and one to deps.dev when the registry names no provenance; each Steam game
-up to four (ProtonDB, PCGamingWiki, GOG GamesDB, GOG); each store link two Wikidata requests; each
-gone page one Wayback CDX request; each Discogs release one Discogs request (the one its card
-makes), and a Discogs master one Wikidata request (the item MusicBrainz relates its release group
-to). Requests that several sources make (an item, a record) are
-shared through the discovery cache. `btcmap` keeps BTC Map's place list in memory, brought up to
-date at most hourly from its sync (`updated_since`, 2,000 places a page); after a restart the
-first lookup reads it again. `unpaywall` and `ncbi` need the contact setting (`[http] contact`)
-and find nothing without it. `deezer` is off by default: Deezer's API terms allow
-non-commercial use only, so turn it on
-(`[also_on.sources.deezer] enabled = true`) only where they do; it costs one request per Deezer
-link and up to two per other track or album with an ISRC or barcode. `tidal` costs a token
-request when its token expires (a minute before TIDAL's `expires_in`), and per TIDAL album or
-track one request, or a share of one: a batch
-of links asks for up to 20 albums or 20 tracks at once (`filter[id]`); a track's ISRC also asks
-MusicBrainz whether several recordings have it (usually cached from `service`).
-
-TIDAL is asked only with a TIDAL developer app's client ID and secret (developer.tidal.com):
-`PINAKES_TIDAL_CLIENT_ID` and `PINAKES_TIDAL_CLIENT_SECRET`, the recommended form (one
-underscore: a build without the source ignores them, where `PINAKES__TIDAL__CLIENT_ID` stops it),
-or `[tidal] client_id` and `client_secret`. Without both the `tidal` source does not run;
-credentials removed later leave the rows it stored until they expire, as `enabled = false` does.
-`[tidal] country` (`US`, an ISO 3166-1 alpha-2 code in upper case; another value stops startup)
-is the country whose catalogue is read. The pair
-and the token never appear in logs, the operator info, errors or debug output. Refused
-credentials (the token endpoint refuses them, the API answers 403, or it rejects a token under a
-minute old) are logged (`TIDAL refused the client credentials`) and counted in
-`pinakes_also_on_service_errors_total{service="tidal"}` (class `refused`, `forbidden` or
-`rejected`); the TIDAL links read meanwhile keep what TIDAL gave them before and retry later
-(`tidal_auth`, after the five-minute hold, then backing off to hourly), and TIDAL is asked again
-when the hold ends. A rate limit
-or an outage (429, 5xx) is waited out: no TIDAL request, batched or single, before the time it
-asked for (`Retry-After`, a minute to an hour) has passed, and the links retry after it
-(`tidal_busy`; a failure the cache replays meanwhile reports the same). TIDAL's answers are
-cached by the credential pair, not the token, so a new token keeps them, and a batch asks only
-for the items that have no cached answer.
-
-Podcast Index is asked only with a key and secret: `[podcast_index] key` and `secret`, or
-`PINAKES__PODCAST_INDEX__KEY` and `PINAKES__PODCAST_INDEX__SECRET` (free from
-api.podcastindex.org). Without them a show joins through its Apple ID only: no GUID is a key, a
-feed gets no Apple ID, a Podcast Index page has nothing to read, and episodes join only by their
-Apple track. The key and secret never appear in logs, the operator info or errors. A refused key
-or a Podcast Index outage fails no lookup: the source keeps what the other services answered,
-and asks again later only when nothing at all was found. Such failures of a secondary service
-(Podcast Index, iTunes, Wikidata, the feed) are counted in
-`pinakes_also_on_service_errors_total{service,class}`.
+it names) and Wikidata for their item links' items together (10 to a request). Each source's page says what it costs per link; requests that
+several sources make (an item, a record) are shared through the discovery cache.
 
 Sources reach their services through the egress policy and its per-host budgets, one request
 at a time per host. A hub's published limit lowers its host's default pace like a source's own
-(`limits.host_rates` names a host's rate outright): MusicBrainz 1 request/s, Deezer 10/s, TIDAL's API 2/s (TIDAL publishes no figure),
-Wikimedia (`www.wikidata.org`, `*.wikipedia.org`, `commons.wikimedia.org`) 200/min, Open
-Library 3/s, iTunes about 20/min, TVmaze 20 per 10 s, crates.io 1/s, Crossref 10/s, NCBI's ID
-Converter 3/s, Software Heritage 120/h, the Wayback Machine one request every 2 s (its CDX API asks
-for it; the pace covers the host, so a tagged capture's card waits behind the lookups too); a limit
-above `limits.host_requests_per_second` (1/s) leaves the default.
+(`limits.host_rates` names a host's rate outright): for the services several sources or the
+resolver read, MusicBrainz 1 request/s, Wikimedia (`www.wikidata.org`, `*.wikipedia.org`,
+`commons.wikimedia.org`) 200/min, Open Library 3/s, iTunes about 20/min, the Wayback Machine one
+request every 2 s (its CDX API asks for it; the pace covers the host, so a tagged capture's card
+waits behind the lookups too); a service only one source reads, at the pace its page names. A
+limit above `limits.host_requests_per_second` (1/s) leaves the default.
 
 ## Groups
 

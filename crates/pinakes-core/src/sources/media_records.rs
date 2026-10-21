@@ -518,6 +518,9 @@ pub mod titles {
         fn id(&self) -> &'static str {
             "titles"
         }
+        fn page(&self) -> &'static str {
+            "media_records"
+        }
         fn applies(&self, subject: &Subject) -> bool {
             subject.status == "ok" && super::wikidata_page(&subject.uri).is_some()
         }

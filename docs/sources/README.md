@@ -7,8 +7,8 @@ For their links, Pinakes reads that API instead of the page. Every source here:
   entry name is UniProt's own identifier. A PubChem compound name gets the compound's card when
   PubChem names exactly one compound for it, but is never an alias of it (nothing merges on a
   name); a name with several compounds gets an ordinary web card;
-- needs no key, except [GitHub](github.md), which is off without the operator's token
-  ([Discogs](discogs.md) takes an optional one);
+- needs no key unless its page says it takes the operator's token (a source that needs one is
+  off without it, one that takes an optional one does more with it);
 - makes every address of the same object one resource: the other addresses are
   [aliases](../api.md#aliases) of one root;
 - records itself on the card: `details.from` names the source and `details.facts` holds the
@@ -102,3 +102,59 @@ or got plain web cards before are read by their source.
 - [`wordpress`](wordpress.md): page hook: a WordPress post's editorial title, excerpt, dates and featured image from its REST record
 - [`zefix`](zefix.md): Swiss companies in the commercial register, by register id.
 - [`zenodo`](zenodo.md): Zenodo records (datasets, software, papers) by record id.
+
+## Also on
+
+The [also-on](../api.md#also-on) sources, in the order they run: each reads a resource after it
+is saved and adds keys, facts and derived links (the API says how they show). A lookup family is
+one module with its sources; a name that is also an official source above has its also-on part
+on the same page.
+
+- [`service`](service.md): the ISRC a music service's own track page states.
+- [`tidal`](tidal.md): TIDAL's own barcodes and ISRCs (with the operator's TIDAL credentials).
+- [`musicbrainz`](musicbrainz.md): what MusicBrainz relates a music link to.
+- [`musicbrainz_entity`](musicbrainz_entity.md): a MusicBrainz page as its own hub.
+- [`performers`](performers.md): an event's performers, keyed to the artist on the page's own service.
+- [`wikidata`](wikidata.md): the Wikidata item of a music link.
+- [`discogs`](discogs.md#also-on): a Discogs object's key and a release's barcodes.
+- [`deezer`](deezer.md): Deezer's own ISRCs and barcodes (off by default).
+- [`itunes`](itunes.md): Apple Music albums by barcode.
+- [`wikipedia`](wikipedia.md): the other editions of a Wikipedia article.
+- [`wikidata_item`](wikidata_item.md): a Wikidata item link as its own hub.
+- [`books`](books.md): Open Library, Amazon, Apple Books and Wikidata for a book.
+- [`films`](films.md): the IMDb title of a film or series.
+- [`podcasts`](podcasts.md): Apple Podcasts, Podcast Index and Wikidata for a show.
+- [`media_records`](media_records.md#also-on): `titles`, the title of a media page the page hook
+  could not name in time.
+- [`federal_register`](federal_register.md#also-on): a Federal Register document's GovInfo,
+  regulations.gov and public-inspection copies.
+- [`places`](places.md): `osm_wikidata`, `wikidata_osm` and `btcmap`, OpenStreetMap objects and
+  Wikidata items that name each other.
+- [`papers`](papers.md): `unpaywall`, `ncbi`, `datacite` and `huggingface`, a paper's open copies,
+  PubMed records and preprint.
+- [`packages`](packages.md): `crates`, `npm`, `pypi` and `software_heritage`, a package's registry
+  pages, provenance and archive.
+- [`games`](games.md): `steam` and `wikidata_stores`, a game's and an app's other stores.
+- [`archive`](archive.md): `wayback`, an archived copy of a gone page.
+
+## Removing a source
+
+Every source (official, also-on, or a lookup family) is removed by deleting its own files and
+its registry lines, nothing else; `scripts/test` and `scripts/e2e --mock` then pass as they are:
+
+- its module: `crates/pinakes-core/src/sources/<name>.rs` (an official source, with its also-on
+  half when it has one), `crates/pinakes-core/src/also_on/<id>.rs` or
+  `crates/pinakes-core/src/lookups/<family>.rs` (a family, with its also-on sources);
+- its lines in each registry it is in: `pub mod <name>;` with its entry in `sources::REGISTRY`,
+  `also_on::registry()` (also for an official source's also-on half) or `lookups::FAMILIES`;
+- its page `docs/sources/<name>.md` and its lines in this index;
+- its `[sources.<name>]` block and `[also_on.sources.<id>]` lines in `pinakes.example.toml`, and
+  its variables in `.env.example` if it has a secret;
+- its fixtures, `crates/pinakes-core/tests/fixtures/sources/<name>/` or
+  `crates/pinakes-core/tests/fixtures/lookups/<family>/`, and its own test file
+  `crates/pinakes-core/tests/<name>.rs` if it has one;
+- its live end-to-end samples, `e2e/samples/<name>.json`.
+
+Shared code stays (`sources/kit.rs`, `sources/biodiversity.rs`, `music.rs`, `music_sources.rs`,
+`wikipedia.rs`, `lookups/mod.rs`, `lookups/wikidata.rs`, `also_on/media.rs`), even a part only
+the removed source used. Tests that need a source skip without it, so none has to change.

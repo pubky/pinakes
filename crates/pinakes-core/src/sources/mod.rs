@@ -2,10 +2,14 @@
 //! bot-walled, thin or moved.
 //!
 //! A source is one module, `sources/<name>.rs`, whose unit struct implements [`Source`] and is
-//! listed once in [`REGISTRY`]. Its documentation is `docs/sources/<name>.md` (with a line in
-//! `docs/sources/README.md`), its recorded fixtures are in `tests/fixtures/sources/<name>/`, its
-//! switch is `[sources.<name>] enabled` and its OpenAPI examples come from
-//! [`Source::examples`].
+//! listed once in [`REGISTRY`] (with its `pub mod` line). Its documentation is
+//! `docs/sources/<name>.md` (with a line in `docs/sources/README.md`), its recorded fixtures are
+//! in `tests/fixtures/sources/<name>/`, its switch is `[sources.<name>] enabled`, its OpenAPI
+//! examples come from [`Source::examples`], its mock end-to-end sample from [`Source::e2e`] and
+//! its live one is `e2e/samples/<name>.json`. A source imports only shared code (`kit`,
+//! `biodiversity`, the crate's shared modules), never another source, and nothing outside the
+//! registry names it: removing it is deleting those files and lines
+//! (`docs/sources/README.md#removing-a-source`).
 //!
 //! Links a source reads go to the `official` card route. A switched-off source's links get
 //! ordinary web cards. A card records the source that answered (`details.from`) and the fields
