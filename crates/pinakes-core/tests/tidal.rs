@@ -464,7 +464,8 @@ async fn a_forbidden_answer_is_a_refusal_of_the_credentials(pool: sqlx::PgPool) 
     );
     let (error, seconds) = due(&pool, &hydra).await;
     assert_eq!(error.as_deref(), Some("tidal_auth"));
-    assert!(seconds > 3000.0, "{seconds}");
+    // The refusal's hold: five minutes.
+    assert!((290.0..=300.0).contains(&seconds), "{seconds}");
     assert!(rows(&pool, KEYS, &hydra).await.is_empty());
     // Within the five minutes the refusal holds, nothing asks TIDAL, not even for a token.
     let seen = run(&pool, config, forbidden).await;
