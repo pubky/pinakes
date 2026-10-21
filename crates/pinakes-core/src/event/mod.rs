@@ -125,7 +125,27 @@ pub struct Offers {
     pub high_price: Option<f64>,
     pub currency: Option<String>,
 }
+/// The performers' share of a document, serialized: sixteen names and a few links; a line-up
+/// with many links each is trimmed to it, links first.
+pub const PERFORMERS_CAP: usize = 2048;
 impl EventFields {
+    fn performers_bytes(&self) -> usize {
+        serde_json::to_vec(&self.performers).map_or(0, |v| v.len())
+    }
+    /// Drop one link of the performer with the most, else the last performer: `false` when
+    /// nothing is left to drop.
+    pub fn shrink_performers(&mut self) -> bool {
+        if let Some(p) = self
+            .performers
+            .iter_mut()
+            .filter(|p| !p.links.is_empty())
+            .max_by_key(|p| p.links.len())
+        {
+            p.links.pop();
+            return true;
+        }
+        self.performers.pop().is_some()
+    }
     pub fn bound(&mut self) {
         use crate::model::truncate;
         for value in [&mut self.tz, &mut self.start_local, &mut self.end_local]
@@ -155,6 +175,7 @@ impl EventFields {
             p.links.retain(|l| l.len() <= 2048);
             p.links.truncate(8);
         }
+        while self.performers_bytes() > PERFORMERS_CAP && self.shrink_performers() {}
         if let Some(o) = &mut self.offers {
             if let Some(c) = &mut o.currency {
                 truncate(c, 16);
