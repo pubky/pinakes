@@ -28,6 +28,9 @@ pub struct EventFields {
     pub venue: Option<Venue>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub organizer: Option<Organizer>,
+    /// Who performs, as the page's own structured data names them (`performer`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub performers: Vec<Performer>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offers: Option<Offers>,
     /// A local time without a resolvable zone is retained; UTC columns are only a sort proxy.
@@ -108,6 +111,14 @@ pub struct Organizer {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 }
+/// A performer the event page names: its name and the links the page gives for it (`url`,
+/// `sameAs`), which the `performers` source reads for the artist's identity.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, ToSchema)]
+pub struct Performer {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<String>,
+}
 #[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
 pub struct Offers {
     pub low_price: Option<f64>,
@@ -137,6 +148,12 @@ impl EventFields {
             if o.url.as_ref().is_some_and(|s| s.len() > 2048) {
                 o.url = None;
             }
+        }
+        self.performers.truncate(16);
+        for p in &mut self.performers {
+            truncate(&mut p.name, 256);
+            p.links.retain(|l| l.len() <= 2048);
+            p.links.truncate(8);
         }
         if let Some(o) = &mut self.offers {
             if let Some(c) = &mut o.currency {

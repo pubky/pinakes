@@ -294,6 +294,9 @@ fn fields(doc: &mut ResourceMeta, v: &Value, base: &Url, ap: bool) {
             name,
         }),
     );
+    if doc.event.performers.is_empty() {
+        doc.event.performers = performers(v, base);
+    }
     if let Some(offer) = v.get("offers") {
         let values: Vec<&Value> = offer
             .as_array()
@@ -322,6 +325,42 @@ fn fields(doc: &mut ResourceMeta, v: &Value, base: &Url, ap: bool) {
 }
 /// Set the start or end from a page value, trimmed at both ends first (a padded date-only value
 /// is still recognised as a date by its length).
+/// An event node's performers (`performer`, one or several): a name each, with the links the
+/// page gives for it (`url`, `sameAs`); a bare name is a performer without links, a nameless
+/// entry nothing.
+pub fn performers(v: &Value, base: &Url) -> Vec<super::Performer> {
+    let nodes: Vec<&Value> = match v.get("performer") {
+        Some(Value::Array(all)) => all.iter().collect(),
+        Some(one) if !one.is_null() => vec![one],
+        _ => vec![],
+    };
+    nodes
+        .into_iter()
+        .filter_map(|p| {
+            let name = string(&p["name"]).or_else(|| string(p))?;
+            let name = name.trim().to_owned();
+            if name.is_empty() {
+                return None;
+            }
+            let mut links = vec![];
+            for field in ["url", "sameAs"] {
+                let values: Vec<&Value> = match p.get(field) {
+                    Some(Value::Array(all)) => all.iter().collect(),
+                    Some(one) => vec![one],
+                    None => vec![],
+                };
+                for value in values {
+                    if let Some(url) = string(value).and_then(|s| origin_url(base, &s)) {
+                        if !links.contains(&url) {
+                            links.push(url);
+                        }
+                    }
+                }
+            }
+            Some(super::Performer { name, links })
+        })
+        .collect()
+}
 pub fn set_time(doc: &mut ResourceMeta, s: &str, end: bool) {
     let s = s.trim();
     if (end && doc.end.is_some()) || (!end && doc.start.is_some()) {

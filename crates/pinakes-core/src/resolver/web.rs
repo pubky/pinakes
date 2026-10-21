@@ -992,6 +992,10 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url, claims: bool) {
             .entry("published".into())
             .or_insert_with(|| date.trim().into());
     }
+    // An event's performers, as the page names them (the event service parses them too).
+    if doc.event.performers.is_empty() {
+        doc.event.performers = crate::event::page::performers(v, base);
+    }
     for field in ["author", "creator"] {
         if !doc.attributes.contains_key("author") {
             if let Some(value) = v.get(field) {
@@ -1295,6 +1299,54 @@ mod tests {
         let body = extract("https://example.org/data.json", &fetched, 100);
         assert_eq!(body.doc.name.as_deref(), Some("Tom &amp; Jerry"));
         assert_eq!(body.doc.description.as_deref(), Some("5&currency=EUR"));
+    }
+    /// An event page's performers, with the links the page gives for them; a bare name is a
+    /// performer without links, and a nameless entry nothing.
+    #[test]
+    fn performers_come_from_the_pages_structured_data() {
+        let body = r#"<title>Radiohead @ RAC Arena</title><script type="application/ld+json">{"@type":"MusicEvent","name":"Radiohead @ RAC Arena","startDate":"2027-05-03T19:30:00","performer":[{"@type":"MusicGroup","name":"Radiohead","genre":["rock"],"sameAs":"https://www.songkick.com/artists/253846-radiohead?utm_medium=organic&utm_source=microformat"},{"@type":"MusicGroup","name":"Support Act","url":"/artists/1-support","sameAs":["https://open.spotify.com/artist/abc","https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711"]},"Someone Else",{"@type":"Person","sameAs":"https://example.org/nobody"}]}</script>"#;
+        let fetched = crate::sources::fixture::page(
+            "https://www.songkick.com/concerts/43402127-radiohead-at-rac-arena",
+            "text/html",
+            body.as_bytes().to_vec(),
+            None,
+        );
+        let out = extract(
+            "https://www.songkick.com/concerts/43402127-radiohead-at-rac-arena",
+            &fetched,
+            100,
+        );
+        assert_eq!(out.doc.type_name, "MusicEvent");
+        let performers: Vec<(&str, Vec<&str>)> = out
+            .doc
+            .event
+            .performers
+            .iter()
+            .map(|p| {
+                (
+                    p.name.as_str(),
+                    p.links.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            performers,
+            [
+                (
+                    "Radiohead",
+                    vec!["https://www.songkick.com/artists/253846-radiohead?utm_medium=organic&utm_source=microformat"]
+                ),
+                (
+                    "Support Act",
+                    vec![
+                        "https://www.songkick.com/artists/1-support",
+                        "https://open.spotify.com/artist/abc",
+                        "https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711"
+                    ]
+                ),
+                ("Someone Else", vec![]),
+            ]
+        );
     }
     #[test]
     fn extraction_precedence_and_promoted_facets() {
