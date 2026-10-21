@@ -7,7 +7,8 @@ For their links, Pinakes reads that API instead of the page. Every source here:
   entry name is UniProt's own identifier. A PubChem compound name gets the compound's card when
   PubChem names exactly one compound for it, but is never an alias of it (nothing merges on a
   name); a name with several compounds gets an ordinary web card;
-- needs no key;
+- needs no key, except [GitHub](github.md), which is off without the operator's token
+  ([Discogs](discogs.md) takes an optional one);
 - makes every address of the same object one resource: the other addresses are
   [aliases](../api.md#aliases) of one root;
 - records itself on the card: `details.from` names the source and `details.facts` holds the
@@ -19,9 +20,10 @@ head tag on the page's own origin), the source reads that record and improves th
 within the web fetch's deadline and at most 3 seconds. The card then names the source in
 `details.from` too; a failure leaves the page's own card.
 
-One source is a wall hook ([`feed`](feed.md)): when a page answers with an access wall, it looks
+Two sources are wall hooks, used when a page answers with an access wall: [`feed`](feed.md) looks
 for that exact link in the same site's RSS or Atom feed or news sitemap, and the item makes the
-card.
+card; [`media_records`](media_records.md) reads the exact record of a walled IMDb title or
+podcast page.
 
 ## Switches
 

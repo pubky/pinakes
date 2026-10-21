@@ -83,11 +83,11 @@ An IMDb title keeps the type its page gives (it can be either).
 | `status` | Fetch health: `ok`, `pending`, `missing`, `unreachable` or `error` |
 | `type` | schema.org type (`MusicEvent`, `Book`, `Place`, …), or one of Pinakes's own types for what schema.org has no class for: `BitcoinBlock`, `BitcoinTransaction`, `BitcoinAddress`, `LightningNode` and `LightningChannel` (not schema.org; each a child of `Thing`) |
 | `name`, `description`, `image` | Display metadata; images point to the origin and are never proxied |
-| `site` | The publishing host; for `pubky://` objects the app path segment (`mapky.app`), not the public key; for a link whose URL names a known service (a music service, a Wikipedia edition, MusicBrainz, Wikidata, a service the also-on lookups know), that service's name (`Apple Music`, `Wikipedia (de)`, `OpenStreetMap`), even before its card is read; for a card read from an official API without a host of its own, the service's name (`Federal Register`) |
+| `site` | The publishing site: the page's own site name (`og:site_name`), else its host; for `pubky://` objects the app path segment (`mapky.app`), not the public key; for a link whose URL names a known service (a music service, a Wikipedia edition, MusicBrainz, Wikidata, a service the also-on lookups know), that service's name (`Apple Music`, `Wikipedia (de)`, `OpenStreetMap`), whatever the page calls itself and even before its card is read; for a card read from an official API without a host of its own, the service's name (`Federal Register`) |
 | `point` | `{lat, lon}` |
 | `start`, `end` | RFC 3339 instants for events and occurrences |
 | `group` | `{id, size}` when the resource or occurrence is in a [group](#groups), else `null` |
-| `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; one per service, at most 8 on a card and 256 on `GET /v1/resources/{id}`, whose `details.also_on` lists every link. A hint only: every member keeps its own card |
+| `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; one per service, at most 8 on a card and 256 on `GET /v1/resources/{id}`, whose `details.also_on` lists every link (up to 256). A hint only: every member keeps its own card |
 | `attribution` | Present on OSM cards, events placed at an OSM venue and events whose zone came from coordinates; display it with the card |
 | `occurrence` | Occurrence cards only: `{feed_id, feed_uri, uid, recurrence_id, status}`; `feed_uri` is the feed's URI, the link people tagged |
 | `event` | Pubky event references only: `{author, object_path, recurrence_id, start, end, status}` |
@@ -114,8 +114,8 @@ body, and answer `If-None-Match` with 304.
 | `venue` | `{name, id}`: the venue's name and, when it resolved to a resource, its ID |
 | `organizer` | `{name, url}` |
 | `from` | Where the card's metadata came from when it is not the page itself: the [source](#sources) whose official API answered, e.g. `federal_register` |
-| `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …), then the facts the [also-on](#also-on) sources read for it (`isrc`, `upc`, `mbid`, `mbid_was`, `artist`, `artist_type`, `duration` in seconds); several values of one name are joined with `; `. Each source's page lists its facts. `null` when there are none. Facts never join anything |
-| `also_on` | Every link of the card's [also on](#also-on), several of one service too (the card shows one per service) |
+| `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …), then the facts the [also-on](#also-on) sources read for it (`isrc`, `upc`, `mbid`, `mbid_was`, `artist`, `artist_type`, `duration` in seconds); several values of one name are joined with `; `. Each source keeps at most `limits.also_on_facts_per_source` (32, at least 8) facts per resource, cutting the many values of one name (a recording's ISRCs) before a name's one value (its MBID, artist). Each source's page lists its facts. `null` when there are none. Facts never join anything |
+| `also_on` | Every link of the card's [also on](#also-on), up to 256, several of one service too (the card shows one per service) |
 | `aliases` | Other spellings of this link that resolve to it ([aliases](#aliases)), at most 50; a page's own `url`, `@id`, `sameAs` or canonical claims are not aliases and are not listed |
 | `updated_at` | When the current metadata was accepted |
 | `maybe_same` | An event's card only: up to ten events that are [possibly the same event](#possibly-the-same-event), best first (the card's `maybe_same` is the first three) |
@@ -125,7 +125,7 @@ operators read the stored document with `GET /v1/resources/{id}/document` on the
 
 ### Occurrence
 
-An occurrence card is a card with `occurrence: {feed_id, uid, recurrence_id, status}`. A null
+An occurrence card is a card with `occurrence: {feed_id, feed_uri, uid, recurrence_id, status}`. A null
 `recurrence_id` is a non-recurring instance; recurring keys are UTC instants or all-day dates.
 `occurrence.status` is the instance's lifecycle (`scheduled`, `cancelled`, `postponed`,
 `rescheduled`, `moved_online`); the card's own `status` is the feed's fetch health. Use
@@ -140,9 +140,9 @@ card, by ID and then member (an occurrence is its own member).
 
 ### Change line
 
-`{seq, resource_id, occurrence?, at, class, fields}`: `at` is Unix milliseconds, `occurrence`
-the serialized `[uid, recurrence_id]` key of an occurrence change, and `fields` every changed
-field. Read the current card for the new values.
+`{seq, resource_id, occurrence?, at, class, fields, root?}`: `at` is Unix milliseconds,
+`occurrence` the serialized `[uid, recurrence_id]` key of an occurrence change, `fields` every
+changed field, and `root`, on an `aliased` line only, the resource that answers for this one. Read the current card for the new values.
 
 ## Examples
 
@@ -444,7 +444,7 @@ not fetch the post. Author and reach filters also constrain that post's author.
 `recent` ranks by the newest reference; `distance` and `start` by negative metres and negative
 Unix seconds, so nearest and earliest come first. Scores are internal and never returned.
 
-**Paging.** Pages are keyset-ordered on `(rank, id)`. The cursor is signed with a key created at
+**Paging.** Pages are keyset-ordered on rank, then one internal key per resource or occurrence. The cursor is signed with a key created at
 daemon startup (HMAC-BLAKE3) and binds the filters, sort and decay instant; keep them unchanged
 (`limit` may change). A tampered cursor, a cursor for other filters or one from a previous
 daemon returns 400: restart without a cursor. A null cursor ends the results. Concurrent
@@ -452,10 +452,10 @@ updates are visible between pages; this is not a frozen snapshot.
 
 **Map clusters.** `cluster=<zoom>` returns `{resolution, clusters, points, truncated, total,
 reach_truncated, facets?}`. A cluster is `{cell, count, lat, lon, top, attribution?}`, where
-`top` holds at most three card IDs by rank and the centroid is the circular mean of member
-points. Points are cards. The H3 resolution comes from `limits.h3_resolutions` by floored zoom;
+`top` holds at most three card IDs by rank, `lat` is the members' mean latitude and `lon` the
+circular mean of their longitudes. Points are cards. The H3 resolution comes from `limits.h3_resolutions` by floored zoom;
 large viewports coarsen to stay within `limits.max_cluster_cells` and `resolution` reports the
-value used. Singleton cells are points, and when the filtered total fits in `limit` every unit
+value used; a viewport that still has more cells returns 400. Singleton cells are points, and when the filtered total fits in `limit` every unit
 is a point. `limit` caps clusters plus points; `truncated` marks omitted units, and otherwise
 the cluster counts plus the points equal `total`. Cluster mode has no cursor: refine the
 viewport.
@@ -472,8 +472,8 @@ pages share `limits.reach_timeout_secs` (5 s); an incomplete list is not cached.
 Nexus user has an empty reach; a Nexus error or the deadline returns 502.
 
 **Caching.** Responses carry `Cache-Control: public, max-age=30` and an `ETag` over the
-parameters, the ingestion cursors and epochs, a write revision and the reach set's hash and
-truncation; `If-None-Match` returns 304 when nothing changed.
+parameters, the resolved time window, the ingestion cursors and epochs, a write revision, the
+same-event revision and the reach set's hash and truncation; `If-None-Match` returns 304 when nothing changed.
 
 ## Resolution and status
 
@@ -526,16 +526,18 @@ root, and a read, lookup, change query or occurrence read of the alias answers w
   `?i={id}` naming that track (`/song/{id}`), the iTunes Store's `itunes.apple.com/…/id{N}` too; YouTube and YouTube Music (`youtu.be`,
   `m.`/`music.youtube.com`, `/shorts/`, `/embed/`) → `https://www.youtube.com/watch?v={id}` and
   `…/playlist?list={id}`; Deezer without the language path → `https://www.deezer.com/{kind}/{id}`;
-  TIDAL (`/browse/`, `listen.tidal.com`, the `/u` share suffix; tracks, albums, artists, videos) →
+  TIDAL (`/browse/`, `listen.tidal.com`, the `/u` share suffix; tracks, albums, artists, videos, playlists) →
   `https://tidal.com/{kind}/{id}`; Qobuz store album
-  pages → `https://open.qobuz.com/{kind}/{id}`; SoundCloud (`m.`, any letter case, parameters) →
-  `https://soundcloud.com/{user}/{track}`; Amazon Music (`albums/{id}?trackAsin=` naming that
+  pages and `play.qobuz.com` → `https://open.qobuz.com/{kind}/{id}`; SoundCloud (`m.`, any letter
+  case, parameters) → `https://soundcloud.com/{user}`, `…/{user}/{track}` or `…/{user}/sets/{set}`; Amazon Music (`albums/{id}?trackAsin=` naming that
   track; Amazon's own hosts only, `music.amazon.com`, `.co.uk`, `.de`, `.fr`, `.it`, `.es`, `.ca`,
   `.com.au`, `.co.jp`, `.in`, `.com.br`, `.com.mx`) → `https://music.amazon.{tld}/{kind}/{id}`;
   Bandcamp without parameters; Discogs (the name after the ID, a language path, no `www`) →
   `https://www.discogs.com/{kind}/{id}`. Short links
   that need a request to expand (`spotify.link`, `deezer.page.link`, `on.soundcloud.com`) are not
   folded.
+- **Wikidata items**: `wikidata.org`, `m.wikidata.org`, `/entity/Q…` and
+  `/wiki/Special:EntityPage/Q…` are aliases of `https://www.wikidata.org/wiki/{Q-id}`.
 - **Wikipedia articles**: the mobile host, `index.php?title=…` (a revision with `oldid` too),
   spaces and percent-encoding are aliases of `https://{lang}.wikipedia.org/wiki/{Title}`. A
   redirect's title stays its own link.
@@ -551,8 +553,10 @@ root, and a read, lookup, change query or occurrence read of the alias answers w
 
 Refresh follows the time to an event's start: more than 30 days or no start, 7 days; 7–30 days,
 2 days; 24 hours to 7 days, 6 hours; under 24 hours or running, 1 hour
-(`limits.refresh_resource_secs`, `limits.refresh_container_secs`). Adapter floors can lengthen
-these; OSM follows `limits.osm_ttl_secs`. One fetch at end + 24 hours (start + 24 hours without
+(`limits.refresh_resource_secs`). Calendars and feeds use `limits.refresh_container_secs` (1
+day, 12 hours, 6 hours, 1 hour), with the feed's own TTL in place of the first two; cursor feeds
+refresh every `limits.refresh_cursor_secs` (5 minutes). Every other interval is at least an
+hour. Adapter floors can lengthen these; OSM follows `limits.osm_ttl_secs`. One fetch at end + 24 hours (start + 24 hours without
 an end) makes a resource final. A final resource stays frozen until a reference newer than its
 last resolution reopens it; `geo:` points stay final.
 
@@ -582,7 +586,8 @@ change at once one class is chosen in this order: lifecycle, time, location, nam
 [alias](#aliases) emits `aliased` with `fields: ["root"]` and `root`, the ID that answers for it
 from then on; the changes of an alias's ID are its own and its root's. A fetch failure emits nothing and never cancels a resource.
 A calendar snapshot with more than `limits.feed_max_changes` (100) occurrence changes emits one
-feed-level `details` line with `fields: ["occurrence_changes"]`: re-read the occurrence window.
+feed-level `details` line with `fields: ["occurrence_changes"]` (and `"resource_change"` when
+the feed's own card changed too): re-read the occurrence window.
 Lines are kept `limits.change_retention_days` (90) and pruned hourly.
 
 ## Calendars and occurrences
@@ -628,8 +633,9 @@ cancellation. A snapshot that loses more than half its active keys, or adds more
 confirms it; a feed over `limits.feed_max_rows` (10000) is held until it shrinks, and
 `limits.feed_max_holds` (5) consecutive holds dead-letter it. A re-parse that moves instances
 (for example by an hour across a DST change) re-keys them once, under the same rules. A feed
-answering HTML, 404 or 410 counts as an empty snapshot: two of them cancel its rows and mark it
-missing, while its history stays readable here. Cancelled, superseded and past rows are purged
+answering 404, 410 or 451, or with an empty feed, counts as an empty snapshot: two of them
+cancel its rows and mark it missing, while its history stays readable here. A feed that answers
+HTML instead is unreachable (retried with backoff) and keeps its rows. Cancelled, superseded and past rows are purged
 `limits.feed_retention_days` (30) after their end.
 
 Calendar validators (ETag, Last-Modified) are sent only after a saved snapshot with nothing
@@ -675,7 +681,8 @@ one thing, only on evidence that cannot be spoofed:
   Central record (`doi`, `arxiv`, `pmid`, `pmcid`), crate, npm and PyPI package, source
   repository (`crate`, `npm`, `pypi`, `repo`), Steam and GOG game (`steam`, `gog`) and Federal
   Register document (`fr`): a join that would bring a second (a wrong ID on a hub) is refused,
-  so one bad claim never chains two groups. ISRCs and barcodes may be several.
+  so one bad claim never chains two groups. ISRCs, barcodes, ISBNs and other keys may be
+  several.
 - **Curation** on the admin listener.
 
 `sameAs`, canonical and other URL claims, and other identifiers, never group. Two located
@@ -704,7 +711,7 @@ Content-Type: application/json
 An occurrence member is `{"uid":"calendar-uid","recurrence_id":"2026-10-20T17:00:00Z"}`.
 Members must exist and have been grouped once. Curation pins its members away from automatic
 groups and overrides the distance and evidence rules; removing a member lets its automatic
-evidence count again. Invalid curation returns 400. `groups.enabled = false` turns off group
+evidence count again. Invalid curation returns 400; a busy group writer returns 503 (retry). `groups.enabled = false` turns off group
 reads, writes and collapse; stored membership stays for when it is turned back on.
 
 ## Possibly the same event
@@ -747,7 +754,8 @@ keeps its own card.
 A background pass computes the pairs for events starting from a day ago to a year ahead, again
 whenever an event's start, place or name changes; a request only reads them. A new or changed
 event is paired within about five seconds of its save, once the events before it in the queue
-are read (the events already stored when the hint is installed are queued at once). Search
+are read; an hourly sweep, which also runs at startup, queues events that entered the window or
+changed unseen. Search
 pages change their `ETag` when a hint on them changes. `[event] same_event_hint = "off"`
 ([operations](operations.md#calendars-and-events)) removes the field from cards, details and the
 OpenAPI document and stops the pass.
@@ -758,30 +766,44 @@ A card's `also_on` says where else the same thing is: first the other members of
 [group](#groups) (links someone tagged, each with its resource `id`), by ID and URI, then
 **derived links**: the same thing on services nobody tagged, found by a source, with
 `derived: true`, the service's name in `site`, the hub or service it came through in `via`
-(`musicbrainz`, `wikidata`), and for some a `kind` (`archived`) and a time `at`. Derived links
-are ordered by service name; each URL appears once (a tagged member wins) and never the card
-itself. A card carries at most 8 entries, and one link per service (by `site`): for a music
-service a tagged member first, because someone used that link (of several, the one on the
-recording's original album, the `original_album` fact), then the derived link most group members
-name, and none on the card's own service (an artist's card never shows another page of its
-service, such as the band's earlier name, which Wikidata may list as a second ID). A member whose
-card is not read yet counts by the service its URL names, against derived links only: it keeps
-derived links on that service off the card, is not deduplicated against other tagged members (two
-such members on one service both show until their cards are read), and counts within the entry
-cap. Any other tagged member
-whose URL is on a service a derived link names (a tagged `f-droid.org` page is on F-Droid, as
-Wikidata's F-Droid link is) takes that service's place the same way; a page that only names
-itself after a service does not, and other tagged members always show. A card of a service the sources know is named after it (`site`): Wikidata,
-OpenStreetMap, Steam, GOG, the App Store, Google Play, F-Droid, crates.io, npm, PyPI, GitHub,
-arXiv, DOI and the others the derived links name. `GET /v1/resources/{id}` shows the same, up to 256 entries, and
-lists every link in `details.also_on` (several of one service too). A derived link can be unavailable in some
-countries (a regional release on a streaming service); nothing public says where, so prefer a
-tagged member.
+(`musicbrainz`, `wikidata`), and for some a `kind`: `archived` (a Wayback Machine copy, with
+its capture time in `at`), `work` (a book's work page, not its edition's), `source` (a
+package's repository), `submitted` and `published` (a paper's preprint and journal version) or
+`pdf`. Derived links are ordered by service name; each URL appears once (a tagged member wins)
+and never the card itself. A card carries at most 8 entries, and one link per service, the
+service a link's URL is on (a derived link's `site`): for a music service a tagged member
+first, because someone used that link (of several, the one on the recording's original album,
+the `original_album` fact), then the derived link most group members name. The card's own
+service, by its URL, shows nothing else: an artist's card never shows another page of its
+service, such as the band's earlier name, which Wikidata may list as a second ID. A music member
+whose card is not read yet counts by the service its URL names, against derived links only: it
+keeps derived links on that service off the card, is not deduplicated against other tagged
+members (two such members on one service both show until their cards are read), and counts
+within the entry cap. Any other tagged member whose URL is on a service a derived link names (a
+tagged `f-droid.org` page is on F-Droid, as Wikidata's F-Droid link is) takes that service's
+place the same way; a page that only names itself after a service does not, and other tagged
+members always show. A card of a service the sources know is named after it (`site`):
+Wikidata, OpenStreetMap, DOI, Steam, SteamDB, ProtonDB, PCGamingWiki, GOG, App Store, Google
+Play, F-Droid, Flathub, Snap Store, crates.io, Docs.rs, lib.rs, npm, jsDelivr, unpkg, PyPI,
+GitHub, GitLab, Software Heritage, arXiv, alphaXiv, PubMed, PubMed Central, Hugging Face
+Papers, BTC Map and Wayback Machine. `GET /v1/resources/{id}` shows the same, up to 256
+entries, and lists every link in `details.also_on` (several of one service too, up to 256). A
+derived link can be unavailable in some countries (a regional release on a streaming service);
+nothing public says where, so prefer a tagged member.
 
 A derived link is a hint: it is never fetched, never counted as a reference and never ranks
 anything. Sources read a resource after it is saved and again when their results age (each
-source's lifetime, typically 30 days); a source's links and keys live twice that, so one failed
-refresh keeps them, and they go when the source stops returning them. A source's exact keys
+source's lifetime: 30 days, `btcmap` 7); a source's links and keys live twice that, so one
+failed refresh keeps them, and they go when the source stops returning them. The sources run in this order, each
+seeing the keys the ones before it found: `service`, `tidal`, `musicbrainz`,
+`musicbrainz_entity`, `wikidata`, `discogs`, `deezer`, `itunes`, `wikipedia`, `wikidata_item`,
+`books`, `films`, `podcasts`, `titles`, `osm_wikidata`, `wikidata_osm`, `btcmap`,
+`federal_register`, `unpaywall`, `ncbi`, `datacite`, `huggingface`, `crates`, `npm`, `pypi`,
+`software_heritage`, `steam`, `wikidata_stores`, `wayback`; `[also_on.sources.<id>] enabled =
+false` turns one off. A MusicBrainz or Wikidata answer over 8 MB is no answer: the source
+records only what the link's URL proves (a MusicBrainz page's MBID or ISRC, a Wikidata item
+link's Q-id, the Q-id an article's own Wikipedia names), else nothing, until its next run. A
+source's exact keys
 (an MBID, a Q-id) also [group](#groups) the links that share them. A derived link found through
 an exact ID (a MusicBrainz relation, a Wikidata item's claim or sitelink, a service's answer to
 a lookup by barcode or ISRC) carries that ID: a tagged resource that is that link (the same URL
@@ -798,49 +820,57 @@ from a known music service's own record of its own object; another host's claim 
   (it names none of them). A track whose ISRC nobody else knows (not MusicBrainz,
   not another link) stays alone with its key, and joins as soon as another link or MusicBrainz
   carries the same ISRC.
-- `tidal` (only with the operator's TIDAL developer credentials,
+- `tidal` (only with the operator's TIDAL client ID and secret, `[tidal] client_id` and
+  `client_secret` or `PINAKES_TIDAL_CLIENT_ID` and `PINAKES_TIDAL_CLIENT_SECRET`,
   [operations](operations.md#also-on)): a TIDAL album's barcode and a track's ISRC from TIDAL's
-  own API, as the keys `upc:…` and `isrc:…` (`via` `tidal`) and as facts; `deezer` and `itunes`
-  below then find the same album or track by them. An ISRC MusicBrainz gives to several
-  recordings is a fact only, as with `service`. TIDAL's catalogue is read in one country
-  (`[tidal] country`, `US`); an item TIDAL does not offer there gives nothing.
+  own API, as the keys `upc:…` and `isrc:…` (`via` `tidal`) and as facts, and no links;
+  `musicbrainz`, `deezer` and `itunes` below then find the same album or track by them. An ISRC
+  MusicBrainz gives to several recordings is a fact only, as with `service`. TIDAL's catalogue is
+  read in one country (`[tidal] country`, `US`); an item TIDAL does not offer there gives
+  nothing. TIDAL's answers are cached per credential pair, so a new token keeps them; a 401 or
+  403 is never cached, and refused credentials are asked again after five minutes.
 - `musicbrainz`: what MusicBrainz relates the link to (one recording, release or release group,
   or artist; several are ambiguous and give nothing), that entity's current links on music
   services, and its MBIDs, the recording's ISRCs (up to eight) and the release's barcode as keys
   (`mb:recording:…`, `mb:release:…`, `mb:release-group:…`, `mb:artist:…`, `isrc:…`,
   `upc:…`). A track MusicBrainz does not relate by URL takes the recording its page's own ISRC
-  is on when that ISRC is a key (TIDAL, `service` above) and MusicBrainz knows exactly one. An album it does not relate by URL takes the releases carrying the album's barcode keys (TIDAL's
-  own record, or a service's from an earlier run, never its own; a search on the exact barcode field, checked
-  against the answer): one release, or editions of one release group, as below. An album link related to up to four releases of one
-  release group (editions MusicBrainz keeps apart) takes the release group's key alone, and the
-  links, facts and barcode every one of those releases has. Its facts: `mbid`, the recording's
-  `isrc`s, the release's barcode as `upc`, the `artist` credit, the recording's `duration` and
-  `original_album` (the earliest official album that is no compilation, live or remix album),
-  and an artist's `artist_type` (`Person`, `Group`, …). ISRCs are stored in upper case and barcodes as
-  GTIN-13 (a 12-digit UPC gains a leading zero), by every source.
-  Discogs pages are taken at their level only: a Discogs master is a release group, a Discogs
-  release one release and never its release group (an edition is not the album), a Discogs
-  artist an artist. Each lists its entity's service pages; a release group's MusicBrainz entry
-  names none (its editions have them), so a master lists the album pages of the one Wikidata
-  item MusicBrainz relates the release group to, when that item names the release group back
-  (P436), keyed by the release group.
+  is on when that ISRC is a key (TIDAL, `service` above) and MusicBrainz knows exactly one. An
+  album it does not relate by URL takes the releases carrying the album's barcode keys (TIDAL's
+  own record, or a service's or Discogs' from an earlier run; at most two, never one a
+  MusicBrainz source found), by a search on the barcode field alone (a 12-digit UPC in both
+  spellings) checked against the answer: one release, or editions of one release group, as
+  below. An album link related to up to four releases of one release group (editions
+  MusicBrainz keeps apart) takes the release group's key alone, and the links, facts and barcode
+  every one of those releases has; releases of different release groups are ambiguous. Its
+  facts: `mbid`, the recording's `isrc`s, the release's barcode as `upc`, the `artist` credit,
+  the recording's `duration` and `original_album` (the earliest official album that is no
+  compilation, live or remix album), and an artist's `artist_type` (`Person`, `Group`, …). ISRCs
+  are stored in upper case and barcodes as GTIN-13 (a 12-digit UPC gains a leading zero), by
+  every source.
+  Discogs pages are taken at their level only: a Discogs master is a release group (never
+  looked up by barcode), a Discogs release one release and never its release group (an edition
+  is not the album), a Discogs artist an artist. Each lists its entity's service pages; a
+  release group's MusicBrainz entry names none (its editions have them), so a master lists the
+  album pages of the one Wikidata item MusicBrainz relates the release group to, when that item
+  names the release group back (P436), keyed by the release group.
+- `wikidata`: the one item carrying the link's own service ID (Spotify, Apple Music, Deezer,
+  TIDAL, Qobuz, YouTube, SoundCloud, Amazon Music, Bandcamp, Discogs), read back and compared
+  exactly (two items are ambiguous and give nothing); its other music-service IDs as links and
+  its Q-id and MusicBrainz ID as keys. An album item lists its Discogs master; a Discogs release
+  ID names an item only when the item is not an album's (no master, no release group). A track
+  takes only an item that is one recording (one MusicBrainz recording ID, no work ID): a song
+  item is a work that its studio, live and remastered recordings share, so a track takes
+  neither its Q-id nor its tracks.
+- `discogs`: a Discogs artist, master or release gets `discogs:{kind}:{id}` as key, and a release
+  up to four of its barcodes as facts, from the record its [card](sources/discogs.md) reads
+  (shared); a release that lists one barcode also gets it as a `upc:` key (a box set lists each
+  disc's), which `deezer` and `itunes` below then look up. Never by title or catalogue number.
 - `deezer` (off unless the operator turns it on: Deezer's API terms allow non-commercial use
   only): a Deezer track's or album's own ISRC or barcode from Deezer's API as a key, and for
   another service's track or album with an ISRC or barcode key, the one Deezer track or album
   the API names for it, keyed by it.
 - `itunes`: for an album with a barcode key, the Apple Music album iTunes' `lookup?upc=` names
   when exactly one album answers, keyed by that barcode (so a tagged link to that album joins).
-- `wikidata`: the one item carrying the link's own service ID (Spotify, Apple Music, Deezer,
-  TIDAL, Qobuz, YouTube, SoundCloud, Amazon Music, Bandcamp, Discogs), read back and compared
-  exactly (two items are ambiguous and give nothing); its other music-service IDs as links and
-  its Q-id and MusicBrainz ID as keys. An album item lists its Discogs master; a Discogs release
-  ID names an item only when the item is not an album's (no master, no release group). A track takes only an item that is one recording (one MusicBrainz
-  recording ID, no work ID): a song item is a work that its studio, live and remastered
-  recordings share, so a track takes neither its Q-id nor its tracks.
-- `discogs`: a Discogs artist, master or release gets `discogs:{kind}:{id}` as key, and a release
-  its barcodes as facts, from the record its [card](sources/discogs.md) reads (shared); a
-  release that lists one barcode also gets it as a `upc:` key (a box set lists each disc's).
-  Never by title or catalogue number.
 
 **Wikipedia.** An article's card comes from its Wikipedia's REST summary (`Article`, the title,
 the first paragraph up to 600 characters, the thumbnail, `site` `Wikipedia ({lang})`), so a long
@@ -891,8 +921,8 @@ exactly, never by title:
   an edition in another language.
 - The work's Wikidata item (the one carrying its Open Library work ID) gives its Q-id as the
   `wikidata` fact and its LibraryThing, Goodreads (the work's editions), Google Books, Project
-  Gutenberg and BookBrainz pages, each with `kind: "work"` on an edition's card. A book can
-  therefore list two Goodreads pages: its edition and its work's editions.
+  Gutenberg and BookBrainz pages, each with `kind: "work"` on an edition's card. A book's
+  details can therefore list two Goodreads pages: its edition and its work's editions.
 - A failing iTunes or Wikidata request leaves what Open Library said.
 - Each link carries the key it was found through: the edition's pages (Amazon and Apple Books
   too) its edition key, the work's pages its work key. A tagged Goodreads or LibraryThing link
@@ -1005,13 +1035,14 @@ dependency list) is another object:
   PyPI trusted publishers, else deps.dev's `SLSA_ATTESTATION`), as a link only: one repository
   often publishes several packages (a workspace, a monorepo), so it joins none of them. A
   package's own `repository` field is the publisher's claim and is never shown.
-- `software_heritage`: a GitHub or GitLab repository's Software Heritage archive page, when it
-  archives it, with the repository's `repo:` key (`key=repo:github.com/{owner}/{name}`).
+- `software_heritage`: a GitHub or GitLab repository's own `repo:` key
+  (`key=repo:github.com/{owner}/{name}`), and its Software Heritage archive page when Software
+  Heritage archives it.
 
 **Games and apps.**
 - `steam`: a Steam game's own page (store, community hub, SteamDB, ProtonDB or PCGamingWiki appid
   link; never a page under it: a discussion, review, guide, workshop item or news item) gets its
-  SteamDB page, its ProtonDB page when ProtonDB has reports, its PCGamingWiki page where the appid
+  Steam store and SteamDB pages, its ProtonDB page when ProtonDB has reports, its PCGamingWiki page where the appid
   lookup leads, and its GOG page through GOG GamesDB (only GOG's and Steam's own rows), with
   `steam:` and `gog:` keys.
 - `wikidata_stores`: an app's or game's own page on Steam, GOG, the App Store, Google Play,
@@ -1040,7 +1071,8 @@ their release group, while two editions (two MusicBrainz releases) stay apart. A
 Public `/v1/info` names the kinds this instance resolves in `resolves`; the admin `/v1/info`
 lists one manifest per resolver and card kind (`media`, `isbn`, `doi`, `nostr`, `activitypub`,
 `official`),
-the event platform adapters, worker status and the effective limits.
+the event platform adapters, and each resolver's switch, concurrency, request rate and job
+counts by status.
 
 - **ISBN**: ISBN-10/13 checksums, metadata from Open Library.
 - **DOI**: `doi:`, `https://doi.org/…` and `https://dx.doi.org/…` request CSL JSON with the
@@ -1051,7 +1083,8 @@ the event platform adapters, worker status and the effective limits.
   are asked only after both HTTP indexers miss.
 - **ActivityPub**: advertised endpoints or ActivityStreams JSON give Person, Article or
   SocialMediaPosting cards only when the fetched URL and the object ID share a registrable
-  domain. Note excerpts are capped at 200 characters; unlisted content is omitted.
+  domain (on a multi-tenant host, the same tenant). Note and Article excerpts are capped at 200
+  characters; unlisted content is omitted.
 - **Media**: oEmbed (`media.oembed`) and page JSON-LD, which wins when healthy. An oEmbed answer
   survives a failed or truncated page. Podcast types need a namespace or an audio/video
   enclosure; plain RSS is a DataFeed. Direct podcast feeds are PodcastSeries; `?guid=` or the
@@ -1071,8 +1104,9 @@ links a card.
 
 ## Sources
 
-Where a service's page is walled, thin or moved, Pinakes reads the service's own keyless API for
-its links instead: the card's `details.from` names the source and `details.facts` holds the
+Where a service's page is walled, thin or moved, Pinakes reads the service's own API for its
+links instead (keyless, except GitHub, which needs `[sources.github] token` or
+`PINAKES_GITHUB_TOKEN` and is off without one): the card's `details.from` names the source and `details.facts` holds the
 API's fields. [docs/sources](sources/README.md) lists every source with the links it reads,
 what it fetches, its card, its facts, its limits and licence, and its examples; each can be
 switched off in `[sources.<name>]`.
@@ -1131,8 +1165,9 @@ Coordinate-derived time zones use ODbL boundary data too; see `data/README.md`.
 Every public `/v1` route and Swagger UI share a per-IP budget on the direct peer address
 (`api.requests_per_minute`, 120; forwarded headers are not trusted). A reach search costs
 `limits.reach_cost` (6) units, charged before any Nexus call; every other request costs one.
-Over budget returns 429 with `Retry-After: 60`. Public queries use their own ten-connection
-pool with a five-second statement and acquisition timeout. The dump is written by the daemon,
+Over budget returns 429 with `Retry-After: 60`. The public and admin listeners share a
+ten-connection pool, apart from the workers', with a five-second statement and acquisition
+timeout. The dump is written by the daemon,
 not by a request: its writer's read-only transaction lifts the statement timeout to drain a large
 snapshot, and the API only serves the file.
 

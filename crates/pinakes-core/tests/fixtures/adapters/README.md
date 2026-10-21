@@ -14,8 +14,8 @@ The integration test uses mock DNS/transport and disables relay fallback. Thirty
 produce the expected fields. Billetto/Rausgegangen/Reservix return 403, Dice returns
 503; Guidle's calendar discovery is refused by the egress content-type policy (the
 failure propagates). Fever exceeds the page cap, and the selected Entradium page lacks event fields.
-These failures are evidence of canary behavior, not claims of successful extraction.
-Counts of time-windowed occurrences are deliberately not fixed as the clock advances.
+These cases test how failures surface; they do not show extraction working.
+Counts of time-windowed occurrences are not fixed, since the clock advances.
 
 The other adapters are covered by synthesized documented contracts in adapters.rs:
 keyed APIs have no configured credentials, Proton has no public share sample, and

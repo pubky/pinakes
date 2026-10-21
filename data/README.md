@@ -64,7 +64,7 @@ license. Updates require an explicit replacement/digest review and resolver test
 the providers added and removed, and rewrites the file and this paragraph's date, count and digest.
 
 Four registry providers are skipped in code
-(`cards::SKIPPED_PROVIDERS`), so an update cannot bring them back: SoundCloud (a bot challenge for
+(`resolver::cards::SKIPPED_PROVIDERS`), so an update cannot bring them back: SoundCloud (a bot challenge for
 server addresses), TikTok (answers without metadata), Facebook and Instagram (an app token).
 
 The media resolver matches registry URL schemes locally, uses JSON-capable provider
@@ -76,5 +76,7 @@ available or permits a particular use.
 Group origin checks use the compiled `psl = 2.1.241` public suffix data pinned in
 Cargo.lock, including private suffixes. The dependency’s Cargo manifest declares MIT/Apache-2.0;
 its source and license ship in the crate.
-WordPress tenant hosts are treated separately even though that boundary is absent
-from the list. No suffix data is fetched at runtime.
+Before the suffix list applies, `multi-tenant-hosts.json` splits multi-tenant hosts by tenant
+(wordpress.com, blogspot.com and github.io by subdomain; podcast feed hosts, Medium and Google
+Calendar by path; rules in [operations](../docs/operations.md)). No suffix data is fetched at
+runtime.

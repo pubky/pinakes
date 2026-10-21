@@ -1,7 +1,8 @@
 # PubChem
 
 Chemical compounds in PubChem, read from PUG REST by compound id (CID). Public data, credited to
-PubChem; no key. PubChem asks for at most 5 requests a second (this source uses 4).
+PubChem; no key. PubChem asks for at most 5 requests a second; Pinakes sends one a second by
+default, and at most 4 when `limits.host_requests_per_second` is raised.
 
 ## Links
 
