@@ -250,7 +250,20 @@ impl MusicBrainzEntitySource {
                 MbKind::Release | MbKind::ReleaseGroup => Level::Album,
                 MbKind::Artist => Level::Artist,
             };
-            return entities_found(cx, base, kind, &[mbid], level).await;
+            let mut found =
+                entities_found(cx, base, kind, std::slice::from_ref(&mbid), level).await?;
+            // A merged entity answers its old MBID with the one it was merged into: the page keys
+            // that one, and keeps the old as a fact, so `key=mbid:{old}` still finds it.
+            if found
+                .facts
+                .iter()
+                .any(|f| f.name == "mbid" && f.value != mbid)
+            {
+                found
+                    .facts
+                    .push(crate::also_on::Fact::new("mbid_was", &mbid));
+            }
+            return Ok(found);
         }
         let Some((isrc, _)) = musicbrainz::isrc_link(&subject.uri) else {
             return Ok(Found::default());

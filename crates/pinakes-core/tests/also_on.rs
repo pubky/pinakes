@@ -1288,6 +1288,9 @@ async fn a_card_shows_one_link_per_service(pool: PgPool) {
     let deezer = "https://www.deezer.com/track/4329888262";
     let tagged = "https://tidal.com/track/534050211";
     let regional = "https://tidal.com/track/567396540";
+    let pending = "https://music.apple.com/us/song/1";
+    let pending_too = "https://music.apple.com/us/song/3";
+    let pending_tidal = "https://tidal.com/track/999";
     let mut ids = vec![];
     for (uri, site) in [(deezer, "Deezer"), (tagged, "TIDAL")] {
         let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -1297,6 +1300,11 @@ async fn a_card_shows_one_link_per_service(pool: PgPool) {
         store::save_document(&pool, &id, 0, &d).await.unwrap();
         ids.push(id);
     }
+    // A tagged Apple link whose card is not read yet.
+    for uri in [pending_too, pending_tidal] {
+        ids.push(store::ensure_resource(&pool, uri).await.unwrap());
+    }
+    ids.push(store::ensure_resource(&pool, pending).await.unwrap());
     let hub = Fake::new("music");
     let recording = "mb:recording:b1a9c0e9-d987-4042-ae91-78d6a3267d69";
     hub.answer(
@@ -1307,6 +1315,15 @@ async fn a_card_shows_one_link_per_service(pool: PgPool) {
                 Link::new(regional, "TIDAL", "musicbrainz"),
                 Link::new("https://open.spotify.com/track/a", "Spotify", "musicbrainz"),
                 Link::new("https://open.spotify.com/track/b", "Spotify", "musicbrainz"),
+                // Tagged but not read yet: they join by this key.
+                Link::new(pending, "Apple Music", "musicbrainz").keyed(recording),
+                Link::new(pending_too, "Apple Music", "musicbrainz").keyed(recording),
+                Link::new(pending_tidal, "TIDAL", "musicbrainz").keyed(recording),
+                Link::new(
+                    "https://music.apple.com/us/song/2",
+                    "Apple Music",
+                    "musicbrainz",
+                ),
             ],
             ..Default::default()
         }),
@@ -1355,16 +1372,44 @@ async fn a_card_shows_one_link_per_service(pool: PgPool) {
         .find(|c| c["id"] == ids[0].as_str())
         .unwrap()
         .clone();
-    assert_eq!(of(&card["also_on"], "TIDAL"), [tagged], "{card}");
+    let sorted = |mut v: Vec<String>| {
+        v.sort();
+        v
+    };
+    // Tagged members all show, read or not: the read TIDAL member and the pending one. The
+    // regional derived TIDAL link does not.
+    assert_eq!(
+        sorted(of(&card["also_on"], "TIDAL")),
+        sorted(vec![tagged.into(), pending_tidal.into()]),
+        "{card}"
+    );
     assert_eq!(
         of(&card["also_on"], "Spotify"),
         ["https://open.spotify.com/track/b"]
     );
+    // Pending members count for Apple Music by their URLs: both show (tagged members always do),
+    // named by their service, and the derived Apple link does not.
+    assert_eq!(
+        sorted(of(&card["also_on"], "Apple Music")),
+        sorted(vec![pending.into(), pending_too.into()]),
+        "{card}"
+    );
     // The read shows the card's view; its details list every link.
     let read = get(&app, &format!("/v1/resources/{}", ids[0])).await;
-    assert_eq!(of(&read["also_on"], "TIDAL"), [tagged]);
-    assert_eq!(of(&read["details"]["also_on"], "TIDAL"), [tagged, regional]);
+    assert_eq!(
+        sorted(of(&read["also_on"], "TIDAL")),
+        sorted(vec![tagged.into(), pending_tidal.into()])
+    );
+    assert_eq!(
+        sorted(of(&read["details"]["also_on"], "TIDAL")),
+        sorted(vec![tagged.into(), regional.into(), pending_tidal.into()])
+    );
     assert_eq!(of(&read["details"]["also_on"], "Spotify").len(), 2);
+    assert_eq!(
+        sorted(of(&read["also_on"], "Apple Music")),
+        sorted(vec![pending.into(), pending_too.into()])
+    );
+    assert_eq!(of(&read["details"]["also_on"], "Apple Music").len(), 3);
 }
 
 /// A card's own service has its link, the card: Radiohead's Discogs artist never shows "On A
@@ -1741,4 +1786,81 @@ async fn reextract_runs_the_also_on_sources_again(pool: PgPool) {
             .await
             .unwrap();
     assert!(!fetch_due, "no re-read of the card");
+}
+
+/// A source's facts are capped, and the cap cuts the many values of one name (ISRCs) before a
+/// name's one value (an MBID, the MBID a page was merged from, an artist), which always fit.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_sources_single_valued_facts_survive_its_cap(pool: PgPool) {
+    use pinakes_core::also_on::Fact;
+    let id = page(&pool, "https://open.spotify.com/track/facts", "Track").await;
+    let mut facts = vec![
+        Fact::new("mbid", "00000000-0000-4000-8000-00000000000f"),
+        Fact::new("mbid_was", "00000000-0000-4000-8000-00000000000e"),
+        Fact::new("artist", "Zz Top"),
+    ];
+    facts.extend((10..50).map(|n| Fact::new("isrc", format!("AAAAA26000{n}"))));
+    also_on::record(
+        &pool,
+        &id,
+        "music",
+        Found {
+            facts,
+            ..Default::default()
+        },
+        Duration::from_secs(60),
+        &Config::default().also_on,
+    )
+    .await
+    .unwrap();
+    let stored: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM resource_fact WHERE resource_id=$1 ORDER BY name")
+            .bind(&id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored.len(), 32);
+    for name in ["artist", "mbid", "mbid_was"] {
+        assert!(stored.contains(&name.to_owned()), "{name}: {stored:?}");
+    }
+    assert_eq!(stored.iter().filter(|n| *n == "isrc").count(), 29);
+}
+
+/// At the cap's floor (8), a recording's single-valued facts still fit beside its ISRCs.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_facts_caps_floor_keeps_a_recordings_single_valued_facts(pool: PgPool) {
+    use pinakes_core::also_on::Fact;
+    let id = page(&pool, "https://open.spotify.com/track/floor", "Track").await;
+    let mut config = Config::default();
+    config.also_on.facts_per_source = 8;
+    let mut facts = vec![
+        Fact::new("artist", "Queen"),
+        Fact::new("mbid", "00000000-0000-4000-8000-00000000000f"),
+        Fact::new("mbid_was", "00000000-0000-4000-8000-00000000000e"),
+    ];
+    facts.extend((10..42).map(|n| Fact::new("isrc", format!("AAAAA26000{n}"))));
+    also_on::record(
+        &pool,
+        &id,
+        "music",
+        Found {
+            facts,
+            ..Default::default()
+        },
+        Duration::from_secs(60),
+        &config.also_on,
+    )
+    .await
+    .unwrap();
+    let stored: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM resource_fact WHERE resource_id=$1 ORDER BY name")
+            .bind(&id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored.len(), 8, "{stored:?}");
+    for name in ["artist", "mbid", "mbid_was"] {
+        assert!(stored.contains(&name.to_owned()), "{name}: {stored:?}");
+    }
+    assert_eq!(stored.iter().filter(|n| *n == "isrc").count(), 5);
 }

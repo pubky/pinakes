@@ -469,7 +469,7 @@
             ]
           },
           "facts": {
-            "description": "The fields that API names for the object, and the facts the also-on sources read for it\n(`isrc`, `upc`, `mbid`, `artist`, `duration`), by name; several values are joined with\n\"; \". Absent when there are none.",
+            "description": "The fields that API names for the object, and the facts the also-on sources read for it\n(`isrc`, `upc`, `mbid`, `mbid_was`, `artist`, `duration`), by name; several values are joined with\n\"; \". Absent when there are none.",
             "type": [
               "object",
               "null"
@@ -3145,7 +3145,7 @@
             }
           },
           {
-            "description": "Links carrying one exact identifier, on any service and in any spelling:\n`mbid:{uuid}` (a MusicBrainz recording, release, release group or artist),\n`wikidata:{Q-id}`, `isrc:{code}`, `upc:{barcode}`, `isbn:{ISBN-10 or ISBN-13}`,\n`imdb:{tt…}` (an IMDb title) or `podcast:{GUID}` (a podcast's `podcast:guid`).",
+            "description": "Links carrying one exact identifier, on any service and in any spelling:\n`mbid:{uuid}` (a MusicBrainz recording, release, release group or artist, or the MBID a\nMusicBrainz page was merged from),\n`wikidata:{Q-id}`, `isrc:{code}`, `upc:{barcode}`, `isbn:{ISBN-10 or ISBN-13}`,\n`imdb:{tt…}` (an IMDb title) or `podcast:{GUID}` (a podcast's `podcast:guid`).",
             "examples": {
               "(none)": {
                 "summary": "(none)",

@@ -219,7 +219,6 @@ pub trait Source: Send + Sync {
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found>;
 }
 
-/// Every source this build has. A source added by a later change is listed here.
 /// A hub's answer over its read's cap is no answer: asking again would read the same megabytes.
 /// The run records `fallback` (what the link's URL alone proves, if anything) instead of failing.
 pub fn unless_over_cap(found: Result<Found>, fallback: impl FnOnce() -> Found) -> Result<Found> {
@@ -228,6 +227,7 @@ pub fn unless_over_cap(found: Result<Found>, fallback: impl FnOnce() -> Found) -
         found => found,
     }
 }
+/// Every source this build has. A source added by a later change is listed here.
 pub fn registry() -> Vec<Arc<dyn Source>> {
     // In this order: each source sees the keys the ones before it found.
     vec![
@@ -309,7 +309,15 @@ fn checked(
         .collect();
     facts.sort();
     facts.dedup();
+    // The cap cuts the many values of one name (a recording's ISRCs) before a name's one value
+    // (its MBID, the MBID it was merged from, its artist), so those always fit.
+    let mut per_name: std::collections::HashMap<String, usize> = Default::default();
+    for f in &facts {
+        *per_name.entry(f.name.clone()).or_default() += 1;
+    }
+    facts.sort_by_key(|f| per_name[&f.name] > 1);
     facts.truncate(cfg.facts_per_source);
+    facts.sort();
     let mut keys: Vec<Key> = found
         .keys
         .into_iter()

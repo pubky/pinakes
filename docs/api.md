@@ -114,7 +114,7 @@ body, and answer `If-None-Match` with 304.
 | `venue` | `{name, id}`: the venue's name and, when it resolved to a resource, its ID |
 | `organizer` | `{name, url}` |
 | `from` | Where the card's metadata came from when it is not the page itself: the [source](#sources) whose official API answered, e.g. `federal_register` |
-| `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …), then the facts the [also-on](#also-on) sources read for it (`isrc`, `upc`, `mbid`, `artist`, `artist_type`, `duration` in seconds); several values of one name are joined with `; `. Each source's page lists its facts. `null` when there are none. Facts never join anything |
+| `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …), then the facts the [also-on](#also-on) sources read for it (`isrc`, `upc`, `mbid`, `mbid_was`, `artist`, `artist_type`, `duration` in seconds); several values of one name are joined with `; `. Each source's page lists its facts. `null` when there are none. Facts never join anything |
 | `also_on` | Every link of the card's [also on](#also-on), several of one music service too (the card shows one per music service) |
 | `aliases` | Other spellings of this link that resolve to it ([aliases](#aliases)), at most 50; a page's own `url`, `@id`, `sameAs` or canonical claims are not aliases and are not listed |
 | `updated_at` | When the current metadata was accepted |
@@ -405,7 +405,7 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 | `q` | Full-text name/description search with a trigram/partial-name fallback; at most 256 bytes. A post whose author opted out of search indexing (`details.facts.opted_out`: Mastodon's `indexable: false` or `noindex`, Bluesky's `!no-unauthenticated`) never matches |
 | `type` | A schema.org type, ancestors included (`Event` matches `MusicEvent`; `Place` matches cafés and other `LocalBusiness` types) |
 | `category`, `host` | Exact filters |
-| `key` | Links carrying one exact identifier, on any service and in any spelling: `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist), `wikidata:{Q-id}`, `isrc:{code}` (any letter case, hyphens allowed), `upc:{barcode}` (a UPC, EAN or GTIN in any of its lengths, check digit verified), `isbn:{ISBN-10 or ISBN-13}` (an edition), `imdb:{tt…}` (a film or series) or `podcast:{GUID}` (a show), as the [also-on](#also-on) sources found them as keys or facts, or as an exact lookup by that key named the link; anything else is 400 |
+| `key` | Links carrying one exact identifier, on any service and in any spelling: `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist), `wikidata:{Q-id}`, `isrc:{code}` (any letter case, hyphens allowed), `upc:{barcode}` (a UPC, EAN or GTIN in any of its lengths, check digit verified), `isbn:{ISBN-10 or ISBN-13}` (an edition), `imdb:{tt…}` (a film or series) or `podcast:{GUID}` (a show), as the [also-on](#also-on) sources found them as keys or facts (`mbid:` also the MBID a MusicBrainz page was merged from, its `mbid_was` fact), or as an exact lookup by that key named the link; anything else is 400 |
 | `tags` | Comma-separated labels; at most 5, each 1–128 bytes |
 | `match` | `any` (default) or `all` (at most 3 tags) |
 | `author` | Resources referenced by this 52-character z-base-32 public key |
@@ -756,8 +756,12 @@ are ordered by service name; each URL appears once (a tagged member wins) and ne
 itself. A card carries at most 8 entries, and one link per service (by `site`): for a music
 service a tagged member first, because someone used that link (of several, the one on the
 recording's original album, the `original_album` fact), then the derived link most group members
-name; none on the card's own service (an artist's card never shows another page of its service,
-such as the band's earlier name, which Wikidata may list as a second ID). Tagged members that are
+name, and none on the card's own service (an artist's card never shows another page of its
+service, such as the band's earlier name, which Wikidata may list as a second ID). A member whose
+card is not read yet counts by the service its URL names, against derived links only: it keeps
+derived links on that service off the card, is not deduplicated against other tagged members (two
+such members on one service both show until their cards are read), and counts within the entry
+cap. Tagged members that are
 not music always show. `GET /v1/resources/{id}` shows the same, up to 256 entries, and
 lists every link in `details.also_on` (several of one service too). A derived link can be unavailable in some
 countries (a regional release on a streaming service); nothing public says where, so prefer a
@@ -830,7 +834,9 @@ service link is related to: its MBIDs, the recording's ISRCs and the release's b
 services at its level, each keyed by the entity. An ISRC's page (`/isrc/{ISRC}`) is the ISRC's
 key, and with exactly one recording MusicBrainz gives the ISRC to, that recording's keys, facts
 and links. An ISRC several recordings have names none of them: its page keeps it as a fact only
-(keyed, it would join whichever of their groups took it first, the other refused).
+(keyed, it would join whichever of their groups took it first, the other refused). A page whose
+MBID MusicBrainz merged into another entity keys that entity and keeps its own MBID as the fact
+`mbid_was`, so `key=mbid:{old}` still finds it.
 The page's card comes from the same answer of MusicBrainz's web service, not from the page
 (unless that answer is over its 8 MB cap: then the page is read as any page, and the sources
 record only what its URL proves, the MBID or the ISRC): the
