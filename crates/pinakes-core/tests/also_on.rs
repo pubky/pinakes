@@ -1558,32 +1558,72 @@ async fn a_page_naming_itself_after_a_service_takes_no_slot(pool: PgPool) {
     );
 }
 
-/// A run whose secondary service failed is recorded (its keys stand) and comes back after the
-/// retry time the source asked for, not after its lifetime.
+/// A run whose secondary service failed is recorded (its keys stand) and comes back after a
+/// failed run's backoff, which grows while the service keeps failing (GOG answering 500 for
+/// hours must not be asked every minute); a run with every service answering resets it.
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_failed_secondary_service_brings_the_next_run_forward(pool: PgPool) {
+async fn a_failed_secondary_service_backs_off_until_it_answers(pool: PgPool) {
     let uri = "https://example.org/paper";
     let id = page(&pool, uri, "Paper").await;
     let hub = Fake::new("datacite");
+    let partial = || {
+        Ok(Found {
+            keys: vec![key("doi:10.1000/x")],
+            // The service named a wait shorter than the backoff: the backoff wins.
+            retry_after: Some(Duration::from_secs(60)),
+            ..Default::default()
+        })
+    };
+    let state = || {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query_as::<_, (i64, f64, i32, Option<String>)>(
+                "SELECT (SELECT count(*) FROM resource_key WHERE resource_id=d.resource_id),extract(epoch FROM d.next_attempt_at-now())::float8,d.attempts,d.last_error FROM also_on_dirty d WHERE d.resource_id=$1",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let due_now = || {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now() WHERE resource_id=$1")
+                .bind(&id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    hub.answer(uri, partial());
+    let sources: Vec<Arc<dyn Source>> = vec![hub.clone()];
+    let cx = cx(Config::default());
+    drain(&pool, &cx, &sources).await;
+    let (keys, due_in, attempts, error) = state().await;
+    assert_eq!((keys, attempts, error), (1, 1, None));
+    assert!((290.0..=305.0).contains(&due_in), "{due_in}");
+    // Still failing: the wait doubles.
+    due_now().await;
+    drain(&pool, &cx, &sources).await;
+    let (keys, due_in, attempts, error) = state().await;
+    assert_eq!((keys, attempts, error), (1, 2, None));
+    assert!((590.0..=605.0).contains(&due_in), "{due_in}");
+    // Every service answered: back to the source's lifetime, the count reset.
     hub.answer(
         uri,
         Ok(Found {
             keys: vec![key("doi:10.1000/x")],
-            retry_after: Some(Duration::from_secs(120)),
             ..Default::default()
         }),
     );
-    let sources: Vec<Arc<dyn Source>> = vec![hub];
-    drain(&pool, &cx(Config::default()), &sources).await;
-    let (keys, due_in, attempts, error): (i64, f64, i32, Option<String>) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM resource_key WHERE resource_id=d.resource_id),extract(epoch FROM d.next_attempt_at-now())::float8,d.attempts,d.last_error FROM also_on_dirty d WHERE d.resource_id=$1",
-    )
-    .bind(&id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    due_now().await;
+    drain(&pool, &cx, &sources).await;
+    let (keys, due_in, attempts, error) = state().await;
     assert_eq!((keys, attempts, error), (1, 0, None));
-    assert!((0.0..=125.0).contains(&due_in), "{due_in}");
+    assert!(due_in > 3600.0, "{due_in}");
 }
 
 /// A page that only types itself as music and names a service (its own JSON-LD) is on no

@@ -133,8 +133,10 @@ pub struct Found {
     /// What was found changes the card itself (a media page's title): the resource is read again
     /// now, and its finished card takes it.
     pub reread: bool,
-    /// A secondary service the source asks failed, so its part is missing from this run: ask
-    /// again after this long instead of after the source's lifetime. What the run found stands.
+    /// A secondary service the source asks failed, so its part is missing from this run: what
+    /// the run found stands, and the worker brings the run back after its backoff, as for a
+    /// failed run (five minutes, doubling to an hour), or after this wait (the one the service
+    /// named) when longer; never after the source's lifetime.
     pub retry_after: Option<Duration>,
 }
 /// A fact a source reads for a resource: a lower-case `name` (`[a-z][a-z0-9_]`, at most 32
@@ -599,9 +601,23 @@ pub async fn drain(
     // became now): that mark stands, so the change is read too.
     for (id, result) in results {
         match result {
-            Ok(Some(next)) => {
+            Ok(Some(Next {
+                lifetime,
+                partial: None,
+            })) => {
                 sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()+$2,attempts=0,last_error=NULL WHERE resource_id=$1 AND next_attempt_at>now()")
-                    .bind(&id).bind(next).execute(pool).await?;
+                    .bind(&id).bind(lifetime).execute(pool).await?;
+            }
+            // A secondary service failed: what the run found is recorded, and the run comes back
+            // after a failed run's backoff, so a service that keeps failing is asked less and
+            // less often (up to hourly), or after the wait it named when longer; never after the
+            // lifetime. A run with every service answering resets the count.
+            Ok(Some(Next {
+                lifetime,
+                partial: Some(asked),
+            })) => {
+                sqlx::query("UPDATE also_on_dirty SET attempts=attempts+1,last_error=NULL,next_attempt_at=now()+least($2,make_interval(secs => greatest($4::float8,least($3::float8*power(2,least(attempts,6)),3600)))) WHERE resource_id=$1 AND next_attempt_at>now()")
+                    .bind(&id).bind(lifetime).bind(cfg.retry_secs as f64).bind(asked.as_secs().min(86_400) as f64).execute(pool).await?;
             }
             Ok(None) => {
                 sqlx::query(
@@ -624,20 +640,29 @@ pub async fn drain(
     }
     Ok(handled)
 }
+/// When a resource's next also-on run is due.
+struct Next {
+    /// The shortest lifetime among the sources that ran.
+    lifetime: chrono::Duration,
+    /// A secondary service failed in this run: the longest wait one named (zero when none).
+    partial: Option<Duration>,
+}
+
 /// One resource: every enabled source that applies runs; each success replaces its rows. Ok
-/// with the time until the next run (the shortest lifetime among them), Ok(None) when no
-/// source applies, Err when any source failed (the others' results are kept).
+/// with when the next run is due, Ok(None) when no source applies, Err when any source failed
+/// (the others' results are kept).
 async fn one(
     pool: &PgPool,
     cx: &Context,
     sources: &[Arc<dyn Source>],
     id: &str,
-) -> Result<Option<chrono::Duration>> {
+) -> Result<Option<Next>> {
     let Some(mut subject) = subject(pool, id).await? else {
         return Ok(None);
     };
     let cfg = &cx.config.also_on;
     let mut next: Option<Duration> = None;
+    let mut partial: Option<Duration> = None;
     let mut failed = None;
     let mut reread = false;
     // In registry order: each source sees the keys the ones before it found in this run (a
@@ -672,11 +697,12 @@ async fn one(
         match lookup {
             Ok(found) => {
                 reread |= found.reread;
-                // A secondary service failed: this run's results stand, and the source runs
-                // again after its retry time instead of after its lifetime.
-                let lifetime = found
-                    .retry_after
-                    .map_or(source.ttl(), |retry| retry.min(source.ttl()));
+                // A secondary service failed: this run's results stand, and the run comes back
+                // early (`drain` sets when).
+                if let Some(asked) = found.retry_after {
+                    partial = Some(partial.map_or(asked, |p| p.max(asked)));
+                }
+                let lifetime = source.ttl();
                 record(pool, id, source.id(), found, source.ttl(), cfg)
                     .await
                     .with_context(|| format!("record {}", source.id()))?;
@@ -709,7 +735,10 @@ async fn one(
     if let Some(error) = failed {
         return Err(error);
     }
-    Ok(next.map(|n| chrono::Duration::from_std(n).unwrap_or(chrono::Duration::days(30))))
+    Ok(next.map(|n| Next {
+        lifetime: chrono::Duration::from_std(n).unwrap_or(chrono::Duration::days(30)),
+        partial,
+    }))
 }
 
 /// The worker: drains due resources until shutdown, pausing when nothing is due.

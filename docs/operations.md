@@ -511,9 +511,10 @@ service besides its own (DataCite and Crossref for a paper, ProtonDB, PCGamingWi
 game, the provenance reads and deps.dev for a package, Software Heritage for a repository, the
 Federal Register API, Discogs' record for a release) keeps what the link and the other services
 gave when that service fails: the link's own key is recorded, the failure is counted in
-`pinakes_also_on_service_errors_total{service,class}`, and the run asks again after the
-service's retry time (fifteen minutes unless it said otherwise) instead of after the source's
-lifetime.
+`pinakes_also_on_service_errors_total{service,class}`, and the run comes back after a failed
+run's backoff instead of after the source's lifetime: five minutes, doubling to an hour while the
+service keeps failing, or the wait the service named when longer. A run in which every service
+answers resets it.
 The sources, in the order they run, are `service`, `tidal`, `musicbrainz`, `musicbrainz_entity`,
 `performers`, `wikidata`, `discogs`, `deezer` and `itunes` (music), `wikipedia`, `wikidata_item`, `books`, `films`, `podcasts`
 and `titles`, `osm_wikidata`, `wikidata_osm` and `btcmap` (places), `federal_register`, `unpaywall`,

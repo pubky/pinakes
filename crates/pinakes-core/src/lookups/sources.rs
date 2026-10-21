@@ -291,14 +291,11 @@ async fn send(
     Ok(f)
 }
 
-/// The operator's contact, for APIs that ask for an email address.
-/// How long until a run asks a secondary service again after it failed, unless the service said
-/// when (a busy one's `Retry-After`).
-const SECONDARY_RETRY: Duration = Duration::from_secs(15 * 60);
 /// A secondary service's answer, or nothing when its request failed: the lookup goes on with
 /// what the link and the other services gave, the failure is counted
-/// (`pinakes_also_on_service_errors_total{service,class}`), and `retry` is brought forward so the
-/// run asks again after the service's retry time instead of after the source's lifetime.
+/// (`pinakes_also_on_service_errors_total{service,class}`), and `retry` is set, so the worker
+/// brings the run back after its backoff (or the wait the service named, when longer) instead
+/// of after the source's lifetime.
 fn secondary<T>(
     service: &'static str,
     retry: &mut Option<Duration>,
@@ -310,21 +307,22 @@ fn secondary<T>(
             let class = crate::resolver::error_class(&error);
             crate::telemetry::also_on_service_error(service, class);
             tracing::debug!(service, class, error = %format!("{error:#}"), "secondary service failed; the lookup goes on without it");
-            let after = error
+            let asked = error
                 .chain()
                 .find_map(|cause| cause.downcast_ref::<RetryLater>())
-                .map_or(SECONDARY_RETRY, |r| Duration::from_secs(r.seconds.max(60)));
-            *retry = Some(retry.map_or(after, |r| r.min(after)));
+                .map_or(Duration::ZERO, |r| Duration::from_secs(r.seconds));
+            *retry = Some(retry.map_or(asked, |r| r.max(asked)));
             None
         }
     }
 }
-/// `found` as recorded, asked again after `retry` when a secondary service failed.
+/// `found` as recorded, with `retry` set when a secondary service failed.
 fn with_retry(mut found: also_on::Found, retry: Option<Duration>) -> also_on::Found {
     found.retry_after = retry;
     found
 }
 
+/// The operator's contact, for APIs that ask for an email address.
 fn contact(cx: &Context) -> Option<&str> {
     super::contact(&cx.config.http.contact)
 }
