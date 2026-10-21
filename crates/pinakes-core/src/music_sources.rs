@@ -442,16 +442,18 @@ async fn entities_found(
     if entities.len() == 1 {
         key(kind, &entity.mbid);
     }
-    // An edition's link (a Discogs release) is not the album: no release group's key.
     match &entity.release_group {
-        Some(_) if edition => {}
         Some(group)
             if entities
                 .iter()
                 .all(|e| e.release_group.as_ref() == Some(group)) =>
         {
-            key(MbKind::ReleaseGroup, group)
+            // An edition's link (a Discogs release) is not the album: no release group's key.
+            if !edition {
+                key(MbKind::ReleaseGroup, group)
+            }
         }
+        // Releases of different release groups: ambiguous, an edition's link too.
         _ if entities.len() > 1 => return Ok(Found::default()),
         _ => {}
     }

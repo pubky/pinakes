@@ -50,6 +50,17 @@ fn mb_url(resource: &str) -> (u16, Vec<u8>) {
             (200, fixture("mb-url-discogs-master-21491.json"))
         }
         "https://www.discogs.com/artist/3840" => (200, fixture("mb-url-discogs-artist-3840.json")),
+        // A Discogs release MusicBrainz relates to two releases of different release groups.
+        "https://www.discogs.com/release/1" => (
+            200,
+            serde_json::to_vec(&serde_json::json!({"resource": resource, "relations": [
+                {"type": "discogs", "target-type": "release", "ended": false,
+                 "release": {"id": "425d8db9-88a3-31e2-bd23-b1a967626dd5"}},
+                {"type": "discogs", "target-type": "release", "ended": false,
+                 "release": {"id": "132919b9-60a8-4835-884f-3a943ba587bf"}}
+            ]}))
+            .unwrap(),
+        ),
         "https://www.discogs.com/release/83182" => {
             (200, fixture("mb-url-discogs-release-83182.json"))
         }
@@ -1676,4 +1687,43 @@ async fn discogs_joins_at_its_level(pool: sqlx::PgPool) {
         .filter(|a| a.starts_with("api.discogs.com/"))
         .collect();
     assert_eq!(discogs, ["api.discogs.com/releases/83182?"]);
+}
+
+/// A Discogs release MusicBrainz relates to releases of different release groups is ambiguous:
+/// the MusicBrainz source records nothing for it, not the first release's group.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_discogs_release_of_two_release_groups_joins_nothing(pool: sqlx::PgPool) {
+    let uri = "https://www.discogs.com/release/1";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut d = ResourceMeta::new(uri, "discogs", 86400);
+    d.set_type("MusicAlbum");
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let cx = also_on::Context {
+        egress: egress(t.clone()),
+        config: Arc::new(Config::default()),
+    };
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let sources: Vec<Arc<dyn also_on::Source>> =
+        vec![Arc::new(pinakes_core::music_sources::MusicBrainzSource)];
+    also_on::drain(&pool, &cx, &sources, 100).await.unwrap();
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM resource_key WHERE resource_id=$1)+(SELECT count(*) FROM derived_link WHERE resource_id=$1)+(SELECT count(*) FROM resource_fact WHERE resource_id=$1)",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, 0);
+    // Both releases were read.
+    let seen = t.seen.lock().unwrap().clone();
+    assert!(
+        seen.iter().any(|s| s.contains("/ws/2/release/132919b9")),
+        "{seen:?}"
+    );
 }
