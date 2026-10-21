@@ -7,7 +7,7 @@
 //! - [`ServiceSource`]: the ISRC a music service's own track page states (its JSON-LD
 //!   `isrcCode`) as the key `isrc:…` when the service vouches for it (TIDAL,
 //!   `Service::vouches_isrc`), and as a fact with its artist, album and length.
-//! - [`crate::also_on::tidal::Tidal`] (with an operator's TIDAL client ID and secret): a TIDAL
+//! - `tidal` (with an operator's TIDAL client ID and secret): a TIDAL
 //!   album's barcode and a track's ISRC from TIDAL's own API, as keys.
 //! - [`MusicBrainzSource`]: what MusicBrainz relates the tagged link to (one recording, release
 //!   or artist; for a track it does not relate, the one recording its page's own ISRC is on; for

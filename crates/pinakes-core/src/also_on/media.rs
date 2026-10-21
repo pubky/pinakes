@@ -283,6 +283,12 @@ pub fn title_type(item: &Item) -> Option<&'static str> {
     }
 }
 
+/// A GUID in lower case, if it is one.
+pub fn guid(v: &str) -> Option<String> {
+    let v = v.trim().to_ascii_lowercase();
+    uuid(&v).then_some(v)
+}
+
 #[cfg(test)]
 pub(crate) mod fixture {
     //! Recorded answers in `tests/fixtures/media/<family>/` (see each `provenance.json`).

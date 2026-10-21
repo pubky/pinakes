@@ -17,7 +17,7 @@
 //! `podcast:apple_episode:{id}` and `podcast:item:{show GUID}:{SHA-256 of the item GUID}`, which
 //! every link to the episode shares; and the show's `wikidata:Q…`.
 use super::{
-    media::{self, digits, property, slug, Deferred, Property},
+    media::{self, digits, guid, property, slug, Deferred, Property},
     Context, Fact, Found, Key, Link, Source, Subject,
 };
 use crate::{
@@ -211,11 +211,6 @@ pub fn derived_guid(feed_url: &str) -> Option<String> {
         &hex[16..20],
         &hex[20..]
     ))
-}
-/// A GUID in lower case, if it is one.
-pub fn guid(v: &str) -> Option<String> {
-    let v = v.trim().to_ascii_lowercase();
-    media::uuid(&v).then_some(v)
 }
 /// The largest podcast feed this source reads (a show's whole back catalogue; the page cap is
 /// 1 MiB).
