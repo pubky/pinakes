@@ -1,3 +1,4 @@
+use crate::event::adapters::SecretKey;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path};
@@ -5,10 +6,11 @@ use std::{collections::BTreeMap, path::Path};
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    pub database_url: String,
+    /// May carry a password: `Debug` and serialization show `[REDACTED]`.
+    pub database_url: SecretKey,
     pub listen: String,
     pub admin_listen: String,
-    pub admin_token: Option<String>,
+    pub admin_token: Option<SecretKey>,
     pub nexus_url: String,
     /// `discover_feeds` is accepted here and in `[cards.media]`; the other resolver sections take
     /// only `enabled`.
@@ -704,7 +706,7 @@ const COUNTRIES: &[&str] = &[
 ];
 impl Config {
     pub fn load(path: Option<&Path>) -> Result<Self> {
-        let mut value = serde_json::to_value(Self::default())?;
+        let mut value = Self::defaults()?;
         if let Some(path) = path {
             let file: toml::Value = toml::from_str(
                 &std::fs::read_to_string(path)
@@ -716,6 +718,15 @@ impl Config {
         apply_env(&mut value, std::env::vars())?;
         apply_named_env(&mut value, std::env::vars())?;
         Self::from_value(value)
+    }
+    /// The defaults in their file form. Secrets serialize as `[REDACTED]`, so their real defaults
+    /// are put back here.
+    fn defaults() -> Result<serde_json::Value> {
+        let config = Self::default();
+        let mut value = serde_json::to_value(&config)?;
+        value["database_url"] = (*config.database_url).into();
+        value["admin_token"] = config.admin_token.as_deref().into();
+        Ok(value)
     }
     /// A configuration from its file form (sections plus `[limits]`), validated.
     pub fn from_value(value: serde_json::Value) -> Result<Self> {
@@ -1015,13 +1026,17 @@ fn merge(dst: &mut serde_json::Value, src: serde_json::Value) {
 mod tests {
     use super::*;
     fn with(change: serde_json::Value) -> Result<Config> {
-        let mut value = serde_json::to_value(Config::default()).unwrap();
+        let mut value = Config::defaults().unwrap();
         merge(&mut value, change);
         Config::from_value(value)
     }
     #[test]
     fn loading_nothing_gives_the_defaults_and_limits_round_trip() {
         let loaded = Config::load(None).unwrap();
+        assert_eq!(
+            &*loaded.database_url,
+            "postgresql:///pinakes?host=/var/run/postgresql"
+        );
         assert_eq!(format!("{loaded:?}"), format!("{:?}", Config::default()));
         assert_eq!(Limits::of(&Config::default()), Limits::default());
         let mut applied = Config::default();
@@ -1077,20 +1092,20 @@ mod tests {
     #[test]
     fn the_github_token_has_a_short_name_the_file_overrides() {
         let vars = |token: &str| vec![("PINAKES_GITHUB_TOKEN".to_owned(), token.to_owned())];
-        let mut value = serde_json::to_value(Config::default()).unwrap();
+        let mut value = Config::defaults().unwrap();
         apply_named_env(&mut value, vars("from-env")).unwrap();
         let cfg = Config::from_value(value).unwrap();
         assert_eq!(cfg.sources.token("github"), Some("from-env"));
         assert!(cfg.sources.enabled("github"));
         // A token in the file (or the `PINAKES__…` form) wins; an empty one is none.
-        let mut value = serde_json::to_value(Config::default()).unwrap();
+        let mut value = Config::defaults().unwrap();
         value["sources"]["github"] = serde_json::json!({"token": "from-file"});
         apply_named_env(&mut value, vars("from-env")).unwrap();
         assert_eq!(
             Config::from_value(value).unwrap().sources.token("github"),
             Some("from-file")
         );
-        let mut value = serde_json::to_value(Config::default()).unwrap();
+        let mut value = Config::defaults().unwrap();
         apply_named_env(&mut value, vars("")).unwrap();
         assert!(!Config::from_value(value).unwrap().sources.enabled("github"));
     }
@@ -1098,7 +1113,7 @@ mod tests {
     #[test]
     fn env_overrides_create_platform_and_host_rate_entries() {
         let load = |vars: &[(&str, &str)]| {
-            let mut value = serde_json::to_value(Config::default()).unwrap();
+            let mut value = Config::defaults().unwrap();
             apply_env(
                 &mut value,
                 vars.iter().map(|(k, v)| (k.to_string(), v.to_string())),
@@ -1130,8 +1145,32 @@ mod tests {
         }
     }
     #[test]
+    fn the_database_url_and_admin_token_come_from_the_environment_and_stay_secret() {
+        let mut value = Config::defaults().unwrap();
+        apply_env(
+            &mut value,
+            [
+                (
+                    "PINAKES__DATABASE_URL",
+                    "postgresql://pinakes:ABCDEFPASS@db/pinakes",
+                ),
+                ("PINAKES__ADMIN_TOKEN", "ABCDEFTOKEN"),
+            ]
+            .map(|(k, v)| (k.to_string(), v.to_string())),
+        )
+        .unwrap();
+        let cfg = Config::from_value(value).unwrap();
+        assert_eq!(
+            &*cfg.database_url,
+            "postgresql://pinakes:ABCDEFPASS@db/pinakes"
+        );
+        assert_eq!(cfg.admin_token.as_deref(), Some("ABCDEFTOKEN"));
+        let shown = format!("{cfg:?} {}", serde_json::to_string(&cfg).unwrap());
+        assert!(!shown.contains("ABCDEF"), "{shown}");
+    }
+    #[test]
     fn the_podcast_index_pair_comes_from_the_environment_and_stays_secret() {
-        let mut value = serde_json::to_value(Config::default()).unwrap();
+        let mut value = Config::defaults().unwrap();
         apply_env(
             &mut value,
             [
@@ -1149,7 +1188,7 @@ mod tests {
     }
     #[test]
     fn the_tidal_pair_comes_from_its_own_variables_and_stays_secret() {
-        let mut value = serde_json::to_value(Config::default()).unwrap();
+        let mut value = Config::defaults().unwrap();
         let vars = [
             ("PINAKES_TIDAL_CLIENT_ID", "ABCDEFID"),
             ("PINAKES_TIDAL_CLIENT_SECRET", "ABCDEFSECRET"),
@@ -1166,7 +1205,7 @@ mod tests {
         let shown = format!("{cfg:?} {}", serde_json::to_string(&cfg).unwrap());
         assert!(!shown.contains("ABCDEF"), "{shown}");
         // An empty variable leaves the file's value.
-        let mut value = serde_json::to_value(Config::default()).unwrap();
+        let mut value = Config::defaults().unwrap();
         value["tidal"]["client_id"] = "FROMFILE".into();
         apply_named_env(&mut value, [("PINAKES_TIDAL_CLIENT_ID".into(), "".into())]).unwrap();
         assert_eq!(value["tidal"]["client_id"], "FROMFILE");
@@ -1198,7 +1237,7 @@ mod tests {
             .collect();
         assert!(vars.len() >= 4, "{vars:?}");
         for var in &vars {
-            let mut value = serde_json::to_value(Config::default()).unwrap();
+            let mut value = Config::defaults().unwrap();
             apply_env(&mut value, [var.clone()]).unwrap_or_else(|e| panic!("{var:?}: {e:#}"));
             Config::from_value(value).unwrap_or_else(|e| panic!("{var:?}: {e:#}"));
         }
