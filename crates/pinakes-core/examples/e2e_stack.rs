@@ -630,8 +630,9 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
             .clone();
         selected.push((id, resolver));
     }
-    // The scope stays small and explicit: only listed samples are ever fetched, one at a time
-    // with a second between them, so the cap bounds a run's fetching (some minutes at most).
+    // The scope stays explicit: only listed samples (and what a fetch shows them to be spellings
+    // of, below) are ever fetched, one at a time with a second between them. The cap bounds how
+    // many, not how long a run takes.
     ensure!(
         (1..=MAX_LIVE_SAMPLES).contains(&selected.len()),
         "live driver requires one to {MAX_LIVE_SAMPLES} sample resources, got {}",
@@ -657,7 +658,22 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
                 eprintln!("live ingestion: {e}");
             }
             for (id, resolver) in &selected {
-                let job=sqlx::query_as::<_,queue::Job>("UPDATE resource SET lease_until=now()+interval '60 seconds',generation=generation+1 WHERE id=$1 AND NOT dead_letter AND NOT final AND next_attempt_at<=now() AND (lease_until IS NULL OR lease_until<now()) RETURNING id,uri,attempts,generation").bind(id).fetch_optional(&pool).await;
+                // A fetch can show a sample to be a spelling of another URI (a Bluesky handle's
+                // post under its DID): the sample becomes that root's alias, and its card is the
+                // root's, so the root is fetched in its place, by the root's own resolver.
+                let job=sqlx::query_as::<_,queue::Job>("UPDATE resource SET lease_until=now()+interval '60 seconds',generation=generation+1 WHERE id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1) AND NOT dead_letter AND NOT final AND next_attempt_at<=now() AND (lease_until IS NULL OR lease_until<now()) RETURNING id,uri,attempts,generation").bind(id).fetch_optional(&pool).await;
+                let resolver = match &job {
+                    Ok(Some(job)) if job.id != *id => {
+                        let Some(root) = pinakes_core::resolver::classify(&job.uri)
+                            .and_then(|kind| resolvers.iter().find(|r| r.name() == kind))
+                        else {
+                            eprintln!("live sample root: no resolver for {}", job.uri);
+                            continue;
+                        };
+                        root
+                    }
+                    _ => resolver,
+                };
                 match job {
                     Ok(Some(job)) => {
                         // The production path: the workers finish every job through a batch.
