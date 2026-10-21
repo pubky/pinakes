@@ -117,7 +117,7 @@ impl WebResolver {
     /// MusicBrainz retries later.
     async fn musicbrainz_card(&self, uri: &str) -> Result<Option<ResourceMeta>> {
         match self.musicbrainz_entity_card(uri).await {
-            Err(e) if e.chain().any(|c| c.is::<super::egress::BodyTooLarge>()) => Ok(None),
+            Err(e) if super::egress::over_cap(&e) => Ok(None),
             card => card,
         }
     }

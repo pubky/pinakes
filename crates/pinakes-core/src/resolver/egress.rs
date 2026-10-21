@@ -28,6 +28,10 @@ impl std::fmt::Display for BodyTooLarge {
     }
 }
 impl std::error::Error for BodyTooLarge {}
+/// Whether `error` is, or wraps, a body over its read's cap.
+pub fn over_cap(error: &anyhow::Error) -> bool {
+    error.chain().any(|c| c.is::<BodyTooLarge>())
+}
 
 pub const BODY_CAP: usize = 1024 * 1024;
 /// The longest a request waits for its host's next slot, queue included. It leaves the request
@@ -554,6 +558,14 @@ impl Egress {
         if options.json_body.is_some() || !options.headers.is_empty() {
             let identity = serde_json::to_vec(&(&options.json_body, &options.headers))?;
             key.push_str(&format!("|request:{}", blake3::hash(&identity).to_hex()));
+        }
+        // A read with another cap gets another answer (a refusal is replayed only to its cap).
+        if options.body_cap.is_some() || options.feed_cap.is_some() {
+            key.push_str(&format!(
+                "|cap:{}:{}",
+                options.body_cap.unwrap_or(0),
+                options.feed_cap.unwrap_or(0)
+            ));
         }
         Ok(key)
     }
@@ -1278,6 +1290,22 @@ mod tests {
         let error = read(capped).await.unwrap_err();
         assert!(error.downcast_ref::<BodyTooLarge>().is_some(), "{error:#}");
         server.abort();
+    }
+    /// A refusal is replayed only to reads with its cap: another cap asks again.
+    #[tokio::test(start_paused = true)]
+    async fn a_refusal_is_replayed_to_its_cap_only() {
+        let url = "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q1";
+        let (egress, recorded) =
+            crate::sources::fixture::egress(vec![(url, 200, "!too-large", vec![])]);
+        let read = |cap: usize| FetchOptions {
+            body_cap: Some(cap),
+            ..Default::default()
+        };
+        for (cap, asked) in [(8 * BODY_CAP, 1), (8 * BODY_CAP, 1), (16 * BODY_CAP, 2)] {
+            let error = egress.discover(url, &read(cap), 3600).await.unwrap_err();
+            assert!(over_cap(&error), "{error:#}");
+            assert_eq!(recorded.asked().len(), asked, "cap {cap}");
+        }
     }
     /// The refusal names the cap it hit.
     #[test]
