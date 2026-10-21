@@ -102,15 +102,20 @@ const reported = card => ({ resource_id: card.id, type: card.type, status: card.
  * or, when its record was slow, once the also-on title reads the card again). Returns the card to
  * keep. */
 export async function expectCard(tag, card, readByUri, timeout, signal) {
-  if (tag.site) assert.equal(card.site, tag.site, `Pinakes ${tag.kind} site`);
-  if (tag.site) assert.equal(card.type, tag.type, `Pinakes ${tag.kind} type`);
+  const holds = c => {
+    assert.equal(c.status, 'ok', `Pinakes ${tag.kind} status`);
+    if (tag.site) assert.equal(c.site, tag.site, `Pinakes ${tag.kind} site`);
+    if (tag.site || tag.name) assert.equal(c.type, tag.type, `Pinakes ${tag.kind} type`);
+  };
+  holds(card);
   if (!tag.name) return card;
   const named = card.name === tag.name ? card : await waitFor(`Pinakes ${tag.kind} name`, async () => {
     const v = await readByUri(tag.uri);
     return v && v.name === tag.name && v;
   }, timeout, signal).catch(error => { if (signal?.aborted) throw error; return card; });
+  // Every expectation holds on the card that is kept, not only on the first one read.
+  holds(named);
   assert.equal(named.name, tag.name, `Pinakes ${tag.kind} name`);
-  assert.equal(named.type, tag.type, `Pinakes ${tag.kind} type`);
   return named;
 }
 /** A card read by its URI can be read once more under another ID: a fetch can show the link to be

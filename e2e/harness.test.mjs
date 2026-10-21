@@ -77,3 +77,24 @@ test('a card that moved to another ID must meet the sample again, and replaces e
   await rereadMoved([tag], docs, report, async () => ({ ...root, status: 'pending' }), check(root));
   assert.equal(docs.get('podcast').id, 'a');
 });
+test('the card kept after waiting for a name meets every expectation, not only the name', async () => {
+  const tag = { kind: 'music', uri: 'https://music.example/a/1', type: 'MusicAlbum', site: 'Music', name: 'OK Computer' };
+  const first = { id: 'a', status: 'ok', type: 'MusicAlbum', site: 'Music', name: 'Untitled' };
+  // The name arrives on a card from elsewhere (another site, another type, not ok): refused.
+  for (const [named, check] of [
+    [{ ...first, name: 'OK Computer', site: 'Other' }, /site/],
+    [{ ...first, name: 'OK Computer', type: 'WebPage' }, /type/],
+    [{ ...first, name: 'OK Computer', status: 'pending' }, /status/],
+  ]) {
+    await assert.rejects(expectCard(tag, first, async () => named, 50), check);
+  }
+  const good = { ...first, name: 'OK Computer' };
+  assert.equal(await expectCard(tag, first, async () => good, 50), good);
+  // Codex's case through the re-read: a moved root whose named card is on another site.
+  const docs = new Map([['music', first]]);
+  const report = { samples: [{ kind: 'music', uri: tag.uri, resource_id: 'a', type: 'MusicAlbum', status: 'ok', site: 'Music' }] };
+  const root = { ...first, id: 'b' };
+  const elsewhere = { ...first, id: 'b', name: 'OK Computer', site: 'Other' };
+  await assert.rejects(rereadMoved([tag], docs, report, async () => root, (t, c) => expectCard(t, c, async () => elsewhere, 50)), /site/);
+  assert.equal(docs.get('music').id, 'a'); assert.equal(report.samples[0].site, 'Music');
+});
