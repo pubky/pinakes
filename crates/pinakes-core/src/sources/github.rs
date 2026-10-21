@@ -16,7 +16,7 @@ pub struct Github;
 const API: &str = "https://api.github.com";
 
 /// First path segments that are GitHub's own pages, never an owner.
-const RESERVED: &[&str] = &[
+pub const RESERVED: &[&str] = &[
     "about",
     "apps",
     "collections",
@@ -116,7 +116,9 @@ pub async fn read(
         .discover(&format!("{API}/repos/{owner}/{repo}"), &options, 3600)
         .await?;
     match f.status {
-        200 => Ok(Answer::Card(Box::new(card(doc, &f.body)?))),
+        // A repository the token can read but the public can't is no public object: no card,
+        // no key, and nothing of its record is kept.
+        200 => Ok(card(doc, &f.body)?.map_or(Answer::Missing, |card| Answer::Card(Box::new(card)))),
         301 | 302 | 307 | 308 => Ok(Answer::Moved),
         401 => Ok(Answer::Refused),
         404 => Ok(Answer::Missing),
@@ -130,9 +132,21 @@ pub async fn read(
     }
 }
 
-/// A repository's card from its API record.
-pub fn card(mut doc: ResourceMeta, body: &[u8]) -> Result<ResourceMeta> {
+/// Whether a repository record is public: not `private`, and its `visibility` (when GitHub
+/// states it) `public`. Anything else (`private`, `internal`, an unknown value) is not public.
+pub fn public(v: &Value) -> bool {
+    v["private"] == false
+        && v["visibility"]
+            .as_str()
+            .is_none_or(|visibility| visibility == "public")
+}
+
+/// A repository's card from its API record, or `None` for a repository that is not public.
+pub fn card(mut doc: ResourceMeta, body: &[u8]) -> Result<Option<ResourceMeta>> {
     let v: Value = serde_json::from_slice(body).context("GitHub answered no JSON")?;
+    if !public(&v) {
+        return Ok(None);
+    }
     let name = text(&v["full_name"]).context("no repository name")?;
     let page = text(&v["html_url"])
         .filter(|u| web_url(u).is_some_and(|u| u.host_str() == Some("github.com")))
@@ -169,7 +183,7 @@ pub fn card(mut doc: ResourceMeta, body: &[u8]) -> Result<ResourceMeta> {
         }
     }
     doc.source_root = Some(page);
-    Ok(doc)
+    Ok(Some(doc))
 }
 
 #[async_trait]
@@ -273,6 +287,7 @@ mod tests {
             ResourceMeta::new("https://github.com/BurntSushi/ripgrep", "github", 3600),
             &fixture::read("github", "repo-ripgrep.json"),
         )
+        .unwrap()
         .unwrap();
         assert_eq!(doc.type_name, "SoftwareSourceCode");
         assert_eq!(doc.name.as_deref(), Some("BurntSushi/ripgrep"));
@@ -285,6 +300,37 @@ mod tests {
             doc.source_root.as_deref(),
             Some("https://github.com/BurntSushi/ripgrep")
         );
+    }
+
+    /// A token that can read private repositories must never make one a public card: a record
+    /// marked `private`, or with a `visibility` other than `public`, gives no card at all.
+    #[test]
+    fn a_non_public_repository_gets_no_card() {
+        let doc = || ResourceMeta::new("https://github.com/acme/secret", "github", 3600);
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fixture::read("github", "repo-ripgrep.json")).unwrap();
+        assert!(public(&record));
+        for (field, value) in [
+            ("private", serde_json::json!(true)),
+            ("visibility", serde_json::json!("private")),
+            ("visibility", serde_json::json!("internal")),
+            ("visibility", serde_json::json!("")),
+        ] {
+            let mut v = record.clone();
+            v[field] = value.clone();
+            assert!(!public(&v), "{field}={value}");
+            assert!(
+                card(doc(), &serde_json::to_vec(&v).unwrap())
+                    .unwrap()
+                    .is_none(),
+                "{field}={value}"
+            );
+        }
+        // A record without `visibility` is public only when `private` says so.
+        record.as_object_mut().unwrap().remove("visibility");
+        assert!(public(&record));
+        record["private"] = serde_json::json!(true);
+        assert!(!public(&record));
     }
 
     /// A transport that answers as GitHub does: the record with the right token, 401 with any
