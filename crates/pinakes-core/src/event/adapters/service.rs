@@ -714,7 +714,11 @@ pub fn endpoint(
         {
             Some((
                 format!("https://www.wikidata.org/wiki/Special:EntityData/{id}.json"),
-                opts,
+                FetchOptions {
+                    // A much-edited item carries megabytes of claims.
+                    body_cap: Some(crate::hubs::WIKIDATA_CAP),
+                    ..opts
+                },
             ))
         }
         "ics_link" if !crate::event::service::is_feed(uri) => {
@@ -785,7 +789,10 @@ async fn wiki(uri: &str, f: &Fetched, egress: &Egress) -> Result<ResourceMeta> {
         let f = egress
             .discover(
                 &format!("https://www.wikidata.org/wiki/Special:EntityData/{qid}.json"),
-                &Default::default(),
+                &FetchOptions {
+                    body_cap: Some(crate::hubs::WIKIDATA_CAP),
+                    ..Default::default()
+                },
                 86400,
             )
             .await?;

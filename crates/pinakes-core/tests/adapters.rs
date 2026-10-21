@@ -2908,6 +2908,85 @@ async fn wikipedia_primary_item_and_plain_web_fallback(pool: PgPool) {
     assert_eq!(doc.name.as_deref(), Some("Plain article"));
 }
 
+/// A transport that answers one large record as the real one does: refused at the default 1 MB
+/// cap, served when the request allows more.
+struct LargeRecord {
+    url: String,
+    size: usize,
+    body: Fetched,
+}
+#[async_trait::async_trait]
+impl Transport for LargeRecord {
+    async fn get(&self, url: &url::Url, addresses: &[SocketAddr]) -> anyhow::Result<Fetched> {
+        self.get_with(url, addresses, &Default::default()).await
+    }
+    async fn get_with(
+        &self,
+        url: &url::Url,
+        _: &[SocketAddr],
+        options: &FetchOptions,
+    ) -> anyhow::Result<Fetched> {
+        anyhow::ensure!(
+            url.as_str() == self.url,
+            "uncaptured fixture request: {url}"
+        );
+        let cap = options
+            .body_cap
+            .unwrap_or(pinakes_core::resolver::egress::BODY_CAP);
+        if self.size > cap {
+            return Err(pinakes_core::resolver::egress::BodyTooLarge { cap }.into());
+        }
+        Ok(self.body.clone())
+    }
+}
+
+/// A much-edited Wikidata item (Signal's record is 2.7 MB, every claim with its references) is
+/// read with the Wikidata entity cap, as the also-on sources read it, not refused at 1 MB.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_large_wikidata_item_gets_its_card(pool: PgPool) {
+    use pinakes_core::resolver::Resolver;
+    let uri = "https://www.wikidata.org/wiki/Q19718090";
+    let entity = "https://www.wikidata.org/wiki/Special:EntityData/Q19718090.json";
+    let body = json!({"entities":{"Q19718090":{"type":"item","id":"Q19718090","labels":{"en":{"language":"en","value":"Signal"}},"descriptions":{"en":{"language":"en","value":"cross-platform encrypted messaging service"}},"claims":{"P31":[{"mainsnak":{"snaktype":"value","property":"P31","datavalue":{"value":{"entity-type":"item","id":"Q620615"}}},"type":"statement","rank":"normal"}],"P856":[{"mainsnak":{"snaktype":"value","property":"P856","datavalue":{"value":"https://signal.org/"}},"type":"statement","rank":"normal"}]}}}}).to_string();
+    let egress = Egress::with_backends(
+        pinakes_core::config::EgressConfig {
+            host_requests_per_second: 1000.,
+            ..Default::default()
+        },
+        Arc::new(AdapterDns),
+        Arc::new(LargeRecord {
+            url: entity.into(),
+            size: 2_678_320,
+            body: Fetched {
+                permanent_redirect: false,
+                truncated: false,
+                url: entity.parse().unwrap(),
+                body: body.into_bytes(),
+                content_type: "application/json".into(),
+                status: 200,
+                retry_after_secs: 60,
+                location: None,
+                validators: Default::default(),
+            },
+        }),
+    );
+    let cfg = EventConfig {
+        geocoding: false,
+        ..Default::default()
+    };
+    let doc = platform(&pool, cfg, egress).resolve(uri).await.unwrap();
+    assert_eq!(doc.name.as_deref(), Some("Signal"));
+    assert_eq!(
+        doc.description.as_deref(),
+        Some("cross-platform encrypted messaging service")
+    );
+    assert!(
+        doc.aliases.iter().any(|a| a == "https://signal.org/"),
+        "{:?}",
+        doc.aliases
+    );
+}
+
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn portal_missing_title_join_and_derivation_disabled(pool: PgPool) {
     use pinakes_core::{model::Status, resolver::Resolver};
