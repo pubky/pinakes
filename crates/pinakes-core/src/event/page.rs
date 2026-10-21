@@ -308,6 +308,7 @@ fn fields(doc: &mut ResourceMeta, v: &Value, base: &Url, ap: bool) {
     );
     if doc.event.performers.is_empty() && owns_page(v, base) {
         doc.event.performers = performers(v, base);
+        doc.event.performers_from = Some(base.to_string());
     }
     if let Some(offer) = v.get("offers") {
         let values: Vec<&Value> = offer

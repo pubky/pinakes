@@ -31,6 +31,10 @@ pub struct EventFields {
     /// Who performs, as the page's own structured data names them (`performer`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub performers: Vec<Performer>,
+    /// Where the performers were read: the page's address after redirects, from the fetch. Only
+    /// a page on the service of a performer's link keys its artist (`music_sources`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub performers_from: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offers: Option<Offers>,
     /// A local time without a resolvable zone is retained; UTC columns are only a sort proxy.
@@ -144,7 +148,11 @@ impl EventFields {
             p.links.pop();
             return true;
         }
-        self.performers.pop().is_some()
+        let dropped = self.performers.pop().is_some();
+        if self.performers.is_empty() {
+            self.performers_from = None;
+        }
+        dropped
     }
     pub fn bound(&mut self) {
         use crate::model::truncate;
@@ -170,6 +178,14 @@ impl EventFields {
             }
         }
         self.performers.truncate(16);
+        if self.performers.is_empty()
+            || self
+                .performers_from
+                .as_ref()
+                .is_some_and(|u| u.len() > 2048)
+        {
+            self.performers_from = None;
+        }
         for p in &mut self.performers {
             truncate(&mut p.name, 256);
             p.links.retain(|l| l.len() <= 2048);

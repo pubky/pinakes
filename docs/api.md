@@ -913,11 +913,13 @@ service of a link it gives for the performer (`url`, `sameAs`): a Songkick conce
 Songkick artist page, a Bandsintown event naming a Bandsintown artist page, a music service's own
 event page naming that service's artist page, when MusicBrainz relates the link (in the spelling
 MusicBrainz stores: Songkick and Bandsintown artists by number) to exactly one artist; that MBID is
-also the fact `performer_mbid`. Any other page chose the identity it names, so it is a fact at
-most: the artist MusicBrainz relates one of its links to, else a MusicBrainz artist page it names,
-is the fact `performer_mbid`, never a key. A performer without either keeps its first link as the
-fact `performer_link`. A name alone is never a key, and nothing is searched by name; a performer
-the page does not key is facts only (`details.facts`), not found by `key=`.
+also the fact `performer_mbid`. The page is the one the fetch ended on, after redirects (a Songkick
+address that redirects off Songkick is the other site's page); a stored card that does not record
+it keys nothing until its page is read again. Any other page chose the identity it names, so it is
+a fact at most: the artist MusicBrainz relates one of its links to, else a MusicBrainz artist page
+it names, is the fact `performer_mbid`, never a key. A performer without either keeps its first
+link as the fact `performer_link`. A name alone is never a key, and nothing is searched by name; a
+performer the page does not key is facts only (`details.facts`), not found by `key=`.
 Text search (`q=`) matches an event's name and description, not its performers: an act the page
 names only in `performer` (a festival's support act) is not found by it.
 Performers are read from the page's own event node only: one whose `url` (else its `@id`) names

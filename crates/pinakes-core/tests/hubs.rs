@@ -1157,6 +1157,9 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     let vouched = "https://www.songkick.com/concerts/1-vouched-beside-a-busy-lookup";
     let hostile = "https://evil.example/gig";
     let elsewhere = "https://www.bandsintown.com/e/1-radiohead-somewhere";
+    let redirected = "https://www.songkick.com/concerts/8-redirected-off-site";
+    let moved = "https://www.songkick.com/concerts/9-moved";
+    let unrecorded = "https://www.songkick.com/concerts/10-no-provenance";
     let over_cap = "https://www.songkick.com/concerts/7-over-cap";
     let busy = "https://www.songkick.com/concerts/2-busy-lookup-alone";
     let lineup = "https://www.songkick.com/concerts/3-three-acts";
@@ -1177,6 +1180,9 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         (vouched, "MusicEvent"),
         (hostile, "MusicEvent"),
         (elsewhere, "MusicEvent"),
+        (redirected, "MusicEvent"),
+        (moved, "MusicEvent"),
+        (unrecorded, "MusicEvent"),
         (over_cap, "MusicEvent"),
         (busy, "MusicEvent"),
         (lineup, "MusicEvent"),
@@ -1269,6 +1275,15 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
                 })
                 .collect();
         }
+        if uri == redirected || uri == moved || uri == unrecorded {
+            // A Songkick concert naming Radiohead's Songkick page, read from wherever the fetch
+            // ended (below).
+            d.start = Some("2027-06-04T20:00:00Z".parse().unwrap());
+            d.event.performers = vec![pinakes_core::event::Performer {
+                name: "Radiohead".into(),
+                links: vec!["https://www.songkick.com/artists/253846-radiohead".into()],
+            }];
+        }
         if uri == hostile || uri == elsewhere {
             // Any page can name any artist's pages for its performer: hostile its Songkick and
             // MusicBrainz pages, elsewhere (a Bandsintown event) its Songkick page.
@@ -1296,6 +1311,18 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
                 name: "Someone".into(),
                 links,
             }];
+        }
+        // Where the page came from, after redirects: the page itself, but off-site for the
+        // redirected one, another Songkick page for the moved one, and nothing said for one
+        // stored without it.
+        if !d.event.performers.is_empty() && uri != unrecorded {
+            d.event.performers_from = Some(if uri == redirected {
+                "https://evil.example/gig".into()
+            } else if uri == moved {
+                concert.into()
+            } else {
+                uri.into()
+            });
         }
         store::save_document(&pool, &id, 0, &d).await.unwrap();
         ids.insert(uri, id);
@@ -1458,7 +1485,17 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     let any_key = "SELECT key FROM resource_key WHERE resource_id=$1";
     let retrying =
         "SELECT coalesce(last_error,'-') FROM also_on_dirty WHERE resource_id=$1 AND attempts>0";
-    for page in [hostile, elsewhere] {
+    // The page that came from elsewhere, or doesn't say where it came from, is no service's
+    // either; a redirect within Songkick is still Songkick's.
+    assert_eq!(
+        rows(
+            "SELECT key||' '||via FROM resource_key WHERE resource_id=$1",
+            ids[moved].clone()
+        )
+        .await,
+        ["mb:artist:a74b1b7f-71a5-4011-9441-d0b5e4122711 musicbrainz"]
+    );
+    for page in [hostile, elsewhere, redirected, unrecorded] {
         assert!(rows(any_key, ids[page].clone()).await.is_empty(), "{page}");
         assert_eq!(
             rows(

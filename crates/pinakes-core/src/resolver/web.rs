@@ -1019,6 +1019,8 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url, claims: bool, vou
     // vouched for), never from another event the page describes, nor through a sibling.
     if doc.event.performers.is_empty() && doc.type_path.iter().any(|t| t == "Event") && own {
         doc.event.performers = crate::event::page::performers(v, base);
+        // `base` is where the page came from (the fetch's final address).
+        doc.event.performers_from = Some(base.to_string());
     }
     for field in ["author", "creator"] {
         if !doc.attributes.contains_key("author") {
@@ -1375,6 +1377,23 @@ mod tests {
         );
     }
     /// Another event the page describes beside its own never donates its performers.
+    /// The performers record where they were read: the fetch's final address, which judges whose
+    /// service the page is (`music_sources`), not the link that was asked for.
+    #[test]
+    fn performers_record_the_address_the_page_came_from() {
+        let body = r#"<title>Gig</title><script type="application/ld+json">{"@type":"MusicEvent","name":"Gig","startDate":"2027-05-03T19:30:00","performer":{"@type":"MusicGroup","name":"Radiohead","sameAs":"https://www.songkick.com/artists/253846-radiohead"}}</script>"#;
+        let asked = "https://www.songkick.com/concerts/8-redirected-off-site";
+        for (from, after) in [
+            (asked, asked),
+            ("https://evil.example/gig", "https://evil.example/gig"),
+        ] {
+            let fetched =
+                crate::sources::fixture::page(from, "text/html", body.as_bytes().to_vec(), None);
+            let out = extract(asked, &fetched, 100);
+            assert_eq!(out.doc.event.performers.len(), 1);
+            assert_eq!(out.doc.event.performers_from.as_deref(), Some(after));
+        }
+    }
     #[test]
     fn another_events_performers_never_donate() {
         let body = r#"<title>Venue</title><script type="application/ld+json">{"@type":"MusicEvent","name":"Tonight","url":"https://venue.example/tonight","startDate":"2027-05-03T19:30:00"}</script><script type="application/ld+json">{"@type":"MusicEvent","name":"Next week","url":"https://venue.example/next-week","startDate":"2027-05-10T19:30:00","performer":[{"@type":"MusicGroup","name":"Radiohead","sameAs":"https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711"}]}</script>"#;

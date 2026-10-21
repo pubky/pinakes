@@ -551,7 +551,9 @@ impl PerformersSource {
         // A key only where the event page speaks for the link's own service: a Songkick concert
         // naming a Songkick artist page (Bandsintown and a music service's own event pages the
         // same). Any other page chose the identity MusicBrainz translates, so it is a fact.
-        let page = service_host(&subject.uri);
+        // The host the page came from (after redirects); a stored page that doesn't say is no
+        // service's.
+        let page = doc.event.performers_from.as_deref().and_then(service_host);
         let owned = |url: &str| page.is_some() && service_host(url) == page;
         for (claimed, links) in performers {
             // The artist MusicBrainz relates a link to, when exactly one.
