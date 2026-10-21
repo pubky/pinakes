@@ -685,6 +685,13 @@ pub mod also_on {
 
     #[async_trait]
     impl Source for Packages {
+        fn budgets(&self) -> &'static [(&'static str, f64)] {
+            match self.0 {
+                // crates.io: 1 request/s.
+                crate::lookups::packages::Registry::Crates => &[("crates.io", 1.0)],
+                _ => &[],
+            }
+        }
         fn single_namespaces(&self) -> &'static [&'static str] {
             match self.0 {
                 crate::lookups::packages::Registry::Crates => &["crate"],
@@ -844,6 +851,10 @@ pub mod also_on {
 
     #[async_trait]
     impl Source for SoftwareHeritage {
+        fn budgets(&self) -> &'static [(&'static str, f64)] {
+            // Software Heritage: 120 requests/hour anonymous.
+            &[("archive.softwareheritage.org", 120.0 / 3600.0)]
+        }
         fn single_namespaces(&self) -> &'static [&'static str] {
             &["repo"]
         }

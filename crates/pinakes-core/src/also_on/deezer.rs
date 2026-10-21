@@ -12,6 +12,10 @@ use crate::music_sources::*;
 pub struct DeezerSource;
 #[async_trait]
 impl Source for DeezerSource {
+    fn budgets(&self) -> &'static [(&'static str, f64)] {
+        // Deezer's public API: 50 requests per 5 seconds.
+        &[("api.deezer.com", 10.0)]
+    }
     fn id(&self) -> &'static str {
         "deezer"
     }

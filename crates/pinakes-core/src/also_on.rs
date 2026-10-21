@@ -254,6 +254,13 @@ pub trait Source: Send + Sync {
     fn service_name(&self, _host: &str, _url: &url::Url) -> Option<&'static str> {
         None
     }
+    /// The published limits of the services only it reads, as `(host, requests_per_second)`:
+    /// each lowers its host's default pace (`limits.host_rates` overrides it), as an official
+    /// source's budgets do. Services several sources or the resolver read keep theirs in
+    /// `resolver::egress::PUBLISHED_RATES`.
+    fn budgets(&self) -> &'static [(&'static str, f64)] {
+        &[]
+    }
     /// The type a media link it reads names, whatever its page calls itself
     /// (`media::link_type`): `Some(None)` for a link it reads that names no one type.
     fn link_type(&self, _uri: &str) -> Option<Option<&'static str>> {
@@ -300,6 +307,12 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
 pub fn registered() -> &'static [Arc<dyn Source>] {
     static ALL: std::sync::OnceLock<Vec<Arc<dyn Source>>> = std::sync::OnceLock::new();
     ALL.get_or_init(registry)
+}
+/// Every also-on source's published host limits ([`Source::budgets`]).
+pub fn budgets() -> impl Iterator<Item = (&'static str, f64)> {
+    registered()
+        .iter()
+        .flat_map(|s| s.budgets().iter().copied())
 }
 /// The source IDs `[also_on.sources]` may name.
 pub fn source_ids() -> Vec<&'static str> {

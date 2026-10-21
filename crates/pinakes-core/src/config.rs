@@ -752,6 +752,7 @@ impl Config {
         self.pubky.max_period_dates = self.event.max_period_dates;
         // A source's published limits, for hosts the operator does not rate.
         self.egress.source_rates = crate::sources::budgets()
+            .chain(crate::also_on::budgets())
             .map(|(host, rate)| (host.to_owned(), rate))
             .collect();
     }
@@ -1385,6 +1386,14 @@ mod tests {
         assert!(c.validate().is_err());
         c.also_on.facts_per_source = 8;
         assert!(c.validate().is_ok());
+    }
+    /// An also-on source's own limits pace its hosts as an official source's do.
+    #[test]
+    fn also_on_source_budgets_pace_their_hosts() {
+        let cfg = Config::default();
+        for (host, rate) in crate::also_on::budgets() {
+            assert_eq!(cfg.egress.source_rates.get(host), Some(&rate), "{host}");
+        }
     }
     #[test]
     fn source_budgets_never_override_the_operator() {

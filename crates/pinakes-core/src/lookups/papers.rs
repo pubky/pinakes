@@ -482,6 +482,10 @@ pub mod also_on {
 
     #[async_trait]
     impl Source for Ncbi {
+        fn budgets(&self) -> &'static [(&'static str, f64)] {
+            // NCBI's E-utilities and ID Converter: 3 requests/s without an API key.
+            &[("pmc.ncbi.nlm.nih.gov", 3.0)]
+        }
         fn single_namespaces(&self) -> &'static [&'static str] {
             &["pmid", "pmcid"]
         }
@@ -553,6 +557,10 @@ pub mod also_on {
 
     #[async_trait]
     impl Source for Datacite {
+        fn budgets(&self) -> &'static [(&'static str, f64)] {
+            // Crossref: 10 requests/s on the polite pool.
+            &[("api.crossref.org", 10.0)]
+        }
         fn single_namespaces(&self) -> &'static [&'static str] {
             &["arxiv"]
         }
