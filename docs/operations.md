@@ -539,7 +539,8 @@ minute old) are logged (`TIDAL refused the client credentials`) and counted in
 or an outage (429, 5xx) is waited out: no TIDAL request, batched or single, before the time it
 asked for (`Retry-After`, a minute to an hour) has passed, and the links retry after it
 (`tidal_busy`; a failure the cache replays meanwhile reports the same). TIDAL's answers are
-cached by the credential pair, not the token, so a new token keeps them.
+cached by the credential pair, not the token, so a new token keeps them, and a batch asks only
+for the items that have no cached answer.
 
 Podcast Index is asked only with a key and secret: `[podcast_index] key` and `secret`, or
 `PINAKES__PODCAST_INDEX__KEY` and `PINAKES__PODCAST_INDEX__SECRET` (free from

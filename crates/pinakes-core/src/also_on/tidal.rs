@@ -462,6 +462,20 @@ async fn prefetch(cx: &Context, kind: Kind, ids: &[&str]) -> Result<()> {
     let s = slots.entry(slot).or_default();
     s.unless_busy()?;
     let token = s.token(cx, client_id, secret).await?;
+    // A batch asks only for what its items don't have cached (a retry's, within the hour).
+    let mut ids: Vec<&str> = ids.to_vec();
+    for id in ids.clone() {
+        if cx
+            .egress
+            .discovered(&item_url(cx, kind, id), &api_options(&token, &slot))
+            .await?
+        {
+            ids.retain(|i| *i != id);
+        }
+    }
+    if ids.len() < 2 {
+        return Ok(());
+    }
     let filter: String = ids
         .iter()
         .map(|id| format!("&filter%5Bid%5D={id}"))
@@ -494,7 +508,7 @@ async fn prefetch(cx: &Context, kind: Kind, ids: &[&str]) -> Result<()> {
     let items = v["data"].as_array().context("TIDAL batch without data")?;
     // A paged answer may hold the missing items on a later page.
     let whole = v["links"]["next"].is_null();
-    for id in ids {
+    for id in &ids {
         let answer = items.iter().find(|i| {
             i["id"].as_str() == Some(*id) && i["type"].as_str() == Some(kind.collection())
         });

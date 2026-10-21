@@ -663,6 +663,18 @@ impl Egress {
             .await
             .map(|_| ())
     }
+    /// Whether the discovery cache holds a live answer for `uri` (a batch may skip what its
+    /// items already have).
+    pub async fn discovered(&self, uri: &str, options: &FetchOptions) -> Result<bool> {
+        let key = Self::discovery_key(uri, options)?;
+        let now = Instant::now();
+        Ok(self
+            .discovered
+            .lock()
+            .await
+            .get(&key)
+            .is_some_and(|entry| entry.expires > now && entry.value.is_some()))
+    }
     /// A successful HTTP response can still contain a transient application error.
     /// Shorten only its existing cache entry, without extending older expiration times.
     pub async fn shorten_discovery(
