@@ -1353,6 +1353,61 @@ async fn a_tagged_member_and_a_derived_link_of_one_service_show_once(pool: PgPoo
     assert_eq!(read["details"]["also_on"].as_array().unwrap().len(), 4);
 }
 
+/// A source that panics on every lookup, as a parser meeting an unexpected shape would.
+struct Panics;
+#[async_trait]
+impl Source for Panics {
+    fn id(&self) -> &'static str {
+        "panics"
+    }
+    fn applies(&self, _: &Subject) -> bool {
+        true
+    }
+    async fn prefetch(&self, _: &Context, _: &[String]) {
+        panic!("a prefetch that panics");
+    }
+    async fn lookup(&self, _: &Context, _: &Subject) -> anyhow::Result<Found> {
+        panic!("a lookup that panics");
+    }
+}
+
+/// A panicking source fails its run like an error: the sources after it still record, the
+/// resource retries with backoff, and the worker drains the next resource.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_panicking_source_never_stops_the_worker(pool: PgPool) {
+    let (a, b) = ("https://example.org/a", "https://example.org/b");
+    let ids = [page(&pool, a, "A").await, page(&pool, b, "B").await];
+    let hub = Fake::new("music");
+    for uri in [a, b] {
+        hub.answer(
+            uri,
+            Ok(Found {
+                keys: vec![key("wikidata:Q1")],
+                ..Default::default()
+            }),
+        );
+    }
+    let sources: Vec<Arc<dyn Source>> = vec![Arc::new(Panics), hub.clone()];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    assert_eq!(
+        hub.calls.lock().unwrap().len(),
+        2,
+        "the source after it ran for both"
+    );
+    let rows: Vec<(i32, Option<String>, i64)> = sqlx::query_as(
+        "SELECT d.attempts,d.last_error,(SELECT count(*) FROM resource_key k WHERE k.resource_id=d.resource_id) FROM also_on_dirty d WHERE resource_id=ANY($1) ORDER BY resource_id",
+    )
+    .bind(&ids)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    for (attempts, error, keys) in rows {
+        assert_eq!((attempts, keys), (1, 1));
+        assert!(error.is_some());
+    }
+}
+
 /// Looks up the barcodes the sources before it found, like iTunes: one keyed link each. Off by
 /// default.
 struct ByBarcode {

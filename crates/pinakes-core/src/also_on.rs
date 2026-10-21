@@ -23,7 +23,7 @@ pub mod titles;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -574,7 +574,14 @@ pub async fn drain(
         .iter()
         .filter(|s| cfg.source_enabled(s.as_ref()) && s.ready(&cx.config))
     {
-        source.prefetch(cx, &uris).await;
+        // A panicking prefetch costs only its batch (each lookup still asks alone).
+        if std::panic::AssertUnwindSafe(source.prefetch(cx, &uris))
+            .catch_unwind()
+            .await
+            .is_err()
+        {
+            tracing::error!(source = source.id(), "also-on prefetch panicked");
+        }
     }
     let work = due.into_iter().map(|id| async move {
         let result = one(pool, cx, sources, &id).await;
@@ -649,7 +656,16 @@ async fn one(
             }
             continue;
         }
-        match source.lookup(cx, &subject).await {
+        // A source that panics (a parser meeting an answer of a shape it doesn't expect) fails
+        // this run like an error: the others' results are kept and the worker goes on.
+        let lookup = std::panic::AssertUnwindSafe(source.lookup(cx, &subject))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| {
+                tracing::error!(resource = %id, source = source.id(), "also-on lookup panicked");
+                Err(anyhow::anyhow!("lookup panicked"))
+            });
+        match lookup {
             Ok(found) => {
                 reread |= found.reread;
                 record(pool, id, source.id(), found, source.ttl(), cfg)

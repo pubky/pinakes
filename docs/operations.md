@@ -490,7 +490,9 @@ cards, so a tagged link an exact derivation names no longer joins by it either;
 `[also_on.sources.<id>] enabled = false` turns one source off and `enabled = true` turns on one
 that is off by default (an unknown ID stops startup). Sources run in a fixed order, and each
 sees the keys the ones before it found in the same run (a barcode MusicBrainz names, then the
-services looked up by it); a source that no longer applies (its key is gone) drops its rows.
+services looked up by it); a source that no longer applies (its key is gone) drops its rows. A
+source that fails or panics keeps its earlier rows and retries with backoff; the others' results
+stand and the worker goes on (a panic is logged as an error).
 The sources, in the order they run, are `service`, `tidal`, `musicbrainz`, `musicbrainz_entity`,
 `wikidata`, `discogs`, `deezer` and `itunes` (music), `wikipedia`, `wikidata_item`, `books`, `films`, `podcasts` and `titles`,
 `osm_wikidata`, `wikidata_osm` and `btcmap` (places), `unpaywall`, `ncbi`, `datacite` and
