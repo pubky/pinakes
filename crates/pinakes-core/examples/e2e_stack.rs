@@ -582,6 +582,8 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
     cfg.egress.contact = "info@synonym.to".into();
     cfg.api.requests_per_minute = 10000;
     cfg.nexus_url = std::env::var("PINAKES_E2E_NEXUS").unwrap_or_else(|_| cfg.nexus_url.clone());
+    // As the daemon: the sources' switches and tokens (GitHub, Discogs) apply to this run.
+    pinakes_core::configure_sources(&cfg);
     let cfg = Arc::new(cfg);
     let egress = Egress::new(cfg.egress.clone());
     let osm = Arc::new(OsmResolver::new(pool.clone(), cfg.osm.clone())?);
