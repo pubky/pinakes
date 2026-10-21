@@ -1428,6 +1428,59 @@ fn urlencoding(value: &str) -> String {
         .collect()
 }
 
+/// Two tagged spellings of one F-Droid page share its slot even when the derived F-Droid link is
+/// one of them (and is therefore dropped as a member before the slots are counted).
+#[sqlx::test(migrations = "../../migrations")]
+async fn two_tagged_spellings_of_a_derived_link_show_once(pool: PgPool) {
+    let app_page = |uri: &'static str, site: &'static str| {
+        let pool = pool.clone();
+        async move {
+            let id = store::ensure_resource(&pool, uri).await.unwrap();
+            let mut d = ResourceMeta::new(uri, "web", 86400);
+            d.name = Some("Mindustry".into());
+            d.site = site.into();
+            d.set_type("SoftwareApplication");
+            store::save_document(&pool, &id, 0, &d).await.unwrap();
+            id
+        }
+    };
+    let play = "https://play.google.com/store/apps/details?id=io.anuke.mindustry";
+    let canonical = "https://f-droid.org/packages/io.anuke.mindustry";
+    let localized = "https://f-droid.org/en/packages/io.anuke.mindustry/";
+    let card = app_page(play, "Google Play").await;
+    app_page(canonical, "F-Droid").await;
+    app_page(localized, "F-Droid").await;
+    let hub = Fake::new("stores");
+    for uri in [play, canonical, localized] {
+        hub.answer(
+            uri,
+            Ok(Found {
+                keys: vec![key("wikidata:Q1")],
+                links: if uri == play {
+                    vec![Link::new(canonical, "F-Droid", "wikidata")]
+                } else {
+                    vec![]
+                },
+                ..Default::default()
+            }),
+        );
+    }
+    let sources: Vec<Arc<dyn Source>> = vec![hub];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let read = get(&app, &format!("/v1/resources/{card}")).await;
+    let sites: Vec<&str> = read["also_on"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["site"].as_str().unwrap())
+        .collect();
+    assert_eq!(sites, ["F-Droid"]);
+}
+
 /// A source that panics on every lookup, as a parser meeting an unexpected shape would.
 struct Panics;
 #[async_trait]

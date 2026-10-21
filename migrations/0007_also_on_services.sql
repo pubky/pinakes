@@ -1,7 +1,8 @@
 -- One entry per service on every card: a tagged member whose card names the same service as a
 -- derived link (a tagged F-Droid page and Wikidata's F-Droid link, both "F-Droid") takes that
--- service's one place, ahead of the derived link, as a music service's tagged member always did.
--- Other tagged members stay one entry each.
+-- service's one place, ahead of the derived link, as a music service's tagged member always did,
+-- also when the derived link is one of the tagged members. Other tagged members stay one entry
+-- each.
 CREATE OR REPLACE FUNCTION also_on(unit text, resource text, cap integer, members boolean, per_site boolean DEFAULT true) RETURNS jsonb
     LANGUAGE sql STABLE
     AS $$
@@ -23,6 +24,10 @@ CREATE OR REPLACE FUNCTION also_on(unit text, resource text, cap integer, member
  tagged AS (SELECT id,uri,min(host) AS host,min(site) AS site,bool_or(mine) AS mine,bool_or(music) AS music,min(album) AS album FROM m GROUP BY id,uri HAVING NOT bool_or(own)),
  owners AS (SELECT resource AS resource_id UNION SELECT u.resource_id FROM grp JOIN group_unit u USING(group_id)),
  original AS (SELECT lower(min(f.value)) AS title FROM resource_fact f JOIN owners o USING(resource_id) WHERE f.name='original_album' AND f.expires_at>now()),
+ -- The services the live derived links name, before those already tagged members are dropped:
+ -- two tagged spellings of one F-Droid page share its slot even when the derived link is one of them.
+ services AS (SELECT DISTINCT lower(l.site) AS service FROM derived_link l JOIN owners o USING(resource_id)
+   WHERE l.expires_at>now() AND l.site IS NOT NULL),
  derived AS (SELECT DISTINCT ON (l.link_id) l.link_id,l.uri,l.site,l.via,l.kind,l.at,
      count(*) OVER (PARTITION BY l.link_id) AS named
    FROM derived_link l JOIN owners o USING(resource_id)
@@ -31,7 +36,7 @@ CREATE OR REPLACE FUNCTION also_on(unit text, resource text, cap integer, member
    ORDER BY l.link_id,l.seen_at DESC,l.via),
  entries AS (SELECT CASE WHEN mine THEN 1 ELSE 0 END AS o,id AS k1,uri AS k2,
      CASE WHEN starts_with(lower(album),(SELECT title FROM original)) THEN -1 ELSE 0 END::bigint AS rank,
-     CASE WHEN site IS NOT NULL AND (music OR lower(site) IN (SELECT lower(d.site) FROM derived d)) THEN lower(site) ELSE 'member:'||id END AS service,
+     CASE WHEN site IS NOT NULL AND (music OR lower(site) IN (SELECT service FROM services)) THEN lower(site) ELSE 'member:'||id END AS service,
      jsonb_build_object('id',id,'uri',uri,'host',host,'site',site) AS e FROM tagged
    UNION ALL SELECT 2,lower(site),uri,-named,lower(site),jsonb_strip_nulls(jsonb_build_object('uri',uri,'site',site,'derived',true,'via',via,'kind',kind,'at',at)) FROM derived),
  own AS (SELECT lower(r.doc->>'site') AS service FROM resource r WHERE r.id=also_on.resource),
