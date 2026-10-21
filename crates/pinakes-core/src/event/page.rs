@@ -361,12 +361,21 @@ pub fn names_page(v: &Value, base: &Url) -> Option<bool> {
         .find_map(|u| identity(&u))
         .map(|id| id == page)
 }
+/// How much of a line-up a page's parse looks at, so a hostile one costs little: the first 64
+/// entries, of which 17 performers with a name, and of each the first 64 link values, of which 9
+/// links. Each is one above what an event keeps (`EventFields::bound`: 16 performers, 8 links),
+/// so trimming still has one to drop.
+const LINEUP_ENTRIES: usize = 64;
+const LINEUP_PERFORMERS: usize = 17;
+const PERFORMER_LINK_VALUES: usize = 64;
+const PERFORMER_LINKS: usize = 9;
+
 /// An event node's performers (`performer`, one or several): a name each, with the links the
 /// page gives for it (`url`, `sameAs`); a bare name is a performer without links, a nameless
 /// entry nothing.
 pub fn performers(v: &Value, base: &Url) -> Vec<super::Performer> {
     let nodes: Vec<&Value> = match v.get("performer") {
-        Some(Value::Array(all)) => all.iter().collect(),
+        Some(Value::Array(all)) => all.iter().take(LINEUP_ENTRIES).collect(),
         Some(one) if !one.is_null() => vec![one],
         _ => vec![],
     };
@@ -379,17 +388,19 @@ pub fn performers(v: &Value, base: &Url) -> Vec<super::Performer> {
                 return None;
             }
             let mut links = vec![];
-            for field in ["url", "sameAs"] {
-                let values: Vec<&Value> = match p.get(field) {
+            let mut seen = std::collections::HashSet::new();
+            let values = ["url", "sameAs"]
+                .into_iter()
+                .flat_map(|field| match p.get(field) {
                     Some(Value::Array(all)) => all.iter().collect(),
                     Some(one) => vec![one],
                     None => vec![],
-                };
-                for value in values {
-                    if let Some(url) = string(value).and_then(|s| origin_url(base, &s)) {
-                        if !links.contains(&url) {
-                            links.push(url);
-                        }
+                })
+                .take(PERFORMER_LINK_VALUES);
+            for value in values {
+                if let Some(url) = string(value).and_then(|s| origin_url(base, &s)) {
+                    if seen.insert(url.clone()) {
+                        links.push(url);
                     }
                 }
             }
@@ -401,8 +412,10 @@ pub fn performers(v: &Value, base: &Url) -> Vec<super::Performer> {
                 Some(crate::music_sources::ArtistLink::Mbid(_)) => 1,
                 None => 2,
             });
+            links.truncate(PERFORMER_LINKS);
             Some(super::Performer { name, links })
         })
+        .take(LINEUP_PERFORMERS)
         .collect()
 }
 pub fn set_time(doc: &mut ResourceMeta, s: &str, end: bool) {
@@ -643,5 +656,36 @@ mod performer_tests {
             fields.performers[0].links,
             ["https://www.songkick.com/artists/253846-radiohead"]
         );
+    }
+
+    /// A hostile line-up costs little: the parse looks at a bounded part of it and keeps one
+    /// performer and one link more than an event stores, the keying link among them.
+    #[test]
+    fn a_hostile_line_up_is_read_in_bounds() {
+        let base = Url::parse("https://tickets.example/show").unwrap();
+        let mut same_as: Vec<String> = (0..1000)
+            .map(|n| format!("https://tickets.example/fans/{n}"))
+            .collect();
+        same_as.insert(
+            40,
+            "https://www.songkick.com/artists/253846-radiohead".into(),
+        );
+        let performer = serde_json::json!({"name":"Radiohead","sameAs":same_as});
+        let node = serde_json::json!({"@type":"MusicEvent","url":"https://tickets.example/show","performer":vec![performer; 1000]});
+        let started = std::time::Instant::now();
+        let found = performers(&node, &base);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(found.len(), 17);
+        for p in &found {
+            assert_eq!(p.links.len(), 9);
+            assert_eq!(
+                p.links[0],
+                "https://www.songkick.com/artists/253846-radiohead"
+            );
+        }
     }
 }
