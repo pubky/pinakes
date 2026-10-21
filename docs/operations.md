@@ -516,7 +516,8 @@ and `titles`, `osm_wikidata`, `wikidata_osm` and `btcmap` (places), `federal_reg
 two-letter country code) is the Apple Music, Apple Books and Apple Podcasts storefront of the
 Apple links they build. `[also_on.sources.musicbrainz] base_url`
 (`https://musicbrainz.org/ws/2`) points every MusicBrainz read at a mirror's web service instead
-(the `musicbrainz` and `musicbrainz_entity` sources, and the cards of MusicBrainz pages), an http(s) URL without a trailing slash and reached through the egress policy;
+(the `musicbrainz`, `musicbrainz_entity` and `performers` sources, and the cards of MusicBrainz
+pages), an http(s) URL without a trailing slash and reached through the egress policy;
 every instance on one public address shares MusicBrainz's 1 request/s, which a mirror does not
 limit. The worker takes up to 100 due resources at a time and asks MusicBrainz about their links'
 URLs together (50 to a request; MusicBrainz echoes each URL, and an answer applies only to the URL
@@ -529,9 +530,12 @@ for an album with barcodes, and two Wikidata requests (a search by its service I
 each Wikipedia article one request to its Wikipedia and one to Wikidata; each MusicBrainz page
 one request for its entity (an ISRC's page one more for the ISRC; MusicBrainz has no lookup of
 several entities at once, and a read the card already made is taken from the cache) and one for a
-recording's original album; each event page naming performers one MusicBrainz URL lookup per
-performer link it can read (an artist's page on a music service, Songkick or Bandsintown; cached
-an hour, so one artist's many concerts ask once); each tagged OSM object one Wikidata request; each book one Open Library
+recording's original album; each event page naming performers (up to 16, with 8 links each,
+within 2 KB of the document) one MusicBrainz URL request for all its performers' readable links
+together (an artist's page on a music service, Songkick or Bandsintown; at most two per
+performer, 50 to a request, each cached an hour, so one artist's many concerts ask once), and none
+for a performer whose links name a MusicBrainz artist page;
+each tagged OSM object one Wikidata request; each book one Open Library
 request, one iTunes lookup for an ebook edition, and two Wikidata requests when Open Library names
 its work; each podcast show one iTunes lookup, two or three Podcast Index requests (the last asks
 who owns the show's GUID), its feed (usually still cached from its card) and two Wikidata requests;

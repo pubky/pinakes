@@ -912,10 +912,16 @@ in its own structured data (schema.org `performer`) has each performer's name as
 performer (`url`, `sameAs`) name a MusicBrainz artist page, or when MusicBrainz relates one of
 them (an artist's page on a music service, Songkick or Bandsintown, in the spelling MusicBrainz
 stores: Songkick and Bandsintown artists by number) to exactly one artist; that MBID is also the
-fact `performer_mbid`, and the first such link the fact `performer_link`. A name alone is never a
-key, and nothing is searched by name. Events [group](#groups) only with events, so the key never
+fact `performer_mbid`; a performer without one keeps its first such link as the fact
+`performer_link`. A name alone is never a
+key, and nothing is searched by name; a performer without a MusicBrainz identity (a service link
+MusicBrainz doesn't relate, or a name alone) is facts only, found by text search, not by `key=`.
+Performers are read from the page's own event node only (the one whose `url` names the page,
+tracking parameters aside, or the head script), never from another event the page describes; a
+page keeps up to 16 performers with 8 links each, within 2 KB. Events [group](#groups) only with events, so the key never
 joins a concert to the artist's pages; it makes the concert the artist's event:
-`GET /v1/search?key=mbid:{artist}&type=MusicEvent&from=now` lists an artist's upcoming concerts.
+`GET /v1/search?key=mbid:{artist}&type=MusicEvent&from=now&sort=start` lists an artist's upcoming
+concerts, soonest first.
 
 **Books.** `books`: an ISBN (`isbn:…`, `openlibrary.org/isbn/{isbn}`), an Open Library edition
 page (`openlibrary.org/books/OL…M`) or work page (`openlibrary.org/works/OL…W`) is looked up
