@@ -1362,11 +1362,11 @@ mod tests {
                 ),
                 (
                     "Support Act",
-                    // What keys the performer first: its MusicBrainz page, then a page
-                    // MusicBrainz relates, then the rest (`abc` is no Spotify ID).
+                    // What keys the performer first: a page MusicBrainz relates, then its
+                    // MusicBrainz page, then the rest (`abc` is no Spotify ID).
                     vec![
-                        "https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711",
                         "https://www.songkick.com/artists/1-support",
+                        "https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711",
                         "https://open.spotify.com/artist/abc"
                     ]
                 ),

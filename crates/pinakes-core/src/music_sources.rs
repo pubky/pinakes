@@ -448,10 +448,11 @@ pub fn artist_link(url: &str) -> Option<ArtistLink> {
 }
 
 /// The performers an event page names in its own structured data: each one's name is a fact,
-/// and its artist identity a key (`mb:artist:…`) when a MusicBrainz artist page is among the
-/// page's links for it, or when MusicBrainz relates one of those links (a music service, Songkick
-/// or Bandsintown artist page) to exactly one artist; a performer without one keeps its first
-/// link as the fact `performer_link`. A name alone is never a key. Events group only
+/// and its artist identity a key (`mb:artist:…`) when MusicBrainz relates one of the page's links
+/// for it (a music service, Songkick or Bandsintown artist page) to exactly one artist. A
+/// MusicBrainz artist page the page names is the page's own claim: the fact `performer_mbid`
+/// when MusicBrainz names none, never a key. A performer without either keeps its first link as
+/// the fact `performer_link`. A name alone is never a key. Events group only
 /// with events, so the key lists the artist's events (`key=mbid:…&type=MusicEvent`) and never
 /// joins a concert to the artist's own pages.
 pub struct PerformersSource;
@@ -477,12 +478,13 @@ impl PerformersSource {
         let base = cx.config.also_on.musicbrainz_base();
         let mut found = Found::default();
         let mut keyed = std::collections::BTreeSet::new();
-        let mut key = |found: &mut Found, id: &str, via: &str| {
+        // A key only from MusicBrainz's own answer; the MBID is a fact too.
+        let mut key = |found: &mut Found, id: &str| {
             if let Some(key) = hubs::key::mb(MbKind::Artist, id) {
                 if keyed.insert(key.clone()) {
                     found.keys.push(Key {
                         key,
-                        via: via.into(),
+                        via: "musicbrainz".into(),
                     });
                 }
             }
@@ -490,39 +492,36 @@ impl PerformersSource {
                 .facts
                 .push(crate::also_on::Fact::new("performer_mbid", id));
         };
-        // What the page itself says first: names, and MusicBrainz artist pages among the links.
-        let mut lookups: Vec<Vec<String>> = vec![];
+        // What the page says: each performer's name, the links MusicBrainz may relate to its
+        // artist (at most two), and a MusicBrainz artist page it names. That page is the page's
+        // own claim, so it is a fact at most, never a key: any page can name any artist's page.
+        let mut performers: Vec<(Option<String>, Vec<String>)> = vec![];
         for performer in doc.event.performers.iter().take(16) {
             found
                 .facts
                 .push(crate::also_on::Fact::new("performer", &performer.name));
             let mut links = vec![];
-            let mut mbid = None;
+            let mut claimed = None;
             for l in &performer.links {
                 match artist_link(l) {
                     Some(ArtistLink::Mbid(id)) => {
-                        mbid.get_or_insert(id);
+                        claimed.get_or_insert(id);
                     }
                     Some(ArtistLink::Lookup(url)) if !links.contains(&url) => links.push(url),
                     _ => {}
                 }
             }
-            // At most two links are asked for a performer the page doesn't identify.
             links.truncate(2);
-            match mbid {
-                Some(id) => key(&mut found, &id, "page"),
-                None => lookups.push(links),
-            }
+            performers.push((claimed, links));
         }
-        // Then MusicBrainz for the rest: all their links in one request, and only that one (a
-        // link its answer leaves out is unknown this run). A failed request fails the run, a
-        // busy MusicBrainz's included: the previous rows stay and it retries in minutes,
-        // recording the page's keys and MusicBrainz's together (recording what was found would
-        // replace the rows without the busy performers' keys until the next run, a month away).
-        // An answer over its cap is no answer.
-        let all: Vec<String> = lookups
+        // Then MusicBrainz: every performer's links in one request, and only that one (a link
+        // its answer leaves out is unknown this run). A failed request fails the run, a busy
+        // MusicBrainz's included: the previous rows stay and it retries in minutes (recording
+        // what was found would replace the rows without the busy performers' keys until the
+        // next run, a month away). An answer over its cap is no answer.
+        let all: Vec<String> = performers
             .iter()
-            .flatten()
+            .flat_map(|(_, links)| links)
             .cloned()
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
@@ -543,7 +542,7 @@ impl PerformersSource {
             Err(e) if crate::resolver::egress::over_cap(&e) => Default::default(),
             Err(e) => return Err(e),
         };
-        for links in lookups {
+        for (claimed, links) in performers {
             // The first link MusicBrainz relates to exactly one artist.
             let mbid = links.iter().find_map(|url| {
                 match answers
@@ -558,11 +557,14 @@ impl PerformersSource {
                     _ => None,
                 }
             });
-            match mbid {
-                Some(id) => key(&mut found, &id, "musicbrainz"),
-                // Without an identity, the link itself is the fact (the only one that fits
-                // beside sixteen names within the facts cap).
-                None => {
+            // One fact beside the name (sixteen performers fit the facts cap): the artist
+            // MusicBrainz names, else the one the page names, else the link itself.
+            match (mbid, claimed) {
+                (Some(id), _) => key(&mut found, &id),
+                (None, Some(id)) => found
+                    .facts
+                    .push(crate::also_on::Fact::new("performer_mbid", id)),
+                (None, None) => {
                     if let Some(url) = links.first() {
                         found
                             .facts

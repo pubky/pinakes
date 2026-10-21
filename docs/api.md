@@ -908,14 +908,15 @@ ISRC's page is its one recording's card, else named `ISRC {code}`.
 
 **Performers.** `performers`: an event page (`MusicEvent`, or any event) that names its performers
 in its own structured data (schema.org `performer`) has each performer's name as the fact
-`performer`, and the artist's identity as the key `mb:artist:…` when the page's links for the
-performer (`url`, `sameAs`) name a MusicBrainz artist page, or when MusicBrainz relates one of
-them (an artist's page on a music service, Songkick or Bandsintown, in the spelling MusicBrainz
-stores: Songkick and Bandsintown artists by number) to exactly one artist; that MBID is also the
-fact `performer_mbid`; a performer without one keeps its first such link as the fact
-`performer_link`. A name alone is never a
-key, and nothing is searched by name; a performer without a MusicBrainz identity (a service link
-MusicBrainz doesn't relate, or a name alone) is facts only (`details.facts`), not found by `key=`.
+`performer`, and the artist's identity as the key `mb:artist:…` when MusicBrainz relates one of the
+page's links for the performer (`url`, `sameAs`: an artist's page on a music service, Songkick or
+Bandsintown, in the spelling MusicBrainz stores, Songkick and Bandsintown artists by number) to
+exactly one artist; that MBID is also the fact `performer_mbid`. A MusicBrainz artist page among
+those links is the page's own claim: any page can name any artist's page, so it is never a key,
+only the fact `performer_mbid` when MusicBrainz names no artist. A performer without either keeps
+its first link as the fact `performer_link`. A name alone is never a key, and nothing is searched
+by name; a performer without an identity from MusicBrainz is facts only (`details.facts`), not
+found by `key=`.
 Text search (`q=`) matches an event's name and description, not its performers: an act the page
 names only in `performer` (a festival's support act) is not found by it.
 Performers are read from the page's own event node only: one whose `url` (else its `@id`) names

@@ -1151,6 +1151,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     let merged_many = "https://musicbrainz.org/recording/00000000-0000-4000-8000-00000000000e";
     let concert = "https://www.songkick.com/concerts/43402127-radiohead-at-rac-arena";
     let vouched = "https://www.songkick.com/concerts/1-vouched-beside-a-busy-lookup";
+    let hostile = "https://evil.example/gig";
     let busy = "https://www.songkick.com/concerts/2-busy-lookup-alone";
     let lineup = "https://www.songkick.com/concerts/3-three-acts";
     let festival = "https://www.songkick.com/concerts/4-one-keyed-one-busy";
@@ -1168,6 +1169,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         (merged_many, "MusicRecording"),
         (concert, "MusicEvent"),
         (vouched, "MusicEvent"),
+        (hostile, "MusicEvent"),
         (busy, "MusicEvent"),
         (lineup, "MusicEvent"),
         (festival, "MusicEvent"),
@@ -1247,6 +1249,16 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
                     links: links.into_iter().map(str::to_owned).collect(),
                 })
                 .collect();
+        }
+        if uri == hostile {
+            // Any page can name any artist's MusicBrainz page for its performer.
+            d.start = Some("2027-06-02T20:00:00Z".parse().unwrap());
+            d.event.performers = vec![pinakes_core::event::Performer {
+                name: "Radiohead".into(),
+                links: vec![
+                    "https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711".into(),
+                ],
+            }];
         }
         if uri == vouched || uri == busy {
             d.start = Some("2027-06-01T20:00:00Z".parse().unwrap());
@@ -1415,19 +1427,33 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         ]
     );
     assert_eq!(rows(group, ids[concert].clone()).await, ["-"]);
-    // A performer the page identifies by its MusicBrainz page needs no lookup: keyed, whatever
-    // MusicBrainz would say of its other links.
-    assert_eq!(
-        rows(
-            "SELECT key||' '||via FROM resource_key WHERE resource_id=$1",
-            ids[vouched].clone()
-        )
-        .await,
-        ["mb:artist:a74b1b7f-71a5-4011-9441-d0b5e4122711 page"]
-    );
+    // A MusicBrainz artist page the event page names is the page's own claim, never a key: a page
+    // naming only that keys nothing and keeps it as a fact; one naming a link beside it that
+    // MusicBrainz is busy on waits for MusicBrainz like any other.
+    let any_key = "SELECT key FROM resource_key WHERE resource_id=$1";
     let retrying =
         "SELECT coalesce(last_error,'-') FROM also_on_dirty WHERE resource_id=$1 AND attempts>0";
-    assert!(rows(retrying, ids[vouched].clone()).await.is_empty());
+    assert!(rows(any_key, ids[hostile].clone()).await.is_empty());
+    assert_eq!(
+        rows(
+            "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name",
+            ids[hostile].clone()
+        )
+        .await,
+        [
+            "performer Radiohead",
+            "performer_mbid a74b1b7f-71a5-4011-9441-d0b5e4122711"
+        ]
+    );
+    assert!(rows(retrying, ids[hostile].clone()).await.is_empty());
+    assert!(rows(any_key, ids[vouched].clone()).await.is_empty());
+    assert!(
+        rows(retrying, ids[vouched].clone())
+            .await
+            .iter()
+            .any(|e| e.contains("musicbrainz_busy")),
+        "a claimed MBID waits for the busy lookup"
+    );
     // A busy MusicBrainz fails the run whatever else was found (another act on the page keyed
     // from it), so it retries in minutes and then records both together; recording only what
     // was found would leave the busy act's key out until the next run, a month away.

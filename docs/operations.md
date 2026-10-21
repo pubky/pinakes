@@ -535,8 +535,8 @@ recording's original album; each event page naming performers (up to 16, with 8 
 and no other (an artist's page on a music service, Songkick or Bandsintown; at most two per
 performer; a link the answer leaves out is unknown until the next run, and a busy or failed request
 fails the run, which retries; answers are cached an hour, so an artist's many concerts naming only
-that artist, by one link, ask once), and none for a performer whose links name a MusicBrainz artist
-page; each tagged OSM object one Wikidata request; each book one Open Library
+that artist, by one link, ask once), and none for a performer the page names by a MusicBrainz
+artist page alone; each tagged OSM object one Wikidata request; each book one Open Library
 request, one iTunes lookup for an ebook edition, and two Wikidata requests when Open Library names
 its work; each podcast show one iTunes lookup, two or three Podcast Index requests (the last asks
 who owns the show's GUID), its feed (usually still cached from its card) and two Wikidata requests;
