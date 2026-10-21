@@ -1140,6 +1140,110 @@ async fn aliases_never_chain_and_fence_running_jobs(pool: PgPool) {
     assert_eq!(generation(first).await, before + 1);
 }
 
+/// An alias row is answered by its root and never fetched again, so it holds no failure: a
+/// dead-lettered row that becomes an alias is `pending` with no error, a row read fine stays
+/// `ok`, and `reextract` repairs an alias that still holds a failure. The admin counts leave
+/// aliases out of the queue statuses and count them apart.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_alias_holds_no_failure_of_its_own(pool: PgPool) {
+    let walled = store::ensure_resource(&pool, "https://example.org/walled-slug")
+        .await
+        .unwrap();
+    let read = store::ensure_resource(&pool, "https://example.org/read-slug")
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET status='unreachable',last_error='wall',attempts=5,dead_letter=true,denial_streak=5,denied_since=now() WHERE id=$1")
+        .bind(&walled)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET status='ok' WHERE id=$1")
+        .bind(&read)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let mut lines = vec![];
+    for (id, root) in [
+        (&walled, "https://example.org/walled"),
+        (&read, "https://example.org/read"),
+    ] {
+        lines.extend(
+            pinakes_core::alias::assign(
+                &mut tx,
+                id,
+                &pinakes_core::alias::Alias {
+                    root: root.into(),
+                    basis: "canonical",
+                },
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    pinakes_core::alias::record(&mut tx, lines).await.unwrap();
+    tx.commit().await.unwrap();
+    let state = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (String, Option<String>, i32, bool, i32)>(
+                "SELECT status,last_error,attempts,dead_letter,denial_streak FROM resource WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(
+        state(walled.clone()).await,
+        ("pending".into(), None, 0, false, 0)
+    );
+    assert_eq!(state(read.clone()).await.0, "ok");
+    // An alias that holds a failure (written as rows were before this rule) is repaired by
+    // `reextract`.
+    sqlx::query("UPDATE resource SET status='unreachable',last_error='wall',attempts=5,dead_letter=true WHERE id=$1")
+        .bind(&walled)
+        .execute(&pool)
+        .await
+        .unwrap();
+    queue::reextract(&pool, &["web".into()]).await.unwrap();
+    assert_eq!(
+        state(walled.clone()).await,
+        ("pending".into(), None, 0, false, 0)
+    );
+    // The admin counts: no queue status for the aliases, which are counted apart.
+    sqlx::query("UPDATE resource SET status='unreachable',dead_letter=true WHERE id=$1")
+        .bind(&walled)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = pinakes_core::api::admin_router(
+        pinakes_core::api::AppState::new(pool.clone(), pinakes_core::config::Config::default())
+            .unwrap(),
+    );
+    let response = tower::ServiceExt::oneshot(
+        app,
+        axum::http::Request::get("/v1/info")
+            .body(axum::body::Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let info: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(info["counts"]["aliases"], 2, "{info}");
+    let dead: i64 = info["resolvers"]["statuses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["dead_letter"].as_i64())
+        .sum();
+    assert_eq!(dead, 0, "{info}");
+}
+
 /// The generation fence covers the alias a page's canonical makes: a job whose lease was taken
 /// over writes no alias; the current job does.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]

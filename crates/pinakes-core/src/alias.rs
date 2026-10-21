@@ -168,6 +168,12 @@ pub async fn record(tx: &mut Transaction<'_, Postgres>, lines: Vec<Line>) -> Res
     }
     Ok(())
 }
+/// An alias row is answered by its root and never fetched again, so it holds no failure of its
+/// own: its error, retry count and dead letter are cleared, and a failure status (`error`,
+/// `unreachable`, `missing`) becomes `pending`. A row read fine before it became an alias stays
+/// `ok`. Binds the alias IDs as `$1`.
+pub const CLEAR_QUEUE: &str = "UPDATE resource SET status=CASE WHEN status IN ('error','unreachable','missing') THEN 'pending' ELSE status END,last_error=NULL,attempts=0,timeout_streak=0,denial_streak=0,denied_since=NULL,missing_streak=0,dead_letter=false,final=false WHERE id=ANY($1) AND (status IN ('error','unreachable','missing') OR last_error IS NOT NULL OR dead_letter OR final OR attempts>0 OR timeout_streak>0 OR denial_streak>0 OR missing_streak>0)";
+
 /// Make `id` an alias of `alias.root`: the root row exists and is queued, the alias row is
 /// never fetched again. An ID that is itself a root keeps its own aliases pointing at it. It
 /// takes `lock`; the caller passes the returned line to `record` before committing.
@@ -227,6 +233,10 @@ pub async fn assign(
     // a concurrent grouping run's fence on the alias.
     sqlx::query("UPDATE resource SET generation=generation+1,resolver=NULL,lease_until=NULL,priority_at=NULL,osm_type=NULL,osm_id=NULL,osm_version=NULL,doc=CASE WHEN osm_id IS NULL THEN doc ELSE '{}'::jsonb END,type_path=CASE WHEN osm_id IS NULL THEN type_path ELSE '{}'::text[] END WHERE id=$1")
         .bind(id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query(CLEAR_QUEUE)
+        .bind(vec![id.to_owned()])
         .execute(&mut **tx)
         .await?;
     // The root is wanted now; its own schedule continues after its first fetch.

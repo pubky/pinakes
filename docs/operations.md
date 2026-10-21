@@ -136,8 +136,10 @@ classified as one of the named routes or card kinds) and re-queues them at once,
 1000. Each loses its HTTP validators and, on the OSM route, its `osm_place` cache entry, so the
 next fetch re-extracts. A row entering or leaving the OSM route swaps its identity envelope and
 becomes pending, as does an OSM-host URL moving to web. Leases are fenced by a generation bump.
-Aliases have no route and are skipped; a row whose URI now has a static alias root (a new
-tracking parameter, say) becomes an alias of it. The selected rows' [also-on](#also-on) lookups are
+Aliases have no route and are not re-queued; one that still holds a failure (an error, a dead
+letter, a retry count) gets an alias's state, `pending` (or `ok` if it was read) with none, since
+its root answers for it. A row whose URI now has a static alias root (a new tracking parameter,
+say) becomes an alias of it. The selected rows' [also-on](#also-on) lookups are
 queued too: a card that comes back unchanged would not run them again, so results read by an
 older version would stay until they expire. `reextract also-on` queues every resource's also-on
 lookups without re-reading any card; it can be combined with routes.
@@ -663,7 +665,8 @@ and `query` scopes by a parameter when the path is short (`embed?src=`).
 
 `GET /metrics` on the admin listener serves Prometheus series per source: fetch outcomes,
 changes, canaries, the queue, ingestion lag and grouping. Admin `GET /v1/info` has the
-manifests, resolver status, counts, ingestion, source and canary state; public `/v1/info` shows
+manifests, resolver status (aliases left out: their roots answer for them), counts (`aliases`
+among them), ingestion, source and canary state; public `/v1/info` shows
 only the version, what the instance resolves, the limits a client must respect and the OSM
 licence. Stored errors are sanitized classes (dns, connect, timeout, http_4xx, http_5xx, parse,
 policy; rate_limited for a link waiting for its host's budget). Admin info and database metrics are cached for 15 seconds.

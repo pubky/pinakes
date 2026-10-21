@@ -135,9 +135,11 @@ pub async fn reextract(pool: &PgPool, routes: &[String]) -> Result<u64> {
         };
         let (mut ids, mut new_routes, mut types, mut osm_ids) = (vec![], vec![], vec![], vec![]);
         let mut aliases = vec![];
+        let mut alias_rows = vec![];
         for (id, uri, stored, is_alias) in rows {
             // An alias has no route of its own; a URI that now has a static root becomes one.
             if is_alias {
+                alias_rows.push(id);
                 continue;
             }
             if let Some(alias) = crate::alias::root(&uri) {
@@ -170,6 +172,13 @@ pub async fn reextract(pool: &PgPool, routes: &[String]) -> Result<u64> {
             new_routes.push(route);
             types.push(osm.as_ref().map(|o| o.osm_type.clone()));
             osm_ids.push(osm.map(|o| o.id));
+        }
+        // An alias row that holds a failure gets an alias's queue state (`alias::CLEAR_QUEUE`).
+        if !alias_rows.is_empty() {
+            sqlx::query(crate::alias::CLEAR_QUEUE)
+                .bind(&alias_rows)
+                .execute(pool)
+                .await?;
         }
         if !aliases.is_empty() {
             let mut tx = pool.begin().await?;
