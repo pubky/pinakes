@@ -1153,6 +1153,10 @@ async fn item_links_are_read_in_one_request(pool: sqlx::PgPool) {
 /// joins the TIDAL artist.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
+    // Its event pages are read by `performers`.
+    if !has(&["performers"]) {
+        return;
+    }
     let recording = "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69";
     let single = "https://musicbrainz.org/isrc/GBUM71029604";
     let shared = "https://musicbrainz.org/isrc/GBCEE0100112";
@@ -1992,6 +1996,9 @@ async fn musicbrainz_s_own_barcode_never_re_finds_its_release(pool: sqlx::PgPool
 /// 83182 is one edition: its own release and barcode, never the release group.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn discogs_joins_at_its_level(pool: sqlx::PgPool) {
+    if !has(&["discogs"]) {
+        return;
+    }
     let links = [
         (
             "https://www.discogs.com/master/21491-Radiohead-OK-Computer",

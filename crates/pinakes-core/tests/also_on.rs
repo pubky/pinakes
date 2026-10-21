@@ -74,6 +74,13 @@ impl Source for Fake {
     }
 }
 
+/// Whether this build names each link's service (`lookups::service_name`): a test of how a
+/// family's services take their place on a card returns early without that family.
+fn named(uris: &[&str]) -> bool {
+    uris.iter()
+        .all(|uri| pinakes_core::lookups::service_name(uri).is_some())
+}
+
 fn cx(config: Config) -> Context {
     Context {
         egress: Egress::new(config.egress.clone()),
@@ -1204,6 +1211,17 @@ async fn a_shared_key_never_joins_two_places_crates_or_games(pool: PgPool) {
             ("https://example.org/app-2", vec!["steam:2", "wikidata:Q2"]),
         ],
     ];
+    // A case counts while its first namespace names one object in this build: OSM's always, a
+    // crate's or a game's with the source that records it.
+    let single: Vec<&str> = also_on::registered()
+        .iter()
+        .flat_map(|s| s.single_namespaces().iter().copied())
+        .chain(["osm"])
+        .collect();
+    let cases: Vec<_> = cases
+        .into_iter()
+        .filter(|pair| single.contains(&pair[0].1[0].split(':').next().unwrap()))
+        .collect();
     let mut pairs = vec![];
     for pair in &cases {
         let mut ids = vec![];
@@ -1243,7 +1261,7 @@ async fn a_shared_key_never_joins_two_places_crates_or_games(pool: PgPool) {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert!(refused >= 3, "{refused}");
+    assert!(refused >= cases.len() as i64, "{refused}");
 }
 
 /// BTC Map's merchant page names one OSM object: an object it lists carries its own `osm:` key,
@@ -1283,6 +1301,13 @@ async fn a_tagged_btc_map_link_joins_its_osm_object(pool: PgPool) {
 /// names takes that service's place; a tagged member of another site still shows.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_tagged_member_and_a_derived_link_of_one_service_show_once(pool: PgPool) {
+    if !named(&[
+        "https://play.google.com/store/apps/details?id=io.anuke.mindustry",
+        "https://f-droid.org/en/packages/io.anuke.mindustry/",
+        "https://store.steampowered.com/app/1127400/",
+    ]) {
+        return;
+    }
     let app_page = |uri: &'static str, site: &'static str| {
         let pool = pool.clone();
         async move {
@@ -1496,6 +1521,12 @@ async fn two_tagged_spellings_of_a_derived_link_show_once(pool: PgPool) {
 /// place: the derived link to the real service still shows.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_page_naming_itself_after_a_service_takes_no_slot(pool: PgPool) {
+    if !named(&[
+        "https://play.google.com/store/apps/details?id=io.anuke.mindustry",
+        "https://f-droid.org/en/packages/io.anuke.mindustry/",
+    ]) {
+        return;
+    }
     let save = |uri: &'static str, site: &'static str, service: Option<&'static str>| {
         let pool = pool.clone();
         async move {
@@ -1796,6 +1827,9 @@ async fn a_music_typed_impostor_takes_no_slot_and_hides_nothing(pool: PgPool) {
 /// itself and the repository keeps GitHub's place.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_non_object_page_on_a_service_host_takes_no_slot(pool: PgPool) {
+    if !named(&["https://github.com/rust-random/rand"]) {
+        return;
+    }
     let topics = "https://github.com/topics/rust";
     let repo = "https://github.com/rust-random/rand";
     let krate = "https://crates.io/crates/rand";
@@ -1850,6 +1884,9 @@ async fn a_non_object_page_on_a_service_host_takes_no_slot(pool: PgPool) {
 /// listed beside it.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_shared_repository_link_with_a_tab_is_the_repository_once(pool: PgPool) {
+    if !named(&["https://github.com/rust-random/rand"]) {
+        return;
+    }
     let shared = "https://github.com/rust-random/rand?tab=readme-ov-file";
     let repo = "https://github.com/rust-random/rand";
     let krate = "https://crates.io/crates/rand";
