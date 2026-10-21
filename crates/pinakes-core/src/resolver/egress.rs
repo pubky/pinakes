@@ -322,30 +322,6 @@ pub fn page_fits(f: &Fetched) -> bool {
         ) && f.body.len() <= MAX_HTML_HEAD_BYTES)
 }
 
-/// Where the head closes in `body`, searching from `from` (less a tag's length, so a tag split
-/// across two chunks is found): after `</head>`, or before `<body` where the body opens it
-/// implicitly, in any letter case.
-fn head_end(body: &[u8], from: usize) -> Option<usize> {
-    const CLOSE: &[u8] = b"</head>";
-    const BODY: &[u8] = b"<body";
-    let start = from.saturating_sub(CLOSE.len());
-    let window = &body[start..];
-    let close = window
-        .windows(CLOSE.len())
-        .position(|w| w.eq_ignore_ascii_case(CLOSE))
-        .map(|at| start + at + CLOSE.len());
-    let opens = window
-        .windows(BODY.len() + 1)
-        .position(|w| {
-            w[..BODY.len()].eq_ignore_ascii_case(BODY)
-                && matches!(w[BODY.len()], b'>' | b' ' | b'\t' | b'\n' | b'\r' | b'/')
-        })
-        .map(|at| start + at);
-    match (close, opens) {
-        (Some(c), Some(o)) => Some(c.min(o)),
-        (one, other) => one.or(other),
-    }
-}
 pub async fn read_response(url: Url, response: reqwest::Response) -> Result<Fetched> {
     read_response_with(url, response, &FetchOptions::default()).await
 }
@@ -439,6 +415,12 @@ pub async fn read_response_with(
         let head_cap = options
             .head_cap
             .filter(|cap| html && options.body_cap.is_none() && *cap > BODY_CAP);
+        // Where the head closes, read as the parser reads markup (`html::Scan`): after `</head>`,
+        // where `<body` opens it, or where the page passes a parse cap (nothing after it is read).
+        let mut scan = head_cap.map(|_| super::html::Scan::default());
+        fn head_closed(scan: &Option<super::html::Scan>) -> Option<usize> {
+            scan.as_ref().and_then(|s| s.head_end().or(s.cut()))
+        }
         if refuse && response.content_length().is_some_and(|n| n > max as u64) {
             return Err(BodyTooLarge { cap: max }.into());
         }
@@ -452,7 +434,7 @@ pub async fn read_response_with(
                     return Err(BodyTooLarge { cap: max }.into());
                 }
                 match head_cap {
-                    Some(cap) if max < cap && head_end(&body, 0).is_none() => max = cap,
+                    Some(cap) if max < cap && head_closed(&scan).is_none() => max = cap,
                     _ => {}
                 }
             }
@@ -461,11 +443,13 @@ pub async fn read_response_with(
                 truncated = true;
                 break;
             }
-            let from = body.len();
             body.extend_from_slice(&chunk);
+            if let Some(scan) = scan.as_mut().filter(|s| s.head_end().or(s.cut()).is_none()) {
+                scan.feed(&chunk);
+            }
             // Past the page cap, reading stops where the head closes.
             if body.len() > BODY_CAP && max > BODY_CAP {
-                if let Some(end) = head_end(&body, from) {
+                if let Some(end) = head_closed(&scan) {
                     // Never less than the page cap a short head would have kept.
                     body.truncate(end.max(BODY_CAP));
                     truncated = true;
@@ -486,7 +470,7 @@ pub async fn read_response_with(
             // timeout. At the page cap with the head still open, the head budget applies.
             if !refuse && body.len() >= max {
                 match head_cap {
-                    Some(cap) if max < cap && head_end(&body, 0).is_none() => max = cap,
+                    Some(cap) if max < cap && head_closed(&scan).is_none() => max = cap,
                     _ => {
                         truncated = true;
                         break;
@@ -1576,14 +1560,6 @@ mod tests {
         assert!(open.truncated);
         assert_eq!(open.body.len(), 2 * BODY_CAP);
         server.abort();
-        // A closing tag split across two chunks is found.
-        let body = b"<html><head><title>t</title></he".to_vec();
-        let mut whole = body.clone();
-        whole.extend_from_slice(b"ad><body>");
-        assert_eq!(
-            head_end(&whole, body.len()),
-            Some(whole.len() - "<body>".len())
-        );
     }
     /// A head the body opens implicitly (no `</head>`) ends where `<body` starts, past the page
     /// cap too; a page that never ends its head arrives whole within the head budget, and a
@@ -1634,6 +1610,55 @@ mod tests {
         assert!(!whole.truncated);
         assert!(whole.body.len() > BODY_CAP);
         assert!(page_fits(&whole));
+        server.abort();
+    }
+    /// `<body` inside a script, a style or a comment does not end the head read: a head of about
+    /// 1.05 MB with such a decoy keeps the title and meta tags after it (Codex's three variants)
+    /// and stops at the real `</head>`.
+    #[tokio::test]
+    async fn markup_in_text_does_not_end_the_head() {
+        use axum::{extract::Path, routing::get, Router};
+        fn page(decoy: &str) -> String {
+            format!(
+                "<html><head><style>{}</style>{decoy}<title>After</title><meta property='og:title' content='After'></head><body>x</body></html>",
+                "x".repeat(BODY_CAP)
+            )
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/{kind}",
+            get(|Path(kind): Path<String>| async move {
+                let decoy = match kind.as_str() {
+                    "script" => "<script>var tpl = '<body class=x>';</script>",
+                    "style" => "<style>/* <body class=x> */ a { b: c }</style>",
+                    _ => "<!-- <body class=x> -->",
+                };
+                ([("content-type", "text/html")], page(decoy))
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        for kind in ["script", "style", "comment"] {
+            let url: Url = format!("http://{addr}/{kind}").parse().unwrap();
+            let options = FetchOptions {
+                head_cap: Some(2 * BODY_CAP),
+                ..Default::default()
+            };
+            let f =
+                read_response_with(url.clone(), client.get(url).send().await.unwrap(), &options)
+                    .await
+                    .unwrap();
+            let text = String::from_utf8_lossy(&f.body);
+            assert!(f.truncated, "{kind}");
+            assert!(text.contains("<title>After</title>"), "{kind}");
+            assert!(text.contains("og:title"), "{kind}");
+            assert!(
+                text.ends_with("</head>"),
+                "{kind}: {}",
+                &text[text.len() - 30..]
+            );
+        }
         server.abort();
     }
     /// A cut read stops as soon as it reaches its cap: a PDF that announces 3 MiB, sends exactly
