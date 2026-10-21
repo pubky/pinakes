@@ -787,7 +787,7 @@ async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
     );
 }
 
-/// The owner's Bohemian Rhapsody on TIDAL: a TIDAL track page states its own ISRC, a key. One
+/// Bohemian Rhapsody on TIDAL: a TIDAL track page states its own ISRC, a key. One
 /// MusicBrainz does not relate by URL joins the one recording its ISRC is on; an ISRC nobody else
 /// knows keeps its key and stays alone; one MusicBrainz gives to two recordings is no key.
 #[sqlx::test(migrations = "../../migrations")]

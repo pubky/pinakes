@@ -352,7 +352,7 @@ async fn a_change_lookup_takes_links_ids_or_both(pool: PgPool) {
     );
     let (_, root) = ask(json!({"resource_ids":[id]})).await;
     assert_eq!(lines.len(), seqs(&root).len() + 1, "{aliased}");
-    // The owner's body: links and nothing else. Without `since`, every retained change, paged.
+    // A body of links and nothing else. Without `since`, every retained change, paged.
     let (code, plain) = call(
         &app,
         "POST",
