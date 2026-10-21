@@ -466,7 +466,7 @@ The upgrade that adds the worker queues every stored resource once. Run
 `pinakesd --config <path> reextract all` after it as well: music and Wikipedia links already
 stored in another spelling become aliases of their canonical link, and music links are typed.
 After an upgrade that adds also-on sources (the media sources brought `books`, `films`,
-`podcasts` and `titles`), or after setting a source's key (`[podcast_index]`), run
+`podcasts` and `titles`), or after setting a source's key (`[podcast_index]`, TIDAL's pair), run
 `pinakesd --config <path> reextract also-on` (or `reextract all`, which includes it): until then
 links already stored keep the results of their last run, without the new source's, for up to its
 lifetime (30 days).
@@ -475,7 +475,7 @@ The also-on worker runs every enabled source that applies to a resource ([the AP
 after a save that changed its document or status, and again when the shortest lifetime among
 them has passed. Its queue is `also_on_dirty`; `limits.also_on_concurrency` (2) resources run at
 once, and a failed run keeps the previous rows and retries after `limits.also_on_retry_secs`
-(300 s), doubling up to an hour. Each run replaces its source's rows (`resource_key`,
+(300 s), doubling up to an hour, or after the wait a service asked for when that is longer. Each run replaces its source's rows (`resource_key`,
 `derived_link`, `resource_fact`); rows live twice the source's lifetime and the hourly maintenance deletes the
 expired ones (a deleted key regroups its resource). A source keeps at most
 `limits.also_on_links_per_source` (32) links, `limits.also_on_keys_per_source` (16) keys and
@@ -487,7 +487,7 @@ cards, so a tagged link an exact derivation names no longer joins by it either;
 that is off by default (an unknown ID stops startup). Sources run in a fixed order, and each
 sees the keys the ones before it found in the same run (a barcode MusicBrainz names, then the
 services looked up by it); a source that no longer applies (its key is gone) drops its rows.
-The sources, in the order they run, are `service`, `musicbrainz`, `musicbrainz_entity`,
+The sources, in the order they run, are `service`, `tidal`, `musicbrainz`, `musicbrainz_entity`,
 `wikidata`, `deezer` and `itunes` (music), `wikipedia`, `wikidata_item`, `books`, `films`, `podcasts` and `titles`
 ([the API](api.md#also-on) says what each reads); `[also_on] apple_storefront` (`us`, a
 two-letter country code) is the Apple Music, Apple Books and Apple Podcasts storefront of the
@@ -517,7 +517,27 @@ when the item has no link there; each TMDB, Trakt, Netflix, Goodreads, Letterbox
 label. `deezer` is off by default: Deezer's API terms allow
 non-commercial use only, so turn it on
 (`[also_on.sources.deezer] enabled = true`) only where they do; it costs one request per Deezer
-link and up to two per other track or album with an ISRC or barcode.
+link and up to two per other track or album with an ISRC or barcode. `tidal` costs a token
+request when its token expires (TIDAL's `expires_in`, four hours today), and per TIDAL album or
+track one request, or a share of one: a batch
+of links asks for up to 20 albums or 20 tracks at once (`filter[id]`); a track's ISRC also asks
+MusicBrainz whether several recordings have it (usually cached from `service`).
+
+TIDAL is asked only with a TIDAL developer app's client ID and secret (developer.tidal.com):
+`PINAKES_TIDAL_CLIENT_ID` and `PINAKES_TIDAL_CLIENT_SECRET`, the recommended form (one
+underscore: a build without the source ignores them, where `PINAKES__TIDAL__CLIENT_ID` stops it),
+or `[tidal] client_id` and `client_secret`. Without both the `tidal` source does not run;
+credentials removed later leave the rows it stored until they expire, as `enabled = false` does.
+`[tidal] country` (`US`, two upper-case letters) is the country whose catalogue is read. The pair
+and the token never appear in logs, the operator info, errors or debug output. Refused
+credentials (the token endpoint refuses them, the API answers 403, or it rejects a token under a
+minute old) are logged (`TIDAL refused the client credentials`) and counted in
+`pinakes_also_on_service_errors_total{service="tidal"}` (class `refused`, `forbidden` or
+`rejected`); the TIDAL links read meanwhile keep what TIDAL gave them before and retry later
+(`tidal_auth`, backing off to hourly), and TIDAL is asked again after five minutes. A rate limit
+or an outage (429, 5xx) is waited out: no TIDAL request, batched or single, before the time it
+asked for (`Retry-After`, a minute to an hour) has passed, and the links retry after it
+(`tidal_busy`).
 
 Podcast Index is asked only with a key and secret: `[podcast_index] key` and `secret`, or
 `PINAKES__PODCAST_INDEX__KEY` and `PINAKES__PODCAST_INDEX__SECRET` (free from
@@ -531,7 +551,7 @@ and asks again later only when nothing at all was found. Such failures of a seco
 
 Sources reach their services through the egress policy and its per-host budgets, one request
 at a time per host. A hub's published limit lowers its host's default pace like a source's own
-(`limits.host_rates` names a host's rate outright): MusicBrainz 1 request/s, Deezer 10/s,
+(`limits.host_rates` names a host's rate outright): MusicBrainz 1 request/s, Deezer 10/s, TIDAL's API 2/s (TIDAL publishes no figure),
 Wikimedia (`www.wikidata.org`, `*.wikipedia.org`, `commons.wikimedia.org`) 200/min, Open
 Library 3/s, iTunes about 20/min, TVmaze 20 per 10 s, crates.io 1/s, Crossref 10/s, Software Heritage
 120/h; a limit above `limits.host_requests_per_second` (1/s) leaves the default.

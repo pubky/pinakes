@@ -7,6 +7,8 @@
 //! - [`ServiceSource`]: the ISRC a music service's own track page states (its JSON-LD
 //!   `isrcCode`) as the key `isrc:…` when the service vouches for it (TIDAL,
 //!   `Service::vouches_isrc`), and as a fact with its artist, album and length.
+//! - [`crate::also_on::tidal::Tidal`] (with an operator's TIDAL client ID and secret): a TIDAL
+//!   album's barcode and a track's ISRC from TIDAL's own API, as keys.
 //! - [`MusicBrainzSource`]: what MusicBrainz relates the tagged link to (one recording, release
 //!   or artist; for a track it does not relate, the one recording its page's own ISRC is on),
 //!   that entity's current links on music services at the same level, and its MBIDs, ISRCs and
@@ -68,6 +70,16 @@ fn own_isrc(subject: &Subject) -> Option<String> {
         .map(|(_, isrc)| isrc)
 }
 
+/// Whether MusicBrainz gives `isrc` to several recordings: such an ISRC names none of them, so
+/// it is a fact, never a key.
+pub(crate) async fn shared_isrc(cx: &Context, isrc: &str) -> Result<bool> {
+    Ok(
+        musicbrainz::isrc(&cx.egress, cx.config.also_on.musicbrainz_base(), isrc)
+            .await?
+            .is_some_and(|recordings| recordings.len() > 1),
+    )
+}
+
 /// A music service's own record of its own object: the ISRC on its track page (a key only from
 /// a service that vouches for it), its artist, album and length.
 pub struct ServiceSource;
@@ -85,11 +97,7 @@ impl Source for ServiceSource {
         };
         let mut found = Found::default();
         if let Some((service, isrc)) = page_isrc(subject) {
-            // An ISRC MusicBrainz gives to several recordings names none of them.
-            let shared = service.vouches_isrc()
-                && musicbrainz::isrc(&cx.egress, cx.config.also_on.musicbrainz_base(), &isrc)
-                    .await?
-                    .is_some_and(|recordings| recordings.len() > 1);
+            let shared = service.vouches_isrc() && shared_isrc(cx, &isrc).await?;
             if service.vouches_isrc() && !shared {
                 found.keys.push(Key {
                     key: format!("isrc:{isrc}"),

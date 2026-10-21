@@ -145,11 +145,13 @@ pub struct Validators {
     pub etag: Option<String>,
     pub last_modified: Option<String>,
 }
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct FetchOptions {
     /// Extra request headers, by literal name.
     pub headers: Vec<(&'static str, String)>,
     pub json_body: Option<serde_json::Value>,
+    /// A form-encoded POST body (an OAuth token request), by literal field name.
+    pub form_body: Option<Vec<(&'static str, String)>>,
     pub sensitive: bool,
     pub accept: Option<String>,
     pub user_agent: Option<String>,
@@ -164,6 +166,48 @@ pub struct FetchOptions {
     /// (`pkarr_relays::PAYLOAD_TYPES`).
     pub extra_types: &'static [&'static str],
     pub validators: Validators,
+}
+impl std::fmt::Debug for FetchOptions {
+    /// A sensitive request's header and form values are its credentials: never printed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redact = |values: &[(&'static str, String)]| -> Vec<(&'static str, String)> {
+            values
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        *k,
+                        if self.sensitive {
+                            "[REDACTED]".to_owned()
+                        } else {
+                            v.clone()
+                        },
+                    )
+                })
+                .collect()
+        };
+        f.debug_struct("FetchOptions")
+            .field("headers", &redact(&self.headers))
+            .field("json_body", &self.json_body)
+            .field("form_body", &self.form_body.as_deref().map(redact))
+            .field("sensitive", &self.sensitive)
+            .field("accept", &self.accept)
+            .field("user_agent", &self.user_agent)
+            .field("feed_cap", &self.feed_cap)
+            .field("body_cap", &self.body_cap)
+            .field("feed_hint", &self.feed_hint)
+            .field("extra_types", &self.extra_types)
+            .field("validators", &self.validators)
+            .finish()
+    }
+}
+impl FetchOptions {
+    /// A request has one body: JSON or a form, never both.
+    fn one_body(&self) -> Result<()> {
+        if self.json_body.is_some() && self.form_body.is_some() {
+            return Err(refused("a request has one body: JSON or a form"));
+        }
+        Ok(())
+    }
 }
 /// A refusal by the egress policy, classed `policy`: not broken content, and not transient.
 fn refused(message: &'static str) -> anyhow::Error {
@@ -204,6 +248,8 @@ impl Transport for PinnedTransport {
             .build()?;
         let mut request = if let Some(body) = &options.json_body {
             client.post(url.clone()).json(body)
+        } else if let Some(form) = &options.form_body {
+            client.post(url.clone()).form(form)
         } else {
             client.get(url.clone())
         }
@@ -506,6 +552,7 @@ impl Egress {
             .context("web resolution exceeded 10 seconds")?
     }
     pub async fn fetch_with(&self, uri: &str, options: &FetchOptions) -> Result<Fetched> {
+        options.one_body()?;
         let result = tokio::time::timeout(
             Duration::from_secs(10),
             self.fetch_options_inner(uri, options),
@@ -552,11 +599,14 @@ impl Egress {
         .await
     }
     fn discovery_key(uri: &str, options: &FetchOptions) -> Result<String> {
+        options.one_body()?;
         let mut url = Url::parse(uri)?;
         url.set_fragment(None);
         let mut key = url.to_string();
-        if options.json_body.is_some() || !options.headers.is_empty() {
-            let identity = serde_json::to_vec(&(&options.json_body, &options.headers))?;
+        if options.json_body.is_some() || options.form_body.is_some() || !options.headers.is_empty()
+        {
+            let identity =
+                serde_json::to_vec(&(&options.json_body, &options.form_body, &options.headers))?;
             key.push_str(&format!("|request:{}", blake3::hash(&identity).to_hex()));
         }
         // A read with another cap gets another answer (a refusal is replayed only to its cap).
@@ -764,7 +814,11 @@ impl Egress {
             observation.status(response.status);
             drop(observation);
             if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
-                if options.sensitive || options.json_body.is_some() || !options.headers.is_empty() {
+                if options.sensitive
+                    || options.json_body.is_some()
+                    || options.form_body.is_some()
+                    || !options.headers.is_empty()
+                {
                     return Err(refused("redirect of authenticated/API request refused"));
                 }
                 if redirects == 3 {
@@ -792,7 +846,11 @@ impl Egress {
                 return Err(super::interstitial::Blocked.into());
             }
             if let super::interstitial::Page::Redirect(target) = page {
-                if options.sensitive || options.json_body.is_some() || !options.headers.is_empty() {
+                if options.sensitive
+                    || options.json_body.is_some()
+                    || options.form_body.is_some()
+                    || !options.headers.is_empty()
+                {
                     return Err(refused("redirect of authenticated/API request refused"));
                 }
                 if redirects == 3 {
@@ -883,10 +941,10 @@ impl Egress {
         rate
     }
 }
-/// Requests per second the hub services the also-on sources read publish as their limit (one
-/// request at a time per host is the rule for every host); it lowers a host's default pace,
-/// beside the sources' own limits (`sources::budgets`). A rule `*.example.org` covers the
-/// subdomains.
+/// Requests per second the hub services the also-on sources read publish as their limit, or a
+/// cautious pace where none is published (one request at a time per host is the rule for every
+/// host); it lowers a host's default pace, beside the sources' own limits (`sources::budgets`).
+/// A rule `*.example.org` covers the subdomains.
 pub const PUBLISHED_RATES: &[(&str, f64)] = &[
     // MusicBrainz: 1 request/s per IP, 503 above that.
     ("musicbrainz.org", 1.0),
@@ -898,6 +956,9 @@ pub const PUBLISHED_RATES: &[(&str, f64)] = &[
     ("openlibrary.org", 3.0),
     // Deezer's public API: 50 requests per 5 seconds.
     ("api.deezer.com", 10.0),
+    // TIDAL's developer API publishes no figure and answers 429 with a time to wait: a cautious
+    // 2/s (a batch asks for 20 items).
+    ("openapi.tidal.com", 2.0),
     // iTunes Search and Lookup: about 20 requests/min.
     ("itunes.apple.com", 20.0 / 60.0),
     // TVmaze: at least 20 calls every 10 seconds per IP.
@@ -1758,6 +1819,69 @@ mod tests {
             assert!(egress.fetch(uri).await.is_err(), "{uri}");
         }
         assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+    }
+    #[test]
+    fn a_sensitive_request_s_debug_hides_its_credentials_and_two_bodies_are_refused() {
+        let options = FetchOptions {
+            headers: vec![("authorization", "Bearer SECRETTOKEN".into())],
+            form_body: Some(vec![("client_secret", "SECRETPAIR".into())]),
+            sensitive: true,
+            ..Default::default()
+        };
+        let shown = format!("{options:?}");
+        assert!(!shown.contains("SECRET"), "{shown}");
+        assert!(
+            shown.contains("authorization") && shown.contains("client_secret"),
+            "{shown}"
+        );
+        let plain = FetchOptions {
+            headers: vec![("x-request-id", "abc".into())],
+            ..Default::default()
+        };
+        assert!(format!("{plain:?}").contains("abc"));
+        let both = FetchOptions {
+            json_body: Some(serde_json::json!({})),
+            form_body: Some(vec![]),
+            ..Default::default()
+        };
+        let error = Egress::discovery_key("https://example.org/", &both).unwrap_err();
+        assert_eq!(super::super::error_class(&error), "policy");
+    }
+    #[tokio::test]
+    async fn a_form_body_is_posted_form_encoded() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut data = vec![0; 4096];
+            let n = socket.read(&mut data).await.unwrap();
+            let request = String::from_utf8_lossy(&data[..n]).to_string();
+            assert!(request.starts_with("POST /token HTTP/1.1"), "{request}");
+            assert!(request
+                .to_lowercase()
+                .contains("content-type: application/x-www-form-urlencoded"));
+            assert!(
+                request.ends_with("\r\n\r\ngrant_type=client_credentials"),
+                "{request}"
+            );
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
+        });
+        let url = Url::parse(&format!(
+            "http://never-resolve.invalid:{}/token",
+            addr.port()
+        ))
+        .unwrap();
+        let options = FetchOptions {
+            form_body: Some(vec![("grant_type", "client_credentials".into())]),
+            ..Default::default()
+        };
+        let response = PinnedTransport
+            .get_with(&url, &[addr], &options)
+            .await
+            .unwrap();
+        assert_eq!(response.status, 200);
+        task.await.unwrap();
     }
     #[tokio::test]
     async fn transport_pins_dns_sends_fixed_agent_and_does_not_follow_or_store_cookies() {

@@ -192,6 +192,11 @@ derive_links = true # Off: keys and facts only; no derived links on cards, nor j
 # enabled = false # Turn one source off.
 # The podcasts source asks Podcast Index only with a key and secret: supply them through
 # PINAKES__PODCAST_INDEX__KEY and PINAKES__PODCAST_INDEX__SECRET (see .env.example).
+# The tidal source asks TIDAL only with a client ID and secret: supply them through
+# PINAKES_TIDAL_CLIENT_ID and PINAKES_TIDAL_CLIENT_SECRET (see .env.example).
+
+[tidal]
+country = "US" # The TIDAL catalogue's country (ISO 3166-1 alpha-2, upper case).
 
 [api]
 # Applied to every public /v1 route using the direct peer IP.

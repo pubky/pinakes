@@ -1,0 +1,10 @@
+
+
+
+{
+ "resultCount":1,
+ "results": [
+{"wrapperType":"collection", "collectionType":"Album", "artistId":982942862, "collectionId":1680053261, "amgArtistId":3097407, "artistName":"DAT ADAM", "collectionName":"HYDRA 3D", "collectionCensoredName":"HYDRA 3D", "artistViewUrl":"https://music.apple.com/us/artist/dat-adam/982942862?uo=4", "collectionViewUrl":"https://music.apple.com/us/album/hydra-3d/1680053261?uo=4", "artworkUrl60":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/2d/9c/0c/2d9c0c53-1a94-97ce-f4ce-46d79faa2736/cover.jpg/60x60bb.jpg", "artworkUrl100":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/2d/9c/0c/2d9c0c53-1a94-97ce-f4ce-46d79faa2736/cover.jpg/100x100bb.jpg", "collectionPrice":10.99, "collectionExplicitness":"explicit", "contentAdvisoryRating":"Explicit", "trackCount":15, "copyright":"℗ 2016 HYDRA MUSIC", "country":"USA", "currency":"USD", "releaseDate":"2016-10-28T07:00:00Z", "primaryGenreName":"Hip-Hop/Rap"}]
+}
+
+

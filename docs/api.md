@@ -787,6 +787,12 @@ from a known music service's own record of its own object; another host's claim 
   (it names none of them). A track whose ISRC nobody else knows (not MusicBrainz,
   not another link) stays alone with its key, and joins as soon as another link or MusicBrainz
   carries the same ISRC.
+- `tidal` (only with the operator's TIDAL developer credentials,
+  [operations](operations.md#also-on)): a TIDAL album's barcode and a track's ISRC from TIDAL's
+  own API, as the keys `upc:…` and `isrc:…` (`via` `tidal`) and as facts; `deezer` and `itunes`
+  below then find the same album or track by them. An ISRC MusicBrainz gives to several
+  recordings is a fact only, as with `service`. TIDAL's catalogue is read in one country
+  (`[tidal] country`, `US`); an item TIDAL does not offer there gives nothing.
 - `musicbrainz`: what MusicBrainz relates the link to (one recording, release or release group,
   or artist; several are ambiguous and give nothing), that entity's current links on music
   services, and its MBIDs, the recording's ISRCs (up to eight) and the release's barcode as keys
