@@ -373,6 +373,9 @@ pub struct Books;
 
 #[async_trait]
 impl Source for Books {
+    fn link_type(&self, uri: &str) -> Option<Option<&'static str>> {
+        book(uri).map(|_| Some("Book"))
+    }
     fn id(&self) -> &'static str {
         "books"
     }

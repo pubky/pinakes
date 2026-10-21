@@ -63,11 +63,136 @@ pub fn parse_wayback(
     }))
 }
 
+/// This family in the lookups' table ([`super::FAMILIES`]).
+pub struct Lookups;
+impl super::Family for Lookups {
+    fn name(&self) -> &'static str {
+        "archive"
+    }
+    fn sources(&self) -> Vec<std::sync::Arc<dyn crate::also_on::Source>> {
+        vec![std::sync::Arc::new(also_on::Wayback)]
+    }
+}
+
+/// The also-on sources that run these lookups: each fetches through the egress (its policy,
+/// budgets and shared discovery cache), hands the answer to this module's parsers, and reports
+/// keys and derived links.
+pub mod also_on {
+    use crate::{
+        also_on::{self, Context, Source, Subject},
+        lookups::send,
+    };
+    use anyhow::Result;
+    use async_trait::async_trait;
+
+    /// A page that is gone or unreachable: its Wayback Machine capture (HTTP 200 only) closest to
+    /// when it was first referenced, with that time.
+    pub struct Wayback;
+
+    #[async_trait]
+    impl Source for Wayback {
+        /// An archived copy only: `/web/{timestamp}/{url}`.
+        fn service_name(&self, host: &str, url: &url::Url) -> Option<&'static str> {
+            let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
+            (host == "web.archive.org"
+                && matches!(
+                    segments.as_slice(),
+                    ["web", at, _, ..] if at.len() >= 4 && at.bytes().all(|b| b.is_ascii_digit())
+                ))
+            .then_some("Wayback Machine")
+        }
+        fn id(&self) -> &'static str {
+            "wayback"
+        }
+        fn applies(&self, subject: &Subject) -> bool {
+            matches!(subject.status.as_str(), "missing" | "unreachable")
+                && crate::lookups::web_url(&subject.uri).is_some()
+        }
+        async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<also_on::Found> {
+            let near = subject.first_seen_at.unwrap_or_else(chrono::Utc::now);
+            let Some(request) = crate::lookups::archive::wayback_request(&subject.uri, near) else {
+                return Ok(also_on::Found::default());
+            };
+            let f = send(cx, &request, "wayback_busy").await?;
+            let links =
+                crate::lookups::archive::parse_wayback(f.status, &f.body, &subject.uri, near)?
+                    .into_iter()
+                    .collect();
+            Ok(crate::lookups::Found {
+                keys: vec![],
+                links,
+            }
+            .into_also_on("wayback"))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::lookups::fixture::{at, recorded};
+
+        #[tokio::test(start_paused = true)]
+        async fn archived_copies() {
+            let near: chrono::DateTime<chrono::Utc> = "2015-06-01T00:00:00Z".parse().unwrap();
+            let cx = recorded(vec![(
+                crate::lookups::archive::wayback_request("https://example.com/", near)
+                    .unwrap()
+                    .url
+                    .into(),
+                "wayback-cdx-example",
+            )]);
+            let mut gone = at("https://example.com/");
+            gone.status = "missing".into();
+            gone.first_seen_at = Some(near);
+            assert!(Wayback.applies(&gone));
+            let found = Wayback.lookup(&cx, &gone).await.unwrap();
+            assert_eq!(found.links.len(), 1);
+            let link = &found.links[0];
+            assert_eq!(
+                (link.kind.as_deref(), link.via.as_str()),
+                (Some("archived"), "wayback")
+            );
+            assert!(link.at.is_some() && link.uri.starts_with("https://web.archive.org/web/"));
+            // A page that answers is not offered an archived copy.
+            assert!(!Wayback.applies(&at("https://example.com/")));
+        }
+
+        /// No link or ID check of this family slices a string inside a multibyte character, and no
+        /// parser panics on an answer it doesn't expect.
+        #[test]
+        fn spellings_and_answers_never_panic() {
+            use crate::lookups::{archive, fixture};
+            for s in fixture::multibyte_spellings(&["https://example.com/"]) {
+                archive::wayback_request(&s, chrono::Utc::now());
+            }
+            let near = chrono::Utc::now();
+            for (status, raw) in fixture::malformed_answers() {
+                let _ = archive::parse_wayback(status, raw, "https://example.org/", near);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::lookups::fixture;
     use chrono::TimeZone;
+
+    /// Only an object's own page on this family's services is named after the service; any
+    /// other page there (a topic list, a search, a user's page, a page under an object) is not.
+    #[test]
+    fn only_an_objects_own_page_is_named_after_its_service() {
+        for (uri, name) in [
+            (
+                "https://web.archive.org/web/20150601000827/http://example.com/",
+                Some("Wayback Machine"),
+            ),
+            ("https://web.archive.org/web/", None),
+        ] {
+            assert_eq!(crate::lookups::service_name(uri), name, "{uri}");
+        }
+    }
 
     fn at(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)

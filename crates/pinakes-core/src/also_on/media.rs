@@ -129,41 +129,18 @@ impl Deferred {
     }
 }
 
-/// The type a media link names, whatever its page calls itself: a TMDB, Letterboxd or Trakt
-/// movie is a `Movie`; a TMDB, Trakt or TVmaze series a `TVSeries`; an Open Library work or
-/// edition (or an ISBN) a `Book`; an Apple Podcasts, Podcast Index, Pocket Casts, Castro or
-/// Fountain show a `PodcastSeries` and its episode a `PodcastEpisode`.
+/// The type a media link names, whatever its page calls itself: what the media source that reads
+/// it says (a TMDB or Letterboxd movie is a `Movie`; a TMDB or TVmaze series a `TVSeries`; an
+/// Open Library work or edition, or an ISBN, a `Book`; an Apple Podcasts, Podcast Index, Pocket
+/// Casts, Castro or Fountain show a `PodcastSeries` and its episode a `PodcastEpisode`), else a
+/// Trakt movie or show or a Goodreads book by its address.
 pub fn link_type(uri: &str) -> Option<&'static str> {
-    use super::{books, films, podcasts};
-    if let Some(film) = films::film(uri) {
-        return match film {
-            films::Film::Tmdb { tv: false, .. } | films::Film::Letterboxd(_) => Some("Movie"),
-            films::Film::Tmdb { tv: true, .. } | films::Film::Tvmaze(_) => Some("TVSeries"),
-            // A Netflix title is a movie or a series: its Wikidata item may say which.
-            films::Film::Netflix(_) => Some("CreativeWork"),
-            // An IMDb title can be either.
-            films::Film::Imdb(_) => None,
-        }
-        .filter(|_| exact_page(uri));
-    }
-    if books::book(uri).is_some() {
-        return Some("Book");
-    }
-    let episode = |e: Option<u64>| {
-        if e.is_some() {
-            "PodcastEpisode"
-        } else {
-            "PodcastSeries"
-        }
-    };
-    if let Some((_, e)) = podcasts::apple(uri) {
-        return Some(episode(e));
-    }
-    if let Some((_, e)) = crate::podcast_index_api::index_page(uri) {
-        return Some(episode(e));
-    }
-    if podcasts::player(uri).is_some() {
-        return Some("PodcastSeries");
+    // A link one of the media sources reads (`also_on::Source::link_type`).
+    if let Some(kind) = crate::also_on::registered()
+        .iter()
+        .find_map(|s| s.link_type(uri))
+    {
+        return kind;
     }
     let url = url::Url::parse(uri).ok()?;
     let host = url.host_str()?;

@@ -27,17 +27,16 @@
 //! The level is exact: a track lists tracks (and videos of the recording), an album lists
 //! albums (and YouTube's album playlists), an artist lists artist pages.
 use crate::{
-    also_on::{Context, Found, Key, Link, Source, Subject},
+    also_on::{Context, Found, Key, Link, Subject},
     hubs::{self, musicbrainz, wikidata, MbKind},
     music::{self, discogs, Level, Service},
 };
 use anyhow::Result;
-use async_trait::async_trait;
 use serde_json::Value;
 
 /// The level a link is joined at: a video counts as its recording, a YouTube playlist as the
 /// album it holds; other playlists are not joined.
-fn join_level(link: &music::Link) -> Option<Level> {
+pub(crate) fn join_level(link: &music::Link) -> Option<Level> {
     match (link.level, link.service) {
         (Level::Video, _) => Some(Level::Track),
         (Level::Playlist, Service::YouTube) => Some(Level::Album),
@@ -46,26 +45,24 @@ fn join_level(link: &music::Link) -> Option<Level> {
     }
 }
 /// A link found on a hub, when it is a music link at `level`: its canonical URL and service.
-fn derived(url: &str, level: Level, via: &str) -> Option<Link> {
+pub(crate) fn derived(url: &str, level: Level, via: &str) -> Option<Link> {
     let found = music::parse(url)?;
     (join_level(&found)? == level).then(|| Link::new(found.canonical, found.service.name(), via))
 }
 
-/// At most this many releases of one link are read to find the release group they share.
-const MAX_EDITIONS: usize = 4;
 /// At most this many of a recording's ISRCs become keys (the MBID key always fits).
-const MAX_ISRC_KEYS: usize = 8;
+pub(crate) const MAX_ISRC_KEYS: usize = 8;
 
 /// The ISRC a music service's track page states (its JSON-LD `isrcCode`), never another host's
 /// claim: a fact.
-fn page_isrc(subject: &Subject) -> Option<(Service, String)> {
+pub(crate) fn page_isrc(subject: &Subject) -> Option<(Service, String)> {
     let link = music::parse(&subject.uri)?;
     (join_level(&link)? == Level::Track && link.level == Level::Track).then_some(())?;
     let isrc = music::isrc(subject.doc.as_ref()?.attributes.get("isrc")?)?;
     Some((link.service, isrc))
 }
 /// The page's ISRC when its service vouches for it (`Service::vouches_isrc`): a key.
-fn own_isrc(subject: &Subject) -> Option<String> {
+pub(crate) fn own_isrc(subject: &Subject) -> Option<String> {
     page_isrc(subject)
         .filter(|(service, _)| service.vouches_isrc())
         .map(|(_, isrc)| isrc)
@@ -79,295 +76,6 @@ pub(crate) async fn shared_isrc(cx: &Context, isrc: &str) -> Result<bool> {
             .await?
             .is_some_and(|recordings| recordings.len() > 1),
     )
-}
-
-/// A music service's own record of its own object: the ISRC on its track page (a key only from
-/// a service that vouches for it), its artist, album and length.
-pub struct ServiceSource;
-#[async_trait]
-impl Source for ServiceSource {
-    fn id(&self) -> &'static str {
-        "service"
-    }
-    fn applies(&self, subject: &Subject) -> bool {
-        music::parse(&subject.uri).is_some()
-    }
-    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
-        let Some(link) = music::parse(&subject.uri) else {
-            return Ok(Found::default());
-        };
-        let mut found = Found::default();
-        if let Some((service, isrc)) = page_isrc(subject) {
-            let shared = service.vouches_isrc() && shared_isrc(cx, &isrc).await?;
-            if service.vouches_isrc() && !shared {
-                found.keys.push(Key {
-                    key: format!("isrc:{isrc}"),
-                    via: service.token().into(),
-                });
-            }
-            found.facts.push(crate::also_on::Fact::new("isrc", isrc));
-        }
-        // What its page says: the artist, a track's album and length (seconds).
-        let attributes = subject.doc.as_ref().map(|d| &d.attributes);
-        let attribute = |name: &str| attributes.and_then(|a| a.get(name)).map(|v| v.trim());
-        if let Some(artist) = attribute("artist") {
-            found
-                .facts
-                .push(crate::also_on::Fact::new("artist", artist));
-        }
-        if link.level == Level::Track {
-            if let Some(album) = attribute("album") {
-                found.facts.push(crate::also_on::Fact::new("album", album));
-            }
-            let seconds = attribute("duration")
-                .and_then(crate::event::time::duration)
-                .map(|d| d.num_seconds())
-                .filter(|s| (1..=86_400).contains(s));
-            if let Some(seconds) = seconds {
-                found
-                    .facts
-                    .push(crate::also_on::Fact::new("duration", seconds.to_string()));
-            }
-        }
-        Ok(found)
-    }
-}
-
-/// MusicBrainz relations of an exact link.
-pub struct MusicBrainzSource;
-#[async_trait]
-impl Source for MusicBrainzSource {
-    fn id(&self) -> &'static str {
-        "musicbrainz"
-    }
-    fn applies(&self, subject: &Subject) -> bool {
-        music::parse(&subject.uri).is_some_and(|l| join_level(&l).is_some())
-    }
-    async fn prefetch(&self, cx: &Context, uris: &[String]) {
-        let links: Vec<String> = uris
-            .iter()
-            .filter_map(|u| music::parse(u))
-            .filter(|l| join_level(l).is_some())
-            .map(|l| l.canonical)
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        if links.len() > 1 {
-            let base = cx.config.also_on.musicbrainz_base();
-            if let Err(error) = musicbrainz::prefetch_urls(&cx.egress, base, &links).await {
-                tracing::debug!(
-                    kind = crate::resolver::error_class(&error),
-                    "batched MusicBrainz lookup failed; links ask alone"
-                );
-            }
-        }
-    }
-    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
-        crate::also_on::unless_over_cap(self.read(cx, subject).await, Found::default)
-    }
-}
-impl MusicBrainzSource {
-    async fn read(&self, cx: &Context, subject: &Subject) -> Result<Found> {
-        let Some(link) = music::parse(&subject.uri) else {
-            return Ok(Found::default());
-        };
-        let Some(level) = join_level(&link) else {
-            return Ok(Found::default());
-        };
-        let base = cx.config.also_on.musicbrainz_base();
-        let targets = musicbrainz::url(&cx.egress, base, &link.canonical)
-            .await?
-            .map(|t| t.targets)
-            .unwrap_or_default();
-        let at = |kind: MbKind| -> Vec<String> {
-            targets
-                .iter()
-                .filter(|(k, _)| *k == kind)
-                .map(|(_, id)| id.clone())
-                .collect()
-        };
-        // Exactly one entity at the link's level; several are ambiguous and join nothing,
-        // except releases of one release group. A Discogs master is a release group and a
-        // Discogs release its releases, never across.
-        let discogs = discogs::of_link(&link).map(|(kind, _)| kind);
-        let (mut kind, mut ids) = match level {
-            Level::Track => (MbKind::Recording, at(MbKind::Recording)),
-            Level::Artist => (MbKind::Artist, at(MbKind::Artist)),
-            _ => match (discogs, at(MbKind::Release)) {
-                (Some(discogs::Kind::Master), _) => {
-                    (MbKind::ReleaseGroup, at(MbKind::ReleaseGroup))
-                }
-                (None, releases) if releases.is_empty() => {
-                    (MbKind::ReleaseGroup, at(MbKind::ReleaseGroup))
-                }
-                (_, releases) => (MbKind::Release, releases),
-            },
-        };
-        // A track MusicBrainz does not relate the URL to: the one recording its page's own ISRC
-        // is on.
-        if kind == MbKind::Recording && ids.is_empty() {
-            if let Some(isrc) = own_isrc(subject) {
-                if let Some(recordings) = musicbrainz::isrc(&cx.egress, base, &isrc).await? {
-                    if recordings.len() == 1 {
-                        ids = recordings;
-                    }
-                }
-            }
-        }
-        // An album MusicBrainz does not relate the URL to: the releases carrying its barcode keys
-        // (TIDAL's own record, or a service's from an earlier run), one or editions of one
-        // release group, as a related URL would name them. Never a barcode this source keyed
-        // itself: that would re-find a release after an editor removed its URL relation. Never
-        // for a Discogs master either: it is a release group, and barcodes name releases.
-        if level == Level::Album && ids.is_empty() && discogs != Some(discogs::Kind::Master) {
-            let barcodes: Vec<&str> = subject
-                .keys
-                .iter()
-                .filter(|(_, source)| !source.starts_with("musicbrainz"))
-                .filter_map(|(key, _)| key.strip_prefix("upc:"))
-                .take(2)
-                .collect();
-            let mut releases = std::collections::BTreeSet::new();
-            for upc in barcodes {
-                releases.extend(musicbrainz::barcode(&cx.egress, base, upc).await?);
-            }
-            if !releases.is_empty() {
-                kind = MbKind::Release;
-                ids = releases.into_iter().collect();
-            }
-        }
-        if ids.is_empty() || ids.len() > 1 && (kind != MbKind::Release || ids.len() > MAX_EDITIONS)
-        {
-            return Ok(Found::default());
-        }
-        let mut found = entities_found(
-            cx,
-            base,
-            kind,
-            &ids,
-            level,
-            discogs == Some(discogs::Kind::Release),
-        )
-        .await?;
-        // A Discogs master is a release group, whose MusicBrainz entry names no service pages
-        // (its editions have them): the one Wikidata item MusicBrainz relates it to names the
-        // album's, when the item names this release group back. The entity is the read above.
-        if let ([group], Some(discogs::Kind::Master), false) =
-            (ids.as_slice(), discogs, found.keys.is_empty())
-        {
-            if let Some(entity) = musicbrainz::entity(&cx.egress, base, kind, group).await? {
-                let named = hubs::key::mb(MbKind::ReleaseGroup, &entity.mbid);
-                let storefront = &cx.config.also_on.apple_storefront;
-                for mut link in album_item_links(cx, &entity, storefront).await? {
-                    if !found.links.iter().any(|l| l.uri == link.uri) {
-                        link.key.clone_from(&named);
-                        found.links.push(link);
-                    }
-                }
-            }
-        }
-        Ok(found)
-    }
-}
-
-/// A MusicBrainz page as its own hub: a recording's, release's, release group's or artist's page
-/// carries that entity's keys and facts and lists its links on music services at its level, as
-/// the `musicbrainz` source does for a service link MusicBrainz relates to the entity. An ISRC's
-/// page keys the ISRC and the one recording MusicBrainz gives it to; an ISRC several recordings
-/// have names none of them (as a service's page ISRC), so its page keeps it as a fact only.
-pub struct MusicBrainzEntitySource;
-#[async_trait]
-impl Source for MusicBrainzEntitySource {
-    fn id(&self) -> &'static str {
-        "musicbrainz_entity"
-    }
-    fn applies(&self, subject: &Subject) -> bool {
-        musicbrainz::entity_link(&subject.uri).is_some()
-            || musicbrainz::isrc_link(&subject.uri).is_some()
-    }
-    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
-        crate::also_on::unless_over_cap(self.read(cx, subject).await, || {
-            Self::own_keys(&subject.uri)
-        })
-    }
-}
-impl MusicBrainzEntitySource {
-    /// What the page's URL alone proves: the entity's MBID, or the ISRC (with its fact).
-    fn own_keys(uri: &str) -> Found {
-        let mut found = Found::default();
-        if let Some((kind, mbid, _)) = musicbrainz::entity_link(uri) {
-            found.keys.extend(hubs::key::mb(kind, &mbid).map(|key| Key {
-                key,
-                via: "musicbrainz".into(),
-            }));
-        } else if let Some((isrc, _)) = musicbrainz::isrc_link(uri) {
-            found.keys.push(Key {
-                key: format!("isrc:{isrc}"),
-                via: "musicbrainz".into(),
-            });
-            found.facts.push(crate::also_on::Fact::new("isrc", isrc));
-        }
-        found
-    }
-    async fn read(&self, cx: &Context, subject: &Subject) -> Result<Found> {
-        let base = cx.config.also_on.musicbrainz_base();
-        if let Some((kind, mbid, _)) = musicbrainz::entity_link(&subject.uri) {
-            let level = match kind {
-                MbKind::Recording => Level::Track,
-                MbKind::Release | MbKind::ReleaseGroup => Level::Album,
-                MbKind::Artist => Level::Artist,
-            };
-            let mut found =
-                entities_found(cx, base, kind, std::slice::from_ref(&mbid), level, false).await?;
-            // A merged entity answers its old MBID with the one it was merged into: the page keys
-            // that one, and keeps the old as a fact, so `key=mbid:{old}` still finds it.
-            if found
-                .facts
-                .iter()
-                .any(|f| f.name == "mbid" && f.value != mbid)
-            {
-                found
-                    .facts
-                    .push(crate::also_on::Fact::new("mbid_was", &mbid));
-            }
-            return Ok(found);
-        }
-        let Some((isrc, _)) = musicbrainz::isrc_link(&subject.uri) else {
-            return Ok(Found::default());
-        };
-        let own = Key {
-            key: format!("isrc:{isrc}"),
-            via: "musicbrainz".into(),
-        };
-        let mut found = match musicbrainz::isrc(&cx.egress, base, &isrc).await? {
-            Some(recordings) if recordings.len() == 1 => {
-                let mut found = entities_found(
-                    cx,
-                    base,
-                    MbKind::Recording,
-                    &recordings,
-                    Level::Track,
-                    false,
-                )
-                .await?;
-                // Its own ISRC first: a recording's other ISRCs are keys only up to a cap.
-                found.keys.retain(|k| k.key != own.key);
-                found.keys.insert(0, own);
-                found
-            }
-            Some(recordings) if recordings.len() > 1 => Found::default(),
-            // An ISRC MusicBrainz doesn't know is still its own key.
-            _ => Found {
-                keys: vec![own],
-                ..Default::default()
-            },
-        };
-        let fact = crate::also_on::Fact::new("isrc", &isrc);
-        if !found.facts.contains(&fact) {
-            found.facts.push(fact);
-        }
-        Ok(found)
-    }
 }
 
 /// A MusicBrainz page's card, from the entity MusicBrainz serves (`musicbrainz_entity` reads the
@@ -449,170 +157,12 @@ pub fn artist_link(url: &str) -> Option<ArtistLink> {
     }
 }
 
-/// The host a link's service is known by: lower case, without `www.`.
-fn service_host(url: &str) -> Option<String> {
-    let host = url::Url::parse(url).ok()?.host_str()?.to_ascii_lowercase();
-    Some(host.strip_prefix("www.").unwrap_or(&host).to_owned())
-}
-
-/// The performers an event page names in its own structured data: each one's name is a fact,
-/// and its artist identity a key (`mb:artist:…`) when the page is on the service of one of its
-/// links for the performer (a Songkick concert naming a Songkick artist page, Bandsintown's and a
-/// music service's own event pages the same) and MusicBrainz relates that link to exactly one
-/// artist. Any other identity is the page's choice, so a fact (`performer_mbid`): the artist
-/// MusicBrainz relates another link to, or a MusicBrainz artist page the page names. A performer
-/// without one keeps its first link as the fact `performer_link`. A name alone is never a key. Events group only
-/// with events, so the key lists the artist's events (`key=mbid:…&type=MusicEvent`) and never
-/// joins a concert to the artist's own pages.
-pub struct PerformersSource;
-#[async_trait]
-impl Source for PerformersSource {
-    fn id(&self) -> &'static str {
-        "performers"
-    }
-    fn applies(&self, subject: &Subject) -> bool {
-        subject.doc.as_ref().is_some_and(|d| {
-            !d.event.performers.is_empty() && d.type_path.iter().any(|t| t == "Event")
-        })
-    }
-    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
-        self.read(cx, subject).await
-    }
-}
-impl PerformersSource {
-    async fn read(&self, cx: &Context, subject: &Subject) -> Result<Found> {
-        let Some(doc) = &subject.doc else {
-            return Ok(Found::default());
-        };
-        let base = cx.config.also_on.musicbrainz_base();
-        let mut found = Found::default();
-        let mut keyed = std::collections::BTreeSet::new();
-        // A key only from MusicBrainz's own answer; the MBID is a fact too.
-        let mut key = |found: &mut Found, id: &str| {
-            if let Some(key) = hubs::key::mb(MbKind::Artist, id) {
-                if keyed.insert(key.clone()) {
-                    found.keys.push(Key {
-                        key,
-                        via: "musicbrainz".into(),
-                    });
-                }
-            }
-            found
-                .facts
-                .push(crate::also_on::Fact::new("performer_mbid", id));
-        };
-        // What the page says: each performer's name, the links MusicBrainz may relate to its
-        // artist (at most two), and a MusicBrainz artist page it names. That page is the page's
-        // own claim, so it is a fact at most, never a key: any page can name any artist's page.
-        let mut performers: Vec<(Option<String>, Vec<String>)> = vec![];
-        for performer in doc.event.performers.iter().take(16) {
-            found
-                .facts
-                .push(crate::also_on::Fact::new("performer", &performer.name));
-            let mut links = vec![];
-            let mut claimed = None;
-            for l in &performer.links {
-                match artist_link(l) {
-                    Some(ArtistLink::Mbid(id)) => {
-                        claimed.get_or_insert(id);
-                    }
-                    Some(ArtistLink::Lookup(url)) if !links.contains(&url) => links.push(url),
-                    _ => {}
-                }
-            }
-            links.truncate(2);
-            performers.push((claimed, links));
-        }
-        // A key only where the event page speaks for the link's own service: a Songkick concert
-        // naming a Songkick artist page (Bandsintown and a music service's own event pages the
-        // same). Any other page chose the identity MusicBrainz translates, so it is a fact. The
-        // page is the host its fetch ended on, after redirects; a stored page that doesn't say
-        // is no service's.
-        let page = doc.event.performers_from().and_then(service_host);
-        let owned = |url: &str| page.is_some() && service_host(url) == page;
-        // Then MusicBrainz: every performer's links in one request, and only that one (a link
-        // its answer leaves out is unknown this run). A failed request, a busy MusicBrainz's or
-        // an answer over its cap included, fails the run of a page that owns a link: the
-        // previous rows stay and it retries later (recording what was found would replace the
-        // rows without those performers' keys until the next run, a month away).
-        let all: Vec<String> = performers
-            .iter()
-            .flat_map(|(_, links)| links)
-            .cloned()
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let answers = match all.as_slice() {
-            [] => Ok(vec![]),
-            [one] => musicbrainz::url(&cx.egress, base, one)
-                .await
-                .map(|t| vec![t]),
-            _ => musicbrainz::urls(&cx.egress, base, &all).await,
-        };
-        let answers: std::collections::BTreeMap<&String, musicbrainz::UrlTargets> = match answers {
-            Ok(answers) => all
-                .iter()
-                .zip(answers)
-                .filter_map(|(link, t)| Some((link, t?)))
-                .collect(),
-            // A page that owns none of its performers' links can be keyed by no answer: what it
-            // says is recorded without MusicBrainz (a key an earlier rule gave goes now), and
-            // MusicBrainz is asked again after its retry time. A page that owns one keeps its
-            // previous rows until MusicBrainz answers.
-            Err(e)
-                if !performers
-                    .iter()
-                    .any(|(_, links)| links.iter().any(|u| owned(u))) =>
-            {
-                let wait = e
-                    .chain()
-                    .find_map(|c| c.downcast_ref::<crate::resolver::RetryLater>())
-                    .map_or(900, |r| r.seconds.max(60));
-                found.retry_after = Some(std::time::Duration::from_secs(wait));
-                Default::default()
-            }
-            Err(e) => return Err(e),
-        };
-        for (claimed, links) in performers {
-            // The artist MusicBrainz relates a link to, when exactly one.
-            let artist = |url: &String| match answers
-                .get(url)?
-                .targets
-                .iter()
-                .filter(|(k, _)| *k == MbKind::Artist)
-                .map(|(_, id)| id)
-                .collect::<Vec<_>>()[..]
-            {
-                [id] => Some(id.clone()),
-                _ => None,
-            };
-            let keyed = links.iter().filter(|u| owned(u)).find_map(artist);
-            // One fact beside the name (sixteen performers fit the facts cap): the artist
-            // MusicBrainz names, else the one the page names, else the link itself.
-            match (keyed, links.iter().find_map(artist).or(claimed)) {
-                (Some(id), _) => key(&mut found, &id),
-                (None, Some(id)) => found
-                    .facts
-                    .push(crate::also_on::Fact::new("performer_mbid", id)),
-                (None, None) => {
-                    if let Some(url) = links.first() {
-                        found
-                            .facts
-                            .push(crate::also_on::Fact::new("performer_link", url));
-                    }
-                }
-            }
-        }
-        Ok(found)
-    }
-}
-
 /// What MusicBrainz says about one entity, or about up to four releases of one release group
 /// (`kind`, `ids`): their MBIDs (the release group's alone for several releases), the recording's
 /// ISRCs and the release's barcode as keys, their facts, and their current links on music
 /// services at `level`, each keyed by the entity MusicBrainz names it on. Nothing when an entity
 /// is unknown, or when several releases are of different release groups.
-async fn entities_found(
+pub(crate) async fn entities_found(
     cx: &Context,
     base: &str,
     kind: MbKind,
@@ -715,119 +265,9 @@ async fn entities_found(
     Ok(found)
 }
 
-/// The album pages of the one Wikidata item a release group's MusicBrainz entry relates it to,
-/// when that item names the release group back (P436) and no other.
-async fn album_item_links(
-    cx: &Context,
-    group: &musicbrainz::Entity,
-    storefront: &str,
-) -> Result<Vec<Link>> {
-    let mut qids: Vec<String> = group
-        .urls
-        .iter()
-        .filter_map(|u| crate::lookups::sources::wikidata_item(&u.url))
-        .collect();
-    qids.sort();
-    qids.dedup();
-    let [qid] = qids.as_slice() else {
-        return Ok(vec![]);
-    };
-    let items = wikidata::items(&cx.egress, std::slice::from_ref(qid)).await?;
-    let Some(item) = items.iter().find(|i| &i.qid == qid) else {
-        return Ok(vec![]);
-    };
-    if !matches!(item.id("P436"), [mbid] if *mbid == group.mbid) {
-        return Ok(vec![]);
-    }
-    Ok(found(item, Level::Album, storefront).links)
-}
-
-/// Deezer's public API: its own record of a Deezer link, and its lookups by ISRC and barcode.
-pub struct DeezerSource;
-const DEEZER_API: &str = "https://api.deezer.com";
-#[async_trait]
-impl Source for DeezerSource {
-    fn id(&self) -> &'static str {
-        "deezer"
-    }
-    fn enabled_by_default(&self) -> bool {
-        false
-    }
-    fn applies(&self, subject: &Subject) -> bool {
-        music::parse(&subject.uri).is_some_and(|l| match (l.service, l.level) {
-            (Service::Deezer, Level::Track | Level::Album) => true,
-            (_, Level::Track) => subject.keys_in("isrc").next().is_some(),
-            (_, Level::Album) => subject.keys_in("upc").next().is_some(),
-            _ => false,
-        })
-    }
-    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
-        let Some(link) = music::parse(&subject.uri) else {
-            return Ok(Found::default());
-        };
-        let (kind, field, namespace) = match link.level {
-            Level::Track => ("track", "isrc", "isrc"),
-            Level::Album => ("album", "upc", "upc"),
-            _ => return Ok(Found::default()),
-        };
-        let normal = if kind == "track" {
-            music::isrc
-        } else {
-            music::gtin13
-        };
-        let mut found = Found::default();
-        if link.service == Service::Deezer {
-            // Its own record of its own object.
-            let Some(v) = deezer(cx, &format!("{kind}/{}", link.id)).await? else {
-                return Ok(found);
-            };
-            if let Some(value) = v[field].as_str().and_then(normal) {
-                found.keys.push(Key {
-                    key: format!("{namespace}:{value}"),
-                    via: "deezer".into(),
-                });
-                found
-                    .facts
-                    .push(crate::also_on::Fact::new(namespace, value));
-            }
-            return Ok(found);
-        }
-        // The link's own ISRC first, then the hubs'.
-        let own = own_isrc(subject).filter(|_| kind == "track");
-        let mut values: Vec<&str> = own.as_deref().into_iter().collect();
-        values.extend(
-            subject
-                .keys_in(namespace)
-                .filter(|v| Some(*v) != own.as_deref()),
-        );
-        for value in values.into_iter().take(2) {
-            // Deezer finds a UPC-A by its 12 digits, without GTIN-13's leading zero.
-            let asked = match value.strip_prefix('0') {
-                Some(upc) if kind == "album" => upc,
-                _ => value,
-            };
-            let Some(v) = deezer(cx, &format!("{kind}/{namespace}:{asked}")).await? else {
-                continue;
-            };
-            // Only the object that has the value asked.
-            if v[field].as_str().and_then(normal).as_deref() != Some(value) {
-                continue;
-            }
-            let url = format!(
-                "https://www.deezer.com/{kind}/{}",
-                v["id"].as_u64().unwrap_or(0)
-            );
-            if let Some(found_link) = derived(&url, link.level, "deezer") {
-                found
-                    .links
-                    .push(found_link.keyed(format!("{namespace}:{value}")));
-            }
-        }
-        Ok(found)
-    }
-}
+pub(crate) const DEEZER_API: &str = "https://api.deezer.com";
 /// One Deezer API object; `None` when Deezer has no data (its error 800) or no such ID.
-async fn deezer(cx: &Context, path: &str) -> Result<Option<Value>> {
+pub(crate) async fn deezer(cx: &Context, path: &str) -> Result<Option<Value>> {
     let options = crate::resolver::egress::FetchOptions {
         accept: Some("application/json".into()),
         ..Default::default()
@@ -857,32 +297,9 @@ async fn deezer(cx: &Context, path: &str) -> Result<Option<Value>> {
     }
 }
 
-/// Apple Music's album for an album's barcode keys, from iTunes.
-pub struct ItunesSource;
-#[async_trait]
-impl Source for ItunesSource {
-    fn id(&self) -> &'static str {
-        "itunes"
-    }
-    fn applies(&self, subject: &Subject) -> bool {
-        music::parse(&subject.uri).is_some_and(|l| {
-            join_level(&l) == Some(Level::Album) && l.service != Service::AppleMusic
-        }) && subject.keys_in("upc").next().is_some()
-    }
-    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
-        let mut found = Found::default();
-        for upc in subject.keys_in("upc").take(2) {
-            if let Some(apple) = itunes_album(cx, upc).await? {
-                found.links.push(apple.keyed(format!("upc:{upc}")));
-            }
-        }
-        Ok(found)
-    }
-}
-
 /// Whether a Discogs page MusicBrainz relates to a `kind` entity is at its level: an artist's
 /// artist, a release group's master, a release's release (any other link: yes).
-fn discogs_fits(url: &str, kind: MbKind) -> bool {
+pub(crate) fn discogs_fits(url: &str, kind: MbKind) -> bool {
     discogs::of_uri(url).is_none_or(|(discogs, _)| {
         matches!(
             (discogs, kind),
@@ -895,7 +312,7 @@ fn discogs_fits(url: &str, kind: MbKind) -> bool {
 
 /// What a MusicBrainz entity says about the object: its MBID, ISRCs, barcode (`upc`), artist
 /// credit and length (`duration`, in seconds).
-fn facts(entity: &musicbrainz::Entity) -> Vec<crate::also_on::Fact> {
+pub(crate) fn facts(entity: &musicbrainz::Entity) -> Vec<crate::also_on::Fact> {
     use crate::also_on::Fact;
     let mut facts = vec![Fact::new("mbid", &entity.mbid)];
     facts.extend(entity.isrcs.iter().map(|isrc| Fact::new("isrc", isrc)));
@@ -920,54 +337,9 @@ fn facts(entity: &musicbrainz::Entity) -> Vec<crate::also_on::Fact> {
     facts
 }
 
-/// Apple Music's album for a barcode: iTunes `lookup?upc=` in the configured storefront, when
-/// exactly one album answers (an unknown code can return unrelated albums). Its results carry no
-/// UPC, so unlike Deezer's the answer can't be read back against the code asked: exactly one
-/// album is the only check, and `upc` is no single-object namespace that would catch a wrong one.
-async fn itunes_album(cx: &Context, barcode: &str) -> Result<Option<Link>> {
-    let storefront = &cx.config.also_on.apple_storefront;
-    let url =
-        format!("https://itunes.apple.com/lookup?upc={barcode}&entity=album&country={storefront}");
-    let fetched = cx.egress.discover(&url, &itunes_options(), 3600).await?;
-    match fetched.status {
-        200 => {}
-        429 | 500..=599 => {
-            return Err(crate::resolver::RetryLater {
-                class: "itunes_busy",
-                seconds: fetched.retry_after_secs.clamp(60, 3600),
-            }
-            .into())
-        }
-        _ => return Ok(None),
-    }
-    // iTunes answers `text/javascript` with leading newlines.
-    let v: Value = serde_json::from_slice(fetched.body.trim_ascii())?;
-    Ok(itunes_parse(&v))
-}
-/// How iTunes is asked: for JSON, which it serves as `text/javascript`.
-fn itunes_options() -> crate::resolver::egress::FetchOptions {
-    crate::resolver::egress::FetchOptions {
-        accept: Some("application/json".into()),
-        extra_types: &["text/javascript"],
-        ..Default::default()
-    }
-}
-/// The one album of an iTunes lookup, as an Apple Music link.
-pub fn itunes_parse(v: &Value) -> Option<Link> {
-    let albums: Vec<&Value> = v["results"]
-        .as_array()?
-        .iter()
-        .filter(|r| r["wrapperType"] == "collection" && r["collectionType"] == "Album")
-        .collect();
-    let [album] = albums.as_slice() else {
-        return None;
-    };
-    derived(album["collectionViewUrl"].as_str()?, Level::Album, "itunes")
-}
-
 /// The Wikidata properties of music services, by service and level, and how each value makes
 /// a URL (`{sf}` is the Apple storefront).
-const PROPERTIES: &[(&str, Service, Level, &str)] = &[
+pub(crate) const PROPERTIES: &[(&str, Service, Level, &str)] = &[
     (
         "P2207",
         Service::Spotify,
@@ -1109,14 +481,14 @@ const PROPERTIES: &[(&str, Service, Level, &str)] = &[
     ),
 ];
 /// The MusicBrainz property of each level, whose values become keys.
-fn mb_property(level: Level) -> (&'static str, MbKind) {
+pub(crate) fn mb_property(level: Level) -> (&'static str, MbKind) {
     match level {
         Level::Track | Level::Video => ("P4404", MbKind::Recording),
         Level::Artist => ("P434", MbKind::Artist),
         _ => ("P436", MbKind::ReleaseGroup),
     }
 }
-fn property_url(template: &str, value: &str, storefront: &str) -> String {
+pub(crate) fn property_url(template: &str, value: &str, storefront: &str) -> String {
     let value: String = url::form_urlencoded::byte_serialize(value.as_bytes()).collect();
     template.replace("{sf}", storefront).replace("{}", &value)
 }
@@ -1135,43 +507,8 @@ pub fn service_links(item: &wikidata::Item, storefront: &str) -> Vec<Link> {
     links
 }
 
-/// Wikidata's item for an exact service ID.
-pub struct WikidataSource;
-#[async_trait]
-impl Source for WikidataSource {
-    fn id(&self) -> &'static str {
-        "wikidata"
-    }
-    fn applies(&self, subject: &Subject) -> bool {
-        music::parse(&subject.uri).is_some_and(|l| property_of(&l).is_some())
-    }
-    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
-        crate::also_on::unless_over_cap(self.read(cx, subject).await, Found::default)
-    }
-}
-impl WikidataSource {
-    async fn read(&self, cx: &Context, subject: &Subject) -> Result<Found> {
-        let Some(link) = music::parse(&subject.uri) else {
-            return Ok(Found::default());
-        };
-        let (Some(property), Some(level)) = (property_of(&link), join_level(&link)) else {
-            return Ok(Found::default());
-        };
-        // A Discogs ID is the number alone.
-        let id = discogs::of_link(&link).map_or(link.id.clone(), |(_, id)| id.to_string());
-        let item = match wikidata::item_with(&cx.egress, property, &id).await? {
-            wikidata::Found::One(item) => item,
-            _ => return Ok(Found::default()),
-        };
-        // An item with a Discogs release is an edition's only when it is not the album's.
-        if property == DISCOGS_RELEASE && ["P1954", "P436"].iter().any(|p| !item.id(p).is_empty()) {
-            return Ok(Found::default());
-        }
-        Ok(found(&item, level, &cx.config.also_on.apple_storefront))
-    }
-}
 /// The Wikidata property for a link's own service ID, if Wikidata has one.
-fn property_of(link: &music::Link) -> Option<&'static str> {
+pub(crate) fn property_of(link: &music::Link) -> Option<&'static str> {
     if discogs::of_link(link).is_some_and(|(kind, _)| kind == discogs::Kind::Release) {
         return Some(DISCOGS_RELEASE);
     }
@@ -1183,11 +520,11 @@ fn property_of(link: &music::Link) -> Option<&'static str> {
 /// Whether an item is one recording: exactly one MusicBrainz recording ID and no work ID. A song
 /// item is a work (its studio, live and remastered recordings share it), so a track takes
 /// nothing from it, neither its Q-id nor its tracks.
-fn recording_item(item: &wikidata::Item) -> bool {
+pub(crate) fn recording_item(item: &wikidata::Item) -> bool {
     item.id("P4404").len() == 1 && item.id("P435").is_empty()
 }
 /// Wikidata's Discogs release ID.
-const DISCOGS_RELEASE: &str = "P2206";
+pub(crate) const DISCOGS_RELEASE: &str = "P2206";
 /// An item's keys and same-level links; at track level only a recording item's.
 pub fn found(item: &wikidata::Item, level: Level, storefront: &str) -> Found {
     let mut found = Found::default();
@@ -1230,6 +567,7 @@ pub fn found(item: &wikidata::Item, level: Level, storefront: &str) -> Found {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     fn fixture(name: &str) -> Value {
         let path = format!("{}/tests/fixtures/hubs/{name}", env!("CARGO_MANIFEST_DIR"));
         serde_json::from_slice(std::fs::read(path).unwrap().trim_ascii()).unwrap()
@@ -1316,91 +654,9 @@ mod tests {
             musicbrainz::parse_entity(MbKind::Release, &fixture("mb-release.json")).unwrap();
         assert!(facts_of(&release).contains(&("upc".into(), "634904078164".into())));
     }
+
     fn facts_of(e: &musicbrainz::Entity) -> Vec<(String, String)> {
         facts(e).into_iter().map(|f| (f.name, f.value)).collect()
-    }
-
-    /// iTunes' real answer (`text/javascript`) passes the egress checks; without admitting it,
-    /// the lookup was refused as `policy` and took MusicBrainz's answer down with it.
-    #[tokio::test]
-    async fn itunes_javascript_json_is_admitted() {
-        use axum::{routing::get, Router};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let app = Router::new().route(
-            "/lookup",
-            get(|| async {
-                (
-                    [("content-type", "text/javascript; charset=utf-8")],
-                    "\n\n\n{\"resultCount\":0,\"results\":[]}",
-                )
-            }),
-        );
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let url: url::Url = format!("http://{addr}/lookup").parse().unwrap();
-        let client = reqwest::Client::new();
-        let read = |options: crate::resolver::egress::FetchOptions| {
-            let (url, request) = (url.clone(), client.get(url.clone()));
-            async move {
-                crate::resolver::egress::read_response_with(
-                    url,
-                    request.send().await.unwrap(),
-                    &options,
-                )
-                .await
-            }
-        };
-        let fetched = read(itunes_options()).await.unwrap();
-        assert_eq!(fetched.status, 200);
-        let v: Value = serde_json::from_slice(fetched.body.trim_ascii()).unwrap();
-        assert!(itunes_parse(&v).is_none());
-        assert!(
-            read(Default::default()).await.is_err(),
-            "refused without the admission"
-        );
-        server.abort();
-    }
-
-    /// A performer's links name the artist only where a hub or MusicBrainz can: a MusicBrainz
-    /// artist page outright; a music service's, Songkick's or Bandsintown's artist page as the
-    /// URL MusicBrainz stores (no slug, no parameters); nothing else.
-    #[test]
-    fn performer_links_name_the_artist_as_musicbrainz_stores_them() {
-        let lookup = |u: &str| Some(ArtistLink::Lookup(u.to_owned()));
-        assert_eq!(
-            artist_link("https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711"),
-            Some(ArtistLink::Mbid(
-                "a74b1b7f-71a5-4011-9441-d0b5e4122711".into()
-            ))
-        );
-        assert_eq!(
-            artist_link("https://www.songkick.com/artists/253846-radiohead?utm_medium=organic&utm_source=microformat"),
-            lookup("https://www.songkick.com/artists/253846")
-        );
-        assert_eq!(
-            artist_link("https://www.bandsintown.com/a/25874-radiohead"),
-            lookup("https://www.bandsintown.com/a/25874")
-        );
-        assert_eq!(
-            artist_link("https://open.spotify.com/intl-de/artist/4Z8W4fKeB5YxbusRsdQVPb?si=x"),
-            lookup("https://open.spotify.com/artist/4Z8W4fKeB5YxbusRsdQVPb")
-        );
-        for other in [
-            "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq",
-            "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69",
-            "https://www.songkick.com/concerts/43402127-radiohead-at-rac-arena",
-            "https://www.songkick.com/artists/radiohead",
-            "https://example.org/artists/253846",
-        ] {
-            assert_eq!(artist_link(other), None, "{other}");
-        }
-    }
-    #[test]
-    fn itunes_counts_only_one_album() {
-        let link = itunes_parse(&fixture("itunes-upc.json")).unwrap();
-        assert_eq!(link.uri, "https://music.apple.com/us/album/1097861387");
-        assert_eq!(link.via, "itunes");
-        assert!(itunes_parse(&fixture("itunes-upc-many.json")).is_none());
     }
 
     #[test]
@@ -1452,5 +708,39 @@ mod tests {
             property_url("https://music.apple.com/{sf}/album/{}", "1097861387", "gb"),
             "https://music.apple.com/gb/album/1097861387"
         );
+    }
+    /// A performer's links name the artist only where a hub or MusicBrainz can: a MusicBrainz
+    /// artist page outright; a music service's, Songkick's or Bandsintown's artist page as the
+    /// URL MusicBrainz stores (no slug, no parameters); nothing else.
+    #[test]
+    fn performer_links_name_the_artist_as_musicbrainz_stores_them() {
+        let lookup = |u: &str| Some(ArtistLink::Lookup(u.to_owned()));
+        assert_eq!(
+            artist_link("https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711"),
+            Some(ArtistLink::Mbid(
+                "a74b1b7f-71a5-4011-9441-d0b5e4122711".into()
+            ))
+        );
+        assert_eq!(
+            artist_link("https://www.songkick.com/artists/253846-radiohead?utm_medium=organic&utm_source=microformat"),
+            lookup("https://www.songkick.com/artists/253846")
+        );
+        assert_eq!(
+            artist_link("https://www.bandsintown.com/a/25874-radiohead"),
+            lookup("https://www.bandsintown.com/a/25874")
+        );
+        assert_eq!(
+            artist_link("https://open.spotify.com/intl-de/artist/4Z8W4fKeB5YxbusRsdQVPb?si=x"),
+            lookup("https://open.spotify.com/artist/4Z8W4fKeB5YxbusRsdQVPb")
+        );
+        for other in [
+            "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq",
+            "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+            "https://www.songkick.com/concerts/43402127-radiohead-at-rac-arena",
+            "https://www.songkick.com/artists/radiohead",
+            "https://example.org/artists/253846",
+        ] {
+            assert_eq!(artist_link(other), None, "{other}");
+        }
     }
 }

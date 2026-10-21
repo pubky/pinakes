@@ -15,10 +15,19 @@
 use crate::{config::Config, model::ResourceMeta, resolver::egress::Egress};
 
 pub mod books;
+pub mod deezer;
 pub mod films;
+pub mod itunes;
 pub mod media;
+pub mod musicbrainz;
+pub mod musicbrainz_entity;
+pub mod performers;
 pub mod podcasts;
+pub mod service;
 pub mod tidal;
+pub mod wikidata;
+pub mod wikidata_item;
+pub mod wikipedia;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -229,6 +238,27 @@ pub trait Source: Send + Sync {
         true
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found>;
+    /// The key namespaces it records that name one object each: a group holds at most one value
+    /// of each (`groups::single_object`).
+    fn single_namespaces(&self) -> &'static [&'static str] {
+        &[]
+    }
+    /// The join key a search names in one of its namespaces (`key={namespace}:{value}`),
+    /// normalized as it records it; `None` for another namespace or a value that is no key.
+    fn search_key(&self, _namespace: &str, _value: &str) -> Option<String> {
+        None
+    }
+    /// The plain name of a service it reads or links to, by a link's host (lower case, without
+    /// `www.`) and URL: the name its derived links carry (`lookups::service_name`). Only for an
+    /// object's own page in a form it recognizes; any other page on that host is on no service.
+    fn service_name(&self, _host: &str, _url: &url::Url) -> Option<&'static str> {
+        None
+    }
+    /// The type a media link it reads names, whatever its page calls itself
+    /// (`media::link_type`): `Some(None)` for a link it reads that names no one type.
+    fn link_type(&self, _uri: &str) -> Option<Option<&'static str>> {
+        None
+    }
 }
 
 /// A hub's answer over its read's cap is no answer: asking again would read the same megabytes.
@@ -239,48 +269,37 @@ pub fn unless_over_cap(found: Result<Found>, fallback: impl FnOnce() -> Found) -
         found => found,
     }
 }
-/// Every also-on source. A new source is listed here, in the order it must run.
+/// Every source this build has: these, then each lookup family's ([`crate::lookups::FAMILIES`]).
 pub fn registry() -> Vec<Arc<dyn Source>> {
     // In this order: each source sees the keys the ones before it found.
-    vec![
-        Arc::new(crate::music_sources::ServiceSource),
+    let own: Vec<Arc<dyn Source>> = vec![
+        Arc::new(service::ServiceSource),
         Arc::new(tidal::Tidal),
-        Arc::new(crate::music_sources::MusicBrainzSource),
-        Arc::new(crate::music_sources::MusicBrainzEntitySource),
-        Arc::new(crate::music_sources::PerformersSource),
-        Arc::new(crate::music_sources::WikidataSource),
+        Arc::new(musicbrainz::MusicBrainzSource),
+        Arc::new(musicbrainz_entity::MusicBrainzEntitySource),
+        Arc::new(performers::PerformersSource),
+        Arc::new(wikidata::WikidataSource),
         // Before the barcode lookups: a Discogs release's barcodes are keys.
-        Arc::new(crate::lookups::sources::Discogs),
-        Arc::new(crate::music_sources::DeezerSource),
-        Arc::new(crate::music_sources::ItunesSource),
-        Arc::new(crate::wikipedia::WikipediaSource),
-        Arc::new(crate::wikipedia::WikidataItemSource),
+        Arc::new(crate::sources::discogs::also_on::Discogs),
+        Arc::new(deezer::DeezerSource),
+        Arc::new(itunes::ItunesSource),
+        Arc::new(wikipedia::WikipediaSource),
+        Arc::new(wikidata_item::WikidataItemSource),
         Arc::new(books::Books),
         Arc::new(films::Films),
         Arc::new(podcasts::Podcasts),
         Arc::new(crate::sources::media_records::titles::Titles),
-        Arc::new(crate::lookups::sources::OsmWikidata),
-        Arc::new(crate::lookups::sources::WikidataOsm),
-        Arc::new(crate::lookups::sources::Btcmap),
-        Arc::new(crate::lookups::sources::FederalRegister),
-        Arc::new(crate::lookups::sources::Unpaywall),
-        Arc::new(crate::lookups::sources::Ncbi),
-        Arc::new(crate::lookups::sources::Datacite),
-        Arc::new(crate::lookups::sources::HuggingFacePapers),
-        Arc::new(crate::lookups::sources::Packages(
-            crate::lookups::packages::Registry::Crates,
-        )),
-        Arc::new(crate::lookups::sources::Packages(
-            crate::lookups::packages::Registry::Npm,
-        )),
-        Arc::new(crate::lookups::sources::Packages(
-            crate::lookups::packages::Registry::PyPI,
-        )),
-        Arc::new(crate::lookups::sources::SoftwareHeritage),
-        Arc::new(crate::lookups::sources::Steam),
-        Arc::new(crate::lookups::sources::WikidataStores),
-        Arc::new(crate::lookups::sources::Wayback),
-    ]
+        Arc::new(crate::sources::federal_register::also_on::FederalRegister),
+    ];
+    own.into_iter()
+        .chain(crate::lookups::FAMILIES.iter().flat_map(|f| f.sources()))
+        .collect()
+}
+/// Every source this build has, built once: for the questions a source answers from a link alone
+/// (its key namespaces, service names, media types).
+pub fn registered() -> &'static [Arc<dyn Source>] {
+    static ALL: std::sync::OnceLock<Vec<Arc<dyn Source>>> = std::sync::OnceLock::new();
+    ALL.get_or_init(registry)
 }
 /// The source IDs `[also_on.sources]` may name.
 pub fn source_ids() -> Vec<&'static str> {

@@ -1,0 +1,106 @@
+{
+  "crossref-lmcs-20-1-8": {
+    "bytes": 3262,
+    "content_type": "application/json",
+    "file": "crossref-lmcs-20-1-8.json",
+    "note": "The publisher's record names arXiv 2302.04668 as its preprint (has-preprint).",
+    "recorded_at": "2026-10-20T18:15:05+00:00",
+    "sha256": "2afac1900708ae0bc27b7b18ed5a0a7dd8b82020cb4dca81e1fb995e10292339",
+    "status": 200,
+    "url": "https://api.crossref.org/works/10.46298/lmcs-20%281%3A8%292024"
+  },
+  "crossref-nature12373": {
+    "bytes": 13647,
+    "content_type": "application/json",
+    "file": "crossref-nature12373.json",
+    "note": "The publisher's record names no preprint.",
+    "recorded_at": "2026-10-20T18:15:06+00:00",
+    "sha256": "d79ef08d614c01b287219296a7002a8b9de052c6e9a573755093aa1a713a170d",
+    "status": 200,
+    "url": "https://api.crossref.org/works/10.1038/nature12373"
+  },
+  "datacite-arxiv-1304.1068": {
+    "bytes": 10564,
+    "content_type": "application/json; charset=utf-8",
+    "file": "datacite-arxiv-1304.1068.json",
+    "note": "DataCite metadata, CC0.",
+    "recorded_at": "2026-10-19T15:18:01+00:00",
+    "sha256": "991c9714f0bcc8f02b1a6edd79497a75eb94482315c05d62449cf8b2573175d1",
+    "status": 200,
+    "url": "https://api.datacite.org/dois/10.48550/arXiv.1304.1068"
+  },
+  "datacite-arxiv-2302.04668": {
+    "bytes": 9855,
+    "content_type": "application/json",
+    "file": "datacite-arxiv-2302.04668.json",
+    "note": "An arXiv record whose journal version's publisher names it back.",
+    "recorded_at": "2026-10-20T18:15:02+00:00",
+    "sha256": "918f29aa54fbabd96836c6f47949514531da12ac9a152598ddeeb8fd62139524",
+    "status": 200,
+    "url": "https://api.datacite.org/dois/10.48550/arXiv.2302.04668"
+  },
+  "datacite-versions-lmcs-20-1-8": {
+    "bytes": 4530,
+    "content_type": "application/json",
+    "file": "datacite-versions-lmcs-20-1-8.json",
+    "recorded_at": "2026-10-20T18:15:04+00:00",
+    "sha256": "faebb407fec4a20ddf363675614d0638e696df8401e230f842b63317ed1f68c0",
+    "status": 200,
+    "url": "https://api.datacite.org/dois?query=relatedIdentifiers.relatedIdentifier%3A%2210.46298%2Flmcs-20%281%3A8%292024%22%20AND%20relatedIdentifiers.relationType%3AIsVersionOf&client-id=arxiv.content&page%5Bsize%5D=25"
+  },
+  "datacite-versions-nature12373": {
+    "bytes": 4620,
+    "content_type": "application/json; charset=utf-8",
+    "file": "datacite-versions-nature12373.json",
+    "note": "DataCite metadata, CC0.",
+    "recorded_at": "2026-10-19T15:18:02+00:00",
+    "sha256": "4642ed74b9c2e82da482e7b2caed14e98a54cfa080e8233c79db6117db873fc1",
+    "status": 200,
+    "url": "https://api.datacite.org/dois?query=relatedIdentifiers.relatedIdentifier:%2210.1038/nature12373%22%20AND%20relatedIdentifiers.relationType:IsVersionOf&client-id=arxiv.content&page%5Bsize%5D=25"
+  },
+  "hf-papers-1304.1068": {
+    "bytes": 302,
+    "content_type": "application/json; charset=utf-8",
+    "file": "hf-papers-1304.1068.json",
+    "recorded_at": "2026-10-19T15:18:05+00:00",
+    "sha256": "d8e9d7934eab6b8d99e1539b65cab9f58f8c5e2c8c6af22edfa126a1e537bdf5",
+    "status": 404,
+    "url": "https://huggingface.co/api/papers/1304.1068"
+  },
+  "hf-papers-1706.03762": {
+    "bytes": 8233,
+    "content_type": "application/json; charset=utf-8",
+    "file": "hf-papers-1706.03762.json",
+    "recorded_at": "2026-10-19T15:18:04+00:00",
+    "sha256": "6dcacf476c046fdde77213a08e6386f6aa0c439707f3c3951850941541a34048",
+    "status": 200,
+    "url": "https://huggingface.co/api/papers/1706.03762"
+  },
+  "ncbi-idconv": {
+    "bytes": 768,
+    "content_type": "application/json",
+    "file": "ncbi-idconv.json",
+    "recorded_at": "2026-10-19T15:17:59+00:00",
+    "sha256": "6361ad624354390b44ea9796b63ba7a0fe101afc0de758390dedb852ab406f51",
+    "status": 200,
+    "url": "https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles/?ids=10.1038/nature12373,10.1093/nar/gks1195,10.9999/pinakes-no-such-doi&format=json&tool=pinakes&email=info%40synonym.to"
+  },
+  "unpaywall-missing": {
+    "bytes": 207,
+    "content_type": "text/html; charset=utf-8",
+    "file": "unpaywall-missing.html",
+    "recorded_at": "2026-10-19T15:17:58+00:00",
+    "sha256": "e9639e3c4681ce85f852fbac48e2eeee5ba51296dbfec57c200d59b76237ab80",
+    "status": 404,
+    "url": "https://api.unpaywall.org/v2/10.9999/pinakes-no-such-doi?email=info%40synonym.to"
+  },
+  "unpaywall-nature12373": {
+    "bytes": 5405,
+    "content_type": "application/json",
+    "file": "unpaywall-nature12373.json",
+    "recorded_at": "2026-10-19T15:17:56+00:00",
+    "sha256": "d335c2cb2af11aeb86edc2b670d9ca4007c67ffbd7691215f3e1f91b80d720c5",
+    "status": 200,
+    "url": "https://api.unpaywall.org/v2/10.1038/nature12373?email=info%40synonym.to"
+  }
+}

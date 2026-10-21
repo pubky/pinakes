@@ -301,6 +301,17 @@ impl Films {
 
 #[async_trait]
 impl Source for Films {
+    fn link_type(&self, uri: &str) -> Option<Option<&'static str>> {
+        let kind = match film(uri)? {
+            Film::Tmdb { tv: false, .. } | Film::Letterboxd(_) => Some("Movie"),
+            Film::Tmdb { tv: true, .. } | Film::Tvmaze(_) => Some("TVSeries"),
+            // A Netflix title is a movie or a series: its Wikidata item may say which.
+            Film::Netflix(_) => Some("CreativeWork"),
+            // An IMDb title can be either.
+            Film::Imdb(_) => None,
+        };
+        Some(kind.filter(|_| super::media::exact_page(uri)))
+    }
     fn id(&self) -> &'static str {
         "films"
     }

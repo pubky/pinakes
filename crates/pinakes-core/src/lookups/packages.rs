@@ -630,10 +630,519 @@ pub fn parse_software_heritage(status: u16, raw: &[u8], repo: &Repo) -> Result<O
     }))
 }
 
+/// This family in the lookups' table ([`super::FAMILIES`]).
+pub struct Lookups;
+impl super::Family for Lookups {
+    fn name(&self) -> &'static str {
+        "packages"
+    }
+    fn sources(&self) -> Vec<std::sync::Arc<dyn crate::also_on::Source>> {
+        vec![
+            std::sync::Arc::new(also_on::Packages(
+                crate::lookups::packages::Registry::Crates,
+            )),
+            std::sync::Arc::new(also_on::Packages(crate::lookups::packages::Registry::Npm)),
+            std::sync::Arc::new(also_on::Packages(crate::lookups::packages::Registry::PyPI)),
+            std::sync::Arc::new(also_on::SoftwareHeritage),
+        ]
+    }
+}
+
+/// The also-on sources that run these lookups: each fetches through the egress (its policy,
+/// budgets and shared discovery cache), hands the answer to this module's parsers, and reports
+/// keys and derived links.
+pub mod also_on {
+    use crate::{
+        also_on::{self, Context, Source, Subject},
+        lookups::{secondary, send, with_retry},
+    };
+    use anyhow::Result;
+    use async_trait::async_trait;
+
+    /// A package on crates.io, npm or PyPI: its pages on the registry and documentation sites, its
+    /// name as key, and its source repository only when signed build provenance names it.
+    pub struct Packages(pub crate::lookups::packages::Registry);
+
+    impl Packages {
+        fn package(&self, subject: &Subject) -> Option<crate::lookups::packages::Package> {
+            crate::lookups::packages::Package::from_uri(&subject.uri)
+                .filter(|p| p.registry == self.0)
+        }
+        /// deps.dev's `SLSA_ATTESTATION` source repository, when the registry's own record names
+        /// none.
+        async fn depsdev(
+            cx: &Context,
+            package: &crate::lookups::packages::Package,
+            version: &str,
+        ) -> Result<Option<crate::lookups::packages::Repo>> {
+            let Some(request) = crate::lookups::packages::depsdev_request(package, version) else {
+                return Ok(None);
+            };
+            let f = send(cx, &request, "depsdev_busy").await?;
+            crate::lookups::packages::parse_depsdev(f.status, &f.body, package, version)
+        }
+    }
+
+    #[async_trait]
+    impl Source for Packages {
+        fn single_namespaces(&self) -> &'static [&'static str] {
+            match self.0 {
+                crate::lookups::packages::Registry::Crates => &["crate"],
+                crate::lookups::packages::Registry::Npm => &["npm"],
+                crate::lookups::packages::Registry::PyPI => &["pypi"],
+            }
+        }
+        fn search_key(&self, namespace: &str, value: &str) -> Option<String> {
+            use crate::lookups::packages::{Package, Registry};
+            let registry = match (namespace, self.0) {
+                ("crate", Registry::Crates) | ("npm", Registry::Npm) | ("pypi", Registry::PyPI) => {
+                    self.0
+                }
+                _ => return None,
+            };
+            Some(Package::new(registry, value)?.key().to_string())
+        }
+        /// A package's own page only (or its page at one version), never a page under it.
+        fn service_name(&self, host: &str, url: &url::Url) -> Option<&'static str> {
+            use crate::lookups::packages::{Package, Registry};
+            let name = match (self.0, host) {
+                (Registry::Crates, "crates.io") => "crates.io",
+                (Registry::Crates, "docs.rs") => "Docs.rs",
+                (Registry::Crates, "lib.rs") => "lib.rs",
+                (Registry::Npm, "npmjs.com") => "npm",
+                (Registry::Npm, "jsdelivr.com") => "jsDelivr",
+                (Registry::Npm, "unpkg.com") => "unpkg",
+                (Registry::PyPI, "pypi.org") => "PyPI",
+                _ => return None,
+            };
+            let object = if host == "unpkg.com" {
+                // unpkg's page for a package: `/{name}/` or `/@scope/{name}/`, nothing under it.
+                let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
+                match segments.as_slice() {
+                    [scope, name] => {
+                        scope.starts_with('@')
+                            && Package::new(Registry::Npm, &format!("{scope}/{name}")).is_some()
+                    }
+                    [name] => !name.starts_with('@') && Package::new(Registry::Npm, name).is_some(),
+                    _ => false,
+                }
+            } else {
+                Package::from_uri(url.as_str()).is_some()
+            };
+            object.then_some(name)
+        }
+        fn id(&self) -> &'static str {
+            match self.0 {
+                crate::lookups::packages::Registry::Crates => "crates",
+                crate::lookups::packages::Registry::Npm => "npm",
+                crate::lookups::packages::Registry::PyPI => "pypi",
+            }
+        }
+        fn applies(&self, subject: &Subject) -> bool {
+            self.package(subject).is_some()
+        }
+        async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<also_on::Found> {
+            use crate::lookups::packages::{self as p, Registry};
+            let Some(package) = self.package(subject) else {
+                return Ok(also_on::Found::default());
+            };
+            // The registry's own answer is the package (its existence and version); the provenance
+            // reads and deps.dev only add the repository, so their failure costs that alone.
+            let mut retry = None;
+            let release = match self.0 {
+                Registry::Crates => {
+                    let Some(request) = p::crates_request(&package) else {
+                        return Ok(also_on::Found::default());
+                    };
+                    let f = send(cx, &request, "crates_busy").await?;
+                    p::parse_crates(f.status, &f.body, &package)?
+                }
+                Registry::Npm => {
+                    let Some(request) = p::npm_latest_request(&package) else {
+                        return Ok(also_on::Found::default());
+                    };
+                    let f = send(cx, &request, "npm_busy").await?;
+                    match p::parse_npm_latest(f.status, &f.body, &package)? {
+                        None => None,
+                        Some(latest) => {
+                            let repository = match &latest.attestations {
+                                Some(request) => secondary(
+                                    "npm",
+                                    &mut retry,
+                                    async {
+                                        let f = send(cx, request, "npm_busy").await?;
+                                        p::parse_npm_attestations(
+                                            f.status,
+                                            &f.body,
+                                            &package,
+                                            &latest.version,
+                                        )
+                                    }
+                                    .await,
+                                )
+                                .flatten(),
+                                None => None,
+                            };
+                            Some(p::Release {
+                                package: package.clone(),
+                                version: latest.version,
+                                repository,
+                            })
+                        }
+                    }
+                }
+                Registry::PyPI => {
+                    let Some(request) = p::pypi_request(&package) else {
+                        return Ok(also_on::Found::default());
+                    };
+                    let f = send(cx, &request, "pypi_busy").await?;
+                    match p::parse_pypi(f.status, &f.body, &package)? {
+                        None => None,
+                        Some(latest) => {
+                            // The files' provenance names the publisher; files that name two
+                            // repositories name none.
+                            let mut named = vec![];
+                            for file in latest.files.iter().take(2) {
+                                let Some(request) = p::pypi_provenance_request(&latest, file)
+                                else {
+                                    continue;
+                                };
+                                let read = secondary(
+                                    "pypi",
+                                    &mut retry,
+                                    async {
+                                        let f = send(cx, &request, "pypi_busy").await?;
+                                        p::parse_pypi_provenance(f.status, &f.body)
+                                    }
+                                    .await,
+                                );
+                                named.extend(read.flatten());
+                            }
+                            let repository = p::one_repository(named);
+                            Some(p::Release {
+                                package: latest.package.clone(),
+                                version: latest.version,
+                                repository,
+                            })
+                        }
+                    }
+                }
+            };
+            let Some(mut release) = release else {
+                return Ok(also_on::Found::default());
+            };
+            if release.repository.is_none() {
+                let named = Self::depsdev(cx, &release.package, &release.version).await;
+                release.repository = secondary("depsdev", &mut retry, named).flatten();
+            }
+            Ok(with_retry(release.found().into_also_on(self.id()), retry))
+        }
+    }
+
+    /// A repository on GitHub or GitLab that Software Heritage archives: its archive page.
+    pub struct SoftwareHeritage;
+
+    #[async_trait]
+    impl Source for SoftwareHeritage {
+        fn single_namespaces(&self) -> &'static [&'static str] {
+            &["repo"]
+        }
+        fn search_key(&self, namespace: &str, value: &str) -> Option<String> {
+            let (host, path) = value.split_once('/').filter(|_| namespace == "repo")?;
+            Some(
+                crate::lookups::packages::Repo::new(host, path)?
+                    .key()
+                    .to_string(),
+            )
+        }
+        /// A repository's own page (`Repo::from_url`), or an origin's archive page
+        /// (`/browse/origin/?origin_url=…`).
+        fn service_name(&self, host: &str, url: &url::Url) -> Option<&'static str> {
+            let (name, object) = match host {
+                "github.com" | "gitlab.com" => (
+                    if host == "github.com" {
+                        "GitHub"
+                    } else {
+                        "GitLab"
+                    },
+                    crate::lookups::packages::Repo::from_url(url.as_str()).is_some(),
+                ),
+                "archive.softwareheritage.org" => (
+                    "Software Heritage",
+                    url.path_segments()?
+                        .filter(|s| !s.is_empty())
+                        .eq(["browse", "origin"])
+                        && url.query_pairs().any(|(k, _)| k == "origin_url"),
+                ),
+                _ => return None,
+            };
+            object.then_some(name)
+        }
+        fn id(&self) -> &'static str {
+            "software_heritage"
+        }
+        fn applies(&self, subject: &Subject) -> bool {
+            crate::lookups::packages::Repo::from_url(&subject.uri).is_some()
+        }
+        async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<also_on::Found> {
+            let Some(repo) = crate::lookups::packages::Repo::from_url(&subject.uri) else {
+                return Ok(also_on::Found::default());
+            };
+            let Some(request) = crate::lookups::packages::software_heritage_request(&repo) else {
+                return Ok(also_on::Found::default());
+            };
+            // The repository's key is its own; the archive page is Software Heritage's to answer.
+            let mut retry = None;
+            let archived = secondary(
+                "software_heritage",
+                &mut retry,
+                async {
+                    let f = send(cx, &request, "software_heritage_busy").await?;
+                    crate::lookups::packages::parse_software_heritage(f.status, &f.body, &repo)
+                }
+                .await,
+            );
+            Ok(with_retry(
+                crate::lookups::Found {
+                    keys: vec![repo.key()],
+                    links: archived.flatten().into_iter().collect(),
+                }
+                .into_also_on("software_heritage"),
+                retry,
+            ))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::lookups::fixture::{at, keys, recorded, sites};
+
+        #[tokio::test(start_paused = true)]
+        async fn packages() {
+            use crate::lookups::packages::Registry;
+            let cx = recorded(vec![]);
+            let crates = Packages(Registry::Crates);
+            let rand = at("https://crates.io/crates/rand");
+            assert!(crates.applies(&rand) && !Packages(Registry::Npm).applies(&rand));
+            let found = crates.lookup(&cx, &rand).await.unwrap();
+            assert!(keys(&found).contains(&"crate:rand"), "{:?}", keys(&found));
+            assert!(sites(&found).contains(&"Docs.rs https://docs.rs/rand".to_owned()));
+            // rand's provenance (trusted publishing, or deps.dev's SLSA attestation) names its
+            // repository: a link, never a key (rand_core and rand_chacha come from it too).
+            assert_eq!(keys(&found), ["crate:rand"]);
+            assert!(
+                sites(&found).contains(&"GitHub https://github.com/rust-random/rand".to_owned()),
+                "{:?}",
+                sites(&found)
+            );
+            assert!(found.links.iter().all(|l| l.via == "crates"));
+
+            let semver = Packages(Registry::Npm)
+                .lookup(&cx, &at("https://www.npmjs.com/package/semver"))
+                .await
+                .unwrap();
+            assert_eq!(keys(&semver), ["npm:semver"]);
+            assert!(
+                sites(&semver).contains(&"GitHub https://github.com/npm/node-semver".to_owned()),
+                "{:?}",
+                sites(&semver)
+            );
+            // left-pad publishes no provenance: no repository.
+            let left_pad = Packages(Registry::Npm)
+                .lookup(&cx, &at("https://www.npmjs.com/package/left-pad"))
+                .await
+                .unwrap();
+            assert_eq!(keys(&left_pad), ["npm:left-pad"]);
+
+            let urllib3 = Packages(Registry::PyPI)
+                .lookup(&cx, &at("https://pypi.org/project/urllib3/"))
+                .await
+                .unwrap();
+            assert_eq!(keys(&urllib3), ["pypi:urllib3"]);
+            assert!(
+                sites(&urllib3).contains(&"GitHub https://github.com/urllib3/urllib3".to_owned()),
+                "{:?}",
+                sites(&urllib3)
+            );
+
+            // The repository itself, on Software Heritage (120 requests an hour: one every 30 s).
+            let repo = at("https://github.com/rust-random/rand");
+            assert!(SoftwareHeritage.applies(&repo));
+            let archived = SoftwareHeritage.lookup(&cx, &repo).await.unwrap();
+            assert_eq!(keys(&archived), ["repo:github.com/rust-random/rand"]);
+            assert_eq!(archived.links.len(), 1);
+            tokio::time::advance(std::time::Duration::from_secs(31)).await;
+            let missing = SoftwareHeritage
+                .lookup(&cx, &at("https://github.com/pubky/pinakes-no-such-repo"))
+                .await
+                .unwrap();
+            assert!(missing.links.is_empty());
+        }
+
+        /// No link or ID check of this family slices a string inside a multibyte character, and no
+        /// parser panics on an answer it doesn't expect.
+        #[test]
+        fn spellings_and_answers_never_panic() {
+            use crate::lookups::{fixture, packages};
+            for s in fixture::multibyte_spellings(&[
+                "https://crates.io/crates/serde_json",
+                "https://docs.rs/crate/rand/0.10.3",
+                "https://www.npmjs.com/package/@sigstore/sign",
+                "https://www.jsdelivr.com/package/npm/vite",
+                "https://pypi.org/project/urllib3/",
+                "https://github.com/npm/node-semver.git",
+            ]) {
+                packages::Package::from_uri(&s);
+                packages::Repo::from_url(&s);
+            }
+            let pkg = |registry, name: &str| packages::Package {
+                registry,
+                name: name.to_owned(),
+            };
+            let repo = packages::Repo::new("github.com", "a/b").unwrap();
+            for (status, raw) in fixture::malformed_answers() {
+                let _ = packages::parse_crates(status, raw, &pkg(packages::Registry::Crates, "a"));
+                let _ = packages::parse_npm_latest(status, raw, &pkg(packages::Registry::Npm, "a"));
+                let _ = packages::parse_npm_attestations(
+                    status,
+                    raw,
+                    &pkg(packages::Registry::Npm, "a"),
+                    "1.0.0",
+                );
+                let _ = packages::parse_pypi(status, raw, &pkg(packages::Registry::PyPI, "a"));
+                let _ = packages::parse_pypi_provenance(status, raw);
+                let _ = packages::parse_depsdev(
+                    status,
+                    raw,
+                    &pkg(packages::Registry::Npm, "a"),
+                    "1.0.0",
+                );
+                let _ = packages::parse_software_heritage(status, raw, &repo);
+            }
+        }
+
+        /// Its key namespaces and services, as searches and cards name them.
+        #[test]
+        fn keys_and_service_names() {
+            use crate::lookups::{search_key, service_name};
+            for (namespace, value, key) in [
+                ("crate", "Serde_JSON", "crate:serde-json"),
+                ("npm", "@sigstore/sign", "npm:@sigstore/sign"),
+                ("pypi", "Zope.Interface", "pypi:zope-interface"),
+                (
+                    "repo",
+                    "github.com/Rust-Random/rand",
+                    "repo:github.com/rust-random/rand",
+                ),
+            ] {
+                assert_eq!(
+                    search_key(namespace, value).as_deref(),
+                    Some(key),
+                    "{namespace}:{value}"
+                );
+            }
+            assert_eq!(search_key("repo", "example.org/a/b"), None);
+            assert_eq!(
+                service_name("https://crates.io/crates/rand"),
+                Some("crates.io")
+            );
+            assert_eq!(
+                service_name("https://github.com/rust-random/rand"),
+                Some("GitHub")
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::lookups::fixture;
+
+    /// Only an object's own page on this family's services is named after the service; any
+    /// other page there (a topic list, a search, a user's page, a page under an object) is not.
+    #[test]
+    fn only_an_objects_own_page_is_named_after_its_service() {
+        for (uri, name) in [
+            ("https://docs.rs/rand/latest/rand/", Some("Docs.rs")),
+            ("https://lib.rs/crates/rand", Some("lib.rs")),
+            ("https://www.npmjs.com/package/@sigstore/sign", Some("npm")),
+            ("https://www.jsdelivr.com/package/npm/vite", Some("jsDelivr")),
+            ("https://unpkg.com/@sigstore/sign/", Some("unpkg")),
+            ("https://unpkg.com/semver/", Some("unpkg")),
+            ("https://pypi.org/project/urllib3/", Some("PyPI")),
+            ("https://gitlab.com/inkscape/inkscape", Some("GitLab")),
+            (
+                "https://github.com/rust-random/rand?tab=readme-ov-file",
+                Some("GitHub"),
+            ),
+            (
+                "https://github.com/rust-random/rand?utm_source=x&ref=producthunt#readme",
+                Some("GitHub"),
+            ),
+            ("https://gitlab.com/inkscape/inkscape?tab=readme", Some("GitLab")),
+            (
+                "https://archive.softwareheritage.org/browse/origin/?origin_url=https://github.com/rust-random/rand",
+                Some("Software Heritage"),
+            ),
+            ("https://github.com/topics/rust", None),
+            ("https://github.com/orgs/rust-lang", None),
+            ("https://github.com/rust-random/rand/issues/1", None),
+            ("https://gitlab.com/inkscape/inkscape/-/issues", None),
+            ("https://github.com/rust-random/rand?q=gen", None),
+            ("https://github.com/search?q=rand&type=repositories", None),
+            ("https://github.com/topics/rust?tab=readme-ov-file", None),
+            ("https://gitlab.com/explore/projects", None),
+            ("https://gitlab.com/explore/projects/starred", None),
+            ("https://gitlab.com/groups/inkscape", None),
+            ("https://gitlab.com/search?search=inkscape", None),
+            ("https://www.npmjs.com/search?q=semver", None),
+            ("https://www.npmjs.com/package/semver/access", None),
+            ("https://www.npmjs.com/~isaacs", None),
+            ("https://unpkg.com/semver/package.json", None),
+            ("https://crates.io/categories/science", None),
+            ("https://docs.rs/rand/latest/rand/fn.random.html", None),
+            ("https://pypi.org/user/urllib3/", None),
+            ("https://archive.softwareheritage.org/", None),
+        ] {
+            assert_eq!(crate::lookups::service_name(uri), name, "{uri}");
+        }
+    }
+
+    /// Every link this family derives is named, by its URL, as the link names its service: the
+    /// object-page rule never unnames the family's own links.
+    #[test]
+    fn every_derived_link_is_named_as_its_service() {
+        let release = Release {
+            package: Package::new(Registry::Npm, "@sigstore/sign").unwrap(),
+            version: "1.0.0".into(),
+            repository: Repo::from_url("https://github.com/sigstore/sigstore-js"),
+        };
+        let crate_release = Release {
+            package: Package::new(Registry::Crates, "rand").unwrap(),
+            version: "0.8.5".into(),
+            repository: Repo::from_url("https://gitlab.com/inkscape/inkscape"),
+        };
+        let pypi = Release {
+            package: Package::new(Registry::PyPI, "urllib3").unwrap(),
+            version: "2.2.0".into(),
+            repository: None,
+        };
+        let links: Vec<_> = [release, crate_release, pypi]
+            .iter()
+            .flat_map(|r| r.found().links)
+            .collect();
+        assert!(!links.is_empty());
+        for link in &links {
+            assert_eq!(
+                crate::lookups::service_name(&link.uri),
+                Some(link.site.as_str()),
+                "{}",
+                link.uri
+            );
+        }
+    }
 
     fn pkg(registry: Registry, name: &str) -> Package {
         Package::new(registry, name).unwrap()

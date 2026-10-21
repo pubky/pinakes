@@ -289,6 +289,22 @@ pub fn wikipedia(item: &Value) -> Vec<Link> {
         .collect()
 }
 
+/// The item a Wikidata link names (`www.wikidata.org/wiki/Q…`, `/entity/Q…`).
+pub fn wikidata_item(uri: &str) -> Option<String> {
+    let url = super::web_url(uri)?;
+    if !matches!(
+        url.host_str()?,
+        "www.wikidata.org" | "wikidata.org" | "m.wikidata.org"
+    ) {
+        return None;
+    }
+    let segments: Vec<&str> = url.path_segments()?.collect();
+    match segments.as_slice() {
+        ["wiki" | "entity", q] => qid(q).map(str::to_owned),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

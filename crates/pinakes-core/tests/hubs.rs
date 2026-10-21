@@ -421,6 +421,13 @@ async fn wikidata_reads_back_every_hit_before_choosing_one() {
     assert_eq!(t.seen.lock().unwrap().len(), before);
 }
 
+/// Whether this build has every also-on source a test needs: a test of some sources returns
+/// early without them.
+fn has(ids: &[&str]) -> bool {
+    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
+    ids.iter().all(|id| registered.contains(id))
+}
+
 /// Two Spotify editions of one album: MusicBrainz names the first (a release, its links and,
 /// through its barcode, the Apple Music album), Wikidata the second (its item and release
 /// group). The shared release group joins them; each card lists the other first, then the
@@ -2121,6 +2128,9 @@ async fn discogs_joins_at_its_level(pool: sqlx::PgPool) {
 /// the MusicBrainz source records nothing for it, not the first release's group.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_discogs_release_of_two_release_groups_joins_nothing(pool: sqlx::PgPool) {
+    if !has(&["musicbrainz", "discogs"]) {
+        return;
+    }
     let uri = "https://www.discogs.com/release/1";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
     let mut d = ResourceMeta::new(uri, "discogs", 86400);
@@ -2137,8 +2147,10 @@ async fn a_discogs_release_of_two_release_groups_joins_nothing(pool: sqlx::PgPoo
         .execute(&pool)
         .await
         .unwrap();
-    let sources: Vec<Arc<dyn also_on::Source>> =
-        vec![Arc::new(pinakes_core::music_sources::MusicBrainzSource)];
+    let sources: Vec<Arc<dyn also_on::Source>> = also_on::registry()
+        .into_iter()
+        .filter(|s| s.id() == "musicbrainz")
+        .collect();
     also_on::drain(&pool, &cx, &sources, 100).await.unwrap();
     let rows: i64 = sqlx::query_scalar(
         "SELECT (SELECT count(*) FROM resource_key WHERE resource_id=$1)+(SELECT count(*) FROM derived_link WHERE resource_id=$1)+(SELECT count(*) FROM resource_fact WHERE resource_id=$1)",

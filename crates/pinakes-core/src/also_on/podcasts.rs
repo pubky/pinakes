@@ -792,6 +792,19 @@ impl Podcasts {
 
 #[async_trait]
 impl Source for Podcasts {
+    fn link_type(&self, uri: &str) -> Option<Option<&'static str>> {
+        let episode = |e: Option<u64>| {
+            if e.is_some() {
+                "PodcastEpisode"
+            } else {
+                "PodcastSeries"
+            }
+        };
+        if let Some((_, e)) = apple(uri).or_else(|| index_page(uri)) {
+            return Some(Some(episode(e)));
+        }
+        player(uri).map(|_| Some("PodcastSeries"))
+    }
     fn id(&self) -> &'static str {
         "podcasts"
     }
