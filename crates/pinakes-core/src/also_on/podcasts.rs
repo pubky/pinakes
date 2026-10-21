@@ -39,7 +39,7 @@ pub struct PodcastIndexConfig {
     pub secret: Option<SecretKey>,
 }
 impl PodcastIndexConfig {
-    fn pair(&self) -> Option<(&str, &str)> {
+    pub(crate) fn pair(&self) -> Option<(&str, &str)> {
         match (self.key.as_deref(), self.secret.as_deref()) {
             (Some(k), Some(s)) if !k.trim().is_empty() && !s.trim().is_empty() => {
                 Some((k.trim(), s.trim()))

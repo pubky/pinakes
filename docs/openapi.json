@@ -2351,6 +2351,18 @@
                     "uri": "https://www.rcsb.org/structure/6VXX"
                   }
                 },
+                "resolve-podcast-index-1": {
+                  "summary": "https://podcastindex.org/podcast/48166",
+                  "value": {
+                    "uri": "https://podcastindex.org/podcast/48166"
+                  }
+                },
+                "resolve-podcast-index-2": {
+                  "summary": "https://podcastindex.org/podcast/255500?episode=61684996715",
+                  "value": {
+                    "uri": "https://podcastindex.org/podcast/255500?episode=61684996715"
+                  }
+                },
                 "resolve-posh-vip-e-halloween-2026-eden": {
                   "summary": "https://posh.vip/e/halloween-2026-eden",
                   "value": {

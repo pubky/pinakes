@@ -1,0 +1,49 @@
+{
+  "episode-61684996715": {
+    "bytes": 2081,
+    "content_type": "application/json",
+    "file": "episode-61684996715.json",
+    "recorded_at": "2026-10-21T19:49:52+00:00",
+    "sha256": "453c63e4cffcd84979be99224cfee0c71c193417c6f3aabb62125ebd06f50ed9",
+    "status": 200,
+    "url": "https://api.podcastindex.org/api/1.0/episodes/byid?id=61684996715"
+  },
+  "episode-missing": {
+    "bytes": 84,
+    "content_type": "application/json",
+    "file": "episode-missing.json",
+    "note": "an id that names no episode",
+    "recorded_at": "2026-10-21T19:49:57+00:00",
+    "sha256": "c9da2d419e573d600238e4be0b83798eb1f0baf6e54579868d6083574f6edb59",
+    "status": 200,
+    "url": "https://api.podcastindex.org/api/1.0/episodes/byid?id=1"
+  },
+  "feed-48166": {
+    "bytes": 1629,
+    "content_type": "application/json",
+    "file": "feed-48166.json",
+    "recorded_at": "2026-10-21T19:49:50+00:00",
+    "sha256": "87a4b2e6ec81e282fff8e1e08a2dd1dae50fb5d550fb674ab3b9ae9ea7766867",
+    "status": 200,
+    "url": "https://api.podcastindex.org/api/1.0/podcasts/byfeedid?id=48166"
+  },
+  "feed-577105": {
+    "bytes": 1889,
+    "content_type": "application/json",
+    "file": "feed-577105.json",
+    "recorded_at": "2026-10-21T19:49:47+00:00",
+    "sha256": "af1fb7c2aebb672ee3033438c17e9072e063cd284582479a9598f7215fef1d09",
+    "status": 200,
+    "url": "https://api.podcastindex.org/api/1.0/podcasts/byfeedid?id=577105"
+  },
+  "feed-missing": {
+    "bytes": 94,
+    "content_type": "application/json",
+    "file": "feed-missing.json",
+    "note": "an id that names no feed",
+    "recorded_at": "2026-10-21T19:49:55+00:00",
+    "sha256": "a747626730cc3b5378e8c57034f96d20237f57c5a4a9e0d58a18c01c96cdbe65",
+    "status": 200,
+    "url": "https://api.podcastindex.org/api/1.0/podcasts/byfeedid?id=999999999"
+  }
+}
