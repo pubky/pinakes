@@ -835,9 +835,12 @@ pub fn store_property(uri: &str) -> Option<(&'static str, String, &'static [item
     let package =
         |v: &str| super::plain(v, 200, |c| c.is_ascii_alphanumeric() || "._-".contains(c));
     let (pid, value, set) = match (host, segments.as_slice()) {
-        ("store.steampowered.com", ["app", id, ..]) => {
-            ("P1733", super::games::appid(id)?.to_string(), items::GAME)
-        }
+        // The game's own store page only (`games::appid_from_uri`), never a page under it.
+        ("store.steampowered.com", ["app", ..]) => (
+            "P1733",
+            super::games::appid_from_uri(uri)?.to_string(),
+            items::GAME,
+        ),
         ("gog.com", [lang, "game", slug]) if lang.len() == 2 => {
             ("P2725", format!("game/{slug}"), items::GAME)
         }
@@ -1624,6 +1627,25 @@ mod tests {
         );
         s.uri = "https://www.discogs.com/label/1".into();
         assert!(!Discogs.applies(&s));
+    }
+
+    #[test]
+    fn a_page_under_a_game_names_no_store_item() {
+        assert_eq!(
+            store_property("https://store.steampowered.com/app/620/Portal_2/")
+                .map(|(p, v, _)| (p, v)),
+            Some(("P1733", "620".to_owned()))
+        );
+        for uri in [
+            "https://store.steampowered.com/app/620/Portal_2/reviews/",
+            "https://store.steampowered.com/app/620/Portal_2/news/1",
+        ] {
+            assert!(store_property(uri).is_none(), "{uri}");
+            assert!(!Steam.applies(&at(uri)), "{uri}");
+        }
+        assert!(!Steam.applies(&at(
+            "https://steamcommunity.com/app/620/discussions/0/123456789/"
+        )));
     }
 
     #[test]

@@ -1005,7 +1005,8 @@ one they find nothing.
   archives it, with the repository's `repo:` key (`key=repo:github.com/{owner}/{name}`).
 
 **Games and apps.**
-- `steam`: a Steam game (store, community, SteamDB, ProtonDB or PCGamingWiki appid link) gets its
+- `steam`: a Steam game's own page (store, community hub, SteamDB, ProtonDB or PCGamingWiki appid
+  link; never a page under it: a discussion, review, guide, workshop item or news item) gets its
   SteamDB page, its ProtonDB page when ProtonDB has reports, its PCGamingWiki page where the appid
   lookup leads, and its GOG page through GOG GamesDB (only GOG's and Steam's own rows), with
   `steam:` and `gog:` keys.

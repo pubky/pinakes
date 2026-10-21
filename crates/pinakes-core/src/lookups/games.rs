@@ -16,14 +16,22 @@ fn number(value: &str, max: usize) -> Option<u64> {
         .flatten()
 }
 
-/// The appid of a Steam store, Steam Community, SteamDB, ProtonDB or PCGamingWiki appid page.
+/// The appid of a game's own page: its Steam store page (`/app/{id}`, with or without its name),
+/// its Steam Community hub, SteamDB or ProtonDB page (`/app/{id}`), or PCGamingWiki's appid
+/// lookup. A page under the game (a discussion, a review, a guide, workshop or news items, a
+/// SteamDB subpage) is another object and names no game.
 pub fn appid_from_uri(uri: &str) -> Option<u64> {
     let url = web_url(uri)?;
     let host = url.host_str()?;
-    let segments: Vec<&str> = url.path_segments()?.collect();
+    let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
+    let slug = |s: &str| plain(s, 200, |c| c.is_ascii_alphanumeric() || "_-.%".contains(c));
     match (host, segments.as_slice()) {
-        ("store.steampowered.com" | "steamcommunity.com" | "steamdb.info", ["app", id, ..])
-        | ("www.protondb.com" | "protondb.com", ["app", id, ..]) => appid(id),
+        ("store.steampowered.com", ["app", id]) => appid(id),
+        ("store.steampowered.com", ["app", id, name]) if slug(name) => appid(id),
+        (
+            "steamcommunity.com" | "steamdb.info" | "www.protondb.com" | "protondb.com",
+            ["app", id],
+        ) => appid(id),
         ("www.pcgamingwiki.com" | "pcgamingwiki.com", ["api", "appid.php"]) => url
             .query_pairs()
             .find(|(k, _)| k == "appid")
@@ -188,8 +196,23 @@ mod tests {
             "https://store.steampowered.com/bundle/620/",
             "https://example.com/app/620",
             "https://store.steampowered.com/app/12345678901/",
+            // Objects under a game are not the game.
+            "https://steamcommunity.com/app/620/discussions/0/123456789/",
+            "https://steamcommunity.com/app/620/reviews/",
+            "https://steamcommunity.com/app/620/workshop/",
+            "https://steamcommunity.com/app/620/allnews/",
+            "https://steamcommunity.com/app/620/guides/",
+            "https://store.steampowered.com/app/620/Portal_2/reviews/",
+            "https://steamdb.info/app/620/charts/",
+            "https://www.protondb.com/app/620/reports",
         ] {
             assert_eq!(appid_from_uri(uri), None, "{uri}");
+        }
+        for uri in [
+            "https://store.steampowered.com/app/620",
+            "https://steamcommunity.com/app/620/",
+        ] {
+            assert_eq!(appid_from_uri(uri), Some(620), "{uri}");
         }
         assert_eq!(steam_key(620).as_str(), "steam:620");
         assert_eq!(
