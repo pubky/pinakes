@@ -1140,6 +1140,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     let vouched = "https://www.songkick.com/concerts/1-vouched-beside-a-busy-lookup";
     let busy = "https://www.songkick.com/concerts/2-busy-lookup-alone";
     let lineup = "https://www.songkick.com/concerts/3-three-acts";
+    let festival = "https://www.songkick.com/concerts/4-one-keyed-one-busy";
     let tidal = "https://tidal.com/track/534050211";
     let tidal_artist = "https://tidal.com/artist/64518";
     let mut ids = std::collections::BTreeMap::new();
@@ -1154,6 +1155,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         (vouched, "MusicEvent"),
         (busy, "MusicEvent"),
         (lineup, "MusicEvent"),
+        (festival, "MusicEvent"),
         (artist, "MusicGroup"),
         (tidal, "MusicRecording"),
         (tidal_artist, "MusicGroup"),
@@ -1183,6 +1185,24 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
                     links: vec![format!("https://www.songkick.com/artists/{slug}")],
                 })
                 .collect();
+        }
+        if uri == festival {
+            // Two acts: one the page names by its MusicBrainz page, one whose Songkick link
+            // MusicBrainz is busy on.
+            d.start = Some("2027-08-01T20:00:00Z".parse().unwrap());
+            d.event.performers = vec![
+                pinakes_core::event::Performer {
+                    name: "Radiohead".into(),
+                    links: vec![
+                        "https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711"
+                            .into(),
+                    ],
+                },
+                pinakes_core::event::Performer {
+                    name: "Busy Act".into(),
+                    links: vec!["https://www.songkick.com/artists/503503-busy".into()],
+                },
+            ];
         }
         if uri == vouched || uri == busy {
             d.start = Some("2027-06-01T20:00:00Z".parse().unwrap());
@@ -1351,8 +1371,8 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         ]
     );
     assert_eq!(rows(group, ids[concert].clone()).await, ["-"]);
-    // A page-vouched identity is kept when MusicBrainz is busy on another of the performer's
-    // links; a busy lookup that left nothing established is retried.
+    // A performer the page identifies by its MusicBrainz page needs no lookup: keyed, whatever
+    // MusicBrainz would say of its other links.
     assert_eq!(
         rows(
             "SELECT key||' '||via FROM resource_key WHERE resource_id=$1",
@@ -1364,6 +1384,19 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     let retrying =
         "SELECT coalesce(last_error,'-') FROM also_on_dirty WHERE resource_id=$1 AND attempts>0";
     assert!(rows(retrying, ids[vouched].clone()).await.is_empty());
+    // A busy MusicBrainz fails the run whatever else was found (another act on the page keyed
+    // from it), so it retries in minutes and then records both together; recording only what
+    // was found would leave the busy act's key out until the next run, a month away.
+    for page in [busy, festival] {
+        assert!(rows(keys, ids[page].clone()).await.is_empty(), "{page}");
+        assert!(
+            rows(retrying, ids[page].clone())
+                .await
+                .iter()
+                .any(|e| e.contains("musicbrainz_busy")),
+            "{page} retries"
+        );
+    }
     assert!(rows(keys, ids[busy].clone()).await.is_empty());
     // Its run failed as a whole: nothing recorded yet, the retry will.
     assert!(rows(

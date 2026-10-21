@@ -515,8 +515,7 @@ impl PerformersSource {
             }
         }
         // Then MusicBrainz for the rest, all their links in one request (each link's own lookup
-        // then reads from the cache). A busy MusicBrainz is retried only when it left nothing
-        // established; an answer over its cap is no answer for that link.
+        // then reads from the cache). An answer over its cap is no answer for that link.
         let all: Vec<String> = lookups
             .iter()
             .flatten()
@@ -565,9 +564,12 @@ impl PerformersSource {
                 }
             }
         }
+        // A busy MusicBrainz fails the run: its previous rows stay and it retries in minutes,
+        // recording the page's keys and MusicBrainz's together (recording what was found would
+        // replace the rows without the busy performer's key until the next run, a month away).
         match busy {
-            Some(e) if found.keys.is_empty() => Err(e),
-            _ => Ok(found),
+            Some(e) => Err(e),
+            None => Ok(found),
         }
     }
 }
