@@ -114,7 +114,7 @@ pub fn public_ip(ip: IpAddr) -> bool {
     };
     !denied.iter().any(|net| net.contains(&ip))
 }
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Fetched {
     /// True only when every redirect from the requested URI was HTTP 301/308.
     pub permanent_redirect: bool,
@@ -152,6 +152,9 @@ pub struct FetchOptions {
     pub json_body: Option<serde_json::Value>,
     /// A form-encoded POST body (an OAuth token request), by literal field name.
     pub form_body: Option<Vec<(&'static str, String)>>,
+    /// Keys the discovery cache in place of the headers when set (a credential pair's hash, so a
+    /// rotated bearer token keeps the answers cached under the old one). Never sent.
+    pub cache_tag: Option<String>,
     pub sensitive: bool,
     pub accept: Option<String>,
     pub user_agent: Option<String>,
@@ -166,6 +169,22 @@ pub struct FetchOptions {
     /// (`pkarr_relays::PAYLOAD_TYPES`).
     pub extra_types: &'static [&'static str],
     pub validators: Validators,
+}
+impl std::fmt::Debug for Fetched {
+    /// The body's length, never the body: a token endpoint's answer holds the token.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Fetched")
+            .field("url", &self.url.as_str())
+            .field("status", &self.status)
+            .field("content_type", &self.content_type)
+            .field("retry_after_secs", &self.retry_after_secs)
+            .field("location", &self.location)
+            .field("permanent_redirect", &self.permanent_redirect)
+            .field("truncated", &self.truncated)
+            .field("validators", &self.validators)
+            .field("body", &format_args!("<{} bytes>", self.body.len()))
+            .finish()
+    }
 }
 impl std::fmt::Debug for FetchOptions {
     /// A sensitive request's header and form values are its credentials: never printed.
@@ -189,6 +208,7 @@ impl std::fmt::Debug for FetchOptions {
             .field("headers", &redact(&self.headers))
             .field("json_body", &self.json_body)
             .field("form_body", &self.form_body.as_deref().map(redact))
+            .field("cache_tag", &self.cache_tag.as_ref().map(|_| "[REDACTED]"))
             .field("sensitive", &self.sensitive)
             .field("accept", &self.accept)
             .field("user_agent", &self.user_agent)
@@ -598,15 +618,25 @@ impl Egress {
         )
         .await
     }
+    /// The cache key of a request: its URL and a hash of what else identifies it (its body, and
+    /// its headers or else its `cache_tag`). A key holds the URL, which may carry credentials in
+    /// its query: never log one.
     fn discovery_key(uri: &str, options: &FetchOptions) -> Result<String> {
         options.one_body()?;
         let mut url = Url::parse(uri)?;
         url.set_fragment(None);
         let mut key = url.to_string();
-        if options.json_body.is_some() || options.form_body.is_some() || !options.headers.is_empty()
+        if options.json_body.is_some()
+            || options.form_body.is_some()
+            || options.cache_tag.is_some()
+            || !options.headers.is_empty()
         {
-            let identity =
-                serde_json::to_vec(&(&options.json_body, &options.form_body, &options.headers))?;
+            let identity = match &options.cache_tag {
+                Some(tag) => serde_json::to_vec(&(&options.json_body, &options.form_body, tag))?,
+                None => {
+                    serde_json::to_vec(&(&options.json_body, &options.form_body, &options.headers))?
+                }
+            };
             key.push_str(&format!("|request:{}", blake3::hash(&identity).to_hex()));
         }
         // A read with another cap gets another answer (a refusal is replayed only to its cap).
@@ -1839,6 +1869,34 @@ mod tests {
             ..Default::default()
         };
         assert!(format!("{plain:?}").contains("abc"));
+        // A cache tag keys the cache in place of the headers, and is never printed.
+        let tagged = |token: &str, tag: &str| FetchOptions {
+            headers: vec![("authorization", format!("Bearer {token}"))],
+            cache_tag: Some(tag.into()),
+            sensitive: true,
+            ..Default::default()
+        };
+        let key = |o: &FetchOptions| Egress::discovery_key("https://example.org/a", o).unwrap();
+        assert_eq!(key(&tagged("old", "pair")), key(&tagged("new", "pair")));
+        assert_ne!(key(&tagged("old", "pair")), key(&tagged("old", "other")));
+        assert!(!format!("{:?}", tagged("TOKEN", "PAIRTAG")).contains("PAIRTAG"));
+        // A fetched answer's Debug never shows its body.
+        let fetched = Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            validators: Default::default(),
+            url: Url::parse("https://auth.example/token").unwrap(),
+            content_type: "application/json".into(),
+            status: 200,
+            retry_after_secs: 60,
+            location: None,
+            body: br#"{"access_token":"SECRETTOKEN"}"#.to_vec(),
+        };
+        let shown = format!("{fetched:?}");
+        assert!(
+            !shown.contains("SECRETTOKEN") && shown.contains("<30 bytes>"),
+            "{shown}"
+        );
         let both = FetchOptions {
             json_body: Some(serde_json::json!({})),
             form_body: Some(vec![]),

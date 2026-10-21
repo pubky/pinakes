@@ -175,13 +175,14 @@ fn item_url(cx: &Context, kind: Kind, id: &str) -> String {
         cx.config.tidal.country
     )
 }
-/// How the API is asked: with the client-credentials token. The token's hash keys the cache, so
-/// a new token asks again.
-fn api_options(token: &str) -> FetchOptions {
+/// How the API is asked: with the client-credentials token, its answers cached by the pair.
+fn api_options(token: &str, slot: &[u8; 32]) -> FetchOptions {
     FetchOptions {
         accept: Some(JSON_API.into()),
         extra_types: &[JSON_API],
         headers: vec![("authorization", format!("Bearer {token}"))],
+        // Answers are cached by the credential pair, not the token: a new token keeps them.
+        cache_tag: Some(blake3::Hash::from(*slot).to_hex().to_string()),
         sensitive: true,
         ..Default::default()
     }
@@ -255,6 +256,13 @@ impl Slot {
             Some(seconds) => {
                 self.cool_down(seconds);
                 busy(seconds)
+            }
+            // A failure the cache replays, while TIDAL's wait holds, is that wait.
+            None if error
+                .downcast_ref::<RetryLater>()
+                .is_some_and(|r| r.class == "discovery_cached") =>
+            {
+                self.unless_busy().err().unwrap_or(error)
             }
             None => error,
         }
@@ -347,12 +355,30 @@ pub fn lookups_waiting(id: &str, secret: &str) -> usize {
         .copied()
         .unwrap_or(0)
 }
+/// A lookup counted as pending at a slot for as long as it lives, whether its turn comes or its
+/// future is dropped while it waits.
+struct Pending([u8; 32]);
+impl Pending {
+    fn new(slot: &[u8; 32]) -> Self {
+        *WAITING.lock().unwrap().entry(*slot).or_default() += 1;
+        Self(*slot)
+    }
+}
+impl Drop for Pending {
+    fn drop(&mut self) {
+        let mut waiting = WAITING.lock().unwrap();
+        if let Some(n) = waiting.get_mut(&self.0) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                waiting.remove(&self.0);
+            }
+        }
+    }
+}
 /// The slots, once this lookup's turn at `slot` comes.
 async fn slots(slot: &[u8; 32]) -> tokio::sync::MutexGuard<'static, HashMap<[u8; 32], Slot>> {
-    *WAITING.lock().unwrap().entry(*slot).or_default() += 1;
-    let slots = SLOTS.lock().await;
-    *WAITING.lock().unwrap().entry(*slot).or_default() -= 1;
-    slots
+    let _pending = Pending::new(slot);
+    SLOTS.lock().await
 }
 fn slot_key(id: &str, secret: &str) -> [u8; 32] {
     *blake3::hash(format!("{id}\n{secret}").as_bytes()).as_bytes()
@@ -389,7 +415,7 @@ async fn item(cx: &Context, kind: Kind, id: &str) -> Result<Option<Value>> {
     s.unless_busy()?;
     let token = s.token(cx, client_id, secret).await?;
     let url = item_url(cx, kind, id);
-    let options = api_options(&token);
+    let options = api_options(&token, &slot);
     let fetched = match cx.egress.discover(&url, &options, 3600).await {
         Ok(fetched) => fetched,
         Err(error) => return Err(s.answered(error)),
@@ -445,7 +471,7 @@ async fn prefetch(cx: &Context, kind: Kind, ids: &[&str]) -> Result<()> {
         kind.collection(),
         cx.config.tidal.country
     );
-    let options = api_options(&token);
+    let options = api_options(&token, &slot);
     let fetched = match cx.egress.fetch_with(&url, &options).await {
         Ok(fetched) => fetched,
         Err(error) => return Err(s.answered(error)),
