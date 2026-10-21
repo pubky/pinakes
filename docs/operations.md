@@ -40,6 +40,8 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `reach_timeout_secs` | `5` | Nexus reach deadline per search (seconds). |
 | `related_taggers` | `200` | Taggers a related page samples (a resource's most recent). |
 | `related_window_days` | `365` | Days a related page looks back, for those taggers and their tags. |
+| `related_refs_per_tagger` | `1000` | References a related page reads per sampled tagger (their most recent). |
+| `related_min_shared` | `2` | Shared taggers a related row needs (its group's, when collapsed). |
 | `max_radius_m` | `200000.0` | Largest `near` radius (metres). |
 | `h3_resolutions` | `[0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 11, 11, 11, 11, 11, 11, 11]` | H3 resolution per map zoom level. |
 | `max_cluster_cells` | `10000` | Most cells one cluster query returns. |

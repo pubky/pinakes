@@ -137,7 +137,9 @@ CREATE TABLE reference (
     CONSTRAINT reference_end_at_range CHECK (end_at >= '0001-01-01 00:00:00+00' AND end_at < '10000-01-01 00:00:00+00'),
     CONSTRAINT reference_created_at_range CHECK (created_at >= '0001-01-01 00:00:00+00' AND created_at < '10000-01-01 00:00:00+00')
 );
-CREATE INDEX reference_author_idx ON reference USING btree (author);
+-- Search's `related` filter reads each tagger's most recent references in its window; the
+-- index serves every lookup by author too.
+CREATE INDEX reference_author_created_idx ON reference USING btree (author, created_at);
 -- `sort=trending` counts the references made inside a window.
 CREATE INDEX reference_created_idx ON reference USING btree (created_at);
 CREATE INDEX reference_event_idx ON reference USING btree (resource_id, start_at) WHERE kind = 'event';

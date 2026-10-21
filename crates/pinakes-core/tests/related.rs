@@ -56,13 +56,17 @@ async fn get_with(config: &Config, pool: &PgPool, path: &str) -> (u16, Value) {
     }
     (status, value)
 }
+/// The defaults, but a row with one shared tagger counts (the ranking tests' rows have few).
+fn one_shared() -> Config {
+    let mut config = Config::default();
+    config.search.related_min_shared = 1;
+    config
+}
 async fn related(pool: &PgPool, id: &str, query: &str) -> Value {
-    let (status, value) = get_with(
-        &Config::default(),
-        pool,
-        &format!("/v1/search?related={id}{query}"),
-    )
-    .await;
+    related_with(&one_shared(), pool, id, query).await
+}
+async fn related_with(config: &Config, pool: &PgPool, id: &str, query: &str) -> Value {
+    let (status, value) = get_with(config, pool, &format!("/v1/search?related={id}{query}")).await;
     assert_eq!(status, 200, "{value}");
     value
 }
@@ -128,7 +132,7 @@ async fn ranked_by_shared_taggers_then_recency(pool: PgPool) {
         "facets count the related rows"
     );
     // A page and the next one keep the ranking (one daemon: cursors are its own).
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let app = api::router(AppState::new(pool.clone(), one_shared()).unwrap());
     let page = |path: String| {
         let app = app.clone();
         async move {
@@ -215,7 +219,7 @@ async fn opted_out_old_and_unsampled_references_do_not_count(pool: PgPool) {
     );
     // Only the most recent tagger with `limits.related_taggers = 1`: tagger 1, whose other
     // references are excluded.
-    let mut one = Config::default();
+    let mut one = one_shared();
     one.search.related_taggers = 1;
     let (_, v) = get_with(&one, &pool, &format!("/v1/search?related={seed}")).await;
     assert!(rows(&v).is_empty(), "{v}");
@@ -234,12 +238,28 @@ async fn an_alias_reads_as_its_root_and_bad_requests_are_refused(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
+    let other_alias = store::ensure_resource(&pool, "https://example.org/other-alias")
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'canonical')")
+        .bind(&other_alias)
+        .bind(&other)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // A reference stored on an alias counts for its root: tagger 2 tagged the root by its alias
+    // and the other resource by its alias, so the other resource has two shared taggers.
     tag(&pool, &root, 1, 1).await;
+    tag(&pool, &alias, 2, 1).await;
     tag(&pool, &other, 1, 1).await;
-    assert_eq!(rows(&related(&pool, &alias, "").await), [other]);
+    tag(&pool, &other_alias, 2, 2).await;
+    let config = Config::default();
+    for seed in [&root, &alias] {
+        let v = related_with(&config, &pool, seed, "").await;
+        assert_eq!(rows(&v), std::slice::from_ref(&other), "{v}");
+    }
     // An unknown resource relates to nothing.
     assert!(rows(&related(&pool, &"0".repeat(32), "").await).is_empty());
-    let config = Config::default();
     for path in [
         "/v1/search?related=xyz".to_owned(),
         format!("/v1/search?related={root}&sort=recent"),
@@ -251,4 +271,97 @@ async fn an_alias_reads_as_its_root_and_bad_requests_are_refused(pool: PgPool) {
     let (_, info) = get_with(&config, &pool, "/v1/info").await;
     assert_eq!(info["limits"]["related_taggers"], 200);
     assert_eq!(info["limits"]["related_window_days"], 365);
+    assert_eq!(info["limits"]["related_refs_per_tagger"], 1000);
+    assert_eq!(info["limits"]["related_min_shared"], 2);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_row_needs_two_shared_taggers_its_groups_when_collapsed(pool: PgPool) {
+    let seed = save(&pool, "https://example.org/seed", "MusicAlbum").await;
+    let one = save(&pool, "https://example.org/one", "MusicAlbum").await;
+    let two = save(&pool, "https://example.org/two", "MusicAlbum").await;
+    let p = save(&pool, "https://example.org/p-tidal", "MusicAlbum").await;
+    let q = save(&pool, "https://example.org/p-spotify", "MusicAlbum").await;
+    group(&pool, "0123456789abcdef0123456789abcdef", &[&p, &q]).await;
+    for who in [1, 2, 3] {
+        tag(&pool, &seed, who, 1).await;
+    }
+    tag(&pool, &one, 1, 1).await;
+    tag(&pool, &two, 1, 2).await;
+    tag(&pool, &two, 2, 2).await;
+    // Each member one shared tagger, the group two.
+    tag(&pool, &p, 1, 3).await;
+    tag(&pool, &q, 3, 3).await;
+    let config = Config::default();
+    assert_eq!(
+        rows(&related_with(&config, &pool, &seed, "").await),
+        std::slice::from_ref(&two)
+    );
+    let v = related_with(&config, &pool, &seed, "&collapse=group").await;
+    let got = rows(&v);
+    assert_eq!(got.len(), 2, "{v}");
+    assert_eq!(got[0], two);
+    assert!(got[1] == p || got[1] == q, "{v}");
+    // A resource with one tagger relates to nothing at the default.
+    let lone = save(&pool, "https://example.org/lone", "MusicAlbum").await;
+    tag(&pool, &lone, 4, 1).await;
+    tag(&pool, &one, 4, 1).await;
+    tag(&pool, &two, 4, 1).await;
+    assert!(rows(&related_with(&config, &pool, &lone, "").await).is_empty());
+    assert!(rows(&related_with(&config, &pool, &lone, "&collapse=group").await).is_empty());
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn each_tagger_counts_only_their_most_recent_references(pool: PgPool) {
+    let seed = save(&pool, "https://example.org/seed", "MusicAlbum").await;
+    let recent = save(&pool, "https://example.org/recent", "MusicAlbum").await;
+    let older = save(&pool, "https://example.org/older", "MusicAlbum").await;
+    tag(&pool, &seed, 1, 1).await;
+    tag(&pool, &recent, 1, 2).await;
+    tag(&pool, &older, 1, 3).await;
+    let mut config = one_shared();
+    assert_eq!(
+        rows(&related_with(&config, &pool, &seed, "").await),
+        [recent.clone(), older.clone()]
+    );
+    // Two references read: the seed's tag and the next most recent.
+    config.search.related_refs_per_tagger = 2;
+    assert_eq!(
+        rows(&related_with(&config, &pool, &seed, "").await),
+        std::slice::from_ref(&recent)
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_group_counts_only_members_that_pass_the_filters_and_never_opted_out_posts(pool: PgPool) {
+    let seed = save(&pool, "https://example.org/seed", "MusicAlbum").await;
+    let album = save(&pool, "https://example.org/album", "MusicAlbum").await;
+    let track = save(&pool, "https://example.org/track", "MusicRecording").await;
+    group(&pool, "0123456789abcdef0123456789abcdef", &[&album, &track]).await;
+    // A post whose author opted out, grouped with another album.
+    let other = save(&pool, "https://example.org/other", "MusicAlbum").await;
+    let post = "https://bsky.app/profile/x/post/1";
+    let opted = store::ensure_resource(&pool, post).await.unwrap();
+    let mut doc = ResourceMeta::new(post, "bluesky", 86400);
+    doc.set_type("SocialMediaPosting");
+    doc.attributes.insert("opted_out".into(), "true".into());
+    store::save_document(&pool, &opted, 0, &doc).await.unwrap();
+    group(&pool, "fedcba9876543210fedcba9876543210", &[&other, &opted]).await;
+    for who in [1, 2] {
+        tag(&pool, &seed, who, 1).await;
+    }
+    tag(&pool, &album, 1, 2).await;
+    tag(&pool, &track, 2, 2).await;
+    tag(&pool, &other, 1, 2).await;
+    tag(&pool, &opted, 2, 2).await;
+    let config = Config::default();
+    // The album's group has two shared taggers; the other album's only one, as the post's
+    // tagger never counts.
+    let v = related_with(&config, &pool, &seed, "&collapse=group").await;
+    let got = rows(&v);
+    assert_eq!(got.len(), 1, "{v}");
+    assert!(got[0] == album || got[0] == track, "{v}");
+    // Of the albums only, the group has one.
+    let v = related_with(&config, &pool, &seed, "&collapse=group&type=MusicAlbum").await;
+    assert!(rows(&v).is_empty(), "{v}");
 }

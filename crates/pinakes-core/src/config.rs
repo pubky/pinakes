@@ -569,6 +569,10 @@ pub struct SearchConfig {
     pub related_taggers: usize,
     /// The days a related page looks back, for those taggers and their tags.
     pub related_window_days: u32,
+    /// The references a related page reads per sampled tagger (their most recent).
+    pub related_refs_per_tagger: usize,
+    /// The shared taggers a related row needs (its group's, when collapsed).
+    pub related_min_shared: usize,
     pub max_radius_m: f64,
     pub h3_resolutions: Vec<u8>,
     pub max_cluster_cells: usize,
@@ -579,6 +583,8 @@ impl Default for SearchConfig {
             reach_timeout_secs: 5,
             related_taggers: 200,
             related_window_days: 365,
+            related_refs_per_tagger: 1000,
+            related_min_shared: 2,
             max_radius_m: 200_000.0,
             h3_resolutions: (0u8..=22).map(|z| z.saturating_sub(4).min(11)).collect(),
             max_cluster_cells: 10000,
@@ -913,6 +919,8 @@ impl Config {
             || !(1..=60).contains(&self.search.reach_timeout_secs)
             || !(1..=10_000).contains(&self.search.related_taggers)
             || !(1..=3650).contains(&self.search.related_window_days)
+            || !(1..=100_000).contains(&self.search.related_refs_per_tagger)
+            || !(1..=10_000).contains(&self.search.related_min_shared)
             || !self.search.max_radius_m.is_finite()
             || !(1.0..=200_000.0).contains(&self.search.max_radius_m)
             || self.search.h3_resolutions.is_empty()
@@ -1444,6 +1452,10 @@ limits! {
     related_taggers: usize = |c| c.search.related_taggers => [|c, v| c.search.related_taggers = v],
     /// Days a related page looks back, for those taggers and their tags.
     related_window_days: u32 = |c| c.search.related_window_days => [|c, v| c.search.related_window_days = v],
+    /// References a related page reads per sampled tagger (their most recent).
+    related_refs_per_tagger: usize = |c| c.search.related_refs_per_tagger => [|c, v| c.search.related_refs_per_tagger = v],
+    /// Shared taggers a related row needs (its group's, when collapsed).
+    related_min_shared: usize = |c| c.search.related_min_shared => [|c, v| c.search.related_min_shared = v],
     /// Largest `near` radius (metres).
     max_radius_m: f64 = |c| c.search.max_radius_m => [|c, v| c.search.max_radius_m = v],
     /// H3 resolution per map zoom level.
