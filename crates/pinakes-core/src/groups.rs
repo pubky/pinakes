@@ -153,27 +153,48 @@ fn evidence(row: &Value) -> Vec<String> {
     }
     keys.into_iter().collect()
 }
-/// A hub key's namespace and value when the namespace names one object, so a group holds at most
-/// one of its values: a MusicBrainz recording, release, release group or artist, a Wikidata item,
-/// a Discogs artist, master or release, an IMDb title, an Open Library edition or work, a
-/// podcast's GUID or Apple Podcasts ID. ISRCs, UPCs and ISBNs may be several (one recording has
-/// many ISRCs, one book several ISBNs).
+/// The hub key namespaces that name one object, so a group holds at most one of their values: a
+/// MusicBrainz recording, release, release group or artist, a Wikidata item, a Discogs artist,
+/// master or release, an IMDb title, an Open Library edition or work, a podcast's GUID or Apple
+/// Podcasts ID, an OSM object, a DOI, an arXiv paper, a PubMed or PubMed Central record, a crate,
+/// an npm or PyPI package, a source repository, a Steam or GOG game, a Federal Register
+/// document. ISRCs, UPCs and ISBNs may be several (one recording has many ISRCs, one book
+/// several ISBNs).
+const SINGLE_OBJECT: &[&str] = &[
+    "mb:recording",
+    "mb:release",
+    "mb:release-group",
+    "mb:artist",
+    "wikidata",
+    "discogs:artist",
+    "discogs:master",
+    "discogs:release",
+    "imdb",
+    "openlibrary:edition",
+    "openlibrary:work",
+    "podcast:guid",
+    "podcast:apple",
+    "osm",
+    "doi",
+    "arxiv",
+    "pmid",
+    "pmcid",
+    "crate",
+    "npm",
+    "pypi",
+    "repo",
+    "steam",
+    "gog",
+    "fr",
+];
+/// A hub key's namespace and value when the namespace names one object (`SINGLE_OBJECT`). The
+/// value may itself hold `:` (a DOI).
 fn single_object(key: &str) -> Option<(&str, &str)> {
-    let (namespace, value) = key.strip_prefix("hub:")?.rsplit_once(':')?;
-    (matches!(
-        namespace,
-        "mb:recording"
-            | "mb:release"
-            | "mb:release-group"
-            | "mb:artist"
-            | "wikidata"
-            | "imdb"
-            | "openlibrary:edition"
-            | "openlibrary:work"
-            | "podcast:guid"
-            | "podcast:apple"
-    ) || namespace.starts_with("discogs:"))
-    .then_some((namespace, value))
+    let key = key.strip_prefix("hub:")?;
+    SINGLE_OBJECT.iter().find_map(|namespace| {
+        let value = key.strip_prefix(namespace)?.strip_prefix(':')?;
+        Some((*namespace, value))
+    })
 }
 /// An ICS UID as a key segment: free text (NIP-52 coordinates, URNs, URLs) never decides the
 /// key's kind or names another feed.
@@ -1306,6 +1327,34 @@ mod tests {
             Some(("podcast:guid", "ead4c236-bf58-58c6-a2c6-a6b28d128cb6"))
         );
         assert_eq!(single_object("mb:recording:a"), None);
+        for (key, namespace, value) in [
+            (
+                "hub:mb:release-group:b1392450",
+                "mb:release-group",
+                "b1392450",
+            ),
+            ("hub:mb:release:425d8db9", "mb:release", "425d8db9"),
+            ("hub:osm:node/240109189", "osm", "node/240109189"),
+            (
+                "hub:doi:10.1002/(sici)1097:4<x>",
+                "doi",
+                "10.1002/(sici)1097:4<x>",
+            ),
+            ("hub:arxiv:1706.03762", "arxiv", "1706.03762"),
+            ("hub:pmcid:PMC123", "pmcid", "PMC123"),
+            ("hub:crate:rand-core", "crate", "rand-core"),
+            ("hub:npm:@babel/core", "npm", "@babel/core"),
+            (
+                "hub:repo:github.com/rust-random/rand",
+                "repo",
+                "github.com/rust-random/rand",
+            ),
+            ("hub:steam:440", "steam", "440"),
+            ("hub:fr:2026-18291", "fr", "2026-18291"),
+        ] {
+            assert_eq!(single_object(key), Some((namespace, value)), "{key}");
+        }
+        assert_eq!(single_object("hub:isrc:GBAYE9701376"), None);
     }
     /// A run that stops on the budget resumes at its stop key and wraps around, so every key of a
     /// component too large for one run is reached in turn.

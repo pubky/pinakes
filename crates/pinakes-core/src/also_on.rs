@@ -23,7 +23,7 @@ pub mod titles;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -91,6 +91,8 @@ pub struct SourceOptions {
     pub enabled: Option<bool>,
     /// The web service a hub source asks (`musicbrainz` only: a mirror's `…/ws/2`).
     pub base_url: Option<String>,
+    /// A service's personal token (`discogs` only); never shown or logged.
+    pub token: Option<crate::event::adapters::SecretKey>,
 }
 
 /// One resource as a source sees it.
@@ -131,6 +133,9 @@ pub struct Found {
     /// What was found changes the card itself (a media page's title): the resource is read again
     /// now, and its finished card takes it.
     pub reread: bool,
+    /// A secondary service the source asks failed, so its part is missing from this run: ask
+    /// again after this long instead of after the source's lifetime. What the run found stands.
+    pub retry_after: Option<Duration>,
 }
 /// A fact a source reads for a resource: a lower-case `name` (`[a-z][a-z0-9_]`, at most 32
 /// bytes) and a printable `value` (at most 512 bytes). Several values of one name are kept.
@@ -242,6 +247,8 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         Arc::new(crate::music_sources::MusicBrainzSource),
         Arc::new(crate::music_sources::MusicBrainzEntitySource),
         Arc::new(crate::music_sources::WikidataSource),
+        // Before the barcode lookups: a Discogs release's barcodes are keys.
+        Arc::new(crate::lookups::sources::Discogs),
         Arc::new(crate::music_sources::DeezerSource),
         Arc::new(crate::music_sources::ItunesSource),
         Arc::new(crate::wikipedia::WikipediaSource),
@@ -250,6 +257,27 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         Arc::new(films::Films),
         Arc::new(podcasts::Podcasts),
         Arc::new(titles::Titles),
+        Arc::new(crate::lookups::sources::OsmWikidata),
+        Arc::new(crate::lookups::sources::WikidataOsm),
+        Arc::new(crate::lookups::sources::Btcmap),
+        Arc::new(crate::lookups::sources::FederalRegister),
+        Arc::new(crate::lookups::sources::Unpaywall),
+        Arc::new(crate::lookups::sources::Ncbi),
+        Arc::new(crate::lookups::sources::Datacite),
+        Arc::new(crate::lookups::sources::HuggingFacePapers),
+        Arc::new(crate::lookups::sources::Packages(
+            crate::lookups::packages::Registry::Crates,
+        )),
+        Arc::new(crate::lookups::sources::Packages(
+            crate::lookups::packages::Registry::Npm,
+        )),
+        Arc::new(crate::lookups::sources::Packages(
+            crate::lookups::packages::Registry::PyPI,
+        )),
+        Arc::new(crate::lookups::sources::SoftwareHeritage),
+        Arc::new(crate::lookups::sources::Steam),
+        Arc::new(crate::lookups::sources::WikidataStores),
+        Arc::new(crate::lookups::sources::Wayback),
     ]
 }
 /// The source IDs `[also_on.sources]` may name.
@@ -264,9 +292,13 @@ fn token(s: &str) -> bool {
 }
 /// A key as stored: a lower-case namespace (letters, digits, `-`, `_`, and `:` between its
 /// parts, e.g. `mb:recording`), then `:` and a value of printable characters without spaces;
-/// 3–512 bytes.
+/// 3–512 bytes. A DOI's value may hold `:` itself (`doi:10.46298/lmcs-20(1:8)2024`).
 pub fn valid_key(key: &str) -> bool {
-    let Some((namespace, value)) = key.rsplit_once(':') else {
+    let split = match key.split_once(':') {
+        Some(("doi", value)) => Some(("doi", value)),
+        _ => key.rsplit_once(':'),
+    };
+    let Some((namespace, value)) = split else {
         return false;
     };
     (3..=512).contains(&key.len())
@@ -545,7 +577,14 @@ pub async fn drain(
         .iter()
         .filter(|s| cfg.source_enabled(s.as_ref()) && s.ready(&cx.config))
     {
-        source.prefetch(cx, &uris).await;
+        // A panicking prefetch costs only its batch (each lookup still asks alone).
+        if std::panic::AssertUnwindSafe(source.prefetch(cx, &uris))
+            .catch_unwind()
+            .await
+            .is_err()
+        {
+            tracing::error!(source = source.id(), "also-on prefetch panicked");
+        }
     }
     let work = due.into_iter().map(|id| async move {
         let result = one(pool, cx, sources, &id).await;
@@ -620,13 +659,27 @@ async fn one(
             }
             continue;
         }
-        match source.lookup(cx, &subject).await {
+        // A source that panics (a parser meeting an answer of a shape it doesn't expect) fails
+        // this run like an error: the others' results are kept and the worker goes on.
+        let lookup = std::panic::AssertUnwindSafe(source.lookup(cx, &subject))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| {
+                tracing::error!(resource = %id, source = source.id(), "also-on lookup panicked");
+                Err(anyhow::anyhow!("lookup panicked"))
+            });
+        match lookup {
             Ok(found) => {
                 reread |= found.reread;
+                // A secondary service failed: this run's results stand, and the source runs
+                // again after its retry time instead of after its lifetime.
+                let lifetime = found
+                    .retry_after
+                    .map_or(source.ttl(), |retry| retry.min(source.ttl()));
                 record(pool, id, source.id(), found, source.ttl(), cfg)
                     .await
                     .with_context(|| format!("record {}", source.id()))?;
-                next = Some(next.map_or(source.ttl(), |n| n.min(source.ttl())));
+                next = Some(next.map_or(lifetime, |n| n.min(lifetime)));
                 subject.keys = sqlx::query_as("SELECT key,source FROM resource_key WHERE resource_id=$1 AND expires_at>now() ORDER BY key")
                     .bind(id)
                     .fetch_all(pool)

@@ -26,6 +26,7 @@ pub mod cleveland;
 pub mod clinicaltrials;
 pub mod commons;
 pub mod courtlistener;
+pub mod discogs;
 pub mod discourse;
 pub mod docker_hub;
 pub mod ecfr;
@@ -38,6 +39,7 @@ pub mod figshare;
 pub mod forgejo;
 pub mod gbif;
 pub mod ghost;
+pub mod github;
 pub mod gitlab;
 pub mod gleif;
 pub mod govinfo;
@@ -75,6 +77,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &clinicaltrials::ClinicalTrials,
     &commons::Commons,
     &courtlistener::Courtlistener,
+    &discogs::Discogs,
     &discourse::Discourse,
     &docker_hub::DockerHub,
     &ecfr::Ecfr,
@@ -86,6 +89,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &forgejo::Forgejo,
     &gbif::Gbif,
     &ghost::Ghost,
+    &github::Github,
     &gitlab::Gitlab,
     &gleif::Gleif,
     &govinfo::Govinfo,
@@ -170,6 +174,11 @@ pub trait Source: Send + Sync {
         _doc: &ResourceMeta,
     ) -> Result<Option<ResourceMeta>> {
         Ok(None)
+    }
+    /// Whether this source reads its service with the operator's token (`[sources.<name>]
+    /// token`): it is then on only with one, and its links get ordinary web cards without it.
+    fn takes_token(&self) -> bool {
+        false
     }
     /// Whether this source answers for pages behind an access wall (`walled`).
     fn hooks_walls(&self) -> bool {
@@ -408,31 +417,76 @@ impl HostMemo {
     }
 }
 
-/// A source's switch.
+/// A source's switch, and its token for a source that takes one (`Source::takes_token`): a
+/// secret that never appears in logs, errors or `Debug` output.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Switch {
     pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<crate::event::adapters::SecretKey>,
 }
 impl Default for Switch {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            token: None,
+        }
     }
 }
-/// `[sources.<name>]`: every source is on unless its table says `enabled = false`.
+/// `[sources.<name>]`: every source is on unless its table says `enabled = false`; a source that
+/// takes a token is on only with one.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(transparent)]
 pub struct SourcesConfig(pub BTreeMap<String, Switch>);
 impl SourcesConfig {
     pub fn enabled(&self, name: &str) -> bool {
-        self.0.get(name).is_none_or(|s| s.enabled)
+        let needs_token = by_name(name).is_some_and(|s| s.takes_token());
+        match self.0.get(name) {
+            Some(s) => s.enabled && (!needs_token || self.token(name).is_some()),
+            None => !needs_token,
+        }
+    }
+    /// The token of `[sources.<name>]`, when it has a non-empty one.
+    pub fn token(&self, name: &str) -> Option<&str> {
+        self.0.get(name)?.token.as_deref().filter(|t| !t.is_empty())
     }
     pub fn validate(&self) -> Result<()> {
-        for name in self.0.keys() {
-            anyhow::ensure!(by_name(name).is_some(), "unknown source [sources.{name}]");
+        for (name, switch) in &self.0 {
+            let source =
+                by_name(name).ok_or_else(|| anyhow::anyhow!("unknown source [sources.{name}]"))?;
+            if let Some(token) = switch.token.as_deref().filter(|t| !t.is_empty()) {
+                anyhow::ensure!(source.takes_token(), "[sources.{name}] takes no token");
+                anyhow::ensure!(
+                    token.len() <= 256 && token.bytes().all(|b| b.is_ascii_graphic()),
+                    "[sources.{name}] token must be at most 256 printable characters"
+                );
+            }
         }
         Ok(())
     }
+}
+
+/// How often each source's service refused its configured token since the daemon started
+/// (`pinakes_source_token_refusals_total`).
+static TOKEN_REFUSALS: std::sync::Mutex<BTreeMap<&'static str, u64>> =
+    std::sync::Mutex::new(BTreeMap::new());
+/// Count one refusal of `source`'s token.
+pub fn token_refused(source: &'static str) {
+    *TOKEN_REFUSALS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(source)
+        .or_default() += 1;
+}
+/// Every source's token refusals so far.
+pub fn token_refusals() -> Vec<(&'static str, u64)> {
+    TOKEN_REFUSALS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .map(|(k, v)| (*k, *v))
+        .collect()
 }
 
 pub fn by_name(name: &str) -> Option<&'static dyn Source> {
@@ -450,9 +504,14 @@ pub fn enabled_source(uri: &str, config: &Config) -> Option<&'static dyn Source>
 static SWITCHES: std::sync::RwLock<Option<SourcesConfig>> = std::sync::RwLock::new(None);
 
 /// Record the daemon's switches, so a switched-off source's address rules no longer merge links
-/// (its links then get ordinary web cards, as its routes do).
+/// (its links then get ordinary web cards, as its routes do), and its sources' tokens.
 pub fn configure(config: &SourcesConfig) {
     *SWITCHES.write().unwrap_or_else(|e| e.into_inner()) = Some(config.clone());
+}
+/// The token the daemon started with for `source` (`configure`).
+pub fn token(source: &str) -> Option<crate::event::adapters::SecretKey> {
+    let switches = SWITCHES.read().unwrap_or_else(|e| e.into_inner());
+    switches.as_ref()?.token(source).map(Into::into)
 }
 
 /// The static alias root of a source's spelling, from the link alone, while that source is on.
@@ -791,7 +850,7 @@ pub(crate) mod fixture {
             serde_json::from_slice(&read(source, "provenance.json")).unwrap();
         provenance[name]["link"].as_str().unwrap().to_owned()
     }
-    struct PublicDns;
+    pub struct PublicDns;
     #[async_trait::async_trait]
     impl crate::resolver::egress::Dns for PublicDns {
         async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<std::net::SocketAddr>> {
@@ -915,8 +974,13 @@ mod tests {
             alias_root_with(uri, Some(&off)).as_deref(),
             Some("fr:2026-18291")
         );
-        off.0
-            .insert("federal_register".into(), Switch { enabled: false });
+        off.0.insert(
+            "federal_register".into(),
+            Switch {
+                enabled: false,
+                ..Default::default()
+            },
+        );
         assert_eq!(alias_root_with(uri, Some(&off)), None);
     }
 
@@ -928,10 +992,13 @@ mod tests {
             enabled_source(uri, &config).map(|s| s.name()),
             Some("federal_register")
         );
-        config
-            .sources
-            .0
-            .insert("federal_register".into(), Switch { enabled: false });
+        config.sources.0.insert(
+            "federal_register".into(),
+            Switch {
+                enabled: false,
+                ..Default::default()
+            },
+        );
         assert!(enabled_source(uri, &config).is_none());
         assert!(reading(uri).is_some());
         assert!(config.sources.validate().is_ok());

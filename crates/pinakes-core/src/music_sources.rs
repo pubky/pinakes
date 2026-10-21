@@ -30,6 +30,7 @@ use crate::{
     also_on::{Context, Found, Key, Link, Source, Subject},
     hubs::{self, musicbrainz, wikidata, MbKind},
     music::{self, Level, Service},
+    sources::discogs,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -184,13 +185,20 @@ impl MusicBrainzSource {
                 .collect()
         };
         // Exactly one entity at the link's level; several are ambiguous and join nothing,
-        // except releases of one release group.
+        // except releases of one release group. A Discogs master is a release group and a
+        // Discogs release its releases, never across.
+        let discogs = discogs::of_link(&link).map(|(kind, _)| kind);
         let (mut kind, mut ids) = match level {
             Level::Track => (MbKind::Recording, at(MbKind::Recording)),
             Level::Artist => (MbKind::Artist, at(MbKind::Artist)),
-            _ => match at(MbKind::Release) {
-                releases if releases.is_empty() => (MbKind::ReleaseGroup, at(MbKind::ReleaseGroup)),
-                releases => (MbKind::Release, releases),
+            _ => match (discogs, at(MbKind::Release)) {
+                (Some(discogs::Kind::Master), _) => {
+                    (MbKind::ReleaseGroup, at(MbKind::ReleaseGroup))
+                }
+                (None, releases) if releases.is_empty() => {
+                    (MbKind::ReleaseGroup, at(MbKind::ReleaseGroup))
+                }
+                (_, releases) => (MbKind::Release, releases),
             },
         };
         // A track MusicBrainz does not relate the URL to: the one recording its page's own ISRC
@@ -207,8 +215,9 @@ impl MusicBrainzSource {
         // An album MusicBrainz does not relate the URL to: the releases carrying its barcode keys
         // (TIDAL's own record, or a service's from an earlier run), one or editions of one
         // release group, as a related URL would name them. Never a barcode this source keyed
-        // itself: that would re-find a release after an editor removed its URL relation.
-        if level == Level::Album && ids.is_empty() {
+        // itself: that would re-find a release after an editor removed its URL relation. Never
+        // for a Discogs master either: it is a release group, and barcodes name releases.
+        if level == Level::Album && ids.is_empty() && discogs != Some(discogs::Kind::Master) {
             let barcodes: Vec<&str> = subject
                 .keys
                 .iter()
@@ -229,7 +238,33 @@ impl MusicBrainzSource {
         {
             return Ok(Found::default());
         }
-        entities_found(cx, base, kind, &ids, level).await
+        let mut found = entities_found(
+            cx,
+            base,
+            kind,
+            &ids,
+            level,
+            discogs == Some(discogs::Kind::Release),
+        )
+        .await?;
+        // A Discogs master is a release group, whose MusicBrainz entry names no service pages
+        // (its editions have them): the one Wikidata item MusicBrainz relates it to names the
+        // album's, when the item names this release group back. The entity is the read above.
+        if let ([group], Some(discogs::Kind::Master), false) =
+            (ids.as_slice(), discogs, found.keys.is_empty())
+        {
+            if let Some(entity) = musicbrainz::entity(&cx.egress, base, kind, group).await? {
+                let named = hubs::key::mb(MbKind::ReleaseGroup, &entity.mbid);
+                let storefront = &cx.config.also_on.apple_storefront;
+                for mut link in album_item_links(cx, &entity, storefront).await? {
+                    if !found.links.iter().any(|l| l.uri == link.uri) {
+                        link.key.clone_from(&named);
+                        found.links.push(link);
+                    }
+                }
+            }
+        }
+        Ok(found)
     }
 }
 
@@ -281,7 +316,7 @@ impl MusicBrainzEntitySource {
                 MbKind::Artist => Level::Artist,
             };
             let mut found =
-                entities_found(cx, base, kind, std::slice::from_ref(&mbid), level).await?;
+                entities_found(cx, base, kind, std::slice::from_ref(&mbid), level, false).await?;
             // A merged entity answers its old MBID with the one it was merged into: the page keys
             // that one, and keeps the old as a fact, so `key=mbid:{old}` still finds it.
             if found
@@ -304,8 +339,15 @@ impl MusicBrainzEntitySource {
         };
         let mut found = match musicbrainz::isrc(&cx.egress, base, &isrc).await? {
             Some(recordings) if recordings.len() == 1 => {
-                let mut found =
-                    entities_found(cx, base, MbKind::Recording, &recordings, Level::Track).await?;
+                let mut found = entities_found(
+                    cx,
+                    base,
+                    MbKind::Recording,
+                    &recordings,
+                    Level::Track,
+                    false,
+                )
+                .await?;
                 // Its own ISRC first: a recording's other ISRCs are keys only up to a cap.
                 found.keys.retain(|k| k.key != own.key);
                 found.keys.insert(0, own);
@@ -377,6 +419,7 @@ async fn entities_found(
     kind: MbKind,
     ids: &[String],
     level: Level,
+    edition: bool,
 ) -> Result<Found> {
     let mut entities = vec![];
     for id in ids {
@@ -405,8 +448,12 @@ async fn entities_found(
                 .iter()
                 .all(|e| e.release_group.as_ref() == Some(group)) =>
         {
-            key(MbKind::ReleaseGroup, group)
+            // An edition's link (a Discogs release) is not the album: no release group's key.
+            if !edition {
+                key(MbKind::ReleaseGroup, group)
+            }
         }
+        // Releases of different release groups: ambiguous, an edition's link too.
         _ if entities.len() > 1 => return Ok(Found::default()),
         _ => {}
     }
@@ -432,6 +479,7 @@ async fn entities_found(
     let links = |e: &musicbrainz::Entity| -> Vec<Link> {
         e.urls
             .iter()
+            .filter(|u| discogs_fits(&u.url, kind))
             .filter_map(|u| derived(&u.url, level, "musicbrainz"))
             .collect()
     };
@@ -466,6 +514,33 @@ async fn entities_found(
         });
     }
     Ok(found)
+}
+
+/// The album pages of the one Wikidata item a release group's MusicBrainz entry relates it to,
+/// when that item names the release group back (P436) and no other.
+async fn album_item_links(
+    cx: &Context,
+    group: &musicbrainz::Entity,
+    storefront: &str,
+) -> Result<Vec<Link>> {
+    let mut qids: Vec<String> = group
+        .urls
+        .iter()
+        .filter_map(|u| crate::lookups::sources::wikidata_item(&u.url))
+        .collect();
+    qids.sort();
+    qids.dedup();
+    let [qid] = qids.as_slice() else {
+        return Ok(vec![]);
+    };
+    let items = wikidata::items(&cx.egress, std::slice::from_ref(qid)).await?;
+    let Some(item) = items.iter().find(|i| &i.qid == qid) else {
+        return Ok(vec![]);
+    };
+    if !matches!(item.id("P436"), [mbid] if *mbid == group.mbid) {
+        return Ok(vec![]);
+    }
+    Ok(found(item, Level::Album, storefront).links)
 }
 
 /// Deezer's public API: its own record of a Deezer link, and its lookups by ISRC and barcode.
@@ -604,6 +679,19 @@ impl Source for ItunesSource {
         }
         Ok(found)
     }
+}
+
+/// Whether a Discogs page MusicBrainz relates to a `kind` entity is at its level: an artist's
+/// artist, a release group's master, a release's release (any other link: yes).
+fn discogs_fits(url: &str, kind: MbKind) -> bool {
+    discogs::of_uri(url).is_none_or(|(discogs, _)| {
+        matches!(
+            (discogs, kind),
+            (discogs::Kind::Artist, MbKind::Artist)
+                | (discogs::Kind::Master, MbKind::ReleaseGroup)
+                | (discogs::Kind::Release, MbKind::Release)
+        )
+    })
 }
 
 /// What a MusicBrainz entity says about the object: its MBID, ISRCs, barcode (`upc`), artist
@@ -807,6 +895,19 @@ const PROPERTIES: &[(&str, Service, Level, &str)] = &[
         Level::Artist,
         "https://{}.bandcamp.com/",
     ),
+    // An album item names its master; a release (P2206) is an edition's (`property_of`).
+    (
+        "P1953",
+        Service::Discogs,
+        Level::Artist,
+        "https://www.discogs.com/artist/{}",
+    ),
+    (
+        "P1954",
+        Service::Discogs,
+        Level::Album,
+        "https://www.discogs.com/master/{}",
+    ),
 ];
 /// The MusicBrainz property of each level, whose values become keys.
 fn mb_property(level: Level) -> (&'static str, MbKind) {
@@ -857,15 +958,24 @@ impl WikidataSource {
         let (Some(property), Some(level)) = (property_of(&link), join_level(&link)) else {
             return Ok(Found::default());
         };
-        let item = match wikidata::item_with(&cx.egress, property, &link.id).await? {
+        // A Discogs ID is the number alone.
+        let id = discogs::of_link(&link).map_or(link.id.clone(), |(_, id)| id.to_string());
+        let item = match wikidata::item_with(&cx.egress, property, &id).await? {
             wikidata::Found::One(item) => item,
             _ => return Ok(Found::default()),
         };
+        // An item with a Discogs release is an edition's only when it is not the album's.
+        if property == DISCOGS_RELEASE && ["P1954", "P436"].iter().any(|p| !item.id(p).is_empty()) {
+            return Ok(Found::default());
+        }
         Ok(found(&item, level, &cx.config.also_on.apple_storefront))
     }
 }
 /// The Wikidata property for a link's own service ID, if Wikidata has one.
 fn property_of(link: &music::Link) -> Option<&'static str> {
+    if discogs::of_link(link).is_some_and(|(kind, _)| kind == discogs::Kind::Release) {
+        return Some(DISCOGS_RELEASE);
+    }
     PROPERTIES
         .iter()
         .find(|(_, service, level, _)| *service == link.service && *level == link.level)
@@ -877,6 +987,8 @@ fn property_of(link: &music::Link) -> Option<&'static str> {
 fn recording_item(item: &wikidata::Item) -> bool {
     item.id("P4404").len() == 1 && item.id("P435").is_empty()
 }
+/// Wikidata's Discogs release ID.
+const DISCOGS_RELEASE: &str = "P2206";
 /// An item's keys and same-level links; at track level only a recording item's.
 pub fn found(item: &wikidata::Item, level: Level, storefront: &str) -> Found {
     let mut found = Found::default();
@@ -945,11 +1057,31 @@ mod tests {
         .is_none());
         // Not a music service: no link.
         assert!(derived(
-            "https://www.discogs.com/release/11993641",
+            "https://www.allmusic.com/album/mw0000024289",
             Level::Album,
             "x"
         )
         .is_none());
+        // Discogs at its level: a release group's master, a release's release, never across.
+        let (release, master) = (
+            "https://www.discogs.com/release/11993641",
+            "https://www.discogs.com/master/21491",
+        );
+        assert!(derived(release, Level::Album, "x").is_some());
+        assert!(derived(release, Level::Artist, "x").is_none());
+        assert!(discogs_fits(release, MbKind::Release));
+        assert!(!discogs_fits(release, MbKind::ReleaseGroup));
+        assert!(discogs_fits(master, MbKind::ReleaseGroup));
+        assert!(!discogs_fits(master, MbKind::Release));
+        assert!(discogs_fits(
+            "https://www.discogs.com/artist/3840",
+            MbKind::Artist
+        ));
+        assert!(discogs_fits("https://tidal.com/album/1", MbKind::Release));
+        let release = music::parse(release).unwrap();
+        assert_eq!(property_of(&release), Some("P2206"));
+        let master = music::parse(master).unwrap();
+        assert_eq!(property_of(&master), Some("P1954"));
         let link = derived(
             "https://music.apple.com/gb/album/ok-computer/1097861387",
             Level::Album,

@@ -1,0 +1,47 @@
+{
+  "artist-3840": {
+    "bytes": 18959,
+    "content_type": "application/json",
+    "file": "artist-3840.json",
+    "recorded_at": "2026-10-20T01:25:29+00:00",
+    "sha256": "94be6328bbcb70db2653d656d4b5f5a3e1c94c831c8de3ff1e673f6d1a1ecd16",
+    "status": 200,
+    "url": "https://api.discogs.com/artists/3840"
+  },
+  "master-21491": {
+    "bytes": 16713,
+    "content_type": "application/json",
+    "file": "master-21491.json",
+    "recorded_at": "2026-10-20T01:25:32+00:00",
+    "sha256": "4d6a1e6652600e40e63b695966f72a98a5ba5830ea96e5abba33a8fe6a7e09b9",
+    "status": 200,
+    "url": "https://api.discogs.com/masters/21491"
+  },
+  "master-missing": {
+    "bytes": 74,
+    "content_type": "application/json",
+    "file": "master-missing.json",
+    "recorded_at": "2026-10-20T01:25:42+00:00",
+    "sha256": "9900530fbf97096469bdcd775b1db7a69dbff23dba9bb89320d9527b12696680",
+    "status": 404,
+    "url": "https://api.discogs.com/masters/999999999"
+  },
+  "release-36457659": {
+    "bytes": 6893,
+    "content_type": "application/json",
+    "file": "release-36457659.json",
+    "recorded_at": "2026-10-20T01:25:39+00:00",
+    "sha256": "5fb3284d9eaf262f8fb420a5ccd1b2f1702b0cf37bfb67687ecc7753336b6741",
+    "status": 200,
+    "url": "https://api.discogs.com/releases/36457659"
+  },
+  "release-83182": {
+    "bytes": 51620,
+    "content_type": "application/json",
+    "file": "release-83182.json",
+    "recorded_at": "2026-10-20T01:25:36+00:00",
+    "sha256": "b53ae7ef77c198d1d8342b9038ff27cf0bc4bfbed7accca85d309bcb7baab082",
+    "status": 200,
+    "url": "https://api.discogs.com/releases/83182"
+  }
+}

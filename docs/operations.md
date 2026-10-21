@@ -187,6 +187,10 @@ The official-API sources ([docs/sources](sources/README.md)) run on the `officia
 (`[cards.official]`), each with its own switch, `[sources.<name>] enabled` (on by default;
 `PINAKES__SOURCES__<NAME>__ENABLED=false`); a switched-off source's links get ordinary web cards
 and its address rules no longer merge new links (links it merged before stay merged). A source
+that reads with the operator's token (`github`: `[sources.github] token` or `PINAKES_GITHUB_TOKEN`)
+is on only with one. Its token is a secret, sent only to its service's API and never through a
+redirect. A token the service refuses (401) switches the source off until restart, and
+`pinakes_source_token_refusals_total{source}` counts each refusal (Discogs' token too). A source
 lowers its service's host to the service's published rate (never above
 `limits.host_requests_per_second`) unless `limits.host_rates` names the host, and a request that
 would wait more than five seconds for its host (its slot, or the request ahead of it) is retried
@@ -470,6 +474,11 @@ After an upgrade that adds also-on sources (the media sources brought `books`, `
 `pinakesd --config <path> reextract also-on` (or `reextract all`, which includes it): until then
 links already stored keep the results of their last run, without the new source's, for up to its
 lifetime (30 days).
+After the upgrade that names cards after their service (the places, papers, software, games and
+archives sources: `Wikidata`, `OpenStreetMap`, `Google Play`, `DOI`, …), run `reextract all`:
+cards stored before keep the raw host as their `site` (`www.wikidata.org`, `f-droid.org`) and
+record no service, so a tagged member and a derived link of one service can both show, until each
+card is fetched again.
 
 The also-on worker runs every enabled source that applies to a resource ([the API](api.md#also-on))
 after a save that changed its document or status, and again when the shortest lifetime among
@@ -486,9 +495,21 @@ cards, so a tagged link an exact derivation names no longer joins by it either;
 `[also_on.sources.<id>] enabled = false` turns one source off and `enabled = true` turns on one
 that is off by default (an unknown ID stops startup). Sources run in a fixed order, and each
 sees the keys the ones before it found in the same run (a barcode MusicBrainz names, then the
-services looked up by it); a source that no longer applies (its key is gone) drops its rows.
-The sources, in the order they run, are `service`, `tidal`, `musicbrainz`, `musicbrainz_entity`,
-`wikidata`, `deezer` and `itunes` (music), `wikipedia`, `wikidata_item`, `books`, `films`, `podcasts` and `titles`
+services looked up by it); a source that no longer applies (its key is gone) drops its rows. A
+source that fails or panics keeps its earlier rows and retries with backoff; the others' results
+stand and the worker goes on (a panic is logged as an error). A source that asks a secondary
+service besides its own (DataCite and Crossref for a paper, ProtonDB, PCGamingWiki and GOG for a
+game, the provenance reads and deps.dev for a package, Software Heritage for a repository, the
+Federal Register API, Discogs' record for a release) keeps what the link and the other services
+gave when that service fails: the link's own key is recorded, the failure is counted in
+`pinakes_also_on_service_errors_total{service,class}`, and the run asks again after the
+service's retry time (fifteen minutes unless it said otherwise) instead of after the source's
+lifetime.
+The sources, in the order they run, are `service`, `tidal`, `musicbrainz`, `musicbrainz_entity`, `wikidata`,
+`discogs`, `deezer` and `itunes` (music), `wikipedia`, `wikidata_item`, `books`, `films`, `podcasts`
+and `titles`, `osm_wikidata`, `wikidata_osm` and `btcmap` (places), `federal_register`, `unpaywall`,
+`ncbi`, `datacite` and `huggingface` (papers), `crates`, `npm`, `pypi` and `software_heritage`
+(software), `steam` and `wikidata_stores` (games and apps) and `wayback` (archived copies)
 ([the API](api.md#also-on) says what each reads); `[also_on] apple_storefront` (`us`, a
 two-letter country code) is the Apple Music, Apple Books and Apple Podcasts storefront of the
 Apple links they build. `[also_on.sources.musicbrainz] base_url`
@@ -506,7 +527,7 @@ for an album with barcodes, and two Wikidata requests (a search by its service I
 each Wikipedia article one request to its Wikipedia and one to Wikidata; each MusicBrainz page
 one request for its entity (an ISRC's page one more for the ISRC; MusicBrainz has no lookup of
 several entities at once, and a read the card already made is taken from the cache) and one for a
-recording's original album; each book one Open Library
+recording's original album; each tagged OSM object one Wikidata request; each book one Open Library
 request, one iTunes lookup for an ebook edition, and two Wikidata requests when Open Library names
 its work; each podcast show one iTunes lookup, two or three Podcast Index requests (the last asks
 who owns the show's GUID), its feed (usually still cached from its card) and two Wikidata requests;
@@ -516,7 +537,19 @@ Podcast Index only when one item of it with audio or video is that page; each fi
 Wikidata requests (a TVmaze show first its TVmaze record), and a Letterboxd and a TVmaze request
 when the item has no link there; each TMDB, Trakt, Netflix, Goodreads, Letterboxd or IMDb page
 (`titles`) the item's search and read (usually cached already) and one request for its English
-label. `deezer` is off by default: Deezer's API terms allow
+label; each DOI one request each to Unpaywall, the NCBI ID Converter and DataCite, and one to
+Crossref when DataCite names its preprint (an arXiv paper one to DataCite, and one to Crossref when
+DataCite names its journal version); each package
+one registry request, a PyPI package up to two more for its files' provenance, an npm package one
+more for its attestations, and one to deps.dev when the registry names no provenance; each Steam game
+up to four (ProtonDB, PCGamingWiki, GOG GamesDB, GOG); each store link two Wikidata requests; each
+gone page one Wayback CDX request; each Discogs release one Discogs request (the one its card
+makes), and a Discogs master one Wikidata request (the item MusicBrainz relates its release group
+to). Requests that several sources make (an item, a record) are
+shared through the discovery cache. `btcmap` keeps BTC Map's place list in memory, brought up to
+date at most hourly from its sync (`updated_since`, 2,000 places a page); after a restart the
+first lookup reads it again. `unpaywall` and `ncbi` need the contact setting (`[http] contact`)
+and find nothing without it. `deezer` is off by default: Deezer's API terms allow
 non-commercial use only, so turn it on
 (`[also_on.sources.deezer] enabled = true`) only where they do; it costs one request per Deezer
 link and up to two per other track or album with an ISRC or barcode. `tidal` costs a token
@@ -559,8 +592,10 @@ Sources reach their services through the egress policy and its per-host budgets,
 at a time per host. A hub's published limit lowers its host's default pace like a source's own
 (`limits.host_rates` names a host's rate outright): MusicBrainz 1 request/s, Deezer 10/s, TIDAL's API 2/s (TIDAL publishes no figure),
 Wikimedia (`www.wikidata.org`, `*.wikipedia.org`, `commons.wikimedia.org`) 200/min, Open
-Library 3/s, iTunes about 20/min, TVmaze 20 per 10 s, crates.io 1/s, Crossref 10/s, Software Heritage
-120/h; a limit above `limits.host_requests_per_second` (1/s) leaves the default.
+Library 3/s, iTunes about 20/min, TVmaze 20 per 10 s, crates.io 1/s, Crossref 10/s, NCBI's ID
+Converter 3/s, Software Heritage 120/h, the Wayback Machine one request every 2 s (its CDX API asks
+for it; the pace covers the host, so a tagged capture's card waits behind the lookups too); a limit
+above `limits.host_requests_per_second` (1/s) leaves the default.
 
 ## Groups
 

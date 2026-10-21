@@ -435,6 +435,38 @@ async fn fixture(pool: &PgPool) {
             .unwrap();
             pinakes_core::groups::reconcile(pool, &id, &Default::default()).await;
         }
+        // A place's keys as `osm_wikidata` records them, and a Federal Register document's.
+        for (uri, source, keys) in [
+            (
+                "https://www.openstreetmap.org/node/240109189",
+                "osm_wikidata",
+                vec![
+                    key("osm:node/240109189", "wikidata"),
+                    key("wikidata:Q64", "wikidata"),
+                ],
+            ),
+            (
+                "fr:2026-18291",
+                "federal_register",
+                vec![key("fr:2026-18291", "federalregister")],
+            ),
+        ] {
+            let id = identity(uri).unwrap().0;
+            also_on::record(
+                pool,
+                &id,
+                source,
+                Found {
+                    keys,
+                    ..Default::default()
+                },
+                std::time::Duration::from_secs(30 * 86400),
+                &AlsoOnConfig::default(),
+            )
+            .await
+            .unwrap();
+            pinakes_core::groups::reconcile(pool, &id, &Default::default()).await;
+        }
         pinakes_core::groups::drain(pool, &Default::default(), 100)
             .await
             .unwrap();
@@ -462,6 +494,7 @@ async fn fixture(pool: &PgPool) {
                 "books",
                 Found {
                     reread: false,
+                    retry_after: None,
                     keys: vec![
                         key("openlibrary:edition:OL7353617M", "openlibrary"),
                         key("openlibrary:work:OL45804W", "openlibrary"),
@@ -482,6 +515,7 @@ async fn fixture(pool: &PgPool) {
                 "podcasts",
                 Found {
                     reread: false,
+                    retry_after: None,
                     keys: vec![
                         key("podcast:apple:1200361736", "itunes"),
                         key(
@@ -508,6 +542,7 @@ async fn fixture(pool: &PgPool) {
                 "films",
                 Found {
                     reread: false,
+                    retry_after: None,
                     keys: vec![key("imdb:tt0111161", "imdb")],
                     facts: vec![
                         Fact::new("wikidata", "Q172241"),

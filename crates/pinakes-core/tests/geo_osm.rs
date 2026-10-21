@@ -1243,7 +1243,7 @@ async fn an_osm_member_keeps_its_own_card_and_the_group_holds_no_osm_fact(pool: 
     assert_eq!(doc["group"], json!({"id": id, "size": 2}));
     assert_eq!(
         doc["also_on"],
-        json!([{"id": osm_id, "uri": node, "site": "www.openstreetmap.org"}])
+        json!([{"id": osm_id, "uri": node, "site": "OpenStreetMap"}])
     );
     // The group read lists both members' own cards; the OSM card carries its facts and credit.
     let (_, _, read) = call(&app, &format!("/v1/groups/{id}"), None).await;

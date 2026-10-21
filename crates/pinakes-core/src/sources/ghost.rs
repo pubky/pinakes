@@ -343,8 +343,13 @@ mod tests {
                 .await;
         assert_eq!(doc.source, "ghost");
         let mut off = crate::sources::SourcesConfig::default();
-        off.0
-            .insert("ghost".into(), crate::sources::Switch { enabled: false });
+        off.0.insert(
+            "ghost".into(),
+            crate::sources::Switch {
+                enabled: false,
+                ..Default::default()
+            },
+        );
         let doc = crate::sources::page_hooks_with(
             &egress,
             PAGE,

@@ -506,6 +506,12 @@ async fn answers_are_checked_and_bounded(pool: PgPool) {
     assert!(also_on::valid_key("mb:release-group:1f2e"));
     assert!(also_on::valid_key("wikidata:Q42"));
     assert!(!also_on::valid_key("MB:x"));
+    // A value may hold `:` (a DOI); the namespace before it is still checked.
+    assert!(also_on::valid_key("doi:10.46298/lmcs-20(1:8)2024"));
+    assert!(!also_on::valid_key("Doi:10.46298/lmcs-20(1:8)2024"));
+    assert!(!also_on::valid_key("doi:"));
+    assert!(!also_on::valid_key(":10.1000/x"));
+    assert!(!also_on::valid_key("doi:10.1000/a b"));
 }
 
 /// A saved document makes its sources due; an unchanged refetch does not; an alias never runs;
@@ -1164,6 +1170,529 @@ async fn a_shared_q_id_never_joins_two_recordings(pool: PgPool) {
     let metrics = pinakes_core::telemetry::Metrics::new().unwrap();
     metrics.refresh(&pool).await.unwrap();
     assert!(metrics.group_key_conflicts.get() > 0);
+}
+
+/// The lookups' own namespaces name one object each too: an OSM object, a crate, a Steam game.
+/// Two of them sharing a second key (an item naming a node and a relation, one repository behind
+/// two crates, an item with two appids) never share a group.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_shared_key_never_joins_two_places_crates_or_games(pool: PgPool) {
+    let hub = Fake::new("lookups");
+    let cases = [
+        [
+            (
+                "https://example.org/node",
+                vec!["osm:node/240109189", "wikidata:Q64"],
+            ),
+            (
+                "https://example.org/relation",
+                vec!["osm:relation/62422", "wikidata:Q64"],
+            ),
+        ],
+        [
+            (
+                "https://example.org/rand",
+                vec!["crate:rand", "repo:github.com/rust-random/rand"],
+            ),
+            (
+                "https://example.org/rand-core",
+                vec!["crate:rand-core", "repo:github.com/rust-random/rand"],
+            ),
+        ],
+        [
+            ("https://example.org/app-1", vec!["steam:1", "wikidata:Q2"]),
+            ("https://example.org/app-2", vec!["steam:2", "wikidata:Q2"]),
+        ],
+    ];
+    let mut pairs = vec![];
+    for pair in &cases {
+        let mut ids = vec![];
+        for (uri, keys) in pair {
+            ids.push(page(&pool, uri, "Thing").await);
+            hub.answer(
+                uri,
+                Ok(Found {
+                    keys: keys.iter().map(|k| key(k)).collect(),
+                    ..Default::default()
+                }),
+            );
+        }
+        pairs.push(ids);
+    }
+    let sources: Vec<Arc<dyn Source>> = vec![hub];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    for ids in pairs {
+        let groups: Vec<Option<String>> = sqlx::query_scalar(
+            "SELECT g.group_id FROM unnest($1::text[]) i(id) LEFT JOIN group_unit g ON g.resource_id=i.id",
+        )
+        .bind(&ids)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(
+            groups[0].is_none() || groups[0] != groups[1],
+            "{ids:?} share {groups:?}"
+        );
+    }
+    // Grouping ran and refused the joins (the pairs share a key), so the check above is not
+    // vacuous.
+    let refused: i64 = sqlx::query_scalar("SELECT count(*) FROM group_input WHERE key_conflicts>0")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(refused >= 3, "{refused}");
+}
+
+/// BTC Map's merchant page names one OSM object: an object it lists carries its own `osm:` key,
+/// and its merchant link names that key, so the tagged merchant link joins the object.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_tagged_btc_map_link_joins_its_osm_object(pool: PgPool) {
+    let way = "https://example.org/way-259338174";
+    let merchant = "https://btcmap.org/merchant/way:259338174";
+    let x = page(&pool, way, "LAC Lugano").await;
+    let y = page(&pool, merchant, "LAC Lugano").await;
+    let btcmap = Fake::new("btcmap");
+    btcmap.answer(
+        way,
+        Ok(Found {
+            keys: vec![key("osm:way/259338174")],
+            links: vec![Link::new(merchant, "BTC Map", "btcmap").keyed("osm:way/259338174")],
+            ..Default::default()
+        }),
+    );
+    let sources: Vec<Arc<dyn Source>> = vec![btcmap];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let groups: Vec<Option<String>> = sqlx::query_scalar(
+        "SELECT g.group_id FROM unnest($1::text[]) i(id) LEFT JOIN group_unit g ON g.resource_id=i.id",
+    )
+    .bind([x, y])
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(groups[0].is_some());
+    assert_eq!(groups[0], groups[1]);
+}
+
+/// One entry per service on any card: a tagged member named after a service a derived link
+/// names takes that service's place; a tagged member of another site still shows.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_tagged_member_and_a_derived_link_of_one_service_show_once(pool: PgPool) {
+    let app_page = |uri: &'static str, site: &'static str| {
+        let pool = pool.clone();
+        async move {
+            let id = store::ensure_resource(&pool, uri).await.unwrap();
+            let mut d = ResourceMeta::new(uri, "web", 86400);
+            d.name = Some("Mindustry".into());
+            d.site = site.into();
+            // As the save path records it: the service its URL is on, if any.
+            d.service = (!uri.starts_with("https://example.org/")).then(|| site.to_owned());
+            d.set_type("SoftwareApplication");
+            store::save_document(&pool, &id, 0, &d).await.unwrap();
+            id
+        }
+    };
+    let play = "https://play.google.com/store/apps/details?id=io.anuke.mindustry";
+    let fdroid = "https://f-droid.org/en/packages/io.anuke.mindustry/";
+    let blog = "https://example.org/mindustry";
+    let card = app_page(play, "Google Play").await;
+    app_page(fdroid, "F-Droid").await;
+    app_page(blog, "Example").await;
+    let hub = Fake::new("stores");
+    for uri in [play, fdroid, blog] {
+        hub.answer(
+            uri,
+            Ok(Found {
+                keys: vec![key("wikidata:Q1")],
+                links: if uri == play {
+                    vec![
+                        Link::new(
+                            "https://f-droid.org/packages/io.anuke.mindustry",
+                            "F-Droid",
+                            "wikidata",
+                        ),
+                        Link::new(
+                            "https://store.steampowered.com/app/1127400/",
+                            "Steam",
+                            "wikidata",
+                        ),
+                    ]
+                } else {
+                    vec![]
+                },
+                ..Default::default()
+            }),
+        );
+    }
+    let sources: Vec<Arc<dyn Source>> = vec![hub];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let read = get(&app, &format!("/v1/resources/{card}")).await;
+    let mut shown: Vec<String> = read["also_on"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            format!(
+                "{} {} {}",
+                e["site"].as_str().unwrap(),
+                e["uri"].as_str().unwrap(),
+                e["derived"] == true
+            )
+        })
+        .collect();
+    shown.sort();
+    assert_eq!(
+        shown,
+        [
+            format!("Example {blog} false"),
+            format!("F-Droid {fdroid} false"),
+            "Steam https://store.steampowered.com/app/1127400/ true".to_owned(),
+        ]
+    );
+    // The details list both F-Droid pages.
+    assert_eq!(read["details"]["also_on"].as_array().unwrap().len(), 4);
+}
+
+/// `key=doi:` finds the DOI card by its own DOI, and the preprint its publisher names, as the
+/// `datacite` source keys them (the card: its DOI and the preprint's arXiv ID; the preprint: its
+/// arXiv ID and the corroborated journal DOI). A DOI holding `:` and any letter case.
+#[sqlx::test(migrations = "../../migrations")]
+async fn search_by_doi_finds_the_card_and_its_preprint(pool: PgPool) {
+    let journal = "doi:10.46298/lmcs-20(1:8)2024";
+    let preprint = "https://arxiv.org/abs/2302.04668";
+    let other = "doi:10.1038/nature12373";
+    let datacite = Fake::new("datacite");
+    let mut ids = vec![];
+    for (uri, keys) in [
+        (
+            journal,
+            vec!["doi:10.46298/lmcs-20(1:8)2024", "arxiv:2302.04668"],
+        ),
+        (
+            preprint,
+            vec!["arxiv:2302.04668", "doi:10.46298/lmcs-20(1:8)2024"],
+        ),
+        (other, vec!["doi:10.1038/nature12373"]),
+    ] {
+        ids.push(page(&pool, uri, "Paper").await);
+        datacite.answer(
+            uri,
+            Ok(Found {
+                keys: keys
+                    .into_iter()
+                    .map(|k| Key {
+                        key: k.into(),
+                        via: "datacite".into(),
+                    })
+                    .collect(),
+                ..Default::default()
+            }),
+        );
+    }
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) SELECT id,repeat('a',52),'tag','/pub/test/tags/'||id,'paper',now() FROM unnest($1::text[]) id")
+        .bind(&ids)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let sources: Vec<Arc<dyn Source>> = vec![datacite];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let found = |key: &str| {
+        let app = app.clone();
+        let path = format!("/v1/search?key={}", urlencoding(key));
+        async move {
+            let mut rows: Vec<String> = get(&app, &path).await["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["id"].as_str().unwrap().to_owned())
+                .collect();
+            rows.sort();
+            rows
+        }
+    };
+    let mut pair = ids[..2].to_vec();
+    pair.sort();
+    assert_eq!(found("doi:10.46298/LMCS-20(1:8)2024").await, pair);
+    assert_eq!(found("doi:10.1038/nature12373").await, [ids[2].clone()]);
+}
+fn urlencoding(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// Two tagged spellings of one F-Droid page share its slot even when the derived F-Droid link is
+/// one of them (and is therefore dropped as a member before the slots are counted).
+#[sqlx::test(migrations = "../../migrations")]
+async fn two_tagged_spellings_of_a_derived_link_show_once(pool: PgPool) {
+    let app_page = |uri: &'static str, site: &'static str| {
+        let pool = pool.clone();
+        async move {
+            let id = store::ensure_resource(&pool, uri).await.unwrap();
+            let mut d = ResourceMeta::new(uri, "web", 86400);
+            d.name = Some("Mindustry".into());
+            d.site = site.into();
+            // As the save path records it: the service its URL is on, if any.
+            d.service = (!uri.starts_with("https://example.org/")).then(|| site.to_owned());
+            d.set_type("SoftwareApplication");
+            store::save_document(&pool, &id, 0, &d).await.unwrap();
+            id
+        }
+    };
+    let play = "https://play.google.com/store/apps/details?id=io.anuke.mindustry";
+    let canonical = "https://f-droid.org/packages/io.anuke.mindustry";
+    let localized = "https://f-droid.org/en/packages/io.anuke.mindustry/";
+    let card = app_page(play, "Google Play").await;
+    app_page(canonical, "F-Droid").await;
+    app_page(localized, "F-Droid").await;
+    let hub = Fake::new("stores");
+    for uri in [play, canonical, localized] {
+        hub.answer(
+            uri,
+            Ok(Found {
+                keys: vec![key("wikidata:Q1")],
+                links: if uri == play {
+                    vec![Link::new(canonical, "F-Droid", "wikidata")]
+                } else {
+                    vec![]
+                },
+                ..Default::default()
+            }),
+        );
+    }
+    let sources: Vec<Arc<dyn Source>> = vec![hub];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let read = get(&app, &format!("/v1/resources/{card}")).await;
+    let sites: Vec<&str> = read["also_on"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["site"].as_str().unwrap())
+        .collect();
+    assert_eq!(sites, ["F-Droid"]);
+}
+
+/// A page that only names itself after a service (its own `og:site_name`) takes no service's
+/// place: the derived link to the real service still shows.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_page_naming_itself_after_a_service_takes_no_slot(pool: PgPool) {
+    let save = |uri: &'static str, site: &'static str, service: Option<&'static str>| {
+        let pool = pool.clone();
+        async move {
+            let id = store::ensure_resource(&pool, uri).await.unwrap();
+            let mut d = ResourceMeta::new(uri, "web", 86400);
+            d.name = Some("Mindustry".into());
+            d.site = site.into();
+            d.service = service.map(str::to_owned);
+            d.set_type("SoftwareApplication");
+            store::save_document(&pool, &id, 0, &d).await.unwrap();
+            id
+        }
+    };
+    let play = "https://play.google.com/store/apps/details?id=io.anuke.mindustry";
+    let impostor = "https://example.org/mindustry-on-fdroid";
+    let card = save(play, "Google Play", Some("Google Play")).await;
+    save(impostor, "F-Droid", None).await;
+    let hub = Fake::new("stores");
+    for uri in [play, impostor] {
+        hub.answer(
+            uri,
+            Ok(Found {
+                keys: vec![key("wikidata:Q1")],
+                links: if uri == play {
+                    vec![Link::new(
+                        "https://f-droid.org/packages/io.anuke.mindustry",
+                        "F-Droid",
+                        "wikidata",
+                    )]
+                } else {
+                    vec![]
+                },
+                ..Default::default()
+            }),
+        );
+    }
+    let sources: Vec<Arc<dyn Source>> = vec![hub];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let read = get(&app, &format!("/v1/resources/{card}")).await;
+    let entries: Vec<(String, bool)> = read["also_on"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| (e["uri"].as_str().unwrap().to_owned(), e["derived"] == true))
+        .collect();
+    assert!(
+        entries.contains(&(impostor.to_owned(), false)),
+        "{entries:?}"
+    );
+    assert!(
+        entries.contains(&(
+            "https://f-droid.org/packages/io.anuke.mindustry".to_owned(),
+            true
+        )),
+        "{entries:?}"
+    );
+}
+
+/// A run whose secondary service failed is recorded (its keys stand) and comes back after the
+/// retry time the source asked for, not after its lifetime.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_failed_secondary_service_brings_the_next_run_forward(pool: PgPool) {
+    let uri = "https://example.org/paper";
+    let id = page(&pool, uri, "Paper").await;
+    let hub = Fake::new("datacite");
+    hub.answer(
+        uri,
+        Ok(Found {
+            keys: vec![key("doi:10.1000/x")],
+            retry_after: Some(Duration::from_secs(120)),
+            ..Default::default()
+        }),
+    );
+    let sources: Vec<Arc<dyn Source>> = vec![hub];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    let (keys, due_in, attempts, error): (i64, f64, i32, Option<String>) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM resource_key WHERE resource_id=d.resource_id),extract(epoch FROM d.next_attempt_at-now())::float8,d.attempts,d.last_error FROM also_on_dirty d WHERE d.resource_id=$1",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((keys, attempts, error), (1, 0, None));
+    assert!((0.0..=125.0).contains(&due_in), "{due_in}");
+}
+
+/// A page that only types itself as music and names a service (its own JSON-LD) is on no
+/// service: it takes no service's place on the group's cards, and its own card hides no derived
+/// link of the service it names.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_music_typed_impostor_takes_no_slot_and_hides_nothing(pool: PgPool) {
+    let tidal = "https://tidal.com/track/534050211";
+    let impostor = "https://example.org/song";
+    let spotify = "https://open.spotify.com/track/2OBofMJx94NryV2SK8p8Zf";
+    let mut ids = vec![];
+    for (uri, site) in [(tidal, "TIDAL"), (impostor, "Spotify")] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "web", 86400);
+        d.name = Some("Song".into());
+        d.site = site.into();
+        d.set_type("MusicRecording");
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.push(id);
+    }
+    let hub = Fake::new("music");
+    for uri in [tidal, impostor] {
+        hub.answer(
+            uri,
+            Ok(Found {
+                keys: vec![key("wikidata:Q1")],
+                links: if uri == tidal {
+                    vec![Link::new(spotify, "Spotify", "musicbrainz")]
+                } else {
+                    vec![]
+                },
+                ..Default::default()
+            }),
+        );
+    }
+    let sources: Vec<Arc<dyn Source>> = vec![hub];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    for id in &ids {
+        let read = get(&app, &format!("/v1/resources/{id}")).await;
+        let entries: Vec<(String, bool)> = read["also_on"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| (e["uri"].as_str().unwrap().to_owned(), e["derived"] == true))
+            .collect();
+        assert!(
+            entries.contains(&(spotify.to_owned(), true)),
+            "{id}: {entries:?}"
+        );
+    }
+}
+
+/// A source that panics on every lookup, as a parser meeting an unexpected shape would.
+struct Panics;
+#[async_trait]
+impl Source for Panics {
+    fn id(&self) -> &'static str {
+        "panics"
+    }
+    fn applies(&self, _: &Subject) -> bool {
+        true
+    }
+    async fn prefetch(&self, _: &Context, _: &[String]) {
+        panic!("a prefetch that panics");
+    }
+    async fn lookup(&self, _: &Context, _: &Subject) -> anyhow::Result<Found> {
+        panic!("a lookup that panics");
+    }
+}
+
+/// A panicking source fails its run like an error: the sources after it still record, the
+/// resource retries with backoff, and the worker drains the next resource.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_panicking_source_never_stops_the_worker(pool: PgPool) {
+    let (a, b) = ("https://example.org/a", "https://example.org/b");
+    let ids = [page(&pool, a, "A").await, page(&pool, b, "B").await];
+    let hub = Fake::new("music");
+    for uri in [a, b] {
+        hub.answer(
+            uri,
+            Ok(Found {
+                keys: vec![key("wikidata:Q1")],
+                ..Default::default()
+            }),
+        );
+    }
+    let sources: Vec<Arc<dyn Source>> = vec![Arc::new(Panics), hub.clone()];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    assert_eq!(
+        hub.calls.lock().unwrap().len(),
+        2,
+        "the source after it ran for both"
+    );
+    let rows: Vec<(i32, Option<String>, i64)> = sqlx::query_as(
+        "SELECT d.attempts,d.last_error,(SELECT count(*) FROM resource_key k WHERE k.resource_id=d.resource_id) FROM also_on_dirty d WHERE resource_id=ANY($1) ORDER BY resource_id",
+    )
+    .bind(&ids)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    for (attempts, error, keys) in rows {
+        assert_eq!((attempts, keys), (1, 1));
+        assert!(error.is_some());
+    }
 }
 
 /// Looks up the barcodes the sources before it found, like iTunes: one keyed link each. Off by

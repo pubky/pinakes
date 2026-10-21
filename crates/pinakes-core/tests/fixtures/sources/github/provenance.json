@@ -1,0 +1,21 @@
+{
+  "repo-missing": {
+    "bytes": 118,
+    "content_type": "application/json",
+    "file": "repo-missing.json",
+    "recorded_at": "2026-10-20T21:10:06+00:00",
+    "sha256": "4f50e254a719a6b1b06b529bdaa08980e4acf0878aad0090cba7771f6ebdf0b9",
+    "status": 404,
+    "url": "https://api.github.com/repos/pubky/pinakes-no-such-repo"
+  },
+  "repo-ripgrep": {
+    "bytes": 5422,
+    "content_type": "application/json",
+    "file": "repo-ripgrep.json",
+    "note": "Recorded without a token (public repository).",
+    "recorded_at": "2026-10-20T21:10:05+00:00",
+    "sha256": "2940d57aaf88d2ce202aebf1b66376fb35288414bdae357616e6b6aa2d07d869",
+    "status": 200,
+    "url": "https://api.github.com/repos/BurntSushi/ripgrep"
+  }
+}

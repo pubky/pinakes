@@ -48,7 +48,11 @@
   {
     "kind": "federal_register",
     "uri": "fr:2026-18291",
-    "type": "Legislation"
+    "type": "Legislation",
+    "derived": [
+      "GovInfo",
+      "Regulations.gov"
+    ]
   },
   {
     "kind": "federal_register_page",
@@ -455,5 +459,53 @@
     "uri": "https://podcastindex.org/podcast/577105",
     "type": "PodcastSeries",
     "name": "Darknet Diaries"
+  },
+  {
+    "kind": "place",
+    "uri": "https://www.openstreetmap.org/node/240109189",
+    "type": "City",
+    "derived": [
+      "Wikidata",
+      "Wikipedia (en)"
+    ]
+  },
+  {
+    "kind": "discogs_master",
+    "uri": "https://www.discogs.com/master/21491-Radiohead-OK-Computer",
+    "type": "MusicAlbum",
+    "derived": [
+      "Apple Music"
+    ]
+  },
+  {
+    "kind": "discogs_album",
+    "uri": "https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE",
+    "type": "MusicAlbum",
+    "group_with": "discogs_master"
+  },
+  {
+    "kind": "discogs_artist",
+    "uri": "https://www.discogs.com/artist/3840-Radiohead",
+    "type": "MusicGroup",
+    "derived": [
+      "Deezer"
+    ]
+  },
+  {
+    "kind": "discogs_artist_spotify",
+    "uri": "https://open.spotify.com/artist/4Z8W4fKeB5YxbusRsdQVPb",
+    "type": "MusicGroup",
+    "group_with": "discogs_artist"
+  },
+  {
+    "kind": "btcmap_way",
+    "uri": "https://www.openstreetmap.org/way/259338174",
+    "type": "Place"
+  },
+  {
+    "kind": "btcmap_merchant",
+    "uri": "https://btcmap.org/merchant/way:259338174",
+    "type": "WebPage",
+    "group_with": "btcmap_way"
   }
 ]

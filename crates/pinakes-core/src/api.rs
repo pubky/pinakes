@@ -439,7 +439,10 @@ pub struct SearchQuery {
     /// `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist, or the MBID a
     /// MusicBrainz page was merged from),
     /// `wikidata:{Q-id}`, `isrc:{code}`, `upc:{barcode}`, `isbn:{ISBN-10 or ISBN-13}`,
-    /// `imdb:{tt…}` (an IMDb title) or `podcast:{GUID}` (a podcast's `podcast:guid`).
+    /// `imdb:{tt…}` (an IMDb title), `podcast:{GUID}` (a podcast's `podcast:guid`),
+    /// `osm:{type}/{id}`, `doi:{DOI}`, `arxiv:{id}`, `pmid:{n}`, `pmcid:PMC{n}`, `crate:{name}`,
+    /// `npm:{name}`, `pypi:{name}`, `repo:{host}/{path}`, `steam:{appid}`, `gog:{id}`,
+    /// `fr:{document number}` or `discogs:{artist|master|release}:{id}`.
     pub key: Option<String>,
     pub tags: Option<String>,
     #[serde(rename = "match")]
@@ -782,8 +785,9 @@ fn present(s: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 /// The site a card names: the app path segment of a `pubky://` object, else the service a link
-/// is on when its URL alone says (a music service, a Wikipedia edition, MusicBrainz, Wikidata),
-/// so a card not read yet never shows a raw host for it, else the document's site or the host.
+/// is on when its URL alone says (a music service, a Wikipedia edition, MusicBrainz, Wikidata, a
+/// service the lookups know), so a card not read yet never shows a raw host for it, else the
+/// document's site or the host.
 pub fn site(uri: &str, doc_site: Option<&str>, host: Option<&str>) -> Option<String> {
     if let Some(path) = uri.strip_prefix("pubky://") {
         let mut parts = path.split('/').skip(1);
@@ -798,7 +802,7 @@ pub fn site(uri: &str, doc_site: Option<&str>, host: Option<&str>) -> Option<Str
         .or_else(|| present(host))
 }
 /// The service a link is on, by its URL alone.
-fn service_site(uri: &str) -> Option<String> {
+pub(crate) fn service_site(uri: &str) -> Option<String> {
     if let Some(link) = crate::music::parse(uri) {
         return Some(link.service.name().to_owned());
     }
@@ -810,7 +814,10 @@ fn service_site(uri: &str) -> Option<String> {
     {
         return Some("MusicBrainz".into());
     }
-    crate::hubs::wikidata::item_link(uri).map(|_| "Wikidata".into())
+    if crate::hubs::wikidata::item_link(uri).is_some() {
+        return Some("Wikidata".into());
+    }
+    crate::lookups::service_name(uri).map(Into::into)
 }
 /// A card from a row of `search_unit` (or a row shaped like one).
 pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
@@ -1148,7 +1155,7 @@ pub(crate) struct KeyFilter {
 }
 pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
     let bad = || {
-        ApiError::bad("key is mbid:{uuid}, wikidata:{Q-id}, isrc:{ISRC}, upc:{UPC, EAN or GTIN with its check digit}, isbn:{ISBN-10 or ISBN-13}, imdb:{tt and 7–8 digits} or podcast:{GUID}")
+        ApiError::bad("key is mbid:{uuid}, wikidata:{Q-id}, isrc:{ISRC}, upc:{UPC, EAN or GTIN with its check digit}, isbn:{ISBN-10 or ISBN-13}, imdb:{tt and 7–8 digits}, podcast:{GUID}, osm:{type}/{id}, doi:{DOI}, arxiv:{id}, pmid:{n}, pmcid:PMC{n}, crate:{name}, npm:{name}, pypi:{name}, repo:{github.com|gitlab.com}/{path}, steam:{appid}, gog:{id}, fr:{document number} or discogs:{artist|master|release}:{id}")
     };
     let (kind, value) = key.split_once(':').ok_or_else(bad)?;
     let keys = |keys: Vec<String>| KeyFilter { keys, fact: None };
@@ -1187,7 +1194,10 @@ pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
         "podcast" => crate::also_on::podcasts::guid(value)
             .map(|g| keys(vec![format!("podcast:guid:{g}")]))
             .ok_or_else(bad),
-        _ => Err(bad()),
+        // The lookups' keys: places, papers, packages, repositories, games, documents.
+        _ => crate::lookups::search_key(kind, value)
+            .map(|key| keys(vec![key]))
+            .ok_or_else(bad),
     }
 }
 fn scope(

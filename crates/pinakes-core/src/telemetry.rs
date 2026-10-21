@@ -54,6 +54,9 @@ pub struct Metrics {
     /// Nexus polls whose batch work panicked outside a feed line (the cursor holds; retried).
     pub ingest_panics: IntCounter,
     pub ingest_rejected: IntCounterVec,
+    /// Requests a source's service answered 401 or 403 to its configured token (it then reads
+    /// without it).
+    pub token_refusals: IntCounterVec,
 }
 impl Metrics {
     pub fn new() -> Result<Self> {
@@ -108,6 +111,12 @@ impl Metrics {
                 "pinakes_ingest_rejected_total",
                 "Rejected feed lines in committed batches by bounded reason",
                 &["reason"]
+            ),
+            token_refusals: metric!(
+                IntCounterVec,
+                "pinakes_source_token_refusals_total",
+                "Requests a source's service refused its configured token for (read without it)",
+                &["source"]
             ),
             discovery: metric!(
                 IntCounterVec,
@@ -221,6 +230,12 @@ impl Metrics {
             return Ok(());
         }
         let row=sqlx::query("SELECT coalesce(sum(greatest(feed_length-cursor,0)),0)::bigint AS lag,coalesce(extract(epoch FROM max(updated_at)),0)::bigint AS success,coalesce(sum(resets),0)::bigint AS resets FROM feed_cursor").fetch_one(pool).await?;
+        for (source, refusals) in crate::sources::token_refusals() {
+            sync_counter(
+                &self.token_refusals.with_label_values(&[source]),
+                refusals as i64,
+            );
+        }
         self.ingest_lag.set(row.try_get("lag")?);
         self.ingest_success.set(row.try_get("success")?);
         sync_counter(&self.ingest_resets, row.try_get("resets")?);

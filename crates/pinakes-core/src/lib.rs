@@ -14,6 +14,7 @@ pub mod hubs;
 pub mod identity;
 pub mod ingest;
 pub mod locks;
+pub mod lookups;
 pub mod maintenance;
 pub mod model;
 pub mod music;

@@ -104,6 +104,7 @@ impl Fixture {
             {"kind":"govinfo","uri":"https://www.govinfo.gov/app/details/PLAW-117publ58","type":"Legislation"},
             {"kind":"stacker_news","uri":"https://stacker.news/items/1596515","type":"DiscussionForumPosting"},
             {"kind":"hacker_news","uri":"https://news.ycombinator.com/item?id=8863","type":"DiscussionForumPosting"},
+            {"kind":"discogs","uri":"https://www.discogs.com/master/21491-Radiohead-OK-Computer","type":"MusicAlbum"},
             {"kind":"lobsters","uri":"https://lobste.rs/s/wtthju/a5_v1_0","type":"DiscussionForumPosting"},
             {"kind":"bluesky","uri":"https://bsky.app/profile/did:plc:z72i7hdynmk6r22z27h6tvur/post/3mxzez2m7wk2r","type":"SocialMediaPosting"},
             {"kind":"mastodon","uri":"https://mastodon.social/@Gargron/1","type":"SocialMediaPosting"},
@@ -169,6 +170,7 @@ impl Dns for FixtureDns {
                 | "www.govinfo.gov"
                 | "stacker.news"
                 | "hacker-news.firebaseio.com"
+                | "api.discogs.com"
                 | "lobste.rs"
                 | "public.api.bsky.app"
                 | "mastodon.social"
@@ -235,6 +237,7 @@ impl Transport for Fixture {
             "ld.admin.ch" if u.path()=="/query"=>("application/sparql-results+json",include_str!("../tests/fixtures/sources/zefix/sparql_company_126286_spo.json").into()),
             "www.govinfo.gov" if u.path()=="/metadata/pkg/PLAW-117publ58/mods.xml"=>("application/xml",gunzip(include_bytes!("../tests/fixtures/sources/govinfo/mods_pkg_PLAW-117publ58.xml.gz"))),
             "stacker.news" if u.path()=="/api/graphql"=>("application/json",include_str!("../tests/fixtures/sources/stacker_news/sn-item-1596515.json").into()),
+            "api.discogs.com" if u.path()=="/masters/21491"=>("application/json",include_str!("../tests/fixtures/sources/discogs/master-21491.json").into()),
             "hacker-news.firebaseio.com" if u.path()=="/v0/item/8863.json"=>("application/json",include_str!("../tests/fixtures/sources/hacker_news/hn-item-8863.json").into()),
             "lobste.rs" if u.path()=="/s/wtthju.json"=>("application/json",include_str!("../tests/fixtures/sources/lobsters/lobsters-wtthju.json").into()),
             "public.api.bsky.app" if u.path()=="/xrpc/app.bsky.feed.getPostThread"=>("application/json",include_str!("../tests/fixtures/sources/bluesky/bsky-thread-3mxzez2m7wk2r.json").into()),

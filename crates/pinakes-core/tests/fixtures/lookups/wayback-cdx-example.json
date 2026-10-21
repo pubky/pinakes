@@ -1,0 +1,6 @@
+[["timestamp","original"],
+["20150601000827","http://user:pass@example.com/"],
+["20150601010608","http://user:pass@example.com/"],
+["20150601024532","http://example.com/"],
+["20150601024533","http://www.example.com/"],
+["20150601030415","http://www.example.com/"]]

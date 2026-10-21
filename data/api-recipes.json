@@ -1532,6 +1532,26 @@
       "expect": "items"
     },
     {
+      "name": "key-osm-node-240109189",
+      "summary": "key=osm:node/240109189",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "key": "osm:node/240109189"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "key-fr-2026-18291",
+      "summary": "key=fr:2026-18291",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "key": "fr:2026-18291"
+      },
+      "expect": "items"
+    },
+    {
       "name": "collapse-book",
       "summary": "type=Book&collapse=group",
       "method": "GET",

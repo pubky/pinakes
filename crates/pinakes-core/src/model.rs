@@ -71,6 +71,11 @@ pub struct ResourceMeta {
     pub image: Option<String>,
     pub url: String,
     pub site: String,
+    /// The service the link is on, by its URL alone ("Spotify", "F-Droid", "Wikidata"), when
+    /// this build knows it (`api::service_site`): only such a member takes a service's one place
+    /// on a card (`also_on()`), never a page that names itself after one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<Point>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -120,6 +125,9 @@ impl ResourceMeta {
                 .ok()
                 .and_then(|u| u.host_str().map(str::to_owned))
                 .unwrap_or_default(),
+            // The service the link is on, by its URL alone: what lets it take a service's place on a
+            // card, never what the page says about itself.
+            service: crate::api::service_site(uri),
             source: source.into(),
             fetched_at: Utc::now().timestamp_millis(),
             ttl_secs,

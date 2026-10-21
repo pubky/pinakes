@@ -65,6 +65,8 @@ enabled = true
 enabled = true
 [sources.courtlistener]
 enabled = true
+[sources.discogs]
+enabled = true
 [sources.discourse]
 enabled = true
 [sources.docker_hub]
@@ -87,6 +89,9 @@ enabled = true
 enabled = true
 [sources.ghost]
 enabled = true
+[sources.github]
+enabled = true
+# token = "" # A fine-grained token (public repositories, read-only): off without one.
 [sources.gitlab]
 enabled = true
 [sources.gleif]
@@ -192,6 +197,9 @@ derive_links = true # Off: keys and facts only; no derived links on cards, nor j
 # enabled = false # Turn one source off.
 # The podcasts source asks Podcast Index only with a key and secret: supply them through
 # PINAKES__PODCAST_INDEX__KEY and PINAKES__PODCAST_INDEX__SECRET (see .env.example).
+# [also_on.sources.discogs]
+# token = "" # A Discogs personal access token: images on Discogs cards.
+
 # The tidal source asks TIDAL only with a client ID and secret: supply them through
 # PINAKES_TIDAL_CLIENT_ID and PINAKES_TIDAL_CLIENT_SECRET (see .env.example).
 
