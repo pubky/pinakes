@@ -1325,13 +1325,24 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         // Where the page came from, after redirects: the page itself, but off-site for the
         // redirected one, another Songkick page for the moved one, and nothing said for one
         // stored without it.
-        if !d.event.performers.is_empty() && uri != unrecorded {
-            d.event.performers_from = Some(if uri == redirected {
-                "https://evil.example/gig".into()
+        if uri != unrecorded {
+            let from = if uri == redirected {
+                "https://evil.example/gig"
             } else if uri == moved {
-                concert.into()
+                concert
             } else {
-                uri.into()
+                uri
+            };
+            d.event.read_from(&Fetched {
+                permanent_redirect: false,
+                truncated: false,
+                validators: Default::default(),
+                url: url::Url::parse(from).unwrap(),
+                content_type: "text/html".into(),
+                status: 200,
+                retry_after_secs: 60,
+                location: None,
+                body: vec![],
             });
         }
         store::save_document(&pool, &id, 0, &d).await.unwrap();

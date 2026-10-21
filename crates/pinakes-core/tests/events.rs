@@ -1488,6 +1488,55 @@ async fn webcals_never_downgrades_to_plaintext(pool: PgPool) {
         .is_err());
     assert_eq!(*transport.0.lock().unwrap(), vec!["https"]);
 }
+
+/// An event page's performers record the address its fetch ended on, on every path, the page's
+/// JSON-LD and the fallback for self-hosted event software (here Mobilizon, named in the page)
+/// alike: a Songkick address that redirected to another site never lends Songkick's authority.
+#[sqlx::test(migrations = "../../migrations")]
+async fn performers_record_where_the_fetch_ended_on_every_path(pool: PgPool) {
+    let egress = Egress::with_backends(
+        EgressConfig::default(),
+        Arc::new(PublicDns),
+        Arc::new(FailedTls(Mutex::new(vec![]))),
+    );
+    let service = pinakes_core::event::service::EventService {
+        pool: pool.clone(),
+        config: EventConfig::default(),
+        osm: Arc::new(OsmResolver::new(pool, OsmConfig::default()).unwrap()),
+    };
+    let asked = "https://www.songkick.com/concerts/43402127-radiohead-at-rac-arena";
+    let body = format!(
+        r#"<html><head><title>Gig</title><script type="application/ld+json">{{"@type":"MusicEvent","name":"Radiohead","url":"{asked}","startDate":"2027-05-03T19:30:00+08:00","performer":{{"@type":"MusicGroup","name":"Radiohead","sameAs":"https://www.songkick.com/artists/253846-radiohead"}}}}</script></head><body>Powered by Mobilizon</body></html>"#
+    );
+    // Off Songkick, the page's own node is not this page's, so only the fallback (which reads
+    // the page against the address asked for) finds the performer: it still records where the
+    // fetch ended.
+    for ended in ["https://evil.example/gig", asked] {
+        let fetched = Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            validators: Default::default(),
+            url: url::Url::parse(ended).unwrap(),
+            content_type: "text/html".into(),
+            status: 200,
+            retry_after_secs: 60,
+            location: None,
+            body: body.clone().into_bytes(),
+        };
+        let doc = service
+            .page(
+                asked,
+                &fetched,
+                ResourceMeta::new(asked, "web", 3600),
+                &egress,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+        assert_eq!(doc.event.performers.len(), 1, "{ended}");
+        assert_eq!(doc.event.performers_from(), Some(ended));
+    }
+}
 struct XmlTransport(reqwest::Client, String);
 #[async_trait::async_trait]
 impl Transport for XmlTransport {

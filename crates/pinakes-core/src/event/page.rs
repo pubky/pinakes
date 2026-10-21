@@ -308,7 +308,6 @@ fn fields(doc: &mut ResourceMeta, v: &Value, base: &Url, ap: bool) {
     );
     if doc.event.performers.is_empty() && owns_page(v, base) {
         doc.event.performers = performers(v, base);
-        doc.event.performers_from = Some(base.to_string());
     }
     if let Some(offer) = v.get("offers") {
         let values: Vec<&Value> = offer
@@ -544,9 +543,14 @@ pub fn merge_missing(doc: &mut ResourceMeta, fallback: &ResourceMeta) -> anyhow:
             }
         }
     }
+    // A document's performers keep their own provenance; ones taken from `fallback` bring its.
+    let own = (!doc.event.performers.is_empty()).then(|| doc.event.performers_from.clone());
     let mut event = serde_json::to_value(&doc.event)?;
     fill(&mut event, &serde_json::to_value(&fallback.event)?);
     doc.event = serde_json::from_value(event)?;
+    if let Some(from) = own {
+        doc.event.performers_from = from;
+    }
     if doc.start.is_none() {
         doc.start = fallback.start;
     }
@@ -688,5 +692,29 @@ mod performer_tests {
                 "https://www.songkick.com/artists/253846-radiohead"
             );
         }
+    }
+
+    /// A merge never pairs one document's performers with another's provenance: performers keep
+    /// their own (or none), and ones taken from the fallback bring the fallback's.
+    #[test]
+    fn performers_keep_their_own_provenance_in_a_merge() {
+        let performer = super::super::Performer {
+            name: "Radiohead".into(),
+            links: vec!["https://www.songkick.com/artists/253846".into()],
+        };
+        let mut fallback = ResourceMeta::new("https://www.songkick.com/concerts/1", "web", 60);
+        fallback.event.performers = vec![performer.clone()];
+        fallback.event.performers_from = Some("https://www.songkick.com/concerts/1".into());
+        let mut own = ResourceMeta::new("https://www.songkick.com/concerts/1", "web", 60);
+        own.event.performers = vec![performer];
+        merge_missing(&mut own, &fallback).unwrap();
+        assert_eq!(own.event.performers_from(), None);
+        let mut none = ResourceMeta::new("https://www.songkick.com/concerts/1", "web", 60);
+        merge_missing(&mut none, &fallback).unwrap();
+        assert_eq!(none.event.performers.len(), 1);
+        assert_eq!(
+            none.event.performers_from(),
+            Some("https://www.songkick.com/concerts/1")
+        );
     }
 }

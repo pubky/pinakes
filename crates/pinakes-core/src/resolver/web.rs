@@ -414,6 +414,7 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
         if let Ok(v) = serde_json::from_str::<Value>(&text) {
             apply_jsonld(&mut out.doc, &v, &fetched.url, true, true);
         }
+        out.doc.event.read_from(fetched);
         return out;
     }
     let html = Html::parse_document(&text);
@@ -625,6 +626,8 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
         .next()
         .map(|el| el.text().collect::<String>().trim().to_owned());
     out.description = meta.get("description").cloned();
+    // The performers' provenance is this fetch's, whatever base the parsers were handed.
+    out.doc.event.read_from(fetched);
     out
 }
 fn cited_doi(value: &str) -> Option<String> {
@@ -1019,8 +1022,6 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url, claims: bool, vou
     // vouched for), never from another event the page describes, nor through a sibling.
     if doc.event.performers.is_empty() && doc.type_path.iter().any(|t| t == "Event") && own {
         doc.event.performers = crate::event::page::performers(v, base);
-        // `base` is where the page came from (the fetch's final address).
-        doc.event.performers_from = Some(base.to_string());
     }
     for field in ["author", "creator"] {
         if !doc.attributes.contains_key("author") {

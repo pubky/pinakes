@@ -31,10 +31,11 @@ pub struct EventFields {
     /// Who performs, as the page's own structured data names them (`performer`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub performers: Vec<Performer>,
-    /// Where the performers were read: the page's address after redirects, from the fetch. Only
-    /// a page on the service of a performer's link keys its artist (`music_sources`).
+    /// Where the performers were read: the address the fetch ended on, after redirects. Only a
+    /// page on the service of a performer's link keys its artist (`music_sources`). Set only from
+    /// a fetch ([`EventFields::read_from`]), never by a parser from the base it was handed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub performers_from: Option<String>,
+    pub(crate) performers_from: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offers: Option<Offers>,
     /// A local time without a resolvable zone is retained; UTC columns are only a sort proxy.
@@ -133,6 +134,15 @@ pub struct Offers {
 /// with many links each is trimmed to it, links first.
 pub const PERFORMERS_CAP: usize = 2048;
 impl EventFields {
+    /// Record that the performers were read from `fetched`: the address its fetch ended on.
+    /// Nothing when there are none.
+    pub fn read_from(&mut self, fetched: &crate::resolver::egress::Fetched) {
+        self.performers_from = (!self.performers.is_empty()).then(|| fetched.url.to_string());
+    }
+    /// Where the performers were read ([`EventFields::read_from`]), if recorded.
+    pub fn performers_from(&self) -> Option<&str> {
+        self.performers_from.as_deref()
+    }
     fn performers_bytes(&self) -> usize {
         serde_json::to_vec(&self.performers).map_or(0, |v| v.len())
     }

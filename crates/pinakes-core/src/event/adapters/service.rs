@@ -496,7 +496,12 @@ pub(crate) async fn enrichment_blocking(
         "non-feed enrichment exceeds cap"
     );
     let (uri, id, body) = (uri.to_owned(), d.id.clone(), f.body.clone());
-    Ok(tokio::task::spawn_blocking(move || state::parse(&id, &uri, &body)).await?)
+    let mut doc = tokio::task::spawn_blocking(move || state::parse(&id, &uri, &body)).await?;
+    // The performers came from this fetch, not from the address the parser was handed.
+    if let Some(doc) = &mut doc {
+        doc.event.read_from(f);
+    }
+    Ok(doc)
 }
 
 fn merge(doc: &mut ResourceMeta, extra: &ResourceMeta) -> Result<()> {

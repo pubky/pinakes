@@ -526,7 +526,7 @@ impl PerformersSource {
         // same). Any other page chose the identity MusicBrainz translates, so it is a fact. The
         // page is the host its fetch ended on, after redirects; a stored page that doesn't say
         // is no service's.
-        let page = doc.event.performers_from.as_deref().and_then(service_host);
+        let page = doc.event.performers_from().and_then(service_host);
         let owned = |url: &str| page.is_some() && service_host(url) == page;
         // Then MusicBrainz: every performer's links in one request, and only that one (a link
         // its answer leaves out is unknown this run). A failed request, a busy MusicBrainz's or

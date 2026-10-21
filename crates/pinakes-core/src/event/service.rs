@@ -270,6 +270,8 @@ impl EventService {
                         let _ = page::merge_missing(&mut event, &extra);
                     }
                 }
+                // Whatever base each parser was handed, the performers came from this fetch.
+                event.event.read_from(fetched);
                 (
                     event,
                     calendar_link,
