@@ -978,7 +978,7 @@
         "uri": "pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json"
       },
       "expect": "card",
-      "card_type": "CreativeWork"
+      "card_type": "LearningResource"
     },
     {
       "name": "resolve-47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao-pub-pub",
@@ -989,7 +989,7 @@
         "uri": "pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2"
       },
       "expect": "card",
-      "card_type": "CreativeWork"
+      "card_type": "Conversation"
     },
     {
       "name": "resolve-www-mexc-com",

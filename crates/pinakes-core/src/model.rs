@@ -36,6 +36,14 @@ pub struct Point {
     pub lat: f64,
     pub lon: f64,
 }
+/// A client that opens an object, and the object's address there.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
+pub struct OpenIn {
+    /// The client's name ("Loopky", "Mapky").
+    pub client: String,
+    /// An `https:` URL.
+    pub url: String,
+}
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LocationSource {
@@ -97,6 +105,9 @@ pub struct ResourceMeta {
     pub attributes: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
+    /// The clients that open a Pubky app's object (`resolver::pubky_apps`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open_in: Vec<OpenIn>,
     /// URLs that may name this same page: its head canonical and the end of an all-permanent
     /// redirect chain. The only alias candidates (`alias::canonical`); never stored.
     #[serde(skip)]
@@ -207,9 +218,16 @@ impl ResourceMeta {
             self.image = None;
         }
         self.aliases.truncate(4);
+        self.open_in.retain(|o| {
+            o.url.len() <= 2048
+                && o.client.len() <= 64
+                && url::Url::parse(&o.url).is_ok_and(|u| u.scheme() == "https")
+        });
+        self.open_in.truncate(4);
         while self.validate(allowed_attributes).is_err() {
             if self.attributes.pop_last().is_some()
                 || self.aliases.pop().is_some()
+                || self.open_in.pop().is_some()
                 || self.group_keys.pop().is_some()
                 || self.event.shrink_performers()
             {

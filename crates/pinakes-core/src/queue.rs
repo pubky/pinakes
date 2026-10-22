@@ -560,7 +560,7 @@ async fn finish_job(
                     crate::resolver::web::ATTRIBUTES
                 }
             }
-            "pubky" => crate::resolver::pubky::ATTRIBUTES,
+            "pubky" => crate::resolver::pubky_apps::attributes(),
             "geo" => crate::resolver::geo::ATTRIBUTES,
             "osm" => crate::resolver::osm::ATTRIBUTES,
             _ => &[],

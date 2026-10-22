@@ -114,13 +114,13 @@ impl Resolver for PubkyResolver {
                     .context(crate::resolver::Upstream(status)))
                 }
             }
-            let doc = card(
+            let doc = super::pubky_apps::card(
                 uri,
                 &fetched.content_type,
                 &fetched.body,
                 self.config.ttl_secs,
             )
-            .bounded(ATTRIBUTES)?;
+            .bounded(super::pubky_apps::attributes())?;
             crate::telemetry::document(crate::telemetry::last_fetch(), &self.manifest(), &doc);
             Ok(doc)
         })
@@ -129,51 +129,6 @@ impl Resolver for PubkyResolver {
     fn refresh_after(&self, doc: &ResourceMeta) -> Duration {
         Duration::from_secs(doc.ttl_secs)
     }
-}
-pub fn card(uri: &str, content_type: &str, body: &[u8], ttl: u64) -> ResourceMeta {
-    let mut doc = ResourceMeta::new(uri, "pubky", ttl);
-    doc.set_type("CreativeWork");
-    doc.attributes
-        .insert("content_type".into(), content_type.into());
-    doc.attributes
-        .insert("content_length".into(), body.len().to_string());
-    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
-        doc.name = v
-            .get("name")
-            .or_else(|| v.get("title"))
-            .and_then(|v| v.as_str())
-            .map(str::to_owned);
-        doc.description = v
-            .get("description")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned);
-        doc.image = v
-            .get("image")
-            .and_then(|v| v.as_str())
-            .and_then(|s| url::Url::parse(uri).ok()?.join(s).ok())
-            .filter(|u| matches!(u.scheme(), "http" | "https" | "pubky"))
-            .map(|u| u.to_string());
-        // An object without a name, title or description (a post, a note) is described by its
-        // content: social content (`cards::social`), so a short excerpt that refreshes within the
-        // hour and is purged with its history once the object is gone.
-        if doc.name.is_none() && doc.description.is_none() {
-            doc.description = v
-                .get("content")
-                .or_else(|| v.get("text"))
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(|s| s.chars().take(200).collect());
-            if doc.description.is_some() {
-                doc.set_type("SocialMediaPosting");
-            }
-        }
-    }
-    // The publishing app (`/pub/<app>/…`), not the author's public key.
-    if let Some(app) = crate::api::site(uri, None, None) {
-        doc.site = app;
-    }
-    doc
 }
 #[cfg(test)]
 mod tests {
@@ -190,7 +145,7 @@ mod tests {
     fn conventional_card_and_namespace_matching() {
         let uri =
             "pubky://ybndrfg8ejkmcpqxot1uwisza345h769ybndrfg8ejkmcpqxot1uwi/pub/other.app/item";
-        let doc=card(uri,"application/json",br#"{"title":"A deck","description":"Cards","image":"https://example.org/cover.png","password":"never keep"}"#,10);
+        let doc=super::super::pubky_apps::card(uri,"application/json",br#"{"title":"A deck","description":"Cards","image":"https://example.org/cover.png","password":"never keep"}"#,10);
         assert_eq!(doc.name.as_deref(), Some("A deck"));
         assert!(!serde_json::to_string(&doc).unwrap().contains("password"));
         assert_eq!(crate::resolver::classify(uri), Some("pubky"));

@@ -37,7 +37,9 @@ Tests use local servers, injected transports and recorded fixtures instead of pu
   - `queue.rs`, `scheduler.rs`, `store.rs`, `changes.rs`: the resolution queue, refresh times,
     saving documents, the change journal and orphan cleanup.
   - `resolver/`: routing (`classify`), the egress client (`egress.rs`), and the web, pubky, geo,
-    OSM and card resolvers.
+    OSM and card resolvers. `resolver/pubky_apps/` holds one profile per Pubky app (what its
+    objects' cards hold and which clients open them); [docs/pubky-apps.md](docs/pubky-apps.md)
+    says how to add one.
   - `event/`: event pages, calendar feeds, event platforms (`adapters/`).
   - `sources/`: official-API sources, one module per service (`kit.rs` holds shared helpers).
   - `also_on.rs`, `also_on/`, `lookups/`, `music.rs`, `music_sources.rs`, `hubs.rs`,

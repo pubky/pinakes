@@ -11,6 +11,7 @@ pub mod interstitial;
 pub mod osm;
 pub mod pkarr_relays;
 pub mod pubky;
+pub mod pubky_apps;
 pub mod web;
 
 #[async_trait]
@@ -72,6 +73,14 @@ const EVENT_PLATFORM: &str = ROUTES[5];
 /// `None` outside `/pub/`, for an empty app, and for any segment that decodes to a separator or
 /// a dot segment: the homeserver would read another path than the one classified.
 pub(crate) fn pubky_app(url: &url::Url) -> Option<String> {
+    match path_segments(url)?.as_slice() {
+        [public, app, ..] if public == "pub" && !app.is_empty() => Some(app.clone()),
+        _ => None,
+    }
+}
+/// A `pubky://` object's path segments, decoded as a homeserver decodes them; `None` when one
+/// decodes to a separator or a dot segment.
+pub(crate) fn path_segments(url: &url::Url) -> Option<Vec<String>> {
     let segments: Vec<String> = url
         .path()
         .split('/')
@@ -89,10 +98,7 @@ pub(crate) fn pubky_app(url: &url::Url) -> Option<String> {
     {
         return None;
     }
-    match segments.as_slice() {
-        [public, app, ..] if public == "pub" && !app.is_empty() => Some(app.clone()),
-        _ => None,
-    }
+    Some(segments)
 }
 /// Scheme modules and host adapters go before the generic web fallback.
 pub fn classify(uri: &str) -> Option<&'static str> {
@@ -106,7 +112,16 @@ fn classify_route(uri: &str) -> Option<&'static str> {
         return Some(kind);
     }
     match url.scheme() {
-        "pubky" if pubky_app(&url).is_some_and(|app| app != "pubky.app") => Some(PUBKY),
+        // Another app's object: a kind its profile reads, or any object of an app no profile
+        // knows (`pubky_apps::route`).
+        "pubky"
+            if pubky_app(&url).is_some()
+                && path_segments(&url)
+                    .and_then(|s| pubky_apps::route(&s[1..]))
+                    .is_some_and(|r| !matches!(r, pubky_apps::Route::Excluded)) =>
+        {
+            Some(PUBKY)
+        }
         "http" | "https"
             if url.host_str() == Some("api.nostr.wine")
                 && crate::event::adapters::detect(uri).is_none() =>

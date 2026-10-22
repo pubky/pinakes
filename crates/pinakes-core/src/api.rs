@@ -611,6 +611,9 @@ pub struct Card {
     /// (`GET /v1/resources/{id}`, `GET /v1/resources/by-uri`, `POST /v1/resolve`), whose
     /// `details.also_on` lists every link, up to 256. A hint: every member keeps its own card.
     pub also_on: Vec<AlsoOn>,
+    /// The clients that open a Pubky app's object, from the app's profile (docs/pubky-apps.md);
+    /// on an event card, those of the event object it names. Empty for every other card.
+    pub open_in: Vec<model::OpenIn>,
     /// OpenStreetMap cards, events placed at an OSM venue and events whose zone was derived from
     /// coordinates: the ODbL attribution to display with the card.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -910,6 +913,19 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
         _ => uri,
     };
     let also_on = also_on_entries(&row["also_on"], Some(&uri));
+    let event = row.get("event").filter(|v| !v.is_null()).cloned();
+    // An event card's clients are its event object's; a read object's are its own, and an object
+    // not read yet has its kind's.
+    let open_in = match (&event, &doc) {
+        (Some(e), _) => match (e["author"].as_str(), e["object_path"].as_str()) {
+            (Some(author), Some(path)) => {
+                crate::resolver::pubky_apps::open_in(&format!("pubky://{author}{path}"))
+            }
+            _ => vec![],
+        },
+        (None, Some(d)) => d.open_in.clone(),
+        (None, None) => crate::resolver::pubky_apps::open_in(&uri),
+    };
     Ok(Card {
         site: site(
             &uri,
@@ -935,6 +951,7 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
                 size: g["size"].as_i64().unwrap_or(1),
             }),
         also_on,
+        open_in,
         attribution: credits(
             row["osm_id"]
                 .as_i64()
@@ -945,7 +962,7 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
                 .and_then(|d| d.event.timezone_attribution.clone()),
         ),
         occurrence,
-        event: row.get("event").filter(|v| !v.is_null()).cloned(),
+        event,
         maybe_same: same_events(row).map(|all| all.into_iter().take(3).collect()),
     })
 }
@@ -1093,7 +1110,10 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
                 (name.is_some() || url.is_some()).then_some(OrganizerRef { name, url })
             }),
             from: crate::sources::from(d).map(str::to_owned),
-            facts: merge_facts(crate::sources::facts(d), facts.clone()),
+            facts: merge_facts(
+                crate::sources::facts(d).or_else(|| crate::resolver::pubky_apps::facts(d)),
+                facts.clone(),
+            ),
             also_on: also_on_entries(&row["also_on_all"], None),
             aliases: aliases.clone(),
             updated_at: row["resolved_at"].as_str().and_then(|s| s.parse().ok()),
