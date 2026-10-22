@@ -47,6 +47,13 @@ impl Resolver for PubkyResolver {
     async fn resolve(&self, uri: &str) -> Result<ResourceMeta> {
         tokio::time::timeout(Duration::from_secs(10), async {
             let object = Url::parse(uri)?;
+            // A path an app's profile does not read (one stored before the profile excluded it)
+            // is never fetched: it keeps no card.
+            if super::pubky_apps::excluded(uri) {
+                let mut doc = ResourceMeta::new(uri, "pubky", self.config.ttl_secs);
+                doc.status = Status::Missing;
+                return Ok(doc);
+            }
             // Only objects of other apps, by their decoded path (`classify`).
             if super::classify(uri) != Some("pubky") {
                 return Err(anyhow::Error::new(ErrorClass("policy"))
@@ -446,6 +453,23 @@ mod tests {
                 "{uri}: {error:#}"
             );
             assert!(homeserver.requests.lock().unwrap().is_empty(), "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_path_an_apps_profile_does_not_read_is_missing_and_never_fetched() {
+        let owner = Keypair::random();
+        let key = owner.public_key().to_z32();
+        for path in ["loopky/settings.json", "pubky-rooms/messages/a/b/c"] {
+            let homeserver = Arc::new(Homeserver::default());
+            let packet = https(&owner, "_pubky", "homeserver.example", 9443, &[]);
+            let doc = resolver(&[packet], &["8.8.8.8"], homeserver.clone())
+                .resolve(&format!("pubky://{key}/pub/{path}"))
+                .await
+                .unwrap();
+            assert_eq!(doc.status, Status::Missing, "{path}");
+            assert_eq!((doc.name, doc.description), (None, None));
+            assert!(homeserver.requests.lock().unwrap().is_empty(), "{path}");
         }
     }
 

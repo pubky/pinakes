@@ -270,6 +270,10 @@ pub fn open_in(uri: &str) -> Vec<OpenIn> {
         _ => vec![],
     }
 }
+/// Whether a `pubky://` object is in a known app's namespace but of no kind its profile reads.
+pub fn excluded(uri: &str) -> bool {
+    segments(uri).is_some_and(|(_, s)| matches!(route(&s), Some(Route::Excluded)))
+}
 /// The profile whose namespace holds a `pubky://` object.
 pub fn profile(uri: &str) -> Option<&'static Profile> {
     let (_, segments) = segments(uri)?;
