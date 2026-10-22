@@ -1734,6 +1734,68 @@ async fn a_non_object_page_on_a_service_host_takes_no_slot(pool: PgPool) {
     assert!(entries.contains(&(repo.to_owned(), true)), "{entries:?}");
 }
 
+/// GitHub's share link (`?tab=readme-ov-file`) is the repository's own page: tagged in a group
+/// whose crate derives the repository, it takes GitHub's one place and the derived link is not
+/// listed beside it.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_shared_repository_link_with_a_tab_is_the_repository_once(pool: PgPool) {
+    let shared = "https://github.com/rust-random/rand?tab=readme-ov-file";
+    let repo = "https://github.com/rust-random/rand";
+    let krate = "https://crates.io/crates/rand";
+    assert_eq!(
+        ResourceMeta::new(shared, "web", 86400).service.as_deref(),
+        Some("GitHub")
+    );
+    let mut ids = vec![];
+    for uri in [krate, shared] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "web", 86400);
+        d.name = Some("rand".into());
+        d.set_type("SoftwareSourceCode");
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.push(id);
+    }
+    let hub = Fake::new("packages");
+    for uri in [krate, shared] {
+        hub.answer(
+            uri,
+            Ok(Found {
+                keys: vec![key("wikidata:Q1")],
+                links: if uri == krate {
+                    vec![Link::new(repo, "GitHub", "crates")]
+                } else {
+                    vec![]
+                },
+                ..Default::default()
+            }),
+        );
+    }
+    let sources: Vec<Arc<dyn Source>> = vec![hub];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let read = get(&app, &format!("/v1/resources/{}", ids[0])).await;
+    let entries: Vec<(String, String, bool)> = read["also_on"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["site"].as_str().unwrap().to_owned(),
+                e["uri"].as_str().unwrap().to_owned(),
+                e["derived"] == true,
+            )
+        })
+        .collect();
+    assert_eq!(
+        entries,
+        [("GitHub".to_owned(), shared.to_owned(), false)],
+        "{entries:?}"
+    );
+}
+
 /// A source that panics on every lookup, as a parser meeting an unexpected shape would.
 struct Panics;
 #[async_trait]

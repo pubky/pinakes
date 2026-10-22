@@ -26,7 +26,7 @@ const KNOWN: &[&str] = &[
 ];
 
 /// First path segments that are the instance's own pages, never a namespace.
-const RESERVED: &[&str] = &[
+pub const RESERVED: &[&str] = &[
     "-",
     ".well-known",
     "abuse_reports",

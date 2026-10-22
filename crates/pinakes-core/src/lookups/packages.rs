@@ -203,14 +203,14 @@ impl Repo {
         let path = path.trim_matches('/');
         let path = path.strip_suffix(".git").unwrap_or(path);
         let parts: Vec<&str> = path.split('/').collect();
+        // The forge's own pages (GitHub's `orgs/…`, `topics/…`; GitLab's `explore/…`,
+        // `groups/…`) are not repositories: each forge source's rule.
+        let first = parts[0].to_ascii_lowercase();
         let depth_ok = if host == "github.com" {
-            // GitHub's own pages (`orgs/…`, `topics/…`) are not repositories: the GitHub
-            // source's rule.
-            parts.len() == 2
-                && !crate::sources::github::RESERVED
-                    .contains(&parts[0].to_ascii_lowercase().as_str())
+            parts.len() == 2 && !crate::sources::github::RESERVED.contains(&first.as_str())
         } else {
             (2..=10).contains(&parts.len())
+                && !crate::sources::gitlab::RESERVED.contains(&first.as_str())
         };
         (depth_ok
             && parts.iter().all(|p| {
@@ -247,10 +247,13 @@ impl Repo {
             path: path.to_owned(),
         })
     }
-    /// A repository named by its address, e.g. `https://github.com/npm/node-semver`.
+    /// A repository named by its address, e.g. `https://github.com/npm/node-semver`. A query that
+    /// only picks a tab or marks where the link was shared from (`?tab=readme-ov-file`, the link
+    /// GitHub's share button gives) and a fragment (`#readme`) leave it the repository's page;
+    /// any other query is another page.
     pub fn from_url(value: &str) -> Option<Self> {
         let url = web_url(value)?;
-        if url.scheme() != "https" || url.query().is_some() || url.fragment().is_some() {
+        if url.scheme() != "https" || !super::harmless_query(&url) {
             return None;
         }
         Self::new(url.host_str()?, url.path())
@@ -948,8 +951,24 @@ mod tests {
             "https://gitlab.com/group/project/tree/master",
             "https://gitlab.com/group/project/issues",
             "https://gitlab.com/group/project/-/merge_requests/1",
+            "https://gitlab.com/explore/projects",
+            "https://gitlab.com/groups/inkscape",
+            "https://gitlab.com/dashboard/projects",
+            "https://github.com/rust-random/rand?q=gen",
         ] {
             assert_eq!(Repo::from_url(uri), None, "{uri}");
+        }
+        // GitHub's share link and other harmless queries name the same repository.
+        for uri in [
+            "https://github.com/rust-random/rand?tab=readme-ov-file",
+            "https://github.com/rust-random/rand?utm_source=newsletter&utm_medium=email",
+            "https://github.com/rust-random/rand#readme",
+        ] {
+            assert_eq!(
+                Repo::from_url(uri).map(|r| r.url()).as_deref(),
+                Some("https://github.com/rust-random/rand"),
+                "{uri}"
+            );
         }
         assert!(Repo::from_url("https://gitlab.com/inkscape/inkscape").is_some());
         assert!(Repo::from_url("https://github.com/rust-random/rand").is_some());

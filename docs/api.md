@@ -827,10 +827,12 @@ Wikidata, OpenStreetMap, DOI, Steam, SteamDB, ProtonDB, PCGamingWiki, GOG, App S
 Play, F-Droid, Flathub, Snap Store, crates.io, Docs.rs, lib.rs, npm, jsDelivr, unpkg, PyPI,
 GitHub, GitLab, Software Heritage, arXiv, alphaXiv, PubMed, PubMed Central, Hugging Face
 Papers, BTC Map and Wayback Machine. Only an object's own page is on the service: a game, app,
-package, repository, paper or place page in the forms the lookups recognize. Any other page on
-those hosts (`github.com/topics/rust`, a search, a user's page, a page under an object) takes no
-service's place; its card keeps the name it gives itself, or its host. `GET /v1/resources/{id}`
-shows the same, up to 256 entries, and lists every link in `details.also_on` (several of one
+package, repository, paper or place page in the forms the lookups recognize (a repository or
+a PCGamingWiki article with no query but one that picks a tab or marks where the link was
+shared from: `?tab=readme-ov-file`, `ref`, `utm_*`). Any other page on those hosts
+(`github.com/topics/rust`, `gitlab.com/explore`, a wiki's `Category:` or `Special:` page, a
+search, a user's page, a page under an object) takes no service's place; its card keeps the
+name it gives itself, or its host. `GET /v1/resources/{id}` shows the same, up to 256 entries, and lists every link in `details.also_on` (several of one
 service too, up to 256). A derived link can be unavailable in some countries (a regional release
 on a streaming service); nothing public says where, so prefer a tagged member.
 

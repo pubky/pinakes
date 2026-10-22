@@ -130,8 +130,14 @@ pub fn service_name(uri: &str) -> Option<&'static str> {
         "store.steampowered.com" | "steamcommunity.com" | "steamdb.info" | "protondb.com" => {
             games::appid_from_uri(uri).is_some()
         }
+        // A game's article: `/wiki/{title}`, no namespace's page (`Special:Search`,
+        // `Category:Games`) and no other view of it (`?action=history`).
         "pcgamingwiki.com" => {
-            games::appid_from_uri(uri).is_some() || matches!(segments.as_slice(), ["wiki", _])
+            games::appid_from_uri(uri).is_some()
+                || matches!(
+                    segments.as_slice(),
+                    ["wiki", title] if harmless_query(&url) && !wiki_namespace(title)
+                )
         }
         "gog.com" | "apps.apple.com" | "play.google.com" | "f-droid.org" | "flathub.org"
         | "snapcraft.io" => sources::store_property(uri).is_some(),
@@ -295,6 +301,51 @@ fn plain(value: &str, max: usize, ok: impl Fn(char) -> bool) -> bool {
 }
 
 /// An `https` or `http` URL with a host, as given (no rewriting).
+/// Whether a link's query only picks a tab or marks where the link was shared from (`tab`,
+/// `ref`, `utm_*`, …), so that the page is the one its path names.
+fn harmless_query(url: &Url) -> bool {
+    url.query_pairs().all(|(k, _)| {
+        matches!(
+            &*k,
+            "tab" | "ref" | "ref_src" | "ref_type" | "source" | "fbclid" | "gclid"
+        ) || k.starts_with("utm_")
+    })
+}
+
+/// Whether a MediaWiki title is a namespace's page (`Category:Games`, `Special:Search`,
+/// `User_talk:Someone`) or the wiki's main page rather than an article.
+fn wiki_namespace(title: &str) -> bool {
+    let title = percent_encoding::percent_decode_str(title).decode_utf8_lossy();
+    let Some((namespace, _)) = title.split_once(':') else {
+        return title.eq_ignore_ascii_case("Main_Page");
+    };
+    let namespace = namespace.replace(' ', "_").to_ascii_lowercase();
+    namespace.ends_with("_talk")
+        || [
+            "special",
+            "talk",
+            "user",
+            "project",
+            "pcgamingwiki",
+            "file",
+            "image",
+            "media",
+            "mediawiki",
+            "template",
+            "help",
+            "category",
+            "module",
+            "property",
+            "form",
+            "concept",
+            "company",
+            "engine",
+            "series",
+            "glossary",
+        ]
+        .contains(&namespace.as_str())
+}
+
 fn web_url(value: &str) -> Option<Url> {
     let url = Url::parse(value).ok()?;
     (matches!(url.scheme(), "https" | "http") && url.host_str().is_some()).then_some(url)
@@ -480,6 +531,21 @@ mod tests {
             ("https://unpkg.com/semver/", Some("unpkg")),
             ("https://pypi.org/project/urllib3/", Some("PyPI")),
             ("https://gitlab.com/inkscape/inkscape", Some("GitLab")),
+            // Share links: a tab, a referrer, a fragment.
+            (
+                "https://github.com/rust-random/rand?tab=readme-ov-file",
+                Some("GitHub"),
+            ),
+            (
+                "https://github.com/rust-random/rand?utm_source=x&ref=producthunt#readme",
+                Some("GitHub"),
+            ),
+            ("https://gitlab.com/inkscape/inkscape?tab=readme", Some("GitLab")),
+            ("https://www.pcgamingwiki.com/wiki/Half-Life:_Alyx", Some("PCGamingWiki")),
+            (
+                "https://www.pcgamingwiki.com/wiki/Portal_2?utm_source=x",
+                Some("PCGamingWiki"),
+            ),
             (
                 "https://archive.softwareheritage.org/browse/origin/?origin_url=https://github.com/rust-random/rand",
                 Some("Software Heritage"),
@@ -497,6 +563,24 @@ mod tests {
             ("https://github.com/orgs/rust-lang", None),
             ("https://github.com/rust-random/rand/issues/1", None),
             ("https://gitlab.com/inkscape/inkscape/-/issues", None),
+            ("https://github.com/rust-random/rand?q=gen", None),
+            ("https://github.com/search?q=rand&type=repositories", None),
+            ("https://github.com/topics/rust?tab=readme-ov-file", None),
+            ("https://gitlab.com/explore/projects", None),
+            ("https://gitlab.com/explore/projects/starred", None),
+            ("https://gitlab.com/groups/inkscape", None),
+            ("https://gitlab.com/search?search=inkscape", None),
+            (
+                "https://www.pcgamingwiki.com/wiki/Special:Search?search=Portal",
+                None,
+            ),
+            ("https://www.pcgamingwiki.com/wiki/Category:Games", None),
+            ("https://www.pcgamingwiki.com/wiki/User_talk:Someone", None),
+            ("https://www.pcgamingwiki.com/wiki/Main_Page", None),
+            (
+                "https://www.pcgamingwiki.com/wiki/Portal_2?action=history",
+                None,
+            ),
             ("https://www.npmjs.com/search?q=semver", None),
             ("https://www.npmjs.com/package/semver/access", None),
             ("https://www.npmjs.com/~isaacs", None),
