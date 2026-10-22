@@ -663,8 +663,8 @@ fails a feed. Recurrence expansion, components, revisions, lines, body size and 
 capped by the `event_*` limits. A recurrence rule is expanded only when it repeats yearly,
 monthly, weekly, daily or hourly and one of its periods holds at most `event_max_period_dates`
 (100,000) dates: the days the period keeps after the rule's own day filters, times its listed
-hours, minutes and seconds. An event with another rule keeps its first occurrence, with the
-warning `series_rule_unexpanded`; a VTIMEZONE with one cannot convert, and an event in that zone
+hours, minutes and seconds (a month-day filter counts as the whole month). An event with another
+rule keeps its first occurrence, with the warning `series_rule_unexpanded`; a VTIMEZONE with one cannot convert, and an event in that zone
 is left out with a warning. An event with more than one RRULE, or with an EXRULE, is left out
 with a warning.
 

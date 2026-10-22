@@ -193,15 +193,12 @@ pub fn rrule_bounded(set: &rrule::RRuleSet, max: usize) -> bool {
 fn period_dates(rule: &rrule::RRule) -> usize {
     use rrule::Frequency::*;
     let count = |n: usize| n.max(1);
-    // The days of a month a rule keeps: its listed days (or the one the crate filled from
-    // DTSTART), else its weekdays (any Monday is at most five a month, the nth one is one), else
-    // days counted from the month's end, which the crate keeps apart: any number of them.
+    // The days of a month a rule keeps. A month-day filter counts as the whole month: the crate
+    // keeps days counted from the month's end (`-1`) in a list it shows nowhere, beside the
+    // listed ones, so their number is unknown here. Else its weekdays (any Monday is at most
+    // five a month, the nth one is one), at most a month.
     let month_days = || {
-        let listed = rule.get_by_month_day().len();
-        if listed > 0 {
-            return listed;
-        }
-        if rule.get_by_weekday().is_empty() {
+        if !rule.get_by_month_day().is_empty() || rule.get_by_weekday().is_empty() {
             return 31;
         }
         rule.get_by_weekday()
@@ -210,7 +207,8 @@ fn period_dates(rule: &rrule::RRule) -> usize {
                 rrule::NWeekday::Every(_) => 5,
                 rrule::NWeekday::Nth(..) => 1,
             })
-            .sum()
+            .sum::<usize>()
+            .min(31)
     };
     let days = match rule.get_freq() {
         Yearly if !rule.get_by_year_day().is_empty() => rule.get_by_year_day().len(),

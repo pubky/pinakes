@@ -4292,3 +4292,65 @@ fn a_rule_with_a_huge_interval_expands_within_the_deadline() {
     assert_eq!(container.occurrences.len(), 1);
     assert!(container.warnings.is_empty(), "{:?}", container.warnings);
 }
+
+#[test]
+fn a_month_day_filter_counts_as_the_whole_month_whatever_its_signs() {
+    // Day 1 and the last 30 days of a month, every hour, minute and second: 2,678,400 dates a
+    // month, though the rule lists one positive day. Refused in any case; days from both ends
+    // at ordinary times expand.
+    let every = |n: usize| (0..n).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+    let ends = (1..=30)
+        .map(|i| format!("-{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let flood = format!(
+        "FREQ=MONTHLY;BYMONTHDAY=1,{ends};BYHOUR={};BYMINUTE={};BYSECOND={}",
+        every(24),
+        every(60),
+        every(60)
+    );
+    let bounded = |rule: &str| {
+        let set: rrule::RRuleSet = format!("DTSTART:20261020T120000Z\nRRULE:{rule}")
+            .parse()
+            .unwrap();
+        pinakes_core::event::time::rrule_bounded(&set, 100_000)
+    };
+    for rule in [
+        flood.clone(),
+        flood.to_lowercase(),
+        format!(
+            "FREQ=MONTHLY;BYMONTHDAY={ends};BYHOUR={};BYMINUTE={};BYSECOND={}",
+            every(24),
+            every(60),
+            every(60)
+        ),
+        format!(
+            "FREQ=YEARLY;BYMONTHDAY=1,{ends};BYHOUR={};BYMINUTE={}",
+            every(24),
+            every(60)
+        ),
+    ] {
+        assert!(!bounded(&rule), "{rule}");
+    }
+    for rule in [
+        "FREQ=MONTHLY;BYMONTHDAY=1,-1;BYHOUR=9",
+        "FREQ=MONTHLY;BYMONTHDAY=-1;BYHOUR=9,18",
+        "FREQ=YEARLY;BYMONTHDAY=-1;BYDAY=FR;BYHOUR=9",
+    ] {
+        assert!(bounded(rule), "{rule}");
+    }
+    let body = cal(&event(
+        "UID:ends\nDTSTART:20261101T090000Z\nRRULE:FREQ=MONTHLY;BYMONTHDAY=1,-1;BYHOUR=9\nSUMMARY:e",
+    ));
+    let cfg = EventConfig {
+        max_occurrences_per_series: 1000,
+        ..Default::default()
+    };
+    let c = calendar::parse("https://example.org/f.ics", body.as_bytes(), &cfg, now())
+        .unwrap()
+        .container
+        .unwrap();
+    // 1 November 2026 to the horizon (twelve months on): the first and last day of each month.
+    assert!(c.occurrences.len() >= 20, "{}", c.occurrences.len());
+    assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+}
