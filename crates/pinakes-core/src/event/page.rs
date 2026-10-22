@@ -391,11 +391,7 @@ pub fn performers(v: &Value, base: &Url) -> Vec<super::Performer> {
             let mut seen = std::collections::HashSet::new();
             let values = ["url", "sameAs"]
                 .into_iter()
-                .flat_map(|field| match p.get(field) {
-                    Some(Value::Array(all)) => all.iter().collect(),
-                    Some(one) => vec![one],
-                    None => vec![],
-                })
+                .flat_map(|field| field_values(p, field))
                 .take(PERFORMER_LINK_VALUES);
             for value in values {
                 if let Some(url) = string(value).and_then(|s| origin_url(base, &s)) {
@@ -417,6 +413,15 @@ pub fn performers(v: &Value, base: &Url) -> Vec<super::Performer> {
         })
         .take(LINEUP_PERFORMERS)
         .collect()
+}
+/// A field's values, one or several, read in place: an array is never copied, so a cap on the
+/// values read bounds the work however long the array is.
+fn field_values<'a>(node: &'a Value, field: &str) -> impl Iterator<Item = &'a Value> {
+    let (all, one) = match node.get(field) {
+        Some(Value::Array(all)) => (all.as_slice(), None),
+        one => (&[][..], one),
+    };
+    all.iter().chain(one)
 }
 pub fn set_time(doc: &mut ResourceMeta, s: &str, end: bool) {
     let s = s.trim();
@@ -692,6 +697,30 @@ mod performer_tests {
                 "https://www.songkick.com/artists/253846-radiohead"
             );
         }
+    }
+
+    /// The values cap counts `url` first, then `sameAs`, each one value or an array.
+    #[test]
+    fn performer_link_values_are_capped_across_fields() {
+        let base = Url::parse("https://tickets.example/show").unwrap();
+        let radiohead = "https://www.songkick.com/artists/253846-radiohead";
+        let filler = |n: usize| -> Vec<String> {
+            (0..n)
+                .map(|i| format!("https://tickets.example/fans/{i}"))
+                .collect()
+        };
+        // 63 `url` values leave room for one `sameAs` value; 64 leave none.
+        for (urls, read) in [(63, true), (64, false)] {
+            let node = serde_json::json!({"performer":{"name":"Radiohead","url":filler(urls),"sameAs":[radiohead,"https://tickets.example/more"]}});
+            let links = &performers(&node, &base)[0].links;
+            assert_eq!(links.len(), 9, "{urls}");
+            assert_eq!(links[0] == radiohead, read, "{urls}: {links:?}");
+        }
+        let node = serde_json::json!({"performer":{"name":"Radiohead","url":"https://tickets.example/radiohead","sameAs":radiohead}});
+        assert_eq!(
+            performers(&node, &base)[0].links,
+            [radiohead, "https://tickets.example/radiohead"]
+        );
     }
 
     /// A merge never pairs one document's performers with another's provenance: performers keep
