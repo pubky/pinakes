@@ -157,7 +157,8 @@ fn missing(v: &Value, id: &str) -> Result<bool> {
             {
                 Ok(true)
             } else {
-                bail!("the API answered an error: {e}")
+                // Never the service's text: an error message may hold the link it names.
+                bail!("the API answered an error")
             }
         }
     }
@@ -515,6 +516,15 @@ mod tests {
         .is_err());
         assert!(parse(200, &read("missing.json"), "bitcoin-whitepaper").is_err());
         assert!(parse(200, br#"{"error":"Internal error"}"#, unknown).is_err());
+        // The service's error text never becomes ours: it may name a link.
+        let error = parse(
+            200,
+            br#"{"error":"failed [https://first.example/a,HTTPS://user:CANARY@second.example/b]"}"#,
+            unknown,
+        )
+        .unwrap_err();
+        assert!(!format!("{error:#}").contains("CANARY"), "{error:#}");
+        assert!(!format!("{error:#}").contains("http"), "{error:#}");
         assert!(parse(429, b"", unknown).is_err());
         assert!(parse(502, b"<html>", unknown).is_err());
         assert!(parse(200, b"[", unknown).is_err());

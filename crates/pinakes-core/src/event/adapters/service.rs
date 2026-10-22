@@ -31,15 +31,15 @@ fn parse_error(e: impl std::fmt::Display) -> anyhow::Error {
 }
 pub(super) fn upstream_status(f: &Fetched) -> Result<()> {
     if f.status >= 500 || matches!(f.status, 408 | 429) {
-        return Err(crate::resolver::RetryLater {
+        return Err(anyhow::Error::new(crate::resolver::RetryLater {
             class: if f.status >= 500 {
                 "http_5xx"
             } else {
                 "http_4xx"
             },
             seconds: f.retry_after_secs.max(60),
-        }
-        .into());
+        })
+        .context(crate::resolver::Upstream(f.status)));
     }
     Ok(())
 }

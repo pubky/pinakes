@@ -209,9 +209,15 @@ pub fn redact(text: &str) -> String {
         .min()
     {
         out.push_str(&text[at..start]);
+        // The link ends at white space, or where another link begins.
         let end = text[start..]
             .find(char::is_whitespace)
             .map_or(text.len(), |n| start + n);
+        let end = ["http://", "https://"]
+            .iter()
+            .filter_map(|s| lower[start + scheme..end].find(s))
+            .min()
+            .map_or(end, |n| start + scheme + n);
         let link = &text[start..end];
         // Up to the first `?` or `#`: no query, no fragment.
         let cut = link.find(['?', '#']).unwrap_or(link.len());
@@ -230,10 +236,31 @@ pub fn redact(text: &str) -> String {
     out
 }
 
-/// An error as a log line prints it: its whole chain (`{:#}`), through `redact`. Every log line
-/// that prints an error prints it through this; a test holds them to it.
+/// An error as a log line prints it: its whole chain (`{:#}`), through `redact`. Only the lines
+/// about this process and its own services (the database, Nexus, the dump) print an error; a
+/// line about a fetch, a lookup or a parse prints the failure's kind (`error_class`), its
+/// upstream status (`status_of`) and the host asked, never an error's text. Tests hold both.
 pub fn log_error<E: std::fmt::Display + ?Sized>(error: &E) -> String {
     redact(&format!("{error:#}"))
+}
+
+/// The HTTP status an upstream answered, as an error's context, so a log line can name it.
+#[derive(Debug)]
+pub struct Upstream(pub u16);
+impl std::fmt::Display for Upstream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "upstream answered HTTP {}", self.0)
+    }
+}
+
+/// The HTTP status behind a failure, when one was answered.
+pub fn status_of(error: &anyhow::Error) -> Option<u16> {
+    error.downcast_ref::<Upstream>().map(|u| u.0).or_else(|| {
+        error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<reqwest::Error>()?.status())
+            .map(|status| status.as_u16())
+    })
 }
 
 pub fn error_class(error: &anyhow::Error) -> &'static str {
@@ -297,6 +324,11 @@ mod tests {
             ),
             ("HTTPS://Example.org/a?token=CANARY", "HTTPS://Example.org/a"),
             ("at https://user:CANARY@example.org/a, ok", "at https://example.org/a, ok"),
+            // Two links in one span: the second loses its user info too (Codex's case).
+            (
+                "failed [https://first.example/a,HTTPS://user:CANARY@second.example/b?t=CANARY]",
+                "failed [https://first.example/a,HTTPS://second.example/b",
+            ),
             ("from http://example.org/c#CANARY", "from http://example.org/c"),
             ("no link here", "no link here"),
             ("https://example.org/plain", "https://example.org/plain"),
@@ -434,8 +466,8 @@ mod tests {
 
     /// Every log line that prints an error prints it through `log_error(…)`: an error's text may
     /// hold a URL (a client library names the one it asked), and `log_error` redacts it. Outside
-    /// `log_error`, `log_host` and `error_class` calls, a log call names `e`, `err`, `error` or
-    /// `cause` only as a field's name, and no format string prints one.
+    /// `log_error`, `log_host`, `error_class` and `status_of` calls, a log call names `e`, `err`,
+    /// `error` or `cause` only as a field's name, and no format string prints one.
     #[test]
     fn every_logged_error_goes_through_log_error() {
         let mut found = vec![];
@@ -448,7 +480,7 @@ mod tests {
             .iter()
             .any(|p| args.contains(p));
             let mut plain = strip_strings(args);
-            for name in ["log_error(", "log_host(", "error_class("] {
+            for name in ["log_error(", "log_host(", "error_class(", "status_of("] {
                 plain = strip_calls(&plain, name);
             }
             let named = plain
@@ -475,6 +507,34 @@ mod tests {
                     path.display(),
                     call.lines().next().unwrap_or("")
                 ));
+            }
+        }
+        assert!(found.is_empty(), "{found:#?}");
+    }
+
+    /// No log line on a fetch, lookup or parse path prints an error's text, not even through
+    /// `log_error`: what an upstream answered may hold a link. Those lines print the failure's
+    /// kind (`error_class`). The lines about this process's own services may print theirs.
+    #[test]
+    fn no_fetch_path_logs_an_error_s_text() {
+        let own = [
+            "/api.rs",
+            "/groups.rs",
+            "/maintenance.rs",
+            "/osm_dump.rs",
+            "/queue.rs",
+            "/same_event.rs",
+            "/resolver/mod.rs",
+            "pinakesd/src/main.rs",
+        ];
+        let mut found = vec![];
+        for (path, call) in log_calls() {
+            let name = path.to_string_lossy();
+            if own.iter().any(|o| name.ends_with(o)) {
+                continue;
+            }
+            if call.contains("log_error(") {
+                found.push(format!("{name}: {}", call.lines().next().unwrap_or("")));
             }
         }
         assert!(found.is_empty(), "{found:#?}");

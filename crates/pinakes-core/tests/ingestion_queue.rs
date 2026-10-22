@@ -755,6 +755,51 @@ async fn a_failure_log_keeps_no_query_secret(pool: PgPool) {
     assert!(!line.contains("CANARY"), "{line}");
 }
 
+/// A resolver whose error repeats what an upstream answered: two links in one span, the second
+/// with user info, a query and a fragment (Codex's case), behind a 503.
+struct UpstreamTextResolver;
+#[async_trait::async_trait]
+impl Resolver for UpstreamTextResolver {
+    fn name(&self) -> &'static str {
+        "web"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, _: &str) -> anyhow::Result<ResourceMeta> {
+        Err(anyhow::anyhow!(
+            "failed [https://first.example/a,HTTPS://user:CANARY@second.example/b?t=CANARY#CANARY]"
+        )
+        .context(pinakes_core::resolver::Upstream(503)))
+    }
+    fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+        Duration::from_secs(86400)
+    }
+}
+/// A failure's log line prints the failure's kind, the upstream status and the host, never the
+/// error's text: nothing an upstream answered reaches the log, however it is shaped.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_failure_log_prints_no_upstream_text(pool: PgPool) {
+    let lines = log_lines();
+    let a = change("https://site.example.org/page", "a", "/pub/app/tags/a");
+    batch(&pool, vec![a], Some("one")).await;
+    let cfg = QueueConfig::default();
+    let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    let _ = queue::run_job(&pool, &UpstreamTextResolver, &cfg, &job).await;
+    let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+    let line = text
+        .lines()
+        .find(|l| l.contains("resolution failed") && l.contains(job.id.as_str()))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(line.contains("\"host\":\"site.example.org\""), "{line}");
+    assert!(line.contains("\"status\":\"503\""), "{line}");
+    assert!(line.contains("\"kind\":\""), "{line}");
+    assert!(
+        !line.contains("CANARY") && !line.to_lowercase().contains("http"),
+        "{line}"
+    );
+}
+
 /// A hook that runs out of time is logged by the link's host, never the link: a canary token in
 /// the query stays out of the line.
 #[tokio::test]

@@ -223,7 +223,7 @@ pub async fn wall_hooks(
             }
             Ok(Ok(None)) => crate::telemetry::discovery("wall_hook", "none"),
             Ok(Err(error)) => {
-                tracing::debug!(source = hook.name(), host = %crate::resolver::log_host(uri), error = %crate::resolver::log_error(&error), "wall hook failed");
+                tracing::debug!(source = hook.name(), host = %crate::resolver::log_host(uri), kind = crate::resolver::error_class(&error), "wall hook failed");
                 crate::telemetry::discovery("wall_hook", "failed");
             }
             Err(_) => {
@@ -285,7 +285,7 @@ pub(crate) async fn page_hooks_with(
             }
             Ok(Ok(None)) => {}
             Ok(Err(error)) => {
-                tracing::debug!(source = hook.name(), host = %crate::resolver::log_host(uri), error = %crate::resolver::log_error(&error), "page hook failed");
+                tracing::debug!(source = hook.name(), host = %crate::resolver::log_host(uri), kind = crate::resolver::error_class(&error), "page hook failed");
                 crate::telemetry::discovery("page_hook", "failed");
             }
             Err(_) => {

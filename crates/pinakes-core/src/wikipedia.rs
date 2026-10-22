@@ -332,7 +332,10 @@ impl Source for WikidataItemSource {
             .collect();
         if qids.len() > 1 {
             if let Err(error) = wikidata::prefetch_items(&cx.egress, &qids).await {
-                tracing::debug!(error = %crate::resolver::log_error(&error), "batched Wikidata read failed; items read alone");
+                tracing::debug!(
+                    kind = crate::resolver::error_class(&error),
+                    "batched Wikidata read failed; items read alone"
+                );
             }
         }
     }

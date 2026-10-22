@@ -738,6 +738,54 @@ async fn a_body_over_two_megabytes_is_refused(pool: PgPool) {
     assert_eq!(code, StatusCode::PAYLOAD_TOO_LARGE);
 }
 
+/// A query or body axum cannot read is refused with what the route takes, never the input: a
+/// link given as a parameter's name, as a value of the wrong type or as a bare JSON string to
+/// `/v1/resolve` (Codex's case) stays out of the answer.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_rejected_request_quotes_no_input(pool: PgPool) {
+    let app = api::router(AppState::new(pool, Config::default()).unwrap());
+    let link = "HTTPS://user:CANARY@example.org/calendar?token=QUERYCANARY#FRAGMENTCANARY";
+    let canary = |answer: &Value| {
+        let text = answer.to_string();
+        assert!(
+            !text.contains("CANARY") && !text.contains("example.org"),
+            "{text}"
+        );
+    };
+    let name: String =
+        percent_encoding::utf8_percent_encode(link, percent_encoding::NON_ALPHANUMERIC).to_string();
+    let (code, answer) = call(&app, "GET", &format!("/v1/search?{name}=1"), None).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    assert!(
+        answer["error"]
+            .as_str()
+            .unwrap()
+            .contains("query parameter"),
+        "{answer}"
+    );
+    canary(&answer);
+    let (code, answer) = call(&app, "POST", "/v1/resolve", Some(json!(link))).await;
+    assert!(code.is_client_error(), "{code}");
+    assert_eq!(
+        answer["error"],
+        "the body must be a JSON object with a `uri` string"
+    );
+    canary(&answer);
+    let (code, answer) = call(
+        &app,
+        "POST",
+        "/v1/resources/lookup",
+        Some(json!({ "uris": link })),
+    )
+    .await;
+    assert!(code.is_client_error(), "{code}");
+    assert!(
+        answer["error"].as_str().unwrap().contains("`uris`"),
+        "{answer}"
+    );
+    canary(&answer);
+}
+
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn reach_searches_pay_for_upstream_pages_before_fetching(pool: PgPool) {
     let (nexus_url, calls, task) = mock_nexus(vec![]).await;

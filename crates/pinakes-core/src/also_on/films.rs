@@ -334,7 +334,10 @@ impl Films {
             Ok(f) => Ok(parse_letterboxd(f.status, &f.url)),
             Err(e) if e.is::<crate::resolver::RetryLater>() => Err(e),
             Err(e) => {
-                tracing::debug!(error = %crate::resolver::log_error(&e), "letterboxd gave no answer");
+                tracing::debug!(
+                    kind = crate::resolver::error_class(&e),
+                    "letterboxd gave no answer"
+                );
                 Ok(None)
             }
         }

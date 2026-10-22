@@ -369,9 +369,59 @@ pub fn with_public_layers(routes: Router<AppState>, state: AppState) -> Router {
 /// Marks a response the panic backstop produced, so the layer around it can log the path.
 #[derive(Clone, Copy)]
 struct CaughtPanic;
+/// An extractor's rejection (a query, path or body axum could not read) answers in plain text
+/// with the input it could not read: an unknown parameter's name, a value of the wrong type, a
+/// bare string where an object was expected. Any of them may be a link. The answer keeps its
+/// status and says what the route takes (`rejection_message`), never the input.
+async fn rejection_without_input(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
+    let response = next.run(request).await;
+    let plain = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("text/plain"));
+    if !response.status().is_client_error() || !plain {
+        return response;
+    }
+    let status = response.status();
+    let message = rejection_message(&method, &path, status);
+    (status, Json(json!({ "error": message }))).into_response()
+}
+/// What a route takes, for a request axum could not read.
+fn rejection_message(method: &axum::http::Method, path: &str, status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::PAYLOAD_TOO_LARGE => return "the body is over 2 MB",
+        StatusCode::UNSUPPORTED_MEDIA_TYPE => {
+            return "the body must be JSON (content-type: application/json)"
+        }
+        _ => {}
+    }
+    if method == axum::http::Method::GET {
+        return "the path or a query parameter could not be read; /v1/openapi.json lists what this route takes";
+    }
+    match path {
+        "/v1/resolve" => "the body must be a JSON object with a `uri` string",
+        "/v1/resources/lookup" => {
+            "the body must be a JSON object with `ids` or `uris`, arrays of strings"
+        }
+        "/v1/changes/lookup" | "/v1/occurrences/lookup" => {
+            "the body must be a JSON object with `resource_ids` or `uris`, arrays of strings"
+        }
+        p if p.starts_with("/v1/groups/") => {
+            "the body must be a JSON object with a `members` array"
+        }
+        _ => "the body must be JSON as /v1/openapi.json describes",
+    }
+}
 /// Backstop: a handler panic answers 500 (counted in `pinakes_api_panics_total`) instead of
 /// dropping the connection, and the request path is logged (never the payload). Innermost, so
-/// the listener's other layers (CORS, Swagger headers) still shape the response.
+/// the listener's other layers (CORS, Swagger headers) still shape the response. Around it, an
+/// extractor's rejection is answered without the input it quotes (`rejection_without_input`).
 fn panic_backstop(
     routes: Router<AppState>,
     state: &AppState,
@@ -401,6 +451,7 @@ fn panic_backstop(
                 response
             },
         ))
+        .layer(axum::middleware::from_fn(rejection_without_input))
 }
 #[derive(Debug)]
 pub struct ApiError(pub(crate) StatusCode, pub(crate) String);
@@ -2140,6 +2191,7 @@ pub async fn admin_document(
 static PUBLIC_DOCUMENT: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
     let mut doc = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI serialization");
     crate::recipes::apply(&mut doc);
+    declare_rejections(&mut doc);
     doc
 });
 /// The document with `[event] same_event_hint = "off"`: no `maybe_same` field and no example
@@ -2173,6 +2225,34 @@ fn without_same_event(doc: &mut Value) {
         }
     }
     examples(&mut doc["paths"]);
+}
+/// Every operation that takes a body answers a body it cannot read with an error object
+/// (`rejection_without_input`): declared once here for all of them.
+fn declare_rejections(doc: &mut Value) {
+    let Some(paths) = doc["paths"].as_object_mut() else {
+        return;
+    };
+    for operations in paths.values_mut() {
+        for method in ["post", "put"] {
+            // `get_mut`, not indexing: indexing a missing key would create the operation.
+            let Some(responses) = operations
+                .get_mut(method)
+                .and_then(|operation| operation.get_mut("responses"))
+                .and_then(Value::as_object_mut)
+            else {
+                continue;
+            };
+            for (status, description) in [
+                ("413", "Body over 2 MB"),
+                ("415", "Body not JSON"),
+                ("422", "Body of another shape than the route takes"),
+            ] {
+                responses
+                    .entry(status)
+                    .or_insert_with(|| json!({ "description": description }));
+            }
+        }
+    }
 }
 /// The public document as an instance with `config` serves it.
 pub fn openapi_document_for(config: &Config) -> &'static Value {
@@ -2583,6 +2663,44 @@ pub async fn curate_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A request axum could not read is answered with what its route takes.
+    #[test]
+    fn a_rejection_says_what_the_route_takes() {
+        use axum::http::Method;
+        let m = |method: Method, path: &str, status| rejection_message(&method, path, status);
+        assert_eq!(
+            m(
+                Method::POST,
+                "/v1/resolve",
+                StatusCode::UNPROCESSABLE_ENTITY
+            ),
+            "the body must be a JSON object with a `uri` string"
+        );
+        assert!(m(
+            Method::POST,
+            "/v1/resources/lookup",
+            StatusCode::BAD_REQUEST
+        )
+        .contains("`uris`"));
+        assert!(m(
+            Method::POST,
+            "/v1/occurrences/lookup",
+            StatusCode::BAD_REQUEST
+        )
+        .contains("`resource_ids`"));
+        assert!(m(Method::PUT, "/v1/groups/abc", StatusCode::BAD_REQUEST).contains("`members`"));
+        assert!(m(Method::GET, "/v1/search", StatusCode::BAD_REQUEST).contains("query parameter"));
+        assert_eq!(
+            m(Method::POST, "/v1/resolve", StatusCode::PAYLOAD_TOO_LARGE),
+            "the body is over 2 MB"
+        );
+        assert!(m(
+            Method::POST,
+            "/v1/resolve",
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        )
+        .contains("application/json"));
+    }
     /// A link on a known service is named by it, even before its card is read.
     #[test]
     fn a_known_service_is_named_before_its_card_is_read() {

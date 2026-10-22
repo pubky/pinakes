@@ -690,12 +690,16 @@ licence. Stored errors are sanitized classes (dns, connect, timeout, http_4xx, h
 policy, too_large for an answer past its size cap, too_complex for a page whose parse did not
 end within its limits; rate_limited for a link waiting for its host's budget). A failed resolve
 is logged at warn as `resolution failed`, with the resource id (`resource_id`), the link's host
-(`host`; its scheme for a link without one, never its path) and this class (`kind`). Logs name a
-link only by its host (a calendar's token or a user's name in a link never reaches a log line),
+(`host`; its scheme for a link without one, never its path), this class (`kind`) and the
+upstream HTTP status when one was answered (`status`), never the error's text. No log line about
+a fetch, a lookup or a parse prints an error's text (what an upstream answered may hold a link);
+the lines about the daemon's own services (the database, Nexus, the dump) print theirs through
+a last guard that cuts every URL before its query or fragment and drops its user info. Logs name
+a link only by its host (a calendar's token or a user's name in a link never reaches a log line),
 errors carry no URL (a fetch error or a Nexus request error names none, an upstream service's
-error text is not repeated, the API answers an invalid link with the reason, not the link), and
-every logged error passes a last guard: a URL that still turns up in its text is cut before its
-query or fragment and loses its user info. Admin info and database metrics are cached for 15 seconds.
+error text is not repeated, the API answers an invalid link with the reason, not the link, and
+a query or body it cannot read with what the route takes, never the parameter name or value it
+could not read). Admin info and database metrics are cached for 15 seconds.
 
 Canaries (`canary.enabled`) run every `limits.canary_interval_secs`, first one interval after
 startup, on the ordinary workers and host budgets; their state survives restarts and they never

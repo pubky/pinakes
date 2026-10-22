@@ -458,8 +458,11 @@ async fn finish_job(
                 Some(status) if status < 500 => "http_4xx",
                 _ => "http_5xx",
             };
-            return Err(anyhow::Error::new(crate::resolver::ErrorClass(class))
-                .context("upstream returned a transient HTTP error"));
+            let error = anyhow::Error::new(crate::resolver::ErrorClass(class));
+            return Err(match doc.http_status {
+                Some(status) => error.context(crate::resolver::Upstream(status)),
+                None => error.context("upstream returned a transient HTTP error"),
+            });
         }
         let invalid_identifier =
             doc.status == Status::Missing && crate::resolver::cards::invalid_identifier(&job.uri);
@@ -601,8 +604,9 @@ async fn finish_job(
     }
     .await;
     if let Err(error) = result {
-        // The host and the stored error kind, so a failure can be found by site or by kind.
-        tracing::warn!(resource_id=%job.id,host=%crate::resolver::log_host(&job.uri),kind=crate::resolver::error_class(&error),resolver=resolver.name(),error=%crate::resolver::log_error(&error),"resolution failed");
+        // The host, the stored error kind and the upstream status, so a failure can be found by
+        // site or by kind; never the error's text, which may hold what an upstream answered.
+        tracing::warn!(resource_id=%job.id,host=%crate::resolver::log_host(&job.uri),kind=crate::resolver::error_class(&error),status=crate::resolver::status_of(&error).map(|s| s.to_string()).unwrap_or_default(),resolver=resolver.name(),"resolution failed");
         if error.is::<crate::resolver::interstitial::Blocked>() {
             // A challenge page: unreachable, with the normal failure backoff and dead letter.
             // The last accepted document stays; a wall never confirms disappearance.
