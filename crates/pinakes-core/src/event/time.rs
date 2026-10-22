@@ -178,10 +178,11 @@ pub const MAX_PERIOD_DATES: usize = 100_000;
 /// The `rrule` crate builds a whole period before it yields its first date, so a yearly rule
 /// listing every weekday, hour, minute and second (31 million dates a year) is never expanded,
 /// while any rule of ordinary size is. The count is an upper bound read from the parsed rule
-/// (so the names' case does not matter): the days a period keeps after the rule's own
-/// `BYYEARDAY`, `BYWEEKNO`, `BYMONTH`, `BYMONTHDAY` and `BYDAY` (the crate fills the unset
-/// ones from DTSTART, so a plain yearly or monthly rule is one day), times its `BYHOUR`,
-/// `BYMINUTE` and `BYSECOND` lists.
+/// (so the names' case does not matter): the days a period keeps after its `BYYEARDAY`,
+/// `BYWEEKNO`, `BYMONTH`, `BYMONTHDAY` and `BYDAY`, times its `BYHOUR`, `BYMINUTE` and
+/// `BYSECOND` lists. Any month-day list counts as the whole month (31 days), the rule's own or
+/// the one the crate fills from DTSTART, so a plain monthly rule counts 31 days and a plain
+/// yearly one 31 (its one month); the time lists the crate fills from DTSTART count one each.
 pub fn rrule_bounded(set: &rrule::RRuleSet, max: usize) -> bool {
     set.get_rrule()
         .iter()

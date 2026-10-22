@@ -4426,3 +4426,23 @@ async fn a_one_off_event_reference_has_a_null_recurrence_id(pool: PgPool) {
     );
     assert_eq!(v["items"][0]["event"]["recurrence_id"], Value::Null);
 }
+
+#[test]
+fn a_plain_rule_counts_its_month_day_as_a_whole_month() {
+    // The crate fills a plain monthly or yearly rule's month day from DTSTART; the bound counts
+    // that list as the whole month, 31 days (a yearly rule's one month), and each time list it
+    // fills as one.
+    let bounded = |rule: &str, max: usize| {
+        let set: rrule::RRuleSet = format!("DTSTART:20261020T120000Z\nRRULE:{rule}")
+            .parse()
+            .unwrap();
+        pinakes_core::event::time::rrule_bounded(&set, max)
+    };
+    for rule in ["FREQ=MONTHLY", "FREQ=YEARLY"] {
+        assert!(bounded(rule, 31), "{rule}");
+        assert!(!bounded(rule, 30), "{rule}");
+    }
+    // A weekly or daily rule is its days.
+    assert!(bounded("FREQ=WEEKLY", 1));
+    assert!(bounded("FREQ=DAILY", 1));
+}
