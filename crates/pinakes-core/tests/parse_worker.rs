@@ -207,31 +207,86 @@ fn many_fragments_in_one_job_share_one_worker() {
 }
 
 /// A job whose caller stops waiting ends at once: its worker is killed, every later parse of
-/// the job fails without a worker, and the slot is free well before the loop would have ended.
+/// the job fails, markup and plain text alike, and the slot is free well before the loop would
+/// have ended.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn a_cancelled_job_stops_its_loop() {
     let _serial = worker();
-    let before = html::running();
-    let refused = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let counted = refused.clone();
-    let job = tokio::spawn(html::blocking(move || {
-        for n in 0..1_000_000 {
-            if html::fragment(&format!("<b>x{n}</b>")).is_err() {
-                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    for (name, fragment) in [("markup", "<b>x{n}</b>"), ("plain text", "x{n} plain")] {
+        let before = html::running();
+        let refused = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let parsed_after = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gone = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (counted, after, cancelled) = (refused.clone(), parsed_after.clone(), gone.clone());
+        let job = tokio::spawn(html::blocking(move || {
+            for n in 0..5_000_000 {
+                let text = fragment.replace("{n}", &n.to_string());
+                match html::fragment(&text) {
+                    Err(_) => {
+                        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    Ok(_) if cancelled.load(std::sync::atomic::Ordering::SeqCst) => {
+                        after.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    Ok(_) => {}
+                }
             }
+        }));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(html::running() > before, "{name}");
+        gone.store(true, std::sync::atomic::Ordering::SeqCst);
+        job.abort();
+        let started = Instant::now();
+        while html::running() != before && started.elapsed() < Duration::from_secs(10) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        assert_eq!(html::running(), before, "{name}: {:?}", started.elapsed());
+        assert!(
+            refused.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "{name}"
+        );
+        // The test marks the caller gone just before `abort`, and the job learns it when the
+        // runtime drops the future: a few parses fit between the two, not the hundreds of
+        // thousands that went on before (Codex counted 944,000 in 5.26 s).
+        assert!(
+            parsed_after.load(std::sync::atomic::Ordering::SeqCst) <= 1_000,
+            "{name}: {} parses after the caller left",
+            parsed_after.load(std::sync::atomic::Ordering::SeqCst)
+        );
+    }
+    assert!(no_worker_left());
+}
+
+/// An Internet Archive answer of 250,000 plain descriptions (about 1 MB, Codex's case): its
+/// caller gone, the job refuses the rest of them and frees its slot within a fraction of a
+/// second, instead of parsing on.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn a_cancelled_job_refuses_the_rest_of_a_plain_answer() {
+    let _serial = worker();
+    let descriptions: Vec<String> = (0..250_000).map(|n| format!("plain {n}")).collect();
+    let body = serde_json::json!({
+        "metadata": {"identifier": "many", "title": "Many", "description": descriptions}
+    })
+    .to_string();
+    assert!(body.len() > 1_000_000);
+    let before = html::running();
+    let job = tokio::spawn(html::blocking(move || {
+        pinakes_core::sources::internet_archive::parse(200, body.as_bytes(), "many").map(|_| ())
     }));
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(html::running() > before);
+    tokio::time::sleep(Duration::from_millis(100)).await;
     job.abort();
     let started = Instant::now();
     while html::running() != before && started.elapsed() < Duration::from_secs(10) {
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(html::running(), before, "{:?}", started.elapsed());
-    assert!(refused.load(std::sync::atomic::Ordering::SeqCst) > 0);
-    assert!(no_worker_left());
+    assert_eq!(html::running(), before);
+    assert!(
+        started.elapsed() < Duration::from_millis(1_000),
+        "{:?}",
+        started.elapsed()
+    );
 }
 
 /// A 1,000-event calendar as calendars are written: plain locations and descriptions with a

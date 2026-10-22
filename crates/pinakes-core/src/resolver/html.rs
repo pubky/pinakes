@@ -17,7 +17,8 @@
 //!    within the job's budget too. The worker answers with the tree, within `MAX_DEPTH` (a deeper
 //!    node is left out) and `MAX_NODES` (more is `TooComplex`), so what the parent reads back is
 //!    bounded and linear to rebuild. Text without a `<` holds no markup and is parsed in this
-//!    process (in linear time), without a worker. The daemon and the e2e stack are their own
+//!    process (in linear time), without a worker, after the same checks of the job: once the job
+//!    is over, plain text is refused too. The daemon and the e2e stack are their own
 //!    workers (`set_worker`); `PINAKES_PARSE_WORKER` names one for any other program. Without a
 //!    worker (a library user, most tests) the parse runs in this process, fed a kibibyte at a
 //!    time and stopped when the job has used its budget of the thread's CPU time, with the same
@@ -413,29 +414,12 @@ pub fn bounded(text: &str) -> &str {
 
 /// Parse in this thread's job, or in a job of its own with `budget` outside one.
 fn parse(kind: Kind, text: &str, budget: Duration) -> anyhow::Result<scraper::Html> {
-    let result = if !text.contains('<') {
-        // No markup: the tokenizer reads text in linear time, and there is no tree to build.
-        // Nothing to send to a worker (a calendar's thousand plain descriptions).
-        parse_in_process(kind, text, PARSE_BUDGET)
-    } else if JOB.with(|j| j.borrow().is_some()) {
-        JOB.with(|j| j.borrow_mut().as_mut().expect("a job").parse(kind, text))
-    } else {
-        let mut job = Job::new(budget, Arc::default());
-        let result = job.parse(kind, text);
-        job.end();
-        result
-    };
-    if let Some(too_complex) = result
-        .as_ref()
-        .err()
-        .and_then(|e| e.downcast_ref::<TooComplex>())
-    {
-        tracing::warn!(
-            reason = too_complex.reason,
-            bytes = text.len(),
-            "an HTML parse did not end within its limits; the page gets no card"
-        );
+    if JOB.with(|j| j.borrow().is_some()) {
+        return JOB.with(|j| j.borrow_mut().as_mut().expect("a job").parse(kind, text));
     }
+    let mut job = Job::new(budget, Arc::default());
+    let result = job.parse(kind, text);
+    job.end();
     result
 }
 
@@ -532,26 +516,30 @@ impl Job {
         }
     }
 
+    /// Every parse of the job, plain text too, passes the job's checks first: a job that is over
+    /// (its caller gone, its deadline or its budget passed, its worker dead) parses nothing more.
     fn parse(&mut self, kind: Kind, text: &str) -> anyhow::Result<scraper::Html> {
-        if self.over.is_none() && self.cancelled.load(Ordering::SeqCst) {
-            self.over = Some("the caller stopped waiting");
-        }
-        if self.over.is_none() && Instant::now() >= self.deadline {
-            self.over = Some("the wall deadline");
-        }
         if let Some(reason) = self.over {
             return Err(TooComplex { reason }.into());
         }
-        let Some(worker) = worker() else {
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Err(self.end_with("the caller stopped waiting", text));
+        }
+        if Instant::now() >= self.deadline {
+            return Err(self.end_with("the wall deadline", text));
+        }
+        // Text without a `<` holds no markup: the tokenizer reads it in linear time and there is
+        // no tree to build, so it is parsed here (a calendar's plain descriptions). It counts
+        // against the job's budget of this thread's CPU time, as every parse without a worker
+        // does; a worker's parses count against the worker's own.
+        let plain = !text.contains('<');
+        let worker = if plain { None } else { worker() };
+        let Some(worker) = worker else {
             let left = self
                 .budget
                 .saturating_sub(thread_cpu().saturating_sub(self.cpu_started));
             if left.is_zero() {
-                self.over = Some("the CPU budget");
-                return Err(TooComplex {
-                    reason: "the CPU budget",
-                }
-                .into());
+                return Err(self.end_with("the CPU budget", text));
             }
             return parse_in_process(kind, text, left);
         };
@@ -560,17 +548,35 @@ impl Job {
         }
         match self.ask(kind, text) {
             Ok(Some(html)) => Ok(html),
-            Ok(None) => Err(TooComplex {
-                reason: "more nodes than the cap",
+            Ok(None) => {
+                // One tree refused; the worker goes on with the job's next parse.
+                tracing::warn!(
+                    reason = "more nodes than the cap",
+                    bytes = text.len(),
+                    "an HTML parse did not end within its limits; the page gets no card"
+                );
+                Err(TooComplex {
+                    reason: "more nodes than the cap",
+                }
+                .into())
             }
-            .into()),
             Err(_) => {
                 // The worker is gone: its status, or the watchdog, says why.
                 let reason = self.stop();
-                self.over = Some(reason);
-                Err(TooComplex { reason }.into())
+                Err(self.end_with(reason, text))
             }
         }
+    }
+
+    /// End the job's parsing for good, logged once, and the error for the parse that found it.
+    fn end_with(&mut self, reason: &'static str, text: &str) -> anyhow::Error {
+        self.over = Some(reason);
+        tracing::warn!(
+            reason,
+            bytes = text.len(),
+            "an HTML parse did not end within its limits; the page gets no card"
+        );
+        TooComplex { reason }.into()
     }
 
     fn start(&self, worker: &Worker) -> anyhow::Result<Process> {
@@ -1881,6 +1887,32 @@ mod tests {
         names(plain.tree.root(), &mut a);
         names(rebuilt.tree.root(), &mut b);
         assert_eq!(a, b, "the same tree, by child lists");
+    }
+
+    /// Plain text passes the job's checks like markup: a job whose caller is gone, whose deadline
+    /// or CPU budget has passed, parses no more plain text either (Codex on 6877c1f). A job still
+    /// within its limits parses it.
+    #[test]
+    fn a_job_that_is_over_refuses_plain_text_too() {
+        let plain = "a plain description, no markup";
+        let mut fresh = Job::new(PARSE_BUDGET, Arc::default());
+        assert!(fresh.parse(Kind::Fragment, plain).is_ok());
+        let mut cancelled = Job::new(PARSE_BUDGET, Arc::new(AtomicBool::new(true)));
+        let mut late = Job::new(PARSE_BUDGET, Arc::default());
+        late.deadline = Instant::now();
+        let mut spent = Job::new(PARSE_BUDGET, Arc::default());
+        spent.budget = Duration::ZERO;
+        for (job, reason) in [
+            (&mut cancelled, "the caller stopped waiting"),
+            (&mut late, "the wall deadline"),
+            (&mut spent, "the CPU budget"),
+        ] {
+            for _ in 0..2 {
+                let error = job.parse(Kind::Fragment, plain).unwrap_err();
+                let error = error.downcast_ref::<TooComplex>().expect("too complex");
+                assert_eq!(error.reason, reason);
+            }
+        }
     }
 
     /// A tree past `MAX_NODES` is refused as too complex, in this process as in a worker.

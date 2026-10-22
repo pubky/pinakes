@@ -189,8 +189,9 @@ CPU time (10 s in a debug build), 1 GiB of memory and a wall-clock deadline. Pas
 as soon as the job's caller stops waiting, the worker dies, every later parse of the job fails
 at once, the parse slot is freed, and the resource is recorded as `too_complex`: final, with no
 card (an earlier card is cleared, and the change recorded), until `pinakesd reextract` revives it
-(the daemon logs `an HTML parse did not end within its limits`). Text without markup (no `<`) is
-parsed in the daemon, in linear time, without a worker.
+(the daemon logs `an HTML parse did not end within its limits`, once per job). Text without
+markup (no `<`) is parsed in the daemon, in linear time, without a worker, but only while the
+job is within its limits: once it is over, it parses no plain text either.
 The tree a worker answers with keeps no node more than 256 elements deep and at most 500,000
 nodes (the largest of 149 real pages has 37,000). Before the parse, a linear scan cuts the text
 at the first obvious cap: 50,000 start tags, 256 open elements, 64 attributes on one tag (end
