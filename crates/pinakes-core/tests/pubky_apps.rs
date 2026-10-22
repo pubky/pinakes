@@ -579,6 +579,7 @@ fn eventky() {
     for rule in [
         "FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2;UNTIL=20260301T000000Z",
         "FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2;COUNT=3",
+        "freq=monthly;byday=tu;bysetpos=2;count=3",
     ] {
         let doc = at(
             "eventky/event-bern-meetup-recurring",
@@ -615,6 +616,17 @@ fn eventky() {
             "a line break",
         ),
         (json!({"rrule": flood}), "31 million dates a period"),
+        (
+            json!({"rrule": flood.to_lowercase()}),
+            "the same in lower case",
+        ),
+        (
+            json!({"rrule": flood
+                .replace("BYHOUR", "byhour")
+                .replace("BYMINUTE", "byMinute")
+                .replace("BYSECOND", "BySecond")}),
+            "the same with its time lists in lower and mixed case (a bound on the text missed it)",
+        ),
         (json!({"rrule": "FREQ=MINUTELY"}), "minutely"),
         (
             json!({"rrule": "FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30"}),
@@ -639,12 +651,43 @@ fn eventky() {
             "{why}"
         );
     }
-    // A daily series since January is still expanded: its next day.
-    let doc = at(
-        "eventky/event-bern-meetup-recurring",
-        json!({"rrule": "FREQ=DAILY"}),
+    // A daily series since January is still expanded, however it spells its names: its next
+    // day.
+    for rule in ["FREQ=DAILY", "freq=daily", "Freq=Daily"] {
+        let doc = at(
+            "eventky/event-bern-meetup-recurring",
+            json!({"rrule": rule}),
+        );
+        assert_eq!(
+            doc.start.unwrap().to_rfc3339(),
+            "2026-10-22T17:00:14+00:00",
+            "{rule}"
+        );
+    }
+    // The bound is the operator's limit: at two dates a period a daily rule at three hours is
+    // not expanded (no time, a next fetch), at the default it is.
+    let (uri, body) = fixture("eventky/event-bern-meetup-recurring");
+    let mut v: Value = serde_json::from_slice(&body).unwrap();
+    v["rrule"] = json!("FREQ=DAILY;BYHOUR=9,12,19");
+    let body = v.to_string();
+    let tight = pubky_apps::card_with(
+        &uri,
+        "application/octet-stream",
+        body.as_bytes(),
+        86400,
+        now,
+        2,
     );
-    assert_eq!(doc.start.unwrap().to_rfc3339(), "2026-10-22T17:00:14+00:00");
+    assert_eq!((tight.start, tight.end), (None, None));
+    assert!(pinakes_core::scheduler::next(&pubky, &tight, now, &refresh).is_some());
+    let usual = pubky_apps::card_at(
+        &uri,
+        "application/octet-stream",
+        body.as_bytes(),
+        86400,
+        now,
+    );
+    assert!(usual.start.is_some());
     // A duration past the calendar's end gives no end; the card keeps its start.
     let doc = edited(
         "eventky/event-psywalk-location-no-uri",

@@ -124,11 +124,13 @@ impl Resolver for PubkyResolver {
                     .context(crate::resolver::Upstream(status)))
                 }
             }
-            let doc = super::pubky_apps::card(
+            let doc = super::pubky_apps::card_with(
                 uri,
                 &fetched.content_type,
                 &fetched.body,
                 self.config.ttl_secs,
+                chrono::Utc::now(),
+                self.config.max_period_dates,
             )
             .bounded(super::pubky_apps::attributes())?;
             crate::telemetry::document(crate::telemetry::last_fetch(), &self.manifest(), &doc);
