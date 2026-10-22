@@ -4138,6 +4138,24 @@ fn a_rule_whose_periods_would_hold_too_many_dates_is_never_expanded() {
         dates_in_2027("FREQ=MONTHLY;BYMONTHDAY=1;BYHOUR=10,14,18"),
         36
     );
+    // The limit is the operator's: at two dates a period, the three-hour rule keeps its first
+    // occurrence with the warning.
+    let body = cal(&event(
+        "UID:r\nDTSTART:20270101T100000Z\nRRULE:FREQ=YEARLY;BYHOUR=10,14,18\nSUMMARY:r",
+    ));
+    let cfg = EventConfig {
+        max_period_dates: 2,
+        months_forward: 15,
+        ..Default::default()
+    };
+    let container = calendar::parse("https://example.org/f.ics", body.as_bytes(), &cfg, now())
+        .unwrap()
+        .container
+        .unwrap();
+    assert_eq!(container.occurrences.len(), 1);
+    assert!(container
+        .warnings
+        .contains(&"series_rule_unexpanded".to_string()));
     let bounded = |rule: &str, max: usize| {
         let set: rrule::RRuleSet = format!("DTSTART:20261020T120000Z\nRRULE:{rule}")
             .parse()

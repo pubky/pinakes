@@ -73,6 +73,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `event_max_revisions` | `10000` | Most revisions of one event (RECURRENCE-ID overrides). |
 | `event_max_document_bytes` | `8388608` | Largest retained event document set per feed (bytes). |
 | `event_max_recurrence_steps` | `100000` | Most recurrence steps one series may take. |
+| `event_max_period_dates` | `100000` | Most dates one period of a recurrence rule may hold; a larger rule is not expanded. |
 | `event_parse_timeout_ms` | `2000` | Calendar parse deadline (milliseconds). |
 | `event_months_back` | `1` | Months of past occurrences kept in the horizon. |
 | `event_months_forward` | `12` | Months of future occurrences kept in the horizon. |
@@ -395,7 +396,11 @@ wait the answer named when shorter; a 429 that names none keeps five minutes).
 Calendar GETs follow the web policy, decompress, and are capped at `limits.event_feed_body_bytes`;
 lines are unfolded from that bounded body and parsed on a blocking worker under
 `limits.event_parse_timeout_ms`. A malformed VEVENT is skipped with a warning; exceeding a work
-or feed cap rejects the snapshot. A JSON feed (Gancio, a JSON Feed) is parsed as one document,
+or feed cap rejects the snapshot. A recurrence rule is expanded only when one of its periods
+holds at most `limits.event_max_period_dates` dates (the recurrence library builds a whole period
+before giving its first date); an event with a larger rule keeps its first occurrence, with the
+warning `series_rule_unexpanded`. After an upgrade that changes how rules are read, run
+`pinakesd reextract event`: feeds re-parse at once instead of at their next fetch. A JSON feed (Gancio, a JSON Feed) is parsed as one document,
 so its parsed form can take several times `limits.event_feed_body_bytes` of memory; size that
 limit with the worker count in mind. `webcal://` is fetched over HTTPS and never downgrades. A
 feed-provided refresh interval is clamped to one hour through 30 days. Held snapshots retry after

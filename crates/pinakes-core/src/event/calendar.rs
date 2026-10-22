@@ -216,6 +216,7 @@ enum ZoneSource {
 struct Zones<'a> {
     deadline: std::time::Instant,
     max_date_values: usize,
+    max_period_dates: usize,
     calendar: Option<&'a str>,
     default: Option<&'a str>,
     embedded: BTreeMap<String, &'a Component>,
@@ -354,6 +355,7 @@ fn transitions(
     wall: NaiveDateTime,
     deadline: std::time::Instant,
     max_date_values: usize,
+    max_period_dates: usize,
 ) -> Result<Vec<Transition>> {
     let mut transitions = vec![];
     let mut values = 0usize;
@@ -378,7 +380,7 @@ fn transitions(
             let set: rrule::RRuleSet =
                 format!("DTSTART:{}Z\nRRULE:{}", start.format("%Y%m%dT%H%M%S"), rule).parse()?;
             ensure!(
-                time::rrule_bounded(&set, time::MAX_PERIOD_DATES),
+                time::rrule_bounded(&set, max_period_dates),
                 "VTIMEZONE RRULE period too large"
             );
             let end = wall
@@ -420,7 +422,13 @@ impl Zones<'_> {
         if !cache.contains_key(&key) {
             cache.insert(
                 key.clone(),
-                transitions(c, year_wall, self.deadline, self.max_date_values)?,
+                transitions(
+                    c,
+                    year_wall,
+                    self.deadline,
+                    self.max_date_values,
+                    self.max_period_dates,
+                )?,
             );
         }
         for &(start, from, to) in &cache[&key] {
@@ -447,7 +455,13 @@ impl Zones<'_> {
         if !cache.contains_key(&key) {
             cache.insert(
                 key.clone(),
-                transitions(c, wall, self.deadline, self.max_date_values)?,
+                transitions(
+                    c,
+                    wall,
+                    self.deadline,
+                    self.max_date_values,
+                    self.max_period_dates,
+                )?,
             );
         }
         let transitions = &cache[&key];
@@ -932,7 +946,7 @@ fn expand(
             parts.join(";")
         )
         .parse()?;
-        if !time::rrule_bounded(&set, time::MAX_PERIOD_DATES) {
+        if !time::rrule_bounded(&set, cfg.max_period_dates) {
             warnings.push("series_rule_unexpanded".into());
             return Ok(out);
         }
@@ -1040,6 +1054,7 @@ pub fn parse(
     let zones = Zones {
         deadline,
         max_date_values: cfg.max_date_values,
+        max_period_dates: cfg.max_period_dates,
         transitions: RefCell::default(),
         calendar: cal.value("X-WR-TIMEZONE"),
         default: cfg.default_timezone.as_deref(),
