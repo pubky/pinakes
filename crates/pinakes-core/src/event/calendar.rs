@@ -890,6 +890,13 @@ fn expand(
     let mut until_at = None;
     let mut out = BTreeMap::new();
     out.insert(start.at, None);
+    // One rule at most, and no exception rule: a second RRULE would be ignored and an EXRULE
+    // (dropped by RFC 5545) never applied, so an event carrying either is refused.
+    ensure!(
+        c.props.iter().filter(|p| p.name == "RRULE").count() <= 1,
+        "several RRULE"
+    );
+    ensure!(c.get("EXRULE").is_none(), "EXRULE is not supported");
     if let Some(rule) = c.value("RRULE") {
         // Names and values are case-insensitive (RFC 5545), and the library reads them so; the
         // checks and rewrites below read capitals.

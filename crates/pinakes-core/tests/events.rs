@@ -4245,3 +4245,35 @@ fn a_rule_in_lower_case_is_read_as_one_in_capitals() {
         );
     }
 }
+
+#[test]
+fn an_event_with_two_rules_or_an_exception_rule_is_left_out() {
+    for props in [
+        "RRULE:FREQ=DAILY\nRRULE:FREQ=WEEKLY",
+        "RRULE:FREQ=DAILY\nEXRULE:FREQ=WEEKLY",
+        "EXRULE:FREQ=WEEKLY",
+    ] {
+        let container = parse(&cal(&format!(
+            "{}\n{}",
+            event(&format!(
+                "UID:rules\nDTSTART:20261020T120000Z\n{props}\nSUMMARY:rules"
+            )),
+            event("UID:good\nDTSTART:20261020T120000Z\nSUMMARY:Healthy")
+        )))
+        .container
+        .unwrap();
+        let uids: Vec<&str> = container
+            .occurrences
+            .iter()
+            .map(|o| o.uid.as_str())
+            .collect();
+        assert_eq!(uids, ["good"], "{props}");
+        assert!(
+            container
+                .warnings
+                .contains(&"invalid_vevent_recurrence".to_string()),
+            "{props}: {:?}",
+            container.warnings
+        );
+    }
+}
