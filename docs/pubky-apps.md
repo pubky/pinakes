@@ -10,8 +10,9 @@ description, image and a few facts the app's format holds, and `open_in`, the cl
 the object (`[{client, url}]`). A profile also says which of the app's objects get a card: every
 other path in its namespace (the user's own state, private-by-intent data, files, tags) is never
 fetched. An object of a listed kind whose content keeps it from a card (an unlisted room, a
-withdrawn listing) is kept as `missing` and checked again as missing links are. An object
-stored before its path was left out becomes `missing` on its next fetch, without a request.
+withdrawn listing) is `missing` once a second fetch confirms it, as for any link, and keeps
+nothing of a card it had before; it is checked again as missing links are. An object stored
+before its path was left out becomes `missing` the same way, without a request.
 
 Profiles are Pinakes's own code, one file per app (`resolver/pubky_apps/<app>.rs`). Nothing is
 read from the apps themselves or from a registry outside this repository.

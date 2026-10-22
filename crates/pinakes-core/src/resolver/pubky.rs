@@ -51,6 +51,7 @@ impl Resolver for PubkyResolver {
             // is never fetched: it keeps no card.
             if super::pubky_apps::excluded(uri) {
                 let mut doc = ResourceMeta::new(uri, "pubky", self.config.ttl_secs);
+                doc.set_type("CreativeWork");
                 doc.status = Status::Missing;
                 return Ok(doc);
             }
@@ -102,6 +103,7 @@ impl Resolver for PubkyResolver {
             };
             let fetched = self.egress.fetch_with(url.as_str(), &options).await?;
             let mut doc = ResourceMeta::new(uri, "pubky", self.config.ttl_secs);
+            doc.set_type("CreativeWork");
             match fetched.status {
                 200..=299 => {}
                 404 | 410 => {
@@ -527,6 +529,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(doc.status, expected, "{status}");
+            assert_eq!(doc.type_name, "CreativeWork", "{status}");
         }
     }
 

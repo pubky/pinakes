@@ -308,7 +308,11 @@ pub async fn save(
             tx.commit().await?;
             return Ok(());
         }
-        if let Some(before) = &before {
+        // A Pubky app's object without a card (withheld by its content, gone, or at a path its
+        // profile leaves out) keeps nothing of its earlier card: an unlisted room or a paused
+        // listing shows nothing it used to.
+        let app_object = doc.source == "pubky" && crate::resolver::pubky_apps::known(&doc.url);
+        if let Some(before) = before.as_ref().filter(|_| !app_object) {
             let mut retained = before.clone();
             retained["fetched_at"] = json!(doc.fetched_at);
             retained["ttl_secs"] = json!(doc.ttl_secs);

@@ -688,3 +688,43 @@ async fn cards_carry_their_client_links_and_facts(pool: PgPool) {
         json!([{"client": "Eventky", "url": format!("https://eventky.app/event/{author}/0035DS0K1ZTEG")}])
     );
 }
+
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_object_that_loses_its_card_keeps_nothing_of_it(pool: PgPool) {
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    for (name, change) in [
+        (
+            "rooms/0035SFYCGVBV2-introductions",
+            json!({"visibility": "unlisted"}),
+        ),
+        ("marketplace/listing-active", json!({"state": "paused"})),
+    ] {
+        let (uri, body) = fixture(name);
+        let id = store::ensure_resource(&pool, &uri).await.unwrap();
+        let mut doc = card_of(&uri, &body);
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+        let shown = get(&app, &format!("/v1/resources/{id}")).await;
+        assert_eq!(shown["status"], "ok", "{shown}");
+        // Withdrawn by its owner: missing once a second fetch confirms it, with nothing of the
+        // card it had.
+        let mut v: Value = serde_json::from_slice(&body).unwrap();
+        for (k, value) in change.as_object().unwrap() {
+            v[k] = value.clone();
+        }
+        let mut gone = card_of(&uri, v.to_string().as_bytes());
+        assert_eq!(gone.status, Status::Missing);
+        for _ in 0..2 {
+            doc.fetched_at += 1000;
+            gone.fetched_at = doc.fetched_at;
+            store::save_document(&pool, &id, 0, &gone).await.unwrap();
+        }
+        let shown = get(&app, &format!("/v1/resources/{id}")).await;
+        assert_eq!(shown["status"], "missing", "{shown}");
+        for field in ["name", "description", "image", "point"] {
+            assert!(shown[field].is_null(), "{name}: {field} in {shown}");
+        }
+        assert_eq!(shown["type"], "CreativeWork", "{shown}");
+        assert_eq!(shown["open_in"], json!([]), "{shown}");
+        assert!(shown["details"]["facts"].is_null(), "{shown}");
+    }
+}

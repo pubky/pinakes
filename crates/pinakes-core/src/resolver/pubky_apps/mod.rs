@@ -174,6 +174,7 @@ pub fn card(uri: &str, content_type: &str, body: &[u8], ttl: u64) -> ResourceMet
             if read == Read::NoCard {
                 // Kept as an object without a card, checked again as missing ones are.
                 let mut empty = ResourceMeta::new(uri, "pubky", ttl);
+                empty.set_type("CreativeWork");
                 empty.site = doc.site;
                 empty.status = Status::Missing;
                 return empty;
@@ -269,6 +270,10 @@ pub fn open_in(uri: &str) -> Vec<OpenIn> {
         ),
         _ => vec![],
     }
+}
+/// Whether a `pubky://` object is in a known app's namespace, of a kind its profile reads or not.
+pub fn known(uri: &str) -> bool {
+    segments(uri).is_some_and(|(_, s)| matches!(route(&s), Some(Route::Kind(..) | Route::Excluded)))
 }
 /// Whether a `pubky://` object is in a known app's namespace but of no kind its profile reads.
 pub fn excluded(uri: &str) -> bool {
