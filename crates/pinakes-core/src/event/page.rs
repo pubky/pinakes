@@ -362,12 +362,14 @@ pub fn names_page(v: &Value, base: &Url) -> Option<bool> {
         .map(|id| id == page)
 }
 /// How much of a line-up a page's parse looks at, so a hostile one costs little: the first 64
-/// entries, of which 17 performers with a name, and of each the first 64 link values, of which 9
-/// links. Each is one above what an event keeps (`EventFields::bound`: 16 performers, 8 links),
-/// so trimming still has one to drop.
+/// entries, of which 17 performers with a name, and of each the first 256 link values, of which
+/// the first 64 distinct links (values that are no link, such as nulls, nested arrays or other
+/// schemes, take no place among the 64), of which 9 are kept. The 17 and 9 are one above what an
+/// event keeps (`EventFields::bound`: 16 performers, 8 links), so trimming still has one to drop.
 const LINEUP_ENTRIES: usize = 64;
 const LINEUP_PERFORMERS: usize = 17;
-const PERFORMER_LINK_VALUES: usize = 64;
+const PERFORMER_LINK_VALUES: usize = 256;
+const PERFORMER_LINKS_READ: usize = 64;
 const PERFORMER_LINKS: usize = 9;
 
 /// An event node's performers (`performer`, one or several): a name each, with the links the
@@ -394,6 +396,9 @@ pub fn performers(v: &Value, base: &Url) -> Vec<super::Performer> {
                 .flat_map(|field| field_values(p, field))
                 .take(PERFORMER_LINK_VALUES);
             for value in values {
+                if links.len() == PERFORMER_LINKS_READ {
+                    break;
+                }
                 if let Some(url) = string(value).and_then(|s| origin_url(base, &s)) {
                     if seen.insert(url.clone()) {
                         links.push(url);
@@ -699,7 +704,9 @@ mod performer_tests {
         }
     }
 
-    /// The values cap counts `url` first, then `sameAs`, each one value or an array.
+    /// The caps count `url` first, then `sameAs`, each one value or an array: 64 distinct links,
+    /// among at most 256 values. A value that is no link takes no place among the 64, so junk
+    /// can't push the page's keying link out; it only uses up the 256.
     #[test]
     fn performer_link_values_are_capped_across_fields() {
         let base = Url::parse("https://tickets.example/show").unwrap();
@@ -721,6 +728,26 @@ mod performer_tests {
             performers(&node, &base)[0].links,
             [radiohead, "https://tickets.example/radiohead"]
         );
+        // 224 values before it, of one distinct link: nulls, nested arrays (never read inside),
+        // numbers, other schemes and one link many times. Its Songkick page is still read.
+        let mut junk = vec![serde_json::Value::Null; 64];
+        junk.extend(vec![
+            serde_json::json!(["https://tickets.example/nested"]);
+            32
+        ]);
+        junk.extend(vec![serde_json::json!(7); 32]);
+        junk.extend(vec![serde_json::json!("ftp://tickets.example/x"); 16]);
+        junk.extend(vec![serde_json::json!("mailto:fans@tickets.example"); 16]);
+        junk.extend(vec![serde_json::json!("https://tickets.example/again"); 64]);
+        let node =
+            serde_json::json!({"performer":{"name":"Radiohead","url":junk,"sameAs":radiohead}});
+        assert_eq!(
+            performers(&node, &base)[0].links,
+            [radiohead, "https://tickets.example/again"]
+        );
+        // The scan stops after 256 values, links or not.
+        let node = serde_json::json!({"performer":{"name":"Radiohead","url":vec![serde_json::Value::Null; 256],"sameAs":radiohead}});
+        assert!(performers(&node, &base)[0].links.is_empty());
     }
 
     /// A merge never pairs one document's performers with another's provenance: performers keep
