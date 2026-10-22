@@ -173,11 +173,9 @@ fn sequence(_: &Object, v: &Value, doc: &mut ResourceMeta) -> Read {
 
 /// An incident report: its type, severity, description and point. An expired report has no
 /// card: it described the road as it was.
-fn incident(_: &Object, v: &Value, doc: &mut ResourceMeta) -> Read {
-    let expired = v
-        .get("expires_at")
-        .and_then(read::micros)
-        .is_some_and(|t| t <= chrono::Utc::now());
+fn incident(object: &Object, v: &Value, doc: &mut ResourceMeta) -> Read {
+    let expires = v.get("expires_at").and_then(read::micros);
+    let expired = expires.is_some_and(|t| t <= object.now);
     let (Some(point), Some(kind)) = (read::point(v), read::text(v, &["incident_type"])) else {
         return Read::NoCard;
     };
@@ -189,6 +187,8 @@ fn incident(_: &Object, v: &Value, doc: &mut ResourceMeta) -> Read {
     located(doc, Some(point));
     fact(doc, "incident_type", Some(kind));
     fact(doc, "severity", read::text(v, &["severity"]));
+    // Its card goes when it expires: it is fetched again then.
+    doc.refresh_by = expires;
     Read::Card
 }
 

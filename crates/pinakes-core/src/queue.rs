@@ -544,6 +544,7 @@ async fn finish_job(
                 doc.ttl_secs = doc.ttl_secs.max(3600);
             }
         }
+        doc.ttl_secs = refresh_by(doc.ttl_secs, doc.refresh_by, chrono::Utc::now());
         if invalid_identifier {
             doc.ttl_secs = 0;
         }
@@ -940,4 +941,40 @@ pub fn spawn_with_egress(
         }
     }
     Ok(workers)
+}
+
+/// The seconds to a card's next fetch when it changes by itself at `by` (an incident expires, an
+/// auction ends): no later than then, and at least a minute away. A card otherwise final (`0`)
+/// is fetched then too.
+fn refresh_by(
+    ttl: u64,
+    by: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> u64 {
+    let Some(by) = by else { return ttl };
+    let seconds = (by - now).num_seconds().max(60) as u64;
+    if ttl == 0 {
+        seconds
+    } else {
+        ttl.min(seconds)
+    }
+}
+#[cfg(test)]
+mod refresh_by_tests {
+    use super::refresh_by;
+    use chrono::{Duration, Utc};
+
+    #[test]
+    fn a_card_that_changes_by_itself_is_fetched_again_then() {
+        let now = Utc::now();
+        let week = 7 * 86400;
+        // An incident expiring in two hours, on a card refreshed weekly: in two hours.
+        assert_eq!(refresh_by(week, Some(now + Duration::hours(2)), now), 7200);
+        // A deadline after the next fetch changes nothing; none at all neither.
+        assert_eq!(refresh_by(3600, Some(now + Duration::days(3)), now), 3600);
+        assert_eq!(refresh_by(week, None, now), week);
+        // A deadline passed or a moment away: in a minute. A final card is fetched then too.
+        assert_eq!(refresh_by(week, Some(now - Duration::hours(1)), now), 60);
+        assert_eq!(refresh_by(0, Some(now + Duration::hours(1)), now), 3600);
+    }
 }

@@ -45,7 +45,7 @@ cards and media, `srs/`, `subscriptions/`, `settings.json`, `tags/`.
 | `routes/{id}` | `Trip`: `name`, `description`, `image_uri`; the first waypoint as its point; facts `activity`, `distance_m`, `elevation_gain_m`, `duration_s` | `https://mapky.app/route/{owner}/{id}` |
 | `geo_captures/{id}` | `Photograph` (a video, audio or 3D capture its own type): `caption`, its point; fact `capture_kind`. The media file is another object and not read | `https://mapky.app/capture/{owner}/{id}` |
 | `sequences/{id}` | `ImageGallery`: `name`, `description` | `https://mapky.app/sequence/{owner}/{id}` |
-| `incidents/{id}` | `SpecialAnnouncement`: `description`, its point; facts `incident_type`, `severity`. No card once `expires_at` has passed | `https://mapky.app/incident/{owner}/{id}` |
+| `incidents/{id}` | `SpecialAnnouncement`: `description`, its point; facts `incident_type`, `severity`. No card once `expires_at` has passed, and it is fetched again then | `https://mapky.app/incident/{owner}/{id}` |
 | `reviews/{id}` | `Review`: `content`; facts `rating` (1 to 10) and `place` (the OpenStreetMap URL) | the place: `https://mapky.app/place/{type}/{id}` |
 | `posts/{id}` | `SocialMediaPosting` (social content): `content`. A post about a place (its `parent`, or `place` in older posts) opens the place; a reply to a route, capture, sequence or incident opens that. An older post with `kind: review` is a `Review`; a post with `kind: collection` is a collection | the place or the parent |
 | `collections/{id}` | `Collection` (the older collection objects): `name`, `description`, `image_uri`; fact `items` (how many places) | none |
@@ -78,7 +78,7 @@ address until rooms.pubky.app is live). Never fetched: `members/`, `messages/`, 
 | Path | Card | Opens in the Pubky Shop |
 | --- | --- | --- |
 | `shop.json` | `OnlineStore`: `name`, `bio`, `avatarUrl`; fact `country` | `https://pubky.app/shop/marketplace/shop/{owner}` |
-| `listings/{listing}` | `Product`: `title`, `description`, the first image; facts `price` (the fixed price or an auction's starting one, `1.00 USD`), `condition`, `category`, `country`. Only an `active` listing whose auction (if any) has not ended; an adult-only listing shows no image | `https://pubky.app/shop/marketplace/listing/{owner}/{listing}` |
+| `listings/{listing}` | `Product`: `title`, `description`, the first image; facts `price` (the fixed price or an auction's starting one, `1.00 USD`), `condition`, `category`, `country`. Only an `active` listing whose auction (if any) has not ended, and an auction is fetched again when it ends; an adult-only listing shows no image | `https://pubky.app/shop/marketplace/listing/{owner}/{listing}` |
 | `drops/{drop}` | `SaleEvent`: `title`, `description`, the first image, `startsAt`, `endsAt` | `https://pubky.app/shop/marketplace/drop/{owner}/{drop}` |
 
 A record must name its owner (`ownerPubky`) and kind (`recordType`), and a listing or drop its

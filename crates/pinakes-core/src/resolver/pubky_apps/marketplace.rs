@@ -67,12 +67,13 @@ fn shop(object: &Object, v: &Value, doc: &mut ResourceMeta) -> Read {
 /// shows no image.
 fn listing(object: &Object, v: &Value, doc: &mut ResourceMeta) -> Read {
     let sale = &v["sale"];
-    let ended = sale.get("format").and_then(Value::as_str) == Some("auction")
-        && sale
-            .get("endsAt")
-            .and_then(Value::as_str)
-            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-            .is_some_and(|end| end <= chrono::Utc::now());
+    let auction_end = sale
+        .get("endsAt")
+        .and_then(Value::as_str)
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .map(|t| t.with_timezone(&chrono::Utc))
+        .filter(|_| sale.get("format").and_then(Value::as_str) == Some("auction"));
+    let ended = auction_end.is_some_and(|end| end <= object.now);
     if !record(object, v, "listing")
         || v.get("listingId").and_then(Value::as_str) != Some(object.var("listing"))
         || v.get("state").and_then(Value::as_str) != Some("active")
@@ -109,6 +110,8 @@ fn listing(object: &Object, v: &Value, doc: &mut ResourceMeta) -> Read {
         }
     }
     country(v, doc);
+    // Its card goes when the auction ends: it is fetched again then.
+    doc.refresh_by = auction_end;
     Read::Card
 }
 

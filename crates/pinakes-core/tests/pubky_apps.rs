@@ -255,8 +255,12 @@ fn marketplace() {
                 "startsAt": "2026-10-01T00:00:00Z", "endsAt": ends.to_rfc3339()}}),
         )
     };
-    let doc = auction(Utc::now() + Duration::days(1));
+    let ends = Utc::now() + Duration::days(1);
+    let doc = auction(ends);
     assert_eq!(facts(&doc)["price"], "0.00001000 BTC");
+    // Fetched again when it ends; a fixed-price listing has no such time.
+    assert_eq!(doc.refresh_by.unwrap().timestamp(), ends.timestamp());
+    assert_eq!(card("marketplace/listing-active").refresh_by, None);
     no_card(&auction(Utc::now() - Duration::days(1)));
     // Paused, ended or removed listings, and records of another kind or owner, have no card.
     no_card(&card("marketplace/listing-paused"));
@@ -442,6 +446,8 @@ fn mapky() {
     );
     assert_eq!(doc.type_name, "SpecialAnnouncement");
     assert_eq!(facts(&doc)["incident_type"], "hazard");
+    // Fetched again when it expires.
+    assert_eq!(doc.refresh_by.unwrap().timestamp_micros(), expires);
     assert!(doc.location.is_some());
     assert_eq!(
         links(&doc),
@@ -812,4 +818,58 @@ async fn an_object_that_loses_its_card_keeps_nothing_of_it(pool: PgPool) {
         assert_eq!(shown["open_in"], json!([]), "{shown}");
         assert!(shown["details"]["facts"].is_null(), "{shown}");
     }
+}
+
+/// The Pubky resolver's answer for one object body, without a network.
+struct Served(Vec<u8>);
+#[async_trait::async_trait]
+impl pinakes_core::resolver::Resolver for Served {
+    fn name(&self) -> &'static str {
+        "pubky"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, uri: &str) -> anyhow::Result<ResourceMeta> {
+        Ok(
+            pubky_apps::card(uri, "application/octet-stream", &self.0, 86400)
+                .bounded(pubky_apps::attributes())?,
+        )
+    }
+    fn refresh_after(&self, doc: &ResourceMeta) -> std::time::Duration {
+        std::time::Duration::from_secs(doc.ttl_secs)
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_incident_is_fetched_again_when_it_expires(pool: PgPool) {
+    use pinakes_core::queue;
+    let owner = "gi169rgooxb3mza8j9uf1xoqjacakgwp4za1dz1hgghbhet4m86y";
+    let uri = format!("pubky://{owner}/pub/mapky.app/incidents/00357W2047V80");
+    let id = store::ensure_resource(&pool, &uri).await.unwrap();
+    let expires = chrono::Utc::now() + chrono::Duration::hours(2);
+    let body = json!({"incident_type": "hazard", "severity": "high", "lat": 47.05, "lon": 8.33,
+        "expires_at": expires.timestamp_micros()});
+    sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let cfg = Config::default().queue;
+    let job = queue::claim(&pool, "pubky", &cfg).await.unwrap().unwrap();
+    queue::run_job(&pool, &Served(body.to_string().into_bytes()), &cfg, &job)
+        .await
+        .unwrap();
+    let (status, refresh, last): (String, chrono::DateTime<chrono::Utc>, bool) =
+        sqlx::query_as("SELECT status,refresh_at,final FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((status.as_str(), last), ("ok", false));
+    // At its expiry, not on the weekly cadence of a card without a time.
+    assert!(
+        (refresh - expires).num_seconds().abs() < 120,
+        "refresh {refresh}, expires {expires}"
+    );
 }

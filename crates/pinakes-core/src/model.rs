@@ -116,6 +116,11 @@ pub struct ResourceMeta {
     /// kind of failure it was; never stored.
     #[serde(skip)]
     pub http_status: Option<u16>,
+    /// When the card changes by itself (an incident expires, an auction ends): its next fetch
+    /// comes no later (`queue::refresh_by`). Never stored.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub refresh_by: Option<DateTime<Utc>>,
     /// The root an official API names for this object (a filing under its primary filer): the
     /// URI becomes an alias of it after the fetch (`alias::source`). Never stored.
     #[serde(skip)]
