@@ -188,8 +188,8 @@ answer with many HTML descriptions, a calendar's events) share one worker and it
 CPU time (10 s in a debug build), 1 GiB of memory and a wall-clock deadline. Past any of them, or
 as soon as the job's caller stops waiting, the worker dies, every later parse of the job fails
 at once, the parse slot is freed, and the resource is recorded as `too_complex`: final, with no
-card, until `pinakesd reextract` revives it (the daemon logs `an HTML parse did not end within
-its limits`). Text without markup (no `<`) is
+card (an earlier card is cleared, and the change recorded), until `pinakesd reextract` revives it
+(the daemon logs `an HTML parse did not end within its limits`). Text without markup (no `<`) is
 parsed in the daemon, in linear time, without a worker.
 The tree a worker answers with keeps no node more than 256 elements deep and at most 500,000
 nodes (the largest of 149 real pages has 37,000). Before the parse, a linear scan cuts the text

@@ -129,6 +129,45 @@ pub(crate) async fn append(
         .bind(source).bind(diff.class).execute(&mut **tx).await?;
     Ok(())
 }
+/// Clear a resource's card for good: its document becomes an empty one with status `error`,
+/// the change is recorded like any other, and the resource is final with `last_error` (a page
+/// too complex to parse). Unlike `save`, nothing of the old card is kept: no drift guard holds
+/// it, and no retained snapshot. `pinakesd reextract` revives the resource.
+pub async fn clear(pool: &PgPool, id: &str, generation: i64, last_error: &str) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+    let row = sqlx::query("SELECT r.uri,r.resolver,r.doc AS accepted FROM resource r WHERE r.id=$1 AND r.generation=$2 AND r.osm_id IS NULL FOR UPDATE OF r")
+        .bind(id)
+        .bind(generation)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some(row) = row else { return Ok(()) };
+    let uri: String = row.try_get("uri")?;
+    let source = row
+        .try_get::<Option<String>, _>("resolver")?
+        .unwrap_or_default();
+    let mut doc = ResourceMeta::new(&uri, &source, 0);
+    doc.status = Status::Error;
+    let before = row
+        .try_get::<Option<Value>, _>("accepted")?
+        .and_then(|v| serde_json::from_value::<ResourceMeta>(v).ok())
+        .map(|d| normalize(&d));
+    let after = normalize(&doc);
+    crate::store::write_document(&mut tx, id, generation, &doc).await?;
+    sqlx::query(
+        "UPDATE resource SET last_error=$3,attempts=attempts+1 WHERE id=$1 AND generation=$2",
+    )
+    .bind(id)
+    .bind(generation)
+    .bind(last_error)
+    .execute(&mut *tx)
+    .await?;
+    if let Some(diff) = diff(before.as_ref(), Some(&after)) {
+        append(&mut tx, id, &source, before, Some(after), diff, None).await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
 pub async fn save(
     pool: &PgPool,
     id: &str,

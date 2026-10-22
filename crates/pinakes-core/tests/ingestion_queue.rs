@@ -755,6 +755,106 @@ async fn a_failure_log_keeps_no_query_secret(pool: PgPool) {
     assert!(!line.contains("CANARY"), "{line}");
 }
 
+/// A resolver whose page is too complex to parse.
+struct TooComplexResolver;
+#[async_trait::async_trait]
+impl Resolver for TooComplexResolver {
+    fn name(&self) -> &'static str {
+        "web"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, _: &str) -> anyhow::Result<ResourceMeta> {
+        Err(pinakes_core::resolver::html::TooComplex {
+            reason: "the CPU budget",
+        }
+        .into())
+    }
+    fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+        Duration::from_secs(86400)
+    }
+}
+/// A resource whose refresh is too complex to parse loses its card: no title, no description,
+/// status `error`, final with `too_complex`, and the change is recorded. Before, the old card
+/// stayed (Codex on 58ed270).
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_too_complex_refresh_clears_the_card(pool: PgPool) {
+    let uri = "https://complex.example.org/page";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut card = ResourceMeta::new(uri, "web", 3600);
+    card.name = Some("Old title".into());
+    card.description = Some("Old description".into());
+    store::save_document(&pool, &id, 0, &card).await.unwrap();
+    let changes_before: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM resource_change WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE resource SET next_attempt_at=now()-interval '1 second' WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let cfg = QueueConfig::default();
+    let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    assert_eq!(job.id, id);
+    queue::run_job(&pool, &TooComplexResolver, &cfg, &job)
+        .await
+        .unwrap();
+    let (status, last_error, is_final, name, doc): (
+        String,
+        Option<String>,
+        bool,
+        Option<String>,
+        serde_json::Value,
+    ) = sqlx::query_as("SELECT status,last_error,final,name,doc FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "error");
+    assert_eq!(last_error.as_deref(), Some("too_complex"));
+    assert!(is_final);
+    assert_eq!(name, None);
+    assert!(
+        doc["name"].is_null() && doc["description"].is_null(),
+        "{doc}"
+    );
+    let changes_after: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM resource_change WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(changes_after, changes_before + 1);
+    // The public card says so too.
+    let app = pinakes_core::api::router(
+        pinakes_core::api::AppState::new(pool.clone(), Default::default()).unwrap(),
+    );
+    let response = tower::ServiceExt::oneshot(
+        app,
+        axum::http::Request::get(format!("/v1/resources/{id}"))
+            .extension(axum::extract::ConnectInfo(
+                "127.0.0.9:1".parse::<std::net::SocketAddr>().unwrap(),
+            ))
+            .body(axum::body::Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let body = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        !text.contains("Old title") && !text.contains("Old description"),
+        "{text}"
+    );
+}
+
 /// A resolver whose error repeats what an upstream answered: two links in one span, the second
 /// with user info, a query and a fragment (Codex's case), behind a 503.
 struct UpstreamTextResolver;

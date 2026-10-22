@@ -624,9 +624,8 @@ async fn finish_job(
             timed_out(pool, job, cfg, 60).await?;
         } else if crate::resolver::error_class(&error) == "too_complex" {
             // The parse did not end within its limits, and would not next time: final, with no
-            // card, until a re-extraction (`pinakesd reextract`) revives it.
-            sqlx::query("UPDATE resource SET status='error',attempts=attempts+1,timeout_streak=0,dead_letter=false,final=true,lease_until=NULL,priority_at=NULL,last_error='too_complex',next_attempt_at='infinity' WHERE id=$1 AND generation=$2")
-                .bind(&job.id).bind(job.generation).execute(pool).await?;
+            // card (an earlier one is cleared), until a re-extraction revives it.
+            crate::changes::clear(pool, &job.id, job.generation, "too_complex").await?;
         } else if crate::resolver::error_class(&error) == "policy"
             && url::Url::parse(&job.uri)
                 .ok()
