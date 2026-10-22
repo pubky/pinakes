@@ -134,21 +134,24 @@ mod tests {
         }
         let mut tests = 0;
         for file in files {
-            let text = std::fs::read_to_string(&file).unwrap();
-            // Each attribute that opens a line, up to its `)]` (rustfmt may spread it over
-            // several lines). The needle is built here so this test's own text isn't one.
+            // Without whitespace, so an attribute with spaces inside it, or one rustfmt spreads over
+            // several lines, reads alike. The needle is built here so this test's own text has none.
+            let text: String = std::fs::read_to_string(&file)
+                .unwrap()
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
             let needle = ["#[sqlx", "::test("].concat();
-            let starts = text.lines().filter(|l| l.trim_start().starts_with(&needle));
-            for line in starts {
-                let at = line.as_ptr() as usize - text.as_ptr() as usize;
+            for (at, _) in text.match_indices(&needle) {
                 let attribute = &text[at..];
                 let attribute = &attribute[..attribute.find(")]").unwrap()];
-                if attribute.contains("migrations = false") {
+                if attribute.contains("migrations=false") {
                     continue;
                 }
                 tests += 1;
+                // Anywhere among its fixtures.
                 assert!(
-                    attribute.contains("require_h3.sql\")"),
+                    attribute.contains("require_h3.sql"),
                     "{}: {attribute}",
                     file.display()
                 );
