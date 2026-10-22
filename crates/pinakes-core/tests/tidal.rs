@@ -339,7 +339,7 @@ async fn a_tidal_barcode_joins_apple_music_and_deezer(pool: sqlx::PgPool) {
     assert_eq!(
         rows(
             &pool,
-            "SELECT uri||' '||via||' '||key FROM derived_link WHERE resource_id=$1 ORDER BY uri",
+            "SELECT uri||' '||via||' '||key FROM derived_link WHERE resource_id=$1 ORDER BY uri COLLATE \"C\"",
             &hydra
         )
         .await,

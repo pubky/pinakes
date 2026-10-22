@@ -785,7 +785,7 @@ async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
         ]
     );
     assert_eq!(
-        rows("SELECT site||' '||uri FROM derived_link WHERE resource_id=$1 AND source='musicbrainz' ORDER BY site").await,
+        rows("SELECT site||' '||uri FROM derived_link WHERE resource_id=$1 AND source='musicbrainz' ORDER BY site COLLATE \"C\"").await,
         [
             "Apple Music https://music.apple.com/au/album/1874125260",
             "Deezer https://www.deezer.com/album/910510411",
@@ -795,7 +795,7 @@ async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
     );
     // Facts both releases share: the barcode, not either MBID or the differing credits.
     assert_eq!(
-        rows("SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name").await,
+        rows("SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name COLLATE \"C\"").await,
         ["upc 0196874054246"]
     );
     let seen = t.seen.lock().unwrap().clone();
@@ -925,7 +925,7 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
     );
     assert_eq!(
         rows(
-            "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 AND source='service' ORDER BY name",
+            "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 AND source='service' ORDER BY name COLLATE \"C\"",
             ids[1].clone()
         )
         .await,
@@ -967,7 +967,7 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
     assert_eq!(tidal, ["https://tidal.com/track/534050211"], "{card}");
     // The recording's other links, found through the ISRC.
     let links = rows(
-        "SELECT uri FROM derived_link WHERE resource_id=$1 ORDER BY uri",
+        "SELECT uri FROM derived_link WHERE resource_id=$1 ORDER BY uri COLLATE \"C\"",
         ids[1].clone(),
     )
     .await;
@@ -1447,7 +1447,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     }
     // A merged recording with 32 ISRCs (the facts cap) keeps its MBIDs: the cap cuts ISRCs first.
     let facts = rows(
-        "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name,value",
+        "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name COLLATE \"C\",value COLLATE \"C\"",
         ids[merged_many].clone(),
     )
     .await;
@@ -1468,7 +1468,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     );
     // The recording's links on services, keyed by it, and its facts.
     let links = rows(
-        "SELECT uri||' '||coalesce(key,'-') FROM derived_link WHERE resource_id=$1 ORDER BY uri",
+        "SELECT uri||' '||coalesce(key,'-') FROM derived_link WHERE resource_id=$1 ORDER BY uri COLLATE \"C\"",
         ids[recording].clone(),
     )
     .await;
@@ -1477,7 +1477,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         "{links:?}"
     );
     let facts = rows(
-        "SELECT name FROM resource_fact WHERE resource_id=$1 AND source='musicbrainz_entity' ORDER BY name",
+        "SELECT name FROM resource_fact WHERE resource_id=$1 AND source='musicbrainz_entity' ORDER BY name COLLATE \"C\"",
         ids[recording].clone(),
     )
     .await;
@@ -1509,7 +1509,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     );
     assert_eq!(
         rows(
-            "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name",
+            "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name COLLATE \"C\"",
             ids[concert].clone()
         )
         .await,
@@ -1542,7 +1542,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     assert!(rows(any_key, ids[revoked].clone()).await.is_empty());
     assert_eq!(
         rows(
-            "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name",
+            "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name COLLATE \"C\"",
             ids[revoked].clone()
         )
         .await,
@@ -1559,7 +1559,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         assert!(rows(any_key, ids[page].clone()).await.is_empty(), "{page}");
         assert_eq!(
             rows(
-                "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name",
+                "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name COLLATE \"C\"",
                 ids[page].clone()
             )
             .await,
@@ -1655,7 +1655,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         ["mb:artist:a74b1b7f-71a5-4011-9441-d0b5e4122711"]
     );
     let lineup_facts = rows(
-        "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name,value",
+        "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name COLLATE \"C\",value COLLATE \"C\"",
         ids[lineup].clone(),
     )
     .await;
@@ -1912,7 +1912,7 @@ async fn an_album_s_barcode_key_finds_its_musicbrainz_release(pool: sqlx::PgPool
         "{hydra:?}"
     );
     let links: Vec<String> = sqlx::query_scalar(
-        "SELECT uri||' '||via FROM derived_link WHERE resource_id=$1 AND source='musicbrainz' ORDER BY uri",
+        "SELECT uri||' '||via FROM derived_link WHERE resource_id=$1 AND source='musicbrainz' ORDER BY uri COLLATE \"C\"",
     )
     .bind(&ids[0])
     .fetch_all(&pool)
@@ -2084,7 +2084,7 @@ async fn discogs_joins_at_its_level(pool: sqlx::PgPool) {
     // relates it to (Q202996, naming this release group back) names the album's, keyed by the
     // release group so a tagged one joins.
     let album_pages =
-        "SELECT site||' '||uri||' '||coalesce(key,'-') FROM derived_link WHERE resource_id=$1 AND source='musicbrainz' ORDER BY site";
+        "SELECT site||' '||uri||' '||coalesce(key,'-') FROM derived_link WHERE resource_id=$1 AND source='musicbrainz' ORDER BY site COLLATE \"C\"";
     assert_eq!(
         rows(album_pages, ids[0].clone()).await,
         [
