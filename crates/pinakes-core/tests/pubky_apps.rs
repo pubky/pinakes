@@ -514,6 +514,32 @@ fn eventky() {
     assert_eq!(doc.start.unwrap().to_rfc3339(), "2026-01-08T18:00:14+00:00");
     assert_eq!(doc.end.unwrap().to_rfc3339(), "2026-01-08T21:00:14+00:00");
     assert_eq!(facts(&doc)["location"], "Department 66");
+    // HTML of any depth is read in one pass: 100,000 nested elements are plain text.
+    let deep = format!(
+        "{}deep{}",
+        "<span><b>".repeat(100_000),
+        "</b></span>".repeat(100_000)
+    );
+    let doc = edited(
+        "eventky/event-psywalk-location-no-uri",
+        json!({"description": null, "styled_description": {"format": "html", "content": deep}}),
+    );
+    assert_eq!(doc.description.as_deref(), Some("deep"));
+    for (html, text) in [
+        ("<p>One &amp; two</p><p>3 < 4</p>", "One & two\n3 < 4"),
+        (
+            "a<br>b<!-- x > y -->c<script>alert('<p>')</script>d",
+            "a\nbcd",
+        ),
+        ("<style>p{}</style><li>x</li><li>y", "x\ny"),
+    ] {
+        assert_eq!(
+            pubky_apps::read::html_text(html).as_deref(),
+            Some(text),
+            "{html}"
+        );
+    }
+    assert_eq!(pubky_apps::read::html_text("<p> </p><unterminated"), None);
     // A time without a zone is left out.
     let doc = edited(
         "eventky/event-psywalk-location-no-uri",

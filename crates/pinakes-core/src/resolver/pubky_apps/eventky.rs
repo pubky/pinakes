@@ -35,7 +35,7 @@ fn description(v: &Value) -> Option<String> {
         let styled = &v["styled_description"];
         let content = read::text(styled, &["content"])?;
         match styled.get("format").and_then(Value::as_str) {
-            Some("html") => crate::sources::kit::html_text(&content),
+            Some("html") => read::html_text(&content),
             _ => Some(content),
         }
     })
