@@ -171,6 +171,68 @@ pub fn fixed(value: &str) -> Option<FixedOffset> {
     }
     FixedOffset::east_opt(sign * (h * 3600 + m * 60 + s))
 }
+/// The most dates one period of a recurrence rule may hold, by default.
+pub const MAX_PERIOD_DATES: usize = 100_000;
+/// Whether a parsed recurrence set is safe to expand: every rule and exception rule repeats
+/// yearly, monthly, weekly, daily or hourly, and one of its periods holds at most `max` dates.
+/// The `rrule` crate builds a whole period before it yields its first date, so a yearly rule
+/// listing every weekday, hour, minute and second (31 million dates a year) is never expanded,
+/// while any rule of ordinary size is. The count is an upper bound read from the parsed rule
+/// (so the names' case does not matter): the days a period keeps after the rule's own
+/// `BYYEARDAY`, `BYWEEKNO`, `BYMONTH`, `BYMONTHDAY` and `BYDAY` (the crate fills the unset
+/// ones from DTSTART, so a plain yearly or monthly rule is one day), times its `BYHOUR`,
+/// `BYMINUTE` and `BYSECOND` lists.
+pub fn rrule_bounded(set: &rrule::RRuleSet, max: usize) -> bool {
+    set.get_rrule()
+        .iter()
+        .chain(set.get_exrule())
+        .all(|rule| period_dates(rule) <= max)
+}
+/// The dates one period of `rule` may hold, at most; `usize::MAX` for a rule whose period is a
+/// minute or a second.
+fn period_dates(rule: &rrule::RRule) -> usize {
+    use rrule::Frequency::*;
+    let count = |n: usize| n.max(1);
+    // The days of a month a rule keeps. A month-day filter counts as the whole month: the crate
+    // keeps days counted from the month's end (`-1`) in a list it shows nowhere, beside the
+    // listed ones, so their number is unknown here. Else its weekdays (any Monday is at most
+    // five a month, the nth one is one), at most a month.
+    let month_days = || {
+        if !rule.get_by_month_day().is_empty() || rule.get_by_weekday().is_empty() {
+            return 31;
+        }
+        rule.get_by_weekday()
+            .iter()
+            .map(|d| match d {
+                rrule::NWeekday::Every(_) => 5,
+                rrule::NWeekday::Nth(..) => 1,
+            })
+            .sum::<usize>()
+            .min(31)
+    };
+    let days = match rule.get_freq() {
+        Yearly if !rule.get_by_year_day().is_empty() => rule.get_by_year_day().len(),
+        Yearly if !rule.get_by_week_no().is_empty() => rule.get_by_week_no().len() * 7,
+        // Months listed, or the one the crate filled from DTSTART, else all twelve.
+        Yearly => match rule.get_by_month().len() {
+            0 => 12,
+            n => n.min(12),
+        }
+        .saturating_mul(month_days()),
+        Monthly => month_days(),
+        Weekly => count(rule.get_by_weekday().len()).min(7),
+        Daily | Hourly => 1,
+        Minutely | Secondly => return usize::MAX,
+    };
+    [
+        days,
+        count(rule.get_by_hour().len()),
+        count(rule.get_by_minute().len()),
+        count(rule.get_by_second().len()),
+    ]
+    .into_iter()
+    .fold(1usize, usize::saturating_mul)
+}
 pub fn duration(value: &str) -> Option<Duration> {
     let (sign, v) = if let Some(v) = value.strip_prefix('-') {
         (-1, v)

@@ -1173,7 +1173,7 @@ fn recurrence_local_days_coordinate_zones_exclusion_budget_and_categories() {
     assert!(calendar::parse(
         "https://example.org/f.ics",
         cal(&event(
-            "UID:expensive\nDTSTART:19000101T000000Z\nRRULE:FREQ=SECONDLY"
+            "UID:expensive\nDTSTART:19000101T000000Z\nRRULE:FREQ=HOURLY"
         ))
         .as_bytes(),
         &cfg,
@@ -4042,4 +4042,365 @@ async fn related_lists_a_feed_and_a_venue_once(pool: PgPool) {
             .iter()
             .all(|row| row.get("occurrence").is_none() && row.get("event").is_none()));
     }
+}
+
+#[test]
+fn a_rule_whose_periods_would_hold_too_many_dates_is_never_expanded() {
+    // Every weekday, hour, minute and second of a year: 31 million dates the `rrule` crate would
+    // build before giving the first. In capitals, lower case or mixed: as an event's rule, the
+    // event keeps its first occurrence with a warning; as an embedded time zone's, the event in
+    // that zone is left out with a warning. The sibling stays, at once.
+    let every = |n: usize| (0..n).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+    let flood = format!(
+        "FREQ=YEARLY;BYDAY=MO,TU,WE,TH,FR,SA,SU;BYHOUR={};BYMINUTE={};BYSECOND={}",
+        every(24),
+        every(60),
+        every(60)
+    );
+    let spellings = [
+        flood.clone(),
+        flood.to_lowercase(),
+        flood
+            .replace("BYHOUR", "byhour")
+            .replace("BYMINUTE", "ByMinute")
+            .replace("BYSECOND", "bySecond"),
+    ];
+    for rule in &spellings {
+        let zone = format!("BEGIN:VTIMEZONE\nTZID:Flood\nBEGIN:STANDARD\nDTSTART:19700101T000000\nTZOFFSETFROM:+0100\nTZOFFSETTO:+0100\nRRULE:{rule}\nEND:STANDARD\nEND:VTIMEZONE");
+        for bad in [
+            format!("UID:bad\nDTSTART:20270101T000000Z\nRRULE:{rule}\nSUMMARY:Flood"),
+            "UID:bad\nDTSTART;TZID=Flood:20261020T120000\nSUMMARY:Flood zone".to_owned(),
+        ] {
+            let body = cal(&format!(
+                "{zone}\n{}\n{}",
+                event(&bad),
+                event("UID:good\nDTSTART:20261020T120000Z\nSUMMARY:Healthy")
+            ));
+            let began = std::time::Instant::now();
+            let container = calendar::parse(
+                "https://example.org/feed.ics",
+                body.as_bytes(),
+                &EventConfig::default(),
+                now(),
+            )
+            .unwrap()
+            .container
+            .unwrap();
+            assert!(
+                began.elapsed() < std::time::Duration::from_secs(5),
+                "{rule}"
+            );
+            let mut uids: Vec<&str> = container
+                .occurrences
+                .iter()
+                .map(|o| o.uid.as_str())
+                .collect();
+            uids.sort();
+            if bad.starts_with("UID:bad\nDTSTART:2027") {
+                assert_eq!(uids, ["bad", "good"], "{bad}");
+                assert!(
+                    container
+                        .warnings
+                        .contains(&"series_rule_unexpanded".to_string()),
+                    "{bad}: {:?}",
+                    container.warnings
+                );
+            } else {
+                assert_eq!(uids, ["good"], "{bad}");
+                assert!(!container.warnings.is_empty(), "{bad}");
+            }
+        }
+    }
+    // Ordinary rules pass the bound, however they spell their names, and expand: a yearly rule
+    // keeps one day of the year (three times that day), a plain yearly one once, a monthly one
+    // a day a month at three times.
+    let dates_in_2027 = |rule: &str| {
+        let body = cal(&event(&format!(
+            "UID:r\nDTSTART:20270101T100000Z\nRRULE:{rule}\nSUMMARY:r"
+        )));
+        let cfg = EventConfig {
+            max_occurrences_per_series: 1000,
+            months_forward: 15,
+            ..Default::default()
+        };
+        calendar::parse("https://example.org/f.ics", body.as_bytes(), &cfg, now())
+            .unwrap()
+            .container
+            .unwrap()
+            .occurrences
+            .iter()
+            .filter(|o| o.doc.start.unwrap().to_rfc3339().starts_with("2027"))
+            .count()
+    };
+    assert_eq!(dates_in_2027("FREQ=YEARLY;BYHOUR=10,14,18"), 3);
+    assert_eq!(dates_in_2027("FREQ=YEARLY"), 1);
+    assert_eq!(
+        dates_in_2027("FREQ=MONTHLY;BYMONTHDAY=1;BYHOUR=10,14,18"),
+        36
+    );
+    // The limit is the operator's: at two dates a period, the three-hour rule keeps its first
+    // occurrence with the warning.
+    let body = cal(&event(
+        "UID:r\nDTSTART:20270101T100000Z\nRRULE:FREQ=YEARLY;BYHOUR=10,14,18\nSUMMARY:r",
+    ));
+    let cfg = EventConfig {
+        max_period_dates: 2,
+        months_forward: 15,
+        ..Default::default()
+    };
+    let container = calendar::parse("https://example.org/f.ics", body.as_bytes(), &cfg, now())
+        .unwrap()
+        .container
+        .unwrap();
+    assert_eq!(container.occurrences.len(), 1);
+    assert!(container
+        .warnings
+        .contains(&"series_rule_unexpanded".to_string()));
+    let bounded = |rule: &str, max: usize| {
+        let set: rrule::RRuleSet = format!("DTSTART:20261020T120000Z\nRRULE:{rule}")
+            .parse()
+            .unwrap();
+        pinakes_core::event::time::rrule_bounded(&set, max)
+    };
+    for rule in [
+        "FREQ=WEEKLY;BYDAY=MO,WE,FR;BYHOUR=9,18",
+        "freq=monthly;byhour=9,18",
+        "FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU",
+        "FREQ=HOURLY;BYMINUTE=0,30",
+        "FREQ=YEARLY;BYHOUR=10,14,18",
+        "FREQ=MONTHLY;BYMONTHDAY=-1,-2,-3;BYHOUR=9",
+    ] {
+        assert!(bounded(rule, 100_000), "{rule}");
+    }
+    // Never: every hour and minute of every day (527,040 a year); every minute of every day of
+    // a month (44,640) under a 10,000 bound; a minutely and a secondly rule.
+    let every = |n: usize| (0..n).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+    let hourly_minutes = format!(
+        "FREQ=YEARLY;BYDAY=MO,TU,WE,TH,FR,SA,SU;BYHOUR={};BYMINUTE={}",
+        every(24),
+        every(60)
+    );
+    let monthly_minutes = format!(
+        "FREQ=MONTHLY;BYMONTHDAY={};BYHOUR={};BYMINUTE={}",
+        (1..=31)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        every(24),
+        every(60)
+    );
+    for (rule, max) in [
+        (flood.as_str(), 100_000),
+        (hourly_minutes.as_str(), 100_000),
+        (monthly_minutes.as_str(), 10_000),
+        ("FREQ=MINUTELY", 100_000),
+        ("freq=secondly", 100_000),
+    ] {
+        assert!(!bounded(rule, max), "{rule}");
+    }
+}
+
+#[test]
+fn a_rule_in_lower_case_is_read_as_one_in_capitals() {
+    // A floating UNTIL converts in the series' zone whatever its case: 11:00 Zurich on the 23rd
+    // ends the series before that day's 12:00, so three days, not four as a UTC reading gives.
+    let days = |rule: &str| {
+        parse(&cal(&event(&format!(
+            "UID:u\nDTSTART;TZID=Europe/Zurich:20261020T120000\nRRULE:{rule}\nSUMMARY:u"
+        ))))
+        .container
+        .unwrap()
+        .occurrences
+        .len()
+    };
+    assert_eq!(days("FREQ=DAILY;UNTIL=20261023T110000"), 3);
+    assert_eq!(days("freq=daily;until=20261023T110000"), 3);
+    assert_eq!(days("Freq=Daily;Until=20261023T110000"), 3);
+    // COUNT and UNTIL together are refused in any case: the event is left out with a warning.
+    for rule in [
+        "FREQ=DAILY;COUNT=2;UNTIL=20261023T110000",
+        "freq=daily;count=2;until=20261023T110000",
+    ] {
+        let container = parse(&cal(&format!(
+            "{}\n{}",
+            event(&format!(
+                "UID:both\nDTSTART:20261020T120000Z\nRRULE:{rule}\nSUMMARY:both"
+            )),
+            event("UID:good\nDTSTART:20261020T120000Z\nSUMMARY:Healthy")
+        )))
+        .container
+        .unwrap();
+        let uids: Vec<&str> = container
+            .occurrences
+            .iter()
+            .map(|o| o.uid.as_str())
+            .collect();
+        assert_eq!(uids, ["good"], "{rule}");
+        assert!(
+            container
+                .warnings
+                .contains(&"invalid_vevent_recurrence".to_string()),
+            "{rule}: {:?}",
+            container.warnings
+        );
+    }
+}
+
+#[test]
+fn an_event_with_two_rules_or_an_exception_rule_is_left_out() {
+    for props in [
+        "RRULE:FREQ=DAILY\nRRULE:FREQ=WEEKLY",
+        "RRULE:FREQ=DAILY\nEXRULE:FREQ=WEEKLY",
+        "EXRULE:FREQ=WEEKLY",
+    ] {
+        let container = parse(&cal(&format!(
+            "{}\n{}",
+            event(&format!(
+                "UID:rules\nDTSTART:20261020T120000Z\n{props}\nSUMMARY:rules"
+            )),
+            event("UID:good\nDTSTART:20261020T120000Z\nSUMMARY:Healthy")
+        )))
+        .container
+        .unwrap();
+        let uids: Vec<&str> = container
+            .occurrences
+            .iter()
+            .map(|o| o.uid.as_str())
+            .collect();
+        assert_eq!(uids, ["good"], "{props}");
+        assert!(
+            container
+                .warnings
+                .contains(&"invalid_vevent_recurrence".to_string()),
+            "{props}: {:?}",
+            container.warnings
+        );
+    }
+}
+
+#[test]
+fn a_rule_with_a_huge_interval_expands_within_the_deadline() {
+    // The library builds one period at a time: a yearly rule every 10,000 years builds its first
+    // year, then steps past the calendar's end and stops, well within the parse deadline.
+    let began = std::time::Instant::now();
+    let container = parse(&cal(&event(
+        "UID:i\nDTSTART:20261020T120000Z\nRRULE:FREQ=YEARLY;INTERVAL=10000\nSUMMARY:i",
+    )))
+    .container
+    .unwrap();
+    assert!(began.elapsed() < std::time::Duration::from_secs(2));
+    assert_eq!(container.occurrences.len(), 1);
+    assert!(container.warnings.is_empty(), "{:?}", container.warnings);
+}
+
+#[test]
+fn a_month_day_filter_counts_as_the_whole_month_whatever_its_signs() {
+    // Day 1 and the last 30 days of a month, every hour, minute and second: 2,678,400 dates a
+    // month, though the rule lists one positive day. Refused in any case; days from both ends
+    // at ordinary times expand.
+    let every = |n: usize| (0..n).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+    let ends = (1..=30)
+        .map(|i| format!("-{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let flood = format!(
+        "FREQ=MONTHLY;BYMONTHDAY=1,{ends};BYHOUR={};BYMINUTE={};BYSECOND={}",
+        every(24),
+        every(60),
+        every(60)
+    );
+    let bounded = |rule: &str| {
+        let set: rrule::RRuleSet = format!("DTSTART:20261020T120000Z\nRRULE:{rule}")
+            .parse()
+            .unwrap();
+        pinakes_core::event::time::rrule_bounded(&set, 100_000)
+    };
+    for rule in [
+        flood.clone(),
+        flood.to_lowercase(),
+        format!(
+            "FREQ=MONTHLY;BYMONTHDAY={ends};BYHOUR={};BYMINUTE={};BYSECOND={}",
+            every(24),
+            every(60),
+            every(60)
+        ),
+        format!(
+            "FREQ=YEARLY;BYMONTHDAY=1,{ends};BYHOUR={};BYMINUTE={}",
+            every(24),
+            every(60)
+        ),
+    ] {
+        assert!(!bounded(&rule), "{rule}");
+    }
+    for rule in [
+        "FREQ=MONTHLY;BYMONTHDAY=1,-1;BYHOUR=9",
+        "FREQ=MONTHLY;BYMONTHDAY=-1;BYHOUR=9,18",
+        "FREQ=YEARLY;BYMONTHDAY=-1;BYDAY=FR;BYHOUR=9",
+    ] {
+        assert!(bounded(rule), "{rule}");
+    }
+    let body = cal(&event(
+        "UID:ends\nDTSTART:20261101T090000Z\nRRULE:FREQ=MONTHLY;BYMONTHDAY=1,-1;BYHOUR=9\nSUMMARY:e",
+    ));
+    let cfg = EventConfig {
+        max_occurrences_per_series: 1000,
+        ..Default::default()
+    };
+    let c = calendar::parse("https://example.org/f.ics", body.as_bytes(), &cfg, now())
+        .unwrap()
+        .container
+        .unwrap();
+    // 1 November 2026 to the horizon (twelve months on): the first and last day of each month.
+    assert!(c.occurrences.len() >= 20, "{}", c.occurrences.len());
+    assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+}
+
+#[test]
+fn an_unexpanded_rule_keeps_its_date_lists_and_the_horizon() {
+    // A rule over the bound gives no dates of its own, but its event's DTSTART, RDATE and
+    // EXDATE, and the horizon, still apply.
+    let every = |n: usize| (0..n).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+    let flood = format!(
+        "freq=yearly;byday=mo,tu,we,th,fr,sa,su;byhour={};byminute={};bysecond={}",
+        every(24),
+        every(60),
+        every(60)
+    );
+    let starts = |props: &str| {
+        let c = parse(&cal(&event(&format!(
+            "UID:u\n{props}\nRRULE:{flood}\nSUMMARY:u"
+        ))))
+        .container
+        .unwrap();
+        assert!(
+            c.warnings.contains(&"series_rule_unexpanded".to_string()),
+            "{props}: {:?}",
+            c.warnings
+        );
+        let mut starts: Vec<String> = c
+            .occurrences
+            .iter()
+            .map(|o| o.doc.start.unwrap().to_rfc3339())
+            .collect();
+        starts.sort();
+        starts
+    };
+    // DTSTART alone.
+    assert_eq!(
+        starts("DTSTART:20261120T120000Z"),
+        ["2026-11-20T12:00:00+00:00"]
+    );
+    // An EXDATE removes it.
+    assert!(starts("DTSTART:20261120T120000Z\nEXDATE:20261120T120000Z").is_empty());
+    // An RDATE adds one.
+    assert_eq!(
+        starts("DTSTART:20261120T120000Z\nRDATE:20261205T120000Z"),
+        ["2026-11-20T12:00:00+00:00", "2026-12-05T12:00:00+00:00"]
+    );
+    // A DTSTART before the horizon gives nothing; an RDATE within it still counts.
+    assert!(starts("DTSTART:20000101T120000Z").is_empty());
+    assert_eq!(
+        starts("DTSTART:20000101T120000Z\nRDATE:20261205T120000Z"),
+        ["2026-12-05T12:00:00+00:00"]
+    );
 }

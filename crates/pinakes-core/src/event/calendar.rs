@@ -216,6 +216,7 @@ enum ZoneSource {
 struct Zones<'a> {
     deadline: std::time::Instant,
     max_date_values: usize,
+    max_period_dates: usize,
     calendar: Option<&'a str>,
     default: Option<&'a str>,
     embedded: BTreeMap<String, &'a Component>,
@@ -354,6 +355,7 @@ fn transitions(
     wall: NaiveDateTime,
     deadline: std::time::Instant,
     max_date_values: usize,
+    max_period_dates: usize,
 ) -> Result<Vec<Transition>> {
     let mut transitions = vec![];
     let mut values = 0usize;
@@ -377,6 +379,10 @@ fn transitions(
         if let Some(rule) = o.value("RRULE") {
             let set: rrule::RRuleSet =
                 format!("DTSTART:{}Z\nRRULE:{}", start.format("%Y%m%dT%H%M%S"), rule).parse()?;
+            ensure!(
+                time::rrule_bounded(&set, max_period_dates),
+                "VTIMEZONE RRULE period too large"
+            );
             let end = wall
                 .checked_add_signed(Duration::days(370))
                 .context("VTIMEZONE horizon overflow")?
@@ -416,7 +422,13 @@ impl Zones<'_> {
         if !cache.contains_key(&key) {
             cache.insert(
                 key.clone(),
-                transitions(c, year_wall, self.deadline, self.max_date_values)?,
+                transitions(
+                    c,
+                    year_wall,
+                    self.deadline,
+                    self.max_date_values,
+                    self.max_period_dates,
+                )?,
             );
         }
         for &(start, from, to) in &cache[&key] {
@@ -443,7 +455,13 @@ impl Zones<'_> {
         if !cache.contains_key(&key) {
             cache.insert(
                 key.clone(),
-                transitions(c, wall, self.deadline, self.max_date_values)?,
+                transitions(
+                    c,
+                    wall,
+                    self.deadline,
+                    self.max_date_values,
+                    self.max_period_dates,
+                )?,
             );
         }
         let transitions = &cache[&key];
@@ -851,7 +869,10 @@ fn series_start(
         Ok(utc_series(start))
     }
 }
-/// Expand a series from its series stamp (`series_start`, applied by `parse`).
+/// Expand a series from its series stamp (`series_start`, applied by `parse`). A rule whose
+/// periods hold too many dates is not expanded: the event keeps DTSTART and its RDATEs, less its
+/// EXDATEs, within the horizon, with the warning `series_rule_unexpanded`.
+#[allow(clippy::too_many_arguments)]
 fn expand(
     c: &Component,
     start: &Stamp,
@@ -860,6 +881,7 @@ fn expand(
     hi: DateTime<Utc>,
     cfg: &EventConfig,
     deadline: std::time::Instant,
+    warnings: &mut Vec<String>,
 ) -> Result<BTreeMap<DateTime<Utc>, Option<Duration>>> {
     // `start` is already the series stamp (`series_start`, converted once in `parse`).
     let wall_start = start.wall;
@@ -868,7 +890,18 @@ fn expand(
     let mut until_at = None;
     let mut out = BTreeMap::new();
     out.insert(start.at, None);
+    // One rule at most, and no exception rule: a second RRULE would be ignored and an EXRULE
+    // (dropped by RFC 5545) never applied, so an event carrying either is refused.
+    ensure!(
+        c.props.iter().filter(|p| p.name == "RRULE").count() <= 1,
+        "several RRULE"
+    );
+    ensure!(c.get("EXRULE").is_none(), "EXRULE is not supported");
     if let Some(rule) = c.value("RRULE") {
+        // Names and values are case-insensitive (RFC 5545), and the library reads them so; the
+        // checks and rewrites below read capitals.
+        let rule = rule.to_ascii_uppercase();
+        let rule = rule.as_str();
         ensure!(
             !(rule.split(';').any(|p| p.starts_with("COUNT="))
                 && rule.split(';').any(|p| p.starts_with("UNTIL="))),
@@ -924,13 +957,21 @@ fn expand(
             parts.join(";")
         )
         .parse()?;
+        // A rule whose periods would hold too many dates gives no dates of its own; DTSTART,
+        // RDATE, EXDATE and the horizon still apply below. The iterator is never asked for a date,
+        // so it never builds a period.
+        let bounded = time::rrule_bounded(&set, cfg.max_period_dates);
+        if !bounded {
+            warnings.push("series_rule_unexpanded".into());
+        }
         // Generate floating wall values with the bounded RRULE iterator, then apply RFC gap rules.
         let take = cfg
             .max_occurrences_per_series
             .saturating_mul(2)
             .saturating_add(10);
         let mut included = 0;
-        for (steps, d) in set.limit().into_iter().enumerate() {
+        let dates = bounded.then(|| set.limit().into_iter());
+        for (steps, d) in dates.into_iter().flatten().enumerate() {
             ensure!(
                 steps < cfg.max_recurrence_steps && std::time::Instant::now() < deadline,
                 "recurrence work budget"
@@ -1028,6 +1069,7 @@ pub fn parse(
     let zones = Zones {
         deadline,
         max_date_values: cfg.max_date_values,
+        max_period_dates: cfg.max_period_dates,
         transitions: RefCell::default(),
         calendar: cal.value("X-WR-TIMEZONE"),
         default: cfg.default_timezone.as_deref(),
@@ -1203,7 +1245,16 @@ pub fn parse(
             std::time::Instant::now() < deadline,
             "calendar parse budget"
         );
-        let expanded = match expand(c, start, &zones, lo, hi, cfg, deadline) {
+        let expanded = match expand(
+            c,
+            start,
+            &zones,
+            lo,
+            hi,
+            cfg,
+            deadline,
+            &mut container.warnings,
+        ) {
             Ok(v) => v,
             Err(e) if e.to_string().contains("budget") => return Err(e),
             Err(_) => {

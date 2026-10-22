@@ -283,6 +283,8 @@ pub struct EventConfig {
     #[serde(skip)]
     pub max_recurrence_steps: usize,
     #[serde(skip)]
+    pub max_period_dates: usize,
+    #[serde(skip)]
     pub parse_timeout_ms: u64,
     #[serde(skip)]
     pub months_back: u32,
@@ -313,6 +315,7 @@ impl Default for EventConfig {
             max_event_revisions: 10000,
             max_event_document_bytes: 8 * 1024 * 1024,
             max_recurrence_steps: 100000,
+            max_period_dates: crate::event::time::MAX_PERIOD_DATES,
             parse_timeout_ms: 2000,
             months_back: 1,
             months_forward: 12,
@@ -874,6 +877,7 @@ impl Config {
             || !(1..=10000).contains(&e.max_event_revisions)
             || !(1024..=32 * 1024 * 1024).contains(&e.max_event_document_bytes)
             || !(1..=1000000).contains(&e.max_recurrence_steps)
+            || !(1..=10_000_000).contains(&e.max_period_dates)
             || !(1..=5000).contains(&e.parse_timeout_ms)
             || e.months_back > 12
             || !(1..=36).contains(&e.months_forward)
@@ -1030,6 +1034,26 @@ mod tests {
                 "{key}={value}"
             );
         }
+    }
+    #[test]
+    fn the_recurrence_period_limit_has_a_default_and_bounds() {
+        assert_eq!(Config::default().event.max_period_dates, 100_000);
+        for (key, value) in [
+            ("event_max_period_dates", 0),
+            ("event_max_period_dates", 10_000_001),
+        ] {
+            assert!(
+                with(serde_json::json!({"limits":{key:value}})).is_err(),
+                "{key}={value}"
+            );
+        }
+        assert_eq!(
+            with(serde_json::json!({"limits":{"event_max_period_dates":2}}))
+                .unwrap()
+                .event
+                .max_period_dates,
+            2
+        );
     }
     #[test]
     fn operations_md_documents_every_limit() {
@@ -1555,6 +1579,8 @@ limits! {
     event_max_document_bytes: usize = |c| c.event.max_event_document_bytes => [|c, v| c.event.max_event_document_bytes = v],
     /// Most recurrence steps one series may take.
     event_max_recurrence_steps: usize = |c| c.event.max_recurrence_steps => [|c, v| c.event.max_recurrence_steps = v],
+    /// Most dates one period of a recurrence rule may hold; a larger rule is not expanded.
+    event_max_period_dates: usize = |c| c.event.max_period_dates => [|c, v| c.event.max_period_dates = v],
     /// Calendar parse deadline (milliseconds).
     event_parse_timeout_ms: u64 = |c| c.event.parse_timeout_ms => [|c, v| c.event.parse_timeout_ms = v],
     /// Months of past occurrences kept in the horizon.
