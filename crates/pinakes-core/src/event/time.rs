@@ -171,32 +171,69 @@ pub fn fixed(value: &str) -> Option<FixedOffset> {
     }
     FixedOffset::east_opt(sign * (h * 3600 + m * 60 + s))
 }
-/// The most dates one period of a recurrence rule may hold.
-pub const MAX_PERIOD_DATES: usize = 1_000;
+/// The most dates one period of a recurrence rule may hold, by default.
+pub const MAX_PERIOD_DATES: usize = 100_000;
 /// Whether a parsed recurrence set is safe to expand: every rule and exception rule repeats
-/// yearly, monthly, weekly, daily or hourly, and one period holds at most `MAX_PERIOD_DATES`
-/// dates (the days in its period times its hours, minutes and seconds). The `rrule` crate builds a
-/// whole period before it yields its first date, so a yearly rule listing every hour, minute and
-/// second would build 31 million at once. It reads the parsed rule, so how the rule spells its
-/// names (`BYHOUR`, `byhour`) does not matter.
-pub fn rrule_bounded(set: &rrule::RRuleSet) -> bool {
-    set.get_rrule().iter().chain(set.get_exrule()).all(|rule| {
-        let listed = |values: usize| values.max(1);
-        let (hours, minutes, seconds) = (
-            listed(rule.get_by_hour().len()),
-            listed(rule.get_by_minute().len()),
-            listed(rule.get_by_second().len()),
-        );
-        let dates = match rule.get_freq() {
-            rrule::Frequency::Yearly => 366 * hours * minutes * seconds,
-            rrule::Frequency::Monthly => 31 * hours * minutes * seconds,
-            rrule::Frequency::Weekly => 7 * hours * minutes * seconds,
-            rrule::Frequency::Daily => hours * minutes * seconds,
-            rrule::Frequency::Hourly => minutes * seconds,
-            rrule::Frequency::Minutely | rrule::Frequency::Secondly => return false,
-        };
-        dates <= MAX_PERIOD_DATES
-    })
+/// yearly, monthly, weekly, daily or hourly, and one of its periods holds at most `max` dates.
+/// The `rrule` crate builds a whole period before it yields its first date, so a yearly rule
+/// listing every weekday, hour, minute and second (31 million dates a year) is never expanded,
+/// while any rule of ordinary size is. The count is an upper bound read from the parsed rule
+/// (so the names' case does not matter): the days a period keeps after the rule's own
+/// `BYYEARDAY`, `BYWEEKNO`, `BYMONTH`, `BYMONTHDAY` and `BYDAY` (the crate fills the unset
+/// ones from DTSTART, so a plain yearly or monthly rule is one day), times its `BYHOUR`,
+/// `BYMINUTE` and `BYSECOND` lists.
+pub fn rrule_bounded(set: &rrule::RRuleSet, max: usize) -> bool {
+    set.get_rrule()
+        .iter()
+        .chain(set.get_exrule())
+        .all(|rule| period_dates(rule) <= max)
+}
+/// The dates one period of `rule` may hold, at most; `usize::MAX` for a rule whose period is a
+/// minute or a second.
+fn period_dates(rule: &rrule::RRule) -> usize {
+    use rrule::Frequency::*;
+    let count = |n: usize| n.max(1);
+    // The days of a month a rule keeps: its listed days (or the one the crate filled from
+    // DTSTART), else its weekdays (any Monday is at most five a month, the nth one is one), else
+    // days counted from the month's end, which the crate keeps apart: any number of them.
+    let month_days = || {
+        let listed = rule.get_by_month_day().len();
+        if listed > 0 {
+            return listed;
+        }
+        if rule.get_by_weekday().is_empty() {
+            return 31;
+        }
+        rule.get_by_weekday()
+            .iter()
+            .map(|d| match d {
+                rrule::NWeekday::Every(_) => 5,
+                rrule::NWeekday::Nth(..) => 1,
+            })
+            .sum()
+    };
+    let days = match rule.get_freq() {
+        Yearly if !rule.get_by_year_day().is_empty() => rule.get_by_year_day().len(),
+        Yearly if !rule.get_by_week_no().is_empty() => rule.get_by_week_no().len() * 7,
+        // Months listed, or the one the crate filled from DTSTART, else all twelve.
+        Yearly => match rule.get_by_month().len() {
+            0 => 12,
+            n => n.min(12),
+        }
+        .saturating_mul(month_days()),
+        Monthly => month_days(),
+        Weekly => count(rule.get_by_weekday().len()).min(7),
+        Daily | Hourly => 1,
+        Minutely | Secondly => return usize::MAX,
+    };
+    [
+        days,
+        count(rule.get_by_hour().len()),
+        count(rule.get_by_minute().len()),
+        count(rule.get_by_second().len()),
+    ]
+    .into_iter()
+    .fold(1usize, usize::saturating_mul)
 }
 pub fn duration(value: &str) -> Option<Duration> {
     let (sign, v) = if let Some(v) = value.strip_prefix('-') {

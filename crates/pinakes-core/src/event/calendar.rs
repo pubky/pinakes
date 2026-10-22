@@ -378,7 +378,7 @@ fn transitions(
             let set: rrule::RRuleSet =
                 format!("DTSTART:{}Z\nRRULE:{}", start.format("%Y%m%dT%H%M%S"), rule).parse()?;
             ensure!(
-                time::rrule_bounded(&set),
+                time::rrule_bounded(&set, time::MAX_PERIOD_DATES),
                 "VTIMEZONE RRULE period too large"
             );
             let end = wall
@@ -855,7 +855,10 @@ fn series_start(
         Ok(utc_series(start))
     }
 }
-/// Expand a series from its series stamp (`series_start`, applied by `parse`).
+/// Expand a series from its series stamp (`series_start`, applied by `parse`). A rule whose
+/// periods hold too many dates is not expanded: the event keeps its first occurrence, with the
+/// warning `series_rule_unexpanded`.
+#[allow(clippy::too_many_arguments)]
 fn expand(
     c: &Component,
     start: &Stamp,
@@ -864,6 +867,7 @@ fn expand(
     hi: DateTime<Utc>,
     cfg: &EventConfig,
     deadline: std::time::Instant,
+    warnings: &mut Vec<String>,
 ) -> Result<BTreeMap<DateTime<Utc>, Option<Duration>>> {
     // `start` is already the series stamp (`series_start`, converted once in `parse`).
     let wall_start = start.wall;
@@ -928,7 +932,10 @@ fn expand(
             parts.join(";")
         )
         .parse()?;
-        ensure!(time::rrule_bounded(&set), "RRULE period too large");
+        if !time::rrule_bounded(&set, time::MAX_PERIOD_DATES) {
+            warnings.push("series_rule_unexpanded".into());
+            return Ok(out);
+        }
         // Generate floating wall values with the bounded RRULE iterator, then apply RFC gap rules.
         let take = cfg
             .max_occurrences_per_series
@@ -1208,7 +1215,16 @@ pub fn parse(
             std::time::Instant::now() < deadline,
             "calendar parse budget"
         );
-        let expanded = match expand(c, start, &zones, lo, hi, cfg, deadline) {
+        let expanded = match expand(
+            c,
+            start,
+            &zones,
+            lo,
+            hi,
+            cfg,
+            deadline,
+            &mut container.warnings,
+        ) {
             Ok(v) => v,
             Err(e) if e.to_string().contains("budget") => return Err(e),
             Err(_) => {

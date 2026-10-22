@@ -660,10 +660,12 @@ limited to UTC years 0001–9999 and truncated to microseconds; a leap second ro
 second. An occurrence starting outside that range is dropped (`occurrence_start_out_of_range`),
 and an end or modification time outside it is dropped from its item, so one bad item never
 fails a feed. Recurrence expansion, components, revisions, lines, body size and parse time are
-capped by the `event_*` limits. A recurrence rule (an event's or a VTIMEZONE's) is expanded only
-when it repeats yearly, monthly, weekly, daily or hourly and one of its periods holds at most
-1,000 dates (the days in the period times its listed hours, minutes and seconds); an event with
-another rule is left out of the feed with a warning, as an event over a limit is.
+capped by the `event_*` limits. A recurrence rule is expanded only when it repeats yearly,
+monthly, weekly, daily or hourly and one of its periods holds at most `event_max_period_dates`
+(100,000) dates: the days the period keeps after the rule's own day filters, times its listed
+hours, minutes and seconds. An event with another rule keeps its first occurrence, with the
+warning `series_rule_unexpanded`; a VTIMEZONE with one cannot convert, and an event in that zone
+is left out with a warning.
 
 **Changes and disappearance.** Rows are compared by SEQUENCE, LAST-MODIFIED and a normalized
 content hash, so DTSTAMP and fetch noise create no changes. Explicit cancellations apply at

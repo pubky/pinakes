@@ -4047,8 +4047,9 @@ async fn related_lists_a_feed_and_a_venue_once(pool: PgPool) {
 #[test]
 fn a_rule_whose_periods_would_hold_too_many_dates_is_never_expanded() {
     // Every weekday, hour, minute and second of a year: 31 million dates the `rrule` crate would
-    // build before giving the first. In capitals, lower case or mixed, in an event or in an
-    // embedded time zone, the event is left out with a warning and its sibling stays, at once.
+    // build before giving the first. In capitals, lower case or mixed: as an event's rule, the
+    // event keeps its first occurrence with a warning; as an embedded time zone's, the event in
+    // that zone is left out with a warning. The sibling stays, at once.
     let every = |n: usize| (0..n).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
     let flood = format!(
         "FREQ=YEARLY;BYDAY=MO,TU,WE,TH,FR,SA,SU;BYHOUR={};BYMINUTE={};BYSECOND={}",
@@ -4089,31 +4090,94 @@ fn a_rule_whose_periods_would_hold_too_many_dates_is_never_expanded() {
                 began.elapsed() < std::time::Duration::from_secs(5),
                 "{rule}"
             );
-            let uids: Vec<&str> = container
+            let mut uids: Vec<&str> = container
                 .occurrences
                 .iter()
                 .map(|o| o.uid.as_str())
                 .collect();
-            assert_eq!(uids, ["good"], "{bad}");
-            assert!(!container.warnings.is_empty(), "{bad}");
+            uids.sort();
+            if bad.starts_with("UID:bad\nDTSTART:2027") {
+                assert_eq!(uids, ["bad", "good"], "{bad}");
+                assert!(
+                    container
+                        .warnings
+                        .contains(&"series_rule_unexpanded".to_string()),
+                    "{bad}: {:?}",
+                    container.warnings
+                );
+            } else {
+                assert_eq!(uids, ["good"], "{bad}");
+                assert!(!container.warnings.is_empty(), "{bad}");
+            }
         }
     }
-    // Ordinary rules pass the bound, however they spell their names.
+    // Ordinary rules pass the bound, however they spell their names, and expand: a yearly rule
+    // keeps one day of the year (three times that day), a plain yearly one once, a monthly one
+    // a day a month at three times.
+    let dates_in_2027 = |rule: &str| {
+        let body = cal(&event(&format!(
+            "UID:r\nDTSTART:20270101T100000Z\nRRULE:{rule}\nSUMMARY:r"
+        )));
+        let cfg = EventConfig {
+            max_occurrences_per_series: 1000,
+            months_forward: 15,
+            ..Default::default()
+        };
+        calendar::parse("https://example.org/f.ics", body.as_bytes(), &cfg, now())
+            .unwrap()
+            .container
+            .unwrap()
+            .occurrences
+            .iter()
+            .filter(|o| o.doc.start.unwrap().to_rfc3339().starts_with("2027"))
+            .count()
+    };
+    assert_eq!(dates_in_2027("FREQ=YEARLY;BYHOUR=10,14,18"), 3);
+    assert_eq!(dates_in_2027("FREQ=YEARLY"), 1);
+    assert_eq!(
+        dates_in_2027("FREQ=MONTHLY;BYMONTHDAY=1;BYHOUR=10,14,18"),
+        36
+    );
+    let bounded = |rule: &str, max: usize| {
+        let set: rrule::RRuleSet = format!("DTSTART:20261020T120000Z\nRRULE:{rule}")
+            .parse()
+            .unwrap();
+        pinakes_core::event::time::rrule_bounded(&set, max)
+    };
     for rule in [
         "FREQ=WEEKLY;BYDAY=MO,WE,FR;BYHOUR=9,18",
         "freq=monthly;byhour=9,18",
         "FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU",
         "FREQ=HOURLY;BYMINUTE=0,30",
+        "FREQ=YEARLY;BYHOUR=10,14,18",
+        "FREQ=MONTHLY;BYMONTHDAY=-1,-2,-3;BYHOUR=9",
     ] {
-        let set: rrule::RRuleSet = format!("DTSTART:20261020T120000Z\nRRULE:{rule}")
-            .parse()
-            .unwrap();
-        assert!(pinakes_core::event::time::rrule_bounded(&set), "{rule}");
+        assert!(bounded(rule, 100_000), "{rule}");
     }
-    for rule in [flood.as_str(), "FREQ=MINUTELY", "freq=secondly"] {
-        let set: rrule::RRuleSet = format!("DTSTART:20261020T120000Z\nRRULE:{rule}")
-            .parse()
-            .unwrap();
-        assert!(!pinakes_core::event::time::rrule_bounded(&set), "{rule}");
+    // Never: every hour and minute of every day (527,040 a year); every minute of every day of
+    // a month (44,640) under a 10,000 bound; a minutely and a secondly rule.
+    let every = |n: usize| (0..n).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+    let hourly_minutes = format!(
+        "FREQ=YEARLY;BYDAY=MO,TU,WE,TH,FR,SA,SU;BYHOUR={};BYMINUTE={}",
+        every(24),
+        every(60)
+    );
+    let monthly_minutes = format!(
+        "FREQ=MONTHLY;BYMONTHDAY={};BYHOUR={};BYMINUTE={}",
+        (1..=31)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        every(24),
+        every(60)
+    );
+    for (rule, max) in [
+        (flood.as_str(), 100_000),
+        (hourly_minutes.as_str(), 100_000),
+        (monthly_minutes.as_str(), 10_000),
+        ("FREQ=MINUTELY", 100_000),
+        ("freq=secondly", 100_000),
+    ] {
+        assert!(!bounded(rule, max), "{rule}");
     }
 }
