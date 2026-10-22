@@ -25,6 +25,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `resolver_ttl_secs` | `86400` | Default document lifetime (seconds) for web, pubky and card resolvers. |
 | `host_requests_per_second` | `1.0` | Requests per second to any one upstream host. |
 | `host_rates` | `{}` | Per-host overrides of `host_requests_per_second`. |
+| `html_head_bytes` | `4194304` | How far an HTML page past the 1 MB page cap is read (bytes); nothing in the page stops the read earlier. |
 | `max_failures` | `5` | Failures before a resource dead-letters. |
 | `timeout_grace` | `3` | Timeouts tolerated before they count as failures. |
 | `backoff_secs` | `30` | First retry backoff (seconds). |
@@ -136,8 +137,10 @@ classified as one of the named routes or card kinds) and re-queues them at once,
 1000. Each loses its HTTP validators and, on the OSM route, its `osm_place` cache entry, so the
 next fetch re-extracts. A row entering or leaving the OSM route swaps its identity envelope and
 becomes pending, as does an OSM-host URL moving to web. Leases are fenced by a generation bump.
-Aliases have no route and are skipped; a row whose URI now has a static alias root (a new
-tracking parameter, say) becomes an alias of it. The selected rows' [also-on](#also-on) lookups are
+Aliases have no route and are not re-queued; one that still holds a failure (an error, a dead
+letter, a retry count) gets an alias's state, `pending` (or `ok` if it was read) with none, since
+its root answers for it. A row whose URI now has a static alias root (a new tracking parameter,
+say) becomes an alias of it. The selected rows' [also-on](#also-on) lookups are
 queued too: a card that comes back unchanged would not run them again, so results read by an
 older version would stay until they expire. `reextract also-on` queues every resource's also-on
 lookups without re-reading any card; it can be combined with routes.
@@ -173,7 +176,29 @@ Web fetches bypass environment proxies, validate every DNS answer, pin the check
 repeat the policy at every redirect (three hops; HTML meta refresh and literal JavaScript
 redirects count). `egress.allow_hosts` and `egress.deny_hosts` take exact names or
 `*.example.org`; they never override the IP policy, and deny wins. Pages are capped at 1 MB of
-decoded body; an oversized page keeps its head metadata with a `truncated` warning. An RSS or
+decoded body; an oversized page keeps its head metadata with a `truncated` warning. An HTML page
+past the cap is read on to `limits.html_head_bytes`, whole when it ends before that and cut there
+otherwise: nothing in the page's text stops the read earlier, since only the parser can say where
+a head ends (a `</head>` in a script is not one). A read that cuts stops as soon as it reaches
+its cap, so a sender that stalls there costs no timeout. An image or PDF past the
+cap is cut too, never refused: its card comes from its URL. Every HTML parse (pages, and HTML
+inside API answers) runs in a child process, `pinakesd parse-worker` (the daemon itself; one
+that cannot run it does not start). All the parses of one job (a page's extraction, a source's
+answer with many HTML descriptions, a calendar's events) share one worker and its limits: 1 s of
+CPU time (10 s in a debug build), 1 GiB of memory and a wall-clock deadline. Past any of them, or
+as soon as the job's caller stops waiting, the worker dies, every later parse of the job fails
+at once, the parse slot is freed, and the resource is recorded as `too_complex`: final, with no
+card (an earlier card is cleared, and the change recorded), until `pinakesd reextract` revives it
+(the daemon logs `an HTML parse did not end within its limits`, once per job). Text without
+markup (no `<`) is parsed in the daemon, in linear time, without a worker, but only while the
+job is within its limits: once it is over, it parses no plain text either.
+The tree a worker answers with keeps no node more than 256 elements deep and at most 500,000
+nodes (of 149 real pages, the most has 37,186). Before the parse, a linear scan cuts the text
+at the first obvious cap: 50,000 start tags, 256 open elements, 64 attributes on one tag (end
+tags too), an attribute value of 1 MiB, a tag name of 256 bytes (real pages stay far below each:
+at most 16,440, 62, 29, 121 KB and 27 bytes over 149 pages). The scan is a cheap early cut; the
+worker's limits are the guarantee. At most as many pages are parsed at once as the machine has
+cores: a parse holds its slot until it ends, even after its request timed out. An RSS or
 Atom feed read without a calendar's feed cap is cut there too (a long show's feed is 2–5 MB):
 its channel and newest items come first, and its card reads up to the last whole item. Wikidata
 entity reads may take 8 MB, since a much-edited item carries megabytes of claims, and so may
@@ -663,10 +688,23 @@ and `query` scopes by a parameter when the path is short (`embed?src=`).
 
 `GET /metrics` on the admin listener serves Prometheus series per source: fetch outcomes,
 changes, canaries, the queue, ingestion lag and grouping. Admin `GET /v1/info` has the
-manifests, resolver status, counts, ingestion, source and canary state; public `/v1/info` shows
+manifests, resolver status (aliases left out: their roots answer for them), counts (`aliases`
+among them), ingestion, source and canary state; public `/v1/info` shows
 only the version, what the instance resolves, the limits a client must respect and the OSM
 licence. Stored errors are sanitized classes (dns, connect, timeout, http_4xx, http_5xx, parse,
-policy; rate_limited for a link waiting for its host's budget). Admin info and database metrics are cached for 15 seconds.
+policy, too_large for an answer past its size cap, too_complex for a page whose parse did not
+end within its limits; rate_limited for a link waiting for its host's budget). A failed resolve
+is logged at warn as `resolution failed`, with the resource id (`resource_id`), the link's host
+(`host`; its scheme for a link without one, never its path), this class (`kind`) and the
+upstream HTTP status when one was answered (`status`), never the error's text. No log line about
+a fetch, a lookup or a parse prints an error's text (what an upstream answered may hold a link);
+the lines about the daemon's own services (the database, Nexus, the dump) print theirs through
+a last guard that cuts every URL before its query or fragment and drops its user info. Logs name
+a link only by its host (a calendar's token or a user's name in a link never reaches a log line),
+errors carry no URL (a fetch error or a Nexus request error names none, an upstream service's
+error text is not repeated, the API answers an invalid link with the reason, not the link, and
+a query or body it cannot read with what the route takes, never the parameter name or value it
+could not read). Admin info and database metrics are cached for 15 seconds.
 
 Canaries (`canary.enabled`) run every `limits.canary_interval_secs`, first one interval after
 startup, on the ordinary workers and host budgets; their state survives restarts and they never

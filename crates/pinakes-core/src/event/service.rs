@@ -114,7 +114,7 @@ impl EventService {
         let uri = uri.to_owned();
         let config = self.config.clone();
         let body = bytes.clone();
-        let mut result = tokio::task::spawn_blocking(move || {
+        let mut result = crate::resolver::html::blocking(move || {
             if ics {
                 calendar::parse(&uri, &body, &config, chrono::Utc::now()).map(Some)
             } else {
@@ -175,8 +175,10 @@ impl EventService {
         if !(200..300).contains(&fetched.status) {
             return Ok(card);
         }
+        // Past the page cap: a page cut where its long head closes, or a whole page within the
+        // head budget (`egress::page_fits`).
         anyhow::ensure!(
-            fetched.body.len() <= crate::resolver::egress::BODY_CAP,
+            crate::resolver::egress::page_fits(fetched),
             "non-calendar page exceeds 1 MB"
         );
         let input_uri = uri.to_owned();
@@ -184,7 +186,7 @@ impl EventService {
         let config = self.config.clone();
         let ttl = card.ttl_secs;
         let (mut event, calendar_link, advertised, event_candidate, platform_extra) =
-            tokio::task::spawn_blocking(move || {
+            crate::resolver::html::blocking(move || -> anyhow::Result<_> {
                 let uri = input_uri.as_str();
                 let fetched = &fetched;
                 let mut event = ResourceMeta::new(uri, "web", ttl);
@@ -198,7 +200,7 @@ impl EventService {
                         page::jsonld(&mut event, &v, &fetched.url);
                         page::activity(&mut event, &v, &fetched.url);
                     }
-                    let html = scraper::Html::parse_document(&text);
+                    let html = crate::resolver::html::document(&text)?;
                     event_candidate = text.contains("startDate")
                         || text.contains("dtstart")
                         || text.contains("dt-start");
@@ -272,15 +274,15 @@ impl EventService {
                 }
                 // Whatever base each parser was handed, the performers came from this fetch.
                 event.event.read_from(fetched);
-                (
+                Ok((
                     event,
                     calendar_link,
                     advertised,
                     event_candidate,
                     platform_extra,
-                )
+                ))
             })
-            .await?;
+            .await??;
         let is_event = event.type_path.contains(&"Event".into());
         if advertised.is_some()
             || (!is_event && event_candidate)
@@ -306,7 +308,7 @@ impl EventService {
                 .await
                 {
                     if response.status == 200 {
-                        let (parsed, matched) = tokio::task::spawn_blocking(move || {
+                        let (parsed, matched) = crate::resolver::html::blocking(move || {
                             let matched = serde_json::from_slice(&response.body)
                                 .is_ok_and(|v| page::activity(&mut event, &v, &response.url));
                             (event, matched)
@@ -343,7 +345,7 @@ impl EventService {
             {
                 if response.status == 200 {
                     let config = self.config.clone();
-                    if let Ok(Ok(mut calendar)) = tokio::task::spawn_blocking(move || {
+                    if let Ok(Ok(mut calendar)) = crate::resolver::html::blocking(move || {
                         calendar::parse(&link, &response.body, &config, chrono::Utc::now())
                     })
                     .await

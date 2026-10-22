@@ -39,7 +39,7 @@ pub struct PodcastIndexConfig {
     pub secret: Option<SecretKey>,
 }
 impl PodcastIndexConfig {
-    fn pair(&self) -> Option<(&str, &str)> {
+    pub(crate) fn pair(&self) -> Option<(&str, &str)> {
         match (self.key.as_deref(), self.secret.as_deref()) {
             (Some(k), Some(s)) if !k.trim().is_empty() && !s.trim().is_empty() => {
                 Some((k.trim(), s.trim()))
@@ -734,7 +734,10 @@ impl Podcasts {
             Ok(f) => f,
             Err(e) if e.is::<RetryLater>() => return Err(e),
             Err(e) => {
-                tracing::debug!(error = %format!("{e:#}"), "podcast feed unreadable");
+                tracing::debug!(
+                    kind = crate::resolver::error_class(&e),
+                    "podcast feed unreadable"
+                );
                 return Ok(None);
             }
         };

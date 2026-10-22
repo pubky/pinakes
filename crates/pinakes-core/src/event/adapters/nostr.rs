@@ -276,7 +276,7 @@ async fn lookup_inner(
                 break;
             }
             let target = target.clone();
-            let parsed = tokio::task::spawn_blocking(move || -> Result<_> {
+            let parsed = crate::resolver::html::blocking(move || -> Result<_> {
                 let v: Value = serde_json::from_slice(&f.body)?;
                 ensure!(
                     v.is_array()
@@ -326,7 +326,9 @@ async fn lookup_inner(
     // event outside the bounded indexer scan. Poll the relay only after both answer.
     if let Ok(values) = relay.await {
         let target = target.clone();
-        if let Some(event) = tokio::task::spawn_blocking(move || newest(&target, &values)).await? {
+        if let Some(event) =
+            crate::resolver::html::blocking(move || newest(&target, &values)).await?
+        {
             return Ok(Some(event));
         }
     }
@@ -498,7 +500,7 @@ pub async fn resolve(
         let f = egress.fetch(uri).await?;
         ensure!(f.status == 200, "Nostr canary HTTP failure");
         let uri = uri.to_owned();
-        return tokio::task::spawn_blocking(move || {
+        return crate::resolver::html::blocking(move || {
             let v: Value = serde_json::from_slice(&f.body)?;
             for value in rows(&v).into_iter().take(256) {
                 if let Ok(event) = serde_json::from_value::<Event>(value) {
@@ -524,7 +526,7 @@ pub async fn resolve(
     }
     if event.kind.as_u16() != 31924 {
         let uri = uri.to_owned();
-        return tokio::task::spawn_blocking(move || parse(&uri, &event)).await?;
+        return crate::resolver::html::blocking(move || parse(&uri, &event)).await?;
     }
     let mut doc = super::cursor::container(uri, cfg);
     doc.source = "nip52".into();

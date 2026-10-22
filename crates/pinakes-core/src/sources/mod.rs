@@ -55,6 +55,7 @@ pub mod media_records;
 pub mod mempool;
 pub mod met;
 pub mod pdb;
+pub mod podcast_index;
 pub mod pubchem;
 pub mod public_inbox;
 pub mod ror;
@@ -104,6 +105,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &mempool::Mempool,
     &met::Met,
     &pdb::Pdb,
+    &podcast_index::PodcastIndex,
     &pubchem::Pubchem,
     &public_inbox::PublicInbox,
     &ror::Ror,
@@ -221,11 +223,11 @@ pub async fn wall_hooks(
             }
             Ok(Ok(None)) => crate::telemetry::discovery("wall_hook", "none"),
             Ok(Err(error)) => {
-                tracing::debug!(source = hook.name(), uri, error = %format!("{error:#}"), "wall hook failed");
+                tracing::debug!(source = hook.name(), host = %crate::resolver::log_host(uri), kind = crate::resolver::error_class(&error), "wall hook failed");
                 crate::telemetry::discovery("wall_hook", "failed");
             }
             Err(_) => {
-                tracing::debug!(source = hook.name(), uri, "wall hook timed out");
+                tracing::debug!(source = hook.name(), host = %crate::resolver::log_host(uri), "wall hook timed out");
                 crate::telemetry::discovery("wall_hook", "failed");
             }
         }
@@ -283,11 +285,11 @@ pub(crate) async fn page_hooks_with(
             }
             Ok(Ok(None)) => {}
             Ok(Err(error)) => {
-                tracing::debug!(source = hook.name(), uri, error = %format!("{error:#}"), "page hook failed");
+                tracing::debug!(source = hook.name(), host = %crate::resolver::log_host(uri), kind = crate::resolver::error_class(&error), "page hook failed");
                 crate::telemetry::discovery("page_hook", "failed");
             }
             Err(_) => {
-                tracing::debug!(source = hook.name(), uri, "page hook timed out");
+                tracing::debug!(source = hook.name(), host = %crate::resolver::log_host(uri), "page hook timed out");
                 crate::telemetry::discovery("page_hook", "failed");
             }
         }

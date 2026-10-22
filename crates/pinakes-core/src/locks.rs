@@ -68,30 +68,18 @@ mod tests {
     #[test]
     fn lock_waits_never_prints_the_database_url() {
         let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/lock-waits");
-        for (url, says) in [
-            // An unescaped `%` in the password: libpq quotes it.
-            (
-                "postgresql://review:CANARY_PASSWORD%zz@localhost/postgres",
-                "not a connection string",
-            ),
-            (
-                "postgresql:///postgres?host=/run&bogus=CANARY_VALUE",
-                "not a connection string",
-            ),
-            (
-                "postgresql://CANARY_USER:CANARY_PASSWORD@/CANARY_DB?host=/nonexistent-CANARY",
-                "cannot connect to the database (check DATABASE_URL)",
-            ),
-            (
-                "postgresql://CANARY_USER:CANARY_PASSWORD@127.0.0.1:1/CANARY_DB",
-                "cannot connect to the database (check DATABASE_URL)",
-            ),
+        // Which of the script's two refusals a URL gets is libpq's to decide (a version that
+        // cannot read a URL says so, another tries it and cannot connect): the test holds the
+        // script to its own words, either of them, and never the URL's parts.
+        for url in [
+            // An unescaped `%` in the password.
+            "postgresql://review:CANARY_PASSWORD%zz@localhost/postgres",
+            "postgresql:///postgres?host=/run&bogus=CANARY_VALUE",
+            "postgresql://CANARY_USER:CANARY_PASSWORD@/CANARY_DB?host=/nonexistent-CANARY",
+            "postgresql://CANARY_USER:CANARY_PASSWORD@127.0.0.1:1/CANARY_DB",
             // A line break in the host makes psql's error a line of the script's own form: psql's
             // stderr is never read, whatever its lines look like (Codex, review of ee24d93).
-            (
-                "postgresql:///postgres?host=/nonexistent%0Alock-waits:%20CANARY_HOST",
-                "cannot connect to the database (check DATABASE_URL)",
-            ),
+            "postgresql:///postgres?host=/nonexistent%0Alock-waits:%20CANARY_HOST",
         ] {
             let run = std::process::Command::new("bash")
                 .args([script, "sleep", "0.5"])
@@ -101,8 +89,12 @@ mod tests {
             let output = [run.stdout, run.stderr].concat();
             let output = String::from_utf8_lossy(&output);
             assert!(!run.status.success(), "{url}: {output}");
-            assert!(output.contains(says), "{url}: {output}");
             assert!(!output.contains("CANARY"), "{url}: {output}");
+            assert!(
+                output.contains("lock-waits: DATABASE_URL is not a connection string")
+                    || output.contains("lock-waits: cannot connect to the database"),
+                "{url}: {output}"
+            );
             assert_eq!(output.lines().count(), 2, "{url}: {output}");
         }
     }

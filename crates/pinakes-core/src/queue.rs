@@ -6,7 +6,7 @@ use crate::{
         Resolver,
     },
 };
-use anyhow::{bail, Result};
+use anyhow::Result;
 use futures_util::FutureExt;
 use sqlx::{FromRow, PgPool};
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -135,9 +135,11 @@ pub async fn reextract(pool: &PgPool, routes: &[String]) -> Result<u64> {
         };
         let (mut ids, mut new_routes, mut types, mut osm_ids) = (vec![], vec![], vec![], vec![]);
         let mut aliases = vec![];
+        let mut alias_rows = vec![];
         for (id, uri, stored, is_alias) in rows {
             // An alias has no route of its own; a URI that now has a static root becomes one.
             if is_alias {
+                alias_rows.push(id);
                 continue;
             }
             if let Some(alias) = crate::alias::root(&uri) {
@@ -170,6 +172,13 @@ pub async fn reextract(pool: &PgPool, routes: &[String]) -> Result<u64> {
             new_routes.push(route);
             types.push(osm.as_ref().map(|o| o.osm_type.clone()));
             osm_ids.push(osm.map(|o| o.id));
+        }
+        // An alias row that holds a failure gets an alias's queue state (`alias::CLEAR_QUEUE`).
+        if !alias_rows.is_empty() {
+            sqlx::query(crate::alias::CLEAR_QUEUE)
+                .bind(&alias_rows)
+                .execute(pool)
+                .await?;
         }
         if !aliases.is_empty() {
             let mut tx = pool.begin().await?;
@@ -444,7 +453,16 @@ async fn finish_job(
     let result = async {
         let mut doc = result?;
         if doc.status == Status::Error {
-            bail!("upstream returned a transient HTTP error");
+            // Recorded by the answer's status, not as a parser failure.
+            let class = match doc.http_status {
+                Some(status) if status < 500 => "http_4xx",
+                _ => "http_5xx",
+            };
+            let error = anyhow::Error::new(crate::resolver::ErrorClass(class));
+            return Err(match doc.http_status {
+                Some(status) => error.context(crate::resolver::Upstream(status)),
+                None => error.context("upstream returned a transient HTTP error"),
+            });
         }
         let invalid_identifier =
             doc.status == Status::Missing && crate::resolver::cards::invalid_identifier(&job.uri);
@@ -586,7 +604,9 @@ async fn finish_job(
     }
     .await;
     if let Err(error) = result {
-        tracing::warn!(resource_id=%job.id,resolver=resolver.name(),error=%error,"resolution failed");
+        // The host, the stored error kind and the upstream status, so a failure can be found by
+        // site or by kind; never the error's text, which may hold what an upstream answered.
+        tracing::warn!(resource_id=%job.id,host=%crate::resolver::log_host(&job.uri),kind=crate::resolver::error_class(&error),status=crate::resolver::status_of(&error).map(|s| s.to_string()).unwrap_or_default(),resolver=resolver.name(),"resolution failed");
         if error.is::<crate::resolver::interstitial::Blocked>() {
             // A challenge page: unreachable, with the normal failure backoff and dead letter.
             // The last accepted document stays; a wall never confirms disappearance.
@@ -602,6 +622,10 @@ async fn finish_job(
             }
         } else if crate::resolver::error_class(&error) == "timeout" {
             timed_out(pool, job, cfg, 60).await?;
+        } else if crate::resolver::error_class(&error) == "too_complex" {
+            // The parse did not end within its limits, and would not next time: final, with no
+            // card (an earlier one is cleared), until a re-extraction revives it.
+            crate::changes::clear(pool, &job.id, job.generation, "too_complex").await?;
         } else if crate::resolver::error_class(&error) == "policy"
             && url::Url::parse(&job.uri)
                 .ok()
@@ -884,11 +908,11 @@ pub fn spawn_with_egress(
                             for manifest in resolver.manifests() {
                             if resolver.canary_allowed_for(&manifest) {
                             match crate::canary::claim(&pool,&manifest,&canary).await {
-                                Ok(Some(generation))=>{if let Err(e)=crate::canary::run_manifest(&pool,resolver.as_ref(),&manifest,&canary,&metrics,generation).await {tracing::warn!(error=%e,"canary bookkeeping failed");}return;},
-                                Err(e)=>tracing::warn!(error=%e,"canary claim failed"),
+                                Ok(Some(generation))=>{if let Err(e)=crate::canary::run_manifest(&pool,resolver.as_ref(),&manifest,&canary,&metrics,generation).await {tracing::warn!(error=%crate::resolver::log_error(&e),"canary bookkeeping failed");}return;},
+                                Err(e)=>tracing::warn!(error=%crate::resolver::log_error(&e),"canary claim failed"),
                                 _=>{}
                             }
-                            } else if let Err(e)=crate::canary::suspend(&pool,&manifest).await {tracing::warn!(error=%e,"canary suspension failed");}
+                            } else if let Err(e)=crate::canary::suspend(&pool,&manifest).await {tracing::warn!(error=%crate::resolver::log_error(&e),"canary suspension failed");}
                             }
                             }
                             match claim_sources(&pool,&resolver.queue_sources(),&cfg,resolver.batch_size()).await {
@@ -904,10 +928,10 @@ pub fn spawn_with_egress(
                                         }
                                         Ok::<_,anyhow::Error>(())
                                     }.await;
-                                    if let Err(e)=result { tracing::error!(error=%e,"queue persistence failed"); }
+                                    if let Err(e)=result { tracing::error!(error=%crate::resolver::log_error(&e),"queue persistence failed"); }
                                 },
                                 Ok(_)=>{ tokio::select! { _=wake.notified()=>{},_=tokio::time::sleep(Duration::from_millis(250))=>{} } },
-                                Err(e)=>{ tracing::error!(error=%e,"queue claim failed"); tokio::time::sleep(Duration::from_secs(1)).await; }
+                                Err(e)=>{ tracing::error!(error=%crate::resolver::log_error(&e),"queue claim failed"); tokio::time::sleep(Duration::from_secs(1)).await; }
                             }
                         }=>{}
                     }

@@ -89,6 +89,7 @@ or got plain web cards before are read by their source.
   channels, from mempool.space (Esplora as fallback).
 - [`met`](met.md): The Metropolitan Museum of Art's works by object id.
 - [`pdb`](pdb.md): Protein Data Bank structures by PDB id.
+- [`podcast_index`](podcast_index.md): Podcast Index shows and episodes by feed and episode id (needs the Podcast Index key).
 - [`pubchem`](pubchem.md): PubChem compounds by compound id.
 - [`public_inbox`](public_inbox.md): mailing-list messages in public-inbox archives (gnusha.org, lore.kernel.org, others), and old bitcoin-dev pipermail addresses
 - [`ror`](ror.md): research organizations by ROR id.

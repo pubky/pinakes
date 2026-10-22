@@ -413,7 +413,7 @@ impl Resolver for CardResolver {
                         .append_pair("jscmd", "data");
                     let f = self.web.egress.fetch(url.as_str()).await?;
                     let uri = uri.to_owned();
-                    tokio::task::spawn_blocking(move || parse_isbn(&uri, &number, &f, ttl)).await?
+                    crate::resolver::html::blocking(move || parse_isbn(&uri, &number, &f, ttl)).await?
                 }
                 "doi" => {
                     let Some(number) = doi(uri) else { return Ok(missing(uri,"doi",0)); };
@@ -435,7 +435,7 @@ impl Resolver for CardResolver {
                         )
                         .await?;
                     let uri = uri.to_owned();
-                    tokio::task::spawn_blocking(move || parse_doi(&uri, &f, ttl)).await?
+                    crate::resolver::html::blocking(move || parse_doi(&uri, &f, ttl)).await?
                 }
                 "nostr" => {
                     let target = crate::event::adapters::nostr::Target::decode(uri)?;
@@ -457,7 +457,7 @@ impl Resolver for CardResolver {
                             &event,);
                     }
                     let uri=uri.to_owned();
-                    tokio::task::spawn_blocking(move || parse_nostr(&uri, &event, ttl)).await?
+                    crate::resolver::html::blocking(move || parse_nostr(&uri, &event, ttl)).await?
                 }
                 "media" => self.media(uri,ttl).await,
                 "official" => match crate::sources::resolve(&self.web.egress, &self.config, uri, ttl).await? {
@@ -714,11 +714,10 @@ pub fn parse_nostr(uri: &str, e: &nostr::event::Event, ttl: u64) -> Result<Resou
     d.bounded(web::ATTRIBUTES)
 }
 pub fn plain(s: &str) -> String {
-    scraper::Html::parse_fragment(s)
-        .root_element()
-        .text()
-        .collect::<Vec<_>>()
-        .join(" ")
+    let Ok(html) = crate::resolver::html::fragment(s) else {
+        return String::new();
+    };
+    html.root_element().text().collect::<Vec<_>>().join(" ")
 }
 pub fn activitypub(uri: &str, v: &Value, base: &Url, ttl: u64) -> Option<ResourceMeta> {
     let kind = match v["type"].as_str()? {
@@ -775,7 +774,7 @@ pub fn activitypub(uri: &str, v: &Value, base: &Url, ttl: u64) -> Option<Resourc
 }
 async fn parse_activitypub(uri: &str, f: &Fetched, ttl: u64) -> Result<Option<ResourceMeta>> {
     let (uri, f) = (uri.to_owned(), f.clone());
-    tokio::task::spawn_blocking(move || {
+    crate::resolver::html::blocking(move || {
         let Ok(v) = serde_json::from_slice::<Value>(&f.body) else {
             return Ok(None);
         };
@@ -803,8 +802,8 @@ pub async fn enrich(
     }
     // One bounded parse for advertised metadata endpoints. Never follow arbitrary links.
     let (body, base) = (f.body.clone(), f.url.clone());
-    let (ap, rss) = tokio::task::spawn_blocking(move || {
-        let html = scraper::Html::parse_document(&String::from_utf8_lossy(&body));
+    let (ap, rss) = super::html::blocking(move || -> anyhow::Result<_> {
+        let html = crate::resolver::html::document(&String::from_utf8_lossy(&body))?;
         let (mut ap, mut rss) = (None, None);
         for el in html
             .select(&scraper::Selector::parse("head link[rel='alternate']").unwrap())
@@ -830,9 +829,9 @@ pub async fn enrich(
                 rss = Some(href);
             }
         }
-        (ap, rss)
+        Ok((ap, rss))
     })
-    .await?;
+    .await??;
     let ap = ap.or_else(|| {
         crate::event::service::header_alternate(f.validators.link.as_deref(), &f.url).map(|v| v.0)
     });
@@ -896,7 +895,7 @@ pub async fn enrich(
         if let Some(f) = feed {
             let (uri, cap, ttl) = (uri.to_owned(), cfg.podcast_items, cfg.media.ttl_secs);
             let referenced = uri.clone();
-            if let Ok(Some(mut d)) = tokio::task::spawn_blocking(move || {
+            if let Ok(Some(mut d)) = crate::resolver::html::blocking(move || {
                 podcast_body(&uri, &f, ttl, cap, direct && is_feed)
             })
             .await?
@@ -918,19 +917,42 @@ pub async fn enrich(
     }
     doc.bounded(web::ATTRIBUTES)
 }
+/// The deepest a feed's elements may nest for `feed_prefix` to complete it: an RSS item ends at
+/// depth 2 (`rss`, `channel`), an Atom entry at 1, and nothing in a real feed comes near this.
+const FEED_DEPTH: usize = 64;
+/// The longest element name `feed_prefix` keeps open (`itunes:new-feed-url` is 19 bytes).
+const FEED_NAME_BYTES: usize = 256;
+
 /// An RSS or Atom body cut off at the fetch cap (`Fetched::truncated`), completed so an XML
 /// parser reads it: up to the end of its last whole `item` or `entry` (at most `cap` of them),
 /// then the elements still open there closed. `None` when no item is whole. Streams the prefix,
 /// so a feed of any length costs the cap and no more.
+///
+/// Its work stays linear whatever the feed: elements nest at most `FEED_DEPTH` deep with names of
+/// at most `FEED_NAME_BYTES` (the prefix ends with the last item whole before a deeper element or
+/// a longer name), and the open elements at an item's end are kept as shared names, so keeping
+/// them copies at most `FEED_DEPTH` pointers. It stops, with no prefix, when its parse job is over (its caller gone,
+/// its deadline passed).
 pub fn feed_prefix(body: &str, cap: usize) -> Option<String> {
     use quick_xml::events::Event;
+    use std::rc::Rc;
     let mut reader = quick_xml::Reader::from_str(body);
-    let mut open: Vec<String> = vec![];
-    let mut last: Option<(usize, Vec<String>)> = None;
+    let mut open: Vec<Rc<str>> = vec![];
+    let mut last: Option<(usize, Vec<Rc<str>>)> = None;
     let mut items = 0;
-    loop {
+    for event in 0u64.. {
+        if event % 1024 == 0 && super::html::job_over() {
+            return None;
+        }
         match reader.read_event() {
-            Ok(Event::Start(e)) => open.push(String::from_utf8_lossy(e.name().as_ref()).into()),
+            Ok(Event::Start(e)) => {
+                let name = e.name();
+                // Deeper or longer than any feed: the items whole before it are the prefix.
+                if open.len() >= FEED_DEPTH || name.as_ref().len() > FEED_NAME_BYTES {
+                    break;
+                }
+                open.push(String::from_utf8_lossy(name.as_ref()).into());
+            }
             Ok(Event::End(e)) => {
                 open.pop();
                 if matches!(e.local_name().as_ref(), b"item" | b"entry") {

@@ -359,7 +359,9 @@ fn podcast_selection_and_schema_media_keys() {
         let mut f = f.clone();
         f.content_type = "text/html".into();
         f.body=format!("<script type='application/ld+json'>{{\"@type\":\"{ty}\",\"name\":\"Media\",\"isrcCode\":\"US-S1Z-99-00001\"}}</script>").into_bytes();
-        let d = pinakes_core::resolver::web::extract("https://example.org/a", &f, 3600).doc;
+        let d = pinakes_core::resolver::web::extract("https://example.org/a", &f, 3600)
+            .unwrap()
+            .doc;
         assert_eq!(d.type_name, ty);
         assert_eq!(d.attributes["isrc"], "US-S1Z-99-00001");
     }
@@ -382,6 +384,38 @@ fn a_feed_cut_off_at_the_cap_reads_to_its_last_whole_item() {
         format!("{head}{}{}</channel></rss>", item(1), item(2))
     );
     assert!(cards::feed_prefix(&format!("{head}{}", &item(1)[..30]), 1000).is_none());
+    // Kimi's shape on ee9a221: hundreds of thousands of open elements, then `</item>` after
+    // `</item>` (1 MiB). Each `</item>` copied the whole open stack, minutes of work at the item
+    // cap. With end tags that close what is open (300,000 `<item>`), the reader takes them all;
+    // with `<a>` it stops at the first mismatch. The prefix ends at once with the last item whole
+    // before the depth no feed reaches.
+    for open in ["<item>", "<a>"] {
+        let hostile = format!(
+            "{head}{}{}{}",
+            item(1),
+            open.repeat(300_000),
+            "</item>".repeat(1_000)
+        );
+        assert!(hostile.len() > 900_000);
+        let started = std::time::Instant::now();
+        let completed = cards::feed_prefix(&hostile, 10_000).unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "{open}: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            completed,
+            format!("{head}{}</channel></rss>", item(1)),
+            "{open}"
+        );
+    }
+    // So does an element name longer than any feed's.
+    let long = format!("{head}{}<{}>x</item>", item(1), "n".repeat(10_000));
+    assert_eq!(
+        cards::feed_prefix(&long, 1000).unwrap(),
+        format!("{head}{}</channel></rss>", item(1))
+    );
     // Atom entries too.
     let atom = r#"<feed xmlns="http://www.w3.org/2005/Atom"><title>A</title><entry><id>1</id></entry><entry><id>2"#;
     assert_eq!(

@@ -267,25 +267,22 @@ impl Source for Feed {
         // Whether some feed listed items, and whether some request failed (then nothing is
         // concluded about the host).
         let (mut any, mut failed) = (false, false);
-        let mut look = |address: String, answer: Result<crate::resolver::egress::Fetched>| {
-            let f = match answer {
-                Ok(f) => f,
-                Err(_) => {
+        let mut look = |address: String, read: Result<Option<Vec<Entry>>, ()>| {
+            let found = match read {
+                Ok(Some(found)) => found,
+                Ok(None) => return None,
+                Err(()) => {
                     failed = true;
                     return None;
                 }
             };
-            if f.status != 200 {
-                return None;
-            }
-            let found = entries(&f.body);
             any |= !found.is_empty();
             find(&found, uri).and_then(|e| card(uri, cx.ttl, e, &address))
         };
         for path in FEEDS {
             let address = format!("{origin}{path}");
             let answer = cx.egress.discover(&address, &feed, FEED_TTL).await;
-            if let Some(doc) = look(address, answer) {
+            if let Some(doc) = look(address, feed_entries(answer).await) {
                 return Ok(Some(doc));
             }
         }
@@ -304,7 +301,7 @@ impl Source for Feed {
         };
         for address in sitemaps {
             let answer = cx.egress.discover(&address, &feed, FEED_TTL).await;
-            if let Some(doc) = look(address, answer) {
+            if let Some(doc) = look(address, feed_entries(answer).await) {
                 return Ok(Some(doc));
             }
         }
@@ -313,6 +310,22 @@ impl Source for Feed {
         }
         Ok(None)
     }
+}
+
+/// A feed answer's entries, parsed in a parse slot: `Err` when the request failed, `None` when
+/// it was no 200.
+async fn feed_entries(
+    answer: Result<crate::resolver::egress::Fetched>,
+) -> std::result::Result<Option<Vec<Entry>>, ()> {
+    let f = answer.map_err(|_| ())?;
+    if f.status != 200 {
+        return Ok(None);
+    }
+    Ok(Some(
+        crate::resolver::html::blocking(move || entries(&f.body))
+            .await
+            .unwrap_or_default(),
+    ))
 }
 
 #[cfg(test)]

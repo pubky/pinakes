@@ -353,7 +353,7 @@ pub fn parse_header(body: &str) -> Result<Header> {
 
 /// One row of a filing's index: (document file, type, description).
 pub fn index_row(html: &str, file: &str) -> Option<(String, String)> {
-    let page = scraper::Html::parse_document(html);
+    let page = crate::resolver::html::document(html).ok()?;
     let rows = scraper::Selector::parse("table.tableFile tr").ok()?;
     let cells = scraper::Selector::parse("td").ok()?;
     for row in page.select(&rows) {
@@ -721,7 +721,16 @@ impl Source for Sec {
                     .await
                     .ok()
                     .filter(|f| f.status == 200);
-                let row = index.and_then(|f| index_row(&String::from_utf8_lossy(&f.body), file));
+                let row = match index {
+                    Some(f) => {
+                        let file = file.clone();
+                        crate::resolver::html::blocking(move || {
+                            index_row(&String::from_utf8_lossy(&f.body), &file)
+                        })
+                        .await?
+                    }
+                    None => None,
+                };
                 Some((file.as_str(), row))
             }
             _ => None,

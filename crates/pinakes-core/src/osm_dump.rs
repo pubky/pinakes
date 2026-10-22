@@ -178,8 +178,12 @@ pub async fn run(pool: PgPool, dir: PathBuf, every: Duration, mut shutdown: watc
     match tokio::task::spawn_blocking(move || remove_leftovers(&leftovers)).await {
         Ok(Ok(0)) => {}
         Ok(Ok(removed)) => tracing::info!(removed, "removed leftover ODbL dump temporary files"),
-        Ok(Err(error)) => tracing::warn!(%error, "could not remove leftover ODbL dump files"),
-        Err(error) => tracing::warn!(%error, "could not remove leftover ODbL dump files"),
+        Ok(Err(error)) => {
+            tracing::warn!(error = %crate::resolver::log_error(&error), "could not remove leftover ODbL dump files")
+        }
+        Err(error) => {
+            tracing::warn!(error = %crate::resolver::log_error(&error), "could not remove leftover ODbL dump files")
+        }
     }
     let mut wait = due_in(&dir, every);
     loop {
@@ -196,7 +200,7 @@ pub async fn run(pool: PgPool, dir: PathBuf, every: Duration, mut shutdown: watc
                 every
             }
             Err(error) => {
-                tracing::warn!(error=%format!("{error:#}"), "ODbL dump failed; retrying in five minutes");
+                tracing::warn!(error=%crate::resolver::log_error(&error), "ODbL dump failed; retrying in five minutes");
                 Duration::from_secs(300)
             }
         };

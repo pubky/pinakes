@@ -238,10 +238,13 @@ impl Source for Cleveland {
             return Ok(cx.missing(uri, self));
         };
         let f = fetch(cx, &request(&artwork).context("artwork")?).await?;
-        Ok(match parse(f.status, &f.body, &artwork)? {
-            Some(card) => card.into_doc(cx.card(uri, self), SITE),
-            None => cx.missing(uri, self),
-        })
+        let read = artwork.clone();
+        Ok(
+            match crate::resolver::html::blocking(move || parse(f.status, &f.body, &read)).await?? {
+                Some(card) => card.into_doc(cx.card(uri, self), SITE),
+                None => cx.missing(uri, self),
+            },
+        )
     }
 }
 

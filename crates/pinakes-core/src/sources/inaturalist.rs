@@ -356,10 +356,14 @@ impl Source for Inaturalist {
             return Ok(cx.missing(uri, self));
         };
         let f = super::kit::fetch(cx, &request(object).context("no request")?).await?;
-        Ok(match parse(f.status, &f.body, object)? {
-            Some(card) => card.into_doc(cx.card(uri, self), SITE),
-            None => cx.missing(uri, self),
-        })
+        Ok(
+            match crate::resolver::html::blocking(move || parse(f.status, &f.body, object))
+                .await??
+            {
+                Some(card) => card.into_doc(cx.card(uri, self), SITE),
+                None => cx.missing(uri, self),
+            },
+        )
     }
 }
 

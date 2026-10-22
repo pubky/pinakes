@@ -31,15 +31,15 @@ fn parse_error(e: impl std::fmt::Display) -> anyhow::Error {
 }
 pub(super) fn upstream_status(f: &Fetched) -> Result<()> {
     if f.status >= 500 || matches!(f.status, 408 | 429) {
-        return Err(crate::resolver::RetryLater {
+        return Err(anyhow::Error::new(crate::resolver::RetryLater {
             class: if f.status >= 500 {
                 "http_5xx"
             } else {
                 "http_4xx"
             },
             seconds: f.retry_after_secs.max(60),
-        }
-        .into());
+        })
+        .context(crate::resolver::Upstream(f.status)));
     }
     Ok(())
 }
@@ -67,7 +67,7 @@ pub(crate) async fn discover_enrichment(
     enrichment_status(&fetched)?;
     if definition.parser == "mobilizon" && fetched.status == 200 {
         let body = fetched.body.clone();
-        let failed = tokio::task::spawn_blocking(move || {
+        let failed = crate::resolver::html::blocking(move || {
             serde_json::from_slice::<Value>(&body)
                 .ok()
                 .is_some_and(|v| v["errors"].as_array().is_some_and(|a| !a.is_empty()))
@@ -236,9 +236,16 @@ impl PlatformResolver {
                         || doc.location.is_none()
                             && doc.event.attendance != Some(crate::event::Attendance::Online))
                 {
-                    if let Some((target, mut opts)) =
-                        endpoint(d, uri, Some(&fetched), cfg).map_err(parse_error)?
-                    {
+                    // Calendar-link discovery reads the page: in a parse slot.
+                    let found = {
+                        let (d, uri, page, cfg) =
+                            (d.clone(), uri.to_owned(), fetched.clone(), cfg.clone());
+                        crate::resolver::html::blocking(move || {
+                            endpoint(&d, &uri, Some(&page), &cfg)
+                        })
+                        .await?
+                    };
+                    if let Some((target, mut opts)) = found.map_err(parse_error)? {
                         if target != fetched.url.as_str() {
                             opts.feed_hint = crate::event::service::is_feed(&target)
                                 || (d.mode == Mode::Container && feed_path(&target))
@@ -452,11 +459,11 @@ async fn extract_blocking(
     ttl: u64,
 ) -> Result<crate::resolver::web::Extracted> {
     ensure!(
-        f.body.len() <= crate::resolver::egress::BODY_CAP,
+        crate::resolver::egress::page_fits(f),
         "non-feed page exceeds cap"
     );
     let (uri, f) = (uri.to_owned(), f.clone());
-    Ok(tokio::task::spawn_blocking(move || crate::resolver::web::extract(&uri, &f, ttl)).await?)
+    crate::resolver::html::blocking(move || crate::resolver::web::extract(&uri, &f, ttl)).await?
 }
 async fn calendar_blocking(
     uri: &str,
@@ -465,7 +472,7 @@ async fn calendar_blocking(
     cfg: &EventConfig,
 ) -> Result<Option<ResourceMeta>> {
     let (uri, id, f, cfg) = (uri.to_owned(), d.id.clone(), f.clone(), cfg.clone());
-    tokio::task::spawn_blocking(move || {
+    crate::resolver::html::blocking(move || {
         let d = super::definition(&id).expect("registered adapter");
         if let Some(doc) = calendar_document(&uri, d, &f, &cfg)? {
             return Ok(Some(doc));
@@ -492,11 +499,11 @@ pub(crate) async fn enrichment_blocking(
         return Ok(Some(doc));
     }
     ensure!(
-        f.body.len() <= crate::resolver::egress::BODY_CAP,
+        crate::resolver::egress::page_fits(f),
         "non-feed enrichment exceeds cap"
     );
     let (uri, id, body) = (uri.to_owned(), d.id.clone(), f.body.clone());
-    let mut doc = tokio::task::spawn_blocking(move || state::parse(&id, &uri, &body)).await?;
+    let mut doc = crate::resolver::html::blocking(move || state::parse(&id, &uri, &body)).await?;
     // The performers came from this fetch, not from the address the parser was handed.
     if let Some(doc) = &mut doc {
         doc.event.read_from(f);
@@ -714,7 +721,11 @@ pub fn endpoint(
         {
             Some((
                 format!("https://www.wikidata.org/wiki/Special:EntityData/{id}.json"),
-                opts,
+                FetchOptions {
+                    // A much-edited item carries megabytes of claims.
+                    body_cap: Some(crate::hubs::WIKIDATA_CAP),
+                    ..opts
+                },
             ))
         }
         "ics_link" if !crate::event::service::is_feed(uri) => {
@@ -757,7 +768,7 @@ pub fn endpoint(
     Ok(result)
 }
 pub fn ics_link(_id: &str, base: &Url, text: &str) -> Option<String> {
-    let html = scraper::Html::parse_document(text);
+    let html = crate::resolver::html::document(text).ok()?;
     html.select(&scraper::Selector::parse("a[href],link[href]").unwrap())
         .filter_map(|e| e.value().attr("href"))
         .filter(|s| {
@@ -773,7 +784,7 @@ pub fn ics_link(_id: &str, base: &Url, text: &str) -> Option<String> {
 
 async fn wiki(uri: &str, f: &Fetched, egress: &Egress) -> Result<ResourceMeta> {
     let f = f.clone();
-    let (mut value, qid) = tokio::task::spawn_blocking(move || {
+    let (mut value, qid) = crate::resolver::html::blocking(move || {
         let value: Value = serde_json::from_slice(&f.body).unwrap_or(Value::Null);
         let text = String::from_utf8_lossy(&f.body);
         let qid = wikipedia_item(&text);
@@ -785,7 +796,10 @@ async fn wiki(uri: &str, f: &Fetched, egress: &Egress) -> Result<ResourceMeta> {
         let f = egress
             .discover(
                 &format!("https://www.wikidata.org/wiki/Special:EntityData/{qid}.json"),
-                &Default::default(),
+                &FetchOptions {
+                    body_cap: Some(crate::hubs::WIKIDATA_CAP),
+                    ..Default::default()
+                },
                 86400,
             )
             .await?;
@@ -802,12 +816,12 @@ async fn wiki(uri: &str, f: &Fetched, egress: &Egress) -> Result<ResourceMeta> {
             }
             .into());
         }
-        value = tokio::task::spawn_blocking(move || serde_json::from_slice(&f.body))
+        value = crate::resolver::html::blocking(move || serde_json::from_slice(&f.body))
             .await?
             .map_err(parse_error)?;
     }
     let uri = uri.to_owned();
-    tokio::task::spawn_blocking(move || wiki_value(&uri, &value))
+    crate::resolver::html::blocking(move || wiki_value(&uri, &value))
         .await?
         .map_err(parse_error)
 }
@@ -825,7 +839,7 @@ pub fn wikipedia_item(text: &str) -> Option<String> {
                 .and_then(|(_, s)| valid(s))
         })
         .or_else(|| {
-            let html = scraper::Html::parse_document(text);
+            let html = crate::resolver::html::document(text).ok()?;
             html.select(&scraper::Selector::parse("script[type='application/ld+json']").unwrap())
                 .find_map(|node| {
                     let v: Value = serde_json::from_str(&node.text().collect::<String>()).ok()?;
@@ -841,12 +855,16 @@ pub fn wikipedia_item(text: &str) -> Option<String> {
 }
 fn wikipedia_candidate(f: &Fetched) -> bool {
     let text = String::from_utf8_lossy(&f.body);
-    let html = scraper::Html::parse_document(&text);
+    let Ok(html) = crate::resolver::html::document(&text) else {
+        return false;
+    };
     let selector=scraper::Selector::parse(".infobox.vevent, .infobox.geography, .infobox .geo, meta[property='place:location:latitude']").unwrap();
     if html.select(&selector).next().is_some() {
         return true;
     }
-    let card = crate::resolver::web::extract(f.url.as_str(), f, 86400).doc;
+    let Ok(card) = crate::resolver::web::extract(f.url.as_str(), f, 86400).map(|e| e.doc) else {
+        return false;
+    };
     card.type_path
         .iter()
         .any(|t| matches!(t.as_str(), "Event" | "Place"))
@@ -862,7 +880,7 @@ pub async fn wikipedia(uri: &str, f: &Fetched, egress: &Egress) -> Result<Option
         return Ok(None);
     }
     let input = f.clone();
-    if !tokio::task::spawn_blocking(move || wikipedia_candidate(&input)).await? {
+    if !crate::resolver::html::blocking(move || wikipedia_candidate(&input)).await? {
         return Ok(None);
     }
     let doc = match wiki(uri, f, egress).await {

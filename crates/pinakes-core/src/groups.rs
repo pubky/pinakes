@@ -1101,10 +1101,10 @@ pub async fn reconcile(pool: &PgPool, id: &str, cfg: &GroupConfig) -> bool {
                 .bind(id).execute(pool).await.ok();
             return false;
         }
-        tracing::warn!(resource_id=id,error=%error,"group_failed; reconciliation deferred");
+        tracing::warn!(resource_id=id,error=%crate::resolver::log_error(&error),"group_failed; reconciliation deferred");
         let parked=sqlx::query("INSERT INTO group_dirty(resource_id,attempts,last_error,next_attempt_at) SELECT id,1,'group_failed',now()+interval '1 minute' FROM resource WHERE id=$1 ON CONFLICT(resource_id) DO UPDATE SET attempts=group_dirty.attempts+1,last_error='group_failed',next_attempt_at=now()+least(3600,60*power(2,least(group_dirty.attempts,6))) * interval '1 second'").bind(id).execute(pool).await;
         if let Err(error) = parked {
-            tracing::warn!(error=%error,"failed to park grouping retry");
+            tracing::warn!(error=%crate::resolver::log_error(&error),"failed to park grouping retry");
         }
         return false;
     }

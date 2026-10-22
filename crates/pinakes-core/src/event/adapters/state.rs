@@ -96,12 +96,10 @@ pub fn object(id: &str, uri: &str, v: &Value) -> Option<ResourceMeta> {
             "description_text",
         ],
     )
-    .map(|mut s| {
+    .and_then(|mut s| {
         crate::model::truncate(&mut s, 8192);
-        scraper::Html::parse_fragment(&s)
-            .root_element()
-            .text()
-            .collect()
+        let html = crate::resolver::html::fragment(&s).ok()?;
+        Some(html.root_element().text().collect())
     });
     doc.event.tz = at(
         v,
@@ -324,8 +322,11 @@ pub fn parse(id: &str, uri: &str, body: &[u8]) -> Option<ResourceMeta> {
         }
         Err(_) => true,
     };
-    if from_scripts {
-        let html = scraper::Html::parse_document(&text);
+    // A page too complex to parse gives no script here; the page's own parse says so.
+    if let Some(html) = from_scripts
+        .then(|| crate::resolver::html::document(&text).ok())
+        .flatten()
+    {
         for node in html.select(&scraper::Selector::parse("script").unwrap()) {
             if roots.len() >= 256 || std::time::Instant::now() >= deadline {
                 break;

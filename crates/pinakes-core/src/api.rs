@@ -369,9 +369,59 @@ pub fn with_public_layers(routes: Router<AppState>, state: AppState) -> Router {
 /// Marks a response the panic backstop produced, so the layer around it can log the path.
 #[derive(Clone, Copy)]
 struct CaughtPanic;
+/// An extractor's rejection (a query, path or body axum could not read) answers in plain text
+/// with the input it could not read: an unknown parameter's name, a value of the wrong type, a
+/// bare string where an object was expected. Any of them may be a link. The answer keeps its
+/// status and says what the route takes (`rejection_message`), never the input.
+async fn rejection_without_input(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
+    let response = next.run(request).await;
+    let plain = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("text/plain"));
+    if !response.status().is_client_error() || !plain {
+        return response;
+    }
+    let status = response.status();
+    let message = rejection_message(&method, &path, status);
+    (status, Json(json!({ "error": message }))).into_response()
+}
+/// What a route takes, for a request axum could not read.
+fn rejection_message(method: &axum::http::Method, path: &str, status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::PAYLOAD_TOO_LARGE => return "the body is over 2 MB",
+        StatusCode::UNSUPPORTED_MEDIA_TYPE => {
+            return "the body must be JSON (content-type: application/json)"
+        }
+        _ => {}
+    }
+    if method == axum::http::Method::GET {
+        return "the path or a query parameter could not be read; /v1/openapi.json lists what this route takes";
+    }
+    match path {
+        "/v1/resolve" => "the body must be a JSON object with a `uri` string",
+        "/v1/resources/lookup" => {
+            "the body must be a JSON object with `ids` or `uris`, arrays of strings"
+        }
+        "/v1/changes/lookup" | "/v1/occurrences/lookup" => {
+            "the body must be a JSON object with `resource_ids` or `uris`, arrays of strings"
+        }
+        p if p.starts_with("/v1/groups/") => {
+            "the body must be a JSON object with a `members` array"
+        }
+        _ => "the body must be JSON as /v1/openapi.json describes",
+    }
+}
 /// Backstop: a handler panic answers 500 (counted in `pinakes_api_panics_total`) instead of
 /// dropping the connection, and the request path is logged (never the payload). Innermost, so
-/// the listener's other layers (CORS, Swagger headers) still shape the response.
+/// the listener's other layers (CORS, Swagger headers) still shape the response. Around it, an
+/// extractor's rejection is answered without the input it quotes (`rejection_without_input`).
 fn panic_backstop(
     routes: Router<AppState>,
     state: &AppState,
@@ -401,6 +451,7 @@ fn panic_backstop(
                 response
             },
         ))
+        .layer(axum::middleware::from_fn(rejection_without_input))
 }
 #[derive(Debug)]
 pub struct ApiError(pub(crate) StatusCode, pub(crate) String);
@@ -411,7 +462,8 @@ impl ApiError {
 }
 impl<E: Into<anyhow::Error>> From<E> for ApiError {
     fn from(error: E) -> Self {
-        tracing::error!(error=%error.into(),"request failed");
+        let error: anyhow::Error = error.into();
+        tracing::error!(error=%crate::resolver::log_error(&error),"request failed");
         Self(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal server error".into(),
@@ -1277,7 +1329,7 @@ pub async fn search(
         .map_err(|e| ApiError::bad(e.to_string()))?;
     let reach = if let (Some(viewer), Some(reach)) = (&q.viewer, &q.reach) {
         Some(state.nexus.reach(viewer, reach).await.map_err(|e| {
-            tracing::warn!(error=%e,"reach unavailable");
+            tracing::warn!(error=%crate::resolver::log_error(&e),"reach unavailable");
             ApiError(StatusCode::BAD_GATEWAY, "Nexus reach unavailable".into())
         })?)
     } else {
@@ -2042,10 +2094,11 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         sqlx::query_scalar("SELECT to_jsonb(s) FROM source_state s ORDER BY source")
             .fetch_all(&state.pool)
             .await?;
-    let row=sqlx::query("SELECT (SELECT count(*) FROM resource) AS resources,(SELECT count(*) FROM reference) AS references,(SELECT count(*) FROM occurrence) AS occurrences").fetch_one(&state.pool).await?;
+    let row=sqlx::query("SELECT (SELECT count(*) FROM resource) AS resources,(SELECT count(*) FROM resource_alias) AS aliases,(SELECT count(*) FROM reference) AS references,(SELECT count(*) FROM occurrence) AS occurrences").fetch_one(&state.pool).await?;
     let ingestion:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('nexus',nexus,'cursor',cursor,'feed_length',feed_length,'lag',greatest(feed_length-cursor,0),'epoch',epoch,'updated_at',updated_at) FROM feed_cursor ORDER BY nexus").fetch_all(&state.pool).await?;
-    let statuses:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('resolver',resolver,'status',status,'count',count(*),'dead_letter',count(*) FILTER (WHERE dead_letter),'leased',count(*) FILTER (WHERE lease_until>now())) FROM resource GROUP BY resolver,status ORDER BY resolver,status").fetch_all(&state.pool).await?;
-    let mut body = json!({"groups":state.config.groups,"version":env!("CARGO_PKG_VERSION"),"manifests":crate::adapter::configured(&state.config),"sources":sources,"metrics":state.metrics.summary(),"ingestion":ingestion,"counts":{"resources":row.try_get::<i64,_>("resources")?,"references":row.try_get::<i64,_>("references")?,"occurrences":row.try_get::<i64,_>("occurrences")?},"osm_licence":{"licence":"ODbL-1.0","attribution":crate::resolver::osm::ATTRIBUTION,"url":"https://opendatacommons.org/licenses/odbl/1-0/","dump":"/v1/dumps/osm_place.ndjson.gz","updated_at":dump_updated_at(&state.config)},"resolvers":{"event":{"enabled":state.config.event.enabled,"calendar":state.config.event.calendars,"geocoding":state.config.event.geocoding,"months_back":state.config.event.months_back,"months_forward":state.config.event.months_forward},"geo":{"enabled":state.config.geo.enabled,"network":false},"osm":{"enabled":state.config.osm.enabled,"concurrency":1,"batch_size":50,"requests_per_second":state.config.osm.requests_per_second},"web":{"enabled":state.config.web.enabled,"concurrency":state.config.web.concurrency},"pubky":{"enabled":state.config.pubky.enabled,"concurrency":state.config.pubky.concurrency},"statuses":statuses}});
+    // Aliases are answered by their roots and have no queue of their own: counted apart.
+    let statuses:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('resolver',resolver,'status',status,'count',count(*),'dead_letter',count(*) FILTER (WHERE dead_letter),'leased',count(*) FILTER (WHERE lease_until>now())) FROM resource r WHERE NOT EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id) GROUP BY resolver,status ORDER BY resolver,status").fetch_all(&state.pool).await?;
+    let mut body = json!({"groups":state.config.groups,"version":env!("CARGO_PKG_VERSION"),"manifests":crate::adapter::configured(&state.config),"sources":sources,"metrics":state.metrics.summary(),"ingestion":ingestion,"counts":{"resources":row.try_get::<i64,_>("resources")?,"aliases":row.try_get::<i64,_>("aliases")?,"references":row.try_get::<i64,_>("references")?,"occurrences":row.try_get::<i64,_>("occurrences")?},"osm_licence":{"licence":"ODbL-1.0","attribution":crate::resolver::osm::ATTRIBUTION,"url":"https://opendatacommons.org/licenses/odbl/1-0/","dump":"/v1/dumps/osm_place.ndjson.gz","updated_at":dump_updated_at(&state.config)},"resolvers":{"event":{"enabled":state.config.event.enabled,"calendar":state.config.event.calendars,"geocoding":state.config.event.geocoding,"months_back":state.config.event.months_back,"months_forward":state.config.event.months_forward},"geo":{"enabled":state.config.geo.enabled,"network":false},"osm":{"enabled":state.config.osm.enabled,"concurrency":1,"batch_size":50,"requests_per_second":state.config.osm.requests_per_second},"web":{"enabled":state.config.web.enabled,"concurrency":state.config.web.concurrency},"pubky":{"enabled":state.config.pubky.enabled,"concurrency":state.config.pubky.concurrency},"statuses":statuses}});
     for kind in crate::resolver::cards::KINDS {
         let c = state.config.cards.resolver(kind);
         body["resolvers"][kind] = json!({"enabled":c.enabled,"concurrency":c.concurrency,"requests_per_second":c.requests_per_second});
@@ -2138,6 +2191,7 @@ pub async fn admin_document(
 static PUBLIC_DOCUMENT: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
     let mut doc = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI serialization");
     crate::recipes::apply(&mut doc);
+    declare_rejections(&mut doc);
     doc
 });
 /// The document with `[event] same_event_hint = "off"`: no `maybe_same` field and no example
@@ -2171,6 +2225,34 @@ fn without_same_event(doc: &mut Value) {
         }
     }
     examples(&mut doc["paths"]);
+}
+/// Every operation that takes a body answers a body it cannot read with an error object
+/// (`rejection_without_input`): declared once here for all of them.
+fn declare_rejections(doc: &mut Value) {
+    let Some(paths) = doc["paths"].as_object_mut() else {
+        return;
+    };
+    for operations in paths.values_mut() {
+        for method in ["post", "put"] {
+            // `get_mut`, not indexing: indexing a missing key would create the operation.
+            let Some(responses) = operations
+                .get_mut(method)
+                .and_then(|operation| operation.get_mut("responses"))
+                .and_then(Value::as_object_mut)
+            else {
+                continue;
+            };
+            for (status, description) in [
+                ("413", "Body over 2 MB"),
+                ("415", "Body not JSON"),
+                ("422", "Body of another shape than the route takes"),
+            ] {
+                responses
+                    .entry(status)
+                    .or_insert_with(|| json!({ "description": description }));
+            }
+        }
+    }
 }
 /// The public document as an instance with `config` serves it.
 pub fn openapi_document_for(config: &Config) -> &'static Value {
@@ -2557,7 +2639,7 @@ pub async fn curate_group(
     crate::groups::curate(&state.pool, &id, body, &state.config.groups)
         .await
         .map_err(|e| {
-            tracing::warn!(error=%e,"group curation failed");
+            tracing::warn!(error=%crate::resolver::log_error(&e),"group curation failed");
             if e.is::<crate::groups::GroupBusy>() {
                 return ApiError(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -2581,6 +2663,44 @@ pub async fn curate_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A request axum could not read is answered with what its route takes.
+    #[test]
+    fn a_rejection_says_what_the_route_takes() {
+        use axum::http::Method;
+        let m = |method: Method, path: &str, status| rejection_message(&method, path, status);
+        assert_eq!(
+            m(
+                Method::POST,
+                "/v1/resolve",
+                StatusCode::UNPROCESSABLE_ENTITY
+            ),
+            "the body must be a JSON object with a `uri` string"
+        );
+        assert!(m(
+            Method::POST,
+            "/v1/resources/lookup",
+            StatusCode::BAD_REQUEST
+        )
+        .contains("`uris`"));
+        assert!(m(
+            Method::POST,
+            "/v1/occurrences/lookup",
+            StatusCode::BAD_REQUEST
+        )
+        .contains("`resource_ids`"));
+        assert!(m(Method::PUT, "/v1/groups/abc", StatusCode::BAD_REQUEST).contains("`members`"));
+        assert!(m(Method::GET, "/v1/search", StatusCode::BAD_REQUEST).contains("query parameter"));
+        assert_eq!(
+            m(Method::POST, "/v1/resolve", StatusCode::PAYLOAD_TOO_LARGE),
+            "the body is over 2 MB"
+        );
+        assert!(m(
+            Method::POST,
+            "/v1/resolve",
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        )
+        .contains("application/json"));
+    }
     /// A link on a known service is named by it, even before its card is read.
     #[test]
     fn a_known_service_is_named_before_its_card_is_read() {

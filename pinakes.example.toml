@@ -120,6 +120,8 @@ enabled = true
 enabled = true
 [sources.pdb]
 enabled = true
+[sources.podcast_index]
+enabled = true
 [sources.pubchem]
 enabled = true
 [sources.public_inbox]

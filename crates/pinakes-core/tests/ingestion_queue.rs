@@ -635,6 +635,319 @@ async fn missing_responses_get_short_refresh_without_losing_references(pool: PgP
     assert!(seconds > 3590.0 && seconds <= 3600.0);
     assert_eq!(refs(&pool).await, 1);
 }
+/// A resolver that answers an upstream failure with the given HTTP status, as the web resolver
+/// does for a 5xx, a 429 or another error status.
+struct FailingResolver(u16);
+#[async_trait::async_trait]
+impl Resolver for FailingResolver {
+    fn name(&self) -> &'static str {
+        "web"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, uri: &str) -> anyhow::Result<ResourceMeta> {
+        let mut doc = ResourceMeta::new(uri, "web", 86400);
+        doc.status = Status::Error;
+        doc.http_status = Some(self.0);
+        Ok(doc)
+    }
+    fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+        Duration::from_secs(86400)
+    }
+}
+/// An upstream failure is recorded by its HTTP status (`http_5xx`, `http_4xx`), never as a parser
+/// failure: on stable, three sites that answered errors for ten minutes were dead-lettered as
+/// `parse`.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_upstream_failure_is_recorded_by_its_status(pool: PgPool) {
+    let a = change("https://example.org/flaky", "a", "/pub/app/tags/a");
+    batch(&pool, vec![a], Some("one")).await;
+    let cfg = QueueConfig::default();
+    for (status, class) in [(503, "http_5xx"), (429, "http_4xx")] {
+        sqlx::query("UPDATE resource SET next_attempt_at=now()")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+        let _ = queue::run_job(&pool, &FailingResolver(status), &cfg, &job).await;
+        let error: Option<String> = sqlx::query_scalar("SELECT last_error FROM resource")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(error.as_deref(), Some(class), "{status}");
+    }
+}
+#[derive(Clone, Default)]
+struct Lines(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+impl std::io::Write for Lines {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+/// The JSON log lines down to debug, from a process-wide subscriber: a thread-local one misses events
+/// while other tests run (the callsites' interest is cached for the whole process). A test finds
+/// its lines by its resource.
+fn log_lines() -> Lines {
+    static LINES: std::sync::OnceLock<Lines> = std::sync::OnceLock::new();
+    LINES
+        .get_or_init(|| {
+            let lines = Lines::default();
+            let writer = lines.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .json()
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(move || writer.clone())
+                .finish();
+            tracing::subscriber::set_global_default(subscriber).unwrap();
+            lines
+        })
+        .clone()
+}
+/// A resolver whose fetch fails as reqwest reports it outside the egress: the error names the
+/// URL, query and all.
+struct UnreachableResolver;
+#[async_trait::async_trait]
+impl Resolver for UnreachableResolver {
+    fn name(&self) -> &'static str {
+        "web"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, _: &str) -> anyhow::Result<ResourceMeta> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let error = reqwest::get(format!("http://127.0.0.1:{port}/calendar.ics?token=CANARY"))
+            .await
+            .unwrap_err();
+        Err(error.into())
+    }
+    fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+        Duration::from_secs(86400)
+    }
+}
+/// A failure's logged error never carries a URL's query: the canary token of a refused
+/// connection stays out of the line.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_failure_log_keeps_no_query_secret(pool: PgPool) {
+    let lines = log_lines();
+    let a = change(
+        "https://cal.example.org/share?token=CANARY",
+        "a",
+        "/pub/app/tags/a",
+    );
+    batch(&pool, vec![a], Some("one")).await;
+    let cfg = QueueConfig::default();
+    let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    let _ = queue::run_job(&pool, &UnreachableResolver, &cfg, &job).await;
+    let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+    let line = text
+        .lines()
+        .find(|l| l.contains("resolution failed") && l.contains(job.id.as_str()))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(line.contains("connect"), "{line}");
+    assert!(!line.contains("CANARY"), "{line}");
+}
+
+/// A resolver whose page is too complex to parse.
+struct TooComplexResolver;
+#[async_trait::async_trait]
+impl Resolver for TooComplexResolver {
+    fn name(&self) -> &'static str {
+        "web"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, _: &str) -> anyhow::Result<ResourceMeta> {
+        Err(pinakes_core::resolver::html::TooComplex {
+            reason: "the CPU budget",
+        }
+        .into())
+    }
+    fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+        Duration::from_secs(86400)
+    }
+}
+/// A resource whose refresh is too complex to parse loses its card: no title, no description,
+/// status `error`, final with `too_complex`, and the change is recorded. Before, the old card
+/// stayed (Codex on 58ed270).
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_too_complex_refresh_clears_the_card(pool: PgPool) {
+    let uri = "https://complex.example.org/page";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut card = ResourceMeta::new(uri, "web", 3600);
+    card.name = Some("Old title".into());
+    card.description = Some("Old description".into());
+    store::save_document(&pool, &id, 0, &card).await.unwrap();
+    let changes_before: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM resource_change WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE resource SET next_attempt_at=now()-interval '1 second' WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let cfg = QueueConfig::default();
+    let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    assert_eq!(job.id, id);
+    queue::run_job(&pool, &TooComplexResolver, &cfg, &job)
+        .await
+        .unwrap();
+    let (status, last_error, is_final, name, doc): (
+        String,
+        Option<String>,
+        bool,
+        Option<String>,
+        serde_json::Value,
+    ) = sqlx::query_as("SELECT status,last_error,final,name,doc FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "error");
+    assert_eq!(last_error.as_deref(), Some("too_complex"));
+    assert!(is_final);
+    assert_eq!(name, None);
+    assert!(
+        doc["name"].is_null() && doc["description"].is_null(),
+        "{doc}"
+    );
+    let changes_after: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM resource_change WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(changes_after, changes_before + 1);
+    // The public card says so too.
+    let app = pinakes_core::api::router(
+        pinakes_core::api::AppState::new(pool.clone(), Default::default()).unwrap(),
+    );
+    let response = tower::ServiceExt::oneshot(
+        app,
+        axum::http::Request::get(format!("/v1/resources/{id}"))
+            .extension(axum::extract::ConnectInfo(
+                "127.0.0.9:1".parse::<std::net::SocketAddr>().unwrap(),
+            ))
+            .body(axum::body::Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let body = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        !text.contains("Old title") && !text.contains("Old description"),
+        "{text}"
+    );
+}
+
+/// A resolver whose error repeats what an upstream answered: two links in one span, the second
+/// with user info, a query and a fragment (Codex's case), behind a 503.
+struct UpstreamTextResolver;
+#[async_trait::async_trait]
+impl Resolver for UpstreamTextResolver {
+    fn name(&self) -> &'static str {
+        "web"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, _: &str) -> anyhow::Result<ResourceMeta> {
+        Err(anyhow::anyhow!(
+            "failed [https://first.example/a,HTTPS://user:CANARY@second.example/b?t=CANARY#CANARY]"
+        )
+        .context(pinakes_core::resolver::Upstream(503)))
+    }
+    fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+        Duration::from_secs(86400)
+    }
+}
+/// A failure's log line prints the failure's kind, the upstream status and the host, never the
+/// error's text: nothing an upstream answered reaches the log, however it is shaped.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_failure_log_prints_no_upstream_text(pool: PgPool) {
+    let lines = log_lines();
+    let a = change("https://site.example.org/page", "a", "/pub/app/tags/a");
+    batch(&pool, vec![a], Some("one")).await;
+    let cfg = QueueConfig::default();
+    let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    let _ = queue::run_job(&pool, &UpstreamTextResolver, &cfg, &job).await;
+    let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+    let line = text
+        .lines()
+        .find(|l| l.contains("resolution failed") && l.contains(job.id.as_str()))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(line.contains("\"host\":\"site.example.org\""), "{line}");
+    assert!(line.contains("\"status\":\"503\""), "{line}");
+    assert!(line.contains("\"kind\":\""), "{line}");
+    assert!(
+        !line.contains("CANARY") && !line.to_lowercase().contains("http"),
+        "{line}"
+    );
+}
+
+/// A hook that runs out of time is logged by the link's host, never the link: a canary token in
+/// the query stays out of the line.
+#[tokio::test]
+async fn a_hook_timeout_names_no_link() {
+    let lines = log_lines();
+    let egress = pinakes_core::resolver::egress::Egress::new(Default::default());
+    // A deadline already passed: every wall hook times out at once.
+    let uri = "https://hooks.example.org/page?token=CANARY";
+    let _ =
+        pinakes_core::sources::wall_hooks(&egress, uri, 3600, tokio::time::Instant::now()).await;
+    let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+    let timed_out: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("wall hook timed out") && l.contains("hooks.example.org"))
+        .collect();
+    assert!(!timed_out.is_empty(), "{text}");
+    assert!(!text.contains("CANARY"), "{text}");
+}
+
+/// A failed resolve is logged with its resource id, its URL's host and the kind of failure, the
+/// class stored in `last_error`: the line can be found by site or by kind.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_failed_resolve_is_logged_with_its_host_and_kind(pool: PgPool) {
+    let lines = log_lines();
+    let a = change(
+        "https://flaky.example.org/page?token=x",
+        "a",
+        "/pub/app/tags/a",
+    );
+    batch(&pool, vec![a], Some("one")).await;
+    let cfg = QueueConfig::default();
+    let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    let _ = queue::run_job(&pool, &FailingResolver(503), &cfg, &job).await;
+    let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+    let line: serde_json::Value = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|l| {
+            l["fields"]["message"] == "resolution failed"
+                && l["fields"]["resource_id"] == job.id.as_str()
+        })
+        .unwrap_or_else(|| panic!("{text}"));
+    assert_eq!(line["fields"]["resource_id"], job.id.as_str());
+    assert_eq!(line["fields"]["host"], "flaky.example.org");
+    assert_eq!(line["fields"]["kind"], "http_5xx");
+    // Never the path or query.
+    assert!(!text.contains("token=x"), "{text}");
+}
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn author_budgets_defer_without_counting_a_failure(pool: PgPool) {
     let a = change("https://example.org/one", "a", "/pub/app/tags/a");
@@ -1138,6 +1451,110 @@ async fn aliases_never_chain_and_fence_running_jobs(pool: PgPool) {
         ]
     );
     assert_eq!(generation(first).await, before + 1);
+}
+
+/// An alias row is answered by its root and never fetched again, so it holds no failure: a
+/// dead-lettered row that becomes an alias is `pending` with no error, a row read fine stays
+/// `ok`, and `reextract` repairs an alias that still holds a failure. The admin counts leave
+/// aliases out of the queue statuses and count them apart.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_alias_holds_no_failure_of_its_own(pool: PgPool) {
+    let walled = store::ensure_resource(&pool, "https://example.org/walled-slug")
+        .await
+        .unwrap();
+    let read = store::ensure_resource(&pool, "https://example.org/read-slug")
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET status='unreachable',last_error='wall',attempts=5,dead_letter=true,denial_streak=5,denied_since=now() WHERE id=$1")
+        .bind(&walled)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET status='ok' WHERE id=$1")
+        .bind(&read)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let mut lines = vec![];
+    for (id, root) in [
+        (&walled, "https://example.org/walled"),
+        (&read, "https://example.org/read"),
+    ] {
+        lines.extend(
+            pinakes_core::alias::assign(
+                &mut tx,
+                id,
+                &pinakes_core::alias::Alias {
+                    root: root.into(),
+                    basis: "canonical",
+                },
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    pinakes_core::alias::record(&mut tx, lines).await.unwrap();
+    tx.commit().await.unwrap();
+    let state = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (String, Option<String>, i32, bool, i32)>(
+                "SELECT status,last_error,attempts,dead_letter,denial_streak FROM resource WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(
+        state(walled.clone()).await,
+        ("pending".into(), None, 0, false, 0)
+    );
+    assert_eq!(state(read.clone()).await.0, "ok");
+    // An alias that holds a failure (written as rows were before this rule) is repaired by
+    // `reextract`.
+    sqlx::query("UPDATE resource SET status='unreachable',last_error='wall',attempts=5,dead_letter=true WHERE id=$1")
+        .bind(&walled)
+        .execute(&pool)
+        .await
+        .unwrap();
+    queue::reextract(&pool, &["web".into()]).await.unwrap();
+    assert_eq!(
+        state(walled.clone()).await,
+        ("pending".into(), None, 0, false, 0)
+    );
+    // The admin counts: no queue status for the aliases, which are counted apart.
+    sqlx::query("UPDATE resource SET status='unreachable',dead_letter=true WHERE id=$1")
+        .bind(&walled)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = pinakes_core::api::admin_router(
+        pinakes_core::api::AppState::new(pool.clone(), pinakes_core::config::Config::default())
+            .unwrap(),
+    );
+    let response = tower::ServiceExt::oneshot(
+        app,
+        axum::http::Request::get("/v1/info")
+            .body(axum::body::Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let info: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(info["counts"]["aliases"], 2, "{info}");
+    let dead: i64 = info["resolvers"]["statuses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["dead_letter"].as_i64())
+        .sum();
+    assert_eq!(dead, 0, "{info}");
 }
 
 /// The generation fence covers the alias a page's canonical makes: a job whose lease was taken

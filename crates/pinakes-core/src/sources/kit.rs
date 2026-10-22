@@ -399,7 +399,7 @@ pub fn float(v: &Value) -> Option<f64> {
 /// one line per block (`p`, `div`, `li`, `br`, …), white space collapsed. `None` when nothing
 /// is left.
 pub fn html_text(html: &str) -> Option<String> {
-    use scraper::{ElementRef, Html, Node};
+    use scraper::Node;
     const BLOCKS: &[&str] = &[
         "address",
         "blockquote",
@@ -425,28 +425,36 @@ pub fn html_text(html: &str) -> Option<String> {
         "tr",
         "ul",
     ];
-    fn walk(el: ElementRef, out: &mut String) {
-        for child in el.children() {
-            match child.value() {
+    // Iterative: a fragment's depth is the input's to decide, never the stack's. Each element
+    // is entered (a block opens its line) and left (a block closes it).
+    enum Step<N> {
+        Enter(N),
+        Leave,
+    }
+    let html = crate::resolver::html::fragment(html).ok()?;
+    let mut out = String::new();
+    let mut steps: Vec<Step<_>> = html
+        .root_element()
+        .children()
+        .rev()
+        .map(Step::Enter)
+        .collect();
+    while let Some(step) = steps.pop() {
+        match step {
+            Step::Leave => out.push('\n'),
+            Step::Enter(node) => match node.value() {
                 Node::Text(t) => out.push_str(t),
                 Node::Element(e) if !matches!(e.name(), "script" | "style") => {
-                    let block = BLOCKS.contains(&e.name());
-                    if block {
+                    if BLOCKS.contains(&e.name()) {
                         out.push('\n');
+                        steps.push(Step::Leave);
                     }
-                    if let Some(c) = ElementRef::wrap(child) {
-                        walk(c, out);
-                    }
-                    if block {
-                        out.push('\n');
-                    }
+                    steps.extend(node.children().rev().map(Step::Enter));
                 }
                 _ => {}
-            }
+            },
         }
     }
-    let mut out = String::new();
-    walk(Html::parse_fragment(html).root_element(), &mut out);
     let lines: Vec<String> = out
         .lines()
         .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))

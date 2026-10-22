@@ -1378,6 +1378,15 @@
           },
           "410": {
             "description": "Cursor expired"
+          },
+          "413": {
+            "description": "Body over 2 MB"
+          },
+          "415": {
+            "description": "Body not JSON"
+          },
+          "422": {
+            "description": "Body of another shape than the route takes"
           }
         },
         "tags": [
@@ -1575,6 +1584,15 @@
           },
           "400": {
             "description": "1–500 valid IDs, a valid window, limit or cursor"
+          },
+          "413": {
+            "description": "Body over 2 MB"
+          },
+          "415": {
+            "description": "Body not JSON"
+          },
+          "422": {
+            "description": "Body of another shape than the route takes"
           }
         },
         "tags": [
@@ -2351,6 +2369,18 @@
                     "uri": "https://www.rcsb.org/structure/6VXX"
                   }
                 },
+                "resolve-podcast-index-1": {
+                  "summary": "https://podcastindex.org/podcast/48166",
+                  "value": {
+                    "uri": "https://podcastindex.org/podcast/48166"
+                  }
+                },
+                "resolve-podcast-index-2": {
+                  "summary": "https://podcastindex.org/podcast/255500?episode=61684996715",
+                  "value": {
+                    "uri": "https://podcastindex.org/podcast/255500?episode=61684996715"
+                  }
+                },
                 "resolve-posh-vip-e-halloween-2026-eden": {
                   "summary": "https://posh.vip/e/halloween-2026-eden",
                   "value": {
@@ -2725,6 +2755,15 @@
           "400": {
             "description": "Unsupported URI or disabled resolver"
           },
+          "413": {
+            "description": "Body over 2 MB"
+          },
+          "415": {
+            "description": "Body not JSON"
+          },
+          "422": {
+            "description": "Body of another shape than the route takes"
+          },
           "429": {
             "description": "Preview rate limit"
           }
@@ -2890,6 +2929,15 @@
           },
           "400": {
             "description": "Exactly one list of 1–500 IDs or URIs"
+          },
+          "413": {
+            "description": "Body over 2 MB"
+          },
+          "415": {
+            "description": "Body not JSON"
+          },
+          "422": {
+            "description": "Body of another shape than the route takes"
           }
         },
         "tags": [

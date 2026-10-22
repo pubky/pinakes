@@ -20,20 +20,20 @@ pub async fn run(
             _=shutdown.changed()=>break,
             _=fold.tick()=>{
                 if let Err(e) = crate::store::compact_search_writes(&pool).await {
-                    tracing::warn!(error=%e,"search revision fold failed");
+                    tracing::warn!(error=%crate::resolver::log_error(&e),"search revision fold failed");
                 }
                 continue;
             }
             _=tick.tick()=>{}
         }
         if let Err(e) = crate::changes::retain(&pool, retention_days).await {
-            tracing::warn!(error=%e,"change retention failed");
+            tracing::warn!(error=%crate::resolver::log_error(&e),"change retention failed");
         }
         if let Err(e) = crate::store::cleanup(&pool, grace_days).await {
-            tracing::warn!(error=%e,"cleanup failed");
+            tracing::warn!(error=%crate::resolver::log_error(&e),"cleanup failed");
         }
         if let Err(e) = crate::also_on::prune(&pool).await {
-            tracing::warn!(error=%e,"also-on pruning failed");
+            tracing::warn!(error=%crate::resolver::log_error(&e),"also-on pruning failed");
         }
     }
 }

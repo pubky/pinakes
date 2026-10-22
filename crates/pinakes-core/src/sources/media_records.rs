@@ -436,9 +436,12 @@ impl Source for MediaRecords {
                     )
                     .await?;
                 super::retry(&f)?;
-                (f.status == 200)
-                    .then(|| named_by_open_library(doc, &path, &f.body))
-                    .flatten()
+                if f.status != 200 {
+                    return Ok(None);
+                }
+                let doc = doc.clone();
+                crate::resolver::html::blocking(move || named_by_open_library(&doc, &path, &f.body))
+                    .await?
             }
             Record::Tvmaze(id) => {
                 let f = cx
@@ -446,9 +449,11 @@ impl Source for MediaRecords {
                     .discover(&format!("https://api.tvmaze.com/shows/{id}"), &json(), 3600)
                     .await?;
                 super::retry(&f)?;
-                (f.status == 200)
-                    .then(|| named_by_tvmaze(doc, id, &f.body))
-                    .flatten()
+                if f.status != 200 {
+                    return Ok(None);
+                }
+                let doc = doc.clone();
+                crate::resolver::html::blocking(move || named_by_tvmaze(&doc, id, &f.body)).await?
             }
             Record::PodcastIndex => named_by_podcast_index(doc),
         })

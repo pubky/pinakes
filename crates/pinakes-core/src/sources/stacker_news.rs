@@ -62,8 +62,9 @@ pub fn card(
 ) -> Result<Option<ResourceMeta>> {
     anyhow::ensure!(status == 200, "Stacker News answered {status}");
     let v: Value = serde_json::from_slice(body)?;
-    if let Some(errors) = v["errors"].as_array().filter(|e| !e.is_empty()) {
-        anyhow::bail!("Stacker News error: {}", errors[0]["message"]);
+    if v["errors"].as_array().is_some_and(|e| !e.is_empty()) {
+        // Their text may repeat the request, link and all: only that there was an error.
+        anyhow::bail!("Stacker News answered an error");
     }
     let node = &v["data"]["item"];
     if node.is_null() || !node["deletedAt"].is_null() {
@@ -197,6 +198,16 @@ mod tests {
 
     fn read(file: &str) -> Vec<u8> {
         crate::sources::fixture::read("stacker_news", file)
+    }
+
+    /// An error answer gives an error without Stacker News' text, which can repeat the request
+    /// (a canary token in a link stays out of it).
+    #[test]
+    fn an_error_answer_repeats_none_of_its_text() {
+        let body = serde_json::json!({"errors": [{"message": "bad item https://stacker.news/items/1?token=CANARY"}]});
+        let doc = ResourceMeta::new("https://stacker.news/items/1", "stacker_news", 3600);
+        let error = card(doc, 1, 200, &serde_json::to_vec(&body).unwrap()).unwrap_err();
+        assert!(!format!("{error:#}").contains("CANARY"), "{error:#}");
     }
     fn base(id: u64) -> ResourceMeta {
         ResourceMeta::new(&root(id), "stacker_news", 3600)

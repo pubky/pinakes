@@ -300,7 +300,7 @@ async fn json(
     }
     Ok((
         f.status,
-        tokio::task::spawn_blocking(move || serde_json::from_slice(&f.body)).await??,
+        crate::resolver::html::blocking(move || serde_json::from_slice(&f.body)).await??,
     ))
 }
 pub async fn resolve(
@@ -347,7 +347,7 @@ pub async fn resolve(
         portal_names(&mut v, egress, cfg).await?;
         let uri = uri.to_owned();
         let cfg = cfg.clone();
-        return tokio::task::spawn_blocking(move || {
+        return crate::resolver::html::blocking(move || {
             let row = rows(&v)
                 .context("invalid portal event list")?
                 .iter()
@@ -495,7 +495,8 @@ pub async fn resolve(
             }
             let uri = uri.to_owned();
             let cfg = cfg.clone();
-            return tokio::task::spawn_blocking(move || single(&uri, "btcmap", &v, &cfg)).await?;
+            return crate::resolver::html::blocking(move || single(&uri, "btcmap", &v, &cfg))
+                .await?;
         }
         // Delta semantics expose updated_at and tombstones even for the initial sync.
         let ceiling = DateTime::<Utc>::from_timestamp_millis(doc.fetched_at + 5 * 60 * 1000)
@@ -668,7 +669,7 @@ async fn append_batch(
         crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
     }
     let (adapter, kind, cfg) = (adapter.to_owned(), kind.to_owned(), cfg.clone());
-    tokio::task::spawn_blocking(move || {
+    crate::resolver::html::blocking(move || {
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_millis(cfg.parse_timeout_ms);
         let entries = if kind == "portal" {

@@ -211,7 +211,10 @@ impl Source for Mastodon {
                 },
             )
             .await?;
-        let result = card(cx.card(uri, self), &target, f.status, &f.body);
+        let (doc, read, status, body) =
+            (cx.card(uri, self), target.clone(), f.status, f.body.clone());
+        let result =
+            crate::resolver::html::blocking(move || card(doc, &read, status, &body)).await?;
         // Only an answer that is not JSON at all says the server is not Mastodon; a JSON
         // refusal (a private post, one server's rule) is about this post alone.
         let json = serde_json::from_slice::<Value>(&f.body).is_ok();

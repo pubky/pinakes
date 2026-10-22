@@ -167,6 +167,10 @@ pub struct FetchOptions {
     /// above it).
     pub body_cap: Option<usize>,
     pub feed_hint: bool,
+    /// How far an HTML page is read while its head is still open at the page cap, so a title
+    /// after a long head (a megabyte of inline styles) is read. The egress sets it from
+    /// `limits.html_head_bytes`.
+    pub head_cap: Option<usize>,
     /// Answer a redirect as it came (its status and `location`) instead of following it: where
     /// a lookup redirects is the answer (PCGamingWiki's appid lookup).
     pub keep_redirect: bool,
@@ -222,6 +226,7 @@ impl std::fmt::Debug for FetchOptions {
             .field("feed_cap", &self.feed_cap)
             .field("body_cap", &self.body_cap)
             .field("feed_hint", &self.feed_hint)
+            .field("head_cap", &self.head_cap)
             .field("extra_types", &self.extra_types)
             .field("validators", &self.validators)
             .finish()
@@ -298,9 +303,25 @@ impl Transport for PinnedTransport {
         if let Some(v) = &options.validators.last_modified {
             request = request.header("if-modified-since", v);
         }
-        read_response_with(url.clone(), request.send().await?, options).await
+        // A reqwest error names its URL, query and all (a calendar's token): never in an error.
+        let response = request.send().await.map_err(reqwest::Error::without_url)?;
+        read_response_with(url.clone(), response, options).await
     }
 }
+/// The largest `limits.html_head_bytes`: no HTML body the egress returns is longer.
+pub const MAX_HTML_HEAD_BYTES: usize = 16 * 1024 * 1024;
+
+/// Whether a fetched page is within what a page parser takes: the page cap, a page cut there
+/// (at most where a long head closes), or a whole HTML page within the head budget.
+pub fn page_fits(f: &Fetched) -> bool {
+    f.body.len() <= BODY_CAP
+        || f.truncated
+        || (matches!(
+            f.content_type.as_str(),
+            "text/html" | "application/xhtml+xml"
+        ) && f.body.len() <= MAX_HTML_HEAD_BYTES)
+}
+
 pub async fn read_response(url: Url, response: reqwest::Response) -> Result<Fetched> {
     read_response_with(url, response, &FetchOptions::default()).await
 }
@@ -382,19 +403,37 @@ pub async fn read_response_with(
             content_type.as_str(),
             "text/xml" | "application/xml" | "application/rss+xml" | "application/atom+xml"
         ) && options.feed_cap.is_none();
-        let (max, refuse) = match options.body_cap {
+        // A file whose card comes from its URL (an image, a PDF) is cut at the page cap, never
+        // refused: its size says nothing against the card.
+        let url_card = content_type.starts_with("image/") || content_type == "application/pdf";
+        let (mut max, refuse) = match options.body_cap {
             Some(cap) => (cap, true),
-            None if html || xml_feed => (BODY_CAP, false),
+            None if html || xml_feed || url_card => (BODY_CAP, false),
             None => (options.feed_cap.unwrap_or(BODY_CAP), true),
         };
+        // A page past the page cap is read on to the head budget, whole or cut there: its head
+        // may still be open, and only the parser can say where it ends (a `</head>` or `<body`
+        // found by a look at the text may be text in a script). No check stops the read early.
+        let head_cap = options
+            .head_cap
+            .filter(|cap| html && options.body_cap.is_none() && *cap > BODY_CAP);
         if refuse && response.content_length().is_some_and(|n| n > max as u64) {
             return Err(BodyTooLarge { cap: max }.into());
         }
-        while let Some(chunk) = response.chunk().await? {
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(reqwest::Error::without_url)?
+        {
             if body.len().saturating_add(chunk.len()) > max {
                 if refuse {
                     return Err(BodyTooLarge { cap: max }.into());
                 }
+                if let Some(cap) = head_cap.filter(|cap| max < *cap) {
+                    max = cap;
+                }
+            }
+            if body.len().saturating_add(chunk.len()) > max {
                 body.extend_from_slice(&chunk[..max.saturating_sub(body.len())]);
                 truncated = true;
                 break;
@@ -405,9 +444,21 @@ pub async fn read_response_with(
                 .starts_with("BEGIN:VCALENDAR");
             if options.body_cap.is_none()
                 && body.len() > BODY_CAP
+                && max <= BODY_CAP
                 && !(options.feed_cap.is_some() && (feed_type || options.feed_hint || sniff))
             {
                 return Err(BodyTooLarge { cap: BODY_CAP }.into());
+            }
+            // A cut read stops as soon as it reaches its cap: a sender that stalls there costs no
+            // timeout. At the page cap, the head budget applies.
+            if !refuse && body.len() >= max {
+                match head_cap {
+                    Some(cap) if max < cap => max = cap,
+                    _ => {
+                        truncated = true;
+                        break;
+                    }
+                }
             }
         }
         let sniff = String::from_utf8_lossy(&body[..body.len().min(256)])
@@ -425,7 +476,11 @@ pub async fn read_response_with(
         // An error page keeps a bounded prefix of its body, so the interstitial classifier sees a
         // challenge; the status is preserved.
         const ERROR_BODY_CAP: usize = 64 * 1024;
-        while let Some(chunk) = response.chunk().await? {
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(reqwest::Error::without_url)?
+        {
             let remaining = ERROR_BODY_CAP.saturating_sub(body.len());
             body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
             if chunk.len() >= remaining {
@@ -873,20 +928,20 @@ impl Egress {
                 }
             }
             let mut observation = crate::telemetry::FetchGuard::start();
-            let with_agent;
             let default_agent = options
                 .user_agent
                 .as_deref()
                 .is_none_or(|ua| ua == USER_AGENT);
-            let options = if default_agent && !self.cfg.contact.is_empty() {
-                with_agent = FetchOptions {
-                    user_agent: Some(user_agent(&self.cfg.contact)),
-                    ..options.clone()
-                };
-                &with_agent
-            } else {
-                options
+            let with_agent = FetchOptions {
+                user_agent: if default_agent && !self.cfg.contact.is_empty() {
+                    Some(user_agent(&self.cfg.contact))
+                } else {
+                    options.user_agent.clone()
+                },
+                head_cap: options.head_cap.or(Some(self.cfg.html_head_bytes)),
+                ..options.clone()
             };
+            let options = &with_agent;
             let mut response = self.transport.get_with(&url, &addresses, options).await?;
             observation.status(response.status);
             drop(observation);
@@ -913,13 +968,12 @@ impl Egress {
                 )?;
                 continue;
             }
-            let page = if response.content_type.contains("html") {
+            // The wall check parses what it reads as HTML, whatever the answer's type says.
+            let page = {
                 let input = response.clone();
                 let original = requested.clone();
-                tokio::task::spawn_blocking(move || super::interstitial::inspect(&original, &input))
-                    .await?
-            } else {
-                super::interstitial::inspect(&requested, &response)
+                super::html::blocking(move || super::interstitial::inspect(&original, &input))
+                    .await??
             };
             if page == super::interstitial::Page::Blocked {
                 crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "blocked");
@@ -1424,6 +1478,256 @@ mod tests {
                 .unwrap();
             assert_eq!(transport.0.lock().unwrap()[0].as_deref(), sent);
         }
+    }
+    /// An HTML page past the page cap is read on to the head budget, whole when it ends before
+    /// it, cut there otherwise, whether or not its head closed by then: nothing in the text
+    /// stops the read early (only the parser can say where a head ends). Without a head budget
+    /// the page is cut at the page cap. A page parser takes what is read (`page_fits`).
+    #[tokio::test]
+    async fn a_page_past_the_cap_is_read_to_the_head_budget() {
+        use axum::{routing::get, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let html = |body: String| ([("content-type", "text/html; charset=utf-8")], body);
+        let app = Router::new()
+            .route(
+                "/long-head",
+                get(move || async move {
+                    html(format!(
+                        "<html><head><style>{}</style><title>Long head</title></HEAD><body>{}</body></html>",
+                        "x".repeat(BODY_CAP + 50_000),
+                        "y".repeat(500_000)
+                    ))
+                }),
+            )
+            .route(
+                "/short-head",
+                get(move || async move {
+                    html(format!(
+                        "<html><head><title>Short</title></head><body>{}</body></html>",
+                        "y".repeat(3 * BODY_CAP)
+                    ))
+                }),
+            )
+            .route(
+                "/implicit",
+                get(move || async move {
+                    html(format!(
+                        "<html><head><title>Implicit</title><style>{}</style><BODY class=x><p>y</p></BODY></html>",
+                        "x".repeat(BODY_CAP)
+                    ))
+                }),
+            )
+            .route(
+                "/open-head",
+                get(move || async move {
+                    html(format!("<html><head><style>{}", "x".repeat(3 * BODY_CAP)))
+                }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        let read = |path: &str, head_cap: Option<usize>| {
+            let url: Url = format!("http://{addr}{path}").parse().unwrap();
+            let request = client.get(url.clone());
+            let options = FetchOptions {
+                head_cap,
+                ..Default::default()
+            };
+            async move { read_response_with(url, request.send().await.unwrap(), &options).await }
+        };
+        let head_cap = Some(2 * BODY_CAP);
+        // 1.55 MB, within the budget: read whole, the title and the body with it.
+        let long = read("/long-head", head_cap).await.unwrap();
+        let text = String::from_utf8_lossy(&long.body);
+        assert!(!long.truncated);
+        assert!(text.contains("<title>Long head</title>"));
+        assert!(text.ends_with("</html>"), "{}", &text[text.len() - 40..]);
+        assert!(page_fits(&long));
+        // Without a head budget, the page is cut at the page cap and the title is lost.
+        let cut = read("/long-head", None).await.unwrap();
+        assert_eq!(cut.body.len(), BODY_CAP);
+        assert!(!String::from_utf8_lossy(&cut.body).contains("<title>"));
+        // 3 MB with a short head: still read to the budget, and cut there.
+        let short = read("/short-head", head_cap).await.unwrap();
+        assert!(short.truncated);
+        assert_eq!(short.body.len(), 2 * BODY_CAP);
+        assert!(page_fits(&short));
+        // A head the body opens implicitly, past the page cap: whole.
+        let implicit = read("/implicit", head_cap).await.unwrap();
+        assert!(!implicit.truncated);
+        assert!(String::from_utf8_lossy(&implicit.body).ends_with("</html>"));
+        assert!(page_fits(&implicit));
+        // A head that never ends: cut at the budget.
+        let open = read("/open-head", head_cap).await.unwrap();
+        assert!(open.truncated);
+        assert_eq!(open.body.len(), 2 * BODY_CAP);
+        assert!(page_fits(&open));
+        server.abort();
+    }
+    /// Nothing in a page's text ends its read early: a head of about 1.05 MB with `<body` or
+    /// `</script>` in a script, a style or a comment (Codex's variants, including a script whose
+    /// `<!--<script>` escapes the `</script>` inside it) is read whole, the title and meta tags
+    /// after the decoy with it.
+    #[tokio::test]
+    async fn no_text_in_a_long_head_ends_its_read() {
+        use axum::{extract::Path, routing::get, Router};
+        fn page(decoy: &str) -> String {
+            format!(
+                "<html><head><style>{}</style>{decoy}<title>After</title><meta property='og:title' content='After'></head><body>x</body></html>",
+                "x".repeat(BODY_CAP)
+            )
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/{kind}",
+            get(|Path(kind): Path<String>| async move {
+                let decoy = match kind.as_str() {
+                    "script" => "<script>var tpl = '<body class=x>';</script>",
+                    "style" => "<style>/* <body class=x> */ a { b: c }</style>",
+                    "escaped" => "<script><!--<script></script><body class=x>--> </script>",
+                    _ => "<!-- <body class=x> -->",
+                };
+                ([("content-type", "text/html")], page(decoy))
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        for kind in ["script", "style", "comment", "escaped"] {
+            let url: Url = format!("http://{addr}/{kind}").parse().unwrap();
+            let options = FetchOptions {
+                head_cap: Some(2 * BODY_CAP),
+                ..Default::default()
+            };
+            let f =
+                read_response_with(url.clone(), client.get(url).send().await.unwrap(), &options)
+                    .await
+                    .unwrap();
+            let text = String::from_utf8_lossy(&f.body);
+            assert!(!f.truncated, "{kind}");
+            assert!(text.contains("<title>After</title>"), "{kind}");
+            assert!(text.contains("og:title"), "{kind}");
+            assert!(
+                text.ends_with("</html>"),
+                "{kind}: {}",
+                &text[text.len() - 30..]
+            );
+        }
+        server.abort();
+    }
+    /// A cut read stops as soon as it reaches its cap: a PDF that announces 3 MiB, sends exactly
+    /// the page cap and stalls gets its bytes at once, as does a head that reaches the head budget
+    /// exactly, instead of waiting out the fetch timeout.
+    #[tokio::test]
+    async fn a_read_stops_at_its_cap_without_another_read() {
+        use axum::{body::Body, http::header, response::Response, routing::get, Router};
+        fn stalled(content_type: &'static str, first: Vec<u8>) -> Response {
+            let stream = futures_util::StreamExt::chain(
+                futures_util::stream::iter([Ok::<_, std::io::Error>(first)]),
+                futures_util::stream::pending(),
+            );
+            Response::builder()
+                .header(header::CONTENT_TYPE, content_type)
+                .header(header::CONTENT_LENGTH, 3 * BODY_CAP)
+                .body(Body::from_stream(stream))
+                .unwrap()
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route(
+                "/paper.pdf",
+                get(|| async { stalled("application/pdf", vec![b'%'; BODY_CAP]) }),
+            )
+            .route(
+                "/open-head",
+                get(|| async {
+                    let mut page = b"<html><head><style>".to_vec();
+                    page.resize(2 * BODY_CAP, b'x');
+                    stalled("text/html", page)
+                }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        let read = |path: &str| {
+            let url: Url = format!("http://{addr}{path}").parse().unwrap();
+            let request = client.get(url.clone());
+            let options = FetchOptions {
+                head_cap: Some(2 * BODY_CAP),
+                ..Default::default()
+            };
+            async move {
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    read_response_with(url, request.send().await.unwrap(), &options),
+                )
+                .await
+            }
+        };
+        let pdf = read("/paper.pdf")
+            .await
+            .expect("no wait past the page cap")
+            .unwrap();
+        assert!(pdf.truncated);
+        assert_eq!(pdf.body.len(), BODY_CAP);
+        let head = read("/open-head")
+            .await
+            .expect("no wait past the head budget")
+            .unwrap();
+        assert!(head.truncated);
+        assert_eq!(head.body.len(), 2 * BODY_CAP);
+        server.abort();
+    }
+    /// A failed request's error never names its URL: a calendar's token in the query stays out of
+    /// every error and log. The error keeps its kind.
+    #[tokio::test]
+    async fn a_failed_request_does_not_name_its_url() {
+        // A closed port: the connection is refused.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let url: Url = format!("http://127.0.0.1:{}/calendar.ics?token=CANARY", addr.port())
+            .parse()
+            .unwrap();
+        let error = PinnedTransport
+            .get_with(&url, &[addr], &FetchOptions::default())
+            .await
+            .unwrap_err();
+        let text = format!("{error:#} {error:?}");
+        assert!(!text.contains("CANARY"), "{text}");
+        assert_eq!(super::super::error_class(&error), "connect");
+    }
+    /// A PDF or an image past the page cap is cut there, not refused: its card comes from its
+    /// URL. Any other file past the cap is still refused.
+    #[tokio::test]
+    async fn a_large_pdf_or_image_is_cut_not_refused() {
+        use axum::{routing::get, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let file = |content_type: &'static str| {
+            move || async move { ([("content-type", content_type)], vec![b'%'; 3 * BODY_CAP]) }
+        };
+        let app = Router::new()
+            .route("/paper.pdf", get(file("application/pdf")))
+            .route("/photo.jpg", get(file("image/jpeg")))
+            .route("/data.json", get(file("application/json")));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        let read = |path: &str| {
+            let url: Url = format!("http://{addr}{path}").parse().unwrap();
+            let request = client.get(url.clone());
+            async move {
+                read_response_with(url, request.send().await.unwrap(), &Default::default()).await
+            }
+        };
+        for path in ["/paper.pdf", "/photo.jpg"] {
+            let fetched = read(path).await.unwrap();
+            assert!(fetched.truncated, "{path}");
+            assert_eq!(fetched.body.len(), BODY_CAP, "{path}");
+        }
+        let error = read("/data.json").await.unwrap_err();
+        assert!(error.downcast_ref::<BodyTooLarge>().is_some(), "{error:#}");
+        server.abort();
     }
     /// An RSS or Atom feed past the page cap keeps its first megabyte, marked truncated, unless
     /// the fetch set a feed cap (calendars), which refuses what exceeds it.

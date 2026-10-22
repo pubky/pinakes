@@ -111,7 +111,7 @@ impl Resolver for PubkyResolver {
                     } else {
                         "http_4xx"
                     }))
-                    .context(format!("homeserver answered {status}")))
+                    .context(crate::resolver::Upstream(status)))
                 }
             }
             let doc = card(

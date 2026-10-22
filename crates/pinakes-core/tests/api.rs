@@ -603,6 +603,17 @@ async fn preview_pending_cached_completion_and_per_ip_uri_budgets(pool: PgPool) 
             .0,
         400
     );
+    // A link pasted with its quotes is refused with the reason, never the input: its user info,
+    // query and fragment stay out of the answer.
+    let (code, answer) = call(
+        &app,
+        "POST",
+        "/v1/resolve",
+        Some(json!({"uri":"\"https://user:CANARY@example.org/p?token=CANARY#CANARY\""})),
+    )
+    .await;
+    assert_eq!(code, 400);
+    assert!(!answer.to_string().contains("CANARY"), "{answer}");
     let mut request = Request::builder()
         .method("POST")
         .uri("/v1/resolve")
@@ -725,6 +736,54 @@ async fn a_body_over_two_megabytes_is_refused(pool: PgPool) {
     assert!(body.to_string().len() > 2 * 1024 * 1024);
     let (code, _) = call(&app, "POST", "/v1/resources/lookup", Some(body)).await;
     assert_eq!(code, StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+/// A query or body axum cannot read is refused with what the route takes, never the input: a
+/// link given as a parameter's name, as a value of the wrong type or as a bare JSON string to
+/// `/v1/resolve` (Codex's case) stays out of the answer.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_rejected_request_quotes_no_input(pool: PgPool) {
+    let app = api::router(AppState::new(pool, Config::default()).unwrap());
+    let link = "HTTPS://user:CANARY@example.org/calendar?token=QUERYCANARY#FRAGMENTCANARY";
+    let canary = |answer: &Value| {
+        let text = answer.to_string();
+        assert!(
+            !text.contains("CANARY") && !text.contains("example.org"),
+            "{text}"
+        );
+    };
+    let name: String =
+        percent_encoding::utf8_percent_encode(link, percent_encoding::NON_ALPHANUMERIC).to_string();
+    let (code, answer) = call(&app, "GET", &format!("/v1/search?{name}=1"), None).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    assert!(
+        answer["error"]
+            .as_str()
+            .unwrap()
+            .contains("query parameter"),
+        "{answer}"
+    );
+    canary(&answer);
+    let (code, answer) = call(&app, "POST", "/v1/resolve", Some(json!(link))).await;
+    assert!(code.is_client_error(), "{code}");
+    assert_eq!(
+        answer["error"],
+        "the body must be a JSON object with a `uri` string"
+    );
+    canary(&answer);
+    let (code, answer) = call(
+        &app,
+        "POST",
+        "/v1/resources/lookup",
+        Some(json!({ "uris": link })),
+    )
+    .await;
+    assert!(code.is_client_error(), "{code}");
+    assert!(
+        answer["error"].as_str().unwrap().contains("`uris`"),
+        "{answer}"
+    );
+    canary(&answer);
 }
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
@@ -2073,7 +2132,10 @@ async fn an_alias_reads_as_its_root_everywhere(pool: PgPool) {
         location: None,
         body: page.as_bytes().into(),
     };
-    let doc = pinakes_core::resolver::web::extract(clean, &fetched, 86400).doc;
+    let doc = pinakes_core::resolver::html::off_runtime(|| {
+        pinakes_core::resolver::web::extract(clean, &fetched, 86400).unwrap()
+    })
+    .doc;
     assert_eq!(doc.name.as_deref(), Some("Talk"));
     store::save_document(&pool, &root, 0, &doc).await.unwrap();
     let pool_for_checks = pool.clone();
@@ -2243,9 +2305,11 @@ async fn an_opted_out_post_is_not_searched_and_keeps_no_history_text(pool: PgPoo
     let card = |file: &str, at: i64| {
         let mut doc = ResourceMeta::new(uri, "mastodon", 3600);
         doc.fetched_at = at;
-        mastodon::card(doc, &target, 200, &fixture(file))
-            .unwrap()
-            .unwrap()
+        pinakes_core::resolver::html::off_runtime(|| {
+            mastodon::card(doc, &target, 200, &fixture(file))
+        })
+        .unwrap()
+        .unwrap()
     };
     store::save_document(&pool, &id, 0, &card("status-1.json", 1000))
         .await
