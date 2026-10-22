@@ -752,6 +752,36 @@ async fn reach_searches_pay_for_upstream_pages_before_fetching(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
+async fn related_searches_cost_their_own_units_and_with_reach_both(pool: PgPool) {
+    let seed = "0".repeat(32);
+    let mut config = Config::default();
+    config.api.requests_per_minute = 7;
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    let path = format!("/v1/search?%72elated={seed}");
+    assert_eq!(call(&app, "GET", &path, None).await.0, 200);
+    assert_eq!(call(&app, "GET", &path, None).await.0, 429);
+    assert_eq!(call(&app, "GET", "/v1/info", None).await.0, 200);
+    assert_eq!(call(&app, "GET", "/v1/search", None).await.0, 429);
+    // With reach too, the search costs both: 12 units.
+    let (nexus_url, calls, task) = mock_nexus(vec![]).await;
+    let both = format!(
+        "/v1/search?related={seed}&reach=following&viewer={}",
+        author(0)
+    );
+    for (budget, status, fetched) in [(11, 429, 0), (12, 200, 6)] {
+        let mut config = Config {
+            nexus_url: nexus_url.clone(),
+            ..Default::default()
+        };
+        config.api.requests_per_minute = budget;
+        let app = api::router(AppState::new(pool.clone(), config).unwrap());
+        assert_eq!(call(&app, "GET", &both, None).await.0, status, "{budget}");
+        assert_eq!(calls.load(Ordering::SeqCst), fetched, "{budget}");
+    }
+    task.abort();
+}
+
+#[sqlx::test(migrations = "../../migrations")]
 async fn cursors_reject_payload_tampering_unsigned_forgery_and_another_daemon_key(pool: PgPool) {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     seed(&pool).await;

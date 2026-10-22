@@ -172,14 +172,20 @@ async fn public_budget(
         )
         .into_response();
     };
-    let cost = if request.method() != axum::http::Method::OPTIONS
-        && request.uri().path() == "/v1/search"
-        && url::form_urlencoded::parse(request.uri().query().unwrap_or_default().as_bytes())
-            .any(|(key, _)| key == "reach")
-    {
-        state.config.api.reach_cost
-    } else {
-        1
+    // A reach search and a related search cost their own units, a search with both the two
+    // together; anything else costs one.
+    let (mut reach, mut related) = (false, false);
+    if request.method() != axum::http::Method::OPTIONS && request.uri().path() == "/v1/search" {
+        let query = request.uri().query().unwrap_or_default();
+        for (key, _) in url::form_urlencoded::parse(query.as_bytes()) {
+            reach |= key == "reach";
+            related |= key == "related";
+        }
+    }
+    let api = &state.config.api;
+    let cost = match (reach, related) {
+        (false, false) => 1,
+        _ => usize::from(reach) * api.reach_cost + usize::from(related) * api.related_cost,
     };
     if let Err(error) = state
         .budget(

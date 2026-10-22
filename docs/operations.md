@@ -50,6 +50,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `max_cluster_cells` | `10000` | Most cells one cluster query returns. |
 | `api_cache_capacity` | `10000` | API response cache entries. |
 | `reach_cost` | `6` | Budget units a reach search costs. |
+| `related_cost` | `6` | Budget units a related search costs. |
 | `preview_requests_per_minute` | `30` | Preview requests per minute per client. |
 | `preview_uri_requests_per_minute` | `30` | Preview requests per minute per URI. |
 | `preview_cache_capacity` | `10000` | Preview cache entries. |

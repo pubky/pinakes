@@ -501,7 +501,8 @@ person (`limits.related_min_shared`, 2).
   authors in reach, the `limits.related_taggers` (200) with the newest tag are sampled. Of each,
   only their most recent `limits.related_refs_per_tagger` (1,000) references within the same days
   count. With `collapse=group`, a group needs the shared taggers of its members that pass the
-  other filters, together. `/v1/info` gives every limit here.
+  other filters, together. `/v1/info` gives every limit here. A related search costs
+  `limits.related_cost` (6) units of the [per-IP budget](#limits-and-errors).
 - Only the references Pinakes copies from Nexus's feed count: the resource's taggers, and any
   reference of theirs (a tag, a reply, an embed, a collection, an event). With `reach`, only the
   taggers within the viewer's reach.
@@ -1231,7 +1232,9 @@ Coordinate-derived time zones use ODbL boundary data too; see `data/README.md`.
 
 Every public `/v1` route and Swagger UI share a per-IP budget on the direct peer address
 (`api.requests_per_minute`, 120; forwarded headers are not trusted). A reach search costs
-`limits.reach_cost` (6) units, charged before any Nexus call; every other request costs one.
+`limits.reach_cost` (6) units, charged before any Nexus call, a related search
+`limits.related_cost` (6), and a search with both the two together; every other request costs
+one.
 Over budget returns 429 with `Retry-After: 60`. The public and admin listeners share a
 ten-connection pool, apart from the workers', with a five-second statement and acquisition
 timeout. The dump is written by the daemon,

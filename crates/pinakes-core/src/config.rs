@@ -611,6 +611,8 @@ pub struct ApiConfig {
     pub cache_capacity: usize,
     #[serde(skip)]
     pub reach_cost: usize,
+    #[serde(skip)]
+    pub related_cost: usize,
     /// Browser origins allowed to call the public listener (CORS): `["*"]` (any origin; the
     /// public API takes no cookies or tokens), a list of `scheme://host[:port]` origins, or `[]`
     /// to send no CORS headers. Never applied to the admin listener.
@@ -624,6 +626,7 @@ impl Default for ApiConfig {
             requests_per_minute: 120,
             cache_capacity: 10000,
             reach_cost: 6,
+            related_cost: 6,
             cors_allow_origins: vec!["*".into()],
             swagger_ui: true,
         }
@@ -928,6 +931,7 @@ impl Config {
             || !(1..=10000).contains(&self.api.requests_per_minute)
             || !(2..=100000).contains(&self.api.cache_capacity)
             || !(2..=100).contains(&self.api.reach_cost)
+            || !(2..=100).contains(&self.api.related_cost)
             || !(1..=60).contains(&self.search.reach_timeout_secs)
             || !(1..=10_000).contains(&self.search.related_taggers)
             || !(1..=3650).contains(&self.search.related_window_days)
@@ -1014,7 +1018,13 @@ mod tests {
     #[test]
     fn related_limits_have_config_bounds() {
         assert_eq!(Config::default().search.related_seed_links, 32);
-        for (key, value) in [("related_seed_links", 0), ("related_seed_links", 1001)] {
+        assert_eq!(Config::default().api.related_cost, 6);
+        for (key, value) in [
+            ("related_seed_links", 0),
+            ("related_seed_links", 1001),
+            ("related_cost", 1),
+            ("related_cost", 101),
+        ] {
             assert!(
                 with(serde_json::json!({"limits":{key:value}})).is_err(),
                 "{key}={value}"
@@ -1499,6 +1509,8 @@ limits! {
     api_cache_capacity: usize = |c| c.api.cache_capacity => [|c, v| c.api.cache_capacity = v],
     /// Budget units a reach search costs.
     reach_cost: usize = |c| c.api.reach_cost => [|c, v| c.api.reach_cost = v],
+    /// Budget units a related search costs.
+    related_cost: usize = |c| c.api.related_cost => [|c, v| c.api.related_cost = v],
     /// Preview requests per minute per client.
     preview_requests_per_minute: usize = |c| c.preview.requests_per_minute => [|c, v| c.preview.requests_per_minute = v],
     /// Preview requests per minute per URI.
