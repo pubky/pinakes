@@ -891,6 +891,10 @@ fn expand(
     let mut out = BTreeMap::new();
     out.insert(start.at, None);
     if let Some(rule) = c.value("RRULE") {
+        // Names and values are case-insensitive (RFC 5545), and the library reads them so; the
+        // checks and rewrites below read capitals.
+        let rule = rule.to_ascii_uppercase();
+        let rule = rule.as_str();
         ensure!(
             !(rule.split(';').any(|p| p.starts_with("COUNT="))
                 && rule.split(';').any(|p| p.starts_with("UNTIL="))),

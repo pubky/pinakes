@@ -4199,3 +4199,49 @@ fn a_rule_whose_periods_would_hold_too_many_dates_is_never_expanded() {
         assert!(!bounded(rule, max), "{rule}");
     }
 }
+
+#[test]
+fn a_rule_in_lower_case_is_read_as_one_in_capitals() {
+    // A floating UNTIL converts in the series' zone whatever its case: 11:00 Zurich on the 23rd
+    // ends the series before that day's 12:00, so three days, not four as a UTC reading gives.
+    let days = |rule: &str| {
+        parse(&cal(&event(&format!(
+            "UID:u\nDTSTART;TZID=Europe/Zurich:20261020T120000\nRRULE:{rule}\nSUMMARY:u"
+        ))))
+        .container
+        .unwrap()
+        .occurrences
+        .len()
+    };
+    assert_eq!(days("FREQ=DAILY;UNTIL=20261023T110000"), 3);
+    assert_eq!(days("freq=daily;until=20261023T110000"), 3);
+    assert_eq!(days("Freq=Daily;Until=20261023T110000"), 3);
+    // COUNT and UNTIL together are refused in any case: the event is left out with a warning.
+    for rule in [
+        "FREQ=DAILY;COUNT=2;UNTIL=20261023T110000",
+        "freq=daily;count=2;until=20261023T110000",
+    ] {
+        let container = parse(&cal(&format!(
+            "{}\n{}",
+            event(&format!(
+                "UID:both\nDTSTART:20261020T120000Z\nRRULE:{rule}\nSUMMARY:both"
+            )),
+            event("UID:good\nDTSTART:20261020T120000Z\nSUMMARY:Healthy")
+        )))
+        .container
+        .unwrap();
+        let uids: Vec<&str> = container
+            .occurrences
+            .iter()
+            .map(|o| o.uid.as_str())
+            .collect();
+        assert_eq!(uids, ["good"], "{rule}");
+        assert!(
+            container
+                .warnings
+                .contains(&"invalid_vevent_recurrence".to_string()),
+            "{rule}: {:?}",
+            container.warnings
+        );
+    }
+}
