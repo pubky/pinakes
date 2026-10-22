@@ -1219,10 +1219,15 @@ pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
 /// The columns of `search_unit` (and `resource_unit`), in order.
 pub const UNIT_COLUMNS: &str = "id,uri,host,type,type_path,name,category,point,start_at,end_at,venue_id,doc,search_text,resolver,resolved_at,refresh_at,status,osm_type,osm_id,unit_id,occurrence,event,event_author";
 /// A related row's rank from `{counts}.n` and `.at`: its shared taggers, then the newest of
-/// their references in whole seconds (below 1e10 until 2286), exact in a double up to 900,000
-/// taggers.
-fn related_rank(counts: &str) -> String {
-    format!("({counts}.n*1e10+floor(extract(epoch FROM {counts}.at)))::double precision")
+/// their references, in whole seconds after the window's start `since`. Every counted reference
+/// is in the window (at most 3,650 days, under 1e10 seconds), so the second term never reaches
+/// the first, whatever the dates; exact in a double up to 900,000 taggers.
+fn related_rank(sql: &mut QueryBuilder<'_, Postgres>, counts: &str, since: DateTime<Utc>) {
+    sql.push(format!(
+        "({counts}.n*1e10+floor(extract(epoch FROM {counts}.at-"
+    ))
+    .push_bind(since)
+    .push(")))::double precision");
 }
 
 fn scope(
@@ -1312,19 +1317,24 @@ pub async fn search(
         ),
         None => None,
     };
+    // The start of a related search's window.
+    let since = match &related {
+        Some(_) => Some(
+            at - if q.window.is_some() {
+                trend_window(q.window.as_deref())?
+            } else {
+                chrono::Duration::days(state.config.search.related_window_days.into())
+            },
+        ),
+        None => None,
+    };
     let mut sql = QueryBuilder::<Postgres>::new("WITH ");
-    if let Some(seed) = &related {
+    if let (Some(seed), Some(since)) = (&related, since) {
         // The resource, or its whole group; a sample of the most recent tags in the window on
         // those not opted out and their aliases, read through the tags-only index, and of the
         // sample's authors in reach the ones with the newest tag; and the most recent references
         // each of them made elsewhere in the window, once per resource.
         let search = &state.config.search;
-        let since = at
-            - if q.window.is_some() {
-                trend_window(q.window.as_deref())?
-            } else {
-                chrono::Duration::days(search.related_window_days.into())
-            };
         sql.push("related_seed AS (SELECT ")
             .push_bind(seed.clone())
             .push("::text AS resource_id UNION SELECT u.resource_id FROM group_unit u WHERE u.group_id=(SELECT group_id FROM group_unit WHERE unit_id=")
@@ -1387,8 +1397,8 @@ pub async fn search(
     });
     if related_groups {
         // Ranked once the rows that pass are known (`eligible` below).
-    } else if related.is_some() {
-        sql.push(related_rank("rel"));
+    } else if let Some(since) = since {
+        related_rank(&mut sql, "rel", since);
     } else if trending && q.collapse.is_some() {
         sql.push("coalesce((SELECT g.n FROM group_unit u JOIN group_trend g USING(group_id) WHERE u.unit_id=r.unit_id),t.n)::double precision");
     } else if trending {
@@ -1516,15 +1526,15 @@ pub async fn search(
             sql.push(")");
         }
     }
-    if related_groups {
+    if let (true, Some(since)) = (related_groups, since) {
         // Each row's group (or the row alone) over the rows that pass: its members' taggers
         // together, counted once, and the newest of their references. A window over the rows,
         // never a join of two of these sets, whose sizes the planner cannot know.
         sql.push("), eligible AS (SELECT ")
             .push(UNIT_COLUMNS)
-            .push(",")
-            .push(related_rank("g"))
-            .push(" AS rank FROM (SELECT p.*,max(p.rel_at) OVER w AS group_at,string_agg(p.rel_authors,' ') OVER w AS group_authors FROM related_pass p WINDOW w AS (PARTITION BY coalesce(p.rel_group,p.id))) p CROSS JOIN LATERAL (SELECT count(DISTINCT a) AS n,p.group_at AS at FROM unnest(string_to_array(p.group_authors,' ')) a) g WHERE g.n>=")
+            .push(",");
+        related_rank(&mut sql, "g", since);
+        sql.push(" AS rank FROM (SELECT p.*,max(p.rel_at) OVER w AS group_at,string_agg(p.rel_authors,' ') OVER w AS group_authors FROM related_pass p WINDOW w AS (PARTITION BY coalesce(p.rel_group,p.id))) p CROSS JOIN LATERAL (SELECT count(DISTINCT a) AS n,p.group_at AS at FROM unnest(string_to_array(p.group_authors,' ')) a) g WHERE g.n>=")
             .push_bind(state.config.search.related_min_shared as i64);
     }
     if q.collapse.is_some() {

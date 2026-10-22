@@ -520,3 +520,59 @@ async fn a_collapsed_group_s_row_is_the_member_with_the_most_references_up_to_th
     assert_eq!(info["limits"]["collapse_refs_per_member"], 2);
     assert_eq!(info["limits"]["related_tag_sample"], 2000);
 }
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_ranking_holds_whatever_the_dates_even_in_year_one(pool: PgPool) {
+    // A clock in year 1 and references a few weeks before it: the rows still rank by their
+    // shared taggers, then by the newest of their references.
+    let seed = save(&pool, "https://example.org/seed", "MusicAlbum").await;
+    let three = save(&pool, "https://example.org/three", "MusicAlbum").await;
+    let a = save(&pool, "https://example.org/a", "MusicAlbum").await;
+    let b = save(&pool, "https://example.org/b", "MusicAlbum").await;
+    // Of the two rows with two taggers, the one listed after the other on a tie (the lower ID)
+    // has the newer references, so a rank that lost the dates would put them the wrong way.
+    let (newer, older) = if a < b { (a, b) } else { (b, a) };
+    let at = |id: &str, who: usize, day: &str| {
+        let pool = pool.clone();
+        let (id, day) = (id.to_owned(), day.to_owned());
+        async move {
+            sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','music',$3,$4::timestamptz)")
+                .bind(&id)
+                .bind(author(who))
+                .bind(format!("/pub/pubky.app/tags/{id}-{who}-{day}"))
+                .bind(format!("0001-{day}T00:00:00Z"))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    for who in [1, 2, 3] {
+        at(&seed, who, "02-20").await;
+        at(&three, who, "01-02").await;
+    }
+    for who in [1, 2] {
+        at(&newer, who, "02-10").await;
+        at(&older, who, "01-05").await;
+    }
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+    let now: chrono::DateTime<chrono::Utc> = "0001-03-01T00:00:00Z".parse().unwrap();
+    state.clock = Some(std::sync::Arc::new(move || now));
+    let app = api::router(state);
+    for query in ["", "&window=90d"] {
+        let mut request = Request::get(format!("/v1/search?related={seed}{query}"))
+            .body(Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(ConnectInfo(
+            "127.0.0.1:4000".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 200);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            rows(&v),
+            [three.clone(), newer.clone(), older.clone()],
+            "{query}"
+        );
+    }
+}
