@@ -63,7 +63,8 @@ mod tests {
 
     /// `scripts/lock-waits` never repeats any part of `DATABASE_URL` when it cannot sample:
     /// libpq's parse errors quote the token they could not read, and psql's connection errors
-    /// name the host, user or database. A canary in each place never reaches its output.
+    /// name the host, user or database. A canary in each place never reaches its output, which
+    /// is the script's fixed lines only.
     #[test]
     fn lock_waits_never_prints_the_database_url() {
         let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/lock-waits");
@@ -85,6 +86,12 @@ mod tests {
                 "postgresql://CANARY_USER:CANARY_PASSWORD@127.0.0.1:1/CANARY_DB",
                 "cannot connect to the database (check DATABASE_URL)",
             ),
+            // A line break in the host makes psql's error a line of the script's own form: psql's
+            // stderr is never read, whatever its lines look like (Codex, review of ee24d93).
+            (
+                "postgresql:///postgres?host=/nonexistent%0Alock-waits:%20CANARY_HOST",
+                "cannot connect to the database (check DATABASE_URL)",
+            ),
         ] {
             let run = std::process::Command::new("bash")
                 .args([script, "sleep", "0.5"])
@@ -96,6 +103,7 @@ mod tests {
             assert!(!run.status.success(), "{url}: {output}");
             assert!(output.contains(says), "{url}: {output}");
             assert!(!output.contains("CANARY"), "{url}: {output}");
+            assert_eq!(output.lines().count(), 2, "{url}: {output}");
         }
     }
 }
