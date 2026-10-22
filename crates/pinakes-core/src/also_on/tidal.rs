@@ -134,7 +134,7 @@ impl Source for Tidal {
             }
             for chunk in ids.chunks(BATCH) {
                 if let Err(error) = prefetch(cx, kind, chunk).await {
-                    tracing::debug!(error = %format!("{error:#}"), "batched TIDAL lookup failed; links ask alone");
+                    tracing::debug!(error = %crate::resolver::log_error(&error), "batched TIDAL lookup failed; links ask alone");
                     break;
                 }
             }

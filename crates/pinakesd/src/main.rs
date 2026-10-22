@@ -96,7 +96,9 @@ async fn main() -> Result<()> {
                     continue;
                 }
                 Ok(_) => {}
-                Err(e) => tracing::warn!(error=%e,"ingestion will retry"),
+                Err(e) => {
+                    tracing::warn!(error=%pinakes_core::resolver::log_error(&e),"ingestion will retry")
+                }
             }
             tokio::select! { _=ingest_shutdown.changed()=>break,_=tokio::time::sleep(Duration::from_secs(ingest_state.config.poll_secs))=>{} }
         }
@@ -112,7 +114,9 @@ async fn main() -> Result<()> {
                     tokio::task::yield_now().await;
                     continue;
                 }
-                Err(error) => tracing::warn!(%error,"group reconciliation will retry"),
+                Err(error) => {
+                    tracing::warn!(error = %pinakes_core::resolver::log_error(&error),"group reconciliation will retry")
+                }
                 _ => {}
             }
             tokio::select! {_=group_shutdown.changed()=>break,_=tokio::time::sleep(Duration::from_secs(2))=>{}}

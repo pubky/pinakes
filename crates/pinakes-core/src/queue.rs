@@ -602,7 +602,7 @@ async fn finish_job(
     .await;
     if let Err(error) = result {
         // The host and the stored error kind, so a failure can be found by site or by kind.
-        tracing::warn!(resource_id=%job.id,host=%crate::resolver::log_host(&job.uri),kind=crate::resolver::error_class(&error),resolver=resolver.name(),error=%crate::resolver::redact(&format!("{error:#}")),"resolution failed");
+        tracing::warn!(resource_id=%job.id,host=%crate::resolver::log_host(&job.uri),kind=crate::resolver::error_class(&error),resolver=resolver.name(),error=%crate::resolver::log_error(&error),"resolution failed");
         if error.is::<crate::resolver::interstitial::Blocked>() {
             // A challenge page: unreachable, with the normal failure backoff and dead letter.
             // The last accepted document stays; a wall never confirms disappearance.
@@ -900,11 +900,11 @@ pub fn spawn_with_egress(
                             for manifest in resolver.manifests() {
                             if resolver.canary_allowed_for(&manifest) {
                             match crate::canary::claim(&pool,&manifest,&canary).await {
-                                Ok(Some(generation))=>{if let Err(e)=crate::canary::run_manifest(&pool,resolver.as_ref(),&manifest,&canary,&metrics,generation).await {tracing::warn!(error=%e,"canary bookkeeping failed");}return;},
-                                Err(e)=>tracing::warn!(error=%e,"canary claim failed"),
+                                Ok(Some(generation))=>{if let Err(e)=crate::canary::run_manifest(&pool,resolver.as_ref(),&manifest,&canary,&metrics,generation).await {tracing::warn!(error=%crate::resolver::log_error(&e),"canary bookkeeping failed");}return;},
+                                Err(e)=>tracing::warn!(error=%crate::resolver::log_error(&e),"canary claim failed"),
                                 _=>{}
                             }
-                            } else if let Err(e)=crate::canary::suspend(&pool,&manifest).await {tracing::warn!(error=%e,"canary suspension failed");}
+                            } else if let Err(e)=crate::canary::suspend(&pool,&manifest).await {tracing::warn!(error=%crate::resolver::log_error(&e),"canary suspension failed");}
                             }
                             }
                             match claim_sources(&pool,&resolver.queue_sources(),&cfg,resolver.batch_size()).await {
@@ -920,10 +920,10 @@ pub fn spawn_with_egress(
                                         }
                                         Ok::<_,anyhow::Error>(())
                                     }.await;
-                                    if let Err(e)=result { tracing::error!(error=%e,"queue persistence failed"); }
+                                    if let Err(e)=result { tracing::error!(error=%crate::resolver::log_error(&e),"queue persistence failed"); }
                                 },
                                 Ok(_)=>{ tokio::select! { _=wake.notified()=>{},_=tokio::time::sleep(Duration::from_millis(250))=>{} } },
-                                Err(e)=>{ tracing::error!(error=%e,"queue claim failed"); tokio::time::sleep(Duration::from_secs(1)).await; }
+                                Err(e)=>{ tracing::error!(error=%crate::resolver::log_error(&e),"queue claim failed"); tokio::time::sleep(Duration::from_secs(1)).await; }
                             }
                         }=>{}
                     }

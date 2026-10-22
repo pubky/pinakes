@@ -734,7 +734,7 @@ impl Podcasts {
             Ok(f) => f,
             Err(e) if e.is::<RetryLater>() => return Err(e),
             Err(e) => {
-                tracing::debug!(error = %format!("{e:#}"), "podcast feed unreadable");
+                tracing::debug!(error = %crate::resolver::log_error(&e), "podcast feed unreadable");
                 return Ok(None);
             }
         };

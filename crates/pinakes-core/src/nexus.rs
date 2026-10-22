@@ -71,6 +71,8 @@ type ReachCache = Arc<Mutex<HashMap<(String, String), (Instant, ReachSet)>>>;
 #[derive(Clone)]
 pub struct Nexus {
     base: String,
+    /// Every request error drops its URL (`without_url`): the configured base may hold user
+    /// info, and a reach request names its viewer.
     client: reqwest::Client,
     cache: ReachCache,
     reach_timeout: Duration,
@@ -97,8 +99,9 @@ impl Nexus {
             .get(format!("{}/v0/resources/changes", self.base))
             .query(&[("cursor", cursor), ("limit", 1000)])
             .send()
-            .await?
-            .error_for_status()?;
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(reqwest::Error::without_url)?;
         let epoch = response
             .headers()
             .get("x-events-epoch")
@@ -157,11 +160,15 @@ impl Nexus {
                 .get(format!("{}/v0/user/{viewer}/{reach}", self.base))
                 .query(&[("skip", skip), ("limit", 200)])
                 .send()
-                .await?;
+                .await
+                .map_err(reqwest::Error::without_url)?;
             if response.status() == reqwest::StatusCode::NOT_FOUND {
                 break;
             }
-            let ids: Vec<String> = bounded_json(response.error_for_status()?).await?;
+            let response = response
+                .error_for_status()
+                .map_err(reqwest::Error::without_url)?;
+            let ids: Vec<String> = bounded_json(response).await?;
             if ids.len() > 200 || ids.iter().any(|id| !valid_author(id)) {
                 bail!("invalid Nexus reach page");
             }
@@ -188,7 +195,11 @@ pub fn valid_author(id: &str) -> bool {
 }
 async fn bounded_json<T: DeserializeOwned>(mut response: reqwest::Response) -> Result<T> {
     let mut bytes = vec![];
-    while let Some(chunk) = response.chunk().await? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(reqwest::Error::without_url)?
+    {
         if bytes.len() + chunk.len() > 8 * 1024 * 1024 {
             bail!("Nexus response exceeded 8 MB");
         }
@@ -208,6 +219,42 @@ mod tests {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (url, task)
+    }
+    /// A failed Nexus request names no URL: not the base's user info, not the feed's query,
+    /// not the viewer a reach request asks for. Refused, and answered 500.
+    #[tokio::test]
+    async fn a_failed_nexus_request_names_no_url() {
+        let app = Router::new()
+            .route(
+                "/v0/resources/changes",
+                get(|| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "down") }),
+            )
+            .route(
+                "/v0/user/{viewer}/following",
+                get(|| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "down") }),
+            );
+        let (url, server) = server(app).await;
+        let refused = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", listener.local_addr().unwrap())
+        };
+        let viewer = "y".repeat(52);
+        for base in [url, refused] {
+            let base = base.replace("http://", "http://feeder:CANARY@");
+            let nexus = Nexus::new(&base).unwrap();
+            let changes = format!("{:#}", nexus.changes(7).await.unwrap_err());
+            let reach = format!("{:#}", nexus.reach(&viewer, "following").await.unwrap_err());
+            for line in [changes, reach] {
+                assert!(
+                    !line.contains("CANARY")
+                        && !line.contains("cursor=")
+                        && !line.contains(&viewer)
+                        && !line.contains("127.0.0.1"),
+                    "{line}"
+                );
+            }
+        }
+        server.abort();
     }
     #[tokio::test]
     async fn slow_reach_does_not_lock_out_other_viewers_or_cache_hits() {

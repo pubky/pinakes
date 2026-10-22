@@ -411,7 +411,8 @@ impl ApiError {
 }
 impl<E: Into<anyhow::Error>> From<E> for ApiError {
     fn from(error: E) -> Self {
-        tracing::error!(error=%error.into(),"request failed");
+        let error: anyhow::Error = error.into();
+        tracing::error!(error=%crate::resolver::log_error(&error),"request failed");
         Self(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal server error".into(),
@@ -1277,7 +1278,7 @@ pub async fn search(
         .map_err(|e| ApiError::bad(e.to_string()))?;
     let reach = if let (Some(viewer), Some(reach)) = (&q.viewer, &q.reach) {
         Some(state.nexus.reach(viewer, reach).await.map_err(|e| {
-            tracing::warn!(error=%e,"reach unavailable");
+            tracing::warn!(error=%crate::resolver::log_error(&e),"reach unavailable");
             ApiError(StatusCode::BAD_GATEWAY, "Nexus reach unavailable".into())
         })?)
     } else {
@@ -2558,7 +2559,7 @@ pub async fn curate_group(
     crate::groups::curate(&state.pool, &id, body, &state.config.groups)
         .await
         .map_err(|e| {
-            tracing::warn!(error=%e,"group curation failed");
+            tracing::warn!(error=%crate::resolver::log_error(&e),"group curation failed");
             if e.is::<crate::groups::GroupBusy>() {
                 return ApiError(
                     StatusCode::SERVICE_UNAVAILABLE,

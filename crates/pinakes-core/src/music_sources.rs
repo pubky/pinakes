@@ -156,7 +156,7 @@ impl Source for MusicBrainzSource {
         if links.len() > 1 {
             let base = cx.config.also_on.musicbrainz_base();
             if let Err(error) = musicbrainz::prefetch_urls(&cx.egress, base, &links).await {
-                tracing::debug!(error = %format!("{error:#}"), "batched MusicBrainz lookup failed; links ask alone");
+                tracing::debug!(error = %crate::resolver::log_error(&error), "batched MusicBrainz lookup failed; links ask alone");
             }
         }
     }

@@ -50,7 +50,9 @@ pub async fn run(pool: PgPool, config: Config, mut shutdown: watch::Receiver<boo
         if swept.is_none_or(|at| at.elapsed() >= Duration::from_secs(3600)) {
             match sweep(&pool).await {
                 Ok(_) => swept = Some(tokio::time::Instant::now()),
-                Err(error) => tracing::warn!(%error, "same-event sweep will retry"),
+                Err(error) => {
+                    tracing::warn!(error = %crate::resolver::log_error(&error), "same-event sweep will retry")
+                }
             }
         }
         let pass = tokio::select! { _=shutdown.changed()=>break, result=drain(&pool, &config, 200)=>result };
@@ -61,7 +63,9 @@ pub async fn run(pool: PgPool, config: Config, mut shutdown: watch::Receiver<boo
                 continue;
             }
             Ok(_) => {}
-            Err(error) => tracing::warn!(%error, "same-event pass will retry"),
+            Err(error) => {
+                tracing::warn!(error = %crate::resolver::log_error(&error), "same-event pass will retry")
+            }
         }
         tokio::select! { _=shutdown.changed()=>break, _=tokio::time::sleep(Duration::from_secs(5))=>{} }
     }
@@ -125,7 +129,7 @@ pub async fn drain(pool: &PgPool, config: &Config, budget: i64) -> Result<usize>
                 }
             }
             Err(error) => {
-                tracing::warn!(resource_id = %id, %error, "same-event pairs will retry");
+                tracing::warn!(resource_id = %id, error = %crate::resolver::log_error(&error), "same-event pairs will retry");
                 mark(pool, id, 60).await?;
             }
         }

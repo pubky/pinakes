@@ -306,7 +306,7 @@ fn secondary<T>(
         Err(error) => {
             let class = crate::resolver::error_class(&error);
             crate::telemetry::also_on_service_error(service, class);
-            tracing::debug!(service, class, error = %format!("{error:#}"), "secondary service failed; the lookup goes on without it");
+            tracing::debug!(service, class, error = %crate::resolver::log_error(&error), "secondary service failed; the lookup goes on without it");
             let asked = error
                 .chain()
                 .find_map(|cause| cause.downcast_ref::<RetryLater>())

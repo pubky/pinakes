@@ -667,7 +667,7 @@ pub async fn drain_leased(
                 .await?;
             }
             Err(error) => {
-                tracing::warn!(resource=%id, error=%crate::resolver::redact(&format!("{error:#}")), "also-on lookup will retry");
+                tracing::warn!(resource=%id, error=%crate::resolver::log_error(&error), "also-on lookup will retry");
                 // A service that said how long to wait is waited for at least that long.
                 let asked = error
                     .downcast_ref::<crate::resolver::RetryLater>()
@@ -806,7 +806,7 @@ pub async fn run(
             Ok(100) => continue,
             Ok(_) => {}
             Err(error) => {
-                tracing::warn!(error=%crate::resolver::redact(&format!("{error:#}")), "also-on worker will retry")
+                tracing::warn!(error=%crate::resolver::log_error(&error), "also-on worker will retry")
             }
         }
         tokio::select! { _=shutdown.changed()=>break, _=tokio::time::sleep(Duration::from_secs(5))=>{} }

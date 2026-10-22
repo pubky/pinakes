@@ -103,7 +103,7 @@ impl WebResolver {
             Ok(fetched) if fetched.status == 200 => fetched,
             Ok(_) => return None,
             Err(error) => {
-                tracing::debug!(error = %format!("{error:#}"), "Wikipedia summary failed; reading the page");
+                tracing::debug!(error = %crate::resolver::log_error(&error), "Wikipedia summary failed; reading the page");
                 return None;
             }
         };

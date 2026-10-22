@@ -230,6 +230,12 @@ pub fn redact(text: &str) -> String {
     out
 }
 
+/// An error as a log line prints it: its whole chain (`{:#}`), through `redact`. Every log line
+/// that prints an error prints it through this; a test holds them to it.
+pub fn log_error<E: std::fmt::Display + ?Sized>(error: &E) -> String {
+    redact(&format!("{error:#}"))
+}
+
 pub fn error_class(error: &anyhow::Error) -> &'static str {
     if error.is::<interstitial::Blocked>() {
         return "wall";
@@ -301,61 +307,63 @@ mod tests {
         assert_eq!(log_host("doi:10.1000/x?token=CANARY"), "doi");
     }
 
-    /// No log line in `src` names a link: a logging macro mentions `uri`, `url` or `link` only
-    /// inside `log_host(…)` or `redact(…)`.
-    #[test]
-    fn no_log_line_names_a_link() {
-        fn strip_strings(text: &str) -> String {
-            let mut out = String::new();
-            let mut chars = text.chars();
-            while let Some(c) = chars.next() {
-                if c == '"' {
-                    let mut escaped = false;
-                    for d in chars.by_ref() {
-                        if escaped {
-                            escaped = false;
-                        } else if d == '\\' {
-                            escaped = true;
-                        } else if d == '"' {
+    /// `text` with each string literal's contents removed.
+    fn strip_strings(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            if c == '"' {
+                let mut escaped = false;
+                for d in chars.by_ref() {
+                    if escaped {
+                        escaped = false;
+                    } else if d == '\\' {
+                        escaped = true;
+                    } else if d == '"' {
+                        break;
+                    }
+                }
+                out.push_str("\"\"");
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// `text` without the calls to `name(…)`, parentheses balanced.
+    fn strip_calls(text: &str, name: &str) -> String {
+        let mut out = String::new();
+        let mut rest = text;
+        while let Some(i) = rest.find(name) {
+            out.push_str(&rest[..i]);
+            let mut depth = 0usize;
+            let mut end = rest.len();
+            for (j, c) in rest[i + name.len() - 1..].char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = i + name.len() - 1 + j + 1;
                             break;
                         }
                     }
-                    out.push_str("\"\"");
-                } else {
-                    out.push(c);
+                    _ => {}
                 }
             }
-            out
+            rest = &rest[end..];
         }
-        /// `text` without the calls to `name(…)`, parentheses balanced.
-        fn strip_calls(text: &str, name: &str) -> String {
-            let mut out = String::new();
-            let mut rest = text;
-            while let Some(i) = rest.find(name) {
-                out.push_str(&rest[..i]);
-                let mut depth = 0usize;
-                let mut end = rest.len();
-                for (j, c) in rest[i + name.len() - 1..].char_indices() {
-                    match c {
-                        '(' => depth += 1,
-                        ')' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                end = i + name.len() - 1 + j + 1;
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                rest = &rest[end..];
-            }
-            out.push_str(rest);
-            out
-        }
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut stack = vec![src];
-        let mut found = vec![];
+        out.push_str(rest);
+        out
+    }
+
+    /// Every logging macro call in the code (not the tests) of this crate and the daemon's: its
+    /// file and its text from the macro's name to its closing parenthesis.
+    fn log_calls() -> Vec<(std::path::PathBuf, String)> {
+        let core = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut stack = vec![core.join("src"), core.join("../pinakesd/src")];
+        let mut calls = vec![];
         while let Some(dir) = stack.pop() {
             for e in std::fs::read_dir(&dir).unwrap() {
                 let path = e.unwrap().path();
@@ -387,24 +395,99 @@ mod tests {
                             _ => {}
                         }
                     }
-                    let call = &after[..end];
-                    let plain =
-                        strip_calls(&strip_calls(&strip_strings(call), "log_host("), "redact(");
-                    let words: Vec<&str> = plain
-                        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                        .collect();
-                    if words.iter().any(|w| matches!(*w, "uri" | "url" | "link")) {
-                        found.push(format!(
-                            "{}: {}",
-                            path.display(),
-                            call.lines().next().unwrap_or("")
-                        ));
-                    }
+                    calls.push((path.clone(), after[..end].to_owned()));
                     rest = &after[end.max(1)..];
                 }
             }
         }
+        assert!(calls
+            .iter()
+            .any(|(p, _)| p.to_string_lossy().contains("pinakesd")));
+        assert!(calls.len() > 40, "the scan found {} log calls", calls.len());
+        calls
+    }
+
+    /// No log line names a link: a logging macro mentions `uri`, `url` or `link` only inside
+    /// `log_host(…)` or `redact(…)`.
+    #[test]
+    fn no_log_line_names_a_link() {
+        let mut found = vec![];
+        for (path, call) in log_calls() {
+            let plain = strip_calls(&strip_calls(&strip_strings(&call), "log_host("), "redact(");
+            let words: Vec<&str> = plain
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .collect();
+            if words.iter().any(|w| matches!(*w, "uri" | "url" | "link")) {
+                found.push(format!(
+                    "{}: {}",
+                    path.display(),
+                    call.lines().next().unwrap_or("")
+                ));
+            }
+        }
         assert!(found.is_empty(), "{found:#?}");
+    }
+
+    /// Every log line that prints an error prints it through `log_error(…)`: an error's text may
+    /// hold a URL (a client library names the one it asked), and `log_error` redacts it. Outside
+    /// `log_error`, `log_host` and `error_class` calls, a log call names `e`, `err`, `error` or
+    /// `cause` only as a field's name, and no format string prints one.
+    #[test]
+    fn every_logged_error_goes_through_log_error() {
+        let mut found = vec![];
+        for (path, call) in log_calls() {
+            // From the macro's arguments on: `tracing::error!` names itself.
+            let args = &call[call.find("!(").unwrap() + 2..];
+            let printed = [
+                "{e}", "{e:", "{err}", "{err:", "{error}", "{error:", "{cause",
+            ]
+            .iter()
+            .any(|p| args.contains(p));
+            let mut plain = strip_strings(args);
+            for name in ["log_error(", "log_host(", "error_class("] {
+                plain = strip_calls(&plain, name);
+            }
+            let named = plain
+                .match_indices(|c: char| c.is_ascii_alphabetic())
+                .any(|(i, _)| {
+                    let starts = i == 0 || {
+                        let b = plain.as_bytes()[i - 1];
+                        !(b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b':')
+                    };
+                    if !starts {
+                        return false;
+                    }
+                    let word: String = plain[i..]
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .collect();
+                    let after = plain[i + word.len()..].trim_start();
+                    let field_name = after.starts_with('=') && !after.starts_with("==");
+                    matches!(word.as_str(), "e" | "err" | "error" | "cause") && !field_name
+                });
+            if printed || named {
+                found.push(format!(
+                    "{}: {}",
+                    path.display(),
+                    call.lines().next().unwrap_or("")
+                ));
+            }
+        }
+        assert!(found.is_empty(), "{found:#?}");
+    }
+
+    #[test]
+    fn log_error_prints_the_chain_redacted() {
+        let error =
+            anyhow::anyhow!("error sending request for url (https://u:p@x.example/a?token=CANARY)")
+                .context("Nexus feed");
+        let line = log_error(&error);
+        assert!(
+            line.starts_with("Nexus feed: error sending request"),
+            "{line}"
+        );
+        assert!(line.contains("https://x.example/a"), "{line}");
+        assert!(!line.contains("CANARY") && !line.contains("u:p"), "{line}");
     }
 
     /// A body past its cap is `too_large`, however deep in the error chain (an adapter adds
