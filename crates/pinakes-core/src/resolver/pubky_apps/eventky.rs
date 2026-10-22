@@ -58,7 +58,8 @@ fn event(_: &Object, v: &Value, doc: &mut ResourceMeta) -> Read {
             .and_then(|t| time::parse(&t, Some(&end_zone)))
             .or_else(|| {
                 let duration = time::duration(&read::text(v, &["duration"])?)?;
-                doc.start.map(|start| start + duration)
+                doc.start
+                    .and_then(|start| start.checked_add_signed(duration))
             })
             .filter(|end| doc.start.is_some_and(|start| *end >= start));
         doc.event.tz = Some(zone.clone());

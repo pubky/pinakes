@@ -540,6 +540,14 @@ fn eventky() {
         );
     }
     assert_eq!(pubky_apps::read::html_text("<p> </p><unterminated"), None);
+    // A duration past the calendar's end gives no end; the card keeps its start.
+    let doc = edited(
+        "eventky/event-psywalk-location-no-uri",
+        json!({"dtend": null, "duration": "P1000000000D"}),
+    );
+    assert_eq!(doc.status, Status::Ok);
+    assert_eq!(doc.start.unwrap().to_rfc3339(), "2026-07-31T16:00:00+00:00");
+    assert_eq!(doc.end, None);
     // A time without a zone is left out.
     let doc = edited(
         "eventky/event-psywalk-location-no-uri",
