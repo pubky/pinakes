@@ -25,7 +25,7 @@ export DATABASE_URL='postgresql:///postgres?host=/var/run/postgresql'
 | `scripts/openapi` | Regenerates `docs/openapi.json`. A test fails while the snapshot differs from the code. |
 | `scripts/verify-osm-boundary [out.sql]` | OSM-derived facts are only in `osm_place` (run by the tests; needs `psql`, `pg_dump`, `rg`). |
 | `scripts/verify-no-capability-urls` | No private calendar share URL in any tracked file (run by the tests). |
-| `scripts/lock-waits COMMAND…` | Samples the database every 50 ms while COMMAND runs and prints which locks backends waited on. |
+| `scripts/lock-waits COMMAND…` | Samples the database every 50 ms while COMMAND runs and prints which locks backends waited on; fails with psql's error when it could not sample. Needs `psql` and `python3`. |
 
 Tests use local servers, injected transports and recorded fixtures instead of public services.
 
