@@ -488,7 +488,8 @@ pub struct OccurrenceRef {
 pub struct ReferenceEvent {
     pub author: String,
     pub object_path: String,
-    pub recurrence_id: String,
+    /// The instance of a recurring event; `null` for a one-off one.
+    pub recurrence_id: Option<String>,
     pub start: chrono::DateTime<chrono::Utc>,
     pub end: Option<chrono::DateTime<chrono::Utc>>,
     pub status: String,

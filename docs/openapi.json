@@ -1092,7 +1092,11 @@
             "type": "string"
           },
           "recurrence_id": {
-            "type": "string"
+            "description": "The instance of a recurring event; `null` for a one-off one.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "start": {
             "format": "date-time",
@@ -1105,7 +1109,6 @@
         "required": [
           "author",
           "object_path",
-          "recurrence_id",
           "start",
           "status"
         ],
