@@ -16,7 +16,7 @@ export DATABASE_URL='postgresql:///postgres?host=/var/run/postgresql'
 | --- | --- |
 | `scripts/test` | The full gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --workspace`, `scripts/check-ops`. Run it before you commit. |
 | `cargo test -p pinakes-core --lib` | Unit tests only. A few need `DATABASE_URL` and fail without it. |
-| `cargo test -p pinakes-core --test <name>` | One integration test file in `crates/pinakes-core/tests/` (`api`, `groups`, `also_on`, `tidal`, …). Each test gets a fresh database with the schema (`#[sqlx::test]`). |
+| `cargo test -p pinakes-core --test <name>` | One integration test file in `crates/pinakes-core/tests/` (`api`, `groups`, `also_on`, `tidal`, …). Each test gets a fresh database with the schema and `tests/fixtures/require_h3.sql`, which stops it with the h3 version found when h3 is older than 4.2.3 (`#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]`; a unit test checks every one has it). |
 | `scripts/check-ops` | `promtool check rules ops/alerts.yml` when promtool is installed; otherwise the test that checks every metric in `ops/alerts.yml` and `ops/grafana/pinakes.json` against the registry (`telemetry.rs`), which `cargo test` also runs. |
 | `npm ci --prefix e2e && npm test --prefix e2e` | The e2e harness's own unit tests. |
 | `scripts/e2e --mock` | The whole flow against fixtures, offline: migrations, ingest, queue, resolvers, groups, API. |

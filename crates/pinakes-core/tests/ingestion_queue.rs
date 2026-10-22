@@ -67,7 +67,7 @@ async fn refs(pool: &PgPool) -> i64 {
         .unwrap()
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn put_delete_replay_retarget_and_grace(pool: PgPool) {
     let a = change("https://example.org/a", "author-a", "/pub/app/tags/shared");
     let mut b = a.clone();
@@ -111,7 +111,7 @@ async fn put_delete_replay_retarget_and_grace(pool: PgPool) {
     assert_eq!(store::cleanup(&pool, 7).await.unwrap(), 1);
     assert_eq!(refs(&pool).await, 1);
 }
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn epoch_headers_length_reset_and_transaction_rollback(pool: PgPool) {
     let limits = IngestConfig::default();
     let metrics = Metrics::new().unwrap();
@@ -184,7 +184,7 @@ async fn epoch_headers_length_reset_and_transaction_rollback(pool: PgPool) {
     );
     assert_eq!(metrics.ingest_rejected.with_label_values(&["uri"]).get(), 1);
 }
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn concurrent_pollers_only_commit_a_batch_once(pool: PgPool) {
     let limits = IngestConfig::default();
     let metrics = Metrics::new().unwrap();
@@ -205,7 +205,7 @@ async fn concurrent_pollers_only_commit_a_batch_once(pool: PgPool) {
     assert_eq!(refs(&pool).await, 1);
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn rejects_oversized_feed_fields_without_stalling_or_truncating_keys(pool: PgPool) {
     let limits = IngestConfig {
         max_label_bytes: 6,
@@ -287,7 +287,7 @@ async fn rejects_oversized_feed_fields_without_stalling_or_truncating_keys(pool:
         .contains("pinakes_ingest_rejected_total{reason=\"object_path\"} 3"));
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn rejected_counts_follow_commit_and_concurrent_cursor_fencing(pool: PgPool) {
     let limits = IngestConfig::default();
     let metrics = Metrics::new().unwrap();
@@ -361,7 +361,7 @@ impl Resolver for DeferredResolver {
     }
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn timeout_escalation_is_durable_fenced_and_resets(pool: PgPool) {
     let cfg = QueueConfig {
         timeout_grace: 3,
@@ -474,7 +474,7 @@ impl Resolver for FakeResolver {
         Duration::from_secs(100)
     }
 }
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn durable_queue_backoff_dead_letter_refresh_and_fencing(pool: PgPool) {
     let cfg = QueueConfig {
         max_failures: 2,
@@ -544,7 +544,7 @@ async fn durable_queue_backoff_dead_letter_refresh_and_fencing(pool: PgPool) {
         id
     );
 }
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn documents_promote_spatial_time_type_and_category_columns(pool: PgPool) {
     let id = store::ensure_resource(&pool, "https://example.org/")
         .await
@@ -598,7 +598,7 @@ impl Resolver for MissingResolver {
         Duration::from_secs(86400)
     }
 }
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn missing_responses_get_short_refresh_without_losing_references(pool: PgPool) {
     let a = change("https://example.org/missing", "a", "/pub/app/tags/a");
     batch(&pool, vec![a], Some("one")).await;
@@ -635,7 +635,7 @@ async fn missing_responses_get_short_refresh_without_losing_references(pool: PgP
     assert!(seconds > 3590.0 && seconds <= 3600.0);
     assert_eq!(refs(&pool).await, 1);
 }
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn author_budgets_defer_without_counting_a_failure(pool: PgPool) {
     let a = change("https://example.org/one", "a", "/pub/app/tags/a");
     let b = change("https://example.org/two", "a", "/pub/app/tags/b");
@@ -661,7 +661,7 @@ async fn author_budgets_defer_without_counting_a_failure(pool: PgPool) {
     assert!(budget.admit(&pool, &second, 0.1).await.unwrap());
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn new_reference_reopens_final_pages_but_never_geo(pool: PgPool) {
     let page = change("https://example.org/final", "a", "/pub/app/tags/a");
     let geo = change("geo:46,8", "b", "/pub/app/tags/b");
@@ -688,7 +688,7 @@ async fn new_reference_reopens_final_pages_but_never_geo(pool: PgPool) {
     assert!(!final_page);
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn epoch_replay_does_not_reopen_final_resource(pool: PgPool) {
     let old = change("https://example.org/finished", "a", "/pub/app/old");
     batch(&pool, vec![old.clone()], Some("before")).await;
@@ -712,7 +712,7 @@ async fn epoch_replay_does_not_reopen_final_resource(pool: PgPool) {
         .unwrap());
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn invalid_event_dates_do_not_stall_feed_and_unknown_status_is_accepted(pool: PgPool) {
     let mut good = change("geo:47,8", "event-author", "/pub/events/1");
     good.kind = Kind::Event;
@@ -756,7 +756,7 @@ impl Resolver for PanicOnce {
         Duration::from_secs(3600)
     }
 }
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn resolver_panic_is_a_failed_job_and_next_batch_can_run(pool: PgPool) {
     let id = store::ensure_resource(&pool, "https://example.org/poison")
         .await
@@ -794,7 +794,7 @@ async fn resolver_panic_is_a_failed_job_and_next_batch_can_run(pool: PgPool) {
 }
 
 struct FinishPanic;
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn denials_expire_to_unreachable_backoff_and_recover(pool: PgPool) {
     let uri = "https://example.org/denied";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -872,7 +872,7 @@ impl Resolver for FinishPanic {
         Duration::from_secs(3600)
     }
 }
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn finish_panic_fails_one_job_and_same_worker_finishes_rest(pool: PgPool) {
     let mut jobs = vec![];
     for path in ["poison", "healthy"] {
@@ -908,7 +908,7 @@ async fn finish_panic_fails_one_job_and_same_worker_finishes_rest(pool: PgPool) 
         .unwrap();
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn invalid_non_event_feed_clock_has_its_own_rejection_reason(pool: PgPool) {
     let mut line = change(
         "https://example.org/clock",
@@ -955,7 +955,7 @@ async fn invalid_non_event_feed_clock_has_its_own_rejection_reason(pool: PgPool)
 
 /// `pinakesd reextract <route…|all>` re-queues only the selected rows, now, fenced by a
 /// generation bump, without their HTTP validators.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn reextract_requeues_the_selected_routes_without_validators(pool: PgPool) {
     let web = store::ensure_resource(&pool, "https://example.org/page")
         .await
@@ -1001,7 +1001,7 @@ async fn reextract_requeues_the_selected_routes_without_validators(pool: PgPool)
 
 /// `pinakesd` holds the instance lock for its whole life, `reextract` included: no writer waits
 /// on it, shared or exclusive, and a second daemon is refused.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn writers_never_wait_on_the_instance_lock(pool: PgPool) {
     let _instance = pinakes_core::locks::own_database(&pool).await.unwrap();
     let refused = pinakes_core::locks::own_database(&pool).await.unwrap_err();
@@ -1030,7 +1030,7 @@ async fn writers_never_wait_on_the_instance_lock(pool: PgPool) {
 
 /// A page promoted to the media or activitypub route by its own card keeps that route through
 /// `reextract`, and is re-queued there; an ordinary page is re-classified.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn reextract_keeps_card_promoted_routes(pool: PgPool) {
     let promoted = store::ensure_resource(&pool, "https://video.example/watch/1")
         .await
@@ -1073,7 +1073,7 @@ async fn reextract_keeps_card_promoted_routes(pool: PgPool) {
 
 /// An alias whose named root has become an alias meanwhile follows it to its own root (reads
 /// follow one hop), and becoming an alias fences any job still running on the resource.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn aliases_never_chain_and_fence_running_jobs(pool: PgPool) {
     let first = store::ensure_resource(&pool, "https://example.org/a/")
         .await
@@ -1142,7 +1142,7 @@ async fn aliases_never_chain_and_fence_running_jobs(pool: PgPool) {
 
 /// The generation fence covers the alias a page's canonical makes: a job whose lease was taken
 /// over writes no alias; the current job does.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_stale_job_never_assigns_an_alias(pool: PgPool) {
     struct Canonical;
     #[async_trait::async_trait]
@@ -1203,7 +1203,7 @@ async fn a_stale_job_never_assigns_an_alias(pool: PgPool) {
     assert!(aliased(pool.clone(), id.clone()).await);
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn our_own_rate_limit_is_its_own_class_and_no_failure(pool: PgPool) {
     let cfg = QueueConfig::default();
     let id = store::ensure_resource(&pool, "https://example.org/slow-host")
@@ -1227,7 +1227,7 @@ async fn our_own_rate_limit_is_its_own_class_and_no_failure(pool: PgPool) {
 
 /// A source that answers `RetryLater` with a class other than `timeout` (a server error, a rate
 /// limit) is rescheduled and never counts toward dead letter, however often it happens.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn upstream_retries_never_count_toward_dead_letter(pool: PgPool) {
     let cfg = QueueConfig {
         timeout_grace: 1,

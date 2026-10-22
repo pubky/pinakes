@@ -108,6 +108,54 @@ pub async fn migrate(pool: &sqlx::PgPool) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// Every database test runs `tests/fixtures/require_h3.sql` after the schema, which makes the
+    /// startup check's test for `H3_FUNCTION`: an older h3 fails each one with the version found.
+    #[test]
+    fn every_database_test_requires_the_h3_function() {
+        let fixture = include_str!("../tests/fixtures/require_h3.sql");
+        assert!(fixture.contains(&format!("to_regprocedure('{}')", super::H3_FUNCTION)));
+        assert!(fixture.contains("h3 4.2.3 or newer required, found %"));
+        fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    rust_files(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let mut files = vec![];
+        for dir in ["src", "tests"] {
+            rust_files(
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(dir),
+                &mut files,
+            );
+        }
+        let mut tests = 0;
+        for file in files {
+            let text = std::fs::read_to_string(&file).unwrap();
+            // Each attribute that opens a line, up to its `)]` (rustfmt may spread it over
+            // several lines). The needle is built here so this test's own text isn't one.
+            let needle = ["#[sqlx", "::test("].concat();
+            let starts = text.lines().filter(|l| l.trim_start().starts_with(&needle));
+            for line in starts {
+                let at = line.as_ptr() as usize - text.as_ptr() as usize;
+                let attribute = &text[at..];
+                let attribute = &attribute[..attribute.find(")]").unwrap()];
+                if attribute.contains("migrations = false") {
+                    continue;
+                }
+                tests += 1;
+                assert!(
+                    attribute.contains("require_h3.sql\")"),
+                    "{}: {attribute}",
+                    file.display()
+                );
+            }
+        }
+        assert!(tests > 100, "{tests}");
+    }
     #[test]
     fn h3_without_the_function_is_refused_with_the_version_and_the_remedy() {
         use super::{h3_requirement, H3Install};
