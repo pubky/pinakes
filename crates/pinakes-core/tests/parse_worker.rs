@@ -176,3 +176,93 @@ async fn an_abandoned_parse_frees_its_slot_when_its_worker_dies() {
     assert_eq!(html::running(), before);
     assert!(no_worker_left());
 }
+
+/// An Internet Archive answer with 20,000 descriptions in markup (Codex's case): one job, one
+/// worker for all of them, done well within the job's limits. One worker per fragment took
+/// minutes and outlived its caller.
+#[test]
+fn many_fragments_in_one_job_share_one_worker() {
+    let _serial = worker();
+    let descriptions: Vec<String> = (0..20_000).map(|n| format!("<b>x{n}</b>")).collect();
+    let body = serde_json::json!({
+        "metadata": {"identifier": "many", "title": "Many", "description": descriptions}
+    })
+    .to_string();
+    let started = Instant::now();
+    let card = html::off_runtime(|| {
+        pinakes_core::sources::internet_archive::parse(200, body.as_bytes(), "many")
+    })
+    .unwrap()
+    .unwrap();
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_secs(20), "{elapsed:?}");
+    let description = card.description.unwrap();
+    assert!(
+        description.starts_with("x0\nx1\n"),
+        "{}",
+        &description[..20]
+    );
+    assert!(description.ends_with("x19999"));
+    assert!(no_worker_left());
+}
+
+/// A job whose caller stops waiting ends at once: its worker is killed, every later parse of
+/// the job fails without a worker, and the slot is free well before the loop would have ended.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn a_cancelled_job_stops_its_loop() {
+    let _serial = worker();
+    let before = html::running();
+    let refused = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = refused.clone();
+    let job = tokio::spawn(html::blocking(move || {
+        for n in 0..1_000_000 {
+            if html::fragment(&format!("<b>x{n}</b>")).is_err() {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(html::running() > before);
+    job.abort();
+    let started = Instant::now();
+    while html::running() != before && started.elapsed() < Duration::from_secs(10) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(html::running(), before, "{:?}", started.elapsed());
+    assert!(refused.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    assert!(no_worker_left());
+}
+
+/// A 1,000-event calendar as calendars are written: plain locations and descriptions with a
+/// meeting link, and an HTML description per event. It parses within the calendar's own budget
+/// (two seconds by default) with every fragment parse through the worker, and its conference
+/// links are found.
+#[test]
+fn a_thousand_event_calendar_parses_in_its_budget_with_the_worker() {
+    let _serial = worker();
+    let mut ics = String::from("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n");
+    for n in 0..1_000 {
+        ics.push_str(&format!(
+            "BEGIN:VEVENT\r\nUID:event-{n}@example.org\r\nDTSTAMP:20261001T000000Z\r\nDTSTART:20261101T{h:02}0000Z\r\nDTEND:20261101T{h:02}3000Z\r\nSUMMARY:Meeting {n}\r\nLOCATION:Room {n}\r\nDESCRIPTION:Join at https://meet.example.org/room-{n} and bring notes.\r\nX-ALT-DESC;FMTTYPE=text/html:<p>Join <a href=\"https://zoom.us/j/{n}\">on Zoom</a></p>\r\nEND:VEVENT\r\n",
+            h = n % 24
+        ));
+    }
+    ics.push_str("END:VCALENDAR\r\n");
+    assert!(ics.len() > 150_000);
+    let started = Instant::now();
+    let doc = html::off_runtime(|| {
+        pinakes_core::event::calendar::parse(
+            "https://example.org/calendar.ics",
+            ics.as_bytes(),
+            &Default::default(),
+            chrono::Utc::now(),
+        )
+    })
+    .unwrap();
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+    let container = doc.container.expect("a calendar");
+    assert_eq!(container.occurrences.len(), 1_000);
+    assert!(no_worker_left());
+}

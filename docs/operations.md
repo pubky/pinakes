@@ -183,10 +183,14 @@ a head ends (a `</head>` in a script is not one). A read that cuts stops as soon
 its cap, so a sender that stalls there costs no timeout. An image or PDF past the
 cap is cut too, never refused: its card comes from its URL. Every HTML parse (pages, and HTML
 inside API answers) runs in a child process, `pinakesd parse-worker` (the daemon itself; one
-that cannot run it does not start), under a CPU limit (1 s of CPU time, 10 s in a debug build),
-a memory limit (1 GiB) and a wall-clock deadline. Past any of them the child dies, the parse slot
-is freed, and the resource is recorded as `too_complex`: final, with no card, until
-`pinakesd reextract` revives it (the daemon logs `an HTML parse did not end within its limits`).
+that cannot run it does not start). All the parses of one job (a page's extraction, a source's
+answer with many HTML descriptions, a calendar's events) share one worker and its limits: 1 s of
+CPU time (10 s in a debug build), 1 GiB of memory and a wall-clock deadline. Past any of them, or
+as soon as the job's caller stops waiting, the worker dies, every later parse of the job fails
+at once, the parse slot is freed, and the resource is recorded as `too_complex`: final, with no
+card, until `pinakesd reextract` revives it (the daemon logs `an HTML parse did not end within
+its limits`). Text without markup (no `<`) is
+parsed in the daemon, in linear time, without a worker.
 The tree a worker answers with keeps no node more than 256 elements deep and at most 500,000
 nodes (the largest of 149 real pages has 37,000). Before the parse, a linear scan cuts the text
 at the first obvious cap: 50,000 start tags, 256 open elements, 64 attributes on one tag (end

@@ -7,16 +7,21 @@
 //! (a test checks no other code names the parser). The bound does not depend on predicting what
 //! the parser does with a text:
 //!
-//! 1. **The worker.** The parse runs in a child process (`pinakesd parse-worker`, or the
+//! 1. **The worker.** Parses run in a child process (`pinakesd parse-worker`, or the
 //!    `pinakes-parse` binary) under `RLIMIT_CPU` (`PARSE_BUDGET` of CPU time) and `RLIMIT_AS`
-//!    (`PARSE_MEMORY`), with a wall-clock deadline in the parent. Past any of them the child dies
-//!    or is killed, the parse slot is freed, and the parse fails as `TooComplex` (the failure
-//!    kind `too_complex`): no card. The child answers with the tree, within `MAX_DEPTH` (a deeper
+//!    (`PARSE_MEMORY`). One `blocking` call is one job (`Job`): its parses share one worker,
+//!    started at the first and ended with the job, so they share its CPU budget and one wall
+//!    deadline, and a watchdog kills the worker at that deadline or as soon as the caller stops
+//!    waiting. Past any limit the parse fails as `TooComplex` (the failure kind `too_complex`):
+//!    no card. Every later parse of that job fails at once, so a loop over many fragments ends
+//!    within the job's budget too. The worker answers with the tree, within `MAX_DEPTH` (a deeper
 //!    node is left out) and `MAX_NODES` (more is `TooComplex`), so what the parent reads back is
-//!    bounded and linear to rebuild. The daemon and the e2e stack are their own workers
-//!    (`set_worker`); `PINAKES_PARSE_WORKER` names one for any other program. Without a worker
-//!    (a library user, most tests) the parse runs in this process, fed a kibibyte at a time and
-//!    stopped at the budget of its thread's CPU time, with the same caps on the tree.
+//!    bounded and linear to rebuild. Text without a `<` holds no markup and is parsed in this
+//!    process (in linear time), without a worker. The daemon and the e2e stack are their own
+//!    workers (`set_worker`); `PINAKES_PARSE_WORKER` names one for any other program. Without a
+//!    worker (a library user, most tests) the parse runs in this process, fed a kibibyte at a
+//!    time and stopped when the job has used its budget of the thread's CPU time, with the same
+//!    caps on the tree.
 //! 2. **The scan** reads the text once, the way the parser does, and cuts it at the first point
 //!    that passes a cap, so the known hostile shapes stop at once and keep what precedes them:
 //!
@@ -37,19 +42,20 @@
 //!    the parser meets the worker's limits.
 //!
 //! A parse runs in `blocking`: on the blocking pool, holding one of a fixed number of permits
-//! until the parse itself ends, even after its caller stopped waiting. In debug builds a parse on
-//! a runtime thread outside `blocking` panics, so the tests find any path that skips it.
+//! until the job ends (its worker dies within 50 ms of its caller giving up). In debug builds a
+//! parse on a runtime thread outside `blocking` panics, so the tests find any path that skips it.
 use anyhow::Context;
 use html5ever::tendril::{StrTendril, TendrilSink};
 use html5ever::{Attribute, LocalName, Namespace, Prefix, QualName};
 use scraper::node::{Comment, Doctype, Element, ProcessingInstruction, Text};
 use scraper::Node;
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
@@ -80,8 +86,6 @@ const PARSE_CHUNK: usize = 1024;
 /// The largest answer a worker may give (the tree, serialized): a tree within `MAX_NODES` from
 /// a page within the head budget is far smaller.
 const MAX_TREE_BYTES: usize = 64 * 1024 * 1024;
-/// The worker's exit status for a tree past `MAX_NODES`.
-const EXIT_TOO_MANY_NODES: i32 = 3;
 
 const VOID: &[&str] = &[
     "area", "base", "basefont", "bgsound", "br", "col", "embed", "frame", "hr", "image", "img",
@@ -291,7 +295,8 @@ static PERMITS: LazyLock<usize> = LazyLock::new(|| {
 });
 static PARSES: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(*PERMITS)));
 thread_local! {
-    static IN_SLOT: Cell<bool> = const { Cell::new(false) };
+    /// The parse job this thread runs, while it runs one (`blocking`, `off_runtime`).
+    static JOB: RefCell<Option<Job>> = const { RefCell::new(None) };
 }
 
 /// The page parses running now.
@@ -299,43 +304,63 @@ pub fn running() -> usize {
     *PERMITS - PARSES.available_permits()
 }
 
-/// Run `parse` on the blocking pool once a parse permit is free, holding the permit until
-/// `parse` returns, even when the caller has stopped waiting.
+/// Sets its flag when dropped: the caller of `blocking` stopped waiting.
+struct Cancel(Arc<AtomicBool>);
+impl Drop for Cancel {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Run `parse` on the blocking pool once a parse permit is free, as one parse job: its parses
+/// share one worker and one budget (`Job`). The permit is held until `parse` returns, even when
+/// the caller has stopped waiting; from then on its parses fail at once and its worker is killed.
 pub async fn blocking<T, F>(parse: F) -> anyhow::Result<T>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
     let permit = PARSES.clone().acquire_owned().await?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let _cancel = Cancel(cancelled.clone());
     Ok(tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        IN_SLOT.with(|slot| slot.set(true));
-        let out = parse();
-        IN_SLOT.with(|slot| slot.set(false));
-        out
+        in_job(Job::new(PARSE_BUDGET, cancelled), parse)
     })
     .await?)
 }
 
-/// Run a parse on a thread of its own, outside the runtime and its permits, and wait for it: for
-/// tests and tools that parse from async code. Daemon code uses `blocking`; a test checks no code
-/// in `src` calls this.
+/// Run a parse on a thread of its own, outside the runtime and its permits, as one parse job,
+/// and wait for it: for tests and tools that parse from async code. Daemon code uses `blocking`;
+/// a test checks no code in `src` calls this.
 #[doc(hidden)]
 pub fn off_runtime<T: Send>(parse: impl FnOnce() -> T + Send) -> T {
     std::thread::scope(|scope| {
         scope
-            .spawn(|| {
-                IN_SLOT.with(|slot| slot.set(true));
-                parse()
-            })
+            .spawn(|| in_job(Job::new(PARSE_BUDGET, Arc::default()), parse))
             .join()
             .expect("parse thread")
     })
 }
 
+/// Run `f` with `job` as this thread's parse job, and end the job (and its worker) after.
+fn in_job<T>(job: Job, f: impl FnOnce() -> T) -> T {
+    struct End;
+    impl Drop for End {
+        fn drop(&mut self) {
+            if let Some(job) = JOB.with(|j| j.borrow_mut().take()) {
+                job.end();
+            }
+        }
+    }
+    JOB.with(|j| *j.borrow_mut() = Some(job));
+    let _end = End;
+    f()
+}
+
 fn check_slot() {
     debug_assert!(
-        IN_SLOT.with(Cell::get) || tokio::runtime::Handle::try_current().is_err(),
+        JOB.with(|j| j.borrow().is_some()) || tokio::runtime::Handle::try_current().is_err(),
         "an HTML parse on a runtime thread outside resolver::html::blocking"
     );
 }
@@ -358,20 +383,20 @@ enum Kind {
     Fragment = 1,
 }
 
-/// `text` parsed as an HTML document, within the caps and the limits.
+/// `text` parsed as an HTML document, within the caps and the job's limits.
 pub fn document(text: &str) -> anyhow::Result<scraper::Html> {
     check_slot();
     parse(Kind::Document, bounded(text), PARSE_BUDGET)
 }
 
-/// `text` parsed as an HTML fragment, within the caps and the limits.
+/// `text` parsed as an HTML fragment, within the caps and the job's limits.
 pub fn fragment(text: &str) -> anyhow::Result<scraper::Html> {
     check_slot();
     parse(Kind::Fragment, bounded(text), PARSE_BUDGET)
 }
 
-/// `text` parsed as a document with the scan's cut skipped and `budget` of CPU time: for the
-/// tests of the limits themselves.
+/// `text` parsed as a document with the scan's cut skipped: for the tests of the limits
+/// themselves. Outside a job, it runs as a job of its own with `budget`.
 #[doc(hidden)]
 pub fn document_unscanned(text: &str, budget: Duration) -> anyhow::Result<scraper::Html> {
     check_slot();
@@ -386,10 +411,19 @@ pub fn bounded(text: &str) -> &str {
     scan.cut.map_or(text, |at| &text[..at])
 }
 
+/// Parse in this thread's job, or in a job of its own with `budget` outside one.
 fn parse(kind: Kind, text: &str, budget: Duration) -> anyhow::Result<scraper::Html> {
-    let result = match worker() {
-        Some(worker) => parse_with_worker(worker, kind, text, budget),
-        None => parse_in_process(kind, text, budget),
+    let result = if !text.contains('<') {
+        // No markup: the tokenizer reads text in linear time, and there is no tree to build.
+        // Nothing to send to a worker (a calendar's thousand plain descriptions).
+        parse_in_process(kind, text, PARSE_BUDGET)
+    } else if JOB.with(|j| j.borrow().is_some()) {
+        JOB.with(|j| j.borrow_mut().as_mut().expect("a job").parse(kind, text))
+    } else {
+        let mut job = Job::new(budget, Arc::default());
+        let result = job.parse(kind, text);
+        job.end();
+        result
     };
     if let Some(too_complex) = result
         .as_ref()
@@ -445,8 +479,13 @@ pub fn has_worker() -> bool {
 
 /// Parse a small document through the worker: a daemon checks it can before it serves.
 pub fn check_worker() -> anyhow::Result<()> {
-    let worker = worker().context("no parse worker is set")?;
-    let html = parse_with_worker(worker, Kind::Document, "<p>worker</p>", PARSE_BUDGET)?;
+    anyhow::ensure!(has_worker(), "no parse worker is set");
+    let mut job = Job::new(PARSE_BUDGET, Arc::default());
+    let html = job.parse(Kind::Document, "<p>worker</p>");
+    let spawned = job.process.is_some();
+    job.end();
+    let html = html?;
+    anyhow::ensure!(spawned, "the parse ran without its worker");
     let p = scraper::Selector::parse("p").expect("a selector");
     anyhow::ensure!(
         html.select(&p).next().map(|e| e.inner_html()).as_deref() == Some("worker"),
@@ -455,101 +494,203 @@ pub fn check_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn parse_with_worker(
-    worker: &Worker,
-    kind: Kind,
-    text: &str,
+/// One parse job: everything one `blocking` call (or one parse outside any) parses. Its parses
+/// share one worker process, started at the first and ended with the job, so they share the
+/// worker's CPU budget (`RLIMIT_CPU` counts the process's whole life) and one wall deadline.
+/// Once the worker has died at a limit, or the caller has stopped waiting, every later parse of
+/// the job fails at once: a loop over twenty thousand fragments ends in its budget, not in
+/// twenty thousand of them. Without a worker, the job's parses share the thread's CPU budget.
+struct Job {
     budget: Duration,
-) -> anyhow::Result<scraper::Html> {
-    let secs = budget.as_secs().max(1);
-    let mut child = Command::new(&worker.program)
-        .args(&worker.args)
-        .arg(secs.to_string())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| {
-            format!(
-                "the parse worker {} did not start",
-                worker.program.display()
-            )
-        })?;
-    let mut stdin = child.stdin.take().expect("a piped stdin");
-    let mut stdout = child.stdout.take().expect("a piped stdout");
-    // The child dies by itself at its CPU or memory limit; the watchdog kills one that is still
-    // there at the wall deadline (a host under load runs it slower than its CPU time).
-    let shared = Arc::new((Mutex::new(Some(child)), Condvar::new()));
-    let wall = budget * 3 + Duration::from_secs(1);
-    let watchdog = {
-        let shared = shared.clone();
-        std::thread::spawn(move || {
-            let (child, done) = &*shared;
-            let deadline = Instant::now() + wall;
-            let mut slot = child.lock().unwrap_or_else(|e| e.into_inner());
-            while slot.is_some() {
-                let left = deadline.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    break;
-                }
-                slot = done
-                    .wait_timeout(slot, left)
-                    .unwrap_or_else(|e| e.into_inner())
-                    .0;
-            }
-            match slot.as_mut() {
-                Some(child) => {
-                    let _ = child.kill();
-                    true
-                }
-                None => false,
-            }
-        })
-    };
-    // The child reads everything before it answers, so writing and then reading cannot
-    // deadlock; a write that fails means the child has ended, and its status says why.
-    let mut input = Vec::with_capacity(text.len() + 1);
-    input.push(kind as u8);
-    input.extend_from_slice(text.as_bytes());
-    let _ = stdin.write_all(&input).and_then(|()| stdin.flush());
-    drop(stdin);
-    let mut answer = Vec::new();
-    let _ = (&mut stdout)
-        .take(MAX_TREE_BYTES as u64 + 1)
-        .read_to_end(&mut answer);
-    drop(stdout);
-    let status = {
-        let (child, done) = &*shared;
-        let child = child.lock().unwrap_or_else(|e| e.into_inner()).take();
-        done.notify_all();
-        child.map(|mut child| child.wait())
-    };
-    let killed = watchdog.join().unwrap_or(false);
-    let status = status.context("the parse worker was lost")??;
-    let reason = if killed {
-        Some("the wall deadline")
-    } else if status.signal() == Some(libc::SIGXCPU) {
-        Some("the CPU budget")
-    } else if status.signal() == Some(libc::SIGABRT) {
-        Some("the memory limit")
-    } else if status.code() == Some(EXIT_TOO_MANY_NODES) {
-        Some("more nodes than the cap")
-    } else if !status.success() {
-        Some("the worker ended early")
-    } else if answer.len() > MAX_TREE_BYTES {
-        Some("a larger tree than the cap")
-    } else {
-        None
-    };
-    if let Some(reason) = reason {
-        return Err(TooComplex { reason }.into());
-    }
-    decode(&answer, kind).context("the parse worker's answer is malformed")
+    deadline: Instant,
+    cancelled: Arc<AtomicBool>,
+    /// The thread's CPU time when the job started (for parses without a worker).
+    cpu_started: Duration,
+    /// Why the job parses no more.
+    over: Option<&'static str>,
+    process: Option<Process>,
 }
 
-/// The parse worker: parse what stdin holds (the kind byte, then the text) under `cpu_secs` of
-/// CPU time and `PARSE_MEMORY`, and write the tree to stdout. The exit status: 0, or
-/// `EXIT_TOO_MANY_NODES`, or 2 when the input or the limits are not as expected.
+/// A running worker: its pipes, and the watchdog that kills it.
+struct Process {
+    shared: Arc<(Mutex<Option<std::process::Child>>, Condvar)>,
+    stdin: std::process::ChildStdin,
+    stdout: std::process::ChildStdout,
+    watchdog: std::thread::JoinHandle<Option<&'static str>>,
+}
+
+impl Job {
+    fn new(budget: Duration, cancelled: Arc<AtomicBool>) -> Self {
+        Self {
+            budget,
+            // A host under load runs the worker slower than its CPU time.
+            deadline: Instant::now() + budget * 3 + Duration::from_secs(1),
+            cancelled,
+            cpu_started: thread_cpu(),
+            over: None,
+            process: None,
+        }
+    }
+
+    fn parse(&mut self, kind: Kind, text: &str) -> anyhow::Result<scraper::Html> {
+        if self.over.is_none() && self.cancelled.load(Ordering::SeqCst) {
+            self.over = Some("the caller stopped waiting");
+        }
+        if self.over.is_none() && Instant::now() >= self.deadline {
+            self.over = Some("the wall deadline");
+        }
+        if let Some(reason) = self.over {
+            return Err(TooComplex { reason }.into());
+        }
+        let Some(worker) = worker() else {
+            let left = self
+                .budget
+                .saturating_sub(thread_cpu().saturating_sub(self.cpu_started));
+            if left.is_zero() {
+                self.over = Some("the CPU budget");
+                return Err(TooComplex {
+                    reason: "the CPU budget",
+                }
+                .into());
+            }
+            return parse_in_process(kind, text, left);
+        };
+        if self.process.is_none() {
+            self.process = Some(self.start(worker)?);
+        }
+        match self.ask(kind, text) {
+            Ok(Some(html)) => Ok(html),
+            Ok(None) => Err(TooComplex {
+                reason: "more nodes than the cap",
+            }
+            .into()),
+            Err(_) => {
+                // The worker is gone: its status, or the watchdog, says why.
+                let reason = self.stop();
+                self.over = Some(reason);
+                Err(TooComplex { reason }.into())
+            }
+        }
+    }
+
+    fn start(&self, worker: &Worker) -> anyhow::Result<Process> {
+        let mut child = Command::new(&worker.program)
+            .args(&worker.args)
+            .arg(self.budget.as_secs().max(1).to_string())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context(|| {
+                format!(
+                    "the parse worker {} did not start",
+                    worker.program.display()
+                )
+            })?;
+        let stdin = child.stdin.take().expect("a piped stdin");
+        let stdout = child.stdout.take().expect("a piped stdout");
+        let shared = Arc::new((Mutex::new(Some(child)), Condvar::new()));
+        // The child dies by itself at its CPU or memory limit; the watchdog kills one still there
+        // at the job's wall deadline, or as soon as the caller stops waiting.
+        let watchdog = {
+            let (shared, cancelled, deadline) =
+                (shared.clone(), self.cancelled.clone(), self.deadline);
+            std::thread::spawn(move || {
+                let (child, done) = &*shared;
+                let mut slot = child.lock().unwrap_or_else(|e| e.into_inner());
+                loop {
+                    let running = slot.as_mut()?;
+                    let reason = if cancelled.load(Ordering::SeqCst) {
+                        Some("the caller stopped waiting")
+                    } else if Instant::now() >= deadline {
+                        Some("the wall deadline")
+                    } else {
+                        None
+                    };
+                    if let Some(reason) = reason {
+                        let _ = running.kill();
+                        return Some(reason);
+                    }
+                    let wait = deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(50));
+                    slot = done
+                        .wait_timeout(slot, wait)
+                        .unwrap_or_else(|e| e.into_inner())
+                        .0;
+                }
+            })
+        };
+        Ok(Process {
+            shared,
+            stdin,
+            stdout,
+            watchdog,
+        })
+    }
+
+    /// One request: the kind and the text's length, then the text; the answer's status and
+    /// length, then the tree. `None` when the worker refused the tree (past `MAX_NODES`).
+    fn ask(&mut self, kind: Kind, text: &str) -> anyhow::Result<Option<scraper::Html>> {
+        let process = self.process.as_mut().expect("a running worker");
+        let mut head = [0u8; 5];
+        head[0] = kind as u8;
+        head[1..].copy_from_slice(&u32::try_from(text.len())?.to_le_bytes());
+        process.stdin.write_all(&head)?;
+        process.stdin.write_all(text.as_bytes())?;
+        process.stdin.flush()?;
+        process.stdout.read_exact(&mut head)?;
+        let len = u32::from_le_bytes(head[1..].try_into().expect("four bytes")) as usize;
+        match head[0] {
+            0 if len <= MAX_TREE_BYTES => {}
+            ANSWER_TOO_MANY_NODES => return Ok(None),
+            _ => anyhow::bail!("an answer out of bounds"),
+        }
+        let mut answer = vec![0; len];
+        process.stdout.read_exact(&mut answer)?;
+        Ok(Some(
+            decode(&answer, kind).context("the parse worker's answer is malformed")?,
+        ))
+    }
+
+    /// End the worker and say why it ended: closed, killed, or dead at a limit.
+    fn stop(&mut self) -> &'static str {
+        let Some(process) = self.process.take() else {
+            return "the worker ended early";
+        };
+        drop(process.stdin);
+        drop(process.stdout);
+        let status = {
+            let (child, done) = &*process.shared;
+            let child = child.lock().unwrap_or_else(|e| e.into_inner()).take();
+            done.notify_all();
+            child.map(|mut child| child.wait())
+        };
+        let killed = process.watchdog.join().ok().flatten();
+        if let Some(reason) = killed {
+            return reason;
+        }
+        match status {
+            Some(Ok(status)) if status.signal() == Some(libc::SIGXCPU) => "the CPU budget",
+            Some(Ok(status)) if matches!(status.signal(), Some(libc::SIGABRT | libc::SIGSEGV)) => {
+                "the memory limit"
+            }
+            _ => "the worker ended early",
+        }
+    }
+
+    fn end(mut self) {
+        let _ = self.stop();
+    }
+}
+
+/// A worker's answer status for a tree past `MAX_NODES` (it goes on with the next request).
+const ANSWER_TOO_MANY_NODES: u8 = 3;
+
+/// The parse worker: parse each request on stdin (the kind byte, the text's length, the text)
+/// under `cpu_secs` of CPU time for all of them and `PARSE_MEMORY`, and answer each on stdout
+/// (a status byte, the tree's length, the tree). Ends with 0 when stdin closes, 2 when the input
+/// or the limits are not as expected.
 pub fn worker_main(cpu_secs: u64) -> i32 {
     let limit = |resource, soft: u64, hard: u64| {
         let limit = libc::rlimit {
@@ -565,31 +706,46 @@ pub fn worker_main(cpu_secs: u64) -> i32 {
     {
         return 2;
     }
-    let mut input = Vec::new();
-    if std::io::stdin().lock().read_to_end(&mut input).is_err() || input.is_empty() {
-        return 2;
-    }
-    let (Some(kind), Ok(text)) = (Kind::from_byte(input[0]), std::str::from_utf8(&input[1..]))
-    else {
-        return 2;
-    };
-    let html = match kind {
-        Kind::Document => scraper::Html::parse_document(text),
-        Kind::Fragment => scraper::Html::parse_fragment(text),
-    };
-    let mut answer = Vec::new();
-    if encode(&html, &mut answer).is_err() {
-        return EXIT_TOO_MANY_NODES;
-    }
+    let mut stdin = std::io::stdin().lock();
     let mut stdout = std::io::stdout().lock();
-    if stdout
-        .write_all(&answer)
-        .and_then(|()| stdout.flush())
-        .is_err()
-    {
-        return 2;
+    loop {
+        let mut head = [0u8; 5];
+        match stdin.read_exact(&mut head) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return 0,
+            Err(_) => return 2,
+        }
+        let len = u32::from_le_bytes(head[1..].try_into().expect("four bytes")) as usize;
+        let mut text = vec![0; len];
+        if stdin.read_exact(&mut text).is_err() {
+            return 2;
+        }
+        let (Some(kind), Ok(text)) = (Kind::from_byte(head[0]), std::str::from_utf8(&text)) else {
+            return 2;
+        };
+        let html = match kind {
+            Kind::Document => scraper::Html::parse_document(text),
+            Kind::Fragment => scraper::Html::parse_fragment(text),
+        };
+        let mut answer = Vec::new();
+        let status = match encode(&html, &mut answer) {
+            Ok(()) => 0,
+            Err(()) => {
+                answer.clear();
+                ANSWER_TOO_MANY_NODES
+            }
+        };
+        let mut head = [status, 0, 0, 0, 0];
+        head[1..].copy_from_slice(&(answer.len() as u32).to_le_bytes());
+        if stdout
+            .write_all(&head)
+            .and_then(|()| stdout.write_all(&answer))
+            .and_then(|()| stdout.flush())
+            .is_err()
+        {
+            return 2;
+        }
     }
-    0
 }
 
 impl Kind {
