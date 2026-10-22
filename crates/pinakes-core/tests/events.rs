@@ -4354,3 +4354,53 @@ fn a_month_day_filter_counts_as_the_whole_month_whatever_its_signs() {
     assert!(c.occurrences.len() >= 20, "{}", c.occurrences.len());
     assert!(c.warnings.is_empty(), "{:?}", c.warnings);
 }
+
+#[test]
+fn an_unexpanded_rule_keeps_its_date_lists_and_the_horizon() {
+    // A rule over the bound gives no dates of its own, but its event's DTSTART, RDATE and
+    // EXDATE, and the horizon, still apply.
+    let every = |n: usize| (0..n).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+    let flood = format!(
+        "freq=yearly;byday=mo,tu,we,th,fr,sa,su;byhour={};byminute={};bysecond={}",
+        every(24),
+        every(60),
+        every(60)
+    );
+    let starts = |props: &str| {
+        let c = parse(&cal(&event(&format!(
+            "UID:u\n{props}\nRRULE:{flood}\nSUMMARY:u"
+        ))))
+        .container
+        .unwrap();
+        assert!(
+            c.warnings.contains(&"series_rule_unexpanded".to_string()),
+            "{props}: {:?}",
+            c.warnings
+        );
+        let mut starts: Vec<String> = c
+            .occurrences
+            .iter()
+            .map(|o| o.doc.start.unwrap().to_rfc3339())
+            .collect();
+        starts.sort();
+        starts
+    };
+    // DTSTART alone.
+    assert_eq!(
+        starts("DTSTART:20261120T120000Z"),
+        ["2026-11-20T12:00:00+00:00"]
+    );
+    // An EXDATE removes it.
+    assert!(starts("DTSTART:20261120T120000Z\nEXDATE:20261120T120000Z").is_empty());
+    // An RDATE adds one.
+    assert_eq!(
+        starts("DTSTART:20261120T120000Z\nRDATE:20261205T120000Z"),
+        ["2026-11-20T12:00:00+00:00", "2026-12-05T12:00:00+00:00"]
+    );
+    // A DTSTART before the horizon gives nothing; an RDATE within it still counts.
+    assert!(starts("DTSTART:20000101T120000Z").is_empty());
+    assert_eq!(
+        starts("DTSTART:20000101T120000Z\nRDATE:20261205T120000Z"),
+        ["2026-12-05T12:00:00+00:00"]
+    );
+}

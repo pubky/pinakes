@@ -398,8 +398,8 @@ lines are unfolded from that bounded body and parsed on a blocking worker under
 `limits.event_parse_timeout_ms`. A malformed VEVENT is skipped with a warning; exceeding a work
 or feed cap rejects the snapshot. A recurrence rule is expanded only when one of its periods
 holds at most `limits.event_max_period_dates` dates (the recurrence library builds a whole period
-before giving its first date); an event with a larger rule keeps its first occurrence, with the
-warning `series_rule_unexpanded`. After an upgrade that changes how rules are read, run
+before giving its first date); an event with a larger rule keeps DTSTART and its RDATEs, less its
+EXDATEs, with the warning `series_rule_unexpanded`. After an upgrade that changes how rules are read, run
 `pinakesd reextract event`: feeds re-parse at once instead of at their next fetch. A JSON feed (Gancio, a JSON Feed) is parsed as one document,
 so its parsed form can take several times `limits.event_feed_body_bytes` of memory; size that
 limit with the worker count in mind. `webcal://` is fetched over HTTPS and never downgrades. A

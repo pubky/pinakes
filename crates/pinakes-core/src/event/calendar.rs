@@ -870,8 +870,8 @@ fn series_start(
     }
 }
 /// Expand a series from its series stamp (`series_start`, applied by `parse`). A rule whose
-/// periods hold too many dates is not expanded: the event keeps its first occurrence, with the
-/// warning `series_rule_unexpanded`.
+/// periods hold too many dates is not expanded: the event keeps DTSTART and its RDATEs, less its
+/// EXDATEs, within the horizon, with the warning `series_rule_unexpanded`.
 #[allow(clippy::too_many_arguments)]
 fn expand(
     c: &Component,
@@ -957,9 +957,12 @@ fn expand(
             parts.join(";")
         )
         .parse()?;
-        if !time::rrule_bounded(&set, cfg.max_period_dates) {
+        // A rule whose periods would hold too many dates gives no dates of its own; DTSTART,
+        // RDATE, EXDATE and the horizon still apply below. The iterator is never asked for a date,
+        // so it never builds a period.
+        let bounded = time::rrule_bounded(&set, cfg.max_period_dates);
+        if !bounded {
             warnings.push("series_rule_unexpanded".into());
-            return Ok(out);
         }
         // Generate floating wall values with the bounded RRULE iterator, then apply RFC gap rules.
         let take = cfg
@@ -967,7 +970,8 @@ fn expand(
             .saturating_mul(2)
             .saturating_add(10);
         let mut included = 0;
-        for (steps, d) in set.limit().into_iter().enumerate() {
+        let dates = bounded.then(|| set.limit().into_iter());
+        for (steps, d) in dates.into_iter().flatten().enumerate() {
             ensure!(
                 steps < cfg.max_recurrence_steps && std::time::Instant::now() < deadline,
                 "recurrence work budget"
