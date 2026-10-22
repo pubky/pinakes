@@ -116,6 +116,11 @@ pub struct ResourceMeta {
     /// kind of failure it was; never stored.
     #[serde(skip)]
     pub http_status: Option<u16>,
+    /// Missing by its own content (a Pubky app's object without a card), not because its
+    /// upstream failed to answer: confirmed at once, as it cannot flap. Never stored.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub withheld: bool,
     /// When the card changes by itself (an incident expires, an auction ends): its next fetch
     /// comes no later (`queue::refresh_by`). Never stored.
     #[serde(skip)]

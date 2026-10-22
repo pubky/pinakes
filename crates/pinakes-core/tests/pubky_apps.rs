@@ -796,19 +796,22 @@ async fn an_object_that_loses_its_card_keeps_nothing_of_it(pool: PgPool) {
         store::save_document(&pool, &id, 0, &doc).await.unwrap();
         let shown = get(&app, &format!("/v1/resources/{id}")).await;
         assert_eq!(shown["status"], "ok", "{shown}");
-        // Withdrawn by its owner: missing once a second fetch confirms it, with nothing of the
-        // card it had.
+        // Withdrawn by its owner: missing at once (its content says so, it cannot flap), with
+        // nothing of the card it had.
         let mut v: Value = serde_json::from_slice(&body).unwrap();
         for (k, value) in change.as_object().unwrap() {
             v[k] = value.clone();
         }
-        let mut gone = card_of(&uri, v.to_string().as_bytes());
+        let mut gone = pubky_apps::card(
+            &uri,
+            "application/octet-stream",
+            v.to_string().as_bytes(),
+            86400,
+        );
         assert_eq!(gone.status, Status::Missing);
-        for _ in 0..2 {
-            doc.fetched_at += 1000;
-            gone.fetched_at = doc.fetched_at;
-            store::save_document(&pool, &id, 0, &gone).await.unwrap();
-        }
+        doc.fetched_at += 1000;
+        gone.fetched_at = doc.fetched_at;
+        store::save_document(&pool, &id, 0, &gone).await.unwrap();
         let shown = get(&app, &format!("/v1/resources/{id}")).await;
         assert_eq!(shown["status"], "missing", "{shown}");
         for field in ["name", "description", "image", "point"] {
@@ -817,6 +820,27 @@ async fn an_object_that_loses_its_card_keeps_nothing_of_it(pool: PgPool) {
         assert_eq!(shown["type"], "CreativeWork", "{shown}");
         assert_eq!(shown["open_in"], json!([]), "{shown}");
         assert!(shown["details"]["facts"].is_null(), "{shown}");
+        // Its history keeps its lines (created, then withdrawn) but none of its text.
+        let lines: Vec<(String, Option<Value>, Option<Value>)> = sqlx::query_as(
+            "SELECT class,before,after FROM resource_change WHERE resource_id=$1 ORDER BY seq",
+        )
+        .bind(&id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(lines.len(), 2, "{name}: {lines:?}");
+        assert!(
+            lines.iter().all(|(_, b, a)| b.is_none() && a.is_none()),
+            "{name}: {lines:?}"
+        );
+        let name_text = doc.name.clone().unwrap();
+        let journal: String =
+            sqlx::query_scalar("SELECT coalesce(string_agg(r::text,' '),'') FROM resource_change r WHERE resource_id=$1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!journal.contains(&name_text), "{name}: {journal}");
     }
 }
 

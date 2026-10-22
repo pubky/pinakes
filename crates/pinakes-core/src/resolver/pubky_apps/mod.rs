@@ -190,6 +190,7 @@ pub fn card_at(
                 empty.set_type("CreativeWork");
                 empty.site = doc.site;
                 empty.status = Status::Missing;
+                empty.withheld = true;
                 return empty;
             }
             let mut links = fill(&object, kind.open_in);

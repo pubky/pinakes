@@ -53,6 +53,7 @@ impl Resolver for PubkyResolver {
                 let mut doc = ResourceMeta::new(uri, "pubky", self.config.ttl_secs);
                 doc.set_type("CreativeWork");
                 doc.status = Status::Missing;
+                doc.withheld = true;
                 return Ok(doc);
             }
             // Only objects of other apps, by their decoded path (`classify`).
