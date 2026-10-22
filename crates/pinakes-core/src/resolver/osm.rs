@@ -180,6 +180,11 @@ fn copy_error(error: &anyhow::Error) -> anyhow::Error {
     anyhow::anyhow!("{error:#}")
 }
 pub(super) fn retry_after(headers: &reqwest::header::HeaderMap) -> u64 {
+    retry_after_named(headers).unwrap_or(60)
+}
+/// The wait a `Retry-After` header names (seconds or an HTTP date), 1 s to an hour; `None`
+/// without one.
+pub(super) fn retry_after_named(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     headers
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|v| v.to_str().ok())
@@ -192,8 +197,7 @@ pub(super) fn retry_after(headers: &reqwest::header::HeaderMap) -> u64 {
                 })
             })
         })
-        .unwrap_or(60)
-        .clamp(1, 3600)
+        .map(|seconds| seconds.clamp(1, 3600))
 }
 pub fn schema_type(category: &str) -> &'static str {
     static MAP: OnceLock<BTreeMap<String, String>> = OnceLock::new();

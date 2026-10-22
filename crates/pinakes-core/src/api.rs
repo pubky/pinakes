@@ -444,6 +444,10 @@ pub struct SearchQuery {
     /// `npm:{name}`, `pypi:{name}`, `repo:{host}/{path}`, `steam:{appid}`, `gog:{id}`,
     /// `fr:{document number}` or `discogs:{artist|master|release}:{id}`.
     pub key: Option<String>,
+    /// Resource ID: what the people who tagged it also referenced, ranked by how many of them
+    /// did, then by the newest of those references (not with `sort`). A resource in a group
+    /// stands for the group, whose members are never listed.
+    pub related: Option<String>,
     pub tags: Option<String>,
     #[serde(rename = "match")]
     pub match_mode: Option<String>,
@@ -451,8 +455,8 @@ pub struct SearchQuery {
     pub reach: Option<String>,
     pub viewer: Option<String>,
     pub sort: Option<String>,
-    /// With `sort=trending`: how far back references count, `1h`–`90d` (`{n}h` or `{n}d`),
-    /// default `7d`.
+    /// With `sort=trending` or `related`: how far back references count, `1h`–`90d` (`{n}h` or
+    /// `{n}d`), default `7d` for trending and `limits.related_window_days` for related.
     pub window: Option<String>,
     #[param(minimum = 1, maximum = 500)]
     pub limit: Option<usize>,
@@ -1078,8 +1082,16 @@ fn validate_search(q: &SearchQuery) -> Result<Vec<String>, ApiError> {
             "sort must be activity, recent, distance, start or trending",
         ));
     }
-    if q.window.is_some() && q.sort.as_deref() != Some("trending") {
-        return Err(ApiError::bad("window applies to sort=trending only"));
+    if q.related.as_deref().is_some_and(|id| !model::valid_id(id)) {
+        return Err(ApiError::bad("related must be a resource ID"));
+    }
+    if q.related.is_some() && q.sort.is_some() {
+        return Err(ApiError::bad("related ranks the rows; it takes no sort"));
+    }
+    if q.window.is_some() && q.sort.as_deref() != Some("trending") && q.related.is_none() {
+        return Err(ApiError::bad(
+            "window applies to sort=trending or related only",
+        ));
     }
     trend_window(q.window.as_deref())?;
     if !matches!(q.match_mode.as_deref(), None | Some("any" | "all")) {
@@ -1204,6 +1216,15 @@ pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
             .ok_or_else(bad),
     }
 }
+/// The columns of `search_unit` (and `resource_unit`), in order.
+pub const UNIT_COLUMNS: &str = "id,uri,host,type,type_path,name,category,point,start_at,end_at,venue_id,doc,search_text,resolver,resolved_at,refresh_at,status,osm_type,osm_id,unit_id,occurrence,event,event_author";
+/// A related row's rank from `{counts}.n` and `.at`: its shared taggers, then the newest of
+/// their references in whole seconds (below 1e10 until 2286), exact in a double up to 900,000
+/// taggers.
+fn related_rank(counts: &str) -> String {
+    format!("({counts}.n*1e10+floor(extract(epoch FROM {counts}.at)))::double precision")
+}
+
 fn scope(
     sql: &mut QueryBuilder<'_, Postgres>,
     q: &SearchQuery,
@@ -1279,7 +1300,64 @@ pub async fn search(
         }
     }
     let trending = q.sort.as_deref() == Some("trending");
+    // `related`: the resource's root (an alias reads as it).
+    let related: Option<String> = match &q.related {
+        Some(id) => Some(
+            sqlx::query_scalar(
+                "SELECT coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)",
+            )
+            .bind(id)
+            .fetch_one(&state.pool)
+            .await?,
+        ),
+        None => None,
+    };
     let mut sql = QueryBuilder::<Postgres>::new("WITH ");
+    if let Some(seed) = &related {
+        // The resource, or its whole group; a sample of the most recent tags in the window on
+        // those not opted out and their aliases, read through the tags-only index, and of the
+        // sample's authors in reach the ones with the newest tag; and the most recent references
+        // each of them made elsewhere in the window, once per resource.
+        let search = &state.config.search;
+        let since = at
+            - if q.window.is_some() {
+                trend_window(q.window.as_deref())?
+            } else {
+                chrono::Duration::days(search.related_window_days.into())
+            };
+        sql.push("related_seed AS (SELECT ")
+            .push_bind(seed.clone())
+            .push("::text AS resource_id UNION SELECT u.resource_id FROM group_unit u WHERE u.group_id=(SELECT group_id FROM group_unit WHERE unit_id=")
+            .push_bind(seed.clone())
+            .push(" AND group_id IS NOT NULL)), related_sources AS (SELECT s.resource_id FROM related_seed s JOIN resource d ON d.id=s.resource_id WHERE coalesce(d.doc->'attributes'->>'opted_out','')<>'true'), related_ids AS (SELECT resource_id FROM related_sources UNION SELECT alias_id FROM resource_alias WHERE root_id IN (SELECT resource_id FROM related_sources)), related_taggers AS (SELECT f.author,max(f.created_at) AS at FROM related_ids i CROSS JOIN LATERAL (SELECT f.author,f.created_at FROM reference f WHERE f.resource_id=i.resource_id AND f.kind='tag' AND f.created_at>=")
+            .push_bind(since)
+            .push(" AND f.created_at<=")
+            .push_bind(at)
+            .push(" ORDER BY f.created_at DESC LIMIT ")
+            .push_bind(search.related_tag_sample as i64)
+            .push(") f WHERE true");
+        scope(&mut sql, &q, &reach);
+        sql.push(" GROUP BY f.author ORDER BY at DESC,f.author LIMIT ")
+            .push_bind(search.related_taggers as i64)
+            .push("), related_refs AS (SELECT a.root AS resource_id,t.author,max(x.created_at) AS at FROM related_taggers t CROSS JOIN LATERAL (SELECT f.resource_id,f.created_at FROM reference f WHERE f.author=t.author AND f.created_at>=")
+            .push_bind(since)
+            .push(" AND f.created_at<=")
+            .push_bind(at)
+            .push(" ORDER BY f.created_at DESC LIMIT ")
+            .push_bind(search.related_refs_per_tagger as i64)
+            .push(") x CROSS JOIN LATERAL (SELECT coalesce((SELECT root_id FROM resource_alias WHERE alias_id=x.resource_id),x.resource_id) AS root) a WHERE a.root NOT IN (SELECT resource_id FROM related_seed) GROUP BY 1,t.author), related AS (SELECT resource_id,count(*) AS n,max(at) AS at");
+        if q.collapse.is_some() {
+            // Its taggers, for its group's count (`eligible`).
+            sql.push(",string_agg(author,' ') AS authors");
+        }
+        sql.push(" FROM related_refs GROUP BY resource_id");
+        if q.collapse.is_none() {
+            // A row needs a crowd, so it never mirrors one person's references.
+            sql.push(" HAVING count(*)>=")
+                .push_bind(search.related_min_shared as i64);
+        }
+        sql.push("), ");
+    }
     if trending {
         // References made inside the window, counted once for all rows (in the same reach),
         // relative to the instant the first page pinned.
@@ -1296,12 +1374,22 @@ pub async fn search(
             sql.push("group_trend AS (SELECT m.group_id,sum(t.n) AS n FROM (SELECT DISTINCT group_id,resource_id FROM group_unit WHERE group_id IS NOT NULL) m JOIN trend t USING(resource_id) GROUP BY m.group_id), ");
         }
     }
-    sql.push(if q.collapse.is_some() {
+    // With `collapse=group`, a related group counts the shared taggers of its members that pass
+    // the filters: those rows first (`related_pass`, each with its taggers and group), ranked
+    // after them.
+    let related_groups = related.is_some() && q.collapse.is_some();
+    sql.push(if related_groups {
+        "related_pass AS (SELECT r.*,rel.at AS rel_at,rel.authors AS rel_authors,gu.group_id AS rel_group"
+    } else if q.collapse.is_some() {
         "eligible AS (SELECT r.*, "
     } else {
         "filtered AS (SELECT r.*, "
     });
-    if trending && q.collapse.is_some() {
+    if related_groups {
+        // Ranked once the rows that pass are known (`eligible` below).
+    } else if related.is_some() {
+        sql.push(related_rank("rel"));
+    } else if trending && q.collapse.is_some() {
         sql.push("coalesce((SELECT g.n FROM group_unit u JOIN group_trend g USING(group_id) WHERE u.unit_id=r.unit_id),t.n)::double precision");
     } else if trending {
         sql.push("t.n::double precision");
@@ -1317,11 +1405,29 @@ pub async fn search(
             .push_bind(at)
             .push("::timestamptz-s.updated_at)))/2592000.0),0)::double precision");
     }
-    sql.push(" AS rank FROM search_unit r LEFT JOIN resource_score s ON s.resource_id=r.id");
+    if !related_groups {
+        sql.push(" AS rank");
+    }
+    if related.is_some() {
+        // Each related resource once, as its own card (never once per occurrence or event
+        // reference), looked up one by one: the set is bounded, and a join would read every card.
+        sql.push(" FROM related rel CROSS JOIN LATERAL (SELECT * FROM resource_unit u WHERE u.id=rel.resource_id OFFSET 0) r");
+    } else {
+        sql.push(" FROM search_unit r");
+    }
+    sql.push(" LEFT JOIN resource_score s ON s.resource_id=r.id");
+    if related_groups {
+        sql.push(" LEFT JOIN group_unit gu ON gu.unit_id=r.unit_id AND gu.group_id IS NOT NULL");
+    }
     if trending {
         sql.push(" JOIN trend t ON t.resource_id=r.id");
     }
     sql.push(" WHERE true");
+    if related.is_some() {
+        // A post whose author opted out of indexing is never suggested, as it is never found by
+        // its text, nor counts toward its group (`eligible` reads the rows that pass).
+        sql.push(" AND coalesce(r.doc->'attributes'->>'opted_out','') <> 'true'");
+    }
     spatial.apply(&mut sql);
     if let Some(venue) = &q.venue {
         sql.push(" AND r.venue_id=").push_bind(venue.clone());
@@ -1384,9 +1490,12 @@ pub async fn search(
             // A post whose author opted out of search indexing is never found by its text.
             .push(") AND coalesce(r.doc->'attributes'->>'opted_out','') <> 'true'");
     }
-    sql.push(" AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id");
-    scope(&mut sql, &q, &reach);
-    sql.push(")");
+    if related.is_none() {
+        // (A related row is referenced by a sampled tagger, who is in scope.)
+        sql.push(" AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id");
+        scope(&mut sql, &q, &reach);
+        sql.push(")");
+    }
     if !tags.is_empty() {
         if q.match_mode.as_deref() == Some("all") {
             for tag in &tags {
@@ -1407,11 +1516,28 @@ pub async fn search(
             sql.push(")");
         }
     }
+    if related_groups {
+        // Each row's group (or the row alone) over the rows that pass: its members' taggers
+        // together, counted once, and the newest of their references. A window over the rows,
+        // never a join of two of these sets, whose sizes the planner cannot know.
+        sql.push("), eligible AS (SELECT ")
+            .push(UNIT_COLUMNS)
+            .push(",")
+            .push(related_rank("g"))
+            .push(" AS rank FROM (SELECT p.*,max(p.rel_at) OVER w AS group_at,string_agg(p.rel_authors,' ') OVER w AS group_authors FROM related_pass p WINDOW w AS (PARTITION BY coalesce(p.rel_group,p.id))) p CROSS JOIN LATERAL (SELECT count(DISTINCT a) AS n,p.group_at AS at FROM unnest(string_to_array(p.group_authors,' ')) a) g WHERE g.n>=")
+            .push_bind(state.config.search.related_min_shared as i64);
+    }
     if q.collapse.is_some() {
         // One row per group: the member with the most references (ties by ID), as itself.
-        // The references are counted once, for the grouped rows only (a per-row count would scan
-        // the alias-resolving view once per row).
-        sql.push("), filtered AS (SELECT DISTINCT ON(coalesce(u.group_id,e.unit_id)) e.* FROM eligible e LEFT JOIN group_unit u ON u.unit_id=e.unit_id AND u.group_id IS NOT NULL LEFT JOIN (SELECT f.resource_id,count(*) AS refs FROM effective_reference f WHERE f.resource_id IN (SELECT x.id FROM eligible x JOIN group_unit g ON g.unit_id=x.unit_id AND g.group_id IS NOT NULL) GROUP BY f.resource_id) c ON c.resource_id=e.id ORDER BY coalesce(u.group_id,e.unit_id),coalesce(c.refs,0) DESC,e.id,e.unit_id");
+        // The references are counted once, for the grouped rows only, through the base table's
+        // index (their IDs and their aliases'), at most `collapse_refs_per_member` each: a popular
+        // member costs the cap, not its history.
+        let cap = state.config.search.collapse_refs_per_member as i64;
+        sql.push("), grouped AS (SELECT DISTINCT x.id FROM eligible x JOIN group_unit g ON g.unit_id=x.unit_id AND g.group_id IS NOT NULL), grouped_ids AS (SELECT id AS root,id AS base FROM grouped UNION ALL SELECT a.root_id,a.alias_id FROM resource_alias a WHERE a.root_id IN (SELECT id FROM grouped)), grouped_refs AS (SELECT gi.root AS resource_id,least(sum(c.n),")
+            .push_bind(cap)
+            .push(") AS refs FROM grouped_ids gi CROSS JOIN LATERAL (SELECT count(*) AS n FROM (SELECT 1 FROM reference f WHERE f.resource_id=gi.base LIMIT ")
+            .push_bind(cap)
+            .push(") x) c GROUP BY gi.root), filtered AS (SELECT DISTINCT ON(coalesce(u.group_id,e.unit_id)) e.* FROM eligible e LEFT JOIN group_unit u ON u.unit_id=e.unit_id AND u.group_id IS NOT NULL LEFT JOIN grouped_refs c ON c.resource_id=e.id ORDER BY coalesce(u.group_id,e.unit_id),coalesce(c.refs,0) DESC,e.id,e.unit_id");
     }
     if let Some(resolution) = spatial.resolution {
         sql.push("), cells AS (SELECT *, h3_latlng_to_cell(point(ST_X(point),ST_Y(point)),")
@@ -1490,7 +1616,13 @@ pub async fn search(
         sql.push("NULL");
     }
     sql.push(") AS facets, jsonb_build_array((SELECT jsonb_agg(jsonb_build_array(cursor,epoch) ORDER BY nexus) FROM feed_cursor),(SELECT revision FROM search_revision WHERE id=1),(SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM same_event_revision)) AS revision");
-    let row = sql.build().fetch_one(&state.pool).await?;
+    // A related page is planned for its own parameters every time: a cached generic plan
+    // guesses its sets hold a row or two and nests loops over thousands.
+    let row = sql
+        .build()
+        .persistent(related.is_none())
+        .fetch_one(&state.pool)
+        .await?;
     if spatial.resolution.is_some()
         && row.try_get::<i64, _>("cell_count")? > state.config.search.max_cluster_cells as i64
     {
@@ -1789,6 +1921,18 @@ pub struct InfoLimits {
     pub occurrence_lookup: usize,
     /// The largest `limit` of one search page.
     pub search_page: usize,
+    /// `related`: the taggers sampled, the authors of the resource's most recent tags, at most this many…
+    pub related_taggers: usize,
+    /// …and how far back their references count without `window` (days)…
+    pub related_window_days: u32,
+    /// …at most this many of each tagger's references (their most recent)…
+    pub related_refs_per_tagger: usize,
+    /// …and a row needs at least this many shared taggers (its group's, when collapsed).
+    pub related_min_shared: usize,
+    /// `related`: the taggers are drawn from the resource's most recent tags, at most this many.
+    pub related_tag_sample: usize,
+    /// `collapse=group`: references counted per member to pick a group's row.
+    pub collapse_refs_per_member: usize,
     /// Requests per minute per client address, every public route together.
     pub requests_per_minute: usize,
     /// `POST /v1/resolve` requests per minute per client address, and per URI.
@@ -1837,6 +1981,12 @@ pub async fn info(State(state): State<AppState>) -> Json<Info> {
             change_lookup: 500,
             occurrence_lookup: 500,
             search_page: 500,
+            related_taggers: c.search.related_taggers,
+            related_window_days: c.search.related_window_days,
+            related_refs_per_tagger: c.search.related_refs_per_tagger,
+            related_min_shared: c.search.related_min_shared,
+            related_tag_sample: c.search.related_tag_sample,
+            collapse_refs_per_member: c.search.collapse_refs_per_member,
             requests_per_minute: c.api.requests_per_minute,
             previews_per_minute: c.preview.requests_per_minute,
             previews_per_uri_per_minute: c.preview.uri_requests_per_minute,

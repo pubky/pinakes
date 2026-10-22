@@ -322,6 +322,7 @@ GET /v1/search?sort=activity
 GET /v1/search?sort=trending&window=24h
 GET /v1/search?sort=trending&window=7d
 GET /v1/search?sort=trending&window=30d
+GET /v1/search?related=586d741bd42f9a0dde1c946b58db20ae
 GET /v1/search?key=mbid:9f9cf187-d6f9-437f-9d98-d59cdbd52757
 GET /v1/search?key=isrc:GBAYE9701376
 GET /v1/search?key=upc:634904078164
@@ -408,13 +409,14 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 | `type` | A schema.org type, ancestors included (`Event` matches `MusicEvent`; `Place` matches cafés and other `LocalBusiness` types) |
 | `category`, `host` | Exact filters |
 | `key` | Links carrying one exact identifier, on any service and in any spelling: `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist), `wikidata:{Q-id}`, `isrc:{code}` (any letter case, hyphens allowed), `upc:{barcode}` (a UPC, EAN or GTIN in any of its lengths, check digit verified), `isbn:{ISBN-10 or ISBN-13}` (an edition), `imdb:{tt…}` (a film or series), `podcast:{GUID}` (a show), `osm:{node|way|relation}/{id}`, `doi:{DOI}`, `arxiv:{id}`, `pmid:{n}`, `pmcid:PMC{n}`, `crate:{name}`, `npm:{name}`, `pypi:{name}` (each normalized as its registry does), `repo:{github.com|gitlab.com}/{path}`, `steam:{appid}`, `gog:{id}`, `fr:{document number}` or `discogs:{artist|master|release}:{id}`, as the [also-on](#also-on) sources found them as keys or facts (`mbid:` also the MBID a MusicBrainz page was merged from, its `mbid_was` fact, and with `type=MusicEvent` an artist's events, by their performers), or as an exact lookup by that key named the link; anything else is 400 |
+| `related` | A resource ID: what the people who tagged it also referenced, ranked by how many of them did ([Related](#related)); not with `sort` |
 | `tags` | Comma-separated labels; at most 5, each 1–128 bytes |
 | `match` | `any` (default) or `all` (at most 3 tags) |
 | `author` | Resources referenced by this 52-character z-base-32 public key |
 | `reach`, `viewer` | `following` or `friends` of the Nexus user `viewer`: only their references and tags count |
 | `venue` | Events at this venue resource ID |
 | `sort` | `activity` (default), `recent`, `distance` (requires `near`), `start` or `trending` (by the references made inside `window`; only links referenced in it; with `collapse=group` one song across services is one row, ranked by the references all its links got in the window) |
-| `window` | With `sort=trending`: `{n}h` or `{n}d`, from `1h` to `90d`, default `7d`, counted back from the first page's instant |
+| `window` | With `sort=trending` or `related`: `{n}h` or `{n}d`, from `1h` to `90d` (default `7d` for trending, `limits.related_window_days` for related), counted back from the first page's instant |
 | `limit` | 1–500, default 50 |
 | `cursor` | The signed next-page token of the previous page |
 | `facet` | `tags`, `type` or both (`type,tags`): counts over the whole filtered set, in `facets.tags` (`{label, count}` per label) and `facets.type` (`{type, count}` per card type), most frequent first |
@@ -462,7 +464,8 @@ viewport.
 
 **Groups.** Without `collapse`, every member of a group is a row of its own, ranked on its own
 references. `collapse=group` filters first, then keeps one row per group: the matching member
-with the most references (ties by the lower ID), as its own card, ranked as itself. Facets count
+with the most references, counted up to `limits.collapse_refs_per_member` (10,000) each (ties
+by the lower ID), as its own card, ranked as itself. Facets count
 every matching link either way; clusters always count links, so `collapse` is refused with
 `cluster`.
 
@@ -474,6 +477,38 @@ Nexus user has an empty reach; a Nexus error or the deadline returns 502.
 **Caching.** Responses carry `Cache-Control: public, max-age=30` and an `ETag` over the
 parameters, the resolved time window, the ingestion cursors and epochs, a write revision, the
 same-event revision and the reach set's hash and truncation; `If-None-Match` returns 304 when nothing changed.
+
+## Related
+
+`related={resource id}` lists what the people who tagged a resource also referenced: other
+resources, ranked by how many of its taggers referenced them, then by the newest of those
+references. It is what a "Fans also tagged" list or a "Because you tagged X" row needs, and like
+every filter it combines with `type`, `tags`, `q`, `reach`/`viewer`, `collapse=group` and `facet`
+(not with `sort`: it is the ranking).
+
+Related lists only what at least two of a link's taggers referenced, so it never mirrors one
+person (`limits.related_min_shared`, 2).
+
+- **Groups.** A resource in a [group](#groups) stands for the whole group: its taggers are the
+  group's members' taggers, and the group's own members are never listed. With `collapse=group`,
+  each row is one group, its members' taggers counted together; without it, each resource counts
+  its own.
+- **Bounds.** The taggers are drawn from a sample of the resource's most recent
+  `limits.related_tag_sample` (2,000) tags within `limits.related_window_days` (365, or
+  `window`): one sample per member of its group and per alias of each, taken before `reach`
+  applies and never filled back up when `reach` leaves fewer; of the sample's authors in reach,
+  the `limits.related_taggers` (200) with the newest tag are sampled. Of each, only their most recent `limits.related_refs_per_tagger` (1,000)
+  references within the same days count. With `collapse=group`, a group needs the shared taggers
+  of its members that pass the other filters, together. `/v1/info` gives every limit here.
+- Only the references Pinakes copies from Nexus's feed count: the resource's taggers, and any
+  reference of theirs (a tag, a reply, an embed, a collection, an event). With `reach`, only the
+  taggers within the viewer's reach.
+- Each resource is listed once, as its own card: never once per occurrence of a feed or per
+  event reference at a venue.
+- A post whose author opted out of indexing is never listed, as it is never found by its text,
+  and references to it count for nothing: not toward its group, and its taggers are not the
+  taggers of a group it is in.
+- An alias reads as its root; an unknown resource relates to nothing.
 
 ## Resolution and status
 

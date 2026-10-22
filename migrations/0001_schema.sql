@@ -137,12 +137,19 @@ CREATE TABLE reference (
     CONSTRAINT reference_end_at_range CHECK (end_at >= '0001-01-01 00:00:00+00' AND end_at < '10000-01-01 00:00:00+00'),
     CONSTRAINT reference_created_at_range CHECK (created_at >= '0001-01-01 00:00:00+00' AND created_at < '10000-01-01 00:00:00+00')
 );
-CREATE INDEX reference_author_idx ON reference USING btree (author);
+-- Search's `related` filter reads each tagger's most recent references in its window; the
+-- index serves every lookup by author too.
+CREATE INDEX reference_author_created_idx ON reference USING btree (author, created_at);
 -- `sort=trending` counts the references made inside a window.
 CREATE INDEX reference_created_idx ON reference USING btree (created_at);
 CREATE INDEX reference_event_idx ON reference USING btree (resource_id, start_at) WHERE kind = 'event';
 CREATE INDEX reference_label_idx ON reference USING btree (label, resource_id);
-CREATE INDEX reference_resource_idx ON reference USING btree (resource_id);
+-- A resource's most recent references (`related` reads its tags in a window); serves every
+-- lookup by resource too.
+CREATE INDEX reference_resource_created_idx ON reference USING btree (resource_id, created_at);
+-- `related`'s taggers are the authors of a resource's most recent tags: an index of its
+-- tags alone, so a resource with many replies or embeds and few tags reads only tags.
+CREATE INDEX reference_resource_tag_idx ON reference USING btree (resource_id, created_at) WHERE kind = 'tag';
 CREATE INDEX reference_start_idx ON reference USING btree (start_at);
 
 -- References as they count: an alias's count for its root.
@@ -410,6 +417,14 @@ UNION ALL
     LEFT JOIN resource_alias a ON a.alias_id = f.resource_id
     JOIN resource_document r ON r.id = coalesce(a.root_id, f.resource_id)
     WHERE f.kind = 'event' AND f.start_at IS NOT NULL;
+
+-- A resource's own search unit: `search_unit`'s first branch, without occurrences and event
+-- references, so `related` reads each related resource's card by its ID alone.
+CREATE VIEW resource_unit AS
+    SELECT r.*, r.id AS unit_id, NULL::jsonb AS occurrence, NULL::jsonb AS event, NULL::text AS event_author
+    FROM resource_document r
+    WHERE (NOT coalesce(r.type_path @> ARRAY['Event'], false) OR r.start_at IS NOT NULL)
+        AND NOT EXISTS (SELECT 1 FROM resource_alias a WHERE a.alias_id = r.id);
 
 
 -- ── The search revision ──────────────────────────────────────────────────────────────────────

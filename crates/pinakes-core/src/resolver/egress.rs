@@ -236,6 +236,8 @@ impl FetchOptions {
         Ok(())
     }
 }
+/// The wait a 429 without `Retry-After` stands for: the five minutes a failure is cached.
+pub const UNNAMED_429_WAIT: u64 = 300;
 /// A refusal by the egress policy, classed `policy`: not broken content, and not transient.
 fn refused(message: &'static str) -> anyhow::Error {
     anyhow::Error::new(super::ErrorClass("policy")).context(message)
@@ -333,7 +335,9 @@ pub async fn read_response_with(
         last_modified: header("last-modified"),
     };
     let status = response.status().as_u16();
-    let retry_after_secs = super::osm::retry_after(response.headers());
+    // A 429 that names no wait is held five minutes; other answers default to a minute.
+    let retry_after_secs = super::osm::retry_after_named(response.headers())
+        .unwrap_or(if status == 429 { UNNAMED_429_WAIT } else { 60 });
     let location = response
         .headers()
         .get("location")
@@ -2063,6 +2067,35 @@ mod tests {
             200
         );
         assert_eq!(transport.0.load(Ordering::SeqCst), 2);
+    }
+    #[tokio::test]
+    async fn a_429_without_retry_after_waits_five_minutes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (header, wait) in [("", UNNAMED_429_WAIT), ("Retry-After: 30\r\n", 30)] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let task = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut data = vec![0; 4096];
+                let _ = socket.read(&mut data).await.unwrap();
+                socket
+                    .write_all(
+                        format!("HTTP/1.1 429 Too Many Requests\r\n{header}Content-Length: 0\r\nConnection: close\r\n\r\n")
+                            .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            });
+            let url =
+                Url::parse(&format!("http://never-resolve.invalid:{}/", addr.port())).unwrap();
+            let response = PinnedTransport.get(&url, &[addr]).await.unwrap();
+            assert_eq!(
+                (response.status, response.retry_after_secs),
+                (429, wait),
+                "{header:?}"
+            );
+            task.await.unwrap();
+        }
     }
     #[tokio::test]
     async fn a_form_body_is_posted_form_encoded() {

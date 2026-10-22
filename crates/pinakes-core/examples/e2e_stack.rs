@@ -459,6 +459,8 @@ async fn run(pool: sqlx::PgPool, f: Fixture) -> Result<()> {
     cfg.egress.contact = "info@synonym.to".into();
     cfg.pubky.enabled = false;
     cfg.api.requests_per_minute = 10000;
+    // The harness tags as one author: one shared tagger relates two samples.
+    cfg.search.related_min_shared = 1;
     let state = AppState::new(pool.clone(), cfg.clone())?;
     let metrics = state.metrics.clone();
     let wake = state.wake.clone();

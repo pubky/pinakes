@@ -651,6 +651,11 @@
             "minimum": 0,
             "type": "integer"
           },
+          "collapse_refs_per_member": {
+            "description": "`collapse=group`: references counted per member to pick a group's row.",
+            "minimum": 0,
+            "type": "integer"
+          },
           "lookup": {
             "description": "IDs or URIs in one `POST /v1/resources/lookup`.",
             "minimum": 0,
@@ -670,6 +675,32 @@
             "minimum": 0,
             "type": "integer"
           },
+          "related_min_shared": {
+            "description": "…and a row needs at least this many shared taggers (its group's, when collapsed).",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "related_refs_per_tagger": {
+            "description": "…at most this many of each tagger's references (their most recent)…",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "related_tag_sample": {
+            "description": "`related`: the taggers are drawn from the resource's most recent tags, at most this many.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "related_taggers": {
+            "description": "`related`: the taggers sampled, the authors of the resource's most recent tags, at most this many…",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "related_window_days": {
+            "description": "…and how far back their references count without `window` (days)…",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "requests_per_minute": {
             "description": "Requests per minute per client address, every public route together.",
             "minimum": 0,
@@ -686,6 +717,12 @@
           "change_lookup",
           "occurrence_lookup",
           "search_page",
+          "related_taggers",
+          "related_window_days",
+          "related_refs_per_tagger",
+          "related_min_shared",
+          "related_tag_sample",
+          "collapse_refs_per_member",
           "requests_per_minute",
           "previews_per_minute",
           "previews_per_uri_per_minute"
@@ -3223,6 +3260,28 @@
             }
           },
           {
+            "description": "Resource ID: what the people who tagged it also referenced, ranked by how many of them\ndid, then by the newest of those references (not with `sort`). A resource in a group\nstands for the group, whose members are never listed.",
+            "examples": {
+              "(none)": {
+                "summary": "(none)",
+                "value": ""
+              },
+              "related-www-meetup-com-bitcoin-meetup-switzerland-events-316894744": {
+                "summary": "https://www.meetup.com/bitcoin-meetup-switzerland/events/316894744/",
+                "value": "586d741bd42f9a0dde1c946b58db20ae"
+              }
+            },
+            "in": "query",
+            "name": "related",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
             "examples": {
               "(none)": {
                 "summary": "(none)",
@@ -3369,7 +3428,7 @@
             }
           },
           {
-            "description": "With `sort=trending`: how far back references count, `1h`–`90d` (`{n}h` or `{n}d`),\ndefault `7d`.",
+            "description": "With `sort=trending` or `related`: how far back references count, `1h`–`90d` (`{n}h` or\n`{n}d`), default `7d` for trending and `limits.related_window_days` for related.",
             "examples": {
               "(none)": {
                 "summary": "(none)",

@@ -17,6 +17,8 @@ use tower::ServiceExt;
 
 /// A seed identity: it tagged every seed entry, and the reach example's viewer follows it.
 const SEED: &str = "pubkyseedauthorpubkyseedauthorpubkyseedauthorpubkyse";
+/// A second identity: it tagged the two Bitcoin events too, so related has a crowd of two.
+const SECOND: &str = "pubkysecondtaggerpubkysecondtaggerpubkysecondtaggerp";
 
 fn recorded(url: &str, content_type: &str, body: &[u8]) -> pinakes_core::resolver::egress::Fetched {
     pinakes_core::resolver::egress::Fetched {
@@ -618,6 +620,12 @@ async fn fixture(pool: &PgPool) {
             tag(pool, &id, label).await;
         }
     }
+    for uri in [
+        "https://luma.com/376whqyw",
+        "https://www.meetup.com/bitcoin-meetup-switzerland/events/316894744/",
+    ] {
+        tag_as(pool, &identity(uri).unwrap().0, "bitcoin", SECOND).await;
+    }
     while pinakes_core::same_event::drain(pool, &Config::default(), 200)
         .await
         .unwrap()
@@ -627,11 +635,17 @@ async fn fixture(pool: &PgPool) {
 
 /// One tag by the seed identity, with the resource's score.
 async fn tag(pool: &PgPool, id: &str, label: &str) {
+    tag_as(pool, id, label, SEED).await
+}
+async fn tag_as(pool: &PgPool, id: &str, label: &str, author: &str) {
     sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag',$3,$4,now()) ON CONFLICT DO NOTHING")
         .bind(id)
-        .bind(SEED)
+        .bind(author)
         .bind(label)
-        .bind(format!("/pub/pubky.app/tags/{id}-{label}"))
+        .bind(match author {
+            SEED => format!("/pub/pubky.app/tags/{id}-{label}"),
+            _ => format!("/pub/pubky.app/tags/{id}-{label}-{author}"),
+        })
         .execute(pool)
         .await
         .unwrap();

@@ -38,6 +38,12 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `osm_dump_every_hours` | `24` | Hours between two writes of the ODbL dump file. |
 | `osm_dump_downloads_per_hour` | `6` | ODbL dump downloads per hour per client address. |
 | `reach_timeout_secs` | `5` | Nexus reach deadline per search (seconds). |
+| `related_taggers` | `200` | Taggers a related page samples: the authors of a resource's most recent tags, at most this many. |
+| `related_window_days` | `365` | Days a related page looks back, for those taggers and their tags. |
+| `related_refs_per_tagger` | `1000` | References a related page reads per sampled tagger (their most recent). |
+| `related_min_shared` | `2` | Shared taggers a related row needs (its group's, when collapsed). |
+| `related_tag_sample` | `2000` | Tags a related page reads per seed link (its most recent), from which the taggers are sampled. |
+| `collapse_refs_per_member` | `10000` | References counted per group member when `collapse=group` picks a group's row. |
 | `max_radius_m` | `200000.0` | Largest `near` radius (metres). |
 | `h3_resolutions` | `[0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 11, 11, 11, 11, 11, 11, 11]` | H3 resolution per map zoom level. |
 | `max_cluster_cells` | `10000` | Most cells one cluster query returns. |
@@ -381,7 +387,8 @@ negotiation), `event.calendars` the calendar feeds and `event.geocoding` venue g
 calendars off, feed URLs fall back to web cards. ActivityPub is negotiated once per resolution
 for an advertised alternate, an event-looking page without an extracted Event, or an Event
 without a zone. An event page can follow a same-host link to its own ICS; discovered URLs share
-an LRU cache (10,000 entries, 32 MiB; one-hour minimum TTL, five minutes for failures).
+an LRU cache (10,000 entries, 32 MiB; one-hour minimum TTL, five minutes for failures, or the
+wait the answer named when shorter; a 429 that names none keeps five minutes).
 
 Calendar GETs follow the web policy, decompress, and are capped at `limits.event_feed_body_bytes`;
 lines are unfolded from that bounded body and parsed on a blocking worker under

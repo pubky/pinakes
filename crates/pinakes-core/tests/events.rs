@@ -3932,3 +3932,114 @@ async fn retention_waits_for_a_writer_holding_nothing_else(pool: PgPool) {
             .unwrap();
     }
 }
+
+/// `related` lists a feed and a venue once each, as their own cards: never once per occurrence
+/// or per event reference (whose authors are other people).
+#[sqlx::test(migrations = "../../migrations")]
+async fn related_lists_a_feed_and_a_venue_once(pool: PgPool) {
+    let feed = "https://example.org/events.ics";
+    reference(
+        &pool,
+        feed,
+        "/pub/social/tags/calendar",
+        Kind::Tag,
+        None,
+        None,
+        Op::Put,
+    )
+    .await;
+    let feed_id = identity(feed).unwrap().0;
+    store::save_document(
+        &pool,
+        &feed_id,
+        0,
+        &dynamic_parse(feed, &future_calendar(50)),
+    )
+    .await
+    .unwrap();
+    let venue = "geo:47,8";
+    let venue_id = store::ensure_resource(&pool, venue).await.unwrap();
+    let place = pinakes_core::resolver::geo::GeoResolver
+        .resolve(venue)
+        .await
+        .unwrap();
+    store::save_document(&pool, &venue_id, 0, &place)
+        .await
+        .unwrap();
+    for i in 0..50 {
+        reference(
+            &pool,
+            venue,
+            &format!("/pub/social/v1/posts/event{i}"),
+            Kind::Event,
+            None,
+            Some(Utc::now() + Duration::days(2 + i)),
+            Op::Put,
+        )
+        .await;
+    }
+    let seed = "https://example.org/seed";
+    reference(
+        &pool,
+        seed,
+        "/pub/social/tags/seed",
+        Kind::Tag,
+        None,
+        None,
+        Op::Put,
+    )
+    .await;
+    let seed_id = identity(seed).unwrap().0;
+    // A second tagger of the seed, the feed and the venue: two shared taggers each.
+    for (i, id) in [&seed_id, &feed_id, &venue_id].into_iter().enumerate() {
+        sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','bitcoin',$3,now())")
+            .bind(id)
+            .bind("z".repeat(52))
+            .bind(format!("/pub/social/tags/second{i}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let units = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM search_unit WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(units(feed_id.clone()).await, 51);
+    assert_eq!(units(venue_id.clone()).await, 51);
+    // `resource_unit` is exactly `search_unit`'s own units.
+    let differ: i64 = sqlx::query_scalar("SELECT count(*) FROM ((SELECT * FROM search_unit WHERE unit_id=id EXCEPT ALL SELECT * FROM resource_unit) UNION ALL (SELECT * FROM resource_unit EXCEPT ALL SELECT * FROM search_unit WHERE unit_id=id)) d")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(differ, 0);
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    for collapse in ["", "&collapse=group"] {
+        let (code, v) = call(
+            &app,
+            &format!("/v1/search?related={seed_id}&limit=500{collapse}"),
+        )
+        .await;
+        assert_eq!(code, 200, "{v}");
+        let mut ids: Vec<&str> = v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap())
+            .collect();
+        ids.sort();
+        let mut want = vec![feed_id.as_str(), venue_id.as_str()];
+        want.sort();
+        assert_eq!(ids, want, "{v}");
+        assert!(v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row.get("occurrence").is_none() && row.get("event").is_none()));
+    }
+}
