@@ -6,8 +6,9 @@
 # sequence, or a row lock of search_write held while waiting for the row's transaction; in this
 # database, as relation OIDs are per database), never by a statement's text, which
 # pg_stat_activity can show stale beside a live wait.
-# A sampler that could not connect, or stopped, fails the run with psql's error: no samples
-# never reads as no waits.
+# A sampler that could not connect, or stopped, fails the run: no samples never reads as no
+# waits. Its messages are this script's own, never psql's or libpq's, which can quote parts of
+# the URL (a password among them).
 # For example, around a re-index:
 #   DATABASE_URL=... scripts/lock-waits pinakesd reextract web
 set -uo pipefail
@@ -26,17 +27,16 @@ pq = ctypes.CDLL(ctypes.util.find_library("pq") or "libpq.so.5")
 pq.PQconninfoParse.restype = ctypes.POINTER(Option)
 pq.PQconninfoParse.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_char_p)]
 error = ctypes.c_char_p()
-url = os.environ["DATABASE_URL"]
-options = pq.PQconninfoParse(url.encode(), ctypes.byref(error))
+options = pq.PQconninfoParse(os.environ["DATABASE_URL"].encode(), ctypes.byref(error))
 if not options:
-    # libpq quotes the URL, which may hold a password.
-    sys.exit("DATABASE_URL: " + (error.value or b"not a connection string").decode().strip().replace(url, "DATABASE_URL"))
+    # Not libpq'"'"'s message: it quotes the token it could not read, which may be a password.
+    sys.exit("lock-waits: DATABASE_URL is not a connection string libpq can read")
 i = 0
 while options[i].keyword:
     o = options[i]
     if o.val is not None:
         if not o.envvar:
-            sys.exit("DATABASE_URL sets %s, which libpq reads from no environment variable" % o.keyword.decode())
+            sys.exit("lock-waits: DATABASE_URL sets %s, which libpq reads from no environment variable" % o.keyword.decode())
         os.environ[o.envvar.decode()] = o.val.decode()
     i += 1
 os.execvp(sys.argv[1], sys.argv[1:])
@@ -63,12 +63,17 @@ kill "$sampler" 2>/dev/null
 wait "$sampler" 2>/dev/null
 samples=$(grep -c '^sample ' "$out")
 if [[ $samples -eq 0 || -s $err ]]; then
-  echo "lock-waits: the sampler failed after $samples samples; no count of lock waits:" >&2
-  if [[ -s $err ]]; then
-    sed 's/^/  /' "$err" >&2
+  # Only this script's own lines from the sampler; anything psql said is summed up.
+  if grep -q '^lock-waits: ' "$err"; then
+    grep '^lock-waits: ' "$err" >&2
+  elif [[ -s $err && $samples -eq 0 ]]; then
+    echo "lock-waits: cannot connect to the database (check DATABASE_URL)" >&2
+  elif [[ -s $err ]]; then
+    echo "lock-waits: the sampler lost the database after $samples samples" >&2
   else
-    echo "  no error: COMMAND ended before the first sample" >&2
+    echo "lock-waits: COMMAND ended before the first sample" >&2
   fi
+  echo "lock-waits: no count of lock waits" >&2
   [[ $status -ne 0 ]] && exit "$status"
   exit 1
 fi
