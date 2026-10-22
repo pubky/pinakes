@@ -411,16 +411,12 @@ pub async fn read_response_with(
             None if html || xml_feed || url_card => (BODY_CAP, false),
             None => (options.feed_cap.unwrap_or(BODY_CAP), true),
         };
-        // A page whose head is still open at the page cap is read on until the head closes.
+        // A page past the page cap is read on to the head budget, whole or cut there: its head
+        // may still be open, and only the parser can say where it ends (a `</head>` or `<body`
+        // found by a look at the text may be text in a script). No check stops the read early.
         let head_cap = options
             .head_cap
             .filter(|cap| html && options.body_cap.is_none() && *cap > BODY_CAP);
-        // Where the head closes, read as the parser reads markup (`html::Scan`): after `</head>`,
-        // where `<body` opens it, or where the page passes a parse cap (nothing after it is read).
-        let mut scan = head_cap.map(|_| super::html::Scan::default());
-        fn head_closed(scan: &Option<super::html::Scan>) -> Option<usize> {
-            scan.as_ref().and_then(|s| s.head_end().or(s.cut()))
-        }
         if refuse && response.content_length().is_some_and(|n| n > max as u64) {
             return Err(BodyTooLarge { cap: max }.into());
         }
@@ -433,9 +429,8 @@ pub async fn read_response_with(
                 if refuse {
                     return Err(BodyTooLarge { cap: max }.into());
                 }
-                match head_cap {
-                    Some(cap) if max < cap && head_closed(&scan).is_none() => max = cap,
-                    _ => {}
+                if let Some(cap) = head_cap.filter(|cap| max < *cap) {
+                    max = cap;
                 }
             }
             if body.len().saturating_add(chunk.len()) > max {
@@ -444,18 +439,6 @@ pub async fn read_response_with(
                 break;
             }
             body.extend_from_slice(&chunk);
-            if let Some(scan) = scan.as_mut().filter(|s| s.head_end().or(s.cut()).is_none()) {
-                scan.feed(&chunk);
-            }
-            // Past the page cap, reading stops where the head closes.
-            if body.len() > BODY_CAP && max > BODY_CAP {
-                if let Some(end) = head_closed(&scan) {
-                    // Never less than the page cap a short head would have kept.
-                    body.truncate(end.max(BODY_CAP));
-                    truncated = true;
-                    break;
-                }
-            }
             let sniff = String::from_utf8_lossy(&body[..body.len().min(256)])
                 .trim_start_matches(['\u{feff}', ' ', '\r', '\n'])
                 .starts_with("BEGIN:VCALENDAR");
@@ -467,10 +450,10 @@ pub async fn read_response_with(
                 return Err(BodyTooLarge { cap: BODY_CAP }.into());
             }
             // A cut read stops as soon as it reaches its cap: a sender that stalls there costs no
-            // timeout. At the page cap with the head still open, the head budget applies.
+            // timeout. At the page cap, the head budget applies.
             if !refuse && body.len() >= max {
                 match head_cap {
-                    Some(cap) if max < cap && head_closed(&scan).is_none() => max = cap,
+                    Some(cap) if max < cap => max = cap,
                     _ => {
                         truncated = true;
                         break;
@@ -1496,12 +1479,12 @@ mod tests {
             assert_eq!(transport.0.lock().unwrap()[0].as_deref(), sent);
         }
     }
-    /// A page whose head is still open at the page cap (a megabyte of inline styles before the
-    /// title, as Google Play's app pages have) is read on until the head closes, up to the head
-    /// cap; a page with a short head is cut at the page cap as before, and a head that never
-    /// closes stops at the head cap.
+    /// An HTML page past the page cap is read on to the head budget, whole when it ends before
+    /// it, cut there otherwise, whether or not its head closed by then: nothing in the text
+    /// stops the read early (only the parser can say where a head ends). Without a head budget
+    /// the page is cut at the page cap. A page parser takes what is read (`page_fits`).
     #[tokio::test]
-    async fn a_long_head_is_read_until_it_closes() {
+    async fn a_page_past_the_cap_is_read_to_the_head_budget() {
         use axum::{routing::get, Router};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1522,7 +1505,16 @@ mod tests {
                 get(move || async move {
                     html(format!(
                         "<html><head><title>Short</title></head><body>{}</body></html>",
-                        "y".repeat(2 * BODY_CAP)
+                        "y".repeat(3 * BODY_CAP)
+                    ))
+                }),
+            )
+            .route(
+                "/implicit",
+                get(move || async move {
+                    html(format!(
+                        "<html><head><title>Implicit</title><style>{}</style><BODY class=x><p>y</p></BODY></html>",
+                        "x".repeat(BODY_CAP)
                     ))
                 }),
             )
@@ -1544,79 +1536,40 @@ mod tests {
             async move { read_response_with(url, request.send().await.unwrap(), &options).await }
         };
         let head_cap = Some(2 * BODY_CAP);
+        // 1.55 MB, within the budget: read whole, the title and the body with it.
         let long = read("/long-head", head_cap).await.unwrap();
         let text = String::from_utf8_lossy(&long.body);
-        assert!(long.truncated);
+        assert!(!long.truncated);
         assert!(text.contains("<title>Long head</title>"));
-        assert!(text.ends_with("</HEAD>"), "{}", &text[text.len() - 40..]);
-        // Without a head cap, the page is cut at the page cap and the title is lost.
+        assert!(text.ends_with("</html>"), "{}", &text[text.len() - 40..]);
+        assert!(page_fits(&long));
+        // Without a head budget, the page is cut at the page cap and the title is lost.
         let cut = read("/long-head", None).await.unwrap();
         assert_eq!(cut.body.len(), BODY_CAP);
         assert!(!String::from_utf8_lossy(&cut.body).contains("<title>"));
+        // 3 MB with a short head: still read to the budget, and cut there.
         let short = read("/short-head", head_cap).await.unwrap();
         assert!(short.truncated);
-        assert_eq!(short.body.len(), BODY_CAP);
+        assert_eq!(short.body.len(), 2 * BODY_CAP);
+        assert!(page_fits(&short));
+        // A head the body opens implicitly, past the page cap: whole.
+        let implicit = read("/implicit", head_cap).await.unwrap();
+        assert!(!implicit.truncated);
+        assert!(String::from_utf8_lossy(&implicit.body).ends_with("</html>"));
+        assert!(page_fits(&implicit));
+        // A head that never ends: cut at the budget.
         let open = read("/open-head", head_cap).await.unwrap();
         assert!(open.truncated);
         assert_eq!(open.body.len(), 2 * BODY_CAP);
+        assert!(page_fits(&open));
         server.abort();
     }
-    /// A head the body opens implicitly (no `</head>`) ends where `<body` starts, past the page
-    /// cap too; a page that never ends its head arrives whole within the head budget, and a
-    /// page parser takes it (`page_fits`).
+    /// Nothing in a page's text ends its read early: a head of about 1.05 MB with `<body` or
+    /// `</script>` in a script, a style or a comment (Codex's variants, including a script whose
+    /// `<!--<script>` escapes the `</script>` inside it) is read whole, the title and meta tags
+    /// after the decoy with it.
     #[tokio::test]
-    async fn a_head_ends_where_the_body_opens() {
-        use axum::{routing::get, Router};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let html = |body: String| ([("content-type", "text/html; charset=utf-8")], body);
-        let app = Router::new()
-            .route(
-                "/implicit",
-                get(move || async move {
-                    html(format!(
-                        "<html><head><title>Implicit</title><style>{}</style><BODY class=x><p>y</p></BODY></html>",
-                        "x".repeat(BODY_CAP)
-                    ))
-                }),
-            )
-            .route(
-                "/no-end",
-                get(move || async move {
-                    html(format!(
-                        "<html><head><title>Whole</title><style>{}</style>",
-                        "x".repeat(BODY_CAP)
-                    ))
-                }),
-            );
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let client = reqwest::Client::new();
-        let read = |path: &str| {
-            let url: Url = format!("http://{addr}{path}").parse().unwrap();
-            let request = client.get(url.clone());
-            let options = FetchOptions {
-                head_cap: Some(2 * BODY_CAP),
-                ..Default::default()
-            };
-            async move { read_response_with(url, request.send().await.unwrap(), &options).await }
-        };
-        let implicit = read("/implicit").await.unwrap();
-        let text = String::from_utf8_lossy(&implicit.body);
-        assert!(implicit.truncated);
-        assert!(text.contains("<title>Implicit</title>"));
-        assert!(text.ends_with("</style>"), "{}", &text[text.len() - 20..]);
-        assert!(page_fits(&implicit));
-        let whole = read("/no-end").await.unwrap();
-        assert!(!whole.truncated);
-        assert!(whole.body.len() > BODY_CAP);
-        assert!(page_fits(&whole));
-        server.abort();
-    }
-    /// `<body` inside a script, a style or a comment does not end the head read: a head of about
-    /// 1.05 MB with such a decoy keeps the title and meta tags after it (Codex's three variants)
-    /// and stops at the real `</head>`.
-    #[tokio::test]
-    async fn markup_in_text_does_not_end_the_head() {
+    async fn no_text_in_a_long_head_ends_its_read() {
         use axum::{extract::Path, routing::get, Router};
         fn page(decoy: &str) -> String {
             format!(
@@ -1632,6 +1585,7 @@ mod tests {
                 let decoy = match kind.as_str() {
                     "script" => "<script>var tpl = '<body class=x>';</script>",
                     "style" => "<style>/* <body class=x> */ a { b: c }</style>",
+                    "escaped" => "<script><!--<script></script><body class=x>--> </script>",
                     _ => "<!-- <body class=x> -->",
                 };
                 ([("content-type", "text/html")], page(decoy))
@@ -1639,7 +1593,7 @@ mod tests {
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client = reqwest::Client::new();
-        for kind in ["script", "style", "comment"] {
+        for kind in ["script", "style", "comment", "escaped"] {
             let url: Url = format!("http://{addr}/{kind}").parse().unwrap();
             let options = FetchOptions {
                 head_cap: Some(2 * BODY_CAP),
@@ -1650,11 +1604,11 @@ mod tests {
                     .await
                     .unwrap();
             let text = String::from_utf8_lossy(&f.body);
-            assert!(f.truncated, "{kind}");
+            assert!(!f.truncated, "{kind}");
             assert!(text.contains("<title>After</title>"), "{kind}");
             assert!(text.contains("og:title"), "{kind}");
             assert!(
-                text.ends_with("</head>"),
+                text.ends_with("</html>"),
                 "{kind}: {}",
                 &text[text.len() - 30..]
             );

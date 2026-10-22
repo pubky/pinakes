@@ -25,7 +25,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `resolver_ttl_secs` | `86400` | Default document lifetime (seconds) for web, pubky and card resolvers. |
 | `host_requests_per_second` | `1.0` | Requests per second to any one upstream host. |
 | `host_rates` | `{}` | Per-host overrides of `host_requests_per_second`. |
-| `html_head_bytes` | `4194304` | How far an HTML page is read while its head is still open at the 1 MB page cap (bytes). |
+| `html_head_bytes` | `4194304` | How far an HTML page past the 1 MB page cap is read (bytes); nothing in the page stops the read earlier. |
 | `max_failures` | `5` | Failures before a resource dead-letters. |
 | `timeout_grace` | `3` | Timeouts tolerated before they count as failures. |
 | `backoff_secs` | `30` | First retry backoff (seconds). |
@@ -176,10 +176,11 @@ Web fetches bypass environment proxies, validate every DNS answer, pin the check
 repeat the policy at every redirect (three hops; HTML meta refresh and literal JavaScript
 redirects count). `egress.allow_hosts` and `egress.deny_hosts` take exact names or
 `*.example.org`; they never override the IP policy, and deny wins. Pages are capped at 1 MB of
-decoded body; an oversized page keeps its head metadata with a `truncated` warning, its whole
-head when the head runs past the cap (up to `limits.html_head_bytes`; the head ends at `</head>`
-or where `<body>` opens, read as markup: not inside a script, style or comment). A whole page within that budget is read whole. A read that cuts stops as soon as it reaches its cap, so a sender
-that stalls there costs no timeout. An image or PDF past the
+decoded body; an oversized page keeps its head metadata with a `truncated` warning. An HTML page
+past the cap is read on to `limits.html_head_bytes`, whole when it ends before that and cut there
+otherwise: nothing in the page's text stops the read earlier, since only the parser can say where
+a head ends (a `</head>` in a script is not one). A read that cuts stops as soon as it reaches
+its cap, so a sender that stalls there costs no timeout. An image or PDF past the
 cap is cut too, never refused: its card comes from its URL. Every HTML parse (pages, and HTML inside API answers) reads its text
 only up to the first point that passes a parse cap: 50,000 start tags, 256 open elements, 64
 attributes on one tag, an attribute value of 1 MiB (real pages stay far below each: at most
