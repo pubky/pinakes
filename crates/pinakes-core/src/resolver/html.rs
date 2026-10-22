@@ -66,8 +66,8 @@ pub const MAX_DEPTH: usize = 256;
 pub const MAX_TAG_ATTRIBUTES: usize = 64;
 pub const MAX_ATTRIBUTE_BYTES: usize = 1024 * 1024;
 pub const MAX_NAME_BYTES: usize = 256;
-/// The most nodes a parsed tree may hold (elements, text, comments). The largest of the 149 real
-/// pages (1.8 MB) has 44,000.
+/// The most nodes a parsed tree may hold (elements, text, comments). Of 149 real pages, the most
+/// has 37,186 (a Wikidata item).
 pub const MAX_NODES: usize = 500_000;
 /// The most ancestors a walk up a parsed tree looks at: the depth cap and the elements it does
 /// not count.
@@ -505,6 +505,10 @@ struct Job {
     cpu_started: Duration,
     /// Why the job parses no more.
     over: Option<&'static str>,
+    /// The worker did not start: the job's parses fail without trying again.
+    start_failed: bool,
+    /// A tree past `MAX_NODES` has been logged (once per job).
+    node_cap_logged: bool,
     process: Option<Process>,
 }
 
@@ -525,6 +529,8 @@ impl Job {
             cancelled,
             cpu_started: thread_cpu(),
             over: None,
+            start_failed: false,
+            node_cap_logged: false,
             process: None,
         }
     }
@@ -532,6 +538,16 @@ impl Job {
     /// Every parse of the job, plain text too, passes the job's checks first: a job that is over
     /// (its caller gone, its deadline or its budget passed, its worker dead) parses nothing more.
     fn parse(&mut self, kind: Kind, text: &str) -> anyhow::Result<scraper::Html> {
+        self.parse_with(kind, text, worker())
+    }
+
+    /// `parse`, with `worker` as the program (`None`: parse in this process).
+    fn parse_with(
+        &mut self,
+        kind: Kind,
+        text: &str,
+        worker: Option<&Worker>,
+    ) -> anyhow::Result<scraper::Html> {
         if let Some(reason) = self.over {
             return Err(TooComplex { reason }.into());
         }
@@ -546,7 +562,7 @@ impl Job {
         // against the job's budget of this thread's CPU time, as every parse without a worker
         // does; a worker's parses count against the worker's own.
         let plain = !text.contains('<');
-        let worker = if plain { None } else { worker() };
+        let worker = if plain { None } else { worker };
         let Some(worker) = worker else {
             let left = self
                 .budget
@@ -554,31 +570,54 @@ impl Job {
             if left.is_zero() {
                 return Err(self.end_with("the CPU budget", text));
             }
-            return parse_in_process(kind, text, left);
+            return parse_in_process(kind, text, left).map_err(|error| {
+                if error.is::<TooComplex>() {
+                    self.node_cap(text)
+                } else {
+                    error
+                }
+            });
         };
+        if self.start_failed {
+            anyhow::bail!("the parse worker did not start");
+        }
         if self.process.is_none() {
-            self.process = Some(self.start(worker)?);
+            match self.start(worker) {
+                Ok(process) => self.process = Some(process),
+                Err(error) => {
+                    // Once per job: a program that does not start will not on the next fragment.
+                    self.start_failed = true;
+                    return Err(error);
+                }
+            }
         }
         match self.ask(kind, text) {
             Ok(Some(html)) => Ok(html),
-            Ok(None) => {
-                // One tree refused; the worker goes on with the job's next parse.
-                tracing::warn!(
-                    reason = "more nodes than the cap",
-                    bytes = text.len(),
-                    "an HTML parse did not end within its limits; the page gets no card"
-                );
-                Err(TooComplex {
-                    reason: "more nodes than the cap",
-                }
-                .into())
-            }
+            // One tree refused; the worker goes on with the job's next parse.
+            Ok(None) => Err(self.node_cap(text)),
             Err(_) => {
                 // The worker is gone: its status, or the watchdog, says why.
                 let reason = self.stop();
                 Err(self.end_with(reason, text))
             }
         }
+    }
+
+    /// A tree refused at `MAX_NODES`: the job goes on, and the first such refusal of the job is
+    /// logged, as the job's end is.
+    fn node_cap(&mut self, text: &str) -> anyhow::Error {
+        if !self.node_cap_logged {
+            self.node_cap_logged = true;
+            tracing::warn!(
+                reason = "more nodes than the cap",
+                bytes = text.len(),
+                "an HTML parse did not end within its limits; the page gets no card"
+            );
+        }
+        TooComplex {
+            reason: "more nodes than the cap",
+        }
+        .into()
     }
 
     /// End the job's parsing for good, logged once, and the error for the parse that found it.
@@ -976,12 +1015,15 @@ fn decode(bytes: &[u8], kind: Kind) -> anyhow::Result<scraper::Html> {
     };
     let count = reader.u32()? as usize;
     anyhow::ensure!(count <= MAX_NODES, "more nodes than the cap");
+    // Each node with its depth (the root is 0): the answer is held to `MAX_DEPTH` as the worker
+    // was, whatever the worker sent.
     let mut ids = Vec::with_capacity(count + 1);
-    ids.push(html.tree.root().id());
+    ids.push((html.tree.root().id(), 0usize));
     for _ in 0..count {
-        let parent = *ids
+        let (parent, depth) = *ids
             .get(reader.u32()? as usize)
             .context("a node before its parent")?;
+        anyhow::ensure!(depth < MAX_DEPTH, "a node deeper than the cap");
         let node = match reader.byte()? {
             1 => Node::Doctype(Doctype {
                 name: reader.tendril()?,
@@ -1019,7 +1061,7 @@ fn decode(bytes: &[u8], kind: Kind) -> anyhow::Result<scraper::Html> {
             .context("a lost parent")?
             .append(node)
             .id();
-        ids.push(id);
+        ids.push((id, depth + 1));
     }
     anyhow::ensure!(reader.0.is_empty(), "bytes after the last node");
     Ok(html)
@@ -1948,6 +1990,93 @@ mod tests {
         let mut late = Job::new(PARSE_BUDGET, Arc::default());
         late.deadline = Instant::now();
         assert!(in_job(late, job_over));
+    }
+
+    /// A worker's answer is held to `MAX_DEPTH` when it is read back, whatever the worker sent (a
+    /// buggy or hostile one): a chain of `MAX_DEPTH` elements is read, one more is refused.
+    #[test]
+    fn a_worker_answer_deeper_than_the_cap_is_refused() {
+        let chain = |nodes: u32| {
+            let mut bytes = vec![0u8];
+            bytes.extend_from_slice(&nodes.to_le_bytes());
+            for parent in 0..nodes {
+                bytes.extend_from_slice(&parent.to_le_bytes());
+                bytes.push(4);
+                for s in ["", "http://www.w3.org/1999/xhtml", "div"] {
+                    bytes.extend_from_slice(&(s.len() as u32).to_le_bytes());
+                    bytes.extend_from_slice(s.as_bytes());
+                }
+                bytes.extend_from_slice(&0u32.to_le_bytes());
+            }
+            bytes
+        };
+        assert!(decode(&chain(MAX_DEPTH as u32), Kind::Document).is_ok());
+        let error = decode(&chain(MAX_DEPTH as u32 + 1), Kind::Document).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("deeper than the cap"),
+            "{error:#}"
+        );
+    }
+
+    /// A worker that does not start is tried once per job: the job's later parses fail at once,
+    /// and its plain text still parses.
+    #[test]
+    fn a_worker_that_does_not_start_is_tried_once_per_job() {
+        let missing = Worker {
+            program: "/nonexistent/pinakes-parse".into(),
+            args: vec![],
+        };
+        let mut job = Job::new(PARSE_BUDGET, Arc::default());
+        let first = job
+            .parse_with(Kind::Fragment, "<b>x</b>", Some(&missing))
+            .unwrap_err();
+        assert!(!first.is::<TooComplex>(), "{first:#}");
+        assert!(job.start_failed);
+        let again = job
+            .parse_with(Kind::Fragment, "<b>y</b>", Some(&missing))
+            .unwrap_err();
+        assert_eq!(format!("{again:#}"), "the parse worker did not start");
+        assert!(job.process.is_none());
+        assert!(job
+            .parse_with(Kind::Fragment, "plain", Some(&missing))
+            .is_ok());
+    }
+
+    /// A tree refused at `MAX_NODES` is logged once per job, however many the job refuses, and
+    /// the job goes on.
+    #[test]
+    fn a_tree_past_the_node_cap_is_logged_once_per_job() {
+        #[derive(Clone, Default)]
+        struct Lines(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Lines {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let lines = Lines::default();
+        let writer = lines.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .finish();
+        let page = format!("<title>T</title>{}", "<b></b>".repeat(MAX_NODES));
+        tracing::subscriber::with_default(subscriber, || {
+            let mut job = Job::new(PARSE_BUDGET, Arc::default());
+            for _ in 0..2 {
+                let error = job.parse_with(Kind::Document, &page, None).unwrap_err();
+                assert!(error.is::<TooComplex>());
+            }
+            assert!(job.parse_with(Kind::Fragment, "<b>x</b>", None).is_ok());
+        });
+        let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            text.matches("did not end within its limits").count(),
+            1,
+            "{text}"
+        );
     }
 
     /// A tree past `MAX_NODES` is refused as too complex, in this process as in a worker.

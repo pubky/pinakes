@@ -193,7 +193,7 @@ card (an earlier card is cleared, and the change recorded), until `pinakesd reex
 markup (no `<`) is parsed in the daemon, in linear time, without a worker, but only while the
 job is within its limits: once it is over, it parses no plain text either.
 The tree a worker answers with keeps no node more than 256 elements deep and at most 500,000
-nodes (the largest of 149 real pages has 37,000). Before the parse, a linear scan cuts the text
+nodes (of 149 real pages, the most has 37,186). Before the parse, a linear scan cuts the text
 at the first obvious cap: 50,000 start tags, 256 open elements, 64 attributes on one tag (end
 tags too), an attribute value of 1 MiB, a tag name of 256 bytes (real pages stay far below each:
 at most 16,440, 62, 29, 121 KB and 27 bytes over 149 pages). The scan is a cheap early cut; the
