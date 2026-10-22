@@ -495,11 +495,13 @@ person (`limits.related_min_shared`, 2).
   its own.
 - **Bounds.** The taggers are drawn from a sample of the resource's most recent
   `limits.related_tag_sample` (2,000) tags within `limits.related_window_days` (365, or
-  `window`): one sample per member of its group and per alias of each, taken before `reach`
-  applies and never filled back up when `reach` leaves fewer; of the sample's authors in reach,
-  the `limits.related_taggers` (200) with the newest tag are sampled. Of each, only their most recent `limits.related_refs_per_tagger` (1,000)
-  references within the same days count. With `collapse=group`, a group needs the shared taggers
-  of its members that pass the other filters, together. `/v1/info` gives every limit here.
+  `window`): one sample per member of its group and per alias of each, up to
+  `limits.related_seed_links` (32) of those links, the ones with the newest tags; all taken
+  before `reach` applies and never filled back up when `reach` leaves fewer; of the sample's
+  authors in reach, the `limits.related_taggers` (200) with the newest tag are sampled. Of each,
+  only their most recent `limits.related_refs_per_tagger` (1,000) references within the same days
+  count. With `collapse=group`, a group needs the shared taggers of its members that pass the
+  other filters, together. `/v1/info` gives every limit here.
 - Only the references Pinakes copies from Nexus's feed count: the resource's taggers, and any
   reference of theirs (a tag, a reply, an embed, a collection, an event). With `reach`, only the
   taggers within the viewer's reach.

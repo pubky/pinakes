@@ -685,8 +685,13 @@
             "minimum": 0,
             "type": "integer"
           },
+          "related_seed_links": {
+            "description": "…on each of at most this many of its links (its group's members and their aliases), the\nones with the newest tags.",
+            "minimum": 0,
+            "type": "integer"
+          },
           "related_tag_sample": {
-            "description": "`related`: the taggers are drawn from the resource's most recent tags, at most this many.",
+            "description": "`related`: the taggers are drawn from the resource's most recent tags, at most this many…",
             "minimum": 0,
             "type": "integer"
           },
@@ -722,6 +727,7 @@
           "related_refs_per_tagger",
           "related_min_shared",
           "related_tag_sample",
+          "related_seed_links",
           "collapse_refs_per_member",
           "requests_per_minute",
           "previews_per_minute",

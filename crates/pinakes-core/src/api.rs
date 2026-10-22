@@ -1330,16 +1330,23 @@ pub async fn search(
     };
     let mut sql = QueryBuilder::<Postgres>::new("WITH ");
     if let (Some(seed), Some(since)) = (&related, since) {
-        // The resource, or its whole group; a sample of the most recent tags in the window on
-        // those not opted out and their aliases, read through the tags-only index, and of the
-        // sample's authors in reach the ones with the newest tag; and the most recent references
-        // each of them made elsewhere in the window, once per resource.
+        // The resource, or its whole group; of those not opted out and their aliases, the links
+        // with the newest tags in the window (one probe each), and on each a sample of its most
+        // recent tags there, both read through the tags-only index; of the sample's authors in
+        // reach the ones with the newest tag; and the most recent references each of them made
+        // elsewhere in the window, once per resource.
         let search = &state.config.search;
         sql.push("related_seed AS (SELECT ")
             .push_bind(seed.clone())
             .push("::text AS resource_id UNION SELECT u.resource_id FROM group_unit u WHERE u.group_id=(SELECT group_id FROM group_unit WHERE unit_id=")
             .push_bind(seed.clone())
-            .push(" AND group_id IS NOT NULL)), related_sources AS (SELECT s.resource_id FROM related_seed s JOIN resource d ON d.id=s.resource_id WHERE coalesce(d.doc->'attributes'->>'opted_out','')<>'true'), related_ids AS (SELECT resource_id FROM related_sources UNION SELECT alias_id FROM resource_alias WHERE root_id IN (SELECT resource_id FROM related_sources)), related_taggers AS (SELECT f.author,max(f.created_at) AS at FROM related_ids i CROSS JOIN LATERAL (SELECT f.author,f.created_at FROM reference f WHERE f.resource_id=i.resource_id AND f.kind='tag' AND f.created_at>=")
+            .push(" AND group_id IS NOT NULL)), related_sources AS (SELECT s.resource_id FROM related_seed s JOIN resource d ON d.id=s.resource_id WHERE coalesce(d.doc->'attributes'->>'opted_out','')<>'true'), related_ids AS (SELECT i.resource_id FROM (SELECT resource_id FROM related_sources UNION SELECT alias_id FROM resource_alias WHERE root_id IN (SELECT resource_id FROM related_sources)) i CROSS JOIN LATERAL (SELECT f.created_at FROM reference f WHERE f.resource_id=i.resource_id AND f.kind='tag' AND f.created_at>=")
+            .push_bind(since)
+            .push(" AND f.created_at<=")
+            .push_bind(at)
+            .push(" ORDER BY f.created_at DESC LIMIT 1) t ORDER BY t.created_at DESC,i.resource_id LIMIT ")
+            .push_bind(search.related_seed_links as i64)
+            .push("), related_taggers AS (SELECT f.author,max(f.created_at) AS at FROM related_ids i CROSS JOIN LATERAL (SELECT f.author,f.created_at FROM reference f WHERE f.resource_id=i.resource_id AND f.kind='tag' AND f.created_at>=")
             .push_bind(since)
             .push(" AND f.created_at<=")
             .push_bind(at)
@@ -1939,8 +1946,11 @@ pub struct InfoLimits {
     pub related_refs_per_tagger: usize,
     /// …and a row needs at least this many shared taggers (its group's, when collapsed).
     pub related_min_shared: usize,
-    /// `related`: the taggers are drawn from the resource's most recent tags, at most this many.
+    /// `related`: the taggers are drawn from the resource's most recent tags, at most this many…
     pub related_tag_sample: usize,
+    /// …on each of at most this many of its links (its group's members and their aliases), the
+    /// ones with the newest tags.
+    pub related_seed_links: usize,
     /// `collapse=group`: references counted per member to pick a group's row.
     pub collapse_refs_per_member: usize,
     /// Requests per minute per client address, every public route together.
@@ -1996,6 +2006,7 @@ pub async fn info(State(state): State<AppState>) -> Json<Info> {
             related_refs_per_tagger: c.search.related_refs_per_tagger,
             related_min_shared: c.search.related_min_shared,
             related_tag_sample: c.search.related_tag_sample,
+            related_seed_links: c.search.related_seed_links,
             collapse_refs_per_member: c.search.collapse_refs_per_member,
             requests_per_minute: c.api.requests_per_minute,
             previews_per_minute: c.preview.requests_per_minute,

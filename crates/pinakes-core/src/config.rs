@@ -577,6 +577,9 @@ pub struct SearchConfig {
     /// The tags a related page reads per seed link (its most recent), from which the taggers
     /// are sampled.
     pub related_tag_sample: usize,
+    /// The seed links a related page samples: of the resource, its group's members and their
+    /// aliases, the ones with the newest tags, at most this many.
+    pub related_seed_links: usize,
     /// The references counted per group member when `collapse=group` picks a group's row.
     pub collapse_refs_per_member: usize,
     pub max_radius_m: f64,
@@ -592,6 +595,7 @@ impl Default for SearchConfig {
             related_refs_per_tagger: 1000,
             related_min_shared: 2,
             related_tag_sample: 2000,
+            related_seed_links: 32,
             collapse_refs_per_member: 10_000,
             max_radius_m: 200_000.0,
             h3_resolutions: (0u8..=22).map(|z| z.saturating_sub(4).min(11)).collect(),
@@ -930,6 +934,7 @@ impl Config {
             || !(1..=100_000).contains(&self.search.related_refs_per_tagger)
             || !(1..=10_000).contains(&self.search.related_min_shared)
             || !(1..=100_000).contains(&self.search.related_tag_sample)
+            || !(1..=1000).contains(&self.search.related_seed_links)
             || !(1..=1_000_000).contains(&self.search.collapse_refs_per_member)
             || !self.search.max_radius_m.is_finite()
             || !(1.0..=200_000.0).contains(&self.search.max_radius_m)
@@ -1005,6 +1010,16 @@ mod tests {
         let mut applied = Config::default();
         Limits::default().apply(&mut applied);
         assert_eq!(format!("{applied:?}"), format!("{:?}", Config::default()));
+    }
+    #[test]
+    fn related_limits_have_config_bounds() {
+        assert_eq!(Config::default().search.related_seed_links, 32);
+        for (key, value) in [("related_seed_links", 0), ("related_seed_links", 1001)] {
+            assert!(
+                with(serde_json::json!({"limits":{key:value}})).is_err(),
+                "{key}={value}"
+            );
+        }
     }
     #[test]
     fn operations_md_documents_every_limit() {
@@ -1469,6 +1484,9 @@ limits! {
     related_min_shared: usize = |c| c.search.related_min_shared => [|c, v| c.search.related_min_shared = v],
     /// Tags a related page reads per seed link (its most recent), from which the taggers are sampled.
     related_tag_sample: usize = |c| c.search.related_tag_sample => [|c, v| c.search.related_tag_sample = v],
+    /// Seed links a related page samples: of the resource, its group's members and their
+    /// aliases, the ones with the newest tags, at most this many.
+    related_seed_links: usize = |c| c.search.related_seed_links => [|c, v| c.search.related_seed_links = v],
     /// References counted per group member when `collapse=group` picks a group's row.
     collapse_refs_per_member: usize = |c| c.search.collapse_refs_per_member => [|c, v| c.search.collapse_refs_per_member = v],
     /// Largest `near` radius (metres).

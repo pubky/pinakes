@@ -576,3 +576,55 @@ async fn the_ranking_holds_whatever_the_dates_even_in_year_one(pool: PgPool) {
         );
     }
 }
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_seed_links_sampled_are_the_ones_with_the_newest_tags_up_to_the_cap(pool: PgPool) {
+    // The seed, two aliases of it and a member of its group, each tagged by its own tagger, the
+    // seed most recently; each tagger also tagged a resource of their own.
+    let seed = save(&pool, "https://example.org/album", "MusicAlbum").await;
+    let first = save(&pool, "https://example.org/album?utm=1", "MusicAlbum").await;
+    let second = save(&pool, "https://example.org/album?utm=2", "MusicAlbum").await;
+    let member = save(&pool, "https://example.net/album", "MusicAlbum").await;
+    for alias in [&first, &second] {
+        sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'tracking')")
+            .bind(alias)
+            .bind(&seed)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    group(&pool, "0123456789abcdef0123456789abcdef", &[&seed, &member]).await;
+    let mut theirs = vec![];
+    for (who, link, days) in [
+        (1, &seed, 1),
+        (2, &first, 2),
+        (3, &second, 30),
+        (4, &member, 40),
+    ] {
+        tag(&pool, link, who, days).await;
+        let own = save(
+            &pool,
+            &format!("https://example.org/own-{who}"),
+            "MusicAlbum",
+        )
+        .await;
+        tag(&pool, &own, who, 3).await;
+        theirs.push(own);
+    }
+    let sorted = |mut ids: Vec<String>| {
+        ids.sort();
+        ids
+    };
+    for (cap, taggers) in [(1, 1), (2, 2), (3, 3), (4, 4), (32, 4)] {
+        let mut config = one_shared();
+        config.search.related_seed_links = cap;
+        let (_, info) = get_with(&config, &pool, "/v1/info").await;
+        assert_eq!(info["limits"]["related_seed_links"], cap, "/v1/info");
+        let v = related_with(&config, &pool, &seed, "").await;
+        assert_eq!(
+            sorted(rows(&v)),
+            sorted(theirs[..taggers].to_vec()),
+            "related_seed_links={cap}"
+        );
+    }
+}
