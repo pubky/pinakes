@@ -8,8 +8,16 @@ use pinakes_core::{
 use std::{path::PathBuf, time::Duration};
 use tokio::sync::watch;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    let (config, command) = parse_args(std::env::args().skip(1))?;
+    // The parse worker runs before any runtime starts: its memory limit is for one thread's
+    // parse, not for a runtime's threads and their address space.
+    if let Command::ParseWorker(secs) = command {
+        std::process::exit(pinakes_core::resolver::html::worker_main(secs));
+    }
+    tokio::runtime::Runtime::new()?.block_on(serve(config, command))
+}
+async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
     tracing_subscriber::fmt()
         .json()
         .with_env_filter(
@@ -17,7 +25,6 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| "pinakes=info,pinakes_core=info,sqlx=warn".into()),
         )
         .init();
-    let (config, command) = parse_args(std::env::args().skip(1))?;
     let (migrate_only, reextract) = match command {
         Command::Serve => (false, None),
         Command::Migrate => (true, None),
@@ -26,7 +33,13 @@ async fn main() -> Result<()> {
             println!("{text}");
             return Ok(());
         }
+        Command::ParseWorker(_) => unreachable!("handled before the runtime"),
     };
+    // Every HTML parse runs in a child `pinakesd parse-worker`, killed at its limits; a daemon
+    // that cannot run one does not serve.
+    pinakes_core::resolver::html::set_worker(std::env::current_exe()?, ["parse-worker"]);
+    pinakes_core::resolver::html::check_worker()
+        .context("the parse worker (`pinakesd parse-worker`) does not run")?;
     let config = Config::load(config.as_deref())?;
     pinakes_core::sources::configure(&config.sources);
     pinakes_core::sources::podcast_index::configure(&config.podcast_index);
@@ -190,6 +203,8 @@ enum Command {
     Migrate,
     Reextract(Vec<String>),
     Print(String),
+    /// `parse-worker <cpu seconds>`: the HTML parse worker the daemon runs itself in.
+    ParseWorker(u64),
 }
 /// Options in any position; every other word after `reextract` is a route, checked here, before
 /// any config is read or database touched.
@@ -205,6 +220,10 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                 ))
             }
             "--migrate" => command = Command::Migrate,
+            "parse-worker" => {
+                let secs = args.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+                return Ok((config, Command::ParseWorker(secs)));
+            }
             "reextract" => routes = Some(vec![]),
             "--openapi" => {
                 return Ok((
@@ -216,7 +235,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                 return Ok((
                     config,
                     Command::Print(
-                        "pinakesd [--config PATH] [--migrate | --openapi | reextract ROUTE…|all|also-on]"
+                        "pinakesd [--config PATH] [--migrate | --openapi | reextract ROUTE…|all|also-on | parse-worker SECS]"
                             .into(),
                     ),
                 ))
@@ -241,6 +260,15 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
 
 #[cfg(test)]
 mod tests {
+    /// `parse-worker SECS` is the parse worker, whatever else is on the line.
+    #[test]
+    fn parse_worker_takes_its_cpu_seconds() {
+        let parse = |a: &[&str]| super::parse_args(a.iter().map(|s| s.to_string()));
+        let (_, command) = parse(&["--config", "x.toml", "parse-worker", "3"]).unwrap();
+        assert!(matches!(command, super::Command::ParseWorker(3)));
+        let (_, command) = parse(&["parse-worker"]).unwrap();
+        assert!(matches!(command, super::Command::ParseWorker(1)));
+    }
     #[test]
     fn options_parse_in_any_position_and_routes_are_checked_first() {
         let parse = |a: &[&str]| super::parse_args(a.iter().map(|s| s.to_string()));

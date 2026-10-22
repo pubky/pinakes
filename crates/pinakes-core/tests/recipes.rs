@@ -270,7 +270,7 @@ async fn fixture(pool: &PgPool) {
         include_bytes!("fixtures/registry/nature12373-head.html"),
     );
     let page = pinakes_core::resolver::html::off_runtime(|| {
-        pinakes_core::resolver::web::extract(landing, &fetched, 86400)
+        pinakes_core::resolver::web::extract(landing, &fetched, 86400).unwrap()
     })
     .doc;
     save(pool, &page).await;

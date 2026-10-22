@@ -103,7 +103,10 @@ impl WebResolver {
             Ok(fetched) if fetched.status == 200 => fetched,
             Ok(_) => return None,
             Err(error) => {
-                tracing::debug!(error = %crate::resolver::log_error(&error), "Wikipedia summary failed; reading the page");
+                tracing::debug!(
+                    kind = crate::resolver::error_class(&error),
+                    "Wikipedia summary failed; reading the page"
+                );
                 return None;
             }
         };
@@ -231,7 +234,7 @@ impl WebResolver {
             let input = fetched.clone();
             let ttl = self.config.ttl_secs;
             let mut extracted =
-                super::html::blocking(move || extract(&input_uri, &input, ttl)).await?;
+                super::html::blocking(move || extract(&input_uri, &input, ttl)).await??;
             if extracted.doc.status == Status::Unreachable {
                 if let Some(doc) =
                     crate::sources::wall_hooks(&self.egress, uri, ttl, deadline).await
@@ -357,7 +360,8 @@ pub struct Extracted {
     pub title: Option<String>,
     pub description: Option<String>,
 }
-pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
+/// `Err` when the page is too complex to parse (`html::TooComplex`).
+pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extracted> {
     let mut doc = ResourceMeta::new(uri, "web", ttl);
     if fetched.truncated {
         doc.event.warnings.push("truncated".into());
@@ -372,12 +376,15 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
         title: None,
         description: None,
     };
-    if Url::parse(uri).is_ok_and(|url| {
-        super::interstitial::inspect(&url, fetched) != super::interstitial::Page::Content
-    }) {
+    if Url::parse(uri)
+        .ok()
+        .map(|url| super::interstitial::inspect(&url, fetched))
+        .transpose()?
+        .is_some_and(|page| page != super::interstitial::Page::Content)
+    {
         out.doc.status = Status::Unreachable;
         out.doc.aliases.clear();
-        return out;
+        return Ok(out);
     }
     if fetched.permanent_redirect && fetched.url.as_str() != uri {
         add_alias(&mut out.doc, fetched.url.to_string());
@@ -386,23 +393,23 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
     match fetched.status {
         404 | 410 | 451 => {
             out.doc.status = Status::Missing;
-            return out;
+            return Ok(out);
         }
         401 | 403 => {
             out.doc.status = Status::Unreachable;
-            return out;
+            return Ok(out);
         }
         200..=299 => {}
         _ => {
             out.doc.status = Status::Error;
             out.doc.http_status = Some(fetched.status);
-            return out;
+            return Ok(out);
         }
     }
     if fetched.content_type.starts_with("image/") {
         out.doc.set_type("ImageObject");
         out.doc.image = Some(fetched.url.to_string());
-        return out;
+        return Ok(out);
     }
     if fetched.content_type == "application/pdf" {
         out.doc.name = fetched
@@ -410,7 +417,7 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
             .path_segments()
             .and_then(|mut s| s.next_back())
             .map(str::to_owned);
-        return out;
+        return Ok(out);
     }
     let text = String::from_utf8_lossy(&fetched.body);
     if fetched.content_type.ends_with("json") {
@@ -418,9 +425,9 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
             apply_jsonld(&mut out.doc, &v, &fetched.url, true, true);
         }
         out.doc.event.read_from(fetched);
-        return out;
+        return Ok(out);
     }
-    let html = crate::resolver::html::document(&text);
+    let html = crate::resolver::html::document(&text)?;
     // JSON-LD stays document-wide (plugins put it in the body), but only the chosen entity
     // may carry claims (url/@id, sameAs, identifiers): from a head script, as with head meta
     // and links (its main-entity url is the publisher's canonical declaration), or from a
@@ -632,7 +639,7 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> Extracted {
     out.description = meta.get("description").cloned();
     // The performers' provenance is this fetch's, whatever base the parsers were handed.
     out.doc.event.read_from(fetched);
-    out
+    Ok(out)
 }
 fn cited_doi(value: &str) -> Option<String> {
     let value = value.trim();
@@ -1139,6 +1146,7 @@ mod tests {
         };
         let feed = |body: &str| {
             extract("https://darknetdiaries.com/episode/180/", &page(body), 3600)
+                .unwrap()
                 .doc
                 .attributes
                 .get("feed")
@@ -1189,6 +1197,7 @@ mod tests {
             &page("https://example.org/a", false, claims),
             3600,
         )
+        .unwrap()
         .doc;
         assert!(d.alias_candidates.is_empty(), "{:?}", d.alias_candidates);
         assert!(d.aliases.iter().any(|a| a.contains("utm_source=og")));
@@ -1201,6 +1210,7 @@ mod tests {
             ),
             3600,
         )
+        .unwrap()
         .doc;
         assert_eq!(
             d.alias_candidates,
@@ -1221,6 +1231,7 @@ mod tests {
             ),
             3600,
         )
+        .unwrap()
         .doc;
         assert_eq!(
             d.alias_candidates,
@@ -1244,7 +1255,7 @@ mod tests {
                 location: None,
                 body: head.as_bytes().into(),
             };
-            extract("https://example.org/", &fetched, 100)
+            extract("https://example.org/", &fetched, 100).unwrap()
         };
         let meta = page(
             r#"<title>Money transfers &amp; payments</title><meta property="og:title" content="It&#39;s &quot;quick&quot; &amp;amp; more"><meta name="description" content="Tom &amp; Jerry &lt;3"><meta property="og:description" content="Bill &amp;amp; Ted"><meta property="og:site_name" content="A &amp; B">"#,
@@ -1327,7 +1338,7 @@ mod tests {
                 .as_slice()
                 .into(),
         };
-        let body = extract("https://example.org/data.json", &fetched, 100);
+        let body = extract("https://example.org/data.json", &fetched, 100).unwrap();
         assert_eq!(body.doc.name.as_deref(), Some("Tom &amp; Jerry"));
         assert_eq!(body.doc.description.as_deref(), Some("5&currency=EUR"));
     }
@@ -1346,7 +1357,8 @@ mod tests {
             "https://www.songkick.com/concerts/43402127-radiohead-at-rac-arena",
             &fetched,
             100,
-        );
+        )
+        .unwrap();
         assert_eq!(out.doc.type_name, "MusicEvent");
         let performers: Vec<(&str, Vec<&str>)> = out
             .doc
@@ -1394,7 +1406,7 @@ mod tests {
         ] {
             let fetched =
                 crate::sources::fixture::page(from, "text/html", body.as_bytes().to_vec(), None);
-            let out = extract(asked, &fetched, 100);
+            let out = extract(asked, &fetched, 100).unwrap();
             assert_eq!(out.doc.event.performers.len(), 1);
             assert_eq!(out.doc.event.performers_from.as_deref(), Some(after));
         }
@@ -1408,7 +1420,7 @@ mod tests {
             body.as_bytes().to_vec(),
             None,
         );
-        let out = extract("https://venue.example/tonight", &fetched, 100);
+        let out = extract("https://venue.example/tonight", &fetched, 100).unwrap();
         assert_eq!(out.doc.name.as_deref(), Some("Tonight"));
         assert!(
             out.doc.event.performers.is_empty(),
@@ -1424,7 +1436,7 @@ mod tests {
             body.as_bytes().to_vec(),
             None,
         );
-        let out = extract("https://venue.example/tonight", &fetched, 100);
+        let out = extract("https://venue.example/tonight", &fetched, 100).unwrap();
         assert_eq!(out.doc.type_name, "MusicEvent");
         assert!(
             out.doc.event.performers.is_empty(),
@@ -1448,7 +1460,9 @@ mod tests {
                 body.into_bytes(),
                 None,
             );
-            extract("https://venue.example/tonight", &fetched, 100).doc
+            extract("https://venue.example/tonight", &fetched, 100)
+                .unwrap()
+                .doc
         };
         let names = |doc: &ResourceMeta| -> Vec<String> {
             doc.event
@@ -1501,7 +1515,9 @@ mod tests {
             body.into_bytes(),
             None,
         );
-        let doc = extract("https://venue.example/tonight", &fetched, 100).doc;
+        let doc = extract("https://venue.example/tonight", &fetched, 100)
+            .unwrap()
+            .doc;
         assert_eq!(names(&doc), ["Radiohead"]);
     }
     #[test]
@@ -1518,7 +1534,7 @@ mod tests {
             location: None,
             body: body.as_bytes().into(),
         };
-        let out = extract("https://example.org/", &fetched, 100);
+        let out = extract("https://example.org/", &fetched, 100).unwrap();
         assert_eq!(out.doc.name.as_deref(), Some("JSON first"));
         assert_eq!(out.doc.description.as_deref(), Some("MF summary"));
         assert_eq!(
@@ -1554,7 +1570,7 @@ mod tests {
             env!("CARGO_MANIFEST_DIR")
         );
         let url = "https://tidal.com/artist/64518";
-        let out = extract(url, &fetch(url, std::fs::read(path).unwrap()), 100);
+        let out = extract(url, &fetch(url, std::fs::read(path).unwrap()), 100).unwrap();
         assert_eq!(
             (out.doc.type_name.as_str(), out.doc.name.as_deref()),
             ("MusicGroup", Some("Radiohead"))
@@ -1577,7 +1593,9 @@ mod tests {
             ),
         ] {
             let path = format!("{}/tests/fixtures/web/{file}", env!("CARGO_MANIFEST_DIR"));
-            let mut doc = extract(url, &fetch(url, std::fs::read(path).unwrap()), 100).doc;
+            let mut doc = extract(url, &fetch(url, std::fs::read(path).unwrap()), 100)
+                .unwrap()
+                .doc;
             doc.status = crate::model::Status::Ok;
             crate::music::type_card(url, None, &mut doc);
             assert_eq!(doc.description.as_deref(), Some(description), "{url}");
@@ -1589,7 +1607,8 @@ mod tests {
             "https://shop.example/",
             &fetch("https://shop.example/", home.as_bytes().to_vec()),
             100,
-        );
+        )
+        .unwrap();
         assert_eq!(out.doc.type_name, "WebPage");
         // An organization naming another page stays a helper.
         let other = r#"<head><script type="application/ld+json">{"@type":"Organization","url":"https://shop.example/","name":"Shop Ltd"}</script><script type="application/ld+json">{"@type":"WebApplication","name":"App"}</script></head>"#;
@@ -1597,7 +1616,8 @@ mod tests {
             "https://shop.example/about",
             &fetch("https://shop.example/about", other.as_bytes().to_vec()),
             100,
-        );
+        )
+        .unwrap();
         assert_eq!(out.doc.type_name, "WebApplication");
     }
 
@@ -1616,6 +1636,7 @@ mod tests {
                 validators: Default::default(),
             };
             extract("https://journal.example/a", &fetched, 100)
+                .unwrap()
                 .doc
                 .group_keys
                 .into_iter()
@@ -1670,7 +1691,7 @@ mod tests {
                 retry_after_secs: 60,
                 validators: Default::default(),
             };
-            extract("https://victim.example/post", &fetched, 100)
+            extract("https://victim.example/post", &fetched, 100).unwrap()
         };
         let claims = |out: &Extracted| {
             out.doc
@@ -1743,7 +1764,9 @@ mod tests {
                 retry_after_secs: 60,
                 validators: Default::default(),
             };
-            let d = extract("https://news.example/story", &fetched, 100).doc;
+            let d = extract("https://news.example/story", &fetched, 100)
+                .unwrap()
+                .doc;
             (d.type_name.clone(), d.aliases)
         };
         // Google's Article shape names the page via mainEntityOfPage (URL or WebPage).

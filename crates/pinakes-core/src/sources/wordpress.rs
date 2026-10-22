@@ -71,7 +71,7 @@ pub fn post_api(page: &Fetched) -> Option<(Url, u64)> {
     if !body.contains("wp-json") && !body.contains("?p=") {
         return None;
     }
-    let html = crate::resolver::html::document(&body);
+    let html = crate::resolver::html::document(&body).ok()?;
     let links = scraper::Selector::parse("head link[href]").ok()?;
     let mut shortlink = None;
     for link in html.select(&links).take(64) {

@@ -37,8 +37,11 @@ fn captured_walls_stubs_and_content_are_distinguished() {
     let wall = include_str!("fixtures/interstitials/federal-register-wall.html");
     for status in [200, 403, 429, 503] {
         let f = page("https://unblock.federalregister.gov/", wall, status);
-        assert_eq!(interstitial::inspect(&requested, &f), Page::Blocked);
-        let d = web::extract(requested.as_str(), &f, 86400).doc;
+        assert_eq!(
+            interstitial::inspect(&requested, &f).unwrap(),
+            Page::Blocked
+        );
+        let d = web::extract(requested.as_str(), &f, 86400).unwrap().doc;
         assert_eq!(d.status, Status::Unreachable);
         assert!(
             d.name.is_none()
@@ -54,7 +57,7 @@ fn captured_walls_stubs_and_content_are_distinguished() {
         200,
     );
     assert_eq!(
-        interstitial::inspect(&uri.parse().unwrap(), &f),
+        interstitial::inspect(&uri.parse().unwrap(), &f).unwrap(),
         Page::Redirect("/pkarr/".into())
     );
     for body in [
@@ -63,7 +66,7 @@ fn captured_walls_stubs_and_content_are_distinguished() {
         "<body>Redirecting to <a href='/next'>next</a></body>",
     ] {
         assert_eq!(
-            interstitial::inspect(&f.url, &page(uri, body, 200)),
+            interstitial::inspect(&f.url, &page(uri, body, 200)).unwrap(),
             Page::Redirect("/next".into())
         );
     }
@@ -76,13 +79,14 @@ fn captured_walls_stubs_and_content_are_distinguished() {
         "Unusual traffic",
     ] {
         assert_eq!(
-            interstitial::inspect(&f.url, &page(uri, &format!("<body>{marker}</body>"), 200)),
+            interstitial::inspect(&f.url, &page(uri, &format!("<body>{marker}</body>"), 200))
+                .unwrap(),
             Page::Blocked
         );
     }
     let ordinary=format!("<title>A real article</title><body>{}<script>const message='Enable JavaScript';</script></body>","Useful text. ".repeat(300));
     assert_eq!(
-        interstitial::inspect(&f.url, &page(uri, &ordinary, 200)),
+        interstitial::inspect(&f.url, &page(uri, &ordinary, 200)).unwrap(),
         Page::Content
     );
 }
@@ -148,7 +152,7 @@ async fn real_http_error_bodies_reach_interstitial_detection_with_a_cap() {
             .unwrap();
         assert_eq!(f.status, status);
         assert_eq!(
-            pinakes_core::resolver::html::off_runtime(|| interstitial::inspect(&uri, &f)),
+            pinakes_core::resolver::html::off_runtime(|| interstitial::inspect(&uri, &f).unwrap()),
             expected
         );
         if path == "unavailable" {
@@ -282,7 +286,7 @@ fn main_entity_canonical_is_identity_but_publisher_nodes_are_not() {
         r#"<script type="application/ld+json">{"@type":"WebPage","url":"https://example.org/wrapper","mainEntity":{"@type":"Article","url":"https://example.org/canonical","name":"Main"}}</script>"#,
         200,
     );
-    let d = web::extract(uri, &f, 86400).doc;
+    let d = web::extract(uri, &f, 86400).unwrap().doc;
     assert!(d
         .aliases
         .contains(&"https://example.org/canonical".to_owned()));
@@ -295,7 +299,7 @@ fn main_entity_canonical_is_identity_but_publisher_nodes_are_not() {
 fn wall_heuristics_need_context_and_cover_more_vendors() {
     let uri = "https://app.example/dashboard";
     let at = |body: &str, status: u16| {
-        interstitial::inspect(&uri.parse().unwrap(), &page(uri, body, status))
+        interstitial::inspect(&uri.parse().unwrap(), &page(uri, body, status)).unwrap()
     };
     let long = "Useful article text. ".repeat(120);
     // A client-rendered shell's <noscript> notice is not visible text.
@@ -303,6 +307,7 @@ fn wall_heuristics_need_context_and_cover_more_vendors() {
     assert_eq!(at(shell, 200), Page::Content);
     assert_eq!(
         web::extract(uri, &page(uri, shell, 200), 86400)
+            .unwrap()
             .doc
             .name
             .as_deref(),
@@ -387,7 +392,7 @@ fn wall_heuristics_need_context_and_cover_more_vendors() {
             200,
         );
         assert_eq!(
-            interstitial::inspect(&requested, &f),
+            interstitial::inspect(&requested, &f).unwrap(),
             Page::Blocked,
             "{wall}"
         );
@@ -401,7 +406,7 @@ fn wall_heuristics_need_context_and_cover_more_vendors() {
         );
         let requested: Url = own.trim_end_matches('/').parse().unwrap();
         assert_eq!(
-            interstitial::inspect(&requested, &f),
+            interstitial::inspect(&requested, &f).unwrap(),
             Page::Content,
             "{own}"
         );
@@ -503,7 +508,7 @@ fn multi_byte_refresh_content_and_sign_in_flows_are_content() {
                 &format!(r#"<meta http-equiv="refresh" content="{content}"><body>{body}</body>"#),
                 200,
             );
-            let _ = interstitial::inspect(&requested, &f);
+            let _ = interstitial::inspect(&requested, &f).unwrap();
         }
     }
     let f = page(
@@ -512,7 +517,7 @@ fn multi_byte_refresh_content_and_sign_in_flows_are_content() {
         200,
     );
     assert_eq!(
-        interstitial::inspect(&requested, &f),
+        interstitial::inspect(&requested, &f).unwrap(),
         Page::Redirect("a€b".into())
     );
 
@@ -536,7 +541,7 @@ fn multi_byte_refresh_content_and_sign_in_flows_are_content() {
             200,
         );
         assert_eq!(
-            interstitial::inspect(&asked.parse().unwrap(), &f),
+            interstitial::inspect(&asked.parse().unwrap(), &f).unwrap(),
             Page::Content,
             "{asked} -> {landed}"
         );
@@ -552,7 +557,7 @@ fn multi_byte_refresh_content_and_sign_in_flows_are_content() {
             200,
         );
         assert_eq!(
-            interstitial::inspect(&"https://example.com/posts/1".parse().unwrap(), &f),
+            interstitial::inspect(&"https://example.com/posts/1".parse().unwrap(), &f).unwrap(),
             Page::Blocked,
             "{landed}"
         );
@@ -576,7 +581,9 @@ fn web_route_dates_are_bounded() {
             r#"<div class="h-event"><b class="p-name">Talk</b><time class="dt-start" datetime="{start}"></time></div>"#
         );
         for body in [jsonld, microformat] {
-            let d = web::extract(uri, &page(uri, &body, 200), 86400).doc;
+            let d = web::extract(uri, &page(uri, &body, 200), 86400)
+                .unwrap()
+                .doc;
             assert_eq!(d.start.is_some(), kept, "{body}");
         }
     }
@@ -595,14 +602,17 @@ fn wall_hosts_need_a_redirect_from_another_host() {
         landed.url = Url::parse(requested).unwrap();
         let requested = Url::parse(requested).unwrap();
         assert_eq!(
-            interstitial::inspect(&requested, &landed),
+            interstitial::inspect(&requested, &landed).unwrap(),
             Page::Content,
             "{requested}"
         );
     }
     landed.url = Url::parse("https://login.example.org/help").unwrap();
     let requested = Url::parse("https://www.example.org/article").unwrap();
-    assert_eq!(interstitial::inspect(&requested, &landed), Page::Blocked);
+    assert_eq!(
+        interstitial::inspect(&requested, &landed).unwrap(),
+        Page::Blocked
+    );
 }
 
 /// A page whose JSON-LD has a plain `&`.

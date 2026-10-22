@@ -1,39 +1,87 @@
-//! The one way to read HTML: a linear scan with hard caps, then the parser, in a parse slot.
+//! The one way to read HTML: a linear scan that cuts the obvious hostile shapes, then the
+//! parser in a worker process that dies at its limits, in a parse slot.
 //!
 //! A page parse is CPU work no timeout can stop, and some inputs make the parser superlinear
-//! (one tag with tens of thousands of attributes, tens of thousands of unclosed elements). Every
-//! HTML parse in the crate goes through `document` or `fragment` (a test checks no other code
-//! names the parser), which first scan the text in one pass, the way the HTML tokenizer reads
-//! it, and cut it at the first point that passes a cap:
+//! (one tag with tens of thousands of attributes, tens of thousands of unclosed elements, end
+//! tags the parser ignores). Every HTML parse in the crate goes through `document` or `fragment`
+//! (a test checks no other code names the parser). The bound does not depend on predicting what
+//! the parser does with a text:
 //!
-//! | Cap | Real pages (149 pages of the hosts stable holds, 2026-10-21) |
-//! | --- | --- |
-//! | `MAX_TAGS` 50,000 start tags | median 508, 95th percentile 2,805, most 16,440 (a Wikidata item) |
-//! | `MAX_DEPTH` 256 open elements | median 14, 95th percentile 31, most 62 |
-//! | `MAX_TAG_ATTRIBUTES` 64 per tag | median 9, 95th percentile 14, most 29 |
-//! | `MAX_ATTRIBUTE_BYTES` 1 MiB per value | median 1 KB, 95th percentile 13 KB, most 121 KB |
+//! 1. **The worker.** The parse runs in a child process (`pinakesd parse-worker`, or the
+//!    `pinakes-parse` binary) under `RLIMIT_CPU` (`PARSE_BUDGET` of CPU time) and `RLIMIT_AS`
+//!    (`PARSE_MEMORY`), with a wall-clock deadline in the parent. Past any of them the child dies
+//!    or is killed, the parse slot is freed, and the parse fails as `TooComplex` (the failure
+//!    kind `too_complex`): no card. The child answers with the tree, within `MAX_DEPTH` (a deeper
+//!    node is left out) and `MAX_NODES` (more is `TooComplex`), so what the parent reads back is
+//!    bounded and linear to rebuild. The daemon and the e2e stack are their own workers
+//!    (`set_worker`); `PINAKES_PARSE_WORKER` names one for any other program. Without a worker
+//!    (a library user, most tests) the parse runs in this process, fed a kibibyte at a time and
+//!    stopped at the budget of its thread's CPU time, with the same caps on the tree.
+//! 2. **The scan** reads the text once, the way the parser does, and cuts it at the first point
+//!    that passes a cap, so the known hostile shapes stop at once and keep what precedes them:
 //!
-//! Text needs no cap: the parser reads it in linear time, and the page caps bound it. Depth
-//! counts open elements as the parser does, unclosed ones too: an end tag closes up to the
-//! element it names and is ignored when none is open. Void elements and the ones a sibling
-//! closes (`p`, `li`, `td`, `option`, …) are not counted, so old markup with unclosed list items
-//! is not cut. Text in `script`, `style` and the other raw-text elements, and comments, are not
-//! markup.
+//!    | Cap | Real pages (149 pages of the hosts stable holds, October 2026) |
+//!    | --- | --- |
+//!    | `MAX_TAGS` 50,000 start tags | median 508, 95th percentile 2,805, most 16,440 (a Wikidata item) |
+//!    | `MAX_DEPTH` 256 open elements | median 14, 95th percentile 31, most 62 |
+//!    | `MAX_TAG_ATTRIBUTES` 64 per tag, end tags too | median 9, 95th percentile 14, most 29 |
+//!    | `MAX_ATTRIBUTE_BYTES` 1 MiB per value | median 1 KB, 95th percentile 13 KB, most 121 KB |
+//!    | `MAX_NAME_BYTES` 256 per tag name | most 27 (`markdown-accessiblity-table`) |
+//!
+//!    It follows the tokenizer (comments, `CDATA` in SVG and MathML, raw text, the script escape
+//!    states, attributes on end tags) and the parts of tree building that decide what is markup
+//!    and what is open (SVG and MathML content, integration points, end tags that stop at a
+//!    special element or a scope boundary). Void elements and the ones a sibling closes (`p`,
+//!    `li`, `td`, `option`, …) are not counted, so old markup with unclosed list items is not
+//!    cut. The scan is a cheap early cut, not the guarantee: a shape it reads differently from
+//!    the parser meets the worker's limits.
 //!
 //! A parse runs in `blocking`: on the blocking pool, holding one of a fixed number of permits
 //! until the parse itself ends, even after its caller stopped waiting. In debug builds a parse on
 //! a runtime thread outside `blocking` panics, so the tests find any path that skips it.
+use anyhow::Context;
+use html5ever::tendril::{StrTendril, TendrilSink};
+use html5ever::{Attribute, LocalName, Namespace, Prefix, QualName};
+use scraper::node::{Comment, Doctype, Element, ProcessingInstruction, Text};
+use scraper::Node;
 use std::cell::Cell;
-use std::sync::{Arc, LazyLock};
+use std::ffi::OsString;
+use std::io::{Read, Write};
+use std::os::unix::process::ExitStatusExt;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 
 pub const MAX_TAGS: usize = 50_000;
 pub const MAX_DEPTH: usize = 256;
 pub const MAX_TAG_ATTRIBUTES: usize = 64;
 pub const MAX_ATTRIBUTE_BYTES: usize = 1024 * 1024;
+pub const MAX_NAME_BYTES: usize = 256;
+/// The most nodes a parsed tree may hold (elements, text, comments). The largest of the 149 real
+/// pages (1.8 MB) has 44,000.
+pub const MAX_NODES: usize = 500_000;
 /// The most ancestors a walk up a parsed tree looks at: the depth cap and the elements it does
 /// not count.
 pub const MAX_ANCESTORS: usize = 2 * MAX_DEPTH;
+/// The CPU time one parse may take, ten times more in a debug build's slower code. The largest
+/// of the 149 real pages parses in 0.5 s in a debug build.
+pub const PARSE_BUDGET: Duration = if cfg!(debug_assertions) {
+    Duration::from_secs(10)
+} else {
+    Duration::from_secs(1)
+};
+/// The address space a parse worker may use. A 4 MiB page of nothing but `<a>` tags, the
+/// densest tree a page within the head budget can make, takes 600 MB in a debug build.
+pub const PARSE_MEMORY: u64 = 1024 * 1024 * 1024;
+/// The parser reads this much between two looks at the budget, without a worker.
+const PARSE_CHUNK: usize = 1024;
+/// The largest answer a worker may give (the tree, serialized): a tree within `MAX_NODES` from
+/// a page within the head budget is far smaller.
+const MAX_TREE_BYTES: usize = 64 * 1024 * 1024;
+/// The worker's exit status for a tree past `MAX_NODES`.
+const EXIT_TOO_MANY_NODES: i32 = 3;
 
 const VOID: &[&str] = &[
     "area", "base", "basefont", "bgsound", "br", "col", "embed", "frame", "hr", "image", "img",
@@ -44,9 +92,194 @@ const IMPLIED: &[&str] = &[
     "body", "caption", "colgroup", "dd", "dt", "head", "html", "li", "optgroup", "option", "p",
     "rb", "rp", "rt", "rtc", "tbody", "td", "tfoot", "th", "thead", "tr",
 ];
-/// Elements whose content is text up to their own end tag.
+/// HTML elements whose content is text up to their own end tag (`script` has its own states).
 const RAW: &[&str] = &[
     "iframe", "noembed", "noframes", "noscript", "script", "style", "textarea", "title", "xmp",
+];
+/// Start tags that end SVG or MathML content (`font` only with `color`, `face` or `size`).
+const BREAKOUT: &[&str] = &[
+    "b",
+    "big",
+    "blockquote",
+    "body",
+    "br",
+    "center",
+    "code",
+    "dd",
+    "div",
+    "dl",
+    "dt",
+    "em",
+    "embed",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "head",
+    "hr",
+    "i",
+    "img",
+    "li",
+    "listing",
+    "menu",
+    "meta",
+    "nobr",
+    "ol",
+    "p",
+    "pre",
+    "ruby",
+    "s",
+    "small",
+    "span",
+    "strong",
+    "strike",
+    "sub",
+    "sup",
+    "table",
+    "tt",
+    "u",
+    "ul",
+    "var",
+];
+/// HTML elements an end tag of another name does not close past (the parser's "special" ones).
+const SPECIAL: &[&str] = &[
+    "address",
+    "applet",
+    "area",
+    "article",
+    "aside",
+    "base",
+    "basefont",
+    "bgsound",
+    "blockquote",
+    "body",
+    "br",
+    "button",
+    "caption",
+    "center",
+    "col",
+    "colgroup",
+    "dd",
+    "details",
+    "dir",
+    "div",
+    "dl",
+    "dt",
+    "embed",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "footer",
+    "form",
+    "frame",
+    "frameset",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "head",
+    "header",
+    "hgroup",
+    "hr",
+    "html",
+    "iframe",
+    "img",
+    "input",
+    "keygen",
+    "li",
+    "link",
+    "listing",
+    "main",
+    "marquee",
+    "menu",
+    "meta",
+    "nav",
+    "noembed",
+    "noframes",
+    "noscript",
+    "object",
+    "ol",
+    "p",
+    "param",
+    "plaintext",
+    "pre",
+    "script",
+    "search",
+    "section",
+    "select",
+    "source",
+    "style",
+    "summary",
+    "table",
+    "tbody",
+    "td",
+    "template",
+    "textarea",
+    "tfoot",
+    "th",
+    "thead",
+    "title",
+    "tr",
+    "track",
+    "ul",
+    "wbr",
+    "xmp",
+];
+/// HTML elements an end tag of their own name closes when one is open above the nearest
+/// `SCOPE` element ("in scope"), closing what is open inside it.
+const SCOPED_END: &[&str] = &[
+    "address",
+    "applet",
+    "article",
+    "aside",
+    "blockquote",
+    "button",
+    "center",
+    "details",
+    "dialog",
+    "dir",
+    "div",
+    "dl",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "footer",
+    "form",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "header",
+    "hgroup",
+    "listing",
+    "main",
+    "marquee",
+    "menu",
+    "nav",
+    "object",
+    "ol",
+    "pre",
+    "search",
+    "section",
+    "select",
+    "summary",
+    "table",
+    "template",
+    "ul",
+];
+/// The elements that bound a scope (with the SVG and MathML integration points).
+const SCOPE: &[&str] = &[
+    "applet", "caption", "html", "marquee", "object", "table", "td", "template", "th",
+];
+/// Formatting elements: an end tag closes the nearest one in scope, whatever is open inside.
+const FORMATTING: &[&str] = &[
+    "a", "b", "big", "code", "em", "font", "i", "nobr", "s", "small", "strike", "strong", "tt", "u",
 ];
 
 /// Page parses that may run at once: the machine's parallelism, at least two.
@@ -107,16 +340,42 @@ fn check_slot() {
     );
 }
 
-/// `text` parsed as an HTML document, cut at the first cap it passes.
-pub fn document(text: &str) -> scraper::Html {
-    check_slot();
-    scraper::Html::parse_document(bounded(text))
+/// A parse that did not end within its limits: the page gets no card (`too_complex`).
+#[derive(Debug)]
+pub struct TooComplex {
+    pub reason: &'static str,
+}
+impl std::fmt::Display for TooComplex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the page is too complex to parse ({})", self.reason)
+    }
+}
+impl std::error::Error for TooComplex {}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Kind {
+    Document = 0,
+    Fragment = 1,
 }
 
-/// `text` parsed as an HTML fragment, cut at the first cap it passes.
-pub fn fragment(text: &str) -> scraper::Html {
+/// `text` parsed as an HTML document, within the caps and the limits.
+pub fn document(text: &str) -> anyhow::Result<scraper::Html> {
     check_slot();
-    scraper::Html::parse_fragment(bounded(text))
+    parse(Kind::Document, bounded(text), PARSE_BUDGET)
+}
+
+/// `text` parsed as an HTML fragment, within the caps and the limits.
+pub fn fragment(text: &str) -> anyhow::Result<scraper::Html> {
+    check_slot();
+    parse(Kind::Fragment, bounded(text), PARSE_BUDGET)
+}
+
+/// `text` parsed as a document with the scan's cut skipped and `budget` of CPU time: for the
+/// tests of the limits themselves.
+#[doc(hidden)]
+pub fn document_unscanned(text: &str, budget: Duration) -> anyhow::Result<scraper::Html> {
+    check_slot();
+    parse(Kind::Document, text, budget)
 }
 
 /// `text` up to the first cap it passes (see the module).
@@ -127,23 +386,476 @@ pub fn bounded(text: &str) -> &str {
     scan.cut.map_or(text, |at| &text[..at])
 }
 
+fn parse(kind: Kind, text: &str, budget: Duration) -> anyhow::Result<scraper::Html> {
+    let result = match worker() {
+        Some(worker) => parse_with_worker(worker, kind, text, budget),
+        None => parse_in_process(kind, text, budget),
+    };
+    if let Some(too_complex) = result
+        .as_ref()
+        .err()
+        .and_then(|e| e.downcast_ref::<TooComplex>())
+    {
+        tracing::warn!(
+            reason = too_complex.reason,
+            bytes = text.len(),
+            "an HTML parse did not end within its limits; the page gets no card"
+        );
+    }
+    result
+}
+
+/// The program that parses for this process.
+#[derive(Debug)]
+struct Worker {
+    program: PathBuf,
+    args: Vec<OsString>,
+}
+static WORKER: OnceLock<Option<Worker>> = OnceLock::new();
+
+/// Parse in a child process, `program args… <cpu seconds>`, which runs `worker_main` (the daemon
+/// itself with `parse-worker`). Set once, before any parse; a later call changes nothing.
+pub fn set_worker(
+    program: impl Into<PathBuf>,
+    args: impl IntoIterator<Item = impl Into<OsString>>,
+) {
+    let _ = WORKER.set(Some(Worker {
+        program: program.into(),
+        args: args.into_iter().map(Into::into).collect(),
+    }));
+}
+
+/// The worker, when one is set, or when `PINAKES_PARSE_WORKER` names a program that takes the
+/// CPU seconds as its one argument (`pinakes-parse`).
+fn worker() -> Option<&'static Worker> {
+    WORKER
+        .get_or_init(|| {
+            Some(Worker {
+                program: std::env::var_os("PINAKES_PARSE_WORKER")?.into(),
+                args: vec![],
+            })
+        })
+        .as_ref()
+}
+
+/// Whether parses run in a worker process.
+pub fn has_worker() -> bool {
+    worker().is_some()
+}
+
+/// Parse a small document through the worker: a daemon checks it can before it serves.
+pub fn check_worker() -> anyhow::Result<()> {
+    let worker = worker().context("no parse worker is set")?;
+    let html = parse_with_worker(worker, Kind::Document, "<p>worker</p>", PARSE_BUDGET)?;
+    let p = scraper::Selector::parse("p").expect("a selector");
+    anyhow::ensure!(
+        html.select(&p).next().map(|e| e.inner_html()).as_deref() == Some("worker"),
+        "the parse worker answered a different tree"
+    );
+    Ok(())
+}
+
+fn parse_with_worker(
+    worker: &Worker,
+    kind: Kind,
+    text: &str,
+    budget: Duration,
+) -> anyhow::Result<scraper::Html> {
+    let secs = budget.as_secs().max(1);
+    let mut child = Command::new(&worker.program)
+        .args(&worker.args)
+        .arg(secs.to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| {
+            format!(
+                "the parse worker {} did not start",
+                worker.program.display()
+            )
+        })?;
+    let mut stdin = child.stdin.take().expect("a piped stdin");
+    let mut stdout = child.stdout.take().expect("a piped stdout");
+    // The child dies by itself at its CPU or memory limit; the watchdog kills one that is still
+    // there at the wall deadline (a host under load runs it slower than its CPU time).
+    let shared = Arc::new((Mutex::new(Some(child)), Condvar::new()));
+    let wall = budget * 3 + Duration::from_secs(1);
+    let watchdog = {
+        let shared = shared.clone();
+        std::thread::spawn(move || {
+            let (child, done) = &*shared;
+            let deadline = Instant::now() + wall;
+            let mut slot = child.lock().unwrap_or_else(|e| e.into_inner());
+            while slot.is_some() {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                slot = done
+                    .wait_timeout(slot, left)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+            }
+            match slot.as_mut() {
+                Some(child) => {
+                    let _ = child.kill();
+                    true
+                }
+                None => false,
+            }
+        })
+    };
+    // The child reads everything before it answers, so writing and then reading cannot
+    // deadlock; a write that fails means the child has ended, and its status says why.
+    let mut input = Vec::with_capacity(text.len() + 1);
+    input.push(kind as u8);
+    input.extend_from_slice(text.as_bytes());
+    let _ = stdin.write_all(&input).and_then(|()| stdin.flush());
+    drop(stdin);
+    let mut answer = Vec::new();
+    let _ = (&mut stdout)
+        .take(MAX_TREE_BYTES as u64 + 1)
+        .read_to_end(&mut answer);
+    drop(stdout);
+    let status = {
+        let (child, done) = &*shared;
+        let child = child.lock().unwrap_or_else(|e| e.into_inner()).take();
+        done.notify_all();
+        child.map(|mut child| child.wait())
+    };
+    let killed = watchdog.join().unwrap_or(false);
+    let status = status.context("the parse worker was lost")??;
+    let reason = if killed {
+        Some("the wall deadline")
+    } else if status.signal() == Some(libc::SIGXCPU) {
+        Some("the CPU budget")
+    } else if status.signal() == Some(libc::SIGABRT) {
+        Some("the memory limit")
+    } else if status.code() == Some(EXIT_TOO_MANY_NODES) {
+        Some("more nodes than the cap")
+    } else if !status.success() {
+        Some("the worker ended early")
+    } else if answer.len() > MAX_TREE_BYTES {
+        Some("a larger tree than the cap")
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
+        return Err(TooComplex { reason }.into());
+    }
+    decode(&answer, kind).context("the parse worker's answer is malformed")
+}
+
+/// The parse worker: parse what stdin holds (the kind byte, then the text) under `cpu_secs` of
+/// CPU time and `PARSE_MEMORY`, and write the tree to stdout. The exit status: 0, or
+/// `EXIT_TOO_MANY_NODES`, or 2 when the input or the limits are not as expected.
+pub fn worker_main(cpu_secs: u64) -> i32 {
+    let limit = |resource, soft: u64, hard: u64| {
+        let limit = libc::rlimit {
+            rlim_cur: soft,
+            rlim_max: hard,
+        };
+        // SAFETY: `setrlimit` reads the limit it is given and touches nothing else.
+        unsafe { libc::setrlimit(resource, &limit) == 0 }
+    };
+    if !limit(libc::RLIMIT_CPU, cpu_secs.max(1), cpu_secs.max(1) + 1)
+        || !limit(libc::RLIMIT_AS, PARSE_MEMORY, PARSE_MEMORY)
+        || !limit(libc::RLIMIT_CORE, 0, 0)
+    {
+        return 2;
+    }
+    let mut input = Vec::new();
+    if std::io::stdin().lock().read_to_end(&mut input).is_err() || input.is_empty() {
+        return 2;
+    }
+    let (Some(kind), Ok(text)) = (Kind::from_byte(input[0]), std::str::from_utf8(&input[1..]))
+    else {
+        return 2;
+    };
+    let html = match kind {
+        Kind::Document => scraper::Html::parse_document(text),
+        Kind::Fragment => scraper::Html::parse_fragment(text),
+    };
+    let mut answer = Vec::new();
+    if encode(&html, &mut answer).is_err() {
+        return EXIT_TOO_MANY_NODES;
+    }
+    let mut stdout = std::io::stdout().lock();
+    if stdout
+        .write_all(&answer)
+        .and_then(|()| stdout.flush())
+        .is_err()
+    {
+        return 2;
+    }
+    0
+}
+
+impl Kind {
+    fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Kind::Document),
+            1 => Some(Kind::Fragment),
+            _ => None,
+        }
+    }
+}
+
+/// Without a worker: the parser fed `text` a chunk at a time until it ends or the parse has used
+/// `budget` of this thread's CPU time, then the tree within its caps.
+fn parse_in_process(kind: Kind, text: &str, budget: Duration) -> anyhow::Result<scraper::Html> {
+    let html = match kind {
+        Kind::Document => within_budget(
+            html5ever::driver::parse_document(
+                scraper::HtmlTreeSink::new(scraper::Html::new_document()),
+                Default::default(),
+            ),
+            text,
+            budget,
+        ),
+        Kind::Fragment => within_budget(
+            html5ever::driver::parse_fragment(
+                scraper::HtmlTreeSink::new(scraper::Html::new_fragment()),
+                Default::default(),
+                QualName::new(None, html5ever::ns!(html), html5ever::local_name!("body")),
+                Vec::new(),
+                false,
+            ),
+            text,
+            budget,
+        ),
+    };
+    // The same trip the worker's answer takes: the depth and node caps apply alike.
+    let mut answer = Vec::new();
+    encode(&html, &mut answer).map_err(|()| TooComplex {
+        reason: "more nodes than the cap",
+    })?;
+    decode(&answer, kind)
+}
+
+/// The CPU time this thread has used.
+fn thread_cpu() -> Duration {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `clock_gettime` only writes the `timespec` it is given, and the thread CPU clock
+    // always exists.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+    Duration::new(
+        u64::try_from(now.tv_sec).unwrap_or(0),
+        u32::try_from(now.tv_nsec).unwrap_or(0),
+    )
+}
+
+fn within_budget<S>(mut parser: S, text: &str, budget: Duration) -> scraper::Html
+where
+    S: TendrilSink<html5ever::tendril::fmt::UTF8, Output = scraper::Html>,
+{
+    let started = thread_cpu();
+    let mut at = 0;
+    while at < text.len() {
+        let mut end = (at + PARSE_CHUNK).min(text.len());
+        while !text.is_char_boundary(end) {
+            end += 1;
+        }
+        parser.process(StrTendril::from_slice(&text[at..end]));
+        at = end;
+        if at < text.len() && thread_cpu().saturating_sub(started) > budget {
+            tracing::warn!(
+                read = at,
+                bytes = text.len(),
+                "an HTML parse used its CPU budget; the rest of the page is not read"
+            );
+            break;
+        }
+    }
+    parser.finish()
+}
+
+/// The tree as a worker answers it: a quirks byte, the node count, then each node but the root
+/// in document order as its parent's index (the root is 0), its kind and its fields. Strings
+/// carry their length first. Nodes below `MAX_DEPTH` are left out; past `MAX_NODES` the answer
+/// is refused. The walk follows child lists, which hold what the parser built: when it moves a
+/// node's children (misnested formatting tags), ego-tree 0.10 updates the parent of only the
+/// first and the last, so the parent pointers of the others are stale. The rebuilt tree's are
+/// not.
+fn encode(html: &scraper::Html, out: &mut Vec<u8>) -> Result<(), ()> {
+    use html5ever::tree_builder::QuirksMode;
+    fn string(out: &mut Vec<u8>, s: &str) {
+        out.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        out.extend_from_slice(s.as_bytes());
+    }
+    fn name(out: &mut Vec<u8>, name: &QualName) {
+        string(out, name.prefix.as_ref().map_or("", |p| &**p));
+        string(out, &name.ns);
+        string(out, &name.local);
+    }
+    out.push(match html.quirks_mode {
+        QuirksMode::NoQuirks => 0,
+        QuirksMode::LimitedQuirks => 1,
+        QuirksMode::Quirks => 2,
+    });
+    out.extend_from_slice(&0u32.to_le_bytes());
+    let mut count = 0u32;
+    let mut stack: Vec<_> = html
+        .tree
+        .root()
+        .children()
+        .rev()
+        .map(|child| (child, 0u32, 1usize))
+        .collect();
+    while let Some((node, parent, depth)) = stack.pop() {
+        if depth > MAX_DEPTH {
+            continue;
+        }
+        if count as usize >= MAX_NODES {
+            return Err(());
+        }
+        count += 1;
+        out.extend_from_slice(&parent.to_le_bytes());
+        match node.value() {
+            Node::Doctype(d) => {
+                out.push(1);
+                string(out, &d.name);
+                string(out, &d.public_id);
+                string(out, &d.system_id);
+            }
+            Node::Comment(c) => {
+                out.push(2);
+                string(out, &c.comment);
+            }
+            Node::Text(t) => {
+                out.push(3);
+                string(out, &t.text);
+            }
+            Node::Element(e) => {
+                out.push(4);
+                name(out, &e.name);
+                out.extend_from_slice(&(e.attrs.len() as u32).to_le_bytes());
+                for (attr, value) in &e.attrs {
+                    name(out, attr);
+                    string(out, value);
+                }
+            }
+            Node::ProcessingInstruction(p) => {
+                out.push(5);
+                string(out, &p.target);
+                string(out, &p.data);
+            }
+            Node::Document | Node::Fragment => out.push(6),
+        }
+        for child in node.children().rev() {
+            stack.push((child, count, depth + 1));
+        }
+    }
+    out[1..5].copy_from_slice(&count.to_le_bytes());
+    Ok(())
+}
+
+/// A tree from a worker's answer (`encode`).
+fn decode(bytes: &[u8], kind: Kind) -> anyhow::Result<scraper::Html> {
+    use html5ever::tree_builder::QuirksMode;
+    struct Reader<'a>(&'a [u8]);
+    impl<'a> Reader<'a> {
+        fn byte(&mut self) -> anyhow::Result<u8> {
+            let (&b, rest) = self.0.split_first().context("a short answer")?;
+            self.0 = rest;
+            Ok(b)
+        }
+        fn u32(&mut self) -> anyhow::Result<u32> {
+            let (n, rest) = self.0.split_first_chunk::<4>().context("a short answer")?;
+            self.0 = rest;
+            Ok(u32::from_le_bytes(*n))
+        }
+        fn string(&mut self) -> anyhow::Result<&'a str> {
+            let n = self.u32()? as usize;
+            let (s, rest) = self.0.split_at_checked(n).context("a short answer")?;
+            self.0 = rest;
+            Ok(std::str::from_utf8(s)?)
+        }
+        fn name(&mut self) -> anyhow::Result<QualName> {
+            let prefix = self.string()?;
+            let ns = self.string()?;
+            let local = self.string()?;
+            Ok(QualName::new(
+                (!prefix.is_empty()).then(|| Prefix::from(prefix)),
+                Namespace::from(ns),
+                LocalName::from(local),
+            ))
+        }
+        fn tendril(&mut self) -> anyhow::Result<StrTendril> {
+            Ok(StrTendril::from_slice(self.string()?))
+        }
+    }
+    let mut html = match kind {
+        Kind::Document => scraper::Html::new_document(),
+        Kind::Fragment => scraper::Html::new_fragment(),
+    };
+    let mut reader = Reader(bytes);
+    html.quirks_mode = match reader.byte()? {
+        0 => QuirksMode::NoQuirks,
+        1 => QuirksMode::LimitedQuirks,
+        _ => QuirksMode::Quirks,
+    };
+    let count = reader.u32()? as usize;
+    anyhow::ensure!(count <= MAX_NODES, "more nodes than the cap");
+    let mut ids = Vec::with_capacity(count + 1);
+    ids.push(html.tree.root().id());
+    for _ in 0..count {
+        let parent = *ids
+            .get(reader.u32()? as usize)
+            .context("a node before its parent")?;
+        let node = match reader.byte()? {
+            1 => Node::Doctype(Doctype {
+                name: reader.tendril()?,
+                public_id: reader.tendril()?,
+                system_id: reader.tendril()?,
+            }),
+            2 => Node::Comment(Comment {
+                comment: reader.tendril()?,
+            }),
+            3 => Node::Text(Text {
+                text: reader.tendril()?,
+            }),
+            4 => {
+                let name = reader.name()?;
+                let attributes = (0..reader.u32()?)
+                    .map(|_| {
+                        Ok(Attribute {
+                            name: reader.name()?,
+                            value: reader.tendril()?,
+                        })
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                Node::Element(Element::new(name, attributes))
+            }
+            5 => Node::ProcessingInstruction(ProcessingInstruction {
+                target: reader.tendril()?,
+                data: reader.tendril()?,
+            }),
+            6 => Node::Fragment,
+            _ => anyhow::bail!("an unknown node kind"),
+        };
+        let id = html
+            .tree
+            .get_mut(parent)
+            .context("a lost parent")?
+            .append(node)
+            .id();
+        ids.push(id);
+    }
+    anyhow::ensure!(reader.0.is_empty(), "bytes after the last node");
+    Ok(html)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 enum State {
     #[default]
     Data,
     TagOpen,
-    /// After `<!`, and after `<!-`.
-    Markup(u8),
-    CommentStart,
-    CommentStartDash,
-    /// In a comment, with the count of `-` just read (at most 2).
-    Comment(u8),
-    CommentEndBang,
-    /// `<!x…>`, `<?…>`, `</ …>`: up to `>`.
-    Bogus,
     EndTagOpen,
-    EndTagName,
-    EndTagRest,
     TagName,
     BeforeAttribute,
     AttributeName,
@@ -153,43 +865,91 @@ enum State {
     Unquoted,
     AfterQuoted,
     SelfClosing,
+    /// After `<!` and the given number of `-`.
+    Markup(u8),
+    /// After `<![` and the given number of bytes of `CDATA[`, in SVG or MathML.
+    CdataOpen(u8),
+    /// In a `CDATA` section, with the count of `]` just read (at most 2).
+    Cdata(u8),
+    CommentStart,
+    CommentStartDash,
+    /// In a comment, with the count of `-` just read (at most 2).
+    Comment(u8),
+    CommentEndBang,
+    /// `<!x…>`, `<?…>`, `</ …>`, a doctype: up to `>`.
+    Bogus,
     /// In a raw-text element, matching its end tag: 0 text, 1 after `<`, 2 after `</` and some
     /// of the name, 3 after the whole name.
     Raw(u8),
+    Script(Script),
     /// After `<plaintext>`: everything is text.
     Plaintext,
 }
 
+/// The tokenizer's script states: `<!--` in a script escapes it, and `<script` inside an escape
+/// escapes it twice, so that a `</script>` there does not end the script.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Script {
+    Data,
+    Lt,
+    EndName,
+    EscapeStart,
+    EscapeStartDash,
+    Escaped,
+    EscapedDash,
+    EscapedDashDash,
+    EscapedLt,
+    EscapedEndName,
+    DoubleStart,
+    Double,
+    DoubleDash,
+    DoubleDashDash,
+    DoubleLt,
+    DoubleEnd,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Ns {
+    Html,
+    Svg,
+    MathMl,
+}
+
+#[derive(Debug)]
+struct Open {
+    name: Box<str>,
+    ns: Ns,
+    /// An SVG or MathML element whose content is read as HTML.
+    integration: bool,
+}
+
 /// The scan of an HTML text, fed in one piece or chunk by chunk: where it must be cut (the
-/// first cap passed) and where its head ends (after `</head>`, or where `<body` opens it).
+/// first cap passed).
 #[derive(Debug, Default)]
-pub struct Scan {
+struct Scan {
     state: State,
     /// Bytes read so far.
     at: usize,
     tags: usize,
-    open: Vec<Box<str>>,
+    open: Vec<Open>,
     attributes: usize,
     value: usize,
     tag_start: usize,
     name: String,
+    end: bool,
+    self_closing: bool,
+    /// The current attribute's name, its first bytes (`font`'s `color`, `face`, `size`).
+    attribute_name: String,
+    font_breakout: bool,
     raw: Option<&'static str>,
     raw_matched: usize,
+    raw_ok: bool,
     cut: Option<usize>,
-    head_end: Option<usize>,
 }
 
 impl Scan {
-    /// Where the text must be cut, when a cap was passed.
-    pub fn cut(&self) -> Option<usize> {
-        self.cut
-    }
-    /// Where the head ends, when it has.
-    pub fn head_end(&self) -> Option<usize> {
-        self.head_end
-    }
     /// Read the next bytes of the text. Once a cap is passed, nothing more is read.
-    pub fn feed(&mut self, bytes: &[u8]) {
+    fn feed(&mut self, bytes: &[u8]) {
         for &b in bytes {
             if self.cut.is_some() {
                 return;
@@ -200,19 +960,42 @@ impl Scan {
     }
 
     fn stop(&mut self) {
-        self.cut = Some(self.tag_start);
-    }
-
-    fn name_byte(&mut self, b: u8) {
-        if self.name.len() < 32 {
-            self.name.push(b.to_ascii_lowercase() as char);
+        if self.cut.is_none() {
+            self.cut = Some(self.tag_start);
         }
     }
 
-    fn attribute(&mut self) {
+    fn open_tag(&mut self, end: bool, b: u8) -> State {
+        self.name.clear();
+        self.attributes = 0;
+        self.end = end;
+        self.self_closing = false;
+        self.font_breakout = false;
+        self.name_byte(b);
+        State::TagName
+    }
+
+    fn name_byte(&mut self, b: u8) {
+        if self.name.len() >= MAX_NAME_BYTES {
+            return self.stop();
+        }
+        self.name.push(b.to_ascii_lowercase() as char);
+    }
+
+    fn attribute(&mut self, b: u8) -> State {
         self.attributes += 1;
         if self.attributes > MAX_TAG_ATTRIBUTES {
             self.stop();
+        }
+        self.attribute_name.clear();
+        self.attribute_name.push(b.to_ascii_lowercase() as char);
+        State::AttributeName
+    }
+
+    /// The current attribute's name has ended.
+    fn attribute_named(&mut self) {
+        if matches!(self.attribute_name.as_str(), "color" | "face" | "size") {
+            self.font_breakout = true;
         }
     }
 
@@ -223,45 +1006,143 @@ impl Scan {
         }
     }
 
-    /// A start tag ended at the current byte (`>`).
+    /// The current node is SVG or MathML, and not one whose content is read as HTML.
+    fn in_foreign(&self) -> bool {
+        self.open
+            .last()
+            .is_some_and(|o| o.ns != Ns::Html && !o.integration)
+    }
+
+    fn push(&mut self, name: Box<str>, ns: Ns) {
+        let integration = match ns {
+            Ns::Html => false,
+            Ns::Svg => matches!(&*name, "foreignobject" | "desc" | "title"),
+            Ns::MathMl => matches!(&*name, "mi" | "mo" | "mn" | "ms" | "mtext"),
+        };
+        self.open.push(Open {
+            name,
+            ns,
+            integration,
+        });
+        if self.open.len() > MAX_DEPTH {
+            self.stop();
+        }
+    }
+
+    /// Pop SVG and MathML elements down to an HTML element or an integration point.
+    fn break_out(&mut self) {
+        while self.in_foreign() {
+            self.open.pop();
+        }
+    }
+
+    /// A tag ended at the current byte (`>`).
+    fn emit(&mut self) -> State {
+        if self.end {
+            self.end_tag();
+        } else {
+            self.start_tag();
+        }
+        self.state
+    }
+
     fn start_tag(&mut self) {
+        self.state = State::Data;
         self.tags += 1;
         if self.tags > MAX_TAGS {
             return self.stop();
         }
-        let name = self.name.as_str();
-        if name == "body" && self.head_end.is_none() {
-            self.head_end = Some(self.tag_start);
+        let name = std::mem::take(&mut self.name);
+        if self.in_foreign() {
+            let breaks =
+                BREAKOUT.contains(&name.as_str()) || (name == "font" && self.font_breakout);
+            if !breaks {
+                if !self.self_closing {
+                    let ns = self.open.last().map_or(Ns::Html, |o| o.ns);
+                    self.push(name.into(), ns);
+                }
+                return;
+            }
+            self.break_out();
         }
-        if name == "plaintext" {
-            self.state = State::Plaintext;
-            return;
-        }
-        if let Some(raw) = RAW.iter().find(|r| **r == name) {
-            self.raw = Some(raw);
-            self.raw_matched = 0;
-            self.state = State::Raw(0);
-            return;
-        }
-        if !VOID.contains(&name) && !IMPLIED.contains(&name) {
-            self.open.push(name.into());
-            if self.open.len() > MAX_DEPTH {
-                return self.stop();
+        match name.as_str() {
+            "svg" | "math" => {
+                if !self.self_closing {
+                    let ns = if name == "svg" { Ns::Svg } else { Ns::MathMl };
+                    self.push(name.into(), ns);
+                }
+            }
+            "plaintext" => self.state = State::Plaintext,
+            "script" => {
+                self.raw = Some("script");
+                self.state = State::Script(Script::Data);
+            }
+            _ => {
+                if let Some(raw) = RAW.iter().find(|r| **r == name) {
+                    self.raw = Some(raw);
+                    self.state = State::Raw(0);
+                } else if !VOID.contains(&name.as_str()) && !IMPLIED.contains(&name.as_str()) {
+                    self.push(name.into(), Ns::Html);
+                }
             }
         }
-        self.state = State::Data;
     }
 
-    /// An end tag ended at the current byte (`>`).
     fn end_tag(&mut self) {
-        let name = self.name.as_str();
-        if name == "head" && self.head_end.is_none() {
-            self.head_end = Some(self.at + 1);
-        }
-        if let Some(i) = self.open.iter().rposition(|open| &**open == name) {
-            self.open.truncate(i);
-        }
         self.state = State::Data;
+        self.raw = None;
+        let name = std::mem::take(&mut self.name);
+        // End tags follow the SVG and MathML rules under any SVG or MathML element, an
+        // integration point too: only start tags and text there are read as HTML.
+        if self.open.last().is_some_and(|o| o.ns != Ns::Html) {
+            if name == "br" || name == "p" {
+                self.break_out();
+            } else {
+                // From the current node down: a foreign element of this name closes; an HTML one
+                // hands the tag to the HTML rules.
+                for i in (0..self.open.len()).rev() {
+                    if self.open[i].ns == Ns::Html {
+                        break;
+                    }
+                    if *self.open[i].name == *name {
+                        self.open.truncate(i);
+                        return;
+                    }
+                }
+            }
+        }
+        self.html_end_tag(&name);
+    }
+
+    fn html_end_tag(&mut self, name: &str) {
+        let boundary = |o: &Open| o.integration || (o.ns == Ns::Html && SCOPE.contains(&&*o.name));
+        let heading = |n: &str| matches!(n, "h1" | "h2" | "h3" | "h4" | "h5" | "h6");
+        if SCOPED_END.contains(&name) || FORMATTING.contains(&name) {
+            for i in (0..self.open.len()).rev() {
+                let o = &self.open[i];
+                let same =
+                    o.ns == Ns::Html && (*o.name == *name || (heading(name) && heading(&o.name)));
+                if same {
+                    self.open.truncate(i);
+                    return;
+                }
+                if boundary(o) {
+                    return;
+                }
+            }
+            return;
+        }
+        // Any other end tag closes the nearest element of its name, but not past a special one.
+        for i in (0..self.open.len()).rev() {
+            let o = &self.open[i];
+            if o.ns == Ns::Html && *o.name == *name {
+                self.open.truncate(i);
+                return;
+            }
+            if o.integration || (o.ns == Ns::Html && SPECIAL.contains(&&*o.name)) {
+                return;
+            }
+        }
     }
 
     fn step(&mut self, b: u8) {
@@ -280,92 +1161,16 @@ impl Scan {
                 b'!' => Markup(0),
                 b'/' => EndTagOpen,
                 b'?' => Bogus,
-                b'<' => {
-                    self.tag_start = self.at;
-                    TagOpen
-                }
-                b if b.is_ascii_alphabetic() => {
-                    self.name.clear();
-                    self.attributes = 0;
-                    self.name_byte(b);
-                    TagName
-                }
-                _ => Data,
+                b if b.is_ascii_alphabetic() => self.open_tag(false, b),
+                _ => return self.reconsume(Data, b),
             },
-            Markup(0) => match b {
-                b'-' => Markup(1),
-                b'>' => Data,
-                _ => Bogus,
-            },
-            Markup(_) => match b {
-                b'-' => CommentStart,
-                b'>' => Data,
-                _ => Bogus,
-            },
-            CommentStart => match b {
-                b'>' => Data,
-                b'-' => CommentStartDash,
-                _ => Comment(0),
-            },
-            CommentStartDash => match b {
-                b'>' => Data,
-                b'-' => Comment(2),
-                _ => Comment(0),
-            },
-            Comment(dashes) => match b {
-                b'-' => Comment((dashes + 1).min(2)),
-                b'>' if dashes >= 2 => Data,
-                b'!' if dashes >= 2 => CommentEndBang,
-                _ => Comment(0),
-            },
-            CommentEndBang => match b {
-                b'>' => Data,
-                b'-' => Comment(1),
-                _ => Comment(0),
-            },
-            Bogus => {
-                if b == b'>' {
-                    Data
-                } else {
-                    Bogus
-                }
-            }
             EndTagOpen => match b {
-                b if b.is_ascii_alphabetic() => {
-                    self.name.clear();
-                    self.name_byte(b);
-                    EndTagName
-                }
+                b if b.is_ascii_alphabetic() => self.open_tag(true, b),
                 b'>' => Data,
                 _ => Bogus,
             },
-            EndTagName => match b {
-                b'>' => {
-                    self.end_tag();
-                    return;
-                }
-                b'/' => EndTagRest,
-                b if space => {
-                    let _ = b;
-                    EndTagRest
-                }
-                b => {
-                    self.name_byte(b);
-                    EndTagName
-                }
-            },
-            EndTagRest => {
-                if b == b'>' {
-                    self.end_tag();
-                    return;
-                }
-                EndTagRest
-            }
             TagName => match b {
-                b'>' => {
-                    self.start_tag();
-                    return;
-                }
+                b'>' => self.emit(),
                 b'/' => SelfClosing,
                 _ if space => BeforeAttribute,
                 b => {
@@ -374,50 +1179,49 @@ impl Scan {
                 }
             },
             BeforeAttribute => match b {
-                b'>' => {
-                    self.start_tag();
-                    return;
-                }
-                b'/' => SelfClosing,
                 _ if space => BeforeAttribute,
-                _ => {
-                    self.attribute();
-                    AttributeName
-                }
+                b'/' => SelfClosing,
+                b'>' => self.emit(),
+                b => self.attribute(b),
             },
             AttributeName => match b {
-                b'>' => {
-                    self.start_tag();
-                    return;
+                _ if space => {
+                    self.attribute_named();
+                    AfterAttributeName
                 }
-                b'/' => SelfClosing,
-                b'=' => BeforeValue,
-                _ if space => AfterAttributeName,
-                _ => AttributeName,
-            },
-            AfterAttributeName => match b {
-                b'>' => {
-                    self.start_tag();
-                    return;
+                b'/' => {
+                    self.attribute_named();
+                    SelfClosing
                 }
-                b'/' => SelfClosing,
-                b'=' => BeforeValue,
-                _ if space => AfterAttributeName,
-                _ => {
-                    self.attribute();
+                b'=' => {
+                    self.attribute_named();
+                    BeforeValue
+                }
+                b'>' => {
+                    self.attribute_named();
+                    self.emit()
+                }
+                b => {
+                    if self.attribute_name.len() < 8 {
+                        self.attribute_name.push(b.to_ascii_lowercase() as char);
+                    }
                     AttributeName
                 }
             },
+            AfterAttributeName => match b {
+                _ if space => AfterAttributeName,
+                b'/' => SelfClosing,
+                b'=' => BeforeValue,
+                b'>' => self.emit(),
+                b => self.attribute(b),
+            },
             BeforeValue => match b {
-                b'>' => {
-                    self.start_tag();
-                    return;
-                }
+                _ if space => BeforeValue,
                 b'"' | b'\'' => {
                     self.value = 0;
                     Quoted(b)
                 }
-                _ if space => BeforeValue,
+                b'>' => self.emit(),
                 _ => {
                     self.value = 0;
                     self.value_byte();
@@ -433,41 +1237,106 @@ impl Scan {
                 }
             }
             Unquoted => match b {
-                b'>' => {
-                    self.start_tag();
-                    return;
-                }
                 _ if space => BeforeAttribute,
+                b'>' => self.emit(),
                 _ => {
                     self.value_byte();
                     Unquoted
                 }
             },
             AfterQuoted => match b {
-                b'>' => {
-                    self.start_tag();
-                    return;
-                }
-                b'/' => SelfClosing,
                 _ if space => BeforeAttribute,
-                _ => {
-                    self.attribute();
-                    AttributeName
-                }
+                b'/' => SelfClosing,
+                b'>' => self.emit(),
+                _ => return self.reconsume(BeforeAttribute, b),
             },
             SelfClosing => match b {
                 b'>' => {
-                    self.start_tag();
-                    return;
+                    self.self_closing = true;
+                    self.emit()
                 }
-                _ => {
-                    self.attribute();
-                    AttributeName
-                }
+                _ => return self.reconsume(BeforeAttribute, b),
             },
+            Markup(0) => match b {
+                b'-' => Markup(1),
+                b'[' if self.open.last().is_some_and(|o| o.ns != Ns::Html) => CdataOpen(1),
+                _ => return self.reconsume(Bogus, b),
+            },
+            Markup(_) => match b {
+                b'-' => CommentStart,
+                _ => return self.reconsume(Bogus, b),
+            },
+            CdataOpen(n) => {
+                if b"[CDATA[".get(usize::from(n)) == Some(&b) {
+                    if n == 6 {
+                        Cdata(0)
+                    } else {
+                        CdataOpen(n + 1)
+                    }
+                } else {
+                    return self.reconsume(Bogus, b);
+                }
+            }
+            Cdata(brackets) => match b {
+                b']' => Cdata((brackets + 1).min(2)),
+                b'>' if brackets == 2 => Data,
+                _ => Cdata(0),
+            },
+            CommentStart => match b {
+                b'-' => CommentStartDash,
+                b'>' => Data,
+                _ => Comment(0),
+            },
+            CommentStartDash => match b {
+                b'-' => Comment(2),
+                b'>' => Data,
+                _ => Comment(0),
+            },
+            Comment(dashes) => match b {
+                b'-' => Comment((dashes + 1).min(2)),
+                b'>' if dashes >= 2 => Data,
+                b'!' if dashes >= 2 => CommentEndBang,
+                _ => Comment(0),
+            },
+            CommentEndBang => match b {
+                b'-' => Comment(1),
+                b'>' => Data,
+                _ => Comment(0),
+            },
+            Bogus => {
+                if b == b'>' {
+                    Data
+                } else {
+                    Bogus
+                }
+            }
             Raw(stage) => self.raw_step(stage, b, space),
+            Script(state) => self.script_step(state, b, space),
             Plaintext => Plaintext,
         };
+    }
+
+    /// Read `b` again in `state`.
+    fn reconsume(&mut self, state: State, b: u8) {
+        self.state = state;
+        self.step(b);
+    }
+
+    /// The raw-text element's end tag has matched up to `b`, a white space, `/` or `>`: it is
+    /// an end tag like any other from here (attributes and all).
+    fn raw_end(&mut self, b: u8, space: bool) -> State {
+        self.name.clear();
+        self.name.push_str(self.raw.unwrap_or(""));
+        self.attributes = 0;
+        self.end = true;
+        self.self_closing = false;
+        if b == b'>' {
+            self.emit()
+        } else if space {
+            State::BeforeAttribute
+        } else {
+            State::SelfClosing
+        }
     }
 
     fn raw_step(&mut self, stage: u8, b: u8, space: bool) -> State {
@@ -485,11 +1354,9 @@ impl Scan {
                 if b == b'/' {
                     self.raw_matched = 0;
                     State::Raw(2)
-                } else if b == b'<' {
-                    self.tag_start = self.at;
-                    State::Raw(1)
                 } else {
-                    State::Raw(0)
+                    self.reconsume(State::Raw(0), b);
+                    self.state
                 }
             }
             2 => {
@@ -500,31 +1367,150 @@ impl Scan {
                     } else {
                         State::Raw(2)
                     }
-                } else if b == b'<' {
-                    self.tag_start = self.at;
-                    State::Raw(1)
                 } else {
-                    State::Raw(0)
+                    self.reconsume(State::Raw(0), b);
+                    self.state
                 }
             }
             _ => {
                 if b == b'>' || b == b'/' || space {
-                    self.name.clear();
-                    self.name.push_str(self.raw.unwrap_or(""));
-                    self.raw = None;
-                    if b == b'>' {
-                        self.end_tag();
-                        return self.state;
-                    }
-                    State::EndTagRest
-                } else if b == b'<' {
-                    self.tag_start = self.at;
-                    State::Raw(1)
+                    self.raw_end(b, space)
                 } else {
-                    State::Raw(0)
+                    self.reconsume(State::Raw(0), b);
+                    self.state
                 }
             }
         }
+    }
+
+    /// Match `b` against `script`, case-insensitively: false once the name differs.
+    fn script_name(&mut self, b: u8) {
+        self.raw_ok =
+            self.raw_ok && b"script".get(self.raw_matched) == Some(&b.to_ascii_lowercase());
+        self.raw_matched += 1;
+    }
+
+    fn script_name_is_script(&self) -> bool {
+        self.raw_ok && self.raw_matched == 6
+    }
+
+    fn script_step(&mut self, state: Script, b: u8, space: bool) -> State {
+        use Script::*;
+        let again = |scan: &mut Self, state: Script| {
+            scan.reconsume(State::Script(state), b);
+            scan.state
+        };
+        let lt = |scan: &mut Self, next: Script| {
+            scan.tag_start = scan.at;
+            State::Script(next)
+        };
+        let next = match state {
+            Data => match b {
+                b'<' => return lt(self, Lt),
+                _ => Data,
+            },
+            Lt => match b {
+                b'/' => {
+                    self.raw_matched = 0;
+                    self.raw_ok = true;
+                    EndName
+                }
+                b'!' => EscapeStart,
+                _ => return again(self, Data),
+            },
+            EndName | EscapedEndName => {
+                let base = if state == EndName { Data } else { Escaped };
+                if b.is_ascii_alphabetic() {
+                    self.script_name(b);
+                    state
+                } else if (space || b == b'/' || b == b'>') && self.script_name_is_script() {
+                    return self.raw_end(b, space);
+                } else {
+                    return again(self, base);
+                }
+            }
+            EscapeStart => match b {
+                b'-' => EscapeStartDash,
+                _ => return again(self, Data),
+            },
+            EscapeStartDash => match b {
+                b'-' => EscapedDashDash,
+                _ => return again(self, Data),
+            },
+            Escaped => match b {
+                b'-' => EscapedDash,
+                b'<' => return lt(self, EscapedLt),
+                _ => Escaped,
+            },
+            EscapedDash => match b {
+                b'-' => EscapedDashDash,
+                b'<' => return lt(self, EscapedLt),
+                _ => Escaped,
+            },
+            EscapedDashDash => match b {
+                b'-' => EscapedDashDash,
+                b'<' => return lt(self, EscapedLt),
+                b'>' => Data,
+                _ => Escaped,
+            },
+            EscapedLt => match b {
+                b'/' => {
+                    self.raw_matched = 0;
+                    self.raw_ok = true;
+                    EscapedEndName
+                }
+                b if b.is_ascii_alphabetic() => {
+                    self.raw_matched = 0;
+                    self.raw_ok = true;
+                    return again(self, DoubleStart);
+                }
+                _ => return again(self, Escaped),
+            },
+            DoubleStart | DoubleEnd => {
+                let (matched, missed) = if state == DoubleStart {
+                    (Double, Escaped)
+                } else {
+                    (Escaped, Double)
+                };
+                if b.is_ascii_alphabetic() {
+                    self.script_name(b);
+                    state
+                } else if space || b == b'/' || b == b'>' {
+                    if self.script_name_is_script() {
+                        matched
+                    } else {
+                        missed
+                    }
+                } else {
+                    return again(self, missed);
+                }
+            }
+            Double => match b {
+                b'-' => DoubleDash,
+                b'<' => DoubleLt,
+                _ => Double,
+            },
+            DoubleDash => match b {
+                b'-' => DoubleDashDash,
+                b'<' => DoubleLt,
+                _ => Double,
+            },
+            DoubleDashDash => match b {
+                b'-' => DoubleDashDash,
+                b'<' => DoubleLt,
+                b'>' => Data,
+                _ => Double,
+            },
+            DoubleLt => match b {
+                b'/' => {
+                    self.raw_matched = 0;
+                    self.raw_ok = true;
+                    DoubleEnd
+                }
+                _ => return again(self, Double),
+            },
+        };
+        State::Script(next)
     }
 }
 
@@ -604,8 +1590,180 @@ mod tests {
             &spaced, &slashed, &joined, &unclosed, &spans, &stray, &comment, &many,
         ] {
             assert!(cut(page).len() < page.len());
-            let html = timed(|| document(page));
+            let html = timed(|| document(page).unwrap());
             assert_eq!(title(&html).as_deref(), Some("Kept"));
+        }
+    }
+
+    /// The second round of Codex's probes: attributes on an end tag, a tag inside SVG's
+    /// `<title>`, names alike in their first 32 bytes, and end tags that cannot close past a
+    /// special element. Each is cut at its cap and parses at once.
+    #[test]
+    fn markup_the_scan_once_misread_is_cut() {
+        let attributes = |tag: &str| {
+            let mut text = format!("<title>Kept</title>{tag}");
+            for n in 0..60_000 {
+                text.push_str(&format!("/a{n}='x'"));
+            }
+            text.push('>');
+            text
+        };
+        let end_tag = attributes("</div");
+        let svg_title = attributes("<svg><title><div");
+        // A `CDATA` section in SVG holds a `>` and a quote the scan must not read as markup.
+        let cdata = attributes("<svg><![CDATA[ > <x a=' ]]><div");
+        // An end tag's quoted value holds a `>`.
+        let end_quoted = attributes("<p></p a='>'><div");
+        let long = "a".repeat(32);
+        let alike = format!(
+            "<title>Kept</title>{}",
+            format!("<{long}x></{long}y>").repeat(14_000)
+        );
+        let special = format!("<title>Kept</title>{}", "<x><div></x>".repeat(20_000));
+        let named = format!("<title>Kept</title><{}>", "a".repeat(MAX_NAME_BYTES + 1));
+        for page in [
+            &end_tag,
+            &svg_title,
+            &cdata,
+            &end_quoted,
+            &alike,
+            &special,
+            &named,
+        ] {
+            assert!(cut(page).len() < page.len(), "{}", &page[..60]);
+            let html = timed(|| document(page).unwrap());
+            assert_eq!(title(&html).as_deref(), Some("Kept"), "{}", &page[..60]);
+        }
+    }
+
+    /// SVG and MathML read as the parser reads them: `<path/>` closes itself, `<div>` ends the
+    /// SVG, and what follows is read as HTML again.
+    #[test]
+    fn svg_and_mathml_are_read_as_the_parser_reads_them() {
+        let paths = "<path d='M0 0 L1 1'/>".repeat(300);
+        let ld = r#"<script type="application/ld+json">{"@type":"Event","name":"After"}</script>"#;
+        for page in [
+            format!("<title>T</title><svg viewBox='0 0 1 1'>{paths}</svg>{ld}"),
+            format!("<title>T</title><svg>{paths}<div>broke out</div>{ld}"),
+            format!("<title>T</title><math><mi>x</mi><mo>+</mo>{}</math>{ld}", "<mn/>".repeat(300)),
+            format!("<title>T</title><svg><title>icon</title><desc><style>a<b{{}}</style></desc>{paths}</svg>{ld}"),
+        ] {
+            assert_eq!(cut(&page), page);
+            let html = document(&page).unwrap();
+            let script = scraper::Selector::parse("script").unwrap();
+            assert_eq!(html.select(&script).count(), 1, "{page}");
+        }
+    }
+
+    /// The parser reads at most its budget of CPU time, whatever the scan let through, and keeps
+    /// what it read.
+    #[test]
+    fn a_parse_stops_at_its_budget() {
+        let mut slashed = String::from("<title>Kept</title></div");
+        for n in 0..60_000 {
+            slashed.push_str(&format!("/a{n}='x'"));
+        }
+        let started = std::time::Instant::now();
+        let html = parse_in_process(Kind::Document, &slashed, Duration::from_millis(50)).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(title(&html).as_deref(), Some("Kept"));
+    }
+
+    /// A tree deeper than `MAX_DEPTH` loses what is below it; `select` meets no deeper node.
+    #[test]
+    fn a_parsed_tree_stays_within_the_depth_cap() {
+        let deep = format!(
+            "<title>Kept</title>{}<b>deep</b>",
+            "<span>".repeat(2 * MAX_DEPTH)
+        );
+        let html = parse_in_process(Kind::Document, &deep, PARSE_BUDGET).unwrap();
+        assert_eq!(title(&html).as_deref(), Some("Kept"));
+        let any = scraper::Selector::parse("*").unwrap();
+        let deepest = html.select(&any).map(|e| e.ancestors().count()).max();
+        // An element's ancestors count the document too.
+        assert!(deepest.is_some_and(|d| d <= MAX_DEPTH), "{deepest:?}");
+        let bold = scraper::Selector::parse("b").unwrap();
+        assert_eq!(html.select(&bold).count(), 0);
+    }
+
+    /// A tree the parser rearranged (misnested `<b>` moves a `<p>`'s children) comes back with
+    /// every parent pointer right: the parser's own tree leaves the middle children pointing at
+    /// their old parent, and `ancestors()` there walks the wrong way.
+    #[test]
+    fn a_rebuilt_tree_has_its_parents_right() {
+        fn names(node: ego_tree::NodeRef<'_, Node>, out: &mut Vec<String>) {
+            for child in node.children() {
+                out.push(match child.value() {
+                    Node::Element(e) => e.name().to_owned(),
+                    Node::Text(t) => t.text.to_string(),
+                    _ => String::new(),
+                });
+                names(child, out);
+            }
+        }
+        let stale = |html: &scraper::Html| {
+            html.tree
+                .root()
+                .descendants()
+                .flat_map(|n| n.children().map(move |c| (n.id(), c)))
+                .filter(|(id, c)| c.parent().map(|p| p.id()) != Some(*id))
+                .count()
+        };
+        let page = "<b>1<p>2<i>a</i><i>b</i><i>c</i><i>d</i></b>after";
+        let plain = scraper::Html::parse_document(page);
+        let rebuilt = parse_in_process(Kind::Document, page, PARSE_BUDGET).unwrap();
+        assert!(
+            stale(&plain) > 0,
+            "ego-tree fixed its reparenting: this test can go"
+        );
+        assert_eq!(stale(&rebuilt), 0);
+        let (mut a, mut b) = (vec![], vec![]);
+        names(plain.tree.root(), &mut a);
+        names(rebuilt.tree.root(), &mut b);
+        assert_eq!(a, b, "the same tree, by child lists");
+    }
+
+    /// A tree past `MAX_NODES` is refused as too complex, in this process as in a worker.
+    #[test]
+    fn a_tree_past_the_node_cap_is_too_complex() {
+        let page = format!("<title>T</title>{}", "<b></b>".repeat(MAX_NODES));
+        let error = parse_in_process(Kind::Document, &page, PARSE_BUDGET).unwrap_err();
+        assert!(error.is::<TooComplex>(), "{error:#}");
+        let within = format!("<title>T</title>{}", "<b></b>".repeat(MAX_NODES - 8));
+        assert!(parse_in_process(Kind::Document, &within, PARSE_BUDGET).is_ok());
+    }
+
+    /// Fed in pieces, the parser builds the tree it builds from one piece.
+    #[test]
+    fn a_parse_in_pieces_builds_the_same_tree() {
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let mut stack = vec![fixtures];
+        let mut pages = vec![
+            format!("<p>{}</p>", "é漢🙂".repeat(1_000)),
+            format!("<script>{}</script><p>x", "if (a<b) {}".repeat(500)),
+        ];
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).unwrap() {
+                let path = e.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|x| x == "html") {
+                    pages.push(std::fs::read_to_string(&path).unwrap());
+                }
+            }
+        }
+        assert!(pages.len() > 20);
+        for page in &pages {
+            let whole = scraper::Html::parse_document(page);
+            let pieces = parse_in_process(Kind::Document, page, PARSE_BUDGET).unwrap();
+            assert_eq!(pieces.root_element().html(), whole.root_element().html());
+            let whole = scraper::Html::parse_fragment(page);
+            let pieces = parse_in_process(Kind::Fragment, page, PARSE_BUDGET).unwrap();
+            assert_eq!(pieces.root_element().html(), whole.root_element().html());
         }
     }
 
@@ -641,71 +1799,21 @@ mod tests {
             slashed.push_str(&format!("/a{n}='x'"));
         }
         for page in [unclosed, slashed] {
-            let out = timed(|| web::extract(url.as_str(), &fetched(200, "text/html", page), 3600));
+            let out = timed(|| {
+                web::extract(url.as_str(), &fetched(200, "text/html", page), 3600).unwrap()
+            });
             assert_eq!(out.doc.name.or(out.title).as_deref(), Some("Kept"));
         }
         // Repeated `<span>x` nesting against the wall check.
         let spans = format!("<title>Kept</title>{}", "<span>x".repeat(30_000));
-        timed(|| interstitial::inspect(&url, &fetched(200, "text/html", spans)));
+        timed(|| interstitial::inspect(&url, &fetched(200, "text/html", spans)).unwrap());
         // Nested JSON-LD scripts.
         let ld = r#"<script type="application/ld+json">{"@type":"Event","name":"x"}</script>"#;
         let json_ld = format!("<title>Kept</title>{}", format!("<div>{ld}").repeat(20_000));
-        timed(|| web::extract(url.as_str(), &fetched(200, "text/html", json_ld), 3600));
+        timed(|| web::extract(url.as_str(), &fetched(200, "text/html", json_ld), 3600).unwrap());
         // A 503 text/plain answer of 13,000 divs, read by the wall check.
         let plain = "<div>".repeat(13_000);
-        timed(|| interstitial::inspect(&url, &fetched(503, "text/plain", plain)));
-    }
-
-    /// Text inside script, style, comments and other raw text is not markup: `<body` there does
-    /// not end the head, and a giant tag there is not counted.
-    #[test]
-    fn the_head_ends_at_markup_only() {
-        let head_end = |text: &str| {
-            let mut scan = Scan::default();
-            scan.feed(text.as_bytes());
-            scan.head_end()
-        };
-        let tail = "<title>T</title></head><body>";
-        for decoy in [
-            "<script>var s = '<body class=x>';</script>",
-            "<style>/* <body> */ a { b: c }</style>",
-            "<!-- <body> -->",
-            "<noscript><body></noscript>",
-        ] {
-            let page = format!("<html><head>{decoy}{tail}");
-            assert_eq!(
-                head_end(&page),
-                Some(page.len() - "<body>".len()),
-                "{decoy}"
-            );
-        }
-        assert_eq!(head_end("<head><title>T</title><BODY class=x>"), Some(22));
-        assert_eq!(head_end("<head><title>T</title>"), None);
-        let mut giant = String::from("<script>x = '<div");
-        for n in 0..1_000 {
-            giant.push_str(&format!(" a{n}"));
-        }
-        giant.push_str(">';</script><p>after</p>");
-        assert_eq!(cut(&giant), giant);
-    }
-
-    /// Fed in pieces, the scan finds what it finds in one piece: a tag split across chunks.
-    #[test]
-    fn a_scan_fed_in_pieces_matches_one_piece() {
-        let page = format!(
-            "<html><head><title>T</title><script>a = '</head>'</script></he{}ad><body>",
-            ""
-        );
-        let mut whole = Scan::default();
-        whole.feed(page.as_bytes());
-        for size in [1, 2, 3, 7] {
-            let mut pieces = Scan::default();
-            for chunk in page.as_bytes().chunks(size) {
-                pieces.feed(chunk);
-            }
-            assert_eq!(pieces.head_end(), whole.head_end(), "{size}");
-        }
-        assert_eq!(whole.head_end(), Some(page.len() - "<body>".len()));
+        timed(|| interstitial::inspect(&url, &fetched(503, "text/plain", plain)).unwrap());
     }
 
     #[tokio::test]

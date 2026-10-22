@@ -82,7 +82,8 @@ fn wall_path(walls: &Walls, path: &str) -> bool {
 }
 /// A challenge page (bot wall, captcha, sign-in redirect) is `Blocked`, a meta refresh or
 /// script redirect stub is a `Redirect` hop, anything else is content.
-pub fn inspect(requested: &Url, f: &Fetched) -> Page {
+/// `Err` when the answer is too complex to parse.
+pub fn inspect(requested: &Url, f: &Fetched) -> anyhow::Result<Page> {
     let walls = &*WALLS;
     // A redirect from the requested host to a challenge or sign-in host of the same site. A
     // page referenced on such a host itself (`login.example.org/help`) is content.
@@ -95,7 +96,7 @@ pub fn inspect(requested: &Url, f: &Fetched) -> Page {
                 .iter()
                 .any(|p| b.starts_with(p.as_str()))
         {
-            return Page::Blocked;
+            return Ok(Page::Blocked);
         }
     }
     // A requested page redirected to a sign-in path (LinkedIn /authwall, Facebook /login/).
@@ -106,21 +107,21 @@ pub fn inspect(requested: &Url, f: &Fetched) -> Page {
         && !wall_path(walls, requested.path())
         && wall_path(walls, f.url.path())
     {
-        return Page::Blocked;
+        return Ok(Page::Blocked);
     }
     if !f.content_type.contains("html")
         && !(matches!(f.status, 403 | 429 | 503)
             && matches!(f.content_type.as_str(), "text/plain" | ""))
     {
-        return Page::Content;
+        return Ok(Page::Content);
     }
     // "Accepted" with nothing in it is a challenge (AWS WAF answers bots so), never a page; an
     // API's empty 202 (not HTML) is its own answer.
     if f.status == 202 && f.body.iter().all(u8::is_ascii_whitespace) {
-        return Page::Blocked;
+        return Ok(Page::Blocked);
     }
     let text = String::from_utf8_lossy(&f.body);
-    let html = crate::resolver::html::document(&text);
+    let html = crate::resolver::html::document(&text)?;
     let title = html
         .select(&select("title"))
         .next()
@@ -154,7 +155,7 @@ pub fn inspect(requested: &Url, f: &Fetched) -> Page {
     // "Accepted" with nothing to read is a challenge (AWS WAF answers bots so: a script that
     // reloads the page), never the page.
     if f.status == 202 && visible.trim().is_empty() {
-        return Page::Blocked;
+        return Ok(Page::Blocked);
     }
     let challenge = matches!(f.status, 403 | 429 | 503);
     let short = visible.trim().len() < 2000;
@@ -169,7 +170,7 @@ pub fn inspect(requested: &Url, f: &Fetched) -> Page {
                 .iter()
                 .any(|s| html.select(&select(s)).next().is_some()))
     {
-        return Page::Blocked;
+        return Ok(Page::Blocked);
     }
     for el in html.select(&select("meta[http-equiv]")) {
         if el
@@ -184,7 +185,7 @@ pub fn inspect(requested: &Url, f: &Fetched) -> Page {
             if let Some(target) = target {
                 let itself = f.url.join(&target).is_ok_and(|t| t == f.url);
                 if delay <= 10.0 || (short && !itself) {
-                    return Page::Redirect(target);
+                    return Ok(Page::Redirect(target));
                 }
             }
         }
@@ -197,7 +198,7 @@ pub fn inspect(requested: &Url, f: &Fetched) -> Page {
         for marker in ["location.replace(", "location.assign("] {
             if let Some((_, tail)) = body.split_once(marker) {
                 if let Some(target) = quoted(tail) {
-                    return Page::Redirect(target.to_owned());
+                    return Ok(Page::Redirect(target.to_owned()));
                 }
             }
         }
@@ -213,16 +214,16 @@ pub fn inspect(requested: &Url, f: &Fetched) -> Page {
             .next()
             .and_then(|a| a.value().attr("href"))
         {
-            return Page::Redirect(target.to_owned());
+            return Ok(Page::Redirect(target.to_owned()));
         }
         if let Some((_, target)) = title.split_once(':') {
             if !target.trim().is_empty() {
-                return Page::Redirect(target.trim().into());
+                return Ok(Page::Redirect(target.trim().into()));
             }
         }
-        return Page::Blocked;
+        return Ok(Page::Blocked);
     }
-    Page::Content
+    Ok(Page::Content)
 }
 
 #[cfg(test)]
@@ -268,11 +269,11 @@ mod tests {
             retry_after_secs: 60,
             validators: Default::default(),
         };
-        assert_eq!(inspect(&url, &fetched(202, b"")), Page::Blocked);
-        assert_eq!(inspect(&url, &fetched(202, b" \n")), Page::Blocked);
+        assert_eq!(inspect(&url, &fetched(202, b"")).unwrap(), Page::Blocked);
+        assert_eq!(inspect(&url, &fetched(202, b" \n")).unwrap(), Page::Blocked);
         // AWS WAF's challenge page: scripts and a <noscript> notice, nothing to read.
         let waf = b"<html><head><title></title><script>window.awsWafCookieDomainList = ['imdb.com'];</script><script src=\"https://x.token.awswaf.com/challenge.js\"></script></head><body><div id=\"challenge-container\"></div><noscript><h1>JavaScript is disabled</h1>In order to continue, we need to verify that you're not a robot.</noscript></body></html>";
-        assert_eq!(inspect(&url, &fetched(202, waf)), Page::Blocked);
+        assert_eq!(inspect(&url, &fetched(202, waf)).unwrap(), Page::Blocked);
         assert_eq!(
             inspect(
                 &url,
@@ -280,13 +281,18 @@ mod tests {
                     202,
                     b"<title>Queued</title><p>Your export is being prepared.</p>"
                 )
-            ),
+            )
+            .unwrap(),
             Page::Content
         );
-        assert_eq!(inspect(&url, &fetched(200, b"")), Page::Content);
+        assert_eq!(inspect(&url, &fetched(200, b"")).unwrap(), Page::Content);
         let mut api = fetched(202, b"");
         api.content_type = "application/json".into();
-        assert_eq!(inspect(&url, &api), Page::Content, "an API's empty 202");
+        assert_eq!(
+            inspect(&url, &api).unwrap(),
+            Page::Content,
+            "an API's empty 202"
+        );
     }
     #[test]
     fn refresh_parsing_survives_multi_byte_content() {

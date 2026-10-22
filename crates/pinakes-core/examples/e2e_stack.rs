@@ -388,10 +388,20 @@ async fn hydrate(State(f): State<Fixture>, Json(q): Json<Value>) -> Json<Value> 
         lines.first().map(|line|json!({"details":{"id":id,"uri":line.uri},"taggers_count":1,"tags":lines.iter().map(|l|json!({"label":l.label,"taggers":[AUTHOR],"taggers_count":1,"relationship":true})).collect::<Vec<_>>()}))
     }).collect()))
 }
-#[tokio::main]
-async fn main() -> Result<()> {
-    let fixture = Fixture::new()?;
+fn main() -> Result<()> {
+    // The stack is its own HTML parse worker, as the daemon is: before any runtime starts, so
+    // the worker's memory limit is for one thread's parse.
     let args: Vec<_> = std::env::args().collect();
+    if args.get(1).is_some_and(|s| s == "parse-worker") {
+        let secs = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
+        std::process::exit(pinakes_core::resolver::html::worker_main(secs));
+    }
+    pinakes_core::resolver::html::set_worker(std::env::current_exe()?, ["parse-worker"]);
+    pinakes_core::resolver::html::check_worker()?;
+    tokio::runtime::Runtime::new()?.block_on(stack(args))
+}
+async fn stack(args: Vec<String>) -> Result<()> {
+    let fixture = Fixture::new()?;
     let mut live = if args.get(1).is_some_and(|s| s == "--live") {
         Some(serde_json::from_slice::<Value>(&std::fs::read(
             args.get(2)

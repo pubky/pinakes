@@ -29,6 +29,11 @@ hmac = "0.13"
 scraper = "0.24"
 # The HTML named character references (the same table scraper's parser uses).
 markup5ever = "=0.35.0"
+# scraper's own parser and tree, fed in pieces under a CPU budget (`resolver::html`).
+html5ever = "=0.35.0"
+ego-tree = "=0.10.0"
+# The parse budget is the parsing thread's CPU time (`clock_gettime`).
+libc = "0.2"
 toml = "0.9"
 ipnet = "2"
 h3o = "0.11"

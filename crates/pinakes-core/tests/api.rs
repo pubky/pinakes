@@ -2085,7 +2085,7 @@ async fn an_alias_reads_as_its_root_everywhere(pool: PgPool) {
         body: page.as_bytes().into(),
     };
     let doc = pinakes_core::resolver::html::off_runtime(|| {
-        pinakes_core::resolver::web::extract(clean, &fetched, 86400)
+        pinakes_core::resolver::web::extract(clean, &fetched, 86400).unwrap()
     })
     .doc;
     assert_eq!(doc.name.as_deref(), Some("Talk"));

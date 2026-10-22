@@ -597,7 +597,9 @@ fn content_hash(c: &Component) -> String {
     hash(props.join("\n").as_bytes())
 }
 fn conference(s: &str) -> bool {
-    let html = crate::resolver::html::fragment(s);
+    let Ok(html) = crate::resolver::html::fragment(s) else {
+        return false;
+    };
     let hrefs: Vec<_> = html
         .select(&scraper::Selector::parse("a[href]").unwrap())
         .filter_map(|n| n.value().attr("href").map(str::to_owned))
@@ -662,11 +664,9 @@ fn document(
     doc.set_type("Event");
     doc.name = c.text("SUMMARY");
     doc.description = c.text("DESCRIPTION").or_else(|| {
-        c.text("X-ALT-DESC").map(|s| {
-            crate::resolver::html::fragment(&s)
-                .root_element()
-                .text()
-                .collect()
+        c.text("X-ALT-DESC").and_then(|s| {
+            let html = crate::resolver::html::fragment(&s).ok()?;
+            Some(html.root_element().text().collect())
         })
     });
     for p in c.props.iter().filter(|p| p.name == "CATEGORIES") {
@@ -813,8 +813,7 @@ fn document(
         }
     });
     if doc.image.is_none() {
-        if let Some(html) = c.value("X-ALT-DESC") {
-            let html = crate::resolver::html::fragment(html);
+        if let Some(Ok(html)) = c.value("X-ALT-DESC").map(crate::resolver::html::fragment) {
             doc.image = html
                 .select(&scraper::Selector::parse("img[src]").unwrap())
                 .find_map(|el| origin_url(base, el.value().attr("src")?));

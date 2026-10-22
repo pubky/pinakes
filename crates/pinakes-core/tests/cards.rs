@@ -359,7 +359,9 @@ fn podcast_selection_and_schema_media_keys() {
         let mut f = f.clone();
         f.content_type = "text/html".into();
         f.body=format!("<script type='application/ld+json'>{{\"@type\":\"{ty}\",\"name\":\"Media\",\"isrcCode\":\"US-S1Z-99-00001\"}}</script>").into_bytes();
-        let d = pinakes_core::resolver::web::extract("https://example.org/a", &f, 3600).doc;
+        let d = pinakes_core::resolver::web::extract("https://example.org/a", &f, 3600)
+            .unwrap()
+            .doc;
         assert_eq!(d.type_name, ty);
         assert_eq!(d.attributes["isrc"], "US-S1Z-99-00001");
     }

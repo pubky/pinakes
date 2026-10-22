@@ -41,7 +41,7 @@ impl Site {
         if !body.contains("data-key") || !body.contains("content=\"Ghost") {
             return None;
         }
-        let html = crate::resolver::html::document(&body);
+        let html = crate::resolver::html::document(&body).ok()?;
         let generator = scraper::Selector::parse("head meta[name='generator']").ok()?;
         let ghost = html
             .select(&generator)

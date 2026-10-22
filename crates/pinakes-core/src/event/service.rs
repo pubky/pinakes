@@ -186,7 +186,7 @@ impl EventService {
         let config = self.config.clone();
         let ttl = card.ttl_secs;
         let (mut event, calendar_link, advertised, event_candidate, platform_extra) =
-            crate::resolver::html::blocking(move || {
+            crate::resolver::html::blocking(move || -> anyhow::Result<_> {
                 let uri = input_uri.as_str();
                 let fetched = &fetched;
                 let mut event = ResourceMeta::new(uri, "web", ttl);
@@ -200,7 +200,7 @@ impl EventService {
                         page::jsonld(&mut event, &v, &fetched.url);
                         page::activity(&mut event, &v, &fetched.url);
                     }
-                    let html = crate::resolver::html::document(&text);
+                    let html = crate::resolver::html::document(&text)?;
                     event_candidate = text.contains("startDate")
                         || text.contains("dtstart")
                         || text.contains("dt-start");
@@ -274,15 +274,15 @@ impl EventService {
                 }
                 // Whatever base each parser was handed, the performers came from this fetch.
                 event.event.read_from(fetched);
-                (
+                Ok((
                     event,
                     calendar_link,
                     advertised,
                     event_candidate,
                     platform_extra,
-                )
+                ))
             })
-            .await?;
+            .await??;
         let is_event = event.type_path.contains(&"Event".into());
         if advertised.is_some()
             || (!is_event && event_candidate)

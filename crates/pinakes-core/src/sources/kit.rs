@@ -431,7 +431,7 @@ pub fn html_text(html: &str) -> Option<String> {
         Enter(N),
         Leave,
     }
-    let html = crate::resolver::html::fragment(html);
+    let html = crate::resolver::html::fragment(html).ok()?;
     let mut out = String::new();
     let mut steps: Vec<Step<_>> = html
         .root_element()

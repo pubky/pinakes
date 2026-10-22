@@ -256,6 +256,10 @@ pub fn error_class(error: &anyhow::Error) -> &'static str {
     {
         return "too_large";
     }
+    // A parse that did not end within its limits: no card, and no retry.
+    if error.chain().any(|cause| cause.is::<html::TooComplex>()) {
+        return "too_complex";
+    }
     for cause in error.chain() {
         if let Some(request) = cause.downcast_ref::<reqwest::Error>() {
             if request.is_timeout() {

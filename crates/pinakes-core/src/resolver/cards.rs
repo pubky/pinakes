@@ -714,11 +714,10 @@ pub fn parse_nostr(uri: &str, e: &nostr::event::Event, ttl: u64) -> Result<Resou
     d.bounded(web::ATTRIBUTES)
 }
 pub fn plain(s: &str) -> String {
-    crate::resolver::html::fragment(s)
-        .root_element()
-        .text()
-        .collect::<Vec<_>>()
-        .join(" ")
+    let Ok(html) = crate::resolver::html::fragment(s) else {
+        return String::new();
+    };
+    html.root_element().text().collect::<Vec<_>>().join(" ")
 }
 pub fn activitypub(uri: &str, v: &Value, base: &Url, ttl: u64) -> Option<ResourceMeta> {
     let kind = match v["type"].as_str()? {
@@ -803,8 +802,8 @@ pub async fn enrich(
     }
     // One bounded parse for advertised metadata endpoints. Never follow arbitrary links.
     let (body, base) = (f.body.clone(), f.url.clone());
-    let (ap, rss) = super::html::blocking(move || {
-        let html = crate::resolver::html::document(&String::from_utf8_lossy(&body));
+    let (ap, rss) = super::html::blocking(move || -> anyhow::Result<_> {
+        let html = crate::resolver::html::document(&String::from_utf8_lossy(&body))?;
         let (mut ap, mut rss) = (None, None);
         for el in html
             .select(&scraper::Selector::parse("head link[rel='alternate']").unwrap())
@@ -830,9 +829,9 @@ pub async fn enrich(
                 rss = Some(href);
             }
         }
-        (ap, rss)
+        Ok((ap, rss))
     })
-    .await?;
+    .await??;
     let ap = ap.or_else(|| {
         crate::event::service::header_alternate(f.validators.link.as_deref(), &f.url).map(|v| v.0)
     });

@@ -463,7 +463,7 @@ async fn extract_blocking(
         "non-feed page exceeds cap"
     );
     let (uri, f) = (uri.to_owned(), f.clone());
-    crate::resolver::html::blocking(move || crate::resolver::web::extract(&uri, &f, ttl)).await
+    crate::resolver::html::blocking(move || crate::resolver::web::extract(&uri, &f, ttl)).await?
 }
 async fn calendar_blocking(
     uri: &str,
@@ -768,7 +768,7 @@ pub fn endpoint(
     Ok(result)
 }
 pub fn ics_link(_id: &str, base: &Url, text: &str) -> Option<String> {
-    let html = crate::resolver::html::document(text);
+    let html = crate::resolver::html::document(text).ok()?;
     html.select(&scraper::Selector::parse("a[href],link[href]").unwrap())
         .filter_map(|e| e.value().attr("href"))
         .filter(|s| {
@@ -839,7 +839,7 @@ pub fn wikipedia_item(text: &str) -> Option<String> {
                 .and_then(|(_, s)| valid(s))
         })
         .or_else(|| {
-            let html = crate::resolver::html::document(text);
+            let html = crate::resolver::html::document(text).ok()?;
             html.select(&scraper::Selector::parse("script[type='application/ld+json']").unwrap())
                 .find_map(|node| {
                     let v: Value = serde_json::from_str(&node.text().collect::<String>()).ok()?;
@@ -855,12 +855,16 @@ pub fn wikipedia_item(text: &str) -> Option<String> {
 }
 fn wikipedia_candidate(f: &Fetched) -> bool {
     let text = String::from_utf8_lossy(&f.body);
-    let html = crate::resolver::html::document(&text);
+    let Ok(html) = crate::resolver::html::document(&text) else {
+        return false;
+    };
     let selector=scraper::Selector::parse(".infobox.vevent, .infobox.geography, .infobox .geo, meta[property='place:location:latitude']").unwrap();
     if html.select(&selector).next().is_some() {
         return true;
     }
-    let card = crate::resolver::web::extract(f.url.as_str(), f, 86400).doc;
+    let Ok(card) = crate::resolver::web::extract(f.url.as_str(), f, 86400).map(|e| e.doc) else {
+        return false;
+    };
     card.type_path
         .iter()
         .any(|t| matches!(t.as_str(), "Event" | "Place"))

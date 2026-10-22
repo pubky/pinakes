@@ -181,12 +181,19 @@ past the cap is read on to `limits.html_head_bytes`, whole when it ends before t
 otherwise: nothing in the page's text stops the read earlier, since only the parser can say where
 a head ends (a `</head>` in a script is not one). A read that cuts stops as soon as it reaches
 its cap, so a sender that stalls there costs no timeout. An image or PDF past the
-cap is cut too, never refused: its card comes from its URL. Every HTML parse (pages, and HTML inside API answers) reads its text
-only up to the first point that passes a parse cap: 50,000 start tags, 256 open elements, 64
-attributes on one tag, an attribute value of 1 MiB (real pages stay far below each: at most
-16,440, 62, 29 and 121 KB over 149 pages). Past a cap the parser would work for minutes. At most
-as many pages are parsed at once as the machine has cores: a parse holds its slot until it ends,
-even after its request timed out. An RSS or
+cap is cut too, never refused: its card comes from its URL. Every HTML parse (pages, and HTML
+inside API answers) runs in a child process, `pinakesd parse-worker` (the daemon itself; one
+that cannot run it does not start), under a CPU limit (1 s of CPU time, 10 s in a debug build),
+a memory limit (1 GiB) and a wall-clock deadline. Past any of them the child dies, the parse slot
+is freed, and the resource is recorded as `too_complex`: final, with no card, until
+`pinakesd reextract` revives it (the daemon logs `an HTML parse did not end within its limits`).
+The tree a worker answers with keeps no node more than 256 elements deep and at most 500,000
+nodes (the largest of 149 real pages has 37,000). Before the parse, a linear scan cuts the text
+at the first obvious cap: 50,000 start tags, 256 open elements, 64 attributes on one tag (end
+tags too), an attribute value of 1 MiB, a tag name of 256 bytes (real pages stay far below each:
+at most 16,440, 62, 29, 121 KB and 27 bytes over 149 pages). The scan is a cheap early cut; the
+worker's limits are the guarantee. At most as many pages are parsed at once as the machine has
+cores: a parse holds its slot until it ends, even after its request timed out. An RSS or
 Atom feed read without a calendar's feed cap is cut there too (a long show's feed is 2–5 MB):
 its channel and newest items come first, and its card reads up to the last whole item. Wikidata
 entity reads may take 8 MB, since a much-edited item carries megabytes of claims, and so may
@@ -680,14 +687,15 @@ manifests, resolver status (aliases left out: their roots answer for them), coun
 among them), ingestion, source and canary state; public `/v1/info` shows
 only the version, what the instance resolves, the limits a client must respect and the OSM
 licence. Stored errors are sanitized classes (dns, connect, timeout, http_4xx, http_5xx, parse,
-policy, too_large for an answer past its size cap; rate_limited for a link waiting for its host's
-budget). A failed resolve is logged at warn as `resolution failed`, with the resource
-id (`resource_id`), the link's host (`host`; its scheme for a link without one, never its path)
-and this class (`kind`). Logs name a link only by its host (a calendar's token or a user's
-name in a link never reaches a log line), errors carry no URL (a fetch error or a Nexus request
-error names none, an upstream service's error text is not repeated, the API answers an invalid
-link with the reason, not the link), and every logged error passes a last guard: a URL that
-still turns up in its text is cut before its query or fragment and loses its user info. Admin info and database metrics are cached for 15 seconds.
+policy, too_large for an answer past its size cap, too_complex for a page whose parse did not
+end within its limits; rate_limited for a link waiting for its host's budget). A failed resolve
+is logged at warn as `resolution failed`, with the resource id (`resource_id`), the link's host
+(`host`; its scheme for a link without one, never its path) and this class (`kind`). Logs name a
+link only by its host (a calendar's token or a user's name in a link never reaches a log line),
+errors carry no URL (a fetch error or a Nexus request error names none, an upstream service's
+error text is not repeated, the API answers an invalid link with the reason, not the link), and
+every logged error passes a last guard: a URL that still turns up in its text is cut before its
+query or fragment and loses its user info. Admin info and database metrics are cached for 15 seconds.
 
 Canaries (`canary.enabled`) run every `limits.canary_interval_secs`, first one interval after
 startup, on the ordinary workers and host budgets; their state survives restarts and they never

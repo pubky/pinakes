@@ -973,7 +973,7 @@ impl Egress {
                 let input = response.clone();
                 let original = requested.clone();
                 super::html::blocking(move || super::interstitial::inspect(&original, &input))
-                    .await?
+                    .await??
             };
             if page == super::interstitial::Page::Blocked {
                 crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "blocked");

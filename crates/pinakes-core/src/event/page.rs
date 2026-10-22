@@ -151,11 +151,9 @@ fn fields(doc: &mut ResourceMeta, v: &Value, base: &Url, ap: bool) {
         text(&v["description"])
             .or_else(|| text(&v["summary"]))
             .or_else(|| {
-                string(&v["content"]).map(|s| {
-                    crate::resolver::html::fragment(&s)
-                        .root_element()
-                        .text()
-                        .collect()
+                string(&v["content"]).and_then(|s| {
+                    let html = crate::resolver::html::fragment(&s).ok()?;
+                    Some(html.root_element().text().collect())
                 })
             }),
     );

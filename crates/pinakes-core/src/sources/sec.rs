@@ -353,7 +353,7 @@ pub fn parse_header(body: &str) -> Result<Header> {
 
 /// One row of a filing's index: (document file, type, description).
 pub fn index_row(html: &str, file: &str) -> Option<(String, String)> {
-    let page = crate::resolver::html::document(html);
+    let page = crate::resolver::html::document(html).ok()?;
     let rows = scraper::Selector::parse("table.tableFile tr").ok()?;
     let cells = scraper::Selector::parse("td").ok()?;
     for row in page.select(&rows) {
