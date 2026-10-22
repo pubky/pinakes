@@ -505,7 +505,9 @@ fn eventky() {
         )
     );
     // The text of an HTML-only description; an end from a duration.
-    let doc = card("eventky/event-bern-meetup-recurring");
+    let (uri, body) = fixture("eventky/event-bern-meetup-recurring");
+    let new_year: chrono::DateTime<chrono::Utc> = "2026-01-01T00:00:00Z".parse().unwrap();
+    let doc = pubky_apps::card_at(&uri, "application/octet-stream", &body, 86400, new_year);
     let text = doc.description.as_deref().unwrap();
     assert!(
         text.contains("Monthly Bitcoin Meetup") && !text.contains("<p>"),
@@ -540,6 +542,55 @@ fn eventky() {
         );
     }
     assert_eq!(pubky_apps::read::html_text("<p> </p><unterminated"), None);
+    // A series is shown, and fetched again, by its next occurrence: the monthly meetup's first
+    // was in January, its next after 22 October is the second Tuesday of November, 19:00:14 in
+    // Zurich. A finished series, or a rule that does not read, keeps its first occurrence.
+    let now: chrono::DateTime<chrono::Utc> = "2026-10-22T12:00:00Z".parse().unwrap();
+    let at = |name: &str, change: Value| {
+        let (uri, body) = fixture(name);
+        let mut v: Value = serde_json::from_slice(&body).unwrap();
+        for (k, value) in change.as_object().unwrap() {
+            v[k] = value.clone();
+        }
+        pubky_apps::card_at(
+            &uri,
+            "application/octet-stream",
+            v.to_string().as_bytes(),
+            86400,
+            now,
+        )
+    };
+    let doc = at("eventky/event-bern-meetup-recurring", json!({}));
+    assert_eq!(doc.start.unwrap().to_rfc3339(), "2026-11-10T18:00:14+00:00");
+    assert_eq!(doc.end.unwrap().to_rfc3339(), "2026-11-10T21:00:14+00:00");
+    let refresh = Config::default().refresh;
+    let pubky = pinakes_core::adapter::manifest("pubky");
+    assert!(pinakes_core::scheduler::next(&pubky, &doc, now, &refresh).is_some());
+    // During an occurrence, that one.
+    let during: chrono::DateTime<chrono::Utc> = "2026-11-10T19:00:00Z".parse().unwrap();
+    let (uri, body) = fixture("eventky/event-bern-meetup-recurring");
+    let doc = pubky_apps::card_at(&uri, "application/octet-stream", &body, 86400, during);
+    assert_eq!(doc.start.unwrap().to_rfc3339(), "2026-11-10T18:00:14+00:00");
+    for rule in [
+        "FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2;UNTIL=20260301T000000Z",
+        "FREQ=SOMETIMES",
+        "FREQ=DAILY\nRDATE:20261101T000000Z",
+    ] {
+        let doc = at(
+            "eventky/event-bern-meetup-recurring",
+            json!({"rrule": rule}),
+        );
+        assert_eq!(
+            doc.start.unwrap().to_rfc3339(),
+            "2026-01-08T18:00:14+00:00",
+            "{rule}"
+        );
+        assert_eq!(
+            pinakes_core::scheduler::next(&pubky, &doc, now, &refresh),
+            None,
+            "{rule}"
+        );
+    }
     // A duration past the calendar's end gives no end; the card keeps its start.
     let doc = edited(
         "eventky/event-psywalk-location-no-uri",

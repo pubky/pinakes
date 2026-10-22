@@ -56,7 +56,7 @@ Never fetched: `files/`, `blobs/`, `tags/`.
 
 | Path | Card | Opens in Eventky |
 | --- | --- | --- |
-| `events/{id}` | `Event`: `summary`, `description` (else the text of `styled_description`), start and end from `dtstart`/`dtend` (or `duration`) in `dtstart_tzid` (a time without a zone is left out), cancelled when `status` is `CANCELLED`; fact `location` (the first location's label) | `https://eventky.app/event/{owner}/{id}` |
+| `events/{id}` | `Event`: `summary`, `description` (else the text of `styled_description`), start and end from `dtstart`/`dtend` (or `duration`) in `dtstart_tzid` (a time without a zone is left out; a recurring event's, by its `rrule`, are its next or current occurrence's, so it is fetched again by that one until the series ends), cancelled when `status` is `CANCELLED`; fact `location` (the first location's label) | `https://eventky.app/event/{owner}/{id}` |
 | `calendars/{id}` | `Collection`: `name`, `description`; fact `timezone` | `https://eventky.app/calendar/{owner}/{id}` |
 
 An Eventky event a Nexus event reference names has the same client link on its event card.

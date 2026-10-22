@@ -59,6 +59,8 @@ pub enum Read {
 pub struct Object<'a> {
     pub uri: &'a str,
     pub owner: &'a str,
+    /// When the object is read: what its expiry, end or next occurrence is measured against.
+    pub now: chrono::DateTime<chrono::Utc>,
     vars: Vec<(&'static str, String)>,
 }
 impl Object<'_> {
@@ -147,6 +149,16 @@ fn segments(uri: &str) -> Option<(String, Vec<String>)> {
 
 /// The card of a fetched object: its kind's, or the general card.
 pub fn card(uri: &str, content_type: &str, body: &[u8], ttl: u64) -> ResourceMeta {
+    card_at(uri, content_type, body, ttl, chrono::Utc::now())
+}
+/// The card of an object fetched at `now`.
+pub fn card_at(
+    uri: &str,
+    content_type: &str,
+    body: &[u8],
+    ttl: u64,
+    now: chrono::DateTime<chrono::Utc>,
+) -> ResourceMeta {
     let mut doc = ResourceMeta::new(uri, "pubky", ttl);
     doc.set_type("CreativeWork");
     doc.attributes
@@ -165,6 +177,7 @@ pub fn card(uri: &str, content_type: &str, body: &[u8], ttl: u64) -> ResourceMet
             let object = Object {
                 uri,
                 owner: &owner,
+                now,
                 vars,
             };
             let read = match json.as_ref().filter(|v| v.is_object()) {
@@ -264,6 +277,7 @@ pub fn open_in(uri: &str) -> Vec<OpenIn> {
             &Object {
                 uri,
                 owner: &owner,
+                now: chrono::Utc::now(),
                 vars,
             },
             kind.open_in,

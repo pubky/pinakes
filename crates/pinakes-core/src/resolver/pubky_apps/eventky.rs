@@ -3,6 +3,7 @@
 //! references, whose cards carry the same client link.
 use super::{read, Client, Kind, Object, Profile, Read};
 use crate::{event::time, model::ResourceMeta};
+use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
 
 pub static PROFILE: Profile = Profile {
@@ -41,9 +42,48 @@ fn description(v: &Value) -> Option<String> {
     })
 }
 
+/// The start of a recurring event's (`rrule`) occurrence that ends after `now`: the series' next
+/// or current one. `None` for a one-off event, a finished series, or a rule that does not read
+/// (it must be RFC 5545 characters only, at most 512 of them, and give an occurrence within
+/// 10,000 steps).
+fn next_occurrence(
+    v: &Value,
+    zone: &str,
+    first: DateTime<Utc>,
+    length: Duration,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    let rule = read::text(v, &["rrule"])?;
+    if rule.len() > 512
+        || !rule
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '=' | ';' | ',' | '-' | '+'))
+    {
+        return None;
+    }
+    let wall = first.with_timezone(&time::zone(zone)?);
+    let set: rrule::RRuleSet = format!(
+        "DTSTART;TZID={zone}:{}\nRRULE:{rule}",
+        wall.format("%Y%m%dT%H%M%S")
+    )
+    .parse()
+    .ok()?;
+    let after = now.checked_sub_signed(length)?;
+    // DTSTART is the first occurrence even where the rule would not give it (RFC 5545).
+    if first > after {
+        return Some(first);
+    }
+    set.limit()
+        .into_iter()
+        .take(10_000)
+        .map(|at| at.with_timezone(&Utc))
+        .find(|at| *at > after)
+}
+
 /// An event: its summary, description, times (local times in their time zone; a time without a
-/// zone is left out) and first location's label.
-fn event(_: &Object, v: &Value, doc: &mut ResourceMeta) -> Read {
+/// zone is left out; a recurring event's are its next or current occurrence's) and first
+/// location's label.
+fn event(object: &Object, v: &Value, doc: &mut ResourceMeta) -> Read {
     let Some(summary) = read::text(v, &["summary"]) else {
         return Read::NoCard;
     };
@@ -62,6 +102,15 @@ fn event(_: &Object, v: &Value, doc: &mut ResourceMeta) -> Read {
                     .and_then(|start| start.checked_add_signed(duration))
             })
             .filter(|end| doc.start.is_some_and(|start| *end >= start));
+        // A series is shown, and fetched again, by its next occurrence: its first one may be
+        // long past while the series goes on.
+        if let Some(first) = doc.start {
+            let length = doc.end.map_or(Duration::zero(), |end| end - first);
+            if let Some(next) = next_occurrence(v, zone, first, length, object.now) {
+                doc.start = Some(next);
+                doc.end = doc.end.and_then(|_| next.checked_add_signed(length));
+            }
+        }
         doc.event.tz = Some(zone.clone());
     }
     if v.get("status").and_then(Value::as_str) == Some("CANCELLED") {
