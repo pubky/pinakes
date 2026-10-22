@@ -1014,6 +1014,35 @@ impl Source for Podcasts {
 mod tests {
     use super::*;
 
+    /// Its links are typed by what they are, whatever their pages call themselves
+    /// (`media::link_type`); a page under an object is not typed.
+    #[test]
+    fn its_links_are_typed_by_what_they_are() {
+        for (uri, kind) in [
+            (
+                "https://podcastindex.org/podcast/577105",
+                Some("PodcastSeries"),
+            ),
+            (
+                "https://podcastindex.org/podcast/743229?episode=61953304662",
+                Some("PodcastEpisode"),
+            ),
+            (
+                "https://podcasts.apple.com/us/podcast/darknet-diaries/id1296350485",
+                Some("PodcastSeries"),
+            ),
+            (
+                "https://podcasts.apple.com/us/podcast/x/id1296350485?i=1000600000000",
+                Some("PodcastEpisode"),
+            ),
+            ("https://pca.st/itunes/1296350485", Some("PodcastSeries")),
+            ("https://fountain.fm/show/abc123", Some("PodcastSeries")),
+            ("https://fountain.fm/episode/abc123", Some("PodcastEpisode")),
+        ] {
+            assert_eq!(super::super::media::link_type(uri), kind, "{uri}");
+        }
+    }
+
     use crate::{also_on::media::fixture, model::ResourceMeta};
 
     fn read(name: &str) -> Vec<u8> {

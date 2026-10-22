@@ -86,12 +86,19 @@ impl Fixture {
             {"kind":"doi_page","uri":"https://publisher.example/articles/pinakes","type":"CreativeWork","group_with":"doi"},
             {"kind":"isbn","uri":"isbn:9780140328721","type":"Book"},
             {"kind":"isbn_twin","uri":"isbn:0140328726","type":"Book","group_with":"isbn"},
-            {"kind":"isbn_page","uri":"https://openlibrary.org/books/OL7353617M","type":"Book","group_with":"isbn"},
+            // Typed a Book by the `books` source (a build without it leaves the sample out).
+            {"kind":"isbn_page","uri":"https://openlibrary.org/books/OL7353617M","type":"Book","group_with":"isbn","needs":"books"},
             {"kind":"media","uri":"https://www.youtube.com/watch?v=fixture","type":"VideoObject"},
             {"kind":"web","uri":"https://web.example/e2e","type":"WebPage"},
         ]);
-        // Each official source's own samples (`Source::e2e`).
+        // A sample that needs an also-on source (`needs`) runs only in a build that has it.
+        let built: Vec<&str> = pinakes_core::also_on::registry()
+            .iter()
+            .map(|s| s.id())
+            .collect();
         let own = samples.as_array_mut().expect("an array");
+        own.retain(|s| s["needs"].as_str().is_none_or(|need| built.contains(&need)));
+        // Each official source's own samples (`Source::e2e`).
         for e2e in pinakes_core::sources::REGISTRY
             .iter()
             .filter_map(|s| s.e2e())

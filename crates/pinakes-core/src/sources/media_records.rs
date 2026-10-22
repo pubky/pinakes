@@ -810,7 +810,7 @@ mod tests {
 
     #[test]
     fn open_library_names_its_work_and_refuses_a_merged_one() {
-        let raw = crate::also_on::media::fixture::read("books", "ol-work-OL27482W.json");
+        let raw = read("ol-work-OL27482W.json");
         let page = web_card(
             "https://openlibrary.org/works/OL27482W",
             "Ka hopita by J.R.R. Tolkien | Open Library",
@@ -819,7 +819,7 @@ mod tests {
         assert_eq!(doc.name.as_deref(), Some("The Hobbit"));
         assert!(doc.description.unwrap().starts_with("The Hobbit is a tale"));
         // A merged work's record redirects: it names another object.
-        let merged = crate::also_on::media::fixture::read("books", "ol-work-OL893415W.json");
+        let merged = read("ol-work-OL893415W.json");
         assert!(named_by_open_library(&page, "works/OL893415W", &merged).is_none());
         // A record for another path names another object.
         assert!(named_by_open_library(&page, "works/OL1W", &raw).is_none());
@@ -855,8 +855,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_walled_player_page_is_named_by_itunes() {
-        let raw =
-            crate::also_on::media::fixture::read("podcasts", "itunes-podcast-1584274529.json");
+        let raw = read("itunes-podcast-1584274529.json");
         let (egress, _) = fixture::egress(vec![]);
         let cx = Context {
             egress: &egress,

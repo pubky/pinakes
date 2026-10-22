@@ -9,6 +9,16 @@
     "status": 200,
     "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q1079&props=claims%7Csitelinks%2Furls&format=json"
   },
+  "itunes-podcast-1584274529": {
+    "bytes": 1587,
+    "content_type": "text/javascript",
+    "file": "itunes-podcast-1584274529.json",
+    "note": "The media_records source's own copy of the podcasts source's recording.",
+    "recorded_at": "2026-10-19T22:21:28+00:00",
+    "sha256": "51ef2b8c7256252ca7a9348e74420bcda15c9430a4670c19551061244686db46",
+    "status": 200,
+    "url": "https://itunes.apple.com/lookup?id=1584274529&entity=podcast&country=us"
+  },
   "labels-Q1079": {
     "bytes": 226,
     "content_type": "application/json",
@@ -18,6 +28,26 @@
     "sha256": "7f5fbf40d196f6d583c790a42d115212fcba9407a77e6c5e53858a4a1704f008",
     "status": 200,
     "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q1079&props=labels%7Cdescriptions&languages=en&languagefallback=1&format=json"
+  },
+  "ol-work-OL27482W": {
+    "bytes": 5311,
+    "content_type": "application/json",
+    "file": "ol-work-OL27482W.json",
+    "note": "The media_records source's own copy of the books source's recording.",
+    "recorded_at": "2026-10-20T00:15:30+00:00",
+    "sha256": "0465c2894c07cf8e165062b263d81083d13b4d3ed64ed2421ce269867aab501c",
+    "status": 200,
+    "url": "https://openlibrary.org/works/OL27482W.json"
+  },
+  "ol-work-OL893415W": {
+    "bytes": 295,
+    "content_type": "application/json",
+    "file": "ol-work-OL893415W.json",
+    "note": "The media_records source's own copy of the books source's recording.",
+    "recorded_at": "2026-10-20T00:15:31+00:00",
+    "sha256": "094c8a366b5d9dd8d7b38778cb071aff2fbb71f874335cbb91d8d7348dc3202a",
+    "status": 200,
+    "url": "https://openlibrary.org/works/OL893415W.json"
   },
   "search-P4983-1396": {
     "bytes": 504,

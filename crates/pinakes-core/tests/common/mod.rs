@@ -1,6 +1,7 @@
 //! Shared test helpers: a small OpenAPI 3.1 response check, and an official source's card from
 //! its recorded answers for a test that needs one source (and skips without it).
 #![allow(dead_code)]
+pub mod media;
 use serde_json::Value;
 use std::collections::BTreeSet;
 

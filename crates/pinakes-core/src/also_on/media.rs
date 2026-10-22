@@ -391,48 +391,13 @@ mod tests {
     }
 
     #[test]
+    /// Each media source types its own links (its tests); a Trakt or Goodreads link is typed here,
+    /// by its address.
     fn media_links_are_typed_by_what_they_are() {
         for (uri, kind) in [
-            (
-                "https://www.themoviedb.org/movie/603-the-matrix",
-                Some("Movie"),
-            ),
-            ("https://www.themoviedb.org/tv/1396", Some("TVSeries")),
-            ("https://www.themoviedb.org/tv/1396/season/1", None),
-            ("https://letterboxd.com/film/the-matrix/", Some("Movie")),
             ("https://trakt.tv/shows/breaking-bad", Some("TVSeries")),
             ("https://trakt.tv/movies/the-matrix-1999", Some("Movie")),
             ("https://trakt.tv/shows/breaking-bad/seasons/1", None),
-            (
-                "https://www.tvmaze.com/shows/169/breaking-bad",
-                Some("TVSeries"),
-            ),
-            ("https://www.tvmaze.com/shows/169/episodes", None),
-            ("https://www.imdb.com/title/tt0133093/", None),
-            (
-                "https://openlibrary.org/works/OL27482W/The_Hobbit",
-                Some("Book"),
-            ),
-            ("https://openlibrary.org/books/OL7353617M", Some("Book")),
-            (
-                "https://podcastindex.org/podcast/577105",
-                Some("PodcastSeries"),
-            ),
-            (
-                "https://podcastindex.org/podcast/743229?episode=61953304662",
-                Some("PodcastEpisode"),
-            ),
-            (
-                "https://podcasts.apple.com/us/podcast/darknet-diaries/id1296350485",
-                Some("PodcastSeries"),
-            ),
-            (
-                "https://podcasts.apple.com/us/podcast/x/id1296350485?i=1000600000000",
-                Some("PodcastEpisode"),
-            ),
-            ("https://pca.st/itunes/1296350485", Some("PodcastSeries")),
-            ("https://fountain.fm/show/abc123", Some("PodcastSeries")),
-            ("https://fountain.fm/episode/abc123", Some("PodcastEpisode")),
             ("https://example.org/", None),
             (
                 "https://www.goodreads.com/work/editions/1540236",
@@ -441,14 +406,6 @@ mod tests {
             (
                 "https://www.goodreads.com/book/show/4671.The_Great_Gatsby",
                 Some("Book"),
-            ),
-            (
-                "https://www.netflix.com/title/70143836",
-                Some("CreativeWork"),
-            ),
-            (
-                "https://www.netflix.com/gb/title/70143836",
-                Some("CreativeWork"),
             ),
         ] {
             assert_eq!(link_type(uri), kind, "{uri}");
@@ -475,81 +432,6 @@ mod tests {
             ),
             "Article"
         );
-        let series = TypeHints {
-            title_type: Some("TVSeries".into()),
-            ..Default::default()
-        };
-        assert_eq!(
-            typed("https://www.netflix.com/title/70143836", series.clone()),
-            "TVSeries"
-        );
-        assert_eq!(
-            typed(
-                "https://www.netflix.com/title/70143836",
-                TypeHints::default()
-            ),
-            "CreativeWork"
-        );
-        assert_eq!(
-            typed("https://www.themoviedb.org/movie/603", series),
-            "Movie",
-            "the link wins"
-        );
-        let mut doc =
-            crate::model::ResourceMeta::new("https://www.themoviedb.org/tv/1396", "web", 60);
-        doc.set_type("WebSite");
-        type_card(
-            "https://www.themoviedb.org/tv/1396",
-            &TypeHints::default(),
-            &mut doc,
-        );
-        assert_eq!(doc.type_name, "TVSeries");
-        doc.status = crate::model::Status::Missing;
-        doc.set_type("WebPage");
-        type_card(
-            "https://www.themoviedb.org/tv/1396",
-            &TypeHints::default(),
-            &mut doc,
-        );
-        assert_eq!(doc.type_name, "WebPage", "a card that did not resolve");
-        // A Netflix card its Wikidata item typed keeps that type without a hint.
-        let mut doc =
-            crate::model::ResourceMeta::new("https://www.netflix.com/title/70143836", "web", 60);
-        doc.set_type("TVSeries");
-        type_card(
-            "https://www.netflix.com/title/70143836",
-            &TypeHints::default(),
-            &mut doc,
-        );
-        assert_eq!(doc.type_name, "TVSeries");
-        // A page the hook did not name takes the title the `titles` source found since.
-        let named = TypeHints {
-            title_type: Some("TVSeries".into()),
-            title: Some("Breaking Bad".into()),
-            title_description: Some("American crime drama television series".into()),
-            ..Default::default()
-        };
-        let mut doc =
-            crate::model::ResourceMeta::new("https://www.themoviedb.org/tv/1396", "jsonld", 60);
-        doc.set_type("WebSite");
-        doc.name = Some("The Movie Database".into());
-        doc.description = Some("Parhaan miespuolisen draamanäyttelijän".into());
-        type_card("https://www.themoviedb.org/tv/1396", &named, &mut doc);
-        assert_eq!(doc.name.as_deref(), Some("Breaking Bad"));
-        assert_eq!(
-            doc.description.as_deref(),
-            Some("American crime drama television series")
-        );
-        assert_eq!(doc.type_name, "TVSeries");
-        // One the hook named keeps the hook's card.
-        let mut hooked = crate::model::ResourceMeta::new(
-            "https://www.themoviedb.org/tv/1396",
-            "media_records",
-            60,
-        );
-        hooked.name = Some("Breaking Bad (series)".into());
-        type_card("https://www.themoviedb.org/tv/1396", &named, &mut hooked);
-        assert_eq!(hooked.name.as_deref(), Some("Breaking Bad (series)"));
     }
 
     #[test]
