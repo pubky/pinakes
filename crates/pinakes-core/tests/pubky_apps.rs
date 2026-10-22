@@ -574,10 +574,11 @@ fn eventky() {
     let (uri, body) = fixture("eventky/event-bern-meetup-recurring");
     let doc = pubky_apps::card_at(&uri, "application/octet-stream", &body, 86400, during);
     assert_eq!(doc.start.unwrap().to_rfc3339(), "2026-11-10T18:00:14+00:00");
+    // A series that has ended (its UNTIL or COUNT passed) keeps its first occurrence and is
+    // final.
     for rule in [
         "FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2;UNTIL=20260301T000000Z",
-        "FREQ=SOMETIMES",
-        "FREQ=DAILY\nRDATE:20261101T000000Z",
+        "FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2;COUNT=3",
     ] {
         let doc = at(
             "eventky/event-bern-meetup-recurring",
@@ -594,6 +595,56 @@ fn eventky() {
             "{rule}"
         );
     }
+    // A series whose next occurrence is not known here has no time and is fetched again on the
+    // usual cadence, never final: a rule that does not read; one whose periods would hold too
+    // many dates (a yearly rule listing every weekday, hour, minute and second: 31 million
+    // dates a year, all built before the first is given); a minutely one; one that never
+    // matches; and an hourly series since 2020, past the 10,000 occurrences one read expands.
+    let every = |n: usize| (0..n).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+    let flood = format!(
+        "FREQ=YEARLY;BYDAY=MO,TU,WE,TH,FR,SA,SU;BYHOUR={};BYMINUTE={};BYSECOND={}",
+        every(24),
+        every(60),
+        every(60)
+    );
+    assert!(flood.len() <= 512, "{}", flood.len());
+    let unknown = [
+        (json!({"rrule": "FREQ=SOMETIMES"}), "an unknown frequency"),
+        (
+            json!({"rrule": "FREQ=DAILY\nRDATE:20261101T000000Z"}),
+            "a line break",
+        ),
+        (json!({"rrule": flood}), "31 million dates a period"),
+        (json!({"rrule": "FREQ=MINUTELY"}), "minutely"),
+        (
+            json!({"rrule": "FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30"}),
+            "never matches",
+        ),
+        (
+            json!({"rrule": "FREQ=HOURLY", "dtstart": "2020-01-01T00:00:00", "duration": "PT1H"}),
+            "hourly since 2020",
+        ),
+    ];
+    for (change, why) in unknown {
+        let began = std::time::Instant::now();
+        let doc = at("eventky/event-bern-meetup-recurring", change);
+        assert!(began.elapsed() < std::time::Duration::from_secs(5), "{why}");
+        assert_eq!(
+            (&doc.status, doc.start, doc.end),
+            (&Status::Ok, None, None),
+            "{why}"
+        );
+        assert!(
+            pinakes_core::scheduler::next(&pubky, &doc, now, &refresh).is_some(),
+            "{why}"
+        );
+    }
+    // A daily series since January is still expanded: its next day.
+    let doc = at(
+        "eventky/event-bern-meetup-recurring",
+        json!({"rrule": "FREQ=DAILY"}),
+    );
+    assert_eq!(doc.start.unwrap().to_rfc3339(), "2026-10-22T17:00:14+00:00");
     // A duration past the calendar's end gives no end; the card keeps its start.
     let doc = edited(
         "eventky/event-psywalk-location-no-uri",

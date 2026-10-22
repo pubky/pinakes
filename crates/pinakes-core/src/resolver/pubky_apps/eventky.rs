@@ -42,47 +42,102 @@ fn description(v: &Value) -> Option<String> {
     })
 }
 
-/// The start of a recurring event's (`rrule`) occurrence that ends after `now`: the series' next
-/// or current one. `None` for a one-off event, a finished series, or a rule that does not read
-/// (it must be RFC 5545 characters only, at most 512 of them, and give an occurrence within
-/// 10,000 steps).
-fn next_occurrence(
+/// What a recurring event's rule (`rrule`) says about its occurrence that ends after `now`.
+#[derive(Debug, PartialEq)]
+enum Series {
+    /// The series' next or current occurrence starts then.
+    At(DateTime<Utc>),
+    /// The series has ended: its rule's `COUNT` or `UNTIL` gives no later occurrence.
+    Over,
+    /// Not known here: the rule is not read (not RFC 5545 characters, over 512 of them, not one
+    /// this reader expands, or one that would build too many dates at once), or the occurrence
+    /// lies past the expansion's budget.
+    Unknown,
+}
+/// The most dates one period of a rule may hold (days in its period times its listed hours,
+/// minutes and seconds): the `rrule` crate builds a whole period before it yields any, so a
+/// yearly rule listing every hour, minute and second (31 million dates) is never expanded.
+const MAX_PERIOD_DATES: usize = 1_000;
+/// The occurrences, and the time, one expansion may take.
+const MAX_OCCURRENCES: usize = 10_000;
+const MAX_EXPANSION: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Whether a rule's periods stay small: only yearly, monthly, weekly, daily and hourly rules,
+/// at most `MAX_PERIOD_DATES` dates a period by their `BYHOUR`, `BYMINUTE` and `BYSECOND`
+/// lists.
+fn bounded(rule: &str) -> bool {
+    let part = |name: &str| {
+        rule.split(';')
+            .find_map(|p| p.strip_prefix(name)?.strip_prefix('='))
+    };
+    let listed = |name: &str| part(name).map_or(1, |v| v.split(',').count());
+    let days = match part("FREQ") {
+        Some("YEARLY") => 366,
+        Some("MONTHLY") => 31,
+        Some("WEEKLY") => 7,
+        Some("DAILY") => 1,
+        Some("HOURLY") => return listed("BYMINUTE") * listed("BYSECOND") <= MAX_PERIOD_DATES,
+        _ => return false,
+    };
+    days * listed("BYHOUR") * listed("BYMINUTE") * listed("BYSECOND") <= MAX_PERIOD_DATES
+}
+
+/// The series of a recurring event, from its first occurrence and length; `None` for a one-off
+/// event.
+fn series(
     v: &Value,
     zone: &str,
     first: DateTime<Utc>,
     length: Duration,
     now: DateTime<Utc>,
-) -> Option<DateTime<Utc>> {
+) -> Option<Series> {
     let rule = read::text(v, &["rrule"])?;
     if rule.len() > 512
         || !rule
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '=' | ';' | ',' | '-' | '+'))
+        || !bounded(&rule)
     {
-        return None;
+        return Some(Series::Unknown);
     }
-    let wall = first.with_timezone(&time::zone(zone)?);
-    let set: rrule::RRuleSet = format!(
-        "DTSTART;TZID={zone}:{}\nRRULE:{rule}",
-        wall.format("%Y%m%dT%H%M%S")
-    )
-    .parse()
-    .ok()?;
-    let after = now.checked_sub_signed(length)?;
+    let Some(set) = time::zone(zone).and_then(|tz| {
+        format!(
+            "DTSTART;TZID={zone}:{}\nRRULE:{rule}",
+            first.with_timezone(&tz).format("%Y%m%dT%H%M%S")
+        )
+        .parse::<rrule::RRuleSet>()
+        .ok()
+    }) else {
+        return Some(Series::Unknown);
+    };
+    let Some(after) = now.checked_sub_signed(length) else {
+        return Some(Series::Unknown);
+    };
     // DTSTART is the first occurrence even where the rule would not give it (RFC 5545).
     if first > after {
-        return Some(first);
+        return Some(Series::At(first));
     }
-    set.limit()
-        .into_iter()
-        .take(10_000)
-        .map(|at| at.with_timezone(&Utc))
-        .find(|at| *at > after)
+    let deadline = std::time::Instant::now() + MAX_EXPANSION;
+    let mut dates = set.limit().into_iter();
+    for _ in 0..MAX_OCCURRENCES {
+        match dates.next().map(|at| at.with_timezone(&Utc)) {
+            Some(at) if at > after => return Some(Series::At(at)),
+            Some(_) if std::time::Instant::now() < deadline => {}
+            Some(_) => return Some(Series::Unknown),
+            // Only a rule with an end has run out; one without (the crate gives up on a rule that
+            // matches too rarely) is not over.
+            None if rule.contains("COUNT=") || rule.contains("UNTIL=") => {
+                return Some(Series::Over)
+            }
+            None => return Some(Series::Unknown),
+        }
+    }
+    Some(Series::Unknown)
 }
 
 /// An event: its summary, description, times (local times in their time zone; a time without a
-/// zone is left out; a recurring event's are its next or current occurrence's) and first
-/// location's label.
+/// zone is left out; a recurring event's are its next or current occurrence's, and none when
+/// that is not known) and first location's label.
 fn event(object: &Object, v: &Value, doc: &mut ResourceMeta) -> Read {
     let Some(summary) = read::text(v, &["summary"]) else {
         return Read::NoCard;
@@ -103,12 +158,18 @@ fn event(object: &Object, v: &Value, doc: &mut ResourceMeta) -> Read {
             })
             .filter(|end| doc.start.is_some_and(|start| *end >= start));
         // A series is shown, and fetched again, by its next occurrence: its first one may be
-        // long past while the series goes on.
+        // long past while the series goes on. When that is not known the card has no time, so
+        // it is fetched again on the usual cadence and never made final; only a series that has
+        // ended keeps its first occurrence.
         if let Some(first) = doc.start {
             let length = doc.end.map_or(Duration::zero(), |end| end - first);
-            if let Some(next) = next_occurrence(v, zone, first, length, object.now) {
-                doc.start = Some(next);
-                doc.end = doc.end.and_then(|_| next.checked_add_signed(length));
+            match series(v, zone, first, length, object.now) {
+                Some(Series::At(next)) => {
+                    doc.start = Some(next);
+                    doc.end = doc.end.and_then(|_| next.checked_add_signed(length));
+                }
+                Some(Series::Unknown) => (doc.start, doc.end) = (None, None),
+                Some(Series::Over) | None => {}
             }
         }
         doc.event.tz = Some(zone.clone());
