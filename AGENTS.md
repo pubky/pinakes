@@ -42,9 +42,9 @@ Tests use local servers, injected transports and recorded fixtures instead of pu
     says how to add one.
   - `event/`: event pages, calendar feeds, event platforms (`adapters/`).
   - `sources/`: official-API sources, one module per service (`kit.rs` holds shared helpers).
-  - `also_on.rs`, `also_on/`, `lookups/`, `music.rs`, `music_sources.rs`, `hubs.rs`,
-    `wikipedia.rs`: the also-on sources and their hubs (music, books, films, podcasts, places,
-    papers, packages, games, archived copies).
+  - `also_on.rs` and `also_on/` (one module per also-on source), `lookups/` (one module per
+    lookup family: places, papers, packages, games, archived copies), and the code they share:
+    `hubs.rs` (MusicBrainz, Wikidata), `music.rs`, `music_sources.rs`, `wikipedia.rs`.
   - `groups.rs`, `group_keys.rs`, `same_event.rs`: groups and the same-event hint.
   - `api.rs`, `change_api.rs`, `spatial.rs`, `recipes.rs`: the HTTP API, its OpenAPI document
     and examples.
@@ -97,8 +97,22 @@ the table in `docs/operations.md` (a test checks every limit is listed).
 `docs/sources/<name>.md`, a line in `docs/sources/README.md`, `[sources.<name>]` in
 `pinakes.example.toml` (alphabetical), recorded fixtures in
 `tests/fixtures/sources/<name>/` with `provenance.json`, and examples (`Source::examples`).
-Tests check the docs, the example config and the examples against the registry. Removing a
-source is deleting its own files and its one registry line.
+Tests check the docs, the example config and the examples against the registry.
+
+**Removing a source** (official, also-on, or a lookup family) is deleting its own files and its
+registry lines, nothing else ([docs/sources](docs/sources/README.md#removing-a-source) has the
+full list):
+- its module: `sources/<name>.rs`, `also_on/<id>.rs` or `lookups/<family>.rs`;
+- its `pub mod` line and its entry in `sources::REGISTRY`, `also_on::registry()` or
+  `lookups::FAMILIES`;
+- `docs/sources/<name>.md` and its line in `docs/sources/README.md`;
+- its block in `pinakes.example.toml` (and its variables in `.env.example`);
+- its fixtures and its own test file, if any;
+- `e2e/samples/<name>.json`.
+
+Shared code stays. A test that needs a source returns early without it, so no test changes. If
+removing a source would need any other edit, first move what it needs into its own files or
+into shared code.
 
 **API.** Response types and routes carry `utoipa` annotations; their doc comments become the
 OpenAPI text. Run `scripts/openapi` after changing them. Every example in
