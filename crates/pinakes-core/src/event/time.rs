@@ -171,6 +171,33 @@ pub fn fixed(value: &str) -> Option<FixedOffset> {
     }
     FixedOffset::east_opt(sign * (h * 3600 + m * 60 + s))
 }
+/// The most dates one period of a recurrence rule may hold.
+pub const MAX_PERIOD_DATES: usize = 1_000;
+/// Whether a parsed recurrence set is safe to expand: every rule and exception rule repeats
+/// yearly, monthly, weekly, daily or hourly, and one period holds at most `MAX_PERIOD_DATES`
+/// dates (the days in its period times its hours, minutes and seconds). The `rrule` crate builds a
+/// whole period before it yields its first date, so a yearly rule listing every hour, minute and
+/// second would build 31 million at once. It reads the parsed rule, so how the rule spells its
+/// names (`BYHOUR`, `byhour`) does not matter.
+pub fn rrule_bounded(set: &rrule::RRuleSet) -> bool {
+    set.get_rrule().iter().chain(set.get_exrule()).all(|rule| {
+        let listed = |values: usize| values.max(1);
+        let (hours, minutes, seconds) = (
+            listed(rule.get_by_hour().len()),
+            listed(rule.get_by_minute().len()),
+            listed(rule.get_by_second().len()),
+        );
+        let dates = match rule.get_freq() {
+            rrule::Frequency::Yearly => 366 * hours * minutes * seconds,
+            rrule::Frequency::Monthly => 31 * hours * minutes * seconds,
+            rrule::Frequency::Weekly => 7 * hours * minutes * seconds,
+            rrule::Frequency::Daily => hours * minutes * seconds,
+            rrule::Frequency::Hourly => minutes * seconds,
+            rrule::Frequency::Minutely | rrule::Frequency::Secondly => return false,
+        };
+        dates <= MAX_PERIOD_DATES
+    })
+}
 pub fn duration(value: &str) -> Option<Duration> {
     let (sign, v) = if let Some(v) = value.strip_prefix('-') {
         (-1, v)

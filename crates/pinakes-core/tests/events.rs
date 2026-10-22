@@ -1173,7 +1173,7 @@ fn recurrence_local_days_coordinate_zones_exclusion_budget_and_categories() {
     assert!(calendar::parse(
         "https://example.org/f.ics",
         cal(&event(
-            "UID:expensive\nDTSTART:19000101T000000Z\nRRULE:FREQ=SECONDLY"
+            "UID:expensive\nDTSTART:19000101T000000Z\nRRULE:FREQ=HOURLY"
         ))
         .as_bytes(),
         &cfg,
@@ -4041,5 +4041,79 @@ async fn related_lists_a_feed_and_a_venue_once(pool: PgPool) {
             .unwrap()
             .iter()
             .all(|row| row.get("occurrence").is_none() && row.get("event").is_none()));
+    }
+}
+
+#[test]
+fn a_rule_whose_periods_would_hold_too_many_dates_is_never_expanded() {
+    // Every weekday, hour, minute and second of a year: 31 million dates the `rrule` crate would
+    // build before giving the first. In capitals, lower case or mixed, in an event or in an
+    // embedded time zone, the event is left out with a warning and its sibling stays, at once.
+    let every = |n: usize| (0..n).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+    let flood = format!(
+        "FREQ=YEARLY;BYDAY=MO,TU,WE,TH,FR,SA,SU;BYHOUR={};BYMINUTE={};BYSECOND={}",
+        every(24),
+        every(60),
+        every(60)
+    );
+    let spellings = [
+        flood.clone(),
+        flood.to_lowercase(),
+        flood
+            .replace("BYHOUR", "byhour")
+            .replace("BYMINUTE", "ByMinute")
+            .replace("BYSECOND", "bySecond"),
+    ];
+    for rule in &spellings {
+        let zone = format!("BEGIN:VTIMEZONE\nTZID:Flood\nBEGIN:STANDARD\nDTSTART:19700101T000000\nTZOFFSETFROM:+0100\nTZOFFSETTO:+0100\nRRULE:{rule}\nEND:STANDARD\nEND:VTIMEZONE");
+        for bad in [
+            format!("UID:bad\nDTSTART:20270101T000000Z\nRRULE:{rule}\nSUMMARY:Flood"),
+            "UID:bad\nDTSTART;TZID=Flood:20261020T120000\nSUMMARY:Flood zone".to_owned(),
+        ] {
+            let body = cal(&format!(
+                "{zone}\n{}\n{}",
+                event(&bad),
+                event("UID:good\nDTSTART:20261020T120000Z\nSUMMARY:Healthy")
+            ));
+            let began = std::time::Instant::now();
+            let container = calendar::parse(
+                "https://example.org/feed.ics",
+                body.as_bytes(),
+                &EventConfig::default(),
+                now(),
+            )
+            .unwrap()
+            .container
+            .unwrap();
+            assert!(
+                began.elapsed() < std::time::Duration::from_secs(5),
+                "{rule}"
+            );
+            let uids: Vec<&str> = container
+                .occurrences
+                .iter()
+                .map(|o| o.uid.as_str())
+                .collect();
+            assert_eq!(uids, ["good"], "{bad}");
+            assert!(!container.warnings.is_empty(), "{bad}");
+        }
+    }
+    // Ordinary rules pass the bound, however they spell their names.
+    for rule in [
+        "FREQ=WEEKLY;BYDAY=MO,WE,FR;BYHOUR=9,18",
+        "freq=monthly;byhour=9,18",
+        "FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU",
+        "FREQ=HOURLY;BYMINUTE=0,30",
+    ] {
+        let set: rrule::RRuleSet = format!("DTSTART:20261020T120000Z\nRRULE:{rule}")
+            .parse()
+            .unwrap();
+        assert!(pinakes_core::event::time::rrule_bounded(&set), "{rule}");
+    }
+    for rule in [flood.as_str(), "FREQ=MINUTELY", "freq=secondly"] {
+        let set: rrule::RRuleSet = format!("DTSTART:20261020T120000Z\nRRULE:{rule}")
+            .parse()
+            .unwrap();
+        assert!(!pinakes_core::event::time::rrule_bounded(&set), "{rule}");
     }
 }

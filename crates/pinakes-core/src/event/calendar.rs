@@ -377,6 +377,10 @@ fn transitions(
         if let Some(rule) = o.value("RRULE") {
             let set: rrule::RRuleSet =
                 format!("DTSTART:{}Z\nRRULE:{}", start.format("%Y%m%dT%H%M%S"), rule).parse()?;
+            ensure!(
+                time::rrule_bounded(&set),
+                "VTIMEZONE RRULE period too large"
+            );
             let end = wall
                 .checked_add_signed(Duration::days(370))
                 .context("VTIMEZONE horizon overflow")?
@@ -924,6 +928,7 @@ fn expand(
             parts.join(";")
         )
         .parse()?;
+        ensure!(time::rrule_bounded(&set), "RRULE period too large");
         // Generate floating wall values with the bounded RRULE iterator, then apply RFC gap rules.
         let take = cfg
             .max_occurrences_per_series
