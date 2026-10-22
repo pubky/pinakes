@@ -3,8 +3,10 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path};
 
+/// The file form: a top-level section no field names is a source's own ([`Sections`]), and one
+/// no source owns is refused at validation.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Config {
     /// May carry a password: `Debug` and serialization show `[REDACTED]`.
     pub database_url: SecretKey,
@@ -31,10 +33,13 @@ pub struct Config {
     pub groups: crate::groups::GroupConfig,
     /// "Also on": keys and derived links from sources (`also_on::registry`).
     pub also_on: crate::also_on::AlsoOnConfig,
-    /// The Podcast Index API's key and secret, for the `podcasts` also-on source.
+    /// The Podcast Index API's key and secret, which the `podcasts` also-on source and the
+    /// `podcast_index` source read (`podcast_index_api`).
     pub podcast_index: crate::podcast_index_api::PodcastIndexConfig,
-    /// TIDAL's developer API credentials and country, for the `tidal` also-on source.
-    pub tidal: crate::also_on::tidal::TidalConfig,
+    /// The sections sources own (`also_on::Source::section`, such as `[tidal]`), each read by its
+    /// source alone (`Config::section`).
+    #[serde(flatten)]
+    pub sections: Sections,
     pub api: ApiConfig,
     pub canary: CanaryConfig,
     /// Every cap, timeout, budget, backoff and refresh tier, with documented defaults
@@ -63,6 +68,76 @@ impl Default for Config {
         config
     }
 }
+/// The top-level sections sources own ([`crate::also_on::OwnSection`]), as written: each source
+/// reads its own (`Config::section`). They show (`Debug`, JSON) through their source's own type,
+/// so their secrets are redacted; one no source owns is refused at validation.
+#[derive(Clone, Deserialize)]
+#[serde(transparent)]
+pub struct Sections(BTreeMap<String, serde_json::Value>);
+impl Sections {
+    /// Every owned section with its defaults.
+    fn defaults() -> Self {
+        Self(
+            crate::also_on::sections()
+                .map(|s| (s.name.to_owned(), (s.default)()))
+                .collect(),
+        )
+    }
+    /// Set a section as the file would (its secrets in clear).
+    pub fn set(&mut self, name: &str, value: serde_json::Value) {
+        self.0.insert(name.to_owned(), value);
+    }
+    /// Each section checked by its source, as it may be shown.
+    fn shown(&self) -> Result<BTreeMap<&str, serde_json::Value>> {
+        let owned: Vec<_> = crate::also_on::sections().collect();
+        self.0
+            .iter()
+            .map(|(name, value)| {
+                let section = owned
+                    .iter()
+                    .find(|s| s.name == name)
+                    .with_context(|| format!("unknown config section [{name}]"))?;
+                let shown = (section.shown)(value).with_context(|| format!("[{name}]"))?;
+                Ok((name.as_str(), shown))
+            })
+            .collect()
+    }
+    fn check(&self) -> Result<()> {
+        self.shown().map(|_| ())
+    }
+}
+impl Default for Sections {
+    fn default() -> Self {
+        Self::defaults()
+    }
+}
+impl Serialize for Sections {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        self.shown()
+            .map_err(serde::ser::Error::custom)?
+            .serialize(s)
+    }
+}
+impl std::fmt::Debug for Sections {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.shown() {
+            Ok(shown) => shown.fmt(f),
+            Err(_) => f.write_str("[unchecked sections]"),
+        }
+    }
+}
+impl Config {
+    /// A source's own section ([`crate::also_on::OwnSection`]): as written, its defaults where
+    /// it says nothing or what it says does not check (validation refuses that at load).
+    pub fn section<T: crate::also_on::OwnSection>(&self) -> T {
+        self.sections
+            .0
+            .get(T::NAME)
+            .and_then(|v| serde_json::from_value::<T>(v.clone()).ok())
+            .filter(|s| s.check().is_ok())
+            .unwrap_or_default()
+    }
+}
 /// Map sections whose entries an operator names: a `PINAKES__…` override may create one (and
 /// its keys); `deny_unknown_fields` and `adapters::validate` still refuse what is unknown.
 const ENV_MAPS: &[&[&str]] = &[
@@ -73,25 +148,25 @@ const ENV_MAPS: &[&[&str]] = &[
 ];
 /// The one map whose new entries are numbers.
 const HOST_RATES: &[&str] = &["limits", "host_rates"];
-/// Secrets read from a variable of their own (`PINAKES_NAME`, one underscore): a build that has no
-/// such setting ignores the variable, where a `PINAKES__SECTION__KEY` it does not know stops it.
-const NAMED_ENV: &[(&str, &[&str], Named)] = &[
-    (
-        "PINAKES_TIDAL_CLIENT_ID",
-        &["tidal", "client_id"],
-        Named::Sets,
-    ),
-    (
-        "PINAKES_TIDAL_CLIENT_SECRET",
-        &["tidal", "client_secret"],
-        Named::Sets,
-    ),
-    (
-        "PINAKES_GITHUB_TOKEN",
-        &["sources", "github", "token"],
-        Named::Fills,
-    ),
-];
+/// Secrets read from a variable of their own (`PINAKES_NAME`, one underscore), as the sources
+/// name them: a source's own section's (`also_on::OwnSection::VARIABLES`) and an official
+/// source's token (`sources::Source::token_variable`). A build that has no such setting ignores
+/// the variable, where a `PINAKES__SECTION__KEY` it does not know stops it.
+fn named_variables() -> Vec<(&'static str, Vec<&'static str>, Named)> {
+    let sections = crate::also_on::sections().flat_map(|s| {
+        s.variables
+            .iter()
+            .map(move |(name, key)| (*name, vec![s.name, *key], Named::Sets))
+    });
+    let tokens = crate::sources::REGISTRY.iter().filter_map(|s| {
+        Some((
+            s.token_variable()?,
+            vec!["sources", s.name(), "token"],
+            Named::Fills,
+        ))
+    });
+    sections.chain(tokens).collect()
+}
 /// How a named variable meets the file form.
 #[derive(Clone, Copy, PartialEq)]
 enum Named {
@@ -101,13 +176,15 @@ enum Named {
     /// entry is created for it).
     Fills,
 }
-/// Apply the `NAMED_ENV` variables that are set (and not empty) onto the file form.
-fn apply_named_env(
+/// Apply the named variables that are set (and not empty) onto the file form.
+pub(crate) fn apply_named_env(
     value: &mut serde_json::Value,
     vars: impl IntoIterator<Item = (String, String)>,
 ) -> Result<()> {
+    let named_variables = named_variables();
     for (key, val) in vars {
-        let Some((_, path, named)) = NAMED_ENV.iter().find(|(name, _, _)| *name == key) else {
+        let Some((_, path, named)) = named_variables.iter().find(|(name, _, _)| *name == key)
+        else {
             continue;
         };
         if val.trim().is_empty() {
@@ -142,7 +219,7 @@ fn apply_named_env(
 /// Apply `PINAKES__SECTION__KEY` overrides onto the file form. Strings are literal; numbers,
 /// booleans and arrays are JSON. A new map entry's keys are strings except `enabled`, and a
 /// new `limits.host_rates` entry is a number.
-fn apply_env(
+pub(crate) fn apply_env(
     value: &mut serde_json::Value,
     vars: impl IntoIterator<Item = (String, String)>,
 ) -> Result<()> {
@@ -200,7 +277,7 @@ impl Config {
             canary: CanaryConfig::default(),
             also_on: Default::default(),
             podcast_index: Default::default(),
-            tidal: Default::default(),
+            sections: Sections::defaults(),
             nexus_url: "http://127.0.0.1:8080".into(),
             poll_secs: 5,
             ingest: IngestConfig::default(),
@@ -689,26 +766,6 @@ impl Default for CanaryConfig {
         }
     }
 }
-/// The ISO 3166-1 alpha-2 codes in use (tzdata's `iso3166.tab`): a TIDAL country must be one,
-/// so a typo stops startup instead of failing every request.
-const COUNTRIES: &[&str] = &[
-    "AD", "AE", "AF", "AG", "AI", "AL", "AM", "AO", "AQ", "AR", "AS", "AT", "AU", "AW", "AX", "AZ",
-    "BA", "BB", "BD", "BE", "BF", "BG", "BH", "BI", "BJ", "BL", "BM", "BN", "BO", "BQ", "BR", "BS",
-    "BT", "BV", "BW", "BY", "BZ", "CA", "CC", "CD", "CF", "CG", "CH", "CI", "CK", "CL", "CM", "CN",
-    "CO", "CR", "CU", "CV", "CW", "CX", "CY", "CZ", "DE", "DJ", "DK", "DM", "DO", "DZ", "EC", "EE",
-    "EG", "EH", "ER", "ES", "ET", "FI", "FJ", "FK", "FM", "FO", "FR", "GA", "GB", "GD", "GE", "GF",
-    "GG", "GH", "GI", "GL", "GM", "GN", "GP", "GQ", "GR", "GS", "GT", "GU", "GW", "GY", "HK", "HM",
-    "HN", "HR", "HT", "HU", "ID", "IE", "IL", "IM", "IN", "IO", "IQ", "IR", "IS", "IT", "JE", "JM",
-    "JO", "JP", "KE", "KG", "KH", "KI", "KM", "KN", "KP", "KR", "KW", "KY", "KZ", "LA", "LB", "LC",
-    "LI", "LK", "LR", "LS", "LT", "LU", "LV", "LY", "MA", "MC", "MD", "ME", "MF", "MG", "MH", "MK",
-    "ML", "MM", "MN", "MO", "MP", "MQ", "MR", "MS", "MT", "MU", "MV", "MW", "MX", "MY", "MZ", "NA",
-    "NC", "NE", "NF", "NG", "NI", "NL", "NO", "NP", "NR", "NU", "NZ", "OM", "PA", "PE", "PF", "PG",
-    "PH", "PK", "PL", "PM", "PN", "PR", "PS", "PT", "PW", "PY", "QA", "RE", "RO", "RS", "RU", "RW",
-    "SA", "SB", "SC", "SD", "SE", "SG", "SH", "SI", "SJ", "SK", "SL", "SM", "SN", "SO", "SR", "SS",
-    "ST", "SV", "SX", "SY", "SZ", "TC", "TD", "TF", "TG", "TH", "TJ", "TK", "TL", "TM", "TN", "TO",
-    "TR", "TT", "TV", "TW", "TZ", "UA", "UG", "UM", "US", "UY", "UZ", "VA", "VC", "VE", "VG", "VI",
-    "VN", "VU", "WF", "WS", "YE", "YT", "ZA", "ZM", "ZW",
-];
 impl Config {
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let mut value = Self::defaults()?;
@@ -859,11 +916,11 @@ impl Config {
                 }
             }
             if let Some(token) = options.token.as_deref().filter(|t| !t.is_empty()) {
-                if id != "discogs"
-                    || token.len() > 256
-                    || !token.bytes().all(|b| b.is_ascii_graphic())
-                {
-                    bail!("also_on.sources.{id}.token must be at most 256 printable characters, and only discogs takes one");
+                let takes = crate::also_on::registered()
+                    .iter()
+                    .any(|s| s.id() == id && s.takes_token());
+                if !takes || token.len() > 256 || !token.bytes().all(|b| b.is_ascii_graphic()) {
+                    bail!("also_on.sources.{id}.token must be at most 256 printable characters, for a source that takes one");
                 }
             }
         }
@@ -876,12 +933,7 @@ impl Config {
         {
             bail!("invalid also_on limits");
         }
-        let country = &self.tidal.country;
-        if !COUNTRIES.contains(&country.as_str()) {
-            bail!(
-                "tidal.country must be an ISO 3166-1 alpha-2 country code in upper case, like US"
-            );
-        }
+        self.sections.check()?;
         if a.apple_storefront.len() != 2
             || !a.apple_storefront.bytes().all(|b| b.is_ascii_lowercase())
         {
@@ -1207,40 +1259,19 @@ mod tests {
         let shown = format!("{cfg:?} {}", serde_json::to_string(&cfg).unwrap());
         assert!(!shown.contains("ABCDEF"), "{shown}");
     }
+    /// A top-level section no field and no source names is refused; each owned section shows
+    /// through its source's type.
     #[test]
-    fn the_tidal_pair_comes_from_its_own_variables_and_stays_secret() {
-        let mut value = Config::defaults().unwrap();
-        let vars = [
-            ("PINAKES_TIDAL_CLIENT_ID", "ABCDEFID"),
-            ("PINAKES_TIDAL_CLIENT_SECRET", "ABCDEFSECRET"),
-            ("PINAKES_OTHER", "x"),
-        ]
-        .map(|(k, v)| (k.to_string(), v.to_string()));
-        // `apply_env` reads only the double-underscore form.
-        apply_env(&mut value, vars.clone()).unwrap();
-        apply_named_env(&mut value, vars).unwrap();
-        let cfg = Config::from_value(value).unwrap();
-        assert_eq!(cfg.tidal.client_id.as_deref(), Some("ABCDEFID"));
-        assert_eq!(cfg.tidal.client_secret.as_deref(), Some("ABCDEFSECRET"));
-        assert_eq!(cfg.tidal.country, "US");
-        let shown = format!("{cfg:?} {}", serde_json::to_string(&cfg).unwrap());
-        assert!(!shown.contains("ABCDEF"), "{shown}");
-        // An empty variable leaves the file's value.
-        let mut value = Config::defaults().unwrap();
-        value["tidal"]["client_id"] = "FROMFILE".into();
-        apply_named_env(&mut value, [("PINAKES_TIDAL_CLIENT_ID".into(), "".into())]).unwrap();
-        assert_eq!(value["tidal"]["client_id"], "FROMFILE");
-        assert_eq!(COUNTRIES.len(), 249);
-        for country in ["us", "USA", "", "UX", "EU"] {
-            assert!(with(serde_json::json!({"tidal":{"country":country}})).is_err());
+    fn a_section_no_source_owns_is_refused() {
+        assert!(with(serde_json::json!({"no_such_section": {"key": "x"}}))
+            .unwrap_err()
+            .to_string()
+            .contains("unknown config section [no_such_section]"));
+        let cfg = Config::default();
+        let shown = serde_json::to_value(&cfg).unwrap();
+        for section in crate::also_on::sections() {
+            assert_eq!(shown[section.name], (section.default)(), "{}", section.name);
         }
-        assert_eq!(
-            with(serde_json::json!({"tidal":{"country":"CH"}}))
-                .unwrap()
-                .tidal
-                .country,
-            "CH"
-        );
     }
     /// `.env.example` names only variables the config accepts (its commented examples too), and
     /// a key for every platform that needs one.

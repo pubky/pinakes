@@ -4,7 +4,6 @@
 use pinakes_core::{
     also_on::{self, SourceOptions},
     config::{Config, EgressConfig},
-    event::adapters::SecretKey,
     groups,
     model::ResourceMeta,
     resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport},
@@ -228,8 +227,10 @@ impl Transport for Recorded {
 fn config(pair: Option<(&str, &str)>) -> Config {
     let mut config = Config::default();
     if let Some((id, secret)) = pair {
-        config.tidal.client_id = Some(SecretKey::from(id.to_owned()));
-        config.tidal.client_secret = Some(SecretKey::from(secret.to_owned()));
+        config.sections.set(
+            "tidal",
+            serde_json::json!({"client_id": id, "client_secret": secret}),
+        );
     }
     for (source, enabled) in [
         ("deezer", true),

@@ -1013,6 +1013,7 @@ impl Source for Podcasts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::{also_on::media::fixture, model::ResourceMeta};
 
     fn read(name: &str) -> Vec<u8> {

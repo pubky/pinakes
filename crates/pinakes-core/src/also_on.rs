@@ -272,6 +272,57 @@ pub trait Source: Send + Sync {
     fn link_type(&self, _uri: &str) -> Option<Option<&'static str>> {
         None
     }
+    /// The top-level section of the config file it owns ([`OwnSection`]), if any.
+    fn section(&self) -> Option<Section> {
+        None
+    }
+    /// Whether `[also_on.sources.<id>]` takes a `token` for it.
+    fn takes_token(&self) -> bool {
+        false
+    }
+}
+
+/// A top-level section of the config file that one source owns and alone reads (`[tidal]`):
+/// its name, the variables of its own (`PINAKES_NAME`) that set one of its keys, replacing the
+/// file's value, and its checks. Its secrets are `SecretKey`s, so it shows them redacted.
+pub trait OwnSection: Default + Serialize + serde::de::DeserializeOwned {
+    const NAME: &'static str;
+    const VARIABLES: &'static [(&'static str, &'static str)] = &[];
+    fn check(&self) -> Result<()> {
+        Ok(())
+    }
+}
+/// What the configuration needs of an [`OwnSection`], whatever its type.
+#[derive(Clone, Copy)]
+pub struct Section {
+    pub name: &'static str,
+    pub variables: &'static [(&'static str, &'static str)],
+    /// The section with its defaults, in its file form.
+    pub default: fn() -> Value,
+    /// The section as written, checked, in the form it may be shown (secrets redacted).
+    pub shown: fn(&Value) -> Result<Value>,
+}
+impl Section {
+    pub fn of<T: OwnSection>() -> Self {
+        fn default<T: OwnSection>() -> Value {
+            serde_json::to_value(T::default()).expect("a config section serializes")
+        }
+        fn shown<T: OwnSection>(value: &Value) -> Result<Value> {
+            let section: T = serde_json::from_value(value.clone())?;
+            section.check()?;
+            Ok(serde_json::to_value(section)?)
+        }
+        Self {
+            name: T::NAME,
+            variables: T::VARIABLES,
+            default: default::<T>,
+            shown: shown::<T>,
+        }
+    }
+}
+/// The config sections the sources own ([`Source::section`]).
+pub fn sections() -> impl Iterator<Item = Section> {
+    registered().iter().filter_map(|s| s.section())
 }
 
 /// A hub's answer over its read's cap is no answer: asking again would read the same megabytes.

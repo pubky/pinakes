@@ -148,8 +148,8 @@ its registry lines, nothing else; `scripts/test` and `scripts/e2e --mock` then p
 - its lines in each registry it is in: `pub mod <name>;` with its entry in `sources::REGISTRY`,
   `also_on::registry()` (also for an official source's also-on half) or `lookups::FAMILIES`;
 - its page `docs/sources/<name>.md` and its lines in this index;
-- its `[sources.<name>]` block and `[also_on.sources.<id>]` lines in `pinakes.example.toml`, and
-  its variables in `.env.example` if it has a secret;
+- its `[sources.<name>]` block, `[also_on.sources.<id>]` lines and own section (such as
+  `[tidal]`) in `pinakes.example.toml`, and its variables in `.env.example` if it has a secret;
 - its fixtures, `crates/pinakes-core/tests/fixtures/sources/<name>/` or
   `crates/pinakes-core/tests/fixtures/lookups/<family>/`, and its own test file
   `crates/pinakes-core/tests/<name>.rs` if it has one;

@@ -86,8 +86,8 @@ published rate) and caches answers. A source with a published limit lowers its h
 never raises it.
 
 **Secrets.** Keys, tokens and passwords come only from the config file or the environment
-(`PINAKES__…`, or a source's own variables such as `PINAKES_TIDAL_CLIENT_ID` and
-`PINAKES_GITHUB_TOKEN`). They never appear in logs, errors, `Debug` output or `/v1/info`. Fixtures
+(`PINAKES__…`, or a variable a source names for itself, `PINAKES_NAME`: an own section's
+`OwnSection::VARIABLES`, an official source's `token_variable`). They never appear in logs, errors, `Debug` output or `/v1/info`. Fixtures
 and samples hold no real keys and no private calendar URLs.
 
 **Limits.** A new cap, timeout or rate is a limit in `config.rs` with a default, and gets a row in

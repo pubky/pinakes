@@ -186,6 +186,11 @@ pub trait Source: Send + Sync {
     fn takes_token(&self) -> bool {
         false
     }
+    /// A variable of its own (`PINAKES_NAME`) that fills its token when the config file and the
+    /// `PINAKES__SOURCES__…` form leave it unset.
+    fn token_variable(&self) -> Option<&'static str> {
+        None
+    }
     /// Whether this source answers for pages behind an access wall (`walled`).
     fn hooks_walls(&self) -> bool {
         false

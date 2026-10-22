@@ -179,6 +179,9 @@ impl Source for Github {
     fn takes_token(&self) -> bool {
         true
     }
+    fn token_variable(&self) -> Option<&'static str> {
+        Some("PINAKES_GITHUB_TOKEN")
+    }
     fn facts(&self) -> &'static [&'static str] {
         &[
             "stars",

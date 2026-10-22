@@ -331,6 +331,9 @@ pub mod also_on {
         fn id(&self) -> &'static str {
             "discogs"
         }
+        fn takes_token(&self) -> bool {
+            true
+        }
         fn applies(&self, subject: &Subject) -> bool {
             super::of_uri(&subject.uri).is_some()
         }
