@@ -10,13 +10,19 @@ use crate::model::{OpenIn, ResourceMeta, Status};
 use serde_json::Value;
 use url::Url;
 
+pub mod eventky;
 pub mod loopky;
+pub mod mapky;
+pub mod marketplace;
 pub mod rooms;
 
 /// Every app profile, one line each, in alphabetical order of module.
 #[rustfmt::skip]
 pub static REGISTRY: &[&Profile] = &[
+    &eventky::PROFILE,
     &loopky::PROFILE,
+    &mapky::PROFILE,
+    &marketplace::PROFILE,
     &rooms::PROFILE,
 ];
 
@@ -321,5 +327,47 @@ pub mod read {
         } else {
             n.to_string()
         })
+    }
+    /// A point from `lat` and `lon` members, when both are valid coordinates.
+    pub fn point(v: &Value) -> Option<crate::model::Point> {
+        let (lat, lon) = (v.get("lat")?.as_f64()?, v.get("lon")?.as_f64()?);
+        ((-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon))
+            .then_some(crate::model::Point { lat, lon })
+    }
+    /// An amount of money from its minor units and exponent: `{100, "USD", 2}` is `1.00 USD`.
+    pub fn money(v: &Value) -> Option<String> {
+        let amount = v.get("amountMinor")?.as_i64()?;
+        let currency = v.get("currency")?.as_str()?;
+        let exponent = v.get("exponent")?.as_u64().filter(|e| *e <= 18)? as u32;
+        if currency.is_empty()
+            || currency.len() > 12
+            || !currency.chars().all(|c| c.is_ascii_alphanumeric())
+        {
+            return None;
+        }
+        let sign = if amount < 0 { "-" } else { "" };
+        let digits = amount.unsigned_abs().to_string();
+        let width = exponent as usize + 1;
+        let digits = format!("{digits:0>width$}");
+        let (whole, fraction) = digits.split_at(digits.len() - exponent as usize);
+        Some(if fraction.is_empty() {
+            format!("{sign}{whole} {currency}")
+        } else {
+            format!("{sign}{whole}.{fraction} {currency}")
+        })
+    }
+    /// An OpenStreetMap element from its canonical URL, `https://www.openstreetmap.org/node/1`.
+    pub fn osm_element(url: &str) -> Option<(&'static str, u64)> {
+        let path = url.strip_prefix("https://www.openstreetmap.org/")?;
+        let (kind, id) = path.split_once('/')?;
+        let kind = ["node", "way", "relation"]
+            .into_iter()
+            .find(|k| *k == kind)?;
+        let id = id.parse::<u64>().ok().filter(|id| *id > 0)?;
+        Some((kind, id))
+    }
+    /// Unix time in microseconds, as a time.
+    pub fn micros(v: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
+        chrono::DateTime::from_timestamp_micros(v.as_i64()?)
     }
 }

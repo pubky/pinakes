@@ -1,13 +1,17 @@
 //! Pubky app profiles (`resolver::pubky_apps`): each app's recorded objects, the general card for
 //! other apps, paths that are never fetched, and hostile objects.
 use axum::{body::Body, extract::ConnectInfo, http::Request};
+use chrono::{Duration, Utc};
 use http_body_util::BodyExt;
 use pinakes_core::{
     api::{self, AppState},
     config::Config,
-    model::{ResourceMeta, Status},
+    ingest,
+    model::{identity, ResourceMeta, Status},
+    nexus::{Change, Changes, FeedPage, Kind, Op},
     resolver::{classify, pubky_apps},
     store,
+    telemetry::Metrics,
 };
 use serde_json::{json, Value};
 use sqlx::PgPool;
@@ -192,6 +196,351 @@ fn rooms() {
 }
 
 #[test]
+fn marketplace() {
+    let shop = "rxtcr8ezoja67qq3wcrxtueefpzaau65tr8nf5o8d8e8oc7a33jo";
+    let doc = card("marketplace/shop");
+    assert_eq!(doc.type_name, "OnlineStore");
+    assert_eq!(doc.name.as_deref(), Some("Dezentralshop"));
+    assert_eq!(doc.description.as_deref(), Some("Your Swiss Bitcoin store"));
+    assert_eq!(
+        doc.image,
+        Some(format!(
+            "pubky://{shop}/pub/pubky.app/marketplace/v1/media/2970e7ce535d4a39ae1ecc7fcdf39ece"
+        ))
+    );
+    assert_eq!(doc.site, "pubky.app");
+    assert_eq!(facts(&doc)["country"], "CH");
+    assert_eq!(
+        links(&doc),
+        link(
+            "Pubky Shop",
+            &format!("https://pubky.app/shop/marketplace/shop/{shop}")
+        )
+    );
+
+    let doc = card("marketplace/listing-active");
+    assert_eq!(doc.type_name, "Product");
+    assert_eq!(doc.name.as_deref(), Some("Hydrangea paniculata"));
+    assert!(doc
+        .image
+        .as_ref()
+        .unwrap()
+        .contains("/marketplace/v1/media/"));
+    assert_eq!(
+        facts(&doc),
+        BTreeMap::from([
+            ("price".into(), "1.00 USD".into()),
+            ("condition".into(), "excellent".into()),
+            ("category".into(), "home-garden".into()),
+            ("country".into(), "FR".into()),
+        ])
+    );
+    assert_eq!(
+        links(&doc),
+        link(
+            "Pubky Shop",
+            "https://pubky.app/shop/marketplace/listing/8fwmk5o1wfmn6whew47zoq31ka1mss15xnkcihattr5zbthp5nbo/14838d8cf28d413ea274ac7ec608c5f8"
+        )
+    );
+    // An adult-only listing shows no image.
+    let doc = edited("marketplace/listing-active", json!({"adultOnly": true}));
+    assert_eq!((doc.status, doc.image), (Status::Ok, None));
+    // An auction: from its starting price, until its end.
+    let auction = |ends: chrono::DateTime<Utc>| {
+        edited(
+            "marketplace/listing-active",
+            json!({"sale": {"format": "auction",
+                "startingPrice": {"amountMinor": 1000, "currency": "BTC", "exponent": 8},
+                "minimumIncrement": {"amountMinor": 100, "currency": "BTC", "exponent": 8},
+                "startsAt": "2026-10-01T00:00:00Z", "endsAt": ends.to_rfc3339()}}),
+        )
+    };
+    let doc = auction(Utc::now() + Duration::days(1));
+    assert_eq!(facts(&doc)["price"], "0.00001000 BTC");
+    no_card(&auction(Utc::now() - Duration::days(1)));
+    // Paused, ended or removed listings, and records of another kind or owner, have no card.
+    no_card(&card("marketplace/listing-paused"));
+    for state in ["ended", "removed"] {
+        no_card(&edited(
+            "marketplace/listing-active",
+            json!({"state": state}),
+        ));
+    }
+    no_card(&edited(
+        "marketplace/listing-active",
+        json!({"ownerPubky": shop}),
+    ));
+    no_card(&edited(
+        "marketplace/listing-active",
+        json!({"recordType": "drop"}),
+    ));
+    no_card(&edited(
+        "marketplace/listing-active",
+        json!({"listingId": "another"}),
+    ));
+
+    let doc = card("marketplace/drop");
+    assert_eq!(doc.type_name, "SaleEvent");
+    assert_eq!(doc.name.as_deref(), Some("faraday bag"));
+    assert_eq!(doc.start.unwrap().to_rfc3339(), "2026-09-10T11:45:00+00:00");
+    assert_eq!(doc.end, None);
+    assert!(doc
+        .image
+        .as_ref()
+        .unwrap()
+        .contains("/marketplace/v1/media/"));
+    assert_eq!(
+        links(&doc),
+        link(
+            "Pubky Shop",
+            "https://pubky.app/shop/marketplace/drop/nkcct8tzquo8n4z5ysz9t963ye9kq1w7gb55aad1z4tmsgjjhmto/0700b93b984743c39f6d8009f4aa1271"
+        )
+    );
+    never_fetched(&[
+        "pubky.app/marketplace/v1/media/2970e7ce535d4a39ae1ecc7fcdf39ece",
+        "pubky.app/marketplace/v1/reviews/0035SFYCGVBV2",
+        "pubky.app/marketplace/v1/deliverables/a/1",
+        "pubky.app/marketplace/v1/delivery-keys/current",
+        "pubky.app/marketplace/v1/session-proofs/x",
+        "pubky.app/marketplace/v2/listings/x",
+        "pubky.app/marketplace-service/v1/x",
+        "pubky.app/posts/0034A0X7NJ52G",
+    ]);
+}
+
+#[test]
+fn mapky() {
+    let owner = "c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey";
+    let doc = card("mapky/route-giggelitrain");
+    assert_eq!(doc.type_name, "Trip");
+    assert_eq!(doc.name.as_deref(), Some("Giggelitrain"));
+    let point = doc.location.as_ref().unwrap();
+    assert_eq!(
+        (point.lat, point.lon),
+        (47.042543417729036, 8.289489434862617)
+    );
+    assert_eq!(
+        facts(&doc),
+        BTreeMap::from([
+            ("activity".into(), "cycling".into()),
+            ("distance_m".into(), "753".into()),
+            ("duration_s".into(), "190".into()),
+        ])
+    );
+    assert_eq!(
+        links(&doc),
+        link(
+            "Mapky",
+            &format!("https://mapky.app/route/{owner}/00351MV7WF0WG")
+        )
+    );
+    assert_eq!(card("mapky/route-merlischachen-luzern").description, None);
+
+    // A review: its rating and the place's page.
+    let doc = card("mapky/review-with-content");
+    assert_eq!(doc.type_name, "Review");
+    assert_eq!(doc.description.as_deref(), Some("Great beer for sats!"));
+    assert_eq!(
+        facts(&doc),
+        BTreeMap::from([
+            ("rating".into(), "10".into()),
+            (
+                "place".into(),
+                "https://www.openstreetmap.org/node/1573053883".into()
+            ),
+        ])
+    );
+    assert_eq!(
+        links(&doc),
+        link("Mapky", "https://mapky.app/place/node/1573053883")
+    );
+    let doc = card("mapky/review-rating-only-way");
+    assert_eq!(
+        links(&doc),
+        link("Mapky", "https://mapky.app/place/way/135207248")
+    );
+    no_card(&edited("mapky/review-with-content", json!({"rating": 11})));
+
+    // Posts: social content about a place; older posts name the place themselves, and an older
+    // review post is a review.
+    let doc = card("mapky/post-short-osm-parent");
+    assert_eq!(doc.type_name, "SocialMediaPosting");
+    assert!(pinakes_core::resolver::cards::social(&doc));
+    assert_eq!(doc.description.as_deref(), Some("Amazing food"));
+    assert_eq!(
+        links(&doc),
+        link("Mapky", "https://mapky.app/place/node/341342368")
+    );
+    let doc = card("mapky/legacy-post-review-place-object");
+    assert_eq!(
+        (doc.type_name.as_str(), facts(&doc)["rating"].as_str()),
+        ("Review", "10")
+    );
+    assert_eq!(
+        links(&doc),
+        link("Mapky", "https://mapky.app/place/node/5651014955")
+    );
+    let doc = card("mapky/legacy-post-review-place-url");
+    assert_eq!(
+        links(&doc),
+        link("Mapky", "https://mapky.app/place/node/1573053883")
+    );
+    let doc = card("mapky/legacy-post-kind-post");
+    assert_eq!(doc.type_name, "SocialMediaPosting");
+    assert_eq!(
+        links(&doc),
+        link("Mapky", "https://mapky.app/place/node/2735447242")
+    );
+    // A reply to a route opens the route.
+    let post = format!("pubky://{owner}/pub/mapky.app/posts/0035C8FNKDQS0");
+    let doc = card_of(
+        &post,
+        json!({"content": "Nice ride", "kind": "short",
+            "parent": format!("pubky://{owner}/pub/mapky.app/routes/00351MV7WF0WG")})
+        .to_string()
+        .as_bytes(),
+    );
+    assert_eq!(
+        links(&doc),
+        link(
+            "Mapky",
+            &format!("https://mapky.app/route/{owner}/00351MV7WF0WG")
+        )
+    );
+    // A collection post, and the older collection objects.
+    let doc = card_of(
+        &post,
+        json!({"kind": "collection",
+            "content": json!({"name": "Lakes", "items": ["https://www.openstreetmap.org/way/1"]}).to_string()})
+        .to_string()
+        .as_bytes(),
+    );
+    assert_eq!(
+        (doc.type_name.as_str(), doc.name.as_deref()),
+        ("Collection", Some("Lakes"))
+    );
+    let doc = card("mapky/legacy-collection-color");
+    assert_eq!(doc.type_name, "Collection");
+    assert_eq!(doc.name.as_deref(), Some("Test"));
+    assert_eq!(facts(&doc)["items"], "1");
+    assert!(doc.open_in.is_empty());
+    assert_eq!(
+        card("mapky/legacy-collection-empty").description.as_deref(),
+        Some("testdesc")
+    );
+
+    // An incident: until it expires.
+    no_card(&card("mapky/incident-hazard-medium"));
+    let incident = format!("pubky://{owner}/pub/mapky.app/incidents/00357W2047V80");
+    let expires = (Utc::now() + Duration::hours(2)).timestamp_micros();
+    let doc = card_of(
+        &incident,
+        json!({"incident_type": "hazard", "severity": "high", "lat": 47.05, "lon": 8.33,
+            "description": "Tree on the road", "expires_at": expires})
+        .to_string()
+        .as_bytes(),
+    );
+    assert_eq!(doc.type_name, "SpecialAnnouncement");
+    assert_eq!(facts(&doc)["incident_type"], "hazard");
+    assert!(doc.location.is_some());
+    assert_eq!(
+        links(&doc),
+        link(
+            "Mapky",
+            &format!("https://mapky.app/incident/{owner}/00357W2047V80")
+        )
+    );
+    // A capture (none recorded: the public ones are at someone's home) and a sequence.
+    let capture = format!("pubky://{owner}/pub/mapky.app/geo_captures/0035C4V0GVX90");
+    let doc = card_of(
+        &capture,
+        json!({"file_uri": format!("pubky://{owner}/pub/mapky.app/files/0035C4V0GVX90"),
+            "kind": "photo", "lat": 46.95, "lon": 7.44, "caption": "Bear pit"})
+        .to_string()
+        .as_bytes(),
+    );
+    assert_eq!(doc.type_name, "Photograph");
+    assert_eq!(doc.description.as_deref(), Some("Bear pit"));
+    assert_eq!(
+        links(&doc),
+        link(
+            "Mapky",
+            &format!("https://mapky.app/capture/{owner}/0035C4V0GVX90")
+        )
+    );
+    no_card(&card_of(&capture, br#"{"kind":"photo","lat":95,"lon":7}"#));
+    let sequence = format!("pubky://{owner}/pub/mapky.app/sequences/0035C4V0GVX91");
+    let doc = card_of(&sequence, br#"{"name":"Old town walk","capture_count":12}"#);
+    assert_eq!(doc.type_name, "ImageGallery");
+    never_fetched(&[
+        "mapky.app/files/0035C4V0GVX90",
+        "mapky.app/blobs/JVYD",
+        "mapky.app/tags/0035C4V0GVX90",
+    ]);
+}
+
+#[test]
+fn eventky() {
+    let owner = "51da3n5m8s6oaq38uqs7jznp6ezbc3qbtmic8oy6fj3g6mokdyco";
+    let doc = card("eventky/event-psywalk-location-no-uri");
+    assert_eq!(doc.type_name, "Event");
+    assert_eq!(doc.name.as_deref(), Some("₿itcoin ₽sy₩alk"));
+    assert!(doc
+        .description
+        .as_ref()
+        .unwrap()
+        .starts_with("Bitcoiner stampfen"));
+    // Local times in Zurich, summer time.
+    assert_eq!(doc.start.unwrap().to_rfc3339(), "2026-07-31T16:00:00+00:00");
+    assert_eq!(doc.end.unwrap().to_rfc3339(), "2026-07-31T21:59:00+00:00");
+    assert_eq!(
+        facts(&doc)["location"],
+        "Moonlight Festzelt, Niederried bei Kallnach"
+    );
+    assert_eq!(
+        links(&doc),
+        link(
+            "Eventky",
+            &format!("https://eventky.app/event/{owner}/0035DS0K1ZTEG")
+        )
+    );
+    // The text of an HTML-only description; an end from a duration.
+    let doc = card("eventky/event-bern-meetup-recurring");
+    let text = doc.description.as_deref().unwrap();
+    assert!(
+        text.contains("Monthly Bitcoin Meetup") && !text.contains("<p>"),
+        "{text}"
+    );
+    assert_eq!(doc.start.unwrap().to_rfc3339(), "2026-01-08T18:00:14+00:00");
+    assert_eq!(doc.end.unwrap().to_rfc3339(), "2026-01-08T21:00:14+00:00");
+    assert_eq!(facts(&doc)["location"], "Department 66");
+    // A time without a zone is left out.
+    let doc = edited(
+        "eventky/event-psywalk-location-no-uri",
+        json!({"dtstart_tzid": null}),
+    );
+    assert_eq!((doc.start, doc.end), (None, None));
+
+    let doc = card("eventky/calendar-dezentralschweiz");
+    assert_eq!(doc.type_name, "Collection");
+    assert_eq!(doc.name.as_deref(), Some("Dezentralschweiz"));
+    assert_eq!(facts(&doc)["timezone"], "Europe/Zurich");
+    assert_eq!(
+        links(&doc),
+        link(
+            "Eventky",
+            &format!("https://eventky.app/calendar/{owner}/0034PXJ40MGQG")
+        )
+    );
+    assert_eq!(card("eventky/calendar-minimal").description, None);
+    no_card(&card("eventky/invalid-calendar-wbg-ptr"));
+    never_fetched(&[
+        "eventky.app/attendees/51da3n5m-07NX3HM0D2SMPS7KBGN1AK9RGW",
+        "eventky.app/tags/07NX3HM0D2SMPS7KBGN1AK9RGW",
+    ]);
+}
+
+#[test]
 fn other_apps_get_the_general_card() {
     let uri =
         "pubky://ybndrfg8ejkmcpqxot1uwisza345h769ybndrfg8ejkmcpqxot1uwi/pub/other.app/items/1";
@@ -213,7 +562,7 @@ fn other_apps_get_the_general_card() {
     assert_eq!(doc.type_name, "SocialMediaPosting");
     // A known app's path that no kind matches is never fetched, and pubky.app's own objects are
     // Nexus's.
-    never_fetched(&["pubky-rooms/settings.json", "pubky.app/profile.json"]);
+    never_fetched(&["mapky.app/settings.json", "pubky.app/profile.json"]);
 }
 
 #[test]
@@ -289,5 +638,53 @@ async fn cards_carry_their_client_links_and_facts(pool: PgPool) {
     assert_eq!(
         get(&app, &format!("/v1/resources/{web}")).await["open_in"],
         json!([])
+    );
+
+    // An Eventky event a Nexus event reference names: its event card opens the event.
+    let venue = "geo:47.37,8.54";
+    let (_, venue_uri, _) = identity(venue).unwrap();
+    let author = "51da3n5m8s6oaq38uqs7jznp6ezbc3qbtmic8oy6fj3g6mokdyco";
+    let cursor = ingest::cursor(&pool, "events").await.unwrap();
+    let start = Utc::now() + Duration::days(3);
+    let line = Change {
+        op: Op::Put,
+        uri: venue_uri,
+        kind: Kind::Event,
+        author: author.into(),
+        object_path: "/pub/eventky.app/events/0035DS0K1ZTEG".into(),
+        label: None,
+        at: Utc::now().timestamp_millis(),
+        recurrence_id: None,
+        start: Some(start.timestamp_millis()),
+        end: Some((start + Duration::hours(2)).timestamp_millis()),
+        status: None,
+    };
+    ingest::apply(
+        &pool,
+        "events",
+        &cursor,
+        &FeedPage {
+            page: Changes {
+                lines: vec![line],
+                next_cursor: cursor.cursor + 1,
+            },
+            epoch: Some("1".into()),
+            length: cursor.cursor + 1,
+        },
+        &Config::default().ingest,
+        &Metrics::new().unwrap(),
+    )
+    .await
+    .unwrap();
+    let found = get(&app, "/v1/search?type=Event").await;
+    let event = found["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["event"]["author"] == author)
+        .unwrap_or_else(|| panic!("{found}"));
+    assert_eq!(
+        event["open_in"],
+        json!([{"client": "Eventky", "url": format!("https://eventky.app/event/{author}/0035DS0K1ZTEG")}])
     );
 }

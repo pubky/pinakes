@@ -934,7 +934,7 @@
         "uri": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G"
       },
       "expect": "card",
-      "card_type": "SocialMediaPosting"
+      "card_type": "Review"
     },
     {
       "name": "resolve-c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey-pub-map-2",
@@ -945,7 +945,7 @@
         "uri": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/reviews/00355XPM88EHG"
       },
       "expect": "card",
-      "card_type": "SocialMediaPosting"
+      "card_type": "Review"
     },
     {
       "name": "resolve-c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey-pub-map-3",
@@ -956,7 +956,7 @@
         "uri": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/collections/00351MVGE211G"
       },
       "expect": "card",
-      "card_type": "CreativeWork"
+      "card_type": "Collection"
     },
     {
       "name": "resolve-9g3zsjpwijn3gsh7ibghjxxadpjidceos5rw4387a6hhziqi8aoy-pub-map",
@@ -967,7 +967,7 @@
         "uri": "pubky://9g3zsjpwijn3gsh7ibghjxxadpjidceos5rw4387a6hhziqi8aoy/pub/mapky.app/geo_captures/0035C4V0GVX90"
       },
       "expect": "card",
-      "card_type": "CreativeWork"
+      "card_type": "Photograph"
     },
     {
       "name": "resolve-3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo-pub-loo",

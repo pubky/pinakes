@@ -88,15 +88,16 @@ An IMDb title keeps the type its page gives (it can be either).
 | `start`, `end` | RFC 3339 instants for events and occurrences |
 | `group` | `{id, size}` when the resource or occurrence is in a [group](#groups), else `null` |
 | `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; one per service, at most 8 on a card and 256 on `GET /v1/resources/{id}`, whose `details.also_on` lists every link (up to 256). A hint only: every member keeps its own card |
-| `open_in` | The clients that open a Pubky app's object, `[{client, url}]` (`url` is `https:`): from the app's profile ([Pubky apps](pubky-apps.md)), e.g. Loopky for a deck; on a Pubky event reference's card, those of the event object. `[]` on every other card |
+| `open_in` | The clients that open a Pubky app's object, `[{client, url}]` (`url` is `https:`): from the app's profile ([Pubky apps](pubky-apps.md)), e.g. Loopky for a deck, Mapky for a route or for a review's place; on a Pubky event reference's card, those of the event object. `[]` on every other card |
 | `attribution` | Present on OSM cards, events placed at an OSM venue and events whose zone came from coordinates; display it with the card |
 | `occurrence` | Occurrence cards only: `{feed_id, feed_uri, uid, recurrence_id, status}`; `feed_uri` is the feed's URI, the link people tagged |
 | `event` | Pubky event references only: `{author, object_path, recurrence_id, start, end, status}` |
 | `maybe_same` | Event and occurrence cards only: up to three other events that are [possibly the same event](#possibly-the-same-event), best first, each `{id, uri, site, start, score}` (`[]` when there are none). A hint only, like `group`. Absent on other cards, and on every card with `[event] same_event_hint = "off"` |
 
-A `pubky://` object of an app Pinakes has a profile for (Loopky, Pubky Rooms) gets that app's
-card; any other app's object gets a general one. Each is in [Pubky apps](pubky-apps.md). An
-object without a name, title or description takes its description from a content-like member (`content`, `text`): such a card is a
+A `pubky://` object of an app Pinakes has a profile for (Loopky, Mapky, Eventky, Pubky Rooms,
+the Pubky marketplace) gets that app's card; any other app's object gets a general one. Each is
+in [Pubky apps](pubky-apps.md). An object without a name, title or description takes its
+description from a content-like member (`content`, `text`): such a card is a
 `SocialMediaPosting`, social content like a note, with a 200-character excerpt that refreshes
 within the hour and is removed once the object is gone.
 
@@ -118,7 +119,7 @@ body, and answer `If-None-Match` with 304.
 | `venue` | `{name, id}`: the venue's name and, when it resolved to a resource, its ID |
 | `organizer` | `{name, url}` |
 | `from` | Where the card's metadata came from when it is not the page itself: the [source](#sources) whose official API answered, e.g. `federal_register` |
-| `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …), or the facts a [Pubky app's](pubky-apps.md) profile reads (`card_count`, …), then the facts the [also-on](#also-on) sources read for it (`isrc`, `upc`, `mbid`, `mbid_was`, `artist`, `artist_type`, `duration` in seconds, an event's `performer`, `performer_mbid` and `performer_link`); several values of one name are joined with `; `. Each source keeps at most `limits.also_on_facts_per_source` (32, at least 8) facts per resource, cutting the many values of one name (a recording's ISRCs) before a name's one value (its MBID, artist). Each source's page lists its facts. `null` when there are none. Facts never join anything |
+| `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …), or the facts a [Pubky app's](pubky-apps.md) profile reads (`card_count`, `price`, `rating`, …), then the facts the [also-on](#also-on) sources read for it (`isrc`, `upc`, `mbid`, `mbid_was`, `artist`, `artist_type`, `duration` in seconds, an event's `performer`, `performer_mbid` and `performer_link`); several values of one name are joined with `; `. Each source keeps at most `limits.also_on_facts_per_source` (32, at least 8) facts per resource, cutting the many values of one name (a recording's ISRCs) before a name's one value (its MBID, artist). Each source's page lists its facts. `null` when there are none. Facts never join anything |
 | `also_on` | Every link of the card's [also on](#also-on), up to 256, several of one service too (the card shows one per service) |
 | `aliases` | Other spellings of this link that resolve to it ([aliases](#aliases)), at most 50; a page's own `url`, `@id`, `sameAs` or canonical claims are not aliases and are not listed |
 | `updated_at` | When the current metadata was accepted |
@@ -268,10 +269,10 @@ of the same URIs and checks that this list matches.
 | `POST /v1/resolve {"uri":"https://www.nature.com/articles/nature12373"}` | ScholarlyArticle |
 | `POST /v1/resolve {"uri":"doi:10.1038/nphys1170"}` | ScholarlyArticle |
 | `POST /v1/resolve {"uri":"nostr:note1qqqdltcknk9rq52w5xq5srdx3znx4cvr4nmst5xz2rtwkm87ay9qeuwqtd"}` | SocialMediaPosting |
-| `POST /v1/resolve {"uri":"pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G"}` | SocialMediaPosting |
-| `POST /v1/resolve {"uri":"pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/reviews/00355XPM88EHG"}` | SocialMediaPosting |
-| `POST /v1/resolve {"uri":"pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/collections/00351MVGE211G"}` | CreativeWork |
-| `POST /v1/resolve {"uri":"pubky://9g3zsjpwijn3gsh7ibghjxxadpjidceos5rw4387a6hhziqi8aoy/pub/mapky.app/geo_captures/0035C4V0GVX90"}` | CreativeWork |
+| `POST /v1/resolve {"uri":"pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G"}` | Review |
+| `POST /v1/resolve {"uri":"pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/reviews/00355XPM88EHG"}` | Review |
+| `POST /v1/resolve {"uri":"pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/collections/00351MVGE211G"}` | Collection |
+| `POST /v1/resolve {"uri":"pubky://9g3zsjpwijn3gsh7ibghjxxadpjidceos5rw4387a6hhziqi8aoy/pub/mapky.app/geo_captures/0035C4V0GVX90"}` | Photograph |
 | `POST /v1/resolve {"uri":"pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json"}` | LearningResource |
 | `POST /v1/resolve {"uri":"pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2"}` | Conversation |
 | `POST /v1/resolve {"uri":"https://www.mexc.com/"}` | `unreachable` |
