@@ -115,7 +115,7 @@ async fn deadlocks(pool: &PgPool) -> i64 {
         .unwrap()
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn concurrent_writers_never_wait_on_the_search_revision(pool: PgPool) {
     let rounds: usize = std::env::var("WRITE_LOAD_ROUNDS")
         .ok()

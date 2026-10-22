@@ -710,7 +710,7 @@ fn identifier_dates_domains_media_attributes_and_social_excerpt() {
     let d=cards::activitypub(base.as_str(),&json!({"type":"Note","id":base.as_str(),"content":"unlisted text","to":["https://social.example/followers"],"cc":["https://www.w3.org/ns/activitystreams#Public"]}),&base,86400).unwrap();
     assert!(!serde_json::to_string(&d).unwrap().contains("unlisted text"));
 }
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn bad_identifiers_are_final_missing_and_ap_promotes_to_worker(pool: sqlx::PgPool) {
     use pinakes_core::{queue, store};
     for uri in ["isbn:9780140328722", "doi:invalid"] {
@@ -840,7 +840,7 @@ async fn oembed_first_keeps_rich_page_types_and_ap_denial_falls_back() {
         Some("Public web card")
     );
 }
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn social_deletion_purges_content_history(pool: sqlx::PgPool) {
     use pinakes_core::{model::Status, store};
     let uri = "https://social.example/post/one";

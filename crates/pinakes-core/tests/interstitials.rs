@@ -408,7 +408,7 @@ fn wall_heuristics_need_context_and_cover_more_vendors() {
 /// A challenge page is a failed fetch: the resource turns `unreachable` with the normal backoff
 /// and dead letter, keeps its accepted facts and group keys, never confirms disappearance and
 /// writes no change line; it stays in search and recovers with the next good page.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn walls_are_unreachable_with_normal_backoff_and_keep_their_facts(pool: PgPool) {
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
@@ -616,7 +616,7 @@ impl Transport for Wallet {
 }
 /// Text stored before the decoding fix (a plain `&` read back as `&amp;`) is repaired by
 /// `reextract web`: the resource is fetched again and extracted with today's rules.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn reextract_repairs_text_stored_before_the_decoding_fix(pool: PgPool) {
     let uri = "https://wallet.example/";
     let id = store::ensure_resource(&pool, uri).await.unwrap();

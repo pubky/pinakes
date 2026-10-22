@@ -699,7 +699,10 @@ mod tests {
             assert!(!crate::model::type_path(kind.as_str().unwrap()).is_empty());
         }
     }
-    #[sqlx::test(migrations = "../../migrations")]
+    #[sqlx::test(
+        migrations = "../../migrations",
+        fixtures("../../tests/fixtures/require_h3.sql")
+    )]
     async fn saved_version_is_the_key_even_with_diagnostic_fields(pool: PgPool) {
         let resolver = OsmResolver::new(pool.clone(), OsmConfig::default()).unwrap();
         let id = parse_id("https://www.openstreetmap.org/node/123").unwrap();

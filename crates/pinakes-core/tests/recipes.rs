@@ -748,7 +748,7 @@ fn examples(doc: &Value) -> BTreeMap<String, (String, String, Option<Value>)> {
 }
 
 /// The schema behind a `$ref` into the document's components.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn every_named_example_returns_data(pool: PgPool) {
     fixture(&pool).await;
     let (nexus_url, nexus) = mock_nexus().await;

@@ -15,7 +15,7 @@ use pinakes_core::{
 use serde_json::{json, Value};
 use sqlx::PgPool;
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn paginated_nostr_and_inconclusive_queue_retry(pool: PgPool) {
     use adapters::nostr::{self as nip52, Target};
     let other = signed(
@@ -107,7 +107,7 @@ async fn paginated_nostr_and_inconclusive_queue_retry(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn cursor_resets_head_clock_missing_and_title_fallback(pool: PgPool) {
     let cfg = EventConfig::default();
     let uri = "https://portal.einundzwanzig.space/api/changes";
@@ -189,7 +189,7 @@ async fn cursor_resets_head_clock_missing_and_title_fallback(pool: PgPool) {
 
 /// A derived link takes its parent's row before the adapter lock, as a feed apply does: the two
 /// never deadlock, though neither waits for the other to start.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_derived_link_and_a_feed_apply_take_locks_in_one_order(pool: PgPool) {
     let parent = store::ensure_resource(&pool, "https://example.org/parent")
         .await
@@ -228,7 +228,7 @@ async fn a_derived_link_and_a_feed_apply_take_locks_in_one_order(pool: PgPool) {
     assert!(link.await.unwrap().unwrap().is_some());
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn derivation_slots_expire_and_adapter_total_is_bounded(pool: PgPool) {
     for p in [
         "https://example.org/parent-a",
@@ -302,7 +302,7 @@ struct WikiFailure {
     calls: std::sync::atomic::AtomicUsize,
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn wikipedia_entity_miss_keeps_article_alive(pool: PgPool) {
     use pinakes_core::resolver::Resolver;
     for status in [404, 410] {
@@ -361,7 +361,7 @@ impl Transport for SecondaryFailure {
     }
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn secondary_denial_or_miss_never_erases_event_start(pool: PgPool) {
     use pinakes_core::{queue, resolver::Resolver};
     for uri in [
@@ -467,7 +467,7 @@ impl Transport for WikiFailure {
         })
     }
 }
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn only_parse_errors_fall_back_and_plain_wikipedia_skips_fetch(pool: PgPool) {
     use pinakes_core::resolver::Resolver;
     for failure in [0, 1, 401, 403, 451, 503] {
@@ -579,7 +579,7 @@ async fn only_parse_errors_fall_back_and_plain_wikipedia_skips_fetch(pool: PgPoo
     assert_eq!(r.web.resolve(uri).await.unwrap().type_name, "Article");
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn billetto_denied_venue_never_dead_letters(pool: PgPool) {
     use pinakes_core::{
         queue,
@@ -667,7 +667,7 @@ async fn billetto_denied_venue_never_dead_letters(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn cursor_outages_preserve_documents_and_checkpoints(pool: PgPool) {
     use pinakes_core::{
         queue,
@@ -745,7 +745,7 @@ async fn cursor_outages_preserve_documents_and_checkpoints(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn btc_status_drift_preserves_single_event(pool: PgPool) {
     use pinakes_core::{
         queue,
@@ -795,7 +795,7 @@ async fn btc_status_drift_preserves_single_event(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn portal_expiration_restarts_comparison_baseline(pool: PgPool) {
     let uri = "https://portal.einundzwanzig.space/api/changes";
     install_cursor(&pool, uri, "900").await;
@@ -831,7 +831,7 @@ async fn portal_expiration_restarts_comparison_baseline(pool: PgPool) {
     assert_eq!(saved_cursor(&pool, &id).await.as_deref(), Some("11"));
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn slow_optional_venue_keeps_single_event_and_attempts(pool: PgPool) {
     use pinakes_core::{queue, resolver::osm::OsmResolver};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -897,7 +897,7 @@ async fn slow_optional_venue_keeps_single_event_and_attempts(pool: PgPool) {
         .contains(&json!("venue_unavailable")));
     assert_eq!((attempts, dead), (0, false));
 }
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn graphql_failure_preserves_accepted_event(pool: PgPool) {
     use pinakes_core::{queue, resolver::RetryLater};
     let uri = "https://mobilizon.fr/events/86a665ae-e495-4e4f-88d4-4cffd44a82f1";
@@ -969,7 +969,7 @@ async fn graphql_failure_preserves_accepted_event(pool: PgPool) {
     assert_eq!(before, after);
     assert_eq!((attempts, dead), (0, false));
 }
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn deleted_wikidata_confirms_missing_twice(pool: PgPool) {
     use pinakes_core::{model::Status, resolver::Resolver};
     for status in [404, 410] {
@@ -1283,7 +1283,7 @@ async fn saved_cursor(pool: &PgPool, id: &str) -> Option<String> {
         .await
         .unwrap()
 }
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn cursor_deltas_tombstones_rollback_hold_reset_and_compare_swap(pool: PgPool) {
     let uri = "https://example.org/cursor.ics";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -1662,7 +1662,7 @@ async fn api_discovery_keys_include_body_and_credentials_never_redirect() {
     assert!(!format!("{error:?}").contains("fixture-secret"));
     assert_eq!(t.seen.lock().unwrap().len(), 3);
 }
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn nostr_calendar_queues_members_and_reads_accepted_children(pool: PgPool) {
     use pinakes_core::event::adapters::nostr::{self as nip52, Target};
     let at = (Utc::now() + Duration::days(1)).timestamp().to_string();
@@ -1721,7 +1721,7 @@ async fn install_cursor(pool: &PgPool, uri: &str, value: &str) {
     sqlx::query("INSERT INTO event_fetch(resource_id,adapter_cursor) VALUES($1,$2) ON CONFLICT(resource_id) DO UPDATE SET adapter_cursor=$2")
         .bind(id).bind(value).execute(pool).await.unwrap();
 }
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn cursor_http_resync_pagination_and_tombstones(pool: PgPool) {
     let mut cfg = EventConfig {
         ..Default::default()
@@ -1841,7 +1841,7 @@ async fn cursor_http_resync_pagination_and_tombstones(pool: PgPool) {
     assert!(seen[0].0.contains("include_deleted=true&status=all"));
     assert!(!seen[0].0.contains("limit="));
 }
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn google_expiration_resets_then_commits_only_final_token(pool: PgPool) {
     let uri = "https://www.googleapis.com/calendar/v3/calendars/public/events";
     let mut cfg = EventConfig {
@@ -1989,7 +1989,7 @@ fn own_calendar_links_and_deterministic_platform_endpoints() {
     }
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn portal_coordinates_are_page_facts_and_btc_website_has_lineage(pool: PgPool) {
     use pinakes_core::{
         event::service::EventService,
@@ -2129,7 +2129,7 @@ fn all_page_and_calendar_adapters_parse_their_public_contracts() {
         Duration::hours(2)
     );
 }
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn platform_ua_config_class_c_and_secret_projection(pool: PgPool) {
     use pinakes_core::{
         config::{Config, QueueConfig},
@@ -2268,7 +2268,7 @@ impl Transport for RecordedResponses {
             .map_err(anyhow::Error::msg)
     }
 }
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn recorded_public_adapter_responses_replay_without_network(pool: PgPool) {
     use pinakes_core::resolver::{osm::OsmResolver, web::WebResolver, Resolver};
     use sha2::Digest;
@@ -2471,7 +2471,7 @@ fn registry_credentials_and_cadence() {
     );
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn shared_roots_and_derived_author_budgets(pool: PgPool) {
     use pinakes_core::queue::{AuthorBudget, Job};
     let root_uri = "https://api.btcmap.org/v4/events";
@@ -2571,7 +2571,7 @@ async fn shared_roots_and_derived_author_budgets(pool: PgPool) {
     assert!(!budgets.admit(&pool, &job(d), 0.01).await.unwrap());
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn portal_cap_commits_progress_and_expires_on_later_page(pool: PgPool) {
     let uri = "https://portal.einundzwanzig.space/api/changes";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -2656,7 +2656,7 @@ async fn portal_cap_commits_progress_and_expires_on_later_page(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn delta_reschedule_unknown_status_hold_and_labels(pool: PgPool) {
     let uri = "https://api.btcmap.org/v4/events";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -2844,7 +2844,7 @@ fn recorded_egress(rows: Vec<(&str, &str, Value)>) -> Egress {
     )
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn wikipedia_primary_item_and_plain_web_fallback(pool: PgPool) {
     use pinakes_core::resolver::Resolver;
     let uri = "https://en.wikipedia.org/wiki/Bitcoin_Conference";
@@ -2908,7 +2908,7 @@ async fn wikipedia_primary_item_and_plain_web_fallback(pool: PgPool) {
     assert_eq!(doc.name.as_deref(), Some("Plain article"));
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn portal_missing_title_join_and_derivation_disabled(pool: PgPool) {
     use pinakes_core::{model::Status, resolver::Resolver};
     let cfg = EventConfig {
@@ -2962,7 +2962,7 @@ async fn portal_missing_title_join_and_derivation_disabled(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn public_canary_redaction_unknown_size_and_disabled_nostr(pool: PgPool) {
     use pinakes_core::{
         api::{self, AppState},
@@ -3071,7 +3071,7 @@ fn nested_flight_and_nuxt_share_one_deadline() {
     }
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn alias_references_scope_search_and_occurrence_reads(pool: PgPool) {
     use pinakes_core::api::{self, AppState};
     use tower::ServiceExt;
@@ -3119,7 +3119,7 @@ async fn alias_references_scope_search_and_occurrence_reads(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn future_stored_cursor_resyncs_without_skipping_data(pool: PgPool) {
     let uri = "https://api.btcmap.org/v4/events";
     install_cursor(&pool, uri, "2035-01-01T00:00:00Z").await;
@@ -3156,7 +3156,7 @@ async fn future_stored_cursor_resyncs_without_skipping_data(pool: PgPool) {
     assert!(t.seen.lock().unwrap()[0].0.contains("since_sequence=0"));
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn luma_calendar_discovery_and_non_calendar_client_url(pool: PgPool) {
     use nostr::nips::nip19::ToBech32;
     use pinakes_core::resolver::Resolver;
@@ -3213,7 +3213,7 @@ impl Transport for HintedGraphql {
         })
     }
 }
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn unregistered_platform_hint_cannot_veto_page(pool: PgPool) {
     use pinakes_core::{queue, resolver::Resolver};
     let uri = "https://generic.example/events/86a665ae-e495-4e4f-88d4-4cffd44a82f1";
@@ -3258,7 +3258,7 @@ async fn unregistered_platform_hint_cannot_veto_page(pool: PgPool) {
             .unwrap();
     assert_eq!(state, ("ok".into(), 0, false));
 }
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn registered_secondary_451_confirms_disappearance(pool: PgPool) {
     use pinakes_core::resolver::Resolver;
     let uri = "https://luma.com/event-removed";
@@ -3300,7 +3300,7 @@ async fn registered_secondary_451_confirms_disappearance(pool: PgPool) {
         );
     }
 }
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn cursor_privacy_is_confirmed_and_bad_requests_back_off(pool: PgPool) {
     let mut cfg = EventConfig {
         geocoding: false,
@@ -3393,7 +3393,7 @@ async fn cursor_privacy_is_confirmed_and_bad_requests_back_off(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn google_credential_denials_keep_occurrences_and_count_drift(pool: PgPool) {
     use pinakes_core::{queue, resolver::Resolver, telemetry};
     let uri = "https://www.googleapis.com/calendar/v3/calendars/public/events";
@@ -3460,7 +3460,7 @@ async fn google_credential_denials_keep_occurrences_and_count_drift(pool: PgPool
         }
     }
 }
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn cursor_quarantines_bad_rows_without_inventing_deletions(pool: PgPool) {
     let uri = "https://portal.einundzwanzig.space/api/changes";
     let cfg = EventConfig {
@@ -3499,7 +3499,7 @@ async fn cursor_quarantines_bad_rows_without_inventing_deletions(pool: PgPool) {
 /// as the calendar parsers (0000–9999). A Nostr event is its own resource, so a bad date refuses
 /// that event's parse, like any other malformed NIP-52 event; a BTC Map row is dropped with the
 /// feed's row warning while its siblings are kept.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn adapter_dates_have_four_digit_years(pool: PgPool) {
     use pinakes_core::event::adapters::nostr::{self as nip52, Target};
     let cfg = EventConfig::default();
@@ -3587,7 +3587,7 @@ async fn adapter_dates_have_four_digit_years(pool: PgPool) {
 /// One BTC Map row with a year-0000 `updated_at`, and one whose start lands in year
 /// 10000 UTC, neither stall the source: the delta applies, keeps the good rows, and commits its
 /// cursor at the last good row.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_bad_btcmap_row_never_stalls_the_cursor(pool: PgPool) {
     let cfg = EventConfig::default();
     let uri = "https://api.btcmap.org/v4/events";
@@ -3634,7 +3634,7 @@ async fn a_bad_btcmap_row_never_stalls_the_cursor(pool: PgPool) {
 /// A NIP-52 calendar member whose own resolution failed (refused parse, unreachable
 /// or dead-lettered) is skipped with `calendar_member_unavailable` like a missing one, so the
 /// calendar applies its other members; a member not yet resolved still makes it wait.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_failed_calendar_member_never_wedges_its_calendar(pool: PgPool) {
     use pinakes_core::event::adapters::nostr::{self as nip52, Target};
     let at = (Utc::now() + Duration::days(1)).timestamp().to_string();
@@ -3775,7 +3775,7 @@ fn member_id(e: &nostr::event::Event) -> (String, String) {
 /// NIP-52 all-day dates whose midnight is not storable (0000-01-01, or 9999-12-31
 /// with its default next-day end) are refused at parse; and an accepted member without a start
 /// is skipped as unavailable instead of keeping its calendar pending.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn year_0000_nip52_dates_never_wedge_a_calendar(pool: PgPool) {
     use pinakes_core::event::adapters::nostr as nip52;
     let cfg = EventConfig::default();
@@ -3844,7 +3844,7 @@ async fn year_0000_nip52_dates_never_wedge_a_calendar(pool: PgPool) {
 /// A member whose newest version is refused (its resource is `error`, its stored
 /// document the last accepted version) is skipped like a missing member: its row is cancelled
 /// after two snapshots; the last accepted version is not kept.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_refused_newest_member_version_cancels_after_two_snapshots(pool: PgPool) {
     use pinakes_core::event::adapters::nostr as nip52;
     let cfg = EventConfig::default();
@@ -3920,7 +3920,7 @@ async fn a_refused_newest_member_version_cancels_after_two_snapshots(pool: PgPoo
 /// A BTC Map end late on 9999-12-31 (year 10000 UTC) never becomes a derived
 /// link's expiry: the start is used instead, and `derive_resource_until` clamps any expiry to
 /// 9999-12-31T23:59:59Z.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn derived_link_expiry_is_bounded(pool: PgPool) {
     use pinakes_core::resolver::Resolver;
     let uri = "https://api.btcmap.org/v4/events";
@@ -3974,7 +3974,7 @@ async fn derived_link_expiry_is_bounded(pool: PgPool) {
 /// A distant but storable BTC Map event never holds a derived link's slot past the
 /// event horizon, and a sub-microsecond `updated_at` just below year 10000 is stored in year
 /// 9999.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn derived_links_expire_within_the_horizon(pool: PgPool) {
     use pinakes_core::resolver::Resolver;
     let cfg = EventConfig {
@@ -4026,7 +4026,7 @@ async fn derived_links_expire_within_the_horizon(pool: PgPool) {
 /// A member that never resolves (its lookup keeps answering "try later") stops
 /// blocking its calendar after `event.adapters.calendar_member_wait_hours`: the calendar applies
 /// its other members with `calendar_member_unavailable`.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_member_that_never_resolves_stops_blocking_its_calendar(pool: PgPool) {
     use pinakes_core::event::adapters::nostr as nip52;
     let cfg = EventConfig::default();
@@ -4081,7 +4081,7 @@ async fn a_member_that_never_resolves_stops_blocking_its_calendar(pool: PgPool) 
 /// calendar listed it (anyone can reference a `nostr:` URI early) does not shorten the wait.
 /// (b) A calendar whose last stored snapshot, or first sighting, is older than the wait stops
 /// waiting for unresolved members, however recently they were listed.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn the_member_wait_is_per_calendar_and_bounded(pool: PgPool) {
     use pinakes_core::event::adapters::nostr as nip52;
     let cfg = EventConfig::default();
@@ -4153,7 +4153,7 @@ async fn the_member_wait_is_per_calendar_and_bounded(pool: PgPool) {
 /// A far BTC Map event's link is capped at the horizon when derived, keeps its
 /// event's own instant, and is extended to it once the event enters the horizon, by the next
 /// delta apply or at startup; a year-9999 event never qualifies and keeps the cap.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_far_event_keeps_its_link_as_the_horizon_moves(pool: PgPool) {
     use pinakes_core::resolver::Resolver;
     let cfg = EventConfig {
@@ -4260,7 +4260,7 @@ async fn a_far_event_keeps_its_link_as_the_horizon_moves(pool: PgPool) {
 
 /// A single BTC Map event document carries storable horizons, not chrono's
 /// sentinels, and saves through the full save path with its container.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_single_event_document_saves_with_storable_horizons(pool: PgPool) {
     let cfg = EventConfig::default();
     let uri = "https://api.btcmap.org/v4/events/7";
@@ -4381,7 +4381,7 @@ async fn group_of(pool: &PgPool, id: &str) -> String {
 /// Meetup's tracking variants of one event are one resource: the known tracking parameters are
 /// aliases from the start, and a variant with another parameter becomes one once its page names
 /// the clean URL as its canonical. Nothing joins across platforms.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn tracking_variants_of_an_event_are_one_resource(pool: PgPool) {
     use pinakes_core::resolver::Resolver;
     let meetup = "https://www.meetup.com/zurich-bitcoin/events/316480149/";
@@ -4457,7 +4457,7 @@ async fn tracking_variants_of_an_event_are_one_resource(pool: PgPool) {
 
 /// Through the web route, a sameAs between event pages on two origins never groups them,
 /// one-sided or reciprocated: a claim is not evidence.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn cross_origin_event_same_as_never_groups(pool: PgPool) {
     use pinakes_core::resolver::Resolver;
     let (a, b) = (
@@ -4494,7 +4494,7 @@ async fn cross_origin_event_same_as_never_groups(pool: PgPool) {
 /// Pages that name others only by their own claims never group: two thebiz.pro episodes whose
 /// canonical is the homepage, docs.pubky.org naming pubky.org, and pubky.org pages naming a
 /// sibling page by canonical and sameAs. Each stays its own resource, ungrouped.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn claim_shaped_pages_never_merge(pool: PgPool) {
     let html = |title: &str, canonical: Option<&str>, same_as: Option<&str>| {
         let canonical = canonical.map_or(String::new(), |c| {
@@ -4623,7 +4623,7 @@ fn class_of(r: anyhow::Result<pinakes_core::model::ResourceMeta>) -> String {
 /// cap keeps applying (the links to members it no longer lists end at once); a listed member's
 /// link lives for a bounded time renewed at each fetch, so the global budget recovers when a
 /// calendar is no longer fetched.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn calendar_member_links_rotate_and_lapse(pool: PgPool) {
     use pinakes_core::event::adapters::nostr as nip52;
     let mut cfg = EventConfig::default();
@@ -4718,7 +4718,7 @@ async fn calendar_member_links_rotate_and_lapse(pool: PgPool) {
 /// A Luma page missing fields takes the API branch, whose *event* response also
 /// names the event's calendar; the page stays the event and is filled from the API, instead
 /// of becoming the calendar.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_luma_event_stays_an_event(pool: PgPool) {
     use pinakes_core::resolver::Resolver;
     let fixture = {
@@ -4767,7 +4767,7 @@ async fn a_luma_event_stays_an_event(pool: PgPool) {
 /// A lapsed link keeps its child through the orphan grace, counted from the link's expiry: a
 /// calendar that failed for a day deletes no member, and a delta feed can still revive the link,
 /// but only within the per-parent and global caps a new link would meet.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn lapsed_links_age_through_the_grace_and_revive_within_the_caps(pool: PgPool) {
     let parent = "https://api.btcmap.org/v4/events";
     store::ensure_resource(&pool, parent).await.unwrap();
@@ -4864,7 +4864,7 @@ async fn lapsed_links_age_through_the_grace_and_revive_within_the_caps(pool: PgP
 
 /// A link whose event is more than one horizon away lapses at the derivation-time
 /// cap, and comes back once its instant enters the horizon while it is still ahead.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_30_month_event_link_comes_back(pool: PgPool) {
     let cfg = EventConfig::default();
     let parent = "https://api.btcmap.org/v4/events";
@@ -4907,7 +4907,7 @@ async fn a_30_month_event_link_comes_back(pool: PgPool) {
 
 /// A link records at most 64 naming rows, those asking for the farthest instants, so its
 /// `until` is still the farthest any row asked for.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn link_sources_are_capped_per_link(pool: PgPool) {
     let parent = "https://api.btcmap.org/v4/events";
     store::ensure_resource(&pool, parent).await.unwrap();
@@ -4942,7 +4942,7 @@ async fn link_sources_are_capped_per_link(pool: PgPool) {
 /// Which BTC Map row names which link. A tombstoned row, and a row that
 /// moves to another website, stop extending the link they named; a website shared by two
 /// events keeps the farther instant when only the nearer event is edited.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn link_sources_follow_tombstones_relinks_and_shared_sites(pool: PgPool) {
     use pinakes_core::resolver::Resolver;
     let cfg = EventConfig {
@@ -5019,7 +5019,7 @@ async fn link_sources_follow_tombstones_relinks_and_shared_sites(pool: PgPool) {
 /// An event page inherits its single-event calendar file's UID (the corroborated mode's
 /// evidence) only when the file is on the page's own origin, not on a host a redirect took the
 /// page to.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_page_inherits_an_ics_uid_only_from_its_own_origin(pool: PgPool) {
     use pinakes_core::resolver::Resolver;
     let page = |name: &str| {
