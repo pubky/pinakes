@@ -917,19 +917,42 @@ pub async fn enrich(
     }
     doc.bounded(web::ATTRIBUTES)
 }
+/// The deepest a feed's elements may nest for `feed_prefix` to complete it: an RSS item ends at
+/// depth 2 (`rss`, `channel`), an Atom entry at 1, and nothing in a real feed comes near this.
+const FEED_DEPTH: usize = 64;
+/// The longest element name `feed_prefix` keeps open (`itunes:new-feed-url` is 19 bytes).
+const FEED_NAME_BYTES: usize = 256;
+
 /// An RSS or Atom body cut off at the fetch cap (`Fetched::truncated`), completed so an XML
 /// parser reads it: up to the end of its last whole `item` or `entry` (at most `cap` of them),
 /// then the elements still open there closed. `None` when no item is whole. Streams the prefix,
 /// so a feed of any length costs the cap and no more.
+///
+/// Its work stays linear whatever the feed: elements nest at most `FEED_DEPTH` deep with names of
+/// at most `FEED_NAME_BYTES` (the prefix ends with the last item whole before a deeper element or
+/// a longer name), and the open elements at an item's end are kept as shared names, so keeping
+/// them copies at most `FEED_DEPTH` pointers. It stops, with no prefix, when its parse job is over (its caller gone,
+/// its deadline passed).
 pub fn feed_prefix(body: &str, cap: usize) -> Option<String> {
     use quick_xml::events::Event;
+    use std::rc::Rc;
     let mut reader = quick_xml::Reader::from_str(body);
-    let mut open: Vec<String> = vec![];
-    let mut last: Option<(usize, Vec<String>)> = None;
+    let mut open: Vec<Rc<str>> = vec![];
+    let mut last: Option<(usize, Vec<Rc<str>>)> = None;
     let mut items = 0;
-    loop {
+    for event in 0u64.. {
+        if event % 1024 == 0 && super::html::job_over() {
+            return None;
+        }
         match reader.read_event() {
-            Ok(Event::Start(e)) => open.push(String::from_utf8_lossy(e.name().as_ref()).into()),
+            Ok(Event::Start(e)) => {
+                let name = e.name();
+                // Deeper or longer than any feed: the items whole before it are the prefix.
+                if open.len() >= FEED_DEPTH || name.as_ref().len() > FEED_NAME_BYTES {
+                    break;
+                }
+                open.push(String::from_utf8_lossy(name.as_ref()).into());
+            }
             Ok(Event::End(e)) => {
                 open.pop();
                 if matches!(e.local_name().as_ref(), b"item" | b"entry") {

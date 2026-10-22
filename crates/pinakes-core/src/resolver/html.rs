@@ -359,6 +359,19 @@ fn in_job<T>(job: Job, f: impl FnOnce() -> T) -> T {
     f()
 }
 
+/// Whether this thread's parse job is over (its caller gone, its deadline passed, its worker
+/// dead): work in the job besides parsing (a feed's prefix) checks it and stops. False outside a
+/// job.
+pub fn job_over() -> bool {
+    JOB.with(|j| {
+        j.borrow().as_ref().is_some_and(|job| {
+            job.over.is_some()
+                || job.cancelled.load(Ordering::SeqCst)
+                || Instant::now() >= job.deadline
+        })
+    })
+}
+
 fn check_slot() {
     debug_assert!(
         JOB.with(|j| j.borrow().is_some()) || tokio::runtime::Handle::try_current().is_err(),
@@ -1913,6 +1926,28 @@ mod tests {
                 assert_eq!(error.reason, reason);
             }
         }
+    }
+
+    /// Work in a job besides parsing sees the job end: `job_over` is false outside a job and in a
+    /// live one, true once its caller is gone or its deadline passed, and a feed's prefix stops
+    /// there.
+    #[test]
+    fn a_feed_prefix_stops_when_its_job_is_over() {
+        let feed = "<rss><channel><item><title>1</title></item><item><title>2";
+        assert!(!job_over());
+        let live = in_job(Job::new(PARSE_BUDGET, Arc::default()), || {
+            (job_over(), crate::resolver::cards::feed_prefix(feed, 10))
+        });
+        assert!(!live.0);
+        assert!(live.1.is_some());
+        let gone = in_job(
+            Job::new(PARSE_BUDGET, Arc::new(AtomicBool::new(true))),
+            || (job_over(), crate::resolver::cards::feed_prefix(feed, 10)),
+        );
+        assert_eq!(gone, (true, None));
+        let mut late = Job::new(PARSE_BUDGET, Arc::default());
+        late.deadline = Instant::now();
+        assert!(in_job(late, job_over));
     }
 
     /// A tree past `MAX_NODES` is refused as too complex, in this process as in a worker.
