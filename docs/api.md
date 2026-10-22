@@ -495,11 +495,14 @@ person (`limits.related_min_shared`, 2).
   its own.
 - **Bounds.** The taggers are drawn from a sample of the resource's most recent
   `limits.related_tag_sample` (2,000) tags within `limits.related_window_days` (365, or
-  `window`): one sample per member of its group and per alias of each, taken before `reach`
-  applies and never filled back up when `reach` leaves fewer; of the sample's authors in reach,
-  the `limits.related_taggers` (200) with the newest tag are sampled. Of each, only their most recent `limits.related_refs_per_tagger` (1,000)
-  references within the same days count. With `collapse=group`, a group needs the shared taggers
-  of its members that pass the other filters, together. `/v1/info` gives every limit here.
+  `window`): one sample per member of its group and per alias of each, up to
+  `limits.related_seed_links` (32) of those links, the ones with the newest tags; all taken
+  before `reach` applies and never filled back up when `reach` leaves fewer; of the sample's
+  authors in reach, the `limits.related_taggers` (200) with the newest tag are sampled. Of each,
+  only their most recent `limits.related_refs_per_tagger` (1,000) references within the same days
+  count. With `collapse=group`, a group needs the shared taggers of its members that pass the
+  other filters, together. `/v1/info` gives every limit here. A related search costs
+  `limits.related_cost` (6) units of the [per-IP budget](#limits-and-errors).
 - Only the references Pinakes copies from Nexus's feed count: the resource's taggers, and any
   reference of theirs (a tag, a reply, an embed, a collection, an event). With `reach`, only the
   taggers within the viewer's reach.
@@ -823,10 +826,15 @@ members always show. A card of a service the sources know is named after it (`si
 Wikidata, OpenStreetMap, DOI, Steam, SteamDB, ProtonDB, PCGamingWiki, GOG, App Store, Google
 Play, F-Droid, Flathub, Snap Store, crates.io, Docs.rs, lib.rs, npm, jsDelivr, unpkg, PyPI,
 GitHub, GitLab, Software Heritage, arXiv, alphaXiv, PubMed, PubMed Central, Hugging Face
-Papers, BTC Map and Wayback Machine. `GET /v1/resources/{id}` shows the same, up to 256
-entries, and lists every link in `details.also_on` (several of one service too, up to 256). A
-derived link can be unavailable in some countries (a regional release on a streaming service);
-nothing public says where, so prefer a tagged member.
+Papers, BTC Map and Wayback Machine. Only an object's own page is on the service: a game, app,
+package, repository, paper or place page in the forms the lookups recognize (a repository or
+a PCGamingWiki article with no query but one that picks a tab or marks where the link was
+shared from: `?tab=readme-ov-file`, `ref`, `utm_*`). Any other page on those hosts
+(`github.com/topics/rust`, `gitlab.com/explore`, a wiki's `Category:` or `Special:` page, a
+search, a user's page, a page under an object) takes no service's place; its card keeps the
+name it gives itself, or its host. `GET /v1/resources/{id}` shows the same, up to 256 entries, and lists every link in `details.also_on` (several of one
+service too, up to 256). A derived link can be unavailable in some countries (a regional release
+on a streaming service); nothing public says where, so prefer a tagged member.
 
 A derived link is a hint: it is never fetched, never counted as a reference and never ranks
 anything. Sources read a resource after it is saved and again when their results age (each
@@ -1226,7 +1234,9 @@ Coordinate-derived time zones use ODbL boundary data too; see `data/README.md`.
 
 Every public `/v1` route and Swagger UI share a per-IP budget on the direct peer address
 (`api.requests_per_minute`, 120; forwarded headers are not trusted). A reach search costs
-`limits.reach_cost` (6) units, charged before any Nexus call; every other request costs one.
+`limits.reach_cost` (6) units, charged before any Nexus call, a related search
+`limits.related_cost` (6), and a search with both the two together; every other request costs
+one.
 Over budget returns 429 with `Retry-After: 60`. The public and admin listeners share a
 ten-connection pool, apart from the workers', with a five-second statement and acquisition
 timeout. The dump is written by the daemon,

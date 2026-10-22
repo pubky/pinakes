@@ -133,8 +133,10 @@ pub struct Found {
     /// What was found changes the card itself (a media page's title): the resource is read again
     /// now, and its finished card takes it.
     pub reread: bool,
-    /// A secondary service the source asks failed, so its part is missing from this run: ask
-    /// again after this long instead of after the source's lifetime. What the run found stands.
+    /// A secondary service the source asks failed, so its part is missing from this run: what
+    /// the run found stands, and the worker brings the run back after its backoff, as for a
+    /// failed run (five minutes, doubling to an hour), or after this wait (the one the service
+    /// named) when longer; never after the source's lifetime.
     pub retry_after: Option<Duration>,
 }
 /// A fact a source reads for a resource: a lower-case `name` (`[a-z][a-z0-9_]`, at most 32
@@ -555,6 +557,9 @@ async fn subject(pool: &PgPool, id: &str) -> Result<Option<Subject>> {
     }))
 }
 
+/// How far ahead a claimed resource's next attempt moves, so a crashed worker's rows come back.
+pub const LEASE: Duration = Duration::from_secs(600);
+
 /// Run the due sources of up to `limit` resources; returns how many were handled.
 pub async fn drain(
     pool: &PgPool,
@@ -562,13 +567,27 @@ pub async fn drain(
     sources: &[Arc<dyn Source>],
     limit: i64,
 ) -> Result<usize> {
+    drain_leased(pool, cx, sources, limit, LEASE).await
+}
+
+/// `drain` with claims held for `lease` (tests use a short one).
+pub async fn drain_leased(
+    pool: &PgPool,
+    cx: &Context,
+    sources: &[Arc<dyn Source>],
+    limit: i64,
+    lease: Duration,
+) -> Result<usize> {
     let cfg = &cx.config.also_on;
-    // Claimed rows move one lease ahead, so a crashed worker's rows come back.
-    let due: Vec<String> = sqlx::query_scalar("UPDATE also_on_dirty SET next_attempt_at=now()+interval '10 minutes' WHERE resource_id IN (SELECT resource_id FROM also_on_dirty WHERE next_attempt_at<=now() ORDER BY next_attempt_at,resource_id LIMIT $1 FOR UPDATE SKIP LOCKED) RETURNING resource_id")
+    // Claimed rows move one lease ahead, so a crashed worker's rows come back. Each row's lease
+    // is kept: its run's outcome is written against it, not against the clock.
+    let due: Vec<(String, DateTime<Utc>)> = sqlx::query_as("UPDATE also_on_dirty SET next_attempt_at=now()+make_interval(secs => $2) WHERE resource_id IN (SELECT resource_id FROM also_on_dirty WHERE next_attempt_at<=now() ORDER BY next_attempt_at,resource_id LIMIT $1 FOR UPDATE SKIP LOCKED) RETURNING resource_id,next_attempt_at")
         .bind(limit)
+        .bind(lease.as_secs_f64())
         .fetch_all(pool)
         .await?;
     let handled = due.len();
+    let (due, leases): (Vec<String>, Vec<_>) = due.into_iter().unzip();
     // Batched hub lookups for the whole batch first (MusicBrainz URLs, Wikidata items).
     let uris: Vec<String> = sqlx::query_scalar("SELECT uri FROM resource WHERE id=ANY($1)")
         .bind(&due)
@@ -587,27 +606,63 @@ pub async fn drain(
             tracing::error!(source = source.id(), "also-on prefetch panicked");
         }
     }
-    let work = due.into_iter().map(|id| async move {
+    let work = due.into_iter().zip(leases).map(|(id, lease)| async move {
         let result = one(pool, cx, sources, &id).await;
-        (id, result)
+        (id, lease, result)
     });
     let results = futures_util::stream::iter(work)
         .buffer_unordered(cfg.concurrency.max(1))
         .collect::<Vec<_>>()
         .await;
-    // A change saved while a resource was read marked it due again (its lease, ten minutes ahead,
-    // became now): that mark stands, so the change is read too.
-    for (id, result) in results {
+    // A change saved while a resource was read marked it due again (its lease became now): that
+    // mark stands, so the change is read too. So does another worker's claim after this lease
+    // ran out. The next attempt is written only while the row still holds this run's lease,
+    // however long the batch took; the count of failed runs and the error are always written.
+    let next = |at: &str| {
+        format!("next_attempt_at=CASE WHEN next_attempt_at=$2 THEN {at} ELSE next_attempt_at END")
+    };
+    for (id, lease, result) in results {
         match result {
-            Ok(Some(next)) => {
-                sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()+$2,attempts=0,last_error=NULL WHERE resource_id=$1 AND next_attempt_at>now()")
-                    .bind(&id).bind(next).execute(pool).await?;
+            Ok(Some(Next {
+                lifetime,
+                partial: None,
+            })) => {
+                sqlx::query(&format!(
+                    "UPDATE also_on_dirty SET attempts=0,last_error=NULL,{} WHERE resource_id=$1",
+                    next("now()+$3")
+                ))
+                .bind(&id)
+                .bind(lease)
+                .bind(lifetime)
+                .execute(pool)
+                .await?;
+            }
+            // A secondary service failed: what the run found is recorded, and the run comes back
+            // after a failed run's backoff, so a service that keeps failing is asked less and
+            // less often (up to hourly), or after the wait it named when longer; never after the
+            // lifetime. A run with every service answering resets the count.
+            Ok(Some(Next {
+                lifetime,
+                partial: Some(asked),
+            })) => {
+                sqlx::query(&format!(
+                    "UPDATE also_on_dirty SET attempts=attempts+1,last_error=NULL,{} WHERE resource_id=$1",
+                    next("now()+least($3,make_interval(secs => greatest($5::float8,least($4::float8*power(2,least(attempts,6)),3600))))")
+                ))
+                .bind(&id)
+                .bind(lease)
+                .bind(lifetime)
+                .bind(cfg.retry_secs as f64)
+                .bind(asked.as_secs().min(86_400) as f64)
+                .execute(pool)
+                .await?;
             }
             Ok(None) => {
                 sqlx::query(
-                    "DELETE FROM also_on_dirty WHERE resource_id=$1 AND next_attempt_at>now()",
+                    "DELETE FROM also_on_dirty WHERE resource_id=$1 AND next_attempt_at=$2",
                 )
                 .bind(&id)
+                .bind(lease)
                 .execute(pool)
                 .await?;
             }
@@ -617,27 +672,45 @@ pub async fn drain(
                 let asked = error
                     .downcast_ref::<crate::resolver::RetryLater>()
                     .map_or(0, |r| r.seconds.min(86_400)) as f64;
-                sqlx::query("UPDATE also_on_dirty SET attempts=attempts+1,last_error=$2,next_attempt_at=now()+make_interval(secs => greatest($4::float8,least($3::float8*power(2,least(attempts,6)),3600))) WHERE resource_id=$1")
-                    .bind(&id).bind(crate::resolver::error_class(&error)).bind(cfg.retry_secs as f64).bind(asked).execute(pool).await?;
+                sqlx::query(&format!(
+                    "UPDATE also_on_dirty SET attempts=attempts+1,last_error=$3,{} WHERE resource_id=$1",
+                    next("now()+make_interval(secs => greatest($5::float8,least($4::float8*power(2,least(attempts,6)),3600)))")
+                ))
+                .bind(&id)
+                .bind(lease)
+                .bind(crate::resolver::error_class(&error))
+                .bind(cfg.retry_secs as f64)
+                .bind(asked)
+                .execute(pool)
+                .await?;
             }
         }
     }
     Ok(handled)
 }
+/// When a resource's next also-on run is due.
+struct Next {
+    /// The shortest lifetime among the sources that ran.
+    lifetime: chrono::Duration,
+    /// A secondary service failed in this run: the longest wait one named (zero when none).
+    partial: Option<Duration>,
+}
+
 /// One resource: every enabled source that applies runs; each success replaces its rows. Ok
-/// with the time until the next run (the shortest lifetime among them), Ok(None) when no
-/// source applies, Err when any source failed (the others' results are kept).
+/// with when the next run is due, Ok(None) when no source applies, Err when any source failed
+/// (the others' results are kept).
 async fn one(
     pool: &PgPool,
     cx: &Context,
     sources: &[Arc<dyn Source>],
     id: &str,
-) -> Result<Option<chrono::Duration>> {
+) -> Result<Option<Next>> {
     let Some(mut subject) = subject(pool, id).await? else {
         return Ok(None);
     };
     let cfg = &cx.config.also_on;
     let mut next: Option<Duration> = None;
+    let mut partial: Option<Duration> = None;
     let mut failed = None;
     let mut reread = false;
     // In registry order: each source sees the keys the ones before it found in this run (a
@@ -672,11 +745,12 @@ async fn one(
         match lookup {
             Ok(found) => {
                 reread |= found.reread;
-                // A secondary service failed: this run's results stand, and the source runs
-                // again after its retry time instead of after its lifetime.
-                let lifetime = found
-                    .retry_after
-                    .map_or(source.ttl(), |retry| retry.min(source.ttl()));
+                // A secondary service failed: this run's results stand, and the run comes back
+                // early (`drain` sets when).
+                if let Some(asked) = found.retry_after {
+                    partial = Some(partial.map_or(asked, |p| p.max(asked)));
+                }
+                let lifetime = source.ttl();
                 record(pool, id, source.id(), found, source.ttl(), cfg)
                     .await
                     .with_context(|| format!("record {}", source.id()))?;
@@ -709,7 +783,10 @@ async fn one(
     if let Some(error) = failed {
         return Err(error);
     }
-    Ok(next.map(|n| chrono::Duration::from_std(n).unwrap_or(chrono::Duration::days(30))))
+    Ok(next.map(|n| Next {
+        lifetime: chrono::Duration::from_std(n).unwrap_or(chrono::Duration::days(30)),
+        partial,
+    }))
 }
 
 /// The worker: drains due resources until shutdown, pausing when nothing is due.

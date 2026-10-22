@@ -117,7 +117,7 @@ async fn drain(pool: &PgPool, cx: &Context, sources: &[Arc<dyn Source>]) {
 
 /// Two tagged links a hub names as one recording join a group; each card lists the other first,
 /// then the derived links of both, by service name, each URL once, never itself.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn hub_keys_join_and_derived_links_reach_the_cards(pool: PgPool) {
     let spotify = "https://open.spotify.com/track/abc";
     let deezer = "https://www.deezer.com/track/123";
@@ -231,7 +231,7 @@ async fn post(app: &axum::Router, path: &str, body: Value) -> Value {
 }
 
 /// A card shows at most eight entries; the resource read shows them all.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_card_shows_eight_and_the_read_all(pool: PgPool) {
     let uri = "https://open.spotify.com/album/xyz";
     let id = page(&pool, uri, "Album").await;
@@ -275,7 +275,7 @@ async fn a_card_shows_eight_and_the_read_all(pool: PgPool) {
 
 /// Each run replaces its source's rows; a failed run keeps them and backs off; another source's
 /// rows are its own; rows nobody refreshes expire; a switched-off source does not run.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn runs_replace_their_rows_failures_keep_them_and_rows_expire(pool: PgPool) {
     let uri = "https://open.spotify.com/track/r1";
     let id = page(&pool, uri, "Track").await;
@@ -418,7 +418,7 @@ async fn runs_replace_their_rows_failures_keep_them_and_rows_expire(pool: PgPool
 
 /// A source's answer is checked: only valid keys, only HTTP(S) links with a service name, the
 /// caps, and with `derive_links` off no link at all (keys still join).
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn answers_are_checked_and_bounded(pool: PgPool) {
     let uri = "https://open.spotify.com/track/c1";
     let id = page(&pool, uri, "Track").await;
@@ -516,7 +516,7 @@ async fn answers_are_checked_and_bounded(pool: PgPool) {
 
 /// A saved document makes its sources due; an unchanged refetch does not; an alias never runs;
 /// the config refuses a source it does not know.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn saves_make_sources_due_and_unknown_sources_are_refused(pool: PgPool) {
     let uri = "https://open.spotify.com/track/d1";
     let id = page(&pool, uri, "Track").await;
@@ -592,7 +592,7 @@ async fn saves_make_sources_due_and_unknown_sources_are_refused(pool: PgPool) {
 
 /// Every spelling of one music object is an alias of its canonical URL (`service`), so the
 /// card and its references are the one resource's.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn music_link_spellings_are_one_resource(pool: PgPool) {
     let canonical = "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq";
     let root = store::ensure_resource(&pool, canonical).await.unwrap();
@@ -631,7 +631,7 @@ async fn music_link_spellings_are_one_resource(pool: PgPool) {
 
 /// A source's facts reach the read's `details.facts` (several values of one name joined), are
 /// checked like everything else, and never join anything.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn facts_are_shown_checked_and_never_join(pool: PgPool) {
     use pinakes_core::also_on::Fact;
     let (a, b) = (
@@ -687,7 +687,7 @@ async fn facts_are_shown_checked_and_never_join(pool: PgPool) {
 
 /// `key` finds every tagged link carrying one exact identifier, on any service: an MBID at any
 /// level, a Q-id, an ISRC or a barcode. Malformed keys are refused; the lookup is indexed.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn search_by_key_finds_the_same_object_on_every_service(pool: PgPool) {
     use pinakes_core::also_on::Fact;
     let mbid = "9f9cf187-d6f9-437f-9d98-d59cdbd52757";
@@ -801,7 +801,7 @@ async fn search_by_key_finds_the_same_object_on_every_service(pool: PgPool) {
 /// `sort=trending` ranks by the references made inside the window (7 days by default), shows
 /// only links referenced in it, combines with tags and `collapse=group` (one song across
 /// services is one row), and refuses windows outside 1h–90d.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn trending_counts_references_inside_the_window(pool: PgPool) {
     let (spotify, deezer, old) = (
         "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq",
@@ -940,7 +940,7 @@ async fn trending_counts_references_inside_the_window(pool: PgPool) {
 
 /// An artist page is a `MusicGroup`, or a `Person` once MusicBrainz says the artist is one
 /// (`artist_type`): the next resolve types it so.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn an_artist_is_a_person_when_musicbrainz_says_so(pool: PgPool) {
     use pinakes_core::{also_on::Fact, config::QueueConfig, queue, resolver::Resolver};
     struct Page;
@@ -1002,7 +1002,7 @@ async fn an_artist_is_a_person_when_musicbrainz_says_so(pool: PgPool) {
 /// The production queue (batched claims, `run_batch`) types and names every music link by what
 /// it is, whatever its page says: the links the candidate showed as VideoObject,
 /// MusicComposition, WebApplication, WebPage, AudioObject or an album.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn the_production_queue_types_and_names_music_links(pool: PgPool) {
     use pinakes_core::{config::QueueConfig, queue, resolver::Resolver};
     /// Each page as the live service describes itself.
@@ -1114,7 +1114,7 @@ async fn the_production_queue_types_and_names_music_links(pool: PgPool) {
 
 /// Wikidata has wrong IDs: two links of different recordings that share a Q-id stay apart, a
 /// third with only the Q-id joins one of them, and the refusal is counted.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_shared_q_id_never_joins_two_recordings(pool: PgPool) {
     let (a, b, c) = (
         "https://example.org/a",
@@ -1175,7 +1175,7 @@ async fn a_shared_q_id_never_joins_two_recordings(pool: PgPool) {
 /// The lookups' own namespaces name one object each too: an OSM object, a crate, a Steam game.
 /// Two of them sharing a second key (an item naming a node and a relation, one repository behind
 /// two crates, an item with two appids) never share a group.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_shared_key_never_joins_two_places_crates_or_games(pool: PgPool) {
     let hub = Fake::new("lookups");
     let cases = [
@@ -1248,7 +1248,7 @@ async fn a_shared_key_never_joins_two_places_crates_or_games(pool: PgPool) {
 
 /// BTC Map's merchant page names one OSM object: an object it lists carries its own `osm:` key,
 /// and its merchant link names that key, so the tagged merchant link joins the object.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_tagged_btc_map_link_joins_its_osm_object(pool: PgPool) {
     let way = "https://example.org/way-259338174";
     let merchant = "https://btcmap.org/merchant/way:259338174";
@@ -1281,7 +1281,7 @@ async fn a_tagged_btc_map_link_joins_its_osm_object(pool: PgPool) {
 
 /// One entry per service on any card: a tagged member named after a service a derived link
 /// names takes that service's place; a tagged member of another site still shows.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_tagged_member_and_a_derived_link_of_one_service_show_once(pool: PgPool) {
     let app_page = |uri: &'static str, site: &'static str| {
         let pool = pool.clone();
@@ -1365,7 +1365,7 @@ async fn a_tagged_member_and_a_derived_link_of_one_service_show_once(pool: PgPoo
 /// `key=doi:` finds the DOI card by its own DOI, and the preprint its publisher names, as the
 /// `datacite` source keys them (the card: its DOI and the preprint's arXiv ID; the preprint: its
 /// arXiv ID and the corroborated journal DOI). A DOI holding `:` and any letter case.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn search_by_doi_finds_the_card_and_its_preprint(pool: PgPool) {
     let journal = "doi:10.46298/lmcs-20(1:8)2024";
     let preprint = "https://arxiv.org/abs/2302.04668";
@@ -1439,7 +1439,7 @@ fn urlencoding(value: &str) -> String {
 
 /// Two tagged spellings of one F-Droid page share its slot even when the derived F-Droid link is
 /// one of them (and is therefore dropped as a member before the slots are counted).
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn two_tagged_spellings_of_a_derived_link_show_once(pool: PgPool) {
     let app_page = |uri: &'static str, site: &'static str| {
         let pool = pool.clone();
@@ -1494,7 +1494,7 @@ async fn two_tagged_spellings_of_a_derived_link_show_once(pool: PgPool) {
 
 /// A page that only names itself after a service (its own `og:site_name`) takes no service's
 /// place: the derived link to the real service still shows.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_page_naming_itself_after_a_service_takes_no_slot(pool: PgPool) {
     let save = |uri: &'static str, site: &'static str, service: Option<&'static str>| {
         let pool = pool.clone();
@@ -1558,38 +1558,189 @@ async fn a_page_naming_itself_after_a_service_takes_no_slot(pool: PgPool) {
     );
 }
 
-/// A run whose secondary service failed is recorded (its keys stand) and comes back after the
-/// retry time the source asked for, not after its lifetime.
-#[sqlx::test(migrations = "../../migrations")]
-async fn a_failed_secondary_service_brings_the_next_run_forward(pool: PgPool) {
+/// A run whose secondary service failed is recorded (its keys stand) and comes back after a
+/// failed run's backoff, which grows while the service keeps failing (GOG answering 500 for
+/// hours must not be asked every minute); a run with every service answering resets it.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_failed_secondary_service_backs_off_until_it_answers(pool: PgPool) {
     let uri = "https://example.org/paper";
     let id = page(&pool, uri, "Paper").await;
     let hub = Fake::new("datacite");
+    let partial = || {
+        Ok(Found {
+            keys: vec![key("doi:10.1000/x")],
+            // The service named a wait shorter than the backoff: the backoff wins.
+            retry_after: Some(Duration::from_secs(60)),
+            ..Default::default()
+        })
+    };
+    let state = || {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query_as::<_, (i64, f64, i32, Option<String>)>(
+                "SELECT (SELECT count(*) FROM resource_key WHERE resource_id=d.resource_id),extract(epoch FROM d.next_attempt_at-now())::float8,d.attempts,d.last_error FROM also_on_dirty d WHERE d.resource_id=$1",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let due_now = || {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now() WHERE resource_id=$1")
+                .bind(&id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    hub.answer(uri, partial());
+    let sources: Vec<Arc<dyn Source>> = vec![hub.clone()];
+    let cx = cx(Config::default());
+    drain(&pool, &cx, &sources).await;
+    let (keys, due_in, attempts, error) = state().await;
+    assert_eq!((keys, attempts, error), (1, 1, None));
+    assert!((290.0..=305.0).contains(&due_in), "{due_in}");
+    // Still failing: the wait doubles.
+    due_now().await;
+    drain(&pool, &cx, &sources).await;
+    let (keys, due_in, attempts, error) = state().await;
+    assert_eq!((keys, attempts, error), (1, 2, None));
+    assert!((590.0..=605.0).contains(&due_in), "{due_in}");
+    // Every service answered: back to the source's lifetime, the count reset.
     hub.answer(
         uri,
         Ok(Found {
             keys: vec![key("doi:10.1000/x")],
-            retry_after: Some(Duration::from_secs(120)),
             ..Default::default()
         }),
     );
-    let sources: Vec<Arc<dyn Source>> = vec![hub];
-    drain(&pool, &cx(Config::default()), &sources).await;
-    let (keys, due_in, attempts, error): (i64, f64, i32, Option<String>) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM resource_key WHERE resource_id=d.resource_id),extract(epoch FROM d.next_attempt_at-now())::float8,d.attempts,d.last_error FROM also_on_dirty d WHERE d.resource_id=$1",
+    due_now().await;
+    drain(&pool, &cx, &sources).await;
+    let (keys, due_in, attempts, error) = state().await;
+    assert_eq!((keys, attempts, error), (1, 0, None));
+    assert!(due_in > 3600.0, "{due_in}");
+}
+
+/// A source that answers as `inner`, but whose lookup of `claimed` first waits `delay`, then
+/// claims that resource as another worker would whose drain began after the lease ran out.
+struct Outlives {
+    inner: Arc<Fake>,
+    pool: PgPool,
+    claimed: &'static str,
+    delay: Duration,
+}
+#[async_trait]
+impl Source for Outlives {
+    fn id(&self) -> &'static str {
+        self.inner.id()
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        self.inner.applies(subject)
+    }
+    fn ttl(&self) -> Duration {
+        self.inner.ttl()
+    }
+    async fn lookup(&self, cx: &Context, subject: &Subject) -> anyhow::Result<Found> {
+        if subject.uri == self.claimed {
+            tokio::time::sleep(self.delay).await;
+            sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()+interval '1 hour' WHERE resource_id=$1")
+                .bind(&subject.id)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+        }
+        self.inner.lookup(cx, subject).await
+    }
+}
+
+/// A batch that outlives its lease still records every run against it (Kimi, train-1): a clean
+/// run schedules its next one, a run no source applies to leaves the queue, a partial or failed
+/// run backs off and counts. Only a row another claim took meanwhile keeps that claim.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_batch_that_outlives_its_lease_still_records_its_runs(pool: PgPool) {
+    let uris = [
+        "https://example.org/clean",
+        "https://example.org/nothing",
+        "https://example.org/partial",
+        "https://example.org/failed",
+        "https://example.org/claimed",
+    ];
+    let mut ids = vec![];
+    for uri in uris {
+        ids.push(page(&pool, uri, "Paper").await);
+    }
+    let hub = Fake::new("datacite");
+    let found = |retry_after| {
+        Ok(Found {
+            keys: vec![key("doi:10.1000/x")],
+            retry_after,
+            ..Default::default()
+        })
+    };
+    hub.answer(uris[0], found(None));
+    hub.answer(uris[2], found(Some(Duration::from_secs(60))));
+    hub.answer(uris[3], Err(anyhow::anyhow!("datacite answered 500")));
+    hub.answer(uris[4], found(None));
+    let sources: Vec<Arc<dyn Source>> = vec![Arc::new(Outlives {
+        inner: hub,
+        pool: pool.clone(),
+        claimed: uris[4],
+        delay: Duration::from_millis(1500),
+    })];
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let handled = also_on::drain_leased(
+        &pool,
+        &cx(Config::default()),
+        &sources,
+        100,
+        Duration::from_secs(1),
     )
-    .bind(&id)
-    .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!((keys, attempts, error), (1, 0, None));
-    assert!((0.0..=125.0).contains(&due_in), "{due_in}");
+    assert_eq!(handled, 5);
+    let state = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (f64, i32, Option<String>)>(
+                "SELECT extract(epoch FROM next_attempt_at-now())::float8,attempts,last_error FROM also_on_dirty WHERE resource_id=$1",
+            )
+            .bind(&id)
+            .fetch_optional(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let (due_in, attempts, error) = state(ids[0].clone()).await.unwrap();
+    assert!(
+        due_in > 3600.0 && attempts == 0 && error.is_none(),
+        "{due_in} {attempts} {error:?}"
+    );
+    assert_eq!(state(ids[1].clone()).await, None);
+    let (due_in, attempts, error) = state(ids[2].clone()).await.unwrap();
+    assert!((290.0..=305.0).contains(&due_in), "{due_in}");
+    assert_eq!((attempts, error), (1, None));
+    let (due_in, attempts, error) = state(ids[3].clone()).await.unwrap();
+    assert!((290.0..=305.0).contains(&due_in), "{due_in}");
+    assert_eq!(attempts, 1);
+    assert!(error.is_some());
+    // The other claim stands; this run's clean outcome resets the count.
+    let (due_in, attempts, error) = state(ids[4].clone()).await.unwrap();
+    assert!((3500.0..=3600.0).contains(&due_in), "{due_in}");
+    assert_eq!((attempts, error), (0, None));
 }
 
 /// A page that only types itself as music and names a service (its own JSON-LD) is on no
 /// service: it takes no service's place on the group's cards, and its own card hides no derived
 /// link of the service it names.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_music_typed_impostor_takes_no_slot_and_hides_nothing(pool: PgPool) {
     let tidal = "https://tidal.com/track/534050211";
     let impostor = "https://example.org/song";
@@ -1640,6 +1791,122 @@ async fn a_music_typed_impostor_takes_no_slot_and_hides_nothing(pool: PgPool) {
     }
 }
 
+/// A page on a service's host that is not an object's own page (GitHub's topic list) is on no
+/// service: in a group with a card that derives a GitHub repository, the topic page shows as
+/// itself and the repository keeps GitHub's place.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_non_object_page_on_a_service_host_takes_no_slot(pool: PgPool) {
+    let topics = "https://github.com/topics/rust";
+    let repo = "https://github.com/rust-random/rand";
+    let krate = "https://crates.io/crates/rand";
+    assert_eq!(ResourceMeta::new(topics, "web", 86400).service, None);
+    assert_eq!(
+        ResourceMeta::new(repo, "web", 86400).service.as_deref(),
+        Some("GitHub")
+    );
+    let mut ids = vec![];
+    for uri in [krate, topics] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "web", 86400);
+        d.name = Some("rand".into());
+        d.set_type("SoftwareSourceCode");
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.push(id);
+    }
+    let hub = Fake::new("packages");
+    for uri in [krate, topics] {
+        hub.answer(
+            uri,
+            Ok(Found {
+                keys: vec![key("wikidata:Q1")],
+                links: if uri == krate {
+                    vec![Link::new(repo, "GitHub", "crates")]
+                } else {
+                    vec![]
+                },
+                ..Default::default()
+            }),
+        );
+    }
+    let sources: Vec<Arc<dyn Source>> = vec![hub];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let read = get(&app, &format!("/v1/resources/{}", ids[0])).await;
+    let entries: Vec<(String, bool)> = read["also_on"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| (e["uri"].as_str().unwrap().to_owned(), e["derived"] == true))
+        .collect();
+    assert!(entries.contains(&(topics.to_owned(), false)), "{entries:?}");
+    assert!(entries.contains(&(repo.to_owned(), true)), "{entries:?}");
+}
+
+/// GitHub's share link (`?tab=readme-ov-file`) is the repository's own page: tagged in a group
+/// whose crate derives the repository, it takes GitHub's one place and the derived link is not
+/// listed beside it.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_shared_repository_link_with_a_tab_is_the_repository_once(pool: PgPool) {
+    let shared = "https://github.com/rust-random/rand?tab=readme-ov-file";
+    let repo = "https://github.com/rust-random/rand";
+    let krate = "https://crates.io/crates/rand";
+    assert_eq!(
+        ResourceMeta::new(shared, "web", 86400).service.as_deref(),
+        Some("GitHub")
+    );
+    let mut ids = vec![];
+    for uri in [krate, shared] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "web", 86400);
+        d.name = Some("rand".into());
+        d.set_type("SoftwareSourceCode");
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.push(id);
+    }
+    let hub = Fake::new("packages");
+    for uri in [krate, shared] {
+        hub.answer(
+            uri,
+            Ok(Found {
+                keys: vec![key("wikidata:Q1")],
+                links: if uri == krate {
+                    vec![Link::new(repo, "GitHub", "crates")]
+                } else {
+                    vec![]
+                },
+                ..Default::default()
+            }),
+        );
+    }
+    let sources: Vec<Arc<dyn Source>> = vec![hub];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let read = get(&app, &format!("/v1/resources/{}", ids[0])).await;
+    let entries: Vec<(String, String, bool)> = read["also_on"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["site"].as_str().unwrap().to_owned(),
+                e["uri"].as_str().unwrap().to_owned(),
+                e["derived"] == true,
+            )
+        })
+        .collect();
+    assert_eq!(
+        entries,
+        [("GitHub".to_owned(), shared.to_owned(), false)],
+        "{entries:?}"
+    );
+}
+
 /// A source that panics on every lookup, as a parser meeting an unexpected shape would.
 struct Panics;
 #[async_trait]
@@ -1660,7 +1927,7 @@ impl Source for Panics {
 
 /// A panicking source fails its run like an error: the sources after it still record, the
 /// resource retries with backoff, and the worker drains the next resource.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_panicking_source_never_stops_the_worker(pool: PgPool) {
     let (a, b) = ("https://example.org/a", "https://example.org/b");
     let ids = [page(&pool, a, "A").await, page(&pool, b, "B").await];
@@ -1726,7 +1993,7 @@ impl Source for ByBarcode {
 
 /// A later source sees the keys an earlier one found in the same run, and the tagged link an
 /// exact lookup names takes the lookup's key: it joins the group and `key=` finds it.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_link_an_exact_lookup_names_joins_by_its_key(pool: PgPool) {
     let deezer = "https://www.deezer.com/album/41839661";
     let apple = "https://music.apple.com/gb/album/1445304934";
@@ -1825,7 +2092,7 @@ async fn a_link_an_exact_lookup_names_joins_by_its_key(pool: PgPool) {
 
 /// A card shows one link per service: the tagged member first (a person used it, so it plays for
 /// them), then the derived link most members name. The details read lists them all.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_card_shows_one_link_per_service(pool: PgPool) {
     let deezer = "https://www.deezer.com/track/4329888262";
     let tagged = "https://tidal.com/track/534050211";
@@ -1956,7 +2223,7 @@ async fn a_card_shows_one_link_per_service(pool: PgPool) {
 
 /// A card's own service has its link, the card: Radiohead's Discogs artist never shows "On A
 /// Friday", the band's earlier name, which Wikidata lists as another Discogs ID. Its details do.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_card_shows_no_other_page_of_its_own_service(pool: PgPool) {
     let artist = "https://www.discogs.com/artist/3840";
     let earlier = "https://www.discogs.com/artist/840842";
@@ -1996,7 +2263,7 @@ async fn a_card_shows_no_other_page_of_its_own_service(pool: PgPool) {
 /// A run takes the write order before the resource rows, as saves do: a save holding its
 /// resource never deadlocks with a run recording it, and an exclusive writer (a re-extraction)
 /// runs alone.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_run_takes_the_write_order_as_saves_do(pool: PgPool) {
     let id = page(&pool, "https://open.spotify.com/track/lock", "Track").await;
     let run = |pool: PgPool, id: String| {
@@ -2068,7 +2335,7 @@ async fn a_run_takes_the_write_order_as_saves_do(pool: PgPool) {
 /// A run locks its resource and the ones its keyed links name in ID order; an ingested batch,
 /// holding the write order shared and the alias lock, locks its lines in feed order, the other
 /// way round. The run takes the alias lock too, so it waits for the batch instead of deadlocking.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_run_naming_another_resource_waits_for_an_ingested_batch(pool: PgPool) {
     let mut pages = vec![];
     for uri in [
@@ -2132,7 +2399,7 @@ async fn a_run_naming_another_resource_waits_for_an_ingested_batch(pool: PgPool)
 
 /// A source's keys and facts are searched (`key=`), so their changes change the search revision
 /// (and every search ETag), as derived links do: pruning an expired fact alone too.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn pruned_keys_and_facts_change_the_search_revision(pool: PgPool) {
     let id = page(&pool, "https://open.spotify.com/track/rev", "Track").await;
     let revision = || async {
@@ -2177,7 +2444,7 @@ async fn pruned_keys_and_facts_change_the_search_revision(pool: PgPool) {
 
 /// A source that found what changes the card itself (`reread`) makes the resource due again at
 /// once; one that did not leaves its refresh where it was.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_found_title_reads_the_card_again(pool: PgPool) {
     let named = "https://www.themoviedb.org/tv/1396";
     let plain = "https://www.themoviedb.org/movie/603";
@@ -2231,7 +2498,7 @@ impl Source for SavesMeanwhile {
 
 /// A card saved while the sources read its resource is read too: the run does not push the
 /// mark the save made 30 days out.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_change_saved_during_a_run_is_read_again(pool: PgPool) {
     let id = page(&pool, "https://example.org/meanwhile", "Pending").await;
     let sources: Vec<Arc<dyn Source>> = vec![Arc::new(SavesMeanwhile(pool.clone()))];
@@ -2262,7 +2529,7 @@ async fn a_change_saved_during_a_run_is_read_again(pool: PgPool) {
 /// `reextract` queues the re-read resources' also-on lookups too: a card that comes back
 /// unchanged would not run them, and their results may predate a source the upgrade added.
 /// `reextract also-on` queues every resource's lookups without re-reading the card.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn reextract_runs_the_also_on_sources_again(pool: PgPool) {
     let feed = "https://feeds.feedburner.com/dancarlin/history?format=xml";
     let id = page(&pool, feed, "Dan Carlin's Hardcore History").await;
@@ -2332,7 +2599,7 @@ async fn reextract_runs_the_also_on_sources_again(pool: PgPool) {
 
 /// A source's facts are capped, and the cap cuts the many values of one name (ISRCs) before a
 /// name's one value (an MBID, the MBID a page was merged from, an artist), which always fit.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_sources_single_valued_facts_survive_its_cap(pool: PgPool) {
     use pinakes_core::also_on::Fact;
     let id = page(&pool, "https://open.spotify.com/track/facts", "Track").await;
@@ -2369,7 +2636,7 @@ async fn a_sources_single_valued_facts_survive_its_cap(pool: PgPool) {
 }
 
 /// At the cap's floor (8), a recording's single-valued facts still fit beside its ISRCs.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn the_facts_caps_floor_keeps_a_recordings_single_valued_facts(pool: PgPool) {
     use pinakes_core::also_on::Fact;
     let id = page(&pool, "https://open.spotify.com/track/floor", "Track").await;
@@ -2409,7 +2676,7 @@ async fn the_facts_caps_floor_keeps_a_recordings_single_valued_facts(pool: PgPoo
 
 /// Two sources fail, the first asking for an hour, the second for five minutes: the resource is
 /// due again after the hour, whichever failed last.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn the_longest_wait_among_failing_sources_sets_the_retry(pool: PgPool) {
     let uri = "https://open.spotify.com/track/waits";
     let id = page(&pool, uri, "Waits").await;

@@ -93,7 +93,7 @@ fn named(card: &Value) -> Vec<&str> {
         .collect()
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn one_meetup_on_three_sites_names_the_others(pool: PgPool) {
     let start = soon();
     let meetup = event(
@@ -158,7 +158,7 @@ async fn one_meetup_on_three_sites_names_the_others(pool: PgPool) {
     assert_eq!(row["maybe_same"].as_array().unwrap().len(), 2);
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_card_shows_three_and_its_details_ten(pool: PgPool) {
     let start = soon();
     let first = event(
@@ -188,7 +188,7 @@ async fn a_card_shows_three_and_its_details_ten(pool: PgPool) {
     assert_eq!(page["items"].as_array().unwrap().len(), 12);
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn other_times_places_names_and_one_feeds_occurrences_are_not_the_same(pool: PgPool) {
     let start = soon();
     let meetup = event(
@@ -288,7 +288,7 @@ async fn other_times_places_names_and_one_feeds_occurrences_are_not_the_same(poo
     }
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_member_of_the_cards_own_group_is_never_listed(pool: PgPool) {
     let start = soon();
     let a = event(
@@ -325,7 +325,7 @@ async fn a_member_of_the_cards_own_group_is_never_listed(pool: PgPool) {
     assert!(named(&card(&pool, &a).await).is_empty());
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn all_day_events_match_on_their_local_date(pool: PgPool) {
     use chrono::TimeZone;
     let day = (Utc::now() + Duration::days(20)).date_naive();
@@ -375,7 +375,7 @@ async fn all_day_events_match_on_their_local_date(pool: PgPool) {
     assert!(!named(&card(&pool, &a).await).contains(&next.as_str()));
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn the_same_organizer_or_venue_counts_without_a_place(pool: PgPool) {
     let start = soon();
     let online = |uri: &str, name: &str| {
@@ -407,7 +407,7 @@ async fn the_same_organizer_or_venue_counts_without_a_place(pool: PgPool) {
     assert_eq!(named(&card(&pool, &a).await), [b.as_str()]);
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_change_or_the_window_moves_the_hint(pool: PgPool) {
     let start = soon();
     let a = event(
@@ -473,7 +473,7 @@ async fn a_change_or_the_window_moves_the_hint(pool: PgPool) {
     assert_eq!(named(&card(&pool, &a).await), [b.as_str()]);
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn off_removes_the_field_and_computes_nothing(pool: PgPool) {
     let mut off = Config::default();
     off.event.same_event_hint = SameEventHint::Off;
@@ -519,7 +519,7 @@ async fn off_removes_the_field_and_computes_nothing(pool: PgPool) {
     assert!(card(&pool, &page).await.get("maybe_same").is_none());
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn names_are_compared_without_dates_filler_and_symbols(pool: PgPool) {
     for (name, want) in [
         (
@@ -546,7 +546,7 @@ async fn names_are_compared_without_dates_filler_and_symbols(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn names_that_keep_different_numbers_are_not_the_same(pool: PgPool) {
     let start = soon();
     let fifty = event(
@@ -578,7 +578,7 @@ async fn names_that_keep_different_numbers_are_not_the_same(pool: PgPool) {
     assert_eq!(named(&card(&pool, &fifty).await), [plain.as_str()]);
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn one_organizers_meetups_in_two_cities_are_not_the_same(pool: PgPool) {
     let start = soon();
     let city = |uri: &str, name: &str, at: Point| {
@@ -622,7 +622,7 @@ async fn one_organizers_meetups_in_two_cities_are_not_the_same(pool: PgPool) {
     assert!(named(&card(&pool, &bern).await).is_empty());
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn an_event_that_becomes_an_alias_leaves_the_hint(pool: PgPool) {
     let start = soon();
     let b = event(
@@ -692,7 +692,7 @@ fn an_api_feed_is_named_by_a_page_a_person_can_open() {
     }
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn events_stored_before_the_hint_are_read_at_once(pool: PgPool) {
     let start = soon();
     let mut ids = vec![];
@@ -718,7 +718,7 @@ async fn events_stored_before_the_hint_are_read_at_once(pool: PgPool) {
     assert_eq!(named(&card(&pool, &ids[0]).await).len(), 2);
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_search_page_changes_its_etag_when_its_hint_does(pool: PgPool) {
     let start = soon();
     for n in 0..2 {
@@ -747,7 +747,7 @@ async fn a_search_page_changes_its_etag_when_its_hint_does(pool: PgPool) {
     assert_ne!(etag().await, before);
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn map_points_keep_their_group_with_the_hint_on_or_off(pool: PgPool) {
     let start = soon();
     let a = event(

@@ -95,7 +95,7 @@ async fn group(pool: &PgPool, id: &str, members: &[&String]) {
         .unwrap();
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn ranked_by_shared_taggers_then_recency(pool: PgPool) {
     let seed = save(&pool, "https://example.org/ok-computer", "MusicAlbum").await;
     let two = save(&pool, "https://example.org/kid-a", "MusicAlbum").await;
@@ -154,7 +154,7 @@ async fn ranked_by_shared_taggers_then_recency(pool: PgPool) {
     assert_eq!(rows(&next), std::slice::from_ref(&old));
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_group_counts_its_members_taggers_together_and_never_lists_itself(pool: PgPool) {
     // OK Computer on two services, one group; Kid A on two services, another; Amnesiac alone.
     let a = save(&pool, "https://example.org/ok-computer-tidal", "MusicAlbum").await;
@@ -194,7 +194,7 @@ async fn a_group_counts_its_members_taggers_together_and_never_lists_itself(pool
     }
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn opted_out_old_and_unsampled_references_do_not_count(pool: PgPool) {
     let seed = save(&pool, "https://example.org/seed", "MusicRecording").await;
     let post = "https://bsky.app/profile/x/post/1";
@@ -225,7 +225,7 @@ async fn opted_out_old_and_unsampled_references_do_not_count(pool: PgPool) {
     assert!(rows(&v).is_empty(), "{v}");
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn an_alias_reads_as_its_root_and_bad_requests_are_refused(pool: PgPool) {
     let root = save(&pool, "https://example.org/root", "MusicAlbum").await;
     let other = save(&pool, "https://example.org/other", "MusicAlbum").await;
@@ -282,7 +282,7 @@ async fn an_alias_reads_as_its_root_and_bad_requests_are_refused(pool: PgPool) {
     assert_eq!(columns.join(","), api::UNIT_COLUMNS);
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_row_needs_two_shared_taggers_its_groups_when_collapsed(pool: PgPool) {
     let seed = save(&pool, "https://example.org/seed", "MusicAlbum").await;
     let one = save(&pool, "https://example.org/one", "MusicAlbum").await;
@@ -318,7 +318,7 @@ async fn a_row_needs_two_shared_taggers_its_groups_when_collapsed(pool: PgPool) 
     assert!(rows(&related_with(&config, &pool, &lone, "&collapse=group").await).is_empty());
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn each_tagger_counts_only_their_most_recent_references(pool: PgPool) {
     let seed = save(&pool, "https://example.org/seed", "MusicAlbum").await;
     let recent = save(&pool, "https://example.org/recent", "MusicAlbum").await;
@@ -339,7 +339,7 @@ async fn each_tagger_counts_only_their_most_recent_references(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn an_opted_out_member_of_the_seed_s_group_supplies_no_taggers(pool: PgPool) {
     let album = save(&pool, "https://example.org/album", "MusicAlbum").await;
     let post = "https://bsky.app/profile/x/post/1";
@@ -366,7 +366,7 @@ async fn an_opted_out_member_of_the_seed_s_group_supplies_no_taggers(pool: PgPoo
     assert_eq!(rows(&v), std::slice::from_ref(&other), "{v}");
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_group_counts_only_members_that_pass_the_filters_and_never_opted_out_posts(pool: PgPool) {
     let seed = save(&pool, "https://example.org/seed", "MusicAlbum").await;
     let album = save(&pool, "https://example.org/album", "MusicAlbum").await;
@@ -400,7 +400,7 @@ async fn a_group_counts_only_members_that_pass_the_filters_and_never_opted_out_p
     assert!(rows(&v).is_empty(), "{v}");
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn the_taggers_are_the_authors_of_the_seed_s_most_recent_tags(pool: PgPool) {
     let seed = save(&pool, "https://example.org/seed", "MusicAlbum").await;
     let old = save(&pool, "https://example.org/old", "MusicAlbum").await;
@@ -447,7 +447,7 @@ async fn the_taggers_are_the_authors_of_the_seed_s_most_recent_tags(pool: PgPool
     );
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_seed_with_many_replies_and_few_tags_samples_its_taggers(pool: PgPool) {
     let seed = save(&pool, "https://example.org/seed", "MusicAlbum").await;
     let recent = save(&pool, "https://example.org/recent", "MusicAlbum").await;
@@ -481,7 +481,7 @@ async fn a_seed_with_many_replies_and_few_tags_samples_its_taggers(pool: PgPool)
     );
 }
 
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_collapsed_group_s_row_is_the_member_with_the_most_references_up_to_the_cap(
     pool: PgPool,
 ) {
@@ -519,4 +519,112 @@ async fn a_collapsed_group_s_row_is_the_member_with_the_most_references_up_to_th
     let (_, info) = get_with(&config, &pool, "/v1/info").await;
     assert_eq!(info["limits"]["collapse_refs_per_member"], 2);
     assert_eq!(info["limits"]["related_tag_sample"], 2000);
+}
+
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn the_ranking_holds_whatever_the_dates_even_in_year_one(pool: PgPool) {
+    // A clock in year 1 and references a few weeks before it: the rows still rank by their
+    // shared taggers, then by the newest of their references.
+    let seed = save(&pool, "https://example.org/seed", "MusicAlbum").await;
+    let three = save(&pool, "https://example.org/three", "MusicAlbum").await;
+    let a = save(&pool, "https://example.org/a", "MusicAlbum").await;
+    let b = save(&pool, "https://example.org/b", "MusicAlbum").await;
+    // Of the two rows with two taggers, the one listed after the other on a tie (the lower ID)
+    // has the newer references, so a rank that lost the dates would put them the wrong way.
+    let (newer, older) = if a < b { (a, b) } else { (b, a) };
+    let at = |id: &str, who: usize, day: &str| {
+        let pool = pool.clone();
+        let (id, day) = (id.to_owned(), day.to_owned());
+        async move {
+            sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','music',$3,$4::timestamptz)")
+                .bind(&id)
+                .bind(author(who))
+                .bind(format!("/pub/pubky.app/tags/{id}-{who}-{day}"))
+                .bind(format!("0001-{day}T00:00:00Z"))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    for who in [1, 2, 3] {
+        at(&seed, who, "02-20").await;
+        at(&three, who, "01-02").await;
+    }
+    for who in [1, 2] {
+        at(&newer, who, "02-10").await;
+        at(&older, who, "01-05").await;
+    }
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+    let now: chrono::DateTime<chrono::Utc> = "0001-03-01T00:00:00Z".parse().unwrap();
+    state.clock = Some(std::sync::Arc::new(move || now));
+    let app = api::router(state);
+    for query in ["", "&window=90d"] {
+        let mut request = Request::get(format!("/v1/search?related={seed}{query}"))
+            .body(Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(ConnectInfo(
+            "127.0.0.1:4000".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 200);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            rows(&v),
+            [three.clone(), newer.clone(), older.clone()],
+            "{query}"
+        );
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn the_seed_links_sampled_are_the_ones_with_the_newest_tags_up_to_the_cap(pool: PgPool) {
+    // The seed, two aliases of it and a member of its group, each tagged by its own tagger, the
+    // seed most recently; each tagger also tagged a resource of their own.
+    let seed = save(&pool, "https://example.org/album", "MusicAlbum").await;
+    let first = save(&pool, "https://example.org/album?utm=1", "MusicAlbum").await;
+    let second = save(&pool, "https://example.org/album?utm=2", "MusicAlbum").await;
+    let member = save(&pool, "https://example.net/album", "MusicAlbum").await;
+    for alias in [&first, &second] {
+        sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'tracking')")
+            .bind(alias)
+            .bind(&seed)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    group(&pool, "0123456789abcdef0123456789abcdef", &[&seed, &member]).await;
+    let mut theirs = vec![];
+    for (who, link, days) in [
+        (1, &seed, 1),
+        (2, &first, 2),
+        (3, &second, 30),
+        (4, &member, 40),
+    ] {
+        tag(&pool, link, who, days).await;
+        let own = save(
+            &pool,
+            &format!("https://example.org/own-{who}"),
+            "MusicAlbum",
+        )
+        .await;
+        tag(&pool, &own, who, 3).await;
+        theirs.push(own);
+    }
+    let sorted = |mut ids: Vec<String>| {
+        ids.sort();
+        ids
+    };
+    for (cap, taggers) in [(1, 1), (2, 2), (3, 3), (4, 4), (32, 4)] {
+        let mut config = one_shared();
+        config.search.related_seed_links = cap;
+        let (_, info) = get_with(&config, &pool, "/v1/info").await;
+        assert_eq!(info["limits"]["related_seed_links"], cap, "/v1/info");
+        let v = related_with(&config, &pool, &seed, "").await;
+        assert_eq!(
+            sorted(rows(&v)),
+            sorted(theirs[..taggers].to_vec()),
+            "related_seed_links={cap}"
+        );
+    }
 }

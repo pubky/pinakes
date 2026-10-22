@@ -309,7 +309,10 @@ mod tests {
         }
     }
 
-    #[sqlx::test(migrations = "../../migrations")]
+    #[sqlx::test(
+        migrations = "../../migrations",
+        fixtures("../tests/fixtures/require_h3.sql")
+    )]
     async fn a_line_that_panics_is_skipped_and_the_cursor_moves_past_it(pool: PgPool) {
         let bad = "https://panic.example/ingest";
         PANICS_ON.lock().unwrap().push(bad.into());
@@ -352,7 +355,10 @@ mod tests {
 
     /// A panic in the batch's work after its lines is an error: counted, the batch rolled back
     /// and the cursor held, so the operator sees a stalled feed instead of a silent retry loop.
-    #[sqlx::test(migrations = "../../migrations")]
+    #[sqlx::test(
+        migrations = "../../migrations",
+        fixtures("../tests/fixtures/require_h3.sql")
+    )]
     async fn a_panic_after_the_lines_holds_the_cursor_and_is_counted(pool: PgPool) {
         let lines = vec![
             line("https://example.org/kept-back", "/a"),

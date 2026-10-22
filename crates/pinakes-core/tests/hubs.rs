@@ -425,7 +425,7 @@ async fn wikidata_reads_back_every_hit_before_choosing_one() {
 /// through its barcode, the Apple Music album), Wikidata the second (its item and release
 /// group). The shared release group joins them; each card lists the other first, then the
 /// derived links by service.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn music_links_join_through_the_hubs_and_list_each_other(pool: sqlx::PgPool) {
     use tower::ServiceExt;
     let first = "https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE";
@@ -458,7 +458,7 @@ async fn music_links_join_through_the_hubs_and_list_each_other(pool: sqlx::PgPoo
         let pool = pool.clone();
         async move {
             sqlx::query_scalar::<_, String>(
-                "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key",
+                "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\"",
             )
             .bind(id)
             .fetch_all(&pool)
@@ -569,7 +569,7 @@ async fn music_links_join_through_the_hubs_and_list_each_other(pool: sqlx::PgPoo
 
 /// An English link (a redirect's title) and a German article are one Wikidata item: they join,
 /// and each card lists the other first, then the other editions and encyclopedias.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn wikipedia_editions_join_through_their_item(pool: sqlx::PgPool) {
     use tower::ServiceExt;
     let en = "https://en.m.wikipedia.org/wiki/Kant";
@@ -658,7 +658,7 @@ async fn wikipedia_editions_join_through_their_item(pool: sqlx::PgPool) {
 /// A Wikidata item link is its own hub: any spelling is the item's canonical link, and its card
 /// lists the item's encyclopedia entries and Wikipedia editions from its own claims and
 /// sitelinks (one request, no search).
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_wikidata_item_lists_its_editions_and_encyclopedias(pool: sqlx::PgPool) {
     use tower::ServiceExt;
     let spelled = "https://m.wikidata.org/wiki/Q9312";
@@ -737,7 +737,7 @@ async fn a_wikidata_item_lists_its_editions_and_encyclopedias(pool: sqlx::PgPool
 /// An album link MusicBrainz relates to several releases of one release group (Dracula: TIDAL,
 /// Apple and Deezer each point to "Dracula" and "Dracula (remix)") takes the release group's key
 /// alone, and the links every release has. A configured mirror is asked instead of musicbrainz.org.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
     let uri = "https://tidal.com/album/495402659";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -778,14 +778,14 @@ async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
         }
     };
     assert_eq!(
-        rows("SELECT key FROM resource_key WHERE resource_id=$1 ORDER BY key").await,
+        rows("SELECT key FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\"").await,
         [
             "mb:release-group:86b6aeeb-f305-45f6-a9c0-76bd6235227e",
             "upc:0196874054246"
         ]
     );
     assert_eq!(
-        rows("SELECT site||' '||uri FROM derived_link WHERE resource_id=$1 AND source='musicbrainz' ORDER BY site").await,
+        rows("SELECT site||' '||uri FROM derived_link WHERE resource_id=$1 AND source='musicbrainz' ORDER BY site COLLATE \"C\"").await,
         [
             "Apple Music https://music.apple.com/au/album/1874125260",
             "Deezer https://www.deezer.com/album/910510411",
@@ -795,7 +795,7 @@ async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
     );
     // Facts both releases share: the barcode, not either MBID or the differing credits.
     assert_eq!(
-        rows("SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name").await,
+        rows("SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name COLLATE \"C\"").await,
         ["upc 0196874054246"]
     );
     let seen = t.seen.lock().unwrap().clone();
@@ -810,7 +810,7 @@ async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
 /// Bohemian Rhapsody on TIDAL: a TIDAL track page states its own ISRC, a key. One
 /// MusicBrainz does not relate by URL joins the one recording its ISRC is on; an ISRC nobody else
 /// knows keeps its key and stays alone; one MusicBrainz gives to two recordings is no key.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
     let tracks = [
         // The seed: MusicBrainz relates the URL to recording b1a9c0e9.
@@ -897,7 +897,7 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
                 .unwrap()
         }
     };
-    let keys = "SELECT key||' '||source||' '||via FROM resource_key WHERE resource_id=$1 ORDER BY key,source";
+    let keys = "SELECT key||' '||source||' '||via FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\",source";
     let joined = rows(keys, ids[1].clone()).await;
     assert!(
         joined.contains(&"isrc:GBUM71029604 service tidal".to_owned()),
@@ -925,7 +925,7 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
     );
     assert_eq!(
         rows(
-            "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 AND source='service' ORDER BY name",
+            "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 AND source='service' ORDER BY name COLLATE \"C\"",
             ids[1].clone()
         )
         .await,
@@ -967,7 +967,7 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
     assert_eq!(tidal, ["https://tidal.com/track/534050211"], "{card}");
     // The recording's other links, found through the ISRC.
     let links = rows(
-        "SELECT uri FROM derived_link WHERE resource_id=$1 ORDER BY uri",
+        "SELECT uri FROM derived_link WHERE resource_id=$1 ORDER BY uri COLLATE \"C\"",
         ids[1].clone(),
     )
     .await;
@@ -998,7 +998,7 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
 /// With Deezer's API on: a Deezer album's own barcode is a key, iTunes names the one Apple album
 /// for it, and the tagged Apple link joins (Cut to the Feeling). A TIDAL track's own ISRC names
 /// the one Deezer track. Off by default, nothing asks Deezer.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_deezer_barcode_names_the_apple_album_that_joins(pool: sqlx::PgPool) {
     let deezer = "https://www.deezer.com/album/41839661";
     let apple = "https://music.apple.com/us/album/1445304934";
@@ -1073,7 +1073,7 @@ async fn a_deezer_barcode_names_the_apple_album_that_joins(pool: sqlx::PgPool) {
     };
     assert_eq!(
         rows(
-            "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key",
+            "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\"",
             ids[0].clone()
         )
         .await,
@@ -1102,7 +1102,7 @@ async fn a_deezer_barcode_names_the_apple_album_that_joins(pool: sqlx::PgPool) {
 }
 
 /// Two Wikidata item links in one batch: one read for both, each item's own read from the cache.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn item_links_are_read_in_one_request(pool: sqlx::PgPool) {
     for q in ["Q202996", "Q33328630"] {
         let uri = format!("https://www.wikidata.org/wiki/{q}");
@@ -1132,7 +1132,7 @@ async fn item_links_are_read_in_one_request(pool: sqlx::PgPool) {
     assert_eq!(reads.len(), 1, "{reads:?}");
     assert!(reads[0].contains("ids=Q202996%7CQ33328630"), "{reads:?}");
     let keys: Vec<String> = sqlx::query_scalar(
-        "SELECT key FROM resource_key WHERE source='wikidata_item' ORDER BY key",
+        "SELECT key FROM resource_key WHERE source='wikidata_item' ORDER BY key COLLATE \"C\"",
     )
     .fetch_all(&pool)
     .await
@@ -1144,7 +1144,7 @@ async fn item_links_are_read_in_one_request(pool: sqlx::PgPool) {
 /// (keyed by it), so it joins the TIDAL track its ISRC names; the page of an ISRC one recording
 /// has joins too; an ISRC two recordings have names neither (a fact, no key); the artist's page
 /// joins the TIDAL artist.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     let recording = "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69";
     let single = "https://musicbrainz.org/isrc/GBUM71029604";
@@ -1395,7 +1395,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
                 .unwrap()
         }
     };
-    let keys = "SELECT key FROM resource_key WHERE resource_id=$1 AND source='musicbrainz_entity' ORDER BY key";
+    let keys = "SELECT key FROM resource_key WHERE resource_id=$1 AND source='musicbrainz_entity' ORDER BY key COLLATE \"C\"";
     let mbid = "mb:recording:b1a9c0e9-d987-4042-ae91-78d6a3267d69".to_owned();
     assert!(rows(keys, ids[recording].clone()).await.contains(&mbid));
     let isrc_keys = rows(keys, ids[single].clone()).await;
@@ -1447,7 +1447,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     }
     // A merged recording with 32 ISRCs (the facts cap) keeps its MBIDs: the cap cuts ISRCs first.
     let facts = rows(
-        "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name,value",
+        "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name COLLATE \"C\",value COLLATE \"C\"",
         ids[merged_many].clone(),
     )
     .await;
@@ -1468,7 +1468,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     );
     // The recording's links on services, keyed by it, and its facts.
     let links = rows(
-        "SELECT uri||' '||coalesce(key,'-') FROM derived_link WHERE resource_id=$1 ORDER BY uri",
+        "SELECT uri||' '||coalesce(key,'-') FROM derived_link WHERE resource_id=$1 ORDER BY uri COLLATE \"C\"",
         ids[recording].clone(),
     )
     .await;
@@ -1477,7 +1477,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         "{links:?}"
     );
     let facts = rows(
-        "SELECT name FROM resource_fact WHERE resource_id=$1 AND source='musicbrainz_entity' ORDER BY name",
+        "SELECT name FROM resource_fact WHERE resource_id=$1 AND source='musicbrainz_entity' ORDER BY name COLLATE \"C\"",
         ids[recording].clone(),
     )
     .await;
@@ -1509,7 +1509,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     );
     assert_eq!(
         rows(
-            "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name",
+            "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name COLLATE \"C\"",
             ids[concert].clone()
         )
         .await,
@@ -1542,7 +1542,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     assert!(rows(any_key, ids[revoked].clone()).await.is_empty());
     assert_eq!(
         rows(
-            "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name",
+            "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name COLLATE \"C\"",
             ids[revoked].clone()
         )
         .await,
@@ -1559,7 +1559,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         assert!(rows(any_key, ids[page].clone()).await.is_empty(), "{page}");
         assert_eq!(
             rows(
-                "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name",
+                "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name COLLATE \"C\"",
                 ids[page].clone()
             )
             .await,
@@ -1655,7 +1655,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         ["mb:artist:a74b1b7f-71a5-4011-9441-d0b5e4122711"]
     );
     let lineup_facts = rows(
-        "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name,value",
+        "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name COLLATE \"C\",value COLLATE \"C\"",
         ids[lineup].clone(),
     )
     .await;
@@ -1775,7 +1775,7 @@ async fn a_musicbrainz_page_card_comes_from_the_entity() {
 /// Wikipedia article's sources record only the key their own service proves and don't retry (asking again would read the same
 /// megabytes), and the MusicBrainz card is read from the page, the second time too, from the
 /// failure cache.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn an_entity_over_the_cap_is_no_answer(pool: sqlx::PgPool) {
     let uri = format!("https://musicbrainz.org/artist/{BIG_BAND}");
     let t = Arc::new(Recorded {
@@ -1819,12 +1819,13 @@ async fn an_entity_over_the_cap_is_no_answer(pool: sqlx::PgPool) {
         // The article's own Wikipedia named the item: that key stays.
         (&ids[2], "wikidata:Q999999999".to_owned()),
     ] {
-        let keys: Vec<String> =
-            sqlx::query_scalar("SELECT key FROM resource_key WHERE resource_id=$1 ORDER BY key")
-                .bind(id)
-                .fetch_all(&pool)
-                .await
-                .unwrap();
+        let keys: Vec<String> = sqlx::query_scalar(
+            "SELECT key FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\"",
+        )
+        .bind(id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
         assert_eq!(keys, [own]);
         let retrying: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM also_on_dirty WHERE resource_id=$1 AND attempts>0",
@@ -1848,7 +1849,7 @@ async fn an_entity_over_the_cap_is_no_answer(pool: sqlx::PgPool) {
 /// its barcode key (TIDAL's own, stored by an earlier run): the release's keys, facts and links.
 /// A barcode MusicBrainz has no release for (Dracula's, on an album URL it does not know
 /// either) asks once, in both spellings, and finds nothing.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn an_album_s_barcode_key_finds_its_musicbrainz_release(pool: sqlx::PgPool) {
     let mut ids = vec![];
     for (uri, upc) in [
@@ -1897,7 +1898,7 @@ async fn an_album_s_barcode_key_finds_its_musicbrainz_release(pool: sqlx::PgPool
         let pool = pool.clone();
         async move {
             sqlx::query_scalar::<_, String>(
-                "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key",
+                "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\"",
             )
             .bind(id)
             .fetch_all(&pool)
@@ -1911,7 +1912,7 @@ async fn an_album_s_barcode_key_finds_its_musicbrainz_release(pool: sqlx::PgPool
         "{hydra:?}"
     );
     let links: Vec<String> = sqlx::query_scalar(
-        "SELECT uri||' '||via FROM derived_link WHERE resource_id=$1 AND source='musicbrainz' ORDER BY uri",
+        "SELECT uri||' '||via FROM derived_link WHERE resource_id=$1 AND source='musicbrainz' ORDER BY uri COLLATE \"C\"",
     )
     .bind(&ids[0])
     .fetch_all(&pool)
@@ -1930,7 +1931,7 @@ async fn an_album_s_barcode_key_finds_its_musicbrainz_release(pool: sqlx::PgPool
 
 /// A barcode the `musicbrainz` source keyed itself (from a release it once found by URL) never
 /// finds that release again once the URL relation is gone: an editor's removal stands.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn musicbrainz_s_own_barcode_never_re_finds_its_release(pool: sqlx::PgPool) {
     let uri = "https://tidal.com/album/199574241";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -1982,7 +1983,7 @@ async fn musicbrainz_s_own_barcode_never_re_finds_its_release(pool: sqlx::PgPool
 /// Discogs joins exactly and at its level: master 21491 is OK Computer's release group (so it
 /// joins the Spotify album), artist 3840 is Radiohead (as is the TIDAL artist page), and release
 /// 83182 is one edition: its own release and barcode, never the release group.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn discogs_joins_at_its_level(pool: sqlx::PgPool) {
     let links = [
         (
@@ -2042,7 +2043,8 @@ async fn discogs_joins_at_its_level(pool: sqlx::PgPool) {
                 .unwrap()
         }
     };
-    let keys = "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key";
+    let keys =
+        "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\"";
     assert_eq!(
         rows(keys, ids[0].clone()).await,
         [
@@ -2082,7 +2084,7 @@ async fn discogs_joins_at_its_level(pool: sqlx::PgPool) {
     // relates it to (Q202996, naming this release group back) names the album's, keyed by the
     // release group so a tagged one joins.
     let album_pages =
-        "SELECT site||' '||uri||' '||coalesce(key,'-') FROM derived_link WHERE resource_id=$1 AND source='musicbrainz' ORDER BY site";
+        "SELECT site||' '||uri||' '||coalesce(key,'-') FROM derived_link WHERE resource_id=$1 AND source='musicbrainz' ORDER BY site COLLATE \"C\"";
     assert_eq!(
         rows(album_pages, ids[0].clone()).await,
         [
@@ -2117,7 +2119,7 @@ async fn discogs_joins_at_its_level(pool: sqlx::PgPool) {
 
 /// A Discogs release MusicBrainz relates to releases of different release groups is ambiguous:
 /// the MusicBrainz source records nothing for it, not the first release's group.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_discogs_release_of_two_release_groups_joins_nothing(pool: sqlx::PgPool) {
     let uri = "https://www.discogs.com/release/1";
     let id = store::ensure_resource(&pool, uri).await.unwrap();

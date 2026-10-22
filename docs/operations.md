@@ -43,12 +43,14 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `related_refs_per_tagger` | `1000` | References a related page reads per sampled tagger (their most recent). |
 | `related_min_shared` | `2` | Shared taggers a related row needs (its group's, when collapsed). |
 | `related_tag_sample` | `2000` | Tags a related page reads per seed link (its most recent), from which the taggers are sampled. |
+| `related_seed_links` | `32` | Seed links a related page samples: of the resource, its group's members and their aliases, the ones with the newest tags, at most this many. |
 | `collapse_refs_per_member` | `10000` | References counted per group member when `collapse=group` picks a group's row. |
 | `max_radius_m` | `200000.0` | Largest `near` radius (metres). |
 | `h3_resolutions` | `[0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 11, 11, 11, 11, 11, 11, 11]` | H3 resolution per map zoom level. |
 | `max_cluster_cells` | `10000` | Most cells one cluster query returns. |
 | `api_cache_capacity` | `10000` | API response cache entries. |
 | `reach_cost` | `6` | Budget units a reach search costs. |
+| `related_cost` | `6` | Budget units a related search costs. |
 | `preview_requests_per_minute` | `30` | Preview requests per minute per client. |
 | `preview_uri_requests_per_minute` | `30` | Preview requests per minute per URI. |
 | `preview_cache_capacity` | `10000` | Preview cache entries. |
@@ -511,9 +513,10 @@ service besides its own (DataCite and Crossref for a paper, ProtonDB, PCGamingWi
 game, the provenance reads and deps.dev for a package, Software Heritage for a repository, the
 Federal Register API, Discogs' record for a release) keeps what the link and the other services
 gave when that service fails: the link's own key is recorded, the failure is counted in
-`pinakes_also_on_service_errors_total{service,class}`, and the run asks again after the
-service's retry time (fifteen minutes unless it said otherwise) instead of after the source's
-lifetime.
+`pinakes_also_on_service_errors_total{service,class}`, and the run comes back after a failed
+run's backoff instead of after the source's lifetime: five minutes, doubling to an hour while the
+service keeps failing, or the wait the service named when longer. A run in which every service
+answers resets it.
 The sources, in the order they run, are `service`, `tidal`, `musicbrainz`, `musicbrainz_entity`,
 `performers`, `wikidata`, `discogs`, `deezer` and `itunes` (music), `wikipedia`, `wikidata_item`, `books`, `films`, `podcasts`
 and `titles`, `osm_wikidata`, `wikidata_osm` and `btcmap` (places), `federal_register`, `unpaywall`,

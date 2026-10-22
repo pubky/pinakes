@@ -97,7 +97,8 @@ outside this policy.
 ## Run locally
 
 Requires Rust 1.89 or newer, PostgreSQL 16–18 with PostGIS 3.4+, `pg_trgm` and h3 4.2.3+
-(`pinakesd` refuses to start without `h3_latlng_to_cell(point, integer)`). On Ubuntu:
+(`pinakesd` refuses to start without `h3_latlng_to_cell(point, integer)`, and every database test
+fails with the h3 version found). On Ubuntu:
 `postgresql-16 postgresql-16-postgis-3 postgresql-contrib-16 postgresql-16-h3` (from the
 [PGDG repository](https://www.postgresql.org/download/linux/ubuntu/) if the distribution lacks
 version 16). Docker is not required.

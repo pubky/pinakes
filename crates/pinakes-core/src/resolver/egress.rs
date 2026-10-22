@@ -707,6 +707,13 @@ impl Egress {
         }
         Ok(())
     }
+    /// Drop the discovery cache's answer for a request: an answer that must not stay in memory
+    /// (a record the public can't read), whatever its TTL.
+    pub async fn forget_discovery(&self, uri: &str, options: &FetchOptions) -> Result<()> {
+        let key = Self::discovery_key(uri, options)?;
+        self.discovered.lock().await.remove(&key);
+        Ok(())
+    }
     async fn cached(
         &self,
         key: String,
