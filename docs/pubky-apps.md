@@ -2,8 +2,7 @@
 
 People tag objects that Pubky apps other than pubky.app keep in their public storage: a Loopky
 deck, a Mapky route, a room. Pinakes fetches such a `pubky://` object from its owner's homeserver
-and gives it a card. pubky.app's own objects (posts, profiles) are Nexus's and never fetched,
-apart from its marketplace.
+and gives it a card. pubky.app's own objects (posts, profiles) are Nexus's and never fetched.
 
 For an app Pinakes has a profile for, the card is that app's: a schema.org type, the name,
 description, image and a few facts the app's format holds, and `open_in`, the clients that open
@@ -75,18 +74,19 @@ Opens in Pubky Rooms: `https://pubky-rooms-staging.fly.dev/r/{owner}/{room}` (th
 address until rooms.pubky.app is live). Never fetched: `members/`, `messages/`, `reactions/`,
 `bans/`, `mutes/`, `tags/`, `profile.json`.
 
-### Pubky marketplace (`pubky.app/marketplace/v1/`)
+### Pubky marketplace (`app.marketplace/`)
+
+The marketplace's own namespace, new and still changing: each kind is one entry in its profile.
 
 | Path | Card | Opens in the Pubky Shop |
 | --- | --- | --- |
-| `shop.json` | `OnlineStore`: `name`, `bio`, `avatarUrl`; fact `country` | `https://pubky.app/shop/marketplace/shop/{owner}` |
-| `listings/{listing}` | `Product`: `title`, `description`, the first image; facts `price` (the fixed price or an auction's starting one, `1.00 USD`), `condition`, `category`, `country`. Only an `active` listing whose auction (if any) has not ended, and an auction is fetched again when it ends; an adult-only listing shows no image | `https://pubky.app/shop/marketplace/listing/{owner}/{listing}` |
-| `drops/{drop}` | `SaleEvent`: `title`, `description`, the first image, `startsAt`, `endsAt` | `https://pubky.app/shop/marketplace/drop/{owner}/{drop}` |
+| `v1/shop.json` | `OnlineStore`: `name`, `bio`, `avatarUrl`; fact `country` | `https://pubky.app/shop/marketplace/shop/{owner}` |
+| `v1/listings/{listing}` | `Product`: `title`, `description`, the first image; facts `price` (the fixed price or an auction's starting one, `1.00 USD`), `condition`, `category`, `country`. Only an `active` listing whose auction (if any) has not ended, and an auction is fetched again when it ends; an adult-only listing shows no image | `https://pubky.app/shop/marketplace/listing/{owner}/{listing}` |
+| `v1/drops/{drop}` | `SaleEvent`: `title`, `description`, the first image, `startsAt`, `endsAt` | `https://pubky.app/shop/marketplace/drop/{owner}/{drop}` |
 
 A record must name its owner (`ownerPubky`) and kind (`recordType`), and a listing or drop its
-own ID. Never fetched: `media/`, `reviews/`, `review_responses/`, `deliverables/`,
-`delivery-keys/`, `session-proofs/`, `cli-grant-proofs/`, `attestor/`, and the rest of
-`pubky.app/`. The site of these cards is `pubky.app`.
+own ID. Every other path in the namespace (media files, reviews, encrypted deliverables, keys,
+proofs) is never fetched.
 
 ## Adding a Pubky app
 

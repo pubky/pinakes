@@ -1,15 +1,16 @@
-//! The Pubky marketplace (the shop at pubky.app/shop): a seller's shop, listings and drops, under
-//! pubky.app's own namespace. Its media files, reviews, encrypted deliverables, keys and proofs
-//! are never fetched.
+//! The Pubky marketplace (the shop at pubky.app/shop): a seller's shop, listings and drops in the
+//! marketplace's namespace, `app.marketplace`. Its layout is new and still changing: each kind is
+//! one entry below, and every other path in it (media files, reviews, encrypted deliverables,
+//! keys, proofs) is never fetched.
 use super::{read, Client, Kind, Object, Profile, Read};
 use crate::model::ResourceMeta;
 use serde_json::Value;
 
 pub static PROFILE: Profile = Profile {
-    namespaces: &["pubky.app/marketplace/v1"],
+    namespaces: &["app.marketplace"],
     kinds: &[
         Kind {
-            path: "shop.json",
+            path: "v1/shop.json",
             read: shop,
             open_in: &[Client {
                 client: "Pubky Shop",
@@ -17,7 +18,7 @@ pub static PROFILE: Profile = Profile {
             }],
         },
         Kind {
-            path: "listings/{listing}",
+            path: "v1/listings/{listing}",
             read: listing,
             open_in: &[Client {
                 client: "Pubky Shop",
@@ -25,7 +26,7 @@ pub static PROFILE: Profile = Profile {
             }],
         },
         Kind {
-            path: "drops/{drop}",
+            path: "v1/drops/{drop}",
             read: drop,
             open_in: &[Client {
                 client: "Pubky Shop",

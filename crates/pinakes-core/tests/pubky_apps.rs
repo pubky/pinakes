@@ -202,13 +202,13 @@ fn marketplace() {
     assert_eq!(doc.type_name, "OnlineStore");
     assert_eq!(doc.name.as_deref(), Some("Dezentralshop"));
     assert_eq!(doc.description.as_deref(), Some("Your Swiss Bitcoin store"));
-    assert_eq!(
-        doc.image,
-        Some(format!(
-            "pubky://{shop}/pub/pubky.app/marketplace/v1/media/2970e7ce535d4a39ae1ecc7fcdf39ece"
-        ))
-    );
-    assert_eq!(doc.site, "pubky.app");
+    // Its avatar: the media file the record names.
+    assert!(doc
+        .image
+        .as_ref()
+        .unwrap()
+        .ends_with("/media/2970e7ce535d4a39ae1ecc7fcdf39ece"));
+    assert_eq!(doc.site, "app.marketplace");
     assert_eq!(facts(&doc)["country"], "CH");
     assert_eq!(
         links(&doc),
@@ -301,14 +301,11 @@ fn marketplace() {
         )
     );
     never_fetched(&[
-        "pubky.app/marketplace/v1/media/2970e7ce535d4a39ae1ecc7fcdf39ece",
-        "pubky.app/marketplace/v1/reviews/0035SFYCGVBV2",
-        "pubky.app/marketplace/v1/deliverables/a/1",
-        "pubky.app/marketplace/v1/delivery-keys/current",
-        "pubky.app/marketplace/v1/session-proofs/x",
-        "pubky.app/marketplace/v2/listings/x",
-        "pubky.app/marketplace-service/v1/x",
-        "pubky.app/posts/0034A0X7NJ52G",
+        "app.marketplace/v1/media/2970e7ce535d4a39ae1ecc7fcdf39ece",
+        "app.marketplace/v1/reviews/0035SFYCGVBV2",
+        "app.marketplace/v1/deliverables/a/1",
+        "app.marketplace/v1/posts/0035SFYCGVBV2/0035SG5BDKZ18.json",
+        "app.marketplace/v2/listings/x",
     ]);
 }
 

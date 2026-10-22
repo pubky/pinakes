@@ -29,7 +29,7 @@ pub static REGISTRY: &[&Profile] = &[
 /// One Pubky app: where its objects live and how each kind becomes a card.
 pub struct Profile {
     /// Its namespaces below `/pub/`, as path segments joined by `/`: `loopky`,
-    /// `pubky.app/marketplace/v1`.
+    /// `app.marketplace`.
     pub namespaces: &'static [&'static str],
     /// The objects that get a card. Every other path in its namespaces is never fetched.
     pub kinds: &'static [Kind],
@@ -100,7 +100,7 @@ pub enum Route {
 }
 /// The route of a `pubky://` object of another app, from its decoded path segments below
 /// `/pub/` (`resolver::pubky_app`'s reading). `None` for pubky.app's own objects, which Nexus
-/// describes, apart from its marketplace (a profile).
+/// describes.
 pub fn route(segments: &[String]) -> Option<Route> {
     for profile in REGISTRY {
         for namespace in profile.namespaces {
