@@ -557,6 +557,9 @@ async fn subject(pool: &PgPool, id: &str) -> Result<Option<Subject>> {
     }))
 }
 
+/// How far ahead a claimed resource's next attempt moves, so a crashed worker's rows come back.
+pub const LEASE: Duration = Duration::from_secs(600);
+
 /// Run the due sources of up to `limit` resources; returns how many were handled.
 pub async fn drain(
     pool: &PgPool,
@@ -564,13 +567,27 @@ pub async fn drain(
     sources: &[Arc<dyn Source>],
     limit: i64,
 ) -> Result<usize> {
+    drain_leased(pool, cx, sources, limit, LEASE).await
+}
+
+/// `drain` with claims held for `lease` (tests use a short one).
+pub async fn drain_leased(
+    pool: &PgPool,
+    cx: &Context,
+    sources: &[Arc<dyn Source>],
+    limit: i64,
+    lease: Duration,
+) -> Result<usize> {
     let cfg = &cx.config.also_on;
-    // Claimed rows move one lease ahead, so a crashed worker's rows come back.
-    let due: Vec<String> = sqlx::query_scalar("UPDATE also_on_dirty SET next_attempt_at=now()+interval '10 minutes' WHERE resource_id IN (SELECT resource_id FROM also_on_dirty WHERE next_attempt_at<=now() ORDER BY next_attempt_at,resource_id LIMIT $1 FOR UPDATE SKIP LOCKED) RETURNING resource_id")
+    // Claimed rows move one lease ahead, so a crashed worker's rows come back. Each row's lease
+    // is kept: its run's outcome is written against it, not against the clock.
+    let due: Vec<(String, DateTime<Utc>)> = sqlx::query_as("UPDATE also_on_dirty SET next_attempt_at=now()+make_interval(secs => $2) WHERE resource_id IN (SELECT resource_id FROM also_on_dirty WHERE next_attempt_at<=now() ORDER BY next_attempt_at,resource_id LIMIT $1 FOR UPDATE SKIP LOCKED) RETURNING resource_id,next_attempt_at")
         .bind(limit)
+        .bind(lease.as_secs_f64())
         .fetch_all(pool)
         .await?;
     let handled = due.len();
+    let (due, leases): (Vec<String>, Vec<_>) = due.into_iter().unzip();
     // Batched hub lookups for the whole batch first (MusicBrainz URLs, Wikidata items).
     let uris: Vec<String> = sqlx::query_scalar("SELECT uri FROM resource WHERE id=ANY($1)")
         .bind(&due)
@@ -589,24 +606,36 @@ pub async fn drain(
             tracing::error!(source = source.id(), "also-on prefetch panicked");
         }
     }
-    let work = due.into_iter().map(|id| async move {
+    let work = due.into_iter().zip(leases).map(|(id, lease)| async move {
         let result = one(pool, cx, sources, &id).await;
-        (id, result)
+        (id, lease, result)
     });
     let results = futures_util::stream::iter(work)
         .buffer_unordered(cfg.concurrency.max(1))
         .collect::<Vec<_>>()
         .await;
-    // A change saved while a resource was read marked it due again (its lease, ten minutes ahead,
-    // became now): that mark stands, so the change is read too.
-    for (id, result) in results {
+    // A change saved while a resource was read marked it due again (its lease became now): that
+    // mark stands, so the change is read too. So does another worker's claim after this lease
+    // ran out. The next attempt is written only while the row still holds this run's lease,
+    // however long the batch took; the count of failed runs and the error are always written.
+    let next = |at: &str| {
+        format!("next_attempt_at=CASE WHEN next_attempt_at=$2 THEN {at} ELSE next_attempt_at END")
+    };
+    for (id, lease, result) in results {
         match result {
             Ok(Some(Next {
                 lifetime,
                 partial: None,
             })) => {
-                sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()+$2,attempts=0,last_error=NULL WHERE resource_id=$1 AND next_attempt_at>now()")
-                    .bind(&id).bind(lifetime).execute(pool).await?;
+                sqlx::query(&format!(
+                    "UPDATE also_on_dirty SET attempts=0,last_error=NULL,{} WHERE resource_id=$1",
+                    next("now()+$3")
+                ))
+                .bind(&id)
+                .bind(lease)
+                .bind(lifetime)
+                .execute(pool)
+                .await?;
             }
             // A secondary service failed: what the run found is recorded, and the run comes back
             // after a failed run's backoff, so a service that keeps failing is asked less and
@@ -616,14 +645,24 @@ pub async fn drain(
                 lifetime,
                 partial: Some(asked),
             })) => {
-                sqlx::query("UPDATE also_on_dirty SET attempts=attempts+1,last_error=NULL,next_attempt_at=now()+least($2,make_interval(secs => greatest($4::float8,least($3::float8*power(2,least(attempts,6)),3600)))) WHERE resource_id=$1 AND next_attempt_at>now()")
-                    .bind(&id).bind(lifetime).bind(cfg.retry_secs as f64).bind(asked.as_secs().min(86_400) as f64).execute(pool).await?;
+                sqlx::query(&format!(
+                    "UPDATE also_on_dirty SET attempts=attempts+1,last_error=NULL,{} WHERE resource_id=$1",
+                    next("now()+least($3,make_interval(secs => greatest($5::float8,least($4::float8*power(2,least(attempts,6)),3600))))")
+                ))
+                .bind(&id)
+                .bind(lease)
+                .bind(lifetime)
+                .bind(cfg.retry_secs as f64)
+                .bind(asked.as_secs().min(86_400) as f64)
+                .execute(pool)
+                .await?;
             }
             Ok(None) => {
                 sqlx::query(
-                    "DELETE FROM also_on_dirty WHERE resource_id=$1 AND next_attempt_at>now()",
+                    "DELETE FROM also_on_dirty WHERE resource_id=$1 AND next_attempt_at=$2",
                 )
                 .bind(&id)
+                .bind(lease)
                 .execute(pool)
                 .await?;
             }
@@ -633,8 +672,17 @@ pub async fn drain(
                 let asked = error
                     .downcast_ref::<crate::resolver::RetryLater>()
                     .map_or(0, |r| r.seconds.min(86_400)) as f64;
-                sqlx::query("UPDATE also_on_dirty SET attempts=attempts+1,last_error=$2,next_attempt_at=now()+make_interval(secs => greatest($4::float8,least($3::float8*power(2,least(attempts,6)),3600))) WHERE resource_id=$1")
-                    .bind(&id).bind(crate::resolver::error_class(&error)).bind(cfg.retry_secs as f64).bind(asked).execute(pool).await?;
+                sqlx::query(&format!(
+                    "UPDATE also_on_dirty SET attempts=attempts+1,last_error=$3,{} WHERE resource_id=$1",
+                    next("now()+make_interval(secs => greatest($5::float8,least($4::float8*power(2,least(attempts,6)),3600)))")
+                ))
+                .bind(&id)
+                .bind(lease)
+                .bind(crate::resolver::error_class(&error))
+                .bind(cfg.retry_secs as f64)
+                .bind(asked)
+                .execute(pool)
+                .await?;
             }
         }
     }

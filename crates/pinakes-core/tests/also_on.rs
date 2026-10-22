@@ -1626,6 +1626,117 @@ async fn a_failed_secondary_service_backs_off_until_it_answers(pool: PgPool) {
     assert!(due_in > 3600.0, "{due_in}");
 }
 
+/// A source that answers as `inner`, but whose lookup of `claimed` first waits `delay`, then
+/// claims that resource as another worker would whose drain began after the lease ran out.
+struct Outlives {
+    inner: Arc<Fake>,
+    pool: PgPool,
+    claimed: &'static str,
+    delay: Duration,
+}
+#[async_trait]
+impl Source for Outlives {
+    fn id(&self) -> &'static str {
+        self.inner.id()
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        self.inner.applies(subject)
+    }
+    fn ttl(&self) -> Duration {
+        self.inner.ttl()
+    }
+    async fn lookup(&self, cx: &Context, subject: &Subject) -> anyhow::Result<Found> {
+        if subject.uri == self.claimed {
+            tokio::time::sleep(self.delay).await;
+            sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()+interval '1 hour' WHERE resource_id=$1")
+                .bind(&subject.id)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+        }
+        self.inner.lookup(cx, subject).await
+    }
+}
+
+/// A batch that outlives its lease still records every run against it (Kimi, train-1): a clean
+/// run schedules its next one, a run no source applies to leaves the queue, a partial or failed
+/// run backs off and counts. Only a row another claim took meanwhile keeps that claim.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_batch_that_outlives_its_lease_still_records_its_runs(pool: PgPool) {
+    let uris = [
+        "https://example.org/clean",
+        "https://example.org/nothing",
+        "https://example.org/partial",
+        "https://example.org/failed",
+        "https://example.org/claimed",
+    ];
+    let mut ids = vec![];
+    for uri in uris {
+        ids.push(page(&pool, uri, "Paper").await);
+    }
+    let hub = Fake::new("datacite");
+    let found = |retry_after| {
+        Ok(Found {
+            keys: vec![key("doi:10.1000/x")],
+            retry_after,
+            ..Default::default()
+        })
+    };
+    hub.answer(uris[0], found(None));
+    hub.answer(uris[2], found(Some(Duration::from_secs(60))));
+    hub.answer(uris[3], Err(anyhow::anyhow!("datacite answered 500")));
+    hub.answer(uris[4], found(None));
+    let sources: Vec<Arc<dyn Source>> = vec![Arc::new(Outlives {
+        inner: hub,
+        pool: pool.clone(),
+        claimed: uris[4],
+        delay: Duration::from_millis(1500),
+    })];
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let handled = also_on::drain_leased(
+        &pool,
+        &cx(Config::default()),
+        &sources,
+        100,
+        Duration::from_secs(1),
+    )
+    .await
+    .unwrap();
+    assert_eq!(handled, 5);
+    let state = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (f64, i32, Option<String>)>(
+                "SELECT extract(epoch FROM next_attempt_at-now())::float8,attempts,last_error FROM also_on_dirty WHERE resource_id=$1",
+            )
+            .bind(&id)
+            .fetch_optional(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let (due_in, attempts, error) = state(ids[0].clone()).await.unwrap();
+    assert!(
+        due_in > 3600.0 && attempts == 0 && error.is_none(),
+        "{due_in} {attempts} {error:?}"
+    );
+    assert_eq!(state(ids[1].clone()).await, None);
+    let (due_in, attempts, error) = state(ids[2].clone()).await.unwrap();
+    assert!((290.0..=305.0).contains(&due_in), "{due_in}");
+    assert_eq!((attempts, error), (1, None));
+    let (due_in, attempts, error) = state(ids[3].clone()).await.unwrap();
+    assert!((290.0..=305.0).contains(&due_in), "{due_in}");
+    assert_eq!(attempts, 1);
+    assert!(error.is_some());
+    // The other claim stands; this run's clean outcome resets the count.
+    let (due_in, attempts, error) = state(ids[4].clone()).await.unwrap();
+    assert!((3500.0..=3600.0).contains(&due_in), "{due_in}");
+    assert_eq!((attempts, error), (0, None));
+}
+
 /// A page that only types itself as music and names a service (its own JSON-LD) is on no
 /// service: it takes no service's place on the group's cards, and its own card hides no derived
 /// link of the service it names.
