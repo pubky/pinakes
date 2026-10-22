@@ -4277,3 +4277,18 @@ fn an_event_with_two_rules_or_an_exception_rule_is_left_out() {
         );
     }
 }
+
+#[test]
+fn a_rule_with_a_huge_interval_expands_within_the_deadline() {
+    // The library builds one period at a time: a yearly rule every 10,000 years builds its first
+    // year, then steps past the calendar's end and stops, well within the parse deadline.
+    let began = std::time::Instant::now();
+    let container = parse(&cal(&event(
+        "UID:i\nDTSTART:20261020T120000Z\nRRULE:FREQ=YEARLY;INTERVAL=10000\nSUMMARY:i",
+    )))
+    .container
+    .unwrap();
+    assert!(began.elapsed() < std::time::Duration::from_secs(2));
+    assert_eq!(container.occurrences.len(), 1);
+    assert!(container.warnings.is_empty(), "{:?}", container.warnings);
+}
