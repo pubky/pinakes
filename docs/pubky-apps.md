@@ -10,10 +10,12 @@ the object (`[{client, url}]`). A profile also says which of the app's objects g
 other path in its namespace (the user's own state, private-by-intent data, files, tags) is never
 fetched. An object of a listed kind whose content keeps it from a card (an unlisted room, a
 withdrawn listing) is `missing` at once: its content says so, it cannot flap. An object that
-is gone (404) is `missing` once a second fetch confirms it, as any link. Either way it keeps
-nothing of a card it had, neither on its card nor in its change history (the lines stay, with
-their kind, fields and time), and is checked again as missing links are. An object stored
-before its path was left out becomes `missing` at once, without a request.
+is gone (404) is `missing` once a second fetch confirms it, as any link. Either way an object in
+a profiled app's namespace keeps nothing of a card it had, neither on its card nor in its change
+history (the lines stay, with their kind, fields and time), and is checked again as missing
+links are; an object of an app without a profile keeps its last card under `missing`, as other
+links do. An object stored before its path was left out becomes `missing` at once, without a
+request.
 
 Profiles are Pinakes's own code, one file per app (`resolver/pubky_apps/<app>.rs`). Nothing is
 read from the apps themselves or from a registry outside this repository.
