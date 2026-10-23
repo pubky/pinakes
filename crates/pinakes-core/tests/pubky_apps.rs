@@ -611,6 +611,44 @@ fn eventky() {
         new_year,
     );
     assert_eq!(doc.start.unwrap().to_rfc3339(), "2026-01-13T18:00:14+00:00");
+    // Without a rule the dates are DTSTART and its list: a later added date is the next
+    // occurrence (refreshed by it); an excluded DTSTART leaves none (no time).
+    let no_rule = |change: Value| {
+        let mut change = change;
+        change["rrule"] = Value::Null;
+        change["dtstart"] = json!("2026-01-10T19:00:00");
+        at("eventky/event-bern-meetup-recurring", change)
+    };
+    let doc = no_rule(json!({"rdate": ["2026-11-10T19:00:00"]}));
+    assert_eq!(doc.start.unwrap().to_rfc3339(), "2026-11-10T18:00:00+00:00");
+    assert_eq!(doc.end.unwrap().to_rfc3339(), "2026-11-10T21:00:00+00:00");
+    assert!(pinakes_core::scheduler::next(&pubky, &doc, now, &refresh).is_some());
+    let doc = no_rule(json!({"rdate": ["2026-02-10T19:00:00"]}));
+    assert_eq!(doc.start.unwrap().to_rfc3339(), "2026-01-10T18:00:00+00:00");
+    assert_eq!(
+        pinakes_core::scheduler::next(&pubky, &doc, now, &refresh),
+        None
+    );
+    let doc = no_rule(json!({"exdate": ["2026-01-10T19:00:00"]}));
+    assert_eq!((doc.start, doc.end), (None, None));
+    // Every date of a series excluded: no time, not the excluded DTSTART.
+    let doc = at(
+        "eventky/event-bern-meetup-recurring",
+        json!({"dtstart": "2026-11-10T19:00:00", "rrule": "FREQ=DAILY;COUNT=1",
+            "exdate": ["2026-11-10T19:00:00"]}),
+    );
+    assert_eq!((doc.start, doc.end), (None, None));
+    // A series that has ended with its DTSTART excluded shows its first date left.
+    let doc = at(
+        "eventky/event-bern-meetup-recurring",
+        json!({"rrule": "FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2;UNTIL=20260301T000000Z",
+            "exdate": ["2026-01-08T19:00:14"]}),
+    );
+    assert_eq!(doc.start.unwrap().to_rfc3339(), "2026-01-13T18:00:14+00:00");
+    assert_eq!(
+        pinakes_core::scheduler::next(&pubky, &doc, now, &refresh),
+        None
+    );
     // A list that cannot be read leaves the next occurrence unknown: no time, a next fetch.
     for change in [
         json!({"exdate": ["soon"]}),

@@ -47,8 +47,10 @@ fn description(v: &Value) -> Option<String> {
 enum Series {
     /// The series' next or current occurrence starts then.
     At(DateTime<Utc>),
-    /// The series has ended: its rule's `COUNT` or `UNTIL` gives no later occurrence.
-    Over,
+    /// The series has ended (its rule's `COUNT` or `UNTIL`, or its last listed date, is past):
+    /// its first occurrence, the first date its set gives (an excluded DTSTART is not one);
+    /// `None` when every date is excluded.
+    Over(Option<DateTime<Utc>>),
     /// Not known here: the rule is not read (not RFC 5545 characters, over 512 of them, or not
     /// one `time::rrule_bounded` lets expand), a date list is not read (over `MAX_DATES` values,
     /// or one that is no time), or the occurrence lies past the expansion's budget.
@@ -79,8 +81,9 @@ fn dates(v: &Value, key: &str, zone: &str) -> Option<Vec<DateTime<Utc>>> {
         .collect()
 }
 
-/// The series of a recurring event, from its first occurrence and length; `None` for a one-off
-/// event.
+/// The series of an event, from its first occurrence and length: its dates are DTSTART, its
+/// rule's (if any) and its `rdate` list, less its `exdate` list. `None` for a one-off event, one
+/// with no rule and no date list.
 fn series(
     v: &Value,
     zone: &str,
@@ -89,31 +92,35 @@ fn series(
     now: DateTime<Utc>,
     max_period_dates: usize,
 ) -> Option<Series> {
-    let rule = read::text(v, &["rrule"])?;
-    if rule.len() > 512
-        || !rule
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '=' | ';' | ',' | '-' | '+'))
-    {
+    let rule = read::text(v, &["rrule"]);
+    let listed = |key: &str| v.get(key).is_some_and(|l| !l.is_null());
+    if rule.is_none() && !listed("rdate") && !listed("exdate") {
+        return None;
+    }
+    if rule.as_ref().is_some_and(|rule| {
+        rule.len() > 512
+            || !rule
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '=' | ';' | ',' | '-' | '+'))
+    }) {
         return Some(Series::Unknown);
     }
     let (Some(rdates), Some(exdates)) = (dates(v, "rdate", zone), dates(v, "exdate", zone)) else {
         return Some(Series::Unknown);
     };
-    // The set: the rule from DTSTART in the zone's canonical name; DTSTART itself as a date
-    // (RFC 5545: the first occurrence, even where the rule would not give it); the event's
-    // added and excluded dates as instants (an exclusion applies to DTSTART too).
+    // The set: DTSTART in the zone's canonical name and the rule from it, if there is one;
+    // DTSTART itself as a date (RFC 5545: the first occurrence, even where the rule would not
+    // give it); the event's added and excluded dates as instants (an exclusion applies to
+    // DTSTART too).
     let instant = |at: &DateTime<Utc>| at.format("%Y%m%dT%H%M%SZ").to_string();
     let Some(set) = time::zone(zone).and_then(|tz| {
-        let mut lines = vec![
-            format!(
-                "DTSTART;TZID={}:{}",
-                tz.name(),
-                first.with_timezone(&tz).format("%Y%m%dT%H%M%S")
-            ),
-            format!("RRULE:{rule}"),
-            format!("RDATE:{}", instant(&first)),
-        ];
+        let mut lines = vec![format!(
+            "DTSTART;TZID={}:{}",
+            tz.name(),
+            first.with_timezone(&tz).format("%Y%m%dT%H%M%S")
+        )];
+        lines.extend(rule.iter().map(|rule| format!("RRULE:{rule}")));
+        lines.push(format!("RDATE:{}", instant(&first)));
         for (name, list) in [("RDATE", &rdates), ("EXDATE", &exdates)] {
             if !list.is_empty() {
                 let values: Vec<String> = list.iter().map(instant).collect();
@@ -132,21 +139,26 @@ fn series(
     let Some(after) = now.checked_sub_signed(length) else {
         return Some(Series::Unknown);
     };
-    // Whether the rule has an end (`COUNT` or `UNTIL`), from the parsed rule.
-    let ends = set
-        .get_rrule()
-        .iter()
-        .any(|r| r.get_count().is_some() || r.get_until().is_some());
+    // Whether the set has an end: no rule (its dates are listed), or a rule with `COUNT` or
+    // `UNTIL`, from the parsed rule.
+    let ends = set.get_rrule().is_empty()
+        || set
+            .get_rrule()
+            .iter()
+            .any(|r| r.get_count().is_some() || r.get_until().is_some());
     let deadline = std::time::Instant::now() + MAX_EXPANSION;
     let mut dates = set.limit().into_iter();
+    let mut earliest = None;
     for _ in 0..MAX_OCCURRENCES {
         match dates.next().map(|at| at.with_timezone(&Utc)) {
             Some(at) if at > after => return Some(Series::At(at)),
-            Some(_) if std::time::Instant::now() < deadline => {}
+            Some(at) if std::time::Instant::now() < deadline => {
+                earliest = earliest.or(Some(at));
+            }
             Some(_) => return Some(Series::Unknown),
-            // Only a rule with an end has run out; one without (the crate gives up on a rule that
-            // matches too rarely) is not over.
-            None if ends => return Some(Series::Over),
+            // Only a set with an end has run out; a rule without one (the crate gives up on a
+            // rule that matches too rarely) is not over.
+            None if ends => return Some(Series::Over(earliest)),
             None => return Some(Series::Unknown),
         }
     }
@@ -177,8 +189,8 @@ fn event(object: &Object, v: &Value, doc: &mut ResourceMeta) -> Read {
             .filter(|end| doc.start.is_some_and(|start| *end >= start));
         // A series is shown, and fetched again, by its next occurrence: its first one may be
         // long past while the series goes on. When that is not known the card has no time, so
-        // it is fetched again on the usual cadence and never made final; only a series that has
-        // ended keeps its first occurrence.
+        // it is fetched again on the usual cadence and never made final. A series that has ended
+        // shows its first occurrence (final), and one whose every date is excluded has no time.
         if let Some(first) = doc.start {
             let length = doc.end.map_or(Duration::zero(), |end| end - first);
             match series(v, zone, first, length, object.now, object.max_period_dates) {
@@ -186,8 +198,12 @@ fn event(object: &Object, v: &Value, doc: &mut ResourceMeta) -> Read {
                     doc.start = Some(next);
                     doc.end = doc.end.and_then(|_| next.checked_add_signed(length));
                 }
-                Some(Series::Unknown) => (doc.start, doc.end) = (None, None),
-                Some(Series::Over) | None => {}
+                Some(Series::Over(Some(earliest))) => {
+                    doc.start = Some(earliest);
+                    doc.end = doc.end.and_then(|_| earliest.checked_add_signed(length));
+                }
+                Some(Series::Unknown | Series::Over(None)) => (doc.start, doc.end) = (None, None),
+                None => {}
             }
         }
         doc.event.tz = Some(zone.clone());
