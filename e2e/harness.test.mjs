@@ -118,3 +118,34 @@ test('a card that moved after the type search must still be of the sample\'s typ
   // Without a word on ancestry, only the exact type passes.
   await assert.rejects(expectCard(event, root, async () => root, 50), /type/);
 });
+
+test('a card whose link became a spelling of another root before the first type search is judged as that root', async () => {
+  // Codex's case: the sample's first card (a MusicEvent, id a) is never listed under Event, since
+  // the link became a spelling of root b meanwhile; b is listed. `isA` as runFlow answers it.
+  const tag = { kind: 'event', uri: 'https://x.example/e', type: 'Event' };
+  const a = { id: 'a', status: 'ok', type: 'MusicEvent' };
+  const b = { id: 'b', status: 'ok', type: 'MusicEvent' };
+  const listed = new Set(['b']);
+  const roots = new Map([[tag.uri, b]]);
+  const asked = [];
+  const isA = async (c, type, uri) => {
+    asked.push(c.id);
+    if (c.type === type || listed.has(c.id)) return true;
+    const root = roots.get(uri);
+    return root && root.status === 'ok' && root.id !== c.id && root;
+  };
+  assert.equal(await expectCard(tag, a, async () => b, 50, undefined, isA), b);
+  assert.deepEqual(asked, ['a', 'b'], 'the root is judged in its turn');
+  // The root must meet the sample itself: one not listed either is refused, and one not yet ok
+  // is not taken (the wait goes on, and ends as the type's).
+  roots.set(tag.uri, { id: 'c', status: 'ok', type: 'WebPage' });
+  await assert.rejects(expectCard(tag, a, async () => b, 50, undefined, isA), /type/);
+  roots.set(tag.uri, { ...b, status: 'pending' });
+  await assert.rejects(expectCard(tag, a, async () => b, 50, undefined, isA), /type/);
+  // Through the first read's path as runFlow uses it: the root replaces the card kept and every reported field.
+  roots.set(tag.uri, b);
+  const docs = new Map(); const report = { samples: [{ kind: 'event', uri: tag.uri, resource_id: 'a', type: 'MusicEvent', status: 'ok' }] };
+  const kept = await expectCard(tag, a, async () => b, 50, undefined, isA);
+  docs.set('event', kept); Object.assign(report.samples[0], { resource_id: kept.id, type: kept.type, status: kept.status, site: kept.site });
+  assert.equal(docs.get('event').id, 'b'); assert.equal(report.samples[0].resource_id, 'b');
+});

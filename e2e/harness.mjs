@@ -104,21 +104,26 @@ const reported = card => ({ resource_id: card.id, type: card.type, status: card.
  * the type search confirms only the first card read, never one that replaces it. Returns the
  * card to keep. */
 export async function expectCard(tag, card, readByUri, timeout, signal, isA = async (c, type) => c.type === type) {
-  const holds = async c => {
+  // The card judged is the one given or, when the sample's link became a spelling of another
+  // root while its type was awaited (`isA` answers with that root), the root: judged in its turn.
+  const judge = async c => {
     assert.equal(c.status, 'ok', `Pinakes ${tag.kind} status`);
     if (tag.site) assert.equal(c.site, tag.site, `Pinakes ${tag.kind} site`);
-    assert(await isA(c, tag.type), `Pinakes ${tag.kind} type: ${c.type} is no ${tag.type}`);
+    const verdict = await isA(c, tag.type, tag.uri);
+    if (verdict !== true && verdict?.id && verdict.id !== c.id) return judge(verdict);
+    assert(verdict === true, `Pinakes ${tag.kind} type: ${c.type} is no ${tag.type}`);
+    return c;
   };
-  await holds(card);
+  card = await judge(card);
   if (!tag.name) return card;
   const named = card.name === tag.name ? card : await waitFor(`Pinakes ${tag.kind} name`, async () => {
     const v = await readByUri(tag.uri);
     return v && v.name === tag.name && v;
   }, timeout, signal).catch(error => { if (signal?.aborted) throw error; return card; });
   // Every expectation holds on the card that is kept, not only on the first one read.
-  await holds(named);
-  assert.equal(named.name, tag.name, `Pinakes ${tag.kind} name`);
-  return named;
+  const kept = await judge(named);
+  assert.equal(kept.name, tag.name, `Pinakes ${tag.kind} name`);
+  return kept;
 }
 /** A card read by its URI can be read once more under another ID: a fetch can show the link to be
  * a spelling of another (a Mastodon @-link of its /users/…/statuses/ form), and its card is then
@@ -165,10 +170,15 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
         return r.ok ? r.json() : null;
       };
       // A card is of a type when the type search (ancestors included) lists it under the run's tag.
-      const isA = async (card, type) => card.type === type || waitFor(`Pinakes ${type} lists ${card.type} ${card.id}`, async () => {
+      // While that is awaited the sample's link may become a spelling of another root (a fetch
+      // showed it to be one): search lists the root, never this card, so the root, read by the
+      // URI, is the answer, for `expectCard` to judge instead (`rereadMoved`'s case, earlier).
+      const isA = async (card, type, uri) => card.type === type || waitFor(`Pinakes ${type} lists ${card.type} ${card.id}`, async () => {
         const found = await search({ type, limit: '500' });
-        return found.items.some(row => row.id === card.id);
-      }, timeout, signal).then(() => true, error => { if (signal?.aborted) throw error; return false; });
+        if (found.items.some(row => row.id === card.id)) return true;
+        const root = await readByUri(uri);
+        return root && root.status === 'ok' && root.id !== card.id && root;
+      }, timeout, signal).catch(error => { if (signal?.aborted) throw error; return false; });
       const check = (tag, card) => expectCard(tag, card, readByUri, timeout, signal, isA);
       for (const tag of tags) {
         // Pinakes is read by the tagged URI: its IDs are its own, never Nexus's.
