@@ -809,10 +809,11 @@ mod tests {
     }
 
     /// A page the hook did not name takes the title the also-on sources found since (`type_card`
-    /// asks this source, `apply_title`); one the hook named keeps the hook's card.
+    /// asks this source, `apply_title`); one the hook named keeps the hook's card. The card's
+    /// type is the link's, which a source reading TMDB links gives: without one it stays.
     #[test]
     fn a_page_the_hook_did_not_name_takes_the_title_the_sources_found() {
-        use crate::also_on::media::{type_card, TypeHints};
+        use crate::also_on::media::{link_type, type_card, TypeHints};
         // A page the hook did not name takes the title the `titles` source found since.
         let named = TypeHints {
             title_type: Some("TVSeries".into()),
@@ -831,7 +832,8 @@ mod tests {
             doc.description.as_deref(),
             Some("American crime drama television series")
         );
-        assert_eq!(doc.type_name, "TVSeries");
+        let typed = link_type("https://www.themoviedb.org/tv/1396").is_some();
+        assert_eq!(doc.type_name, if typed { "TVSeries" } else { "WebSite" });
         // One the hook named keeps the hook's card.
         let mut hooked = crate::model::ResourceMeta::new(
             "https://www.themoviedb.org/tv/1396",
