@@ -582,6 +582,10 @@ async fn music_links_join_through_the_hubs_and_list_each_other(pool: sqlx::PgPoo
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn wikipedia_editions_join_through_their_item(pool: sqlx::PgPool) {
     use tower::ServiceExt;
+    // The articles' cards are the wikipedia source's.
+    if !has(&["wikipedia"]) {
+        return;
+    }
     let en = "https://en.m.wikipedia.org/wiki/Kant";
     let de = "https://de.wikipedia.org/wiki/Immanuel_Kant";
     let mut ids = vec![];
@@ -671,6 +675,10 @@ async fn wikipedia_editions_join_through_their_item(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_wikidata_item_lists_its_editions_and_encyclopedias(pool: sqlx::PgPool) {
     use tower::ServiceExt;
+    // The item's card is the wikidata_item source's.
+    if !has(&["wikidata_item"]) {
+        return;
+    }
     let spelled = "https://m.wikidata.org/wiki/Q9312";
     let alias = store::ensure_resource(&pool, spelled).await.unwrap();
     let id = pinakes_core::model::identity("https://www.wikidata.org/wiki/Q9312")
@@ -1016,6 +1024,10 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
 /// the one Deezer track. Off by default, nothing asks Deezer.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_deezer_barcode_names_the_apple_album_that_joins(pool: sqlx::PgPool) {
+    // Deezer's barcode and iTunes' album for it are the two sources' work.
+    if !has(&["deezer", "itunes"]) {
+        return;
+    }
     let deezer = "https://www.deezer.com/album/41839661";
     let apple = "https://music.apple.com/us/album/1445304934";
     let tidal = "https://tidal.com/track/534050211";
@@ -1120,6 +1132,10 @@ async fn a_deezer_barcode_names_the_apple_album_that_joins(pool: sqlx::PgPool) {
 /// Two Wikidata item links in one batch: one read for both, each item's own read from the cache.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn item_links_are_read_in_one_request(pool: sqlx::PgPool) {
+    // The items' reads are the wikidata_item source's.
+    if !has(&["wikidata_item"]) {
+        return;
+    }
     for q in ["Q202996", "Q33328630"] {
         let uri = format!("https://www.wikidata.org/wiki/{q}");
         let id = store::ensure_resource(&pool, &uri).await.unwrap();
@@ -1162,8 +1178,8 @@ async fn item_links_are_read_in_one_request(pool: sqlx::PgPool) {
 /// joins the TIDAL artist.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
-    // Its event pages are read by `performers`.
-    if !has(&["performers"]) {
+    // Its keys are the musicbrainz_entity source's; its event pages are read by `performers`.
+    if !has(&["musicbrainz_entity", "performers"]) {
         return;
     }
     let recording = "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69";
@@ -1797,6 +1813,10 @@ async fn a_musicbrainz_page_card_comes_from_the_entity() {
 /// failure cache.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn an_entity_over_the_cap_is_no_answer(pool: sqlx::PgPool) {
+    // The three pages' sources are the ones that answer over the cap.
+    if !has(&["musicbrainz_entity", "wikipedia", "wikidata_item"]) {
+        return;
+    }
     let uri = format!("https://musicbrainz.org/artist/{BIG_BAND}");
     let t = Arc::new(Recorded {
         seen: Mutex::default(),

@@ -306,8 +306,12 @@ const KEYS: &str =
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_tidal_barcode_joins_apple_music_and_deezer(pool: sqlx::PgPool) {
-    // Deezer's album is one of the joins; without the source there is nothing to check.
-    if !also_on::registry().iter().any(|s| s.id() == "deezer") {
+    // Deezer's album and iTunes' are the joins; without either source there is nothing to check.
+    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
+    if !["deezer", "itunes"]
+        .iter()
+        .all(|id| registered.contains(id))
+    {
         return;
     }
     let hydra = save(&pool, "https://tidal.com/album/199574241", "MusicAlbum").await;
