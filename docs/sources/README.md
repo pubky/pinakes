@@ -158,9 +158,11 @@ its registry lines, nothing else; `scripts/test` and `scripts/e2e --mock` then p
   (`crates/pinakes-core/tests/<name>.rs` or `tests/also_on_<name>.rs`) if it has one;
 - its live end-to-end samples, `e2e/samples/<name>.json`.
 
-`scripts/check-removals [NAME…]` proves it: it removes each source on a scratch worktree by this
-list and builds every test target with warnings as errors, so a removal that would need any other
-edit is named before it is needed.
+`scripts/check-removals [--tests] [NAME…]` proves it: it removes each source on a scratch
+worktree by this list and builds every test target with warnings as errors, and with `--tests`
+runs the workspace's tests too, which catch what the build cannot (a test of another source that
+relied on it, a recording it took along). A removal that would need any other edit is named
+before it is needed.
 
 Shared code stays (`sources/kit.rs`, `sources/biodiversity.rs`, `music.rs`, `music_sources.rs`,
 `wikipedia.rs`, `lookups/mod.rs`, `lookups/wikidata.rs`, `also_on/media.rs`); code only one
