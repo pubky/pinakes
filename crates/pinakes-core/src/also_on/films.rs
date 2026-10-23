@@ -301,10 +301,6 @@ impl Films {
 
 #[async_trait]
 impl Source for Films {
-    fn budgets(&self) -> &'static [(&'static str, f64)] {
-        // TVmaze: at least 20 calls every 10 seconds per IP.
-        &[("api.tvmaze.com", 2.0)]
-    }
     fn link_type(&self, uri: &str) -> Option<Option<&'static str>> {
         let kind = match film(uri)? {
             Film::Tmdb { tv: false, .. } | Film::Letterboxd(_) => Some("Movie"),

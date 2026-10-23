@@ -1091,6 +1091,8 @@ pub const PUBLISHED_RATES: &[(&str, f64)] = &[
     ("openlibrary.org", 3.0),
     // iTunes Search and Lookup: about 20 requests/min.
     ("itunes.apple.com", 20.0 / 60.0),
+    // TVmaze: at least 20 calls every 10 seconds per IP (the films and media_records sources).
+    ("api.tvmaze.com", 2.0),
     // The Wayback Machine's CDX API asks for a gentle pace (the whole host: tagged captures too).
     ("web.archive.org", 0.5),
 ];
