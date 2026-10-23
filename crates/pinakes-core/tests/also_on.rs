@@ -571,7 +571,11 @@ async fn saves_make_sources_due_and_unknown_sources_are_refused(pool: PgPool) {
     let unknown =
         toml::from_str::<Config>("[also_on.sources.nope]\nenabled = false\n").map(|c| c.validate());
     assert!(matches!(unknown, Ok(Err(_))), "{unknown:?}");
-    // A MusicBrainz mirror: an http(s) web service root; no other source takes a base URL.
+    // A MusicBrainz mirror: an http(s) web service root; no other source takes a base URL. The
+    // setting is the musicbrainz source's: nothing to check in a build without it.
+    if !also_on::registry().iter().any(|s| s.id() == "musicbrainz") {
+        return;
+    }
     let base = |id: &str, url: &str| {
         toml::from_str::<Config>(&format!("[also_on.sources.{id}]\nbase_url = \"{url}\"\n"))
             .unwrap()

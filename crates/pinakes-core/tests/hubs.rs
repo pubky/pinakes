@@ -749,6 +749,9 @@ async fn a_wikidata_item_lists_its_editions_and_encyclopedias(pool: sqlx::PgPool
 /// alone, and the links every release has. A configured mirror is asked instead of musicbrainz.org.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
+    if !has(&["musicbrainz"]) {
+        return;
+    }
     let uri = "https://tidal.com/album/495402659";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
     let mut d = ResourceMeta::new(uri, "media", 86400);
@@ -822,6 +825,9 @@ async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
 /// knows keeps its key and stays alone; one MusicBrainz gives to two recordings is no key.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
+    if !has(&["service", "musicbrainz"]) {
+        return;
+    }
     let tracks = [
         // The seed: MusicBrainz relates the URL to recording b1a9c0e9.
         (
@@ -1865,6 +1871,9 @@ async fn an_entity_over_the_cap_is_no_answer(pool: sqlx::PgPool) {
 /// either) asks once, in both spellings, and finds nothing.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn an_album_s_barcode_key_finds_its_musicbrainz_release(pool: sqlx::PgPool) {
+    if !has(&["musicbrainz"]) {
+        return;
+    }
     let mut ids = vec![];
     for (uri, upc) in [
         ("https://tidal.com/album/199574241", "4018939306052"),
@@ -1947,6 +1956,9 @@ async fn an_album_s_barcode_key_finds_its_musicbrainz_release(pool: sqlx::PgPool
 /// finds that release again once the URL relation is gone: an editor's removal stands.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn musicbrainz_s_own_barcode_never_re_finds_its_release(pool: sqlx::PgPool) {
+    if !has(&["musicbrainz"]) {
+        return;
+    }
     let uri = "https://tidal.com/album/199574241";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
     let mut d = ResourceMeta::new(uri, "jsonld", 86400);
@@ -1999,7 +2011,7 @@ async fn musicbrainz_s_own_barcode_never_re_finds_its_release(pool: sqlx::PgPool
 /// 83182 is one edition: its own release and barcode, never the release group.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn discogs_joins_at_its_level(pool: sqlx::PgPool) {
-    if !has(&["discogs"]) {
+    if !has(&["discogs", "musicbrainz"]) {
         return;
     }
     let links = [
