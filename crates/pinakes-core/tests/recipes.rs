@@ -436,38 +436,26 @@ async fn fixture(pool: &PgPool) {
             .unwrap();
             pinakes_core::groups::reconcile(pool, &id, &Default::default()).await;
         }
-        // A place's keys as `osm_wikidata` records them, and a Federal Register document's.
-        for (uri, source, keys) in [
-            (
-                "https://www.openstreetmap.org/node/240109189",
-                "osm_wikidata",
-                vec![
+        // A place's keys as `osm_wikidata` records them.
+        let place = "https://www.openstreetmap.org/node/240109189";
+        let id = identity(place).unwrap().0;
+        also_on::record(
+            pool,
+            &id,
+            "osm_wikidata",
+            Found {
+                keys: vec![
                     key("osm:node/240109189", "wikidata"),
                     key("wikidata:Q64", "wikidata"),
                 ],
-            ),
-            (
-                "fr:2026-18291",
-                "federal_register",
-                vec![key("fr:2026-18291", "federalregister")],
-            ),
-        ] {
-            let id = identity(uri).unwrap().0;
-            also_on::record(
-                pool,
-                &id,
-                source,
-                Found {
-                    keys,
-                    ..Default::default()
-                },
-                std::time::Duration::from_secs(30 * 86400),
-                &AlsoOnConfig::default(),
-            )
-            .await
-            .unwrap();
-            pinakes_core::groups::reconcile(pool, &id, &Default::default()).await;
-        }
+                ..Default::default()
+            },
+            std::time::Duration::from_secs(30 * 86400),
+            &AlsoOnConfig::default(),
+        )
+        .await
+        .unwrap();
+        pinakes_core::groups::reconcile(pool, &id, &Default::default()).await;
         pinakes_core::groups::drain(pool, &Default::default(), 100)
             .await
             .unwrap();

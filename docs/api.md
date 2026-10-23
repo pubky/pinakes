@@ -336,7 +336,6 @@ GET /v1/search?key=isbn:9780140328721
 GET /v1/search?key=imdb:tt0111161
 GET /v1/search?key=podcast:304b84f0-07b0-5265-b6b7-da5cf5aeb56e
 GET /v1/search?key=osm:node%2F240109189
-GET /v1/search?key=fr:2026-18291
 GET /v1/search?collapse=group&type=Book
 GET /v1/search?collapse=group&type=ScholarlyArticle
 GET /v1/search?bbox=8.90,45.98,9.00,46.03&cluster=12
