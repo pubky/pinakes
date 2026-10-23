@@ -753,9 +753,12 @@ impl Config {
             if self.pubky.pkarr_relays.is_empty() {
                 bail!("[pubky] pkarr_relays must list at least one relay");
             }
-            for relay in &self.pubky.pkarr_relays {
-                let url = url::Url::parse(relay)
-                    .with_context(|| format!("[pubky] pkarr_relays: invalid URL {relay}"))?;
+            // An entry is named by its place in the list and its host, never in full: a relay URL
+            // with credentials would put them in the startup error.
+            for (n, relay) in self.pubky.pkarr_relays.iter().enumerate() {
+                let Ok(url) = url::Url::parse(relay) else {
+                    bail!("[pubky] pkarr_relays: entry {} is not a URL", n + 1);
+                };
                 if url.scheme() != "https"
                     || url.host_str().is_none()
                     || !url.username().is_empty()
@@ -763,7 +766,11 @@ impl Config {
                     || url.query().is_some()
                     || url.fragment().is_some()
                 {
-                    bail!("[pubky] pkarr_relays: {relay} must be an https:// base URL without credentials, query or fragment");
+                    bail!(
+                        "[pubky] pkarr_relays: entry {} ({}) must be an https:// base URL without credentials, query or fragment",
+                        n + 1,
+                        url.host_str().unwrap_or("no host")
+                    );
                 }
             }
         }
@@ -1254,6 +1261,27 @@ mod tests {
                 );
                 assert!(example.contains(&name), "{name}");
             }
+        }
+    }
+    /// A relay entry that is refused is named by its place and host, never with what its URL
+    /// carries (Kimi).
+    #[test]
+    fn a_refused_pkarr_relay_is_named_by_its_host_alone() {
+        for (relay, says) in [
+            (
+                "https://user:CANARY@relay.example/?token=CANARY",
+                "entry 2 (relay.example)",
+            ),
+            ("http://relay.example/CANARY", "entry 2 (relay.example)"),
+            ("not a url CANARY", "entry 2 is not a URL"),
+        ] {
+            let error = with(serde_json::json!({
+                "pubky": {"pkarr_relays": ["https://ok.example/", relay]}
+            }))
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains(says), "{error}");
+            assert!(!error.contains("CANARY"), "{error}");
         }
     }
     #[test]
