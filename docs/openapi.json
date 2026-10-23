@@ -625,7 +625,7 @@
         "type": "object"
       },
       "Info": {
-        "description": "What a client needs: the version, what this instance resolves, the limits a client must\nrespect, and the licence of the OSM-derived values its cards carry.",
+        "description": "What a client needs: the version, the User-Agent this instance sends, what it resolves, the\nlimits a client must respect, and the licence of the OSM-derived values its cards carry.",
         "properties": {
           "limits": {
             "$ref": "#/components/schemas/InfoLimits"
@@ -640,12 +640,17 @@
             },
             "type": "array"
           },
+          "user_agent": {
+            "description": "The User-Agent this instance's requests to other services carry: its version and the\noperator's contact (`http.contact`), when set.",
+            "type": "string"
+          },
           "version": {
             "type": "string"
           }
         },
         "required": [
           "version",
+          "user_agent",
           "resolves",
           "limits",
           "osm_licence"

@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { E2E_CONTACT, dropRefusedPages, freshen, json, preflight, runFlow, userAgent } from './harness.mjs';
+import { E2E_CONTACT, dropRefusedPages, freshen, instanceAgent, json, preflight, runFlow, userAgent } from './harness.mjs';
 
 const mock = process.argv.includes('--mock');
 let child, session, liveSamples, skipped = [];
@@ -28,12 +28,13 @@ try {
     // A pubky:// sample names an object of the test identity: `{author}` is its public key.
     samples = JSON.parse((await readFile(process.env.PINAKES_E2E_SAMPLES ?? 'e2e/samples.live.json', 'utf8')).replaceAll('{author}', author));
     for (const sample of samples) if (sample.kind === 'ics' && process.env.PINAKES_E2E_ICS_URL) sample.uri = process.env.PINAKES_E2E_ICS_URL;
-    // The preflight fetches go out as Pinakes' egress will: its version (the stack this checkout
-    // builds, or the running instance's `/v1/info`) and the operator's contact, else the run's.
-    const version = process.argv.includes('--isolated-live')
-      ? /\[workspace\.package\][^[]*?\bversion\s*=\s*"([^"]+)"/.exec(await readFile('Cargo.toml', 'utf8'))[1]
-      : (await json(`${pinakes}/v1/info`)).version;
-    const fetches = preflight(userAgent(version, process.env.PINAKES__HTTP__CONTACT?.trim() || E2E_CONTACT));
+    // The preflight fetches go out as Pinakes' egress will: the stack this checkout builds sends
+    // its version with the operator's contact, else the run's; a running instance says what it
+    // sends in its `/v1/info`.
+    const agent = process.argv.includes('--isolated-live')
+      ? userAgent(/\[workspace\.package\][^[]*?\bversion\s*=\s*"([^"]+)"/.exec(await readFile('Cargo.toml', 'utf8'))[1], process.env.PINAKES__HTTP__CONTACT?.trim() || E2E_CONTACT)
+      : instanceAgent(await json(`${pinakes}/v1/info`));
+    const fetches = preflight(agent);
     await freshen(samples, fetches.text);
     ({ samples, skipped } = await dropRefusedPages(samples, fetches.status));
     for (const s of skipped) console.error(`left out: ${s.kind} (${s.uri}): ${s.reason}`);

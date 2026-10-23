@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { dropRefusedPages, expectCard, freshen, newestLink, ownTags, rereadMoved, userAgent, withTags } from './harness.mjs';
+import { dropRefusedPages, expectCard, freshen, instanceAgent, newestLink, ownTags, rereadMoved, userAgent, withTags } from './harness.mjs';
 test('a PUT that commits then times out is included in cleanup', async () => {
   const stored = new Set(), report = {}, journal = [];
   const storage = { exists: async p => stored.has(p), putJson: async p => { stored.add(p); if (p === 'second') throw new Error('timeout'); }, delete: async p => stored.delete(p) };
@@ -153,4 +153,10 @@ test('the preflight User-Agent is the one Pinakes\' egress sends', () => {
   // `resolver::egress::user_agent` and `USER_AGENT`.
   assert.equal(userAgent('0.1.0', 'ops@example.org'), 'pinakes/0.1.0 (+https://pubky.app; ops@example.org)');
   assert.equal(userAgent('0.2.0', ''), 'pinakes/0.2.0 (+https://pubky.app)');
+});
+test('a running instance\'s preflight sends the User-Agent its /v1/info reports', () => {
+  // The instance's contact may be set in its file alone: the run's contact is never a substitute.
+  assert.equal(instanceAgent({ version: '0.1.0', user_agent: 'pinakes/0.1.0 (+https://pubky.app; ops@example.org)' }), 'pinakes/0.1.0 (+https://pubky.app; ops@example.org)');
+  assert.throws(() => instanceAgent({ version: '0.1.0' }), /user_agent/);
+  assert.throws(() => instanceAgent({ version: '0.1.0', user_agent: 'curl/8' }), /user_agent/);
 });

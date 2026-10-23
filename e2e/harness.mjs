@@ -19,6 +19,12 @@ export const E2E_CONTACT = 'info@synonym.to';
 /** The User-Agent Pinakes' egress sends (`resolver::egress::user_agent`): its version and the
  * contact, so a site sees the run's preflight fetches as it will see Pinakes'. */
 export const userAgent = (version, contact) => contact ? `pinakes/${version} (+https://pubky.app; ${contact})` : `pinakes/${version} (+https://pubky.app)`;
+/** The User-Agent a running instance sends, as its `/v1/info` reports it: its contact may be set
+ * in its file alone, so the preflight takes the agent from the instance, never from the run. */
+export function instanceAgent(info) {
+  assert(typeof info?.user_agent === 'string' && info.user_agent.startsWith('pinakes/'), 'the instance\'s /v1/info does not report its User-Agent (user_agent): run one built from this checkout');
+  return info.user_agent;
+}
 /** The preflight's fetches of a page's text and of its status, with that User-Agent. */
 export function preflight(agent) {
   const get = url => fetch(url, { headers: { 'user-agent': agent }, signal: AbortSignal.timeout(15000) });

@@ -149,8 +149,14 @@ async fn every_read_route_and_document_projection(pool: PgPool) {
     let keys: Vec<&String> = info.as_object().unwrap().keys().collect();
     assert_eq!(
         keys,
-        ["limits", "osm_licence", "resolves", "version"],
+        ["limits", "osm_licence", "resolves", "user_agent", "version"],
         "{info}"
+    );
+    // The User-Agent its requests carry, so a harness can send the same: with no contact set,
+    // without one.
+    assert_eq!(
+        info["user_agent"],
+        format!("pinakes/{} (+https://pubky.app)", env!("CARGO_PKG_VERSION"))
     );
     assert!(info["resolves"]
         .as_array()
