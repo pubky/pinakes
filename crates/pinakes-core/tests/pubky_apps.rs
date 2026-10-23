@@ -574,6 +574,49 @@ fn eventky() {
     let (uri, body) = fixture("eventky/event-bern-meetup-recurring");
     let doc = pubky_apps::card_at(&uri, "application/octet-stream", &body, 86400, during);
     assert_eq!(doc.start.unwrap().to_rfc3339(), "2026-11-10T18:00:14+00:00");
+    // The event's own date lists: an excluded next occurrence gives the one after it (December's
+    // second Tuesday); an added earlier date is the next; a value with an offset reads as its
+    // instant; an excluded DTSTART, read before it, gives the rule's next.
+    let doc = at(
+        "eventky/event-bern-meetup-recurring",
+        json!({"exdate": ["2026-11-10T19:00:14"]}),
+    );
+    assert_eq!(doc.start.unwrap().to_rfc3339(), "2026-12-08T18:00:14+00:00");
+    assert_eq!(doc.end.unwrap().to_rfc3339(), "2026-12-08T21:00:14+00:00");
+    let doc = at(
+        "eventky/event-bern-meetup-recurring",
+        json!({"rdate": ["2026-11-03T19:00:14"]}),
+    );
+    assert_eq!(doc.start.unwrap().to_rfc3339(), "2026-11-03T18:00:14+00:00");
+    let doc = at(
+        "eventky/event-bern-meetup-recurring",
+        json!({"exdate": ["2026-11-10T18:00:14Z"]}),
+    );
+    assert_eq!(doc.start.unwrap().to_rfc3339(), "2026-12-08T18:00:14+00:00");
+    let (uri, body) = fixture("eventky/event-bern-meetup-recurring");
+    let mut v: Value = serde_json::from_slice(&body).unwrap();
+    v["exdate"] = json!(["2026-01-08T19:00:14"]);
+    let doc = pubky_apps::card_at(
+        &uri,
+        "application/octet-stream",
+        v.to_string().as_bytes(),
+        86400,
+        new_year,
+    );
+    assert_eq!(doc.start.unwrap().to_rfc3339(), "2026-01-13T18:00:14+00:00");
+    // A list that cannot be read leaves the next occurrence unknown: no time, a next fetch.
+    for change in [
+        json!({"exdate": ["soon"]}),
+        json!({"rdate": "2026-11-03T19:00:14"}),
+        json!({"exdate": (0..129).map(|i| format!("2027-01-{:02}T19:00:14", i % 28 + 1)).collect::<Vec<_>>()}),
+    ] {
+        let doc = at("eventky/event-bern-meetup-recurring", change.clone());
+        assert_eq!((doc.start, doc.end), (None, None), "{change}");
+        assert!(
+            pinakes_core::scheduler::next(&pubky, &doc, now, &refresh).is_some(),
+            "{change}"
+        );
+    }
     // A series that has ended (its UNTIL or COUNT passed) keeps its first occurrence and is
     // final.
     for rule in [

@@ -50,13 +50,34 @@ enum Series {
     /// The series has ended: its rule's `COUNT` or `UNTIL` gives no later occurrence.
     Over,
     /// Not known here: the rule is not read (not RFC 5545 characters, over 512 of them, or not
-    /// one `time::rrule_bounded` lets expand), or the occurrence lies past the expansion's
-    /// budget.
+    /// one `time::rrule_bounded` lets expand), a date list is not read (over `MAX_DATES` values,
+    /// or one that is no time), or the occurrence lies past the expansion's budget.
     Unknown,
 }
 /// The occurrences, and the time, one expansion may take.
 const MAX_OCCURRENCES: usize = 10_000;
 const MAX_EXPANSION: std::time::Duration = std::time::Duration::from_millis(100);
+/// The most dates an event's `rdate` or `exdate` list may hold.
+const MAX_DATES: usize = 128;
+
+/// An event's `rdate` or `exdate` list as instants, read in the event's zone (a value with an
+/// offset keeps its own). `None` when the list is over `MAX_DATES` or holds a value that is no
+/// time: an exclusion that cannot be read must not be dropped.
+fn dates(v: &Value, key: &str, zone: &str) -> Option<Vec<DateTime<Utc>>> {
+    let Some(list) = v.get(key).filter(|l| !l.is_null()) else {
+        return Some(vec![]);
+    };
+    let list = list.as_array()?;
+    if list.len() > MAX_DATES {
+        return None;
+    }
+    list.iter()
+        .map(|d| {
+            let text = d.as_str()?.trim();
+            (text.len() <= 64).then(|| time::parse(text, Some(zone)))?
+        })
+        .collect()
+}
 
 /// The series of a recurring event, from its first occurrence and length; `None` for a one-off
 /// event.
@@ -76,25 +97,41 @@ fn series(
     {
         return Some(Series::Unknown);
     }
+    let (Some(rdates), Some(exdates)) = (dates(v, "rdate", zone), dates(v, "exdate", zone)) else {
+        return Some(Series::Unknown);
+    };
+    // The set: the rule from DTSTART in the zone's canonical name; DTSTART itself as a date
+    // (RFC 5545: the first occurrence, even where the rule would not give it); the event's
+    // added and excluded dates as instants (an exclusion applies to DTSTART too).
+    let instant = |at: &DateTime<Utc>| at.format("%Y%m%dT%H%M%SZ").to_string();
     let Some(set) = time::zone(zone).and_then(|tz| {
-        format!(
-            "DTSTART;TZID={zone}:{}\nRRULE:{rule}",
-            first.with_timezone(&tz).format("%Y%m%dT%H%M%S")
-        )
-        .parse::<rrule::RRuleSet>()
-        .ok()
-        // Its periods must stay small (`time::rrule_bounded`), however its names are spelled.
-        .filter(|set| time::rrule_bounded(set, max_period_dates))
+        let mut lines = vec![
+            format!(
+                "DTSTART;TZID={}:{}",
+                tz.name(),
+                first.with_timezone(&tz).format("%Y%m%dT%H%M%S")
+            ),
+            format!("RRULE:{rule}"),
+            format!("RDATE:{}", instant(&first)),
+        ];
+        for (name, list) in [("RDATE", &rdates), ("EXDATE", &exdates)] {
+            if !list.is_empty() {
+                let values: Vec<String> = list.iter().map(instant).collect();
+                lines.push(format!("{name}:{}", values.join(",")));
+            }
+        }
+        lines
+            .join("\n")
+            .parse::<rrule::RRuleSet>()
+            .ok()
+            // Its periods must stay small (`time::rrule_bounded`), however its names are spelled.
+            .filter(|set| time::rrule_bounded(set, max_period_dates))
     }) else {
         return Some(Series::Unknown);
     };
     let Some(after) = now.checked_sub_signed(length) else {
         return Some(Series::Unknown);
     };
-    // DTSTART is the first occurrence even where the rule would not give it (RFC 5545).
-    if first > after {
-        return Some(Series::At(first));
-    }
     // Whether the rule has an end (`COUNT` or `UNTIL`), from the parsed rule.
     let ends = set
         .get_rrule()
