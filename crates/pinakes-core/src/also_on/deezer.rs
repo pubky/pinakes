@@ -7,6 +7,39 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::music_sources::*;
+use serde_json::Value;
+
+const DEEZER_API: &str = "https://api.deezer.com";
+/// One Deezer API object; `None` when Deezer has no data (its error 800) or no such ID.
+async fn deezer(cx: &Context, path: &str) -> Result<Option<Value>> {
+    let options = crate::resolver::egress::FetchOptions {
+        accept: Some("application/json".into()),
+        ..Default::default()
+    };
+    let fetched = cx
+        .egress
+        .discover(&format!("{DEEZER_API}/{path}"), &options, 3600)
+        .await?;
+    let busy = || -> anyhow::Error {
+        crate::resolver::RetryLater {
+            class: "deezer_busy",
+            seconds: fetched.retry_after_secs.clamp(60, 3600),
+        }
+        .into()
+    };
+    match fetched.status {
+        200 => {}
+        429 | 500..=599 => return Err(busy()),
+        _ => return Ok(None),
+    }
+    let v: Value = serde_json::from_slice(&fetched.body)?;
+    // Deezer answers errors with 200: 4 is its quota, 800 "no data".
+    match v["error"]["code"].as_u64() {
+        None if v["id"].as_u64().is_some() => Ok(Some(v)),
+        Some(4) => Err(busy()),
+        _ => Ok(None),
+    }
+}
 
 /// Deezer's public API: its own record of a Deezer link, and its lookups by ISRC and barcode.
 pub struct DeezerSource;

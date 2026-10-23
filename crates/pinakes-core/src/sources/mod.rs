@@ -852,6 +852,8 @@ pub fn list(values: &[String]) -> Option<String> {
 }
 
 #[cfg(test)]
+// Helpers for any source's tests: one only some source uses stays when that source goes.
+#[allow(dead_code)]
 pub(crate) mod fixture {
     //! Recorded responses: `tests/fixtures/sources/<source>/` (see its `provenance.json`).
     use std::io::Read;

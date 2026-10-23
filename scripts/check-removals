@@ -116,7 +116,7 @@ def check(kind, name):
         )
         if run.returncode == 0:
             return None
-        errors = [l for l in run.stderr.splitlines() if l.startswith("error") or l.startswith("  -->")]
+        errors = [l.strip() for l in run.stderr.splitlines() if l.startswith("error") or l.lstrip().startswith("-->")]
         return "\n".join(errors[:12]) or run.stderr[-2000:]
     finally:
         subprocess.run(["git", "worktree", "remove", "--force", wt], cwd=ROOT, check=False)

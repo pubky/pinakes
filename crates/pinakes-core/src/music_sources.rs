@@ -32,7 +32,6 @@ use crate::{
     music::{self, discogs, Level, Service},
 };
 use anyhow::Result;
-use serde_json::Value;
 
 /// The level a link is joined at: a video counts as its recording, a YouTube playlist as the
 /// album it holds; other playlists are not joined.
@@ -265,38 +264,6 @@ pub(crate) async fn entities_found(
     Ok(found)
 }
 
-pub(crate) const DEEZER_API: &str = "https://api.deezer.com";
-/// One Deezer API object; `None` when Deezer has no data (its error 800) or no such ID.
-pub(crate) async fn deezer(cx: &Context, path: &str) -> Result<Option<Value>> {
-    let options = crate::resolver::egress::FetchOptions {
-        accept: Some("application/json".into()),
-        ..Default::default()
-    };
-    let fetched = cx
-        .egress
-        .discover(&format!("{DEEZER_API}/{path}"), &options, 3600)
-        .await?;
-    let busy = || -> anyhow::Error {
-        crate::resolver::RetryLater {
-            class: "deezer_busy",
-            seconds: fetched.retry_after_secs.clamp(60, 3600),
-        }
-        .into()
-    };
-    match fetched.status {
-        200 => {}
-        429 | 500..=599 => return Err(busy()),
-        _ => return Ok(None),
-    }
-    let v: Value = serde_json::from_slice(&fetched.body)?;
-    // Deezer answers errors with 200: 4 is its quota, 800 "no data".
-    match v["error"]["code"].as_u64() {
-        None if v["id"].as_u64().is_some() => Ok(Some(v)),
-        Some(4) => Err(busy()),
-        _ => Ok(None),
-    }
-}
-
 /// Whether a Discogs page MusicBrainz relates to a `kind` entity is at its level: an artist's
 /// artist, a release group's master, a release's release (any other link: yes).
 pub(crate) fn discogs_fits(url: &str, kind: MbKind) -> bool {
@@ -507,24 +474,12 @@ pub fn service_links(item: &wikidata::Item, storefront: &str) -> Vec<Link> {
     links
 }
 
-/// The Wikidata property for a link's own service ID, if Wikidata has one.
-pub(crate) fn property_of(link: &music::Link) -> Option<&'static str> {
-    if discogs::of_link(link).is_some_and(|(kind, _)| kind == discogs::Kind::Release) {
-        return Some(DISCOGS_RELEASE);
-    }
-    PROPERTIES
-        .iter()
-        .find(|(_, service, level, _)| *service == link.service && *level == link.level)
-        .map(|(p, ..)| *p)
-}
 /// Whether an item is one recording: exactly one MusicBrainz recording ID and no work ID. A song
 /// item is a work (its studio, live and remastered recordings share it), so a track takes
 /// nothing from it, neither its Q-id nor its tracks.
 pub(crate) fn recording_item(item: &wikidata::Item) -> bool {
     item.id("P4404").len() == 1 && item.id("P435").is_empty()
 }
-/// Wikidata's Discogs release ID.
-pub(crate) const DISCOGS_RELEASE: &str = "P2206";
 /// An item's keys and same-level links; at track level only a recording item's.
 pub fn found(item: &wikidata::Item, level: Level, storefront: &str) -> Found {
     let mut found = Found::default();
@@ -567,6 +522,7 @@ pub fn found(item: &wikidata::Item, level: Level, storefront: &str) -> Found {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     fn fixture(name: &str) -> Value {
         let path = format!("{}/tests/fixtures/hubs/{name}", env!("CARGO_MANIFEST_DIR"));
@@ -615,10 +571,6 @@ mod tests {
             MbKind::Artist
         ));
         assert!(discogs_fits("https://tidal.com/album/1", MbKind::Release));
-        let release = music::parse(release).unwrap();
-        assert_eq!(property_of(&release), Some("P2206"));
-        let master = music::parse(master).unwrap();
-        assert_eq!(property_of(&master), Some("P1954"));
         let link = derived(
             "https://music.apple.com/gb/album/ok-computer/1097861387",
             Level::Album,

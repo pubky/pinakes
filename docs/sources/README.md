@@ -161,5 +161,6 @@ list and builds every test target with warnings as errors, so a removal that wou
 edit is named before it is needed.
 
 Shared code stays (`sources/kit.rs`, `sources/biodiversity.rs`, `music.rs`, `music_sources.rs`,
-`wikipedia.rs`, `lookups/mod.rs`, `lookups/wikidata.rs`, `also_on/media.rs`), even a part only
-the removed source used. Tests that need a source skip without it, so none has to change.
+`wikipedia.rs`, `lookups/mod.rs`, `lookups/wikidata.rs`, `also_on/media.rs`); code only one
+source uses is in that source's files, so a removal leaves no unused code behind (test helpers
+for any source excepted). Tests that need a source skip without it, so none has to change.

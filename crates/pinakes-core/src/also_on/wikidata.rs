@@ -9,6 +9,19 @@ use async_trait::async_trait;
 
 use crate::music_sources::*;
 
+/// The Wikidata property for a link's own service ID, if Wikidata has one.
+fn property_of(link: &music::Link) -> Option<&'static str> {
+    if discogs::of_link(link).is_some_and(|(kind, _)| kind == discogs::Kind::Release) {
+        return Some(DISCOGS_RELEASE);
+    }
+    PROPERTIES
+        .iter()
+        .find(|(_, service, level, _)| *service == link.service && *level == link.level)
+        .map(|(p, ..)| *p)
+}
+/// Wikidata's Discogs release ID.
+const DISCOGS_RELEASE: &str = "P2206";
+
 /// Wikidata's item for an exact service ID.
 pub struct WikidataSource;
 #[async_trait]
@@ -42,5 +55,19 @@ impl WikidataSource {
             return Ok(Found::default());
         }
         Ok(found(&item, level, &cx.config.also_on.apple_storefront))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A Discogs release's ID is Wikidata's P2206, a master's P1954 (`PROPERTIES`).
+    #[test]
+    fn a_discogs_link_has_its_wikidata_property() {
+        let release = music::parse("https://www.discogs.com/release/83182").unwrap();
+        assert_eq!(property_of(&release), Some("P2206"));
+        let master = music::parse("https://www.discogs.com/master/21491").unwrap();
+        assert_eq!(property_of(&master), Some("P1954"));
     }
 }
