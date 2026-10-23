@@ -223,8 +223,12 @@ async fn a_cancelled_job_stops_its_loop() {
             for n in 0..5_000_000 {
                 let text = fragment.replace("{n}", &n.to_string());
                 match html::fragment(&text) {
+                    // A thousand refusals show the job over; the millions of parses left would
+                    // fail the same way and only hold the slot for seconds more.
                     Err(_) => {
-                        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 999 {
+                            break;
+                        }
                     }
                     Ok(_) if cancelled.load(std::sync::atomic::Ordering::SeqCst) => {
                         after.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -242,8 +246,9 @@ async fn a_cancelled_job_stops_its_loop() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert_eq!(html::running(), before, "{name}: {:?}", started.elapsed());
-        assert!(
-            refused.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        assert_eq!(
+            refused.load(std::sync::atomic::Ordering::SeqCst),
+            1_000,
             "{name}"
         );
         // The test marks the caller gone just before `abort`, and the job learns it when the
