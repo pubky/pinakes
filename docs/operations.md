@@ -207,7 +207,8 @@ refused, never cut, and remembered as such for five minutes. The also-on sources
 what the link's URL proves (a MusicBrainz page its MBID or ISRC, a Wikidata item its Q-id) and
 don't retry it; Wikidata items verified together that are over it together are read one by one;
 a MusicBrainz page's card is read from the page. Requests
-time out after ten seconds. Images stay origin URLs and are never fetched.
+time out after ten seconds. Card images stay origin URLs and are never fetched; a link that is
+itself an image resolves to an ImageObject card.
 
 Discovery reads (`Egress::discover`: the also-on sources and hubs, oEmbed endpoints, feed and
 calendar discovery, and a few page hooks and sources such as `feed`, `media_records`, Discogs and
@@ -220,12 +221,12 @@ authentication failure (TIDAL's 401 and 403) is never kept, so a new token asks 
 for Pinakes's own host budget is not a failure.
 
 Every request introduces itself as `pinakes/<version> (+https://pubky.app; <contact>)`, with
-`http.contact` as the contact (`info@synonym.to` in the example configuration; without one,
-`pinakes/<version> (+https://pubky.app)`). Set it to an address the services you read can reach:
-some refuse requests without one, and the links of the sources that need it (SEC EDGAR) wait
-until it is set. The User-Agent never names a code-hosting site, which some
-services refuse as an undeclared tool. Event platform adapters that need a browser profile keep
-their own User-Agent.
+`http.contact` as the contact, or `pinakes/<version> (+https://pubky.app)` without one. There is
+none by default, and the example configuration has only a commented placeholder. Set it to an
+address the services you read can reach: some refuse requests without one, and the links of the
+sources that need it (SEC EDGAR) wait until it is set. The User-Agent never names a code-hosting
+site, which some services refuse as an undeclared tool. Event platform adapters that need a browser
+profile keep their own User-Agent.
 
 The official-API sources ([docs/sources](sources/README.md)) run on the `official` card route
 (`[cards.official]`), each with its own switch, `[sources.<name>] enabled` (on by default;

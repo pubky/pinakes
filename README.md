@@ -11,6 +11,9 @@ Clients combine the two by URI: **Pinakes ranks, Nexus hydrates.** A client send
 cards Pinakes returns (`uri`, and `details.aliases` for other spellings; for an occurrence,
 `occurrence.feed_uri`) to Nexus `/v0/stream/resources/by_ids` as `uris` (batches of 100) for
 counts and tags. Pinakes IDs are its own and never match Nexus IDs.
+That batch view, and a feed of tag lines, are on the branch `feat/resources-changes-feed` of the
+fork [`gillohner/pubky-nexus`](https://github.com/gillohner/pubky-nexus/tree/feat/resources-changes-feed),
+not yet in pubky/pubky-nexus ([design §4](docs/design.md#nexus)).
 
 ## How it works
 
@@ -91,8 +94,9 @@ public HTTP(S) only, every DNS answer checked and pinned, private and metadata a
 at most three redirects (each checked again), a 10-second timeout and a 1 MB body cap (8 MB for
 MusicBrainz and Wikidata answers). Requests to one host go one at a time, paced to
 `limits.host_requests_per_second` or the host's published rate. Discovery reads (also-on
-lookups, oEmbed, feed discovery) are cached and shared between concurrent readers. Images are never fetched. Nominatim and Nexus are trusted upstreams
-outside this policy.
+lookups, oEmbed, feed discovery) are cached and shared between concurrent readers. Card images
+stay origin URLs and are never fetched; a link that is itself an image resolves to an ImageObject
+card. Nominatim and Nexus are trusted upstreams outside this policy.
 
 ## Run locally
 

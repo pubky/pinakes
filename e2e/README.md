@@ -54,29 +54,38 @@ export PINAKES_E2E_REPORT=.runtime/e2e-live.json
 CARGO_PROFILE_DEV_DEBUG=0 scripts/e2e --isolated-live
 ```
 
-`--isolated-live` uses the real SDK, homeserver, Nexus and public upstreams. Its
-private Pinakes driver reads the Nexus feed but resolves only the samples it is given, one to
-thirty-two of them, through the production queue path (batched completion, leases and resolver
-policy), and runs the also-on sources for them. `samples.live.json` holds more than thirty-two, so
-point `PINAKES_E2E_SAMPLES` at a file with the ones to run. Music samples
-must be typed and named by what they are (Spotify, Apple Music, TIDAL, Bandcamp, SoundCloud;
-`name` checks a card's name, Daft Punk's TIDAL page); the Spotify track sample must show Deezer
-as a derived link, found through MusicBrainz, the Wikidata item for Paris its French and
-English Wikipedia editions, and the Berlin node (tagged `wikidata=Q64`, which names it back) its
-Wikidata page and English Wikipedia article, and Discogs' OK Computer master its Apple Music
-album, through the Wikidata item MusicBrainz relates its release group to, and Discogs' Radiohead
-its Deezer page. A tagged BTC Map
-merchant page joins the OSM way it names (LAC Lugano). The music cases join (`group_with`): TIDAL's `/u` share
-link of Bohemian Rhapsody with the seed's recording through its own ISRC, Cut to the Feeling's
-Spotify and Deezer albums through their MusicBrainz release, Dracula's TIDAL, Apple and Deezer
-albums through their one release group, MusicBrainz's recording and ISRC pages with TIDAL's
-share link and its artist page with TIDAL's artist, a TIDAL album with Apple Music's through
-their barcode, and Discogs' OK Computer master and Radiohead artist with their Spotify pages; a
-TIDAL track whose ISRC nobody else knows
-keeps it in its `facts`. Canaries and unrelated backlog
-fetching are off. Use this mode for a scoped live smoke test. Run `scripts/e2e` without a mode
-to use an already configured dev stack
-at `PINAKES_E2E_PINAKES` (default `http://127.0.0.1:8090`).
+`--isolated-live` uses the real SDK, homeserver, Nexus and public upstreams. Its private Pinakes
+driver reads the Nexus feed but resolves only the samples it is given (those in `samples.live.json`
+by default, at most 128, one at a time), through the production queue path (batched completion,
+leases and resolver policy), and runs the also-on sources for them. Music samples must be typed and
+named by what they are (Spotify, Apple Music, TIDAL, Bandcamp, SoundCloud; `name` checks a card's
+name, Daft Punk's TIDAL page); the Spotify track sample must show Deezer as a derived link, found
+through MusicBrainz, the Wikidata item for Paris its French and English Wikipedia editions, and the
+Berlin node (tagged `wikidata=Q64`, which names it back) its Wikidata page and English Wikipedia
+article, and Discogs' OK Computer master its Apple Music album, through the Wikidata item
+MusicBrainz relates its release group to, and Discogs' Radiohead its Deezer page. A tagged BTC Map
+merchant page joins the OSM way it names (LAC Lugano). The music cases join (`group_with`): TIDAL's
+`/u` share link of Bohemian Rhapsody with the seed's recording through its own ISRC, Cut to the
+Feeling's Spotify and Deezer albums through their MusicBrainz release, Dracula's TIDAL, Apple and
+Deezer albums through their one release group, MusicBrainz's recording and ISRC pages with TIDAL's
+share link and its artist page with TIDAL's artist, a TIDAL album with Apple Music's through their
+barcode, and Discogs' OK Computer master and Radiohead artist with their Spotify pages; a TIDAL
+track whose ISRC nobody else knows keeps it in its `facts`. A fetch can show a sample to be another
+link's spelling (a Bluesky post's handle URL, under its DID); the driver then resolves that link in
+its place. Canaries and unrelated backlog fetching are off.
+
+The driver reads its settings from the environment as `pinakesd` does (`PINAKES__…` and the named
+secrets). A sample marked `"needs": "tidal"` (the barcode and own-ISRC cases) needs the TIDAL
+source, so set `PINAKES_TIDAL_CLIENT_ID` and `PINAKES_TIDAL_CLIENT_SECRET`; without them the driver
+refuses to start and names those samples. The walled article (`feed`) names its site's RSS feed
+(`latest_in`), and the harness tags that feed's newest item: the card comes from the feed, which
+lists recent items only. A sample marked `needs_page` (the Podcast Index page) is a card read from
+its page: when the site answers this host 401 or 403, the harness leaves it out of the run and
+reports why (`skipped` in the report); every other sample stays strict. A full run of the default
+samples takes three to eight minutes; each wait for Pinakes has its own deadline of ten minutes
+(`PINAKES_E2E_TIMEOUT_MS`). Use this mode for a scoped live smoke test. Run `scripts/e2e` without a
+mode to use an already configured dev stack at `PINAKES_E2E_PINAKES` (default
+`http://127.0.0.1:8090`).
 
 The harness creates a minimal `/pub/pubky.app/profile.json` only when missing,
 including on an existing identity; an existing profile is never overwritten. The live samples

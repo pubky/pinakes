@@ -219,6 +219,7 @@ impl Source for Ecfr {
             "chapter",
             "cfr_part",
             "reserved",
+            "version_date",
             "page_url",
         ]
     }
@@ -355,6 +356,9 @@ mod tests {
         let raw = read("ancestry_2020-01-01_title-17_section-240.10b-5.json");
         let doc = card(base.clone(), &dated, 200, &raw).unwrap().unwrap();
         assert_eq!(doc.attributes["version_date"], "2020-01-01");
+        // The date reaches the card's facts, as docs/sources/ecfr.md says.
+        let facts = crate::sources::facts(&doc).unwrap();
+        assert_eq!(facts["version_date"], "2020-01-01");
         assert_eq!(
             doc.attributes["page_url"],
             "https://www.ecfr.gov/on/2020-01-01/title-17/section-240.10b-5"

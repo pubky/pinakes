@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ownTags, withTags } from './harness.mjs';
+import { dropRefusedPages, expectCard, freshen, newestLink, ownTags, rereadMoved, userAgent, withTags } from './harness.mjs';
 test('a PUT that commits then times out is included in cleanup', async () => {
   const stored = new Set(), report = {}, journal = [];
   const storage = { exists: async p => stored.has(p), putJson: async p => { stored.add(p); if (p === 'second') throw new Error('timeout'); }, delete: async p => stored.delete(p) };
@@ -28,4 +28,129 @@ test('a full by-URI tag list is confirmed through the resource tag route', async
   await assert.rejects(ownTags([short], ['https://example.org/short'], 'run', 'me', tagsOf), /Missing Nexus hydration: https:\/\/example.org\/short/);
   await assert.rejects(ownTags([own], ['https://example.org/own', 'https://example.org/absent'], 'run', 'me', tagsOf), /Missing Nexus hydration: https:\/\/example.org\/absent/);
   await assert.rejects(ownTags([full], ['https://example.org/full'], 'run', 'someone', tagsOf), /Missing own tag on Nexus: https:\/\/example.org\/full/);
+});
+test('a latest_in sample takes its feed\'s newest item', async () => {
+  const rss = '<rss><channel><link>https://x.example</link><item><title>New</title><link><![CDATA[https://x.example/news/new]]></link></item><item><link>https://x.example/news/old</link></item></channel></rss>';
+  assert.equal(newestLink(rss), 'https://x.example/news/new');
+  assert.equal(newestLink('<rss><channel><link>https://x.example</link></channel></rss>'), undefined);
+  const samples = [{ kind: 'feed', uri: 'https://x.example/news/gone', latest_in: 'https://x.example/rss.xml' }, { kind: 'web', uri: 'https://y.example/' }];
+  const asked = [];
+  await freshen(samples, async url => { asked.push(url); return rss; });
+  assert.deepEqual(asked, ['https://x.example/rss.xml']);
+  assert.deepEqual(samples.map(s => s.uri), ['https://x.example/news/new', 'https://y.example/']);
+  await assert.rejects(freshen([{ kind: 'feed', latest_in: 'https://x.example/rss.xml' }], async () => '<rss/>'), /No item/);
+});
+test('a needs_page sample whose site refuses this host is left out with the reason', async () => {
+  const samples = [{ kind: 'index', uri: 'https://index.example/p/1', needs_page: true }, { kind: 'open', uri: 'https://open.example/p/2', needs_page: true }, { kind: 'web', uri: 'https://web.example/' }];
+  const status = { 'https://index.example/p/1': 403, 'https://open.example/p/2': 200 };
+  const asked = [];
+  const kept = await dropRefusedPages(samples, async url => { asked.push(url); return status[url]; });
+  assert.deepEqual(asked, ['https://index.example/p/1', 'https://open.example/p/2']);
+  assert.deepEqual(kept.samples.map(s => s.kind), ['open', 'web']);
+  assert.deepEqual(kept.skipped, [{ kind: 'index', uri: 'https://index.example/p/1', reason: "index.example refuses this host's page fetches (HTTP 403)" }]);
+  // A sample another one joins is never left out.
+  await assert.rejects(dropRefusedPages([...samples, { kind: 'pair', uri: 'https://x.example/', group_with: 'index' }], async url => status[url] ?? 200), /joined by another/);
+});
+test('a card that moved to another ID must meet the sample again, and replaces every reported field', async () => {
+  const tag = { kind: 'podcast', uri: 'https://index.example/p/1', type: 'PodcastSeries', site: 'Index', name: 'Darknet Diaries' };
+  const first = { id: 'a', status: 'ok', type: 'PodcastSeries', site: 'Index', name: 'Darknet Diaries' };
+  const fresh = () => ({ docs: new Map([['podcast', first]]), report: { samples: [{ kind: 'podcast', uri: tag.uri, resource_id: 'a', type: 'PodcastSeries', status: 'ok', site: 'Index' }] } });
+  const check = root => (t, card) => expectCard(t, card, async () => root, 50);
+  // The root names something else: refused, and nothing is replaced.
+  const wrong = { id: 'b', status: 'ok', type: 'PodcastSeries', site: 'Index', name: 'Another show' };
+  let { docs, report } = fresh();
+  await assert.rejects(rereadMoved([tag], docs, report, async () => wrong, check(wrong)), /name/);
+  assert.equal(docs.get('podcast').id, 'a'); assert.equal(report.samples[0].resource_id, 'a');
+  // Its site differs: refused too.
+  ({ docs, report } = fresh());
+  const elsewhere = { ...first, id: 'b', site: 'Other' };
+  await assert.rejects(rereadMoved([tag], docs, report, async () => elsewhere, check(elsewhere)), /site/);
+  // A root that meets the sample replaces the card and every reported field.
+  ({ docs, report } = fresh());
+  const root = { id: 'b', status: 'ok', type: 'PodcastSeries', site: 'Index', name: 'Darknet Diaries' };
+  await rereadMoved([tag], docs, report, async () => root, check(root));
+  assert.equal(docs.get('podcast'), root);
+  assert.deepEqual(report.samples[0], { kind: 'podcast', uri: tag.uri, resource_id: 'b', type: 'PodcastSeries', status: 'ok', site: 'Index' });
+  // The same ID, or a card not yet ok, changes nothing.
+  ({ docs, report } = fresh());
+  await rereadMoved([tag], docs, report, async () => first, check(first));
+  await rereadMoved([tag], docs, report, async () => ({ ...root, status: 'pending' }), check(root));
+  assert.equal(docs.get('podcast').id, 'a');
+});
+test('the card kept after waiting for a name meets every expectation, not only the name', async () => {
+  const tag = { kind: 'music', uri: 'https://music.example/a/1', type: 'MusicAlbum', site: 'Music', name: 'OK Computer' };
+  const first = { id: 'a', status: 'ok', type: 'MusicAlbum', site: 'Music', name: 'Untitled' };
+  // The name arrives on a card from elsewhere (another site, another type, not ok): refused.
+  for (const [named, check] of [
+    [{ ...first, name: 'OK Computer', site: 'Other' }, /site/],
+    [{ ...first, name: 'OK Computer', type: 'WebPage' }, /type/],
+    [{ ...first, name: 'OK Computer', status: 'pending' }, /status/],
+  ]) {
+    await assert.rejects(expectCard(tag, first, async () => named, 50), check);
+  }
+  const good = { ...first, name: 'OK Computer' };
+  assert.equal(await expectCard(tag, first, async () => good, 50), good);
+  // Codex's case through the re-read: a moved root whose named card is on another site.
+  const docs = new Map([['music', first]]);
+  const report = { samples: [{ kind: 'music', uri: tag.uri, resource_id: 'a', type: 'MusicAlbum', status: 'ok', site: 'Music' }] };
+  const root = { ...first, id: 'b' };
+  const elsewhere = { ...first, id: 'b', name: 'OK Computer', site: 'Other' };
+  await assert.rejects(rereadMoved([tag], docs, report, async () => root, (t, c) => expectCard(t, c, async () => elsewhere, 50)), /site/);
+  assert.equal(docs.get('music').id, 'a'); assert.equal(report.samples[0].site, 'Music');
+});
+test('a card that moved after the type search must still be of the sample\'s type, ancestors included', async () => {
+  // Codex's case: an Article sample whose root is a WebPage, read again after the type search.
+  const tag = { kind: 'article', uri: 'https://x.example/a', type: 'Article' };
+  const first = { id: 'a', status: 'ok', type: 'Article' };
+  const isA = async (c, type) => c.type === type || (c.type === 'MusicEvent' && type === 'Event');
+  const check = (t, c) => expectCard(t, c, async () => c, 50, undefined, isA);
+  const docs = new Map([['article', first]]);
+  const report = { samples: [{ kind: 'article', uri: tag.uri, resource_id: 'a', type: 'Article', status: 'ok' }] };
+  await assert.rejects(rereadMoved([tag], docs, report, async () => ({ id: 'b', status: 'ok', type: 'WebPage' }), check), /type/);
+  assert.equal(docs.get('article').id, 'a'); assert.equal(report.samples[0].type, 'Article');
+  // A subtype is the type: an Event sample's root may be a MusicEvent.
+  const event = { kind: 'event', uri: 'https://x.example/e', type: 'Event' };
+  const events = new Map([['event', { id: 'a', status: 'ok', type: 'Event' }]]);
+  const eventReport = { samples: [{ kind: 'event', uri: event.uri, resource_id: 'a', type: 'Event', status: 'ok' }] };
+  const root = { id: 'b', status: 'ok', type: 'MusicEvent' };
+  await rereadMoved([event], events, eventReport, async () => root, check);
+  assert.equal(events.get('event'), root); assert.equal(eventReport.samples[0].type, 'MusicEvent');
+  // Without a word on ancestry, only the exact type passes.
+  await assert.rejects(expectCard(event, root, async () => root, 50), /type/);
+});
+
+test('a card whose link became a spelling of another root before the first type search is judged as that root', async () => {
+  // Codex's case: the sample's first card (a MusicEvent, id a) is never listed under Event, since
+  // the link became a spelling of root b meanwhile; b is listed. `isA` as runFlow answers it.
+  const tag = { kind: 'event', uri: 'https://x.example/e', type: 'Event' };
+  const a = { id: 'a', status: 'ok', type: 'MusicEvent' };
+  const b = { id: 'b', status: 'ok', type: 'MusicEvent' };
+  const listed = new Set(['b']);
+  const roots = new Map([[tag.uri, b]]);
+  const asked = [];
+  const isA = async (c, type, uri) => {
+    asked.push(c.id);
+    if (c.type === type || listed.has(c.id)) return true;
+    const root = roots.get(uri);
+    return root && root.status === 'ok' && root.id !== c.id && root;
+  };
+  assert.equal(await expectCard(tag, a, async () => b, 50, undefined, isA), b);
+  assert.deepEqual(asked, ['a', 'b'], 'the root is judged in its turn');
+  // The root must meet the sample itself: one not listed either is refused, and one not yet ok
+  // is not taken (the wait goes on, and ends as the type's).
+  roots.set(tag.uri, { id: 'c', status: 'ok', type: 'WebPage' });
+  await assert.rejects(expectCard(tag, a, async () => b, 50, undefined, isA), /type/);
+  roots.set(tag.uri, { ...b, status: 'pending' });
+  await assert.rejects(expectCard(tag, a, async () => b, 50, undefined, isA), /type/);
+  // Through the first read's path as runFlow uses it: the root replaces the card kept and every reported field.
+  roots.set(tag.uri, b);
+  const docs = new Map(); const report = { samples: [{ kind: 'event', uri: tag.uri, resource_id: 'a', type: 'MusicEvent', status: 'ok' }] };
+  const kept = await expectCard(tag, a, async () => b, 50, undefined, isA);
+  docs.set('event', kept); Object.assign(report.samples[0], { resource_id: kept.id, type: kept.type, status: kept.status, site: kept.site });
+  assert.equal(docs.get('event').id, 'b'); assert.equal(report.samples[0].resource_id, 'b');
+});
+test('the preflight User-Agent is the one Pinakes\' egress sends', () => {
+  // `resolver::egress::user_agent` and `USER_AGENT`.
+  assert.equal(userAgent('0.1.0', 'ops@example.org'), 'pinakes/0.1.0 (+https://pubky.app; ops@example.org)');
+  assert.equal(userAgent('0.2.0', ''), 'pinakes/0.2.0 (+https://pubky.app)');
 });

@@ -1,6 +1,6 @@
 //! Isolated e2e stack with the real schema, ingestion, resolver parsers, storage and API.
 //! Default mode mocks external boundaries with no public network; --live scopes real fetches
-//! to the sample IDs (at most thirty-two).
+//! to the sample IDs (at most `MAX_LIVE_SAMPLES`).
 // The mock's sample list is one `json!` literal, deeper than the default macro recursion limit.
 #![recursion_limit = "256"]
 use anyhow::{bail, ensure, Result};
@@ -294,6 +294,12 @@ struct Write {
     path: String,
     tag: Value,
 }
+/// The most sample resources one live run fetches.
+const MAX_LIVE_SAMPLES: usize = 128;
+/// The contact a run gives the services it reads when the operator set none (`http.contact`);
+/// `e2e/harness.mjs`'s preflight fetches name the same one.
+const E2E_CONTACT: &str = "info@synonym.to";
+
 async fn write(State(f): State<Fixture>, Json(w): Json<Write>) -> axum::http::StatusCode {
     if !w.path.starts_with("/pub/pinakes.e2e/tags/") {
         return axum::http::StatusCode::BAD_REQUEST;
@@ -466,7 +472,8 @@ async fn run(pool: sqlx::PgPool, f: Fixture) -> Result<()> {
     cfg.osm.requests_per_second = 10.;
     cfg.canary.enabled = false;
     // Services that need a contact (SEC EDGAR) wait without one.
-    cfg.egress.contact = "info@synonym.to".into();
+    cfg.egress.contact = E2E_CONTACT.into();
+    cfg.osm.contact = E2E_CONTACT.into();
     cfg.pubky.enabled = false;
     cfg.api.requests_per_minute = 10000;
     // The harness tags as one author: one shared tagger relates two samples.
@@ -571,12 +578,20 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
     };
     pinakes_core::migrate(&pool).await?;
     let _instance = pinakes_core::locks::own_database(&pool).await?;
-    let mut cfg = Config::default();
+    // Settings and secrets come from the environment as the daemon reads them (the TIDAL
+    // credentials, `PINAKES__…`); there is no file.
+    let mut cfg = Config::load(None)?;
     cfg.canary.enabled = false;
-    // Services that need a contact (SEC EDGAR) wait without one.
-    cfg.egress.contact = "info@synonym.to".into();
+    // Services that need a contact (SEC EDGAR) wait without one: the operator's
+    // (`PINAKES__HTTP__CONTACT`, which `Config::load` gave every client), else this run's.
+    if cfg.egress.contact.is_empty() {
+        cfg.egress.contact = E2E_CONTACT.into();
+        cfg.osm.contact = E2E_CONTACT.into();
+    }
     cfg.api.requests_per_minute = 10000;
     cfg.nexus_url = std::env::var("PINAKES_E2E_NEXUS").unwrap_or_else(|_| cfg.nexus_url.clone());
+    // As the daemon: the sources' switches and tokens (GitHub, Discogs) apply to this run.
+    pinakes_core::configure_sources(&cfg);
     let cfg = Arc::new(cfg);
     let egress = Egress::new(cfg.egress.clone());
     let osm = Arc::new(OsmResolver::new(pool.clone(), cfg.osm.clone())?);
@@ -607,6 +622,27 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
             web: web(),
         }));
     }
+    // A sample whose expectations come from one also-on source (`needs`: a TIDAL album's own
+    // barcode) is refused at once when that source cannot run, rather than timing out later.
+    let sources = pinakes_core::also_on::registry();
+    let unmet: Vec<String> = samples
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|sample| {
+            let need = sample["needs"].as_str()?;
+            let ready = sources
+                .iter()
+                .any(|s| s.id() == need && cfg.also_on.source_enabled(s.as_ref()) && s.ready(&cfg));
+            (!ready).then(|| format!("{} needs {need}", sample["kind"].as_str().unwrap_or("?")))
+        })
+        .collect();
+    ensure!(
+        unmet.is_empty(),
+        "live samples need an also-on source this stack cannot run ({}); for tidal, set \
+         PINAKES_TIDAL_CLIENT_ID and PINAKES_TIDAL_CLIENT_SECRET",
+        unmet.join(", ")
+    );
     let mut selected = vec![];
     for sample in samples
         .as_array()
@@ -627,10 +663,13 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
             .clone();
         selected.push((id, resolver));
     }
-    // The scope stays small and explicit: only listed samples are ever fetched.
+    // The scope stays explicit: only listed samples (and what a fetch shows them to be spellings
+    // of, below) are ever fetched, one at a time with a second between them. The cap bounds how
+    // many, not how long a run takes.
     ensure!(
-        (1..=32).contains(&selected.len()),
-        "live driver requires one to thirty-two sample resources"
+        (1..=MAX_LIVE_SAMPLES).contains(&selected.len()),
+        "live driver requires one to {MAX_LIVE_SAMPLES} sample resources, got {}",
+        selected.len()
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);
@@ -643,7 +682,6 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
         egress: egress.clone(),
         config: cfg.clone(),
     };
-    let sources = pinakes_core::also_on::registry();
     let polling = tokio::spawn(async move {
         loop {
             if let Err(e) =
@@ -652,7 +690,22 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
                 eprintln!("live ingestion: {e}");
             }
             for (id, resolver) in &selected {
-                let job=sqlx::query_as::<_,queue::Job>("UPDATE resource SET lease_until=now()+interval '60 seconds',generation=generation+1 WHERE id=$1 AND NOT dead_letter AND NOT final AND next_attempt_at<=now() AND (lease_until IS NULL OR lease_until<now()) RETURNING id,uri,attempts,generation").bind(id).fetch_optional(&pool).await;
+                // A fetch can show a sample to be a spelling of another URI (a Bluesky handle's
+                // post under its DID): the sample becomes that root's alias, and its card is the
+                // root's, so the root is fetched in its place, by the root's own resolver.
+                let job=sqlx::query_as::<_,queue::Job>("UPDATE resource SET lease_until=now()+interval '60 seconds',generation=generation+1 WHERE id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1) AND NOT dead_letter AND NOT final AND next_attempt_at<=now() AND (lease_until IS NULL OR lease_until<now()) RETURNING id,uri,attempts,generation").bind(id).fetch_optional(&pool).await;
+                let resolver = match &job {
+                    Ok(Some(job)) if job.id != *id => {
+                        let Some(root) = pinakes_core::resolver::classify(&job.uri)
+                            .and_then(|kind| resolvers.iter().find(|r| r.name() == kind))
+                        else {
+                            eprintln!("live sample root: no resolver for {}", job.uri);
+                            continue;
+                        };
+                        root
+                    }
+                    _ => resolver,
+                };
                 match job {
                     Ok(Some(job)) => {
                         // The production path: the workers finish every job through a batch.

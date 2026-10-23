@@ -211,14 +211,18 @@ pub fn log_host(uri: &str) -> String {
         .unwrap_or_default()
 }
 
-/// `text` with every web URL in it cut before its query or fragment (from the first `?` or `#`
-/// to the next white space) and without user info, in any letter case. The last guard for error
-/// text that goes to a log; no code puts a URL in an error on purpose.
+/// The URL schemes `redact` cuts: the web's, and the database's (a `DATABASE_URL` holds a
+/// password as user info and the socket or TLS settings as its query).
+const REDACTED_SCHEMES: [&str; 4] = ["http://", "https://", "postgres://", "postgresql://"];
+
+/// `text` with every web or database URL in it cut before its query or fragment (from the first
+/// `?` or `#` to the next white space) and without user info, in any letter case. The last guard
+/// for error text that goes to a log; no code puts a URL in an error on purpose.
 pub fn redact(text: &str) -> String {
     let lower = text.to_ascii_lowercase();
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
-    while let Some((start, scheme)) = ["http://", "https://"]
+    while let Some((start, scheme)) = REDACTED_SCHEMES
         .iter()
         .filter_map(|scheme| lower[at..].find(scheme).map(|i| (at + i, scheme.len())))
         .min()
@@ -228,7 +232,7 @@ pub fn redact(text: &str) -> String {
         let end = text[start..]
             .find(char::is_whitespace)
             .map_or(text.len(), |n| start + n);
-        let end = ["http://", "https://"]
+        let end = REDACTED_SCHEMES
             .iter()
             .filter_map(|s| lower[start + scheme..end].find(s))
             .min()
@@ -345,6 +349,19 @@ mod tests {
                 "failed [https://first.example/a,HTTPS://second.example/b",
             ),
             ("from http://example.org/c#CANARY", "from http://example.org/c"),
+            // A database URL: its password (user info) and its settings (query) go (Kimi).
+            (
+                "connect postgresql://pinakes:CANARY@db.example:5432/pinakes?sslmode=require&password=CANARY failed",
+                "connect postgresql://db.example:5432/pinakes failed",
+            ),
+            (
+                "POSTGRES://user:CANARY@/pinakes?host=/run/CANARY",
+                "POSTGRES:///pinakes",
+            ),
+            (
+                "url=postgres://u:CANARY@db/x,then https://user:CANARY@a.example/b",
+                "url=postgres://db/x,then https://a.example/b",
+            ),
             ("no link here", "no link here"),
             ("https://example.org/plain", "https://example.org/plain"),
         ] {

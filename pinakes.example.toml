@@ -178,8 +178,8 @@ websocket = true # Nostr relays: one relay hint, after both HTTP indexers miss.
 
 [http]
 # Sent in the User-Agent, pinakes/<version> (+https://pubky.app; <contact>). Empty: the links of
-# sources that need a contact wait. An address naming github is refused.
-contact = "info@synonym.to"
+# sources that need a contact wait. An address naming github is refused. Set your own address:
+# contact = "operator@example.org"
 
 [egress]
 # Exact names or *.example.org. An empty allow list permits all public hosts.

@@ -8,6 +8,57 @@ export async function json(url, body, method = body === undefined ? 'GET' : 'POS
   assert(response.ok, `${method} ${new URL(url).pathname}: HTTP ${response.status}`);
   return response.status === 204 ? null : response.json();
 }
+/** The newest item's link in an RSS feed: the first `<item>`'s `<link>`. */
+export function newestLink(rss) {
+  const item = /<item\b[\s\S]*?<\/item>/.exec(rss)?.[0];
+  return item && /<link>\s*(?:<!\[CDATA\[)?\s*(https?:\/\/[^\s<\]]+)/.exec(item)?.[1];
+}
+/** The contact a run gives the services it reads when the operator set none
+ * (`PINAKES__HTTP__CONTACT`); the e2e driver falls back to the same one (`E2E_CONTACT`). */
+export const E2E_CONTACT = 'info@synonym.to';
+/** The User-Agent Pinakes' egress sends (`resolver::egress::user_agent`): its version and the
+ * contact, so a site sees the run's preflight fetches as it will see Pinakes'. */
+export const userAgent = (version, contact) => contact ? `pinakes/${version} (+https://pubky.app; ${contact})` : `pinakes/${version} (+https://pubky.app)`;
+/** The preflight's fetches of a page's text and of its status, with that User-Agent. */
+export function preflight(agent) {
+  const get = url => fetch(url, { headers: { 'user-agent': agent }, signal: AbortSignal.timeout(15000) });
+  return {
+    text: async url => {
+      const response = await get(url);
+      assert(response.ok, `${url}: HTTP ${response.status}`);
+      return response.text();
+    },
+    status: async url => {
+      const response = await get(url);
+      await response.body?.cancel();
+      return response.status;
+    },
+  };
+}
+/** A sample naming `latest_in` (a walled site's RSS feed) takes that feed's newest item as its
+ * link: feeds list recent items only, so a fixed article drops out of them within days. */
+export async function freshen(samples, fetchText) {
+  for (const sample of samples.filter(s => s.latest_in)) {
+    const link = newestLink(await fetchText(sample.latest_in));
+    assert(link, `No item in ${sample.latest_in} for the ${sample.kind} sample`);
+    sample.uri = link;
+  }
+  return samples;
+}
+/** Samples marked `needs_page` are cards read from the page itself. A site that refuses this
+ * host's page fetches (401 or 403) cannot make that card from here, whatever Pinakes does, so the
+ * sample is left out of the run and reported with the reason; every other sample stays strict.
+ * A sample another one joins (`group_with`, `maybe_same_with`) is never left out. */
+export async function dropRefusedPages(samples, fetchStatus) {
+  const skipped = [];
+  for (const sample of samples.filter(s => s.needs_page)) {
+    const status = await fetchStatus(sample.uri);
+    if (status !== 401 && status !== 403) continue;
+    assert(!samples.some(s => s.group_with === sample.kind || s.maybe_same_with === sample.kind), `The ${sample.kind} sample is joined by another and cannot be left out`);
+    skipped.push({ kind: sample.kind, uri: sample.uri, reason: `${new URL(sample.uri).host} refuses this host's page fetches (HTTP ${status})` });
+  }
+  return { samples: samples.filter(s => !skipped.some(k => k.kind === s.kind)), skipped };
+}
 export async function waitFor(label, action, timeout, signal) {
   const end = Date.now() + timeout;
   while (Date.now() < end) {
@@ -58,6 +109,50 @@ export async function ownTags(hydrated, uris, label, author, tagsOf) {
   }
   return confirmed;
 }
+/** The fields the report keeps of a sample's card. */
+const reported = card => ({ resource_id: card.id, type: card.type, status: card.status, site: card.site });
+/** A sample's card meets the sample's expectations: a music link is typed and named by what it is,
+ * whatever its page says, and a media page is named after its object (by the page hook at once,
+ * or, when its record was slow, once the also-on title reads the card again). Every card kept is
+ * of the sample's type, ancestors included (`isA`: an Event sample's card may be a MusicEvent);
+ * the type search confirms only the first card read, never one that replaces it. Returns the
+ * card to keep. */
+export async function expectCard(tag, card, readByUri, timeout, signal, isA = async (c, type) => c.type === type) {
+  // The card judged is the one given or, when the sample's link became a spelling of another
+  // root while its type was awaited (`isA` answers with that root), the root: judged in its turn.
+  const judge = async c => {
+    assert.equal(c.status, 'ok', `Pinakes ${tag.kind} status`);
+    if (tag.site) assert.equal(c.site, tag.site, `Pinakes ${tag.kind} site`);
+    const verdict = await isA(c, tag.type, tag.uri);
+    if (verdict !== true && verdict?.id && verdict.id !== c.id) return judge(verdict);
+    assert(verdict === true, `Pinakes ${tag.kind} type: ${c.type} is no ${tag.type}`);
+    return c;
+  };
+  card = await judge(card);
+  if (!tag.name) return card;
+  const named = card.name === tag.name ? card : await waitFor(`Pinakes ${tag.kind} name`, async () => {
+    const v = await readByUri(tag.uri);
+    return v && v.name === tag.name && v;
+  }, timeout, signal).catch(error => { if (signal?.aborted) throw error; return card; });
+  // Every expectation holds on the card that is kept, not only on the first one read.
+  const kept = await judge(named);
+  assert.equal(kept.name, tag.name, `Pinakes ${tag.kind} name`);
+  return kept;
+}
+/** A card read by its URI can be read once more under another ID: a fetch can show the link to be
+ * a spelling of another (a Mastodon @-link of its /users/…/statuses/ form), and its card is then
+ * the root's, the only one search lists. Each sample search does not list is read again by its
+ * URI; a card under another ID must meet the sample's expectations again (`check`) before it
+ * replaces the first, in `docs` and in every reported field. */
+export async function rereadMoved(tags, docs, report, readByUri, check) {
+  for (const tag of tags) {
+    const card = await readByUri(tag.uri);
+    if (!card || card.status !== 'ok' || card.id === docs.get(tag.kind).id) continue;
+    const kept = await check(tag, card);
+    docs.set(tag.kind, kept);
+    Object.assign(report.samples.find(s => s.kind === tag.kind), reported(kept));
+  }
+}
 export async function runFlow({ storage, author, samples, pinakes, nexus, positiveVenue = false, timeout = 120000, journal, signal }) {
   const report = { at: new Date().toISOString(), run: randomUUID(), author, samples: [], assertions: [], cleanup: [] };
   const label = `e2e-${report.run.replaceAll("-", "").slice(0, 16)}`;
@@ -84,6 +179,21 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
     await withTags(storage, tags, async () => {
       await waitFor('Nexus puts', async () => { await poll(); return tags.every(tag => feed.get(tag.path)?.op === 'put'); }, timeout, signal);
       const docs = new Map();
+      const readByUri = async uri => {
+        const r = await fetch(`${pinakes}/v1/resources/by-uri?${new URLSearchParams({ uri })}`, { signal: AbortSignal.timeout(15000) });
+        return r.ok ? r.json() : null;
+      };
+      // A card is of a type when the type search (ancestors included) lists it under the run's tag.
+      // While that is awaited the sample's link may become a spelling of another root (a fetch
+      // showed it to be one): search lists the root, never this card, so the root, read by the
+      // URI, is the answer, for `expectCard` to judge instead (`rereadMoved`'s case, earlier).
+      const isA = async (card, type, uri) => card.type === type || waitFor(`Pinakes ${type} lists ${card.type} ${card.id}`, async () => {
+        const found = await search({ type, limit: '500' });
+        if (found.items.some(row => row.id === card.id)) return true;
+        const root = await readByUri(uri);
+        return root && root.status === 'ok' && root.id !== card.id && root;
+      }, timeout, signal).catch(error => { if (signal?.aborted) throw error; return false; });
+      const check = (tag, card) => expectCard(tag, card, readByUri, timeout, signal, isA);
       for (const tag of tags) {
         // Pinakes is read by the tagged URI: its IDs are its own, never Nexus's.
         const d = await waitFor(`Pinakes ${tag.kind}`, async () => {
@@ -94,29 +204,19 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
           assert(!['missing','error','unreachable'].includes(d.status), `Pinakes ${tag.kind} finalized ${d.status}`);
           return d.status === 'ok' && d;
         }, timeout, signal);
-        docs.set(tag.kind, d);
-        report.samples.push({ kind: tag.kind, uri: tag.uri, resource_id: d.id, type: d.type, status: d.status, site: d.site });
-        // A music link is typed and named by what it is, whatever its page says.
-        if (tag.site) assert.equal(d.site, tag.site, `Pinakes ${tag.kind} site`);
-        if (tag.site) assert.equal(d.type, tag.type, `Pinakes ${tag.kind} type`);
-        // A media page is named after its object: by the page hook at once, or, when its record
-        // was slow, once the also-on title reads the card again.
-        if (tag.name) {
-          const named = await waitFor(`Pinakes ${tag.kind} name`, async () => {
-            const r = await fetch(`${pinakes}/v1/resources/by-uri?${new URLSearchParams({ uri: tag.uri })}`, { signal: AbortSignal.timeout(15000) });
-            const v = r.ok && await r.json();
-            return v && v.name === tag.name && v;
-          }, timeout, signal).catch(error => { if (signal?.aborted) throw error; return d; });
-          assert.equal(named.name, tag.name, `Pinakes ${tag.kind} name`);
-          assert.equal(named.type, tag.type, `Pinakes ${tag.kind} type`);
-        }
+        report.samples.push({ kind: tag.kind, uri: tag.uri, ...reported(d) });
+        const kept = await check(tag, d);
+        docs.set(tag.kind, kept);
+        Object.assign(report.samples.at(-1), reported(kept));
       }
+      const reread = missing => rereadMoved(missing, docs, report, readByUri, check);
       // The type filter matches ancestors, so a MusicEvent sample is found under type=Event.
       for (const type of new Set(tags.map(tag => tag.type))) {
-        const wanted = tags.filter(tag => tag.type === type).map(tag => docs.get(tag.kind).id);
         await waitFor(`Pinakes type ${type}`, async () => {
           const found = await search({ type, limit: '500' });
-          return wanted.every(id => found.items.some(row => row.id === id));
+          const missing = tags.filter(tag => tag.type === type && !found.items.some(row => row.id === docs.get(tag.kind).id));
+          await reread(missing);
+          return missing.length === 0;
         }, timeout, signal);
       }
       report.assertions.push(`${tags.length} SDK tags reached Nexus and resolved with expected types`);
@@ -124,7 +224,9 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
       // Pinakes is still ingesting this run's new tag. Wait for the scoped rows too.
       const results = await waitFor('Pinakes tagged search', async () => {
         const result = await search({ facet: 'tags', limit: '500' });
-        return [...docs.values()].every(d => result.items.some(row => row.id === d.id)) && result;
+        const missing = tags.filter(tag => !result.items.some(row => row.id === docs.get(tag.kind).id));
+        await reread(missing);
+        return missing.length === 0 && result;
       }, timeout, signal);
       assert(results.facets.tags.some(f => f.label === label && f.count === results.items.length));
       report.assertions.push('search and tag facets');

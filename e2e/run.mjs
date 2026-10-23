@@ -4,10 +4,10 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { json, runFlow } from './harness.mjs';
+import { E2E_CONTACT, dropRefusedPages, freshen, json, preflight, runFlow, userAgent } from './harness.mjs';
 
 const mock = process.argv.includes('--mock');
-let child, session, liveSamples;
+let child, session, liveSamples, skipped = [];
 const control = new AbortController();
 process.on('SIGINT', () => control.abort(new Error('Interrupted')));
 process.on('SIGTERM', () => control.abort(new Error('Interrupted')));
@@ -28,6 +28,15 @@ try {
     // A pubky:// sample names an object of the test identity: `{author}` is its public key.
     samples = JSON.parse((await readFile(process.env.PINAKES_E2E_SAMPLES ?? 'e2e/samples.live.json', 'utf8')).replaceAll('{author}', author));
     for (const sample of samples) if (sample.kind === 'ics' && process.env.PINAKES_E2E_ICS_URL) sample.uri = process.env.PINAKES_E2E_ICS_URL;
+    // The preflight fetches go out as Pinakes' egress will: its version (the stack this checkout
+    // builds, or the running instance's `/v1/info`) and the operator's contact, else the run's.
+    const version = process.argv.includes('--isolated-live')
+      ? /\[workspace\.package\][^[]*?\bversion\s*=\s*"([^"]+)"/.exec(await readFile('Cargo.toml', 'utf8'))[1]
+      : (await json(`${pinakes}/v1/info`)).version;
+    const fetches = preflight(userAgent(version, process.env.PINAKES__HTTP__CONTACT?.trim() || E2E_CONTACT));
+    await freshen(samples, fetches.text);
+    ({ samples, skipped } = await dropRefusedPages(samples, fetches.status));
+    for (const s of skipped) console.error(`left out: ${s.kind} (${s.uri}): ${s.reason}`);
     liveSamples = `.runtime/e2e-samples-${randomUUID()}.json`;
     await writeFile(liveSamples, JSON.stringify(samples, null, 2));
   }
@@ -66,7 +75,7 @@ try {
   }
   const journal = (tags, cleanup) => writeFile(journalFile, JSON.stringify({ author, tags, cleanup }, null, 2), { mode: 0o600 });
   report = await runFlow({ storage, author, samples, pinakes, nexus, positiveVenue, journal, signal: control.signal, timeout: Number(process.env.PINAKES_E2E_TIMEOUT_MS ?? (mock ? 120000 : 600000)) });
-  report.mode = mock ? 'mock' : 'live'; report.journal = journalFile;
+  report.mode = mock ? 'mock' : 'live'; report.journal = journalFile; if (skipped.length) report.skipped = skipped;
 } catch (error) {
   report = { ok: false, mode: mock ? 'mock' : 'live', error: error.message ?? String(error), journal: journalFile };
 } finally {

@@ -49,9 +49,9 @@ Fragments are stripped, on purpose. The one place a fragment would be the only h
 1. **A reference feed.** `GET /v0/resources/changes?cursor=&limit=`, one line per reference to a non-post, non-user URI that Nexus accepted: `{op: put|del, resource_id, uri, kind: tag|reply|embed|collection, author, label?, object_path, at}`; Pinakes reads the `uri` and computes its own id. The tag and post handlers append it after they commit, the way they append to `Event:Events`; the route carries the feed epoch header; a migration seeds it from the existing `TAGGED` and `REPLIED` edges. Why: this is what makes Pinakes spec-free, epoch-free and fetch-free, and it is the feed a third-party indexer wants from a Nexus light instance.
 2. **A batch resource view.** `POST /v0/stream/resources/by_ids` with `{uris: [1–100], viewer_id?}` (or Nexus's own `resource_ids`), answered in request order, mirroring `posts/by_ids`. Why: one call hydrates a map page or a feed, by the URIs Pinakes returns ([3](#identity)).
 
-Reach uses the existing `following` and `friends` lists (pages of 200 ids).
+Today, on the branch `feat/resources-changes-feed` of the fork [`gillohner/pubky-nexus`](https://github.com/gillohner/pubky-nexus/tree/feat/resources-changes-feed) (not yet in pubky/pubky-nexus), the batch view exists and the feed carries tag lines only, seeded from `TAGGED` edges; reply, embed and collection lines are reserved. Reach uses the existing `following` and `friends` lists (pages of 200 ids).
 
-`Resource` nodes, `TAGGED` edges, the per-resource tag and tagger routes and `by_ids` stay in Nexus; they are the social truth.
+`Resource` nodes, `TAGGED` edges and the per-resource tag and tagger routes stay in Nexus, and the batch view joins them there; they are the social truth.
 
 Not needed: webhooks, a plug-in trait, a point index, metadata on `Resource`, place endpoints, any `geo:` handling. Nexus does not know that a resource has a location.
 
