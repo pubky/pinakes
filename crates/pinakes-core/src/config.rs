@@ -1162,25 +1162,34 @@ mod tests {
             assert!(text.contains(&format!("| `{key}` |")), "{key}");
         }
     }
+    /// A source's own token variable fills `[sources.<name>] token` when the file leaves it
+    /// unset; the file (or the `PINAKES__…` form) wins; an empty variable is none.
     #[test]
-    fn the_github_token_has_a_short_name_the_file_overrides() {
-        let vars = |token: &str| vec![("PINAKES_GITHUB_TOKEN".to_owned(), token.to_owned())];
+    fn a_token_variable_fills_what_the_file_leaves_unset() {
+        // Whichever registered source has one: a build without any has nothing to check.
+        let Some(source) = crate::sources::REGISTRY
+            .iter()
+            .find(|s| s.takes_token() && s.token_variable().is_some())
+        else {
+            return;
+        };
+        let (name, variable) = (source.name(), source.token_variable().unwrap());
+        let vars = |token: &str| vec![(variable.to_owned(), token.to_owned())];
         let mut value = Config::defaults().unwrap();
         apply_named_env(&mut value, vars("from-env")).unwrap();
         let cfg = Config::from_value(value).unwrap();
-        assert_eq!(cfg.sources.token("github"), Some("from-env"));
-        assert!(cfg.sources.enabled("github"));
-        // A token in the file (or the `PINAKES__…` form) wins; an empty one is none.
+        assert_eq!(cfg.sources.token(name), Some("from-env"));
+        assert!(cfg.sources.enabled(name));
         let mut value = Config::defaults().unwrap();
-        value["sources"]["github"] = serde_json::json!({"token": "from-file"});
+        value["sources"][name] = serde_json::json!({"token": "from-file"});
         apply_named_env(&mut value, vars("from-env")).unwrap();
         assert_eq!(
-            Config::from_value(value).unwrap().sources.token("github"),
+            Config::from_value(value).unwrap().sources.token(name),
             Some("from-file")
         );
         let mut value = Config::defaults().unwrap();
         apply_named_env(&mut value, vars("")).unwrap();
-        assert!(!Config::from_value(value).unwrap().sources.enabled("github"));
+        assert!(!Config::from_value(value).unwrap().sources.enabled(name));
     }
 
     #[test]
