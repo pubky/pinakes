@@ -98,3 +98,23 @@ test('the card kept after waiting for a name meets every expectation, not only t
   await assert.rejects(rereadMoved([tag], docs, report, async () => root, (t, c) => expectCard(t, c, async () => elsewhere, 50)), /site/);
   assert.equal(docs.get('music').id, 'a'); assert.equal(report.samples[0].site, 'Music');
 });
+test('a card that moved after the type search must still be of the sample\'s type, ancestors included', async () => {
+  // Codex's case: an Article sample whose root is a WebPage, read again after the type search.
+  const tag = { kind: 'article', uri: 'https://x.example/a', type: 'Article' };
+  const first = { id: 'a', status: 'ok', type: 'Article' };
+  const isA = async (c, type) => c.type === type || (c.type === 'MusicEvent' && type === 'Event');
+  const check = (t, c) => expectCard(t, c, async () => c, 50, undefined, isA);
+  const docs = new Map([['article', first]]);
+  const report = { samples: [{ kind: 'article', uri: tag.uri, resource_id: 'a', type: 'Article', status: 'ok' }] };
+  await assert.rejects(rereadMoved([tag], docs, report, async () => ({ id: 'b', status: 'ok', type: 'WebPage' }), check), /type/);
+  assert.equal(docs.get('article').id, 'a'); assert.equal(report.samples[0].type, 'Article');
+  // A subtype is the type: an Event sample's root may be a MusicEvent.
+  const event = { kind: 'event', uri: 'https://x.example/e', type: 'Event' };
+  const events = new Map([['event', { id: 'a', status: 'ok', type: 'Event' }]]);
+  const eventReport = { samples: [{ kind: 'event', uri: event.uri, resource_id: 'a', type: 'Event', status: 'ok' }] };
+  const root = { id: 'b', status: 'ok', type: 'MusicEvent' };
+  await rereadMoved([event], events, eventReport, async () => root, check);
+  assert.equal(events.get('event'), root); assert.equal(eventReport.samples[0].type, 'MusicEvent');
+  // Without a word on ancestry, only the exact type passes.
+  await assert.rejects(expectCard(event, root, async () => root, 50), /type/);
+});

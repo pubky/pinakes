@@ -99,22 +99,24 @@ export async function ownTags(hydrated, uris, label, author, tagsOf) {
 const reported = card => ({ resource_id: card.id, type: card.type, status: card.status, site: card.site });
 /** A sample's card meets the sample's expectations: a music link is typed and named by what it is,
  * whatever its page says, and a media page is named after its object (by the page hook at once,
- * or, when its record was slow, once the also-on title reads the card again). Returns the card to
- * keep. */
-export async function expectCard(tag, card, readByUri, timeout, signal) {
-  const holds = c => {
+ * or, when its record was slow, once the also-on title reads the card again). Every card kept is
+ * of the sample's type, ancestors included (`isA`: an Event sample's card may be a MusicEvent);
+ * the type search confirms only the first card read, never one that replaces it. Returns the
+ * card to keep. */
+export async function expectCard(tag, card, readByUri, timeout, signal, isA = async (c, type) => c.type === type) {
+  const holds = async c => {
     assert.equal(c.status, 'ok', `Pinakes ${tag.kind} status`);
     if (tag.site) assert.equal(c.site, tag.site, `Pinakes ${tag.kind} site`);
-    if (tag.site || tag.name) assert.equal(c.type, tag.type, `Pinakes ${tag.kind} type`);
+    assert(await isA(c, tag.type), `Pinakes ${tag.kind} type: ${c.type} is no ${tag.type}`);
   };
-  holds(card);
+  await holds(card);
   if (!tag.name) return card;
   const named = card.name === tag.name ? card : await waitFor(`Pinakes ${tag.kind} name`, async () => {
     const v = await readByUri(tag.uri);
     return v && v.name === tag.name && v;
   }, timeout, signal).catch(error => { if (signal?.aborted) throw error; return card; });
   // Every expectation holds on the card that is kept, not only on the first one read.
-  holds(named);
+  await holds(named);
   assert.equal(named.name, tag.name, `Pinakes ${tag.kind} name`);
   return named;
 }
@@ -162,7 +164,12 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
         const r = await fetch(`${pinakes}/v1/resources/by-uri?${new URLSearchParams({ uri })}`, { signal: AbortSignal.timeout(15000) });
         return r.ok ? r.json() : null;
       };
-      const check = (tag, card) => expectCard(tag, card, readByUri, timeout, signal);
+      // A card is of a type when the type search (ancestors included) lists it under the run's tag.
+      const isA = async (card, type) => card.type === type || waitFor(`Pinakes ${type} lists ${card.type} ${card.id}`, async () => {
+        const found = await search({ type, limit: '500' });
+        return found.items.some(row => row.id === card.id);
+      }, timeout, signal).then(() => true, error => { if (signal?.aborted) throw error; return false; });
+      const check = (tag, card) => expectCard(tag, card, readByUri, timeout, signal, isA);
       for (const tag of tags) {
         // Pinakes is read by the tagged URI: its IDs are its own, never Nexus's.
         const d = await waitFor(`Pinakes ${tag.kind}`, async () => {
