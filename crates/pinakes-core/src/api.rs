@@ -1996,11 +1996,14 @@ pub async fn resolve(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
-/// What a client needs: the version, what this instance resolves, the limits a client must
-/// respect, and the licence of the OSM-derived values its cards carry.
+/// What a client needs: the version, the User-Agent this instance sends, what it resolves, the
+/// limits a client must respect, and the licence of the OSM-derived values its cards carry.
 #[derive(Serialize, ToSchema)]
 pub struct Info {
     pub version: String,
+    /// The User-Agent this instance's requests to other services carry: its version and the
+    /// operator's contact (`http.contact`), when set.
+    pub user_agent: String,
     /// The kinds of links this instance resolves: its routes and card kinds that are on.
     pub resolves: Vec<String>,
     pub limits: InfoLimits,
@@ -2073,6 +2076,7 @@ pub async fn info(State(state): State<AppState>) -> Json<Info> {
     );
     Json(Info {
         version: env!("CARGO_PKG_VERSION").into(),
+        user_agent: crate::resolver::egress::user_agent(&c.egress.contact),
         resolves,
         limits: InfoLimits {
             lookup: 500,

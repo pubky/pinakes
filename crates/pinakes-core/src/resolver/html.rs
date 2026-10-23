@@ -2042,6 +2042,10 @@ mod tests {
             .is_ok());
     }
 
+    /// A CPU budget no parse of a test reaches: a page cut short at the budget is a smaller tree,
+    /// so a test of the node cap parses with this budget and the cap alone can stop it.
+    const AMPLE_BUDGET: Duration = Duration::from_secs(60 * 60);
+
     /// A tree refused at `MAX_NODES` is logged once per job, however many the job refuses, and
     /// the job goes on.
     #[test]
@@ -2064,7 +2068,7 @@ mod tests {
             .finish();
         let page = format!("<title>T</title>{}", "<b></b>".repeat(MAX_NODES));
         tracing::subscriber::with_default(subscriber, || {
-            let mut job = Job::new(PARSE_BUDGET, Arc::default());
+            let mut job = Job::new(AMPLE_BUDGET, Arc::default());
             for _ in 0..2 {
                 let error = job.parse_with(Kind::Document, &page, None).unwrap_err();
                 assert!(error.is::<TooComplex>());
@@ -2083,10 +2087,10 @@ mod tests {
     #[test]
     fn a_tree_past_the_node_cap_is_too_complex() {
         let page = format!("<title>T</title>{}", "<b></b>".repeat(MAX_NODES));
-        let error = parse_in_process(Kind::Document, &page, PARSE_BUDGET).unwrap_err();
+        let error = parse_in_process(Kind::Document, &page, AMPLE_BUDGET).unwrap_err();
         assert!(error.is::<TooComplex>(), "{error:#}");
         let within = format!("<title>T</title>{}", "<b></b>".repeat(MAX_NODES - 8));
-        assert!(parse_in_process(Kind::Document, &within, PARSE_BUDGET).is_ok());
+        assert!(parse_in_process(Kind::Document, &within, AMPLE_BUDGET).is_ok());
     }
 
     /// Fed in pieces, the parser builds the tree it builds from one piece.

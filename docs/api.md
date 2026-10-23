@@ -26,7 +26,7 @@ snapshot; a test fails when it is stale.
 | `POST /v1/occurrences/lookup` | `{resource_ids?, uris?, from?, to?, limit?, cursor?}`: 1–500 feed IDs and links together | `{items: [occurrence card], cursor}` across the feeds, by start |
 | `GET /v1/groups/{id}` | 32-character group ID | `{id, type, curated, keys, members: [card]}`; 404 if unknown |
 | `POST /v1/changes/lookup` | `{resource_ids?, uris?, since?, cursor?, limit?}`: 1–500 IDs and links together | Change page for those resources |
-| `GET /v1/info` | None | `{version, resolves, limits, osm_licence}`: what this instance resolves and the limits a client must respect |
+| `GET /v1/info` | None | `{version, user_agent, resolves, limits, osm_licence}`: what this instance resolves, the limits a client must respect, and the User-Agent its requests carry |
 | `GET /v1/dumps/osm_place.ndjson.gz` | None | The ODbL derivative database as a daily gzip file ([OSM](#openstreetmap-and-locations)) |
 | `GET /v1/openapi.json` | None | OpenAPI 3.1 |
 | `GET /swagger-ui` | None | Swagger UI (when `api.swagger_ui`) |
@@ -1270,9 +1270,10 @@ routes.
 (the stored document with its internal fields) and group curation (`PUT /v1/groups/{id}`). With
 `admin_token` (or `PINAKES__ADMIN_TOKEN`) every admin route needs `Authorization: Bearer`,
 compared in constant time; a non-loopback bind without a token is refused. It sends no CORS
-headers. Public `/v1/info` shows only what a client needs (the version, the kinds of links this
-instance resolves, the lookup sizes, the search page limit, the per-IP and preview budgets and
-the OSM licence); the admin `/v1/info` adds manifests, resolver status, counts, ingestion,
+headers. Public `/v1/info` shows only what a client needs (the version, the User-Agent this
+instance's requests carry, the kinds of links it resolves, the lookup sizes, the search page
+limit, the per-IP and preview budgets and the OSM licence); the admin `/v1/info` adds manifests,
+resolver status, counts, ingestion,
 sources and metrics. Errors are stored only as sanitized classes. Admin info and database
 metrics are cached for 15 seconds. Metrics and alerts are described in [ops](../ops/README.md).
 
