@@ -435,6 +435,9 @@ fn has(ids: &[&str]) -> bool {
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn music_links_join_through_the_hubs_and_list_each_other(pool: sqlx::PgPool) {
     use tower::ServiceExt;
+    if !has(&["musicbrainz", "wikidata", "itunes"]) {
+        return;
+    }
     let first = "https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE";
     let second = "https://open.spotify.com/album/2fGCAYUMssLKiUAoNdxGLx";
     let mut ids = vec![];
