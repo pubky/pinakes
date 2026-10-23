@@ -142,6 +142,13 @@
               }
             ]
           },
+          "open_in": {
+            "description": "The clients that open a Pubky app's object, from the app's profile (docs/pubky-apps.md);\non an event card, those of the event object it names. Empty for every other card.",
+            "items": {
+              "$ref": "#/components/schemas/OpenIn"
+            },
+            "type": "array"
+          },
           "point": {
             "oneOf": [
               {
@@ -183,7 +190,8 @@
           "id",
           "uri",
           "status",
-          "also_on"
+          "also_on",
+          "open_in"
         ],
         "type": "object"
       },
@@ -868,6 +876,24 @@
         ],
         "type": "object"
       },
+      "OpenIn": {
+        "description": "A client that opens an object, and the object's address there.",
+        "properties": {
+          "client": {
+            "description": "The client's name (\"Loopky\", \"Mapky\").",
+            "type": "string"
+          },
+          "url": {
+            "description": "An `https:` URL.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "client",
+          "url"
+        ],
+        "type": "object"
+      },
       "OrganizerRef": {
         "properties": {
           "name": {
@@ -1092,7 +1118,11 @@
             "type": "string"
           },
           "recurrence_id": {
-            "type": "string"
+            "description": "The instance of a recurring event; `null` for a one-off one.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "start": {
             "format": "date-time",
@@ -1105,7 +1135,6 @@
         "required": [
           "author",
           "object_path",
-          "recurrence_id",
           "start",
           "status"
         ],

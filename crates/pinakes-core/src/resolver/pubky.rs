@@ -47,6 +47,15 @@ impl Resolver for PubkyResolver {
     async fn resolve(&self, uri: &str) -> Result<ResourceMeta> {
         tokio::time::timeout(Duration::from_secs(10), async {
             let object = Url::parse(uri)?;
+            // A path an app's profile does not read (one stored before the profile excluded it)
+            // is never fetched: it keeps no card.
+            if super::pubky_apps::excluded(uri) {
+                let mut doc = ResourceMeta::new(uri, "pubky", self.config.ttl_secs);
+                doc.set_type("CreativeWork");
+                doc.status = Status::Missing;
+                doc.withheld = true;
+                return Ok(doc);
+            }
             // Only objects of other apps, by their decoded path (`classify`).
             if super::classify(uri) != Some("pubky") {
                 return Err(anyhow::Error::new(ErrorClass("policy"))
@@ -95,6 +104,7 @@ impl Resolver for PubkyResolver {
             };
             let fetched = self.egress.fetch_with(url.as_str(), &options).await?;
             let mut doc = ResourceMeta::new(uri, "pubky", self.config.ttl_secs);
+            doc.set_type("CreativeWork");
             match fetched.status {
                 200..=299 => {}
                 404 | 410 => {
@@ -114,13 +124,15 @@ impl Resolver for PubkyResolver {
                     .context(crate::resolver::Upstream(status)))
                 }
             }
-            let doc = card(
+            let doc = super::pubky_apps::card_with(
                 uri,
                 &fetched.content_type,
                 &fetched.body,
                 self.config.ttl_secs,
+                chrono::Utc::now(),
+                self.config.max_period_dates,
             )
-            .bounded(ATTRIBUTES)?;
+            .bounded(super::pubky_apps::attributes())?;
             crate::telemetry::document(crate::telemetry::last_fetch(), &self.manifest(), &doc);
             Ok(doc)
         })
@@ -129,51 +141,6 @@ impl Resolver for PubkyResolver {
     fn refresh_after(&self, doc: &ResourceMeta) -> Duration {
         Duration::from_secs(doc.ttl_secs)
     }
-}
-pub fn card(uri: &str, content_type: &str, body: &[u8], ttl: u64) -> ResourceMeta {
-    let mut doc = ResourceMeta::new(uri, "pubky", ttl);
-    doc.set_type("CreativeWork");
-    doc.attributes
-        .insert("content_type".into(), content_type.into());
-    doc.attributes
-        .insert("content_length".into(), body.len().to_string());
-    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
-        doc.name = v
-            .get("name")
-            .or_else(|| v.get("title"))
-            .and_then(|v| v.as_str())
-            .map(str::to_owned);
-        doc.description = v
-            .get("description")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned);
-        doc.image = v
-            .get("image")
-            .and_then(|v| v.as_str())
-            .and_then(|s| url::Url::parse(uri).ok()?.join(s).ok())
-            .filter(|u| matches!(u.scheme(), "http" | "https" | "pubky"))
-            .map(|u| u.to_string());
-        // An object without a name, title or description (a post, a note) is described by its
-        // content: social content (`cards::social`), so a short excerpt that refreshes within the
-        // hour and is purged with its history once the object is gone.
-        if doc.name.is_none() && doc.description.is_none() {
-            doc.description = v
-                .get("content")
-                .or_else(|| v.get("text"))
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(|s| s.chars().take(200).collect());
-            if doc.description.is_some() {
-                doc.set_type("SocialMediaPosting");
-            }
-        }
-    }
-    // The publishing app (`/pub/<app>/…`), not the author's public key.
-    if let Some(app) = crate::api::site(uri, None, None) {
-        doc.site = app;
-    }
-    doc
 }
 #[cfg(test)]
 mod tests {
@@ -190,7 +157,7 @@ mod tests {
     fn conventional_card_and_namespace_matching() {
         let uri =
             "pubky://ybndrfg8ejkmcpqxot1uwisza345h769ybndrfg8ejkmcpqxot1uwi/pub/other.app/item";
-        let doc=card(uri,"application/json",br#"{"title":"A deck","description":"Cards","image":"https://example.org/cover.png","password":"never keep"}"#,10);
+        let doc=super::super::pubky_apps::card(uri,"application/json",br#"{"title":"A deck","description":"Cards","image":"https://example.org/cover.png","password":"never keep"}"#,10);
         assert_eq!(doc.name.as_deref(), Some("A deck"));
         assert!(!serde_json::to_string(&doc).unwrap().contains("password"));
         assert_eq!(crate::resolver::classify(uri), Some("pubky"));
@@ -495,6 +462,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_path_an_apps_profile_does_not_read_is_missing_and_never_fetched() {
+        let owner = Keypair::random();
+        let key = owner.public_key().to_z32();
+        for path in ["loopky/settings.json", "pubky-rooms/messages/a/b/c"] {
+            let homeserver = Arc::new(Homeserver::default());
+            let packet = https(&owner, "_pubky", "homeserver.example", 9443, &[]);
+            let doc = resolver(&[packet], &["8.8.8.8"], homeserver.clone())
+                .resolve(&format!("pubky://{key}/pub/{path}"))
+                .await
+                .unwrap();
+            assert_eq!(doc.status, Status::Missing, "{path}");
+            assert_eq!((doc.name, doc.description), (None, None));
+            assert!(homeserver.requests.lock().unwrap().is_empty(), "{path}");
+        }
+    }
+
+    #[tokio::test]
     async fn a_homeserver_redirect_is_refused() {
         let owner = Keypair::random();
         for status in [301, 302, 307, 308] {
@@ -548,6 +532,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(doc.status, expected, "{status}");
+            assert_eq!(doc.type_name, "CreativeWork", "{status}");
         }
     }
 

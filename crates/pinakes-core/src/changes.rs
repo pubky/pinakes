@@ -177,6 +177,8 @@ pub async fn save(
 ) -> Result<()> {
     let bounded = crate::event::bound_instants(doc);
     let doc = bounded.as_ref().unwrap_or(doc);
+    // Read before the document's copy below, which leaves out what is never stored.
+    let withheld = doc.withheld;
     let mut prepared = if let Some(container) = &doc.container {
         Some(
             crate::event::storage::prepare(pool, id, container, doc.fetched_at, doc.ttl_secs)
@@ -251,6 +253,9 @@ pub async fn save(
                 .as_ref()
                 .is_some_and(crate::resolver::cards::social)
         });
+    let app_missing = doc.status == Status::Missing
+        && doc.source == "pubky"
+        && crate::resolver::pubky_apps::known(&doc.url);
     if social_missing || opted_out {
         sqlx::query("DELETE FROM resource_change WHERE resource_id=$1")
             .bind(id)
@@ -275,7 +280,7 @@ pub async fn save(
             .context("invalid fetch time")?;
         let last: Option<chrono::DateTime<chrono::Utc>> = row.try_get("last_missing_at")?;
         let streak: i32 = row.try_get("missing_streak")?;
-        let streak = if crate::resolver::cards::invalid_identifier(&doc.url) {
+        let streak = if crate::resolver::cards::invalid_identifier(&doc.url) || withheld {
             2
         } else if last.is_some_and(|last| last >= fetched) {
             streak
@@ -308,7 +313,16 @@ pub async fn save(
             tx.commit().await?;
             return Ok(());
         }
-        if let Some(before) = &before {
+        // A Pubky app's object without a card (withheld by its content, gone, or at a path its
+        // profile leaves out) keeps nothing of its earlier card, in its document or in its
+        // history: an unlisted room or a paused listing shows nothing it used to.
+        if app_missing {
+            sqlx::query("UPDATE resource_change SET before=NULL,after=NULL WHERE resource_id=$1 AND (before IS NOT NULL OR after IS NOT NULL)")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        if let Some(before) = before.as_ref().filter(|_| !app_missing) {
             let mut retained = before.clone();
             retained["fetched_at"] = json!(doc.fetched_at);
             retained["ttl_secs"] = json!(doc.ttl_secs);
@@ -375,7 +389,7 @@ pub async fn save(
             plan.append_changes(&mut tx, id).await?;
         }
         if let Some(diff) = diff {
-            let (before, after) = if opted_out {
+            let (before, after) = if opted_out || app_missing {
                 (None, None)
             } else {
                 (before, Some(after))

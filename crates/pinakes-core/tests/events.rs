@@ -4404,3 +4404,45 @@ fn an_unexpanded_rule_keeps_its_date_lists_and_the_horizon() {
         ["2026-12-05T12:00:00+00:00"]
     );
 }
+
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_one_off_event_reference_has_a_null_recurrence_id(pool: PgPool) {
+    reference(
+        &pool,
+        "geo:47.37,8.54",
+        "/pub/social/v1/posts/once",
+        Kind::Event,
+        None,
+        Some(Utc::now() + Duration::days(2)),
+        Op::Put,
+    )
+    .await;
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (code, v) = call(&app, "/v1/search?type=Event").await;
+    assert_eq!(code, 200, "{v}");
+    assert_eq!(
+        v["items"][0]["event"]["object_path"],
+        "/pub/social/v1/posts/once"
+    );
+    assert_eq!(v["items"][0]["event"]["recurrence_id"], Value::Null);
+}
+
+#[test]
+fn a_plain_rule_counts_its_month_day_as_a_whole_month() {
+    // The crate fills a plain monthly or yearly rule's month day from DTSTART; the bound counts
+    // that list as the whole month, 31 days (a yearly rule's one month), and each time list it
+    // fills as one.
+    let bounded = |rule: &str, max: usize| {
+        let set: rrule::RRuleSet = format!("DTSTART:20261020T120000Z\nRRULE:{rule}")
+            .parse()
+            .unwrap();
+        pinakes_core::event::time::rrule_bounded(&set, max)
+    };
+    for rule in ["FREQ=MONTHLY", "FREQ=YEARLY"] {
+        assert!(bounded(rule, 31), "{rule}");
+        assert!(!bounded(rule, 30), "{rule}");
+    }
+    // A weekly or daily rule is its days.
+    assert!(bounded("FREQ=WEEKLY", 1));
+    assert!(bounded("FREQ=DAILY", 1));
+}
