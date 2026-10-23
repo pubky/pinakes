@@ -181,13 +181,8 @@ fn rooms() {
         doc.description.as_deref(),
         Some("Who you are and what you are building.")
     );
-    assert_eq!(
-        links(&doc),
-        link(
-            "Pubky Rooms",
-            "https://pubky-rooms-staging.fly.dev/r/47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/0035SFYCGVBV2"
-        )
-    );
+    // No client link until rooms.pubky.app is live.
+    assert!(doc.open_in.is_empty(), "{:?}", doc.open_in);
     assert_eq!(card("rooms/0035TNXH48JYE-null-topic").description, None);
     // An unlisted room, or one in a format this build doesn't know, has no card.
     no_card(&edited(
@@ -875,7 +870,7 @@ async fn cards_carry_their_client_links_and_facts(pool: PgPool) {
     store::save_document(&pool, &id, 0, &card_of(&uri, &body))
         .await
         .unwrap();
-    // A room not read yet: its kind's link.
+    // A room not read yet: its kind's links (none until rooms.pubky.app is live).
     let (room, _) = fixture("rooms/0035SFYCGVBV2-introductions");
     let room_id = store::ensure_resource(&pool, &room).await.unwrap();
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
@@ -887,7 +882,7 @@ async fn cards_carry_their_client_links_and_facts(pool: PgPool) {
     assert_eq!(deck["details"]["facts"]["card_count"], "1210");
     let room = get(&app, &format!("/v1/resources/{room_id}")).await;
     assert_eq!(room["status"], "pending");
-    assert_eq!(room["open_in"][0]["client"], "Pubky Rooms");
+    assert_eq!(room["open_in"], json!([]));
     // A web page has none.
     let web = store::ensure_resource(&pool, "https://example.org/")
         .await

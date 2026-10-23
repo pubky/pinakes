@@ -70,8 +70,8 @@ Images are Pubky file records, not images, and are not read. Never fetched: `att
 | --- | --- |
 | `rooms/{room}` | `Conversation`: `name`, `topic`. Only a listed room (`visibility: public`); an unlisted one has no card |
 
-Opens in Pubky Rooms: `https://pubky-rooms-staging.fly.dev/r/{owner}/{room}` (the client's
-address until rooms.pubky.app is live). Never fetched: `members/`, `messages/`, `reactions/`,
+No client link until rooms.pubky.app is live (the client's address today is a hosting
+provider's subdomain). Never fetched: `members/`, `messages/`, `reactions/`,
 `bans/`, `mutes/`, `tags/`, `profile.json`.
 
 ### Pubky marketplace (`app.marketplace/`)

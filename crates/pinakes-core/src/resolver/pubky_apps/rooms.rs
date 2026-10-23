@@ -1,6 +1,6 @@
 //! Pubky Rooms (chat rooms): a listed room. Members, messages, reactions, bans, mutes, tags and
 //! the nickname file are never fetched.
-use super::{read, Client, Kind, Object, Profile, Read};
+use super::{read, Kind, Object, Profile, Read};
 use crate::model::ResourceMeta;
 use serde_json::Value;
 
@@ -9,12 +9,9 @@ pub static PROFILE: Profile = Profile {
     kinds: &[Kind {
         path: "rooms/{room}",
         read: room,
-        // The Rooms web client's address today; its production one (rooms.pubky.app) is not
-        // live yet.
-        open_in: &[Client {
-            client: "Pubky Rooms",
-            url: "https://pubky-rooms-staging.fly.dev/r/{owner}/{room}",
-        }],
+        // No client link until rooms.pubky.app is live: the client's address today is a hosting
+        // provider's subdomain, which anyone could take over once the app leaves it.
+        open_in: &[],
     }],
     facts: &[],
 };
