@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { dropRefusedPages, expectCard, freshen, newestLink, ownTags, rereadMoved, withTags } from './harness.mjs';
+import { dropRefusedPages, expectCard, freshen, newestLink, ownTags, rereadMoved, userAgent, withTags } from './harness.mjs';
 test('a PUT that commits then times out is included in cleanup', async () => {
   const stored = new Set(), report = {}, journal = [];
   const storage = { exists: async p => stored.has(p), putJson: async p => { stored.add(p); if (p === 'second') throw new Error('timeout'); }, delete: async p => stored.delete(p) };
@@ -148,4 +148,9 @@ test('a card whose link became a spelling of another root before the first type 
   const kept = await expectCard(tag, a, async () => b, 50, undefined, isA);
   docs.set('event', kept); Object.assign(report.samples[0], { resource_id: kept.id, type: kept.type, status: kept.status, site: kept.site });
   assert.equal(docs.get('event').id, 'b'); assert.equal(report.samples[0].resource_id, 'b');
+});
+test('the preflight User-Agent is the one Pinakes\' egress sends', () => {
+  // `resolver::egress::user_agent` and `USER_AGENT`.
+  assert.equal(userAgent('0.1.0', 'ops@example.org'), 'pinakes/0.1.0 (+https://pubky.app; ops@example.org)');
+  assert.equal(userAgent('0.2.0', ''), 'pinakes/0.2.0 (+https://pubky.app)');
 });

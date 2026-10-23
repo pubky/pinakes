@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { dropRefusedPages, freshen, json, runFlow } from './harness.mjs';
+import { E2E_CONTACT, dropRefusedPages, freshen, json, preflight, runFlow, userAgent } from './harness.mjs';
 
 const mock = process.argv.includes('--mock');
 let child, session, liveSamples, skipped = [];
@@ -28,8 +28,14 @@ try {
     // A pubky:// sample names an object of the test identity: `{author}` is its public key.
     samples = JSON.parse((await readFile(process.env.PINAKES_E2E_SAMPLES ?? 'e2e/samples.live.json', 'utf8')).replaceAll('{author}', author));
     for (const sample of samples) if (sample.kind === 'ics' && process.env.PINAKES_E2E_ICS_URL) sample.uri = process.env.PINAKES_E2E_ICS_URL;
-    await freshen(samples);
-    ({ samples, skipped } = await dropRefusedPages(samples));
+    // The preflight fetches go out as Pinakes' egress will: its version (the stack this checkout
+    // builds, or the running instance's `/v1/info`) and the operator's contact, else the run's.
+    const version = process.argv.includes('--isolated-live')
+      ? /\[workspace\.package\][^[]*?\bversion\s*=\s*"([^"]+)"/.exec(await readFile('Cargo.toml', 'utf8'))[1]
+      : (await json(`${pinakes}/v1/info`)).version;
+    const fetches = preflight(userAgent(version, process.env.PINAKES__HTTP__CONTACT?.trim() || E2E_CONTACT));
+    await freshen(samples, fetches.text);
+    ({ samples, skipped } = await dropRefusedPages(samples, fetches.status));
     for (const s of skipped) console.error(`left out: ${s.kind} (${s.uri}): ${s.reason}`);
     liveSamples = `.runtime/e2e-samples-${randomUUID()}.json`;
     await writeFile(liveSamples, JSON.stringify(samples, null, 2));

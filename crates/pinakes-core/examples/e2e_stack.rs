@@ -296,6 +296,9 @@ struct Write {
 }
 /// The most sample resources one live run fetches.
 const MAX_LIVE_SAMPLES: usize = 128;
+/// The contact a run gives the services it reads when the operator set none (`http.contact`);
+/// `e2e/harness.mjs`'s preflight fetches name the same one.
+const E2E_CONTACT: &str = "info@synonym.to";
 
 async fn write(State(f): State<Fixture>, Json(w): Json<Write>) -> axum::http::StatusCode {
     if !w.path.starts_with("/pub/pinakes.e2e/tags/") {
@@ -469,7 +472,8 @@ async fn run(pool: sqlx::PgPool, f: Fixture) -> Result<()> {
     cfg.osm.requests_per_second = 10.;
     cfg.canary.enabled = false;
     // Services that need a contact (SEC EDGAR) wait without one.
-    cfg.egress.contact = "info@synonym.to".into();
+    cfg.egress.contact = E2E_CONTACT.into();
+    cfg.osm.contact = E2E_CONTACT.into();
     cfg.pubky.enabled = false;
     cfg.api.requests_per_minute = 10000;
     // The harness tags as one author: one shared tagger relates two samples.
@@ -578,8 +582,12 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
     // credentials, `PINAKES__…`); there is no file.
     let mut cfg = Config::load(None)?;
     cfg.canary.enabled = false;
-    // Services that need a contact (SEC EDGAR) wait without one.
-    cfg.egress.contact = "info@synonym.to".into();
+    // Services that need a contact (SEC EDGAR) wait without one: the operator's
+    // (`PINAKES__HTTP__CONTACT`, which `Config::load` gave every client), else this run's.
+    if cfg.egress.contact.is_empty() {
+        cfg.egress.contact = E2E_CONTACT.into();
+        cfg.osm.contact = E2E_CONTACT.into();
+    }
     cfg.api.requests_per_minute = 10000;
     cfg.nexus_url = std::env::var("PINAKES_E2E_NEXUS").unwrap_or_else(|_| cfg.nexus_url.clone());
     // As the daemon: the sources' switches and tokens (GitHub, Discogs) apply to this run.

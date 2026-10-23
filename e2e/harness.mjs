@@ -13,13 +13,31 @@ export function newestLink(rss) {
   const item = /<item\b[\s\S]*?<\/item>/.exec(rss)?.[0];
   return item && /<link>\s*(?:<!\[CDATA\[)?\s*(https?:\/\/[^\s<\]]+)/.exec(item)?.[1];
 }
+/** The contact a run gives the services it reads when the operator set none
+ * (`PINAKES__HTTP__CONTACT`); the e2e driver falls back to the same one (`E2E_CONTACT`). */
+export const E2E_CONTACT = 'info@synonym.to';
+/** The User-Agent Pinakes' egress sends (`resolver::egress::user_agent`): its version and the
+ * contact, so a site sees the run's preflight fetches as it will see Pinakes'. */
+export const userAgent = (version, contact) => contact ? `pinakes/${version} (+https://pubky.app; ${contact})` : `pinakes/${version} (+https://pubky.app)`;
+/** The preflight's fetches of a page's text and of its status, with that User-Agent. */
+export function preflight(agent) {
+  const get = url => fetch(url, { headers: { 'user-agent': agent }, signal: AbortSignal.timeout(15000) });
+  return {
+    text: async url => {
+      const response = await get(url);
+      assert(response.ok, `${url}: HTTP ${response.status}`);
+      return response.text();
+    },
+    status: async url => {
+      const response = await get(url);
+      await response.body?.cancel();
+      return response.status;
+    },
+  };
+}
 /** A sample naming `latest_in` (a walled site's RSS feed) takes that feed's newest item as its
  * link: feeds list recent items only, so a fixed article drops out of them within days. */
-export async function freshen(samples, fetchText = async url => {
-  const response = await fetch(url, { headers: { 'user-agent': 'pinakes/0.1.0 (+https://pubky.app; info@synonym.to)' }, signal: AbortSignal.timeout(15000) });
-  assert(response.ok, `${url}: HTTP ${response.status}`);
-  return response.text();
-}) {
+export async function freshen(samples, fetchText) {
   for (const sample of samples.filter(s => s.latest_in)) {
     const link = newestLink(await fetchText(sample.latest_in));
     assert(link, `No item in ${sample.latest_in} for the ${sample.kind} sample`);
@@ -31,11 +49,7 @@ export async function freshen(samples, fetchText = async url => {
  * host's page fetches (401 or 403) cannot make that card from here, whatever Pinakes does, so the
  * sample is left out of the run and reported with the reason; every other sample stays strict.
  * A sample another one joins (`group_with`, `maybe_same_with`) is never left out. */
-export async function dropRefusedPages(samples, fetchStatus = async url => {
-  const response = await fetch(url, { headers: { 'user-agent': 'pinakes/0.1.0 (+https://pubky.app; info@synonym.to)' }, signal: AbortSignal.timeout(15000) });
-  await response.body?.cancel();
-  return response.status;
-}) {
+export async function dropRefusedPages(samples, fetchStatus) {
   const skipped = [];
   for (const sample of samples.filter(s => s.needs_page)) {
     const status = await fetchStatus(sample.uri);
