@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""check-removals [NAME...]: prove each source goes by the checklist alone.
+
+For every official source, also-on source and lookup family (every registered one, or the NAMEs
+given), removes it on a scratch worktree of HEAD as AGENTS.md says (its module, its registry
+lines, its docs page and index line, its example-configuration block and variables, its fixtures,
+its own test file and its e2e samples) and builds every test target with warnings as errors. A
+source whose removal needs any other edit fails, with its first errors. `--list` names the
+sources and stops.
+
+Builds share CARGO_TARGET_DIR (set it; else the repository's own target directory is used), and
+each source takes a few minutes: run it for the sources a change touches, or everything before a
+release. Exit status 1 when any source fails.
+"""
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CORE = "crates/pinakes-core/"
+MODULE = {"sources": "src/sources/%s.rs", "also_on": "src/also_on/%s.rs", "lookups": "src/lookups/%s.rs"}
+REGISTRY = {"sources": "src/sources/mod.rs", "also_on": "src/also_on.rs", "lookups": "src/lookups/mod.rs"}
+
+
+def read(path):
+    with open(os.path.join(ROOT, path), encoding="utf-8") as f:
+        return f.read()
+
+
+def registered():
+    """(kind, module) for every entry of the three registries, in their order."""
+    out = []
+    text = read(CORE + REGISTRY["sources"])
+    block = text[text.index("pub static REGISTRY") :]
+    out += [("sources", m) for m in re.findall(r"^\s*&(\w+)::", block[: block.index("];")], re.M)]
+    text = read(CORE + REGISTRY["also_on"])
+    block = text[text.index("pub fn registry()") :]
+    block = block[: block.index("\n}\n")]
+    # `Arc::new(crate::sources::…)`: an official source's also-on half, removed with that source.
+    out += [("also_on", m) for m in re.findall(r"Arc::new\((\w+)::", block) if m not in ("crate", "super")]
+    text = read(CORE + REGISTRY["lookups"])
+    block = text[text.index("pub static FAMILIES") :]
+    out += [("lookups", m) for m in re.findall(r"^\s*&(\w+)::", block[: block.index("];")], re.M)]
+    return out
+
+
+def remove(wt, kind, name):
+    """Delete the source's own files and lines in the worktree `wt`, as the checklist says."""
+
+    def rm(rel):
+        p = os.path.join(wt, rel)
+        if os.path.isdir(p):
+            shutil.rmtree(p)
+        elif os.path.exists(p):
+            os.remove(p)
+        else:
+            return False
+        return True
+
+    def edit(rel, fn):
+        p = os.path.join(wt, rel)
+        with open(p, encoding="utf-8") as f:
+            s = f.read()
+        t = fn(s)
+        if t != s:
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(t)
+
+    if not rm(CORE + MODULE[kind] % name):
+        raise SystemExit(f"{name}: no module {MODULE[kind] % name}")
+    registry = CORE + REGISTRY[kind]
+    edit(registry, lambda s: re.sub(r"^pub mod %s;\n" % name, "", s, count=1, flags=re.M))
+    edit(registry, lambda s: re.sub(r"^\s*(&%s::\w+,|Arc::new\(%s::\w+\),)\n" % (name, name), "", s, count=1, flags=re.M))
+    if kind == "sources":
+        # An official source's also-on half (`Arc::new(crate::sources::<name>::…)`) goes with it.
+        edit(CORE + REGISTRY["also_on"], lambda s: re.sub(r"^\s*Arc::new\(crate::sources::%s::[\w:]+\),\n" % name, "", s, flags=re.M))
+    rm("docs/sources/%s.md" % name)
+    edit("docs/sources/README.md", lambda s: re.sub(r"^- \[`%s`\]\(%s\.md\):[^\n]*\n(  [^\n]*\n)*" % (name, name), "", s, flags=re.M))
+    for d in ("tests/fixtures/sources/", "tests/fixtures/media/", "tests/fixtures/lookups/"):
+        rm(CORE + d + name)
+    for t in ("tests/%s.rs", "tests/also_on_%s.rs"):
+        rm(CORE + t % name)
+    rm("e2e/samples/%s.json" % name)
+
+    def toml(s):
+        # Its `[sources.<name>]` block, to the next section or blank line.
+        s = re.sub(r"^\[sources\.%s\]\n(?:[^\[\n][^\n]*\n)*" % name, "", s, flags=re.M)
+        # Its `[also_on.sources.<id>]` lines, set or commented.
+        s = re.sub(r"^[^\n]*also_on\.sources\.%s\b[^\n]*\n" % name, "", s, flags=re.M)
+        # Its own section (`[tidal]`), with the comment paragraph above it.
+        s = re.sub(r"(?:^#[^\n]*\n)*\n?^\[%s\]\n(?:[^\[\n][^\n]*\n)*" % name, "", s, flags=re.M)
+        return s
+
+    edit("pinakes.example.toml", toml)
+    upper = name.upper()
+    edit(".env.example", lambda s: re.sub(r"^PINAKES_{1,2}%s_{1,2}\w*=[^\n]*\n" % upper, "", s, flags=re.M))
+
+
+def check(kind, name):
+    wt = tempfile.mkdtemp(prefix="check-removal-")
+    os.rmdir(wt)
+    subprocess.run(["git", "worktree", "add", "-q", "--detach", wt, "HEAD"], cwd=ROOT, check=True)
+    try:
+        remove(wt, kind, name)
+        env = dict(os.environ)
+        env.setdefault("CARGO_TARGET_DIR", os.path.join(ROOT, "target"))
+        run = subprocess.run(
+            ["cargo", "clippy", "-q", "--all-targets", "--", "-D", "warnings"],
+            cwd=wt,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        if run.returncode == 0:
+            return None
+        errors = [l for l in run.stderr.splitlines() if l.startswith("error") or l.startswith("  -->")]
+        return "\n".join(errors[:12]) or run.stderr[-2000:]
+    finally:
+        subprocess.run(["git", "worktree", "remove", "--force", wt], cwd=ROOT, check=False)
+
+
+def main(argv):
+    all_sources = registered()
+    if argv == ["--list"]:
+        for kind, name in all_sources:
+            print(f"{kind} {name}")
+        return 0
+    chosen = all_sources if not argv else [(k, n) for k, n in all_sources if n in argv]
+    missing = set(argv) - {n for _, n in chosen}
+    if missing:
+        raise SystemExit("not registered: " + ", ".join(sorted(missing)))
+    failed = 0
+    for kind, name in chosen:
+        error = check(kind, name)
+        if error is None:
+            print(f"{name}: ok", flush=True)
+        else:
+            failed += 1
+            print(f"{name}: FAIL\n" + "\n".join("  " + l for l in error.splitlines()), flush=True)
+    print(f"{len(chosen) - failed} of {len(chosen)} sources remove cleanly")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

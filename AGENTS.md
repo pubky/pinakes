@@ -25,6 +25,7 @@ export DATABASE_URL='postgresql:///postgres?host=/var/run/postgresql'
 | `scripts/openapi` | Regenerates `docs/openapi.json`. A test fails while the snapshot differs from the code. |
 | `scripts/verify-osm-boundary [out.sql]` | OSM-derived facts are only in `osm_place` (run by the tests; needs `psql`, `pg_dump`, `rg`). |
 | `scripts/verify-no-capability-urls` | No private calendar share URL in any tracked file (run by the tests). |
+| `scripts/check-removals [NAME…]` | Removes each source (every registered one, or the named ones) on a scratch worktree by the checklist below and builds every test target with warnings as errors: a source whose removal needs any other edit fails. Minutes per source; run it for the sources a change touches. |
 | `scripts/lock-waits COMMAND…` | Samples the database every 50 ms while COMMAND runs and prints which locks backends waited on; fails, without repeating any part of `DATABASE_URL`, when it could not sample. Needs `psql` and `python3`. |
 
 Tests use local servers, injected transports and recorded fixtures instead of public services.
@@ -112,7 +113,7 @@ full list):
 
 Shared code stays. A test that needs a source returns early without it, so no test changes. If
 removing a source would need any other edit, first move what it needs into its own files or
-into shared code.
+into shared code; `scripts/check-removals <name>` proves it.
 
 **API.** Response types and routes carry `utoipa` annotations; their doc comments become the
 OpenAPI text. Run `scripts/openapi` after changing them. Every example in

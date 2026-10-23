@@ -150,10 +150,15 @@ its registry lines, nothing else; `scripts/test` and `scripts/e2e --mock` then p
 - its page `docs/sources/<name>.md` and its lines in this index;
 - its `[sources.<name>]` block, `[also_on.sources.<id>]` lines and own section (such as
   `[tidal]`) in `pinakes.example.toml`, and its variables in `.env.example` if it has a secret;
-- its fixtures, `crates/pinakes-core/tests/fixtures/sources/<name>/` or
+- its fixtures, `crates/pinakes-core/tests/fixtures/sources/<name>/`,
+  `crates/pinakes-core/tests/fixtures/media/<name>/` or
   `crates/pinakes-core/tests/fixtures/lookups/<family>/`, and its own test file
-  `crates/pinakes-core/tests/<name>.rs` if it has one;
+  (`crates/pinakes-core/tests/<name>.rs` or `tests/also_on_<name>.rs`) if it has one;
 - its live end-to-end samples, `e2e/samples/<name>.json`.
+
+`scripts/check-removals [NAME…]` proves it: it removes each source on a scratch worktree by this
+list and builds every test target with warnings as errors, so a removal that would need any other
+edit is named before it is needed.
 
 Shared code stays (`sources/kit.rs`, `sources/biodiversity.rs`, `music.rs`, `music_sources.rs`,
 `wikipedia.rs`, `lookups/mod.rs`, `lookups/wikidata.rs`, `also_on/media.rs`), even a part only
