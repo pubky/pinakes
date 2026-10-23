@@ -106,7 +106,9 @@ def remove(wt, kind, name):
 
     edit("pinakes.example.toml", toml)
     upper = name.upper()
-    edit(".env.example", lambda s: re.sub(r"^PINAKES_{1,2}%s_{1,2}\w*=[^\n]*\n" % upper, "", s, flags=re.M))
+    # Its variables: its own (`PINAKES_NAME_TOKEN`) and the `PINAKES__SOURCES__NAME__…` and
+    # `PINAKES__ALSO_ON__SOURCES__NAME__…` forms.
+    edit(".env.example", lambda s: re.sub(r"^PINAKES_{1,2}(?:(?:ALSO_ON__)?SOURCES__)?%s_{1,2}\w*=[^\n]*\n" % upper, "", s, flags=re.M))
 
 
 def failures(output):
