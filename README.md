@@ -11,8 +11,9 @@ Clients combine the two by URI: **Pinakes ranks, Nexus hydrates.** A client send
 cards Pinakes returns (`uri`, and `details.aliases` for other spellings; for an occurrence,
 `occurrence.feed_uri`) to Nexus `/v0/stream/resources/by_ids` as `uris` (batches of 100) for
 counts and tags. Pinakes IDs are its own and never match Nexus IDs.
-That batch view, and a feed of tag lines, are on the Nexus branch `feat/resources-changes-feed`,
-not yet on Nexus main ([design §4](docs/design.md#nexus)).
+That batch view, and a feed of tag lines, are on the branch `feat/resources-changes-feed` of the
+fork [`gillohner/pubky-nexus`](https://github.com/gillohner/pubky-nexus/tree/feat/resources-changes-feed),
+not yet in pubky/pubky-nexus ([design §4](docs/design.md#nexus)).
 
 ## How it works
 
