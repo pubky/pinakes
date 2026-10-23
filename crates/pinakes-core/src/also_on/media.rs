@@ -310,9 +310,9 @@ pub(crate) mod fixture {
             raw
         }
     }
-    /// The recorded Wikidata items (`wikidata/entities-media.json.gz`) by Q-id.
+    /// The recorded Wikidata items (`shared/entities-media.json.gz`) by Q-id.
     pub fn items() -> Vec<crate::hubs::wikidata::Item> {
-        let raw = read("wikidata", "entities-media.json.gz");
+        let raw = read("shared", "entities-media.json.gz");
         crate::hubs::wikidata::parse_entities(&serde_json::from_slice(&raw).unwrap())
     }
     pub fn item(qid: &str) -> crate::hubs::wikidata::Item {

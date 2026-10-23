@@ -59,15 +59,17 @@ pub fn read(family: &str, file: &str) -> Vec<u8> {
 impl Recorded {
     pub fn new() -> Arc<Self> {
         let mut answers = BTreeMap::new();
-        // Each source's recorded answers, while the source (and so its fixtures) is in this build.
-        for family in ["books", "films", "podcasts", "wikidata"] {
-            let dir = format!(
-                "{}/tests/fixtures/media/{family}",
-                env!("CARGO_MANIFEST_DIR")
-            );
-            if !std::path::Path::new(&dir).exists() {
-                continue;
-            }
+        // Every directory's recorded answers: each source's while it is in this build (its
+        // fixtures go with it), and the shared ones (`shared/`).
+        let root = format!("{}/tests/fixtures/media", env!("CARGO_MANIFEST_DIR"));
+        let mut families: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().join("provenance.json").exists())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        families.sort();
+        for family in &families {
             let provenance: serde_json::Value =
                 serde_json::from_slice(&read(family, "provenance.json")).unwrap();
             let entries = provenance.as_object().unwrap();

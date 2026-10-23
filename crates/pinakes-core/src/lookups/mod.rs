@@ -378,7 +378,7 @@ pub(crate) fn with_retry(mut found: also_on::Found, retry: Option<Duration>) -> 
 #[cfg(test)]
 pub(crate) mod fixture {
     //! Recorded responses: `tests/fixtures/lookups/<family>/` (each family's, gone with it) and
-    //! `tests/fixtures/lookups/wikidata/` (Wikidata items several families read); see each
+    //! `tests/fixtures/lookups/shared/` (Wikidata items several families read); see each
     //! directory's `provenance.json`.
     use crate::{
         also_on::{self, Context, Subject},

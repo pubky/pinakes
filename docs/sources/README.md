@@ -150,9 +150,11 @@ its registry lines, nothing else; `scripts/test` and `scripts/e2e --mock` then p
 - its page `docs/sources/<name>.md` and its lines in this index;
 - its `[sources.<name>]` block, `[also_on.sources.<id>]` lines and own section (such as
   `[tidal]`) in `pinakes.example.toml`, and its variables in `.env.example` if it has a secret;
-- its fixtures, `crates/pinakes-core/tests/fixtures/sources/<name>/`,
+- its fixture directories, those named after it:
+  `crates/pinakes-core/tests/fixtures/sources/<name>/`,
   `crates/pinakes-core/tests/fixtures/media/<name>/` or
-  `crates/pinakes-core/tests/fixtures/lookups/<family>/`, and its own test file
+  `crates/pinakes-core/tests/fixtures/lookups/<family>/` (recordings several modules read are in
+  `shared/` there, never in a directory named after a source), and its own test file
   (`crates/pinakes-core/tests/<name>.rs` or `tests/also_on_<name>.rs`) if it has one;
 - its live end-to-end samples, `e2e/samples/<name>.json`.
 

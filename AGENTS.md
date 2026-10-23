@@ -108,12 +108,13 @@ full list):
   `lookups::FAMILIES`;
 - `docs/sources/<name>.md` and its line in `docs/sources/README.md`;
 - its block in `pinakes.example.toml` (and its variables in `.env.example`);
-- its fixtures and its own test file, if any;
+- its fixture directories (those named after it) and its own test file, if any;
 - `e2e/samples/<name>.json`.
 
 Shared code stays. A test that needs a source returns early without it, so no test changes. If
 removing a source would need any other edit, first move what it needs into its own files or
-into shared code; `scripts/check-removals <name>` proves it.
+into shared code; `scripts/check-removals <name>` proves it. Recordings several modules read
+are in a fixtures `shared/` directory, never one named after a source.
 
 **API.** Response types and routes carry `utoipa` annotations; their doc comments become the
 OpenAPI text. Run `scripts/openapi` after changing them. Every example in
