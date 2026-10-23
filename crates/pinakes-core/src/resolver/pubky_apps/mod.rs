@@ -73,22 +73,30 @@ impl Object<'_> {
             .find(|(n, _)| *n == name)
             .map_or("", |(_, v)| v.as_str())
     }
-    /// A link the object names: absolute (`https:`, or `pubky:` in someone's public storage), or
-    /// relative to the object's own folder.
+    /// A link the object names (`link`), relative to the object's own folder.
     pub fn link(&self, value: &str) -> Option<String> {
-        let value = value.trim();
-        if value.is_empty() {
-            return None;
-        }
-        Url::parse(self.uri)
-            .ok()?
-            .join(value)
-            .ok()
-            .filter(|u| {
-                u.scheme() == "https" || u.scheme() == "pubky" && u.path().starts_with("/pub/")
-            })
-            .map(String::from)
+        link(self.uri, value)
     }
+}
+/// A link an object at `uri` names: `https:`, or `pubky:` in someone's public storage, with no
+/// user name, password or port (as `kit::web_url` reads a service's links); absolute, or relative
+/// to the object's own folder. Anything else is no link.
+fn link(uri: &str, value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    Url::parse(uri)
+        .ok()?
+        .join(value)
+        .ok()
+        .filter(|u| {
+            (u.scheme() == "https" || u.scheme() == "pubky" && u.path().starts_with("/pub/"))
+                && u.port().is_none()
+                && u.username().is_empty()
+                && u.password().is_none()
+        })
+        .map(String::from)
 }
 
 /// Where a `pubky://` object's path leads.
@@ -239,10 +247,8 @@ pub fn general(uri: &str, v: &Value, doc: &mut ResourceMeta) {
     };
     doc.name = text(&["name", "title", "summary", "topic", "caption"]);
     doc.description = text(&["description", "bio"]);
-    doc.image = text(&["image", "image_uri", "imageUrl", "cover", "avatarUrl"])
-        .and_then(|s| Url::parse(uri).ok()?.join(&s).ok())
-        .filter(|u| matches!(u.scheme(), "http" | "https" | "pubky"))
-        .map(String::from);
+    doc.image =
+        text(&["image", "image_uri", "imageUrl", "cover", "avatarUrl"]).and_then(|s| link(uri, &s));
     // An object without a title or description (a post, a note) is described by its content:
     // social content (`cards::social`), so a short excerpt that refreshes within the hour and is
     // purged with its history once the object is gone.

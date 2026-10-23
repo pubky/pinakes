@@ -134,6 +134,18 @@ fn loopky_decks() {
     }
     let doc = card("loopky/y9zq5xw1ng1e-bare");
     assert_eq!((doc.image, doc.description), (None, None));
+    // A cover with a user name or a port is no image (a profile's links are read as the general
+    // card's), nor is one that leaves public storage.
+    for url in [
+        "https://u:p@example.org/c.jpg",
+        "https://example.org:8443/c.jpg",
+    ] {
+        let doc = edited(
+            "loopky/medeng2026a-url-cover",
+            json!({"cover_image_ref": {"url": url, "mime": "image/jpeg"}}),
+        );
+        assert_eq!(doc.image, None, "{url}");
+    }
     // A cover path that leaves public storage is no image.
     let doc = edited(
         "loopky/p2uuj5jo5ln2-media-cover",
@@ -785,6 +797,26 @@ fn other_apps_get_the_general_card() {
     assert!(!serde_json::to_string(&doc).unwrap().contains("never kept"));
     let doc = card_of(uri, br#"{"text":"Just words"}"#);
     assert_eq!(doc.type_name, "SocialMediaPosting");
+    // An image is a link as any the profiles read: https or public Pubky storage, with no user
+    // name, password or port; plain http, a private path, a port or a user name is none.
+    for image in [
+        "http://example.org/pic.png",
+        "https://u:p@example.org/pic.png",
+        "https://example.org:8443/pic.png",
+        "pubky://ybndrfg8ejkmcpqxot1uwisza345h769ybndrfg8ejkmcpqxot1uwi/priv/other.app/pic.png",
+        "../../../priv/other.app/pic.png",
+    ] {
+        let doc = card_of(
+            uri,
+            json!({"name": "n", "image": image}).to_string().as_bytes(),
+        );
+        assert_eq!(doc.image, None, "{image}");
+    }
+    let doc = card_of(
+        uri,
+        br#"{"name":"n","image":"https://example.org/pic.png"}"#,
+    );
+    assert_eq!(doc.image.as_deref(), Some("https://example.org/pic.png"));
     // A known app's path that no kind matches is never fetched, and pubky.app's own objects are
     // Nexus's.
     never_fetched(&["mapky.app/settings.json", "pubky.app/profile.json"]);
