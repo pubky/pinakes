@@ -808,6 +808,41 @@ mod tests {
         assert!(own.description.as_deref().unwrap().starts_with("Parhaan"));
     }
 
+    /// A page the hook did not name takes the title the also-on sources found since (`type_card`
+    /// asks this source, `apply_title`); one the hook named keeps the hook's card.
+    #[test]
+    fn a_page_the_hook_did_not_name_takes_the_title_the_sources_found() {
+        use crate::also_on::media::{type_card, TypeHints};
+        // A page the hook did not name takes the title the `titles` source found since.
+        let named = TypeHints {
+            title_type: Some("TVSeries".into()),
+            title: Some("Breaking Bad".into()),
+            title_description: Some("American crime drama television series".into()),
+            ..Default::default()
+        };
+        let mut doc =
+            crate::model::ResourceMeta::new("https://www.themoviedb.org/tv/1396", "jsonld", 60);
+        doc.set_type("WebSite");
+        doc.name = Some("The Movie Database".into());
+        doc.description = Some("Parhaan miespuolisen draamanäyttelijän".into());
+        type_card("https://www.themoviedb.org/tv/1396", &named, &mut doc);
+        assert_eq!(doc.name.as_deref(), Some("Breaking Bad"));
+        assert_eq!(
+            doc.description.as_deref(),
+            Some("American crime drama television series")
+        );
+        assert_eq!(doc.type_name, "TVSeries");
+        // One the hook named keeps the hook's card.
+        let mut hooked = crate::model::ResourceMeta::new(
+            "https://www.themoviedb.org/tv/1396",
+            "media_records",
+            60,
+        );
+        hooked.name = Some("Breaking Bad (series)".into());
+        type_card("https://www.themoviedb.org/tv/1396", &named, &mut hooked);
+        assert_eq!(hooked.name.as_deref(), Some("Breaking Bad (series)"));
+    }
+
     #[test]
     fn open_library_names_its_work_and_refuses_a_merged_one() {
         let raw = read("ol-work-OL27482W.json");

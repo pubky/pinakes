@@ -232,12 +232,17 @@ fn config(pair: Option<(&str, &str)>) -> Config {
             serde_json::json!({"client_id": id, "client_secret": secret}),
         );
     }
+    // Only the sources this build has: a switch for one it lacks is refused at validation.
+    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     for (source, enabled) in [
         ("deezer", true),
         ("musicbrainz", false),
         ("musicbrainz_entity", false),
         ("wikidata", false),
     ] {
+        if !registered.contains(&source) {
+            continue;
+        }
         config.also_on.sources.insert(
             source.into(),
             SourceOptions {
@@ -301,6 +306,10 @@ const KEYS: &str =
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_tidal_barcode_joins_apple_music_and_deezer(pool: sqlx::PgPool) {
+    // Deezer's album is one of the joins; without the source there is nothing to check.
+    if !also_on::registry().iter().any(|s| s.id() == "deezer") {
+        return;
+    }
     let hydra = save(&pool, "https://tidal.com/album/199574241", "MusicAlbum").await;
     let dracula = save(&pool, "https://tidal.com/album/495402659", "MusicAlbum").await;
     let track = save(&pool, "https://tidal.com/track/199574242", "MusicRecording").await;
