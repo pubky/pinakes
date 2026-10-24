@@ -4,8 +4,9 @@
 For every official source, also-on source and lookup family (every registered one, or the NAMEs
 given), removes it on a scratch worktree of HEAD as AGENTS.md says (its module, its registry
 lines, its docs page and index line, its example-configuration block and variables, its fixture
-directories, its own test file and its e2e samples) and builds every test target with warnings
-as errors. With `--tests`, it then runs the workspace's tests (`cargo test --workspace`, as
+directories, its own test file and its e2e samples), checks nothing of those is left (the module
+and the registry lines must have been there; the rest need not), and builds every test target
+with warnings as errors. With `--tests`, it then runs the workspace's tests (`cargo test --workspace`, as
 scripts/test does, every target even after one fails: set DATABASE_URL and RUST_TEST_THREADS as
 for it), which a source's removal
 can break where the build does not: a test of another source that relied on it, a recording it
@@ -56,8 +57,46 @@ def registered():
     return out
 
 
+# The patterns of a source's own lines in the shared files, by name: `remove` deletes what they
+# match, `verify` checks nothing matches after.
+def own_lines(kind, name):
+    upper = name.upper()
+    own = {
+        CORE + REGISTRY[kind]: [r"^pub mod %s;\n" % name, r"^\s*(&%s::\w+,|Arc::new\(%s::\w+\),)\n" % (name, name)],
+        "docs/sources/README.md": [r"^- \[`%s`\]\(%s\.md\):[^\n]*\n(  [^\n]*\n)*" % (name, name)],
+        "pinakes.example.toml": [
+            # Its `[sources.<name>]` block, to the next section or blank line.
+            r"^\[sources\.%s\]\n(?:[^\[\n][^\n]*\n)*" % name,
+            # Its `[also_on.sources.<id>]` lines, set or commented.
+            r"^[^\n]*also_on\.sources\.%s\b[^\n]*\n" % name,
+            # Its own section (`[tidal]`), with the comment paragraph above it.
+            r"(?:^#[^\n]*\n)*\n?^\[%s\]\n(?:[^\[\n][^\n]*\n)*" % name,
+        ],
+        # Its variables: its own (`PINAKES_NAME_TOKEN`) and the `PINAKES__SOURCES__NAME__…` and
+        # `PINAKES__ALSO_ON__SOURCES__NAME__…` forms.
+        ".env.example": [r"^PINAKES_{1,2}(?:(?:ALSO_ON__)?SOURCES__)?%s_{1,2}\w*=[^\n]*\n" % upper],
+    }
+    if kind == "sources":
+        # An official source's also-on half (`Arc::new(crate::sources::<name>::…)`) goes with it.
+        own.setdefault(CORE + REGISTRY["also_on"], []).append(r"^\s*Arc::new\(crate::sources::%s::[\w:]+\),\n" % name)
+    return own
+
+
+# The files and directories that are a source's own: its module, docs page, fixture directories
+# (those named after it; shared recordings are in `shared/`), own test files and e2e samples.
+def own_paths(kind, name):
+    return [
+        CORE + MODULE[kind] % name,
+        "docs/sources/%s.md" % name,
+        *(CORE + d + name for d in ("tests/fixtures/sources/", "tests/fixtures/media/", "tests/fixtures/lookups/")),
+        *(CORE + t % name for t in ("tests/%s.rs", "tests/also_on_%s.rs")),
+        "e2e/samples/%s.json" % name,
+    ]
+
+
 def remove(wt, kind, name):
-    """Delete the source's own files and lines in the worktree `wt`, as the checklist says."""
+    """Delete the source's own files and lines in the worktree `wt`, as the checklist says. The
+    module and its registry lines must be there; the rest is deleted when present."""
 
     def rm(rel):
         p = os.path.join(wt, rel)
@@ -69,46 +108,40 @@ def remove(wt, kind, name):
             return False
         return True
 
-    def edit(rel, fn):
+    def edit(rel, pattern):
+        """Delete every match of `pattern` in the file: how many there were."""
         p = os.path.join(wt, rel)
         with open(p, encoding="utf-8") as f:
             s = f.read()
-        t = fn(s)
-        if t != s:
+        t, n = re.subn(pattern, "", s, flags=re.M)
+        if n:
             with open(p, "w", encoding="utf-8") as f:
                 f.write(t)
+        return n
 
     if not rm(CORE + MODULE[kind] % name):
         raise SystemExit(f"{name}: no module {MODULE[kind] % name}")
-    registry = CORE + REGISTRY[kind]
-    edit(registry, lambda s: re.sub(r"^pub mod %s;\n" % name, "", s, count=1, flags=re.M))
-    edit(registry, lambda s: re.sub(r"^\s*(&%s::\w+,|Arc::new\(%s::\w+\),)\n" % (name, name), "", s, count=1, flags=re.M))
-    if kind == "sources":
-        # An official source's also-on half (`Arc::new(crate::sources::<name>::…)`) goes with it.
-        edit(CORE + REGISTRY["also_on"], lambda s: re.sub(r"^\s*Arc::new\(crate::sources::%s::[\w:]+\),\n" % name, "", s, flags=re.M))
-    rm("docs/sources/%s.md" % name)
-    edit("docs/sources/README.md", lambda s: re.sub(r"^- \[`%s`\]\(%s\.md\):[^\n]*\n(  [^\n]*\n)*" % (name, name), "", s, flags=re.M))
-    # Its fixture directories: those named after it. Shared recordings are in `shared/`.
-    for d in ("tests/fixtures/sources/", "tests/fixtures/media/", "tests/fixtures/lookups/"):
-        rm(CORE + d + name)
-    for t in ("tests/%s.rs", "tests/also_on_%s.rs"):
-        rm(CORE + t % name)
-    rm("e2e/samples/%s.json" % name)
+    for rel in own_paths(kind, name)[1:]:
+        rm(rel)
+    lines = own_lines(kind, name)
+    for pattern in lines.pop(CORE + REGISTRY[kind]):
+        if edit(CORE + REGISTRY[kind], pattern) != 1:
+            raise SystemExit(f"{name}: {REGISTRY[kind]} has no line matching {pattern!r}")
+    for rel, patterns in lines.items():
+        for pattern in patterns:
+            edit(rel, pattern)
 
-    def toml(s):
-        # Its `[sources.<name>]` block, to the next section or blank line.
-        s = re.sub(r"^\[sources\.%s\]\n(?:[^\[\n][^\n]*\n)*" % name, "", s, flags=re.M)
-        # Its `[also_on.sources.<id>]` lines, set or commented.
-        s = re.sub(r"^[^\n]*also_on\.sources\.%s\b[^\n]*\n" % name, "", s, flags=re.M)
-        # Its own section (`[tidal]`), with the comment paragraph above it.
-        s = re.sub(r"(?:^#[^\n]*\n)*\n?^\[%s\]\n(?:[^\[\n][^\n]*\n)*" % name, "", s, flags=re.M)
-        return s
 
-    edit("pinakes.example.toml", toml)
-    upper = name.upper()
-    # Its variables: its own (`PINAKES_NAME_TOKEN`) and the `PINAKES__SOURCES__NAME__…` and
-    # `PINAKES__ALSO_ON__SOURCES__NAME__…` forms.
-    edit(".env.example", lambda s: re.sub(r"^PINAKES_{1,2}(?:(?:ALSO_ON__)?SOURCES__)?%s_{1,2}\w*=[^\n]*\n" % upper, "", s, flags=re.M))
+def verify(wt, kind, name):
+    """What the removal left of the source's own files and lines: nothing, or the leftovers."""
+    left = [rel for rel in own_paths(kind, name) if os.path.exists(os.path.join(wt, rel))]
+    for rel, patterns in own_lines(kind, name).items():
+        with open(os.path.join(wt, rel), encoding="utf-8") as f:
+            s = f.read()
+        for pattern in patterns:
+            if re.search(pattern, s, flags=re.M):
+                left.append(f"{rel}: a line matching {pattern!r}")
+    return left
 
 
 def failures(output):
@@ -133,6 +166,9 @@ def check(kind, name, tests):
     subprocess.run(["git", "worktree", "add", "-q", "--detach", wt, "HEAD"], cwd=ROOT, check=True)
     try:
         remove(wt, kind, name)
+        left = verify(wt, kind, name)
+        if left:
+            return "the removal left:\n" + "\n".join(left)
         env = dict(os.environ)
         env.setdefault("CARGO_TARGET_DIR", os.path.join(ROOT, "target"))
         steps = [["cargo", "clippy", "-q", "--all-targets", "--", "-D", "warnings"]]

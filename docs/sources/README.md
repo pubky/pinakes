@@ -159,7 +159,8 @@ its registry lines, nothing else; `scripts/test` and `scripts/e2e --mock` then p
 - its live end-to-end samples, `e2e/samples/<name>.json`.
 
 `scripts/check-removals [--tests] [NAME…]` proves it: it removes each source on a scratch
-worktree by this list and builds every test target with warnings as errors, and with `--tests`
+worktree by this list, checks that nothing of the source's own is left (a line its patterns
+no longer match would be), builds every test target with warnings as errors, and with `--tests`
 runs the workspace's tests too, which catch what the build cannot (a test of another source that
 relied on it, a recording it took along). A removal that would need any other edit is named
 before it is needed.
