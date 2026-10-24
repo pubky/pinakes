@@ -3,15 +3,27 @@
 
 For every official source, also-on source and lookup family (every registered one, or the NAMEs
 given), removes it on a scratch worktree of HEAD as AGENTS.md says (its module, its registry
-lines, its docs page and index line, its example-configuration block and variables, its fixture
-directories, its own test file and its e2e samples), checks nothing of those is left (the module
-and the registry lines must have been there; the rest need not), and builds every test target
-with warnings as errors. With `--tests`, it then runs the workspace's tests (`cargo test --workspace`, as
-scripts/test does, every target even after one fails: set DATABASE_URL and RUST_TEST_THREADS as
-for it), which a source's removal
-can break where the build does not: a test of another source that relied on it, a recording it
-took along. A source whose removal needs any other edit fails, with its first errors or failed
-tests. `--list` names the sources and stops.
+lines, its docs page and index lines, its example-configuration blocks and variables, its fixture
+directories, its own test file and its e2e samples), checks nothing of its own is left, and
+builds every test target with warnings as errors. With `--tests`, it then runs the workspace's
+tests (`cargo test --workspace`, as scripts/test does, every target even after one fails: set
+DATABASE_URL and RUST_TEST_THREADS as for it), which a source's removal can break where the build
+does not: a test of another source that relied on it, a recording it took along. A source whose
+removal needs any other edit fails, with its first errors or failed tests. `--list` names the
+sources and stops; `--self-test` checks the leftover check itself and stops.
+
+The leftover check (`verify`) does not reuse the deletion's patterns: it looks for the source
+where an id is an identifier, not a word. A link to its docs page anywhere; its module or path
+in its registry; a section of the example configuration, parsed, or a section header set or
+commented out; a variable of .env.example, set or commented out, and its banner; its id in
+backticks in the docs index and the fixtures' indexes; its id as an identifier (backticks,
+quotes, a path, a section) in scripts other than this one, which names in `SHARED` the ids
+whose lines may stay. Those fail the source; its e2e samples are a file of its own, and the
+shared samples name no source. Its id in backticks (as prose names a source) and its display
+name as a word anywhere else (docs/, README.md, AGENTS.md, e2e/README.md, and the comments of
+the files above) are reported for a reader, not failed: display names are services' names,
+which describe other sources' links and the services themselves as often as the source, and
+only a reader can tell. `SHARED` names the lines that may stay, each with its reason.
 
 A fixture directory named after a source (`tests/fixtures/{sources,media,lookups}/<name>/`) is
 that source's and goes with it; recordings several modules read are in a `shared/` directory,
@@ -28,11 +40,28 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CORE = "crates/pinakes-core/"
 MODULE = {"sources": "src/sources/%s.rs", "also_on": "src/also_on/%s.rs", "lookups": "src/lookups/%s.rs"}
 REGISTRY = {"sources": "src/sources/mod.rs", "also_on": "src/also_on.rs", "lookups": "src/lookups/mod.rs"}
+# The indexes of the recorded fixtures: a source's fixtures are described by its own
+# `provenance.json`, never here.
+FIXTURE_INDEXES = [CORE + "tests/fixtures/%s/README.md" % d for d in ("sources", "media", "lookups")]
+# The prose a reader is pointed to when it names a removed source.
+PROSE = ["README.md", "AGENTS.md", "e2e/README.md"]
+# Lines that may name a source after its removal, each with its reason: what they belong to is in
+# the build without the source.
+SHARED = [
+    # `podcast_index_api.rs`: the Podcast Index key and secret, which the podcast_index source and
+    # the podcasts also-on source both use; removing one leaves the other needing them.
+    (re.compile(r"PODCAST_INDEX__(KEY|SECRET)|Podcast Index"), "the shared Podcast Index client's key and secret (podcast_index_api.rs)"),
+    # The papers family's own huggingface source (a paper's Hugging Face page) shares its id with
+    # the official huggingface source (model and dataset pages); the family's index entry names
+    # its own.
+    (re.compile(r"^- \[`papers`\]\(papers\.md\):.*`huggingface`"), "the papers family's own source of that id"),
+]
 
 
 def read(path):
@@ -57,24 +86,42 @@ def registered():
     return out
 
 
-# The patterns of a source's own lines in the shared files, by name: `remove` deletes what they
-# match, `verify` checks nothing matches after.
-def own_lines(kind, name):
+def display_name(wt, name):
+    """The source's display name, the title of its docs page (`# Discogs`): None when the page
+    is titled by the id (`# \\`tidal\\`: …`) or missing."""
+    p = os.path.join(wt, "docs/sources/%s.md" % name)
+    if not os.path.exists(p):
+        return None
+    with open(p, encoding="utf-8") as f:
+        title = f.readline().strip().lstrip("#").strip()
+    return None if not title or title.startswith("`") else title
+
+
+def own_lines(kind, name, title):
+    """The patterns of a source's own lines in the shared files, by name: what `remove` deletes."""
     upper = name.upper()
+    banner = "|".join(re.escape(t) for t in (name, title) if t)
     own = {
         CORE + REGISTRY[kind]: [r"^pub mod %s;\n" % name, r"^\s*(&%s::\w+,|Arc::new\(%s::\w+\),)\n" % (name, name)],
-        "docs/sources/README.md": [r"^- \[`%s`\]\(%s\.md\):[^\n]*\n(  [^\n]*\n)*" % (name, name)],
+        # Its index entries (the page's, and `name.md#also-on` for an official source's half).
+        "docs/sources/README.md": [r"^- \[`%s`\]\(%s\.md(?:#[^)]*)?\):[^\n]*\n(  [^\n]*\n)*" % (name, name)],
         "pinakes.example.toml": [
-            # Its `[sources.<name>]` block, to the next section or blank line.
-            r"^\[sources\.%s\]\n(?:[^\[\n][^\n]*\n)*" % name,
-            # Its `[also_on.sources.<id>]` lines, set or commented.
-            r"^[^\n]*also_on\.sources\.%s\b[^\n]*\n" % name,
-            # Its own section (`[tidal]`), with the comment paragraph above it.
-            r"(?:^#[^\n]*\n)*\n?^\[%s\]\n(?:[^\[\n][^\n]*\n)*" % name,
+            # Its `[sources.<name>]` block (the header may carry a comment), to the next section or
+            # blank line.
+            r"^\[sources\.%s\][^\n]*\n(?:[^\[\n][^\n]*\n)*" % name,
+            # Its `[also_on.sources.<id>]` block, set or commented out: the header and the comment or
+            # key lines under it, to the next section or blank line.
+            r"^#?\s*\[also_on\.sources\.%s\][^\n]*\n(?:(?!#?\s*\[)[^\n]+\n)*" % name,
+            # Its own section (`[<name>]`), with the comment paragraph above it.
+            r"(?:^#[^\n]*\n)*\n?^\[%s\][^\n]*\n(?:[^\[\n][^\n]*\n)*" % name,
         ],
-        # Its variables: its own (`PINAKES_NAME_TOKEN`) and the `PINAKES__SOURCES__NAME__…` and
+        # Its banner paragraph (`# --- Name ---` to the blank line) and its variables: its own
+        # (`PINAKES_NAME_TOKEN`) and the `PINAKES__SOURCES__NAME__…` and
         # `PINAKES__ALSO_ON__SOURCES__NAME__…` forms.
-        ".env.example": [r"^PINAKES_{1,2}(?:(?:ALSO_ON__)?SOURCES__)?%s_{1,2}\w*=[^\n]*\n" % upper],
+        ".env.example": [
+            r"(?i)^# --- (?:%s) -+\n(?:[^\n]+\n)*" % banner,
+            r"^PINAKES_{1,2}(?:(?:ALSO_ON__)?SOURCES__)?%s_{1,2}\w*=[^\n]*\n" % upper,
+        ],
     }
     if kind == "sources":
         # An official source's also-on half (`Arc::new(crate::sources::<name>::…)`) goes with it.
@@ -82,9 +129,10 @@ def own_lines(kind, name):
     return own
 
 
-# The files and directories that are a source's own: its module, docs page, fixture directories
-# (those named after it; shared recordings are in `shared/`), own test files and e2e samples.
 def own_paths(kind, name):
+    """The files and directories that are a source's own: its module, docs page, fixture
+    directories (those named after it; shared recordings are in `shared/`), own test files and
+    e2e samples."""
     return [
         CORE + MODULE[kind] % name,
         "docs/sources/%s.md" % name,
@@ -119,11 +167,12 @@ def remove(wt, kind, name):
                 f.write(t)
         return n
 
+    title = display_name(wt, name)
     if not rm(CORE + MODULE[kind] % name):
         raise SystemExit(f"{name}: no module {MODULE[kind] % name}")
     for rel in own_paths(kind, name)[1:]:
         rm(rel)
-    lines = own_lines(kind, name)
+    lines = own_lines(kind, name, title)
     for pattern in lines.pop(CORE + REGISTRY[kind]):
         if edit(CORE + REGISTRY[kind], pattern) != 1:
             raise SystemExit(f"{name}: {REGISTRY[kind]} has no line matching {pattern!r}")
@@ -132,16 +181,101 @@ def remove(wt, kind, name):
             edit(rel, pattern)
 
 
-def verify(wt, kind, name):
-    """What the removal left of the source's own files and lines: nothing, or the leftovers."""
-    left = [rel for rel in own_paths(kind, name) if os.path.exists(os.path.join(wt, rel))]
-    for rel, patterns in own_lines(kind, name).items():
+def names_source(line, name, title):
+    """Whether the line names the source: its id in backticks (as prose names a source), or its
+    display name as a whole word."""
+    if "`%s`" % name in line:
+        return True
+    return bool(title) and re.search(r"(?<![\w-])%s(?![\w-])" % re.escape(title), line) is not None
+
+
+def shared(line):
+    """The reason a line that names a source may stay, or None."""
+    return next((why for pattern, why in SHARED if pattern.search(line)), None)
+
+
+def files_under(wt, rel):
+    p = os.path.join(wt, rel)
+    if os.path.isfile(p):
+        yield rel
+        return
+    for root, dirs, files in os.walk(p):
+        dirs[:] = sorted(d for d in dirs if d not in (".git", "target", "node_modules"))
+        for f in sorted(files):
+            yield os.path.relpath(os.path.join(root, f), wt)
+
+
+def text_lines(wt, rel):
+    try:
         with open(os.path.join(wt, rel), encoding="utf-8") as f:
-            s = f.read()
-        for pattern in patterns:
-            if re.search(pattern, s, flags=re.M):
-                left.append(f"{rel}: a line matching {pattern!r}")
-    return left
+            return list(enumerate(f.read().splitlines(), 1))
+    except (UnicodeDecodeError, OSError):
+        return []
+
+
+def verify(wt, kind, name, title):
+    """What the removal left of the source: (leftovers, mentions). Independent of `remove`: it
+    looks for the source as an identifier (the module doc says where), not for what the
+    deletion's patterns match. The mentions are its id and display name as words elsewhere, for
+    a reader."""
+    q = re.escape(name)
+    left = [rel for rel in own_paths(kind, name) if os.path.exists(os.path.join(wt, rel))]
+
+    def found(rel, i, what):
+        left.append(f"{rel}:{i}: {what}")
+
+    # Its registry: its module declared, or its module's path (`name::`, not `hubs::name::`).
+    for i, l in text_lines(wt, CORE + REGISTRY[kind]):
+        if re.search(r"^\s*pub mod %s;|(?<![\w:])%s::" % (q, q), l) and not shared(l):
+            found(CORE + REGISTRY[kind], i, l.strip())
+    # A link to its docs page from anywhere (the index entry, another page, a README).
+    link = re.compile(r"\]\([^)]*(?<![\w-])%s\.md(?:#[^)]*)?\)" % q)
+    for rel in files_under(wt, "."):
+        if rel.endswith(".md"):
+            for i, l in text_lines(wt, rel):
+                if link.search(l):
+                    found(rel, i, "links to its page: " + l.strip())
+    # The example configuration: no section is the source's, parsed, nor a header set or
+    # commented out.
+    with open(os.path.join(wt, "pinakes.example.toml"), "rb") as f:
+        config = tomllib.load(f)
+    for path in (("sources", name), ("also_on", "sources", name), (name,)):
+        table = config
+        for key in path:
+            table = table.get(key) if isinstance(table, dict) else None
+        if table is not None:
+            left.append("pinakes.example.toml: section [%s]" % ".".join(path))
+    for i, l in text_lines(wt, "pinakes.example.toml"):
+        if re.match(r"\s*#?\s*\[(?:[\w-]+\.)*%s\]" % q, l):
+            found("pinakes.example.toml", i, "section header " + l.strip())
+    # .env.example: no variable, set or commented out, is the source's; nor a banner.
+    for i, l in text_lines(wt, ".env.example"):
+        m = re.match(r"\s*#?\s*([A-Z][A-Z0-9_]*)=", l)
+        if m and re.search(r"(?:^|_)%s(?:_|$)" % re.escape(name.upper()), m.group(1)) and not shared(l):
+            found(".env.example", i, "variable " + m.group(1))
+        if re.match(r"# --- (?:%s) -" % "|".join(re.escape(w) for w in (name, title) if w), l, re.I) and not shared(l):
+            found(".env.example", i, "banner " + l.strip())
+    # The docs index and the fixtures' indexes: its id in backticks.
+    for rel in ["docs/sources/README.md", *FIXTURE_INDEXES]:
+        for i, l in text_lines(wt, rel):
+            if re.search(r"`%s`" % q, l) and not shared(l):
+                found(rel, i, l.strip())
+    # Scripts: its id as an identifier. Not this script, whose SHARED table names ids.
+    for rel in files_under(wt, "scripts"):
+        if rel == "scripts/check-removals":
+            continue
+        for i, l in text_lines(wt, rel):
+            if re.search(r"`%s`|[\"']%s[\"']|/%s/|(?<![\w-])%s\.(?:md|json|rs)\b|\[(?:[\w-]+\.)*%s\]" % (q, q, q, q, q), l) and not shared(l):
+                found(rel, i, l.strip())
+    # Its id in backticks and its display name, elsewhere: for a reader.
+    mentions = []
+    for rel in [*PROSE, *files_under(wt, "docs"), "pinakes.example.toml", ".env.example"]:
+        if rel.endswith((".md", ".toml", ".example")):
+            for i, l in text_lines(wt, rel):
+                line = f"{rel}:{i}: {l.strip()}"
+                if names_source(l, name, title) and not shared(l) and line not in left and f"{rel}:{i}: links to its page: {l.strip()}" not in left:
+                    mentions.append(line)
+    return sorted(set(left)), mentions
 
 
 def failures(output):
@@ -160,15 +294,25 @@ def failures(output):
     return keep
 
 
-def check(kind, name, tests):
+def worktree():
     wt = tempfile.mkdtemp(prefix="check-removal-")
     os.rmdir(wt)
     subprocess.run(["git", "worktree", "add", "-q", "--detach", wt, "HEAD"], cwd=ROOT, check=True)
+    return wt
+
+
+def drop_worktree(wt):
+    subprocess.run(["git", "worktree", "remove", "--force", wt], cwd=ROOT, check=False)
+
+
+def check(kind, name, tests):
+    wt = worktree()
     try:
+        title = display_name(wt, name)
         remove(wt, kind, name)
-        left = verify(wt, kind, name)
+        left, mentions = verify(wt, kind, name, title)
         if left:
-            return "the removal left:\n" + "\n".join(left)
+            return "the removal left:\n" + "\n".join(left), mentions
         env = dict(os.environ)
         env.setdefault("CARGO_TARGET_DIR", os.path.join(ROOT, "target"))
         steps = [["cargo", "clippy", "-q", "--all-targets", "--", "-D", "warnings"]]
@@ -179,10 +323,51 @@ def check(kind, name, tests):
             run = subprocess.run(step, cwd=wt, env=env, capture_output=True, text=True)
             if run.returncode != 0:
                 output = run.stderr + run.stdout
-                return "\n".join(failures(output)[:16]) or output[-2000:]
-        return None
+                return "\n".join(failures(output)[:16]) or output[-2000:], mentions
+        return None, mentions
     finally:
-        subprocess.run(["git", "worktree", "remove", "--force", wt], cwd=ROOT, check=False)
+        drop_worktree(wt)
+
+
+def self_test():
+    """The leftover check catches what the deletion's patterns would not. For every official
+    source with an also-on half (ids of one word and of two): a clean removal verifies clean;
+    its index entry put back as the also-on half's (`name.md#also-on`), its section put back with
+    a trailing comment (`[sources.name] # Name`), and its banner and variable put back in
+    .env.example are each named."""
+    halves = read(CORE + REGISTRY["also_on"])
+    names = [n for k, n in registered() if k == "sources" and "crate::sources::%s::" % n in halves]
+    assert names, "no official source has an also-on half"
+    for name in names:
+        self_test_on(name)
+    print("self-test ok (%s)" % ", ".join(names))
+    return 0
+
+
+def self_test_on(name):
+    wt = worktree()
+    try:
+        title = display_name(wt, name) or name
+        remove(wt, "sources", name)
+        left, _ = verify(wt, "sources", name, title)
+        assert not left, f"{name} removed: {left}"
+        cases = [
+            ("docs/sources/README.md", "- [`%s`](%s.md#also-on): its keys.\n" % (name, name), "links to its page"),
+            ("pinakes.example.toml", "\n[sources.%s] # %s\nenabled = true\n" % (name, title), "section [sources.%s]" % name),
+            (".env.example", "\n# --- %s ---\n# Its token.\nPINAKES_%s_TOKEN=\n" % (title, name.upper()), "variable PINAKES_%s_TOKEN" % name.upper()),
+        ]
+        for rel, text, expected in cases:
+            p = os.path.join(wt, rel)
+            with open(p, encoding="utf-8") as f:
+                before = f.read()
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(text)
+            left, _ = verify(wt, "sources", name, title)
+            assert any(expected in l for l in left), f"{rel}: {text!r} not named; left: {left}"
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(before)
+    finally:
+        drop_worktree(wt)
 
 
 def main(argv):
@@ -193,6 +378,8 @@ def main(argv):
         for kind, name in all_sources:
             print(f"{kind} {name}")
         return 0
+    if argv == ["--self-test"]:
+        return self_test()
     tests = "--tests" in argv
     names = [a for a in argv if a != "--tests"]
     chosen = all_sources if not names else [(k, n) for k, n in all_sources if n in names]
@@ -202,13 +389,16 @@ def main(argv):
     failed = 0
     for kind, name in chosen:
         started = time.monotonic()
-        error = check(kind, name, tests)
+        error, mentions = check(kind, name, tests)
         took = f"{time.monotonic() - started:.0f} s"
         if error is None:
             print(f"{name}: ok ({took})", flush=True)
         else:
             failed += 1
             print(f"{name}: FAIL ({took})\n" + "\n".join("  " + l for l in error.splitlines()), flush=True)
+        if mentions:
+            shown = "".join("\n    " + m for m in mentions[:8]) + ("\n    …" if len(mentions) > 8 else "")
+            print(f"  {len(mentions)} line(s) of prose name it, for a reader:{shown}", flush=True)
     print(f"{len(chosen) - failed} of {len(chosen)} sources remove cleanly" + (" (build and tests)" if tests else " (build)"))
     return 1 if failed else 0
 

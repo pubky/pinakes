@@ -14,27 +14,26 @@ For their links, Pinakes reads that API instead of the page. Every source here:
 - records itself on the card: `details.from` names the source and `details.facts` holds the
   fields its API names for the object, by name (lists joined with `; `).
 
-A few sources are page hooks instead (WordPress, Ghost, media records): they claim no links. The web route
+A few sources are page hooks instead (their entries below say so): they claim no links. The web route
 fetches the page as usual, and when the page names its own record on its service (a header or
 head tag on the page's own origin), the source reads that record and improves the page's card,
 within the web fetch's deadline and at most 3 seconds. The card then names the source in
 `details.from` too; a failure leaves the page's own card.
 
-Two sources are wall hooks, used when a page answers with an access wall: [`feed`](feed.md) looks
-for that exact link in the same site's RSS or Atom feed or news sitemap, and the item makes the
-card; [`media_records`](media_records.md) reads the exact record of a walled IMDb title or
-podcast page.
+Two sources are wall hooks (their entries say so), used when a page answers with an access
+wall: one looks for that exact link in the same site's RSS or Atom feed or news sitemap, and the
+item makes the card; the other reads the exact record of a walled media page.
 
 ## Switches
 
 Each source has its own switch, on by default:
 
 ```toml
-[sources.federal_register]
+[sources.<name>]
 enabled = false
 ```
 
-(or `PINAKES__SOURCES__FEDERAL_REGISTER__ENABLED=false`). A switched-off source's web links get
+(or `PINAKES__SOURCES__<NAME>__ENABLED=false`). A switched-off source's web links get
 ordinary web cards; a link in its own identifier scheme (such as `fr:…`) waits until the source is
 on again. The whole route can be switched off with `[cards.official] enabled = false`.
 
@@ -42,7 +41,7 @@ on again. The whole route can be switched off with `[cards.official] enabled = f
 
 Every request carries the operator's contact in the User-Agent (`http.contact`, see
 [operations](../operations.md#deployment-and-egress)); while it is empty, the links of a source
-whose service requires an email address ([SEC EDGAR](sec.md)) wait and are retried hourly.
+whose service requires an email address (its page says so) wait and are retried hourly.
 Requests share the per-host budget (`limits.host_requests_per_second`, one per second by
 default) and never have more than one request in flight per host. A source whose service
 publishes a lower limit lowers that host's rate (a windowed limit as its average rate); a host
@@ -148,8 +147,9 @@ its registry lines, nothing else; `scripts/test` and `scripts/e2e --mock` then p
 - its lines in each registry it is in: `pub mod <name>;` with its entry in `sources::REGISTRY`,
   `also_on::registry()` (also for an official source's also-on half) or `lookups::FAMILIES`;
 - its page `docs/sources/<name>.md` and its lines in this index;
-- its `[sources.<name>]` block, `[also_on.sources.<id>]` lines and own section (such as
-  `[tidal]`) in `pinakes.example.toml`, and its variables in `.env.example` if it has a secret;
+- its `[sources.<name>]` block, `[also_on.sources.<id>]` lines and own section (`[<name>]`) in
+  `pinakes.example.toml`, and its banner paragraph and variables in `.env.example` if it has a
+  secret;
 - its fixture directories, those named after it:
   `crates/pinakes-core/tests/fixtures/sources/<name>/`,
   `crates/pinakes-core/tests/fixtures/media/<name>/` or
@@ -159,8 +159,11 @@ its registry lines, nothing else; `scripts/test` and `scripts/e2e --mock` then p
 - its live end-to-end samples, `e2e/samples/<name>.json`.
 
 `scripts/check-removals [--tests] [NAME…]` proves it: it removes each source on a scratch
-worktree by this list, checks that nothing of the source's own is left (a line its patterns
-no longer match would be), builds every test target with warnings as errors, and with `--tests`
+worktree by this list, checks that nothing of the source's own is left (it looks for the
+source's id and display name where every source has lines of its own, parses the example
+configuration and `.env.example`, and finds a link to its page anywhere, independently of what
+it deleted; prose elsewhere that names the source is listed for a reader), builds every test
+target with warnings as errors, and with `--tests`
 runs the workspace's tests too, which catch what the build cannot (a test of another source that
 relied on it, a recording it took along). A removal that would need any other edit is named
 before it is needed.

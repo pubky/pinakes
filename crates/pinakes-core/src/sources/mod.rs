@@ -1048,6 +1048,26 @@ mod tests {
         }
     }
 
+    /// `scripts/check-removals`'s leftover check catches what its deletion would not: the
+    /// script's self-test removes an official source on a scratch worktree, verifies it clean,
+    /// and puts back an also-on index entry, a section with a trailing comment and an
+    /// environment banner, each of which it must name.
+    #[test]
+    fn check_removals_finds_leftovers_its_deletion_missed() {
+        let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/check-removals");
+        let output = std::process::Command::new("python3")
+            .arg(script)
+            .arg("--self-test")
+            .output()
+            .expect("python3");
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     /// A source's mock end-to-end samples are links it reads (or pages it improves), each named
     /// once in the run; their answers are recorded files of its own that match a request.
     #[test]
