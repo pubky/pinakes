@@ -728,69 +728,51 @@ fn live_selection(
 mod tests {
     use super::*;
 
-    /// The live samples as `run.mjs` reads them, but for the files `without`.
-    fn live_samples(without: &[&str]) -> Vec<Value> {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let mut files = vec![root.join("e2e/samples.live.json")];
-        let mut own: Vec<_> = std::fs::read_dir(root.join("e2e/samples"))
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .filter(|p| {
-                p.extension().is_some_and(|e| e == "json")
-                    && !without.iter().any(|w| p.file_stem().unwrap() == *w)
-            })
-            .collect();
-        own.sort();
-        files.extend(own);
-        files
-            .iter()
-            .flat_map(|f| serde_json::from_slice::<Vec<Value>>(&std::fs::read(f).unwrap()).unwrap())
-            .collect()
+    /// Synthetic samples, so the tests hold whatever sources this build has: one needs a source
+    /// the build has (`kept_source`), one a source it does not (`gone_source`), one needs none,
+    /// and one joins the sample that is left out.
+    fn samples() -> Vec<Value> {
+        vec![
+            json!({"kind": "plain", "uri": "https://plain.example/1"}),
+            json!({"kind": "with_kept", "uri": "https://kept.example/1", "needs": "kept_source"}),
+            json!({"kind": "with_gone", "uri": "https://gone.example/1", "needs": "gone_source"}),
+            json!({"kind": "joins_gone", "uri": "https://plain.example/2", "group_with": "with_gone", "needs": "gone_source"}),
+        ]
     }
 
-    /// With the tidal source removed (its sample file with it), the live stack starts: the
-    /// MusicBrainz samples whose group joins TIDAL's, and so need the source, are left out and
-    /// named, the rest run, and no sample that runs joins one that is gone.
+    /// A build without a source runs the samples but those that need it, and names each one it
+    /// leaves out with its reason; the live selection starts (no refusal for a source the build
+    /// does not have at all).
     #[test]
-    fn a_build_without_tidal_runs_the_live_samples_but_those_that_need_it() {
-        let built: Vec<&str> = built().into_iter().filter(|id| *id != "tidal").collect();
+    fn a_sample_whose_source_the_build_lacks_is_left_out_and_named() {
         let (kept, skipped) =
-            live_selection(live_samples(&["tidal"]), &built, |_| true).expect("starts");
-        let mut names: Vec<&str> = skipped
-            .iter()
-            .map(|s| s["kind"].as_str().unwrap())
-            .collect();
-        names.sort_unstable();
-        assert_eq!(names, ["mb_artist", "mb_isrc", "mb_recording"]);
-        assert!(skipped
-            .iter()
-            .all(|s| s["reason"] == "needs tidal, which this build does not have"));
+            live_selection(samples(), &["kept_source"], |_| true).expect("starts");
         let kinds: Vec<&str> = kept.iter().filter_map(|s| s["kind"].as_str()).collect();
-        for sample in &kept {
-            for key in ["group_with", "maybe_same_with"] {
-                if let Some(other) = sample[key].as_str() {
-                    assert!(kinds.contains(&other), "{} {key} {other}", sample["kind"]);
-                }
-            }
-        }
+        assert_eq!(kinds, ["plain", "with_kept"]);
+        assert_eq!(
+            skipped,
+            [
+                json!({"kind": "with_gone", "uri": "https://gone.example/1", "reason": "needs gone_source, which this build does not have"}),
+                json!({"kind": "joins_gone", "uri": "https://plain.example/2", "reason": "needs gone_source, which this build does not have"}),
+            ]
+        );
+        // The mock stack's selection is the same.
+        assert_eq!(by_needs(samples(), &["kept_source"]), (kept, skipped));
     }
 
-    /// A build that has the tidal source but cannot run it (no credentials) still refuses, and
-    /// names every sample that needs it; with everything built and running, nothing is left out.
+    /// A source the build has but cannot run (switched off, or without its credentials) still
+    /// refuses the live start, naming every sample that needs it; with every source built and
+    /// running, nothing is left out.
     #[test]
-    fn a_build_with_tidal_that_cannot_run_it_refuses() {
-        // A build without the source has nothing to refuse (the test above covers it).
-        if !built().contains(&"tidal") {
-            return;
-        }
-        let samples = live_samples(&[]);
-        let error = live_selection(samples.clone(), &built(), |need| need != "tidal")
+    fn a_source_the_build_has_but_cannot_run_refuses() {
+        let error = live_selection(samples(), &["kept_source"], |need| need != "kept_source")
             .unwrap_err()
             .to_string();
-        assert!(error.contains("mb_recording needs tidal"), "{error}");
-        assert!(error.contains("tidal_barcode needs tidal"), "{error}");
-        let (kept, skipped) = live_selection(samples.clone(), &built(), |_| true).unwrap();
+        assert!(error.contains("with_kept needs kept_source"), "{error}");
+        assert!(!error.contains("gone_source"), "{error}");
+        let (kept, skipped) =
+            live_selection(samples(), &["kept_source", "gone_source"], |_| true).unwrap();
         assert!(skipped.is_empty());
-        assert_eq!(kept.len(), samples.len());
+        assert_eq!(kept, samples());
     }
 }
