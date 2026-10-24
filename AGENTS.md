@@ -111,9 +111,10 @@ full list):
 - its fixture directories (those named after it) and its own test file, if any;
 - `e2e/samples/<name>.json`.
 
-Shared code stays. A test that needs a source returns early without it, so no test changes. If
-removing a source would need any other edit, first move what it needs into its own files or
-into shared code; `scripts/check-removals --tests <name>` proves it. Recordings several modules
+Shared code stays. A test that needs a source returns early without it, so no test changes. A
+removed source's keys stay in the database until they expire, and keep their grouping rule
+(`single_object_namespace` remembers it). If removing a source would need any other edit, first
+move what it needs into its own files or into shared code; `scripts/check-removals --tests <name>` proves it. Recordings several modules
 read are in a fixtures `shared/` directory, never one named after a source.
 
 **API.** Response types and routes carry `utoipa` annotations; their doc comments become the

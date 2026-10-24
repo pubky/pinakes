@@ -729,7 +729,9 @@ one thing, only on evidence that cannot be spoofed:
   (`openlibrary:…`), podcast GUID and Apple podcast ID (`podcast:guid`, `podcast:apple`), OSM
   object (`osm`), DOI (`doi`), and the namespaces each source's page in
   [docs/sources](sources/README.md#also-on) calls single-object: a join that would bring a second (a wrong ID on a hub) is refused,
-  so one bad claim never chains two groups. ISRCs, barcodes, ISBNs and other keys may be several. An event page's keys are never such
+  so one bad claim never chains two groups. The database remembers every such namespace a
+  source registered (`single_object_namespace`), so a removed source's keys keep the rule until
+  they expire. ISRCs, barcodes, ISBNs and other keys may be several. An event page's keys are never such
   evidence: a concert's performer key (`mb:artist:…`) names the artist, not another copy of the
   concert, so events group only with events.
 - **Curation** on the admin listener.

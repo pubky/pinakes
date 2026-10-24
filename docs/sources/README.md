@@ -167,4 +167,7 @@ before it is needed.
 Shared code stays (`sources/kit.rs`, `sources/biodiversity.rs`, `music.rs`, `music_sources.rs`,
 `wikipedia.rs`, `lookups/mod.rs`, `lookups/wikidata.rs`, `also_on/media.rs`); code only one
 source uses is in that source's files, so a removal leaves no unused code behind (test helpers
-for any source excepted). Tests that need a source skip without it, so none has to change.
+for any source excepted). Tests that need a source skip without it, so none has to change. The
+keys a removed source recorded stay until they expire (up to their lifetime), and keep their
+single-object rule: the daemon writes every registered namespace's rule to the database at start
+(`single_object_namespace`), so grouping reads it after the code is gone.

@@ -1183,6 +1183,114 @@ async fn a_shared_q_id_never_joins_two_recordings(pool: PgPool) {
     assert!(metrics.group_key_conflicts.get() > 0);
 }
 
+/// A removed source's keys keep their rule: the database remembers every single-object namespace
+/// a source registered (`groups::configure`), so two objects with distinct IDs in a namespace
+/// whose source this build no longer has, sharing a barcode, stay two groups; the same pair in a
+/// namespace nobody ever registered is one.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_removed_source_s_keys_keep_their_single_object_rule(pool: PgPool) {
+    // What the daemon's start writes: this build's namespaces, each with its source.
+    groups::configure(&pool, &Default::default()).await.unwrap();
+    let remembered: Vec<(String, String)> =
+        sqlx::query_as("SELECT namespace,source FROM single_object_namespace ORDER BY namespace")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(
+        remembered.contains(&("mb:recording".into(), "groups".into())),
+        "{remembered:?}"
+    );
+    for source in also_on::registered() {
+        for namespace in source.single_namespaces() {
+            assert!(
+                remembered.contains(&((*namespace).into(), source.id().into())),
+                "{namespace} of {}",
+                source.id()
+            );
+        }
+    }
+    // A source gone from this build registered `gone:release` once; its keys are still stored.
+    sqlx::query(
+        "INSERT INTO single_object_namespace(namespace,source) VALUES('gone:release','gone')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let hub = Fake::new("music");
+    let pairs = [
+        [
+            (
+                "https://example.org/gone-1",
+                vec!["gone:release:1", "upc:0000000000017"],
+            ),
+            (
+                "https://example.org/gone-2",
+                vec!["gone:release:2", "upc:0000000000017"],
+            ),
+        ],
+        [
+            (
+                "https://example.org/nobody-1",
+                vec!["nobody:1", "upc:0000000000024"],
+            ),
+            (
+                "https://example.org/nobody-2",
+                vec!["nobody:2", "upc:0000000000024"],
+            ),
+        ],
+    ];
+    let mut ids = vec![];
+    for pair in &pairs {
+        let mut these = vec![];
+        for (uri, keys) in pair {
+            these.push(page(&pool, uri, "Album").await);
+            hub.answer(
+                uri,
+                Ok(Found {
+                    keys: keys.iter().map(|k| key(k)).collect(),
+                    ..Default::default()
+                }),
+            );
+        }
+        ids.push(these);
+    }
+    let sources: Vec<Arc<dyn Source>> = vec![hub];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let group = |ids: &[String]| {
+        let pool = pool.clone();
+        let ids = ids.to_vec();
+        async move {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT g.group_id FROM unnest($1::text[]) i(id) LEFT JOIN group_unit g ON g.resource_id=i.id",
+            )
+            .bind(&ids)
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    // Apart: a unit alone has no group, so neither has one, or they differ.
+    let gone = group(&ids[0]).await;
+    assert!(
+        gone[0].is_none() || gone[0] != gone[1],
+        "two objects of the removed source's namespace stay apart: {gone:?}"
+    );
+    let nobody = group(&ids[1]).await;
+    assert!(
+        nobody[0].is_some() && nobody[0] == nobody[1],
+        "a namespace nobody registered joins on the barcode: {nobody:?}"
+    );
+    let refused: i64 = sqlx::query_scalar("SELECT count(*) FROM group_input WHERE key_conflicts>0")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    // The refusal is the removed source's pair's: the other pair joined.
+    assert!(refused >= 1, "{refused}");
+}
+
 /// The lookups' own namespaces name one object each too: an OSM object, a crate, a Steam game.
 /// Two of them sharing a second key (an item naming a node and a relation, one repository behind
 /// two crates, an item with two appids) never share a group.

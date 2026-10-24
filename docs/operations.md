@@ -588,7 +588,8 @@ the hour with `last_error = 'work_budget'` (`state="stopped"`), starting at the 
 at, so a component too large for one run is covered in turn; after 24 stopped runs on unchanged
 input it settles with the groups the last run left until its input changes (`state="settled"`).
 A join that would put two values of a single-object hub key in one group (two recordings, two
-Q-ids) is refused; `pinakes_group_key_conflict_resources` counts the resources whose last run
+Q-ids) is refused, for the namespaces of the sources this build has and those it had (the
+`single_object_namespace` table, written at start, outlives a removed source); `pinakes_group_key_conflict_resources` counts the resources whose last run
 refused one, which points at a wrong ID on a hub.
 Parked keys' checks count against the run. Past either limit, every set of units holding one the
 run did not finish keeps each member's group, and no other set takes that group's ID; in a
