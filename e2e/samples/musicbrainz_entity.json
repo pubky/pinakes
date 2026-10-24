@@ -5,7 +5,8 @@
     "type": "MusicRecording",
     "site": "MusicBrainz",
     "name": "Bohemian Rhapsody",
-    "group_with": "tidal_share"
+    "group_with": "tidal_share",
+    "needs": "tidal"
   },
   {
     "kind": "mb_isrc",
@@ -20,6 +21,7 @@
     "type": "MusicGroup",
     "site": "MusicBrainz",
     "name": "Radiohead",
-    "group_with": "tidal_artist"
+    "group_with": "tidal_artist",
+    "needs": "tidal"
   }
 ]
