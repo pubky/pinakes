@@ -10,7 +10,8 @@ tests (`cargo test --workspace`, as scripts/test does, every target even after o
 DATABASE_URL and RUST_TEST_THREADS as for it), which a source's removal can break where the build
 does not: a test of another source that relied on it, a recording it took along. A source whose
 removal needs any other edit fails, with its first errors or failed tests. `--list` names the
-sources and stops; `--self-test` checks the leftover check itself and stops.
+sources and stops; `--self-test` checks the deletion and the leftover check on a synthetic tree
+of their own, independent of the repository and of which sources it has, and stops.
 
 The leftover check (`verify`) does not reuse the deletion's patterns: it looks for the source
 where an id is an identifier, not a word. A link to its docs page anywhere; its module or path
@@ -64,23 +65,24 @@ SHARED = [
 ]
 
 
-def read(path):
-    with open(os.path.join(ROOT, path), encoding="utf-8") as f:
+def read(path, root=ROOT):
+    with open(os.path.join(root, path), encoding="utf-8") as f:
         return f.read()
 
 
-def registered():
-    """(kind, module) for every entry of the three registries, in their order."""
+def registered(root=ROOT):
+    """(kind, module) for every entry of the three registries of the tree at `root`, in their
+    order."""
     out = []
-    text = read(CORE + REGISTRY["sources"])
+    text = read(CORE + REGISTRY["sources"], root)
     block = text[text.index("pub static REGISTRY") :]
     out += [("sources", m) for m in re.findall(r"^\s*&(\w+)::", block[: block.index("];")], re.M)]
-    text = read(CORE + REGISTRY["also_on"])
+    text = read(CORE + REGISTRY["also_on"], root)
     block = text[text.index("pub fn registry()") :]
     block = block[: block.index("\n}\n")]
     # `Arc::new(crate::sources::…)`: an official source's also-on half, removed with that source.
     out += [("also_on", m) for m in re.findall(r"Arc::new\((\w+)::", block) if m not in ("crate", "super")]
-    text = read(CORE + REGISTRY["lookups"])
+    text = read(CORE + REGISTRY["lookups"], root)
     block = text[text.index("pub static FAMILIES") :]
     out += [("lookups", m) for m in re.findall(r"^\s*&(\w+)::", block[: block.index("];")], re.M)]
     return out
@@ -250,7 +252,7 @@ def verify(wt, kind, name, title):
             found("pinakes.example.toml", i, "section header " + l.strip())
     # .env.example: no variable, set or commented out, is the source's; nor a banner.
     for i, l in text_lines(wt, ".env.example"):
-        m = re.match(r"\s*#?\s*([A-Z][A-Z0-9_]*)=", l)
+        m = re.match(r"\s*#?\s*(?:export\s+)?([A-Z][A-Z0-9_]*)=", l)
         if m and re.search(r"(?:^|_)%s(?:_|$)" % re.escape(name.upper()), m.group(1)) and not shared(l):
             found(".env.example", i, "variable " + m.group(1))
         if re.match(r"# --- (?:%s) -" % "|".join(re.escape(w) for w in (name, title) if w), l, re.I) and not shared(l):
@@ -329,48 +331,147 @@ def check(kind, name, tests):
         drop_worktree(wt)
 
 
+# The self-test's tree: three registries, one source of each kind (an official source with an
+# also-on half, an also-on source, a lookup family) and the shared files, in the forms the real
+# ones have. Nothing in it comes from the repository or from which sources it has.
+SYNTHETIC = {
+    CORE + REGISTRY["sources"]: """pub mod alpha_beta;
+pub mod gamma;
+
+pub static REGISTRY: &[&dyn Source] = &[
+    &alpha_beta::AlphaBeta,
+    &gamma::Gamma,
+];
+""",
+    CORE + REGISTRY["also_on"]: """pub mod delta;
+
+pub fn registry() -> Vec<Arc<dyn Source>> {
+    vec![
+        Arc::new(delta::Delta),
+        Arc::new(crate::sources::alpha_beta::also_on::AlphaBetaKeys),
+    ]
+}
+""",
+    CORE + REGISTRY["lookups"]: """pub mod epsilon;
+
+pub static FAMILIES: &[&dyn Family] = &[
+    &epsilon::Lookups,
+];
+""",
+    CORE + "src/sources/alpha_beta.rs": "pub struct AlphaBeta;\n",
+    CORE + "src/sources/gamma.rs": "pub struct Gamma;\n",
+    CORE + "src/also_on/delta.rs": "pub struct Delta;\n",
+    CORE + "src/lookups/epsilon.rs": "pub struct Lookups;\n",
+    "docs/sources/alpha_beta.md": "# Alpha Beta\n\nReads alpha-beta.example.\n",
+    "docs/sources/gamma.md": "# Gamma\n",
+    "docs/sources/delta.md": "# `delta`: the delta keys\n",
+    "docs/sources/epsilon.md": "# `epsilon`: an object's other places\n",
+    "docs/sources/README.md": """# Sources
+
+## Sources
+
+- [`alpha_beta`](alpha_beta.md): Alpha Beta objects by id.
+- [`gamma`](gamma.md): Gamma objects by id, from the
+  Gamma API.
+
+## Also on
+
+- [`delta`](delta.md): the delta keys.
+- [`alpha_beta`](alpha_beta.md#also-on): an Alpha Beta object's keys.
+- [`epsilon`](epsilon.md): an object's other places.
+""",
+    "pinakes.example.toml": """[sources.alpha_beta]
+enabled = true
+
+[sources.gamma]
+enabled = true
+
+[also_on]
+enabled = true
+# [also_on.sources.delta]
+# token = "" # The delta token.
+
+# The epsilon family asks only with a key.
+
+[epsilon]
+country = "US"
+""",
+    ".env.example": """# --- Alpha Beta -------------------------------------------------------------
+# Its token.
+PINAKES__SOURCES__ALPHA_BETA__TOKEN=
+
+# --- DELTA ------------------------------------------------------------------
+PINAKES_DELTA_KEY=
+""",
+    CORE + "tests/fixtures/sources/alpha_beta/provenance.json": "{}\n",
+    CORE + "tests/fixtures/sources/README.md": "One directory per source, `<name>/`.\n",
+    CORE + "tests/fixtures/media/README.md": "Recorded answers.\n",
+    CORE + "tests/fixtures/lookups/README.md": "Recorded answers.\n",
+    CORE + "tests/alpha_beta.rs": "\n",
+    "e2e/samples/alpha_beta.json": "[]\n",
+}
+
+
+def synthetic(root):
+    for rel, text in SYNTHETIC.items():
+        p = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
+
+
 def self_test():
-    """The leftover check catches what the deletion's patterns would not. For every official
-    source with an also-on half (ids of one word and of two): a clean removal verifies clean;
-    its index entry put back as the also-on half's (`name.md#also-on`), its section put back with
-    a trailing comment (`[sources.name] # Name`), and its banner and variable put back in
-    .env.example are each named."""
-    halves = read(CORE + REGISTRY["also_on"])
-    names = [n for k, n in registered() if k == "sources" and "crate::sources::%s::" % n in halves]
-    assert names, "no official source has an also-on half"
-    for name in names:
-        self_test_on(name)
-    print("self-test ok (%s)" % ", ".join(names))
-    return 0
-
-
-def self_test_on(name):
-    wt = worktree()
+    """The leftover check catches what the deletion's patterns would not, on a synthetic tree of
+    its own (`SYNTHETIC`), whatever the repository holds. Each source of the tree (an official one
+    with an also-on half, an also-on one, a family; ids of one word and of two) removes and
+    verifies clean. Then, after the official source's removal, each leftover the deletion would
+    miss is put back alone and must be named: its index entry as the also-on half's
+    (`name.md#also-on`), an index entry with ` - ` for `:`, a section header with a trailing
+    comment (`[sources.name] # Name`), a commented-out section header, an `export` variable, and
+    a banner."""
+    base = tempfile.mkdtemp(prefix="check-removals-self-test-")
     try:
-        title = display_name(wt, name) or name
-        remove(wt, "sources", name)
-        left, _ = verify(wt, "sources", name, title)
-        assert not left, f"{name} removed: {left}"
+        tree = os.path.join(base, "tree")
+        synthetic(tree)
+        sources = registered(tree)
+        expected = [("sources", "alpha_beta"), ("sources", "gamma"), ("also_on", "delta"), ("lookups", "epsilon")]
+        assert sources == expected, sources
+        for kind, name in sources:
+            wt = os.path.join(base, name)
+            shutil.copytree(tree, wt)
+            title = display_name(wt, name)
+            remove(wt, kind, name)
+            left, _ = verify(wt, kind, name, title)
+            assert not left, f"{name} removed: {left}"
+        wt, name = os.path.join(base, "alpha_beta"), "alpha_beta"
         cases = [
-            ("docs/sources/README.md", "- [`%s`](%s.md#also-on): its keys.\n" % (name, name), "links to its page"),
-            ("pinakes.example.toml", "\n[sources.%s] # %s\nenabled = true\n" % (name, title), "section [sources.%s]" % name),
-            (".env.example", "\n# --- %s ---\n# Its token.\nPINAKES_%s_TOKEN=\n" % (title, name.upper()), "variable PINAKES_%s_TOKEN" % name.upper()),
+            ("docs/sources/README.md", "- [`alpha_beta`](alpha_beta.md#also-on): its keys.\n", "links to its page"),
+            ("docs/sources/README.md", "- [`alpha_beta`](alpha_beta.md) - Alpha Beta objects.\n", "links to its page"),
+            ("pinakes.example.toml", "\n[sources.alpha_beta] # Alpha Beta\nenabled = true\n", "section [sources.alpha_beta]"),
+            ("pinakes.example.toml", "# [also_on.sources.alpha_beta]\n", "section header # [also_on.sources.alpha_beta]"),
+            (".env.example", "export PINAKES_ALPHA_BETA_TOKEN=x\n", "variable PINAKES_ALPHA_BETA_TOKEN"),
+            (".env.example", "\n# --- Alpha Beta ---\n", "banner # --- Alpha Beta ---"),
         ]
-        for rel, text, expected in cases:
+        for rel, text, want in cases:
             p = os.path.join(wt, rel)
             with open(p, encoding="utf-8") as f:
                 before = f.read()
             with open(p, "a", encoding="utf-8") as f:
                 f.write(text)
-            left, _ = verify(wt, "sources", name, title)
-            assert any(expected in l for l in left), f"{rel}: {text!r} not named; left: {left}"
+            left, _ = verify(wt, "sources", name, "Alpha Beta")
+            assert any(want in l for l in left), f"{rel}: {text!r} not named; left: {left}"
             with open(p, "w", encoding="utf-8") as f:
                 f.write(before)
+        print("self-test ok (%d removals, %d leftovers named)" % (len(sources), len(cases)))
+        return 0
     finally:
-        drop_worktree(wt)
+        shutil.rmtree(base, ignore_errors=True)
 
 
 def main(argv):
+    # The self-test reads nothing of the repository: before its registries are read.
+    if argv == ["--self-test"]:
+        return self_test()
     all_sources = registered()
     if "shared" in {n for _, n in all_sources}:
         raise SystemExit("no source may be named `shared`: that is the fixtures' shared directory")
@@ -378,8 +479,6 @@ def main(argv):
         for kind, name in all_sources:
             print(f"{kind} {name}")
         return 0
-    if argv == ["--self-test"]:
-        return self_test()
     tests = "--tests" in argv
     names = [a for a in argv if a != "--tests"]
     chosen = all_sources if not names else [(k, n) for k, n in all_sources if n in names]

@@ -1048,16 +1048,12 @@ mod tests {
         }
     }
 
-    /// `scripts/check-removals`'s leftover check catches what its deletion would not: the
-    /// script's self-test removes an official source on a scratch worktree, verifies it clean,
-    /// and puts back an also-on index entry, a section with a trailing comment and an
-    /// environment banner, each of which it must name.
-    #[test]
-    fn check_removals_finds_leftovers_its_deletion_missed() {
-        let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/check-removals");
+    /// `scripts/check-removals --self-test`, run from `root`: it must pass.
+    fn check_removals_self_test(root: &Path) {
         let output = std::process::Command::new("python3")
-            .arg(script)
+            .arg(root.join("scripts/check-removals"))
             .arg("--self-test")
+            .current_dir(root)
             .output()
             .expect("python3");
         assert!(
@@ -1066,6 +1062,112 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    /// A scratch directory, removed when dropped (a failed test too).
+    struct Scratch(std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A scratch directory holding a copy of `scripts/check-removals` and the given files, and
+    /// nothing else of the repository.
+    fn scratch_with_script(label: &str, files: &[(&str, &str)]) -> Scratch {
+        let root = std::env::temp_dir().join(format!(
+            "check-removals-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("scripts")).unwrap();
+        std::fs::write(
+            root.join("scripts/check-removals"),
+            repo("scripts/check-removals"),
+        )
+        .unwrap();
+        let scratch = Scratch(root);
+        for (path, text) in files {
+            let path = scratch.0.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        scratch
+    }
+
+    /// `scripts/check-removals`'s leftover check catches what its deletion would not, on a
+    /// synthetic tree of the self-test's own: each kind of source removes and verifies clean, and
+    /// each leftover the deletion misses, put back alone, is named.
+    #[test]
+    fn check_removals_finds_leftovers_its_deletion_missed() {
+        check_removals_self_test(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+    }
+
+    /// The self-test reads nothing of the repository: a new official source with an also-on half
+    /// that is not committed (a git repository whose HEAD has only the script) leaves it passing.
+    #[test]
+    fn check_removals_self_test_ignores_an_uncommitted_source() {
+        let scratch = scratch_with_script("uncommitted", &[]);
+        let root = &scratch.0;
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.org"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .current_dir(root)
+                .output()
+                .expect("git");
+            assert!(status.status.success(), "git {args:?}: {status:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "scripts/check-removals"]);
+        git(&["commit", "-q", "-m", "the script alone"]);
+        for (path, text) in [
+            (
+                "crates/pinakes-core/src/sources/mod.rs",
+                "pub mod review_source;\npub static REGISTRY: &[&dyn Source] = &[\n    &review_source::ReviewSource,\n];\n",
+            ),
+            (
+                "crates/pinakes-core/src/also_on.rs",
+                "pub fn registry() -> Vec<Arc<dyn Source>> {\n    vec![\n        Arc::new(crate::sources::review_source::also_on::Keys),\n    ]\n}\n",
+            ),
+            (
+                "crates/pinakes-core/src/sources/review_source.rs",
+                "pub struct ReviewSource;\n",
+            ),
+        ] {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        check_removals_self_test(root);
+    }
+
+    /// The self-test needs no official source with an also-on half: with the registries of a
+    /// build that has none (each such source removed), it passes.
+    #[test]
+    fn check_removals_self_test_needs_no_also_on_half() {
+        let scratch = scratch_with_script(
+            "no-halves",
+            &[
+                (
+                    "crates/pinakes-core/src/sources/mod.rs",
+                    "pub mod plain_source;\npub static REGISTRY: &[&dyn Source] = &[\n    &plain_source::PlainSource,\n];\n",
+                ),
+                (
+                    "crates/pinakes-core/src/also_on.rs",
+                    "pub fn registry() -> Vec<Arc<dyn Source>> {\n    vec![]\n}\n",
+                ),
+                (
+                    "crates/pinakes-core/src/lookups/mod.rs",
+                    "pub static FAMILIES: &[&dyn Family] = &[];\n",
+                ),
+            ],
+        );
+        check_removals_self_test(&scratch.0);
     }
 
     /// A source's mock end-to-end samples are links it reads (or pages it improves), each named
