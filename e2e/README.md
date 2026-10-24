@@ -77,9 +77,11 @@ link's spelling (a Bluesky post's handle URL, under its DID); the driver then re
 its place. Canaries and unrelated backlog fetching are off.
 
 The driver reads its settings from the environment as `pinakesd` does (`PINAKES__…` and the named
-secrets). A sample marked `"needs": "tidal"` (the barcode and own-ISRC cases) needs the TIDAL
-source, so set `PINAKES_TIDAL_CLIENT_ID` and `PINAKES_TIDAL_CLIENT_SECRET`; without them the driver
-refuses to start and names those samples. The walled article (`feed`) names its site's RSS feed
+secrets). A sample marked `"needs": "tidal"` (the barcode and own-ISRC cases, and the MusicBrainz
+samples whose group joins TIDAL's) needs the TIDAL source, so set `PINAKES_TIDAL_CLIENT_ID` and
+`PINAKES_TIDAL_CLIENT_SECRET`; without them the driver refuses to start and names those samples.
+A build without the source at all leaves them out, in both modes, and the run names each one
+(`left out: …`, and the report's `skipped`). The walled article (`feed`) names its site's RSS feed
 (`latest_in`), and the harness tags that feed's newest item: the card comes from the feed, which
 lists recent items only. A sample marked `needs_page` (the Podcast Index page) is a card read from
 its page: when the site answers this host 401 or 403, the harness leaves it out of the run and

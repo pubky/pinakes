@@ -50,6 +50,10 @@ try {
     const lines = createInterface({ input: child.stdout });
     const startup = await Promise.race([once(lines, 'line').then(([line]) => JSON.parse(line)), once(child, 'exit').then(([code]) => { throw new Error(`Stack exited before ready: ${code}`); })]);
     pinakes = startup.pinakes; nexus = startup.nexus;
+    // Samples that need a source this build does not have are left out by the stack, as named.
+    for (const s of startup.skipped ?? []) console.error(`left out: ${s.kind} (${s.uri}): ${s.reason}`);
+    if (!mock) samples = samples.filter(s => !(startup.skipped ?? []).some(k => k.kind === s.kind));
+    skipped.push(...(startup.skipped ?? []));
   }
   if (mock) {
     const config = await json(`${pinakes}/mock/config`);

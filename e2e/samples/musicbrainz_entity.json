@@ -5,14 +5,16 @@
     "type": "MusicRecording",
     "site": "MusicBrainz",
     "name": "Bohemian Rhapsody",
-    "group_with": "tidal_share"
+    "group_with": "tidal_share",
+    "needs": "tidal"
   },
   {
     "kind": "mb_isrc",
     "uri": "https://musicbrainz.org/isrc/GBUM71029604",
     "type": "MusicRecording",
     "site": "MusicBrainz",
-    "group_with": "mb_recording"
+    "group_with": "mb_recording",
+    "needs": "tidal"
   },
   {
     "kind": "mb_artist",
@@ -20,6 +22,7 @@
     "type": "MusicGroup",
     "site": "MusicBrainz",
     "name": "Radiohead",
-    "group_with": "tidal_artist"
+    "group_with": "tidal_artist",
+    "needs": "tidal"
   }
 ]

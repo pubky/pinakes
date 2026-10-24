@@ -1,6 +1,6 @@
 Responses from the official APIs that `pinakes_core::sources` reads, one directory per source
-(`<name>/`, named as in `[sources.<name>]`; `esplora/` holds the blockstream.info answers the
-`mempool` source falls back to). Each was recorded once with the Pinakes User-Agent
+(`<name>/`, named as in `[sources.<name>]`; a fallback service's answers are in a subdirectory
+of the source's own, `<name>/<service>/`). Each was recorded once with the Pinakes User-Agent
 and the contact `info@synonym.to`, at the service's published pace; test runs make no public
 requests.
 
