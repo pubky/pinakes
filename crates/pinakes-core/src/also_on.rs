@@ -15,11 +15,19 @@
 use crate::{config::Config, model::ResourceMeta, resolver::egress::Egress};
 
 pub mod books;
+pub mod deezer;
 pub mod films;
+pub mod itunes;
 pub mod media;
+pub mod musicbrainz;
+pub mod musicbrainz_entity;
+pub mod performers;
 pub mod podcasts;
+pub mod service;
 pub mod tidal;
-pub mod titles;
+pub mod wikidata;
+pub mod wikidata_item;
+pub mod wikipedia;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -91,7 +99,8 @@ pub struct SourceOptions {
     pub enabled: Option<bool>,
     /// The web service a hub source asks (`musicbrainz` only: a mirror's `…/ws/2`).
     pub base_url: Option<String>,
-    /// A service's personal token (`discogs` only); never shown or logged.
+    /// A service's personal token, for a source that takes one (`Source::takes_token`); never
+    /// shown or logged.
     pub token: Option<crate::event::adapters::SecretKey>,
 }
 
@@ -230,6 +239,90 @@ pub trait Source: Send + Sync {
         true
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found>;
+    /// The key namespaces it records that name one object each: a group holds at most one value
+    /// of each (`groups::single_object`).
+    fn single_namespaces(&self) -> &'static [&'static str] {
+        &[]
+    }
+    /// The join key a search names in one of its namespaces (`key={namespace}:{value}`),
+    /// normalized as it records it; `None` for another namespace or a value that is no key.
+    fn search_key(&self, _namespace: &str, _value: &str) -> Option<String> {
+        None
+    }
+    /// The plain name of a service it reads or links to, by a link's host (lower case, without
+    /// `www.`) and URL: the name its derived links carry (`lookups::service_name`). Only for an
+    /// object's own page in a form it recognizes; any other page on that host is on no service.
+    fn service_name(&self, _host: &str, _url: &url::Url) -> Option<&'static str> {
+        None
+    }
+    /// Its page in docs/sources: its own (`<id>.md`), unless it is the also-on half of an official
+    /// source of another name. A lookup family's sources share their family's page.
+    fn page(&self) -> &'static str {
+        self.id()
+    }
+    /// The published limits of the services only it reads, as `(host, requests_per_second)`:
+    /// each lowers its host's default pace (`limits.host_rates` overrides it), as an official
+    /// source's budgets do. Services several sources or the resolver read keep theirs in
+    /// `resolver::egress::PUBLISHED_RATES`.
+    fn budgets(&self) -> &'static [(&'static str, f64)] {
+        &[]
+    }
+    /// The type a media link it reads names, whatever its page calls itself
+    /// (`media::link_type`): `Some(None)` for a link it reads that names no one type.
+    fn link_type(&self, _uri: &str) -> Option<Option<&'static str>> {
+        None
+    }
+    /// The top-level section of the config file it owns ([`OwnSection`]), if any.
+    fn section(&self) -> Option<Section> {
+        None
+    }
+    /// Whether `[also_on.sources.<id>]` takes a `token` for it.
+    fn takes_token(&self) -> bool {
+        false
+    }
+}
+
+/// A top-level section of the config file that one source owns and alone reads (`[tidal]`):
+/// its name, the variables of its own (`PINAKES_NAME`) that set one of its keys, replacing the
+/// file's value, and its checks. Its secrets are `SecretKey`s, so it shows them redacted.
+pub trait OwnSection: Default + Serialize + serde::de::DeserializeOwned {
+    const NAME: &'static str;
+    const VARIABLES: &'static [(&'static str, &'static str)] = &[];
+    fn check(&self) -> Result<()> {
+        Ok(())
+    }
+}
+/// What the configuration needs of an [`OwnSection`], whatever its type.
+#[derive(Clone, Copy)]
+pub struct Section {
+    pub name: &'static str,
+    pub variables: &'static [(&'static str, &'static str)],
+    /// The section with its defaults, in its file form.
+    pub default: fn() -> Value,
+    /// The section as written, checked, in the form it may be shown (secrets redacted).
+    pub shown: fn(&Value) -> Result<Value>,
+}
+impl Section {
+    pub fn of<T: OwnSection>() -> Self {
+        fn default<T: OwnSection>() -> Value {
+            serde_json::to_value(T::default()).expect("a config section serializes")
+        }
+        fn shown<T: OwnSection>(value: &Value) -> Result<Value> {
+            let section: T = serde_json::from_value(value.clone())?;
+            section.check()?;
+            Ok(serde_json::to_value(section)?)
+        }
+        Self {
+            name: T::NAME,
+            variables: T::VARIABLES,
+            default: default::<T>,
+            shown: shown::<T>,
+        }
+    }
+}
+/// The config sections the sources own ([`Source::section`]).
+pub fn sections() -> impl Iterator<Item = Section> {
+    registered().iter().filter_map(|s| s.section())
 }
 
 /// A hub's answer over its read's cap is no answer: asking again would read the same megabytes.
@@ -240,48 +333,43 @@ pub fn unless_over_cap(found: Result<Found>, fallback: impl FnOnce() -> Found) -
         found => found,
     }
 }
-/// Every also-on source. A new source is listed here, in the order it must run.
+/// Every source this build has: these, then each lookup family's ([`crate::lookups::FAMILIES`]).
 pub fn registry() -> Vec<Arc<dyn Source>> {
     // In this order: each source sees the keys the ones before it found.
-    vec![
-        Arc::new(crate::music_sources::ServiceSource),
+    let own: Vec<Arc<dyn Source>> = vec![
+        Arc::new(service::ServiceSource),
         Arc::new(tidal::Tidal),
-        Arc::new(crate::music_sources::MusicBrainzSource),
-        Arc::new(crate::music_sources::MusicBrainzEntitySource),
-        Arc::new(crate::music_sources::PerformersSource),
-        Arc::new(crate::music_sources::WikidataSource),
+        Arc::new(musicbrainz::MusicBrainzSource),
+        Arc::new(musicbrainz_entity::MusicBrainzEntitySource),
+        Arc::new(performers::PerformersSource),
+        Arc::new(wikidata::WikidataSource),
         // Before the barcode lookups: a Discogs release's barcodes are keys.
-        Arc::new(crate::lookups::sources::Discogs),
-        Arc::new(crate::music_sources::DeezerSource),
-        Arc::new(crate::music_sources::ItunesSource),
-        Arc::new(crate::wikipedia::WikipediaSource),
-        Arc::new(crate::wikipedia::WikidataItemSource),
+        Arc::new(crate::sources::discogs::also_on::Discogs),
+        Arc::new(deezer::DeezerSource),
+        Arc::new(itunes::ItunesSource),
+        Arc::new(wikipedia::WikipediaSource),
+        Arc::new(wikidata_item::WikidataItemSource),
         Arc::new(books::Books),
         Arc::new(films::Films),
         Arc::new(podcasts::Podcasts),
-        Arc::new(titles::Titles),
-        Arc::new(crate::lookups::sources::OsmWikidata),
-        Arc::new(crate::lookups::sources::WikidataOsm),
-        Arc::new(crate::lookups::sources::Btcmap),
-        Arc::new(crate::lookups::sources::FederalRegister),
-        Arc::new(crate::lookups::sources::Unpaywall),
-        Arc::new(crate::lookups::sources::Ncbi),
-        Arc::new(crate::lookups::sources::Datacite),
-        Arc::new(crate::lookups::sources::HuggingFacePapers),
-        Arc::new(crate::lookups::sources::Packages(
-            crate::lookups::packages::Registry::Crates,
-        )),
-        Arc::new(crate::lookups::sources::Packages(
-            crate::lookups::packages::Registry::Npm,
-        )),
-        Arc::new(crate::lookups::sources::Packages(
-            crate::lookups::packages::Registry::PyPI,
-        )),
-        Arc::new(crate::lookups::sources::SoftwareHeritage),
-        Arc::new(crate::lookups::sources::Steam),
-        Arc::new(crate::lookups::sources::WikidataStores),
-        Arc::new(crate::lookups::sources::Wayback),
-    ]
+        Arc::new(crate::sources::media_records::titles::Titles),
+        Arc::new(crate::sources::federal_register::also_on::FederalRegister),
+    ];
+    own.into_iter()
+        .chain(crate::lookups::FAMILIES.iter().flat_map(|f| f.sources()))
+        .collect()
+}
+/// Every source this build has, built once: for the questions a source answers from a link alone
+/// (its key namespaces, service names, media types).
+pub fn registered() -> &'static [Arc<dyn Source>] {
+    static ALL: std::sync::OnceLock<Vec<Arc<dyn Source>>> = std::sync::OnceLock::new();
+    ALL.get_or_init(registry)
+}
+/// Every also-on source's published host limits ([`Source::budgets`]).
+pub fn budgets() -> impl Iterator<Item = (&'static str, f64)> {
+    registered()
+        .iter()
+        .flat_map(|s| s.budgets().iter().copied())
 }
 /// The source IDs `[also_on.sources]` may name.
 pub fn source_ids() -> Vec<&'static str> {
@@ -813,5 +901,39 @@ pub async fn run(
             }
         }
         tokio::select! { _=shutdown.changed()=>break, _=tokio::time::sleep(Duration::from_secs(5))=>{} }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each also-on source and lookup family has its page in docs/sources, listed in the index
+    /// there: a family's sources their family's page, an official source's also-on half that
+    /// source's.
+    #[test]
+    fn each_source_and_family_has_its_page() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/sources");
+        let index = std::fs::read_to_string(dir.join("README.md")).unwrap();
+        let listed = |page: &str| {
+            assert!(
+                dir.join(format!("{page}.md")).exists(),
+                "docs/sources/{page}.md"
+            );
+            assert!(
+                index.contains(&format!("[`{page}`]({page}.md")),
+                "docs/sources/README.md lacks {page}"
+            );
+        };
+        let mut in_families = std::collections::BTreeSet::new();
+        for family in crate::lookups::FAMILIES {
+            listed(family.name());
+            in_families.extend(family.sources().iter().map(|s| s.id()));
+        }
+        for source in registry() {
+            if !in_families.contains(source.id()) {
+                listed(source.page());
+            }
+        }
     }
 }

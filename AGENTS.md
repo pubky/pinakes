@@ -25,6 +25,7 @@ export DATABASE_URL='postgresql:///postgres?host=/var/run/postgresql'
 | `scripts/openapi` | Regenerates `docs/openapi.json`. A test fails while the snapshot differs from the code. |
 | `scripts/verify-osm-boundary [out.sql]` | OSM-derived facts are only in `osm_place` (run by the tests; needs `psql`, `pg_dump`, `rg`). |
 | `scripts/verify-no-capability-urls` | No private calendar share URL in any tracked file (run by the tests). |
+| `scripts/check-removals [--tests] [NAME…]` | Removes each source (every registered one, or the named ones) on a scratch worktree by the checklist below, checks nothing of the source's is left, and builds every test target with warnings as errors; with `--tests`, also runs the workspace's tests. A source whose removal needs any other edit fails. Half a minute per source to build, minutes more with the tests; run it for the sources a change touches. |
 | `scripts/lock-waits COMMAND…` | Samples the database every 50 ms while COMMAND runs and prints which locks backends waited on; fails, without repeating any part of `DATABASE_URL`, when it could not sample. Needs `psql` and `python3`. |
 
 Tests use local servers, injected transports and recorded fixtures instead of public services.
@@ -42,9 +43,9 @@ Tests use local servers, injected transports and recorded fixtures instead of pu
     says how to add one.
   - `event/`: event pages, calendar feeds, event platforms (`adapters/`).
   - `sources/`: official-API sources, one module per service (`kit.rs` holds shared helpers).
-  - `also_on.rs`, `also_on/`, `lookups/`, `music.rs`, `music_sources.rs`, `hubs.rs`,
-    `wikipedia.rs`: the also-on sources and their hubs (music, books, films, podcasts, places,
-    papers, packages, games, archived copies).
+  - `also_on.rs` and `also_on/` (one module per also-on source), `lookups/` (one module per
+    lookup family: places, papers, packages, games, archived copies), and the code they share:
+    `hubs.rs` (MusicBrainz, Wikidata), `music.rs`, `music_sources.rs`, `wikipedia.rs`.
   - `groups.rs`, `group_keys.rs`, `same_event.rs`: groups and the same-event hint.
   - `api.rs`, `change_api.rs`, `spatial.rs`, `recipes.rs`: the HTTP API, its OpenAPI document
     and examples.
@@ -86,8 +87,8 @@ published rate) and caches answers. A source with a published limit lowers its h
 never raises it.
 
 **Secrets.** Keys, tokens and passwords come only from the config file or the environment
-(`PINAKES__…`, or a source's own variables such as `PINAKES_TIDAL_CLIENT_ID` and
-`PINAKES_GITHUB_TOKEN`). They never appear in logs, errors, `Debug` output or `/v1/info`. Fixtures
+(`PINAKES__…`, or a variable a source names for itself, `PINAKES_NAME`: an own section's
+`OwnSection::VARIABLES`, an official source's `token_variable`). They never appear in logs, errors, `Debug` output or `/v1/info`. Fixtures
 and samples hold no real keys and no private calendar URLs.
 
 **Limits.** A new cap, timeout or rate is a limit in `config.rs` with a default, and gets a row in
@@ -97,8 +98,24 @@ the table in `docs/operations.md` (a test checks every limit is listed).
 `docs/sources/<name>.md`, a line in `docs/sources/README.md`, `[sources.<name>]` in
 `pinakes.example.toml` (alphabetical), recorded fixtures in
 `tests/fixtures/sources/<name>/` with `provenance.json`, and examples (`Source::examples`).
-Tests check the docs, the example config and the examples against the registry. Removing a
-source is deleting its own files and its one registry line.
+Tests check the docs, the example config and the examples against the registry.
+
+**Removing a source** (official, also-on, or a lookup family) is deleting its own files and its
+registry lines, nothing else ([docs/sources](docs/sources/README.md#removing-a-source) has the
+full list):
+- its module: `sources/<name>.rs`, `also_on/<id>.rs` or `lookups/<family>.rs`;
+- its `pub mod` line and its entry in `sources::REGISTRY`, `also_on::registry()` or
+  `lookups::FAMILIES`;
+- `docs/sources/<name>.md` and its line in `docs/sources/README.md`;
+- its block in `pinakes.example.toml` (and its variables in `.env.example`);
+- its fixture directories (those named after it) and its own test file, if any;
+- `e2e/samples/<name>.json`.
+
+Shared code stays. A test that needs a source returns early without it, so no test changes. A
+removed source's keys stay in the database until they expire, and keep their grouping rule
+(`single_object_namespace` remembers it). If removing a source would need any other edit, first
+move what it needs into its own files or into shared code; `scripts/check-removals --tests <name>` proves it. Recordings several modules
+read are in a fixtures `shared/` directory, never one named after a source.
 
 **API.** Response types and routes carry `utoipa` annotations; their doc comments become the
 OpenAPI text. Run `scripts/openapi` after changing them. Every example in

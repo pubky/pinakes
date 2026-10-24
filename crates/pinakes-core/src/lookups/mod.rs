@@ -18,8 +18,24 @@ pub mod games;
 pub mod packages;
 pub mod papers;
 pub mod places;
-pub mod sources;
 pub mod wikidata;
+
+/// A lookup family: the pure parsers of one kind of service (`lookups/<family>.rs`) and the also-on
+/// sources that run them (its `also_on` module). Listed once in [`FAMILIES`].
+pub trait Family: Send + Sync {
+    /// Its module, its page in docs/sources and its fixture directory.
+    fn name(&self) -> &'static str;
+    /// Its also-on sources, in the order they run (after the other also-on sources).
+    fn sources(&self) -> Vec<std::sync::Arc<dyn crate::also_on::Source>>;
+}
+/// Every lookup family, one line each, in the order their sources run.
+pub static FAMILIES: &[&dyn Family] = &[
+    &places::Lookups,
+    &papers::Lookups,
+    &packages::Lookups,
+    &games::Lookups,
+    &archive::Lookups,
+];
 
 /// One HTTP GET to an external API.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -106,12 +122,14 @@ impl Found {
     }
 }
 
-/// The plain name of a service these lookups read or link to, by its link: the name their derived
-/// links carry ("OpenStreetMap", "Google Play", "crates.io", "DOI"), so a tagged member of a
-/// group and a derived link to the same service read as one service. Only an object's own page
-/// is named (the forms the lookups recognize: a game, an app, a package, a repository, a paper,
-/// a place); any other page on those hosts (a topic list, a search, a user's page, a page under
-/// an object) is `None`, so it takes no service's place on a card.
+/// The plain name of a service the also-on sources read or link to, by its link: the name their
+/// derived links carry ("OpenStreetMap", "Google Play", "crates.io", "DOI"), so a tagged member
+/// of a group and a derived link to the same service read as one service. Only an object's own
+/// page is named (a game, an app, a package, a repository, a paper, a place: the forms its source
+/// recognizes); any other page on those hosts (a topic list, a search, a user's page, a page
+/// under an object) is `None`, so it takes no service's place on a card. OpenStreetMap, Wikidata
+/// and DOI are named here; every other service by the source that reads it
+/// (`also_on::Source::service_name`).
 pub fn service_name(uri: &str) -> Option<&'static str> {
     if uri.get(..4).is_some_and(|s| s.eq_ignore_ascii_case("doi:")) {
         return crate::resolver::cards::doi(uri).map(|_| "DOI");
@@ -119,148 +137,47 @@ pub fn service_name(uri: &str) -> Option<&'static str> {
     let url = web_url(uri)?;
     let host = url.host_str()?.to_ascii_lowercase();
     let host = host.strip_prefix("www.").unwrap_or(&host);
-    let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
-    let digits = |s: &str| plain(s, 20, |c| c.is_ascii_digit());
-    // Only an object's own page is on the service: a topic list, a search, a user's page or a
-    // page under the object is on none (its card keeps the name it gives itself).
-    let object = match host {
-        "openstreetmap.org" | "osm.org" => crate::resolver::osm::parse_id(uri).is_some(),
-        "wikidata.org" | "m.wikidata.org" => sources::wikidata_item(uri).is_some(),
-        "doi.org" | "dx.doi.org" => crate::resolver::cards::doi(uri).is_some(),
-        "store.steampowered.com" | "steamcommunity.com" | "steamdb.info" | "protondb.com" => {
-            games::appid_from_uri(uri).is_some()
+    match host {
+        "openstreetmap.org" | "osm.org" => {
+            return crate::resolver::osm::parse_id(uri).map(|_| "OpenStreetMap")
         }
-        // A game's article: `/wiki/{title}`, no namespace's page (`Special:Search`,
-        // `Category:Games`) and no other view of it (`?action=history`).
-        "pcgamingwiki.com" => {
-            games::appid_from_uri(uri).is_some()
-                || matches!(
-                    segments.as_slice(),
-                    ["wiki", title] if harmless_query(&url) && !wiki_namespace(title)
-                )
+        "wikidata.org" | "m.wikidata.org" => {
+            return wikidata::wikidata_item(uri).map(|_| "Wikidata")
         }
-        "gog.com" | "apps.apple.com" | "play.google.com" | "f-droid.org" | "flathub.org"
-        | "snapcraft.io" => sources::store_property(uri).is_some(),
-        "crates.io" | "docs.rs" | "lib.rs" | "npmjs.com" | "jsdelivr.com" | "pypi.org" => {
-            packages::Package::from_uri(uri).is_some()
-        }
-        // unpkg's page for a package: `/{name}/` or `/@scope/{name}/`, nothing under it.
-        "unpkg.com" => match segments.as_slice() {
-            [scope, name] => {
-                scope.starts_with('@')
-                    && packages::Package::new(packages::Registry::Npm, &format!("{scope}/{name}"))
-                        .is_some()
-            }
-            [name] => {
-                !name.starts_with('@')
-                    && packages::Package::new(packages::Registry::Npm, name).is_some()
-            }
-            _ => false,
-        },
-        "github.com" | "gitlab.com" => packages::Repo::from_url(uri).is_some(),
-        // An origin's archive page, `/browse/origin/?origin_url=…`.
-        "archive.softwareheritage.org" => {
-            segments == ["browse", "origin"] && url.query_pairs().any(|(k, _)| k == "origin_url")
-        }
-        "arxiv.org" | "alphaxiv.org" => papers::arxiv_from_uri(uri).is_some(),
-        "pubmed.ncbi.nlm.nih.gov" => matches!(segments.as_slice(), [pmid] if digits(pmid)),
-        "pmc.ncbi.nlm.nih.gov" => matches!(
-            segments.as_slice(),
-            ["articles", id] if id.strip_prefix("PMC").is_some_and(digits)
-        ),
-        "huggingface.co" => {
-            matches!(segments.as_slice(), ["papers", id] if papers::arxiv_id(id).is_some())
-        }
-        // A merchant page names one OSM object: `/merchant/{node|way|relation}:{id}`.
-        "btcmap.org" => matches!(
-            segments.as_slice(),
-            ["merchant", object] if object.split_once(':').is_some_and(|(kind, id)| {
-                matches!(kind, "node" | "way" | "relation") && digits(id)
-            })
-        ),
-        // An archived copy: `/web/{timestamp}/{url}`.
-        "web.archive.org" => matches!(
-            segments.as_slice(),
-            ["web", at, _, ..] if at.len() >= 4 && digits(at)
-        ),
-        _ => false,
-    };
-    if !object {
-        return None;
+        "doi.org" | "dx.doi.org" => return crate::resolver::cards::doi(uri).map(|_| "DOI"),
+        _ => {}
     }
-    Some(match host {
-        "openstreetmap.org" | "osm.org" => "OpenStreetMap",
-        "wikidata.org" | "m.wikidata.org" => "Wikidata",
-        "doi.org" | "dx.doi.org" => "DOI",
-        "store.steampowered.com" | "steamcommunity.com" => "Steam",
-        "steamdb.info" => "SteamDB",
-        "protondb.com" => "ProtonDB",
-        "pcgamingwiki.com" => "PCGamingWiki",
-        "gog.com" => "GOG",
-        "apps.apple.com" => "App Store",
-        "play.google.com" => "Google Play",
-        "f-droid.org" => "F-Droid",
-        "flathub.org" => "Flathub",
-        "snapcraft.io" => "Snap Store",
-        "crates.io" => "crates.io",
-        "docs.rs" => "Docs.rs",
-        "lib.rs" => "lib.rs",
-        "npmjs.com" => "npm",
-        "jsdelivr.com" => "jsDelivr",
-        "unpkg.com" => "unpkg",
-        "pypi.org" => "PyPI",
-        "github.com" => "GitHub",
-        "gitlab.com" => "GitLab",
-        "archive.softwareheritage.org" => "Software Heritage",
-        "arxiv.org" => "arXiv",
-        "alphaxiv.org" => "alphaXiv",
-        "pubmed.ncbi.nlm.nih.gov" => "PubMed",
-        "pmc.ncbi.nlm.nih.gov" => "PubMed Central",
-        "huggingface.co" => "Hugging Face Papers",
-        "btcmap.org" => "BTC Map",
-        "web.archive.org" => "Wayback Machine",
-        _ => return None,
-    })
+    crate::also_on::registered()
+        .iter()
+        .find_map(|s| s.service_name(host, &url))
 }
 
 /// The join key a search names (`key={namespace}:{value}`), normalized as the sources record
-/// it, or `None` when it is not one of these lookups' keys.
+/// it, or `None` when no source records that namespace: an OSM object and a DOI here, every
+/// other namespace by the source that records it (`also_on::Source::search_key`).
 pub fn search_key(namespace: &str, value: &str) -> Option<String> {
-    let digits = |v: &str| plain(v, 20, |c| c.is_ascii_digit()) && !v.starts_with('0');
     let key = match namespace {
         "osm" => {
             let (kind, id) = value.split_once('/')?;
             (matches!(kind, "node" | "way" | "relation") && digits(id))
                 .then(|| Key::new("osm", value))?
         }
-        "doi" => papers::doi_key(&crate::resolver::cards::doi(&format!("doi:{value}"))?),
-        "arxiv" => papers::arxiv_key(&papers::arxiv_id(value)?),
-        "pmid" => digits(value).then(|| Key::new("pmid", value))?,
-        "pmcid" => {
-            let n = value.strip_prefix("PMC")?;
-            digits(n).then(|| Key::new("pmcid", value))?
-        }
-        "crate" => packages::Package::new(packages::Registry::Crates, value)?.key(),
-        "npm" => packages::Package::new(packages::Registry::Npm, value)?.key(),
-        "pypi" => packages::Package::new(packages::Registry::PyPI, value)?.key(),
-        "repo" => {
-            let (host, path) = value.split_once('/')?;
-            packages::Repo::new(host, path)?.key()
-        }
-        "steam" => games::steam_key(games::appid(value)?),
-        "gog" => games::gog_key(value.parse().ok().filter(|_| digits(value))?),
-        "fr" => Key::new(
-            "fr",
-            &crate::sources::federal_register::document_number(value)?,
+        "doi" => Key::new(
+            "doi",
+            &crate::resolver::cards::doi(&format!("doi:{value}"))?,
         ),
-        "discogs" => {
-            let (kind, id) = value.split_once(':')?;
-            (matches!(kind, "artist" | "master" | "release") && digits(id))
-                .then(|| Key::new("discogs", value))?
+        _ => {
+            return crate::also_on::registered()
+                .iter()
+                .find_map(|s| s.search_key(namespace, value))
         }
-        _ => return None,
     };
     Some(key.0)
+}
+
+/// Positive decimal digits without a leading zero, at most 20 (an ID).
+pub(crate) fn digits(value: &str) -> bool {
+    plain(value, 20, |c| c.is_ascii_digit()) && !value.starts_with('0')
 }
 
 /// The body of a response, `None` for a status that means "no such object", or an error.
@@ -288,22 +205,14 @@ fn encode_path(value: &str) -> String {
     utf8_percent_encode(value, PATH).to_string()
 }
 
-/// The contact for APIs that ask for one (`email`, `mailto`), or `None` when it is not set.
-fn contact(contact: &str) -> Option<&str> {
-    let contact = contact.trim();
-    (!contact.is_empty() && contact.contains('@') && !contact.contains(char::is_whitespace))
-        .then_some(contact)
-}
-
 /// A plain identifier: non-empty, at most `max` bytes, and only the characters `ok` allows.
 fn plain(value: &str, max: usize, ok: impl Fn(char) -> bool) -> bool {
     !value.is_empty() && value.len() <= max && value.chars().all(ok)
 }
 
-/// An `https` or `http` URL with a host, as given (no rewriting).
 /// Whether a link's query only picks a tab or marks where the link was shared from (`tab`,
 /// `ref`, `utm_*`, …), so that the page is the one its path names.
-fn harmless_query(url: &Url) -> bool {
+pub(crate) fn harmless_query(url: &Url) -> bool {
     url.query_pairs().all(|(k, _)| {
         matches!(
             &*k,
@@ -312,53 +221,192 @@ fn harmless_query(url: &Url) -> bool {
     })
 }
 
-/// Whether a MediaWiki title is a namespace's page (`Category:Games`, `Special:Search`,
-/// `User_talk:Someone`) or the wiki's main page rather than an article.
-fn wiki_namespace(title: &str) -> bool {
-    let title = percent_encoding::percent_decode_str(title).decode_utf8_lossy();
-    let Some((namespace, _)) = title.split_once(':') else {
-        return title.eq_ignore_ascii_case("Main_Page");
-    };
-    let namespace = namespace.replace(' ', "_").to_ascii_lowercase();
-    namespace.ends_with("_talk")
-        || [
-            "special",
-            "talk",
-            "user",
-            "project",
-            "pcgamingwiki",
-            "file",
-            "image",
-            "media",
-            "mediawiki",
-            "template",
-            "help",
-            "category",
-            "module",
-            "property",
-            "form",
-            "concept",
-            "company",
-            "engine",
-            "series",
-            "glossary",
-        ]
-        .contains(&namespace.as_str())
-}
-
+/// An `https` or `http` URL with a host, as given (no rewriting).
 fn web_url(value: &str) -> Option<Url> {
     let url = Url::parse(value).ok()?;
     (matches!(url.scheme(), "https" | "http") && url.host_str().is_some()).then_some(url)
 }
 
+// What the also-on sources running these lookups share.
+use crate::{
+    also_on::{self, Context},
+    hubs,
+    resolver::{egress::FetchOptions, RetryLater},
+};
+use serde_json::Value;
+use std::time::Duration;
+
+impl Found {
+    /// As the also-on machinery records it: every key vouched for by `via`.
+    pub fn into_also_on(self, via: &str) -> also_on::Found {
+        also_on::Found {
+            keys: self
+                .keys
+                .into_iter()
+                .map(|k| also_on::Key {
+                    key: k.0,
+                    via: via.into(),
+                })
+                .collect(),
+            links: self
+                .links
+                .into_iter()
+                .map(|l| {
+                    let mut link = also_on::Link::new(l.uri, l.site, l.via);
+                    link.kind = l.kind.map(str::to_owned);
+                    link.at = l.at.and_then(|at| at.parse().ok());
+                    link
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+}
+
+/// A JSON GET through the shared discovery cache (an hour). A busy service (429, 5xx) answers
+/// `RetryLater` with `class`; every other status is the caller's. A Wikidata read takes the
+/// hubs' larger cap (a much-edited item), as the hubs' own reads of the same URL do.
+pub(crate) async fn get(cx: &Context, url: &str, class: &'static str) -> Result<(u16, Vec<u8>)> {
+    let options = FetchOptions {
+        accept: Some("application/json".into()),
+        body_cap: url
+            .starts_with("https://www.wikidata.org/")
+            .then_some(hubs::WIKIDATA_CAP),
+        ..Default::default()
+    };
+    let f = cx.egress.discover(url, &options, 3600).await?;
+    if f.status == 429 || f.status >= 500 {
+        return Err(RetryLater {
+            class,
+            seconds: f.retry_after_secs.clamp(60, 3600),
+        }
+        .into());
+    }
+    Ok((f.status, f.body))
+}
+
+/// One Wikidata item, as the raw entity (for every claim type, URLs included) and as the hub
+/// reads it (external IDs and sitelinks), or `None` when it has none or its answer is over the
+/// cap. The request is the hub's own, so both share its cache.
+pub(crate) async fn item(cx: &Context, qid: &str) -> Result<Option<(Value, hubs::wikidata::Item)>> {
+    let url = hubs::wikidata::entities_lookup(&[qid.to_owned()]);
+    // An item over its read's cap is no answer: asking again would read the same megabytes.
+    let (status, body) = match get(cx, &url, "wikidata_busy").await {
+        Err(error) if crate::resolver::egress::over_cap(&error) => return Ok(None),
+        answer => answer?,
+    };
+    if status == 404 {
+        return Ok(None);
+    }
+    let mut entities = wikidata::parse_entities(status, &body)?;
+    let Some(raw) = entities.remove(qid) else {
+        return Ok(None);
+    };
+    let hub = hubs::wikidata::parse_entities(&serde_json::from_slice(&body)?)
+        .into_iter()
+        .find(|i| i.qid == qid);
+    Ok(hub.map(|hub| (raw, hub)))
+}
+
+/// A request a builder made, through the shared discovery cache (an hour), with its `Accept`.
+/// A busy service (429, 5xx) answers `RetryLater` with `class`.
+pub(crate) async fn send(
+    cx: &Context,
+    request: &Request,
+    class: &'static str,
+) -> Result<crate::resolver::egress::Fetched> {
+    let options = FetchOptions {
+        accept: Some(request.accept.unwrap_or("application/json").into()),
+        // JSON under its own media types: PyPI's provenance, JSON:API.
+        extra_types: &[
+            "application/vnd.pypi.integrity.v1+json",
+            "application/vnd.api+json",
+        ],
+        keep_redirect: !request.follow_redirects,
+        ..Default::default()
+    };
+    let f = cx
+        .egress
+        .discover(request.url.as_str(), &options, 3600)
+        .await?;
+    if f.status == 429 || f.status >= 500 {
+        return Err(RetryLater {
+            class,
+            seconds: f.retry_after_secs.clamp(60, 3600),
+        }
+        .into());
+    }
+    Ok(f)
+}
+
+/// A secondary service's answer, or nothing when its request failed: the lookup goes on with
+/// what the link and the other services gave, the failure is counted
+/// (`pinakes_also_on_service_errors_total{service,class}`), and `retry` is set, so the worker
+/// brings the run back after its backoff (or the wait the service named, when longer) instead
+/// of after the source's lifetime.
+pub(crate) fn secondary<T>(
+    service: &'static str,
+    retry: &mut Option<Duration>,
+    result: Result<T>,
+) -> Option<T> {
+    match result {
+        Ok(answer) => Some(answer),
+        Err(error) => {
+            let class = crate::resolver::error_class(&error);
+            crate::telemetry::also_on_service_error(service, class);
+            tracing::debug!(
+                service,
+                class,
+                "secondary service failed; the lookup goes on without it"
+            );
+            let asked = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<RetryLater>())
+                .map_or(Duration::ZERO, |r| Duration::from_secs(r.seconds));
+            *retry = Some(retry.map_or(asked, |r| r.max(asked)));
+            None
+        }
+    }
+}
+
+/// `found` as recorded, with `retry` set when a secondary service failed.
+pub(crate) fn with_retry(mut found: also_on::Found, retry: Option<Duration>) -> also_on::Found {
+    found.retry_after = retry;
+    found
+}
+
 #[cfg(test)]
 pub(crate) mod fixture {
-    //! Recorded responses (see `tests/fixtures/lookups/provenance.json`).
+    //! Recorded responses: `tests/fixtures/lookups/<family>/` (each family's, gone with it) and
+    //! `tests/fixtures/lookups/shared/` (Wikidata items several families read); see each
+    //! directory's `provenance.json`.
+    use crate::{
+        also_on::{self, Context, Subject},
+        model::ResourceMeta,
+    };
+    use serde_json::Value;
     use std::io::Read;
 
+    const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/lookups");
+    /// The fixture directories this build has.
+    fn dirs() -> Vec<std::path::PathBuf> {
+        let mut dirs: Vec<_> = std::fs::read_dir(DIR)
+            .expect("fixtures")
+            .filter_map(|e| Some(e.ok()?.path()))
+            .filter(|p| p.is_dir())
+            .collect();
+        dirs.sort();
+        dirs
+    }
+
+    /// A recorded response, from whichever directory holds it.
     pub fn read(name: &str) -> Vec<u8> {
-        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/lookups/");
-        let raw = std::fs::read(format!("{dir}{name}")).expect("fixture");
+        let path = dirs()
+            .into_iter()
+            .map(|d| d.join(name))
+            .find(|p| p.exists())
+            .unwrap_or_else(|| panic!("no fixture {name}"));
+        let raw = std::fs::read(path).expect("fixture");
         if name.ends_with(".gz") {
             let mut out = Vec::new();
             flate2::read::GzDecoder::new(raw.as_slice())
@@ -369,6 +417,141 @@ pub(crate) mod fixture {
             raw
         }
     }
+    pub const JSON: &str = "application/json";
+
+    /// `link` with a multibyte character inserted at every boundary, for checks that may never
+    /// slice a string inside one.
+    pub fn multibyte_spellings(links: &[&str]) -> Vec<String> {
+        let mut out = vec![];
+        for link in links {
+            for at in (0..=link.len()).filter(|i| link.is_char_boundary(*i)) {
+                for insert in ["é", "€", "😀", "\u{301}"] {
+                    out.push(format!("{}{insert}{}", &link[..at], &link[at..]));
+                }
+            }
+        }
+        out
+    }
+    /// Answers no parser expects (JSON of the wrong shape, other types, no JSON), with the
+    /// statuses they may come with.
+    pub fn malformed_answers() -> Vec<(u16, &'static [u8])> {
+        let raws: [&'static [u8]; 9] = [
+            b"[]",
+            b"false",
+            b"null",
+            b"1",
+            b"\"x\"",
+            b"{}",
+            b"{\"data\": 1, \"message\": [], \"entities\": false, \"records\": {}}",
+            b"[{}]",
+            b"not json",
+        ];
+        raws.iter()
+            .flat_map(|raw| [(200, *raw), (404, *raw)])
+            .collect()
+    }
+
+    pub fn subject(uri: &str, wikidata: Option<&str>) -> Subject {
+        let mut doc = ResourceMeta::new(uri, "osm", 3600);
+        if let Some(q) = wikidata {
+            doc.attributes.insert("wikidata".into(), q.into());
+        }
+        Subject {
+            id: "x".into(),
+            uri: uri.into(),
+            status: "ok".into(),
+            type_name: Some("Place".into()),
+            doc: Some(doc),
+            keys: vec![],
+            first_seen_at: None,
+        }
+    }
+
+    pub fn context(routes: Vec<(&str, u16, &'static str, Vec<u8>)>) -> Context {
+        let (egress, _) = crate::sources::fixture::egress(routes);
+        Context {
+            egress,
+            config: Default::default(),
+        }
+    }
+
+    /// Every recorded lookup answer, by its request URL (a redirect's body is its `Location`),
+    /// plus `extra` routes for requests made differently from the recording.
+    pub fn recorded(extra: Vec<(String, &str)>) -> Context {
+        recorded_but_busy(extra, &[])
+    }
+
+    /// As `recorded`, with `busy` URLs answering 503.
+    pub fn recorded_but_busy(extra: Vec<(String, &str)>, busy: &[&str]) -> Context {
+        // Every directory's provenance: the routes of every family this build has.
+        let mut provenance = serde_json::Map::new();
+        for dir in dirs() {
+            let raw = std::fs::read(dir.join("provenance.json")).expect("provenance");
+            let entries: serde_json::Map<String, Value> = serde_json::from_slice(&raw).unwrap();
+            provenance.extend(entries);
+        }
+        let provenance = Value::Object(provenance);
+        let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
+        let mut routes: Vec<(String, u16, &'static str, Vec<u8>)> = vec![];
+        for entry in provenance.as_object().unwrap().values() {
+            let status = entry["status"].as_u64().unwrap() as u16;
+            let kind = leak(
+                entry["content_type"]
+                    .as_str()
+                    .unwrap_or("text/html")
+                    .to_owned(),
+            );
+            let body = match (entry["location"].as_str(), entry["file"].as_str()) {
+                (Some(location), _) => location.as_bytes().to_vec(),
+                (None, Some(file)) => read(file),
+                (None, None) => vec![],
+            };
+            routes.push((
+                entry["url"].as_str().unwrap().to_owned(),
+                status,
+                kind,
+                body,
+            ));
+        }
+        for (url, like) in extra {
+            let entry = &provenance[like];
+            let kind = leak(entry["content_type"].as_str().unwrap().to_owned());
+            routes.push((
+                url,
+                entry["status"].as_u64().unwrap() as u16,
+                kind,
+                read(entry["file"].as_str().unwrap()),
+            ));
+        }
+        for url in busy {
+            routes.push((url.to_string(), 503, "text/html", vec![]));
+        }
+        context(
+            routes
+                .iter()
+                .map(|(u, s, k, b)| (u.as_str(), *s, *k, b.clone()))
+                .collect(),
+        )
+    }
+
+    pub fn at(uri: &str) -> Subject {
+        Subject {
+            doc: None,
+            ..subject(uri, None)
+        }
+    }
+
+    pub fn sites(found: &also_on::Found) -> Vec<String> {
+        found
+            .links
+            .iter()
+            .map(|l| format!("{} {}", l.site, l.uri))
+            .collect()
+    }
+
+    pub fn keys(found: &also_on::Found) -> Vec<&str> {
+        found.keys.iter().map(|k| k.key.as_str()).collect()
+    }
 }
 
 #[cfg(test)]
@@ -376,41 +559,13 @@ mod tests {
     use super::*;
 
     /// Link-derived text may hold any character: no link or id check may slice a string inside
-    /// one.
+    /// one (each family checks its own the same way).
     #[test]
     fn a_multibyte_character_anywhere_in_a_link_never_panics() {
-        let links = [
-            "https://arxiv.org/abs/1304.1068v2",
-            "https://arxiv.org/pdf/2101.00001v1.pdf",
-            "http://arxiv.org/abs/hep-th/9901001",
-            "https://doi.org/10.48550/arXiv.1304.1068",
-            "https://www.alphaxiv.org/abs/1706.03762",
-            "https://crates.io/crates/serde_json",
-            "https://docs.rs/crate/rand/0.10.3",
-            "https://www.npmjs.com/package/@sigstore/sign",
-            "https://www.jsdelivr.com/package/npm/vite",
-            "https://pypi.org/project/urllib3/",
-            "https://github.com/npm/node-semver.git",
-            "https://store.steampowered.com/app/620/Portal_2/",
-            "https://www.pcgamingwiki.com/api/appid.php?appid=620",
-            "https://example.com/",
-            "Q7024",
-        ];
-        for link in links {
-            for at in (0..=link.len()).filter(|i| link.is_char_boundary(*i)) {
-                for insert in ["é", "€", "😀", "\u{301}"] {
-                    let s = format!("{}{insert}{}", &link[..at], &link[at..]);
-                    papers::arxiv_from_uri(&s);
-                    papers::arxiv_id(&s);
-                    packages::Package::from_uri(&s);
-                    packages::Repo::from_url(&s);
-                    games::appid_from_uri(&s);
-                    games::appid(&s);
-                    places::wikidata_tag(&s);
-                    wikidata::qid(&s);
-                    archive::wayback_request(&s, chrono::Utc::now());
-                }
-            }
+        for s in fixture::multibyte_spellings(&["https://www.wikidata.org/wiki/Q7024", "Q7024"]) {
+            wikidata::qid(&s);
+            wikidata::wikidata_item(&s);
+            service_name(&s);
         }
     }
 
@@ -419,19 +574,6 @@ mod tests {
         for (namespace, value, key) in [
             ("osm", "node/240109189", "osm:node/240109189"),
             ("doi", "10.1038/NATURE12373", "doi:10.1038/nature12373"),
-            ("arxiv", "1304.1068v2", "arxiv:1304.1068"),
-            ("pmcid", "PMC3672233", "pmcid:PMC3672233"),
-            ("crate", "Serde_JSON", "crate:serde-json"),
-            ("npm", "@sigstore/sign", "npm:@sigstore/sign"),
-            ("pypi", "Zope.Interface", "pypi:zope-interface"),
-            (
-                "repo",
-                "github.com/Rust-Random/rand",
-                "repo:github.com/rust-random/rand",
-            ),
-            ("steam", "620", "steam:620"),
-            ("fr", "2026-18291", "fr:2026-18291"),
-            ("discogs", "master:21491", "discogs:master:21491"),
         ] {
             assert_eq!(
                 search_key(namespace, value).as_deref(),
@@ -442,12 +584,8 @@ mod tests {
         for (namespace, value) in [
             ("osm", "area/1"),
             ("osm", "node/01"),
-            ("pmcid", "123"),
-            ("steam", "x"),
             ("isbn", "1"),
-            ("repo", "example.org/a/b"),
-            ("discogs", "label:1"),
-            ("discogs", "release:083182"),
+            ("nonesuch", "1"),
         ] {
             assert_eq!(search_key(namespace, value), None, "{namespace}:{value}");
         }
@@ -460,14 +598,6 @@ mod tests {
         assert!(body(429, b"x", &[404]).is_err());
         assert!(body(500, b"x", &[404]).is_err());
         assert!(body(404, b"x", &[]).is_err());
-    }
-
-    #[test]
-    fn contact_setting() {
-        assert_eq!(contact(" info@synonym.to "), Some("info@synonym.to"));
-        assert_eq!(contact(""), None);
-        assert_eq!(contact("nobody"), None);
-        assert_eq!(contact("a b@c"), None);
     }
 
     #[test]
@@ -488,6 +618,8 @@ mod tests {
         assert_eq!(f.keys[0].to_string(), "doi:10.1/x");
     }
 
+    /// OpenStreetMap, Wikidata and DOI are named here, an object's own page only; each family
+    /// tests the names of its own services.
     #[test]
     fn a_service_card_has_its_plain_name() {
         for (uri, name) in [
@@ -497,113 +629,9 @@ mod tests {
             ),
             ("https://www.openstreetmap.org/about", None),
             ("https://www.wikidata.org/wiki/Q64", Some("Wikidata")),
-            (
-                "https://play.google.com/store/apps/details?id=io.anuke.mindustry",
-                Some("Google Play"),
-            ),
-            (
-                "https://f-droid.org/en/packages/io.anuke.mindustry/",
-                Some("F-Droid"),
-            ),
-            ("https://store.steampowered.com/app/1127400/", Some("Steam")),
-            ("https://crates.io/crates/rand", Some("crates.io")),
-            ("https://github.com/rust-random/rand", Some("GitHub")),
-            ("https://arxiv.org/abs/1706.03762", Some("arXiv")),
             ("doi:10.1038/nature12373", Some("DOI")),
             ("https://doi.org/10.1038/nature12373", Some("DOI")),
-            ("https://btcmap.org/merchant/way:259338174", Some("BTC Map")),
-            ("https://huggingface.co/models", None),
             ("https://example.org/", None),
-            // Every other object form the lookups name.
-            ("https://steamcommunity.com/app/620", Some("Steam")),
-            ("https://steamdb.info/app/620/", Some("SteamDB")),
-            ("https://www.protondb.com/app/620", Some("ProtonDB")),
-            ("https://www.pcgamingwiki.com/wiki/Portal_2", Some("PCGamingWiki")),
-            ("https://www.gog.com/en/game/stardew_valley", Some("GOG")),
-            ("https://apps.apple.com/us/app/vlc-media-player/id650377962", Some("App Store")),
-            ("https://flathub.org/apps/org.videolan.VLC", Some("Flathub")),
-            ("https://snapcraft.io/vlc", Some("Snap Store")),
-            ("https://docs.rs/rand/latest/rand/", Some("Docs.rs")),
-            ("https://lib.rs/crates/rand", Some("lib.rs")),
-            ("https://www.npmjs.com/package/@sigstore/sign", Some("npm")),
-            ("https://www.jsdelivr.com/package/npm/vite", Some("jsDelivr")),
-            ("https://unpkg.com/@sigstore/sign/", Some("unpkg")),
-            ("https://unpkg.com/semver/", Some("unpkg")),
-            ("https://pypi.org/project/urllib3/", Some("PyPI")),
-            ("https://gitlab.com/inkscape/inkscape", Some("GitLab")),
-            // Share links: a tab, a referrer, a fragment.
-            (
-                "https://github.com/rust-random/rand?tab=readme-ov-file",
-                Some("GitHub"),
-            ),
-            (
-                "https://github.com/rust-random/rand?utm_source=x&ref=producthunt#readme",
-                Some("GitHub"),
-            ),
-            ("https://gitlab.com/inkscape/inkscape?tab=readme", Some("GitLab")),
-            ("https://www.pcgamingwiki.com/wiki/Half-Life:_Alyx", Some("PCGamingWiki")),
-            (
-                "https://www.pcgamingwiki.com/wiki/Portal_2?utm_source=x",
-                Some("PCGamingWiki"),
-            ),
-            (
-                "https://archive.softwareheritage.org/browse/origin/?origin_url=https://github.com/rust-random/rand",
-                Some("Software Heritage"),
-            ),
-            ("https://www.alphaxiv.org/abs/1706.03762", Some("alphaXiv")),
-            ("https://pubmed.ncbi.nlm.nih.gov/23903748/", Some("PubMed")),
-            ("https://pmc.ncbi.nlm.nih.gov/articles/PMC3779179/", Some("PubMed Central")),
-            ("https://huggingface.co/papers/1706.03762", Some("Hugging Face Papers")),
-            (
-                "https://web.archive.org/web/20150601000827/http://example.com/",
-                Some("Wayback Machine"),
-            ),
-            // A page on those hosts that is not an object's own page names no service.
-            ("https://github.com/topics/rust", None),
-            ("https://github.com/orgs/rust-lang", None),
-            ("https://github.com/rust-random/rand/issues/1", None),
-            ("https://gitlab.com/inkscape/inkscape/-/issues", None),
-            ("https://github.com/rust-random/rand?q=gen", None),
-            ("https://github.com/search?q=rand&type=repositories", None),
-            ("https://github.com/topics/rust?tab=readme-ov-file", None),
-            ("https://gitlab.com/explore/projects", None),
-            ("https://gitlab.com/explore/projects/starred", None),
-            ("https://gitlab.com/groups/inkscape", None),
-            ("https://gitlab.com/search?search=inkscape", None),
-            (
-                "https://www.pcgamingwiki.com/wiki/Special:Search?search=Portal",
-                None,
-            ),
-            ("https://www.pcgamingwiki.com/wiki/Category:Games", None),
-            ("https://www.pcgamingwiki.com/wiki/User_talk:Someone", None),
-            ("https://www.pcgamingwiki.com/wiki/Main_Page", None),
-            (
-                "https://www.pcgamingwiki.com/wiki/Portal_2?action=history",
-                None,
-            ),
-            ("https://www.npmjs.com/search?q=semver", None),
-            ("https://www.npmjs.com/package/semver/access", None),
-            ("https://www.npmjs.com/~isaacs", None),
-            ("https://unpkg.com/semver/package.json", None),
-            ("https://crates.io/categories/science", None),
-            ("https://docs.rs/rand/latest/rand/fn.random.html", None),
-            ("https://pypi.org/user/urllib3/", None),
-            ("https://steamcommunity.com/app/620/discussions/", None),
-            ("https://steamcommunity.com/id/someone", None),
-            ("https://store.steampowered.com/search/?term=portal", None),
-            ("https://steamdb.info/app/620/charts/", None),
-            ("https://www.pcgamingwiki.com/wiki/Portal_2/Talk", None),
-            ("https://www.gog.com/en/games", None),
-            ("https://play.google.com/store/apps", None),
-            ("https://play.google.com/store/apps/dev?id=1", None),
-            ("https://f-droid.org/en/docs/", None),
-            ("https://apps.apple.com/us/developer/videolan/id1234", None),
-            ("https://arxiv.org/list/cs.AI/new", None),
-            ("https://pubmed.ncbi.nlm.nih.gov/?term=x", None),
-            ("https://huggingface.co/papers", None),
-            ("https://btcmap.org/map", None),
-            ("https://web.archive.org/web/", None),
-            ("https://archive.softwareheritage.org/", None),
             ("https://doi.org/", None),
             ("https://www.openstreetmap.org/user/someone", None),
         ] {
@@ -611,100 +639,16 @@ mod tests {
         }
     }
 
-    /// Every link the lookups derive is named, by its URL, as the link names its service: the
-    /// object-page rule never unnames a source's own links.
-    #[test]
-    fn every_derived_link_is_named_as_its_service() {
-        let release = packages::Release {
-            package: packages::Package::new(packages::Registry::Npm, "@sigstore/sign").unwrap(),
-            version: "1.0.0".into(),
-            repository: packages::Repo::from_url("https://github.com/sigstore/sigstore-js"),
-        };
-        let crate_release = packages::Release {
-            package: packages::Package::new(packages::Registry::Crates, "rand").unwrap(),
-            version: "0.8.5".into(),
-            repository: packages::Repo::from_url("https://gitlab.com/inkscape/inkscape"),
-        };
-        let pypi = packages::Release {
-            package: packages::Package::new(packages::Registry::PyPI, "urllib3").unwrap(),
-            version: "2.2.0".into(),
-            repository: None,
-        };
-        let links = games::templates(620)
-            .into_iter()
-            .chain(papers::arxiv_links("1706.03762", "datacite"))
-            .chain(release.found().links)
-            .chain(crate_release.found().links)
-            .chain(pypi.found().links);
-        let mut n = 0;
-        for link in links {
-            assert_eq!(
-                service_name(&link.uri),
-                Some(link.site.as_str()),
-                "{}",
-                link.uri
-            );
-            n += 1;
-        }
-        assert!(n >= 10, "{n}");
-    }
-
     /// Every parser takes any answer: JSON of the wrong shape, other types or no JSON at all is an
-    /// error or nothing, never a panic (a panic would end the also-on run).
+    /// error or nothing, never a panic (a panic would end the also-on run). Each family checks
+    /// its own parsers the same way.
     #[test]
     fn no_parser_panics_on_a_malformed_answer() {
-        let pkg = |registry, name: &str| packages::Package {
-            registry,
-            name: name.to_owned(),
-        };
-        let repo = packages::Repo::new("github.com", "a/b").unwrap();
-        let near = chrono::Utc::now();
-        for raw in [
-            &b"[]"[..],
-            b"false",
-            b"null",
-            b"1",
-            b"\"x\"",
-            b"{}",
-            b"{\"data\": 1, \"message\": [], \"entities\": false, \"records\": {}}",
-            b"[{}]",
-            b"not json",
-        ] {
-            for status in [200, 404] {
-                let _ = places::parse_btcmap_places(status, raw);
-                let _ = games::parse_protondb(status, raw, 620);
-                let _ = games::parse_gog_gamesdb(status, raw, 620);
-                let _ = games::parse_gog_product(status, raw, 1);
-                let _ = wikidata::parse_entities(status, raw);
-                let _ = packages::parse_crates(status, raw, &pkg(packages::Registry::Crates, "a"));
-                let _ = packages::parse_npm_latest(status, raw, &pkg(packages::Registry::Npm, "a"));
-                let _ = packages::parse_npm_attestations(
-                    status,
-                    raw,
-                    &pkg(packages::Registry::Npm, "a"),
-                    "1.0.0",
-                );
-                let _ = packages::parse_pypi(status, raw, &pkg(packages::Registry::PyPI, "a"));
-                let _ = packages::parse_pypi_provenance(status, raw);
-                let _ = packages::parse_depsdev(
-                    status,
-                    raw,
-                    &pkg(packages::Registry::Npm, "a"),
-                    "1.0.0",
-                );
-                let _ = packages::parse_software_heritage(status, raw, &repo);
-                let _ = papers::parse_unpaywall(status, raw, "10.1000/x");
-                let _ = papers::parse_ncbi(status, raw);
-                let _ = papers::parse_datacite_arxiv(status, raw, "1304.1068");
-                let _ = papers::parse_datacite_versions(status, raw, "10.1000/x");
-                let _ = papers::parse_crossref_preprint(status, raw, "10.1000/x", "1304.1068");
-                let _ = papers::parse_hugging_face(status, raw, "1304.1068");
-                let _ = archive::parse_wayback(status, raw, "https://example.org/", near);
-                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(raw) {
-                    let _ = crate::sources::discogs::barcodes(&v);
-                    let _ = wikidata::best_values(&v, "P402");
-                    let _ = wikidata::wikipedia(&v);
-                }
+        for (status, raw) in fixture::malformed_answers() {
+            let _ = wikidata::parse_entities(status, raw);
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(raw) {
+                let _ = wikidata::best_values(&v, "P402");
+                let _ = wikidata::wikipedia(&v);
             }
         }
     }

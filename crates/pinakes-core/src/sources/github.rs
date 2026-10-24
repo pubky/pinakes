@@ -15,35 +15,7 @@ pub struct Github;
 
 const API: &str = "https://api.github.com";
 
-/// First path segments that are GitHub's own pages, never an owner.
-pub const RESERVED: &[&str] = &[
-    "about",
-    "apps",
-    "collections",
-    "contact",
-    "customer-stories",
-    "enterprise",
-    "events",
-    "explore",
-    "features",
-    "login",
-    "marketplace",
-    "new",
-    "notifications",
-    "orgs",
-    "organizations",
-    "pricing",
-    "pulls",
-    "issues",
-    "search",
-    "security",
-    "settings",
-    "site",
-    "sponsors",
-    "topics",
-    "trending",
-    "users",
-];
+use super::kit::GITHUB_RESERVED as RESERVED;
 
 /// Whether GitHub has refused the configured token since the daemon started.
 static REFUSED: AtomicBool = AtomicBool::new(false);
@@ -206,6 +178,9 @@ impl Source for Github {
     }
     fn takes_token(&self) -> bool {
         true
+    }
+    fn token_variable(&self) -> Option<&'static str> {
+        Some("PINAKES_GITHUB_TOKEN")
     }
     fn facts(&self) -> &'static [&'static str] {
         &[

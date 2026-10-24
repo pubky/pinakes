@@ -1,0 +1,22 @@
+[
+  {
+    "kind": "place",
+    "uri": "https://www.openstreetmap.org/node/240109189",
+    "type": "City",
+    "derived": [
+      "Wikidata",
+      "Wikipedia (en)"
+    ]
+  },
+  {
+    "kind": "btcmap_way",
+    "uri": "https://www.openstreetmap.org/way/259338174",
+    "type": "Place"
+  },
+  {
+    "kind": "btcmap_merchant",
+    "uri": "https://btcmap.org/merchant/way:259338174",
+    "type": "WebPage",
+    "group_with": "btcmap_way"
+  }
+]

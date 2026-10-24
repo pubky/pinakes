@@ -1,0 +1,15 @@
+[
+  {
+    "kind": "cut_deezer",
+    "uri": "https://www.deezer.com/album/41839661",
+    "type": "MusicAlbum",
+    "site": "Deezer"
+  },
+  {
+    "kind": "cut_spotify",
+    "uri": "https://open.spotify.com/album/0tGPJ0bkWOUmH7MEOR77qc",
+    "type": "MusicAlbum",
+    "site": "Spotify",
+    "group_with": "cut_deezer"
+  }
+]

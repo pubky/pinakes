@@ -2,7 +2,7 @@
 //! its API (`api.discogs.com`): its web pages answer bots with a wall. No key: 25 requests a
 //! minute. An optional personal token (`[also_on.sources.discogs] token`) adds images to the
 //! cards; it never reaches a log or an error.
-use super::{text, web_url, Budget, Context, Example, Source};
+use super::{text, Budget, Context, Example, Source};
 use crate::{
     model::ResourceMeta,
     resolver::{
@@ -19,81 +19,13 @@ pub struct Discogs;
 
 const API: &str = "https://api.discogs.com";
 
-/// What a Discogs link names.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
-    Artist,
-    /// An album: every edition of it (a MusicBrainz release group).
-    Master,
-    /// One edition (a MusicBrainz release).
-    Release,
-}
-impl Kind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Artist => "artist",
-            Self::Master => "master",
-            Self::Release => "release",
-        }
-    }
-}
-
-/// The kind and ID of `www.discogs.com/{lang/}?{artist,master,release}/{id}[-slug]`.
-pub fn of_uri(uri: &str) -> Option<(Kind, u64)> {
-    let url = web_url(uri)?;
-    if !matches!(url.host_str()?, "www.discogs.com" | "discogs.com") {
-        return None;
-    }
-    let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
-    // A language path (`de`, `pt_BR`) before the kind.
-    let language = |s: &str| {
-        let (lang, region) = s.split_once('_').unwrap_or((s, "AA"));
-        lang.len() == 2
-            && lang.bytes().all(|b| b.is_ascii_lowercase())
-            && region.len() == 2
-            && region.bytes().all(|b| b.is_ascii_uppercase())
-    };
-    let segments = match segments.as_slice() {
-        [lang, rest @ ..] if language(lang) => rest,
-        all => all,
-    };
-    let [kind, id] = segments else {
-        return None;
-    };
-    let kind = match *kind {
-        "artist" => Kind::Artist,
-        "master" => Kind::Master,
-        "release" => Kind::Release,
-        _ => return None,
-    };
-    let id = id.split('-').next()?;
-    if id.is_empty()
-        || id.len() > 12
-        || id.starts_with('0')
-        || !id.bytes().all(|b| b.is_ascii_digit())
-    {
-        return None;
-    }
-    Some((kind, id.parse().ok()?))
-}
-
-/// The one address of a Discogs object.
-pub fn root(kind: Kind, id: u64) -> String {
-    format!("https://www.discogs.com/{}/{id}", kind.as_str())
-}
-
-/// The kind and ID of a music link on Discogs.
-pub fn of_link(link: &crate::music::Link) -> Option<(Kind, u64)> {
-    (link.service == crate::music::Service::Discogs)
-        .then(|| of_uri(&link.canonical))
-        .flatten()
-}
+pub use crate::music::discogs::{of_link, of_uri, root, Kind};
 
 /// The personal token the daemon started with (`configure`).
 static TOKEN: RwLock<Option<crate::event::adapters::SecretKey>> = RwLock::new(None);
 
 /// Record `[also_on.sources.discogs] token` for the card route.
-pub fn configure(config: &crate::config::Config) {
+fn configure(config: &crate::config::Config) {
     *TOKEN.write().unwrap_or_else(|e| e.into_inner()) = token(config);
 }
 /// The configured token, if any.
@@ -310,6 +242,28 @@ impl Source for Discogs {
     fn name(&self) -> &'static str {
         "discogs"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "discogs",
+                uri: "https://www.discogs.com/master/21491-Radiohead-OK-Computer",
+                card_type: "MusicAlbum",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "api.discogs.com",
+                path: "/masters/21491",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "master-21491.json",
+            }],
+        })
+    }
+    fn configure(&self, config: &crate::config::Config) {
+        configure(config);
+    }
     fn reads(&self, uri: &str) -> bool {
         of_uri(uri).is_some()
     }
@@ -348,6 +302,136 @@ impl Source for Discogs {
         Ok(record
             .and_then(|v| card(cx.card(uri, self), kind, &v, authenticated))
             .unwrap_or_else(|| cx.missing(uri, self)))
+    }
+}
+
+/// The also-on half of this source, `discogs`.
+pub mod also_on {
+    use crate::{
+        also_on::{self, Context, Source, Subject},
+        lookups::secondary,
+    };
+    use anyhow::Result;
+    use async_trait::async_trait;
+
+    /// A Discogs link's own ID as the key `discogs:{kind}:{id}`, and a release's barcodes from its
+    /// record (the card's request, shared) as `upc:` keys and facts.
+    pub struct Discogs;
+
+    #[async_trait]
+    impl Source for Discogs {
+        fn single_namespaces(&self) -> &'static [&'static str] {
+            &["discogs:artist", "discogs:master", "discogs:release"]
+        }
+        fn search_key(&self, namespace: &str, value: &str) -> Option<String> {
+            let (kind, id) = value.split_once(':').filter(|_| namespace == "discogs")?;
+            (matches!(kind, "artist" | "master" | "release") && crate::lookups::digits(id))
+                .then(|| format!("discogs:{value}"))
+        }
+        fn id(&self) -> &'static str {
+            "discogs"
+        }
+        fn takes_token(&self) -> bool {
+            true
+        }
+        fn applies(&self, subject: &Subject) -> bool {
+            super::of_uri(&subject.uri).is_some()
+        }
+        async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<also_on::Found> {
+            let Some((kind, id)) = super::of_uri(&subject.uri) else {
+                return Ok(also_on::Found::default());
+            };
+            let key = |key: String| also_on::Key {
+                key,
+                via: "discogs".into(),
+            };
+            let mut found = also_on::Found {
+                keys: vec![key(format!("discogs:{}:{id}", kind.as_str()))],
+                ..Default::default()
+            };
+            if kind == super::Kind::Release {
+                // The ID is the key; the record only adds the barcodes.
+                let token = super::token(&cx.config);
+                let record = super::record(&cx.egress, kind, id, token.as_deref()).await;
+                if let Some((Some(v), _)) = secondary("discogs", &mut found.retry_after, record) {
+                    let barcodes = super::barcodes(&v);
+                    // A box set lists each disc's barcode: only a release with one barcode keys it.
+                    if let [upc] = barcodes.as_slice() {
+                        found.keys.push(key(format!("upc:{upc}")));
+                    }
+                    for upc in barcodes.into_iter().take(4) {
+                        found.facts.push(also_on::Fact::new("upc", upc));
+                    }
+                }
+            }
+            Ok(found)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::lookups::fixture::{context, subject, JSON};
+
+        #[tokio::test(start_paused = true)]
+        async fn discogs_keys_its_id_and_a_releases_barcodes() {
+            let release = crate::sources::fixture::read("discogs", "release-83182.json");
+            // The same release listing a second disc's barcode, as a box set does.
+            let mut boxed: serde_json::Value = serde_json::from_slice(&release).unwrap();
+            boxed["id"] = 1.into();
+            boxed["identifiers"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({"type": "Barcode", "value": "0724384260521"}));
+            let cx = context(vec![
+                ("https://api.discogs.com/releases/83182", 200, JSON, release),
+                (
+                    "https://api.discogs.com/releases/1",
+                    200,
+                    JSON,
+                    serde_json::to_vec(&boxed).unwrap(),
+                ),
+            ]);
+            let keys = |found: also_on::Found| -> Vec<String> {
+                found.keys.into_iter().map(|k| k.key).collect()
+            };
+            let mut s = subject("https://www.discogs.com/release/83182", None);
+            assert!(Discogs.applies(&s));
+            assert_eq!(
+                keys(Discogs.lookup(&cx, &s).await.unwrap()),
+                ["discogs:release:83182", "upc:0724385522925"]
+            );
+            // Two barcodes: facts, no key, so a box set never joins its discs' albums.
+            s.uri = "https://www.discogs.com/release/1".into();
+            let found = Discogs.lookup(&cx, &s).await.unwrap();
+            assert_eq!(found.facts.len(), 2);
+            assert_eq!(keys(found), ["discogs:release:1"]);
+            // A master's or artist's key needs no request.
+            s.uri = "https://www.discogs.com/master/21491".into();
+            assert_eq!(
+                keys(Discogs.lookup(&cx, &s).await.unwrap()),
+                ["discogs:master:21491"]
+            );
+            s.uri = "https://www.discogs.com/label/1".into();
+            assert!(!Discogs.applies(&s));
+        }
+
+        /// Its key namespace, as searches name it, and its barcode reader on any answer.
+        #[test]
+        fn keys_and_malformed_records() {
+            use crate::lookups::{fixture, search_key};
+            assert_eq!(
+                search_key("discogs", "master:21491").as_deref(),
+                Some("discogs:master:21491")
+            );
+            assert_eq!(search_key("discogs", "label:1"), None);
+            assert_eq!(search_key("discogs", "release:083182"), None);
+            for (_, raw) in fixture::malformed_answers() {
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(raw) {
+                    let _ = super::super::barcodes(&v);
+                }
+            }
+        }
     }
 }
 

@@ -74,6 +74,27 @@ impl Source for Fake {
     }
 }
 
+/// Whether this build has each lookup family (`lookups::FAMILIES`): a test of how a family's
+/// services take their place on a card returns early without the family, and with it asserts
+/// the names (`named`), never the other way round.
+fn families(names: &[&str]) -> bool {
+    let registered: Vec<&str> = pinakes_core::lookups::FAMILIES
+        .iter()
+        .map(|f| f.name())
+        .collect();
+    names.iter().all(|name| registered.contains(name))
+}
+/// Each link's service is named (`lookups::service_name`): asserted once its family is in the
+/// build, so a classification that stops naming a page fails the test instead of skipping it.
+fn named(uris: &[&str]) {
+    for uri in uris {
+        assert!(
+            pinakes_core::lookups::service_name(uri).is_some(),
+            "{uri} is on no service"
+        );
+    }
+}
+
 fn cx(config: Config) -> Context {
     Context {
         egress: Egress::new(config.egress.clone()),
@@ -564,7 +585,11 @@ async fn saves_make_sources_due_and_unknown_sources_are_refused(pool: PgPool) {
     let unknown =
         toml::from_str::<Config>("[also_on.sources.nope]\nenabled = false\n").map(|c| c.validate());
     assert!(matches!(unknown, Ok(Err(_))), "{unknown:?}");
-    // A MusicBrainz mirror: an http(s) web service root; no other source takes a base URL.
+    // A MusicBrainz mirror: an http(s) web service root; no other source takes a base URL. The
+    // setting is the musicbrainz source's: nothing to check in a build without it.
+    if !also_on::registry().iter().any(|s| s.id() == "musicbrainz") {
+        return;
+    }
     let base = |id: &str, url: &str| {
         toml::from_str::<Config>(&format!("[also_on.sources.{id}]\nbase_url = \"{url}\"\n"))
             .unwrap()
@@ -1172,38 +1197,176 @@ async fn a_shared_q_id_never_joins_two_recordings(pool: PgPool) {
     assert!(metrics.group_key_conflicts.get() > 0);
 }
 
+/// A removed source's keys keep their rule: the database remembers every single-object namespace
+/// a source registered (`groups::configure`), so two objects with distinct IDs in a namespace
+/// whose source this build no longer has, sharing a barcode, stay two groups; the same pair in a
+/// namespace nobody ever registered is one.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_removed_source_s_keys_keep_their_single_object_rule(pool: PgPool) {
+    // What the daemon's start writes: this build's namespaces, each with its source.
+    groups::configure(&pool, &Default::default()).await.unwrap();
+    let remembered: Vec<(String, String)> =
+        sqlx::query_as("SELECT namespace,source FROM single_object_namespace ORDER BY namespace")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(
+        remembered.contains(&("mb:recording".into(), "groups".into())),
+        "{remembered:?}"
+    );
+    for source in also_on::registered() {
+        for namespace in source.single_namespaces() {
+            assert!(
+                remembered.contains(&((*namespace).into(), source.id().into())),
+                "{namespace} of {}",
+                source.id()
+            );
+        }
+    }
+    // A source gone from this build registered `gone:release` once; its keys are still stored.
+    sqlx::query(
+        "INSERT INTO single_object_namespace(namespace,source) VALUES('gone:release','gone')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let hub = Fake::new("music");
+    let pairs = [
+        [
+            (
+                "https://example.org/gone-1",
+                vec!["gone:release:1", "upc:0000000000017"],
+            ),
+            (
+                "https://example.org/gone-2",
+                vec!["gone:release:2", "upc:0000000000017"],
+            ),
+        ],
+        [
+            (
+                "https://example.org/nobody-1",
+                vec!["nobody:1", "upc:0000000000024"],
+            ),
+            (
+                "https://example.org/nobody-2",
+                vec!["nobody:2", "upc:0000000000024"],
+            ),
+        ],
+    ];
+    let mut ids = vec![];
+    for pair in &pairs {
+        let mut these = vec![];
+        for (uri, keys) in pair {
+            these.push(page(&pool, uri, "Album").await);
+            hub.answer(
+                uri,
+                Ok(Found {
+                    keys: keys.iter().map(|k| key(k)).collect(),
+                    ..Default::default()
+                }),
+            );
+        }
+        ids.push(these);
+    }
+    let sources: Vec<Arc<dyn Source>> = vec![hub];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let group = |ids: &[String]| {
+        let pool = pool.clone();
+        let ids = ids.to_vec();
+        async move {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT g.group_id FROM unnest($1::text[]) i(id) LEFT JOIN group_unit g ON g.resource_id=i.id",
+            )
+            .bind(&ids)
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    // Apart: a unit alone has no group, so neither has one, or they differ.
+    let gone = group(&ids[0]).await;
+    assert!(
+        gone[0].is_none() || gone[0] != gone[1],
+        "two objects of the removed source's namespace stay apart: {gone:?}"
+    );
+    let nobody = group(&ids[1]).await;
+    assert!(
+        nobody[0].is_some() && nobody[0] == nobody[1],
+        "a namespace nobody registered joins on the barcode: {nobody:?}"
+    );
+    let refused: i64 = sqlx::query_scalar("SELECT count(*) FROM group_input WHERE key_conflicts>0")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    // The refusal is the removed source's pair's: the other pair joined.
+    assert!(refused >= 1, "{refused}");
+}
+
 /// The lookups' own namespaces name one object each too: an OSM object, a crate, a Steam game.
 /// Two of them sharing a second key (an item naming a node and a relation, one repository behind
 /// two crates, an item with two appids) never share a group.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_shared_key_never_joins_two_places_crates_or_games(pool: PgPool) {
     let hub = Fake::new("lookups");
+    // Each case with the family that records its namespace (OSM's is built in): a case runs
+    // whenever its family is in the build, and asserts the namespace is declared single-object,
+    // so a declaration lost from a registered family fails here instead of dropping the case.
     let cases = [
-        [
-            (
-                "https://example.org/node",
-                vec!["osm:node/240109189", "wikidata:Q64"],
-            ),
-            (
-                "https://example.org/relation",
-                vec!["osm:relation/62422", "wikidata:Q64"],
-            ),
-        ],
-        [
-            (
-                "https://example.org/rand",
-                vec!["crate:rand", "repo:github.com/rust-random/rand"],
-            ),
-            (
-                "https://example.org/rand-core",
-                vec!["crate:rand-core", "repo:github.com/rust-random/rand"],
-            ),
-        ],
-        [
-            ("https://example.org/app-1", vec!["steam:1", "wikidata:Q2"]),
-            ("https://example.org/app-2", vec!["steam:2", "wikidata:Q2"]),
-        ],
+        (
+            None,
+            "osm",
+            [
+                (
+                    "https://example.org/node",
+                    vec!["osm:node/240109189", "wikidata:Q64"],
+                ),
+                (
+                    "https://example.org/relation",
+                    vec!["osm:relation/62422", "wikidata:Q64"],
+                ),
+            ],
+        ),
+        (
+            Some("packages"),
+            "crate",
+            [
+                (
+                    "https://example.org/rand",
+                    vec!["crate:rand", "repo:github.com/rust-random/rand"],
+                ),
+                (
+                    "https://example.org/rand-core",
+                    vec!["crate:rand-core", "repo:github.com/rust-random/rand"],
+                ),
+            ],
+        ),
+        (
+            Some("games"),
+            "steam",
+            [
+                ("https://example.org/app-1", vec!["steam:1", "wikidata:Q2"]),
+                ("https://example.org/app-2", vec!["steam:2", "wikidata:Q2"]),
+            ],
+        ),
     ];
+    let cases: Vec<_> = cases
+        .into_iter()
+        .filter(|(family, _, _)| family.is_none_or(|f| families(&[f])))
+        .collect();
+    for (family, namespace, _) in &cases {
+        if family.is_some() {
+            assert!(
+                also_on::registered()
+                    .iter()
+                    .any(|s| s.single_namespaces().contains(namespace)),
+                "{namespace} names one object"
+            );
+        }
+    }
+    let cases: Vec<_> = cases.into_iter().map(|(_, _, pair)| pair).collect();
     let mut pairs = vec![];
     for pair in &cases {
         let mut ids = vec![];
@@ -1243,7 +1406,7 @@ async fn a_shared_key_never_joins_two_places_crates_or_games(pool: PgPool) {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert!(refused >= 3, "{refused}");
+    assert!(refused >= cases.len() as i64, "{refused}");
 }
 
 /// BTC Map's merchant page names one OSM object: an object it lists carries its own `osm:` key,
@@ -1283,6 +1446,14 @@ async fn a_tagged_btc_map_link_joins_its_osm_object(pool: PgPool) {
 /// names takes that service's place; a tagged member of another site still shows.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_tagged_member_and_a_derived_link_of_one_service_show_once(pool: PgPool) {
+    if !families(&["games"]) {
+        return;
+    }
+    named(&[
+        "https://play.google.com/store/apps/details?id=io.anuke.mindustry",
+        "https://f-droid.org/en/packages/io.anuke.mindustry/",
+        "https://store.steampowered.com/app/1127400/",
+    ]);
     let app_page = |uri: &'static str, site: &'static str| {
         let pool = pool.clone();
         async move {
@@ -1496,6 +1667,13 @@ async fn two_tagged_spellings_of_a_derived_link_show_once(pool: PgPool) {
 /// place: the derived link to the real service still shows.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_page_naming_itself_after_a_service_takes_no_slot(pool: PgPool) {
+    if !families(&["games"]) {
+        return;
+    }
+    named(&[
+        "https://play.google.com/store/apps/details?id=io.anuke.mindustry",
+        "https://f-droid.org/en/packages/io.anuke.mindustry/",
+    ]);
     let save = |uri: &'static str, site: &'static str, service: Option<&'static str>| {
         let pool = pool.clone();
         async move {
@@ -1796,6 +1974,10 @@ async fn a_music_typed_impostor_takes_no_slot_and_hides_nothing(pool: PgPool) {
 /// itself and the repository keeps GitHub's place.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_non_object_page_on_a_service_host_takes_no_slot(pool: PgPool) {
+    if !families(&["packages"]) {
+        return;
+    }
+    named(&["https://github.com/rust-random/rand"]);
     let topics = "https://github.com/topics/rust";
     let repo = "https://github.com/rust-random/rand";
     let krate = "https://crates.io/crates/rand";
@@ -1850,6 +2032,10 @@ async fn a_non_object_page_on_a_service_host_takes_no_slot(pool: PgPool) {
 /// listed beside it.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_shared_repository_link_with_a_tab_is_the_repository_once(pool: PgPool) {
+    if !families(&["packages"]) {
+        return;
+    }
+    named(&["https://github.com/rust-random/rand"]);
     let shared = "https://github.com/rust-random/rand?tab=readme-ov-file";
     let repo = "https://github.com/rust-random/rand";
     let krate = "https://crates.io/crates/rand";

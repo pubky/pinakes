@@ -1,5 +1,7 @@
-//! Shared test helpers: a small OpenAPI 3.1 response check.
+//! Shared test helpers: a small OpenAPI 3.1 response check, and an official source's card from
+//! its recorded answers for a test that needs one source (and skips without it).
 #![allow(dead_code)]
+pub mod media;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -219,4 +221,73 @@ pub fn check_response(method: &str, path: &str, status: u16, value: &Value) {
         errors.is_empty(),
         "{method} {path} {status}: {errors:#?}\n{value}"
     );
+}
+
+/// The card a registered official source makes of `uri` from recorded answers (`(url, status,
+/// content type, file)`, the files in `tests/fixtures/sources/{name}/`), or `None` when this build
+/// has no source named `name`: a test that needs one source returns early without it.
+pub async fn source_card(
+    name: &str,
+    uri: &str,
+    answers: &[(&str, u16, &str, &str)],
+) -> Option<pinakes_core::model::ResourceMeta> {
+    let source = pinakes_core::sources::by_name(name)?;
+    let dir = format!(
+        "{}/tests/fixtures/sources/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let routes = answers
+        .iter()
+        .map(|(url, status, kind, file)| {
+            let body = std::fs::read(format!("{dir}/{file}")).unwrap();
+            (url.to_string(), (*status, kind.to_string(), body))
+        })
+        .collect();
+    let egress = pinakes_core::resolver::egress::Egress::with_backends(
+        Default::default(),
+        std::sync::Arc::new(PublicDns),
+        std::sync::Arc::new(Recorded(routes)),
+    );
+    let cx = pinakes_core::sources::Context {
+        egress: &egress,
+        ttl: 3600,
+    };
+    Some(source.resolve(&cx, uri).await.unwrap())
+}
+/// Recorded answers by exact URL; anything else is a 404.
+struct Recorded(std::collections::BTreeMap<String, (u16, String, Vec<u8>)>);
+#[async_trait::async_trait]
+impl pinakes_core::resolver::egress::Transport for Recorded {
+    async fn get(
+        &self,
+        url: &url::Url,
+        _: &[std::net::SocketAddr],
+    ) -> anyhow::Result<pinakes_core::resolver::egress::Fetched> {
+        let (status, kind, body) = self.0.get(url.as_str()).cloned().unwrap_or((
+            404,
+            "text/html".into(),
+            b"not found".to_vec(),
+        ));
+        Ok(pinakes_core::resolver::egress::Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            validators: Default::default(),
+            url: url.clone(),
+            content_type: kind,
+            status,
+            retry_after_secs: 60,
+            location: None,
+            body,
+        })
+    }
+}
+struct PublicDns;
+#[async_trait::async_trait]
+impl pinakes_core::resolver::egress::Dns for PublicDns {
+    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<std::net::SocketAddr>> {
+        Ok(vec![std::net::SocketAddr::new(
+            [93, 184, 216, 34].into(),
+            port,
+        )])
+    }
 }

@@ -227,6 +227,25 @@ impl Source for Figshare {
     fn name(&self) -> &'static str {
         "figshare"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "figshare",
+                uri: "https://figshare.com/articles/dataset/Garden_data_set/1018700",
+                card_type: "Dataset",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "api.figshare.com",
+                path: "/v2/articles/1018700",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "article-1018700.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         target(uri).is_some()
     }

@@ -13,12 +13,10 @@
 //! Encyclopedia of Philosophy, Internet Encyclopedia of Philosophy, Scholarpedia and Namuwiki
 //! entries, with the Q-id as key. Nothing is matched by title across languages.
 use crate::{
-    also_on::{Context, Found, Key, Link, Source, Subject},
+    also_on::{Found, Key, Link},
     hubs::{self, wikidata},
     model::ResourceMeta,
 };
-use anyhow::Result;
-use async_trait::async_trait;
 use serde_json::Value;
 use url::Url;
 
@@ -166,7 +164,7 @@ const ENCYCLOPEDIAS: &[Encyclopedia] = &[
         valid: namuwiki,
     },
 ];
-fn britannica(v: &str) -> bool {
+pub(crate) fn britannica(v: &str) -> bool {
     let mut parts = v.split('/');
     matches!(
         parts.next(),
@@ -191,26 +189,26 @@ fn britannica(v: &str) -> bool {
                     .all(|b| b.is_ascii_graphic() && b != b'?' && b != b'#')
         })
 }
-fn sep(v: &str) -> bool {
+pub(crate) fn sep(v: &str) -> bool {
     !v.is_empty() && v.len() <= 128 && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
-fn iep(v: &str) -> bool {
+pub(crate) fn iep(v: &str) -> bool {
     !v.is_empty()
         && v.len() <= 128
         && v.split('-')
             .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_lowercase()))
 }
-fn scholarpedia(v: &str) -> bool {
+pub(crate) fn scholarpedia(v: &str) -> bool {
     !v.is_empty()
         && v.len() <= 256
         && v.chars()
             .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
 }
-fn namuwiki(v: &str) -> bool {
+pub(crate) fn namuwiki(v: &str) -> bool {
     !v.is_empty() && v.len() <= 512 && !v.chars().any(|c| c.is_control() || c == '#')
 }
 /// Language editions listed first when an article has more than the per-source cap.
-const LANGUAGES: &[&str] = &[
+pub(crate) const LANGUAGES: &[&str] = &[
     "en", "de", "fr", "es", "it", "ja", "ru", "pt", "zh", "pl", "nl", "ar", "sv", "uk", "fa", "ko",
     "tr", "id", "he", "cs", "vi", "fi", "no", "hu", "ca", "ro", "el", "da", "th", "bg", "sr", "hr",
 ];
@@ -233,7 +231,7 @@ pub fn found(item: &wikidata::Item, own: &Article) -> Found {
     found
 }
 /// An item's Q-id as a key.
-fn item_key(item: &wikidata::Item) -> Vec<Key> {
+pub(crate) fn item_key(item: &wikidata::Item) -> Vec<Key> {
     hubs::key::wikidata(&item.qid)
         .map(|key| Key {
             key,
@@ -244,7 +242,7 @@ fn item_key(item: &wikidata::Item) -> Vec<Key> {
 }
 /// A link an item's own claim or sitelink names: keyed by the item, so a tagged link that is it
 /// joins the item's group.
-fn named(item: &wikidata::Item, link: Link) -> Link {
+pub(crate) fn named(item: &wikidata::Item, link: Link) -> Link {
     match hubs::key::wikidata(&item.qid) {
         Some(key) => link.keyed(key),
         None => link,
@@ -295,155 +293,11 @@ pub fn editions(item: &wikidata::Item, skip: Option<&str>) -> Vec<Link> {
         })
         .collect()
 }
-/// What a Wikidata item link lists: its Q-id as key; its encyclopedia entries, the music
-/// services its best-rank IDs name (every level: the item is the thing itself, so these carry
-/// no key: a song item's track is one of several recordings) and its Wikipedia editions. Only
-/// the item's own claims and sitelinks, never a search.
-pub fn item_found(item: &wikidata::Item, storefront: &str) -> Found {
-    let mut found = Found {
-        keys: item_key(item),
-        ..Default::default()
-    };
-    found.links = encyclopedias(item);
-    found
-        .links
-        .extend(crate::music_sources::service_links(item, storefront));
-    found.links.extend(editions(item, None));
-    found
-}
-
-/// A Wikidata item link: the item's own hub.
-pub struct WikidataItemSource;
-#[async_trait]
-impl Source for WikidataItemSource {
-    fn id(&self) -> &'static str {
-        "wikidata_item"
-    }
-    fn applies(&self, subject: &Subject) -> bool {
-        wikidata::item_link(&subject.uri).is_some()
-    }
-    async fn prefetch(&self, cx: &Context, uris: &[String]) {
-        let qids: Vec<String> = uris
-            .iter()
-            .filter_map(|u| wikidata::item_link(u))
-            .map(|(qid, _)| qid)
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        if qids.len() > 1 {
-            if let Err(error) = wikidata::prefetch_items(&cx.egress, &qids).await {
-                tracing::debug!(
-                    kind = crate::resolver::error_class(&error),
-                    "batched Wikidata read failed; items read alone"
-                );
-            }
-        }
-    }
-    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
-        crate::also_on::unless_over_cap(self.read(cx, subject).await, || {
-            Self::own_key(&subject.uri)
-        })
-    }
-}
-impl WikidataItemSource {
-    /// What the item link alone proves: its Q-id.
-    fn own_key(uri: &str) -> Found {
-        Found {
-            keys: wikidata::item_link(uri)
-                .and_then(|(qid, _)| hubs::key::wikidata(&qid))
-                .map(|key| Key {
-                    key,
-                    via: "wikidata".into(),
-                })
-                .into_iter()
-                .collect(),
-            ..Default::default()
-        }
-    }
-    async fn read(&self, cx: &Context, subject: &Subject) -> Result<Found> {
-        let Some((qid, _)) = wikidata::item_link(&subject.uri) else {
-            return Ok(Found::default());
-        };
-        Ok(wikidata::items(&cx.egress, &[qid])
-            .await?
-            .first()
-            .map(|item| item_found(item, &cx.config.also_on.apple_storefront))
-            .unwrap_or_default())
-    }
-}
-
-/// Language editions and other encyclopedias of a Wikipedia article.
-pub struct WikipediaSource;
-#[async_trait]
-impl Source for WikipediaSource {
-    fn id(&self) -> &'static str {
-        "wikipedia"
-    }
-    fn applies(&self, subject: &Subject) -> bool {
-        parse(&subject.uri).is_some()
-    }
-    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
-        crate::also_on::unless_over_cap(self.read(cx, subject).await, Found::default)
-    }
-}
-impl WikipediaSource {
-    async fn read(&self, cx: &Context, subject: &Subject) -> Result<Found> {
-        let Some(article) = parse(&subject.uri) else {
-            return Ok(Found::default());
-        };
-        let mut url = Url::parse(&format!("https://{}.wikipedia.org/w/api.php", article.lang))?;
-        url.query_pairs_mut()
-            .append_pair("action", "query")
-            .append_pair("prop", "pageprops")
-            .append_pair("ppprop", "wikibase_item")
-            .append_pair("titles", &article.title)
-            .append_pair("redirects", "1")
-            .append_pair("format", "json");
-        let options = crate::resolver::egress::FetchOptions {
-            accept: Some("application/json".into()),
-            ..Default::default()
-        };
-        let fetched = cx.egress.discover(url.as_str(), &options, 3600).await?;
-        match fetched.status {
-            200 => {}
-            429 | 500..=599 => {
-                return Err(crate::resolver::RetryLater {
-                    class: "wikipedia_busy",
-                    seconds: fetched.retry_after_secs.clamp(60, 3600),
-                }
-                .into())
-            }
-            _ => return Ok(Found::default()),
-        }
-        let Some(qid) = parse_item(&serde_json::from_slice(&fetched.body)?) else {
-            return Ok(Found::default());
-        };
-        // The item over the cap: the article keeps the key its own Wikipedia proved.
-        let read = wikidata::items(&cx.egress, std::slice::from_ref(&qid)).await;
-        crate::also_on::unless_over_cap(
-            read.map(|items| {
-                items
-                    .first()
-                    .map(|item| found(item, &article))
-                    .unwrap_or_default()
-            }),
-            || Found {
-                keys: hubs::key::wikidata(&qid)
-                    .map(|key| Key {
-                        key,
-                        via: "wikidata".into(),
-                    })
-                    .into_iter()
-                    .collect(),
-                ..Default::default()
-            },
-        )
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     fn fixture(name: &str) -> Value {
         let path = format!("{}/tests/fixtures/hubs/{name}", env!("CARGO_MANIFEST_DIR"));
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
@@ -587,54 +441,6 @@ mod tests {
         );
         // Wikiquote and Wikisource sitelinks are not Wikipedia editions.
         assert!(editions.len() > 100, "{}", editions.len());
-    }
-
-    #[test]
-    fn a_wikidata_item_link_is_its_own_hub() {
-        for uri in [
-            "https://www.wikidata.org/wiki/Q90",
-            "http://www.wikidata.org/entity/Q90",
-            "https://m.wikidata.org/wiki/Q90#sitelinks",
-            "https://www.wikidata.org/wiki/Special:EntityPage/Q90",
-            "https://wikidata.org/wiki/Q90",
-        ] {
-            assert_eq!(
-                wikidata::item_link(uri),
-                Some(("Q90".into(), "https://www.wikidata.org/wiki/Q90".into())),
-                "{uri}"
-            );
-        }
-        for uri in [
-            "https://www.wikidata.org/wiki/Property:P31",
-            "https://www.wikidata.org/wiki/Q0",
-            "https://www.wikidata.org/wiki/Special:EntityData/Q90.json",
-            "https://evil.example/wiki/Q90",
-        ] {
-            assert!(wikidata::item_link(uri).is_none(), "{uri}");
-        }
-        // Kant's item: encyclopedias and every edition, English included.
-        let kant = &wikidata::parse_entities(&fixture("wd-kant.json"))[0];
-        let found = item_found(kant, "us");
-        assert_eq!(found.keys[0].key, "wikidata:Q9312");
-        let sites: Vec<&str> = found.links.iter().map(|l| l.site.as_str()).collect();
-        assert!(sites.contains(&"Britannica") && sites.contains(&"Wikipedia (en)"));
-        let editions: Vec<&&str> = sites
-            .iter()
-            .filter(|s| s.starts_with("Wikipedia"))
-            .collect();
-        assert_eq!(*editions[0], "Wikipedia (en)");
-        // OK Computer's item: the music services its IDs name, then its editions.
-        let album = wikidata::parse_entities(&fixture("wd-entities.json"))
-            .into_iter()
-            .find(|i| i.qid == "Q202996")
-            .unwrap();
-        let uris: Vec<String> = item_found(&album, "us")
-            .links
-            .into_iter()
-            .map(|l| l.uri)
-            .collect();
-        assert!(uris.contains(&"https://open.spotify.com/album/2fGCAYUMssLKiUAoNdxGLx".into()));
-        assert!(uris.contains(&"https://en.wikipedia.org/wiki/OK_Computer".into()));
     }
 
     #[test]

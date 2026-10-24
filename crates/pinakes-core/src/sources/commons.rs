@@ -354,6 +354,29 @@ impl Source for Commons {
     fn name(&self) -> &'static str {
         "commons"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[
+                E2eSample {
+                    kind: "commons",
+                    uri: "https://commons.wikimedia.org/wiki/File:Golden_Gate_Bridge_as_seen_from_Battery_East.jpg",
+                    card_type: "ImageObject",
+                    group_with: None,
+                },
+            ],
+            answers: &[
+                E2eAnswer {
+                    host: "commons.wikimedia.org",
+                    path: "/w/api.php",
+                    query: &[("titles", "File:Golden Gate Bridge as seen from Battery East.jpg")],
+                    header: None,
+                    content_type: "application/json",
+                    file: "golden-gate.json",
+                },
+            ],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         target(uri).is_some()
     }

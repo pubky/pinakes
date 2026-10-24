@@ -1,0 +1,76 @@
+[
+  {
+    "kind": "tidal_artist",
+    "uri": "https://tidal.com/artist/64518",
+    "type": "MusicGroup",
+    "site": "TIDAL"
+  },
+  {
+    "kind": "tidal_seed",
+    "uri": "https://tidal.com/track/567396540",
+    "type": "MusicRecording",
+    "site": "TIDAL"
+  },
+  {
+    "kind": "tidal_share",
+    "uri": "https://tidal.com/track/534050211/u",
+    "type": "MusicRecording",
+    "site": "TIDAL",
+    "group_with": "tidal_seed"
+  },
+  {
+    "kind": "tidal_barcode",
+    "uri": "https://tidal.com/album/199574241",
+    "type": "MusicAlbum",
+    "site": "TIDAL",
+    "facts": {
+      "upc": "4018939306052"
+    },
+    "needs": "tidal"
+  },
+  {
+    "kind": "apple_barcode",
+    "uri": "https://music.apple.com/us/album/1680053261",
+    "type": "MusicAlbum",
+    "site": "Apple Music",
+    "group_with": "tidal_barcode",
+    "needs": "tidal"
+  },
+  {
+    "kind": "tidal_own_isrc",
+    "uri": "https://tidal.com/track/551040646",
+    "type": "MusicRecording",
+    "site": "TIDAL",
+    "facts": {
+      "isrc": "GBUM72103841"
+    },
+    "needs": "tidal"
+  },
+  {
+    "kind": "tidal_daft_punk",
+    "uri": "https://tidal.com/artist/8847",
+    "type": "MusicGroup",
+    "site": "TIDAL",
+    "name": "Daft Punk"
+  },
+  {
+    "kind": "dracula_tidal",
+    "uri": "https://tidal.com/album/495402659",
+    "type": "MusicAlbum",
+    "site": "TIDAL"
+  },
+  {
+    "kind": "dracula_apple",
+    "uri": "https://music.apple.com/au/album/1874125260",
+    "type": "MusicAlbum",
+    "site": "Apple Music",
+    "group_with": "dracula_tidal"
+  },
+  {
+    "kind": "dracula_deezer",
+    "uri": "https://www.deezer.com/album/910510411",
+    "type": "MusicAlbum",
+    "site": "Deezer",
+    "group_with": "dracula_tidal"
+  }
+]

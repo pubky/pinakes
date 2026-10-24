@@ -1075,9 +1075,10 @@ impl Egress {
         rate
     }
 }
-/// Requests per second the hub services the also-on sources read publish as their limit, or a
-/// cautious pace where none is published (one request at a time per host is the rule for every
-/// host); it lowers a host's default pace, beside the sources' own limits (`sources::budgets`).
+/// Requests per second the services several sources or the resolver read publish as their limit,
+/// or a cautious pace where none is published (one request at a time per host is the rule for
+/// every host); it lowers a host's default pace, beside the sources' own limits
+/// (`sources::budgets`, `also_on::budgets`: a service only one source reads).
 /// A rule `*.example.org` covers the subdomains.
 pub const PUBLISHED_RATES: &[(&str, f64)] = &[
     // MusicBrainz: 1 request/s per IP, 503 above that.
@@ -1088,25 +1089,12 @@ pub const PUBLISHED_RATES: &[(&str, f64)] = &[
     ("commons.wikimedia.org", 200.0 / 60.0),
     // Open Library: 3 requests/s with a User-Agent and a contact.
     ("openlibrary.org", 3.0),
-    // Deezer's public API: 50 requests per 5 seconds.
-    ("api.deezer.com", 10.0),
-    // TIDAL's developer API publishes no figure and answers 429 with a time to wait: a cautious
-    // 2/s (a batch asks for 20 items).
-    ("openapi.tidal.com", 2.0),
     // iTunes Search and Lookup: about 20 requests/min.
     ("itunes.apple.com", 20.0 / 60.0),
-    // TVmaze: at least 20 calls every 10 seconds per IP.
+    // TVmaze: at least 20 calls every 10 seconds per IP (the films and media_records sources).
     ("api.tvmaze.com", 2.0),
-    // crates.io: 1 request/s.
-    ("crates.io", 1.0),
-    // Crossref: 10 requests/s on the polite pool.
-    ("api.crossref.org", 10.0),
-    // Software Heritage: 120 requests/hour anonymous.
-    ("archive.softwareheritage.org", 120.0 / 3600.0),
     // The Wayback Machine's CDX API asks for a gentle pace (the whole host: tagged captures too).
     ("web.archive.org", 0.5),
-    // NCBI's E-utilities and ID Converter: 3 requests/s without an API key.
-    ("pmc.ncbi.nlm.nih.gov", 3.0),
 ];
 /// The published rate of `host`, if it has one (the most specific rule).
 pub fn published_rate(host: &str) -> Option<f64> {

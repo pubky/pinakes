@@ -4,7 +4,6 @@
 use pinakes_core::{
     also_on::{self, SourceOptions},
     config::{Config, EgressConfig},
-    event::adapters::SecretKey,
     groups,
     model::ResourceMeta,
     resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport},
@@ -228,15 +227,22 @@ impl Transport for Recorded {
 fn config(pair: Option<(&str, &str)>) -> Config {
     let mut config = Config::default();
     if let Some((id, secret)) = pair {
-        config.tidal.client_id = Some(SecretKey::from(id.to_owned()));
-        config.tidal.client_secret = Some(SecretKey::from(secret.to_owned()));
+        config.sections.set(
+            "tidal",
+            serde_json::json!({"client_id": id, "client_secret": secret}),
+        );
     }
+    // Only the sources this build has: a switch for one it lacks is refused at validation.
+    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     for (source, enabled) in [
         ("deezer", true),
         ("musicbrainz", false),
         ("musicbrainz_entity", false),
         ("wikidata", false),
     ] {
+        if !registered.contains(&source) {
+            continue;
+        }
         config.also_on.sources.insert(
             source.into(),
             SourceOptions {
@@ -300,6 +306,14 @@ const KEYS: &str =
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_tidal_barcode_joins_apple_music_and_deezer(pool: sqlx::PgPool) {
+    // Deezer's album and iTunes' are the joins; without either source there is nothing to check.
+    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
+    if !["deezer", "itunes"]
+        .iter()
+        .all(|id| registered.contains(id))
+    {
+        return;
+    }
     let hydra = save(&pool, "https://tidal.com/album/199574241", "MusicAlbum").await;
     let dracula = save(&pool, "https://tidal.com/album/495402659", "MusicAlbum").await;
     let track = save(&pool, "https://tidal.com/track/199574242", "MusicRecording").await;

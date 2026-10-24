@@ -1,0 +1,35 @@
+# `books`: Open Library, Amazon, Apple Books and Wikidata for a book
+
+An [also on](../api.md#also-on) source.
+
+`books`: an ISBN (`isbn:…`, `openlibrary.org/isbn/{isbn}`), an Open Library edition
+page (`openlibrary.org/books/OL…M`) or work page (`openlibrary.org/works/OL…W`) is looked up
+exactly, never by title:
+- Open Library's edition record must list the ISBN asked. Its edition and work IDs are keys
+  (`openlibrary:edition:…`, `openlibrary:work:…`, so the editions of one work join, a hint like
+  every group), its ISBN-13s are `isbn` facts, and it links the edition, its work
+  (`kind: "work"`), its Internet Archive copy (`ocaid`), and its Goodreads edition, LibraryThing
+  work (`kind: "work"`) and Google Books pages when it holds exactly one ID for each.
+- A work page's key is `openlibrary:work:…`. Open Library's record must be that work; an ID it
+  merged into another work is followed to that work, which it then links.
+- A printed edition's 978 ISBN gives its Amazon page (`amazon.com/dp/{ISBN-10}`, `via: "isbn"`).
+- An ebook edition's ISBN gives its Apple Books page when iTunes lists exactly one ebook for it.
+  iTunes' answer carries no ISBN, so Open Library's format field ("Ebook", "Epub", …) is the
+  guard. A printed edition's ISBN is never asked: iTunes answers it with loose matches, such as
+  an edition in another language.
+- The work's Wikidata item (the one carrying its Open Library work ID) gives its Q-id as the
+  `wikidata` fact and its LibraryThing, Goodreads (the work's editions), Google Books, Project
+  Gutenberg and BookBrainz pages, each with `kind: "work"` on an edition's card. A book's
+  details can therefore list two Goodreads pages: its edition and its work's editions.
+- A failing iTunes or Wikidata request leaves what Open Library said.
+- Each link carries the key it was found through: the edition's pages (Amazon and Apple Books
+  too) its edition key, the work's pages its work key. A tagged Goodreads or LibraryThing link
+  therefore joins its edition or work.
+
+Goodreads' `book/isbn/{isbn}` redirect is never used: it answers an unknown ISBN with an
+unrelated book.
+
+## Operations
+
+Each book costs one Open Library request, one iTunes lookup for an ebook edition, and two
+Wikidata requests when Open Library names its work.

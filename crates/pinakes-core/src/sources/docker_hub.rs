@@ -156,6 +156,25 @@ impl Source for DockerHub {
     fn name(&self) -> &'static str {
         "docker_hub"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "docker_hub",
+                uri: "https://hub.docker.com/_/nginx",
+                card_type: "SoftwareApplication",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "hub.docker.com",
+                path: "/v2/repositories/library/nginx/",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "repo-library-nginx.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         target(uri).is_some()
     }
@@ -397,5 +416,36 @@ mod tests {
         assert!(parse(200, &read("repo-library-nginx.json"), &nginx).is_err());
         assert!(parse(429, b"", &lncm()).is_err());
         assert!(parse(500, b"", &lncm()).is_err());
+    }
+
+    /// A card of a thing (not an event) is refreshed on the official route's schedule, however
+    /// old its dates; the same card with a past `start` would be final.
+    #[test]
+    fn a_thing_with_old_dates_is_refreshed() {
+        use crate::{model::ResourceMeta, resolver::cards::manifests};
+        use chrono::{TimeZone, Utc};
+        let manifest = manifests(&Default::default())
+            .into_iter()
+            .find(|m| m.source == "official")
+            .expect("the official route");
+        let repo = from_uri("https://hub.docker.com/_/nginx").unwrap();
+        let raw = fixture::read("docker_hub", "repo-library-nginx.json");
+        let card = parse(200, &raw, &repo).unwrap().unwrap();
+        assert_eq!(card.details["registered"], "2014-06-05T19:14:45+00:00");
+        let doc = card.into_doc(
+            ResourceMeta::new("docker:library/nginx", "docker_hub", 60),
+            "x",
+        );
+        let now = Utc::now();
+        let refresh = Default::default();
+        let next = crate::scheduler::next(&manifest, &doc, now, &refresh);
+        assert!(next.is_some_and(|at| at > now), "refreshed");
+        let mut dated = doc;
+        dated.start = Some(Utc.with_ymd_and_hms(2014, 6, 5, 19, 14, 45).unwrap());
+        assert_eq!(
+            crate::scheduler::next(&manifest, &dated, now, &refresh),
+            None,
+            "final"
+        );
     }
 }

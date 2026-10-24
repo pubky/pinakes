@@ -142,6 +142,37 @@ impl Source for Ghost {
     fn name(&self) -> &'static str {
         "ghost"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[
+                E2eSample {
+                    kind: "ghost",
+                    uri: "https://www.privacyguides.org/news/2026/10/19/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/",
+                    card_type: "Article",
+                    group_with: None,
+                },
+            ],
+            answers: &[
+                E2eAnswer {
+                    host: "www.privacyguides.org",
+                    path: "/ghost/api/content/posts/slug/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/",
+                    query: &[],
+                    header: None,
+                    content_type: "application/json",
+                    file: "post-cellebrite.json",
+                },
+                E2eAnswer {
+                    host: "www.privacyguides.org",
+                    path: "/news/2026/10/19/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/",
+                    query: &[],
+                    header: None,
+                    content_type: "text/html; charset=utf-8",
+                    file: "page-cellebrite.html",
+                },
+            ],
+        })
+    }
     fn reads(&self, _uri: &str) -> bool {
         false
     }

@@ -67,7 +67,7 @@ Such a card is named after its object, not its page: where a TMDB, Trakt, Netfli
 Letterboxd, Open Library, TVmaze or Podcast Index page names its site, another language's title
 or nothing, the name (and, where the page's text is not the object's, the description) comes
 from the object's exact record: the Wikidata item that carries the page's own ID, or the
-service's own record ([media records](sources/media_records.md)). That record is read while the
+service's own record (`media_records`, [docs/sources](sources/README.md)). That record is read while the
 page is, within a few seconds; when Wikidata is slower, the card keeps the page's name at first.
 The `titles` source then reads the same item without that limit and, when the card bears another
 name, has the link read again: its card then takes the item's label (and description where the
@@ -119,7 +119,7 @@ body, and answer `If-None-Match` with 304.
 | `venue` | `{name, id}`: the venue's name and, when it resolved to a resource, its ID |
 | `organizer` | `{name, url}` |
 | `from` | Where the card's metadata came from when it is not the page itself: the [source](#sources) whose official API answered, e.g. `federal_register` |
-| `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …), or the facts a [Pubky app's](pubky-apps.md) profile reads (`card_count`, `price`, `rating`, …), then the facts the [also-on](#also-on) sources read for it (`isrc`, `upc`, `mbid`, `mbid_was`, `artist`, `artist_type`, `duration` in seconds, an event's `performer`, `performer_mbid` and `performer_link`); several values of one name are joined with `; `. Each source keeps at most `limits.also_on_facts_per_source` (32, at least 8) facts per resource, cutting the many values of one name (a recording's ISRCs) before a name's one value (its MBID, artist). Each source's page lists its facts. `null` when there are none. Facts never join anything |
+| `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …), or the facts a [Pubky app's](pubky-apps.md) profile reads (`card_count`, `price`, `rating`, …), then the facts the [also-on](#also-on) sources read for it (such as a music link's `isrc`, `upc` and `mbid`); several values of one name are joined with `; `. Each source keeps at most `limits.also_on_facts_per_source` (32, at least 8) facts per resource, cutting the many values of one name (a recording's ISRCs) before a name's one value (its MBID, artist). Each source's page lists its facts. `null` when there are none. Facts never join anything |
 | `also_on` | Every link of the card's [also on](#also-on), up to 256, several of one service too (the card shows one per service) |
 | `aliases` | Other spellings of this link that resolve to it ([aliases](#aliases)), at most 50; a page's own `url`, `@id`, `sameAs` or canonical claims are not aliases and are not listed |
 | `updated_at` | When the current metadata was accepted |
@@ -336,7 +336,6 @@ GET /v1/search?key=isbn:9780140328721
 GET /v1/search?key=imdb:tt0111161
 GET /v1/search?key=podcast:304b84f0-07b0-5265-b6b7-da5cf5aeb56e
 GET /v1/search?key=osm:node%2F240109189
-GET /v1/search?key=fr:2026-18291
 GET /v1/search?collapse=group&type=Book
 GET /v1/search?collapse=group&type=ScholarlyArticle
 GET /v1/search?bbox=8.90,45.98,9.00,46.03&cluster=12
@@ -413,7 +412,7 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 | `q` | Full-text name/description search with a trigram/partial-name fallback; at most 256 bytes. A post whose author opted out of search indexing (`details.facts.opted_out`: Mastodon's `indexable: false` or `noindex`, Bluesky's `!no-unauthenticated`) never matches |
 | `type` | A schema.org type, ancestors included (`Event` matches `MusicEvent`; `Place` matches cafés and other `LocalBusiness` types) |
 | `category`, `host` | Exact filters |
-| `key` | Links carrying one exact identifier, on any service and in any spelling: `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist), `wikidata:{Q-id}`, `isrc:{code}` (any letter case, hyphens allowed), `upc:{barcode}` (a UPC, EAN or GTIN in any of its lengths, check digit verified), `isbn:{ISBN-10 or ISBN-13}` (an edition), `imdb:{tt…}` (a film or series), `podcast:{GUID}` (a show), `osm:{node|way|relation}/{id}`, `doi:{DOI}`, `arxiv:{id}`, `pmid:{n}`, `pmcid:PMC{n}`, `crate:{name}`, `npm:{name}`, `pypi:{name}` (each normalized as its registry does), `repo:{github.com|gitlab.com}/{path}`, `steam:{appid}`, `gog:{id}`, `fr:{document number}` or `discogs:{artist|master|release}:{id}`, as the [also-on](#also-on) sources found them as keys or facts (`mbid:` also the MBID a MusicBrainz page was merged from, its `mbid_was` fact, and with `type=MusicEvent` an artist's events, by their performers), or as an exact lookup by that key named the link; anything else is 400 |
+| `key` | Links carrying one exact identifier, on any service and in any spelling: `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist), `wikidata:{Q-id}`, `isrc:{code}` (any letter case, hyphens allowed), `upc:{barcode}` (a UPC, EAN or GTIN in any of its lengths, check digit verified), `isbn:{ISBN-10 or ISBN-13}` (an edition), `imdb:{tt…}` (a film or series), `podcast:{GUID}` (a show), `osm:{node|way|relation}/{id}`, `doi:{DOI}`, or another namespace a source records (its page in [docs/sources](sources/README.md#also-on) names its namespaces and how each is normalized), as the [also-on](#also-on) sources found them as keys or facts (`mbid:` also the MBID a MusicBrainz page was merged from, its `mbid_was` fact, and with `type=MusicEvent` an artist's events, by their performers), or as an exact lookup by that key named the link; anything else is 400 |
 | `related` | A resource ID: what the people who tagged it also referenced, ranked by how many of them did ([Related](#related)); not with `sort` |
 | `tags` | Comma-separated labels; at most 5, each 1–128 bytes |
 | `match` | `any` (default) or `all` (at most 3 tags) |
@@ -726,16 +725,15 @@ one thing, only on evidence that cannot be spoofed:
   `wikidata:Q…`), or a known music service's own record of its own object (the ISRC on a TIDAL
   track page). Any other page's claims are never such a key. A group holds at most one value of
   each single-object namespace: MusicBrainz recording, release, release group and artist
-  (`mb:…`), Wikidata item (`wikidata`), Discogs artist, master and release (`discogs:…`), IMDb
-  title (`imdb`), Open Library edition and work (`openlibrary:…`), podcast GUID and Apple podcast
-  ID (`podcast:guid`, `podcast:apple`), OSM object (`osm`), DOI, arXiv paper, PubMed and PubMed
-  Central record (`doi`, `arxiv`, `pmid`, `pmcid`), crate, npm and PyPI package, source
-  repository (`crate`, `npm`, `pypi`, `repo`), Steam and GOG game (`steam`, `gog`) and Federal
-  Register document (`fr`): a join that would bring a second (a wrong ID on a hub) is refused,
-  so one bad claim never chains two groups. ISRCs, barcodes, ISBNs and other keys may be
-  several. An event page's keys are never such evidence: a concert's performer key
-  (`mb:artist:…`) names the artist, not another copy of the concert, so events group only with
-  events.
+  (`mb:…`), Wikidata item (`wikidata`), IMDb title (`imdb`), Open Library edition and work
+  (`openlibrary:…`), podcast GUID and Apple podcast ID (`podcast:guid`, `podcast:apple`), OSM
+  object (`osm`), DOI (`doi`), and the namespaces each source's page in
+  [docs/sources](sources/README.md#also-on) calls single-object: a join that would bring a second (a wrong ID on a hub) is refused,
+  so one bad claim never chains two groups. The database remembers every such namespace a
+  source registered (`single_object_namespace`), so a removed source's keys keep the rule until
+  they expire. ISRCs, barcodes, ISBNs and other keys may be several. An event page's keys are never such
+  evidence: a concert's performer key (`mb:artist:…`) names the artist, not another copy of the
+  concert, so events group only with events.
 - **Curation** on the admin listener.
 
 `sameAs`, canonical and other URL claims, and other identifiers, never group. Two located
@@ -819,10 +817,8 @@ A card's `also_on` says where else the same thing is: first the other members of
 [group](#groups) (links someone tagged, each with its resource `id`), by ID and URI, then
 **derived links**: the same thing on services nobody tagged, found by a source, with
 `derived: true`, the service's name in `site`, the hub or service it came through in `via`
-(`musicbrainz`, `wikidata`), and for some a `kind`: `archived` (a Wayback Machine copy, with
-its capture time in `at`), `work` (a book's work page, not its edition's), `source` (a
-package's repository), `submitted` and `published` (a paper's preprint and journal version) or
-`pdf`. Derived links are ordered by service name; each URL appears once (a tagged member wins)
+(`musicbrainz`, `wikidata`), and for some a `kind` its source's page names (`archived`: a Wayback Machine copy, with
+its capture time in `at`). Derived links are ordered by service name; each URL appears once (a tagged member wins)
 and never the card itself. A card carries at most 8 entries, and one link per service, the
 service a link's URL is on (a derived link's `site`): for a music service a tagged member
 first, because someone used that link (of several, the one on the recording's original album,
@@ -836,18 +832,14 @@ within the entry cap. Any other tagged member whose URL is on a service a derive
 tagged `f-droid.org` page is on F-Droid, as Wikidata's F-Droid link is) takes that service's
 place the same way; a page that only names itself after a service does not, and other tagged
 members always show. A card of a service the sources know is named after it (`site`):
-Wikidata, OpenStreetMap, DOI, Steam, SteamDB, ProtonDB, PCGamingWiki, GOG, App Store, Google
-Play, F-Droid, Flathub, Snap Store, crates.io, Docs.rs, lib.rs, npm, jsDelivr, unpkg, PyPI,
-GitHub, GitLab, Software Heritage, arXiv, alphaXiv, PubMed, PubMed Central, Hugging Face
-Papers, BTC Map and Wayback Machine. Only an object's own page is on the service: a game, app,
-package, repository, paper or place page in the forms the lookups recognize (a repository or
-a PCGamingWiki article with no query but one that picks a tab or marks where the link was
-shared from: `?tab=readme-ov-file`, `ref`, `utm_*`). Any other page on those hosts
-(`github.com/topics/rust`, `gitlab.com/explore`, a wiki's `Category:` or `Special:` page, a
-search, a user's page, a page under an object) takes no service's place; its card keeps the
-name it gives itself, or its host. `GET /v1/resources/{id}` shows the same, up to 256 entries, and lists every link in `details.also_on` (several of one
-service too, up to 256). A derived link can be unavailable in some countries (a regional release
-on a streaming service); nothing public says where, so prefer a tagged member.
+Wikidata, OpenStreetMap, DOI and the services each source's page names (the ones its derived
+links name). Only an object's own page is on the service, in the forms its source recognizes
+(its page says which). Any other page on those hosts (a topic list, a search, a user's page, a
+page under an object) takes no service's place; its card keeps the name it gives itself, or its
+host. `GET /v1/resources/{id}` shows the same, up to 256 entries, and lists every link in
+`details.also_on` (several of one service too, up to 256). A derived link can be unavailable in
+some countries (a regional release on a streaming service); nothing public says where, so prefer
+a tagged member.
 
 A derived link is a hint: it is never fetched, never counted as a reference and never ranks
 anything. Sources read a resource after it is saved and again when their results age (each
@@ -867,287 +859,27 @@ an exact ID (a MusicBrainz relation, a Wikidata item's claim or sitelink, a serv
 a lookup by barcode or ISRC) carries that ID: a tagged resource that is that link (the same URL
 after its aliases) takes it too and joins the group, even when its own lookup finds nothing.
 
-**Music.** A track, album or artist link on a music service ([music service links](#aliases))
-is looked up exactly, never by title or name. A key comes from a hub (MusicBrainz, Wikidata) or
-from a known music service's own record of its own object; another host's claim (its JSON-LD
-`isrcCode`, `sameAs`, a canonical link) is a fact at most.
-- `service`: the ISRC a music service's own track page states (its JSON-LD `isrcCode`), as the
-  key `isrc:…` (`via` the service) only from a service whose catalogue comes from labels and whose
-  pages were checked to state it: TIDAL. Elsewhere it is the fact `isrc` (on Bandcamp and
-  SoundCloud an uploader types it), and not when MusicBrainz gives that ISRC to several recordings
-  (it names none of them). A track whose ISRC nobody else knows (not MusicBrainz,
-  not another link) stays alone with its key, and joins as soon as another link or MusicBrainz
-  carries the same ISRC.
-- `tidal` (only with the operator's TIDAL client ID and secret, `[tidal] client_id` and
-  `client_secret` or `PINAKES_TIDAL_CLIENT_ID` and `PINAKES_TIDAL_CLIENT_SECRET`,
-  [operations](operations.md#also-on)): a TIDAL album's barcode and a track's ISRC from TIDAL's
-  own API, as the keys `upc:…` and `isrc:…` (`via` `tidal`) and as facts, and no links;
-  `musicbrainz`, `deezer` and `itunes` below then find the same album or track by them. An ISRC
-  MusicBrainz gives to several recordings is a fact only, as with `service`. TIDAL's catalogue is
-  read in one country (`[tidal] country`, `US`); an item TIDAL does not offer there gives
-  nothing. TIDAL's answers are cached per credential pair, so a new token keeps them; a 401 or
-  403 is never cached, and refused credentials are asked again after five minutes.
-- `musicbrainz`: what MusicBrainz relates the link to (one recording, release or release group,
-  or artist; several are ambiguous and give nothing), that entity's current links on music
-  services, and its MBIDs, the recording's ISRCs (up to eight) and the release's barcode as keys
-  (`mb:recording:…`, `mb:release:…`, `mb:release-group:…`, `mb:artist:…`, `isrc:…`,
-  `upc:…`). A track MusicBrainz does not relate by URL takes the recording its page's own ISRC
-  is on when that ISRC is a key (TIDAL, `service` above) and MusicBrainz knows exactly one. An
-  album it does not relate by URL takes the releases carrying the album's barcode keys (TIDAL's
-  own record, or a service's or Discogs' from an earlier run; at most two, never one a
-  MusicBrainz source found), by a search on the barcode field alone (a 12-digit UPC in both
-  spellings) checked against the answer: one release, or editions of one release group, as
-  below. An album link related to up to four releases of one release group (editions
-  MusicBrainz keeps apart) takes the release group's key alone, and the links, facts and barcode
-  every one of those releases has; releases of different release groups are ambiguous. Its
-  facts: `mbid`, the recording's `isrc`s, the release's barcode as `upc`, the `artist` credit,
-  the recording's `duration` and `original_album` (the earliest official album that is no
-  compilation, live or remix album), and an artist's `artist_type` (`Person`, `Group`, …). ISRCs
-  are stored in upper case and barcodes as GTIN-13 (a 12-digit UPC gains a leading zero), by
-  every source.
-  Discogs pages are taken at their level only: a Discogs master is a release group (never
-  looked up by barcode), a Discogs release one release and never its release group (an edition
-  is not the album), a Discogs artist an artist. Each lists its entity's service pages; a
-  release group's MusicBrainz entry names none (its editions have them), so a master lists the
-  album pages of the one Wikidata item MusicBrainz relates the release group to, when that item
-  names the release group back (P436), keyed by the release group.
-- `wikidata`: the one item carrying the link's own service ID (Spotify, Apple Music, Deezer,
-  TIDAL, Qobuz, YouTube, SoundCloud, Amazon Music, Bandcamp, Discogs), read back and compared
-  exactly (two items are ambiguous and give nothing); its other music-service IDs as links and
-  its Q-id and MusicBrainz ID as keys. An album item lists its Discogs master; a Discogs release
-  ID names an item only when the item is not an album's (no master, no release group). A track
-  takes only an item that is one recording (one MusicBrainz recording ID, no work ID): a song
-  item is a work that its studio, live and remastered recordings share, so a track takes
-  neither its Q-id nor its tracks.
-- `discogs`: a Discogs artist, master or release gets `discogs:{kind}:{id}` as key, and a release
-  up to four of its barcodes as facts, from the record its [card](sources/discogs.md) reads
-  (shared); a release that lists one barcode also gets it as a `upc:` key (a box set lists each
-  disc's), which `deezer` and `itunes` below then look up. Never by title or catalogue number.
-- `deezer` (off unless the operator turns it on: Deezer's API terms allow non-commercial use
-  only): a Deezer track's or album's own ISRC or barcode from Deezer's API as a key, and for
-  another service's track or album with an ISRC or barcode key, the one Deezer track or album
-  the API names for it, keyed by it.
-- `itunes`: for an album with a barcode key, the Apple Music album iTunes' `lookup?upc=` names
-  when exactly one album answers, keyed by that barcode (so a tagged link to that album joins).
+**The sources.** Each source's page in [docs/sources](sources/README.md#also-on) says what it reads
+and finds and what it costs; the index lists them in the order they run. A music link (a track,
+album or artist on a music service, [its spellings](#aliases)) is looked up exactly, never by title
+or name. A key comes from a hub (MusicBrainz, Wikidata) or from a known music service's own record
+of its own object; another host's claim (its JSON-LD `isrcCode`, `sameAs`, a canonical link) is a
+fact at most. ISRCs are stored in upper case and barcodes as GTIN-13 (a 12-digit UPC gains a
+leading zero), by every source. The level is exact: a track lists tracks and videos of the
+recording, an album lists albums and YouTube's album playlists, an artist lists artist pages and
+channels. Album links group by their release group, while two editions (two MusicBrainz releases)
+stay apart. Apple Music, Apple Books and Apple Podcasts links use the storefront `[also_on]
+apple_storefront` (`us`).
 
-**Wikipedia.** An article's card comes from its Wikipedia's REST summary (`Article`, the title,
-the first paragraph up to 600 characters, the thumbnail, `site` `Wikipedia ({lang})`), so a long
-article whose page exceeds the page cap still gets one; a page the summary does not cover (a
-special page) is read as a web page. `wikipedia`: the article's own Wikipedia names its Wikidata item (following
-redirects); the item's other language editions are listed as `Wikipedia ({lang})`, the major
-languages first, with its Britannica, Stanford Encyclopedia of Philosophy, Internet Encyclopedia
-of Philosophy, Scholarpedia and Namuwiki entries, and its Q-id is the key, so two editions of one
-article join. Titles are never matched across languages.
-
-**Wikidata items.** `wikidata_item`: a Wikidata item link (`/wiki/Q…`, `/entity/Q…`,
-`Special:EntityPage`, the mobile host: all aliases of `https://www.wikidata.org/wiki/{Q-id}`) is
-its own hub. Its card lists the item's encyclopedia entries, the music services its best-rank
-IDs name, and all its Wikipedia editions (the major languages first), with the Q-id as key. Only
-the item's own claims and sitelinks count, never a search.
-
-**MusicBrainz pages.** `musicbrainz_entity`: a MusicBrainz recording, release, release group or
-artist page ([its spellings](#aliases)) is its own hub, read as `musicbrainz` reads the entity a
-service link is related to: its MBIDs, the recording's ISRCs and the release's barcode as keys
-(so it joins the links MusicBrainz relates to it), its facts, and its current links on music
-services at its level, each keyed by the entity. An ISRC's page (`/isrc/{ISRC}`) is the ISRC's
-key, and with exactly one recording MusicBrainz gives the ISRC to, that recording's keys, facts
-and links. An ISRC several recordings have names none of them: its page keeps it as a fact only
-(keyed, it would join whichever of their groups took it first, the other refused). A page whose
-MBID MusicBrainz merged into another entity keys that entity and keeps its own MBID as the fact
-`mbid_was`, so `key=mbid:{old}` still finds it.
-The page's card comes from the same answer of MusicBrainz's web service, not from the page
-(unless that answer is over its 8 MB cap: then the page is read as any page, and the sources
-record only what its URL proves, the MBID or the ISRC): the
-title, `MusicRecording`, `MusicAlbum`, `MusicGroup` or `Person` (an artist MusicBrainz calls a
-person), the artist credit and a recording's length as its description, `site` `MusicBrainz`; an
-ISRC's page is its one recording's card, else named `ISRC {code}`.
-
-**Performers.** `performers`: an event page (`MusicEvent`, or any event) that names its performers
-in its own structured data (schema.org `performer`) has each performer's name as the fact
-`performer`. The artist's identity is the key `mb:artist:…` only where the page speaks for the
-service of a link it gives for the performer (`url`, `sameAs`): a Songkick concert naming a
-Songkick artist page, a Bandsintown event naming a Bandsintown artist page, a music service's own
-event page naming that service's artist page, when MusicBrainz relates the link (in the spelling
-MusicBrainz stores: Songkick and Bandsintown artists by number) to exactly one artist; that MBID is
-also the fact `performer_mbid`. The page is the one the fetch ended on, after redirects (a Songkick
-address that redirects off Songkick is the other site's page); a stored card that does not record
-it keys nothing until its page is read again. Any other page chose the identity it names, so it is
-a fact at most: the artist MusicBrainz relates one of its links to, else a MusicBrainz artist page
-it names, is the fact `performer_mbid`, never a key. A performer without either keeps its first
-link as the fact `performer_link`. A name alone is never a key, and nothing is searched by name; a
-performer the page does not key is facts only (`details.facts`), not found by `key=`.
-Text search (`q=`) matches an event's name and description, not its performers: an act the page
-names only in `performer` (a festival's support act) is not found by it.
-Performers are read from the page's own event node only: one whose `url` (else its `@id`) names
-the page, tracking parameters and fragments aside, or one naming no page in a head script or as
-the main entity of the page's own node; never from another event the page describes, and never
-because a sibling node names the page (a body script's event naming no page gives none). Among
-events the page's own is read first. A page keeps up to 16 performers with 8 links each, within 2 KB. Events [group](#groups) only with events, so the key never
-joins a concert to the artist's pages; it makes the concert the artist's event:
-`GET /v1/search?key=mbid:{artist}&type=MusicEvent&from=now&sort=start` lists an artist's upcoming
-concerts, soonest first.
-
-**Books.** `books`: an ISBN (`isbn:…`, `openlibrary.org/isbn/{isbn}`), an Open Library edition
-page (`openlibrary.org/books/OL…M`) or work page (`openlibrary.org/works/OL…W`) is looked up
-exactly, never by title:
-- Open Library's edition record must list the ISBN asked. Its edition and work IDs are keys
-  (`openlibrary:edition:…`, `openlibrary:work:…`, so the editions of one work join, a hint like
-  every group), its ISBN-13s are `isbn` facts, and it links the edition, its work
-  (`kind: "work"`), its Internet Archive copy (`ocaid`), and its Goodreads edition, LibraryThing
-  work (`kind: "work"`) and Google Books pages when it holds exactly one ID for each.
-- A work page's key is `openlibrary:work:…`. Open Library's record must be that work; an ID it
-  merged into another work is followed to that work, which it then links.
-- A printed edition's 978 ISBN gives its Amazon page (`amazon.com/dp/{ISBN-10}`, `via: "isbn"`).
-- An ebook edition's ISBN gives its Apple Books page when iTunes lists exactly one ebook for it.
-  iTunes' answer carries no ISBN, so Open Library's format field ("Ebook", "Epub", …) is the
-  guard. A printed edition's ISBN is never asked: iTunes answers it with loose matches, such as
-  an edition in another language.
-- The work's Wikidata item (the one carrying its Open Library work ID) gives its Q-id as the
-  `wikidata` fact and its LibraryThing, Goodreads (the work's editions), Google Books, Project
-  Gutenberg and BookBrainz pages, each with `kind: "work"` on an edition's card. A book's
-  details can therefore list two Goodreads pages: its edition and its work's editions.
-- A failing iTunes or Wikidata request leaves what Open Library said.
-- Each link carries the key it was found through: the edition's pages (Amazon and Apple Books
-  too) its edition key, the work's pages its work key. A tagged Goodreads or LibraryThing link
-  therefore joins its edition or work.
-
-Goodreads' `book/isbn/{isbn}` redirect is never used: it answers an unknown ISBN with an
-unrelated book.
-
-**Podcasts.** `podcasts`: an Apple Podcasts link (`podcasts.apple.com/{cc}/podcast/{slug}/id{n}`
-in any spelling, an episode with `?i={n}`), a player link that opens a show by its Apple ID
-(`pca.st/itunes/{n}`, `castro.fm/itunes/{n}`), a Podcast Index page
-(`podcastindex.org/podcast/{feed id}`, an episode with `?episode={id}`) or a podcast feed's card
-(a `PodcastSeries`, or a `PodcastEpisode` with its item's GUID) is looked up exactly:
-- iTunes must know an Apple ID as a show. The show's key is `podcast:apple:{id}` (a player link
-  has it from its URL alone), and it links Apple Podcasts, Pocket Casts and Castro.
-- Apple is the authority for its own IDs. An Apple ID that Podcast Index names for a feed counts
-  only when iTunes' own record of that show names this feed (`feedUrl`, compared without scheme
-  and trailing slash); and an Apple show link takes Podcast Index's feed for its ID only when
-  that feed is iTunes' feed. Otherwise there is no Apple key, Apple link or Apple episode for
-  the feed, and no Podcast Index feed for the show. (The Daily is such a show: iTunes and
-  Podcast Index read different feeds of it.)
-- A show's GUID is a key, `podcast:guid:{uuid}`, only when Podcast Index vouches for it: its
-  answer for this feed URL, Apple ID or feed ID names that GUID (an Apple ID it names counts only
-  once iTunes knows it), and its feed for that GUID (`byguid`) is this same feed. A copy of a
-  show's feed carries the show's GUID too, but Podcast Index names the show's own feed for it.
-  This needs an operator's Podcast Index key ([operations](operations.md#also-on)).
-- The show's `podcast_guid` fact is the GUID its feed names (read at the card's own feed URL,
-  never through a redirect), else Podcast Index's, else the one derived from the feed's URL as
-  the podcast namespace says. A GUID nobody vouches for is never a key: a copied feed can name
-  any show's GUID, and a derived one changes with the feed's URL.
-- An episode's keys are its Apple track, `podcast:apple_episode:{id}`, and
-  `podcast:item:{show GUID}:{SHA-256 of the item GUID}` from its show's vouched GUID. An Apple
-  episode takes the item GUID from iTunes, a Podcast Index episode from Podcast Index, and a
-  page only when the feed (its feed card's, or the RSS feed its own head names, followed through
-  redirects, read up to 8 MiB) is vouched and has one item with audio or video whose `<link>` is
-  that page. Such a page is typed `PodcastEpisode` from its next refresh. A feed item finds its Apple track among the show's
-  latest 200 episodes by its GUID.
-- A Podcast Index page links the show's feed and its Apple, Pocket Casts and Castro pages.
-- The show's Wikidata item (by its Apple ID) gives its Q-id as a key and its Spotify, Podcast
-  Index, Podchaser, Pocket Casts and Castbox pages.
-- Each link carries the key it was found through: the Apple, player and Wikidata item pages the
-  Apple ID, a Podcast Index page or feed the GUID Podcast Index vouches for (else the Apple ID),
-  an episode's Apple page its track. A tagged Spotify show link therefore joins its show.
-- A link never lists its own service. A Podcast Index failure (a refused key, an outage) never
-  fails the lookup: what the other services answered still counts.
-- A Pocket Casts short link (`pca.st/{slug}`) carries no Apple ID and is not looked up.
-
-**Films and series.** `films`: an IMDb title (`imdb.com/title/tt…`), a TMDB movie or series, a
-Letterboxd film, a TVmaze show or a Netflix title is looked up exactly, never by title:
-- The IMDb title ID is the join, as the key `imdb:{tt…}`. An IMDb link names it, TVmaze's record
-  of a show names it, and a TMDB, Letterboxd or Netflix link reaches it through the one Wikidata
-  item with that link's ID.
-- The title's Wikidata item (by its IMDb ID) gives its IMDb, TMDB, Letterboxd, Trakt, Rotten
-  Tomatoes, TheTVDB, Apple TV, Netflix, MUBI, TVmaze, MyAnimeList and AniList pages, its Q-id as
-  the `wikidata` fact, and `title_type` (`Movie` or `TVSeries`) when its IDs are a movie's or a
-  series' only.
-- Letterboxd and TVmaze are asked by IMDb ID only when the item has no link there: Letterboxd's
-  `imdb/{tt}/` redirects to its film (an unknown ID answers a page, not a redirect), and
-  TVmaze's `lookup/shows?imdb=` to its show, whose record must name the same IMDb ID. TVmaze's
-  data is CC BY-SA; its links say `via: "tvmaze"`.
-- Every link of a title with an IMDb ID carries `imdb:{tt…}`, so a tagged Netflix, Trakt or
-  Letterboxd link joins the title.
-
-A title never lists its own service. A Trakt link is typed (a `Movie` or a `TVSeries`) but not
-looked up itself; it joins as one of a title's links, by the title's IMDb ID.
-
-**Places.** Only where an OpenStreetMap object and a Wikidata item point at each other:
-- `osm_wikidata`: an OSM object tagged `wikidata=Q…` whose item names it back (P402 relation,
-  P11693 node or P10689 way) gets the item's Wikidata page, official website, Google Maps, Apple
-  Maps, Tripadvisor and Yelp places, and its Wikipedia editions (the major languages first).
-  `osm:{type}/{id}` and the Q-id are keys only when the item names no other OSM object, so the
-  object and the item's Wikipedia articles join one to one; a city whose item names both its
-  relation and a node (Berlin, Lugano) gets the links without keys. An item that does not name
-  the object gives nothing.
-- `wikidata_osm`: a Wikidata item link (`www.wikidata.org/wiki/Q…`), a Wikipedia article (through
-  its item) or a resource another source keyed with a Q-id gets the item's OpenStreetMap object:
-  its relation (P402) when it has exactly one, else its only OSM link of any type; several give
-  nothing.
-- `btcmap`: an OSM object that BTC Map lists gets its merchant page
-  (`btcmap.org/merchant/{type}:{id}`), from BTC Map's place list by OSM ID, never by probing a
-  page. The page names that one object, so both carry the object's `osm:{type}/{id}` key, and a
-  tagged merchant link joins the object.
-
-**Papers.** A DOI card (and an arXiv paper):
-- `unpaywall`: the open copies Unpaywall lists (repository and preprint copies, arXiv and PubMed
-  Central at their canonical addresses); links only, since Unpaywall matches copies itself.
-- `ncbi`: its PubMed and PubMed Central pages from the NCBI ID Converter, with `pmid:` and
-  `pmcid:` keys.
-- `datacite`: the arXiv preprint and its journal version where DataCite names them exactly
-  (`IsVersionOf`, only when the record names one journal version): the journal card gets the
-  arXiv and alphaXiv pages, the arXiv paper its own pages and the journal version, as links.
-  A DOI card's own `doi:{DOI}` and an arXiv paper's own `arxiv:{id}` are their keys, recorded
-  whatever DataCite and Crossref answer, so `key=doi:` finds the card. DataCite records what arXiv's submitter
-  entered, so the two join (the journal card gets `arxiv:{id}`, the arXiv paper also
-  `doi:{journal DOI}`) only when the journal's publisher names the preprint in its own Crossref
-  record (`relation.has-preprint`, asserted by the publisher, by arXiv id or arXiv DOI). A
-  preprint that names someone else's article stays a link and joins nothing, and so does one
-  whose journal's Crossref record is too long to read (over 1 MB).
-- `huggingface`: an arXiv paper's Hugging Face Papers page, only when its API knows the paper.
-
-`unpaywall` and `ncbi` send the operator's contact (`[http] contact`) as their APIs ask; without
-one they find nothing.
-
-**Software.** A package's own page on crates.io (and docs.rs, lib.rs), npm (and jsDelivr) or
-PyPI, or its page at one version; a page under it (a function's documentation, a source file, a
-dependency list) is another object:
-- `crates`, `npm`, `pypi`: the package's pages on its registry and documentation sites, its name
-  as key (`crate:`, `npm:`, `pypi:`, normalized as each registry does), and its source repository
-  only when signed build provenance names it (crates.io trusted publishing, npm SLSA provenance,
-  PyPI trusted publishers, else deps.dev's `SLSA_ATTESTATION`), as a link only: one repository
-  often publishes several packages (a workspace, a monorepo), so it joins none of them. A
-  package's own `repository` field is the publisher's claim and is never shown.
-- `software_heritage`: a GitHub or GitLab repository's own `repo:` key
-  (`key=repo:github.com/{owner}/{name}`), and its Software Heritage archive page when Software
-  Heritage archives it.
-
-**Games and apps.**
-- `steam`: a Steam game's own page (store, community hub, SteamDB, ProtonDB or PCGamingWiki appid
-  link; never a page under it: a discussion, review, guide, workshop item or news item) gets its
-  Steam store and SteamDB pages, its ProtonDB page when ProtonDB has reports, its PCGamingWiki page where the appid
-  lookup leads, and its GOG page through GOG GamesDB (only GOG's and Steam's own rows), with
-  `steam:` and `gog:` keys.
-- `wikidata_stores`: an app's or game's own page on Steam, GOG, the App Store, Google Play,
-  F-Droid, Flathub or the Snap Store (never a page under it) gets the one Wikidata item carrying that store's ID (read back and compared exactly;
-  several are ambiguous and give nothing), its other stores and game databases (Epic Games
-  Store, itch.io, IGDB, MobyGames, PCGamingWiki, HowLongToBeat, Homebrew) with one value each,
-  and its Q-id as key when the item carries no other ID on that store (an item with two Steam
-  appids is neither page's).
-
-**Archived copies.** `wayback`: a page that is `missing` or `unreachable` gets its Wayback
-Machine capture closest to when it was first referenced (captures that answered 200 only), with
-`kind: "archived"` and the capture time in `at`. archive.today is never used.
-
-**Federal Register.** `federal_register`: a document gets its GovInfo PDF and details page, its
-regulations.gov document and its public-inspection PDF from its API record, and the key
-`fr:{number}`; a GovInfo copy of it someone tags gets the same key from its address alone, so the
-two join.
-
-The level is exact: a track lists tracks and videos of the recording, an album lists albums and
-YouTube's album playlists, an artist lists artist pages and channels. Album links group by
-their release group, while two editions (two MusicBrainz releases) stay apart. Apple Music, Apple Books and Apple Podcasts links use the storefront
-`[also_on] apple_storefront` (`us`).
+An article's card comes from its Wikipedia's REST summary (`Article`, the title, the first
+paragraph up to 600 characters, the thumbnail, `site` `Wikipedia ({lang})`), so a long article
+whose page exceeds the page cap still gets one; a page the summary does not cover (a special page)
+is read as a web page. A MusicBrainz page's card ([its spellings](#aliases)) comes from
+MusicBrainz's web service (the entity it names), not from the page (unless that answer is over its
+8 MB cap: then the page is read as any page, and the sources record only what its URL proves, the
+MBID or the ISRC): the title, `MusicRecording`, `MusicAlbum`, `MusicGroup` or `Person` (an artist
+MusicBrainz calls a person), the artist credit and a recording's length as its description, `site`
+`MusicBrainz`; an ISRC's page is its one recording's card, else named `ISRC {code}`.
 
 ## Cards and resolvers
 

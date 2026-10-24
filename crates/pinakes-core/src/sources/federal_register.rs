@@ -288,6 +288,33 @@ impl Source for FederalRegister {
     fn name(&self) -> &'static str {
         "federal_register"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[
+                E2eSample {
+                    kind: "federal_register",
+                    uri: "fr:2026-18291",
+                    card_type: "Legislation",
+                    group_with: None,
+                },
+                E2eSample {
+                    kind: "federal_register_page",
+                    uri: "https://www.federalregister.gov/d/2026-18291",
+                    card_type: "Legislation",
+                    group_with: Some("federal_register"),
+                },
+            ],
+            answers: &[E2eAnswer {
+                host: "www.federalregister.gov",
+                path: "/api/v1/documents/2026-18291.json",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "fr-2026-18291.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         number(uri).is_some()
     }
@@ -344,6 +371,153 @@ impl Source for FederalRegister {
             Some(document) => card(cx.card(uri, self), document),
             None => cx.missing(uri, self),
         })
+    }
+}
+
+/// The also-on half of this source, `federal_register`.
+pub mod also_on {
+    use crate::{
+        also_on::{self, Context, Source, Subject},
+        lookups::{get, secondary, with_retry},
+    };
+    use anyhow::Result;
+    use async_trait::async_trait;
+
+    /// A Federal Register document: its GovInfo copies, regulations.gov document and
+    /// public-inspection PDF from the API record, and `fr:{number}`, which a GovInfo copy someone
+    /// tags shares (read from its address alone).
+    pub struct FederalRegister;
+
+    #[async_trait]
+    impl Source for FederalRegister {
+        fn single_namespaces(&self) -> &'static [&'static str] {
+            &["fr"]
+        }
+        fn search_key(&self, namespace: &str, value: &str) -> Option<String> {
+            (namespace == "fr").then(|| Some(format!("fr:{}", super::document_number(value)?)))?
+        }
+        fn id(&self) -> &'static str {
+            "federal_register"
+        }
+        fn applies(&self, subject: &Subject) -> bool {
+            use crate::sources::federal_register as fr;
+            fr::number(&subject.uri).is_some() || fr::from_govinfo_uri(&subject.uri).is_some()
+        }
+        async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<also_on::Found> {
+            use crate::sources::federal_register as fr;
+            let key = |number: &str| also_on::Key {
+                key: format!("fr:{number}"),
+                via: "federalregister".into(),
+            };
+            if let Some(number) = fr::from_govinfo_uri(&subject.uri) {
+                return Ok(also_on::Found {
+                    keys: vec![key(&number)],
+                    ..Default::default()
+                });
+            }
+            let Some(number) = fr::number(&subject.uri) else {
+                return Ok(also_on::Found::default());
+            };
+            let Some(url) = fr::api_url(&number) else {
+                return Ok(also_on::Found::default());
+            };
+            // The document's number is its key whatever the API answers; a number the API doesn't
+            // know still names nothing.
+            let mut retry = None;
+            let answer = secondary(
+                "federalregister",
+                &mut retry,
+                async {
+                    let (status, body) = get(cx, &url, "federalregister_busy").await?;
+                    fr::parse(status, &body, &number)
+                }
+                .await,
+            );
+            let Some(document) = answer else {
+                return Ok(with_retry(
+                    also_on::Found {
+                        keys: vec![key(&number)],
+                        ..Default::default()
+                    },
+                    retry,
+                ));
+            };
+            let Some(document) = document else {
+                return Ok(also_on::Found::default());
+            };
+            let links = document
+                .related
+                .into_iter()
+                .map(|r| {
+                    let mut link = also_on::Link::new(r.uri, r.site, "federalregister");
+                    link.kind = r.kind.map(str::to_owned);
+                    link
+                })
+                .collect();
+            Ok(also_on::Found {
+                keys: vec![key(&document.number)],
+                links,
+                ..Default::default()
+            })
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::lookups::fixture::{at, keys, sites, JSON};
+
+        #[tokio::test(start_paused = true)]
+        async fn federal_register_and_its_govinfo_copies() {
+            let record = "https://www.federalregister.gov/api/v1/documents/2026-18291.json";
+            let (egress, _) = crate::sources::fixture::egress(vec![(
+                record,
+                200,
+                JSON,
+                crate::sources::fixture::read("federal_register", "fr-2026-18291.json"),
+            )]);
+            let cx = Context {
+                egress,
+                config: Default::default(),
+            };
+            let doc = at("fr:2026-18291");
+            assert!(FederalRegister.applies(&doc));
+            let found = FederalRegister.lookup(&cx, &doc).await.unwrap();
+            assert_eq!(keys(&found), ["fr:2026-18291"]);
+            let s = sites(&found);
+            assert!(
+                s.contains(
+                    &"GovInfo https://www.govinfo.gov/app/details/FR-2026-09-09/2026-18291"
+                        .to_owned()
+                ),
+                "{s:?}"
+            );
+            assert!(
+                s.contains(
+                    &"Regulations.gov https://www.regulations.gov/document/SEC-2026-5584-0001"
+                        .to_owned()
+                ),
+                "{s:?}"
+            );
+            assert!(found.links.iter().any(|l| l.kind.as_deref() == Some("pdf")));
+            // A GovInfo copy someone tags shares the key, from its address alone.
+            let copy = at("https://www.govinfo.gov/content/pkg/FR-2026-09-09/pdf/2026-18291.pdf");
+            assert!(FederalRegister.applies(&copy));
+            let found = FederalRegister.lookup(&cx, &copy).await.unwrap();
+            assert_eq!(
+                (keys(&found), found.links.len()),
+                (vec!["fr:2026-18291"], 0)
+            );
+        }
+
+        /// Its key namespace, as searches name it.
+        #[test]
+        fn search_keys() {
+            assert_eq!(
+                crate::lookups::search_key("fr", "2026-18291").as_deref(),
+                Some("fr:2026-18291")
+            );
+        }
     }
 }
 

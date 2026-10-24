@@ -964,28 +964,20 @@ async fn retention_preserves_normalized_current_and_cached_osm_versions(pool: Pg
 /// them, so the two never deadlock; the skipped lines go with the save, or at the next run.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn retention_and_an_opted_out_save_of_the_same_post_never_deadlock(pool: PgPool) {
-    use pinakes_core::sources::mastodon;
     let uri = "https://mastodon.social/@Gargron/1";
-    let id = store::ensure_resource(&pool, uri).await.unwrap();
-    let target = mastodon::Target {
-        host: "mastodon.social".into(),
-        id: "1".into(),
-    };
-    let card = |file: &str, at: i64| {
-        let body = std::fs::read(format!(
-            "{}/tests/fixtures/sources/mastodon/{file}",
-            env!("CARGO_MANIFEST_DIR")
-        ))
-        .unwrap();
-        let mut doc = ResourceMeta::new(uri, "mastodon", 3600);
+    // The post's card from the Mastodon source; without it in this build there is nothing to test.
+    let card = |file: &'static str, at: i64| async move {
+        let api = "https://mastodon.social/api/v1/statuses/1";
+        let mut doc =
+            common::source_card("mastodon", uri, &[(api, 200, "application/json", file)]).await?;
         doc.fetched_at = at;
-        pinakes_core::resolver::html::off_runtime(|| mastodon::card(doc, &target, 200, &body))
-            .unwrap()
-            .unwrap()
+        Some(doc)
     };
-    store::save_document(&pool, &id, 0, &card("status-1.json", 1000))
-        .await
-        .unwrap();
+    let Some(first) = card("status-1.json", 1000).await else {
+        return;
+    };
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    store::save_document(&pool, &id, 0, &first).await.unwrap();
     // A spelling that became an alias of the post: the opted-out save clears its row too.
     let spelling = "https://mastodon.social/@Gargron/1/";
     let alias_id = store::ensure_resource(&pool, spelling).await.unwrap();
@@ -1024,7 +1016,7 @@ async fn retention_and_an_opted_out_save_of_the_same_post_never_deadlock(pool: P
         .unwrap();
     let save = tokio::spawn({
         let (pool, id) = (pool.clone(), id.clone());
-        let opted = card("status-1-opted-out.json", 2000);
+        let opted = card("status-1-opted-out.json", 2000).await.unwrap();
         async move { store::save_document(&pool, &id, 0, &opted).await }
     });
     let held = || async {

@@ -180,6 +180,25 @@ impl Source for Zenodo {
     fn name(&self) -> &'static str {
         "zenodo"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "zenodo",
+                uri: "https://zenodo.org/records/1234567",
+                card_type: "ScholarlyArticle",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "zenodo.org",
+                path: "/api/records/1234567",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "record-1234567.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         target(uri).is_some()
     }

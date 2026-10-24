@@ -279,11 +279,14 @@ mod tests {
     #[test]
     fn official_api_spellings_and_named_roots() {
         let r = |u: &str| root(u).map(|a| (a.root, a.basis));
-        assert_eq!(
-            r("https://www.federalregister.gov/d/2026-18291"),
-            Some(("fr:2026-18291".into(), "identifier"))
-        );
-        assert_eq!(r("fr:2026-18291"), None);
+        // An official source's own spelling (the Federal Register's, in a build that has it).
+        if crate::sources::by_name("federal_register").is_some() {
+            assert_eq!(
+                r("https://www.federalregister.gov/d/2026-18291"),
+                Some(("fr:2026-18291".into(), "identifier"))
+            );
+            assert_eq!(r("fr:2026-18291"), None);
+        }
         let named = source("https://example.org/a/", "https://example.org/b/").unwrap();
         assert_eq!(
             (named.root.as_str(), named.basis),

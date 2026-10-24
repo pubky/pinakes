@@ -1,9 +1,21 @@
 //! Papers (DOI cards): open copies from Unpaywall, PubMed and PubMed Central from the NCBI ID
 //! Converter, the arXiv ↔ journal version pair from DataCite, alphaXiv, and Hugging Face Papers.
-use super::{body, contact, encode, encode_path, plain, web_url, Found, Key, Link, Request};
+use super::{body, encode, encode_path, plain, web_url, Found, Key, Link, Request};
 use crate::resolver::cards::doi;
 use anyhow::{Context, Result};
 use serde_json::Value;
+
+/// The contact for APIs that ask for one (`email`, `mailto`), or `None` when it is not set.
+fn contact(contact: &str) -> Option<&str> {
+    let contact = contact.trim();
+    (!contact.is_empty() && contact.contains('@') && !contact.contains(char::is_whitespace))
+        .then_some(contact)
+}
+
+/// The operator's contact, for APIs that ask for an email address.
+pub(crate) fn operator_contact(cx: &crate::also_on::Context) -> Option<&str> {
+    contact(&cx.config.http.contact)
+}
 
 /// The most ids one NCBI ID Converter request may carry.
 pub const NCBI_MAX_IDS: usize = 200;
@@ -394,10 +406,571 @@ pub fn parse_hugging_face(status: u16, raw: &[u8], arxiv: &str) -> Result<Option
     }))
 }
 
+/// This family in the lookups' table ([`super::FAMILIES`]).
+pub struct Lookups;
+impl super::Family for Lookups {
+    fn name(&self) -> &'static str {
+        "papers"
+    }
+    fn sources(&self) -> Vec<std::sync::Arc<dyn crate::also_on::Source>> {
+        vec![
+            std::sync::Arc::new(also_on::Unpaywall),
+            std::sync::Arc::new(also_on::Ncbi),
+            std::sync::Arc::new(also_on::Datacite),
+            std::sync::Arc::new(also_on::HuggingFacePapers),
+        ]
+    }
+}
+
+/// The also-on sources that run these lookups: each fetches through the egress (its policy,
+/// budgets and shared discovery cache), hands the answer to this module's parsers, and reports
+/// keys and derived links.
+pub mod also_on {
+    use crate::{
+        also_on::{self, Context, Source, Subject},
+        lookups::{papers::operator_contact, secondary, send, with_retry},
+    };
+    use anyhow::Result;
+    use async_trait::async_trait;
+
+    /// The DOI of a card, unless it is arXiv's own (`10.48550/arXiv.…`, read as an arXiv paper).
+    fn journal_doi(subject: &Subject) -> Option<String> {
+        let doi = crate::resolver::cards::doi(&subject.uri)?;
+        (!doi.starts_with("10.48550/")).then_some(doi)
+    }
+
+    /// The arXiv paper of a card: its arXiv, alphaXiv or arXiv DOI link, or a key another source
+    /// found for it.
+    fn arxiv(subject: &Subject) -> Option<String> {
+        crate::lookups::papers::arxiv_from_uri(&subject.uri).or_else(|| {
+            subject
+                .keys_in("arxiv")
+                .find_map(crate::lookups::papers::arxiv_id)
+        })
+    }
+
+    /// Open copies of a paper from Unpaywall (links, never keys). Needs the contact setting.
+    pub struct Unpaywall;
+
+    #[async_trait]
+    impl Source for Unpaywall {
+        fn id(&self) -> &'static str {
+            "unpaywall"
+        }
+        fn applies(&self, subject: &Subject) -> bool {
+            journal_doi(subject).is_some()
+        }
+        async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<also_on::Found> {
+            let (Some(doi), Some(contact)) = (journal_doi(subject), operator_contact(cx)) else {
+                return Ok(also_on::Found::default());
+            };
+            let Some(request) = crate::lookups::papers::unpaywall_request(&doi, contact) else {
+                return Ok(also_on::Found::default());
+            };
+            let f = send(cx, &request, "unpaywall_busy").await?;
+            let links = crate::lookups::papers::parse_unpaywall(f.status, &f.body, &doi)?;
+            Ok(crate::lookups::Found {
+                keys: vec![],
+                links,
+            }
+            .into_also_on("unpaywall"))
+        }
+    }
+
+    /// PubMed and PubMed Central for a DOI, from the NCBI ID Converter. Needs the contact setting.
+    pub struct Ncbi;
+
+    #[async_trait]
+    impl Source for Ncbi {
+        fn budgets(&self) -> &'static [(&'static str, f64)] {
+            // NCBI's E-utilities and ID Converter: 3 requests/s without an API key.
+            &[("pmc.ncbi.nlm.nih.gov", 3.0)]
+        }
+        fn single_namespaces(&self) -> &'static [&'static str] {
+            &["pmid", "pmcid"]
+        }
+        fn search_key(&self, namespace: &str, value: &str) -> Option<String> {
+            let digits = crate::lookups::digits;
+            match namespace {
+                "pmid" => digits(value).then(|| format!("pmid:{value}")),
+                "pmcid" => digits(value.strip_prefix("PMC")?).then(|| format!("pmcid:{value}")),
+                _ => None,
+            }
+        }
+        /// An article's own page: `/{pmid}` on PubMed, `/articles/PMC{n}` on PubMed Central.
+        fn service_name(&self, host: &str, url: &url::Url) -> Option<&'static str> {
+            use crate::lookups::digits;
+            let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
+            match (host, segments.as_slice()) {
+                ("pubmed.ncbi.nlm.nih.gov", [pmid]) if digits(pmid) => Some("PubMed"),
+                ("pmc.ncbi.nlm.nih.gov", ["articles", id])
+                    if id.strip_prefix("PMC").is_some_and(digits) =>
+                {
+                    Some("PubMed Central")
+                }
+                _ => None,
+            }
+        }
+        fn id(&self) -> &'static str {
+            "ncbi"
+        }
+        fn applies(&self, subject: &Subject) -> bool {
+            journal_doi(subject).is_some()
+        }
+        async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<also_on::Found> {
+            let (Some(doi), Some(contact)) = (journal_doi(subject), operator_contact(cx)) else {
+                return Ok(also_on::Found::default());
+            };
+            let Some(request) = crate::lookups::papers::ncbi_request(&[&doi], contact) else {
+                return Ok(also_on::Found::default());
+            };
+            let f = send(cx, &request, "ncbi_busy").await?;
+            Ok(crate::lookups::papers::parse_ncbi(f.status, &f.body)?
+                .into_iter()
+                .find(|(requested, _)| requested.eq_ignore_ascii_case(&doi))
+                .map(|(_, found)| found.into_also_on("ncbi"))
+                .unwrap_or_default())
+        }
+    }
+
+    /// The arXiv preprint and its journal version, which DataCite names exactly in both directions;
+    /// an arXiv paper also gets its arXiv and alphaXiv pages. DataCite records what arXiv's
+    /// submitter entered, so the two share keys only when the journal's publisher names the
+    /// preprint back in its Crossref record.
+    pub struct Datacite;
+
+    impl Datacite {
+        async fn publisher_names(cx: &Context, doi: &str, arxiv: &str) -> Result<bool> {
+            let Some(request) = crate::lookups::papers::crossref_request(doi) else {
+                return Ok(false);
+            };
+            let f = match send(cx, &request, "crossref_busy").await {
+                Ok(f) => f,
+                // A record past the body cap (a very long reference list) confirms nothing; the
+                // run keeps its other answers.
+                Err(error) if crate::resolver::egress::over_cap(&error) => return Ok(false),
+                Err(error) => return Err(error),
+            };
+            crate::lookups::papers::parse_crossref_preprint(f.status, &f.body, doi, arxiv)
+        }
+    }
+
+    #[async_trait]
+    impl Source for Datacite {
+        fn budgets(&self) -> &'static [(&'static str, f64)] {
+            // Crossref: 10 requests/s on the polite pool.
+            &[("api.crossref.org", 10.0)]
+        }
+        fn single_namespaces(&self) -> &'static [&'static str] {
+            &["arxiv"]
+        }
+        fn search_key(&self, namespace: &str, value: &str) -> Option<String> {
+            use crate::lookups::papers::{arxiv_id, arxiv_key};
+            (namespace == "arxiv").then(|| Some(arxiv_key(&arxiv_id(value)?).to_string()))?
+        }
+        /// A paper's own page (`arxiv_from_uri`).
+        fn service_name(&self, host: &str, url: &url::Url) -> Option<&'static str> {
+            let name = match host {
+                "arxiv.org" => "arXiv",
+                "alphaxiv.org" => "alphaXiv",
+                _ => return None,
+            };
+            crate::lookups::papers::arxiv_from_uri(url.as_str()).map(|_| name)
+        }
+        fn id(&self) -> &'static str {
+            "datacite"
+        }
+        fn applies(&self, subject: &Subject) -> bool {
+            journal_doi(subject).is_some()
+                || crate::lookups::papers::arxiv_from_uri(&subject.uri).is_some()
+        }
+        async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<also_on::Found> {
+            use crate::lookups::papers;
+            let mut retry = None;
+            if let Some(id) = papers::arxiv_from_uri(&subject.uri) {
+                // The paper's own key and pages first: they never wait for DataCite or Crossref.
+                let mut found = crate::lookups::Found::default();
+                found.push_key(papers::arxiv_key(&id));
+                for link in papers::arxiv_links(&id, "datacite") {
+                    found.push_link(link);
+                }
+                let Some(request) = papers::datacite_arxiv_request(&id) else {
+                    return Ok(found.into_also_on("datacite"));
+                };
+                let record = secondary(
+                    "datacite",
+                    &mut retry,
+                    async {
+                        let f = send(cx, &request, "datacite_busy").await?;
+                        papers::parse_datacite_arxiv(f.status, &f.body, &id)
+                    }
+                    .await,
+                );
+                if let Some((named, journal)) = record {
+                    for link in named.links {
+                        found.push_link(link);
+                    }
+                    if let Some(journal) = journal {
+                        let confirmed = Self::publisher_names(cx, &journal, &id).await;
+                        if secondary("crossref", &mut retry, confirmed) == Some(true) {
+                            found.push_key(papers::doi_key(&journal));
+                        }
+                    }
+                }
+                return Ok(with_retry(found.into_also_on("datacite"), retry));
+            }
+            let Some(doi) = journal_doi(subject) else {
+                return Ok(also_on::Found::default());
+            };
+            // The card's own DOI is its key (`key=doi:` finds it) whatever DataCite and Crossref
+            // answer; only the publisher's record gives it to the preprint.
+            let mut found = crate::lookups::Found::default();
+            found.push_key(papers::doi_key(&doi));
+            let Some(request) = papers::datacite_versions_request(&doi) else {
+                return Ok(found.into_also_on("datacite"));
+            };
+            let record = secondary(
+                "datacite",
+                &mut retry,
+                async {
+                    let f = send(cx, &request, "datacite_busy").await?;
+                    papers::parse_datacite_versions(f.status, &f.body, &doi)
+                }
+                .await,
+            );
+            if let Some((named, preprint)) = record {
+                for link in named.links {
+                    found.push_link(link);
+                }
+                if let Some(id) = preprint {
+                    let confirmed = Self::publisher_names(cx, &doi, &id).await;
+                    if secondary("crossref", &mut retry, confirmed) == Some(true) {
+                        found.push_key(papers::arxiv_key(&id));
+                    }
+                }
+            }
+            Ok(with_retry(found.into_also_on("datacite"), retry))
+        }
+    }
+
+    /// The Hugging Face Papers page of an arXiv paper, only when its API says the page exists.
+    pub struct HuggingFacePapers;
+
+    #[async_trait]
+    impl Source for HuggingFacePapers {
+        /// A paper's own page: `/papers/{arXiv id}`.
+        fn service_name(&self, host: &str, url: &url::Url) -> Option<&'static str> {
+            let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
+            (host == "huggingface.co"
+                && matches!(
+                    segments.as_slice(),
+                    ["papers", id] if crate::lookups::papers::arxiv_id(id).is_some()
+                ))
+            .then_some("Hugging Face Papers")
+        }
+        fn id(&self) -> &'static str {
+            "huggingface"
+        }
+        fn applies(&self, subject: &Subject) -> bool {
+            arxiv(subject).is_some()
+        }
+        async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<also_on::Found> {
+            let Some(id) = arxiv(subject) else {
+                return Ok(also_on::Found::default());
+            };
+            let Some(request) = crate::lookups::papers::hugging_face_request(&id) else {
+                return Ok(also_on::Found::default());
+            };
+            let f = send(cx, &request, "huggingface_busy").await?;
+            let links = crate::lookups::papers::parse_hugging_face(f.status, &f.body, &id)?
+                .into_iter()
+                .collect();
+            Ok(crate::lookups::Found {
+                keys: vec![],
+                links,
+            }
+            .into_also_on("huggingface"))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::lookups::fixture::{at, keys, read, recorded, recorded_but_busy, sites, JSON};
+
+        #[tokio::test(start_paused = true)]
+        async fn papers() {
+            use crate::lookups::papers as p;
+            let doi_text = "10.1038/nature12373";
+            let mut cx = recorded(vec![
+                (
+                    p::ncbi_request(&[doi_text], "info@synonym.to")
+                        .unwrap()
+                        .url
+                        .into(),
+                    "ncbi-idconv",
+                ),
+                (
+                    p::datacite_versions_request(doi_text).unwrap().url.into(),
+                    "datacite-versions-nature12373",
+                ),
+            ]);
+            let mut config = crate::config::Config::default();
+            config.http.contact = "info@synonym.to".into();
+            cx.config = std::sync::Arc::new(config);
+            let doi = at("doi:10.1038/nature12373");
+            for source in [&Unpaywall as &dyn Source, &Ncbi, &Datacite] {
+                assert!(source.applies(&doi), "{}", source.id());
+            }
+            assert!(!HuggingFacePapers.applies(&doi));
+            let open = Unpaywall.lookup(&cx, &doi).await.unwrap();
+            assert!(!open.links.is_empty() && open.keys.is_empty());
+            assert!(open.links.iter().all(|l| l.via == "unpaywall"));
+            let ncbi = Ncbi.lookup(&cx, &doi).await.unwrap();
+            assert_eq!(keys(&ncbi).len(), 2, "{:?}", keys(&ncbi));
+            assert!(sites(&ncbi)
+                .iter()
+                .any(|s| s.starts_with("PubMed https://pubmed.ncbi.nlm.nih.gov/")));
+            // arXiv 1304.1068's submitter named this DOI; Nature's own record names no preprint, so
+            // the preprint is a link and the two never join.
+            let preprint = Datacite.lookup(&cx, &doi).await.unwrap();
+            assert_eq!(keys(&preprint), ["doi:10.1038/nature12373"]);
+            assert!(sites(&preprint).contains(&"arXiv https://arxiv.org/abs/1304.1068".to_owned()));
+            let arxiv = at("https://arxiv.org/abs/1304.1068v2");
+            assert!(!Unpaywall.applies(&arxiv) && Datacite.applies(&arxiv));
+            let journal = Datacite.lookup(&cx, &arxiv).await.unwrap();
+            assert_eq!(keys(&journal), ["arxiv:1304.1068"]);
+            let journal_sites = sites(&journal);
+            assert!(journal_sites
+                .contains(&"alphaXiv https://www.alphaxiv.org/abs/1304.1068".to_owned()));
+            assert!(journal_sites.contains(&"DOI https://doi.org/10.1038/nature12373".to_owned()));
+
+            // LMCS names arXiv 2302.04668 as its preprint (has-preprint): both sides share the keys.
+            let lmcs = Datacite
+                .lookup(&cx, &at("doi:10.46298/lmcs-20(1:8)2024"))
+                .await
+                .unwrap();
+            assert_eq!(
+                keys(&lmcs),
+                ["doi:10.46298/lmcs-20(1:8)2024", "arxiv:2302.04668"]
+            );
+            let preprint = Datacite
+                .lookup(&cx, &at("https://arxiv.org/abs/2302.04668"))
+                .await
+                .unwrap();
+            assert_eq!(
+                keys(&preprint),
+                ["arxiv:2302.04668", "doi:10.46298/lmcs-20(1:8)2024"]
+            );
+            // Hugging Face only when its API knows the paper.
+            assert!(HuggingFacePapers
+                .lookup(&cx, &arxiv)
+                .await
+                .unwrap()
+                .links
+                .is_empty());
+            let attention = HuggingFacePapers
+                .lookup(&cx, &at("https://arxiv.org/abs/1706.03762"))
+                .await
+                .unwrap();
+            assert_eq!(
+                sites(&attention),
+                ["Hugging Face Papers https://huggingface.co/papers/1706.03762"]
+            );
+
+            // Without a contact, the sources that need one find nothing (and ask nothing).
+            let cx = recorded(vec![]);
+            assert_eq!(
+                Unpaywall.lookup(&cx, &doi).await.unwrap(),
+                Default::default()
+            );
+            assert_eq!(Ncbi.lookup(&cx, &doi).await.unwrap(), Default::default());
+        }
+
+        /// A Crossref record past the body cap confirms nothing: the preprint keeps its own key and
+        /// links, without the journal's DOI, and the source doesn't fail.
+        #[tokio::test(start_paused = true)]
+        async fn an_oversized_crossref_record_confirms_nothing() {
+            struct TooLarge(std::sync::Arc<crate::sources::fixture::Recorded>);
+            #[async_trait]
+            impl crate::resolver::egress::Transport for TooLarge {
+                async fn get(
+                    &self,
+                    url: &url::Url,
+                    addresses: &[std::net::SocketAddr],
+                ) -> Result<crate::resolver::egress::Fetched> {
+                    if url.host_str() == Some("api.crossref.org") {
+                        return Err(crate::resolver::egress::BodyTooLarge {
+                            cap: crate::resolver::egress::BODY_CAP,
+                        }
+                        .into());
+                    }
+                    self.0.get(url, addresses).await
+                }
+            }
+            let arxiv = "https://api.datacite.org/dois/10.48550/arXiv.2302.04668";
+            let (_, recorded) = crate::sources::fixture::egress(vec![(
+                arxiv,
+                200,
+                JSON,
+                read("datacite-arxiv-2302.04668.json"),
+            )]);
+            let cx = Context {
+                egress: crate::resolver::egress::Egress::with_backends(
+                    Default::default(),
+                    std::sync::Arc::new(crate::sources::fixture::PublicDns),
+                    std::sync::Arc::new(TooLarge(recorded)),
+                ),
+                config: Default::default(),
+            };
+            let found = Datacite
+                .lookup(&cx, &at("https://arxiv.org/abs/2302.04668"))
+                .await
+                .unwrap();
+            assert_eq!(keys(&found), ["arxiv:2302.04668"]);
+            assert!(
+                sites(&found).contains(&"DOI https://doi.org/10.46298/lmcs-20(1:8)2024".to_owned())
+            );
+        }
+
+        /// A secondary service that fails costs its own part only: the link's own key and the other
+        /// services' answers are recorded, and the run asks again after the service's retry time.
+        #[tokio::test(start_paused = true)]
+        async fn a_failing_secondary_service_keeps_the_links_own_key() {
+            use crate::lookups::papers as p;
+            let nature = "10.1038/nature12373";
+            let versions = p::datacite_versions_request(nature)
+                .unwrap()
+                .url
+                .to_string();
+            let arxiv = "https://api.datacite.org/dois/10.48550/arXiv.1304.1068";
+            // DataCite busy: the DOI card keeps its own key, the preprint its key and pages.
+            let busy = recorded_but_busy(vec![], &[versions.as_str(), arxiv]);
+            let found = Datacite
+                .lookup(&busy, &at("doi:10.1038/nature12373"))
+                .await
+                .unwrap();
+            assert_eq!(keys(&found), ["doi:10.1038/nature12373"]);
+            assert!(found.retry_after.is_some());
+            let found = Datacite
+                .lookup(&busy, &at("https://arxiv.org/abs/1304.1068"))
+                .await
+                .unwrap();
+            assert_eq!(keys(&found), ["arxiv:1304.1068"]);
+            assert!(sites(&found).contains(&"arXiv https://arxiv.org/abs/1304.1068".to_owned()));
+            assert!(found.retry_after.is_some());
+            // Crossref busy: LMCS keeps its own key and the preprint's pages, not its key.
+            let busy = recorded_but_busy(
+                vec![],
+                &["https://api.crossref.org/works/10.46298/lmcs-20%281%3A8%292024"],
+            );
+            let found = Datacite
+                .lookup(&busy, &at("doi:10.46298/lmcs-20(1:8)2024"))
+                .await
+                .unwrap();
+            assert_eq!(keys(&found), ["doi:10.46298/lmcs-20(1:8)2024"]);
+            assert!(sites(&found).contains(&"arXiv https://arxiv.org/abs/2302.04668".to_owned()));
+            assert!(found.retry_after.is_some());
+        }
+
+        /// No link or ID check of this family slices a string inside a multibyte character, and no
+        /// parser panics on an answer it doesn't expect.
+        #[test]
+        fn spellings_and_answers_never_panic() {
+            use crate::lookups::{fixture, papers};
+            for s in fixture::multibyte_spellings(&[
+                "https://arxiv.org/abs/1304.1068v2",
+                "https://arxiv.org/pdf/2101.00001v1.pdf",
+                "http://arxiv.org/abs/hep-th/9901001",
+                "https://doi.org/10.48550/arXiv.1304.1068",
+                "https://www.alphaxiv.org/abs/1706.03762",
+            ]) {
+                papers::arxiv_from_uri(&s);
+                papers::arxiv_id(&s);
+            }
+            for (status, raw) in fixture::malformed_answers() {
+                let _ = papers::parse_unpaywall(status, raw, "10.1000/x");
+                let _ = papers::parse_ncbi(status, raw);
+                let _ = papers::parse_datacite_arxiv(status, raw, "1304.1068");
+                let _ = papers::parse_datacite_versions(status, raw, "10.1000/x");
+                let _ = papers::parse_crossref_preprint(status, raw, "10.1000/x", "1304.1068");
+                let _ = papers::parse_hugging_face(status, raw, "1304.1068");
+            }
+        }
+
+        /// Its key namespaces and services, as searches and cards name them.
+        #[test]
+        fn keys_and_service_names() {
+            use crate::lookups::{search_key, service_name};
+            assert_eq!(
+                search_key("arxiv", "1304.1068v2").as_deref(),
+                Some("arxiv:1304.1068")
+            );
+            assert_eq!(
+                search_key("pmcid", "PMC3672233").as_deref(),
+                Some("pmcid:PMC3672233")
+            );
+            assert_eq!(search_key("pmcid", "123"), None);
+            assert_eq!(
+                service_name("https://arxiv.org/abs/1706.03762"),
+                Some("arXiv")
+            );
+            assert_eq!(service_name("https://huggingface.co/models"), None);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::lookups::fixture;
+
+    #[test]
+    fn contact_setting() {
+        assert_eq!(contact(" info@synonym.to "), Some("info@synonym.to"));
+        assert_eq!(contact(""), None);
+        assert_eq!(contact("nobody"), None);
+        assert_eq!(contact("a b@c"), None);
+    }
+
+    /// Only an object's own page on this family's services is named after the service; any
+    /// other page there (a topic list, a search, a user's page, a page under an object) is not.
+    #[test]
+    fn only_an_objects_own_page_is_named_after_its_service() {
+        for (uri, name) in [
+            ("https://www.alphaxiv.org/abs/1706.03762", Some("alphaXiv")),
+            ("https://pubmed.ncbi.nlm.nih.gov/23903748/", Some("PubMed")),
+            (
+                "https://pmc.ncbi.nlm.nih.gov/articles/PMC3779179/",
+                Some("PubMed Central"),
+            ),
+            (
+                "https://huggingface.co/papers/1706.03762",
+                Some("Hugging Face Papers"),
+            ),
+            ("https://arxiv.org/list/cs.AI/new", None),
+            ("https://pubmed.ncbi.nlm.nih.gov/?term=x", None),
+            ("https://huggingface.co/papers", None),
+        ] {
+            assert_eq!(crate::lookups::service_name(uri), name, "{uri}");
+        }
+    }
+
+    /// Every link this family derives is named, by its URL, as the link names its service: the
+    /// object-page rule never unnames the family's own links.
+    #[test]
+    fn every_derived_link_is_named_as_its_service() {
+        let links = arxiv_links("1706.03762", "datacite");
+        assert!(!links.is_empty());
+        for link in &links {
+            assert_eq!(
+                crate::lookups::service_name(&link.uri),
+                Some(link.site.as_str()),
+                "{}",
+                link.uri
+            );
+        }
+    }
 
     const NATURE: &str = "10.1038/nature12373";
 

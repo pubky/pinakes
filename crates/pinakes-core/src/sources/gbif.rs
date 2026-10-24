@@ -35,13 +35,7 @@ pub fn key(value: &str) -> Option<u64> {
         .filter(|k| *k > 0)
 }
 
-/// A language prefix of gbif.org, e.g. `es`, `fr` or `zh-tw`.
-fn language(segment: &str) -> bool {
-    let (lang, region) = segment.split_once('-').unwrap_or((segment, "ab"));
-    [lang, region]
-        .iter()
-        .all(|s| s.len() == 2 && s.bytes().all(|b| b.is_ascii_lowercase()))
-}
+use super::biodiversity::gbif_language as language;
 
 /// What a gbif.org or GBIF API link names. The species tabs (`metrics`, `verbatim`,
 /// `literature`, `treatments`) and the occurrence's `verbatim` tab name the same object.
@@ -234,14 +228,6 @@ fn occurrence_point(v: &Value) -> Option<Point> {
     )
 }
 
-/// The id of an iNaturalist observation URL.
-fn inat_observation(uri: &str) -> Option<u64> {
-    match super::inaturalist::from_uri(uri)? {
-        super::inaturalist::Object::Observation(id) => Some(id),
-        super::inaturalist::Object::Taxon(_) => None,
-    }
-}
-
 /// An occurrence: one record of an organism at a place and time.
 pub fn parse_occurrence(status: u16, raw: &[u8], key: u64) -> Result<Option<Card>> {
     let Some(v) = json(status, raw, &[404])? else {
@@ -289,11 +275,14 @@ pub fn parse_occurrence(status: u16, raw: &[u8], key: u64) -> Result<Option<Card
         format!("{credit}, via GBIF.org")
     });
     let occurrence_id = text(&v["occurrenceID"]);
-    if let Some(id) = occurrence_id.as_deref().and_then(inat_observation) {
+    if let Some(id) = occurrence_id
+        .as_deref()
+        .and_then(super::biodiversity::inaturalist_observation)
+    {
         card.detail("inat_observation", id);
         card.link(Link::new(
             "iNaturalist",
-            super::inaturalist::page(super::inaturalist::Object::Observation(id)),
+            super::biodiversity::inaturalist_observation_page(id),
             VIA,
         ));
     }
@@ -308,6 +297,25 @@ pub struct Gbif;
 impl Source for Gbif {
     fn name(&self) -> &'static str {
         "gbif"
+    }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "gbif",
+                uri: "https://www.gbif.org/species/1341976",
+                card_type: "Taxon",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "api.gbif.org",
+                path: "/v1/species/1341976",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "species-1341976.json",
+            }],
+        })
     }
     fn reads(&self, uri: &str) -> bool {
         target(uri).is_some()

@@ -1,0 +1,22 @@
+{
+  "wikidata-games-apps": {
+    "bytes": 1103277,
+    "content_type": "application/json; charset=utf-8",
+    "file": "wikidata-games-apps.json.gz",
+    "note": "Wikidata entities (claims and sitelink URLs), CC0.",
+    "recorded_at": "2026-10-19T15:18:17+00:00",
+    "sha256": "770d225ec65872ce3d32f5b42e87781d5f2d0c890e36b746a623129df750d058",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&format=json&props=claims%7Csitelinks%2Furls&ids=Q23013817%7CQ171477"
+  },
+  "wikidata-places": {
+    "bytes": 377557,
+    "content_type": "application/json; charset=utf-8",
+    "file": "wikidata-places.json.gz",
+    "note": "Wikidata entities (claims and sitelink URLs), CC0.",
+    "recorded_at": "2026-10-19T15:17:52+00:00",
+    "sha256": "a4dd4d13036294a8ae2d6bf3e87c1ea7882d981bd2515f2bf4d2f9141b620648",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&format=json&props=claims%7Csitelinks%2Furls&ids=Q7024%7CQ153306%7CQ38945047"
+  }
+}

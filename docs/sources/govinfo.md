@@ -4,7 +4,7 @@ The US Government Publishing Office's GovInfo repository: public and private law
 sections and laws as printed in the Statutes at Large, read from their MODS metadata records.
 Public domain; no key; one request per second. GovInfo's copies of Federal Register documents and
 of the Code of Federal Regulations are other editions of what the
-[`federal_register`](federal_register.md) and [`ecfr`](ecfr.md) sources read, and are not read
+`federal_register` and `ecfr` sources read, and are not read
 here.
 
 ## Links

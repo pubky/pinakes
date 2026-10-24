@@ -1,0 +1,118 @@
+{
+  "gog-gamesdb-steam-1": {
+    "bytes": 91,
+    "content_type": "application/json",
+    "file": "gog-gamesdb-steam-1.json",
+    "recorded_at": "2026-10-19T15:18:25+00:00",
+    "sha256": "c821ac1e580f124cba5356268922c08f26f3c6a60ad9bd044694b7bd801f64d8",
+    "status": 404,
+    "url": "https://gamesdb.gog.com/platforms/steam/external_releases/1"
+  },
+  "gog-gamesdb-steam-292030": {
+    "bytes": 27237,
+    "content_type": "application/json",
+    "file": "gog-gamesdb-steam-292030.json",
+    "recorded_at": "2026-10-19T15:18:24+00:00",
+    "sha256": "637825acc446164cf3f9b18cba70fa54b2ae991900ead397cb634188df31deeb",
+    "status": 200,
+    "url": "https://gamesdb.gog.com/platforms/steam/external_releases/292030"
+  },
+  "gog-gamesdb-steam-413150": {
+    "bytes": 14950,
+    "content_type": "application/json",
+    "file": "gog-gamesdb-steam-413150.json",
+    "recorded_at": "2026-10-19T15:18:23+00:00",
+    "sha256": "c989023daa1fb715e3ed696cf183ca643d489d225b5aafa2b72b56334baad1be",
+    "status": 200,
+    "url": "https://gamesdb.gog.com/platforms/steam/external_releases/413150"
+  },
+  "gog-product-1453375253": {
+    "bytes": 2250,
+    "content_type": "application/json",
+    "file": "gog-product-1453375253.json",
+    "recorded_at": "2026-10-19T15:18:26+00:00",
+    "sha256": "cdf5679ff7f9a520e3a3040a788d67a522fd212e5d5a2f7fc17121d864d2db21",
+    "status": 200,
+    "url": "https://api.gog.com/products/1453375253"
+  },
+  "pcgamingwiki-1": {
+    "bytes": 18249,
+    "content_type": "text/html; charset=UTF-8",
+    "file": null,
+    "note": "Status only: an unknown appid answers 200 with the wiki search page and no redirect.",
+    "recorded_at": "2026-10-19T15:18:22+00:00",
+    "sha256": "2975ce5bbcdd97d9c08b80927192901d00ba0cf72e12d98f55daf11425e1cd2e",
+    "status": 200,
+    "url": "https://www.pcgamingwiki.com/api/appid.php?appid=1"
+  },
+  "pcgamingwiki-620": {
+    "bytes": 0,
+    "content_type": "text/html; charset=UTF-8",
+    "file": null,
+    "location": "https://www.pcgamingwiki.com/wiki/Portal_2",
+    "note": "Status and Location only.",
+    "recorded_at": "2026-10-19T15:18:21+00:00",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "status": 302,
+    "url": "https://www.pcgamingwiki.com/api/appid.php?appid=620"
+  },
+  "protondb-1": {
+    "bytes": 3449,
+    "content_type": "text/html; charset=utf-8",
+    "file": "protondb-1.html",
+    "recorded_at": "2026-10-19T15:18:20+00:00",
+    "sha256": "8514f0009a58c6e0acb5468f88037732b59b70af5e524f452e3bef8fb33effc5",
+    "status": 404,
+    "url": "https://www.protondb.com/api/v1/reports/summaries/1.json"
+  },
+  "protondb-620": {
+    "bytes": 147,
+    "content_type": "application/json",
+    "file": "protondb-620.json",
+    "note": "ProtonDB summary, ODbL.",
+    "recorded_at": "2026-10-19T15:18:18+00:00",
+    "sha256": "cad52f595fcb46f45cd9fc9cad78175c6959986bb97013511d7a3c7a9dbb0416",
+    "status": 200,
+    "url": "https://www.protondb.com/api/v1/reports/summaries/620.json"
+  },
+  "wikidata-q16927599": {
+    "bytes": 163686,
+    "content_type": "application/json; charset=utf-8",
+    "file": "wikidata-q16927599.json.gz",
+    "note": "AntennaPod.",
+    "recorded_at": "2026-10-19T23:09:40+00:00",
+    "sha256": "aa4bd38e9dd2e1c5ddd2a9e8215f717b73032238ba23f6dc34b41bfea78d3427",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q16927599&props=claims%7Csitelinks%2Furls&format=json"
+  },
+  "wikidata-q279446": {
+    "bytes": 241093,
+    "content_type": "application/json; charset=utf-8",
+    "file": "wikidata-q279446.json.gz",
+    "note": "Portal 2.",
+    "recorded_at": "2026-10-19T23:09:14+00:00",
+    "sha256": "007aee78ff0c4f91932b1790d9b09ada02e08666a1f6bae5a737c00a88633f56",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q279446&props=claims%7Csitelinks%2Furls&format=json"
+  },
+  "wikidata-search-p1733-620": {
+    "bytes": 719,
+    "content_type": "application/json; charset=utf-8",
+    "file": "wikidata-search-p1733-620.json",
+    "note": "The item with Steam application ID 620 (Portal 2).",
+    "recorded_at": "2026-10-19T23:09:12+00:00",
+    "sha256": "29fb340b339e7609aa7c406c8caaa3bef7ae65258d7b7cb4b6077031f1f1094d",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP1733%3D620&srlimit=5&format=json"
+  },
+  "wikidata-search-p3418-antennapod": {
+    "bytes": 360,
+    "content_type": "application/json; charset=utf-8",
+    "file": "wikidata-search-p3418-antennapod.json",
+    "note": "The item with Google Play ID de.danoeh.antennapod (AntennaPod).",
+    "recorded_at": "2026-10-19T23:09:39+00:00",
+    "sha256": "13811f7e24d156f63ac01973d680e62a3b00f7ddb219ca4ae215525eb056e95b",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP3418%3Dde.danoeh.antennapod&srlimit=5&format=json"
+  }
+}

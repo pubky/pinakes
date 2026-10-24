@@ -102,6 +102,25 @@ impl Source for HackerNews {
     fn name(&self) -> &'static str {
         "hacker_news"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "hacker_news",
+                uri: "https://news.ycombinator.com/item?id=8863",
+                card_type: "DiscussionForumPosting",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "hacker-news.firebaseio.com",
+                path: "/v0/item/8863.json",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "hn-item-8863.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         of_uri(uri).is_some()
     }

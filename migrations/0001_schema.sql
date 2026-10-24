@@ -539,6 +539,17 @@ CREATE TABLE group_runtime (
     settings jsonb
 );
 
+-- The hub key namespaces that name one object each, as every source that records them has
+-- registered them (`groups::configure`, at start): a group holds at most one value of each. The
+-- rule outlives the source: a removed source's keys stay until they expire, and group as before.
+CREATE TABLE single_object_namespace (
+    namespace text PRIMARY KEY,
+    source text NOT NULL,
+    seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT single_object_namespace_namespace_check CHECK ((namespace ~ '^[a-z][a-z0-9_:-]{0,63}$')),
+    CONSTRAINT single_object_namespace_source_check CHECK ((source ~ '^[a-z0-9_]{1,32}$'))
+);
+
 -- A group member's document, as its card shows it: a resource's, an occurrence's, or an event
 -- reference's.
 CREATE VIEW group_member_document AS

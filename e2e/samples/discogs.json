@@ -1,0 +1,30 @@
+[
+  {
+    "kind": "discogs_master",
+    "uri": "https://www.discogs.com/master/21491-Radiohead-OK-Computer",
+    "type": "MusicAlbum",
+    "derived": [
+      "Apple Music"
+    ]
+  },
+  {
+    "kind": "discogs_album",
+    "uri": "https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE",
+    "type": "MusicAlbum",
+    "group_with": "discogs_master"
+  },
+  {
+    "kind": "discogs_artist",
+    "uri": "https://www.discogs.com/artist/3840-Radiohead",
+    "type": "MusicGroup",
+    "derived": [
+      "Deezer"
+    ]
+  },
+  {
+    "kind": "discogs_artist_spotify",
+    "uri": "https://open.spotify.com/artist/4Z8W4fKeB5YxbusRsdQVPb",
+    "type": "MusicGroup",
+    "group_with": "discogs_artist"
+  }
+]

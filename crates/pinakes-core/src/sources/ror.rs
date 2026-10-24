@@ -217,6 +217,25 @@ impl Source for Ror {
     fn name(&self) -> &'static str {
         "ror"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "ror",
+                uri: "https://ror.org/03yrm5c26",
+                card_type: "ArchiveOrganization",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "api.ror.org",
+                path: "/v2/organizations/03yrm5c26",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "org-03yrm5c26.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         target(uri).is_some()
     }
@@ -504,5 +523,12 @@ mod tests {
         assert!(parse(200, &read("org-042nb2s44.json"), "03yrm5c26").is_err());
         assert!(parse(429, b"", "03yrm5c26").is_err());
         assert!(parse(502, b"", "03yrm5c26").is_err());
+    }
+
+    #[test]
+    fn ror_ids_with_multibyte_characters() {
+        // Nine bytes whose seventh byte is inside `é`.
+        assert_eq!(ror_id("0abcdeé1"), None);
+        assert!(!Ror.reads("https://ror.org/0abcdeé1"));
     }
 }

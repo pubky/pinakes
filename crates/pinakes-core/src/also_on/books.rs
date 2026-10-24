@@ -373,6 +373,9 @@ pub struct Books;
 
 #[async_trait]
 impl Source for Books {
+    fn link_type(&self, uri: &str) -> Option<Option<&'static str>> {
+        book(uri).map(|_| Some("Book"))
+    }
     fn id(&self) -> &'static str {
         "books"
     }
@@ -512,6 +515,21 @@ impl Books {
 mod tests {
     use super::*;
     use crate::also_on::media::fixture;
+
+    /// Its links are typed by what they are, whatever their pages call themselves
+    /// (`media::link_type`); a page under an object is not typed.
+    #[test]
+    fn its_links_are_typed_by_what_they_are() {
+        for (uri, kind) in [
+            (
+                "https://openlibrary.org/works/OL27482W/The_Hobbit",
+                Some("Book"),
+            ),
+            ("https://openlibrary.org/books/OL7353617M", Some("Book")),
+        ] {
+            assert_eq!(super::super::media::link_type(uri), kind, "{uri}");
+        }
+    }
 
     fn read(name: &str) -> Vec<u8> {
         fixture::read("books", name)

@@ -17,37 +17,17 @@
 //! `podcast:apple_episode:{id}` and `podcast:item:{show GUID}:{SHA-256 of the item GUID}`, which
 //! every link to the episode shares; and the show's `wikidata:Q…`.
 use super::{
-    media::{self, digits, property, slug, Deferred, Property},
+    media::{self, digits, guid, property, slug, Deferred, Property},
     Context, Fact, Found, Key, Link, Source, Subject,
 };
 use crate::{
-    event::adapters::SecretKey,
     hubs::{self, wikidata},
+    podcast_index_api::{index_page, pi_episode_request, pi_headers, pi_request, Ask},
     resolver::{egress::FetchOptions, RetryLater},
 };
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
-
-/// The Podcast Index API's key and secret (`[podcast_index]`, or `PINAKES__PODCAST_INDEX__KEY`
-/// and `__SECRET`). Without both, Podcast Index is never asked.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct PodcastIndexConfig {
-    pub key: Option<SecretKey>,
-    pub secret: Option<SecretKey>,
-}
-impl PodcastIndexConfig {
-    pub(crate) fn pair(&self) -> Option<(&str, &str)> {
-        match (self.key.as_deref(), self.secret.as_deref()) {
-            (Some(k), Some(s)) if !k.trim().is_empty() && !s.trim().is_empty() => {
-                Some((k.trim(), s.trim()))
-            }
-            _ => None,
-        }
-    }
-}
 
 /// What a subject names.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,20 +101,6 @@ pub fn player(uri: &str) -> Option<(u64, &'static str)> {
         ["itunes", id] => Some((number(id)?, site)),
         _ => None,
     }
-}
-/// The feed (and episode) a Podcast Index page names: `podcastindex.org/podcast/{feed id}`,
-/// with `?episode={episode id}`.
-pub fn index_page(uri: &str) -> Option<(u64, Option<u64>)> {
-    let url = plain(uri, &["podcastindex.org", "www.podcastindex.org"])?;
-    let feed = match segments(&url).as_slice() {
-        ["podcast", id] => number(id)?,
-        _ => return None,
-    };
-    let episode = match url.query_pairs().find(|(k, _)| k == "episode") {
-        Some((_, e)) => Some(number(&e)?),
-        None => None,
-    };
-    Some((feed, episode))
 }
 fn number(v: &str) -> Option<u64> {
     digits(v).then(|| v.parse().ok()).flatten()
@@ -245,11 +211,6 @@ pub fn derived_guid(feed_url: &str) -> Option<String> {
         &hex[16..20],
         &hex[20..]
     ))
-}
-/// A GUID in lower case, if it is one.
-pub fn guid(v: &str) -> Option<String> {
-    let v = v.trim().to_ascii_lowercase();
-    media::uuid(&v).then_some(v)
 }
 /// The largest podcast feed this source reads (a show's whole back catalogue; the page cap is
 /// 1 MiB).
@@ -435,40 +396,6 @@ fn by_track(episodes: &[Episode], track: u64) -> Option<&Episode> {
     episodes.iter().find(|e| e.track == track)
 }
 
-const PODCAST_INDEX: &str = "https://api.podcastindex.org/api/1.0";
-/// What Podcast Index is asked.
-#[derive(Clone, Copy, Debug)]
-pub enum Ask<'a> {
-    Apple(u64),
-    Feed(&'a str),
-    Guid(&'a str),
-    FeedId(u64),
-}
-pub fn pi_request(ask: Ask) -> String {
-    let enc = |v: &str| url::form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>();
-    match ask {
-        Ask::Apple(id) => format!("{PODCAST_INDEX}/podcasts/byitunesid?id={id}"),
-        Ask::Feed(url) => format!("{PODCAST_INDEX}/podcasts/byfeedurl?url={}", enc(url)),
-        Ask::Guid(g) => format!("{PODCAST_INDEX}/podcasts/byguid?guid={}", enc(g)),
-        Ask::FeedId(id) => format!("{PODCAST_INDEX}/podcasts/byfeedid?id={id}"),
-    }
-}
-/// Podcast Index's episode record.
-pub fn pi_episode_request(id: u64) -> String {
-    format!("{PODCAST_INDEX}/episodes/byid?id={id}")
-}
-/// Podcast Index's signed headers: the key, the time, and SHA-1 of key, secret and time.
-pub fn pi_headers(key: &str, secret: &str, now: i64) -> Vec<(&'static str, String)> {
-    let hash = Sha1::digest(format!("{key}{secret}{now}").as_bytes());
-    vec![
-        ("X-Auth-Key", key.into()),
-        ("X-Auth-Date", now.to_string()),
-        (
-            "Authorization",
-            hash.iter().map(|b| format!("{b:02x}")).collect(),
-        ),
-    ]
-}
 /// A feed as Podcast Index records it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexFeed {
@@ -860,6 +787,19 @@ impl Podcasts {
 
 #[async_trait]
 impl Source for Podcasts {
+    fn link_type(&self, uri: &str) -> Option<Option<&'static str>> {
+        let episode = |e: Option<u64>| {
+            if e.is_some() {
+                "PodcastEpisode"
+            } else {
+                "PodcastSeries"
+            }
+        };
+        if let Some((_, e)) = apple(uri).or_else(|| index_page(uri)) {
+            return Some(Some(episode(e)));
+        }
+        player(uri).map(|_| Some("PodcastSeries"))
+    }
     fn id(&self) -> &'static str {
         "podcasts"
     }
@@ -1073,6 +1013,36 @@ impl Source for Podcasts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Its links are typed by what they are, whatever their pages call themselves
+    /// (`media::link_type`); a page under an object is not typed.
+    #[test]
+    fn its_links_are_typed_by_what_they_are() {
+        for (uri, kind) in [
+            (
+                "https://podcastindex.org/podcast/577105",
+                Some("PodcastSeries"),
+            ),
+            (
+                "https://podcastindex.org/podcast/743229?episode=61953304662",
+                Some("PodcastEpisode"),
+            ),
+            (
+                "https://podcasts.apple.com/us/podcast/darknet-diaries/id1296350485",
+                Some("PodcastSeries"),
+            ),
+            (
+                "https://podcasts.apple.com/us/podcast/x/id1296350485?i=1000600000000",
+                Some("PodcastEpisode"),
+            ),
+            ("https://pca.st/itunes/1296350485", Some("PodcastSeries")),
+            ("https://fountain.fm/show/abc123", Some("PodcastSeries")),
+            ("https://fountain.fm/episode/abc123", Some("PodcastEpisode")),
+        ] {
+            assert_eq!(super::super::media::link_type(uri), kind, "{uri}");
+        }
+    }
+
     use crate::{also_on::media::fixture, model::ResourceMeta};
 
     fn read(name: &str) -> Vec<u8> {
@@ -1328,38 +1298,6 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-    }
-
-    #[test]
-    fn podcast_index_requests_are_signed() {
-        assert_eq!(
-            pi_request(Ask::Feed("https://feeds.simplecast.com/54nAGcIl")),
-            "https://api.podcastindex.org/api/1.0/podcasts/byfeedurl?url=https%3A%2F%2Ffeeds.simplecast.com%2F54nAGcIl"
-        );
-        assert_eq!(
-            pi_request(Ask::Apple(DAILY)),
-            "https://api.podcastindex.org/api/1.0/podcasts/byitunesid?id=1200361736"
-        );
-        assert_eq!(
-            pi_request(Ask::Guid("304b84f0-07b0-5265-b6b7-da5cf5aeb56e")),
-            "https://api.podcastindex.org/api/1.0/podcasts/byguid?guid=304b84f0-07b0-5265-b6b7-da5cf5aeb56e"
-        );
-        assert_eq!(
-            pi_headers("KEY", "SECRET", 1792440000),
-            [
-                ("X-Auth-Key", "KEY".to_string()),
-                ("X-Auth-Date", "1792440000".into()),
-                (
-                    "Authorization",
-                    "2d50ebc58cd40f3e713415c20e206d6948fcff1d".into()
-                ),
-            ]
-        );
-        let config: PodcastIndexConfig =
-            serde_json::from_str(r#"{"key":"KEY","secret":" "}"#).unwrap();
-        assert_eq!(config.pair(), None, "an empty secret is none");
-        assert!(!format!("{config:?}").contains("KEY"));
-        assert!(!serde_json::to_string(&config).unwrap().contains("KEY"));
     }
 
     #[test]

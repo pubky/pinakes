@@ -69,6 +69,18 @@ names for them at their level. A master's card lists the album's pages on other 
 names none for a release group (its editions have them), so they come from the one Wikidata item
 MusicBrainz relates the release group to, when that item names the release group back.
 
+The `discogs` also-on source: a Discogs artist, master or release gets `discogs:{kind}:{id}` as key, and a release
+up to four of its barcodes as facts, from the record its card reads (shared); a release that
+lists one barcode also gets it as a `upc:` key (a box set lists each disc's), which
+`deezer` and `itunes` then look up. Never by title or catalogue number.
+
+Each Discogs release costs one Discogs request (the one its card makes), and a Discogs master one
+Wikidata request (the item MusicBrainz relates its release group to). When Discogs' record fails,
+the link's own key is recorded and the run comes back after a failed run's backoff
+([operations](../operations.md#also-on)).
+
+Keys: `discogs:{artist|master|release}:{id}`: each names one object, so a [group](../api.md#groups) holds at most one value of each, and [`key=`](../api.md#search) finds the links that carry it.
+
 ## Examples
 
 - `https://www.discogs.com/master/21491-Radiohead-OK-Computer`

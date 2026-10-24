@@ -477,7 +477,7 @@
             ]
           },
           "facts": {
-            "description": "The fields that API names for the object, and the facts the also-on sources read for it\n(`isrc`, `upc`, `mbid`, `mbid_was`, `artist`, `artist_type`, `duration`, `performer`,\n`performer_mbid`, `performer_link`, …), by name; several values are joined with \"; \".\n`null` when there are none.",
+            "description": "The fields that API names for the object, and the facts the also-on sources read for it\n(such as a music link's `isrc`, `upc` and `mbid`; each source's page in docs/sources lists\nits own), by name; several values are joined with \"; \".\n`null` when there are none.",
             "type": [
               "object",
               "null"
@@ -1743,28 +1743,10 @@
                     "uri": "https://api.weezevent.com/sites/view/live/E1114506.ics"
                   }
                 },
-                "resolve-artic-1": {
-                  "summary": "https://www.artic.edu/artworks/27992",
-                  "value": {
-                    "uri": "https://www.artic.edu/artworks/27992"
-                  }
-                },
                 "resolve-bitcoinops-org-feed-xml": {
                   "summary": "https://bitcoinops.org/feed.xml",
                   "value": {
                     "uri": "https://bitcoinops.org/feed.xml"
-                  }
-                },
-                "resolve-bluesky-1": {
-                  "summary": "https://bsky.app/profile/bsky.app/post/3mxzez2m7wk2r",
-                  "value": {
-                    "uri": "https://bsky.app/profile/bsky.app/post/3mxzez2m7wk2r"
-                  }
-                },
-                "resolve-bluesky-2": {
-                  "summary": "https://bsky.app/profile/bsky.app",
-                  "value": {
-                    "uri": "https://bsky.app/profile/bsky.app"
                   }
                 },
                 "resolve-c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey-pub-map": {
@@ -1803,36 +1785,6 @@
                     "uri": "https://casa.io/"
                   }
                 },
-                "resolve-cleveland-1": {
-                  "summary": "https://www.clevelandart.org/art/1958.39",
-                  "value": {
-                    "uri": "https://www.clevelandart.org/art/1958.39"
-                  }
-                },
-                "resolve-clinicaltrials-1": {
-                  "summary": "https://clinicaltrials.gov/study/NCT04368728",
-                  "value": {
-                    "uri": "https://clinicaltrials.gov/study/NCT04368728"
-                  }
-                },
-                "resolve-commons-1": {
-                  "summary": "https://commons.wikimedia.org/wiki/File:Golden_Gate_Bridge_as_seen_from_Battery_East.jpg",
-                  "value": {
-                    "uri": "https://commons.wikimedia.org/wiki/File:Golden_Gate_Bridge_as_seen_from_Battery_East.jpg"
-                  }
-                },
-                "resolve-commons-2": {
-                  "summary": "https://commons.wikimedia.org/wiki/File:Bitcoin.svg",
-                  "value": {
-                    "uri": "https://commons.wikimedia.org/wiki/File:Bitcoin.svg"
-                  }
-                },
-                "resolve-courtlistener-1": {
-                  "summary": "https://www.courtlistener.com/opinion/2812209/obergefell-v-hodges/",
-                  "value": {
-                    "uri": "https://www.courtlistener.com/opinion/2812209/obergefell-v-hodges/"
-                  }
-                },
                 "resolve-de-wikipedia-org-wiki-immanuel-kant": {
                   "summary": "https://de.wikipedia.org/wiki/Immanuel_Kant",
                   "value": {
@@ -1845,54 +1797,6 @@
                     "uri": "pubky://dir8gnjfnhdn5cpo8gxmfxfpqm9kffkoqpmsefcjkdpkxo15d5ey/pub/pinakes.e2e/none.json"
                   }
                 },
-                "resolve-discogs-1": {
-                  "summary": "https://www.discogs.com/master/21491-Radiohead-OK-Computer",
-                  "value": {
-                    "uri": "https://www.discogs.com/master/21491-Radiohead-OK-Computer"
-                  }
-                },
-                "resolve-discogs-2": {
-                  "summary": "https://www.discogs.com/release/83182-Radiohead-OK-Computer",
-                  "value": {
-                    "uri": "https://www.discogs.com/release/83182-Radiohead-OK-Computer"
-                  }
-                },
-                "resolve-discogs-3": {
-                  "summary": "https://www.discogs.com/artist/3840-Radiohead",
-                  "value": {
-                    "uri": "https://www.discogs.com/artist/3840-Radiohead"
-                  }
-                },
-                "resolve-discourse-1": {
-                  "summary": "https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304",
-                  "value": {
-                    "uri": "https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304"
-                  }
-                },
-                "resolve-discourse-2": {
-                  "summary": "https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304/2",
-                  "value": {
-                    "uri": "https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304/2"
-                  }
-                },
-                "resolve-docker-hub-1": {
-                  "summary": "https://hub.docker.com/_/nginx",
-                  "value": {
-                    "uri": "https://hub.docker.com/_/nginx"
-                  }
-                },
-                "resolve-docker-hub-2": {
-                  "summary": "https://hub.docker.com/r/btcpayserver/btcpayserver",
-                  "value": {
-                    "uri": "https://hub.docker.com/r/btcpayserver/btcpayserver"
-                  }
-                },
-                "resolve-docker-hub-3": {
-                  "summary": "https://hub.docker.com/r/lncm/bitcoind/tags",
-                  "value": {
-                    "uri": "https://hub.docker.com/r/lncm/bitcoind/tags"
-                  }
-                },
                 "resolve-doi-org-10-1038-nature12373": {
                   "summary": "https://doi.org/10.1038/nature12373",
                   "value": {
@@ -1903,18 +1807,6 @@
                   "summary": "https://dx.doi.org/10.1038/nature12373",
                   "value": {
                     "uri": "https://dx.doi.org/10.1038/nature12373"
-                  }
-                },
-                "resolve-ecfr-1": {
-                  "summary": "https://www.ecfr.gov/current/title-17/section-240.10b-5",
-                  "value": {
-                    "uri": "https://www.ecfr.gov/current/title-17/section-240.10b-5"
-                  }
-                },
-                "resolve-ecfr-2": {
-                  "summary": "https://www.ecfr.gov/current/title-14/chapter-I/subchapter-C/part-39",
-                  "value": {
-                    "uri": "https://www.ecfr.gov/current/title-14/chapter-I/subchapter-C/part-39"
                   }
                 },
                 "resolve-en-wikipedia-org-wiki-bitcoin": {
@@ -1933,18 +1825,6 @@
                   "summary": "https://en.wikipedia.org/wiki/Lugano",
                   "value": {
                     "uri": "https://en.wikipedia.org/wiki/Lugano"
-                  }
-                },
-                "resolve-eur-lex-1": {
-                  "summary": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32016R0679",
-                  "value": {
-                    "uri": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32016R0679"
-                  }
-                },
-                "resolve-eur-lex-2": {
-                  "summary": "https://eur-lex.europa.eu/eli/reg/2023/1114/oj",
-                  "value": {
-                    "uri": "https://eur-lex.europa.eu/eli/reg/2023/1114/oj"
                   }
                 },
                 "resolve-eventfrog-ch-stream-de-event-7503702322012243890-ics": {
@@ -1983,94 +1863,10 @@
                     "uri": "https://example.org/"
                   }
                 },
-                "resolve-federal-register-1": {
-                  "summary": "fr:2026-18291",
-                  "value": {
-                    "uri": "fr:2026-18291"
-                  }
-                },
-                "resolve-federal-register-2": {
-                  "summary": "https://www.federalregister.gov/documents/2026/09/09/2026-18291/self-regulatory-organizations-nasdaq-texas-llc-notice-of-filing-and-order-granting-accelerated",
-                  "value": {
-                    "uri": "https://www.federalregister.gov/documents/2026/09/09/2026-18291/self-regulatory-organizations-nasdaq-texas-llc-notice-of-filing-and-order-granting-accelerated"
-                  }
-                },
-                "resolve-fedlex-1": {
-                  "summary": "https://www.fedlex.admin.ch/eli/cc/1999/404/de",
-                  "value": {
-                    "uri": "https://www.fedlex.admin.ch/eli/cc/1999/404/de"
-                  }
-                },
-                "resolve-fedlex-2": {
-                  "summary": "https://www.fedlex.admin.ch/eli/cc/24/233_245_233/fr",
-                  "value": {
-                    "uri": "https://www.fedlex.admin.ch/eli/cc/24/233_245_233/fr"
-                  }
-                },
-                "resolve-feed-1": {
-                  "summary": "https://www.theblock.co/news/business/2026-10-19-mesh-visa-partner-spend-crypto-stablecoins-421058",
-                  "value": {
-                    "uri": "https://www.theblock.co/news/business/2026-10-19-mesh-visa-partner-spend-crypto-stablecoins-421058"
-                  }
-                },
-                "resolve-figshare-1": {
-                  "summary": "https://figshare.com/articles/dataset/Garden_data_set/1018700",
-                  "value": {
-                    "uri": "https://figshare.com/articles/dataset/Garden_data_set/1018700"
-                  }
-                },
-                "resolve-figshare-2": {
-                  "summary": "https://figshare.com/articles/presentation/Using_APIs_to_customise_repositories_and_engage_audiences/5616445",
-                  "value": {
-                    "uri": "https://figshare.com/articles/presentation/Using_APIs_to_customise_repositories_and_engage_audiences/5616445"
-                  }
-                },
                 "resolve-fixr-co-event-halloween-2026-welcome-to-the-haunted-hotel-ti": {
                   "summary": "https://fixr.co/event/halloween-2026-welcome-to-the-haunted-hotel-tickets-404456056",
                   "value": {
                     "uri": "https://fixr.co/event/halloween-2026-welcome-to-the-haunted-hotel-tickets-404456056"
-                  }
-                },
-                "resolve-forgejo-1": {
-                  "summary": "https://codeberg.org/forgejo/forgejo",
-                  "value": {
-                    "uri": "https://codeberg.org/forgejo/forgejo"
-                  }
-                },
-                "resolve-forgejo-2": {
-                  "summary": "https://codeberg.org/forgejo/forgejo/src/branch/forgejo/README.md",
-                  "value": {
-                    "uri": "https://codeberg.org/forgejo/forgejo/src/branch/forgejo/README.md"
-                  }
-                },
-                "resolve-forgejo-3": {
-                  "summary": "https://codeberg.org/forgejo/forgejo/releases/tag/v11.0.1",
-                  "value": {
-                    "uri": "https://codeberg.org/forgejo/forgejo/releases/tag/v11.0.1"
-                  }
-                },
-                "resolve-gbif-1": {
-                  "summary": "https://www.gbif.org/species/1341976",
-                  "value": {
-                    "uri": "https://www.gbif.org/species/1341976"
-                  }
-                },
-                "resolve-gbif-2": {
-                  "summary": "https://www.gbif.org/occurrence/5938027305",
-                  "value": {
-                    "uri": "https://www.gbif.org/occurrence/5938027305"
-                  }
-                },
-                "resolve-ghost-1": {
-                  "summary": "https://www.privacyguides.org/news/2026/10/19/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/",
-                  "value": {
-                    "uri": "https://www.privacyguides.org/news/2026/10/19/leaked-document-suggests-cellebrite-can-wirelessly-exploit-iphones/"
-                  }
-                },
-                "resolve-github-1": {
-                  "summary": "https://github.com/BurntSushi/ripgrep",
-                  "value": {
-                    "uri": "https://github.com/BurntSushi/ripgrep"
                   }
                 },
                 "resolve-github-com-pubky-pubky-core-releases-atom": {
@@ -2079,124 +1875,16 @@
                     "uri": "https://github.com/pubky/pubky-core/releases.atom"
                   }
                 },
-                "resolve-gitlab-1": {
-                  "summary": "https://gitlab.com/inkscape/inkscape",
-                  "value": {
-                    "uri": "https://gitlab.com/inkscape/inkscape"
-                  }
-                },
-                "resolve-gitlab-2": {
-                  "summary": "https://gitlab.com/inkscape/inkscape/-/blob/master/README.md",
-                  "value": {
-                    "uri": "https://gitlab.com/inkscape/inkscape/-/blob/master/README.md"
-                  }
-                },
-                "resolve-gitlab-3": {
-                  "summary": "https://gitlab.com/inkscape/inkscape/-/releases/INKSCAPE_1_4",
-                  "value": {
-                    "uri": "https://gitlab.com/inkscape/inkscape/-/releases/INKSCAPE_1_4"
-                  }
-                },
-                "resolve-gleif-1": {
-                  "summary": "lei:KY37LUS27QQX7BB93L28",
-                  "value": {
-                    "uri": "lei:KY37LUS27QQX7BB93L28"
-                  }
-                },
-                "resolve-gleif-2": {
-                  "summary": "https://api.gleif.org/api/v1/lei-records/5493001KJTIIGC8Y1R12",
-                  "value": {
-                    "uri": "https://api.gleif.org/api/v1/lei-records/5493001KJTIIGC8Y1R12"
-                  }
-                },
-                "resolve-govinfo-1": {
-                  "summary": "https://www.govinfo.gov/app/details/PLAW-117publ58",
-                  "value": {
-                    "uri": "https://www.govinfo.gov/app/details/PLAW-117publ58"
-                  }
-                },
-                "resolve-govinfo-2": {
-                  "summary": "https://www.govinfo.gov/link/uscode/26/501",
-                  "value": {
-                    "uri": "https://www.govinfo.gov/link/uscode/26/501"
-                  }
-                },
                 "resolve-grounds-stager-co-shop-default-events-111608505": {
                   "summary": "https://grounds.stager.co/shop/default/events/111608505",
                   "value": {
                     "uri": "https://grounds.stager.co/shop/default/events/111608505"
                   }
                 },
-                "resolve-hacker-news-1": {
-                  "summary": "https://news.ycombinator.com/item?id=8863",
-                  "value": {
-                    "uri": "https://news.ycombinator.com/item?id=8863"
-                  }
-                },
-                "resolve-hacker-news-2": {
-                  "summary": "https://hnsignals.com/signal/2921983",
-                  "value": {
-                    "uri": "https://hnsignals.com/signal/2921983"
-                  }
-                },
-                "resolve-huggingface-1": {
-                  "summary": "https://huggingface.co/meta-llama/Llama-2-7b-hf",
-                  "value": {
-                    "uri": "https://huggingface.co/meta-llama/Llama-2-7b-hf"
-                  }
-                },
-                "resolve-huggingface-2": {
-                  "summary": "https://huggingface.co/datasets/openai/gsm8k",
-                  "value": {
-                    "uri": "https://huggingface.co/datasets/openai/gsm8k"
-                  }
-                },
-                "resolve-huggingface-3": {
-                  "summary": "https://huggingface.co/spaces/huggingface-projects/llama-2-7b-chat",
-                  "value": {
-                    "uri": "https://huggingface.co/spaces/huggingface-projects/llama-2-7b-chat"
-                  }
-                },
-                "resolve-inaturalist-1": {
-                  "summary": "https://www.inaturalist.org/observations/333069440",
-                  "value": {
-                    "uri": "https://www.inaturalist.org/observations/333069440"
-                  }
-                },
-                "resolve-inaturalist-2": {
-                  "summary": "https://www.inaturalist.org/taxa/47219-Apis-mellifera",
-                  "value": {
-                    "uri": "https://www.inaturalist.org/taxa/47219-Apis-mellifera"
-                  }
-                },
                 "resolve-infomaniak-events-en-ch-conferences-seminaire-des-autorites": {
                   "summary": "https://infomaniak.events/en-ch/conferences/seminaire-des-autorites-2026/92392f2a-6711-4917-b9e9-60c88e8c550a/events/396911",
                   "value": {
                     "uri": "https://infomaniak.events/en-ch/conferences/seminaire-des-autorites-2026/92392f2a-6711-4917-b9e9-60c88e8c550a/events/396911"
-                  }
-                },
-                "resolve-internet-archive-1": {
-                  "summary": "https://archive.org/details/bitcoin-whitepaper",
-                  "value": {
-                    "uri": "https://archive.org/details/bitcoin-whitepaper"
-                  }
-                },
-                "resolve-legislation-gov-uk-1": {
-                  "summary": "https://www.legislation.gov.uk/ukpga/2018/12/contents",
-                  "value": {
-                    "uri": "https://www.legislation.gov.uk/ukpga/2018/12/contents"
-                  }
-                },
-                "resolve-legislation-gov-uk-2": {
-                  "summary": "https://www.legislation.gov.uk/uksi/2019/419/made",
-                  "value": {
-                    "uri": "https://www.legislation.gov.uk/uksi/2019/419/made"
-                  }
-                },
-                "resolve-lobsters-1": {
-                  "summary": "https://lobste.rs/s/wtthju/a5_v1_0",
-                  "value": {
-                    "uri": "https://lobste.rs/s/wtthju/a5_v1_0"
                   }
                 },
                 "resolve-luma-com-376whqyw": {
@@ -2209,84 +1897,6 @@
                   "summary": "https://luma.com/je0oh6s1",
                   "value": {
                     "uri": "https://luma.com/je0oh6s1"
-                  }
-                },
-                "resolve-mastodon-1": {
-                  "summary": "https://mastodon.social/@Gargron/1",
-                  "value": {
-                    "uri": "https://mastodon.social/@Gargron/1"
-                  }
-                },
-                "resolve-media-records-1": {
-                  "summary": "https://www.themoviedb.org/movie/603",
-                  "value": {
-                    "uri": "https://www.themoviedb.org/movie/603"
-                  }
-                },
-                "resolve-media-records-2": {
-                  "summary": "https://www.themoviedb.org/tv/1396",
-                  "value": {
-                    "uri": "https://www.themoviedb.org/tv/1396"
-                  }
-                },
-                "resolve-media-records-3": {
-                  "summary": "https://trakt.tv/shows/breaking-bad",
-                  "value": {
-                    "uri": "https://trakt.tv/shows/breaking-bad"
-                  }
-                },
-                "resolve-media-records-4": {
-                  "summary": "https://www.netflix.com/title/70143836",
-                  "value": {
-                    "uri": "https://www.netflix.com/title/70143836"
-                  }
-                },
-                "resolve-media-records-5": {
-                  "summary": "https://openlibrary.org/works/OL27482W",
-                  "value": {
-                    "uri": "https://openlibrary.org/works/OL27482W"
-                  }
-                },
-                "resolve-media-records-6": {
-                  "summary": "https://www.goodreads.com/work/editions/1540236",
-                  "value": {
-                    "uri": "https://www.goodreads.com/work/editions/1540236"
-                  }
-                },
-                "resolve-media-records-7": {
-                  "summary": "https://www.tvmaze.com/shows/169/breaking-bad",
-                  "value": {
-                    "uri": "https://www.tvmaze.com/shows/169/breaking-bad"
-                  }
-                },
-                "resolve-media-records-8": {
-                  "summary": "https://podcastindex.org/podcast/577105",
-                  "value": {
-                    "uri": "https://podcastindex.org/podcast/577105"
-                  }
-                },
-                "resolve-mempool-1": {
-                  "summary": "https://mempool.space/tx/a1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d",
-                  "value": {
-                    "uri": "https://mempool.space/tx/a1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d"
-                  }
-                },
-                "resolve-mempool-2": {
-                  "summary": "https://mempool.space/block/481824",
-                  "value": {
-                    "uri": "https://mempool.space/block/481824"
-                  }
-                },
-                "resolve-mempool-3": {
-                  "summary": "https://mempool.space/lightning/node/03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f",
-                  "value": {
-                    "uri": "https://mempool.space/lightning/node/03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f"
-                  }
-                },
-                "resolve-met-1": {
-                  "summary": "https://www.metmuseum.org/art/collection/search/436535",
-                  "value": {
-                    "uri": "https://www.metmuseum.org/art/collection/search/436535"
                   }
                 },
                 "resolve-mobilizon-fr-events-86a665ae-e495-4e4f-88d4-4cffd44a82f1": {
@@ -2391,30 +2001,6 @@
                     "uri": "https://partiful.com/e/AK0FMV5lu2PmfSyxuXwY"
                   }
                 },
-                "resolve-pdb-1": {
-                  "summary": "https://www.rcsb.org/structure/4HHB",
-                  "value": {
-                    "uri": "https://www.rcsb.org/structure/4HHB"
-                  }
-                },
-                "resolve-pdb-2": {
-                  "summary": "https://www.rcsb.org/structure/6VXX",
-                  "value": {
-                    "uri": "https://www.rcsb.org/structure/6VXX"
-                  }
-                },
-                "resolve-podcast-index-1": {
-                  "summary": "https://podcastindex.org/podcast/48166",
-                  "value": {
-                    "uri": "https://podcastindex.org/podcast/48166"
-                  }
-                },
-                "resolve-podcast-index-2": {
-                  "summary": "https://podcastindex.org/podcast/255500?episode=61684996715",
-                  "value": {
-                    "uri": "https://podcastindex.org/podcast/255500?episode=61684996715"
-                  }
-                },
                 "resolve-posh-vip-e-halloween-2026-eden": {
                   "summary": "https://posh.vip/e/halloween-2026-eden",
                   "value": {
@@ -2427,34 +2013,10 @@
                     "uri": "https://pretix.eu/demo/democon/ical/"
                   }
                 },
-                "resolve-pubchem-1": {
-                  "summary": "https://pubchem.ncbi.nlm.nih.gov/compound/2244",
-                  "value": {
-                    "uri": "https://pubchem.ncbi.nlm.nih.gov/compound/2244"
-                  }
-                },
-                "resolve-pubchem-2": {
-                  "summary": "https://pubchem.ncbi.nlm.nih.gov/compound/2519",
-                  "value": {
-                    "uri": "https://pubchem.ncbi.nlm.nih.gov/compound/2519"
-                  }
-                },
                 "resolve-pubky-org": {
                   "summary": "https://pubky.org/",
                   "value": {
                     "uri": "https://pubky.org/"
-                  }
-                },
-                "resolve-public-inbox-1": {
-                  "summary": "https://gnusha.org/pi/bitcoindev/atCSAVprBE-tAnN3@erisian.com.au/",
-                  "value": {
-                    "uri": "https://gnusha.org/pi/bitcoindev/atCSAVprBE-tAnN3@erisian.com.au/"
-                  }
-                },
-                "resolve-public-inbox-2": {
-                  "summary": "https://lore.kernel.org/git/pull.2458.git.git.1792437798463.gitgitgadget@gmail.com/",
-                  "value": {
-                    "uri": "https://lore.kernel.org/git/pull.2458.git.git.1792437798463.gitgitgadget@gmail.com/"
                   }
                 },
                 "resolve-radiohead-bandcamp-com-album-ok-computer": {
@@ -2463,64 +2025,10 @@
                     "uri": "https://radiohead.bandcamp.com/album/ok-computer"
                   }
                 },
-                "resolve-ror-1": {
-                  "summary": "https://ror.org/03yrm5c26",
-                  "value": {
-                    "uri": "https://ror.org/03yrm5c26"
-                  }
-                },
-                "resolve-ror-2": {
-                  "summary": "https://ror.org/042nb2s44",
-                  "value": {
-                    "uri": "https://ror.org/042nb2s44"
-                  }
-                },
                 "resolve-s3-eu-west-1-amazonaws-com-starticket-wwwroot-ticketing-feed": {
                   "summary": "https://s3-eu-west-1.amazonaws.com/starticket/wwwroot/ticketing/feeds/starticketfeed_D.xml",
                   "value": {
                     "uri": "https://s3-eu-west-1.amazonaws.com/starticket/wwwroot/ticketing/feeds/starticketfeed_D.xml"
-                  }
-                },
-                "resolve-sec-1": {
-                  "summary": "https://www.sec.gov/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959-index.htm",
-                  "value": {
-                    "uri": "https://www.sec.gov/Archives/edgar/data/2103612/000110465926000959/0001104659-26-000959-index.htm"
-                  }
-                },
-                "resolve-sec-2": {
-                  "summary": "https://www.sec.gov/Archives/edgar/data/2070457/000121390026079805/ea029862901ex99-1.htm",
-                  "value": {
-                    "uri": "https://www.sec.gov/Archives/edgar/data/2070457/000121390026079805/ea029862901ex99-1.htm"
-                  }
-                },
-                "resolve-sec-3": {
-                  "summary": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0002070457",
-                  "value": {
-                    "uri": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0002070457"
-                  }
-                },
-                "resolve-sec-4": {
-                  "summary": "https://www.sec.gov/files/rules/sro/nasdaqtx/2026/34-106268.pdf",
-                  "value": {
-                    "uri": "https://www.sec.gov/files/rules/sro/nasdaqtx/2026/34-106268.pdf"
-                  }
-                },
-                "resolve-stacker-news-1": {
-                  "summary": "https://stacker.news/items/1596515",
-                  "value": {
-                    "uri": "https://stacker.news/items/1596515"
-                  }
-                },
-                "resolve-stacker-news-2": {
-                  "summary": "https://stacker.news/items/1596515?commentId=1596517",
-                  "value": {
-                    "uri": "https://stacker.news/items/1596515?commentId=1596517"
-                  }
-                },
-                "resolve-swiss-parliament-1": {
-                  "summary": "https://www.parlament.ch/de/ratsbetrieb/suche-curia-vista/geschaeft?AffairId=20223765",
-                  "value": {
-                    "uri": "https://www.parlament.ch/de/ratsbetrieb/suche-curia-vista/geschaeft?AffairId=20223765"
                   }
                 },
                 "resolve-thebiz-pro-episodes-1-making-cypherpunk-products-and-busines": {
@@ -2541,36 +2049,6 @@
                     "uri": "https://tidal.com/track/58990512"
                   }
                 },
-                "resolve-uk-parliament-bills-1": {
-                  "summary": "https://bills.parliament.uk/bills/3737",
-                  "value": {
-                    "uri": "https://bills.parliament.uk/bills/3737"
-                  }
-                },
-                "resolve-uniprot-1": {
-                  "summary": "https://www.uniprot.org/uniprotkb/P69905/entry",
-                  "value": {
-                    "uri": "https://www.uniprot.org/uniprotkb/P69905/entry"
-                  }
-                },
-                "resolve-uniprot-2": {
-                  "summary": "https://www.uniprot.org/uniprotkb/P04637/entry",
-                  "value": {
-                    "uri": "https://www.uniprot.org/uniprotkb/P04637/entry"
-                  }
-                },
-                "resolve-usgs-1": {
-                  "summary": "https://earthquake.usgs.gov/earthquakes/eventpage/official20110311054624120_30",
-                  "value": {
-                    "uri": "https://earthquake.usgs.gov/earthquakes/eventpage/official20110311054624120_30"
-                  }
-                },
-                "resolve-usgs-2": {
-                  "summary": "https://earthquake.usgs.gov/earthquakes/eventpage/ci38457511/executive",
-                  "value": {
-                    "uri": "https://earthquake.usgs.gov/earthquakes/eventpage/ci38457511/executive"
-                  }
-                },
                 "resolve-v4-wegow-com-es-conciertos-konzert-von-yasi-hofer-band-in-bo": {
                   "summary": "https://v4.wegow.com/es/conciertos/konzert-von-yasi-hofer-band-in-bonn-harmonie",
                   "value": {
@@ -2581,12 +2059,6 @@
                   "summary": "https://vimeo.com/76979871",
                   "value": {
                     "uri": "https://vimeo.com/76979871"
-                  }
-                },
-                "resolve-wordpress-1": {
-                  "summary": "https://bitcoinmagazine.com/markets/no-uptober-yet-as-bitcoin-slips",
-                  "value": {
-                    "uri": "https://bitcoinmagazine.com/markets/no-uptober-yet-as-bitcoin-slips"
                   }
                 },
                 "resolve-www-calendarlabs-com-ical-calendar-ics-76-us-holidays-ics": {
@@ -2743,18 +2215,6 @@
                   "summary": "https://xceed.me/en/roma/event/dissonanze-2026-day-1/220015",
                   "value": {
                     "uri": "https://xceed.me/en/roma/event/dissonanze-2026-day-1/220015"
-                  }
-                },
-                "resolve-zefix-1": {
-                  "summary": "https://register.ld.admin.ch/zefix/company/126286",
-                  "value": {
-                    "uri": "https://register.ld.admin.ch/zefix/company/126286"
-                  }
-                },
-                "resolve-zenodo-1": {
-                  "summary": "https://zenodo.org/records/1234567",
-                  "value": {
-                    "uri": "https://zenodo.org/records/1234567"
                   }
                 }
               },
@@ -3294,7 +2754,7 @@
             }
           },
           {
-            "description": "Links carrying one exact identifier, on any service and in any spelling:\n`mbid:{uuid}` (a MusicBrainz recording, release, release group or artist, or the MBID a\nMusicBrainz page was merged from),\n`wikidata:{Q-id}`, `isrc:{code}`, `upc:{barcode}`, `isbn:{ISBN-10 or ISBN-13}`,\n`imdb:{tt…}` (an IMDb title), `podcast:{GUID}` (a podcast's `podcast:guid`),\n`osm:{type}/{id}`, `doi:{DOI}`, `arxiv:{id}`, `pmid:{n}`, `pmcid:PMC{n}`, `crate:{name}`,\n`npm:{name}`, `pypi:{name}`, `repo:{host}/{path}`, `steam:{appid}`, `gog:{id}`,\n`fr:{document number}` or `discogs:{artist|master|release}:{id}`.",
+            "description": "Links carrying one exact identifier, on any service and in any spelling:\n`mbid:{uuid}` (a MusicBrainz recording, release, release group or artist, or the MBID a\nMusicBrainz page was merged from),\n`wikidata:{Q-id}`, `isrc:{code}`, `upc:{barcode}`, `isbn:{ISBN-10 or ISBN-13}`,\n`imdb:{tt…}` (an IMDb title), `podcast:{GUID}` (a podcast's `podcast:guid`),\n`osm:{type}/{id}`, `doi:{DOI}`, or another namespace a source records (its page in\ndocs/sources names it).",
             "examples": {
               "(none)": {
                 "summary": "(none)",
@@ -3315,10 +2775,6 @@
               "key-9f9cf187-d6f9-437f-9d98-d59cdbd52757": {
                 "summary": "mbid:9f9cf187-d6f9-437f-9d98-d59cdbd52757",
                 "value": "mbid:9f9cf187-d6f9-437f-9d98-d59cdbd52757"
-              },
-              "key-fr-2026-18291": {
-                "summary": "fr:2026-18291",
-                "value": "fr:2026-18291"
               },
               "key-gbaye9701376": {
                 "summary": "isrc:GBAYE9701376",

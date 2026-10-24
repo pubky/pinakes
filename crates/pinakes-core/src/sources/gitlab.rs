@@ -3,6 +3,7 @@
 //! unauthenticated API requests per minute. Project pages are read on known instances; the
 //! `/-/` shapes on any host, which is remembered for a day once it answers (or does not answer)
 //! as GitLab.
+use super::kit::GITLAB_RESERVED as RESERVED;
 use super::{list, text, web_url, Budget, Context, Declined, Example, HostMemo, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
@@ -23,33 +24,6 @@ const KNOWN: &[&str] = &[
     "gitlab.gnome.org",
     "invent.kde.org",
     "salsa.debian.org",
-];
-
-/// First path segments that are the instance's own pages, never a namespace.
-pub const RESERVED: &[&str] = &[
-    "-",
-    ".well-known",
-    "abuse_reports",
-    "admin",
-    "api",
-    "assets",
-    "dashboard",
-    "explore",
-    "groups",
-    "help",
-    "import",
-    "jwt",
-    "oauth",
-    "profile",
-    "projects",
-    "public",
-    "s",
-    "search",
-    "sitemap",
-    "snippets",
-    "uploads",
-    "users",
-    "v2",
 ];
 
 /// How many leading segments of `/-/tree/…` or `/-/blob/…` are tried as the ref name.
@@ -420,6 +394,25 @@ pub fn release_card(
 impl Source for Gitlab {
     fn name(&self) -> &'static str {
         "gitlab"
+    }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "gitlab",
+                uri: "https://gitlab.com/inkscape/inkscape",
+                card_type: "SoftwareSourceCode",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "gitlab.com",
+                path: "/api/v4/projects/inkscape%2Finkscape",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "project-inkscape.json",
+            }],
+        })
     }
     fn reads(&self, uri: &str) -> bool {
         Target::of_uri(uri).is_some_and(|t| match INSTANCES.get(&t.host) {

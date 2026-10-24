@@ -46,7 +46,7 @@ Federal Register document that publishes the release, found by its docket id `Re
   `{accession}-index.htm`, for the document's type and description.
 - A company: `https://data.sec.gov/submissions/CIK{cik}.json`.
 - An SRO release: the Federal Register API's documents under docket `{release}`, then that
-  document's record (see [federal_register](federal_register.md)).
+  document's record (see federal_register).
 
 ## Card
 

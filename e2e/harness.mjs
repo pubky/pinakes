@@ -311,7 +311,8 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
         // spellings) or share one group (a publisher page with the DOI/ISBN resource whose
         // registry names it as landing page and which it cites). A group is a hint: each card
         // names the other members, and each member keeps its own card.
-        const pairs = samples.filter(s => s.group_with).map(s => [s.kind, s.group_with]);
+        // A pair whose other sample is not in this run (its source's samples gone with it) is left out.
+        const pairs = samples.filter(s => s.group_with && docs.has(s.group_with)).map(s => [s.kind, s.group_with]);
         for (const [kind, other] of pairs) {
           const ids = [docs.get(kind).id, docs.get(other).id];
           // An alias (another spelling) reads as its root: one resource, no group needed.
@@ -347,7 +348,7 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
       report.assertions.push(`group hints, members and collapse (${samples.filter(s => s.group_with).map(s => `${s.kind}~${s.group_with}`).join(', ') || 'no pairs'})`);
       // Samples naming `maybe_same_with` are one event on two pages: each card names the other
       // as possibly the same event, a hint that is never a group.
-      const twins = samples.filter(s => s.maybe_same_with).map(s => [s.kind, s.maybe_same_with]);
+      const twins = samples.filter(s => s.maybe_same_with && docs.has(s.maybe_same_with)).map(s => [s.kind, s.maybe_same_with]);
       await waitFor('same-event hints', async () => {
         for (const [kind, other] of twins) {
           const [a, b] = [docs.get(kind).id, docs.get(other).id];

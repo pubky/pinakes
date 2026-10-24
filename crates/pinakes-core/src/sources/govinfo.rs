@@ -422,6 +422,25 @@ impl Source for Govinfo {
     fn name(&self) -> &'static str {
         "govinfo"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "govinfo",
+                uri: "https://www.govinfo.gov/app/details/PLAW-117publ58",
+                card_type: "Legislation",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "www.govinfo.gov",
+                path: "/metadata/pkg/PLAW-117publ58/mods.xml",
+                query: &[],
+                header: None,
+                content_type: "application/xml",
+                file: "mods_pkg_PLAW-117publ58.xml.gz",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         Target::of_uri(uri).is_some()
     }

@@ -98,6 +98,11 @@ impl Transport for Scripted {
     }
 }
 
+/// Whether this build has the source a test needs: a test of one source returns early without it.
+fn has(source: &str) -> bool {
+    pinakes_core::sources::by_name(source).is_some()
+}
+
 fn official() -> CardResolver {
     CardResolver::new(
         "official",
@@ -110,18 +115,25 @@ fn official() -> CardResolver {
 /// `timeout` (which counts toward dead letter): the route leaves the fetch room to time out first.
 #[tokio::test(start_paused = true)]
 async fn a_slow_usgs_answer_is_a_retry_that_never_counts() {
+    if !has("usgs") {
+        return;
+    }
     let error = official()
         .resolve("https://earthquake.usgs.gov/earthquakes/eventpage/ci38457511")
         .await
         .unwrap_err();
     let retry = error.downcast_ref::<RetryLater>().expect("a retry");
     assert_eq!(retry.class, "upstream_denied");
-    assert_eq!(retry.seconds, pinakes_core::sources::usgs::SLOW_RETRY_SECS);
+    // USGS's own slow-answer wait: ten minutes.
+    assert_eq!(retry.seconds, 600);
 }
 
 /// mempool.space answers a server error for a node it doesn't know: the search decides.
 #[tokio::test(start_paused = true)]
 async fn an_unknown_lightning_node_is_missing_and_a_listed_one_counts() {
+    if !has("mempool") {
+        return;
+    }
     let doc = official()
         .resolve(&format!("https://mempool.space/lightning/node/{UNKNOWN}"))
         .await
@@ -139,6 +151,9 @@ async fn an_unknown_lightning_node_is_missing_and_a_listed_one_counts() {
 /// for a server error, so a listed node is never counted as failing for it.
 #[tokio::test(start_paused = true)]
 async fn a_rate_limited_lightning_node_is_only_a_retry() {
+    if !has("mempool") {
+        return;
+    }
     for (key, class) in [(BUSY, "http_4xx"), (SLOW, "rate_limited")] {
         let error = official()
             .resolve(&format!("https://mempool.space/lightning/node/{key}"))
@@ -153,6 +168,9 @@ async fn a_rate_limited_lightning_node_is_only_a_retry() {
 /// it, and several give the page an ordinary web card.
 #[tokio::test(start_paused = true)]
 async fn compound_names_never_merge() {
+    if !has("pubchem") {
+        return;
+    }
     let one = official()
         .resolve("https://pubchem.ncbi.nlm.nih.gov/compound/aspirin")
         .await

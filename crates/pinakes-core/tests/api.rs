@@ -1235,10 +1235,12 @@ async fn swagger_ui_and_the_openapi_document_are_on_the_public_listener_only(poo
     );
     assert_eq!(rendered, allowed);
 
-    // The document matches its snapshot and every $ref resolves.
+    // The document matches its snapshot (without the sources' own examples) and every $ref
+    // resolves.
     let docs = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/");
     let public_doc = serde_json::to_value(api::openapi_document()).unwrap();
-    for (doc, file) in [(&public_doc, "openapi.json")] {
+    let snapshot_doc = api::openapi_snapshot();
+    for (doc, file) in [(&snapshot_doc, "openapi.json")] {
         let snapshot: Value =
             serde_json::from_str(&std::fs::read_to_string(format!("{docs}{file}")).unwrap())
                 .unwrap();
@@ -2294,37 +2296,25 @@ async fn a_deleted_pubky_post_loses_its_excerpt(pool: PgPool) {
 /// opt-out line itself carries only its kind and time.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn an_opted_out_post_is_not_searched_and_keeps_no_history_text(pool: PgPool) {
-    use pinakes_core::sources::mastodon;
     let uri = "https://mastodon.social/@Gargron/1";
-    let id = store::ensure_resource(&pool, uri).await.unwrap();
-    let target = mastodon::Target {
-        host: "mastodon.social".into(),
-        id: "1".into(),
-    };
-    let fixture = |file: &str| {
-        std::fs::read(format!(
-            "{}/tests/fixtures/sources/mastodon/{file}",
-            env!("CARGO_MANIFEST_DIR")
-        ))
-        .unwrap()
-    };
-    let card = |file: &str, at: i64| {
-        let mut doc = ResourceMeta::new(uri, "mastodon", 3600);
+    // The post's card from the Mastodon source; without it in this build there is nothing to test.
+    let card = |file: &'static str, at: i64| async move {
+        let api = "https://mastodon.social/api/v1/statuses/1";
+        let mut doc =
+            common::source_card("mastodon", uri, &[(api, 200, "application/json", file)]).await?;
         doc.fetched_at = at;
-        pinakes_core::resolver::html::off_runtime(|| {
-            mastodon::card(doc, &target, 200, &fixture(file))
-        })
-        .unwrap()
-        .unwrap()
+        Some(doc)
     };
-    store::save_document(&pool, &id, 0, &card("status-1.json", 1000))
-        .await
-        .unwrap();
+    let Some(first) = card("status-1.json", 1000).await else {
+        return;
+    };
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    store::save_document(&pool, &id, 0, &first).await.unwrap();
     // The usual `/@{user}/{id}` spelling, saved with the full card before it became an alias of
     // the post's ActivityPub id.
     let spelling = "https://mastodon.social/@Gargron/1/";
     let alias_id = store::ensure_resource(&pool, spelling).await.unwrap();
-    let mut early = card("status-1.json", 900);
+    let mut early = card("status-1.json", 900).await.unwrap();
     early.url = spelling.into();
     store::save_document(&pool, &alias_id, 0, &early)
         .await
@@ -2372,7 +2362,7 @@ async fn an_opted_out_post_is_not_searched_and_keeps_no_history_text(pool: PgPoo
     assert!(texts().await.unwrap() > 1);
 
     // The author opts out: the card stays, its text is no longer searched or kept.
-    let opted = card("status-1-opted-out.json", 2000);
+    let opted = card("status-1-opted-out.json", 2000).await.unwrap();
     assert_eq!(opted.attributes["opted_out"], "true");
     assert_eq!(opted.description.as_deref(), Some("Hello world"));
     store::save_document(&pool, &id, 0, &opted).await.unwrap();

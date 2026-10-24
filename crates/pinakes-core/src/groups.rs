@@ -83,7 +83,8 @@ pub struct Curation {
 /// - `hub:{key}`: an exact key a source vouches for (`also_on`: a MusicBrainz MBID, a Wikidata
 ///   Q-id), or that named this resource in another's exact lookup (a keyed derived link). Two
 ///   links with the same key are one thing on two services. A group never holds two
-///   values of a single-object namespace ([`single_object`]): a join that would is refused.
+///   values of a single-object namespace ([`single_object`], and those the database remembers
+///   from sources since removed, `single_object_namespace`): a join that would is refused.
 ///
 /// A point (`geo:` or a map link) never groups.
 fn evidence(row: &Value) -> Vec<String> {
@@ -164,21 +165,19 @@ fn evidence(row: &Value) -> Vec<String> {
     keys.into_iter().collect()
 }
 /// The hub key namespaces that name one object, so a group holds at most one of their values: a
-/// MusicBrainz recording, release, release group or artist, a Wikidata item, a Discogs artist,
-/// master or release, an IMDb title, an Open Library edition or work, a podcast's GUID or Apple
-/// Podcasts ID, an OSM object, a DOI, an arXiv paper, a PubMed or PubMed Central record, a crate,
-/// an npm or PyPI package, a source repository, a Steam or GOG game, a Federal Register
-/// document. ISRCs, UPCs and ISBNs may be several (one recording has many ISRCs, one book
-/// several ISBNs).
+/// MusicBrainz recording, release, release group or artist, a Wikidata item, an IMDb title, an
+/// Open Library edition or work, a podcast's GUID or Apple Podcasts ID, an OSM object, a DOI; and
+/// those each also-on source declares (`also_on::Source::single_namespaces`: a Discogs object, an
+/// arXiv paper, a package, a game…). ISRCs, UPCs and ISBNs may be several (one recording has many
+/// ISRCs, one book several ISBNs). `configure` writes them all to `single_object_namespace`, so
+/// a source's rule outlives the source: its keys stay up to their lifetime after it is removed,
+/// and `sync` reads the table beside this list.
 const SINGLE_OBJECT: &[&str] = &[
     "mb:recording",
     "mb:release",
     "mb:release-group",
     "mb:artist",
     "wikidata",
-    "discogs:artist",
-    "discogs:master",
-    "discogs:release",
     "imdb",
     "openlibrary:edition",
     "openlibrary:work",
@@ -186,25 +185,45 @@ const SINGLE_OBJECT: &[&str] = &[
     "podcast:apple",
     "osm",
     "doi",
-    "arxiv",
-    "pmid",
-    "pmcid",
-    "crate",
-    "npm",
-    "pypi",
-    "repo",
-    "steam",
-    "gog",
-    "fr",
 ];
-/// A hub key's namespace and value when the namespace names one object (`SINGLE_OBJECT`). The
-/// value may itself hold `:` (a DOI).
+/// [`SINGLE_OBJECT`] and every also-on source's own.
+fn single_object_namespaces() -> &'static [&'static str] {
+    static ALL: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    ALL.get_or_init(|| {
+        let mut all = SINGLE_OBJECT.to_vec();
+        for source in crate::also_on::registered() {
+            all.extend(source.single_namespaces());
+        }
+        all
+    })
+}
+/// A hub key's namespace and value when the namespace names one object
+/// ([`single_object_namespaces`]). The value may itself hold `:` (a DOI).
 fn single_object(key: &str) -> Option<(&str, &str)> {
     let key = key.strip_prefix("hub:")?;
-    SINGLE_OBJECT.iter().find_map(|namespace| {
+    single_object_namespaces().iter().find_map(|namespace| {
         let value = key.strip_prefix(namespace)?.strip_prefix(':')?;
         Some((*namespace, value))
     })
+}
+/// [`single_object`], and over `remembered` too: the namespaces the database holds
+/// (`single_object_namespace`), those of sources since removed among them.
+fn single_object_with<'k>(remembered: &'k [String], key: &'k str) -> Option<(&'k str, &'k str)> {
+    single_object(key).or_else(|| {
+        let key = key.strip_prefix("hub:")?;
+        remembered.iter().find_map(|namespace| {
+            let value = key.strip_prefix(namespace.as_str())?.strip_prefix(':')?;
+            Some((namespace.as_str(), value))
+        })
+    })
+}
+/// The single-object namespaces the database remembers (`configure` writes them).
+async fn remembered_namespaces(tx: &mut Transaction<'_, Postgres>) -> Result<Vec<String>> {
+    Ok(
+        sqlx::query_scalar("SELECT namespace FROM single_object_namespace ORDER BY namespace")
+            .fetch_all(&mut **tx)
+            .await?,
+    )
 }
 /// An ICS UID as a key segment: free text (NIP-52 coordinates, URNs, URLs) never decides the
 /// key's kind or names another feed.
@@ -746,6 +765,7 @@ async fn plan(
     let mut trigrams = vec![Vec::new(); names.len()];
     let mut overrides = vec![None; names.len()];
     let mut singles: Vec<Vec<(String, String)>> = vec![Vec::new(); names.len()];
+    let remembered = remembered_namespaces(tx).await?;
     // The automatic group each unit is in now, so a group keeps its ID as it grows or merges.
     let mut current: Vec<Option<String>> = vec![None; names.len()];
     let mut bykey: BTreeMap<String, Vec<(usize, chrono::DateTime<chrono::Utc>)>> = BTreeMap::new();
@@ -763,7 +783,7 @@ async fn plan(
             current[i] = e.group_id.clone().or(current[i].take());
         }
         old.extend(e.group_id.clone());
-        if let Some((namespace, value)) = single_object(&e.key) {
+        if let Some((namespace, value)) = single_object_with(&remembered, &e.key) {
             singles[i].push((namespace.to_owned(), value.to_owned()));
         }
         if !e.key.starts_with("unit:") {
@@ -1210,6 +1230,7 @@ pub async fn curate(pool: &PgPool, id: &str, body: Curation, cfg: &GroupConfig) 
 
 /// Invalidate derived memberships when an operator changes grouping policy.
 pub async fn configure(pool: &PgPool, cfg: &GroupConfig) -> Result<bool> {
+    remember_namespaces(pool).await?;
     let settings = cfg.policy();
     let mut tx = pool.begin().await?;
     let old: Option<Value> =
@@ -1230,6 +1251,22 @@ pub async fn configure(pool: &PgPool, cfg: &GroupConfig) -> Result<bool> {
     tx.commit().await?;
     tracing::info!("grouping policy changed; derived memberships queued for reconciliation");
     Ok(true)
+}
+/// Write every single-object namespace this build knows to `single_object_namespace`, with the
+/// source that records it (`groups` for [`SINGLE_OBJECT`]): the rule for a source's keys outlives
+/// the source.
+async fn remember_namespaces(pool: &PgPool) -> Result<()> {
+    let mut namespaces: Vec<(&str, &str)> = SINGLE_OBJECT.iter().map(|n| (*n, "groups")).collect();
+    for source in crate::also_on::registered() {
+        namespaces.extend(source.single_namespaces().iter().map(|n| (*n, source.id())));
+    }
+    let (names, sources): (Vec<&str>, Vec<&str>) = namespaces.into_iter().unzip();
+    sqlx::query("INSERT INTO single_object_namespace(namespace,source) SELECT * FROM unnest($1::text[],$2::text[]) ON CONFLICT(namespace) DO UPDATE SET source=excluded.source,seen_at=now()")
+        .bind(&names)
+        .bind(&sources)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1323,10 +1360,6 @@ mod tests {
         assert!(same(&mut joined, 0, 2) && same(&mut joined, 0, 3));
         // Q1 refused 1 with 0, then 1 with {0, 2}.
         assert_eq!(joined.conflicts, 2);
-        assert_eq!(
-            single_object("hub:discogs:master:21491"),
-            Some(("discogs:master", "21491"))
-        );
         assert_eq!(single_object("hub:upc:0602557656527"), None);
         assert_eq!(
             single_object("hub:imdb:tt0133093"),
@@ -1350,19 +1383,15 @@ mod tests {
                 "doi",
                 "10.1002/(sici)1097:4<x>",
             ),
-            ("hub:arxiv:1706.03762", "arxiv", "1706.03762"),
-            ("hub:pmcid:PMC123", "pmcid", "PMC123"),
-            ("hub:crate:rand-core", "crate", "rand-core"),
-            ("hub:npm:@babel/core", "npm", "@babel/core"),
-            (
-                "hub:repo:github.com/rust-random/rand",
-                "repo",
-                "github.com/rust-random/rand",
-            ),
-            ("hub:steam:440", "steam", "440"),
-            ("hub:fr:2026-18291", "fr", "2026-18291"),
         ] {
             assert_eq!(single_object(key), Some((namespace, value)), "{key}");
+        }
+        // Each also-on source's own single-object namespaces (a Discogs master, a crate…).
+        for source in crate::also_on::registered() {
+            for namespace in source.single_namespaces() {
+                let key = format!("hub:{namespace}:1/a:b");
+                assert_eq!(single_object(&key), Some((*namespace, "1/a:b")), "{key}");
+            }
         }
         assert_eq!(single_object("hub:isrc:GBAYE9701376"), None);
     }

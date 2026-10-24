@@ -421,6 +421,13 @@ async fn wikidata_reads_back_every_hit_before_choosing_one() {
     assert_eq!(t.seen.lock().unwrap().len(), before);
 }
 
+/// Whether this build has every also-on source a test needs: a test of some sources returns
+/// early without them.
+fn has(ids: &[&str]) -> bool {
+    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
+    ids.iter().all(|id| registered.contains(id))
+}
+
 /// Two Spotify editions of one album: MusicBrainz names the first (a release, its links and,
 /// through its barcode, the Apple Music album), Wikidata the second (its item and release
 /// group). The shared release group joins them; each card lists the other first, then the
@@ -428,6 +435,9 @@ async fn wikidata_reads_back_every_hit_before_choosing_one() {
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn music_links_join_through_the_hubs_and_list_each_other(pool: sqlx::PgPool) {
     use tower::ServiceExt;
+    if !has(&["musicbrainz", "wikidata", "itunes"]) {
+        return;
+    }
     let first = "https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE";
     let second = "https://open.spotify.com/album/2fGCAYUMssLKiUAoNdxGLx";
     let mut ids = vec![];
@@ -572,6 +582,10 @@ async fn music_links_join_through_the_hubs_and_list_each_other(pool: sqlx::PgPoo
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn wikipedia_editions_join_through_their_item(pool: sqlx::PgPool) {
     use tower::ServiceExt;
+    // The articles' cards are the wikipedia source's.
+    if !has(&["wikipedia"]) {
+        return;
+    }
     let en = "https://en.m.wikipedia.org/wiki/Kant";
     let de = "https://de.wikipedia.org/wiki/Immanuel_Kant";
     let mut ids = vec![];
@@ -661,6 +675,10 @@ async fn wikipedia_editions_join_through_their_item(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_wikidata_item_lists_its_editions_and_encyclopedias(pool: sqlx::PgPool) {
     use tower::ServiceExt;
+    // The item's card is the wikidata_item source's.
+    if !has(&["wikidata_item"]) {
+        return;
+    }
     let spelled = "https://m.wikidata.org/wiki/Q9312";
     let alias = store::ensure_resource(&pool, spelled).await.unwrap();
     let id = pinakes_core::model::identity("https://www.wikidata.org/wiki/Q9312")
@@ -739,6 +757,9 @@ async fn a_wikidata_item_lists_its_editions_and_encyclopedias(pool: sqlx::PgPool
 /// alone, and the links every release has. A configured mirror is asked instead of musicbrainz.org.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
+    if !has(&["musicbrainz"]) {
+        return;
+    }
     let uri = "https://tidal.com/album/495402659";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
     let mut d = ResourceMeta::new(uri, "media", 86400);
@@ -812,6 +833,9 @@ async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
 /// knows keeps its key and stays alone; one MusicBrainz gives to two recordings is no key.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
+    if !has(&["service", "musicbrainz"]) {
+        return;
+    }
     let tracks = [
         // The seed: MusicBrainz relates the URL to recording b1a9c0e9.
         (
@@ -1000,6 +1024,10 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
 /// the one Deezer track. Off by default, nothing asks Deezer.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_deezer_barcode_names_the_apple_album_that_joins(pool: sqlx::PgPool) {
+    // Deezer's barcode and iTunes' album for it are the two sources' work.
+    if !has(&["deezer", "itunes"]) {
+        return;
+    }
     let deezer = "https://www.deezer.com/album/41839661";
     let apple = "https://music.apple.com/us/album/1445304934";
     let tidal = "https://tidal.com/track/534050211";
@@ -1104,6 +1132,10 @@ async fn a_deezer_barcode_names_the_apple_album_that_joins(pool: sqlx::PgPool) {
 /// Two Wikidata item links in one batch: one read for both, each item's own read from the cache.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn item_links_are_read_in_one_request(pool: sqlx::PgPool) {
+    // The items' reads are the wikidata_item source's.
+    if !has(&["wikidata_item"]) {
+        return;
+    }
     for q in ["Q202996", "Q33328630"] {
         let uri = format!("https://www.wikidata.org/wiki/{q}");
         let id = store::ensure_resource(&pool, &uri).await.unwrap();
@@ -1146,6 +1178,10 @@ async fn item_links_are_read_in_one_request(pool: sqlx::PgPool) {
 /// joins the TIDAL artist.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
+    // Its keys are the musicbrainz_entity source's; its event pages are read by `performers`.
+    if !has(&["musicbrainz_entity", "performers"]) {
+        return;
+    }
     let recording = "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69";
     let single = "https://musicbrainz.org/isrc/GBUM71029604";
     let shared = "https://musicbrainz.org/isrc/GBCEE0100112";
@@ -1777,6 +1813,10 @@ async fn a_musicbrainz_page_card_comes_from_the_entity() {
 /// failure cache.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn an_entity_over_the_cap_is_no_answer(pool: sqlx::PgPool) {
+    // The three pages' sources are the ones that answer over the cap.
+    if !has(&["musicbrainz_entity", "wikipedia", "wikidata_item"]) {
+        return;
+    }
     let uri = format!("https://musicbrainz.org/artist/{BIG_BAND}");
     let t = Arc::new(Recorded {
         seen: Mutex::default(),
@@ -1851,6 +1891,9 @@ async fn an_entity_over_the_cap_is_no_answer(pool: sqlx::PgPool) {
 /// either) asks once, in both spellings, and finds nothing.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn an_album_s_barcode_key_finds_its_musicbrainz_release(pool: sqlx::PgPool) {
+    if !has(&["musicbrainz"]) {
+        return;
+    }
     let mut ids = vec![];
     for (uri, upc) in [
         ("https://tidal.com/album/199574241", "4018939306052"),
@@ -1933,6 +1976,9 @@ async fn an_album_s_barcode_key_finds_its_musicbrainz_release(pool: sqlx::PgPool
 /// finds that release again once the URL relation is gone: an editor's removal stands.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn musicbrainz_s_own_barcode_never_re_finds_its_release(pool: sqlx::PgPool) {
+    if !has(&["musicbrainz"]) {
+        return;
+    }
     let uri = "https://tidal.com/album/199574241";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
     let mut d = ResourceMeta::new(uri, "jsonld", 86400);
@@ -1985,6 +2031,9 @@ async fn musicbrainz_s_own_barcode_never_re_finds_its_release(pool: sqlx::PgPool
 /// 83182 is one edition: its own release and barcode, never the release group.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn discogs_joins_at_its_level(pool: sqlx::PgPool) {
+    if !has(&["discogs", "musicbrainz"]) {
+        return;
+    }
     let links = [
         (
             "https://www.discogs.com/master/21491-Radiohead-OK-Computer",
@@ -2121,6 +2170,9 @@ async fn discogs_joins_at_its_level(pool: sqlx::PgPool) {
 /// the MusicBrainz source records nothing for it, not the first release's group.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_discogs_release_of_two_release_groups_joins_nothing(pool: sqlx::PgPool) {
+    if !has(&["musicbrainz", "discogs"]) {
+        return;
+    }
     let uri = "https://www.discogs.com/release/1";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
     let mut d = ResourceMeta::new(uri, "discogs", 86400);
@@ -2137,8 +2189,10 @@ async fn a_discogs_release_of_two_release_groups_joins_nothing(pool: sqlx::PgPoo
         .execute(&pool)
         .await
         .unwrap();
-    let sources: Vec<Arc<dyn also_on::Source>> =
-        vec![Arc::new(pinakes_core::music_sources::MusicBrainzSource)];
+    let sources: Vec<Arc<dyn also_on::Source>> = also_on::registry()
+        .into_iter()
+        .filter(|s| s.id() == "musicbrainz")
+        .collect();
     also_on::drain(&pool, &cx, &sources, 100).await.unwrap();
     let rows: i64 = sqlx::query_scalar(
         "SELECT (SELECT count(*) FROM resource_key WHERE resource_id=$1)+(SELECT count(*) FROM derived_link WHERE resource_id=$1)+(SELECT count(*) FROM resource_fact WHERE resource_id=$1)",

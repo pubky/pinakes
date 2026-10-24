@@ -7,7 +7,7 @@
 //! `lookup/shows?imdb=` its show (TVmaze's data is CC BY-SA: its links say `via: "tvmaze"`);
 //! each is asked only when the item has no link there.
 use super::{
-    media::{self, digits, property, slug, Deferred, Property},
+    media::{self, digits, imdb, property, slug, title_type, Deferred, Property},
     Context, Fact, Found, Key, Link, Source, Subject,
 };
 use crate::{hubs::wikidata, resolver::egress::FetchOptions};
@@ -27,12 +27,6 @@ pub enum Film {
     Tvmaze(u64),
     /// A Netflix title (a movie or a series).
     Netflix(String),
-}
-
-/// An IMDb title ID.
-pub fn imdb(v: &str) -> bool {
-    v.strip_prefix("tt")
-        .is_some_and(|d| matches!(d.len(), 7 | 8) && d.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// The title a link names: `imdb.com/title/{tt}`, `themoviedb.org/movie/{id}` or `/tv/{id}`
@@ -83,30 +77,6 @@ fn site(film: &Film) -> &'static str {
     }
 }
 
-/// Whether a film link is the title's own page (not a season, cast or review page under it).
-pub fn exact_page(uri: &str) -> bool {
-    let Ok(url) = url::Url::parse(uri) else {
-        return false;
-    };
-    let s: Vec<&str> = url
-        .path_segments()
-        .map(|s| s.filter(|s| !s.is_empty()).collect())
-        .unwrap_or_default();
-    match (
-        url.host_str().map(|h| h.strip_prefix("www.").unwrap_or(h)),
-        s.as_slice(),
-    ) {
-        // TVmaze's show page carries its slug; its subpages have fixed names.
-        (Some("tvmaze.com"), [_, _, sub]) => !matches!(
-            *sub,
-            "episodes" | "seasons" | "cast" | "crew" | "characters" | "gallery" | "news" | "akas"
-        ),
-        // A Netflix title, localized or not.
-        (Some("netflix.com"), [_, "title", _]) => true,
-        (_, s) => s.len() == 2,
-    }
-}
-
 /// The Wikidata property holding a link's own ID, and the ID.
 fn property_of(film: &Film) -> (&'static str, String) {
     match film {
@@ -116,21 +86,6 @@ fn property_of(film: &Film) -> (&'static str, String) {
         Film::Letterboxd(name) => ("P6127", name.clone()),
         Film::Tvmaze(id) => ("P8600", id.to_string()),
         Film::Netflix(id) => ("P1874", id.clone()),
-    }
-}
-
-/// What a title's Wikidata item says it is, by the kind of IDs it holds: a movie (TMDB movie,
-/// TheTVDB movie, Apple TV movie, Trakt film) or a series (TMDB TV, TheTVDB series, Apple TV
-/// show, TVmaze show). Both or neither: nothing.
-pub fn title_type(item: &wikidata::Item) -> Option<&'static str> {
-    let any = |ps: &[&str]| ps.iter().any(|p| !item.id(p).is_empty());
-    match (
-        any(&["P4947", "P12196", "P9586", "P12492"]),
-        any(&["P4983", "P4835", "P9751", "P8600"]),
-    ) {
-        (true, false) => Some("Movie"),
-        (false, true) => Some("TVSeries"),
-        _ => None,
     }
 }
 
@@ -346,6 +301,17 @@ impl Films {
 
 #[async_trait]
 impl Source for Films {
+    fn link_type(&self, uri: &str) -> Option<Option<&'static str>> {
+        let kind = match film(uri)? {
+            Film::Tmdb { tv: false, .. } | Film::Letterboxd(_) => Some("Movie"),
+            Film::Tmdb { tv: true, .. } | Film::Tvmaze(_) => Some("TVSeries"),
+            // A Netflix title is a movie or a series: its Wikidata item may say which.
+            Film::Netflix(_) => Some("CreativeWork"),
+            // An IMDb title can be either.
+            Film::Imdb(_) => None,
+        };
+        Some(kind.filter(|_| super::media::exact_page(uri)))
+    }
     fn id(&self) -> &'static str {
         "films"
     }
@@ -434,6 +400,97 @@ impl Source for Films {
 mod tests {
     use super::*;
     use crate::also_on::media::fixture;
+
+    /// Its links are typed by what they are, whatever their pages call themselves
+    /// (`media::link_type`); a page under an object is not typed.
+    #[test]
+    fn its_links_are_typed_by_what_they_are() {
+        for (uri, kind) in [
+            (
+                "https://www.themoviedb.org/movie/603-the-matrix",
+                Some("Movie"),
+            ),
+            ("https://www.themoviedb.org/tv/1396", Some("TVSeries")),
+            ("https://www.themoviedb.org/tv/1396/season/1", None),
+            ("https://letterboxd.com/film/the-matrix/", Some("Movie")),
+            (
+                "https://www.tvmaze.com/shows/169/breaking-bad",
+                Some("TVSeries"),
+            ),
+            ("https://www.tvmaze.com/shows/169/episodes", None),
+            ("https://www.imdb.com/title/tt0133093/", None),
+            (
+                "https://www.netflix.com/title/70143836",
+                Some("CreativeWork"),
+            ),
+            (
+                "https://www.netflix.com/gb/title/70143836",
+                Some("CreativeWork"),
+            ),
+        ] {
+            assert_eq!(super::super::media::link_type(uri), kind, "{uri}");
+        }
+    }
+
+    /// A film's or series' card is typed by its link before what the sources found; a link that
+    /// names no type (a Netflix title) takes the type the sources found, and keeps it.
+    #[test]
+    fn its_cards_are_typed_by_the_link_before_what_the_sources_found() {
+        use crate::also_on::media::{type_card, TypeHints};
+        let typed = |uri: &str, hints: TypeHints| {
+            let mut doc = crate::model::ResourceMeta::new(uri, "web", 60);
+            doc.set_type("Article");
+            type_card(uri, &hints, &mut doc);
+            doc.type_name
+        };
+        let series = TypeHints {
+            title_type: Some("TVSeries".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            typed("https://www.netflix.com/title/70143836", series.clone()),
+            "TVSeries"
+        );
+        assert_eq!(
+            typed(
+                "https://www.netflix.com/title/70143836",
+                TypeHints::default()
+            ),
+            "CreativeWork"
+        );
+        assert_eq!(
+            typed("https://www.themoviedb.org/movie/603", series),
+            "Movie",
+            "the link wins"
+        );
+        let mut doc =
+            crate::model::ResourceMeta::new("https://www.themoviedb.org/tv/1396", "web", 60);
+        doc.set_type("WebSite");
+        type_card(
+            "https://www.themoviedb.org/tv/1396",
+            &TypeHints::default(),
+            &mut doc,
+        );
+        assert_eq!(doc.type_name, "TVSeries");
+        doc.status = crate::model::Status::Missing;
+        doc.set_type("WebPage");
+        type_card(
+            "https://www.themoviedb.org/tv/1396",
+            &TypeHints::default(),
+            &mut doc,
+        );
+        assert_eq!(doc.type_name, "WebPage", "a card that did not resolve");
+        // A Netflix card its Wikidata item typed keeps that type without a hint.
+        let mut doc =
+            crate::model::ResourceMeta::new("https://www.netflix.com/title/70143836", "web", 60);
+        doc.set_type("TVSeries");
+        type_card(
+            "https://www.netflix.com/title/70143836",
+            &TypeHints::default(),
+            &mut doc,
+        );
+        assert_eq!(doc.type_name, "TVSeries");
+    }
 
     fn read(name: &str) -> Vec<u8> {
         fixture::read("films", name)
@@ -605,9 +662,6 @@ mod tests {
         assert!(anime.contains(&s("MyAnimeList", "https://myanimelist.net/anime/1")));
         assert!(anime.contains(&s("AniList", "https://anilist.co/anime/1")));
         assert!(trakt("shows/breaking-bad") && !trakt("people/x") && !trakt("movies/"));
-        // What an item's IDs say it is.
-        assert_eq!(title_type(&fixture::item("Q172241")), Some("Movie"));
-        assert_eq!(title_type(&fixture::item("Q1079")), Some("TVSeries"));
         assert!(rotten("m/shawshank_redemption") && !rotten("celebrity/x"));
     }
 }

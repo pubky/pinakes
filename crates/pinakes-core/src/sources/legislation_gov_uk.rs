@@ -267,6 +267,25 @@ impl Source for LegislationGovUk {
     fn name(&self) -> &'static str {
         "legislation_gov_uk"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "legislation_gov_uk",
+                uri: "https://www.legislation.gov.uk/ukpga/2018/12/contents",
+                card_type: "Legislation",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "www.legislation.gov.uk",
+                path: "/ukpga/2018/12/introduction/data.xml",
+                query: &[],
+                header: None,
+                content_type: "application/xml",
+                file: "ukpga_2018_12_introduction.xml",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         Item::of_uri(uri).is_some()
     }

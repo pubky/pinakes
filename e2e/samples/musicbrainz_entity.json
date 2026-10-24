@@ -1,0 +1,25 @@
+[
+  {
+    "kind": "mb_recording",
+    "uri": "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+    "type": "MusicRecording",
+    "site": "MusicBrainz",
+    "name": "Bohemian Rhapsody",
+    "group_with": "tidal_share"
+  },
+  {
+    "kind": "mb_isrc",
+    "uri": "https://musicbrainz.org/isrc/GBUM71029604",
+    "type": "MusicRecording",
+    "site": "MusicBrainz",
+    "group_with": "mb_recording"
+  },
+  {
+    "kind": "mb_artist",
+    "uri": "https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711",
+    "type": "MusicGroup",
+    "site": "MusicBrainz",
+    "name": "Radiohead",
+    "group_with": "tidal_artist"
+  }
+]

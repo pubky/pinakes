@@ -2,8 +2,8 @@
 //! read from Podcast Index's API: `podcasts/byfeedid` for a show, `episodes/byid` for an
 //! episode. The website is never fetched (it answers 403 to some hosts while the API works).
 //!
-//! The API is signed with the operator's Podcast Index key and secret (`[podcast_index]`, the
-//! pair the also-on `podcasts` source uses). Without them the source declines and the page gets
+//! The API is signed with the operator's Podcast Index key and secret (`[podcast_index]`,
+//! `podcast_index_api`). Without them the source declines and the page gets
 //! an ordinary web card. The pair goes only to `api.podcastindex.org` and never appears in logs,
 //! errors or cards.
 use super::{
@@ -11,11 +11,11 @@ use super::{
     Example, Source,
 };
 use crate::{
-    also_on::podcasts::{
-        index_page, pi_episode_request, pi_headers, pi_request, Ask, PodcastIndexConfig,
-    },
     event::adapters::SecretKey,
     model::ResourceMeta,
+    podcast_index_api::{
+        index_page, pi_episode_request, pi_headers, pi_request, Ask, PodcastIndexConfig,
+    },
     resolver::egress::FetchOptions,
 };
 use anyhow::{ensure, Result};
@@ -29,7 +29,7 @@ static CREDENTIALS: std::sync::RwLock<Option<(SecretKey, SecretKey)>> =
     std::sync::RwLock::new(None);
 
 /// Record the operator's Podcast Index pair, when both are set.
-pub fn configure(config: &PodcastIndexConfig) {
+fn configure(config: &PodcastIndexConfig) {
     *CREDENTIALS.write().unwrap_or_else(|e| e.into_inner()) = config
         .pair()
         .map(|(key, secret)| (SecretKey::from(key), SecretKey::from(secret)));
@@ -127,6 +127,9 @@ pub struct PodcastIndex;
 impl Source for PodcastIndex {
     fn name(&self) -> &'static str {
         "podcast_index"
+    }
+    fn configure(&self, config: &crate::config::Config) {
+        configure(&config.podcast_index);
     }
     fn reads(&self, uri: &str) -> bool {
         index_page(uri).is_some()

@@ -498,9 +498,8 @@ pub struct SearchQuery {
     /// MusicBrainz page was merged from),
     /// `wikidata:{Q-id}`, `isrc:{code}`, `upc:{barcode}`, `isbn:{ISBN-10 or ISBN-13}`,
     /// `imdb:{tt…}` (an IMDb title), `podcast:{GUID}` (a podcast's `podcast:guid`),
-    /// `osm:{type}/{id}`, `doi:{DOI}`, `arxiv:{id}`, `pmid:{n}`, `pmcid:PMC{n}`, `crate:{name}`,
-    /// `npm:{name}`, `pypi:{name}`, `repo:{host}/{path}`, `steam:{appid}`, `gog:{id}`,
-    /// `fr:{document number}` or `discogs:{artist|master|release}:{id}`.
+    /// `osm:{type}/{id}`, `doi:{DOI}`, or another namespace a source records (its page in
+    /// docs/sources names it).
     pub key: Option<String>,
     /// Resource ID: what the people who tagged it also referenced, ranked by how many of them
     /// did, then by the newest of those references (not with `sort`). A resource in a group
@@ -712,8 +711,8 @@ pub struct Details {
     /// that answered (docs/sources).
     pub from: Option<String>,
     /// The fields that API names for the object, and the facts the also-on sources read for it
-    /// (`isrc`, `upc`, `mbid`, `mbid_was`, `artist`, `artist_type`, `duration`, `performer`,
-    /// `performer_mbid`, `performer_link`, …), by name; several values are joined with "; ".
+    /// (such as a music link's `isrc`, `upc` and `mbid`; each source's page in docs/sources lists
+    /// its own), by name; several values are joined with "; ".
     /// `null` when there are none.
     #[schema(value_type = Option<Object>)]
     pub facts: Option<std::collections::BTreeMap<String, String>>,
@@ -1249,7 +1248,7 @@ pub(crate) struct KeyFilter {
 }
 pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
     let bad = || {
-        ApiError::bad("key is mbid:{uuid}, wikidata:{Q-id}, isrc:{ISRC}, upc:{UPC, EAN or GTIN with its check digit}, isbn:{ISBN-10 or ISBN-13}, imdb:{tt and 7–8 digits}, podcast:{GUID}, osm:{type}/{id}, doi:{DOI}, arxiv:{id}, pmid:{n}, pmcid:PMC{n}, crate:{name}, npm:{name}, pypi:{name}, repo:{github.com|gitlab.com}/{path}, steam:{appid}, gog:{id}, fr:{document number} or discogs:{artist|master|release}:{id}")
+        ApiError::bad("key is mbid:{uuid}, wikidata:{Q-id}, isrc:{ISRC}, upc:{UPC, EAN or GTIN with its check digit}, isbn:{ISBN-10 or ISBN-13}, imdb:{tt and 7–8 digits}, podcast:{GUID}, osm:{type}/{id}, doi:{DOI} or another namespace a source records (docs/sources)")
     };
     let (kind, value) = key.split_once(':').ok_or_else(bad)?;
     let keys = |keys: Vec<String>| KeyFilter { keys, fact: None };
@@ -1284,8 +1283,8 @@ pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
         "isbn" => crate::resolver::cards::isbn(key)
             .map(|n| both("isbn", crate::resolver::cards::isbn13(&n)))
             .ok_or_else(bad),
-        "imdb" if crate::also_on::films::imdb(value) => Ok(keys(vec![format!("imdb:{value}")])),
-        "podcast" => crate::also_on::podcasts::guid(value)
+        "imdb" if crate::also_on::media::imdb(value) => Ok(keys(vec![format!("imdb:{value}")])),
+        "podcast" => crate::also_on::media::guid(value)
             .map(|g| keys(vec![format!("podcast:guid:{g}")]))
             .ok_or_else(bad),
         // The lookups' keys: places, papers, packages, repositories, games, documents.
@@ -2288,6 +2287,31 @@ pub fn openapi_document_for(config: &Config) -> &'static Value {
 }
 pub fn openapi_document() -> Value {
     PUBLIC_DOCUMENT.clone()
+}
+/// The document as `docs/openapi.json` keeps it: without each official-API source's examples
+/// (`resolve-{source}-{n}`), which its page in docs/sources lists, so adding or removing a
+/// source leaves the snapshot as it is.
+pub fn openapi_snapshot() -> Value {
+    let own: std::collections::BTreeSet<String> = crate::recipes::recipes()
+        .into_iter()
+        .filter(|r| r.source.is_some())
+        .map(|r| r.name)
+        .collect();
+    fn examples(v: &mut Value, own: &std::collections::BTreeSet<String>) {
+        match v {
+            Value::Object(map) => {
+                if let Some(Value::Object(named)) = map.get_mut("examples") {
+                    named.retain(|name, _| !own.contains(name));
+                }
+                map.values_mut().for_each(|v| examples(v, own));
+            }
+            Value::Array(items) => items.iter_mut().for_each(|v| examples(v, own)),
+            _ => {}
+        }
+    }
+    let mut doc = openapi_document();
+    examples(&mut doc["paths"], &own);
+    doc
 }
 #[utoipa::path(get,tag="Service",path="/v1/openapi.json",responses((status=200,body=Value)))]
 async fn openapi(State(state): State<AppState>) -> Json<&'static Value> {

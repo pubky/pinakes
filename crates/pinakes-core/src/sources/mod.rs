@@ -2,10 +2,14 @@
 //! bot-walled, thin or moved.
 //!
 //! A source is one module, `sources/<name>.rs`, whose unit struct implements [`Source`] and is
-//! listed once in [`REGISTRY`]. Its documentation is `docs/sources/<name>.md` (with a line in
-//! `docs/sources/README.md`), its recorded fixtures are in `tests/fixtures/sources/<name>/`, its
-//! switch is `[sources.<name>] enabled` and its OpenAPI examples come from
-//! [`Source::examples`].
+//! listed once in [`REGISTRY`] (with its `pub mod` line). Its documentation is
+//! `docs/sources/<name>.md` (with a line in `docs/sources/README.md`), its recorded fixtures are
+//! in `tests/fixtures/sources/<name>/`, its switch is `[sources.<name>] enabled`, its OpenAPI
+//! examples come from [`Source::examples`], its mock end-to-end sample from [`Source::e2e`] and
+//! its live one is `e2e/samples/<name>.json`. A source imports only shared code (`kit`,
+//! `biodiversity`, the crate's shared modules), never another source, and nothing outside the
+//! registry names it: removing it is deleting those files and lines
+//! (`docs/sources/README.md#removing-a-source`).
 //!
 //! Links a source reads go to the `official` card route. A switched-off source's links get
 //! ordinary web cards. A card records the source that answered (`details.from`) and the fields
@@ -21,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::OnceLock};
 
 pub mod artic;
+pub mod biodiversity;
 pub mod bluesky;
 pub mod cleveland;
 pub mod clinicaltrials;
@@ -30,7 +35,6 @@ pub mod discogs;
 pub mod discourse;
 pub mod docker_hub;
 pub mod ecfr;
-pub mod esplora;
 pub mod eur_lex;
 pub mod federal_register;
 pub mod fedlex;
@@ -182,6 +186,11 @@ pub trait Source: Send + Sync {
     fn takes_token(&self) -> bool {
         false
     }
+    /// A variable of its own (`PINAKES_NAME`) that fills its token when the config file and the
+    /// `PINAKES__SOURCES__…` form leave it unset.
+    fn token_variable(&self) -> Option<&'static str> {
+        None
+    }
     /// Whether this source answers for pages behind an access wall (`walled`).
     fn hooks_walls(&self) -> bool {
         false
@@ -191,6 +200,26 @@ pub trait Source: Send + Sync {
     /// with a short deadline; an error leaves the wall.
     async fn walled(&self, _cx: &Context<'_>, _uri: &str) -> Result<Option<ResourceMeta>> {
         Ok(None)
+    }
+    /// Take what this source needs from the daemon's configuration at startup (a token another
+    /// table holds, say).
+    fn configure(&self, _config: &Config) {}
+    /// What the mock end-to-end run tags for this source and the answers its service gives there
+    /// (`examples/e2e_stack.rs`); `None` for a source that run leaves out.
+    fn e2e(&self) -> Option<E2e> {
+        None
+    }
+    /// A finished card of `uri` named from the title the also-on sources found since its page
+    /// was read (`also_on::media::type_card`), for a page whose card this source names: whether
+    /// it applied.
+    fn apply_title(
+        &self,
+        _uri: &str,
+        _title: &str,
+        _description: Option<&str>,
+        _doc: &mut ResourceMeta,
+    ) -> bool {
+        false
     }
 }
 
@@ -325,6 +354,57 @@ pub const MAX_HEADERS: usize = 4;
 pub struct Example {
     pub uri: &'static str,
     pub card_type: &'static str,
+}
+
+/// What the mock end-to-end run tags for one source and answers for it: sample links with the
+/// card types they resolve to, and the recorded answers (files in
+/// `tests/fixtures/sources/<name>/`) its requests get.
+#[derive(Clone, Copy, Debug)]
+pub struct E2e {
+    pub samples: &'static [E2eSample],
+    pub answers: &'static [E2eAnswer],
+}
+/// A link the end-to-end run tags.
+#[derive(Clone, Copy, Debug)]
+pub struct E2eSample {
+    /// Its name in the run's report: the source's name, or another for a second link.
+    pub kind: &'static str,
+    pub uri: &'static str,
+    pub card_type: &'static str,
+    /// The kind of a sample whose resource it groups with.
+    pub group_with: Option<&'static str>,
+}
+/// A recorded answer of the mock run, for the requests it matches.
+#[derive(Clone, Copy, Debug)]
+pub struct E2eAnswer {
+    pub host: &'static str,
+    /// The request's path; with a trailing `*`, its start.
+    pub path: &'static str,
+    /// Query parameters the request carries, decoded.
+    pub query: &'static [(&'static str, &'static str)],
+    /// A request header it carries (a service's own identification header).
+    pub header: Option<&'static str>,
+    pub content_type: &'static str,
+    /// The answer's file in the source's fixture directory (`.gz` is unpacked).
+    pub file: &'static str,
+}
+impl E2eAnswer {
+    /// Whether this answers a request for `url` with `headers`.
+    pub fn matches(&self, url: &url::Url, headers: &[(&'static str, String)]) -> bool {
+        let path = match self.path.strip_suffix('*') {
+            Some(start) => url.path().starts_with(start),
+            None => url.path() == self.path,
+        };
+        url.host_str() == Some(self.host)
+            && path
+            && self
+                .query
+                .iter()
+                .all(|(k, v)| url.query_pairs().any(|(qk, qv)| qk == *k && qv == *v))
+            && self
+                .header
+                .is_none_or(|h| headers.iter().any(|(name, _)| name.eq_ignore_ascii_case(h)))
+    }
 }
 
 /// What a source's `resolve` works with.
@@ -506,9 +586,44 @@ pub fn enabled_source(uri: &str, config: &Config) -> Option<&'static dyn Source>
 static SWITCHES: std::sync::RwLock<Option<SourcesConfig>> = std::sync::RwLock::new(None);
 
 /// Record the daemon's switches, so a switched-off source's address rules no longer merge links
-/// (its links then get ordinary web cards, as its routes do), and its sources' tokens.
-pub fn configure(config: &SourcesConfig) {
-    *SWITCHES.write().unwrap_or_else(|e| e.into_inner()) = Some(config.clone());
+/// (its links then get ordinary web cards, as its routes do), and its sources' tokens; and let
+/// every source take what it needs from the configuration (`Source::configure`).
+pub fn configure(config: &Config) {
+    *SWITCHES.write().unwrap_or_else(|e| e.into_inner()) = Some(config.sources.clone());
+    for source in REGISTRY {
+        source.configure(config);
+    }
+}
+/// A finished card named from the title the also-on sources found (`Source::apply_title`), by
+/// the first source that names that page's cards: whether one applied.
+pub fn apply_title(
+    uri: &str,
+    title: &str,
+    description: Option<&str>,
+    doc: &mut ResourceMeta,
+) -> bool {
+    REGISTRY
+        .iter()
+        .any(|s| s.apply_title(uri, title, description, doc))
+}
+/// The card the switched-on source reading `uri` makes of it, `None` when no source reads it,
+/// its source declined it or the object does not exist: for a source whose card builds on another
+/// object's (an SEC release on the Federal Register document that publishes it), by the other
+/// object's identifier alone.
+pub async fn card_of(cx: &Context<'_>, uri: &str) -> Result<Option<ResourceMeta>> {
+    let source = {
+        let switches = SWITCHES.read().unwrap_or_else(|e| e.into_inner());
+        reading(uri).filter(|s| switches.as_ref().is_none_or(|c| c.enabled(s.name())))
+    };
+    let Some(source) = source else {
+        return Ok(None);
+    };
+    match source.resolve(cx, uri).await {
+        Ok(doc) if doc.status == Status::Ok => Ok(Some(doc)),
+        Ok(_) => Ok(None),
+        Err(error) if error.is::<Declined>() => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 /// The token the daemon started with for `source` (`configure`).
 pub fn token(source: &str) -> Option<crate::event::adapters::SecretKey> {
@@ -737,6 +852,8 @@ pub fn list(values: &[String]) -> Option<String> {
 }
 
 #[cfg(test)]
+// Helpers for any source's tests: one only some source uses stays when that source goes.
+#[allow(dead_code)]
 pub(crate) mod fixture {
     //! Recorded responses: `tests/fixtures/sources/<source>/` (see its `provenance.json`).
     use std::io::Read;
@@ -931,6 +1048,58 @@ mod tests {
         }
     }
 
+    /// A source's mock end-to-end samples are links it reads (or pages it improves), each named
+    /// once in the run; their answers are recorded files of its own that match a request.
+    #[test]
+    fn each_sources_e2e_samples_and_answers_are_its_own() {
+        let mut kinds = std::collections::BTreeSet::new();
+        for source in REGISTRY {
+            let Some(e2e) = source.e2e() else {
+                continue;
+            };
+            let name = source.name();
+            assert!(!e2e.samples.is_empty() && !e2e.answers.is_empty(), "{name}");
+            for sample in e2e.samples {
+                assert!(
+                    sample.kind == name || sample.kind.starts_with(&format!("{name}_")),
+                    "{name}: sample {}",
+                    sample.kind
+                );
+                assert!(kinds.insert(sample.kind), "{} twice", sample.kind);
+                assert!(
+                    source.reads(sample.uri) || source.hooks_pages() || source.hooks_walls(),
+                    "{name} does not read {}",
+                    sample.uri
+                );
+                assert!(!crate::model::type_path(sample.card_type).is_empty());
+            }
+            for answer in e2e.answers {
+                fixture::read(name, answer.file);
+                let mut url = url::Url::parse(&format!(
+                    "https://{}{}",
+                    answer.host,
+                    answer.path.trim_end_matches('*')
+                ))
+                .unwrap();
+                for (k, v) in answer.query {
+                    url.query_pairs_mut().append_pair(k, v);
+                }
+                let headers: Vec<(&'static str, String)> = answer
+                    .header
+                    .map(|h| (h, String::new()))
+                    .into_iter()
+                    .collect();
+                assert!(answer.matches(&url, &headers), "{name}: {url}");
+                if answer.header.is_some() {
+                    assert!(
+                        !answer.matches(&url, &[]),
+                        "{name}: {url} without its header"
+                    );
+                }
+            }
+        }
+    }
+
     /// Link-derived text may hold any character: no address check may slice a string inside one.
     #[test]
     fn a_multibyte_character_anywhere_in_a_link_never_panics() {
@@ -967,17 +1136,26 @@ mod tests {
         }
     }
 
+    /// A registered source (whichever this build has) and an example link of it whose alias root
+    /// differs from the link.
+    fn aliased_example() -> Option<(&'static dyn Source, &'static str, String)> {
+        REGISTRY.iter().find_map(|s| {
+            s.examples()
+                .iter()
+                .find_map(|e| Some((*s, e.uri, s.alias_root(e.uri)?)))
+        })
+    }
+
     #[test]
     fn a_switched_off_source_merges_nothing() {
-        let uri = "https://www.federalregister.gov/d/2026-18291";
-        assert_eq!(alias_root_with(uri, None).as_deref(), Some("fr:2026-18291"));
+        let Some((source, uri, root)) = aliased_example() else {
+            return;
+        };
+        assert_eq!(alias_root_with(uri, None), Some(root.clone()));
         let mut off = SourcesConfig::default();
-        assert_eq!(
-            alias_root_with(uri, Some(&off)).as_deref(),
-            Some("fr:2026-18291")
-        );
+        assert_eq!(alias_root_with(uri, Some(&off)), Some(root));
         off.0.insert(
-            "federal_register".into(),
+            source.name().into(),
             Switch {
                 enabled: false,
                 ..Default::default()
@@ -989,13 +1167,19 @@ mod tests {
     #[test]
     fn switches_and_names() {
         let mut config = Config::default();
-        let uri = federal_register::FederalRegister.examples()[0].uri;
+        let Some(source) = REGISTRY
+            .iter()
+            .find(|s| !s.takes_token() && s.reads(s.examples()[0].uri))
+        else {
+            return;
+        };
+        let uri = source.examples()[0].uri;
         assert_eq!(
             enabled_source(uri, &config).map(|s| s.name()),
-            Some("federal_register")
+            Some(source.name())
         );
         config.sources.0.insert(
-            "federal_register".into(),
+            source.name().into(),
             Switch {
                 enabled: false,
                 ..Default::default()
@@ -1088,7 +1272,10 @@ mod tests {
 
     #[test]
     fn attribution_reaches_the_card() {
-        let mut doc = ResourceMeta::new("fr:2026-18291", "federal_register", 60);
+        let Some(source) = REGISTRY.first() else {
+            return;
+        };
+        let mut doc = ResourceMeta::new("fr:2026-18291", source.name(), 60);
         doc.set_type("Legislation");
         doc.attribution = Some("Source: an official register (CC BY 4.0)".into());
         let doc = doc.bounded(attributes()).unwrap();
@@ -1108,18 +1295,28 @@ mod tests {
 
     #[test]
     fn facts_only_on_source_cards() {
-        let mut doc = ResourceMeta::new("fr:2026-18291", "federal_register", 60);
-        doc.attributes
-            .insert("citation".into(), "91 FR 57392".into());
+        // A source with two facts, neither of them a web attribute.
+        let web = crate::resolver::web::ATTRIBUTES;
+        let Some((source, fact, blank)) = REGISTRY.iter().find_map(|s| {
+            if s.facts().contains(&"author") {
+                return None;
+            }
+            let mut own = s.facts().iter().filter(|f| !web.contains(f));
+            Some((*s, *own.next()?, *own.next()?))
+        }) else {
+            return;
+        };
+        let mut doc = ResourceMeta::new("fr:2026-18291", source.name(), 60);
+        doc.attributes.insert(fact.into(), "91 FR 57392".into());
         doc.attributes.insert("author".into(), "x".into());
-        doc.attributes.insert("docket_ids".into(), " ".into());
-        assert_eq!(from(&doc), Some("federal_register"));
+        doc.attributes.insert(blank.into(), " ".into());
+        assert_eq!(from(&doc), Some(source.name()));
         let facts = facts(&doc).unwrap();
-        assert_eq!(facts.len(), 1);
-        assert_eq!(facts["citation"], "91 FR 57392");
+        assert_eq!(facts.len(), 1, "{facts:?}");
+        assert_eq!(facts[fact], "91 FR 57392");
         doc.source = "web".into();
         assert_eq!((from(&doc), self::facts(&doc)), (None, None));
-        assert!(attributes().contains(&"author") && attributes().contains(&"citation"));
+        assert!(attributes().contains(&"author") && attributes().contains(&fact));
         let values = ["a ".to_owned(), String::new(), "b".to_owned()];
         assert_eq!(list(&values).as_deref(), Some("a; b"));
         assert_eq!(list(&[]), None);

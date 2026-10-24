@@ -177,26 +177,24 @@ async fn an_abandoned_parse_frees_its_slot_when_its_worker_dies() {
     assert!(no_worker_left());
 }
 
-/// An Internet Archive answer with 20,000 descriptions in markup (Codex's case): one job, one
-/// worker for all of them, done well within the job's limits. One worker per fragment took
-/// minutes and outlived its caller.
+/// A record with 20,000 descriptions in markup (Codex's Internet Archive case), their text
+/// joined as a record parser does (`kit::html_text` each): one job, one worker for all of them,
+/// done well within the job's limits. One worker per fragment took minutes and outlived its
+/// caller.
 #[test]
 fn many_fragments_in_one_job_share_one_worker() {
     let _serial = worker();
     let descriptions: Vec<String> = (0..20_000).map(|n| format!("<b>x{n}</b>")).collect();
-    let body = serde_json::json!({
-        "metadata": {"identifier": "many", "title": "Many", "description": descriptions}
-    })
-    .to_string();
     let started = Instant::now();
-    let card = html::off_runtime(|| {
-        pinakes_core::sources::internet_archive::parse(200, body.as_bytes(), "many")
-    })
-    .unwrap()
-    .unwrap();
+    let description = html::off_runtime(|| {
+        descriptions
+            .iter()
+            .filter_map(|d| pinakes_core::sources::kit::html_text(d))
+            .collect::<Vec<_>>()
+            .join("\n")
+    });
     let elapsed = started.elapsed();
     assert!(elapsed < Duration::from_secs(20), "{elapsed:?}");
-    let description = card.description.unwrap();
     assert!(
         description.starts_with("x0\nx1\n"),
         "{}",
@@ -263,7 +261,7 @@ async fn a_cancelled_job_stops_its_loop() {
     assert!(no_worker_left());
 }
 
-/// An Internet Archive answer of 250,000 plain descriptions (about 1 MB, Codex's case): its
+/// A record of 250,000 plain descriptions (about 1 MB, Codex's Internet Archive case): its
 /// caller gone, the job refuses the rest of them and frees its slot within a fraction of a
 /// second, instead of parsing on.
 #[tokio::test]
@@ -271,14 +269,13 @@ async fn a_cancelled_job_stops_its_loop() {
 async fn a_cancelled_job_refuses_the_rest_of_a_plain_answer() {
     let _serial = worker();
     let descriptions: Vec<String> = (0..250_000).map(|n| format!("plain {n}")).collect();
-    let body = serde_json::json!({
-        "metadata": {"identifier": "many", "title": "Many", "description": descriptions}
-    })
-    .to_string();
-    assert!(body.len() > 1_000_000);
+    assert!(descriptions.iter().map(String::len).sum::<usize>() > 1_000_000);
     let before = html::running();
     let job = tokio::spawn(html::blocking(move || {
-        pinakes_core::sources::internet_archive::parse(200, body.as_bytes(), "many").map(|_| ())
+        descriptions
+            .iter()
+            .filter_map(|d| pinakes_core::sources::kit::html_text(d))
+            .count()
     }));
     tokio::time::sleep(Duration::from_millis(100)).await;
     job.abort();

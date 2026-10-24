@@ -8,11 +8,11 @@
 //! stored.
 //!
 //! The API's data is CC0; images are shown only for works the API marks CC0.
+use super::kit::wikidata_id;
 use super::kit::{
     fetch, host_and_segments, html_text, int, json, plain, text, texts, web_url, Card, Key, Link,
     Request,
 };
-use super::met::wikidata_id;
 use super::{Context, Example, Source};
 use crate::model::ResourceMeta;
 use anyhow::{ensure, Context as _, Result};
@@ -188,6 +188,25 @@ pub struct Cleveland;
 impl Source for Cleveland {
     fn name(&self) -> &'static str {
         "cleveland"
+    }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "cleveland",
+                uri: "https://www.clevelandart.org/art/1958.39",
+                card_type: "VisualArtwork",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "openaccess-api.clevelandart.org",
+                path: "/api/artworks/1958.39",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "artwork-1958.39.json",
+            }],
+        })
     }
     fn reads(&self, uri: &str) -> bool {
         target(uri).is_some()

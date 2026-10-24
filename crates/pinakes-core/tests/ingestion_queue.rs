@@ -904,6 +904,11 @@ async fn a_failure_log_prints_no_upstream_text(pool: PgPool) {
 /// the query stays out of the line.
 #[tokio::test]
 async fn a_hook_timeout_names_no_link() {
+    // The feed source's hook reads any host, so it is the one a passed deadline times out;
+    // another hook answers a host it does not know at once. Nothing to log without it.
+    if pinakes_core::sources::by_name("feed").is_none() {
+        return;
+    }
     let lines = log_lines();
     let egress = pinakes_core::resolver::egress::Egress::new(Default::default());
     // A deadline already passed: every wall hook times out at once.

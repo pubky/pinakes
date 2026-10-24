@@ -151,6 +151,29 @@ impl Source for SwissParliament {
     fn name(&self) -> &'static str {
         "swiss_parliament"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[
+                E2eSample {
+                    kind: "swiss_parliament",
+                    uri: "https://www.parlament.ch/de/ratsbetrieb/suche-curia-vista/geschaeft?AffairId=20223765",
+                    card_type: "CreativeWork",
+                    group_with: None,
+                },
+            ],
+            answers: &[
+                E2eAnswer {
+                    host: "ws.parlament.ch",
+                    path: "/odata.svc/Business(ID=20223765,Language='DE')",
+                    query: &[],
+                    header: None,
+                    content_type: "application/json",
+                    file: "business_20223765_DE_select.json",
+                },
+            ],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         of_uri(uri).is_some()
     }

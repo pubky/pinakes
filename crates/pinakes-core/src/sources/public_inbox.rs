@@ -458,6 +458,25 @@ impl Source for PublicInbox {
     fn name(&self) -> &'static str {
         "public_inbox"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "public_inbox",
+                uri: "https://gnusha.org/pi/bitcoindev/atCSAVprBE-tAnN3@erisian.com.au/",
+                card_type: "EmailMessage",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "gnusha.org",
+                path: "/pi/bitcoindev/atCSAVprBE-tAnN3@erisian.com.au/raw",
+                query: &[],
+                header: None,
+                content_type: "application/mbox; charset=UTF-8",
+                file: "raw-towns.mbox",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         match Target::of_uri(uri) {
             Some(Target::Message { host, .. }) => ARCHIVES.get(&host) != Some(false),

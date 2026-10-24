@@ -209,6 +209,25 @@ impl Source for Pubchem {
     fn name(&self) -> &'static str {
         "pubchem"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "pubchem",
+                uri: "https://pubchem.ncbi.nlm.nih.gov/compound/2244",
+                card_type: "MolecularEntity",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "pubchem.ncbi.nlm.nih.gov",
+                path: "/rest/pug/compound/cid/2244/property/*",
+                query: &[],
+                header: None,
+                content_type: "application/json",
+                file: "compound-2244.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         target(uri).is_some()
     }

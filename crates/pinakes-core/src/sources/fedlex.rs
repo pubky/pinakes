@@ -224,6 +224,25 @@ impl Source for Fedlex {
     fn name(&self) -> &'static str {
         "fedlex"
     }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "fedlex",
+                uri: "https://www.fedlex.admin.ch/eli/cc/1999/404/de",
+                card_type: "Legislation",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "fedlex.data.admin.ch",
+                path: "/sparqlendpoint",
+                query: &[],
+                header: None,
+                content_type: "application/sparql-results+json",
+                file: "eli_cc_1999_404.json",
+            }],
+        })
+    }
     fn reads(&self, uri: &str) -> bool {
         Key::of_uri(uri).is_some()
     }

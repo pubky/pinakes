@@ -226,7 +226,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
             "--openapi" => {
                 return Ok((
                     config,
-                    Command::Print(serde_json::to_string_pretty(&api::openapi_document())?),
+                    Command::Print(serde_json::to_string_pretty(&api::openapi_snapshot())?),
                 ))
             }
             "--help" => {

@@ -1,0 +1,52 @@
+{
+  "btcmap-places": {
+    "bytes": 6873,
+    "content_type": "application/json",
+    "file": "btcmap-places.json",
+    "note": "BTC Map places sync page.",
+    "recorded_at": "2026-10-19T15:23:29+00:00",
+    "sha256": "48111260561ecce69e5a001487f5aef073ee9604a8e813d6cd3b57d069b92265",
+    "status": 200,
+    "url": "https://api.btcmap.org/v4/places?fields=id,osm_id,osm_url,name,updated_at,deleted_at&updated_since=2026-10-10T00:12:50Z&limit=40&include_deleted=true"
+  },
+  "enwiki-pageprops-paris": {
+    "bytes": 124,
+    "content_type": "application/json; charset=utf-8",
+    "file": "enwiki-pageprops-paris.json",
+    "note": "The Wikidata item of en.wikipedia.org/wiki/Paris.",
+    "recorded_at": "2026-10-19T22:57:51+00:00",
+    "sha256": "31a06115f6046231d0214e572513fdc1287cde0dce3082c43ea73c658541fe95",
+    "status": 200,
+    "url": "https://en.wikipedia.org/w/api.php?action=query&prop=pageprops&ppprop=wikibase_item&titles=Paris&redirects=1&format=json"
+  },
+  "nominatim-places": {
+    "bytes": 3616,
+    "content_type": "application/json; charset=utf-8",
+    "file": "nominatim-places.json",
+    "note": "© OpenStreetMap contributors, ODbL 1.0.",
+    "recorded_at": "2026-10-19T15:17:53+00:00",
+    "sha256": "cd46a69a5d42af09d1716e9dd3cf97492f40fc30751897159378f471dab3ed1f",
+    "status": 200,
+    "url": "https://nominatim.openstreetmap.org/lookup?osm_ids=R2888417,N9984134345,W70417858&format=jsonv2&extratags=1"
+  },
+  "wikidata-q64": {
+    "bytes": 438666,
+    "content_type": "application/json; charset=utf-8",
+    "file": "wikidata-q64.json.gz",
+    "note": "Berlin: P402 relation 62422, P11693 node 240109189 (tagged wikidata=Q64).",
+    "recorded_at": "2026-10-19T22:57:48+00:00",
+    "sha256": "7f6402020a14188564daf612d1c3b281610a7651a7e568fca0d00bb086122fc4",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q64&props=claims%7Csitelinks%2Furls&format=json"
+  },
+  "wikidata-q90": {
+    "bytes": 465252,
+    "content_type": "application/json; charset=utf-8",
+    "file": "wikidata-q90.json.gz",
+    "note": "Paris: P402 relation 7444, P11693 node 17807753.",
+    "recorded_at": "2026-10-19T22:57:50+00:00",
+    "sha256": "4a5fad501bb84fc0a6ee7485a9702946aac7a6c2f65e04e1a52f47edee6e3bdc",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q90&props=claims%7Csitelinks%2Furls&format=json"
+  }
+}
