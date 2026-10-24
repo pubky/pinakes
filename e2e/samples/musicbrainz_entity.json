@@ -13,7 +13,8 @@
     "uri": "https://musicbrainz.org/isrc/GBUM71029604",
     "type": "MusicRecording",
     "site": "MusicBrainz",
-    "group_with": "mb_recording"
+    "group_with": "mb_recording",
+    "needs": "tidal"
   },
   {
     "kind": "mb_artist",

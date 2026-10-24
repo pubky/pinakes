@@ -344,19 +344,21 @@ def verify(wt, kind, name, title, kept=()):
         for i, l in text_lines(wt, rel):
             if re.search(r"`%s`|[\"']%s[\"']|/%s/|(?<![\w-])%s\.(?:md|json|rs)\b|\[(?:[\w-]+\.)*%s\]" % (q, q, q, q, q), l) and not shared(l, rel, name):
                 found(rel, i, l.strip())
-    # The e2e samples that stay: none is of its kind, and none that stays in a run without the
-    # source (`needs` names another, or none) joins a sample that is gone.
+    # The e2e samples that stay: none is of its kind, and none that runs without the source joins
+    # a sample that does not. A sample that `needs` the source is left out of a run without it,
+    # by the mock and the live stack alike (e2e_stack's `by_needs`): it does not run, its joins do
+    # not count, and a sample that joins it joins a sample that is gone.
     samples = []
     for rel in ["e2e/samples.live.json", *files_under(wt, "e2e/samples")]:
         if rel.endswith(".json") and os.path.exists(os.path.join(wt, rel)):
             with open(os.path.join(wt, rel), encoding="utf-8") as f:
                 samples += [(rel, smp) for smp in json.load(f)]
-    kinds = {smp.get("kind") for _, smp in samples}
+    runs = [(rel, smp) for rel, smp in samples if smp.get("needs") != name]
+    kinds = {smp.get("kind") for _, smp in runs}
     for rel, smp in samples:
         if smp.get("kind") == name:
             left.append(f"{rel}: a sample of kind {name!r}")
-        if smp.get("needs") == name:
-            continue
+    for rel, smp in runs:
         for key in ("group_with", "maybe_same_with"):
             if key in smp and smp[key] not in kinds:
                 left.append(f"{rel}: {smp.get('kind')!r} {key} {smp[key]!r}, which is gone")
@@ -537,7 +539,7 @@ def self_test():
     directory, a reference-style link); a section header with a trailing comment, commented out,
     with a quoted key, with spaces; an `export` variable and a banner; a shared line gone; its id
     in the fixtures' index and in a script; a sample of its kind, and samples that join one that
-    is gone. What may stay is checked to stay: the shared line, prose naming it, a link to a file
+    is gone or one left out with the source (it `needs` it). What may stay is checked to stay: the shared line, prose naming it, a link to a file
     of the same name elsewhere, and the joining sample that needs it."""
     base = tempfile.mkdtemp(prefix="check-removals-self-test-")
     try:
@@ -582,12 +584,16 @@ def self_test():
             ("e2e/samples.live.json", None, "a sample of kind 'alpha_beta'"),
             ("e2e/samples/delta.json", None, "'delta_join' group_with 'alpha_beta_seed', which is gone"),
             ("e2e/samples.live.json", "maybe_same", "'web_twin' maybe_same_with 'alpha_beta_seed', which is gone"),
+            ("e2e/samples/delta.json", "joins the left out", "'delta_child' group_with 'delta_join', which is gone"),
         ]
         edits = {
             (".env.example", None): lambda t: t.replace("PINAKES__PODCAST_INDEX__KEY=\n", ""),
             ("e2e/samples.live.json", None): lambda t: t.replace('{"kind": "web",', '{"kind": "alpha_beta",'),
             ("e2e/samples/delta.json", None): lambda t: t.replace(', "needs": "alpha_beta"', ""),
             ("e2e/samples.live.json", "maybe_same"): lambda t: t.replace('"maybe_same_with": "web"', '"maybe_same_with": "alpha_beta_seed"'),
+            ("e2e/samples/delta.json", "joins the left out"): lambda t: t.replace(
+                "}]", '}, {"kind": "delta_child", "uri": "https://delta.example/2", "group_with": "delta_join"}]'
+            ),
         }
         for rel, text, want in cases:
             p = os.path.join(wt, rel)

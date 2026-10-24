@@ -40,6 +40,8 @@ struct Boundary {
 struct Fixture {
     boundary: Arc<Mutex<Boundary>>,
     samples: Value,
+    /// The samples left out for a source this build does not have (`by_needs`).
+    skipped: Vec<Value>,
     event: nostr::event::Event,
     start: chrono::DateTime<chrono::Utc>,
 }
@@ -92,12 +94,12 @@ impl Fixture {
             {"kind":"web","uri":"https://web.example/e2e","type":"WebPage"},
         ]);
         // A sample that needs an also-on source (`needs`) runs only in a build that has it.
-        let built: Vec<&str> = pinakes_core::also_on::registry()
-            .iter()
-            .map(|s| s.id())
-            .collect();
+        let (kept, skipped) = by_needs(
+            std::mem::take(samples.as_array_mut().expect("an array")),
+            &built(),
+        );
+        *samples.as_array_mut().expect("an array") = kept;
         let own = samples.as_array_mut().expect("an array");
-        own.retain(|s| s["needs"].as_str().is_none_or(|need| built.contains(&need)));
         // Each official source's own samples (`Source::e2e`).
         for e2e in pinakes_core::sources::REGISTRY
             .iter()
@@ -115,6 +117,7 @@ impl Fixture {
         Ok(Self {
             boundary: Arc::default(),
             samples,
+            skipped,
             event,
             start,
         })
@@ -427,6 +430,7 @@ async fn run(pool: sqlx::PgPool, f: Fixture) -> Result<()> {
             .with_state(f.clone()),
     );
     let (shutdown, rx) = tokio::sync::watch::channel(false);
+    let skipped = f.skipped.clone();
     let egress = Egress::with_backends(cfg.egress.clone(), Arc::new(FixtureDns), Arc::new(f));
     ensure!(
         egress
@@ -462,7 +466,10 @@ async fn run(pool: sqlx::PgPool, f: Fixture) -> Result<()> {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     });
-    println!("{}", json!({"pinakes":base,"nexus":base,"mock":true}));
+    println!(
+        "{}",
+        json!({"pinakes":base,"nexus":base,"mock":true,"skipped":skipped})
+    );
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     axum::serve(
         listener,
@@ -538,26 +545,23 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
         }));
     }
     // A sample whose expectations come from one also-on source (`needs`: a TIDAL album's own
-    // barcode) is refused at once when that source cannot run, rather than timing out later.
+    // barcode) runs only in a build that has the source, as in the mock stack: without it the
+    // sample is left out and named in the ready line. A build that has the source but cannot run
+    // it (TIDAL without its credentials) refuses at once, rather than timing out later.
     let sources = pinakes_core::also_on::registry();
-    let unmet: Vec<String> = samples
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|sample| {
-            let need = sample["needs"].as_str()?;
-            let ready = sources
+    let (samples, skipped) = live_selection(
+        samples
+            .as_array()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("samples must be an array"))?,
+        &built(),
+        |need| {
+            sources
                 .iter()
-                .any(|s| s.id() == need && cfg.also_on.source_enabled(s.as_ref()) && s.ready(&cfg));
-            (!ready).then(|| format!("{} needs {need}", sample["kind"].as_str().unwrap_or("?")))
-        })
-        .collect();
-    ensure!(
-        unmet.is_empty(),
-        "live samples need an also-on source this stack cannot run ({}); for tidal, set \
-         PINAKES_TIDAL_CLIENT_ID and PINAKES_TIDAL_CLIENT_SECRET",
-        unmet.join(", ")
-    );
+                .any(|s| s.id() == need && cfg.also_on.source_enabled(s.as_ref()) && s.ready(&cfg))
+        },
+    )?;
+    let samples = Value::Array(samples);
     let mut selected = vec![];
     for sample in samples
         .as_array()
@@ -592,7 +596,7 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
     let metrics = state.metrics.clone();
     let app = api::router(state);
     let nexus = Nexus::new(&cfg.nexus_url)?;
-    let ready = json!({"pinakes":base,"nexus":cfg.nexus_url,"mock":false});
+    let ready = json!({"pinakes":base,"nexus":cfg.nexus_url,"mock":false,"skipped":skipped});
     let also_on = pinakes_core::also_on::Context {
         egress: egress.clone(),
         config: cfg.clone(),
@@ -666,4 +670,127 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
     polling.abort();
     let _ = polling.await;
     Ok(())
+}
+
+/// The also-on sources this build has.
+fn built() -> Vec<&'static str> {
+    pinakes_core::also_on::registry()
+        .iter()
+        .map(|s| s.id())
+        .collect()
+}
+
+/// The samples a build runs, and those it leaves out: a sample that `needs` an also-on source
+/// this build does not have (removed with its files) is left out, as `{kind, uri, reason}`.
+fn by_needs(samples: Vec<Value>, built: &[&str]) -> (Vec<Value>, Vec<Value>) {
+    let (kept, skipped): (Vec<Value>, Vec<Value>) = samples
+        .into_iter()
+        .partition(|s| s["needs"].as_str().is_none_or(|need| built.contains(&need)));
+    let skipped = skipped
+        .into_iter()
+        .map(|s| {
+            json!({
+                "kind": s["kind"],
+                "uri": s["uri"],
+                "reason": format!("needs {}, which this build does not have", s["needs"].as_str().unwrap_or("?")),
+            })
+        })
+        .collect();
+    (kept, skipped)
+}
+
+/// The live stack's samples (`by_needs`), refusing a sample whose source this build has but
+/// cannot run (`runs`: switched on and ready, its credentials set).
+fn live_selection(
+    samples: Vec<Value>,
+    built: &[&str],
+    runs: impl Fn(&str) -> bool,
+) -> Result<(Vec<Value>, Vec<Value>)> {
+    let (kept, skipped) = by_needs(samples, built);
+    let unmet: Vec<String> = kept
+        .iter()
+        .filter_map(|sample| {
+            let need = sample["needs"].as_str()?;
+            (!runs(need))
+                .then(|| format!("{} needs {need}", sample["kind"].as_str().unwrap_or("?")))
+        })
+        .collect();
+    ensure!(
+        unmet.is_empty(),
+        "live samples need an also-on source this stack cannot run ({}); for tidal, set \
+         PINAKES_TIDAL_CLIENT_ID and PINAKES_TIDAL_CLIENT_SECRET",
+        unmet.join(", ")
+    );
+    Ok((kept, skipped))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The live samples as `run.mjs` reads them, but for the files `without`.
+    fn live_samples(without: &[&str]) -> Vec<Value> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files = vec![root.join("e2e/samples.live.json")];
+        let mut own: Vec<_> = std::fs::read_dir(root.join("e2e/samples"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.extension().is_some_and(|e| e == "json")
+                    && !without.iter().any(|w| p.file_stem().unwrap() == *w)
+            })
+            .collect();
+        own.sort();
+        files.extend(own);
+        files
+            .iter()
+            .flat_map(|f| serde_json::from_slice::<Vec<Value>>(&std::fs::read(f).unwrap()).unwrap())
+            .collect()
+    }
+
+    /// With the tidal source removed (its sample file with it), the live stack starts: the
+    /// MusicBrainz samples whose group joins TIDAL's, and so need the source, are left out and
+    /// named, the rest run, and no sample that runs joins one that is gone.
+    #[test]
+    fn a_build_without_tidal_runs_the_live_samples_but_those_that_need_it() {
+        let built: Vec<&str> = built().into_iter().filter(|id| *id != "tidal").collect();
+        let (kept, skipped) =
+            live_selection(live_samples(&["tidal"]), &built, |_| true).expect("starts");
+        let mut names: Vec<&str> = skipped
+            .iter()
+            .map(|s| s["kind"].as_str().unwrap())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, ["mb_artist", "mb_isrc", "mb_recording"]);
+        assert!(skipped
+            .iter()
+            .all(|s| s["reason"] == "needs tidal, which this build does not have"));
+        let kinds: Vec<&str> = kept.iter().filter_map(|s| s["kind"].as_str()).collect();
+        for sample in &kept {
+            for key in ["group_with", "maybe_same_with"] {
+                if let Some(other) = sample[key].as_str() {
+                    assert!(kinds.contains(&other), "{} {key} {other}", sample["kind"]);
+                }
+            }
+        }
+    }
+
+    /// A build that has the tidal source but cannot run it (no credentials) still refuses, and
+    /// names every sample that needs it; with everything built and running, nothing is left out.
+    #[test]
+    fn a_build_with_tidal_that_cannot_run_it_refuses() {
+        // A build without the source has nothing to refuse (the test above covers it).
+        if !built().contains(&"tidal") {
+            return;
+        }
+        let samples = live_samples(&[]);
+        let error = live_selection(samples.clone(), &built(), |need| need != "tidal")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("mb_recording needs tidal"), "{error}");
+        assert!(error.contains("tidal_barcode needs tidal"), "{error}");
+        let (kept, skipped) = live_selection(samples.clone(), &built(), |_| true).unwrap();
+        assert!(skipped.is_empty());
+        assert_eq!(kept.len(), samples.len());
+    }
 }
