@@ -155,6 +155,8 @@ enabled = true
 enabled = true
 [sources.wordpress]
 enabled = true
+[sources.x]
+enabled = true
 [sources.zefix]
 enabled = true
 [sources.zenodo]

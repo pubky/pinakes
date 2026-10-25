@@ -1,0 +1,254 @@
+//! What the social-platform sources share. Each reads its platform's public page (its Open
+//! Graph tags, with any JSON-LD) or its oEmbed endpoint, never an account's view, and gives one
+//! of three cards: a post, a profile or a video. A platform that refuses the request (a sign-in
+//! redirect, a challenge page, a 401, 403 or 999) still gets a card, of the link's shape alone,
+//! marked `blocked`: the link resolves, groups and counts while the platform shows the object to
+//! accounts only.
+use super::Context;
+use crate::{
+    model::{ResourceMeta, Status},
+    resolver::{egress::FetchOptions, html, interstitial::Blocked, web},
+};
+use anyhow::{bail, Result};
+use serde_json::Value;
+
+/// What a link names on a platform, and so the card's type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shape {
+    Post,
+    Profile,
+    Video,
+}
+impl Shape {
+    pub fn type_name(self) -> &'static str {
+        match self {
+            Self::Post => "SocialMediaPosting",
+            Self::Profile => "Person",
+            Self::Video => "VideoObject",
+        }
+    }
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Post => "Post",
+            Self::Profile => "Profile",
+            Self::Video => "Video",
+        }
+    }
+    /// A card of this shape named by what the link is alone ("Post on x.com"): the card of a
+    /// platform that shows nothing to a request without an account, and the start of every
+    /// other.
+    pub fn card(self, mut doc: ResourceMeta, site: &str) -> ResourceMeta {
+        doc.set_type(self.type_name());
+        doc.site = site.into();
+        doc.name = Some(format!("{} on {site}", self.noun()));
+        doc
+    }
+}
+
+/// The card of a link whose platform refused the request: its shape alone, marked `blocked`.
+pub fn blocked(doc: ResourceMeta, shape: Shape, site: &str) -> ResourceMeta {
+    let mut doc = shape.card(doc, site);
+    doc.description = Some("Blocked by the site.".into());
+    doc.attributes.insert("blocked".into(), "true".into());
+    doc
+}
+
+/// What a platform answered for one of its pages.
+pub enum Page {
+    /// The page, read by the web resolver's extractor: its Open Graph name, description, image
+    /// and site name, and what its JSON-LD gave (an event's dates), with the URL the fetch ended
+    /// at. A source takes the fields it wants from it; identity (aliases) stays the link's.
+    Read {
+        doc: Box<ResourceMeta>,
+        url: url::Url,
+    },
+    /// The platform says there is no such object.
+    Missing,
+    /// The platform refused the request.
+    Blocked,
+}
+
+/// Fetch a platform's public page.
+pub async fn page(cx: &Context<'_>, url: &str) -> Result<Page> {
+    let fetched = match cx.fetch(url, &FetchOptions::default()).await {
+        Ok(fetched) => fetched,
+        Err(e) if e.is::<Blocked>() => return Ok(Page::Blocked),
+        Err(e) => return Err(e),
+    };
+    match fetched.status {
+        200 => {}
+        404 | 410 | 451 => return Ok(Page::Missing),
+        401 | 403 | 999 => return Ok(Page::Blocked),
+        s => bail!("the site answered {s}"),
+    }
+    let (uri, ttl, ended_at) = (url.to_owned(), cx.ttl, fetched.url.clone());
+    let extracted = html::blocking(move || web::extract(&uri, &fetched, ttl)).await??;
+    Ok(match extracted.doc.status {
+        Status::Ok => Page::Read {
+            doc: Box::new(extracted.doc),
+            url: ended_at,
+        },
+        Status::Missing => Page::Missing,
+        _ => Page::Blocked,
+    })
+}
+
+/// A page's name, description and image onto a card, where the page has them.
+pub fn take(doc: &mut ResourceMeta, page: &ResourceMeta) {
+    if page.name.is_some() {
+        doc.name = page.name.clone();
+    }
+    doc.description = page.description.clone();
+    doc.image = page.image.clone();
+}
+
+/// What an oEmbed endpoint answered for a link.
+pub enum Oembed {
+    Found(Value),
+    /// The provider says there is no such object (404, or 400 naming the link).
+    Missing,
+    Blocked,
+}
+
+/// The oEmbed answer of `endpoint` (which may carry fixed parameters) for `url`.
+pub async fn oembed(cx: &Context<'_>, endpoint: &str, url: &str) -> Result<Oembed> {
+    let mut request = url::Url::parse(endpoint)?;
+    request.query_pairs_mut().append_pair("url", url);
+    let options = FetchOptions {
+        accept: Some("application/json".into()),
+        ..Default::default()
+    };
+    let fetched = match cx.fetch(request.as_str(), &options).await {
+        Ok(fetched) => fetched,
+        Err(e) if e.is::<Blocked>() => return Ok(Oembed::Blocked),
+        Err(e) => return Err(e),
+    };
+    match fetched.status {
+        200 => match serde_json::from_slice::<Value>(&fetched.body) {
+            Ok(v) if v.is_object() => Ok(Oembed::Found(v)),
+            _ => bail!("the oEmbed answer is not JSON"),
+        },
+        400 | 404 => Ok(Oembed::Missing),
+        401 | 403 => Ok(Oembed::Blocked),
+        s => bail!("the oEmbed endpoint answered {s}"),
+    }
+}
+
+/// At most `max` characters of `text`, its whitespace flattened, with an ellipsis when cut.
+pub fn excerpt(text: &str, max: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut cut: String = flat.chars().take(max).collect();
+    if cut.len() < flat.len() {
+        cut.push('…');
+    }
+    cut
+}
+
+/// A post's text as its card's name (its first 120 characters) and description (200); a post
+/// without text is named by its author.
+pub fn post_text(doc: &mut ResourceMeta, text: &str, by: Option<&str>) {
+    let flat = excerpt(text, usize::MAX);
+    if flat.is_empty() {
+        if let Some(by) = by {
+            doc.name = Some(format!("Post by {by}"));
+        }
+        doc.description = None;
+    } else {
+        doc.name = Some(excerpt(&flat, 120));
+        doc.description = Some(excerpt(&flat, 200));
+    }
+}
+
+/// The name and the handle an Open Graph title carries: `Name (@handle) on X`,
+/// `Name (@handle) • Threads`.
+pub fn name_and_handle(title: &str) -> (Option<String>, Option<String>) {
+    let Some((name, rest)) = title.split_once(" (@") else {
+        return (trimmed(title), None);
+    };
+    let handle = rest.split_once(')').map(|(handle, _)| handle);
+    (trimmed(name), handle.and_then(trimmed))
+}
+fn trimmed(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+/// A handle of letters, digits, `_`, `.` and `-`, up to `max` bytes.
+pub fn handle(value: &str, max: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+}
+
+/// A decimal id of up to 20 digits.
+pub fn numeric(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 20 && value.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// A fact on a card, when there is a value.
+pub fn fact(doc: &mut ResourceMeta, key: &str, value: Option<String>) {
+    if let Some(value) = value {
+        doc.attributes.insert(key.into(), value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn titles_name_and_handle() {
+        assert_eq!(
+            name_and_handle("X (@X) on X"),
+            (Some("X".into()), Some("X".into()))
+        );
+        assert_eq!(
+            name_and_handle("Threads (@threads) • Threads, Say more"),
+            (Some("Threads".into()), Some("threads".into()))
+        );
+        assert_eq!(
+            name_and_handle("Twitch - Twitch"),
+            (Some("Twitch - Twitch".into()), None)
+        );
+        assert_eq!(name_and_handle("  "), (None, None));
+    }
+
+    #[test]
+    fn a_post_is_named_by_its_text_or_its_author() {
+        let mut doc = ResourceMeta::new("https://x.com/a/status/1", "x", 3600);
+        post_text(&mut doc, "  just   setting\nup my twttr ", Some("jack"));
+        assert_eq!(doc.name.as_deref(), Some("just setting up my twttr"));
+        assert_eq!(doc.description.as_deref(), Some("just setting up my twttr"));
+        post_text(&mut doc, " ", Some("jack"));
+        assert_eq!(doc.name.as_deref(), Some("Post by jack"));
+        assert_eq!(doc.description, None);
+        let long = "x".repeat(300);
+        post_text(&mut doc, &long, None);
+        assert_eq!(
+            doc.name.as_deref().map(str::chars).map(Iterator::count),
+            Some(121)
+        );
+        assert!(doc.description.as_deref().unwrap().ends_with('…'));
+    }
+
+    #[test]
+    fn a_blocked_card_is_the_shape_alone() {
+        let doc = ResourceMeta::new("https://www.instagram.com/instagram/", "instagram", 3600);
+        let doc = blocked(doc, Shape::Profile, "instagram.com");
+        assert_eq!(doc.type_name, "Person");
+        assert_eq!(doc.name.as_deref(), Some("Profile on instagram.com"));
+        assert_eq!(doc.description.as_deref(), Some("Blocked by the site."));
+        assert_eq!(doc.attributes["blocked"], "true");
+        assert_eq!(doc.site, "instagram.com");
+        assert_eq!(Shape::Video.type_name(), "VideoObject");
+    }
+
+    #[test]
+    fn handles_and_ids() {
+        assert!(handle("jack", 15) && handle("a.b-c_d", 15) && !handle("", 15));
+        assert!(!handle("jack@x", 15) && !handle("abcdefghijklmnop", 15));
+        assert!(numeric("20") && !numeric("") && !numeric("2a") && !numeric(&"1".repeat(21)));
+    }
+}

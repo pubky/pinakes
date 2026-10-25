@@ -70,12 +70,14 @@ pub mod public_inbox;
 pub mod ror;
 pub mod sec;
 pub mod snap_store;
+pub mod social;
 pub mod stacker_news;
 pub mod swiss_parliament;
 pub mod uk_parliament_bills;
 pub mod uniprot;
 pub mod usgs;
 pub mod wordpress;
+pub mod x;
 pub mod zefix;
 pub mod zenodo;
 
@@ -132,6 +134,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &uniprot::Uniprot,
     &usgs::Usgs,
     &wordpress::Wordpress,
+    &x::X,
     &zefix::Zefix,
     &zenodo::Zenodo,
 ];

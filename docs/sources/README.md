@@ -105,6 +105,7 @@ or got plain web cards before are read by their source.
 - [`uniprot`](uniprot.md): UniProtKB proteins by accession.
 - [`usgs`](usgs.md): USGS earthquakes and other seismic events by event id.
 - [`wordpress`](wordpress.md): page hook: a WordPress post's editorial title, excerpt, dates and featured image from its REST record
+- [`x`](x.md): X (Twitter) posts and profiles.
 - [`zefix`](zefix.md): Swiss companies in the commercial register, by register id.
 - [`zenodo`](zenodo.md): Zenodo records (datasets, software, papers) by record id.
 

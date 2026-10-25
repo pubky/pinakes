@@ -1,0 +1,38 @@
+{
+  "oembed-jack-20": {
+    "bytes": 539,
+    "content_type": "application/json; charset=utf-8",
+    "file": "oembed-jack-20.json",
+    "recorded_at": "2026-10-25T23:54:54+00:00",
+    "sha256": "2da6d2c72be1599e31e8a6fa5c4eead0a9d845a608e84425392f5bc730e69c60",
+    "status": 200,
+    "url": "https://publish.x.com/oembed?url=https://x.com/jack/status/20&omit_script=true&dnt=true"
+  },
+  "oembed-missing": {
+    "bytes": 3656,
+    "content_type": "text/html;charset=utf-8",
+    "file": "oembed-missing.html",
+    "recorded_at": "2026-10-25T23:54:54+00:00",
+    "sha256": "b4056ca07cbe8a3c71d16206c45c9d5515c74912647eb67100390f95a8a88600",
+    "status": 404,
+    "url": "https://publish.x.com/oembed?url=https://x.com/jack/status/1&omit_script=true&dnt=true"
+  },
+  "profile-missing": {
+    "bytes": 40525,
+    "content_type": "text/html; charset=UTF-8",
+    "file": "profile-missing.html",
+    "recorded_at": "2026-10-25T23:54:55+00:00",
+    "sha256": "2a5c5a97e660324a5919f6dc72f0d82df3e572e334535855dd571cc50aac5a82",
+    "status": 404,
+    "url": "https://x.com/thisuserdoesnotexist12345x"
+  },
+  "profile-x": {
+    "bytes": 142733,
+    "content_type": "text/html; charset=UTF-8",
+    "file": "profile-x.html.gz",
+    "recorded_at": "2026-10-25T23:54:54+00:00",
+    "sha256": "3e915c4c651a86dff268d3f35cd0c7c9d77481c439170dc71ae03f740757a81a",
+    "status": 200,
+    "url": "https://x.com/X"
+  }
+}
