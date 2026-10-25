@@ -57,7 +57,7 @@ sources reuse them.
   - Open Library and TVmaze: their record's description, and TVmaze's image.
 - A film or series item types the card `Movie` or `TVSeries` when its IDs are one or the
   other's only.
-- `details.from` is `media_records`.
+- `from` is `media_records`.
 
 | Fact | Meaning |
 | --- | --- |

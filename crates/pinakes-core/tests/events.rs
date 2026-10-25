@@ -916,8 +916,8 @@ async fn reextract_repairs_event_text(pool: PgPool) {
     let (code, v) = call(&card, &format!("/v1/resources/{id}")).await;
     assert_eq!(code, 200, "{v}");
     assert_eq!(v["name"], "Café night");
-    assert_eq!(v["details"]["venue"]["name"], "Café Français");
-    assert_eq!(v["details"]["organizer"]["name"], "Smith & Sons");
+    assert_eq!(v["venue"]["name"], "Café Français");
+    assert_eq!(v["organizer"]["name"], "Smith & Sons");
 }
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]

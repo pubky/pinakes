@@ -510,7 +510,7 @@ async fn music_links_join_through_the_hubs_and_list_each_other(pool: sqlx::PgPoo
         .to_bytes();
     let card: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     // Every link: the details' list (the card shows one per music service).
-    let also_on = card["details"]["also_on"].as_array().unwrap();
+    let also_on = card["also_on"].as_array().unwrap();
     // The other edition first, as a tagged member with its ID.
     assert_eq!(also_on[0]["id"], ids[1].as_str(), "{card}");
     let derived: Vec<(&str, &str, &str)> = also_on[1..]

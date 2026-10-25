@@ -15,7 +15,7 @@ it keys nothing until its page is read again. Any other page chose the identity 
 a fact at most: the artist MusicBrainz relates one of its links to, else a MusicBrainz artist page
 it names, is the fact `performer_mbid`, never a key. A performer without either keeps its first
 link as the fact `performer_link`. A name alone is never a key, and nothing is searched by name; a
-performer the page does not key is facts only (`details.facts`), not found by `key=`.
+performer the page does not key is facts only (a read's `facts`), not found by `key=`.
 Text search (`q=`) matches an event's name and description, not its performers: an act the page
 names only in `performer` (a festival's support act) is not found by it.
 Performers are read from the page's own event node only: one whose `url` (else its `@id`) names

@@ -934,7 +934,7 @@ async fn cards_carry_their_client_links_and_facts(pool: PgPool) {
         deck["open_in"],
         json!([{"client": "Loopky", "url": "https://loopky.app/deck/?author=3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo&id=medeng2026a"}])
     );
-    assert_eq!(deck["details"]["facts"]["card_count"], "1210");
+    assert_eq!(deck["facts"]["card_count"], "1210");
     let room = get(&app, &format!("/v1/resources/{room_id}")).await;
     assert_eq!(room["status"], "pending");
     assert_eq!(room["open_in"], json!([]));
@@ -1035,7 +1035,7 @@ async fn an_object_that_loses_its_card_keeps_nothing_of_it(pool: PgPool) {
         }
         assert_eq!(shown["type"], "CreativeWork", "{shown}");
         assert_eq!(shown["open_in"], json!([]), "{shown}");
-        assert!(shown["details"]["facts"].is_null(), "{shown}");
+        assert!(shown["facts"].is_null(), "{shown}");
         // Its history keeps its lines (created, then withdrawn) but none of its text.
         let lines: Vec<(String, Option<Value>, Option<Value>)> = sqlx::query_as(
             "SELECT class,before,after FROM resource_change WHERE resource_id=$1 ORDER BY seq",

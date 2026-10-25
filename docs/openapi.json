@@ -57,7 +57,7 @@
         "description": "The one card every route returns for a resource, occurrence or reference event. Absent\nvalues are null, never \"\".",
         "properties": {
           "also_on": {
-            "description": "The same thing elsewhere: the other members of its group (tagged links, with their ID),\nthen derived links nobody tagged (`derived: true`), by service name; one per service, at\nmost 8 on a search or lookup card and up to 256 on a resource read\n(`GET /v1/resources/{id}`, `GET /v1/resources/by-uri`, `POST /v1/resolve`), whose\n`details.also_on` lists every link, up to 256. A hint: every member keeps its own card.",
+            "description": "The same thing elsewhere: the other members of its group (tagged links, with their ID),\nthen derived links nobody tagged (`derived: true`), by service name. On a search, lookup\nor group card one per service, at most 8; on a resource read (`GET /v1/resources/{id}`,\n`GET /v1/resources/by-uri`, `POST /v1/resolve`) every link, several of one service too,\nup to 256. A hint: every member keeps its own card.",
             "items": {
               "$ref": "#/components/schemas/AlsoOn"
             },
@@ -115,7 +115,7 @@
             ]
           },
           "maybe_same": {
-            "description": "On an event card: up to three other events that are possibly the same one, best first\n(the rule: \"Possibly the same event\" in docs/api.md); on an app's store card, up to three\nother store cards that are possibly the same app (\"Possibly the same app\"). A hint only:\nnever a group, never counted, and never a member of this card's own group.\nAbsent on other cards, and everywhere when `[event] same_event_hint = \"off\"`.",
+            "description": "On an event card: other events that are possibly the same one, best first (the rule:\n\"Possibly the same event\" in docs/api.md); on an app's store card, other store cards that\nare possibly the same app (\"Possibly the same app\"). Up to three on a search, lookup or\ngroup card and up to ten on a resource read. A hint only: never a group, never counted, and\nnever a member of this card's own group. Absent on other cards, and everywhere when\n`[event] same_event_hint = \"off\"`.",
             "items": {
               "$ref": "#/components/schemas/SameEvent"
             },
@@ -182,6 +182,13 @@
               "null"
             ]
           },
+          "type_path": {
+            "description": "The type's ancestors, root first (`[\"Thing\", \"Event\", \"MusicEvent\"]`): a search for\n`type=Event` matches this card when `Event` is among them.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "uri": {
             "type": "string"
           }
@@ -190,6 +197,7 @@
           "id",
           "uri",
           "status",
+          "type_path",
           "also_on",
           "open_in"
         ],
@@ -422,6 +430,7 @@
         "type": "string"
       },
       "Details": {
+        "description": "The fields a resource read adds to the card.",
         "properties": {
           "address": {
             "type": [
@@ -430,7 +439,7 @@
             ]
           },
           "aliases": {
-            "description": "Other spellings of this link that resolve to it (its aliases), by URI, at most 50. A\npage's own claims (`url`, `@id`, `sameAs`, canonical links) are not aliases and are not\nlisted.",
+            "description": "Other spellings of this link that resolve to it (its aliases), by URI, at most 50. A\npage's own claims (`url`, `@id`, `sameAs`, canonical links) are not aliases and are not\nlisted. The card's `uri` is the canonical one: an alias is answered with its root's card.",
             "items": {
               "type": "string"
             },
@@ -441,13 +450,6 @@
               "boolean",
               "null"
             ]
-          },
-          "also_on": {
-            "description": "Every link of `also_on`, up to 256: each tagged member and each derived link, several of\none service too (the card's `also_on` shows one per service).",
-            "items": {
-              "$ref": "#/components/schemas/AlsoOn"
-            },
-            "type": "array"
           },
           "attendance": {
             "type": [
@@ -491,15 +493,12 @@
               "null"
             ]
           },
-          "maybe_same": {
-            "description": "On an event card: up to ten events that are possibly the same one, best first (the card's\n`maybe_same` is the first three); on an app's store card, up to ten store cards that are\npossibly the same app.",
+          "keys": {
+            "description": "The public identifiers this resource is keyed by, as `GET /v1/search?key=` takes them\n(`isrc:…`, `upc:…`, `doi:…`, `isbn:…`, `mb:recording:…`, `wikidata:Q…`, `osm:node/…`):\nthe keys its sources vouch for, sorted; `[]` when there are none.",
             "items": {
-              "$ref": "#/components/schemas/SameEvent"
+              "type": "string"
             },
-            "type": [
-              "array",
-              "null"
-            ]
+            "type": "array"
           },
           "organizer": {
             "oneOf": [
@@ -536,7 +535,7 @@
           }
         },
         "required": [
-          "also_on",
+          "keys",
           "aliases"
         ],
         "type": "object"
@@ -688,6 +687,12 @@
       "Info": {
         "description": "What a client needs: the version, the User-Agent this instance sends, what it resolves, the\nlimits a client must respect, and the licence of the OSM-derived values its cards carry.",
         "properties": {
+          "api_shape": {
+            "description": "The shape of the cards this instance returns: 2, one flat object per card (docs/api.md).",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "limits": {
             "$ref": "#/components/schemas/InfoLimits"
           },
@@ -711,6 +716,7 @@
         },
         "required": [
           "version",
+          "api_shape",
           "user_agent",
           "resolves",
           "limits",
@@ -1224,18 +1230,10 @@
             "$ref": "#/components/schemas/Card"
           },
           {
-            "properties": {
-              "details": {
-                "$ref": "#/components/schemas/Details"
-              }
-            },
-            "required": [
-              "details"
-            ],
-            "type": "object"
+            "$ref": "#/components/schemas/Details"
           }
         ],
-        "description": "`GET /v1/resources/{id}` and `/v1/resolve`: the card plus the resource's details."
+        "description": "`GET /v1/resources/{id}`, `GET /v1/resources/by-uri` and `POST /v1/resolve`: the card with\nthe resource's further fields, one flat object (`api_shape` 2 in `/v1/info`)."
       },
       "SameEvent": {
         "description": "Another event that is possibly the same one: it starts together with this one, near it (or,\nwhen either has no place, at the same venue or under the same organizer), under a similar\nname, on another page. On an app's store card: another store card with the same website host\nand name (`start` is absent, `score` 1).",

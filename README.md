@@ -8,7 +8,7 @@ a small typed card, joins the same thing across services, and answers one search
 map area, time, tags and reach.
 
 Clients combine the two by URI: **Pinakes ranks, Nexus hydrates.** A client sends the URIs of the
-cards Pinakes returns (`uri`, and `details.aliases` for other spellings; for an occurrence,
+cards Pinakes returns (`uri`, and `aliases` for other spellings; for an occurrence,
 `occurrence.feed_uri`) to Nexus `/v0/stream/resources/by_ids` as `uris` (batches of 100) for
 counts and tags. Pinakes IDs are its own and never match Nexus IDs.
 That batch view, and a feed of tag lines, are on the branch `feat/resources-changes-feed` of the
@@ -59,7 +59,7 @@ Nominatim), event pages and calendar feeds, event platforms (`data/event-adapter
 ISBN, DOI, Nostr and ActivityPub cards. Over forty services with their own API (Federal Register,
 SEC EDGAR, Bluesky, GitHub, Discogs, Zenodo, …) are read from that API instead of their pages; each
 has a page in [docs/sources](docs/sources/README.md). The result is one document per resource: a
-schema.org type, name, description, image, site, point, start and end, and details. A change to a
+schema.org type, name, description, image, site, point, start and end, and the rest a read shows. A change to a
 stored document becomes a line in the change journal.
 
 **Join.** An alias is the same object under another spelling (tracking parameters, OSM URL forms,

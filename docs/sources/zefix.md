@@ -22,7 +22,7 @@ identifiers, and the names of its legal form and seat (about 14 KB). An id with 
 ## Card
 
 An `Organization` named by its legal name, described by its purpose, with its registered address
-in `details.address`.
+in `address`.
 
 | Fact | Meaning |
 | --- | --- |

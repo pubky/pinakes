@@ -635,6 +635,9 @@ pub struct Card {
     pub status: String,
     #[serde(rename = "type")]
     pub type_name: Option<String>,
+    /// The type's ancestors, root first (`["Thing", "Event", "MusicEvent"]`): a search for
+    /// `type=Event` matches this card when `Event` is among them.
+    pub type_path: Vec<String>,
     /// Plain text, entity-decoded: escape it before rendering it as HTML.
     pub name: Option<String>,
     /// Plain text, entity-decoded: escape it before rendering it as HTML.
@@ -650,10 +653,10 @@ pub struct Card {
     pub end: Option<DateTime<Utc>>,
     pub group: Option<GroupRef>,
     /// The same thing elsewhere: the other members of its group (tagged links, with their ID),
-    /// then derived links nobody tagged (`derived: true`), by service name; one per service, at
-    /// most 8 on a search or lookup card and up to 256 on a resource read
-    /// (`GET /v1/resources/{id}`, `GET /v1/resources/by-uri`, `POST /v1/resolve`), whose
-    /// `details.also_on` lists every link, up to 256. A hint: every member keeps its own card.
+    /// then derived links nobody tagged (`derived: true`), by service name. On a search, lookup
+    /// or group card one per service, at most 8; on a resource read (`GET /v1/resources/{id}`,
+    /// `GET /v1/resources/by-uri`, `POST /v1/resolve`) every link, several of one service too,
+    /// up to 256. A hint: every member keeps its own card.
     pub also_on: Vec<AlsoOn>,
     /// The clients that open a Pubky app's object, from the app's profile (docs/pubky-apps.md);
     /// on an event card, those of the event object it names. Empty for every other card.
@@ -669,11 +672,12 @@ pub struct Card {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<crate::event::storage::ReferenceEvent>)]
     pub event: Option<Value>,
-    /// On an event card: up to three other events that are possibly the same one, best first
-    /// (the rule: "Possibly the same event" in docs/api.md); on an app's store card, up to three
-    /// other store cards that are possibly the same app ("Possibly the same app"). A hint only:
-    /// never a group, never counted, and never a member of this card's own group.
-    /// Absent on other cards, and everywhere when `[event] same_event_hint = "off"`.
+    /// On an event card: other events that are possibly the same one, best first (the rule:
+    /// "Possibly the same event" in docs/api.md); on an app's store card, other store cards that
+    /// are possibly the same app ("Possibly the same app"). Up to three on a search, lookup or
+    /// group card and up to ten on a resource read. A hint only: never a group, never counted, and
+    /// never a member of this card's own group. Absent on other cards, and everywhere when
+    /// `[event] same_event_hint = "off"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub maybe_same: Option<Vec<SameEvent>>,
 }
@@ -737,13 +741,16 @@ pub struct OccurrenceKey {
     /// `moved_online`. The card's own `status` is the feed's fetch health.
     pub status: String,
 }
-/// `GET /v1/resources/{id}` and `/v1/resolve`: the card plus the resource's details.
+/// `GET /v1/resources/{id}`, `GET /v1/resources/by-uri` and `POST /v1/resolve`: the card with
+/// the resource's further fields, one flat object (`api_shape` 2 in `/v1/info`).
 #[derive(Serialize, ToSchema)]
 pub struct ResourceDetail {
     #[serde(flatten)]
     pub card: Card,
+    #[serde(flatten)]
     pub details: Details,
 }
+/// The fields a resource read adds to the card.
 #[derive(Serialize, ToSchema)]
 pub struct Details {
     pub category: Option<String>,
@@ -765,19 +772,15 @@ pub struct Details {
     /// `null` when there are none.
     #[schema(value_type = Option<Object>)]
     pub facts: Option<std::collections::BTreeMap<String, String>>,
-    /// Every link of `also_on`, up to 256: each tagged member and each derived link, several of
-    /// one service too (the card's `also_on` shows one per service).
-    pub also_on: Vec<AlsoOn>,
+    /// The public identifiers this resource is keyed by, as `GET /v1/search?key=` takes them
+    /// (`isrc:…`, `upc:…`, `doi:…`, `isbn:…`, `mb:recording:…`, `wikidata:Q…`, `osm:node/…`):
+    /// the keys its sources vouch for, sorted; `[]` when there are none.
+    pub keys: Vec<String>,
     /// Other spellings of this link that resolve to it (its aliases), by URI, at most 50. A
     /// page's own claims (`url`, `@id`, `sameAs`, canonical links) are not aliases and are not
-    /// listed.
+    /// listed. The card's `uri` is the canonical one: an alias is answered with its root's card.
     pub aliases: Vec<String>,
     pub updated_at: Option<DateTime<Utc>>,
-    /// On an event card: up to ten events that are possibly the same one, best first (the card's
-    /// `maybe_same` is the first three); on an app's store card, up to ten store cards that are
-    /// possibly the same app.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub maybe_same: Option<Vec<SameEvent>>,
 }
 #[derive(Serialize, ToSchema)]
 pub struct OrganizerRef {
@@ -991,6 +994,7 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
         uri,
         status: row["status"].as_str().unwrap_or("pending").into(),
         type_name: present(row["type"].as_str()),
+        type_path: serde_json::from_value(row["type_path"].clone()).unwrap_or_default(),
         name: present(row["name"].as_str())
             .or_else(|| doc.as_ref().and_then(|d| present(d.name.as_deref()))),
         description: doc.as_ref().and_then(|d| present(d.description.as_deref())),
@@ -1159,8 +1163,9 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
     } else {
         None
     };
-    // The alias rows `read` joins in, not the document's claims.
+    // The alias rows `read` joins in, not the document's claims; the keys its sources vouch for.
     let aliases: Vec<String> = serde_json::from_value(row["aliases"].clone()).unwrap_or_default();
+    let keys: Vec<String> = serde_json::from_value(row["keys"].clone()).unwrap_or_default();
     let facts: Option<std::collections::BTreeMap<String, String>> =
         serde_json::from_value(row["facts"].clone()).ok().flatten();
     let details = match &doc {
@@ -1185,10 +1190,9 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
                 crate::sources::facts(d).or_else(|| crate::resolver::pubky_apps::facts(d)),
                 facts.clone(),
             ),
-            also_on: also_on_entries(&row["also_on_all"], None),
+            keys: keys.clone(),
             aliases: aliases.clone(),
             updated_at: row["resolved_at"].as_str().and_then(|s| s.parse().ok()),
-            maybe_same: same_events(row),
         },
         None => Details {
             category: None,
@@ -1202,16 +1206,17 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
             organizer: None,
             from: None,
             facts,
-            also_on: also_on_entries(&row["also_on_all"], None),
+            keys,
             aliases,
             updated_at: None,
-            maybe_same: None,
         },
     };
-    Ok(ResourceDetail {
-        card: card(row)?,
-        details,
-    })
+    // The read's card: every link of `also_on` (several of one service too, the card's own
+    // service's other pages included), and up to ten possible duplicates.
+    let mut card = card(row)?;
+    card.also_on = also_on_entries(&row["also_on_all"], None);
+    card.maybe_same = same_events(row);
+    Ok(ResourceDetail { card, details })
 }
 /// The types a search's `type` names (1–10, comma-separated), each as its vocabulary spells it.
 fn search_types(types: &str) -> Result<Vec<String>, ApiError> {
@@ -2031,7 +2036,7 @@ async fn read(
         sqlx::query_scalar(&[
             "SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',CASE WHEN $3 THEN ",
             &maybe_same_sql("r.id", "r.type_path", 10),
-            " END,'also_on',also_on(r.id,r.id,256,$2),'also_on_all',also_on(r.id,r.id,256,$2,false),'aliases',coalesce((SELECT jsonb_agg(uri ORDER BY uri) FROM (SELECT x.uri FROM resource_alias a JOIN resource x ON x.id=a.alias_id WHERE a.root_id=r.id ORDER BY x.uri LIMIT 50) s),'[]'),'facts',(SELECT jsonb_object_agg(name,vals) FROM (SELECT name,string_agg(value,'; ' ORDER BY value) AS vals FROM resource_fact WHERE resource_id=r.id AND expires_at>now() GROUP BY name) f)) FROM resource_document r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)",
+            " END,'also_on',also_on(r.id,r.id,256,$2),'also_on_all',also_on(r.id,r.id,256,$2,false),'aliases',coalesce((SELECT jsonb_agg(uri ORDER BY uri) FROM (SELECT x.uri FROM resource_alias a JOIN resource x ON x.id=a.alias_id WHERE a.root_id=r.id ORDER BY x.uri LIMIT 50) s),'[]'),'keys',coalesce((SELECT jsonb_agg(key ORDER BY key COLLATE \"C\") FROM resource_key WHERE resource_id=r.id AND expires_at>now()),'[]'),'facts',(SELECT jsonb_object_agg(name,vals) FROM (SELECT name,string_agg(value,'; ' ORDER BY value) AS vals FROM resource_fact WHERE resource_id=r.id AND expires_at>now() GROUP BY name) f)) FROM resource_document r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)",
         ]
         .concat())
             .bind(id)
@@ -2188,6 +2193,8 @@ pub async fn resolve(
 #[derive(Serialize, ToSchema)]
 pub struct Info {
     pub version: String,
+    /// The shape of the cards this instance returns: 2, one flat object per card (docs/api.md).
+    pub api_shape: u8,
     /// The User-Agent this instance's requests to other services carry: its version and the
     /// operator's contact (`http.contact`), when set.
     pub user_agent: String,
@@ -2263,6 +2270,7 @@ pub async fn info(State(state): State<AppState>) -> Json<Info> {
     );
     Json(Info {
         version: env!("CARGO_PKG_VERSION").into(),
+        api_shape: 2,
         user_agent: crate::resolver::egress::user_agent(&c.egress.contact),
         resolves,
         limits: InfoLimits {

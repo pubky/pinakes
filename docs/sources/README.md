@@ -11,14 +11,14 @@ For their links, Pinakes reads that API instead of the page. Every source here:
   off without it, one that takes an optional one does more with it);
 - makes every address of the same object one resource: the other addresses are
   [aliases](../api.md#aliases) of one root;
-- records itself on the card: `details.from` names the source and `details.facts` holds the
+- records itself on the card: a read's `from` names the source and `facts` holds the
   fields its API names for the object, by name (lists joined with `; `).
 
 A few sources are page hooks instead (their entries below say so): they claim no links. The web route
 fetches the page as usual, and when the page names its own record on its service (a header or
 head tag on the page's own origin), the source reads that record and improves the page's card,
 within the web fetch's deadline and at most 3 seconds. The card then names the source in
-`details.from` too; a failure leaves the page's own card.
+`from` too; a failure leaves the page's own card.
 
 Two sources are wall hooks (their entries say so), used when a page answers with an access
 wall: one looks for that exact link in the same site's RSS or Atom feed or news sitemap, and the

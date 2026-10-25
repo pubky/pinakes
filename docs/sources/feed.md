@@ -27,7 +27,7 @@ cached. A host whose feeds all answered and none listed any item is remembered f
 ## Card
 
 `Article` (from an RSS or Atom feed) or `NewsArticle` (from a news sitemap), named by the item's
-title and described by its description (at most 300 characters), with its image. `details.from`
+title and described by its description (at most 300 characters), with its image. `from`
 is `feed`.
 
 | Fact | Meaning |

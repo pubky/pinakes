@@ -9,7 +9,7 @@ source's own samples: its `Source::e2e` sample and recorded answers in the mock,
 book and podcast pages whose cards must carry the object's name, not the page's), and live a Pubky object of another app. It checks the
 Nexus reference feed, Pinakes typed documents, facets, bbox/Event/venue search,
 occurrences, changes, group membership, same-event hints and Nexus hydration by URI (`by_ids` with `uris`: the
-cards' own `uri` and `details.aliases`, and an occurrence's `occurrence.feed_uri`, matched by
+cards' own `uri` and `aliases`, and an occurrence's `occurrence.feed_uri`, matched by
 `details.uri`; Pinakes is read by URI too, its IDs being its own), then deletes
 its tags and waits for both indexes to remove their references. `by_ids` lists at most five
 tags per resource, so when a shared live resource already carries five other tags the
