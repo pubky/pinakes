@@ -20,6 +20,7 @@ pub mod kinds;
 pub mod locks;
 pub mod lookups;
 pub mod maintenance;
+pub mod matching;
 pub mod model;
 pub mod music;
 pub mod music_sources;
