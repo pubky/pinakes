@@ -75,6 +75,7 @@ pub mod stacker_news;
 pub mod swiss_parliament;
 pub mod telegram;
 pub mod threads;
+pub mod twitch;
 pub mod uk_parliament_bills;
 pub mod uniprot;
 pub mod usgs;
@@ -134,6 +135,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &swiss_parliament::SwissParliament,
     &telegram::Telegram,
     &threads::Threads,
+    &twitch::Twitch,
     &uk_parliament_bills::UkParliamentBills,
     &uniprot::Uniprot,
     &usgs::Usgs,

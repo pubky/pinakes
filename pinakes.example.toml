@@ -151,6 +151,8 @@ enabled = true
 enabled = true
 [sources.threads]
 enabled = true
+[sources.twitch]
+enabled = true
 [sources.uk_parliament_bills]
 enabled = true
 [sources.uniprot]

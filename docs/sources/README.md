@@ -103,6 +103,7 @@ or got plain web cards before are read by their source.
 - [`swiss_parliament`](swiss_parliament.md): Swiss Parliament business items (Curia Vista) by affair id.
 - [`telegram`](telegram.md): Telegram public channels and their posts.
 - [`threads`](threads.md): Threads posts and profiles.
+- [`twitch`](twitch.md): Twitch channels, videos and clips.
 - [`uk_parliament_bills`](uk_parliament_bills.md): UK Parliament bills and Acts by bill id.
 - [`uniprot`](uniprot.md): UniProtKB proteins by accession.
 - [`usgs`](usgs.md): USGS earthquakes and other seismic events by event id.
