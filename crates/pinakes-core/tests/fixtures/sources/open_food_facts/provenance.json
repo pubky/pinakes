@@ -1,0 +1,56 @@
+{
+  "obf-0000080466468": {
+    "bytes": 371,
+    "content_type": "application/json; charset=utf-8",
+    "file": "obf-0000080466468.json",
+    "recorded_at": "2026-10-26T20:49:39+00:00",
+    "sha256": "1ed944a843d91f8d2cbd6a47d072810f7f3a66953f5fc06e7febbe268c78665c",
+    "status": 200,
+    "url": "https://world.openbeautyfacts.org/api/v2/product/0000080466468.json?fields=code,product_name,brands,quantity,product_type,nutriscore_grade,image_front_small_url"
+  },
+  "off-0000080466468": {
+    "bytes": 101,
+    "content_type": "application/json; charset=utf-8",
+    "file": "off-0000080466468.json",
+    "recorded_at": "2026-10-26T20:49:38+00:00",
+    "sha256": "01e71207b8587660df50bc14b20f713c563d3af3edf2f3e594e2fbe5489e81e6",
+    "status": 404,
+    "url": "https://world.openfoodfacts.org/api/v2/product/0000080466468.json?fields=code,product_name,brands,quantity,product_type,nutriscore_grade,image_front_small_url"
+  },
+  "off-0602557656527": {
+    "bytes": 72,
+    "content_type": "application/json; charset=utf-8",
+    "file": "off-0602557656527.json",
+    "recorded_at": "2026-10-26T20:49:40+00:00",
+    "sha256": "0b6a129b6e3840d1287999b7f8b8b94c724dad758e6829b42f0ecfde4f46d822",
+    "status": 404,
+    "url": "https://world.openfoodfacts.org/api/v2/product/0602557656527.json?fields=code,product_name,brands,quantity,product_type,nutriscore_grade,image_front_small_url"
+  },
+  "off-3017620422003": {
+    "bytes": 335,
+    "content_type": "application/json; charset=utf-8",
+    "file": "off-3017620422003.json",
+    "recorded_at": "2026-10-26T20:49:38+00:00",
+    "sha256": "317e1e00a7b1544e1ebb759989ae850707dc31b6746635d976bb6f2cde44c63f",
+    "status": 200,
+    "url": "https://world.openfoodfacts.org/api/v2/product/3017620422003.json?fields=code,product_name,brands,quantity,product_type,nutriscore_grade,image_front_small_url"
+  },
+  "off-6111259733749": {
+    "bytes": 107,
+    "content_type": "application/json; charset=utf-8",
+    "file": "off-6111259733749.json",
+    "recorded_at": "2026-10-26T20:49:40+00:00",
+    "sha256": "a9481ed45b4ecab4bb06025e9973188966b809dedb45341da63bf34e4d8e5c96",
+    "status": 404,
+    "url": "https://world.openfoodfacts.org/api/v2/product/6111259733749.json?fields=code,product_name,brands,quantity,product_type,nutriscore_grade,image_front_small_url"
+  },
+  "opf-6111259733749": {
+    "bytes": 361,
+    "content_type": "application/json; charset=utf-8",
+    "file": "opf-6111259733749.json",
+    "recorded_at": "2026-10-26T20:49:40+00:00",
+    "sha256": "3ba33690efaebb0ff891f8ffbeae57c97e580f87ad57edc2aef7b4c93054f46a",
+    "status": 200,
+    "url": "https://world.openproductsfacts.org/api/v2/product/6111259733749.json?fields=code,product_name,brands,quantity,product_type,nutriscore_grade,image_front_small_url"
+  }
+}

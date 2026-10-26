@@ -15,6 +15,9 @@ mod common;
 use common::conforms;
 use tower::ServiceExt;
 
+/// A shop's product page.
+const ALTERNATE: &str =
+    "https://www.alternate.ch/Corsair/SABRE-v3-PRO-PureVector-Ultralight-Ergo-Gaming-Maus/html/product/100222861";
 /// A seed identity: it tagged every seed entry, and the reach example's viewer follows it.
 const SEED: &str = "pubkyseedauthorpubkyseedauthorpubkyseedauthorpubkyse";
 /// A second identity: it tagged the two Bitcoin events too, so related has a crowd of two.
@@ -490,6 +493,16 @@ async fn fixture(pool: &PgPool) {
         use pinakes_core::also_on::{self, AlsoOnConfig, Fact, Found, Key, Link};
         let apple = "https://podcasts.apple.com/us/podcast/the-daily/id1200361736";
         let imdb = "https://www.imdb.com/title/tt0111161/";
+        let mut mouse = card(
+            ALTERNATE,
+            "jsonld",
+            "Product",
+            "SABRE v3 PRO PureVector Ultralight Ergo",
+        );
+        mouse
+            .attributes
+            .insert("gtin".into(), "0840440422266".into());
+        save(pool, &mouse).await;
         save(pool, &card(apple, "web", "PodcastSeries", "The Daily")).await;
         save(
             pool,
@@ -547,6 +560,17 @@ async fn fixture(pool: &PgPool) {
                         "podcast_guid",
                         "304b84f0-07b0-5265-b6b7-da5cf5aeb56e",
                     )],
+                },
+            ),
+            (
+                ALTERNATE,
+                "product_keys",
+                Found {
+                    reread: false,
+                    retry_after: None,
+                    keys: vec![key("gtin:0840440422266", "page")],
+                    links: vec![],
+                    facts: vec![],
                 },
             ),
             (
@@ -624,6 +648,7 @@ async fn fixture(pool: &PgPool) {
             &["podcast", "news"],
         ),
         ("https://www.imdb.com/title/tt0111161/", &["film"]),
+        (ALTERNATE, &["shop"]),
         (
             "https://bitcoinerjobs.com/job/1682142-staff-software-engineer-river",
             &["jobs"],

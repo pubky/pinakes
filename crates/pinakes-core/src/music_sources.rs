@@ -266,7 +266,7 @@ pub(crate) async fn entities_found(
         .as_ref()
         .filter(|b| entities.iter().all(|e| e.barcode.as_ref() == Some(*b)));
     // A barcode is a key (the services that look albums up by it start from it).
-    if let Some(upc) = barcode.and_then(|b| music::gtin13(b)) {
+    if let Some(upc) = barcode.and_then(|b| crate::barcode::gtin13(b)) {
         found.keys.push(Key {
             key: format!("upc:{upc}"),
             via: "musicbrainz".into(),

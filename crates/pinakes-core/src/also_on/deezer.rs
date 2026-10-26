@@ -78,7 +78,7 @@ impl Source for DeezerSource {
         let normal = if kind == "track" {
             music::isrc
         } else {
-            music::gtin13
+            crate::barcode::gtin13
         };
         let mut found = Found::default();
         if link.service == Service::Deezer {

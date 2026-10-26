@@ -1,0 +1,21 @@
+{
+  "allbirds-mens-tree-runners": {
+    "bytes": 7980,
+    "content_type": "application/json; charset=utf-8",
+    "file": "allbirds-mens-tree-runners.json",
+    "recorded_at": "2026-10-26T20:42:06+00:00",
+    "sha256": "e37708fc53bdd5472c8c59178744b1b6c42a40b8d3db3a235fdeb2722da51149",
+    "status": 200,
+    "url": "https://www.allbirds.com/products/mens-tree-runners.json"
+  },
+  "allbirds-mens-tree-runners-page": {
+    "bytes": 15858,
+    "content_type": "text/html; charset=utf-8",
+    "file": "allbirds-mens-tree-runners.html",
+    "recorded_at": "2026-10-26T20:42:36+00:00",
+    "sha256": "00f69a6e9a869d99a902bc9d1a2010899a2a13b66348d4c05a2b6df90165eea7",
+    "status": 200,
+    "url": "https://www.allbirds.com/products/mens-tree-runners?variant=33179624669264",
+    "note": "Reduced to the page title, canonical link, the script line naming Shopify.shop and the JSON-LD scripts, verbatim; the rest of the page (808 KB) is dropped: it carries third-party client keys."
+  }
+}

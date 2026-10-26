@@ -538,8 +538,9 @@ pub struct SearchQuery {
     /// MusicBrainz page was merged from),
     /// `wikidata:{Q-id}`, `isrc:{code}`, `upc:{barcode}`, `isbn:{ISBN-10 or ISBN-13}`,
     /// `imdb:{tt…}` (an IMDb title), `podcast:{GUID}` (a podcast's `podcast:guid`),
-    /// `osm:{type}/{id}`, `doi:{DOI}`, any key exactly as a resource read lists it in `keys`,
-    /// or another namespace a source records (its page in docs/sources names it).
+    /// `osm:{type}/{id}`, `doi:{DOI}`, `gtin:{barcode}` (a product, in any of its lengths), any
+    /// key exactly as a resource read lists it in `keys`, or another namespace a source records
+    /// (its page in docs/sources names it).
     pub key: Option<String>,
     /// Resource ID: what the people who tagged it also referenced, ranked by how many of them
     /// did, then by the newest of those references (not with `sort`). A resource in a group
@@ -1416,7 +1417,7 @@ pub(crate) struct KeyFilter {
 }
 pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
     let bad = || {
-        ApiError::bad("key is mbid:{uuid}, wikidata:{Q-id}, isrc:{ISRC}, upc:{UPC, EAN or GTIN with its check digit}, isbn:{ISBN-10 or ISBN-13}, imdb:{tt and 7–8 digits}, podcast:{GUID}, osm:{type}/{id}, doi:{DOI}, any key as a resource read lists it (keys), or another namespace a source records (docs/sources)")
+        ApiError::bad("key is mbid:{uuid}, wikidata:{Q-id}, isrc:{ISRC}, upc:{UPC, EAN or GTIN with its check digit}, gtin:{a product's barcode}, isbn:{ISBN-10 or ISBN-13}, imdb:{tt and 7–8 digits}, podcast:{GUID}, osm:{type}/{id}, doi:{DOI}, any key as a resource read lists it (keys), or another namespace a source records (docs/sources)")
     };
     let (kind, value) = key.split_once(':').ok_or_else(bad)?;
     let keys = |keys: Vec<String>| KeyFilter { keys, fact: None };
@@ -1446,7 +1447,9 @@ pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
             crate::hubs::key::wikidata(value).ok_or_else(bad)?
         ])),
         "isrc" => Ok(both("isrc", crate::music::isrc(value).ok_or_else(bad)?)),
-        "upc" => Ok(both("upc", crate::music::gtin13(value).ok_or_else(bad)?)),
+        "upc" => Ok(both("upc", crate::barcode::gtin13(value).ok_or_else(bad)?)),
+        // A product's barcode (`kinds::products`).
+        "gtin" => Ok(both("gtin", crate::barcode::gtin13(value).ok_or_else(bad)?)),
         // The books source records each edition's ISBN-13s as facts.
         "isbn" => crate::resolver::cards::isbn(key)
             .map(|n| both("isbn", crate::resolver::cards::isbn13(&n)))

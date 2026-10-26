@@ -1,0 +1,8 @@
+[
+  {
+    "kind": "open_food_facts",
+    "uri": "https://world.openfoodfacts.org/product/3017620422003/nutella-ferrero",
+    "type": "Product",
+    "facts": {"gtin": "3017620422003"}
+  }
+]

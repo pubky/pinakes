@@ -67,6 +67,7 @@ pub mod mastodon;
 pub mod media_records;
 pub mod mempool;
 pub mod met;
+pub mod open_food_facts;
 pub mod pdb;
 pub mod pinterest;
 pub mod podcast_index;
@@ -75,6 +76,7 @@ pub mod public_inbox;
 pub mod reddit;
 pub mod ror;
 pub mod sec;
+pub mod shopify;
 pub mod snap_store;
 pub mod social;
 pub mod stacker_news;
@@ -136,6 +138,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &media_records::MediaRecords,
     &mempool::Mempool,
     &met::Met,
+    &open_food_facts::OpenFoodFacts,
     &pdb::Pdb,
     &pinterest::Pinterest,
     &podcast_index::PodcastIndex,
@@ -144,6 +147,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &reddit::Reddit,
     &ror::Ror,
     &sec::Sec,
+    &shopify::Shopify,
     &snap_store::SnapStore,
     &stacker_news::StackerNews,
     &substack::Substack,

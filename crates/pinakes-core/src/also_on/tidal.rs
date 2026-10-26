@@ -133,7 +133,7 @@ impl Kind {
     }
     fn normal(self, value: &str) -> Option<String> {
         match self {
-            Self::Album => music::gtin13(value),
+            Self::Album => crate::barcode::gtin13(value),
             Self::Track => music::isrc(value),
         }
     }

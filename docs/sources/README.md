@@ -96,6 +96,7 @@ or got plain web cards before are read by their source.
 - [`mempool`](mempool.md): Bitcoin blocks, transactions and addresses, and Lightning nodes and
   channels, from mempool.space (Esplora as fallback).
 - [`met`](met.md): The Metropolitan Museum of Art's works by object id.
+- [`open_food_facts`](open_food_facts.md): products on the Open Food Facts databases by barcode.
 - [`pdb`](pdb.md): Protein Data Bank structures by PDB id.
 - [`pinterest`](pinterest.md): Pinterest pins and profiles.
 - [`podcast_index`](podcast_index.md): Podcast Index shows and episodes by feed and episode id (needs the Podcast Index key).
@@ -104,6 +105,8 @@ or got plain web cards before are read by their source.
 - [`reddit`](reddit.md): Reddit posts, subreddits and users.
 - [`ror`](ror.md): research organizations by ROR id.
 - [`sec`](sec.md): SEC EDGAR filings, their documents and companies.
+- [`shopify`](shopify.md): Shopify stores' product pages, from the store's own product record (a page
+  hook).
 - [`snap_store`](snap_store.md): Snap Store apps by snap name, from the snapcraft.io info API.
 - [`stacker_news`](stacker_news.md): Stacker News posts and comments by item id.
 - [`substack`](substack.md): Substack publications, posts and profiles.
@@ -143,6 +146,9 @@ registered source), and in a debug build a source records no other form.
 - [`books`](books.md): Open Library, Amazon, Apple Books and Wikidata for a book.
 - [`films`](films.md): the IMDb title of a film or series.
 - [`podcasts`](podcasts.md): Apple Podcasts, Podcast Index and Wikidata for a show.
+- [`product_keys`](product_keys.md): a product's own barcode as its key.
+- [`open_food_facts`](open_food_facts.md#also-on): a product's barcode on Open Food, Beauty,
+  Products and Pet Food Facts.
 - [`media_records`](media_records.md#also-on): `titles`, the title of a media page the page hook
   could not name in time.
 - [`federal_register`](federal_register.md#also-on): a Federal Register document's GovInfo,

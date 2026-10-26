@@ -2822,6 +2822,10 @@
                 "summary": "PodcastSeries",
                 "value": "PodcastSeries"
               },
+              "type-product": {
+                "summary": "Product",
+                "value": "Product"
+              },
               "type-scholarlyarticle": {
                 "summary": "ScholarlyArticle",
                 "value": "ScholarlyArticle"
@@ -2872,11 +2876,15 @@
             }
           },
           {
-            "description": "Links carrying one exact identifier, on any service and in any spelling:\n`mbid:{uuid}` (a MusicBrainz recording, release, release group or artist, or the MBID a\nMusicBrainz page was merged from),\n`wikidata:{Q-id}`, `isrc:{code}`, `upc:{barcode}`, `isbn:{ISBN-10 or ISBN-13}`,\n`imdb:{tt…}` (an IMDb title), `podcast:{GUID}` (a podcast's `podcast:guid`),\n`osm:{type}/{id}`, `doi:{DOI}`, any key exactly as a resource read lists it in `keys`,\nor another namespace a source records (its page in docs/sources names it).",
+            "description": "Links carrying one exact identifier, on any service and in any spelling:\n`mbid:{uuid}` (a MusicBrainz recording, release, release group or artist, or the MBID a\nMusicBrainz page was merged from),\n`wikidata:{Q-id}`, `isrc:{code}`, `upc:{barcode}`, `isbn:{ISBN-10 or ISBN-13}`,\n`imdb:{tt…}` (an IMDb title), `podcast:{GUID}` (a podcast's `podcast:guid`),\n`osm:{type}/{id}`, `doi:{DOI}`, `gtin:{barcode}` (a product, in any of its lengths), any\nkey exactly as a resource read lists it in `keys`, or another namespace a source records\n(its page in docs/sources names it).",
             "examples": {
               "(none)": {
                 "summary": "(none)",
                 "value": ""
+              },
+              "key-0840440422266": {
+                "summary": "gtin:0840440422266",
+                "value": "gtin:0840440422266"
               },
               "key-304b84f0-07b0-5265-b6b7-da5cf5aeb56e": {
                 "summary": "podcast:304b84f0-07b0-5265-b6b7-da5cf5aeb56e",
