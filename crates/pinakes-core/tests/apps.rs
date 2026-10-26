@@ -93,24 +93,26 @@ impl Transport for Recorded {
     }
 }
 
-/// Signal's pages on Google Play (in German), the App Store, Flathub and the Snap Store join
-/// one group: each finds Signal's Wikidata item (Signal replaces TextSecure, which carries the
-/// same Android package), whose store IDs are keys of each. A Google Play and an F-Droid page of
-/// a package Wikidata lacks join through the package alone.
+/// Signal's pages on Google Play, the App Store, Flathub and the Snap Store join one group (a
+/// Play link in German and a storefront's App Store page are aliases of them): each finds
+/// Signal's Wikidata item (Signal replaces TextSecure, which carries the same Android package),
+/// whose store IDs are keys of each. A Google Play and an F-Droid page of a package Wikidata
+/// lacks join through the package alone.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn an_apps_store_links_join_one_group(pool: sqlx::PgPool) {
     if !also_on::registry().iter().any(|s| s.id() == "app_stores") {
         return;
     }
+    // Each store's own address: every other spelling is an alias of it.
     let signal = [
-        "https://play.google.com/store/apps/details?id=org.thoughtcrime.securesms&hl=de",
-        "https://apps.apple.com/us/app/signal-private-messenger/id874139669",
+        "https://play.google.com/store/apps/details?id=org.thoughtcrime.securesms",
+        "https://apps.apple.com/app/id874139669",
         "https://flathub.org/apps/org.signal.Signal",
         "https://snapcraft.io/signal-desktop",
     ];
     let unlisted = [
         "https://play.google.com/store/apps/details?id=org.example.unlisted",
-        "https://f-droid.org/en/packages/org.example.unlisted/",
+        "https://f-droid.org/packages/org.example.unlisted",
     ];
     let mut ids = vec![];
     for uri in signal.iter().chain(&unlisted) {
@@ -120,6 +122,29 @@ async fn an_apps_store_links_join_one_group(pool: sqlx::PgPool) {
         d.name = Some("An app".into());
         store::save_document(&pool, &id, 0, &d).await.unwrap();
         ids.push(id);
+    }
+    // A Play link in another language, and the App Store's page in a storefront, are the same
+    // app: aliases of its one address.
+    for (spelling, root) in [
+        (
+            "https://play.google.com/store/apps/details?id=org.thoughtcrime.securesms&hl=de",
+            &ids[0],
+        ),
+        (
+            "https://apps.apple.com/us/app/signal-private-messenger/id874139669",
+            &ids[1],
+        ),
+        (
+            "https://f-droid.org/en/packages/org.example.unlisted/",
+            &ids[5],
+        ),
+    ] {
+        let id = store::ensure_resource(&pool, spelling).await.unwrap();
+        assert_eq!(
+            &pinakes_core::alias::resolve_id(&pool, &id).await.unwrap(),
+            root,
+            "{spelling}"
+        );
     }
     let config = Config::default();
     let cx = also_on::Context {

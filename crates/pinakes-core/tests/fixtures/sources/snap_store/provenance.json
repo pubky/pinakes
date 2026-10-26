@@ -1,0 +1,22 @@
+{
+  "info-missing": {
+    "bytes": 118,
+    "content_type": "application/json",
+    "file": "info-missing.json",
+    "note": "Sent with the header Snap-Device-Series: 16.",
+    "recorded_at": "2026-10-26T18:40:03+00:00",
+    "sha256": "a3296cac7c1346532b65a059677ba1d75c2e778cd9889f7e88f28888dbadbc0a",
+    "status": 404,
+    "url": "https://api.snapcraft.io/v2/snaps/info/no-such-snap-pinakes?fields=title,summary,publisher,media,website,license,categories"
+  },
+  "info-signal-desktop": {
+    "bytes": 1299,
+    "content_type": "application/json",
+    "file": "info-signal-desktop.json",
+    "note": "Sent with the header Snap-Device-Series: 16.",
+    "recorded_at": "2026-10-26T18:40:03+00:00",
+    "sha256": "297743a1a7eebc17be8594240370c2925bf8bd63d71109999ba95e140e960e15",
+    "status": 200,
+    "url": "https://api.snapcraft.io/v2/snaps/info/signal-desktop?fields=title,summary,publisher,media,website,license,categories"
+  }
+}
