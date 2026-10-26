@@ -3,8 +3,8 @@
 //! Never a key: a normalised name equal to another is a candidate, and only beside facts that
 //! agree (the artist, a length within seconds).
 //!
-//! The SQL functions `matching_title(text)` and `matching_artist(text)` (the schema) apply the
-//! same rules, so a report can group by them; a test holds the two to the same answers.
+//! The same-recording pass stores each recording's keys (`same_recording_unit`), so a report
+//! can group by them.
 //!
 //! A title is lower-cased, and its tags (in brackets, or after ` - ` as Spotify writes them)
 //! are read one by one: a tag that keeps the recording's identity goes ("Remastered 2011",

@@ -165,8 +165,10 @@ impl Fact {
         }
     }
 }
-/// An exact join key, `{namespace}:{value}` (`mb:recording:{mbid}`, `wikidata:Q42`, `isrc:…`
-/// stays an attribute and is not a key). `via` names the hub it came through.
+/// An exact join key, `{namespace}:{value}` (`mb:recording:{mbid}`, `wikidata:Q42`, `isrc:…`,
+/// `upc:…`). An ISRC or a barcode is a key only where a source vouches for it: a service's own
+/// record of its track or album (TIDAL, Deezer), or a MusicBrainz match that names one recording
+/// (`music_sources::isrc_key`; a shared ISRC stays a fact). `via` names the hub it came through.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Key {
     pub key: String,
