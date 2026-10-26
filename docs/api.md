@@ -34,6 +34,7 @@ snapshot; a test fails when it is stale.
 | `GET /llms.txt` | None | The usage guide for agents, plain text ([Agents](#agents)) |
 | `GET /skill.md` | None | The guide as an agent skill named `pinakes` ([Agents](#agents)) |
 | `POST /mcp` | One MCP JSON-RPC message | The MCP endpoint (when `api.mcp`; [Agents](#agents)); not in the OpenAPI document |
+| `GET /mcp` | None | A browser (`Accept: text/html`): a short page on how to connect; any other GET: 405 with `Allow: POST` ([Agents](#agents)) |
 
 URIs are normalized and IDs computed by Pinakes itself: lowercase scheme and host, no default
 port, userinfo or fragment, then BLAKE3. Each URI is at most 2048 bytes; IDs are 32 lowercase hex
@@ -1035,6 +1036,12 @@ characters), `image`, `site`, `point`, `start`, `end`, `group`, `also_on` (`uri`
 (`GET /v1/resources/{id}`); every answer names the REST URL of its full result. A failed request
 is the tool's error (`isError`), its text `{error, status, hint, url}` with the route's status
 and message; an unknown tool is a JSON-RPC error.
+
+**A browser on `/mcp`.** A `GET /mcp` that accepts `text/html` answers a short HTML page: what
+the endpoint is, the Claude Code line (`claude mcp add --transport http pinakes {base}/mcp`),
+the JSON configuration other clients take, the tools' names and links to `/llms.txt` and
+`/skill.md`, with the base as the guide's. Any other GET is the 405 the protocol allows, with
+`Allow: POST` and one line of plain text; every other method is MCP's.
 
 **Budget.** An MCP message spends one unit of the per-IP budget, and a tool call what its
 requests cost on top (a `reach` search 6, `types` two requests, `social` one). Bodies are capped
