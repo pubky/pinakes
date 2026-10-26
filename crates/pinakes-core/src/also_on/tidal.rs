@@ -288,8 +288,7 @@ async fn item(cx: &Context, kind: Kind, id: &str) -> Result<Option<Value>> {
 /// and one TIDAL leaves out finds that it has none.
 async fn prefetch(cx: &Context, kind: Kind, ids: &[&str]) -> Result<()> {
     let (client_id, secret, slot) = pair_of(cx)?;
-    let mut slots = client_credentials::slots(&slot).await;
-    let s = slots.entry(slot).or_default();
+    let mut s = client_credentials::slot(&slot).await;
     s.unless_busy(&TIDAL)?;
     let token = s.token(&TIDAL, cx, &client_id, &secret).await?;
     // A batch asks only for what its items don't have cached (a retry's, within the hour).
@@ -333,7 +332,7 @@ async fn prefetch(cx: &Context, kind: Kind, ids: &[&str]) -> Result<()> {
         }
         status => anyhow::bail!("TIDAL batch answered {status}"),
     }
-    drop(slots);
+    drop(s);
     let v: Value = serde_json::from_slice(&fetched.body).context("TIDAL batch")?;
     let items = v["data"].as_array().context("TIDAL batch without data")?;
     // A paged answer may hold the missing items on a later page.
@@ -371,7 +370,7 @@ async fn prefetch(cx: &Context, kind: Kind, ids: &[&str]) -> Result<()> {
 mod tests {
     use super::*;
     use crate::resolver::RetryLater;
-    use client_credentials::{Issued, Slot, SLOTS};
+    use client_credentials::{Issued, Slot};
     use std::time::{Duration, Instant};
 
     /// `[tidal]` is TIDAL's own section: its pair from the file or its own variables, secret in
@@ -509,17 +508,14 @@ mod tests {
         // A token issued two minutes ago, which TIDAL now rejects.
         let slot = slot_key(&TIDAL, "rotate-id", "rotate-secret");
         let now = Instant::now();
-        SLOTS.lock().await.insert(
-            slot,
-            Slot {
-                token: Some(Issued {
-                    token: "old".into(),
-                    at: now.checked_sub(Duration::from_secs(120)).unwrap_or(now),
-                    until: now + Duration::from_secs(3600),
-                }),
-                ..Default::default()
-            },
-        );
+        *client_credentials::slot(&slot).await = Slot {
+            token: Some(Issued {
+                token: "old".into(),
+                at: now.checked_sub(Duration::from_secs(120)).unwrap_or(now),
+                until: now + Duration::from_secs(3600),
+            }),
+            ..Default::default()
+        };
         let error = item(&cx, Kind::Track, "7").await.unwrap_err();
         assert_eq!(
             error

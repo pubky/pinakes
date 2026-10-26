@@ -10,7 +10,7 @@ use base64::Engine;
 use serde_json::Value;
 use std::{
     collections::HashMap,
-    sync::LazyLock,
+    sync::{Arc, LazyLock},
     time::{Duration, Instant},
 };
 
@@ -199,11 +199,15 @@ impl Slot {
         }
     }
 }
-/// One slot per service and credential pair, and one request at a time per slot: a lookup holds
-/// its slot from the cooldown check to the answer, so one admitted before a 429 lands waits here
-/// and then sees the wait, instead of sending under host pacing alone.
-pub(crate) static SLOTS: LazyLock<tokio::sync::Mutex<HashMap<[u8; 32], Slot>>> =
+/// One slot per service and credential pair, each behind its own lock, and one request at a time
+/// per slot: a lookup holds its slot from the cooldown check to the answer, so one admitted
+/// before a 429 lands waits here and then sees the wait, instead of sending under host pacing
+/// alone. Another slot (another service, another pair) is never held up by it: the map's own
+/// lock is held only to find or create a slot.
+static SLOTS: LazyLock<std::sync::Mutex<HashMap<[u8; 32], SlotCell>>> =
     LazyLock::new(Default::default);
+/// One slot's own lock.
+type SlotCell = Arc<tokio::sync::Mutex<Slot>>;
 /// Lookups waiting for a slot right now: a test's service answers one of its own lookups once
 /// the next is pending, and no other slot's lookup counts.
 static WAITING: LazyLock<std::sync::Mutex<HashMap<[u8; 32], usize>>> =
@@ -233,12 +237,16 @@ impl Drop for Pending {
         }
     }
 }
-/// The slots, once this lookup's turn at `slot` comes.
-pub(crate) async fn slots(
-    slot: &[u8; 32],
-) -> tokio::sync::MutexGuard<'static, HashMap<[u8; 32], Slot>> {
-    let _pending = Pending::new(slot);
-    SLOTS.lock().await
+/// The slot `key` names, once this lookup's turn at it comes.
+pub(crate) async fn slot(key: &[u8; 32]) -> tokio::sync::OwnedMutexGuard<Slot> {
+    let _pending = Pending::new(key);
+    let cell = SLOTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(*key)
+        .or_default()
+        .clone();
+    cell.lock_owned().await
 }
 /// A key of this process's own, so a cache tag is never the pair's plain hash (an offline check
 /// of a guessed secret).
@@ -285,8 +293,7 @@ pub(crate) async fn object(
     (accept, extra_types): (&'static str, &'static [&'static str]),
 ) -> Result<Option<Value>> {
     let slot = slot_key(api, id, secret);
-    let mut slots = slots(&slot).await;
-    let s = slots.entry(slot).or_default();
+    let mut s = self::slot(&slot).await;
     s.unless_busy(api)?;
     let token = s.token(api, cx, id, secret).await?;
     let options = api_options(&token, &slot, accept, extra_types);
@@ -315,7 +322,7 @@ pub(crate) async fn object(
             anyhow::bail!("{} answered {status}", api.label);
         }
     }
-    drop(slots);
+    drop(s);
     Ok(Some(
         serde_json::from_slice(&fetched.body).with_context(|| format!("{} answer", api.label))?,
     ))
@@ -336,29 +343,14 @@ mod tests {
         let r = error.downcast_ref::<RetryLater>().unwrap();
         (r.class, r.seconds)
     }
-    async fn unless_busy(slot: &[u8; 32]) -> Result<()> {
-        SLOTS
-            .lock()
-            .await
-            .entry(*slot)
-            .or_default()
-            .unless_busy(&API)
+    async fn unless_busy(key: &[u8; 32]) -> Result<()> {
+        slot(key).await.unless_busy(&API)
     }
-    async fn cool_down(slot: &[u8; 32], seconds: u64) {
-        SLOTS
-            .lock()
-            .await
-            .entry(*slot)
-            .or_default()
-            .cool_down(seconds);
+    async fn cool_down(key: &[u8; 32], seconds: u64) {
+        slot(key).await.cool_down(seconds);
     }
-    async fn reject(slot: &[u8; 32], token: &str) -> anyhow::Error {
-        SLOTS
-            .lock()
-            .await
-            .entry(*slot)
-            .or_default()
-            .reject(&API, token)
+    async fn reject(key: &[u8; 32], token: &str) -> anyhow::Error {
+        slot(key).await.reject(&API, token)
     }
 
     #[tokio::test]
@@ -371,20 +363,18 @@ mod tests {
             until: now + Duration::from_secs(3600),
         };
         let two_minutes_ago = now.checked_sub(Duration::from_secs(120)).unwrap_or(now);
-        SLOTS.lock().await.insert(
-            slot,
-            Slot {
-                token: Some(issued("new", two_minutes_ago)),
-                ..Default::default()
-            },
-        );
+        *self::slot(&slot).await = Slot {
+            token: Some(issued("new", two_minutes_ago)),
+            ..Default::default()
+        };
         // A lookup that held an older token: the new one stays.
         assert_eq!(
             class_and_seconds(&reject(&slot, "old").await),
             ("unit_auth", 60)
         );
         assert_eq!(
-            SLOTS.lock().await[&slot]
+            self::slot(&slot)
+                .await
                 .token
                 .as_ref()
                 .map(|i| i.token.as_str()),
@@ -397,18 +387,16 @@ mod tests {
         );
         {
             // A scope of its own: the guard would otherwise hold the lock past the next one.
-            let slots = SLOTS.lock().await;
-            let s = &slots[&slot];
+            let s = self::slot(&slot).await;
             assert!(s.token.is_none() && s.refused_until.is_none());
         }
         // One issued just now and rejected: the credentials are refused for five minutes.
-        SLOTS.lock().await.get_mut(&slot).unwrap().token = Some(issued("fresh", now));
+        self::slot(&slot).await.token = Some(issued("fresh", now));
         assert_eq!(
             class_and_seconds(&reject(&slot, "fresh").await),
             ("unit_auth", REFUSAL_HOLD)
         );
-        let slots = SLOTS.lock().await;
-        let s = &slots[&slot];
+        let s = self::slot(&slot).await;
         assert!(s.token.is_none() && s.refused_until.is_some_and(|u| u > now));
     }
     #[tokio::test]
@@ -441,6 +429,113 @@ mod tests {
         }
         .into();
         assert_eq!(asked_wait(&limited), Some(900));
+    }
+    /// A request held open at one service (Spotify, slow to answer) holds its own slot only:
+    /// another service's lookup (TIDAL) completes meanwhile (review of 18e57ab: one lock over
+    /// every slot stopped TIDAL while a Spotify request was pending).
+    #[tokio::test]
+    async fn a_slow_request_holds_only_its_own_slot() {
+        use crate::resolver::egress::{Dns, Egress, Fetched, Transport};
+        use std::net::SocketAddr;
+        struct Public;
+        #[async_trait::async_trait]
+        impl Dns for Public {
+            async fn lookup(&self, _: &str, port: u16) -> Result<Vec<SocketAddr>> {
+                Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
+            }
+        }
+        /// Answers every token and API request at once, but `slow.example`'s API request only
+        /// once released.
+        #[derive(Default)]
+        struct Held {
+            entered: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+        }
+        #[async_trait::async_trait]
+        impl Transport for Held {
+            async fn get(&self, url: &url::Url, a: &[SocketAddr]) -> Result<Fetched> {
+                self.get_with(url, a, &FetchOptions::default()).await
+            }
+            async fn get_with(
+                &self,
+                url: &url::Url,
+                _: &[SocketAddr],
+                _: &FetchOptions,
+            ) -> Result<Fetched> {
+                let token = url.path() == "/token";
+                if url.host_str() == Some("slow.example") && !token {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
+                let body = if token {
+                    r#"{"access_token":"t","expires_in":3600}"#
+                } else {
+                    r#"{"id":"1"}"#
+                };
+                Ok(Fetched {
+                    permanent_redirect: false,
+                    truncated: false,
+                    validators: Default::default(),
+                    url: url.clone(),
+                    content_type: "application/json".into(),
+                    status: 200,
+                    retry_after_secs: 60,
+                    location: None,
+                    body: body.as_bytes().to_vec(),
+                })
+            }
+        }
+        static SLOW: Api = Api {
+            service: "slow",
+            label: "Slow",
+            auth: "https://slow.example/token",
+            auth_class: "slow_auth",
+            busy_class: "slow_busy",
+        };
+        static FAST: Api = Api {
+            service: "fast",
+            label: "Fast",
+            auth: "https://fast.example/token",
+            auth_class: "fast_auth",
+            busy_class: "fast_busy",
+        };
+        let held = Arc::new(Held::default());
+        let cx = Arc::new(Context {
+            egress: Egress::with_backends(Default::default(), Arc::new(Public), held.clone()),
+            config: Arc::new(crate::config::Config::default()),
+        });
+        let json = ("application/json", &[] as &[&str]);
+        let pending = {
+            let cx = cx.clone();
+            tokio::spawn(async move {
+                object(
+                    &SLOW,
+                    &cx,
+                    ("slow-id", "slow-secret"),
+                    "https://slow.example/api/1",
+                    json,
+                )
+                .await
+            })
+        };
+        // The slow service's request is in flight, its slot held.
+        held.entered.notified().await;
+        let fast = tokio::time::timeout(
+            Duration::from_secs(5),
+            object(
+                &FAST,
+                &cx,
+                ("fast-id", "fast-secret"),
+                "https://fast.example/api/1",
+                json,
+            ),
+        )
+        .await
+        .expect("a lookup at another service waited for the slow one's slot")
+        .unwrap();
+        assert_eq!(fast.unwrap()["id"], "1");
+        held.release.notify_one();
+        assert!(pending.await.unwrap().unwrap().is_some());
     }
     #[test]
     fn a_cache_tag_is_keyed_and_stable_and_slots_are_per_service() {
