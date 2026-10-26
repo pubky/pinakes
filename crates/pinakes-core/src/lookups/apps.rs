@@ -203,6 +203,24 @@ pub fn item_keys(item: &Value) -> Vec<Key> {
     keys
 }
 
+/// The fact an app's store card is compared by when no Wikidata item joins its stores
+/// (`app_match`): its official website's host (without `www.`) and its name in lower case, with
+/// every run of other characters than letters and digits as one space ("signal.org signal private
+/// messenger"). Two store cards with the same one are possibly the same app (`maybe_same`): a
+/// hint, never a join. `None` without a website or a name.
+pub fn app_match(name: &str, website: &str) -> Option<String> {
+    let host = web_url(website)?.host_str()?.to_ascii_lowercase();
+    let host = host.trim_start_matches("www.").trim_end_matches('.');
+    let name = name
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let value = format!("{host} {name}");
+    (!host.is_empty() && !name.is_empty() && value.len() <= 512).then_some(value)
+}
+
 /// This family in the lookups' table ([`super::FAMILIES`]).
 pub struct Lookups;
 impl super::Family for Lookups {
@@ -215,7 +233,7 @@ impl super::Family for Lookups {
 }
 
 pub mod also_on {
-    use super::{app_from_uri, item_keys, Store};
+    use super::{app_from_uri, app_match, item_keys, Store};
     use crate::{
         also_on::{self, Context, Source, Subject},
         hubs,
@@ -282,7 +300,20 @@ pub mod also_on {
                     }
                 }
             }
-            Ok(found.into_also_on("wikidata"))
+            let mut found = found.into_also_on("wikidata");
+            // The card's own name and website, for the possibly-same-app hint.
+            if let Some(doc) = &subject.doc {
+                let website = doc.attributes.get("website");
+                if let Some(value) = doc
+                    .name
+                    .as_deref()
+                    .zip(website)
+                    .and_then(|(n, w)| app_match(n, w))
+                {
+                    found.facts.push(also_on::Fact::new("app_match", value));
+                }
+            }
+            Ok(found)
         }
     }
 
@@ -379,6 +410,22 @@ pub mod also_on {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn app_match_is_the_website_host_and_the_plain_name() {
+        let play = app_match("Signal Private Messenger", "https://signal.org");
+        assert_eq!(play.as_deref(), Some("signal.org signal private messenger"));
+        assert_eq!(
+            app_match("Signal - Private Messenger", "https://www.Signal.org/"),
+            play
+        );
+        assert_eq!(
+            app_match("Über·App", "https://example.org/app").as_deref(),
+            Some("example.org über app")
+        );
+        assert_eq!(app_match("Signal", "mailto:a@signal.org"), None);
+        assert_eq!(app_match(" - ", "https://signal.org"), None);
+    }
 
     #[test]
     fn store_links() {

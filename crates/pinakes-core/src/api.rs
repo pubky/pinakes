@@ -646,14 +646,17 @@ pub struct Card {
     #[schema(value_type = Option<crate::event::storage::ReferenceEvent>)]
     pub event: Option<Value>,
     /// On an event card: up to three other events that are possibly the same one, best first
-    /// (the rule: "Possibly the same event" in docs/api.md). A hint only: never a group, never counted, and never a member of this card's own group.
+    /// (the rule: "Possibly the same event" in docs/api.md); on an app's store card, up to three
+    /// other store cards that are possibly the same app ("Possibly the same app"). A hint only:
+    /// never a group, never counted, and never a member of this card's own group.
     /// Absent on other cards, and everywhere when `[event] same_event_hint = "off"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub maybe_same: Option<Vec<SameEvent>>,
 }
 /// Another event that is possibly the same one: it starts together with this one, near it (or,
 /// when either has no place, at the same venue or under the same organizer), under a similar
-/// name, on another page.
+/// name, on another page. On an app's store card: another store card with the same website host
+/// and name (`start` is absent, `score` 1).
 #[derive(Clone, Serialize, ToSchema)]
 pub struct SameEvent {
     /// Its card's ID (a feed's, for an occurrence).
@@ -663,7 +666,8 @@ pub struct SameEvent {
     pub uri: String,
     pub site: Option<String>,
     pub start: Option<DateTime<Utc>>,
-    /// How alike the two names are, from 0.5 to 1 (pg_trgm similarity of the normalised names).
+    /// How alike the two names are, from 0.5 to 1 (pg_trgm similarity of the normalised names);
+    /// 1 for an app.
     pub score: f64,
 }
 /// The group this card is in (its other members are in `also_on`). Nothing is merged; every
@@ -987,6 +991,22 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
     })
 }
 /// Whether event cards carry the same-event hint.
+/// A card's `maybe_same` as SQL, over a unit's ID and type path (SQL expressions): the
+/// same-event hint for an event; for an app's store card, up to `n` other store cards with its
+/// `app_match` fact (the same website host and name), each with score 1, by URI; else `NULL`. An
+/// alias, a missing card and a member of the card's own group are never named.
+pub(crate) fn maybe_same_sql(unit: &str, type_path: &str, n: u32) -> String {
+    format!(
+        "coalesce(same_event_hint({unit},{type_path},{n}),(SELECT jsonb_agg(jsonb_build_object('id',same_app.id,'uri',same_app.uri,'host',same_app.host,'site',same_app.site,'start',NULL,'score',1) ORDER BY same_app.uri) \
+         FROM (SELECT DISTINCT same_r.id,same_r.uri,same_r.host,same_r.doc->>'site' AS site FROM resource_fact same_f \
+         JOIN resource_fact same_g ON same_g.name='app_match' AND same_g.value=same_f.value AND same_g.resource_id<>same_f.resource_id AND same_g.expires_at>now() \
+         JOIN resource same_r ON same_r.id=same_g.resource_id \
+         WHERE same_f.resource_id={unit} AND same_f.name='app_match' AND same_f.expires_at>now() AND same_r.status<>'missing' \
+         AND NOT EXISTS (SELECT 1 FROM resource_alias same_alias WHERE same_alias.alias_id=same_r.id) \
+         AND NOT EXISTS (SELECT 1 FROM group_unit same_a JOIN group_unit same_b ON same_b.group_id=same_a.group_id WHERE same_a.unit_id={unit} AND same_b.unit_id=same_r.id AND same_a.group_id IS NOT NULL) \
+         ORDER BY same_r.uri LIMIT {n}) same_app))"
+    )
+}
 pub(crate) fn same_event(config: &Config) -> bool {
     config.event.same_event_hint == crate::config::SameEventHint::On
 }
@@ -1676,7 +1696,14 @@ pub async fn search(
             sql.push("||jsonb_build_object('also_on',also_on(p.unit_id,p.unit_id,8,false))");
         }
         if same_event(&state.config) {
-            sql.push("||jsonb_build_object('maybe_same',same_event_hint(p.unit_id,ARRAY(SELECT jsonb_array_elements_text(p.item->'type_path')),3))");
+            sql.push(format!(
+                "||jsonb_build_object('maybe_same',{})",
+                maybe_same_sql(
+                    "p.unit_id",
+                    "ARRAY(SELECT jsonb_array_elements_text(p.item->'type_path'))",
+                    3
+                )
+            ));
         }
         sql.push(") ELSE '{}'::jsonb END");
         sql.push(" ORDER BY rank DESC,unit_id DESC) FROM page p),'[]') AS items, (SELECT count(*) FROM filtered) AS total, (SELECT count(*) FROM groups) AS cell_count, ");
@@ -1698,9 +1725,10 @@ pub async fn search(
             sql.push(" || jsonb_build_object('also_on',also_on(p.unit_id,p.unit_id,8,false))");
         }
         if same_event(&state.config) {
-            sql.push(
-                " || jsonb_build_object('maybe_same',same_event_hint(p.unit_id,p.type_path,3))",
-            );
+            sql.push(format!(
+                " || jsonb_build_object('maybe_same',{})",
+                maybe_same_sql("p.unit_id", "p.type_path", 3)
+            ));
         }
         sql.push(" ORDER BY rank DESC,unit_id DESC) FROM page p),'[]') AS items, ");
     }
@@ -1871,7 +1899,12 @@ async fn read(
     config: &Config,
 ) -> Result<Option<ResourceDetail>, ApiError> {
     let value: Option<Value> =
-        sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',CASE WHEN $3 THEN same_event_hint(r.id,r.type_path,10) END,'also_on',also_on(r.id,r.id,256,$2),'also_on_all',also_on(r.id,r.id,256,$2,false),'aliases',coalesce((SELECT jsonb_agg(uri ORDER BY uri) FROM (SELECT x.uri FROM resource_alias a JOIN resource x ON x.id=a.alias_id WHERE a.root_id=r.id ORDER BY x.uri LIMIT 50) s),'[]'),'facts',(SELECT jsonb_object_agg(name,vals) FROM (SELECT name,string_agg(value,'; ' ORDER BY value) AS vals FROM resource_fact WHERE resource_id=r.id AND expires_at>now() GROUP BY name) f)) FROM resource_document r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)")
+        sqlx::query_scalar(&[
+            "SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',CASE WHEN $3 THEN ",
+            &maybe_same_sql("r.id", "r.type_path", 10),
+            " END,'also_on',also_on(r.id,r.id,256,$2),'also_on_all',also_on(r.id,r.id,256,$2,false),'aliases',coalesce((SELECT jsonb_agg(uri ORDER BY uri) FROM (SELECT x.uri FROM resource_alias a JOIN resource x ON x.id=a.alias_id WHERE a.root_id=r.id ORDER BY x.uri LIMIT 50) s),'[]'),'facts',(SELECT jsonb_object_agg(name,vals) FROM (SELECT name,string_agg(value,'; ' ORDER BY value) AS vals FROM resource_fact WHERE resource_id=r.id AND expires_at>now() GROUP BY name) f)) FROM resource_document r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)",
+        ]
+        .concat())
             .bind(id)
             .bind(config.groups.enabled)
             .bind(same_event(config))
@@ -1972,7 +2005,12 @@ pub async fn lookup(
     let roots: Vec<String> = sqlx::query_scalar("SELECT coalesce(a.root_id,w.id) FROM unnest($1::text[]) w(id) LEFT JOIN resource_alias a ON a.alias_id=w.id").bind(&ids).fetch_all(&state.pool).await?;
     store::expedite(&state.pool, &roots).await?;
     state.wake.notify_waiters();
-    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',CASE WHEN $3 THEN same_event_hint(r.id,r.type_path,3) END,'also_on',also_on(r.id,r.id,8,$2)) FROM unnest($1::text[]) WITH ORDINALITY AS wanted(id,n) LEFT JOIN resource_alias a ON a.alias_id=wanted.id JOIN resource_document r ON r.id=coalesce(a.root_id,wanted.id) ORDER BY wanted.n").bind(ids).bind(state.config.groups.enabled).bind(same_event(&state.config)).fetch_all(&state.pool).await?;
+    let rows:Vec<Value>=sqlx::query_scalar(&[
+            "SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',CASE WHEN $3 THEN ",
+            &maybe_same_sql("r.id", "r.type_path", 3),
+            " END,'also_on',also_on(r.id,r.id,8,$2)) FROM unnest($1::text[]) WITH ORDINALITY AS wanted(id,n) LEFT JOIN resource_alias a ON a.alias_id=wanted.id JOIN resource_document r ON r.id=coalesce(a.root_id,wanted.id) ORDER BY wanted.n",
+        ]
+        .concat()).bind(ids).bind(state.config.groups.enabled).bind(same_event(&state.config)).fetch_all(&state.pool).await?;
     Ok(Json(rows.iter().map(card).collect::<Result<_, _>>()?))
 }
 #[utoipa::path(post,tag="Previews",path="/v1/resolve",request_body=ResolveRequest,responses((status=200,body=ResourceDetail),(status=202,body=ResourceDetail,description="Queued; poll resource by ID"),(status=400,description="Unsupported URI or disabled resolver"),(status=429,description="Preview rate limit")))]
@@ -2682,8 +2720,12 @@ async fn group_detail(
     .bind(id)
     .fetch_all(pool)
     .await?;
-    let rows: Vec<Value> = sqlx::query_scalar(
-        "SELECT to_jsonb(d)||jsonb_build_object('group',group_hint(d.unit_id),'maybe_same',CASE WHEN $2 THEN same_event_hint(d.unit_id,d.type_path,3) END,'also_on',also_on(d.unit_id,d.unit_id,8,true)) FROM group_unit u CROSS JOIN LATERAL (SELECT * FROM group_member_document WHERE unit_id=u.unit_id OFFSET 0) d WHERE u.group_id=$1 ORDER BY d.id,d.unit_id",
+    let rows: Vec<Value> = sqlx::query_scalar(&[
+            "SELECT to_jsonb(d)||jsonb_build_object('group',group_hint(d.unit_id),'maybe_same',CASE WHEN $2 THEN ",
+            &maybe_same_sql("d.unit_id", "d.type_path", 3),
+            " END,'also_on',also_on(d.unit_id,d.unit_id,8,true)) FROM group_unit u CROSS JOIN LATERAL (SELECT * FROM group_member_document WHERE unit_id=u.unit_id OFFSET 0) d WHERE u.group_id=$1 ORDER BY d.id,d.unit_id",
+        ]
+        .concat(),
     )
     .bind(id)
     .bind(same)

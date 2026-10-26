@@ -12,7 +12,11 @@ A lookup family of [also on](../api.md#also-on) (`lookups/apps.rs`).
     Android package, and Signal is the package's item. Several others are ambiguous and give
     nothing;
   - from that item, its Q-id, its store IDs (one value each) as keys, and its other stores (and
-    Homebrew) as links.
+    Homebrew) as links;
+  - its `app_match` fact, from its card's name and official website (the `website` fact the
+    store sources `app_store`, `google_play`, `fdroid`, `flathub` and `snap_store` give): store
+    cards with the same one are [possibly the same app](../api.md#possibly-the-same-app), a hint
+    for an app Wikidata does not join.
 
   So every store link of one app joins one [group](../api.md#groups), together with the app's
   Wikidata and Wikipedia cards.

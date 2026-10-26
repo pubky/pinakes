@@ -345,7 +345,8 @@ pub struct EventConfig {
     pub geocoding: bool,
     /// Wall-clock expansion of UTC-DTSTART series (see `UtcSeriesWallClock`).
     pub utc_series_wall_clock: UtcSeriesWallClock,
-    /// Event cards name other events that are possibly the same one (`maybe_same`).
+    /// Event cards name other events that are possibly the same one, and app store cards other
+    /// store cards that are possibly the same app (`maybe_same`).
     pub same_event_hint: SameEventHint,
     #[serde(skip)]
     pub feed_body_bytes: usize,

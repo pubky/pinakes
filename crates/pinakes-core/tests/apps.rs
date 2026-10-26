@@ -3,6 +3,7 @@
 //! `tests/fixtures/lookups/apps`.
 use pinakes_core::{
     also_on,
+    api::{self, AppState},
     config::Config,
     groups,
     model::ResourceMeta,
@@ -10,6 +11,7 @@ use pinakes_core::{
     store,
 };
 use std::{collections::BTreeMap, io::Read, net::SocketAddr, sync::Arc};
+use tower::ServiceExt;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/lookups/apps");
 
@@ -208,4 +210,118 @@ async fn an_apps_store_links_join_one_group(pool: sqlx::PgPool) {
     ] {
         assert!(keys.iter().any(|k| k == key), "{key} in {keys:?}");
     }
+}
+
+/// An app Wikidata lacks, on the App Store and Flathub under one website and one name (as each
+/// store spells it): no group, but each card names the other as possibly the same app. A Snap
+/// with the same name under another website is not named.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_app_wikidata_lacks_is_only_possibly_the_same(pool: sqlx::PgPool) {
+    if !also_on::registry().iter().any(|s| s.id() == "app_stores") {
+        return;
+    }
+    let cards = [
+        (
+            "https://apps.apple.com/app/id1234567890",
+            "Example Notes - Private Notes",
+            "https://www.example.org/",
+        ),
+        (
+            "https://flathub.org/apps/org.example.Notes",
+            "Example Notes: Private Notes",
+            "https://example.org",
+        ),
+        (
+            "https://snapcraft.io/example-notes",
+            "Example Notes - Private Notes",
+            "https://notes.example/",
+        ),
+    ];
+    let mut ids = vec![];
+    for (uri, name, website) in cards {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "web", 86400);
+        d.set_type("SoftwareApplication");
+        d.name = Some(name.into());
+        d.attributes.insert("website".into(), website.into());
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.push(id);
+    }
+    let cx = also_on::Context {
+        egress: Egress::with_backends(
+            Default::default(),
+            Arc::new(PublicDns),
+            Arc::new(Recorded::new()),
+        ),
+        config: Arc::new(Config::default()),
+    };
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let facts: Vec<String> = sqlx::query_scalar(
+        "SELECT value FROM resource_fact WHERE name='app_match' AND resource_id=ANY($1) ORDER BY value",
+    )
+    .bind(&ids)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        facts,
+        [
+            "example.org example notes private notes",
+            "example.org example notes private notes",
+            "notes.example example notes private notes",
+        ]
+    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let read = |id: &String| {
+        let app = app.clone();
+        let mut request = axum::http::Request::get(format!("/v1/resources/{id}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
+        ));
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), 200);
+            let body = http_body_util::BodyExt::collect(response.into_body())
+                .await
+                .unwrap()
+                .to_bytes();
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        }
+    };
+    let named = |card: &serde_json::Value| -> Vec<String> {
+        card["maybe_same"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|m| m["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let store_card = read(&ids[0]).await;
+    assert_eq!(named(&store_card), [ids[1].clone()], "{store_card}");
+    assert_eq!(store_card["maybe_same"][0]["score"], 1.0);
+    assert_eq!(named(&read(&ids[1]).await), [ids[0].clone()]);
+    assert!(named(&read(&ids[2]).await).is_empty());
+    let group = |id: &String| {
+        let (pool, id) = (pool.clone(), id.clone());
+        async move {
+            sqlx::query_scalar::<_, Option<String>>("SELECT (group_hint($1))->>'id'")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let (a, b) = (group(&ids[0]).await, group(&ids[1]).await);
+    assert!(a.is_none() || a != b, "never one group: {a:?} {b:?}");
 }
