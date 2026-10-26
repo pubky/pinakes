@@ -31,6 +31,7 @@ pub mod queue;
 pub mod recipes;
 pub mod resolver;
 pub mod same_event;
+pub mod same_recording;
 pub mod scheduler;
 pub mod source;
 pub mod sources;

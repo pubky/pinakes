@@ -1,0 +1,278 @@
+//! The same-recording hint: recordings on different pages that are possibly the same one when
+//! nothing exact joins them (no shared ISRC, MBID or barcode), such as a re-release whose ISRC
+//! MusicBrainz does not know beside the recording's own page. A hint only: never a group, never
+//! counted, never ranks anything. Two recordings (`MusicRecording` roots) are a pair when:
+//! - their titles are equal as two cards compare them (`matching::recording_title`: identity-
+//!   keeping tags such as "Remastered 2011" go, "Live" or "Remix" stay);
+//! - their first credited artists are equal (`matching::artist_name`; a recording without one
+//!   pairs with nothing);
+//! - their lengths, when both are known, are within [`LENGTH_WINDOW_SECS`] (score 1); with one
+//!   unknown they still pair (score 0.7).
+//!
+//! A member of the card's own group is left out when the card is read, so a pair that a key
+//! later joins needs no change here.
+//!
+//! The pass reads the resources whose recording may have changed (`same_recording_dirty`,
+//! marked by triggers on the resource and its facts, and by the sweep), bounded per pass and
+//! going on at once while more is due; an hourly sweep marks the recordings never read and those
+//! that are no longer recordings (an alias, a retyped or gone page). Cards only read the stored
+//! pairs (`same_recording_hint`).
+use crate::config::{Config, SameEventHint};
+use anyhow::Result;
+use sqlx::{PgPool, Row};
+use std::time::Duration;
+use tokio::sync::watch;
+
+/// How far apart two lengths may be, in seconds (as a service's ISRC is matched to a recording).
+pub const LENGTH_WINDOW_SECS: i64 = crate::music_sources::LENGTH_WINDOW_SECS as i64;
+/// The score of a pair whose lengths both are known and agree, and of one with a length unknown.
+pub const SCORE_LENGTHS_AGREE: f32 = 1.0;
+pub const SCORE_LENGTH_UNKNOWN: f32 = 0.7;
+/// Pairs kept per recording, best first (a card shows three, its details ten).
+const KEPT: i64 = 20;
+/// Resources claimed per pass.
+const CLAIMED: i64 = 25;
+
+fn enabled(config: &Config) -> bool {
+    config.groups.same_recording_hint == SameEventHint::On
+}
+
+/// The pass and the hourly sweep, until shutdown.
+pub async fn run(pool: PgPool, config: Config, mut shutdown: watch::Receiver<bool>) {
+    if !enabled(&config) {
+        return;
+    }
+    let mut swept: Option<tokio::time::Instant> = None;
+    loop {
+        if swept.is_none_or(|at| at.elapsed() >= Duration::from_secs(3600)) {
+            match sweep(&pool).await {
+                Ok(_) => swept = Some(tokio::time::Instant::now()),
+                Err(error) => {
+                    tracing::warn!(error = %crate::resolver::log_error(&error), "same-recording sweep will retry")
+                }
+            }
+        }
+        let pass = tokio::select! { _=shutdown.changed()=>break, result=drain(&pool, &config, 200)=>result };
+        match pass {
+            // There was work: more may be due, so go on at once.
+            Ok(n) if n > 0 => {
+                tokio::task::yield_now().await;
+                continue;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(error = %crate::resolver::log_error(&error), "same-recording pass will retry")
+            }
+        }
+        tokio::select! { _=shutdown.changed()=>break, _=tokio::time::sleep(Duration::from_secs(5))=>{} }
+    }
+}
+
+/// Marks the recordings never read (a database from before the hint, a recording saved while
+/// the hint was off) and the stored units whose resource is no longer a recording root: an
+/// alias, a page that is not ok, a retyped page. Returns the resources marked.
+pub async fn sweep(pool: &PgPool) -> Result<u64> {
+    let entered = sqlx::query(
+        "INSERT INTO same_recording_dirty(resource_id) SELECT r.id FROM resource r \
+         WHERE r.type_path @> ARRAY['MusicRecording'] AND r.status='ok' \
+         AND NOT EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id) \
+         AND NOT EXISTS(SELECT 1 FROM same_recording_unit u WHERE u.resource_id=r.id) \
+         ON CONFLICT DO NOTHING",
+    )
+    .execute(pool)
+    .await?;
+    let stale = sqlx::query(
+        "INSERT INTO same_recording_dirty(resource_id) SELECT u.resource_id FROM same_recording_unit u JOIN resource r ON r.id=u.resource_id \
+         WHERE EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id) OR r.status<>'ok' OR NOT coalesce(r.type_path @> ARRAY['MusicRecording'],false) \
+         ON CONFLICT DO NOTHING",
+    )
+    .execute(pool)
+    .await?;
+    Ok(entered.rows_affected() + stale.rows_affected())
+}
+
+/// One pass: claims up to `CLAIMED` due resources (at most `budget`) and reads each one's
+/// recording; a failed read is marked again for a minute later. Returns the resources claimed.
+pub async fn drain(pool: &PgPool, config: &Config, budget: i64) -> Result<usize> {
+    if !enabled(config) {
+        return Ok(0);
+    }
+    let due: Vec<String> = sqlx::query_scalar("DELETE FROM same_recording_dirty WHERE resource_id IN (SELECT resource_id FROM same_recording_dirty WHERE next_attempt_at<=now() ORDER BY next_attempt_at,resource_id LIMIT $1 FOR UPDATE SKIP LOCKED) RETURNING resource_id")
+        .bind(CLAIMED.min(budget.max(1)))
+        .fetch_all(pool)
+        .await?;
+    let mut changed = false;
+    for id in &due {
+        match resource(pool, id).await {
+            Ok(moved) => changed |= moved,
+            Err(error) => {
+                tracing::warn!(resource_id = %id, error = %crate::resolver::log_error(&error), "same-recording pairs will retry");
+                sqlx::query("INSERT INTO same_recording_dirty(resource_id,next_attempt_at) SELECT id,now()+interval '60 seconds' FROM resource WHERE id=$1 ON CONFLICT DO NOTHING")
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+            }
+        }
+    }
+    if changed {
+        sqlx::query("SELECT nextval('same_recording_revision')")
+            .execute(pool)
+            .await?;
+    }
+    Ok(due.len())
+}
+
+/// A recording as the pass compares it: its title and artist keys and its length, from its
+/// name, the artist and duration facts the sources read (first), else what its page states.
+#[derive(Debug, PartialEq)]
+pub struct Unit {
+    pub title_key: String,
+    pub artist_key: String,
+    pub length_secs: Option<i64>,
+}
+impl Unit {
+    pub fn new(
+        name: &str,
+        artist: Option<&str>,
+        duration_fact: Option<&str>,
+        page_duration: Option<&str>,
+    ) -> Self {
+        let length_secs = duration_fact
+            .and_then(|d| d.parse::<i64>().ok())
+            .filter(|s| (1..=86_400).contains(s))
+            .or_else(|| page_duration.and_then(crate::music_sources::duration_secs));
+        Self {
+            title_key: crate::matching::recording_title(name),
+            artist_key: crate::matching::artist_name(artist.unwrap_or_default()),
+            length_secs,
+        }
+    }
+    fn fingerprint(&self) -> String {
+        let bytes =
+            serde_json::to_vec(&(&self.title_key, &self.artist_key, self.length_secs)).unwrap();
+        blake3::hash(&bytes).to_hex()[..32].to_owned()
+    }
+}
+
+/// One resource: its unit is dropped (with its pairs) when it is no longer a recording root
+/// with a title, else written when its values changed, and its pairs computed anew. Returns
+/// whether any pair or unit changed.
+async fn resource(pool: &PgPool, id: &str) -> Result<bool> {
+    let row = sqlx::query(
+        "SELECT r.name,(r.type_path @> ARRAY['MusicRecording'] AND r.status='ok' AND NOT EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id)) AS recording,\
+         r.doc#>>'{attributes,artist}' AS page_artist,r.doc#>>'{attributes,duration}' AS page_duration,\
+         (SELECT min(f.value) FROM resource_fact f WHERE f.resource_id=r.id AND f.name='artist' AND f.expires_at>now()) AS artist,\
+         (SELECT min(f.value) FROM resource_fact f WHERE f.resource_id=r.id AND f.name='duration' AND f.expires_at>now()) AS duration,\
+         (SELECT u.fingerprint FROM same_recording_unit u WHERE u.resource_id=r.id) AS fingerprint \
+         FROM resource r WHERE r.id=$1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    let name: Option<String> = row.try_get("name")?;
+    let recording: bool = row.try_get("recording")?;
+    let unit = name.as_deref().filter(|_| recording).map(|name| {
+        Unit::new(
+            name,
+            row.try_get::<Option<String>, _>("artist")
+                .ok()
+                .flatten()
+                .or_else(|| row.try_get("page_artist").ok().flatten())
+                .as_deref(),
+            row.try_get::<Option<String>, _>("duration")
+                .ok()
+                .flatten()
+                .as_deref(),
+            row.try_get::<Option<String>, _>("page_duration")
+                .ok()
+                .flatten()
+                .as_deref(),
+        )
+    });
+    let unit = match unit {
+        Some(unit) if !unit.title_key.is_empty() => unit,
+        _ => {
+            let dropped = sqlx::query("DELETE FROM same_recording_unit WHERE resource_id=$1")
+                .bind(id)
+                .execute(pool)
+                .await?
+                .rows_affected();
+            return Ok(dropped > 0);
+        }
+    };
+    let fingerprint = unit.fingerprint();
+    if row.try_get::<Option<String>, _>("fingerprint")? == Some(fingerprint.clone()) {
+        return Ok(false);
+    }
+    let mut tx = pool.begin().await?;
+    sqlx::query("INSERT INTO same_recording_unit(resource_id,fingerprint,title_key,artist_key,length_secs) VALUES($1,$2,$3,$4,$5) \
+        ON CONFLICT(resource_id) DO UPDATE SET fingerprint=excluded.fingerprint,title_key=excluded.title_key,artist_key=excluded.artist_key,length_secs=excluded.length_secs")
+        .bind(id)
+        .bind(&fingerprint)
+        .bind(&unit.title_key)
+        .bind(&unit.artist_key)
+        .bind(unit.length_secs.map(|s| s as i32))
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM same_recording WHERE resource_id=$1 OR other_id=$1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    // The other recordings already read, on the values they were read with (a change marks a
+    // recording to be read again); a recording read later finds this one in turn.
+    sqlx::query(
+        "WITH me AS (SELECT * FROM same_recording_unit WHERE resource_id=$1), best AS (\
+         SELECT u.resource_id,CASE WHEN me.length_secs IS NULL OR u.length_secs IS NULL THEN $4 ELSE $3 END AS score \
+         FROM me,same_recording_unit u WHERE u.resource_id<>me.resource_id AND me.artist_key<>'' \
+         AND u.title_key=me.title_key AND u.artist_key=me.artist_key \
+         AND (me.length_secs IS NULL OR u.length_secs IS NULL OR abs(me.length_secs-u.length_secs)<=$2) \
+         ORDER BY score DESC,u.resource_id LIMIT $5) \
+         INSERT INTO same_recording(resource_id,other_id,score) SELECT $1,resource_id,score FROM best UNION ALL SELECT resource_id,$1,score FROM best \
+         ON CONFLICT(resource_id,other_id) DO UPDATE SET score=excluded.score",
+    )
+    .bind(id)
+    .bind(LENGTH_WINDOW_SECS as i32)
+    .bind(SCORE_LENGTHS_AGREE)
+    .bind(SCORE_LENGTH_UNKNOWN)
+    .bind(KEPT)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A unit takes the sources' artist and length first, the page's when they have none; a
+    /// length is seconds (a fact) or an ISO duration (the page); the keys are the normalised
+    /// title and first artist.
+    #[test]
+    fn a_unit_is_the_title_the_first_artist_and_the_length() {
+        let unit = Unit::new(
+            "Bohemian Rhapsody - Remastered 2011",
+            Some("Queen & David Bowie"),
+            Some("355"),
+            Some("PT5M54S"),
+        );
+        assert_eq!(
+            unit,
+            Unit {
+                title_key: "bohemian rhapsody".into(),
+                artist_key: "queen".into(),
+                length_secs: Some(355),
+            }
+        );
+        let page = Unit::new("Bohemian Rhapsody", None, None, Some("PT5M54S"));
+        assert_eq!(
+            (page.artist_key.as_str(), page.length_secs),
+            ("", Some(354))
+        );
+        assert_eq!(Unit::new("x", None, Some("0"), None).length_secs, None);
+        assert_ne!(unit.fingerprint(), page.fingerprint());
+    }
+}

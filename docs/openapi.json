@@ -115,7 +115,7 @@
             ]
           },
           "maybe_same": {
-            "description": "On an event card: other events that are possibly the same one, best first (the rule:\n\"Possibly the same event\" in docs/api.md); on an app's store card, other store cards that\nare possibly the same app (\"Possibly the same app\"). Up to three on a search, lookup or\ngroup card and up to ten on a resource read. A hint only: never a group, never counted, and\nnever a member of this card's own group. Absent on other cards, and everywhere when\n`[event] same_event_hint = \"off\"`.",
+            "description": "On an event card: other events that are possibly the same one, best first (the rule:\n\"Possibly the same event\" in docs/api.md); on an app's store card, other store cards that\nare possibly the same app (\"Possibly the same app\"); on a MusicRecording card, other\nrecordings that are possibly the same one (\"Possibly the same recording\"). Up to three on\na search, lookup or group card and up to ten on a resource read. A hint only: never a\ngroup, never counted, and never a member of this card's own group. Absent on other cards,\nand on a kind's cards when its hint is off (`[event] same_event_hint` for events and apps,\n`[groups] same_recording_hint`).",
             "items": {
               "$ref": "#/components/schemas/SameEvent"
             },
@@ -1244,14 +1244,14 @@
         "description": "`GET /v1/resources/{id}`, `GET /v1/resources/by-uri` and `POST /v1/resolve`: the card with\nthe resource's further fields, one flat object (`api_shape` 2 in `/v1/info`)."
       },
       "SameEvent": {
-        "description": "Another event that is possibly the same one: it starts together with this one, near it (or,\nwhen either has no place, at the same venue or under the same organizer), under a similar\nname, on another page. On an app's store card: another store card with the same website host\nand name (`start` is absent, `score` 1).",
+        "description": "Another event, app or recording that is possibly the same one. An event: it starts together\nwith this one, near it (or, when either has no place, at the same venue or under the same\norganizer), under a similar name, on another page. On an app's store card: another store card\nwith the same website host and name (`start` is absent, `score` 1). A recording: the same title\nand first artist, and a length within 3 s when both are known, on another page, with no key\nthat joins them.",
         "properties": {
           "id": {
             "description": "Its card's ID (a feed's, for an occurrence).",
             "type": "string"
           },
           "score": {
-            "description": "How alike the two names are, from 0.5 to 1 (pg_trgm similarity of the normalised names);\n1 for an app.",
+            "description": "An event: how alike the two names are, from 0.5 to 1 (pg_trgm similarity of the normalised\nnames). An app: 1. A recording: 1 when both lengths are known and within 3 s, 0.7 when one\nis unknown.",
             "format": "double",
             "type": "number"
           },
@@ -1262,6 +1262,7 @@
             ]
           },
           "start": {
+            "description": "An event's start; absent for a recording.",
             "format": "date-time",
             "type": [
               "string",
@@ -1269,7 +1270,7 @@
             ]
           },
           "uri": {
-            "description": "Its page: the occurrence's own page, or the feed's or event's link (for a feed read from a\nservice's API, that service's page).",
+            "description": "Its page: the occurrence's own page, or the feed's or event's link (for a feed read from a\nservice's API, that service's page); a recording's link.",
             "type": "string"
           }
         },

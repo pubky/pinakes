@@ -960,6 +960,100 @@ CREATE FUNCTION same_event_hint(unit text, type_path text[], n integer) RETURNS 
 $$;
 
 
+-- ── The same-recording hint ──────────────────────────────────────────────────────────────────
+
+-- Recordings (`MusicRecording` roots) on different pages that are possibly the same one when
+-- nothing exact joins them: the same title and first artist as two cards compare them
+-- (matching.rs) and a length within 3 s. A hint only: never a group, never counted, never
+-- ranks. A background pass (same_recording::drain) writes the pairs; cards only read them.
+
+-- A recording the pass has read, with what pairs are matched on: its title and artist keys and
+-- its length; and the `fingerprint` of the values they came from, so a change is read again.
+CREATE TABLE same_recording_unit (
+    resource_id text PRIMARY KEY REFERENCES resource(id) ON DELETE CASCADE,
+    fingerprint text NOT NULL,
+    title_key text NOT NULL,
+    artist_key text NOT NULL,
+    length_secs integer
+);
+CREATE INDEX same_recording_unit_name_idx ON same_recording_unit USING btree (title_key, artist_key);
+
+-- One row per direction of a pair: `score` is 1 when both lengths are known and within 3 s,
+-- 0.7 when one is unknown.
+CREATE TABLE same_recording (
+    resource_id text NOT NULL REFERENCES same_recording_unit(resource_id) ON DELETE CASCADE,
+    other_id text NOT NULL REFERENCES same_recording_unit(resource_id) ON DELETE CASCADE,
+    score real NOT NULL,
+    PRIMARY KEY (resource_id, other_id),
+    CONSTRAINT same_recording_pair CHECK (resource_id <> other_id)
+);
+CREATE INDEX same_recording_other_idx ON same_recording USING btree (other_id);
+
+-- Resources whose recording may have changed (its name, type, status, or the artist and
+-- length its page or the sources state), or that the sweep found unread.
+CREATE TABLE same_recording_dirty (
+    resource_id text PRIMARY KEY REFERENCES resource(id) ON DELETE CASCADE,
+    next_attempt_at timestamp with time zone DEFAULT now() NOT NULL
+);
+CREATE INDEX same_recording_dirty_due_idx ON same_recording_dirty USING btree (next_attempt_at, resource_id);
+
+-- Changes that can move a pair: a recording's (or a former recording's) name, type, status,
+-- page artist or duration, and an artist or duration fact of a recording. A fact row's key
+-- never changes, so a refreshed fact marks nothing; a deleted one (expired) does.
+CREATE FUNCTION mark_same_recording_dirty() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE target text;
+BEGIN
+ IF TG_TABLE_NAME='resource' THEN
+  IF NOT coalesce(NEW.type_path @> ARRAY['MusicRecording'],false)
+     AND NOT (TG_OP='UPDATE' AND coalesce(OLD.type_path @> ARRAY['MusicRecording'],false)) THEN RETURN NULL; END IF;
+  IF TG_OP='UPDATE' AND (NEW.name,NEW.type_path,NEW.status,NEW.doc#>>'{attributes,artist}',NEW.doc#>>'{attributes,duration}')
+     IS NOT DISTINCT FROM (OLD.name,OLD.type_path,OLD.status,OLD.doc#>>'{attributes,artist}',OLD.doc#>>'{attributes,duration}') THEN RETURN NULL; END IF;
+  target:=NEW.id;
+ ELSE
+  IF TG_OP='UPDATE' THEN RETURN NULL; END IF;
+  IF TG_OP='DELETE' THEN target:=OLD.resource_id; ELSE target:=NEW.resource_id; END IF;
+  IF coalesce(NEW.name,OLD.name) NOT IN ('artist','duration') THEN RETURN NULL; END IF;
+  IF NOT EXISTS (SELECT 1 FROM resource WHERE id=target AND type_path @> ARRAY['MusicRecording']) THEN RETURN NULL; END IF;
+ END IF;
+ INSERT INTO same_recording_dirty(resource_id) VALUES(target)
+  ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=excluded.next_attempt_at WHERE same_recording_dirty.next_attempt_at>excluded.next_attempt_at;
+ RETURN NULL;
+END $$;
+CREATE TRIGGER same_recording_resource_dirty AFTER INSERT OR UPDATE OF name, type_path, status, doc ON resource FOR EACH ROW EXECUTE FUNCTION mark_same_recording_dirty();
+CREATE TRIGGER same_recording_fact_dirty AFTER INSERT OR DELETE OR UPDATE ON resource_fact FOR EACH ROW EXECUTE FUNCTION mark_same_recording_dirty();
+
+-- Bumped whenever the pass or the sweep changes pairs: search pages hash it into their ETag.
+CREATE SEQUENCE same_recording_revision;
+
+-- The hint on a recording's card: up to `n` recordings that are possibly the same one, best
+-- first, each as {id, uri, host, site, start (null), score}, the shape of the event hint. A
+-- member of the card's own group, an alias and a card that is not ok are never listed. Read at
+-- request time.
+CREATE FUNCTION same_recording_hint(me text, n integer) RETURNS jsonb
+    LANGUAGE sql STABLE
+    AS $$
+ SELECT coalesce((
+  SELECT jsonb_agg(jsonb_build_object('id',x.id,'uri',x.uri,'host',x.host,'site',x.site,'start',NULL,'score',x.score) ORDER BY x.score DESC,x.uri)
+  FROM (SELECT r.id,r.uri,r.host,r.doc->>'site' AS site,round(p.score::numeric,2) AS score
+   FROM same_recording p JOIN resource r ON r.id=p.other_id
+   WHERE p.resource_id=me AND r.status='ok'
+   AND NOT EXISTS (SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id)
+   AND NOT EXISTS (SELECT 1 FROM group_unit a JOIN group_unit b ON b.group_id=a.group_id WHERE a.unit_id=me AND b.unit_id=p.other_id AND a.group_id IS NOT NULL)
+   ORDER BY p.score DESC,r.uri LIMIT n) x),'[]'::jsonb)
+$$;
+
+-- A card's hint by its kind: an event's with `events` on, a recording's with `recordings` on;
+-- NULL for another card, or a kind whose hint is off.
+CREATE FUNCTION maybe_same_hint(unit text, type_path text[], n integer, events boolean, recordings boolean) RETURNS jsonb
+    LANGUAGE sql STABLE
+    AS $$
+ SELECT CASE WHEN events AND coalesce(type_path @> ARRAY['Event'],false) THEN same_event_hint(unit,type_path,n)
+             WHEN recordings AND coalesce(type_path @> ARRAY['MusicRecording'],false) THEN same_recording_hint(unit,n) END
+$$;
+
+
 -- ── Rows the code updates in place ───────────────────────────────────────────────────────────
 
 -- The search revision starts at 1.

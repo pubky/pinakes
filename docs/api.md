@@ -98,7 +98,7 @@ An IMDb title keeps the type its page gives (it can be either).
 | `attribution` | Present on OSM cards, events placed at an OSM venue and events whose zone came from coordinates; display it with the card |
 | `occurrence` | Occurrence cards only: `{feed_id, feed_uri, uid, recurrence_id, status}`; `feed_uri` is the feed's URI, the link people tagged |
 | `event` | Pubky event references only (an event post's occurrence at a place; no feed writes them today: social events are Nexus's, see [Pubky events](#calendars-and-occurrences)): `{author, object_path, recurrence_id, start, end, status}`; `object_path` is the post's versionless path, `recurrence_id` the occurrence's local start (`YYYY-MM-DDTHH:MM:SS`) or null for a one-off |
-| `maybe_same` | Event and occurrence cards: other events that are [possibly the same event](#possibly-the-same-event), best first, each `{id, uri, site, start, score}` (`[]` when there are none). An app's store card: store cards that are [possibly the same app](#possibly-the-same-app). Up to three on a search, lookup or group card, up to ten on a resource read. A hint only, like `group`. Absent on other cards, and on every card with `[event] same_event_hint = "off"` |
+| `maybe_same` | Event and occurrence cards: other events that are [possibly the same event](#possibly-the-same-event), best first, each `{id, uri, site, start, score}` (`[]` when there are none). An app's store card: store cards that are [possibly the same app](#possibly-the-same-app). `MusicRecording` cards: other recordings that are [possibly the same recording](#possibly-the-same-recording), the same shape (`start` is `null`). Up to three on a search, lookup or group card, up to ten on a resource read. A hint only, like `group`. Absent on other cards, on event and app cards with `[event] same_event_hint = "off"` and on recording cards with `[groups] same_recording_hint = "off"` |
 
 A `pubky://` object of an app Pinakes has a profile for (Loopky, Pubky Rooms,
 the Pubky marketplace) gets that app's card; any other app's object gets a general one. Each is
@@ -849,8 +849,43 @@ event is paired within about five seconds of its save, once the events before it
 are read; an hourly sweep, which also runs at startup, queues events that entered the window or
 changed unseen. Search
 pages change their `ETag` when a hint on them changes. `[event] same_event_hint = "off"`
-([operations](operations.md#calendars-and-events)) removes the field from cards, details and the
-OpenAPI document and stops the pass.
+([operations](operations.md#calendars-and-events)) removes the field from event cards and details
+and stops the pass (and from the OpenAPI document, with the recording hint off too).
+
+## Possibly the same recording
+
+One recording is often on a page nothing exact joins to the others: a re-release whose ISRC
+MusicBrainz does not know, a service page that states no identifier. Such pages never
+[group](#groups) (a group needs a key a hub or the service vouches for). Instead a
+`MusicRecording` card names other recordings that are possibly the same one, in `maybe_same`:
+`{id, uri, site, start, score}` as for events, with `start` `null`, best first, up to three on a
+card and ten in its `details`.
+
+Two recordings are possibly the same when all of these hold:
+
+- their titles are equal once both are normalised: lower case, `&` as `and`, punctuation as
+  space; without the tags that keep a recording's identity, in brackets or after ` - `
+  ("Remastered 2011", "2011 Remaster", "Explicit", "Album Version", "Deluxe", "Bonus Track",
+  "From the X Soundtrack", a `feat.` or `with` credit); with the tags that name another
+  recording ("Live", "Remix", "Radio Edit", "Acoustic", "Instrumental", "Demo", "Extended",
+  "Mono", "Stereo", "Part 2", "Taylor's Version"), so "Bohemian Rhapsody - Remastered 2011" is
+  "Bohemian Rhapsody" and "Bohemian Rhapsody (Live Aid)" is not;
+- their first credited artists are equal, normalised the same way (the artist fact the
+  [also-on](#also-on) sources read, else the one the page states; a recording without one
+  names nothing);
+- their lengths, when both are known (the `duration` fact, else the page's), are within 3 s.
+
+`score` is 1 when both lengths are known and agree, 0.7 when one is unknown. A member of the
+card's own group and an alias are never listed, so a pair that a key later joins drops out of
+the hint by itself. It is a hint, like a group, and less: nothing is merged, counted or ranked
+by it, and each recording keeps its own card.
+
+A background pass computes the pairs, again whenever a recording's name, type, artist or length
+changes (its page or the sources' facts); a request only reads them. An hourly sweep, which also
+runs at startup, reads recordings saved before the hint existed or while it was off. Search pages
+change their `ETag` when a hint on them changes. `[groups] same_recording_hint = "off"`
+([operations](operations.md#groups)) removes the field from recording cards and details and stops
+the pass.
 
 ## Possibly the same app
 

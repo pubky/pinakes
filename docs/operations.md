@@ -181,6 +181,14 @@ UPDATE same_event_unit SET fingerprint='';
 INSERT INTO same_event_dirty(resource_id) SELECT DISTINCT resource_id FROM same_event_unit ON CONFLICT DO NOTHING;
 ```
 
+**Same-recording hint rebuild** (after a change of the title normaliser, `matching.rs`), the
+same way:
+
+```sql
+UPDATE same_recording_unit SET fingerprint='';
+INSERT INTO same_recording_dirty(resource_id) SELECT resource_id FROM same_recording_unit ON CONFLICT DO NOTHING;
+```
+
 ## Deployment and egress
 
 Web fetches bypass environment proxies, validate every DNS answer, pin the checked addresses and
@@ -663,6 +671,20 @@ at once. Writer lock contention retries after one to three seconds; curation wai
 seconds and answers 503 with Retry-After. `groups.cross_container_occurrences = "corroborated"`
 also joins one UID across feeds when the instances are within 500 m, 300 s and a name similarity
 of 0.5; a determined publisher can copy that, so it is off by default.
+
+`groups.same_recording_hint` (default `"on"`; `"off"`) puts `maybe_same` on `MusicRecording`
+cards: other recordings that are possibly the same one ([the
+rule](api.md#possibly-the-same-recording): the same normalised title and first artist, a length
+within 3 s), which no key joins. A background pass in the daemon computes it: triggers queue a
+recording when its name, type, status, page artist or duration changes, or an artist or duration
+fact of it is read or expires; each pass takes up to 25 queued resources, and the next follows at
+once while there was work, else after five seconds. A recording's normalised title and artist and
+its length are stored once read, and its pairs are matched among the recordings already read. An
+hourly sweep, which also runs at startup, queues recordings never read (a database from before the
+hint) and drops the units of resources that are no longer recordings. Requests only read the
+stored pairs, leaving out the card's own group members. `"off"` stops the pass and removes the
+field from recording cards and details (and from `/v1/openapi.json` when the event hint is off
+too); the stored pairs stay.
 
 Tenant rules (`data/multi-tenant-hosts.json`) say which part of a multi-tenant host is one
 publisher; the canonical [alias](api.md#aliases) rule needs the same tenant. A rule is
