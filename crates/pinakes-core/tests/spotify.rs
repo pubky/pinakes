@@ -46,6 +46,17 @@ fn album_body() -> Vec<u8> {
     }))
     .unwrap()
 }
+/// Two made-up tracks with an ISRC MusicBrainz gives to two recordings (3:33 and 2:59, as in
+/// the hubs tests): one 3:34 long, which picks the first, and one 3:16, which picks neither.
+const SHARED_PICKED: &str = "1sharedIsrcTrack214sec";
+const SHARED_NEITHER: &str = "1sharedIsrcTrack196sec";
+fn shared_track_body(id: &str, ms: u64) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "id": id, "type": "track", "name": "Never Gonna Give You Up", "duration_ms": ms,
+        "external_ids": {"isrc": "GBARL9300135"},
+    }))
+    .unwrap()
+}
 /// `GET /v1/tracks/{TRACK}`: `id`, `type`, `external_ids.isrc` and `duration_ms` (5:54).
 fn track_body() -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
@@ -148,6 +159,10 @@ impl Transport for Recorded {
                     answer(200, album_body(), "application/json; charset=utf-8")
                 } else if path == format!("/v1/tracks/{TRACK}") {
                     answer(200, track_body(), "application/json; charset=utf-8")
+                } else if path == format!("/v1/tracks/{SHARED_PICKED}") {
+                    answer(200, shared_track_body(SHARED_PICKED, 214_000), "application/json")
+                } else if path == format!("/v1/tracks/{SHARED_NEITHER}") {
+                    answer(200, shared_track_body(SHARED_NEITHER, 196_000), "application/json")
                 } else {
                     answer(
                         404,
@@ -156,6 +171,11 @@ impl Transport for Recorded {
                     )
                 }
             }
+            ("musicbrainz.org", "/ws/2/isrc/GBARL9300135") => answer(
+                200,
+                br#"{"isrc":"GBARL9300135","recordings":[{"id":"8f3471b5-7e6a-48da-86a9-c1c07a0f47ae","length":212946,"title":"Never Gonna Give You Up"},{"id":"e00ebb77-541e-41f3-86ba-a90530414922","length":178933,"title":"Never Gonna Give You Up"}]}"#.to_vec(),
+                "application/json",
+            ),
             ("musicbrainz.org", "/ws/2/isrc/GBUM71029604") => answer(
                 200,
                 fixture("mb-isrc-GBUM71029604.json"),
@@ -417,5 +437,43 @@ async fn refused_credentials_keep_what_spotify_gave_and_retry_later(pool: sqlx::
         // The refusal is kept five minutes: the retry asks Spotify nothing.
         let seen = run(&pool, config(Some(pair)), answers).await;
         assert!(spotify_requests(&seen).is_empty(), "{seen:?}");
+    }
+}
+
+/// An ISRC MusicBrainz gives to several recordings is never Spotify's key: the recording the
+/// track's length picks is (its MBID), else nothing; the ISRC is a fact either way.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_shared_isrc_is_never_a_spotify_key(pool: sqlx::PgPool) {
+    let picked = save(
+        &pool,
+        &format!("https://open.spotify.com/track/{SHARED_PICKED}"),
+        "MusicRecording",
+    )
+    .await;
+    let neither = save(
+        &pool,
+        &format!("https://open.spotify.com/track/{SHARED_NEITHER}"),
+        "MusicRecording",
+    )
+    .await;
+    run(
+        &pool,
+        config(Some(("shared-id", "shared-secret"))),
+        Answers::default(),
+    )
+    .await;
+    let spotify_keys =
+        "SELECT key FROM resource_key WHERE resource_id=$1 AND source='spotify' ORDER BY key";
+    assert_eq!(
+        rows(&pool, spotify_keys, &picked).await,
+        ["mb:recording:8f3471b5-7e6a-48da-86a9-c1c07a0f47ae"]
+    );
+    assert!(rows(&pool, spotify_keys, &neither).await.is_empty());
+    let any_isrc_key = "SELECT key FROM resource_key WHERE resource_id=$1 AND key LIKE 'isrc:%'";
+    let facts =
+        "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 AND source='spotify'";
+    for id in [&picked, &neither] {
+        assert!(rows(&pool, any_isrc_key, id).await.is_empty());
+        assert_eq!(rows(&pool, facts, id).await, ["isrc GBARL9300135"]);
     }
 }
