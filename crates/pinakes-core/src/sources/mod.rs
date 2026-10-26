@@ -44,6 +44,7 @@ pub mod feed;
 pub mod figshare;
 pub mod flathub;
 pub mod forgejo;
+pub mod fountain;
 pub mod gbif;
 pub mod ghost;
 pub mod github;
@@ -100,6 +101,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &figshare::Figshare,
     &flathub::Flathub,
     &forgejo::Forgejo,
+    &fountain::Fountain,
     &gbif::Gbif,
     &ghost::Ghost,
     &github::Github,

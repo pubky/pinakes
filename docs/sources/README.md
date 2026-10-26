@@ -73,6 +73,7 @@ or got plain web cards before are read by their source.
 - [`figshare`](figshare.md): Figshare articles (datasets, figures, papers) by article id.
 - [`flathub`](flathub.md): Flathub apps by app ID, from its AppStream API.
 - [`forgejo`](forgejo.md): repositories, branches, tags, releases and files on Forgejo and Gitea instances (Codeberg, gitea.com, others)
+- [`fountain`](fountain.md): page hook: a Fountain show's or episode's feed, from the data its page embeds.
 - [`gbif`](gbif.md): GBIF species and occurrence records by key.
 - [`ghost`](ghost.md): page hook: a Ghost post's title, excerpt, image, dates, authors and tags from the Content API
 - [`github`](github.md): repositories on github.com, with the operator's token (off without one)
