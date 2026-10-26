@@ -101,6 +101,7 @@ or got plain web cards before are read by their source.
 - [`snap_store`](snap_store.md): Snap Store apps by snap name, from the snapcraft.io info API.
 - [`stacker_news`](stacker_news.md): Stacker News posts and comments by item id.
 - [`swiss_parliament`](swiss_parliament.md): Swiss Parliament business items (Curia Vista) by affair id.
+- [`telegram`](telegram.md): Telegram public channels and their posts.
 - [`threads`](threads.md): Threads posts and profiles.
 - [`uk_parliament_bills`](uk_parliament_bills.md): UK Parliament bills and Acts by bill id.
 - [`uniprot`](uniprot.md): UniProtKB proteins by accession.
