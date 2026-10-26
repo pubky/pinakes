@@ -29,8 +29,8 @@ fn slug(value: &str) -> bool {
 pub enum Target {
     Person(String),
     Company(String),
-    /// A post by its activity id, with the address the link spelled when it was a `/posts/`
-    /// one (the address LinkedIn shows without an account).
+    /// A post by its activity id, with the slug the link spelled when it was a `/posts/` one:
+    /// the address LinkedIn shows without an account, and so the post's root.
     Post {
         id: String,
         posts: Option<String>,
@@ -77,22 +77,19 @@ impl Target {
             _ => None,
         }
     }
+    /// The one address of the object, and the page read for it. A `/posts/` link keeps its
+    /// own address: it is the one LinkedIn shows without an account, and the activity id alone
+    /// cannot spell it back, so it is never an alias of `/feed/update/urn:li:activity:{id}`.
     pub fn root(&self) -> String {
         match self {
             Self::Person(slug) => format!("https://www.linkedin.com/in/{slug}"),
             Self::Company(slug) => format!("https://www.linkedin.com/company/{slug}"),
-            Self::Post { id, .. } => {
-                format!("https://www.linkedin.com/feed/update/urn:li:activity:{id}")
-            }
-        }
-    }
-    /// The page to read: a post's `/posts/` address when the link spelled one.
-    fn page(&self) -> String {
-        match self {
             Self::Post {
                 posts: Some(posts), ..
             } => format!("https://www.linkedin.com/posts/{posts}"),
-            _ => self.root(),
+            Self::Post { id, posts: None } => {
+                format!("https://www.linkedin.com/feed/update/urn:li:activity:{id}")
+            }
         }
     }
     fn shape(&self) -> Shape {
@@ -278,7 +275,7 @@ impl Source for LinkedIn {
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let target = Target::of_uri(uri).context("not a LinkedIn link")?;
         let doc = cx.card(uri, self);
-        let mut doc = match social::page_body(cx, &target.page()).await? {
+        let mut doc = match social::page_body(cx, &target.root()).await? {
             Body::Read { body, .. } => {
                 let tags =
                     crate::resolver::html::blocking(move || social::open_graph(&body)).await??;
@@ -346,13 +343,23 @@ mod tests {
         ] {
             assert_eq!(Target::of_uri(uri), None, "{uri}");
         }
+        // A `/posts/` link is its own root, the page read for it: never an alias of the
+        // activity URN, which LinkedIn shows to accounts only.
+        let posts = "https://www.linkedin.com/posts/linkedin_activity-7517918134654218241-7OWA";
+        assert_eq!(LinkedIn.alias_root(posts), None);
         assert_eq!(
             LinkedIn
                 .alias_root(
-                    "https://www.linkedin.com/posts/linkedin_activity-7517918134654218241-7OWA"
+                    "https://de.linkedin.com/posts/linkedin_activity-7517918134654218241-7OWA?trk=x"
                 )
                 .as_deref(),
-            Some("https://www.linkedin.com/feed/update/urn:li:activity:7517918134654218241")
+            Some(posts)
+        );
+        assert_eq!(
+            LinkedIn.alias_root(
+                "https://www.linkedin.com/feed/update/urn:li:activity:7517918134654218241"
+            ),
+            None
         );
         assert_eq!(
             LinkedIn.alias_root("https://www.linkedin.com/in/williamhgates"),
@@ -428,5 +435,37 @@ mod tests {
         assert_eq!(doc.name.as_deref(), Some("LinkedIn on LinkedIn: hello"));
         assert_eq!(doc.description.as_deref(), Some("hello world"));
         assert!(!doc.attributes.contains_key("blocked"));
+    }
+
+    /// The resolver reads a `/posts/` link at its own address, and a link LinkedIn answers with
+    /// its 999 (as recorded for a profile without an account) is the blocked card, not a retry.
+    #[tokio::test(start_paused = true)]
+    async fn posts_are_read_at_their_address_and_999_is_a_blocked_card() {
+        let posts = "https://www.linkedin.com/posts/linkedin_activity-7517918134654218241-7OWA";
+        let person = "https://www.linkedin.com/in/thispersondoesnotexist12345x";
+        let read = |file: &str| crate::sources::fixture::read("linkedin", file);
+        let (egress, recorded) = crate::sources::fixture::egress(vec![
+            (
+                posts,
+                200,
+                "text/html",
+                read("post-linkedin-7517918134654218241.html.gz"),
+            ),
+            (person, 999, "text/html", read("person-missing.html")),
+        ]);
+        let cx = crate::sources::Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = LinkedIn.resolve(&cx, posts).await.unwrap();
+        assert_eq!(recorded.asked(), [posts]);
+        assert_eq!(doc.source_root.as_deref(), Some(posts));
+        assert_eq!(doc.type_name, "SocialMediaPosting");
+        assert_eq!(doc.attributes["author"], "linkedin");
+        let doc = LinkedIn.resolve(&cx, person).await.unwrap();
+        assert_eq!(doc.status, crate::model::Status::Ok);
+        assert_eq!(doc.type_name, "Person");
+        assert_eq!(doc.attributes["blocked"], "true");
+        assert_eq!(doc.name.as_deref(), Some("Profile on linkedin.com"));
     }
 }

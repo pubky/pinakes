@@ -6,11 +6,13 @@ card rather than a failure (below).
 
 ## Links
 
-A profile is named by its slug, a company (or school) by its slug, a post by its activity id:
-`https://www.linkedin.com/in/{slug}`, `https://www.linkedin.com/company/{slug}` and
-`https://www.linkedin.com/feed/update/urn:li:activity:{id}` are the roots. The host without
-`www.` or with a country prefix (`de.linkedin.com`), a capitalised slug, `/school/{slug}` and a
-post's `/posts/{slug}-activity-{id}-{tag}` address are aliases of them.
+A profile is named by its slug, a company (or school) by its slug:
+`https://www.linkedin.com/in/{slug}` and `https://www.linkedin.com/company/{slug}` are the roots. A post's root is the address the
+link spells: `https://www.linkedin.com/posts/{slug}-activity-{id}-{tag}`, the one LinkedIn shows
+without an account, or `https://www.linkedin.com/feed/update/urn:li:activity:{id}`. The two are
+not aliases of each other: the activity id alone cannot spell the `/posts/` address, and the
+URN's page is shown to accounts only. The host without `www.` or with a country prefix
+(`de.linkedin.com`), a capitalised slug and `/school/{slug}` are aliases.
 
 ## What it reads
 
@@ -20,9 +22,8 @@ post's `/posts/{slug}-activity-{id}-{tag}` address are aliases of them.
 - A company: `GET https://www.linkedin.com/company/{slug}`, its Open Graph tags
   (`Name | LinkedIn`; the description starts `Name | N followers on LinkedIn.`). A 404 is
   `missing`.
-- A post: `GET` of its `/posts/` address when the link spelled one (the address LinkedIn shows
-  without an account), else its root. A page offering to sign in instead of the post gives
-  the plain card.
+- A post: `GET` of its root. A page offering to sign in instead of the post gives the plain
+  card.
 
 The tags are read as written: LinkedIn's JSON-LD describes recent posts, not the page.
 LinkedIn answers many requests without an account with HTTP 999 or its sign-in page; such a

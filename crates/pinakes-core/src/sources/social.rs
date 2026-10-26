@@ -7,7 +7,12 @@
 use super::Context;
 use crate::{
     model::{ResourceMeta, Status},
-    resolver::{egress::FetchOptions, html, interstitial::Blocked, web},
+    resolver::{
+        egress::{FetchOptions, Fetched},
+        html,
+        interstitial::Blocked,
+        web,
+    },
 };
 use anyhow::{bail, Result};
 use serde_json::Value;
@@ -68,17 +73,34 @@ pub enum Page {
     Blocked,
 }
 
+/// LinkedIn's status for a request it refuses without an account.
+const REFUSED: u16 = 999;
+
+/// A request to a platform, or `None` when the platform refused it: an access wall, or its 999.
+/// Rate limits and server errors are `RetryLater`, as `Context::fetch` makes them; 999 is above
+/// 500 but a refusal, and is answered before that rule would read it as a server error.
+async fn fetch(cx: &Context<'_>, url: &str, options: &FetchOptions) -> Result<Option<Fetched>> {
+    let fetched = match cx.egress.fetch_with(url, options).await {
+        Ok(fetched) => fetched,
+        Err(e) if e.is::<Blocked>() => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if fetched.status == REFUSED {
+        return Ok(None);
+    }
+    super::retry(&fetched)?;
+    Ok(Some(fetched))
+}
+
 /// Fetch a platform's public page.
 pub async fn page(cx: &Context<'_>, url: &str) -> Result<Page> {
-    let fetched = match cx.fetch(url, &FetchOptions::default()).await {
-        Ok(fetched) => fetched,
-        Err(e) if e.is::<Blocked>() => return Ok(Page::Blocked),
-        Err(e) => return Err(e),
+    let Some(fetched) = fetch(cx, url, &FetchOptions::default()).await? else {
+        return Ok(Page::Blocked);
     };
     match fetched.status {
         200 => {}
         404 | 410 | 451 => return Ok(Page::Missing),
-        401 | 403 | 999 => return Ok(Page::Blocked),
+        401 | 403 => return Ok(Page::Blocked),
         s => bail!("the site answered {s}"),
     }
     let (uri, ttl, ended_at) = (url.to_owned(), cx.ttl, fetched.url.clone());
@@ -118,10 +140,8 @@ pub async fn oembed(cx: &Context<'_>, endpoint: &str, url: &str) -> Result<Oembe
         accept: Some("application/json".into()),
         ..Default::default()
     };
-    let fetched = match cx.fetch(request.as_str(), &options).await {
-        Ok(fetched) => fetched,
-        Err(e) if e.is::<Blocked>() => return Ok(Oembed::Blocked),
-        Err(e) => return Err(e),
+    let Some(fetched) = fetch(cx, request.as_str(), &options).await? else {
+        return Ok(Oembed::Blocked);
     };
     match fetched.status {
         200 => match serde_json::from_slice::<Value>(&fetched.body) {
@@ -144,10 +164,8 @@ pub enum Body {
 
 /// Fetch a platform's public page as text.
 pub async fn page_body(cx: &Context<'_>, url: &str) -> Result<Body> {
-    let fetched = match cx.fetch(url, &FetchOptions::default()).await {
-        Ok(fetched) => fetched,
-        Err(e) if e.is::<Blocked>() => return Ok(Body::Blocked),
-        Err(e) => return Err(e),
+    let Some(fetched) = fetch(cx, url, &FetchOptions::default()).await? else {
+        return Ok(Body::Blocked);
     };
     Ok(match fetched.status {
         200 => Body::Read {
@@ -155,7 +173,7 @@ pub async fn page_body(cx: &Context<'_>, url: &str) -> Result<Body> {
             url: fetched.url,
         },
         404 | 410 | 451 => Body::Missing,
-        401 | 403 | 999 => Body::Blocked,
+        401 | 403 => Body::Blocked,
         s => bail!("the site answered {s}"),
     })
 }
