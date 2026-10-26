@@ -40,9 +40,10 @@ pub enum Target {
 }
 
 impl Target {
-    /// `https://www.reddit.com/r/{sub}/comments/{id}[/slug]`, `/comments/{id}`, `/r/{sub}`,
-    /// `/user/{name}` (also `/u/`), on reddit.com with any of its hosts (www., old., new.,
-    /// np., m., none), and `https://redd.it/{id}`.
+    /// `https://www.reddit.com/r/{sub}/comments/{id}[/slug]`, `/comments/{id}[/slug]`,
+    /// `/r/{sub}`, `/user/{name}` (also `/u/`), on reddit.com with any of its hosts (www., old.,
+    /// new., np., m., none), and `https://redd.it/{id}`. A comment's permalink (a segment after
+    /// the slug) is not read: a comment is its own thing, never its post.
     pub fn of_uri(uri: &str) -> Option<Self> {
         let url = web_url(uri)?;
         let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
@@ -53,10 +54,14 @@ impl Target {
             },
             "reddit.com" | "www.reddit.com" | "old.reddit.com" | "new.reddit.com"
             | "np.reddit.com" | "m.reddit.com" => match segments.as_slice() {
-                ["r", sub, "comments", id, ..] if name(sub) && post_id(id) => {
+                ["r", sub, "comments", id] | ["r", sub, "comments", id, _]
+                    if name(sub) && post_id(id) =>
+                {
                     Some(Self::Post((*id).to_owned()))
                 }
-                ["comments", id, ..] if post_id(id) => Some(Self::Post((*id).to_owned())),
+                ["comments", id] | ["comments", id, _] if post_id(id) => {
+                    Some(Self::Post((*id).to_owned()))
+                }
                 ["r", sub] if name(sub) => Some(Self::Subreddit(sub.to_ascii_lowercase())),
                 ["user" | "u", user] if name(user) => Some(Self::User(user.to_ascii_lowercase())),
                 _ => None,
@@ -183,6 +188,16 @@ pub fn user_card(doc: ResourceMeta, name: &str, v: &Value) -> Result<Option<Reso
     Ok(Some(doc))
 }
 
+/// The card of a link Reddit refused: its shape alone, marked `blocked`, a post keeping the type
+/// its readable card has.
+pub fn blocked(doc: ResourceMeta, target: &Target) -> ResourceMeta {
+    let mut doc = social::blocked(doc, target.shape(), SITE);
+    if matches!(target, Target::Post(_)) {
+        doc.set_type("DiscussionForumPosting");
+    }
+    doc
+}
+
 #[async_trait]
 impl Source for Reddit {
     fn name(&self) -> &'static str {
@@ -250,8 +265,13 @@ impl Source for Reddit {
         // Reddit's published limit for requests without an account: 10 per minute.
         &[("www.reddit.com", 10.0 / 60.0, None)]
     }
+    /// A post's card, and its blocked card (a post Reddit refused to show), whose type is the
+    /// same: storage asks the stored card whether to purge the post's history once it is gone.
     fn social(&self, doc: &ResourceMeta) -> bool {
-        doc.type_name == "DiscussionForumPosting"
+        matches!(
+            doc.type_name.as_str(),
+            "DiscussionForumPosting" | "SocialMediaPosting"
+        )
     }
     fn examples(&self) -> &'static [Example] {
         &[
@@ -279,7 +299,7 @@ impl Source for Reddit {
         let fetched = match cx.fetch(&target.json(), &options).await {
             Ok(fetched) => fetched,
             Err(e) if e.is::<crate::resolver::interstitial::Blocked>() => {
-                return Ok(social::blocked(doc, target.shape(), SITE).with_root(target.root()))
+                return Ok(blocked(doc, &target).with_root(target.root()))
             }
             Err(e) => return Err(e),
         };
@@ -295,7 +315,7 @@ impl Source for Reddit {
                 .unwrap_or_else(|| cx.missing(uri, self))
             }
             404 => cx.missing(uri, self),
-            401 | 403 => social::blocked(doc, target.shape(), SITE),
+            401 | 403 => blocked(doc, &target),
             s => anyhow::bail!("Reddit answered {s}"),
         };
         doc.source_root = Some(target.root());
@@ -342,6 +362,10 @@ mod tests {
             assert_eq!(Target::of_uri(uri), Some(target), "{uri}");
         }
         for uri in [
+            // A comment's permalink, with and without its post's slug, is not its post.
+            "https://www.reddit.com/r/announcements/comments/1k3d0pk/a_title/abcdefg/",
+            "https://old.reddit.com/r/announcements/comments/1k3d0pk/a_title/abcdefg",
+            "https://www.reddit.com/comments/1k3d0pk/a_title/abcdefg/",
             "https://www.reddit.com/r/announcements/s/AbCdEf",
             "https://www.reddit.com/r/announcements/wiki/index",
             "https://www.reddit.com/comments/",

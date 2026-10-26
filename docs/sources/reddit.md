@@ -12,7 +12,9 @@ A post is named by its id, a subreddit and a user by their names:
 `https://www.reddit.com/user/{name}/` are the roots. Reddit's other hosts (old., new., np.,
 m., none), a post's subreddit and slug (`/r/{sub}/comments/{id}/{slug}/`), `redd.it/{id}`,
 `/u/{name}` and a capitalised name are aliases of them. Share links (`/r/{sub}/s/{code}`) name
-nothing without a fetch and are not read.
+nothing without a fetch and are not read. A comment's permalink
+(`…/comments/{id}/{slug}/{comment}/`) is not read either: a comment is its own thing, never its
+post.
 
 ## What it reads
 
@@ -24,7 +26,8 @@ nothing without a fetch and are not read.
 A 404 is `missing`; an answer for another object is an error. Reddit refuses many requests
 without a browser with its network-security page (403): the card of the link's shape alone,
 "Post on reddit.com" or "Profile on reddit.com", with the `blocked` fact. The link still
-resolves, groups and counts.
+resolves, groups and counts. A refused post keeps the post's type, so it stays social content:
+once the post is gone, its text leaves the change history.
 
 The recorded fixtures hold Reddit's refusals; the JSON fixtures are written by hand after
 Reddit's public JSON, as their provenance says.
