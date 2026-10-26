@@ -10,7 +10,8 @@
 //!
 //! The pass reads the units of resources whose events changed (`same_event_dirty`, marked by
 //! triggers and by the sweep) and starting in the window (a
-//! day ago to a year ahead), bounded per pass and going on at once while more is due; an hourly
+//! day ago to a year ahead), bounded per pass and going on at once while more is due; an entry
+//! is claimed for a while and dropped once read, so a stopped pass loses nothing; an hourly
 //! sweep drops units that left the window and marks those that entered it, changed unseen or
 //! became an alias. Cards only read the stored pairs (`same_event_hint`).
 use crate::config::{Config, SameEventHint};
@@ -101,23 +102,45 @@ pub async fn sweep(pool: &PgPool) -> Result<u64> {
     Ok(entered.rows_affected() + stale.rows_affected())
 }
 
-/// One pass: claims up to `CLAIMED` due resources (never one a save is still marking) and pairs
-/// their new or changed units, at most `budget` of them; a resource with more, or one the budget
-/// did not reach, is marked again. Returns the resources claimed.
+/// How long a claimed resource is the pass's: one that is not done by then (the pass was
+/// stopped, the process ended) is due again, without waiting for the sweep.
+const LEASE: Duration = Duration::from_secs(300);
+
+/// Claims up to `n` due resources (never one a save is still marking: its row is locked) for
+/// `lease`: each one's entry stays, moved `lease` ahead, and the time it was moved to is the
+/// claim. Exposed for the interruption test; `drain` claims with [`LEASE`].
+pub async fn claim(
+    pool: &PgPool,
+    n: i64,
+    lease: Duration,
+) -> Result<Vec<(String, chrono::DateTime<chrono::Utc>)>> {
+    let rows = sqlx::query("UPDATE same_event_dirty d SET next_attempt_at=now()+$2*interval '1 millisecond' \
+        WHERE d.resource_id IN (SELECT resource_id FROM same_event_dirty WHERE next_attempt_at<=now() ORDER BY next_attempt_at,resource_id LIMIT $1 FOR UPDATE SKIP LOCKED) \
+        RETURNING d.resource_id,d.next_attempt_at")
+        .bind(n)
+        .bind(lease.as_millis() as f64)
+        .fetch_all(pool)
+        .await?;
+    rows.iter()
+        .map(|r| Ok((r.try_get("resource_id")?, r.try_get("next_attempt_at")?)))
+        .collect()
+}
+
+/// One pass: claims up to `CLAIMED` due resources and pairs their new or changed units, at most
+/// `budget` of them; a resource with more, or one the budget did not reach, is due again at once.
+/// A claim is settled only while it is still the claim: a change marked meanwhile moved the entry
+/// back to now (the trigger), and the next pass reads the resource again. An interrupted pass
+/// leaves its claims to run out. Returns the resources claimed.
 pub async fn drain(pool: &PgPool, config: &Config, budget: i64) -> Result<usize> {
     if !enabled(config) {
         return Ok(0);
     }
-    // Unmarked first: a change while the units are read marks the resource again.
-    let due: Vec<String> = sqlx::query_scalar("DELETE FROM same_event_dirty WHERE resource_id IN (SELECT resource_id FROM same_event_dirty WHERE next_attempt_at<=now() ORDER BY next_attempt_at,resource_id LIMIT $1 FOR UPDATE SKIP LOCKED) RETURNING resource_id")
-        .bind(CLAIMED)
-        .fetch_all(pool)
-        .await?;
+    let due = claim(pool, CLAIMED, LEASE).await?;
     let mut read = 0;
     let mut changed = false;
-    for id in &due {
+    for (id, claimed) in &due {
         if read as i64 >= budget {
-            mark(pool, id, 0).await?;
+            release(pool, id, claimed, 0).await?;
             continue;
         }
         match resource(pool, id, budget - read as i64).await {
@@ -125,12 +148,20 @@ pub async fn drain(pool: &PgPool, config: &Config, budget: i64) -> Result<usize>
                 read += n;
                 changed |= n > 0 || dropped;
                 if more {
-                    mark(pool, id, 0).await?;
+                    release(pool, id, claimed, 0).await?;
+                } else {
+                    sqlx::query(
+                        "DELETE FROM same_event_dirty WHERE resource_id=$1 AND next_attempt_at=$2",
+                    )
+                    .bind(id)
+                    .bind(claimed)
+                    .execute(pool)
+                    .await?;
                 }
             }
             Err(error) => {
                 tracing::warn!(resource_id = %id, error = %crate::resolver::log_error(&error), "same-event pairs will retry");
-                mark(pool, id, 60).await?;
+                release(pool, id, claimed, 60).await?;
             }
         }
     }
@@ -140,18 +171,25 @@ pub async fn drain(pool: &PgPool, config: &Config, budget: i64) -> Result<usize>
     Ok(due.len())
 }
 
-/// Search pages hash this into their ETag, so a changed hint is never answered with a 304.
-async fn bump(pool: &PgPool) -> Result<()> {
-    sqlx::query("SELECT nextval('same_event_revision')")
+/// A claimed resource due again `after_secs` from now, if the entry is still the claim.
+async fn release(
+    pool: &PgPool,
+    id: &str,
+    claimed: &chrono::DateTime<chrono::Utc>,
+    after_secs: i64,
+) -> Result<()> {
+    sqlx::query("UPDATE same_event_dirty SET next_attempt_at=now()+$3*interval '1 second' WHERE resource_id=$1 AND next_attempt_at=$2")
+        .bind(id)
+        .bind(claimed)
+        .bind(after_secs)
         .execute(pool)
         .await?;
     Ok(())
 }
 
-async fn mark(pool: &PgPool, id: &str, after_secs: i64) -> Result<()> {
-    sqlx::query("INSERT INTO same_event_dirty(resource_id,next_attempt_at) SELECT id,now()+$2*interval '1 second' FROM resource WHERE id=$1 ON CONFLICT DO NOTHING")
-        .bind(id)
-        .bind(after_secs)
+/// Search pages hash this into their ETag, so a changed hint is never answered with a 304.
+async fn bump(pool: &PgPool) -> Result<()> {
+    sqlx::query("SELECT nextval('same_event_revision')")
         .execute(pool)
         .await?;
     Ok(())
