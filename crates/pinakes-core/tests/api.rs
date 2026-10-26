@@ -354,6 +354,11 @@ async fn search_filters_facets_true_keyset_and_invalid_options(pool: PgPool) {
         "reach=wot_2",
         "reach=following",
         "reach=strangers",
+        "boost=following",
+        "boost=strangers&viewer=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+        "boost=following&viewer=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy&sort=distance",
+        "boost=friends&viewer=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy&sort=recent",
+        "boost=friends&viewer=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy&related=00000000000000000000000000000000",
         "sort=distance",
         "sort=unknown",
         "limit=0",
@@ -1664,7 +1669,7 @@ async fn multibyte_input_never_panics_any_public_route(pool: PgPool) {
         "radius" => "&near=46.0,8.9",
         "near" => "&radius=1000",
         "cluster" => "&bbox=8.9,45.9,9.1,46.1",
-        "reach" => "&viewer=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+        "reach" | "boost" => "&viewer=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
         "viewer" => "&reach=following",
         _ => "",
     };
@@ -1680,7 +1685,10 @@ async fn multibyte_input_never_panics_any_public_route(pool: PgPool) {
         assert!(
             status.is_success()
                 || status.is_client_error()
-                || (status == StatusCode::BAD_GATEWAY && what.contains("reach=")),
+                || (matches!(
+                    status,
+                    StatusCode::BAD_GATEWAY | StatusCode::NOT_IMPLEMENTED
+                ) && (what.contains("reach=") || what.contains("boost="))),
             "{what}: {status} {body}"
         );
         if relative_field(what, name) && value.starts_with("now") {
@@ -2399,4 +2407,160 @@ async fn an_opted_out_post_is_not_searched_and_keeps_no_history_text(pool: PgPoo
     );
     let (_, read) = call(&app, "GET", &format!("/v1/resources/{id}"), None).await;
     assert_eq!(read["name"], "Hello world", "{read}");
+}
+
+/// One viewer's sets on the fixture graph: friends are author `friend`, the reach set
+/// (`wot_2`) is author `wot`, following is everyone.
+async fn graph_nexus(friend: usize, wot: usize) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route(
+            "/v0/user/{id}/friends",
+            get(move || async move { Json(vec![author(friend)]) }),
+        )
+        .route(
+            "/v0/user/{id}/following",
+            get(|| async { Json((0..5).map(author).collect::<Vec<_>>()) }),
+        )
+        .route(
+            "/v0/user/{id}/reach-set",
+            get(move || async move {
+                (
+                    [("etag", "\"set-1\"")],
+                    Json(json!({"authors": [author(wot)], "truncated": false})),
+                )
+            }),
+        );
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}"), task)
+}
+fn ids_of(page: &Value) -> Vec<String> {
+    page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap().to_owned())
+        .collect()
+}
+/// `boost` ranks the cards the set's authors referenced first and leaves nothing out; `reach`
+/// with the same set keeps only those. `wot_2` answers 501 until the Nexus serves the reach-set
+/// route, then reads it.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_boost_ranks_the_viewers_set_first_and_never_filters(pool: PgPool) {
+    let ids = seed(&pool).await;
+    // Each item is tagged by its own author (item 0 twice, by one author): the default ranking
+    // ties them and orders them by ID. The friend is the author of the last item but item 0,
+    // the reach set's the author of the one before it.
+    let plain_app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (_, page) = call(&plain_app, "GET", "/v1/search?limit=50", None).await;
+    let plain = ids_of(&page);
+    assert_eq!(plain.len(), 5);
+    let order: Vec<usize> = plain
+        .iter()
+        .map(|id| ids.iter().position(|i| i == id).unwrap())
+        .filter(|i| *i != 0)
+        .collect();
+    let (friend, wot) = (order[3], order[2]);
+    let (nexus_url, task) = graph_nexus(friend, wot).await;
+    let config = Config {
+        nexus_url: nexus_url.clone(),
+        ..Default::default()
+    };
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    let viewer = author(9999);
+    let get = |path: String| {
+        let app = app.clone();
+        async move {
+            let (code, page) = call(&app, "GET", &path, None).await;
+            assert_eq!(code, 200, "{path}: {page}");
+            page
+        }
+    };
+    assert_ne!(plain[0], ids[friend]);
+    // Boosted by the friend who tagged it, the friend's item leads, and all five are still there.
+    let boosted = ids_of(&get(format!("/v1/search?boost=friends&viewer={viewer}")).await);
+    assert_eq!(boosted[0], ids[friend], "{boosted:?}");
+    let (mut a, mut b) = (plain.clone(), boosted.clone());
+    a.sort();
+    b.sort();
+    assert_eq!(a, b, "a boost never filters");
+    // The same set as `reach` is a filter: the friend's item alone.
+    assert_eq!(
+        ids_of(&get(format!("/v1/search?reach=friends&viewer={viewer}")).await),
+        [ids[friend].clone()]
+    );
+    // Trending in the window: a reference by the set counts twice, so the friend's item (one
+    // tag) ties item 0 (two tags) at the top.
+    let trending = ids_of(
+        &get(format!(
+            "/v1/search?sort=trending&window=90d&boost=friends&viewer={viewer}"
+        ))
+        .await,
+    );
+    assert_eq!(trending.len(), 5);
+    let mut top: Vec<_> = trending[..2].to_vec();
+    top.sort();
+    let mut expected = vec![ids[0].clone(), ids[friend].clone()];
+    expected.sort();
+    assert_eq!(top, expected, "{trending:?}");
+    // A set everyone is in boosts every card alike: the default order stays.
+    assert_eq!(
+        ids_of(&get(format!("/v1/search?boost=following&viewer={viewer}")).await),
+        plain
+    );
+    // The boost is part of the page's identity: its cursor and ETag differ from the plain ones.
+    let (_, page) = call(&app, "GET", "/v1/search?limit=2", None).await;
+    let cursor = page["cursor"].as_str().unwrap().to_owned();
+    let (code, _) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?limit=2&boost=friends&viewer={viewer}&cursor={cursor}"),
+        None,
+    )
+    .await;
+    assert_eq!(code, 400);
+    // `wot_2` without the reach-set route: 501 with a plain message, before any Nexus request.
+    for set in ["boost", "reach"] {
+        let (code, body) = call(
+            &app,
+            "GET",
+            &format!("/v1/search?{set}=wot_2&viewer={viewer}"),
+            None,
+        )
+        .await;
+        assert_eq!(code, 501, "{body}");
+        assert!(body["error"].as_str().unwrap().contains("not supported"));
+    }
+    // With it: the set the route names.
+    let app = api::router(
+        AppState::new(
+            pool,
+            Config {
+                nexus_url,
+                nexus_reach_set: true,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    );
+    let (code, page) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?boost=wot_2&viewer={viewer}"),
+        None,
+    )
+    .await;
+    assert_eq!(code, 200, "{page}");
+    assert_eq!(ids_of(&page)[0], ids[wot]);
+    assert_eq!(ids_of(&page).len(), 5);
+    let (_, page) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?reach=wot_2&viewer={viewer}"),
+        None,
+    )
+    .await;
+    assert_eq!(ids_of(&page), [ids[wot].clone()]);
+    task.abort();
 }

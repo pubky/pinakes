@@ -183,20 +183,24 @@ async fn public_budget(
         )
         .into_response();
     };
-    // A reach search and a related search cost their own units, a search with both the two
-    // together; anything else costs one.
-    let (mut reach, mut related) = (false, false);
+    // A reach search (`reach` or `boost`, each a set read from Nexus) and a related search cost
+    // their own units, a search with several all of them together; anything else costs one.
+    let (mut reach, mut boost, mut related) = (false, false, false);
     if request.method() != axum::http::Method::OPTIONS && request.uri().path() == "/v1/search" {
         let query = request.uri().query().unwrap_or_default();
         for (key, _) in url::form_urlencoded::parse(query.as_bytes()) {
             reach |= key == "reach";
+            boost |= key == "boost";
             related |= key == "related";
         }
     }
     let api = &state.config.api;
-    let cost = match (reach, related) {
-        (false, false) => 1,
-        _ => usize::from(reach) * api.reach_cost + usize::from(related) * api.related_cost,
+    let cost = match (reach, boost, related) {
+        (false, false, false) => 1,
+        _ => {
+            (usize::from(reach) + usize::from(boost)) * api.reach_cost
+                + usize::from(related) * api.related_cost
+        }
     };
     if let Err(error) = state
         .budget(
@@ -530,7 +534,13 @@ pub struct SearchQuery {
     #[serde(rename = "match")]
     pub match_mode: Option<String>,
     pub author: Option<String>,
+    /// `following`, `friends` or `wot_2` of `viewer`: only references by authors in that set
+    /// count (a filter). `wot_2` needs a Nexus that serves the reach-set route (else 501).
     pub reach: Option<String>,
+    /// `following`, `friends` or `wot_2` of `viewer`: cards that authors in that set referenced
+    /// rank higher, the more of them and the more recently they did, and nothing is left out
+    /// (with the default ranking or `sort=trending`).
+    pub boost: Option<String>,
     pub viewer: Option<String>,
     pub sort: Option<String>,
     /// With `sort=trending` or `related`: how far back references count, `1h`–`90d` (`{n}h` or
@@ -804,6 +814,7 @@ fn facets_asked(facet: Option<&str>) -> Result<(bool, bool), ApiError> {
 pub struct SearchResponse {
     pub items: Vec<Card>,
     pub cursor: Option<String>,
+    /// The `reach` or `boost` set was capped at 1,000 authors.
     pub reach_truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub facets: Option<Facets>,
@@ -825,6 +836,7 @@ pub struct ClusterResponse {
     pub points: Vec<Card>,
     pub truncated: bool,
     pub total: i64,
+    /// The `reach` or `boost` set was capped at 1,000 authors.
     pub reach_truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub facets: Option<Facets>,
@@ -1196,15 +1208,22 @@ fn validate_search(q: &SearchQuery) -> Result<Vec<String>, ApiError> {
         return Err(ApiError::bad("match must be any or all"));
     }
     facets_asked(q.facet.as_deref())?;
-    if let Some(reach) = &q.reach {
-        if reach == "wot_2" {
-            return Err(ApiError::bad("wot_2 is not available"));
+    for (name, set) in [("reach", &q.reach), ("boost", &q.boost)] {
+        if let Some(set) = set {
+            if !crate::nexus::reach_kind(set) || q.viewer.is_none() {
+                return Err(ApiError::bad(format!(
+                    "{name} must be following, friends or wot_2 and requires viewer"
+                )));
+            }
         }
-        if !matches!(reach.as_str(), "following" | "friends") || q.viewer.is_none() {
-            return Err(ApiError::bad(
-                "reach must be following or friends and requires viewer",
-            ));
-        }
+    }
+    if q.boost.is_some() && q.related.is_some() {
+        return Err(ApiError::bad("related ranks the rows; it takes no boost"));
+    }
+    if q.boost.is_some() && !matches!(q.sort.as_deref(), None | Some("trending")) {
+        return Err(ApiError::bad(
+            "boost applies to the default ranking or sort=trending",
+        ));
     }
     for id in [&q.viewer, &q.author].into_iter().flatten() {
         if !crate::nexus::valid_author(id) {
@@ -1314,6 +1333,10 @@ pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
             .ok_or_else(bad),
     }
 }
+/// How much the `boost` set weighs against a card's own score: `BOOST_WEIGHT · log1p(n)` for
+/// `n` authors in the set who referenced it (with the same 30-day half-life), so one recent
+/// reference from the set counts as much as about three taggers do in the score.
+pub const BOOST_WEIGHT: f64 = 2.0;
 /// The columns of `search_unit` (and `resource_unit`), in order.
 pub const UNIT_COLUMNS: &str = "id,uri,host,type,type_path,name,category,point,start_at,end_at,venue_id,doc,search_text,resolver,resolved_at,refresh_at,status,osm_type,osm_id,unit_id,occurrence,event,event_author";
 /// A related row's rank from `{counts}.n` and `.at`: its shared taggers, then the newest of
@@ -1342,7 +1365,7 @@ fn scope(
             .push(")");
     }
 }
-#[utoipa::path(get,tag="Search",path="/v1/search",params(SearchQuery),responses((status=200,body=SearchResult),(status=304,description="ETag unchanged"),(status=400,description="Invalid or unavailable filter"),(status=502,description="Nexus reach unavailable")))]
+#[utoipa::path(get,tag="Search",path="/v1/search",params(SearchQuery),responses((status=200,body=SearchResult),(status=304,description="ETag unchanged"),(status=400,description="Invalid or unavailable filter"),(status=501,description="wot_2 asked of an instance whose Nexus serves no reach set"),(status=502,description="Nexus reach unavailable")))]
 pub async fn search(
     State(state): State<AppState>,
     Query(q): Query<SearchQuery>,
@@ -1367,28 +1390,48 @@ pub async fn search(
     let at = cursor.as_ref().map_or_else(|| state.now(), |c| c.at);
     let spatial = crate::spatial::Filters::parse_at(&q, &state.config.search, at)
         .map_err(|e| ApiError::bad(e.to_string()))?;
-    let reach = if let (Some(viewer), Some(reach)) = (&q.viewer, &q.reach) {
-        Some(state.nexus.reach(viewer, reach).await.map_err(|e| {
-            tracing::warn!(error=%crate::resolver::log_error(&e),"reach unavailable");
-            ApiError(StatusCode::BAD_GATEWAY, "Nexus reach unavailable".into())
-        })?)
-    } else {
-        None
-    };
+    if !state.config.nexus_reach_set
+        && [&q.reach, &q.boost]
+            .iter()
+            .any(|set| set.as_deref() == Some("wot_2"))
+    {
+        return Err(ApiError(
+            StatusCode::NOT_IMPLEMENTED,
+            "wot_2 is not supported: the Nexus this instance reads serves no reach set".into(),
+        ));
+    }
+    // The `reach` filter's set and the `boost` set, each read from Nexus (cached per viewer).
+    let mut sets = vec![];
+    for kind in [&q.reach, &q.boost] {
+        sets.push(match (&q.viewer, kind) {
+            (Some(viewer), Some(kind)) => {
+                Some(state.nexus.reach(viewer, kind).await.map_err(|e| {
+                    tracing::warn!(error=%crate::resolver::log_error(&e),"reach unavailable");
+                    ApiError(StatusCode::BAD_GATEWAY, "Nexus reach unavailable".into())
+                })?)
+            }
+            _ => None,
+        });
+    }
+    let boost = sets.pop().flatten();
+    let reach = sets.pop().flatten();
     let mut fingerprint = q.clone();
     fingerprint.cursor = None;
     fingerprint.limit = None;
-    let reach_revision = reach.as_ref().map(|r| {
-        let mut authors = r.authors.clone();
-        authors.sort();
-        authors.dedup();
-        (
-            blake3::hash(authors.join("\n").as_bytes())
-                .to_hex()
-                .to_string(),
-            r.truncated,
-        )
-    });
+    let revision_of = |set: &Option<crate::nexus::ReachSet>| {
+        set.as_ref().map(|r| {
+            let mut authors = r.authors.clone();
+            authors.sort();
+            authors.dedup();
+            (
+                blake3::hash(authors.join("\n").as_bytes())
+                    .to_hex()
+                    .to_string(),
+                r.truncated,
+            )
+        })
+    };
+    let reach_revision = (revision_of(&reach), revision_of(&boost));
     let filter = blake3::hash(&serde_json::to_vec(&(&fingerprint, &reach_revision))?)
         .to_hex()
         .to_string();
@@ -1477,7 +1520,14 @@ pub async fn search(
         // References made inside the window, counted once for all rows (in the same reach),
         // relative to the instant the first page pinned.
         let since = at - trend_window(q.window.as_deref())?;
-        sql.push("trend AS (SELECT f.resource_id,count(*) AS n FROM effective_reference f WHERE f.created_at>=")
+        // With `boost`, a reference by an author in the boost set counts twice.
+        sql.push("trend AS (SELECT f.resource_id,count(*)");
+        if let Some(boost) = &boost {
+            sql.push("+count(*) FILTER (WHERE f.author=ANY(")
+                .push_bind(boost.authors.clone())
+                .push("))");
+        }
+        sql.push(" AS n FROM effective_reference f WHERE f.created_at>=")
             .push_bind(since)
             .push(" AND f.created_at<=")
             .push_bind(at);
@@ -1516,9 +1566,19 @@ pub async fn search(
     } else if q.sort.as_deref() == Some("recent") {
         sql.push("coalesce(extract(epoch FROM s.newest_at),0)::double precision");
     } else {
-        sql.push("coalesce(s.score * exp(-ln(2.0)*greatest(0,extract(epoch FROM (")
+        sql.push("(coalesce(s.score * exp(-ln(2.0)*greatest(0,extract(epoch FROM (")
             .push_bind(at)
-            .push("::timestamptz-s.updated_at)))/2592000.0),0)::double precision");
+            .push("::timestamptz-s.updated_at)))/2592000.0),0)");
+        if boost.is_some() {
+            // `boost`: BOOST_WEIGHT · log1p(authors in the set who referenced it), halved every
+            // 30 days since the newest of their references.
+            sql.push(format!(
+                "+coalesce({BOOST_WEIGHT}*ln(1+b.n)*exp(-ln(2.0)*greatest(0,extract(epoch FROM ("
+            ))
+            .push_bind(at)
+            .push("::timestamptz-b.at)))/2592000.0),0)");
+        }
+        sql.push(")::double precision");
     }
     if !related_groups {
         sql.push(" AS rank");
@@ -1531,6 +1591,12 @@ pub async fn search(
         sql.push(" FROM search_unit r");
     }
     sql.push(" LEFT JOIN resource_score s ON s.resource_id=r.id");
+    if let (Some(boost), false) = (&boost, trending) {
+        // The authors in the boost set who referenced it, and the newest of their references.
+        sql.push(" LEFT JOIN LATERAL (SELECT count(DISTINCT f.author) AS n,max(f.created_at) AS at FROM effective_reference f WHERE f.resource_id=r.id AND f.author=ANY(")
+            .push_bind(boost.authors.clone())
+            .push(")) b ON true");
+    }
     if related_groups {
         sql.push(" LEFT JOIN group_unit gu ON gu.unit_id=r.unit_id AND gu.group_id IS NOT NULL");
     }
@@ -1835,7 +1901,9 @@ pub async fn search(
             points,
             truncated: has_more,
             total: row.try_get("total")?,
-            reach_truncated: reach.is_some_and(|r| r.truncated),
+            reach_truncated: [&reach, &boost]
+                .iter()
+                .any(|set| set.as_ref().is_some_and(|r| r.truncated)),
             facets,
         })
         .into_response()
@@ -1843,7 +1911,9 @@ pub async fn search(
         Json(SearchResponse {
             items: items.iter().map(card).collect::<Result<_, _>>()?,
             cursor: next,
-            reach_truncated: reach.is_some_and(|r| r.truncated),
+            reach_truncated: [&reach, &boost]
+                .iter()
+                .any(|set| set.as_ref().is_some_and(|r| r.truncated)),
             facets,
         })
         .into_response()

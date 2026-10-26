@@ -14,6 +14,9 @@ pub struct Config {
     pub admin_listen: String,
     pub admin_token: Option<SecretKey>,
     pub nexus_url: String,
+    /// Whether the Nexus at `nexus_url` serves the reach-set route, so search takes
+    /// `reach=wot_2` and `boost=wot_2` (`nexus::Nexus::reach`); off, those answer 501.
+    pub nexus_reach_set: bool,
     /// `discover_feeds` is accepted here and in `[cards.media]`; the other resolver sections take
     /// only `enabled`.
     #[serde(with = "feed_section")]
@@ -279,6 +282,7 @@ impl Config {
             podcast_index: Default::default(),
             sections: Sections::defaults(),
             nexus_url: "http://127.0.0.1:8080".into(),
+            nexus_reach_set: false,
             poll_secs: 5,
             ingest: IngestConfig::default(),
             grace_days: 7,
@@ -1674,7 +1678,7 @@ limits! {
     max_cluster_cells: usize = |c| c.search.max_cluster_cells => [|c, v| c.search.max_cluster_cells = v],
     /// API response cache entries.
     api_cache_capacity: usize = |c| c.api.cache_capacity => [|c, v| c.api.cache_capacity = v],
-    /// Budget units a reach search costs.
+    /// Budget units a search costs for each of `reach` and `boost`.
     reach_cost: usize = |c| c.api.reach_cost => [|c, v| c.api.reach_cost = v],
     /// Budget units a related search costs.
     related_cost: usize = |c| c.api.related_cost => [|c, v| c.api.related_cost = v],

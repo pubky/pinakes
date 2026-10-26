@@ -420,6 +420,23 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
       assert(related.items.every(row => !own.has(row.id)), 'related never lists the resource or its group');
       if (floor <= 1) assert(related.items.some(row => [...docs.values()].some(d => d.id === row.id)), 'related lists another sample');
       report.assertions.push(`related (${related.items.length} rows for ${seedKind}, floor ${floor})`);
+      // `boost` ranks what the viewer's set referenced higher and never filters: the same rows as
+      // without it, whoever the author follows.
+      const rowIds = page => page.items.map(row => row.id).sort();
+      const plain = await search({ limit: '500' });
+      const boosted = await search({ boost: 'following', viewer: author, limit: '500' });
+      assert.deepEqual(rowIds(boosted), rowIds(plain), 'a boost never filters');
+      report.assertions.push(`boost=following keeps every row (${boosted.items.length})`);
+      // `wot_2` needs the Nexus reach-set route: an instance without it says so with 501 (and a
+      // plain message), one with it boosts like the other sets.
+      const wot = await fetch(`${pinakes}/v1/search?${new URLSearchParams({ tags: label, boost: 'wot_2', viewer: author, limit: '500' })}`, { signal: AbortSignal.timeout(15000) });
+      if (wot.status === 501) {
+        assert.match((await wot.json()).error, /not supported/, 'wot_2 without a reach set says why');
+      } else {
+        assert.equal(wot.status, 200, `boost=wot_2: HTTP ${wot.status}`);
+        assert.deepEqual(rowIds(await wot.json()), rowIds(plain), 'a wot_2 boost never filters');
+      }
+      report.assertions.push(`boost=wot_2 answers ${wot.status}`);
       // A sample naming `derived` services shows each as a derived link: the same thing on a
       // service nobody tagged, found by an exact hub lookup.
       for (const sample of samples.filter(s => s.derived)) {
