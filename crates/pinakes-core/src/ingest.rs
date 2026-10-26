@@ -18,6 +18,7 @@ pub const REJECT_REASONS: &[&str] = &[
     "object_path",
     "timestamp",
     "uri",
+    "social",
     "panic",
 ];
 fn rejection_reason(line: &Change, limits: &IngestConfig) -> Option<&'static str> {
@@ -257,7 +258,8 @@ async fn apply_line(
 }
 /// Why a `post` line is rejected: its URI must be a post in its author's storage
 /// (`pubky://<author>/pub/<namespace>/v1/posts/{id}`), its object path a version file directly in
-/// that post (`…/{id}/{editId}.json`).
+/// that post (`…/{id}/{editId}.json`). A social specs' post (`/pub/social/…`: an event, an rsvp)
+/// is Nexus's: Pinakes neither fetches nor indexes it (`social`).
 fn post_rejection(line: &Change, uri: &str) -> Option<&'static str> {
     let Some(path) = uri
         .strip_prefix("pubky://")
@@ -269,6 +271,9 @@ fn post_rejection(line: &Change, uri: &str) -> Option<&'static str> {
     else {
         return Some("uri");
     };
+    if path.starts_with("/pub/social/") {
+        return Some("social");
+    }
     let file = line
         .object_path
         .strip_prefix(path)

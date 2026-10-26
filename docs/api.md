@@ -96,7 +96,7 @@ An IMDb title keeps the type its page gives (it can be either).
 | `open_in` | The clients that open a Pubky app's object, `[{client, url}]` (`url` is `https:`): from the app's profile ([Pubky apps](pubky-apps.md)), e.g. Loopky for a deck; on a Pubky event reference's card, those of the event object. `[]` on every other card |
 | `attribution` | Present on OSM cards, events placed at an OSM venue and events whose zone came from coordinates; display it with the card |
 | `occurrence` | Occurrence cards only: `{feed_id, feed_uri, uid, recurrence_id, status}`; `feed_uri` is the feed's URI, the link people tagged |
-| `event` | Pubky event references only (an event post's occurrence at a place; no feed writes them today: a social event post is its own `Event` card, see [Pubky apps](pubky-apps.md#posts)): `{author, object_path, recurrence_id, start, end, status}`; `object_path` is the post's versionless path, `recurrence_id` the occurrence's local start (`YYYY-MM-DDTHH:MM:SS`) or null for a one-off |
+| `event` | Pubky event references only (an event post's occurrence at a place; no feed writes them today: social events are Nexus's, see [Pubky events](#calendars-and-occurrences)): `{author, object_path, recurrence_id, start, end, status}`; `object_path` is the post's versionless path, `recurrence_id` the occurrence's local start (`YYYY-MM-DDTHH:MM:SS`) or null for a one-off |
 | `maybe_same` | Event and occurrence cards: other events that are [possibly the same event](#possibly-the-same-event), best first, each `{id, uri, site, start, score}` (`[]` when there are none). An app's store card: store cards that are [possibly the same app](#possibly-the-same-app). Up to three on a search, lookup or group card, up to ten on a resource read. A hint only, like `group`. Absent on other cards, and on every card with `[event] same_event_hint = "off"` |
 
 A `pubky://` object of an app Pinakes has a profile for (Loopky, Pubky Rooms,
@@ -711,14 +711,13 @@ held or pending and more than half the forward window left; otherwise an uncondi
 fetches a body. A 304 renews the TTL but neither confirms a disappearance nor extends the
 horizon. Mixed dated and undated RSS, Atom and JSON feeds keep their dated items.
 
-**Pubky events.** A social `event` post (pubky-social-specs v1.1,
-`pubky://<author>/pub/social/v1/posts/{id}`) is a resource like any `pubky://` object: the Pubky
-resolver reads its latest version into an `Event` card, with its JSCalendar time (a recurring
-one's next or current occurrence), zone, status and venue ([Pubky apps](pubky-apps.md#posts)), so
-searches by time and place find it as they find any event card. The resource feed carries no
-event lines: a `kind:event` line is skipped as `unknown_kind`. Event references (one per
-occurrence and place, the `event` field) remain in the schema and the search, but nothing writes
-them today.
+**Pubky events.** Social events and rsvps (pubky-social-specs v1.1,
+`pubky://<author>/pub/social/v1/posts/{id}`) are Nexus's: Nexus indexes their time, occurrences,
+rsvps and counts, and a client reads them there. Pinakes never fetches or indexes them; it
+indexes external events (pages, calendar feeds, NIP-52), and a client merges both. The resource
+feed carries no event lines: a `kind:event` line is skipped as `unknown_kind`, a `post` line for
+a social post is rejected. Event references (one per occurrence and place, the `event` field)
+remain in the schema and the search, but nothing writes them today.
 
 **NIP-52 calendars.** A calendar waits (`calendar_members_pending`) for members not yet
 resolved, at most `limits.calendar_member_wait_hours` (48) after it first listed them. A member

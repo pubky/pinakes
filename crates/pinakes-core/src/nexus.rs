@@ -21,7 +21,7 @@ pub enum Kind {
     Reply,
     Embed,
     Collection,
-    /// An app post or a social event or rsvp, which names itself: `uri` is the post
+    /// An app's post, which names itself (a social specs' post is rejected: Nexus's): `uri` is the post
     /// (`pubky://<author>/pub/<namespace>/v1/posts/{id}`), `object_path` its version file
     /// (`…/{id}/{editId}.json`).
     Post,
@@ -62,7 +62,7 @@ pub struct Changes {
 /// The reasons a feed line is skipped while parsing a page (`Changes::skipped`).
 pub const SKIP_REASONS: &[&str] = &["unknown_kind", "malformed"];
 /// The kinds of the reference feed this build reads. A `kind:event` line, which Nexus reserves,
-/// is `unknown_kind`: social events come as posts.
+/// is `unknown_kind`: social events are Nexus's.
 const KINDS: &[&str] = &["tag", "reply", "embed", "collection", "post"];
 impl Changes {
     /// The lines the page held: those read and those skipped. The cursor moves by this many.
@@ -383,7 +383,7 @@ mod tests {
             "author":"y".repeat(52),"object_path":"/pub/pubky.app/tags/1","label":"rust","at":1});
         let mut unknown = good.clone();
         unknown["kind"] = "listen".into();
-        // Nexus reserves `kind:event`; social events come as posts.
+        // Nexus reserves `kind:event`; social events are Nexus's.
         let mut event = good.clone();
         event["kind"] = "event".into();
         let post = serde_json::json!({"op":"put","kind":"post","author":"y".repeat(52),

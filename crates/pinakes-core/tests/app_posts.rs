@@ -1,10 +1,10 @@
-//! App posts and the social specs' events and rsvps (TASK-app-posts.md, its second amendment):
-//! `post` lines on the resource feed name a post, which the Pubky resolver reads in its latest
-//! version by its namespace and kind. Every URI and identity here is made up.
+//! App posts (TASK-app-posts.md, its second amendment): `post` lines on the resource feed name a
+//! post, which the Pubky resolver reads in its latest version by its namespace and kind. The
+//! social specs' posts (events, rsvps) are Nexus's: never fetched, their lines rejected (owner
+//! decision, 2026-10-26). Every URI and identity here is made up.
 use chrono::{DateTime, Duration, Utc};
 use pinakes_core::{
     config::{IngestConfig, QueueConfig},
-    event::EventStatus,
     ingest,
     model::{identity, ResourceMeta, Status},
     nexus::{Change, Changes, FeedPage, Kind, Op},
@@ -214,12 +214,13 @@ async fn a_post_line_outside_its_post_is_rejected(pool: PgPool) {
     assert_eq!(total, 1);
 }
 
-/// The posts of the profiled namespaces go to the Pubky resolver; every other social object, and
-/// the posts of namespaces no profile reads, are never fetched.
+/// The posts of the profiled namespaces go to the Pubky resolver; the social specs' objects
+/// (their posts, events and rsvps included), and the posts of namespaces no profile reads, are
+/// never fetched.
 #[test]
 fn posts_route_by_namespace() {
     let id = id();
-    for namespace in ["social", "maps", "events", "music"] {
+    for namespace in ["maps", "events", "music"] {
         assert_eq!(
             classify(&post(namespace, &id)),
             Some("pubky"),
@@ -233,104 +234,13 @@ fn posts_route_by_namespace() {
     }
     for uri in [
         post("chess", &id),
+        post("social", &id),
         format!("pubky://{AUTHOR}/pub/social/v1/tags/{id}"),
         format!("pubky://{AUTHOR}/pub/social/v1.1/posts/{id}"),
         format!("pubky://{AUTHOR}/pub/pubky.app/posts/{id}"),
     ] {
         assert_eq!(classify(&uri), None, "{uri}");
     }
-}
-
-/// A social event: its JSCalendar time in its zone, status and first location as its venue; a
-/// recurring one shows its next occurrence.
-#[test]
-fn a_social_event_is_an_event_card() {
-    let uri = post("social", &id());
-    let content = json!({
-        "title": "Bern meetup", "description": "Monthly.",
-        "start": "2026-10-20T18:30:00", "timeZone": "Europe/Zurich", "duration": "PT2H",
-        "locations": [{"name": "Café Fédéral", "uri": "https://www.openstreetmap.org/node/1"}],
-    });
-    let doc = card(&uri, &envelope("event", content.clone()));
-    assert_eq!(doc.name.as_deref(), Some("Bern meetup"));
-    assert_eq!(doc.type_path.last().map(String::as_str), Some("Event"));
-    assert_eq!(doc.start, Some("2026-10-20T16:30:00Z".parse().unwrap()));
-    assert_eq!(doc.end, Some("2026-10-20T18:30:00Z".parse().unwrap()));
-    assert_eq!(doc.event.tz.as_deref(), Some("Europe/Zurich"));
-    assert_eq!(
-        doc.event.venue.as_ref().map(|v| v.text.as_str()),
-        Some("Café Fédéral")
-    );
-    assert_eq!(
-        fact(&doc, "location_uri"),
-        Some("https://www.openstreetmap.org/node/1")
-    );
-    assert_eq!(doc.event.event_status, None);
-
-    // Weekly from 6 October: on 16 October (`now`) the next is the 20th.
-    let mut weekly = content.clone();
-    weekly["start"] = "2026-10-06T18:30:00".into();
-    weekly["recurrenceRules"] = json!([{"frequency": "weekly", "count": 10}]);
-    let doc = card(&uri, &envelope("event", weekly.clone()));
-    assert_eq!(doc.start, Some("2026-10-20T16:30:00Z".parse().unwrap()));
-    // An excluded date is skipped (the next is after the change to winter time).
-    weekly["excludedDates"] = json!(["2026-10-20T18:30:00"]);
-    let doc = card(&uri, &envelope("event", weekly.clone()));
-    assert_eq!(doc.start, Some("2026-10-27T17:30:00Z".parse().unwrap()));
-    // A series that has ended shows its last occurrence.
-    weekly["recurrenceRules"] = json!([{"frequency": "weekly", "count": 2}]);
-    let doc = card(&uri, &envelope("event", weekly));
-    assert_eq!(doc.start, Some("2026-10-13T16:30:00Z".parse().unwrap()));
-
-    let mut cancelled = content.clone();
-    cancelled["status"] = "cancelled".into();
-    let doc = card(&uri, &envelope("event", cancelled));
-    assert_eq!(doc.event.event_status, Some(EventStatus::Cancelled));
-
-    // A geo location is its point.
-    let mut at = content.clone();
-    at["locations"] = json!([{"uri": "geo:46.948,7.447"}]);
-    let doc = card(&uri, &envelope("event", at));
-    assert_eq!(
-        doc.location.as_ref().map(|p| (p.lat, p.lon)),
-        Some((46.948, 7.447))
-    );
-
-    for (key, value) in [
-        ("status", json!("postponed")),
-        ("timeZone", json!("Mars/Olympus")),
-        ("start", json!("tomorrow")),
-        ("duration", json!("-PT1H")),
-    ] {
-        let mut bad = content.clone();
-        bad[key] = value;
-        assert!(no_card(&card(&uri, &envelope("event", bad))), "{key}");
-    }
-}
-
-/// An rsvp answers an event; every other social post is Nexus's and has no card.
-#[test]
-fn an_rsvp_is_a_card_and_other_social_posts_have_none() {
-    let uri = post("social", &id());
-    let event = post("social", &id());
-    let mut answer = envelope("rsvp", json!({"status": "accepted", "guests": 2}));
-    answer["parent"] = event.clone().into();
-    let doc = card(&uri, &answer);
-    assert_eq!(doc.type_path.last().map(String::as_str), Some("RsvpAction"));
-    assert_eq!(fact(&doc, "status"), Some("accepted"));
-    assert_eq!(fact(&doc, "guests"), Some("2"));
-    assert_eq!(fact(&doc, "event"), Some(event.as_str()));
-    let mut unknown = answer.clone();
-    unknown["content"] = json!({"status": "maybe"}).to_string().into();
-    assert!(no_card(&card(&uri, &unknown)));
-    assert!(no_card(&card(
-        &uri,
-        &envelope("short", json!({"text": "hello"}))
-    )));
-    assert!(no_card(&card(
-        &uri,
-        &envelope("article", json!({"title": "A"}))
-    )));
 }
 
 /// Maps routes, events availability and music listens and sessions: each its own card; a kind
@@ -408,20 +318,14 @@ fn content_references_are_gated_and_text_is_storable() {
         json!({"name": "Hidden", "waypoints": [{"uri": "geo:46.95,7.44"}, {"uri": private}]}),
     );
     assert!(no_card(&card(&post("maps", &id()), &route)));
-    let event = |location: &str, title: &str| {
+    let named = |name: &str| {
         envelope(
-            "event",
-            json!({"title": title, "start": "2026-10-20T18:30:00", "timeZone": "Europe/Zurich",
-                "duration": "PT1H", "locations": [{"uri": location}]}),
+            "route",
+            json!({"name": name, "waypoints": [{"uri": "geo:46.95,7.44"}, {"uri": "geo:46.9,7.5"}]}),
         )
     };
-    let social = post("social", &id());
-    assert!(!no_card(&card(&social, &event("geo:46.95,7.44", "Meetup"))));
-    assert!(no_card(&card(&social, &event(&private, "Meetup"))));
-    assert!(no_card(&card(
-        &social,
-        &event("geo:46.95,7.44", "Meet\0up")
-    )));
+    assert!(!no_card(&card(&post("maps", &id()), &named("Aare walk"))));
+    assert!(no_card(&card(&post("maps", &id()), &named("Aare\0walk"))));
     let availability = envelope(
         "availability",
         json!({"timeZone": "Europe/Zurich", "horizonDays": 7, "for": private, "available": []}),
@@ -564,4 +468,35 @@ async fn a_read_in_flight_never_undoes_a_newer_version(pool: PgPool) {
         .unwrap();
     assert_eq!(card_name(&pool, &route).await.as_deref(), Some("Version B"));
     assert!(!due(&pool, &route).await);
+}
+
+/// A social specs' post (an event, an rsvp) is Nexus's: its feed line is rejected and counted
+/// (`social`), and it queues nothing, so nothing fetches it.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_social_post_line_queues_nothing_and_fetches_nothing(pool: PgPool) {
+    let metrics = Metrics::new().unwrap();
+    let event = post("social", &id());
+    batch(
+        &pool,
+        vec![
+            line(Op::Put, &event, "0034A", Utc::now()),
+            line(Op::Del, &event, "0034A", Utc::now()),
+        ],
+        &metrics,
+    )
+    .await;
+    assert_eq!(
+        metrics.ingest_rejected.with_label_values(&["social"]).get(),
+        2
+    );
+    let (id, _, _) = identity(&event).unwrap();
+    let rows: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM resource WHERE id=$1),(SELECT count(*) FROM reference)",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, (0, 0));
+    assert_eq!(classify(&event), None);
 }

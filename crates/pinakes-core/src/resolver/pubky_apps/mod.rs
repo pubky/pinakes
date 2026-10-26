@@ -23,7 +23,6 @@ pub static REGISTRY: &[&Profile] = &[
     &posts::EVENTS,
     &posts::MAPS,
     &posts::MUSIC,
-    &posts::SOCIAL,
     &rooms::PROFILE,
 ];
 
@@ -123,12 +122,12 @@ pub enum Route {
     /// An app no profile knows: the general card.
     General,
 }
-/// The namespaces whose objects Pinakes never fetches: pubky.app's own, which Nexus describes, and
-/// the old Mapky and Eventky layouts (`mapky.app`, `eventky.app`), whose data the owner
-/// disregards: Maps and Events write posts now (`posts`). The social specs' namespace is a
-/// profile's (`posts::SOCIAL`): its events and rsvps are read, every other social object is
-/// Nexus's and excluded.
-const NEVER_FETCHED: &[&str] = &["pubky.app", "mapky.app", "eventky.app"];
+/// The namespaces whose objects Pinakes never fetches: those Nexus describes (pubky.app's own, and
+/// the social specs', `/pub/social/…` in any version, their posts, events and rsvps included:
+/// social events are Nexus's, owner decision 2026-10-26), and the old Mapky and Eventky layouts
+/// (`mapky.app`, `eventky.app`), whose data the owner disregards: Maps and Events write posts now
+/// (`posts`).
+const NEVER_FETCHED: &[&str] = &["pubky.app", "social", "mapky.app", "eventky.app"];
 /// The route of a `pubky://` object of another app, from its decoded path segments below
 /// `/pub/` (`resolver::pubky_app`'s reading). `None` for the objects Nexus describes
 /// (`NEVER_FETCHED`) and for the posts of a namespace no profile reads.

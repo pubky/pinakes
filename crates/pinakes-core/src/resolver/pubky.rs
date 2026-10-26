@@ -221,9 +221,10 @@ mod tests {
             crate::resolver::classify(&uri.replace("other.app", "pubky.app")),
             None
         );
-        // The social specs' objects are Nexus's too, in any version, but their v1 posts (whose
-        // events and rsvps are read): never fetched.
+        // The social specs' objects are Nexus's too, in any version, their posts, events and
+        // rsvps included: never fetched.
         for path in [
+            "social/v1/posts/0034A0X7NJ52G",
             "social/v1/posts/0034A0X7NJ52G/0034A0X7NJ52H.json",
             "social/v1.1/ratings/1",
             "social/item",
