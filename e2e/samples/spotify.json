@@ -1,0 +1,20 @@
+[
+  {
+    "kind": "spotify_own_isrc",
+    "uri": "https://open.spotify.com/track/7tFiyTwD0nx5a1eklYtX2J",
+    "type": "MusicRecording",
+    "site": "Spotify",
+    "facts": {
+      "isrc": "GBUM71029604"
+    },
+    "needs": "spotify"
+  },
+  {
+    "kind": "spotify_mb_recording",
+    "uri": "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+    "type": "MusicRecording",
+    "site": "MusicBrainz",
+    "group_with": "spotify_own_isrc",
+    "needs": "spotify"
+  }
+]

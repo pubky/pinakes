@@ -15,6 +15,7 @@
 use crate::{config::Config, model::ResourceMeta, resolver::egress::Egress};
 
 pub mod books;
+pub mod client_credentials;
 pub mod deezer;
 pub mod films;
 pub mod itunes;
@@ -25,6 +26,7 @@ pub mod performers;
 pub mod podcasts;
 pub mod product_keys;
 pub mod service;
+pub mod spotify;
 pub mod tidal;
 pub mod wikidata;
 pub mod wikidata_item;
@@ -350,6 +352,7 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
     let own: Vec<Arc<dyn Source>> = vec![
         Arc::new(service::ServiceSource),
         Arc::new(tidal::Tidal),
+        Arc::new(spotify::Spotify),
         Arc::new(musicbrainz::MusicBrainzSource),
         Arc::new(musicbrainz_entity::MusicBrainzEntitySource),
         Arc::new(performers::PerformersSource),

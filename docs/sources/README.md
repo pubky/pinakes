@@ -145,6 +145,7 @@ goes without the others needing a change.
 
 - [`service`](service.md): the ISRC a music service's own track page states.
 - [`tidal`](tidal.md): TIDAL's own barcodes and ISRCs (with the operator's TIDAL credentials).
+- [`spotify`](spotify.md): Spotify's own barcodes and ISRCs (with the operator's Spotify app credentials).
 - [`musicbrainz`](musicbrainz.md): what MusicBrainz relates a music link to.
 - [`musicbrainz_entity`](musicbrainz_entity.md): a MusicBrainz page as its own hub.
 - [`performers`](performers.md): an event's performers, keyed to the artist on the page's own service.
