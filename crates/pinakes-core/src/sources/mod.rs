@@ -56,6 +56,7 @@ pub mod govinfo;
 pub mod hacker_news;
 pub mod huggingface;
 pub mod inaturalist;
+pub mod instagram;
 pub mod internet_archive;
 pub mod kit;
 pub mod legislation_gov_uk;
@@ -122,6 +123,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &hacker_news::HackerNews,
     &huggingface::HuggingFace,
     &inaturalist::Inaturalist,
+    &instagram::Instagram,
     &internet_archive::InternetArchive,
     &legislation_gov_uk::LegislationGovUk,
     &linkedin::LinkedIn,

@@ -117,6 +117,8 @@ enabled = true
 enabled = true
 [sources.inaturalist]
 enabled = true
+[sources.instagram]
+enabled = true
 [sources.internet_archive]
 enabled = true
 [sources.legislation_gov_uk]

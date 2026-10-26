@@ -85,6 +85,7 @@ or got plain web cards before are read by their source.
 - [`hacker_news`](hacker_news.md): Hacker News items by id (and hnsignals.com pages).
 - [`huggingface`](huggingface.md): Hugging Face models, datasets and Spaces by repo id.
 - [`inaturalist`](inaturalist.md): iNaturalist observations and taxa by id.
+- [`instagram`](instagram.md): Instagram posts, reels and profiles.
 - [`internet_archive`](internet_archive.md): Internet Archive items (books, films, audio, software…) by identifier.
 - [`legislation_gov_uk`](legislation_gov_uk.md): UK Acts, statutory instruments and retained EU law.
 - [`linkedin`](linkedin.md): LinkedIn profiles, company pages and posts.
