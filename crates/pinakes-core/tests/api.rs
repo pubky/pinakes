@@ -2485,6 +2485,16 @@ async fn a_boost_ranks_the_viewers_set_first_and_never_filters(pool: PgPool) {
     a.sort();
     b.sort();
     assert_eq!(a, b, "a boost never filters");
+    // `sort=activity` is the default ranking said out loud: the same boosted page.
+    assert_eq!(
+        ids_of(
+            &get(format!(
+                "/v1/search?boost=friends&viewer={viewer}&sort=activity"
+            ))
+            .await
+        ),
+        boosted
+    );
     // The same set as `reach` is a filter: the friend's item alone.
     assert_eq!(
         ids_of(&get(format!("/v1/search?reach=friends&viewer={viewer}")).await),
@@ -2563,4 +2573,102 @@ async fn a_boost_ranks_the_viewers_set_first_and_never_filters(pool: PgPool) {
     .await;
     assert_eq!(ids_of(&page), [ids[wot].clone()]);
     task.abort();
+}
+
+/// A boost reads the set's references once, not once per card: 10,000 cards each referenced by
+/// the friend answer well inside the five-second statement timeout.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_boost_over_many_cards_answers_in_time(pool: PgPool) {
+    let friend = 3;
+    sqlx::query("INSERT INTO resource(id,uri) SELECT md5('many'||i),'https://many.example.org/'||i FROM generate_series(1,10000) i")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) SELECT md5('many'||i),$1,'tag','many','/pub/app/tags/many-'||i,now() FROM generate_series(1,10000) i")
+        .bind(author(friend))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("ANALYZE").execute(&pool).await.unwrap();
+    let (nexus_url, _task) = graph_nexus(friend, friend).await;
+    let app = api::router(
+        AppState::new(
+            pool,
+            Config {
+                nexus_url,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    );
+    let viewer = author(9999);
+    let started = std::time::Instant::now();
+    let (code, page) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?limit=20&boost=friends&viewer={viewer}"),
+        None,
+    )
+    .await;
+    assert_eq!(code, 200, "{page}");
+    assert_eq!(ids_of(&page).len(), 20);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// A reference from 1900 (in range) boosts nothing and breaks nothing: its decay is clamped to
+/// zero instead of underflowing a double, in the boost and in the plain ranking.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_old_reference_neither_boosts_nor_breaks_a_search(pool: PgPool) {
+    let ids = seed(&pool).await;
+    let friend = 1;
+    let (nexus_url, _task) = graph_nexus(friend, friend).await;
+    let app = api::router(
+        AppState::new(
+            pool.clone(),
+            Config {
+                nexus_url,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    );
+    let viewer = author(9999);
+    // Item 2 keeps its current reference by its author and gets one from the friend in 1900; a
+    // new card has only a reference from 1900.
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','old','/pub/app/tags/old-2','1900-01-01T00:00:00Z')")
+        .bind(&ids[2])
+        .bind(author(friend))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let lone = store::ensure_resource(&pool, "https://example.org/item/1900")
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','old','/pub/app/tags/old-lone','1900-01-01T00:00:00Z')")
+        .bind(&lone)
+        .bind(author(friend))
+        .execute(&pool)
+        .await
+        .unwrap();
+    for path in [
+        "/v1/search?limit=50".to_owned(),
+        format!("/v1/search?limit=50&boost=friends&viewer={viewer}"),
+    ] {
+        let (code, page) = call(&app, "GET", &path, None).await;
+        assert_eq!(code, 200, "{path}: {page}");
+        assert!(ids_of(&page).contains(&lone), "{path}: {page}");
+    }
+    // The friend's current reference still leads the boosted page; the old one adds nothing.
+    let (_, page) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?boost=friends&viewer={viewer}"),
+        None,
+    )
+    .await;
+    assert_eq!(ids_of(&page)[0], ids[friend], "{page}");
 }

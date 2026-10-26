@@ -1220,7 +1220,7 @@ fn validate_search(q: &SearchQuery) -> Result<Vec<String>, ApiError> {
     if q.boost.is_some() && q.related.is_some() {
         return Err(ApiError::bad("related ranks the rows; it takes no boost"));
     }
-    if q.boost.is_some() && !matches!(q.sort.as_deref(), None | Some("trending")) {
+    if q.boost.is_some() && !matches!(q.sort.as_deref(), None | Some("activity" | "trending")) {
         return Err(ApiError::bad(
             "boost applies to the default ranking or sort=trending",
         ));
@@ -1337,6 +1337,8 @@ pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
 /// `n` authors in the set who referenced it (with the same 30-day half-life), so one recent
 /// reference from the set counts as much as about three taggers do in the score.
 pub const BOOST_WEIGHT: f64 = 2.0;
+/// After this many 30-day halvings (about five years) a boost counts nothing.
+pub const BOOST_HALF_LIVES: i64 = 60;
 /// The columns of `search_unit` (and `resource_unit`), in order.
 pub const UNIT_COLUMNS: &str = "id,uri,host,type,type_path,name,category,point,start_at,end_at,venue_id,doc,search_text,resolver,resolved_at,refresh_at,status,osm_type,osm_id,unit_id,occurrence,event,event_author";
 /// A related row's rank from `{counts}.n` and `.at`: its shared taggers, then the newest of
@@ -1539,6 +1541,13 @@ pub async fn search(
             sql.push("group_trend AS (SELECT m.group_id,sum(t.n) AS n FROM (SELECT DISTINCT group_id,resource_id FROM group_unit WHERE group_id IS NOT NULL) m JOIN trend t USING(resource_id) GROUP BY m.group_id), ");
         }
     }
+    if let (Some(boost), false) = (&boost, trending) {
+        // The authors in the boost set who referenced each resource, and the newest of their
+        // references: read once by author (the set is bounded), never per candidate row.
+        sql.push("boost_refs AS (SELECT f.resource_id,count(DISTINCT f.author) AS n,max(f.created_at) AS at FROM effective_reference f WHERE f.author=ANY(")
+            .push_bind(boost.authors.clone())
+            .push(") GROUP BY f.resource_id), ");
+    }
     // With `collapse=group`, a related group counts the shared taggers of its members that pass
     // the filters: those rows first (`related_pass`, each with its taggers and group), ranked
     // after them.
@@ -1571,12 +1580,16 @@ pub async fn search(
             .push("::timestamptz-s.updated_at)))/2592000.0),0)");
         if boost.is_some() {
             // `boost`: BOOST_WEIGHT · log1p(authors in the set who referenced it), halved every
-            // 30 days since the newest of their references.
-            sql.push(format!(
-                "+coalesce({BOOST_WEIGHT}*ln(1+b.n)*exp(-ln(2.0)*greatest(0,extract(epoch FROM ("
-            ))
-            .push_bind(at)
-            .push("::timestamptz-b.at)))/2592000.0),0)");
+            // 30 days since the newest of their references. Older than BOOST_HALF_LIVES halvings
+            // it is nothing: the decay would underflow a double (a reference dated 1900).
+            sql.push("+coalesce(CASE WHEN b.at<")
+                .push_bind(at)
+                .push(format!(
+                    "::timestamptz-interval '{} days' THEN 0 ELSE {BOOST_WEIGHT}*ln(1+b.n)*exp(-ln(2.0)*greatest(0,extract(epoch FROM (",
+                    BOOST_HALF_LIVES * 30
+                ))
+                .push_bind(at)
+                .push("::timestamptz-b.at)))/2592000.0) END,0)");
         }
         sql.push(")::double precision");
     }
@@ -1591,11 +1604,8 @@ pub async fn search(
         sql.push(" FROM search_unit r");
     }
     sql.push(" LEFT JOIN resource_score s ON s.resource_id=r.id");
-    if let (Some(boost), false) = (&boost, trending) {
-        // The authors in the boost set who referenced it, and the newest of their references.
-        sql.push(" LEFT JOIN LATERAL (SELECT count(DISTINCT f.author) AS n,max(f.created_at) AS at FROM effective_reference f WHERE f.resource_id=r.id AND f.author=ANY(")
-            .push_bind(boost.authors.clone())
-            .push(")) b ON true");
+    if boost.is_some() && !trending {
+        sql.push(" LEFT JOIN boost_refs b ON b.resource_id=r.id");
     }
     if related_groups {
         sql.push(" LEFT JOIN group_unit gu ON gu.unit_id=r.unit_id AND gu.group_id IS NOT NULL");
