@@ -106,6 +106,10 @@ pub struct SourceOptions {
     /// A service's personal token, for a source that takes one (`Source::takes_token`); never
     /// shown or logged.
     pub token: Option<crate::event::adapters::SecretKey>,
+    /// An app's consumer key and secret, for a source that takes them
+    /// (`Source::app_key_variables`); never shown or logged.
+    pub key: Option<crate::event::adapters::SecretKey>,
+    pub secret: Option<crate::event::adapters::SecretKey>,
 }
 
 /// One resource as a source sees it.
@@ -292,6 +296,12 @@ pub trait Source: Send + Sync {
     /// Whether `[also_on.sources.<id>]` takes a `token` for it.
     fn takes_token(&self) -> bool {
         false
+    }
+    /// The variables of its own (`PINAKES_NAME`) that fill `[also_on.sources.<id>] key` and
+    /// `secret`, an app's consumer pair, when the file leaves them unset; `None` for a source
+    /// that takes no such pair.
+    fn app_key_variables(&self) -> Option<(&'static str, &'static str)> {
+        None
     }
 }
 

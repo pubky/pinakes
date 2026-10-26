@@ -1,8 +1,11 @@
 //! Discogs artists, masters (an album across its editions) and releases (one edition), read from
 //! its API (`api.discogs.com`): its web pages answer bots with a wall. No key: 25 requests a
-//! minute. An optional personal token (`[also_on.sources.discogs] token`) adds images to the
-//! cards; it never reaches a log or an error.
+//! minute. An optional personal token (`[also_on.sources.discogs] token`), or an app's consumer
+//! key and secret (`key` and `secret`, or `PINAKES_DISCOGS_CONSUMER_KEY` and
+//! `PINAKES_DISCOGS_CONSUMER_SECRET`), gives 60 a minute and images on the cards; the token wins
+//! when both are set. Neither ever reaches a log or an error.
 use super::{text, Budget, Context, Example, Source};
+use crate::event::adapters::SecretKey;
 use crate::{
     model::ResourceMeta,
     resolver::{
@@ -21,43 +24,60 @@ const API: &str = "https://api.discogs.com";
 
 pub use crate::music::discogs::{of_link, of_uri, root, Kind};
 
-/// The personal token the daemon started with (`configure`).
-static TOKEN: RwLock<Option<crate::event::adapters::SecretKey>> = RwLock::new(None);
+/// The credential the daemon started with (`configure`).
+static CREDENTIAL: RwLock<Option<Credential>> = RwLock::new(None);
 
-/// Record `[also_on.sources.discogs] token` for the card route.
+/// Record `[also_on.sources.discogs]`'s credential for the card route.
 fn configure(config: &crate::config::Config) {
-    *TOKEN.write().unwrap_or_else(|e| e.into_inner()) = token(config);
+    *CREDENTIAL.write().unwrap_or_else(|e| e.into_inner()) = credential(config);
 }
-/// The configured token, if any.
-pub fn token(config: &crate::config::Config) -> Option<crate::event::adapters::SecretKey> {
-    config
-        .also_on
-        .sources
-        .get("discogs")
-        .and_then(|s| s.token.clone())
-        .filter(|t| !t.is_empty())
+/// How Discogs is asked with credentials: a personal token, or an app's consumer key and secret.
+/// Either gives 60 requests a minute and images.
+#[derive(Clone)]
+pub enum Credential {
+    Token(SecretKey),
+    App { key: SecretKey, secret: SecretKey },
+}
+impl Credential {
+    /// The `Authorization` header Discogs reads.
+    fn header(&self) -> String {
+        match self {
+            Self::Token(token) => format!("Discogs token={}", &**token),
+            Self::App { key, secret } => format!("Discogs key={}, secret={}", &**key, &**secret),
+        }
+    }
+}
+/// The configured credential: the token when it is set, else the key and secret when both are.
+pub fn credential(config: &crate::config::Config) -> Option<Credential> {
+    let options = config.also_on.sources.get("discogs")?;
+    let set = |v: &Option<SecretKey>| v.clone().filter(|v| !v.trim().is_empty());
+    match (set(&options.token), set(&options.key), set(&options.secret)) {
+        (Some(token), _, _) => Some(Credential::Token(token)),
+        (None, Some(key), Some(secret)) => Some(Credential::App { key, secret }),
+        _ => None,
+    }
 }
 
-/// Discogs' record of one object, `None` when it has none, and whether the token was used. The
-/// answer is shared for an hour, so the card and the also-on lookup ask once. A token Discogs
-/// refuses (401, 403: expired or mistyped) is dropped, with one warning: that request is asked
-/// again without it, and later ones go without it from the start, so cards still work without
-/// images.
+/// Discogs' record of one object, `None` when it has none, and whether the credential was used.
+/// The answer is shared for an hour, so the card and the also-on lookup ask once. A credential
+/// Discogs refuses (401, 403: expired, revoked or mistyped) is dropped, with one warning: that
+/// request is asked again without it, and later ones go without it from the start, so cards
+/// still work without images.
 pub async fn record(
     egress: &Egress,
     kind: Kind,
     id: u64,
-    token: Option<&str>,
+    credential: Option<&Credential>,
 ) -> Result<(Option<Value>, bool)> {
-    let token = token.filter(|t| !refused(t));
-    let mut f = fetch(egress, kind, id, token).await?;
-    let mut authenticated = token.is_some();
-    if let (Some(token), 401 | 403) = (token, f.status) {
+    let header = credential.map(Credential::header).filter(|h| !refused(h));
+    let mut f = fetch(egress, kind, id, header.as_deref()).await?;
+    let mut authenticated = header.is_some();
+    if let (Some(header), 401 | 403) = (header.as_deref(), f.status) {
         super::token_refused("discogs");
-        if refuse(token) {
+        if refuse(header) {
             tracing::warn!(
                 status = f.status,
-                "Discogs refused the configured token; reading without it (no images)"
+                "Discogs refused the configured credential; reading without it (no images)"
             );
         }
         f = fetch(egress, kind, id, None).await?;
@@ -74,18 +94,19 @@ pub async fn record(
         status => anyhow::bail!("Discogs answered {status}"),
     }
 }
-/// The tokens Discogs has refused since the daemon started, by hash (never the token itself).
+/// The credentials Discogs has refused since the daemon started, by the hash of their header
+/// (never the credential itself).
 static REFUSED: std::sync::Mutex<Vec<[u8; 32]>> = std::sync::Mutex::new(Vec::new());
-fn refused(token: &str) -> bool {
-    let hash = *blake3::hash(token.as_bytes()).as_bytes();
+fn refused(header: &str) -> bool {
+    let hash = *blake3::hash(header.as_bytes()).as_bytes();
     REFUSED
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .contains(&hash)
 }
-/// Remember a refused token; true the first time.
-fn refuse(token: &str) -> bool {
-    let hash = *blake3::hash(token.as_bytes()).as_bytes();
+/// Remember a refused credential; true the first time.
+fn refuse(header: &str) -> bool {
+    let hash = *blake3::hash(header.as_bytes()).as_bytes();
     let mut refused = REFUSED.lock().unwrap_or_else(|e| e.into_inner());
     !refused.contains(&hash) && {
         refused.push(hash);
@@ -96,14 +117,14 @@ async fn fetch(
     egress: &Egress,
     kind: Kind,
     id: u64,
-    token: Option<&str>,
+    header: Option<&str>,
 ) -> Result<crate::resolver::egress::Fetched> {
     let options = FetchOptions {
         accept: Some("application/json".into()),
-        headers: token
-            .map(|t| vec![("authorization", format!("Discogs token={t}"))])
+        headers: header
+            .map(|h| vec![("authorization", h.to_owned())])
             .unwrap_or_default(),
-        sensitive: token.is_some(),
+        sensitive: header.is_some(),
         ..Default::default()
     };
     let url = format!("{API}/{}s/{id}", kind.as_str());
@@ -177,7 +198,7 @@ fn year(v: &Value) -> Option<String> {
 
 /// The card of a Discogs record: an artist is a `MusicGroup`, a master or release a
 /// `MusicAlbum` described by its artist credit and year (a release also by its format and
-/// country). The primary image only with a token (`images`).
+/// country). The primary image only with a credential (`images`).
 pub fn card(mut doc: ResourceMeta, kind: Kind, v: &Value, images: bool) -> Option<ResourceMeta> {
     doc.site = "Discogs".into();
     if kind == Kind::Artist {
@@ -287,8 +308,8 @@ impl Source for Discogs {
     }
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let (kind, id) = of_uri(uri).ok_or_else(|| anyhow::anyhow!("not a Discogs link"))?;
-        let token = TOKEN.read().unwrap_or_else(|e| e.into_inner()).clone();
-        let (record, authenticated) = record(cx.egress, kind, id, token.as_deref()).await?;
+        let credential = CREDENTIAL.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let (record, authenticated) = record(cx.egress, kind, id, credential.as_ref()).await?;
         Ok(record
             .and_then(|v| card(cx.card(uri, self), kind, &v, authenticated))
             .unwrap_or_else(|| cx.missing(uri, self)))
@@ -332,6 +353,12 @@ pub mod also_on {
         fn takes_token(&self) -> bool {
             true
         }
+        fn app_key_variables(&self) -> Option<(&'static str, &'static str)> {
+            Some((
+                "PINAKES_DISCOGS_CONSUMER_KEY",
+                "PINAKES_DISCOGS_CONSUMER_SECRET",
+            ))
+        }
         fn applies(&self, subject: &Subject) -> bool {
             super::of_uri(&subject.uri).is_some()
         }
@@ -349,8 +376,8 @@ pub mod also_on {
             };
             if kind == super::Kind::Release {
                 // The ID is the key; the record only adds the barcodes.
-                let token = super::token(&cx.config);
-                let record = super::record(&cx.egress, kind, id, token.as_deref()).await;
+                let credential = super::credential(&cx.config);
+                let record = super::record(&cx.egress, kind, id, credential.as_ref()).await;
                 if let Some((Some(v), _)) = secondary("discogs", &mut found.retry_after, record) {
                     let barcodes = super::barcodes(&v);
                     // A box set lists each disc's barcode: only a release with one barcode keys it.
@@ -587,7 +614,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(d.status, crate::model::Status::Missing);
-        let error = record(&egress, Kind::Artist, 1, Some("s3cret-token"))
+        let token = Credential::Token("s3cret-token".into());
+        let error = record(&egress, Kind::Artist, 1, Some(&token))
             .await
             .unwrap_err();
         assert!(!format!("{error:?}").contains("s3cret"), "{error:?}");
@@ -600,6 +628,123 @@ mod tests {
                 "https://api.discogs.com/artists/1",
                 "https://api.discogs.com/artists/1",
             ]
+        );
+    }
+
+    /// An app's consumer key and secret are a credential, from the file or their own variables;
+    /// the token wins when both are set; neither shows in the config's forms; a key with a comma
+    /// (which would split the header) is refused.
+    #[test]
+    fn an_app_key_and_secret_are_a_credential_and_the_token_wins() {
+        use crate::config::{apply_named_env, Config};
+        let vars = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<Vec<_>>()
+        };
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        apply_named_env(
+            &mut value,
+            vars(&[
+                ("PINAKES_DISCOGS_CONSUMER_KEY", "ABCDEFKEY"),
+                ("PINAKES_DISCOGS_CONSUMER_SECRET", "ABCDEFSECRET"),
+            ]),
+        )
+        .unwrap();
+        let cfg = Config::from_value(value.clone()).unwrap();
+        assert_eq!(
+            credential(&cfg).map(|c| c.header()).as_deref(),
+            Some("Discogs key=ABCDEFKEY, secret=ABCDEFSECRET")
+        );
+        let shown = format!("{cfg:?} {}", serde_json::to_string(&cfg).unwrap());
+        assert!(!shown.contains("ABCDEF"), "{shown}");
+        // The token wins.
+        value["also_on"]["sources"]["discogs"]["token"] = "ABCDEFTOKEN".into();
+        let cfg = Config::from_value(value).unwrap();
+        assert_eq!(
+            credential(&cfg).map(|c| c.header()).as_deref(),
+            Some("Discogs token=ABCDEFTOKEN")
+        );
+        // A key without its secret is no credential; the file's value stays when the variable
+        // is set too.
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        value["also_on"]["sources"]["discogs"] = serde_json::json!({"key": "FROMFILE"});
+        apply_named_env(
+            &mut value,
+            vars(&[("PINAKES_DISCOGS_CONSUMER_KEY", "FROMENV")]),
+        )
+        .unwrap();
+        assert_eq!(value["also_on"]["sources"]["discogs"]["key"], "FROMFILE");
+        assert!(credential(&Config::from_value(value).unwrap()).is_none());
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        value["also_on"]["sources"]["discogs"] = serde_json::json!({"key": "a,b", "secret": "s"});
+        assert!(Config::from_value(value).is_err());
+        // Only Discogs takes one.
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        value["also_on"]["sources"]["deezer"] = serde_json::json!({"key": "k", "secret": "s"});
+        assert!(Config::from_value(value).is_err());
+    }
+
+    /// The app's pair goes in Discogs' own header form, with the request kept out of logs.
+    #[tokio::test(start_paused = true)]
+    async fn an_app_key_and_secret_are_sent_as_discogs_reads_them() {
+        #[derive(Default)]
+        struct Seen(std::sync::Mutex<Vec<(String, bool)>>);
+        #[async_trait::async_trait]
+        impl crate::resolver::egress::Transport for Seen {
+            async fn get(
+                &self,
+                url: &url::Url,
+                addresses: &[std::net::SocketAddr],
+            ) -> Result<crate::resolver::egress::Fetched> {
+                self.get_with(url, addresses, &FetchOptions::default())
+                    .await
+            }
+            async fn get_with(
+                &self,
+                url: &url::Url,
+                _: &[std::net::SocketAddr],
+                options: &FetchOptions,
+            ) -> Result<crate::resolver::egress::Fetched> {
+                let header = options
+                    .headers
+                    .iter()
+                    .find(|(name, _)| *name == "authorization")
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default();
+                self.0.lock().unwrap().push((header, options.sensitive));
+                Ok(crate::resolver::egress::Fetched {
+                    permanent_redirect: false,
+                    truncated: false,
+                    validators: Default::default(),
+                    url: url.clone(),
+                    content_type: "application/json".into(),
+                    status: 200,
+                    retry_after_secs: 60,
+                    location: None,
+                    body: crate::sources::fixture::read("discogs", "master-21491.json"),
+                })
+            }
+        }
+        let seen = std::sync::Arc::new(Seen::default());
+        let egress = Egress::with_backends(
+            Default::default(),
+            std::sync::Arc::new(crate::sources::fixture::PublicDns),
+            seen.clone(),
+        );
+        let app = Credential::App {
+            key: "app-key".into(),
+            secret: "app-secret".into(),
+        };
+        let (master, authenticated) = record(&egress, Kind::Master, 21491, Some(&app))
+            .await
+            .unwrap();
+        assert_eq!(master.unwrap()["title"], "OK Computer");
+        assert!(authenticated);
+        assert_eq!(
+            *seen.0.lock().unwrap(),
+            [("Discogs key=app-key, secret=app-secret".to_owned(), true)]
         );
     }
 
@@ -657,13 +802,14 @@ mod tests {
             std::sync::Arc::new(crate::sources::fixture::PublicDns),
             api.clone(),
         );
-        let (master, authenticated) = record(&egress, Kind::Master, 21491, Some("expired"))
+        let expired = Credential::Token("expired".into());
+        let (master, authenticated) = record(&egress, Kind::Master, 21491, Some(&expired))
             .await
             .unwrap();
         assert_eq!(master.unwrap()["title"], "OK Computer");
         assert!(!authenticated);
         // Once refused, the token is not sent again.
-        let (_, authenticated) = record(&egress, Kind::Master, 21492, Some("expired"))
+        let (_, authenticated) = record(&egress, Kind::Master, 21492, Some(&expired))
             .await
             .unwrap();
         assert!(!authenticated);

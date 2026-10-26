@@ -2,15 +2,22 @@
 
 Artists, masters and releases in the Discogs music database, read from its API
 (`api.discogs.com`): Discogs answers requests for its web pages with a bot wall. No key; 25
-requests a minute, the pace Pinakes keeps by default. Discogs' images need authentication: with a
-personal access token (`[also_on.sources.discogs] token`, or
-`PINAKES__ALSO_ON__SOURCES__DISCOGS__TOKEN`) the cards show them. With a token Discogs allows 60
+requests a minute, the pace Pinakes keeps by default. Discogs' images need authentication, by
+either credential Discogs takes:
+- a personal access token (`[also_on.sources.discogs] token`, or
+  `PINAKES__ALSO_ON__SOURCES__DISCOGS__TOKEN`), sent as `Authorization: Discogs token=…`;
+- an app's consumer key and secret (`[also_on.sources.discogs] key` and `secret`, or
+  `PINAKES_DISCOGS_CONSUMER_KEY` and `PINAKES_DISCOGS_CONSUMER_SECRET`, which fill them when the
+  file leaves them unset), sent as `Authorization: Discogs key=…, secret=…`.
+
+The token wins when both are set. With either, the cards show images and Discogs allows 60
 requests a minute; an operator's `limits.host_rates` entry sets the pace outright
-(`"api.discogs.com" = 1.0` under `[limits.host_rates]`). The token is sent only to
-`api.discogs.com` and never appears in logs or errors. A token Discogs refuses (401 or 403: expired
-or mistyped) is dropped: that request is asked again without it, later ones go without it from the start,
-one warning is logged, and the cards are read without it (no images); `pinakes_source_token_refusals_total{source="discogs"}` counts each
-refusal. Release data is CC0.
+(`"api.discogs.com" = 1.0` under `[limits.host_rates]`). The credential is sent only to
+`api.discogs.com` and never appears in logs, errors or the operator info. A credential Discogs
+refuses (401 or 403: expired, revoked or mistyped) is dropped, remembered by the hash of its
+header: that request is asked again without it, later ones go without it from the start, one
+warning is logged, and the cards are read without it (no images);
+`pinakes_source_token_refusals_total{source="discogs"}` counts each refusal. Release data is CC0.
 
 ## Links
 

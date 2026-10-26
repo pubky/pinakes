@@ -168,7 +168,17 @@ fn named_variables() -> Vec<(&'static str, Vec<&'static str>, Named)> {
             Named::Fills,
         ))
     });
-    sections.chain(tokens).collect()
+    let app_keys = crate::also_on::registered().iter().filter_map(|s| {
+        let (key, secret) = s.app_key_variables()?;
+        Some([(key, "key"), (secret, "secret")].map(|(variable, field)| {
+            (
+                variable,
+                vec!["also_on", "sources", s.id(), field],
+                Named::Fills,
+            )
+        }))
+    });
+    sections.chain(tokens).chain(app_keys.flatten()).collect()
 }
 /// How a named variable meets the file form.
 #[derive(Clone, Copy, PartialEq)]
@@ -930,6 +940,20 @@ impl Config {
                     .any(|s| s.id() == id && s.takes_token());
                 if !takes || token.len() > 256 || !token.bytes().all(|b| b.is_ascii_graphic()) {
                     bail!("also_on.sources.{id}.token must be at most 256 printable characters, for a source that takes one");
+                }
+            }
+            for (field, value) in [("key", &options.key), ("secret", &options.secret)] {
+                if let Some(value) = value.as_deref().filter(|v| !v.is_empty()) {
+                    let takes = crate::also_on::registered()
+                        .iter()
+                        .any(|s| s.id() == id && s.app_key_variables().is_some());
+                    // Printable and without a comma: they go into one header.
+                    if !takes
+                        || value.len() > 256
+                        || !value.bytes().all(|b| b.is_ascii_graphic() && b != b',')
+                    {
+                        bail!("also_on.sources.{id}.{field} must be at most 256 printable characters without a comma, for a source that takes an app key");
+                    }
                 }
             }
         }
