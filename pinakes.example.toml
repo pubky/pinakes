@@ -131,6 +131,8 @@ enabled = true
 enabled = true
 [sources.pdb]
 enabled = true
+[sources.pinterest]
+enabled = true
 [sources.podcast_index]
 enabled = true
 [sources.pubchem]

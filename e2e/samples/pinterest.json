@@ -1,0 +1,12 @@
+[
+  {
+    "kind": "pinterest",
+    "uri": "https://www.pinterest.com/pin/99360735500167749/",
+    "type": "SocialMediaPosting"
+  },
+  {
+    "kind": "pinterest_profile",
+    "uri": "https://www.pinterest.com/pinterest/",
+    "type": "Person"
+  }
+]

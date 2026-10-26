@@ -64,6 +64,7 @@ pub mod media_records;
 pub mod mempool;
 pub mod met;
 pub mod pdb;
+pub mod pinterest;
 pub mod podcast_index;
 pub mod pubchem;
 pub mod public_inbox;
@@ -125,6 +126,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &mempool::Mempool,
     &met::Met,
     &pdb::Pdb,
+    &pinterest::Pinterest,
     &podcast_index::PodcastIndex,
     &pubchem::Pubchem,
     &public_inbox::PublicInbox,
