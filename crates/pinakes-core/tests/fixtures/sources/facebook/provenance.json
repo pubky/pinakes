@@ -1,0 +1,42 @@
+{
+  "event-1": {
+    "bytes": 0,
+    "content_type": "text/html; charset=\"utf-8\"",
+    "file": null,
+    "location": "https://www.facebook.com/login/?next=https%3A%2F%2Fwww.facebook.com%2Fevents%2F1",
+    "note": "Status and Location only.",
+    "recorded_at": "2026-10-26T00:33:46+00:00",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "status": 302,
+    "url": "https://www.facebook.com/events/1"
+  },
+  "page-facebook": {
+    "bytes": 964800,
+    "content_type": "text/html; charset=\"utf-8\"",
+    "file": "page-facebook.html.gz",
+    "recorded_at": "2026-10-26T00:33:45+00:00",
+    "sha256": "903c0ea6493091aa402a3f5959b99ef310ec6184925b6b237221b782ecc61068",
+    "status": 200,
+    "url": "https://www.facebook.com/facebook"
+  },
+  "page-missing": {
+    "bytes": 0,
+    "content_type": "text/html; charset=\"utf-8\"",
+    "file": null,
+    "location": "https://www.facebook.com/login/?next=https%3A%2F%2Fwww.facebook.com%2Fthispagedoesnotexist12345x",
+    "note": "Status and Location only.",
+    "recorded_at": "2026-10-26T00:33:46+00:00",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "status": 302,
+    "url": "https://www.facebook.com/thispagedoesnotexist12345x"
+  },
+  "post-1": {
+    "bytes": 1542,
+    "content_type": "text/html; charset=\"utf-8\"",
+    "file": "post-1.html",
+    "recorded_at": "2026-10-26T00:33:46+00:00",
+    "sha256": "a3cdeabf0cc451a1502fcaf0e4f74fcafd0b89ee5fe1550ec5050acb209880a1",
+    "status": 500,
+    "url": "https://www.facebook.com/facebook/posts/1"
+  }
+}

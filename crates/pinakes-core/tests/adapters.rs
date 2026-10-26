@@ -2394,6 +2394,7 @@ fn platform(
 fn registry_credentials_and_cadence() {
     use pinakes_core::{adapter::Mode, resolver::classify};
     adapters::validate(&EventConfig::default()).unwrap();
+    // Outside an event platform's paths: a page, or the official card of a source that reads it.
     for uri in [
         "https://en.wikipedia.org/wiki/Bitcoin",
         "https://facebook.com/person",
@@ -2401,7 +2402,12 @@ fn registry_credentials_and_cadence() {
         "https://api.btcmap.org/v4/users",
         "https://portal.einundzwanzig.space/api/anything",
     ] {
-        assert_eq!(classify(uri), Some("web"), "{uri}");
+        let route = if pinakes_core::sources::reading(uri).is_some() {
+            "official"
+        } else {
+            "web"
+        };
+        assert_eq!(classify(uri), Some(route), "{uri}");
     }
     assert_eq!(classify("https://api.nostr.wine/search?kind=0"), None);
     for (id, uri, path) in [

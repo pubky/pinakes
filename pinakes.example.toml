@@ -78,6 +78,8 @@ enabled = true
 enabled = true
 [sources.eur_lex]
 enabled = true
+[sources.facebook]
+enabled = true
 [sources.fdroid]
 enabled = true
 [sources.federal_register]

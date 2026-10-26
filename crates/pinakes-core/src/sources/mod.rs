@@ -37,6 +37,7 @@ pub mod discourse;
 pub mod docker_hub;
 pub mod ecfr;
 pub mod eur_lex;
+pub mod facebook;
 pub mod fdroid;
 pub mod federal_register;
 pub mod fedlex;
@@ -102,6 +103,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &docker_hub::DockerHub,
     &ecfr::Ecfr,
     &eur_lex::EurLex,
+    &facebook::Facebook,
     &fdroid::FDroid,
     &federal_register::FederalRegister,
     &fedlex::Fedlex,

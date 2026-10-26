@@ -66,6 +66,7 @@ or got plain web cards before are read by their source.
 - [`docker_hub`](docker_hub.md): Docker Hub image repositories by namespace and name.
 - [`ecfr`](ecfr.md): sections and parts of the Code of Federal Regulations.
 - [`eur_lex`](eur_lex.md): EU law by CELEX number, ELI or Official Journal id.
+- [`facebook`](facebook.md): Facebook pages, posts, videos and events.
 - [`fdroid`](fdroid.md): F-Droid apps by package, from its package API and page.
 - [`federal_register`](federal_register.md): Federal Register documents by document number.
 - [`fedlex`](fedlex.md): Swiss federal law in the classified compilation, by ELI.
