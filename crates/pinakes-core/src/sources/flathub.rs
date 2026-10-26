@@ -4,7 +4,7 @@
 //! Every Flathub link of one app is an alias of `https://flathub.org/apps/{id}`. An app ID is a
 //! reverse-DNS name (`org.signal.Signal`) and keeps its case.
 use super::{
-    kit::{fetch, json, plain, text, texts, web_url, Card, Request},
+    kit::{fetch, json, text, texts, web_url, Card, Request},
     Example, Source,
 };
 use crate::model::ResourceMeta;
@@ -13,13 +13,9 @@ use async_trait::async_trait;
 
 pub const SITE: &str = "Flathub";
 
-/// A Flathub app ID: at least three dot-separated parts of letters, digits, `_` and `-`.
+/// A Flathub app ID (`app_ids`).
 fn app_id(value: &str) -> Option<String> {
-    (plain(value, 255, |c| {
-        c.is_ascii_alphanumeric() || "._-".contains(c)
-    }) && value.split('.').count() >= 3
-        && value.split('.').all(|part| !part.is_empty()))
-    .then(|| value.to_owned())
+    crate::app_ids::flathub_id(value).then(|| value.to_owned())
 }
 
 /// A Flathub site language (`de`, `pt-BR`, `zh-Hans`).

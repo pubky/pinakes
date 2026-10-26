@@ -6,7 +6,7 @@
 //! app that storefront does not sell is missing. The app's `bundleId` is Apple's alone: it is a
 //! fact, never the Android package.
 use super::{
-    kit::{fetch, float, int, json, plain, text, time, web_url, Card, Request},
+    kit::{fetch, float, int, json, text, time, web_url, Card, Request},
     Example, Source,
 };
 use crate::model::ResourceMeta;
@@ -15,9 +15,9 @@ use async_trait::async_trait;
 
 pub const SITE: &str = "App Store";
 
-/// An App Store ID: digits, no leading zero.
+/// An App Store ID: digits, no leading zero (`app_ids`).
 fn app_id(value: &str) -> Option<String> {
-    (plain(value, 20, |c| c.is_ascii_digit()) && !value.starts_with('0')).then(|| value.to_owned())
+    crate::app_ids::app_store_id(value).then(|| value.to_owned())
 }
 
 /// The app an App Store link names: `apps.apple.com/{cc}/app/{name}/id{id}`, with or without
@@ -29,7 +29,8 @@ pub fn from_uri(uri: &str) -> Option<String> {
     }
     let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
     let country = |cc: &str| cc.len() == 2 && cc.bytes().all(|b| b.is_ascii_lowercase());
-    let name = |n: &str| plain(n, 200, |c| c.is_ascii_alphanumeric() || "-_.%".contains(c));
+    // The app's name in the link is any one segment (Japanese names included).
+    let name = |n: &str| !n.is_empty() && n.len() <= 600;
     let id = match segments.as_slice() {
         [cc, "app", n, id] if country(cc) && name(n) => id,
         [cc, "app", id] if country(cc) => id,
@@ -197,6 +198,8 @@ mod tests {
             "https://apps.apple.com/app/id874139669",
             "https://apps.apple.com/ch/app/id874139669",
             "https://itunes.apple.com/us/app/signal-private-messenger/id874139669?mt=8",
+            // A name in another script.
+            "https://apps.apple.com/jp/app/%E3%82%B7%E3%82%B0%E3%83%8A%E3%83%AB/id874139669",
         ] {
             assert_eq!(from_uri(uri).as_deref(), Some("874139669"), "{uri}");
             assert_eq!(

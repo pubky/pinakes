@@ -5,7 +5,7 @@
 //! Every F-Droid link of one package (with or without a site language) is an alias of
 //! `https://f-droid.org/packages/{package}`, as Wikidata's F-Droid links spell it.
 use super::{
-    kit::{fetch, json, plain, text, web_url, Card, Request},
+    kit::{fetch, json, text, web_url, Card, Request},
     Example, Source,
 };
 use crate::model::ResourceMeta;
@@ -14,16 +14,9 @@ use async_trait::async_trait;
 
 pub const SITE: &str = "F-Droid";
 
-/// An Android package name: dot-separated segments of letters, digits and `_`, each starting
-/// with a letter.
+/// An Android package name (`app_ids`).
 fn package(value: &str) -> Option<String> {
-    (plain(value, 200, |c| {
-        c.is_ascii_alphanumeric() || "._".contains(c)
-    }) && value.contains('.')
-        && value
-            .split('.')
-            .all(|s| s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic())))
-    .then(|| value.to_owned())
+    crate::app_ids::android_package(value).then(|| value.to_owned())
 }
 
 /// An F-Droid site language (`en`, `fr`, `zh_Hant`, `pt_BR`).

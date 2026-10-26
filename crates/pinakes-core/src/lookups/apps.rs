@@ -2,7 +2,7 @@
 //! Microsoft Store. Each store's own ID is a key (`android:` for Google Play and F-Droid, which
 //! share the Android package), and the one Wikidata item carrying it bridges an app's stores:
 //! its other store IDs become keys and links, so every store link of one app joins one group.
-use super::{plain, web_url, Key};
+use super::{web_url, Key};
 use serde_json::Value;
 
 /// A store an app is on.
@@ -59,22 +59,15 @@ impl Store {
     }
     /// The store's ID in its own spelling, or `None` for a value that is no such ID.
     pub fn id(self, value: &str) -> Option<String> {
-        match self {
-            Self::GooglePlay | Self::FDroid => package(value).then(|| value.to_owned()),
-            Self::AppStore => (plain(value, 20, |c| c.is_ascii_digit()) && !value.starts_with('0'))
-                .then(|| value.to_owned()),
-            Self::Flathub => (plain(value, 255, |c| {
-                c.is_ascii_alphanumeric() || "._-".contains(c)
-            }) && value.split('.').count() >= 3)
-                .then(|| value.to_owned()),
-            Self::Snap => (plain(value, 40, |c| {
-                c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'
-            }) && !value.starts_with('-'))
-            .then(|| value.to_owned()),
-            Self::MicrosoftStore => (value.len() == 12
-                && value.bytes().all(|b| b.is_ascii_alphanumeric()))
-            .then(|| value.to_ascii_uppercase()),
-        }
+        use crate::app_ids;
+        let valid = match self {
+            Self::GooglePlay | Self::FDroid => app_ids::android_package(value),
+            Self::AppStore => app_ids::app_store_id(value),
+            Self::Flathub => app_ids::flathub_id(value),
+            Self::Snap => app_ids::snap_name(value),
+            Self::MicrosoftStore => return app_ids::msstore_id(value),
+        };
+        valid.then(|| value.to_owned())
     }
     /// The app's own page on the store.
     pub fn page(self, id: &str) -> String {
@@ -87,16 +80,6 @@ impl Store {
             Self::MicrosoftStore => format!("https://apps.microsoft.com/detail/{id}"),
         }
     }
-}
-
-/// An Android package name: dot-separated segments of letters, digits and underscores.
-fn package(value: &str) -> bool {
-    plain(value, 200, |c| {
-        c.is_ascii_alphanumeric() || "._".contains(c)
-    }) && value.contains('.')
-        && value
-            .split('.')
-            .all(|s| s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic()))
 }
 
 /// An app on a store, from its own page's link.
@@ -135,7 +118,8 @@ pub fn app_from_uri(uri: &str) -> Option<App> {
         // `/{cc}/app/{name}/id{N}`, with or without the storefront and the name.
         ("apps.apple.com", rest) => {
             let country = |cc: &str| cc.len() == 2 && cc.bytes().all(|b| b.is_ascii_lowercase());
-            let name = |n: &str| plain(n, 200, |c| c.is_ascii_alphanumeric() || "-_.%".contains(c));
+            // The app's name in the link is any one segment (Japanese names included).
+            let name = |n: &str| !n.is_empty() && n.len() <= 600;
             let id = match rest {
                 [cc, "app", n, id] if country(cc) && name(n) => id,
                 [cc, "app", id] if country(cc) => id,
@@ -505,6 +489,13 @@ mod tests {
             "https://flathub.org/apps/collection/popular",
             "https://snapcraft.io/docs/x",
             "https://snapcraft.io/Firefox",
+            // snapcraft.io's own pages and names no snap can have.
+            "https://snapcraft.io/store",
+            "https://snapcraft.io/blog",
+            "https://snapcraft.io/docs",
+            "https://snapcraft.io/123",
+            "https://snapcraft.io/signal-",
+            "https://flathub.org/apps/org..Signal",
             "https://apps.microsoft.com/detail/short",
             "https://apps.apple.com/us/app/vlc/extra/id650377962",
             "https://apps.apple.com/us/story/id650377962",
@@ -514,6 +505,14 @@ mod tests {
         ] {
             assert_eq!(app_from_uri(uri), None, "{uri}");
         }
+        // An App Store link names its app in any script: the ID is the app.
+        assert_eq!(
+            app_from_uri(
+                "https://apps.apple.com/jp/app/%E3%83%A2%E3%83%B3%E3%82%B9%E3%83%88/id1015862326"
+            )
+            .map(|a| a.key()),
+            Some(Key::new("appstore", "1015862326"))
+        );
         // Google Play and F-Droid name one Android package: the same key.
         assert_eq!(
             app_from_uri("https://f-droid.org/packages/de.danoeh.antennapod").map(|a| a.key()),

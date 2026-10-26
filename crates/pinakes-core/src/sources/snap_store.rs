@@ -3,7 +3,7 @@
 //!
 //! Every Snap Store link of one snap is an alias of `https://snapcraft.io/{name}`.
 use super::{
-    kit::{fetch, json, plain, text, web_url, Card, Request},
+    kit::{fetch, json, text, web_url, Card, Request},
     Example, Source,
 };
 use crate::model::ResourceMeta;
@@ -12,32 +12,9 @@ use async_trait::async_trait;
 
 pub const SITE: &str = "Snap Store";
 
-/// The site's own pages at the root, which are no snaps.
-const PAGES: &[&str] = &[
-    "about",
-    "account",
-    "blog",
-    "docs",
-    "first-snap",
-    "iot",
-    "login",
-    "logout",
-    "publisher",
-    "search",
-    "snaps",
-    "store",
-    "tutorials",
-];
-
-/// A snap name: lower-case letters, digits and `-`, at most 40, not starting or ending with `-`.
+/// A snap name, never one of snapcraft.io's own pages (`app_ids`).
 fn snap_name(value: &str) -> Option<String> {
-    (plain(value, 40, |c| {
-        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'
-    }) && !value.starts_with('-')
-        && !value.ends_with('-')
-        && value.bytes().any(|b| b.is_ascii_lowercase())
-        && !PAGES.contains(&value))
-    .then(|| value.to_owned())
+    crate::app_ids::snap_name(value).then(|| value.to_owned())
 }
 
 /// The snap a Snap Store link names: `snapcraft.io/{name}` and `snapcraft.io/install/{name}/…`.

@@ -6,7 +6,7 @@
 //! Every Google Play link of one app is an alias of
 //! `https://play.google.com/store/apps/details?id={package}`: its language and country
 //! parameters (`hl=`, `gl=`) and anything else are the page's, not another app.
-use super::{kit::plain, text, web_url, Context, Example, Source};
+use super::{text, web_url, Context, Example, Source};
 use crate::{model::ResourceMeta, resolver::egress::Fetched};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -14,16 +14,9 @@ use serde_json::Value;
 
 pub const SITE: &str = "Google Play";
 
-/// An Android package name: dot-separated segments of letters, digits and `_`, each starting
-/// with a letter.
+/// An Android package name (`app_ids`).
 fn package(value: &str) -> Option<String> {
-    (plain(value, 200, |c| {
-        c.is_ascii_alphanumeric() || "._".contains(c)
-    }) && value.contains('.')
-        && value
-            .split('.')
-            .all(|s| s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic())))
-    .then(|| value.to_owned())
+    crate::app_ids::android_package(value).then(|| value.to_owned())
 }
 
 /// The app a Google Play link names: `/store/apps/details?id={package}`.
