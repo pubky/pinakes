@@ -32,6 +32,11 @@ the link's shape alone with the `blocked` fact: the link still resolves, groups 
 
 A profile is a `Person`, a post a `SocialMediaPosting`, a reel a `VideoObject`.
 
+Instagram serves a reel under both forms (`/p/{code}/` and `/reel/{code}/`, one code), but this
+source keeps them apart: `/p/` names a post and `/reel/` a reel, and the link alone cannot say
+whether a `/p/` code is a reel. One reel linked both ways is therefore two cards, never one card
+for two different things.
+
 | Fact | Meaning |
 | --- | --- |
 | `author_name` | A post's author, when the page names one |

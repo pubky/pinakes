@@ -112,14 +112,17 @@ pub fn publication_card(doc: ResourceMeta, name: &str, page: &ResourceMeta) -> R
         .map(|d| social::excerpt(d, 200));
     doc.image = page.image.clone();
     social::fact(&mut doc, "handle", Some(name.to_owned()));
+    // The feed the page advertises only on the publication's own host; else its own `/feed`.
+    let own_host = format!("{name}.substack.com");
     social::fact(
         &mut doc,
         "feed",
         Some(
             page.attributes
                 .get("feed")
+                .filter(|f| web_url(f).is_some_and(|u| u.host_str() == Some(own_host.as_str())))
                 .cloned()
-                .unwrap_or_else(|| format!("https://{name}.substack.com/feed")),
+                .unwrap_or_else(|| format!("https://{own_host}/feed")),
         ),
     );
     doc
@@ -319,6 +322,17 @@ mod tests {
         assert!(about.starts_with("Resources, stories") && !about.contains("Click to read"));
         assert_eq!(doc.attributes["feed"], "https://on.substack.com/feed");
         assert_eq!(doc.attributes["handle"], "on");
+        // A feed the page advertises on another host is not the publication's.
+        let mut elsewhere = page("https://on.substack.com/", "publication-on.html.gz");
+        elsewhere
+            .attributes
+            .insert("feed".into(), "https://feeds.example.org/on.xml".into());
+        let doc = publication_card(
+            ResourceMeta::new("https://on.substack.com/", "substack", 3600),
+            "on",
+            &elsewhere,
+        );
+        assert_eq!(doc.attributes["feed"], "https://on.substack.com/feed");
 
         let uri = "https://on.substack.com/p/model-behavior-rick-rubin";
         let doc = post_card(

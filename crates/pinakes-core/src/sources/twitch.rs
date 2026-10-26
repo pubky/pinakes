@@ -195,6 +195,10 @@ impl Source for Twitch {
     fn name(&self) -> &'static str {
         "twitch"
     }
+    /// A video's title is its creator's own text, as a TikTok's or a reel's is.
+    fn social(&self, doc: &ResourceMeta) -> bool {
+        doc.type_name == "VideoObject"
+    }
     fn e2e(&self) -> Option<super::E2e> {
         use super::{E2e, E2eAnswer, E2eSample};
         Some(E2e {
@@ -373,6 +377,17 @@ mod tests {
             ),
         )
         .is_none());
+    }
+
+    /// A video's card quotes its creator (social, purged when the video goes); a channel's is
+    /// the channel's.
+    #[test]
+    fn videos_are_social_content() {
+        let mut doc = ResourceMeta::new("https://www.twitch.tv/videos/1", "twitch", 60);
+        doc.set_type("VideoObject");
+        assert!(Twitch.social(&doc));
+        doc.set_type("Person");
+        assert!(!Twitch.social(&doc));
     }
 
     #[test]

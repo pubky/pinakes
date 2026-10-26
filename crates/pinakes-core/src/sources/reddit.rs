@@ -192,12 +192,14 @@ pub fn user_card(doc: ResourceMeta, name: &str, v: &Value) -> Result<Option<Reso
     Ok(Some(doc))
 }
 
-/// The card of a link Reddit refused: its shape alone, marked `blocked`, a post keeping the type
-/// its readable card has.
+/// The card of a link Reddit refused: its shape alone, marked `blocked`, a post and a subreddit
+/// keeping the type their readable cards have.
 pub fn blocked(doc: ResourceMeta, target: &Target) -> ResourceMeta {
     let mut doc = social::blocked(doc, target.shape(), SITE);
-    if matches!(target, Target::Post(_)) {
-        doc.set_type("DiscussionForumPosting");
+    match target {
+        Target::Post(_) => doc.set_type("DiscussionForumPosting"),
+        Target::Subreddit(_) => doc.set_type("Organization"),
+        Target::User(_) => {}
     }
     doc
 }
@@ -343,6 +345,22 @@ mod tests {
 
     fn read(file: &str) -> Value {
         serde_json::from_slice(&crate::sources::fixture::read("reddit", file)).unwrap()
+    }
+
+    /// A refused post or subreddit keeps the type its readable card has; a user stays a profile.
+    #[test]
+    fn a_refused_link_keeps_its_readable_type() {
+        for (uri, kind) in [
+            (
+                "https://www.reddit.com/comments/1k3d0pk/",
+                "DiscussionForumPosting",
+            ),
+            ("https://www.reddit.com/r/announcements/", "Organization"),
+        ] {
+            let target = Target::of_uri(uri).unwrap();
+            let doc = blocked(ResourceMeta::new(uri, "reddit", 60), &target);
+            assert_eq!(doc.type_name, kind, "{uri}");
+        }
     }
 
     #[test]
