@@ -303,6 +303,20 @@ async fn search_filters_facets_true_keyset_and_invalid_options(pool: PgPool) {
     }
     let (_, page) = call(&app, "GET", "/v1/search?type=Article,NotAType", None).await;
     assert!(page["error"].as_str().unwrap().contains("NotAType"));
+    // Anything but a type's name is never echoed: a URL given as a type keeps its credentials,
+    // query and fragment out of the answer.
+    let (code, page) = call(
+        &app,
+        "GET",
+        "/v1/search?type=https%3A%2F%2Fuser%3Asecret%40example.org%2Fx%3Ftoken%3Dabc%23frag",
+        None,
+    )
+    .await;
+    assert_eq!(code, 400);
+    let error = page["error"].as_str().unwrap();
+    for leaked in ["secret", "token", "abc", "frag", "example.org"] {
+        assert!(!error.contains(leaked), "{leaked} in {error}");
+    }
     let (_, page) = call(&app, "GET", "/v1/search?facet=type,tags", None).await;
     assert!(page["facets"]["type"].is_array() && page["facets"]["tags"].is_array());
     assert_eq!(

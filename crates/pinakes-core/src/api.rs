@@ -1180,7 +1180,15 @@ fn search_types(types: &str) -> Result<Vec<String>, ApiError> {
     for name in names {
         let mut path = model::type_path(name);
         let Some(leaf) = path.pop() else {
-            return Err(ApiError::bad(format!("unknown schema.org type: {name}")));
+            // Only a type's name is echoed: a URL or anything else given as a type is not
+            // repeated back (it may hold credentials, a query or a fragment).
+            let a_name =
+                (1..=64).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_alphanumeric());
+            return Err(ApiError::bad(if a_name {
+                format!("unknown schema.org type: {name}")
+            } else {
+                "type names schema.org types (letters and digits, comma-separated)".to_owned()
+            }));
         };
         if !known.contains(&leaf) {
             known.push(leaf);
