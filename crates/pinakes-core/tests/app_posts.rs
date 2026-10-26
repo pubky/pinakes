@@ -348,10 +348,12 @@ fn app_kinds_by_namespace() {
     assert_eq!(fact(&doc, "distance_m"), Some("12000"));
     assert_eq!(fact(&doc, "waypoints"), Some("2"));
 
+    // `for`: the resource the schedule belongs to, as in the spec's example.
+    let listing = format!("pubky://{AUTHOR}/pub/shop/v1/listings/0032SSN7Q4EVG");
     let availability = envelope(
         "availability",
         json!({
-            "timeZone": "Europe/Zurich", "horizonDays": 30, "for": "coaching",
+            "timeZone": "Europe/Zurich", "horizonDays": 30, "for": listing,
             "available": [{"title": "Office hours", "start": "2026-10-19T09:00:00", "duration": "PT3H"}],
             "busy": [],
         }),
@@ -361,7 +363,7 @@ fn app_kinds_by_namespace() {
     assert_eq!(doc.name.as_deref(), Some("Office hours"));
     assert_eq!(doc.start, Some("2026-10-19T07:00:00Z".parse().unwrap()));
     assert_eq!(doc.end, Some("2026-10-19T10:00:00Z".parse().unwrap()));
-    assert_eq!(fact(&doc, "for"), Some("coaching"));
+    assert_eq!(fact(&doc, "for"), Some(listing.as_str()));
 
     let mut listen = envelope("listen", json!({}));
     listen["embed"] = "https://tracks.example/track/1".into();
@@ -392,4 +394,35 @@ fn app_kinds_by_namespace() {
     let mut null = route.clone();
     null["attachments"] = Value::Null;
     assert!(no_card(&card(&post("maps", &id()), &null)));
+}
+
+/// The references inside a post's content pass the specs' gate as the envelope's own do: a
+/// private one refuses the post. A text the database cannot hold (a NUL) is no text.
+#[test]
+fn content_references_are_gated_and_text_is_storable() {
+    let private = format!("pubky://{AUTHOR}/priv/maps/v1/posts/{}", id());
+    let route = envelope(
+        "route",
+        json!({"name": "Hidden", "waypoints": [{"uri": "geo:46.95,7.44"}, {"uri": private}]}),
+    );
+    assert!(no_card(&card(&post("maps", &id()), &route)));
+    let event = |location: &str, title: &str| {
+        envelope(
+            "event",
+            json!({"title": title, "start": "2026-10-20T18:30:00", "timeZone": "Europe/Zurich",
+                "duration": "PT1H", "locations": [{"uri": location}]}),
+        )
+    };
+    let social = post("social", &id());
+    assert!(!no_card(&card(&social, &event("geo:46.95,7.44", "Meetup"))));
+    assert!(no_card(&card(&social, &event(&private, "Meetup"))));
+    assert!(no_card(&card(
+        &social,
+        &event("geo:46.95,7.44", "Meet\0up")
+    )));
+    let availability = envelope(
+        "availability",
+        json!({"timeZone": "Europe/Zurich", "horizonDays": 7, "for": private, "available": []}),
+    );
+    assert!(no_card(&card(&post("events", &id()), &availability)));
 }

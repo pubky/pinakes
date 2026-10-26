@@ -15,7 +15,10 @@
 use super::{Client, Kind, Object, Profile, Read};
 use crate::{event::time, model::ResourceMeta};
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
-use pubky_social_specs::{traits::Validatable, PostEnvelope, PostKind, ValidationCtx, PUB_CTX};
+use pubky_social_specs::{
+    traits::Validatable, AllowedSchemes, ContentReference, PostEnvelope, PostKind, ValidationCtx,
+    PUB_CTX, VALIDATION_LIMITS,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -92,6 +95,39 @@ impl PostKind for AppKind {
     fn validate_content(&self, _: &PostEnvelope<Self>, _: &ValidationCtx) -> Result<(), String> {
         Ok(())
     }
+    /// The references inside the content the profiles read (an event's locations, a route's
+    /// waypoints, an availability's `for`), so the envelope's gate refuses a private or
+    /// non-canonical one as it does the envelope's own.
+    fn content_references(&self, post: &PostEnvelope<Self>) -> Vec<ContentReference> {
+        let Ok(content) = serde_json::from_str::<Value>(&post.content) else {
+            return vec![];
+        };
+        let reference = |field: String, uri: &Value| {
+            uri.as_str().map(|uri| ContentReference {
+                field,
+                uri: uri.to_owned(),
+                schemes: AllowedSchemes::Universal,
+                max_code_points: VALIDATION_LIMITS.reference_uri_max_length,
+            })
+        };
+        let list = |key: &str| {
+            content[key]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .filter_map(|(i, item)| reference(format!("{key}[{i}].uri"), &item["uri"]))
+                .collect::<Vec<_>>()
+        };
+        match self.0.as_str() {
+            "event" => list("locations"),
+            "route" => list("waypoints"),
+            "availability" => reference("for".into(), &content["for"])
+                .into_iter()
+                .collect(),
+            _ => vec![],
+        }
+    }
 }
 
 /// The post's envelope, checked as pubky-social-specs checks it (its id the path's), and its
@@ -113,12 +149,13 @@ fn fact(doc: &mut ResourceMeta, key: &str, value: Option<String>) {
         doc.attributes.insert(key.into(), value);
     }
 }
-/// A text member, trimmed, within `max` code points.
+/// A text member, trimmed, within `max` code points; none with a NUL, which no stored text
+/// may hold.
 fn text(v: &Value, key: &str, max: usize) -> Option<String> {
     v[key]
         .as_str()
         .map(str::trim)
-        .filter(|t| !t.is_empty() && t.chars().count() <= max)
+        .filter(|t| !t.is_empty() && t.chars().count() <= max && !t.contains('\0'))
         .map(str::to_owned)
 }
 
@@ -477,7 +514,7 @@ fn availability(content: &Value, doc: &mut ResourceMeta) -> Read {
         Some(count("available").to_string()),
     );
     fact(doc, "busy_blocks", Some(count("busy").to_string()));
-    fact(doc, "for", content["for"].as_str().map(str::to_owned));
+    fact(doc, "for", text(content, "for", 1024));
     fact(doc, "kind", Some("availability".into()));
     Read::Card
 }
