@@ -84,7 +84,8 @@ An IMDb title keeps the type its page gives (it can be either).
 | Field | Meaning |
 | --- | --- |
 | `id` | Resource ID; for an occurrence, the feed's ID |
-| `uri` | The resource URI; for an occurrence, its own URL when it has one, else the feed's. To combine with Nexus, send `uri`, and for an occurrence `occurrence.feed_uri` (its own URL was never tagged) |
+| `uri` | The resource URI; for an occurrence, its own URL when it has one, else the feed's. To combine with Nexus, send `uri` and `refs`, and for an occurrence `occurrence.feed_uri` (its own URL was never tagged) |
+| `refs` | The links people referenced on Pubky that resolve to this card, most referenced first, at most 5: its own `uri` and its aliases that carry references, normalized as every URI is. A typed card's `uri` is often a link nobody wrote (`btc:block/…`, `uniprot:…`, `isbn:…`) while people tagged the mempool.space, UniProt or Open Library page: ask Nexus about each of `refs` too and add up the card's tags over them. An occurrence's are its feed's. `[]` when nothing references the card |
 | `status` | Fetch health: `ok`, `pending`, `missing`, `unreachable` or `error` |
 | `type`, `type_path` | schema.org type (`MusicEvent`, `Book`, `Place`, …), or one of Pinakes's own types for what schema.org has no class for: `BitcoinBlock`, `BitcoinTransaction`, `BitcoinAddress`, `LightningNode` and `LightningChannel` (not schema.org; each a child of `Thing`); `type_path` is the type's ancestors, root first (`["Thing", "Event", "MusicEvent"]`), the types a `type=` search matches it by |
 | `name`, `description`, `image` | Display metadata; images point to the origin and are never proxied |
@@ -1060,10 +1061,10 @@ layers, with the caller's address:
 | `lookup` | `GET /v1/search?key=` | Compact cards |
 | `group` | `GET /v1/groups/{id}` | `id`, `type`, `keys`, every member's compact card, and `best`: the most complete readable member of the group's type |
 | `types` | `GET /v1/search?facet=type&limit=1` and `GET /v1/info` | The card types with their counts, and `resolves` |
-| `social` | Nexus `POST /v0/stream/resources/by_ids` for 1–100 URIs, with an optional `viewer` | Per URI the tags (`label`, `taggers_count`, `viewer_tagged`) and `taggers_count`; `unknown` lists the URIs Nexus does not know |
+| `social` | `POST /v1/resources/lookup` for card `ids`, then Nexus `POST /v0/stream/resources/by_ids` (100 URIs a call) with each card's `uri` and `refs`, and any plain `uris`; 1–100 entries together, optional `viewer` | Per card (or link): `asked` (the URIs sent, the card's own first), `found` (those Nexus knew), and the tags merged over them: per label `taggers_count` (each tagger once when Nexus lists them) and `viewer_tagged`; `taggers_count` over all labels. `unknown_ids` names ids Pinakes does not know |
 
 A compact card keeps `id`, `uri`, `status`, `type`, `name`, `description` (at most 300
-characters), `image`, `site`, `point`, `start`, `end`, `group`, `also_on` (`uri`, `site`),
+characters), `image`, `site`, `point`, `start`, `end`, `group`, `also_on` (`uri`, `site`), `refs`,
 `occurrence`, `event` and `attribution`, and adds `url`, the card's full read
 (`GET /v1/resources/{id}`); every answer names the REST URL of its full result. A failed request
 is the tool's error (`isError`), its text `{error, status, hint, url}` with the route's status
@@ -1076,7 +1077,7 @@ the JSON configuration other clients take, the tools' names and links to `/llms.
 `Allow: POST` and one line of plain text; every other method is MCP's.
 
 **Budget.** An MCP message spends one unit of the per-IP budget, and a tool call what its
-requests cost on top (a `reach` search 6, `types` two requests, `social` one). Bodies are capped
+requests cost on top (a `reach` search 6, `types` two requests, `social` its lookup plus one per 100 URIs it asks Nexus). Bodies are capped
 at 2 MB, as for every route; the routes keep their statement timeout, and `social` the Nexus
 client's 10-second timeout. When Nexus does not answer the batch view, `social` is the error
 `502`.

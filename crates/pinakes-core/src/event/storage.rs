@@ -682,9 +682,10 @@ async fn page(
     } else {
         None
     };
-    let items = values
+    let mut items: Vec<crate::api::Card> = values
         .iter()
         .map(crate::api::card)
         .collect::<Result<_, _>>()?;
+    crate::api::with_refs(&state.pool, items.iter_mut()).await?;
     Ok(Some(OccurrencePage { items, cursor }))
 }

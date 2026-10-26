@@ -122,7 +122,11 @@ member with the most references standing for it.
 Pinakes ranks, Nexus hydrates. Pinakes's `id` is its own: join the two indexes by **URI**, never
 by id. Who tagged a link, with which labels, and what your own follows think of it are Nexus's.
 
-1. Search Pinakes: take each card's `uri`.
+1. Search Pinakes: take each card's `uri` **and its `refs`**. A typed card's `uri` is often not
+   a link anyone wrote: the card of a Bitcoin block is `btc:block/…`, a protein's `uniprot:…`,
+   a book's `isbn:…`, while people tagged the mempool.space, UniProt or Open Library page.
+   `refs` lists those links, the ones that carry references, most referenced first (at most
+   5). Ask Nexus about all of them, and add up a card's tags over its links.
 2. Send those URIs, 100 at a time, to the Nexus batch resource view:
 
 ```sh
@@ -132,8 +136,9 @@ curl -s "$NEXUS/v0/stream/resources/by_ids" -H 'content-type: application/json' 
 
 Each answer has `details.uri`, `tags` (`label`, `taggers_count`, and with `viewer_id`
 `relationship`: whether the viewer used that label) and `taggers_count`, in request order;
-unknown URIs are skipped. Through MCP, the `social` tool makes this call to the Nexus this
-instance reads.
+unknown URIs are skipped. Through MCP, the `social` tool does the whole join with the Nexus
+this instance reads: give it card ids, and it asks by each card's `uri` and `refs` and merges
+the answers per card (each tagger counted once per label).
 
 For graph questions (who follows whom, trust, threads, a user's tags) use **nexus-scout**
 (`https://nexus-scout.pubky.app/llms.txt`): read-only Cypher over the Pubky social graph. To keep
@@ -153,7 +158,7 @@ the full result:
 | `lookup` | Every card with one identifier (`isbn:…`, `doi:…`, `isrc:…`, `osm:…`, …) |
 | `group` | A group's members by group id |
 | `types` | The card types this instance holds, with counts, and the kinds of links it resolves |
-| `social` | 1–100 URIs through the Nexus this instance reads: tags and tagger counts per URI |
+| `social` | Tags and taggers per card, from the Nexus this instance reads: card `ids` (asked by their `uri` and `refs`, merged) or plain `uris`, 1–100 together |
 
 Add it to a client as a remote (HTTP) MCP server at `{{BASE}}/mcp`.
 

@@ -23,6 +23,13 @@ use std::net::SocketAddr;
 use tower::ServiceExt;
 
 const AUTHOR: &str = "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy";
+const BLOCK: &str = "btc:block/00000000000000000024fb37364cbf81fd49cc2d51c09c75c35433c3a1945d04";
+const MEMPOOL: &str =
+    "https://mempool.space/block/00000000000000000024fb37364cbf81fd49cc2d51c09c75c35433c3a1945d04";
+const PROTEIN: &str = "uniprot:P69905";
+const UNIPROT_PAGE: &str = "https://www.uniprot.org/uniprotkb/P69905/entry";
+const BOOK: &str = "isbn:9780140328721";
+const OPENLIBRARY: &str = "https://openlibrary.org/isbn/9780140328721";
 
 /// Three tagged links: a music event in Zürich, an article and a book with an ISBN.
 async fn seed(pool: &PgPool) -> Vec<String> {
@@ -102,7 +109,16 @@ async fn seed(pool: &PgPool) -> Vec<String> {
     ids
 }
 
-/// A Nexus whose batch resource view knows the concert, tagged `music` once.
+/// The links a fake Nexus knows, with the label and the taggers each carries.
+const NEXUS_KNOWS: &[(&str, &str, &[&str])] = &[
+    ("https://example.org/concert", "music", &[AUTHOR]),
+    (MEMPOOL, "halving", &[AUTHOR, OTHER]),
+    (UNIPROT_PAGE, "protein", &[OTHER]),
+    (OPENLIBRARY, "reading", &[AUTHOR]),
+];
+const OTHER: &str = "ybbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+/// A Nexus whose batch resource view knows [`NEXUS_KNOWS`].
 async fn nexus() -> String {
     let app = Router::new().route(
         "/v0/stream/resources/by_ids",
@@ -111,11 +127,11 @@ async fn nexus() -> String {
                 .as_array()
                 .unwrap()
                 .iter()
-                .filter(|u| u.as_str() == Some("https://example.org/concert"))
-                .map(|u| {
-                    json!({"details": {"id": "n1", "uri": u}, "taggers_count": 1,
-                           "tags": [{"label": "music", "taggers_count": 1, "taggers": [AUTHOR],
-                                     "relationship": body["viewer_id"] == AUTHOR}]})
+                .filter_map(|u| {
+                    let (uri, label, taggers) = NEXUS_KNOWS.iter().find(|(k, _, _)| u == k)?;
+                    Some(json!({"details": {"id": "n1", "uri": uri}, "taggers_count": taggers.len(),
+                           "tags": [{"label": label, "taggers_count": taggers.len(), "taggers": taggers,
+                                     "relationship": taggers.contains(&body["viewer_id"].as_str().unwrap_or_default())}]}))
                 })
                 .collect();
             Json(Value::Array(views))
@@ -385,7 +401,8 @@ async fn the_mcp_handshake_and_every_tool(pool: PgPool) {
         .unwrap()
         .contains(&json!("web")));
 
-    // social: tags per URI from Nexus, with the viewer's own; unknown links listed.
+    // social by links: tags per link from Nexus, with the viewer's own; a link Nexus does not
+    // know has none.
     let (error, social) = call(
         &app,
         "social",
@@ -396,9 +413,13 @@ async fn the_mcp_handshake_and_every_tool(pool: PgPool) {
     assert!(!error, "{social}");
     assert_eq!(
         social,
-        json!({"items": [{"uri": "https://example.org/concert", "taggers_count": 1,
-                          "tags": [{"label": "music", "taggers_count": 1, "viewer_tagged": true}]}],
-               "unknown": ["https://example.org/article"]})
+        json!({"items": [
+            {"uri": "https://example.org/concert", "asked": ["https://example.org/concert"],
+             "found": ["https://example.org/concert"], "taggers_count": 1,
+             "tags": [{"label": "music", "taggers_count": 1, "viewer_tagged": true}]},
+            {"uri": "https://example.org/article", "asked": ["https://example.org/article"],
+             "found": [], "taggers_count": 0, "tags": []}
+        ]})
     );
     let (error, refused) = call(&app, "social", json!({"uris": []})).await;
     assert!(error);
@@ -576,4 +597,140 @@ async fn a_browser_opening_mcp_sees_how_to_connect(pool: PgPool) {
     .await;
     assert_eq!(status, 200);
     assert_eq!(answer["result"]["tools"].as_array().unwrap().len(), 6);
+}
+
+/// Typed cards whose own link nobody wrote: a block, a protein and a book, each tagged through
+/// another link that is its alias (the book also by its own `isbn:` once). Returns the cards' ids.
+async fn seed_typed(pool: &PgPool) -> Vec<String> {
+    let saved = ingest::cursor(pool, "fixture").await.unwrap();
+    let tags = [
+        (MEMPOOL, AUTHOR, "halving"),
+        (MEMPOOL, OTHER, "halving"),
+        (UNIPROT_PAGE, OTHER, "protein"),
+        (OPENLIBRARY, AUTHOR, "reading"),
+        (OPENLIBRARY, OTHER, "reading"),
+        (BOOK, OTHER, "books"),
+    ];
+    let lines: Vec<Change> = tags
+        .iter()
+        .enumerate()
+        .map(|(i, (uri, author, label))| Change {
+            op: Op::Put,
+            uri: (*uri).into(),
+            kind: Kind::Tag,
+            author: (*author).into(),
+            object_path: format!("/pub/app/tags/typed-{i}"),
+            label: Some((*label).into()),
+            at: 1_790_000_000_000,
+            recurrence_id: None,
+            status: None,
+            start: None,
+            end: None,
+        })
+        .collect();
+    let next = lines.len() as i64;
+    ingest::apply(
+        pool,
+        "fixture",
+        &saved,
+        &FeedPage {
+            page: Changes {
+                lines,
+                next_cursor: next,
+            },
+            epoch: Some("fixture".into()),
+            length: next,
+        },
+        &IngestConfig::default(),
+        &Metrics::new().unwrap(),
+    )
+    .await
+    .unwrap();
+    let mut ids = vec![];
+    for (root, alias, kind) in [
+        (BLOCK, MEMPOOL, "Thing"),
+        (PROTEIN, UNIPROT_PAGE, "Thing"),
+        (BOOK, OPENLIBRARY, "Book"),
+    ] {
+        let root_id = store::ensure_resource(pool, root).await.unwrap();
+        let (alias_id, _, _) = identity(alias).unwrap();
+        sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'identifier') ON CONFLICT (alias_id) DO NOTHING")
+            .bind(&alias_id)
+            .bind(&root_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let mut doc = ResourceMeta::new(root, "web", 86400);
+        doc.name = Some(format!("The card of {root}"));
+        doc.set_type(kind);
+        store::save_document(pool, &root_id, 0, &doc).await.unwrap();
+        ids.push(root_id);
+    }
+    ids
+}
+
+/// A typed card names the links people wrote for it (`refs`), on every read, and `social`
+/// asks Nexus by the card's own link and those, merging their tags per card.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn typed_cards_name_the_links_people_wrote_and_social_joins_by_them(pool: PgPool) {
+    let ids = seed_typed(&pool).await;
+    let config = Config {
+        nexus_url: nexus().await,
+        ..Config::default()
+    };
+    let app = api::router(AppState::new(pool, config).unwrap());
+    let get = |path: String| {
+        let app = app.clone();
+        async move {
+            let (code, _, body) = raw(&app, "GET", &path, &[], None).await;
+            assert_eq!(code, 200, "{path}");
+            serde_json::from_slice::<Value>(&body).unwrap()
+        }
+    };
+    // Each read names the referenced links, most referenced first: the book's Open Library page
+    // (two references) before its own isbn: link (one).
+    let expected = [vec![MEMPOOL], vec![UNIPROT_PAGE], vec![OPENLIBRARY, BOOK]];
+    for (id, refs) in ids.iter().zip(&expected) {
+        let card = get(format!("/v1/resources/{id}")).await;
+        assert_eq!(card["refs"], json!(refs), "{id}");
+    }
+    let (code, _, body) = raw(
+        &app,
+        "POST",
+        "/v1/resources/lookup",
+        &[("content-type", "application/json")],
+        Some(json!({ "ids": ids })),
+    )
+    .await;
+    assert_eq!(code, 200);
+    let cards: Value = serde_json::from_slice(&body).unwrap();
+    for (card, refs) in cards.as_array().unwrap().iter().zip(&expected) {
+        assert_eq!(card["refs"], json!(refs));
+    }
+    let page = get("/v1/search?type=Book".into()).await;
+    assert_eq!(page["items"][0]["refs"], json!([OPENLIBRARY, BOOK]));
+
+    // social by card: asked by the card's link and its refs, merged per card.
+    let (error, social) = call(&app, "social", json!({"ids": ids, "viewer": AUTHOR})).await;
+    assert!(!error, "{social}");
+    let items = social["items"].as_array().unwrap();
+    assert_eq!(items.len(), 3);
+    assert_eq!(items[0]["id"], ids[0]);
+    assert_eq!(items[0]["asked"], json!([BLOCK, MEMPOOL]));
+    assert_eq!(items[0]["found"], json!([MEMPOOL]));
+    assert_eq!(
+        items[0]["tags"],
+        json!([{"label": "halving", "taggers_count": 2, "viewer_tagged": true}])
+    );
+    assert_eq!(items[1]["found"], json!([UNIPROT_PAGE]));
+    assert_eq!(
+        items[1]["tags"],
+        json!([{"label": "protein", "taggers_count": 1, "viewer_tagged": false}])
+    );
+    assert_eq!(items[2]["asked"], json!([BOOK, OPENLIBRARY]));
+    assert_eq!(items[2]["taggers_count"], 1);
+    // An id Pinakes does not know is named, not guessed.
+    let (error, unknown) = call(&app, "social", json!({"ids": ["0".repeat(32)]})).await;
+    assert!(!error, "{unknown}");
+    assert_eq!(unknown["unknown_ids"], json!(["0".repeat(32)]));
 }
