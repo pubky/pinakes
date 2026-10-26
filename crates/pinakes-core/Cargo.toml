@@ -61,7 +61,7 @@ tower = { version = "0.5", features = ["util"] }
 
 # The post envelope app posts are written on (`resolver::pubky_apps::posts`): the pin Nexus and
 # the music node use.
-pubky-social-specs = { git = "https://github.com/pubky/pubky-social-specs", rev = "acde362939dabb79a3b08de250bcbc70da4e827d" }
+pubky-social-specs = "=1.0.0-rc.1"
 
 [[example]]
 name = "e2e_stack"
