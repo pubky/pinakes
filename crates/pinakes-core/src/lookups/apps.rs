@@ -263,7 +263,6 @@ pub mod also_on {
                 return Ok(also_on::Found::default());
             };
             let mut found = crate::lookups::Found::default();
-            found.push_key(app.key());
             let pid = app.store.property();
             // An answer over its read's cap is no answer: asking again would read the same
             // megabytes.
@@ -285,6 +284,16 @@ pub mod also_on {
                 }
             }
             let mut found = found.into_also_on("wikidata");
+            // The store's own key comes from its link, not from Wikidata.
+            let own = app.key();
+            found.keys.retain(|k| k.key != own.as_str());
+            found.keys.insert(
+                0,
+                also_on::Key {
+                    key: own.as_str().to_owned(),
+                    via: "app_stores".into(),
+                },
+            );
             // The card's own name and website, for the possibly-same-app hint.
             if let Some(doc) = &subject.doc {
                 let website = doc.attributes.get("website");
@@ -345,6 +354,19 @@ pub mod also_on {
                 keys(&found)
             );
             assert!(keys(&found).contains(&"android:org.thoughtcrime.securesms"));
+            let via = |key: &str| {
+                found
+                    .keys
+                    .iter()
+                    .find(|k| k.key == key)
+                    .map(|k| k.via.clone())
+            };
+            // The App Store link's own key is the link's; the package is Wikidata's word.
+            assert_eq!(via("appstore:874139669").as_deref(), Some("app_stores"));
+            assert_eq!(
+                via("android:org.thoughtcrime.securesms").as_deref(),
+                Some("wikidata")
+            );
         }
 
         /// AntennaPod's Google Play page finds its item, whose F-Droid page is a link.
@@ -385,6 +407,10 @@ pub mod also_on {
                 .await
                 .unwrap();
             assert_eq!(keys(&found), ["android:org.example.unlisted"]);
+            assert_eq!(
+                found.keys[0].via, "app_stores",
+                "the link's own key, not Wikidata's"
+            );
             assert!(sites(&found).is_empty());
         }
     }

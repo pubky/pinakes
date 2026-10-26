@@ -491,7 +491,7 @@
             ]
           },
           "maybe_same": {
-            "description": "On an event card: up to ten events that are possibly the same one, best first (the card's\n`maybe_same` is the first three).",
+            "description": "On an event card: up to ten events that are possibly the same one, best first (the card's\n`maybe_same` is the first three); on an app's store card, up to ten store cards that are\npossibly the same app.",
             "items": {
               "$ref": "#/components/schemas/SameEvent"
             },

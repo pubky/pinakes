@@ -754,6 +754,8 @@ pub mod wikidata {
             });
         (property_ok && value_ok).then(|| format!("haswbstatement:{property}={value}"))
     }
+    /// The most items one `haswbstatement` search returns (and `item_with` reads back).
+    pub const SEARCH_LIMIT: usize = 5;
     pub fn search_lookup(property: &str, value: &str) -> Option<String> {
         let query = statement(property, value)?;
         let mut url = url::Url::parse(API).expect("constant URL");
@@ -761,7 +763,7 @@ pub mod wikidata {
             .append_pair("action", "query")
             .append_pair("list", "search")
             .append_pair("srsearch", &query)
-            .append_pair("srlimit", "5")
+            .append_pair("srlimit", &SEARCH_LIMIT.to_string())
             .append_pair("format", "json");
         Some(url.into())
     }
@@ -777,6 +779,7 @@ pub mod wikidata {
         if !matches!(url.scheme(), "https" | "http")
             || url.port().is_some()
             || !url.username().is_empty()
+            || url.password().is_some()
         {
             return None;
         }
@@ -837,10 +840,17 @@ pub mod wikidata {
         let Some(lookup) = search_lookup(property, value) else {
             return Ok(Found::None);
         };
-        let hits = get(egress, &lookup, "wikidata")
-            .await?
-            .map(|v| parse_search(&v))
-            .unwrap_or_default();
+        let answer = get(egress, &lookup, "wikidata").await?;
+        // More items carry the value than the search returned: whichever one verifies, others
+        // went unread, so no item is chosen.
+        let total = answer
+            .as_ref()
+            .and_then(|v| v["query"]["searchinfo"]["totalhits"].as_u64())
+            .unwrap_or(0);
+        if total > SEARCH_LIMIT as u64 {
+            return Ok(Found::Ambiguous(total as usize));
+        }
+        let hits = answer.map(|v| parse_search(&v)).unwrap_or_default();
         let read = match items(egress, &hits).await {
             // Items over the cap together: each alone. One over it alone can't be verified, so
             // the search has no answer (its refusal).
@@ -935,6 +945,7 @@ mod tests {
             (rotten, "https://www.rottentomatoes.com/"),
             (rotten, "https://rottentomatoes.example/m/x"),
             (rotten, "https://www.rottentomatoes.com:8443/m/x"),
+            (rotten, "https://:secret@www.rottentomatoes.com/m/x"),
             (
                 "https://www.google.com/maps?cid=$1",
                 "https://www.google.com/maps?q=Paris",
@@ -1042,6 +1053,43 @@ mod tests {
             .await
             .unwrap_err();
         assert!(crate::resolver::egress::over_cap(&error), "{error:#}");
+    }
+
+    /// A search that found more items than it returned is ambiguous, even when only one of the
+    /// returned items verifies: the others went unread.
+    #[tokio::test(start_paused = true)]
+    async fn more_hits_than_returned_are_ambiguous() {
+        let search = wikidata::search_lookup("P4983", "1396").unwrap();
+        let one = wikidata::entities_lookup(&["Q1".into()]);
+        let item = serde_json::to_vec(&serde_json::json!({"entities": {"Q1": {"type": "item",
+            "id": "Q1", "claims": {"P4983": [{"rank": "normal", "mainsnak": {"snaktype": "value",
+            "datatype": "external-id", "datavalue": {"value": "1396"}}}]}}}}))
+        .unwrap();
+        let answer = |total: usize| {
+            serde_json::to_vec(
+                &serde_json::json!({"query": {"searchinfo": {"totalhits": total},
+                "search": [{"title": "Q1"}]}}),
+            )
+            .unwrap()
+        };
+        for (total, expected) in [
+            (1, None),
+            (wikidata::SEARCH_LIMIT, None),
+            (wikidata::SEARCH_LIMIT + 1, Some(wikidata::SEARCH_LIMIT + 1)),
+        ] {
+            let (egress, _) = crate::sources::fixture::egress(vec![
+                (&search, 200, "application/json", answer(total)),
+                (&one, 200, "application/json", item.clone()),
+            ]);
+            let found = wikidata::item_with(&egress, "P4983", "1396").await.unwrap();
+            match expected {
+                None => assert!(
+                    matches!(&found, wikidata::Found::One(i) if i.qid == "Q1"),
+                    "{total}: {found:?}"
+                ),
+                Some(n) => assert_eq!(found, wikidata::Found::Ambiguous(n), "{total}"),
+            }
+        }
     }
 
     /// Wikidata's `maxlag` comes with 200: the answer is busy, and the next ask fetches again

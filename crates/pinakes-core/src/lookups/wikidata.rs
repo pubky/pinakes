@@ -265,6 +265,10 @@ pub fn links(item: &Value, properties: &[Property]) -> Vec<Link> {
             let value = single(item, property)?;
             let uri = match property.format {
                 Format::Url => web_url(value)?.to_string(),
+                // A value that walks out of its path (`..`) names another page.
+                Format::Template(_) if value.split('/').any(|seg| seg == "." || seg == "..") => {
+                    return None
+                }
                 Format::Template(t) => t.replace("$1", &encode_path(value)),
             };
             Some(Link::new(property.site, uri, VIA))
@@ -459,6 +463,13 @@ mod tests {
             links(&encoded, PLACE)[0].uri,
             "https://www.yelp.com/biz/caf%C3%A9-z%C3%BCrich"
         );
+        // A value that walks out of its path names another page: no link.
+        for value in ["..", "a/../b", "."] {
+            let walking: Value = serde_json::json!({"claims": {"P3108": [
+                {"rank": "normal", "mainsnak": {"snaktype": "value", "datavalue": {"value": value}}}
+            ]}});
+            assert!(links(&walking, PLACE).is_empty(), "{value}");
+        }
     }
 
     #[test]

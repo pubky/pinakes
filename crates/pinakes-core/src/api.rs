@@ -750,7 +750,8 @@ pub struct Details {
     pub aliases: Vec<String>,
     pub updated_at: Option<DateTime<Utc>>,
     /// On an event card: up to ten events that are possibly the same one, best first (the card's
-    /// `maybe_same` is the first three).
+    /// `maybe_same` is the first three); on an app's store card, up to ten store cards that are
+    /// possibly the same app.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub maybe_same: Option<Vec<SameEvent>>,
 }
