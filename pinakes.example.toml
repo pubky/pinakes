@@ -147,6 +147,8 @@ enabled = true
 enabled = true
 [sources.swiss_parliament]
 enabled = true
+[sources.threads]
+enabled = true
 [sources.uk_parliament_bills]
 enabled = true
 [sources.uniprot]
