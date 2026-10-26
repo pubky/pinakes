@@ -119,9 +119,12 @@ pub enum Route {
     /// An app no profile knows: the general card.
     General,
 }
+/// The namespaces whose objects Nexus describes and Pinakes never fetches: pubky.app's own, and
+/// the social specs' (`/pub/social/v1/…`, any version: pubky-social-specs, indexed by Nexus).
+const NEXUS_NAMESPACES: &[&str] = &["pubky.app", "social"];
 /// The route of a `pubky://` object of another app, from its decoded path segments below
-/// `/pub/` (`resolver::pubky_app`'s reading). `None` for pubky.app's own objects, which Nexus
-/// describes.
+/// `/pub/` (`resolver::pubky_app`'s reading). `None` for the objects Nexus describes
+/// (`NEXUS_NAMESPACES`).
 pub fn route(segments: &[String]) -> Option<Route> {
     for profile in REGISTRY {
         for namespace in profile.namespaces {
@@ -139,7 +142,7 @@ pub fn route(segments: &[String]) -> Option<Route> {
         }
     }
     match segments.first() {
-        Some(app) if app == "pubky.app" => None,
+        Some(app) if NEXUS_NAMESPACES.contains(&app.as_str()) => None,
         Some(app) if !app.is_empty() => Some(Route::General),
         _ => None,
     }

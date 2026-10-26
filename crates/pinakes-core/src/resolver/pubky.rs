@@ -165,6 +165,18 @@ mod tests {
             crate::resolver::classify(&uri.replace("other.app", "pubky.app")),
             None
         );
+        // The social specs' objects are Nexus's too, in any version: never fetched.
+        for path in [
+            "social/v1/posts/0034A0X7NJ52G",
+            "social/v1.1/ratings/1",
+            "social/item",
+        ] {
+            assert_eq!(
+                crate::resolver::classify(&uri.replace("other.app/item", path)),
+                None,
+                "{path}"
+            );
+        }
         assert_eq!(crate::resolver::classify("geo:1,2"), Some("geo"));
         assert_eq!(
             crate::resolver::classify("https://www.openstreetmap.org/node/1"),

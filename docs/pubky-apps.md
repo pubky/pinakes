@@ -2,7 +2,8 @@
 
 People tag objects that Pubky apps other than pubky.app keep in their public storage: a Loopky
 deck, a Mapky route, a room. Pinakes fetches such a `pubky://` object from its owner's homeserver
-and gives it a card. pubky.app's own objects (posts, profiles) are Nexus's and never fetched.
+and gives it a card. pubky.app's own objects (posts, profiles) and the social specs' objects
+(`/pub/social/v1/…`, any version: posts, tags, ratings) are Nexus's and never fetched.
 
 For an app Pinakes has a profile for, the card is that app's: a schema.org type, the name,
 description, image and a few facts the app's format holds, and `open_in`, the clients that open
