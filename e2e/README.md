@@ -100,7 +100,7 @@ including on an existing identity; an existing profile is never overwritten. The
 also tag a Pubky object of another app, `pubky://{author}/pub/pinakes.e2e/objects/sample`
 (`{author}` is the test identity's key), created the same way when missing and kept, which
 Pinakes fetches from the homeserver's HTTPS domain through its egress policy. It has no file
-extension, so the homeserver serves its JSON as `application/octet-stream`, as it does Mapky's. A new
+extension, so the homeserver serves its JSON as `application/octet-stream`, as it does other apps' objects. A new
 identity needs the signup token. Signup/sign-in failures are redacted. The secret is read only from the named file, never logged.
 Do not commit secrets, session state or invite tokens. SDK sessions are signed out
 at the end.

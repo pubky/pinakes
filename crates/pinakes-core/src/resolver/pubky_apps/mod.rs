@@ -10,18 +10,14 @@ use crate::model::{OpenIn, ResourceMeta, Status};
 use serde_json::Value;
 use url::Url;
 
-pub mod eventky;
 pub mod loopky;
-pub mod mapky;
 pub mod marketplace;
 pub mod rooms;
 
 /// Every app profile, one line each, in alphabetical order of module.
 #[rustfmt::skip]
 pub static REGISTRY: &[&Profile] = &[
-    &eventky::PROFILE,
     &loopky::PROFILE,
-    &mapky::PROFILE,
     &marketplace::PROFILE,
     &rooms::PROFILE,
 ];
@@ -119,12 +115,14 @@ pub enum Route {
     /// An app no profile knows: the general card.
     General,
 }
-/// The namespaces whose objects Nexus describes and Pinakes never fetches: pubky.app's own, and
-/// the social specs' (`/pub/social/v1/…`, any version: pubky-social-specs, indexed by Nexus).
-const NEXUS_NAMESPACES: &[&str] = &["pubky.app", "social"];
+/// The namespaces whose objects Pinakes never fetches: those Nexus describes (pubky.app's own, and
+/// the social specs', `/pub/social/v1/…` in any version), and the old Mapky and Eventky layouts
+/// (`mapky.app`, `eventky.app`), whose data the owner disregards: Maps and Events write app posts
+/// now (`app_posts`).
+const NEVER_FETCHED: &[&str] = &["pubky.app", "social", "mapky.app", "eventky.app"];
 /// The route of a `pubky://` object of another app, from its decoded path segments below
 /// `/pub/` (`resolver::pubky_app`'s reading). `None` for the objects Nexus describes
-/// (`NEXUS_NAMESPACES`).
+/// (`NEVER_FETCHED`).
 pub fn route(segments: &[String]) -> Option<Route> {
     // An app post (`/pub/<ns>/v1/posts/…`) is read from the app-post feed (`app_posts`), its
     // versionless path never fetched.
@@ -147,7 +145,7 @@ pub fn route(segments: &[String]) -> Option<Route> {
         }
     }
     match segments.first() {
-        Some(app) if NEXUS_NAMESPACES.contains(&app.as_str()) => None,
+        Some(app) if NEVER_FETCHED.contains(&app.as_str()) => None,
         Some(app) if !app.is_empty() => Some(Route::General),
         _ => None,
     }

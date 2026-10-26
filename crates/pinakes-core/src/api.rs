@@ -643,7 +643,7 @@ pub struct Card {
     /// Plain text, entity-decoded: escape it before rendering it as HTML.
     pub description: Option<String>,
     pub image: Option<String>,
-    /// The publishing site: the app for `pubky://` objects (e.g. `mapky.app`); the service a
+    /// The publishing site: the app for `pubky://` objects (e.g. `loopky`); the service a
     /// link's URL names (`Apple Music`, `Wikipedia (de)`, `MusicBrainz`, `Wikidata`,
     /// `OpenStreetMap`); else the site name the document gives, else the host. Plain text, like
     /// every text field.

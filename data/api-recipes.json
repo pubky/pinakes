@@ -288,17 +288,6 @@
       "card_type": "Event"
     },
     {
-      "name": "resolve-51da3n5m8s6oaq38uqs7jznp6ezbc3qbtmic8oy6fj3g6mokdyco-pub-eve",
-      "summary": "pubky://51da3n5m8s6oaq38uqs7jznp6ezbc3qbtmic8oy6fj3g6mokdyco/pub/eventky.app/events/0034FED2YCDKG",
-      "method": "POST",
-      "path": "/v1/resolve",
-      "body": {
-        "uri": "pubky://51da3n5m8s6oaq38uqs7jznp6ezbc3qbtmic8oy6fj3g6mokdyco/pub/eventky.app/events/0034FED2YCDKG"
-      },
-      "expect": "card",
-      "card_type": "Event"
-    },
-    {
       "name": "resolve-naddr1qqjx2dryvcmn2c3395enwce4956rxeny943x2c35943kvetrvf3xyc",
       "summary": "nostr:naddr1qqjx2dryvcmn2c3395enwce4956rxeny943x2c35943kvetrvf3xycmyvvcrjq3qs0mv35668yg7t4jk49zdltkezn0em0s3jpt2qn8mkneurnw2edwsxpqqqp7tgmysyuc",
       "method": "POST",
@@ -926,50 +915,6 @@
       "card_type": "SocialMediaPosting"
     },
     {
-      "name": "resolve-c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey-pub-map",
-      "summary": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G",
-      "method": "POST",
-      "path": "/v1/resolve",
-      "body": {
-        "uri": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G"
-      },
-      "expect": "card",
-      "card_type": "Review"
-    },
-    {
-      "name": "resolve-c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey-pub-map-2",
-      "summary": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/reviews/00355XPM88EHG",
-      "method": "POST",
-      "path": "/v1/resolve",
-      "body": {
-        "uri": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/reviews/00355XPM88EHG"
-      },
-      "expect": "card",
-      "card_type": "Review"
-    },
-    {
-      "name": "resolve-c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey-pub-map-3",
-      "summary": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/collections/00351MVGE211G",
-      "method": "POST",
-      "path": "/v1/resolve",
-      "body": {
-        "uri": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/collections/00351MVGE211G"
-      },
-      "expect": "card",
-      "card_type": "Collection"
-    },
-    {
-      "name": "resolve-9g3zsjpwijn3gsh7ibghjxxadpjidceos5rw4387a6hhziqi8aoy-pub-map",
-      "summary": "pubky://9g3zsjpwijn3gsh7ibghjxxadpjidceos5rw4387a6hhziqi8aoy/pub/mapky.app/geo_captures/0035C4V0GVX90",
-      "method": "POST",
-      "path": "/v1/resolve",
-      "body": {
-        "uri": "pubky://9g3zsjpwijn3gsh7ibghjxxadpjidceos5rw4387a6hhziqi8aoy/pub/mapky.app/geo_captures/0035C4V0GVX90"
-      },
-      "expect": "card",
-      "card_type": "Photograph"
-    },
-    {
       "name": "resolve-3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo-pub-loo",
       "summary": "pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json",
       "method": "POST",
@@ -1050,12 +995,11 @@
     },
     {
       "name": "lookup-pubky",
-      "summary": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G, pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json, pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2",
+      "summary": "pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json, pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2",
       "method": "POST",
       "path": "/v1/resources/lookup",
       "body": {
         "uris": [
-          "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G",
           "pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json",
           "pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2"
         ]
@@ -1750,15 +1694,15 @@
       "expect": "card"
     },
     {
-      "name": "read-c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey-pub-map",
-      "summary": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G",
+      "name": "read-3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo-pub-loo",
+      "summary": "pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json",
       "method": "GET",
       "path": "/v1/resources/{id}",
       "params": {
-        "id": "id(pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G)"
+        "id": "id(pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json)"
       },
       "labels": {
-        "id": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G"
+        "id": "pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json"
       },
       "expect": "card"
     },
@@ -1799,16 +1743,6 @@
       "path": "/v1/resources/by-uri",
       "query": {
         "uri": "isbn:9780140328721"
-      },
-      "expect": "card"
-    },
-    {
-      "name": "by-uri-c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey-pub-map",
-      "summary": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G",
-      "method": "GET",
-      "path": "/v1/resources/by-uri",
-      "query": {
-        "uri": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G"
       },
       "expect": "card"
     },
@@ -1976,12 +1910,11 @@
     },
     {
       "name": "changes-of-pubky",
-      "summary": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G, pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json, pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2 since now-30d",
+      "summary": "pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json, pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2 since now-30d",
       "method": "POST",
       "path": "/v1/changes/lookup",
       "body": {
         "uris": [
-          "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G",
           "pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json",
           "pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2"
         ],

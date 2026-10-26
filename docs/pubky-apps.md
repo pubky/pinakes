@@ -1,9 +1,11 @@
 # Pubky apps
 
 People tag objects that Pubky apps other than pubky.app keep in their public storage: a Loopky
-deck, a Mapky route, a room. Pinakes fetches such a `pubky://` object from its owner's homeserver
-and gives it a card. pubky.app's own objects (posts, profiles) and the social specs' objects
-(`/pub/social/v1/…`, any version: posts, tags, ratings) are Nexus's and never fetched.
+deck, a room, a marketplace listing. Pinakes fetches such a `pubky://` object from its owner's
+homeserver and gives it a card. pubky.app's own objects (posts, profiles) and the social specs'
+objects (`/pub/social/v1/…`, any version: posts, tags, ratings) are Nexus's and never fetched.
+Neither are the old Mapky and Eventky layouts (`/pub/mapky.app/…`, `/pub/eventky.app/…`), whose
+data is disregarded: routes, availability and events now come as [app posts](#app-posts).
 
 For an app Pinakes has a profile for, the card is that app's: a schema.org type, the name,
 description, image and a few facts the app's format holds, and `open_in`, the clients that open
@@ -41,31 +43,6 @@ Paths are below `pubky://{owner}/pub/`. Every path not listed is never fetched.
 
 Opens in Loopky: `https://loopky.app/deck/?author={owner}&id={deck}`. Never fetched: the deck's
 cards and media, `srs/`, `subscriptions/`, `settings.json`, `tags/`.
-
-### Mapky (`mapky.app/`)
-
-| Path | Card | Opens in Mapky |
-| --- | --- | --- |
-| `routes/{id}` | `Trip`: `name`, `description`, `image_uri`; the first waypoint as its point; facts `activity`, `distance_m`, `elevation_gain_m`, `duration_s` | `https://mapky.app/route/{owner}/{id}` |
-| `geo_captures/{id}` | `Photograph` (a video, audio or 3D capture its own type): `caption`, its point; fact `capture_kind`. The media file is another object and not read | `https://mapky.app/capture/{owner}/{id}` |
-| `sequences/{id}` | `ImageGallery`: `name`, `description` | `https://mapky.app/sequence/{owner}/{id}` |
-| `incidents/{id}` | `SpecialAnnouncement`: `description`, its point; facts `incident_type`, `severity`. No card once `expires_at` has passed, and it is fetched again then | `https://mapky.app/incident/{owner}/{id}` |
-| `reviews/{id}` | `Review`: `content`; facts `rating` (1 to 10) and `place` (the OpenStreetMap URL) | the place: `https://mapky.app/place/{type}/{id}` |
-| `posts/{id}` | `SocialMediaPosting` (social content): `content`. A post about a place (its `parent`, or `place` in older posts) opens the place; a reply to a route, capture, sequence or incident opens that. An older post with `kind: review` is a `Review`; a post with `kind: collection` is a collection | the place or the parent |
-| `collections/{id}` | `Collection` (the older collection objects): `name`, `description`, `image_uri`; fact `items` (how many places) | none |
-
-Never fetched: `files/`, `blobs/`, `tags/`.
-
-### Eventky (`eventky.app/`)
-
-| Path | Card | Opens in Eventky |
-| --- | --- | --- |
-| `events/{id}` | `Event`: `summary`, `description` (else the text of `styled_description`), start and end from `dtstart`/`dtend` (or `duration`) in `dtstart_tzid` (a time without a zone is left out; a recurring event's, by its `rrule` and its `rdate` and `exdate` lists (with or without a rule), are its next or current occurrence's, so it is fetched again by that one until the series ends; one that has ended shows its first date left, and one whose every date is excluded has no time; when that occurrence is not known here, because the rule is not one Pinakes expands (yearly, monthly, weekly, daily or hourly, with at most `limits.event_max_period_dates` dates a period, 100,000 by default, counted as for calendar feeds in [the API reference](api.md)) or lies past 10,000 occurrences, the card has no time and is fetched again on the usual cadence), cancelled when `status` is `CANCELLED`; fact `location` (the first location's label) | `https://eventky.app/event/{owner}/{id}` |
-| `calendars/{id}` | `Collection`: `name`, `description`; fact `timezone` | `https://eventky.app/calendar/{owner}/{id}` |
-
-An Eventky event a Nexus event reference names has the same client link on its event card.
-Images are Pubky file records, not images, and are not read. Never fetched: `attendees/`,
-`tags/`.
 
 ### Pubky Rooms (`pubky-rooms/`)
 
