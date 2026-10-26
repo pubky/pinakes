@@ -1,6 +1,8 @@
 # TikTok
 
-TikTok videos and profiles, from TikTok's oEmbed endpoint. No key and no account.
+TikTok videos and profiles, from TikTok's oEmbed endpoint. No key and no account. Videos are
+social content (their title is the author's caption): the card quotes at most 200 characters,
+refreshes within the hour and is removed once the video is gone.
 
 ## Links
 

@@ -185,8 +185,9 @@ impl Source for Instagram {
     fn facts(&self) -> &'static [&'static str] {
         &["author_name", "handle", "blocked"]
     }
+    /// A post's card and a reel's: both quote the author's caption.
     fn social(&self, doc: &ResourceMeta) -> bool {
-        doc.type_name == "SocialMediaPosting"
+        matches!(doc.type_name.as_str(), "SocialMediaPosting" | "VideoObject")
     }
     fn examples(&self) -> &'static [Example] {
         &[
@@ -289,6 +290,8 @@ mod tests {
         assert_eq!(doc.name.as_deref(), Some("Hello, world"));
         assert_eq!(doc.attributes["author_name"], "Instagram");
         assert_eq!(doc.image.as_deref(), Some("https://example.com/a.jpg"));
+        // A reel quotes its caption: social content, as a post is.
+        assert!(Instagram.social(&doc));
     }
 
     #[test]

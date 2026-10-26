@@ -3,7 +3,9 @@
 Instagram posts, reels and profiles, from their pages' Open Graph tags when Instagram writes
 them for a request without an account. No key and no account; Instagram's oEmbed endpoint
 needs an app token and is not used. Instagram shows almost everything to accounts only: such a
-link gets a plain card rather than a failure (below).
+link gets a plain card rather than a failure (below). Posts and reels are social content: the
+card quotes at most 200 characters, refreshes within the hour and is removed once the post is
+gone.
 
 ## Links
 

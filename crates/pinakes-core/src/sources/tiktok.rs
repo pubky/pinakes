@@ -176,6 +176,10 @@ impl Source for TikTok {
     fn facts(&self) -> &'static [&'static str] {
         &["author", "author_name", "handle", "blocked"]
     }
+    /// A video's card quotes its author's caption (`title`).
+    fn social(&self, doc: &ResourceMeta) -> bool {
+        doc.type_name == "VideoObject"
+    }
     fn examples(&self) -> &'static [Example] {
         &[
             Example {
@@ -279,6 +283,8 @@ mod tests {
             doc.image.as_deref(),
             Some("https://p16.tiktokcdn.com/a.jpg")
         );
+        // Its title is the author's caption: social content.
+        assert!(TikTok.social(&doc));
     }
 
     #[test]
