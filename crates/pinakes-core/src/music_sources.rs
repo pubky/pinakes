@@ -232,7 +232,9 @@ pub fn artist_link(url: &str) -> Option<ArtistLink> {
 /// (`kind`, `ids`): their MBIDs (the release group's alone for several releases), the recording's
 /// ISRCs and the release's barcode as keys, their facts, and their current links on music
 /// services at `level`, each keyed by the entity MusicBrainz names it on. Nothing when an entity
-/// is unknown, or when several releases are of different release groups.
+/// is unknown, or when several releases are of different release groups. `shared` are ISRCs
+/// known to be on several recordings (the one a track's length picked among them): they stay
+/// facts, never keys, as a key would join whichever recording's group took it first.
 pub(crate) async fn entities_found(
     cx: &Context,
     base: &str,
@@ -240,6 +242,7 @@ pub(crate) async fn entities_found(
     ids: &[String],
     level: Level,
     edition: bool,
+    shared: &[String],
 ) -> Result<Found> {
     let mut entities = vec![];
     for id in ids {
@@ -277,7 +280,12 @@ pub(crate) async fn entities_found(
         _ if entities.len() > 1 => return Ok(Found::default()),
         _ => {}
     }
-    for isrc in entity.isrcs.iter().take(MAX_ISRC_KEYS) {
+    for isrc in entity
+        .isrcs
+        .iter()
+        .filter(|i| !shared.contains(i))
+        .take(MAX_ISRC_KEYS)
+    {
         found.keys.push(Key {
             key: format!("isrc:{isrc}"),
             via: "musicbrainz".into(),

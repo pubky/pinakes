@@ -2313,23 +2313,15 @@ async fn a_shared_isrc_names_the_recording_the_tracks_length_picks(pool: sqlx::P
     let keys = "SELECT key||' '||source||' '||via FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\",source";
     let facts = "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 AND name='isrc'";
     // The page's pick is the key (one row per key: the `service` source records it first); the
-    // `musicbrainz` source followed the same pick and keyed the recording's ISRCs.
+    // `musicbrainz` source followed the same pick, and the shared ISRC stays a fact there too.
     let long = rows(keys, ids[0].clone()).await;
-    assert_eq!(
-        long,
-        [
-            "isrc:GBARL9300135 musicbrainz musicbrainz".to_owned(),
-            format!("{album} service tidal")
-        ]
-    );
+    assert_eq!(long, [format!("{album} service tidal")]);
     let short = rows(keys, ids[1].clone()).await;
-    assert_eq!(
-        short,
-        [
-            "isrc:GBARL9300135 musicbrainz musicbrainz".to_owned(),
-            format!("{edit} service tidal")
-        ]
-    );
+    assert_eq!(short, [format!("{edit} service tidal")]);
+    // So Deezer is never asked for the shared ISRC on the 3:00 track's behalf: it would answer
+    // with its 3:34 track (the album recording's).
+    let deezer_links = "SELECT uri FROM derived_link WHERE resource_id=$1 AND source='deezer'";
+    assert!(rows(deezer_links, ids[1].clone()).await.is_empty());
     // Neither recording is within 3 s of 3:16: the ISRC stays a fact, and MusicBrainz relates
     // the URL to nothing.
     let between = rows(keys, ids[2].clone()).await;

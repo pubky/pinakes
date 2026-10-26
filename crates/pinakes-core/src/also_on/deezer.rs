@@ -104,8 +104,10 @@ impl Source for DeezerSource {
             }
             return Ok(found);
         }
-        // The link's own ISRC first, then the hubs'.
-        let own = own_isrc(subject).filter(|_| kind == "track");
+        // The link's own ISRC first, then the hubs'. Its own only when it is a key: a shared ISRC
+        // (on several recordings) is a fact, and Deezer would answer with any of them.
+        let own = own_isrc(subject)
+            .filter(|o| kind == "track" && subject.keys_in(namespace).any(|k| k == o.as_str()));
         let mut values: Vec<&str> = own.as_deref().into_iter().collect();
         values.extend(
             subject

@@ -85,11 +85,17 @@ impl MusicBrainzSource {
             },
         };
         // A track MusicBrainz does not relate the URL to: the one recording its page's own ISRC
-        // is on, or the one of several its length picks (`isrc_match`).
+        // is on, or the one of several its length picks (`isrc_match`). A picked recording's
+        // shared ISRC stays a fact: it names the other recordings too.
+        let mut shared = vec![];
         if kind == MbKind::Recording && ids.is_empty() {
             if let Some(isrc) = own_isrc(subject) {
                 match isrc_match(cx, &isrc, page_duration(subject)).await? {
-                    IsrcMatch::One(mbid) | IsrcMatch::Picked(mbid) => ids = vec![mbid],
+                    IsrcMatch::One(mbid) => ids = vec![mbid],
+                    IsrcMatch::Picked(mbid) => {
+                        ids = vec![mbid];
+                        shared.push(isrc);
+                    }
                     IsrcMatch::Unknown | IsrcMatch::Shared => {}
                 }
             }
@@ -127,6 +133,7 @@ impl MusicBrainzSource {
             &ids,
             level,
             discogs == Some(discogs::Kind::Release),
+            &shared,
         )
         .await?;
         // A Discogs master is a release group, whose MusicBrainz entry names no service pages

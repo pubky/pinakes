@@ -59,8 +59,16 @@ impl MusicBrainzEntitySource {
                 MbKind::Release | MbKind::ReleaseGroup => Level::Album,
                 MbKind::Artist => Level::Artist,
             };
-            let mut found =
-                entities_found(cx, base, kind, std::slice::from_ref(&mbid), level, false).await?;
+            let mut found = entities_found(
+                cx,
+                base,
+                kind,
+                std::slice::from_ref(&mbid),
+                level,
+                false,
+                &[],
+            )
+            .await?;
             // A merged entity answers its old MBID with the one it was merged into: the page keys
             // that one, and keeps the old as a fact, so `key=mbid:{old}` still finds it.
             if found
@@ -90,6 +98,7 @@ impl MusicBrainzEntitySource {
                     &[recordings[0].mbid.clone()],
                     Level::Track,
                     false,
+                    &[],
                 )
                 .await?;
                 // Its own ISRC first: a recording's other ISRCs are keys only up to a cap.
