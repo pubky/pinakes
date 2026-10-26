@@ -1350,4 +1350,25 @@ async fn youtube_is_named_by_its_oembed_answer_not_a_regional_page() {
             .unwrap();
         assert_eq!(seen, expected);
     }
+    // The placeholder titles are YouTube's own, on its hosts: the regional page's very title on
+    // another site is just a title.
+    let regional = YouTube
+        .get(
+            &Url::parse("https://www.youtube.com/watch?v=fJ9rUzIMcZQ").unwrap(),
+            &[],
+        )
+        .await
+        .unwrap();
+    for (link, expected) in [
+        ("https://m.youtube.com/watch?v=fJ9rUzIMcZQ", Page::Blocked),
+        ("https://youtu.be/fJ9rUzIMcZQ", Page::Blocked),
+        ("https://example.org/articles/youtube", Page::Content),
+        ("https://notyoutube.com/watch?v=fJ9rUzIMcZQ", Page::Content),
+    ] {
+        let (link, page) = (Url::parse(link).unwrap(), regional.clone());
+        let seen = pinakes_core::resolver::html::blocking(move || inspect(&link, &page).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(seen, expected, "{expected:?}");
+    }
 }

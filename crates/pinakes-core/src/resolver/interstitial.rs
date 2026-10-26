@@ -25,9 +25,10 @@ pub enum Page {
 #[serde(deny_unknown_fields)]
 struct Walls {
     text: Vec<String>,
-    /// Whole page titles that name only the site, never an object: the page a service shows
-    /// in place of the object (YouTube's regional or consent page is titled "- YouTube").
-    placeholder_titles: Vec<String>,
+    /// Whole page titles that name only the site, never an object, by the site's domain: the
+    /// page a service shows in place of the object (YouTube's regional or consent page is titled
+    /// "- YouTube"). A title counts only on its domain and the domain's subdomains.
+    placeholder_titles: std::collections::BTreeMap<String, Vec<String>>,
     captcha_selectors: Vec<String>,
     wall_host_prefixes: Vec<String>,
     wall_paths: Vec<String>,
@@ -166,9 +167,15 @@ pub fn inspect(requested: &Url, f: &Fetched) -> anyhow::Result<Page> {
     // "Just a Moment" is not a wall. Captcha widgets in comment forms need the same context.
     // A page titled only with its site's name, for a link below the site's root, is the
     // service's stand-in for the object.
+    let host = requested
+        .host_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let placeholder = walls
         .placeholder_titles
         .iter()
+        .filter(|(domain, _)| host == **domain || host.ends_with(&format!(".{domain}")))
+        .flat_map(|(_, titles)| titles)
         .any(|t| t.eq_ignore_ascii_case(title.trim()));
     if placeholder && !requested.path().trim_end_matches('/').is_empty() {
         return Ok(Page::Blocked);
