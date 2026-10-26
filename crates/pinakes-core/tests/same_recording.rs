@@ -445,3 +445,47 @@ async fn a_crowd_of_one_recording_keeps_twenty_pairs_each(pool: PgPool) {
         "{kept:?}"
     );
 }
+
+/// A claim that ran out never settles: a change saved after it ran out leaves the entry's time
+/// as it was (the trigger only moves it earlier), so the old pass finishing late must not drop
+/// the entry; the next pass reads the change.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_expired_claim_never_drops_a_later_change(pool: PgPool) {
+    let config = Config::default();
+    let take_five = |pool: &PgPool, uri: &'static str, length: &'static str| {
+        let pool = pool.clone();
+        async move {
+            recording(
+                &pool,
+                uri,
+                "Take Five",
+                Some("The Dave Brubeck Quartet"),
+                Some(length),
+            )
+            .await
+        }
+    };
+    let a = take_five(&pool, "https://tidal.com/track/1", "PT1M40S").await;
+    let b = take_five(&pool, "https://www.deezer.com/track/1031007", "PT1M40S").await;
+    pass(&pool, &config).await;
+    assert_eq!(named(&card(&config, &pool, &a).await), [b.as_str()]);
+    // A pass claims the first track (the lease already over), it becomes 3:20, then that pass
+    // finishes.
+    take_five(&pool, "https://tidal.com/track/1", "PT1M41S").await;
+    let claimed = same_recording::claim(&pool, 25, Duration::ZERO)
+        .await
+        .unwrap();
+    let (_, claim) = claimed.iter().find(|(id, _)| id == &a).unwrap().clone();
+    take_five(&pool, "https://tidal.com/track/1", "PT3M20S").await;
+    same_recording::settle(&pool, &a, &claim).await.unwrap();
+    let due: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM same_recording_dirty WHERE resource_id=$1 AND next_attempt_at<=now()",
+    )
+    .bind(&a)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(due, 1, "the expired claim left the entry due");
+    pass(&pool, &config).await;
+    assert!(named(&card(&config, &pool, &a).await).is_empty());
+}
