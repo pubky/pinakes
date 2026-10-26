@@ -7,12 +7,15 @@ A lookup family of [also on](../api.md#also-on) (`lookups/games.rs`).
   Steam store and SteamDB pages, its ProtonDB page when ProtonDB has reports, its PCGamingWiki page where the appid
   lookup leads, and its GOG page through GOG GamesDB (only GOG's and Steam's own rows), with
   `steam:` and `gog:` keys.
-- `wikidata_stores`: a game's own page on Steam or GOG (never a page under it) gets the one
-  Wikidata item carrying that store's ID (read back and compared exactly; an item its successor
-  replaces gives way to it; several others are ambiguous and give nothing), its other stores
-  and game databases (Epic Games Store, itch.io, IGDB, MobyGames, PCGamingWiki, HowLongToBeat)
-  with one value each, and its Q-id as key when the item carries no other ID on that store (an
-  item with two Steam appids is neither page's). An app's store pages are the
+- `wikidata_stores`: a game's own page on Steam or GOG (never a page under it), or on any store
+  or game database the item lists below (Epic Games Store `store.epicgames.com/p/{slug}`, IGDB,
+  MobyGames, PCGamingWiki, HowLongToBeat, by the address the item's own link has), gets the one
+  Wikidata item carrying that page's ID (read back and compared exactly; an item its successor
+  replaces gives way to it; several others are ambiguous and give nothing). It gets the item's
+  other stores and game databases (Epic Games Store, itch.io, IGDB, MobyGames, PCGamingWiki,
+  HowLongToBeat) with one value each, its Q-id as key when the item carries no other ID on that
+  store (an item with two Steam appids is neither page's), and, off Steam, its one Steam appid
+  as the `steam:` key, so the page joins the game's Steam page. An app's store pages are the
   `apps` family's, when the build has it.
 
 

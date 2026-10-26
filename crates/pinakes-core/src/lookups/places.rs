@@ -42,7 +42,7 @@ pub fn names(osm: &OsmId, tag: &str, item: &Value) -> bool {
 }
 
 /// The OSM objects an item's best-rank statements name, of every type (`node/1`, `way/2`).
-fn objects(item: &Value) -> std::collections::BTreeSet<String> {
+pub fn objects(item: &Value) -> std::collections::BTreeSet<String> {
     [("node", "P11693"), ("way", "P10689"), ("relation", "P402")]
         .into_iter()
         .flat_map(|(kind, pid)| {
@@ -78,6 +78,46 @@ pub fn from_item(osm: &OsmId, tag: &str, item: &Value) -> Found {
         found.push_link(link);
     }
     found
+}
+
+/// Tripadvisor's country sites, after `tripadvisor.`.
+const TRIPADVISOR: &[&str] = &[
+    "com", "co.uk", "ca", "com.au", "co.nz", "ie", "in", "de", "at", "ch", "fr", "be", "it", "es",
+    "pt", "nl", "dk", "se", "fi", "jp", "com.br", "com.mx", "com.ar", "cl", "co", "com.sg",
+    "com.my", "com.ph", "co.id", "co.za", "com.tr", "gr", "ru", "com.hk", "com.tw", "co.kr",
+];
+
+/// The Wikidata property a place's page on a map or review site names, its value, and the
+/// site: Google Maps (`?cid=`), Apple Maps (`?auid=`) and Yelp by the place table's links
+/// (`wikidata::PLACE`), and Tripadvisor by the location number in any of its pages' names
+/// (`…-d188151-…`, on any of its country sites), which is all its property holds.
+pub fn place_page(uri: &str) -> Option<(&'static str, String, &'static str)> {
+    let url = super::web_url(uri)?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    let host = host.trim_start_matches("www.");
+    let tripadvisor = host
+        .strip_prefix("tripadvisor.")
+        .is_some_and(|site| TRIPADVISOR.contains(&site));
+    if tripadvisor {
+        let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
+        let [page] = segments.as_slice() else {
+            return None;
+        };
+        let (kind, rest) = page.strip_suffix(".html")?.split_once("-g")?;
+        if !matches!(
+            kind,
+            "Attraction_Review" | "Restaurant_Review" | "Hotel_Review" | "ShowUserReviews"
+        ) {
+            return None;
+        }
+        let number = rest.split('-').find_map(|part| part.strip_prefix('d'))?;
+        return (plain(number, 12, |c| c.is_ascii_digit()) && !number.starts_with('0'))
+            .then(|| ("P3134", number.to_owned(), "Tripadvisor"));
+    }
+    wikidata::PLACE
+        .iter()
+        .filter(|p| p.site != "Tripadvisor")
+        .find_map(|p| p.value_in(uri).map(|value| (p.pid, value, p.site)))
 }
 
 /// The BTC Map fields the places sync asks for.
@@ -179,6 +219,7 @@ impl super::Family for Lookups {
         vec![
             std::sync::Arc::new(also_on::OsmWikidata),
             std::sync::Arc::new(also_on::WikidataOsm),
+            std::sync::Arc::new(also_on::WikidataPlaces),
             std::sync::Arc::new(also_on::Btcmap),
         ]
     }
@@ -362,6 +403,76 @@ pub mod also_on {
         }
     }
 
+    /// A place's page on a map or review site (`places::place_page`): the one Wikidata item
+    /// carrying the page's value (read back and compared exactly; several are ambiguous and give
+    /// nothing), its Q-id as key, its one OSM object (when it names exactly one) as key and link,
+    /// and its Wikidata page, other place links and Wikipedia editions as links.
+    pub struct WikidataPlaces;
+
+    #[async_trait]
+    impl Source for WikidataPlaces {
+        fn id(&self) -> &'static str {
+            "wikidata_places"
+        }
+        fn applies(&self, subject: &Subject) -> bool {
+            places::place_page(&subject.uri).is_some()
+        }
+        async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<also_on::Found> {
+            let Some((pid, value, own)) = places::place_page(&subject.uri) else {
+                return Ok(also_on::Found::default());
+            };
+            // An answer over its read's cap is no answer: asking again would read the same megabytes.
+            let hub = match crate::hubs::wikidata::item_with(&cx.egress, pid, &value).await {
+                Err(error) if crate::resolver::egress::over_cap(&error) => None,
+                Ok(crate::hubs::wikidata::Found::One(hub)) => Some(hub),
+                Ok(_) => None,
+                Err(error) => return Err(error),
+            };
+            let Some(hub) = hub else {
+                return Ok(also_on::Found::default());
+            };
+            let Some((raw, hub)) = item(cx, &hub.qid).await? else {
+                return Ok(also_on::Found::default());
+            };
+            let mut found = crate::lookups::Found::default();
+            found.push_key(items::key(&hub.qid));
+            let objects = places::objects(&raw);
+            let mut links = vec![];
+            if let [object] = objects.iter().collect::<Vec<_>>().as_slice() {
+                if let Some((kind, id)) = object.split_once('/') {
+                    let osm = crate::model::OsmId {
+                        osm_type: kind.to_owned(),
+                        id: id.parse()?,
+                    };
+                    found.push_key(places::key(&osm));
+                }
+                links.push(also_on::Link::new(
+                    format!("https://www.openstreetmap.org/{object}"),
+                    "OpenStreetMap",
+                    "wikidata",
+                ));
+            }
+            links.push(also_on::Link::new(
+                format!("https://www.wikidata.org/wiki/{}", hub.qid),
+                "Wikidata",
+                "wikidata",
+            ));
+            let found = found.into_also_on("wikidata");
+            links.extend(
+                items::links(&raw, items::PLACE)
+                    .into_iter()
+                    .map(|l| also_on::Link::new(l.uri, l.site, l.via))
+                    .filter(|l| l.site != own),
+            );
+            links.extend(editions(&hub));
+            Ok(also_on::Found {
+                keys: found.keys,
+                links,
+                ..Default::default()
+            })
+        }
+    }
+
     /// BTC Map's places by OSM object, from its keyless sync (`updated_since`, deleted places
     /// included), kept in memory and brought up to date at most hourly.
     #[derive(Default)]
@@ -512,6 +623,37 @@ pub mod also_on {
 
         fn entity(q: &str) -> String {
             crate::hubs::wikidata::entities_lookup(&[q.to_owned()])
+        }
+
+        /// The Eiffel Tower's Tripadvisor page on the German site finds its item by the location
+        /// number alone: the item's Q-id and its one OSM way are keys, and its OSM, Wikidata,
+        /// Google Maps, Yelp and Wikipedia pages are links, never Tripadvisor itself.
+        #[tokio::test(start_paused = true)]
+        async fn a_tripadvisor_page_reaches_its_place_through_wikidata() {
+            let cx = recorded(vec![]);
+            let page = at("https://www.tripadvisor.de/Attraction_Review-g187147-d188151-Reviews-Eiffelturm-Paris_Ile_de_France.html");
+            assert!(WikidataPlaces.applies(&page));
+            let found = WikidataPlaces.lookup(&cx, &page).await.unwrap();
+            assert_eq!(keys(&found), ["wikidata:Q243", "osm:way/5013364"]);
+            let sites: Vec<&str> = found.links.iter().map(|l| l.site.as_str()).collect();
+            assert_eq!(
+                sites[..4],
+                ["OpenStreetMap", "Wikidata", "Google Maps", "Yelp"]
+            );
+            assert!(
+                sites.iter().any(|s| s.starts_with("Wikipedia")),
+                "{sites:?}"
+            );
+            assert!(!sites.contains(&"Tripadvisor"));
+            assert_eq!(
+                found.links[0].uri,
+                "https://www.openstreetmap.org/way/5013364"
+            );
+            // A value nobody recorded finds no item and gives nothing.
+            let other = at("https://www.yelp.com/biz/no-such-place-pinakes");
+            assert!(WikidataPlaces.applies(&other));
+            let none = WikidataPlaces.lookup(&cx, &other).await.unwrap();
+            assert!(none.keys.is_empty() && none.links.is_empty());
         }
 
         #[tokio::test(start_paused = true)]
@@ -769,6 +911,47 @@ mod tests {
     use super::*;
     use crate::lookups::fixture;
     use std::collections::BTreeMap;
+
+    /// A place's page on a map or review site names its Wikidata property and value: Tripadvisor
+    /// by the location number on any of its country sites, the others by the place table's
+    /// links.
+    #[test]
+    fn place_pages_name_their_property_and_value() {
+        for (uri, found) in [
+            (
+                "https://www.tripadvisor.de/Attraction_Review-g187147-d188151-Reviews-Eiffelturm-Paris_Ile_de_France.html",
+                Some(("P3134", "188151", "Tripadvisor")),
+            ),
+            (
+                "https://www.tripadvisor.co.uk/Restaurant_Review-g188113-d1234567-Reviews-Name-Zurich.html",
+                Some(("P3134", "1234567", "Tripadvisor")),
+            ),
+            (
+                "https://www.google.com/maps?cid=10222232094831998944",
+                Some(("P3749", "10222232094831998944", "Google Maps")),
+            ),
+            (
+                "https://maps.apple.com/place?auid=123456789",
+                Some(("P10046", "123456789", "Apple Maps")),
+            ),
+            (
+                "https://www.yelp.com/biz/la-tour-eiffel-paris-4",
+                Some(("P3108", "la-tour-eiffel-paris-4", "Yelp")),
+            ),
+            ("https://www.tripadvisor.de/Tourism-g187147-Paris_Ile_de_France-Vacations.html", None),
+            ("https://www.tripadvisor.com/188151", None),
+            ("https://www.tripadvisor.evil.example/Attraction_Review-g1-d2-Reviews-x.html", None),
+            ("https://tripadvisor.xyz.com/Attraction_Review-g1-d2-Reviews-x.html", None),
+            ("https://www.google.com/maps/place/Eiffel+Tower", None),
+        ] {
+            let got = place_page(uri);
+            assert_eq!(
+                got.as_ref().map(|(p, v, s)| (*p, v.as_str(), *s)),
+                found,
+                "{uri}"
+            );
+        }
+    }
 
     /// Only an object's own page on this family's services is named after the service; any
     /// other page there (a topic list, a search, a user's page, a page under an object) is not.

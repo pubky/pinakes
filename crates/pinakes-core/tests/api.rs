@@ -567,6 +567,16 @@ async fn preview_pending_cached_completion_and_per_ip_uri_budgets(pool: PgPool) 
     store::save_document(&pool, &job.id, job.generation, &doc)
         .await
         .unwrap();
+    // A preview takes a tagged link's path: nobody referenced it, yet its card queues its
+    // also-on lookups.
+    let (referenced, queued): (bool, bool) = sqlx::query_as(
+        "SELECT EXISTS(SELECT 1 FROM reference WHERE resource_id=$1),EXISTS(SELECT 1 FROM also_on_dirty WHERE resource_id=$1)",
+    )
+    .bind(&job.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((referenced, queued), (false, true));
     let (code, preview) = call(
         &app,
         "POST",

@@ -593,6 +593,8 @@ pub mod wikidata {
         /// (P1365), at their best rank: a discontinued product and its successor.
         pub replaced_by: Vec<String>,
         pub replaces: Vec<String>,
+        /// The works this one is an edition or translation of (P629), at their best rank.
+        pub edition_of: Vec<String>,
     }
     impl Item {
         pub fn id(&self, property: &str) -> &[String] {
@@ -653,6 +655,7 @@ pub mod wikidata {
                     ids,
                     sitelinks,
                     replaced_by: item_values(&e["claims"]["P1366"]),
+                    edition_of: item_values(&e["claims"]["P629"]),
                     replaces: item_values(&e["claims"]["P1365"]),
                 })
             })
@@ -762,6 +765,57 @@ pub mod wikidata {
             .append_pair("format", "json");
         Some(url.into())
     }
+    /// The value a page's link holds for a property whose formatter is `template` (`$1` for the
+    /// value): the inverse of the URL a property table builds, so a page any table links to is
+    /// also a starting point (`item_with`). Host case, `www.` and the scheme never matter. In the
+    /// path, the value is what lies between the template's text around `$1` (decoded; a trailing
+    /// `/` is the page's); in the query, the named parameter's value, whatever else the query
+    /// holds (`hl=`). The caller validates the value as the property's.
+    pub fn template_value(template: &str, uri: &str) -> Option<String> {
+        let (head, tail) = template.split_once("$1")?;
+        let url = url::Url::parse(uri).ok()?;
+        if !matches!(url.scheme(), "https" | "http")
+            || url.port().is_some()
+            || !url.username().is_empty()
+        {
+            return None;
+        }
+        let (_, rest) = head.split_once("://")?;
+        let (host, path_head) = rest.split_once('/').unwrap_or((rest, ""));
+        let bare = |h: &str| h.trim_start_matches("www.").to_ascii_lowercase();
+        if bare(url.host_str()?) != bare(host) {
+            return None;
+        }
+        let decode = |v: &str| {
+            percent_encoding::percent_decode_str(v)
+                .decode_utf8()
+                .ok()
+                .map(|v| v.into_owned())
+        };
+        let value = match path_head.split_once('?') {
+            // `/path?name=$1`: the same path, the named parameter.
+            Some((path, query)) => {
+                let name = query.strip_suffix('=')?;
+                if !tail.is_empty()
+                    || url.path().trim_end_matches('/') != format!("/{path}").trim_end_matches('/')
+                {
+                    return None;
+                }
+                url.query_pairs()
+                    .find(|(k, _)| k == name)
+                    .map(|(_, v)| v.into_owned())?
+            }
+            None => {
+                let rest = url.path().strip_prefix(&format!("/{path_head}"))?;
+                let rest = rest.trim_end_matches('/');
+                let rest = rest
+                    .strip_suffix(tail.trim_end_matches('/'))
+                    .unwrap_or(rest);
+                decode(rest)?
+            }
+        };
+        (!value.is_empty()).then_some(value)
+    }
     /// Up to 50 items by ID; unknown or redirected-away IDs are left out.
     pub async fn items(egress: &Egress, qids: &[String]) -> Result<Vec<Item>> {
         let mut qids: Vec<String> = qids.iter().filter_map(|q| qid(q)).collect();
@@ -834,6 +888,70 @@ pub mod wikidata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A page's link holds the value its property's URL template has in place of `$1`: in the
+    /// path (decoded, with or without a trailing slash, on either scheme, with or without
+    /// `www.`) or in a named query parameter (whatever else the query holds).
+    #[test]
+    fn a_template_gives_back_the_value_a_link_holds() {
+        let value = wikidata::template_value;
+        let rotten = "https://www.rottentomatoes.com/$1";
+        for uri in [
+            "https://www.rottentomatoes.com/m/1009113-halloween",
+            "http://rottentomatoes.com/m/1009113-halloween/",
+            "https://WWW.RottenTomatoes.com/m/1009113-halloween?utm_source=x",
+        ] {
+            assert_eq!(
+                value(rotten, uri).as_deref(),
+                Some("m/1009113-halloween"),
+                "{uri}"
+            );
+        }
+        assert_eq!(
+            value(
+                "https://www.mobygames.com/game/$1/",
+                "https://www.mobygames.com/game/73001/"
+            )
+            .as_deref(),
+            Some("73001")
+        );
+        assert_eq!(
+            value(
+                "https://www.pcgamingwiki.com/wiki/$1",
+                "https://www.pcgamingwiki.com/wiki/The_Witcher_3:_Wild_Hunt"
+            )
+            .as_deref(),
+            Some("The_Witcher_3:_Wild_Hunt")
+        );
+        assert_eq!(
+            value(
+                "https://www.google.com/maps?cid=$1",
+                "https://www.google.com/maps?hl=de&cid=10222232094831998944"
+            )
+            .as_deref(),
+            Some("10222232094831998944")
+        );
+        for (template, uri) in [
+            (rotten, "https://www.rottentomatoes.com/"),
+            (rotten, "https://rottentomatoes.example/m/x"),
+            (rotten, "https://www.rottentomatoes.com:8443/m/x"),
+            (
+                "https://www.google.com/maps?cid=$1",
+                "https://www.google.com/maps?q=Paris",
+            ),
+            (
+                "https://www.google.com/maps?cid=$1",
+                "https://www.google.com/search?cid=1",
+            ),
+            ("https://mubi.com/films/$1", "https://mubi.com/en/films/1"),
+            (
+                "https://letterboxd.com/film/$1/",
+                "ftp://letterboxd.com/film/x/",
+            ),
+        ] {
+            assert_eq!(value(template, uri), None, "{uri}");
+        }
+    }
 
     /// Two items carrying one Android package: TextSecure, "replaced by" Signal, and Signal,
     /// which "replaces" it. The successor is the package's item; either statement alone is

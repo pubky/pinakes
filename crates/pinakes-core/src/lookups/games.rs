@@ -367,8 +367,10 @@ pub mod also_on {
         }
     }
 
-    /// The Wikidata property a game's store link names, its value, and the stores to list for
-    /// the item. An app's store links are the apps family's (`lookups::apps`).
+    /// The Wikidata property a game's store or database link names, its value, and the stores
+    /// to list for the item: Steam, GOG (with or without its language path), and any other page
+    /// the game table links to (Epic, IGDB, MobyGames, PCGamingWiki, HowLongToBeat), by the value
+    /// it holds. An app's store links are the apps family's (`lookups::apps`).
     pub fn store_property(uri: &str) -> Option<(&'static str, String, &'static [items::Property])> {
         let url = crate::lookups::web_url(uri)?;
         let host = url.host_str()?.trim_start_matches("www.");
@@ -387,7 +389,11 @@ pub mod also_on {
                 ("P2725", format!("game/{slug}"), items::GAME)
             }
             ("gog.com", ["game", slug]) => ("P2725", format!("game/{slug}"), items::GAME),
-            _ => return None,
+            _ => {
+                return items::GAME
+                    .iter()
+                    .find_map(|p| p.value_in(uri).map(|value| (p.pid, value, items::GAME)))
+            }
         };
         (pid == "P2725" || pid == "P1733" || package(&value)).then_some((pid, value, set))
     }
@@ -434,6 +440,16 @@ pub mod also_on {
             let mut found = crate::lookups::Found::default();
             if only_value(&raw, pid, &value) {
                 found.push_key(items::key(&hub.qid));
+            }
+            // The game's one Steam appid joins its Steam page, as the Steam source keys it.
+            if pid != "P1733" {
+                let steam = items::GAME.iter().find(|p| p.pid == "P1733");
+                if let Some(appid) = steam
+                    .and_then(|p| items::single(&raw, p))
+                    .and_then(|v| v.parse().ok())
+                {
+                    found.push_key(crate::lookups::games::steam_key(appid));
+                }
             }
             for link in items::links(&raw, set) {
                 found.push_link(link);
@@ -499,6 +515,27 @@ pub mod also_on {
             assert!(!s.iter().any(|s| s.starts_with("MobyGames")), "{s:?}");
         }
 
+        /// A GOG page reaches its game through the one item with its GOG ID: the item names two
+        /// GOG values (the game and its expansion pass), so its Q-id is no key of this page, but
+        /// its one Steam appid is, and the page joins the game's Steam page.
+        #[tokio::test(start_paused = true)]
+        async fn a_gog_page_joins_the_games_steam_page_through_its_item() {
+            let cx = recorded(vec![]);
+            let gog = at("https://www.gog.com/en/game/the_witcher_3_wild_hunt");
+            assert!(WikidataStores.applies(&gog));
+            let found = WikidataStores.lookup(&cx, &gog).await.unwrap();
+            assert_eq!(keys(&found), ["steam:292030"]);
+            let s = sites(&found);
+            for site in [
+                "Steam https://store.steampowered.com/app/292030/",
+                "Epic Games Store https://store.epicgames.com/p/the-witcher-3-wild-hunt",
+                "MobyGames https://www.mobygames.com/game/73001/",
+            ] {
+                assert!(s.contains(&site.to_owned()), "{site} in {s:?}");
+            }
+            assert!(!s.iter().any(|s| s.starts_with("GOG")), "{s:?}");
+        }
+
         #[test]
         fn store_links() {
             for (uri, pid, value) in [
@@ -511,6 +548,18 @@ pub mod also_on {
                     "https://www.gog.com/en/game/the_witcher_3_wild_hunt",
                     "P2725",
                     "game/the_witcher_3_wild_hunt",
+                ),
+                (
+                    "https://store.epicgames.com/p/the-witcher-3-wild-hunt",
+                    "P6278",
+                    "the-witcher-3-wild-hunt",
+                ),
+                ("https://www.mobygames.com/game/73001/", "P11688", "73001"),
+                ("https://howlongtobeat.com/game/10270", "P2816", "10270"),
+                (
+                    "https://www.igdb.com/games/the-witcher-3-wild-hunt",
+                    "P5794",
+                    "the-witcher-3-wild-hunt",
                 ),
             ] {
                 let (p, v, _) = store_property(uri).unwrap_or_else(|| panic!("{uri}"));

@@ -1,4 +1,4 @@
-# `places`: OpenStreetMap objects and Wikidata items that name each other
+# `places`: OpenStreetMap objects, Wikidata items and a place's other pages
 
 A lookup family of [also on](../api.md#also-on) (`lookups/places.rs`).
 
@@ -14,6 +14,13 @@ Only where an OpenStreetMap object and a Wikidata item point at each other:
   its item) or a resource another source keyed with a Q-id gets the item's OpenStreetMap object:
   its relation (P402) when it has exactly one, else its only OSM link of any type; several give
   nothing.
+- `wikidata_places`: a place's page on Google Maps (`google.com/maps?cid={cid}`), Apple Maps
+  (`maps.apple.com/place?auid={auid}`), Yelp (`yelp.com/biz/{name}`) or Tripadvisor (an
+  attraction, restaurant or hotel page on any of its country sites, by the `d{number}` in its
+  name, which is all Wikidata's P3134 holds) gets the one Wikidata item carrying that value
+  (read back and compared exactly; several items are ambiguous and give nothing): the item's
+  Q-id as key, its OSM object as key and link when it names exactly one (so the page joins the
+  object's group), and its Wikidata page, other place links and Wikipedia editions.
 - `btcmap`: an OSM object that BTC Map lists gets its merchant page
   (`btcmap.org/merchant/{type}:{id}`), from BTC Map's place list by OSM ID, never by probing a
   page. The page names that one object, so both carry the object's `osm:{type}/{id}` key, and a
@@ -21,6 +28,7 @@ Only where an OpenStreetMap object and a Wikidata item point at each other:
 
 ## Operations
 
-Each tagged OSM object costs one Wikidata request. `btcmap` keeps BTC Map's place list in
+Each tagged OSM object costs one Wikidata request; each map or review page two (the search and
+the item). `btcmap` keeps BTC Map's place list in
 memory, brought up to date at most hourly from its sync (`updated_since`, 2,000 places a page);
 after a restart the first lookup reads it again.

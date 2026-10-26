@@ -17,6 +17,13 @@ pub struct Property {
     pub template: &'static str,
     valid: fn(&str) -> bool,
 }
+impl Property {
+    /// The value a link to this property's page holds (the inverse of the page `links` makes),
+    /// valid as the property's: such a link is a starting point too (`hubs::wikidata::item_with`).
+    pub fn value_in(&self, uri: &str) -> Option<String> {
+        crate::hubs::wikidata::template_value(self.template, uri).filter(|v| (self.valid)(v))
+    }
+}
 pub(crate) const fn property(
     pid: &'static str,
     site: &'static str,

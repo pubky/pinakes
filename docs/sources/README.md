@@ -132,8 +132,9 @@ on the same page.
   could not name in time.
 - [`federal_register`](federal_register.md#also-on): a Federal Register document's GovInfo,
   regulations.gov and public-inspection copies.
-- [`places`](places.md): `osm_wikidata`, `wikidata_osm` and `btcmap`, OpenStreetMap objects and
-  Wikidata items that name each other.
+- [`places`](places.md): `osm_wikidata`, `wikidata_osm`, `wikidata_places` and `btcmap`,
+  OpenStreetMap objects and Wikidata items that name each other, and a place's map and review
+  pages through its item.
 - [`papers`](papers.md): `unpaywall`, `ncbi`, `datacite` and `huggingface`, a paper's open copies,
   PubMed records and preprint.
 - [`packages`](packages.md): `crates`, `npm`, `pypi` and `software_heritage`, a package's registry

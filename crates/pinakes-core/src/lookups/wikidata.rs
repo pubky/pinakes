@@ -90,6 +90,18 @@ pub struct Property {
     valid: fn(&str) -> bool,
 }
 
+impl Property {
+    /// The value a link to this property's page holds (the inverse of the page `links` makes),
+    /// valid as the property's: such a link is a starting point too. A property whose value is a
+    /// whole URL (an official website, an itch.io page) is no starting point.
+    pub fn value_in(&self, uri: &str) -> Option<String> {
+        let Format::Template(template) = self.format else {
+            return None;
+        };
+        crate::hubs::wikidata::template_value(template, uri).filter(|v| (self.valid)(v))
+    }
+}
+
 fn digits(v: &str) -> bool {
     plain(v, 20, |c| c.is_ascii_digit()) && !v.starts_with('0')
 }

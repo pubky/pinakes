@@ -865,7 +865,7 @@ source's lifetime: 30 days, `btcmap` 7); a source's links and keys live twice th
 failed refresh keeps them, and they go when the source stops returning them. The sources run in this order, each
 seeing the keys the ones before it found: `service`, `tidal`, `musicbrainz`,
 `musicbrainz_entity`, `wikidata`, `discogs`, `deezer`, `itunes`, `wikipedia`, `wikidata_item`,
-`books`, `films`, `podcasts`, `titles`, `osm_wikidata`, `wikidata_osm`, `btcmap`,
+`books`, `films`, `podcasts`, `titles`, `osm_wikidata`, `wikidata_osm`, `wikidata_places`, `btcmap`,
 `federal_register`, `unpaywall`, `ncbi`, `datacite`, `huggingface`, `crates`, `npm`, `pypi`,
 `software_heritage`, `steam`, `wikidata_stores`, `app_stores`, `wayback`; `[also_on.sources.<id>] enabled =
 false` turns one off. A MusicBrainz or Wikidata answer over 8 MB is no answer: the source

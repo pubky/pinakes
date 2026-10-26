@@ -1,12 +1,31 @@
 {
   "entities-media": {
-    "bytes": 718054,
+    "bytes": 832451,
     "content_type": "application/json",
     "file": "entities-media.json.gz",
+    "note": "The answer recorded 2026-10-20 from `url` (718054 bytes, sha256 c2dac5326c081e2b992e01d99dcd9a7c4b2419ee3d3436e7c4de4d7b5a2b6525), with Q221103, Q766263, Q4738401, Q126600192 added from https://www.wikidata.org/w/api.php?action=wbgetentities&format=json&props=claims&ids=Q221103%7CQ766263%7CQ4738401%7CQ126600192 recorded 2026-10-26T19:02:52+00:00 (304528 bytes, sha256 0f4ee62f2762df3ce030129df268739a727210575e720eb422d2824e68e03a36), trimmed to their external-ID and string claims and P31, P629, P1365 and P1366. Every item the media tests read is in this one answer.",
     "recorded_at": "2026-10-20T00:15:33+00:00",
-    "sha256": "c2dac5326c081e2b992e01d99dcd9a7c4b2419ee3d3436e7c4de4d7b5a2b6525",
+    "sha256": "8590d49334892944b63e89cb69dbdf90ed2f6783a5f0b938de72d51cab3c4a3c",
     "status": 200,
     "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&format=json&props=claims&ids=Q172241%7CQ1079%7CQ101244908%7CQ214371%7CQ48741148%7CQ74287"
+  },
+  "search-P1258-m-1009113-halloween": {
+    "bytes": 553,
+    "content_type": "application/json; charset=utf-8",
+    "file": "search-P1258-m-1009113-halloween.json",
+    "recorded_at": "2026-10-26T19:03:08+00:00",
+    "sha256": "5a8b6d3fb151679505b31774fe30d9d68bee6ad7337ee1c6d2ef6e5b4dba738f",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP1258%3Dm%2F1009113-halloween&srlimit=5&format=json"
+  },
+  "search-P1258-m-chungking_express": {
+    "bytes": 1304,
+    "content_type": "application/json; charset=utf-8",
+    "file": "search-P1258-m-chungking_express.json",
+    "recorded_at": "2026-10-26T19:03:09+00:00",
+    "sha256": "4883875efaa33edf6c44caf3821be65027d7a6e2c34807aa1f835a6085a06b89",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP1258%3Dm%2Fchungking_express&srlimit=5&format=json"
   },
   "search-P1874-70143836": {
     "bytes": 504,
@@ -16,6 +35,15 @@
     "sha256": "9b34bd4c75ca3212c92178defe07db77054e33b65cd5516e239aeddbb806c008",
     "status": 200,
     "url": "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP1874%3D70143836&srlimit=5&format=json"
+  },
+  "search-P2969-5907": {
+    "bytes": 222,
+    "content_type": "application/json; charset=utf-8",
+    "file": "search-P2969-5907.json",
+    "recorded_at": "2026-10-26T19:03:09+00:00",
+    "sha256": "de50aa693f0b4ff0f3f248e9f7fd1166c6aa9b36f80e103b328bffe8e49398a9",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP2969%3D5907&srlimit=5&format=json"
   },
   "search-P345-missing": {
     "bytes": 71,
@@ -97,5 +125,14 @@
     "sha256": "688d401ed6447a04b61b8b5aea327e975f2f69ec5596d800d49a0b230236ea4b",
     "status": 200,
     "url": "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP648%3DOL893414W&srlimit=5&format=json"
+  },
+  "search-P8383-1540236": {
+    "bytes": 441,
+    "content_type": "application/json; charset=utf-8",
+    "file": "search-P8383-1540236.json",
+    "recorded_at": "2026-10-26T19:04:53+00:00",
+    "sha256": "8572a77c0b02b4e5eccbd8774a3712bf8dd7ae2acd218c37a8d534d06c0037d3",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP8383%3D1540236&srlimit=5&format=json"
   }
 }
