@@ -69,6 +69,7 @@ pub static PROFILE: Profile = Profile {
         "place",
         "items",
     ],
+    links_off: None,
 };
 
 /// The Mapky page of an OpenStreetMap place.

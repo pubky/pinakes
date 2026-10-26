@@ -9,11 +9,10 @@ pub static PROFILE: Profile = Profile {
     kinds: &[Kind {
         path: "rooms/{room}",
         read: room,
-        // No client link until rooms.pubky.app is live: the client's address today is a hosting
-        // provider's subdomain, which anyone could take over once the app leaves it.
         open_in: &[],
     }],
     facts: &[],
+    links_off: Some("rooms.pubky.app does not resolve yet, and the client's address today is a hosting provider's subdomain anyone could take over once the app leaves it; set `open_in` in resolver/pubky_apps/rooms.rs to https://rooms.pubky.app/r/{owner}/{room} when it resolves, then run `pinakesd reextract pubky`"),
 };
 
 /// A room: its name and topic. Only a listed (`public`) room has a card; an unlisted one is left

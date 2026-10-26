@@ -27,6 +27,7 @@ pub static PROFILE: Profile = Profile {
         },
     ],
     facts: &["location", "timezone"],
+    links_off: None,
 };
 
 /// The plain text of a description: `description`, else the styled one (HTML, Markdown or plain
