@@ -59,7 +59,7 @@ pub struct Changes {
     /// this build does not know, `malformed`: anything else), never their content: the cursor
     /// moves past them (`ingest::apply` counts them with the lines it read).
     #[serde(skip)]
-    pub skipped: std::collections::BTreeMap<&'static str, u64>,
+    pub skipped: Skipped,
 }
 /// The reasons a feed line is skipped while parsing a page (`Changes::skipped`).
 pub const SKIP_REASONS: &[&str] = &["unknown_kind", "malformed"];
@@ -74,33 +74,94 @@ impl Changes {
     /// a line of a kind this build does not know, or one it cannot parse, is skipped and counted
     /// rather than failing the page, so one line never stops the feed.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
-        #[derive(Deserialize)]
-        struct Raw {
-            lines: Vec<serde_json::Value>,
-            next_cursor: i64,
-        }
-        let raw: Raw = serde_json::from_slice(bytes)?;
-        let mut page = Self {
-            lines: Vec::with_capacity(raw.lines.len()),
-            next_cursor: raw.next_cursor,
-            skipped: Default::default(),
-        };
-        for line in raw.lines {
-            let unknown_kind = line["kind"].as_str().is_some_and(|k| !KINDS.contains(&k));
-            match serde_json::from_value::<Change>(line) {
-                Ok(change) => page.lines.push(change),
-                Err(_) => {
-                    let reason = if unknown_kind {
-                        "unknown_kind"
-                    } else {
-                        "malformed"
-                    };
-                    *page.skipped.entry(reason).or_default() += 1;
-                }
+        let (lines, next_cursor, skipped) = parse_lines(bytes, |line| {
+            line["kind"].as_str().is_some_and(|k| !KINDS.contains(&k))
+        })?;
+        Ok(Self {
+            lines,
+            next_cursor,
+            skipped,
+        })
+    }
+}
+/// The lines skipped while parsing a page, by reason.
+pub type Skipped = std::collections::BTreeMap<&'static str, u64>;
+/// A feed page's lines, its next cursor and the lines skipped by reason: the envelope (`lines`,
+/// `next_cursor`) strictly, each line on its own. A line `unknown` says is of a kind this build
+/// does not read is `unknown_kind`; any other line that does not parse is `malformed`.
+fn parse_lines<T: DeserializeOwned>(
+    bytes: &[u8],
+    unknown: impl Fn(&serde_json::Value) -> bool,
+) -> Result<(Vec<T>, i64, Skipped)> {
+    #[derive(Deserialize)]
+    struct Raw {
+        lines: Vec<serde_json::Value>,
+        next_cursor: i64,
+    }
+    let raw: Raw = serde_json::from_slice(bytes)?;
+    let mut lines = Vec::with_capacity(raw.lines.len());
+    let mut skipped = Skipped::new();
+    for line in raw.lines {
+        let unknown_kind = unknown(&line);
+        match serde_json::from_value::<T>(line) {
+            Ok(parsed) => lines.push(parsed),
+            Err(_) => {
+                let reason = if unknown_kind {
+                    "unknown_kind"
+                } else {
+                    "malformed"
+                };
+                *skipped.entry(reason).or_default() += 1;
             }
         }
-        Ok(page)
     }
+    Ok((lines, raw.next_cursor, skipped))
+}
+/// One line of the Nexus fork's app-post feed (`GET /v0/app-posts/changes`): a post an app wrote
+/// on the social post envelope under its own namespace, and the version file to read.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AppPostLine {
+    pub op: Op,
+    pub author: String,
+    /// The post, versionless: `/pub/<namespace>/v1/posts/{id}`.
+    pub post: String,
+    /// The version to read: `/pub/<namespace>/v1/posts/{id}/{editId}.json`.
+    pub version: String,
+    pub namespace: String,
+    pub post_kind: String,
+    /// Unix milliseconds.
+    pub at: i64,
+}
+/// A page of the app-post feed: its lines, the next cursor and the lines skipped while parsing.
+#[derive(Clone, Debug, Serialize)]
+pub struct AppPostChanges {
+    pub lines: Vec<AppPostLine>,
+    pub next_cursor: i64,
+    #[serde(skip)]
+    pub skipped: Skipped,
+}
+impl AppPostChanges {
+    /// The lines the page held, read and skipped: the cursor moves by this many.
+    pub fn read(&self) -> usize {
+        self.lines.len() + self.skipped.values().sum::<u64>() as usize
+    }
+    /// A page parsed line by line, as `Changes::parse`: a line that does not parse is
+    /// `malformed` (which namespaces and kinds are read is the profiles' question, not the
+    /// parser's).
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        let (lines, next_cursor, skipped) = parse_lines(bytes, |_| false)?;
+        Ok(Self {
+            lines,
+            next_cursor,
+            skipped,
+        })
+    }
+}
+#[derive(Clone, Debug)]
+pub struct AppPostPage {
+    pub page: AppPostChanges,
+    pub epoch: Option<String>,
+    pub length: i64,
 }
 #[derive(Clone, Debug)]
 pub struct FeedPage {
@@ -153,10 +214,34 @@ impl Nexus {
         })
     }
     pub async fn changes(&self, cursor: i64) -> Result<FeedPage> {
+        let (response, epoch, length) = self.feed("resources", cursor, 1000).await?;
+        Ok(FeedPage {
+            page: Changes::parse(&bounded_bytes(response).await?)?,
+            epoch,
+            length,
+        })
+    }
+    /// A page of the app-post feed (`GET /v0/app-posts/changes`), under the resource feed's
+    /// cursor and epoch rules. Its lines name files to fetch, so its pages are small.
+    pub async fn app_post_changes(&self, cursor: i64, limit: i64) -> Result<AppPostPage> {
+        let (response, epoch, length) = self.feed("app-posts", cursor, limit).await?;
+        Ok(AppPostPage {
+            page: AppPostChanges::parse(&bounded_bytes(response).await?)?,
+            epoch,
+            length,
+        })
+    }
+    /// One page request of a feed (`/v0/{feed}/changes`), with its epoch and length headers.
+    async fn feed(
+        &self,
+        feed: &str,
+        cursor: i64,
+        limit: i64,
+    ) -> Result<(reqwest::Response, Option<String>, i64)> {
         let response = self
             .client
-            .get(format!("{}/v0/resources/changes", self.base))
-            .query(&[("cursor", cursor), ("limit", 1000)])
+            .get(format!("{}/v0/{feed}/changes", self.base))
+            .query(&[("cursor", cursor), ("limit", limit)])
             .send()
             .await
             .and_then(reqwest::Response::error_for_status)
@@ -175,11 +260,7 @@ impl Nexus {
         if length < 0 {
             bail!("negative Nexus feed length");
         }
-        Ok(FeedPage {
-            page: Changes::parse(&bounded_bytes(response).await?)?,
-            epoch,
-            length,
-        })
+        Ok((response, epoch, length))
     }
     /// Nexus's batch resource view of `uris` (`POST /v0/stream/resources/by_ids`, 1–100), for
     /// `viewer` when given: one view per URI it knows, in request order, with its tags and tagger

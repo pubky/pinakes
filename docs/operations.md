@@ -363,10 +363,29 @@ savepoint: a line whose processing panics is rolled back alone and skipped (`pan
 line names its feed position only, never its content). A panic anywhere else in a poll (the
 batch's score update or cursor write, say) is an error: the batch rolls back, the cursor holds,
 `pinakes_ingest_panics_total` counts it and the poll is retried. A feed epoch change, or a
-cursor beyond the feed's length, clears the reference projection and scores and restarts at
-zero; resource documents stay through the grace period. A resource without references is
-deleted `limits.grace_days` after it became orphaned, previews included. A Nexus outage leaves
-cached data served and polling retries.
+cursor beyond the feed's length, clears that feed's references (`reference.feed`) and the scores
+and restarts at zero; the other feed's references stay, and resource documents stay through the
+grace period. A resource without references is deleted `limits.grace_days` after it became
+orphaned, previews included. A Nexus outage leaves cached data served and polling retries.
+
+### The app-post feed
+
+With `[nexus] app_posts = true` (off by default, until the Nexus fork serves it), a second loop
+reads `GET /v0/app-posts/changes` under the same cursor and epoch rules, 100 lines a page, its
+cursor beside the resource feed's in `feed_cursor` (`<nexus_url>#app-posts`). Each line names a
+post an app wrote on the social post envelope (`/pub/<namespace>/v1/posts/{id}`) and the version
+file to read (`…/{id}/{editId}.json`); Pinakes fetches the version from the author's homeserver
+through the Pubky resolver's fetch (pkarr relays, egress policy), checks it with
+pubky-social-specs' `PostEnvelope<K>` (the pin Nexus and the music node use, acde362), and reads it
+by its namespace and kind ([Pubky apps](pubky-apps.md#app-posts)). A post's references replace its
+previous version's; a deleted post's go, and its card is `missing` at once. A page that cannot
+reach a homeserver is retried, and after five polls its failing lines are skipped
+(`unreachable`), so one homeserver never stops the feed. Every line is counted in
+`pinakes_app_posts_total{outcome}`: `indexed`, `deleted`, or why it was skipped (`malformed`,
+`author`, `path`, `unprofiled` for a namespace or kind no profile reads, `foreign` for an rsvp to a
+Pubky object, which Nexus counts, `gone` for a version the homeserver no longer has, `invalid`
+for a post the envelope or its profile refuses, `unreachable`). An app-post feed reset drops its
+references alone.
 
 Search's `reach` and `boost` read the viewer's `following` and `friends` lists from the same
 Nexus. `nexus_reach_set` (default `false`) says that Nexus also serves the reach-set route

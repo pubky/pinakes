@@ -27,6 +27,55 @@ pub struct PubkyResolver {
     config: ResolverConfig,
 }
 impl PubkyResolver {
+    /// One object of an owner's homeserver, fetched as the resolver fetches it: the owner's
+    /// canonical z32 key as the host, its homeserver from the pkarr relays, the path unchanged as
+    /// an HTTPS path, through the egress policy. For the app-post feed's version files too
+    /// (`app_posts`), which the resolver itself never routes.
+    pub async fn fetch_object(&self, object: &Url) -> Result<super::egress::Fetched> {
+        let host = object.host_str().context("missing Pubky owner")?;
+        // One spelling per object: the owner's key as the whole host, in z32.
+        let owner = host
+            .parse::<PublicKey>()
+            .ok()
+            .filter(|owner| owner.to_z32() == host)
+            .ok_or_else(|| {
+                anyhow::Error::new(ErrorClass("policy"))
+                    .context("the Pubky owner is not a canonical z32 key")
+            })?;
+        let (domain, port) = self.relays.homeserver(&owner).await?;
+        // The `pubky-host` form the SDK uses for ICANN endpoints. Egress pins the checked
+        // addresses, refuses non-public ones and, because of the header, every redirect.
+        let mut url = Url::parse(&format!("https://{domain}/"))
+            .map_err(|_| ErrorClass("policy"))
+            .context("homeserver domain")?;
+        // A domain only: an IP literal as the target names no homeserver.
+        if !matches!(url.host(), Some(url::Host::Domain(_))) {
+            return Err(anyhow::Error::new(ErrorClass("policy"))
+                .context("the homeserver endpoint is an IP address, not a domain"));
+        }
+        url.set_port(port)
+            .map_err(|_| anyhow::Error::new(ErrorClass("policy")))?;
+        url.set_path(object.path());
+        // In a `pubky:` URL a backslash or a dot segment is literal, in an `https:` one it is
+        // not: the path fetched must be the path classified, or the namespace check is moot.
+        if url.path() != object.path() {
+            return Err(anyhow::Error::new(ErrorClass("policy"))
+                .context("the Pubky object path changes as an HTTPS path"));
+        }
+        // Homeservers serve many objects as `application/octet-stream`; `card` reads JSON
+        // whatever the declared type.
+        let options = FetchOptions {
+            headers: vec![("pubky-host", owner.to_z32())],
+            accept: Some(format!(
+                "{}, application/octet-stream",
+                super::egress::ALLOWED_TYPES.join(", ")
+            )),
+            extra_types: OBJECT_TYPES,
+            ..Default::default()
+        };
+        self.egress.fetch_with(url.as_str(), &options).await
+    }
+
     pub fn new(config: ResolverConfig, egress: Egress) -> Result<Self> {
         Ok(Self {
             relays: Relays::new(&config.pkarr_relays, egress.clone())?,
@@ -61,48 +110,7 @@ impl Resolver for PubkyResolver {
                 return Err(anyhow::Error::new(ErrorClass("policy"))
                     .context("not a Pubky object of another app"));
             }
-            let host = object.host_str().context("missing Pubky owner")?;
-            // One spelling per object: the owner's key as the whole host, in z32.
-            let owner = host
-                .parse::<PublicKey>()
-                .ok()
-                .filter(|owner| owner.to_z32() == host)
-                .ok_or_else(|| {
-                    anyhow::Error::new(ErrorClass("policy"))
-                        .context("the Pubky owner is not a canonical z32 key")
-                })?;
-            let (domain, port) = self.relays.homeserver(&owner).await?;
-            // The `pubky-host` form the SDK uses for ICANN endpoints. Egress pins the checked
-            // addresses, refuses non-public ones and, because of the header, every redirect.
-            let mut url = Url::parse(&format!("https://{domain}/"))
-                .map_err(|_| ErrorClass("policy"))
-                .context("homeserver domain")?;
-            // A domain only: an IP literal as the target names no homeserver.
-            if !matches!(url.host(), Some(url::Host::Domain(_))) {
-                return Err(anyhow::Error::new(ErrorClass("policy"))
-                    .context("the homeserver endpoint is an IP address, not a domain"));
-            }
-            url.set_port(port)
-                .map_err(|_| anyhow::Error::new(ErrorClass("policy")))?;
-            url.set_path(object.path());
-            // In a `pubky:` URL a backslash or a dot segment is literal, in an `https:` one it is
-            // not: the path fetched must be the path classified, or the namespace check is moot.
-            if url.path() != object.path() {
-                return Err(anyhow::Error::new(ErrorClass("policy"))
-                    .context("the Pubky object path changes as an HTTPS path"));
-            }
-            // Homeservers serve many objects as `application/octet-stream`; `card` reads JSON
-            // whatever the declared type.
-            let options = FetchOptions {
-                headers: vec![("pubky-host", owner.to_z32())],
-                accept: Some(format!(
-                    "{}, application/octet-stream",
-                    super::egress::ALLOWED_TYPES.join(", ")
-                )),
-                extra_types: OBJECT_TYPES,
-                ..Default::default()
-            };
-            let fetched = self.egress.fetch_with(url.as_str(), &options).await?;
+            let fetched = self.fetch_object(&object).await?;
             let mut doc = ResourceMeta::new(uri, "pubky", self.config.ttl_secs);
             doc.set_type("CreativeWork");
             match fetched.status {

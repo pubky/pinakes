@@ -17,6 +17,8 @@ pub struct Config {
     /// Whether the Nexus at `nexus_url` serves the reach-set route, so search takes
     /// `reach=wot_2` and `boost=wot_2` (`nexus::Nexus::reach`); off, those answer 501.
     pub nexus_reach_set: bool,
+    /// `[nexus]`: the Nexus feeds read besides the resource feed.
+    pub nexus: NexusConfig,
     /// `discover_feeds` is accepted here and in `[cards.media]`; the other resolver sections take
     /// only `enabled`.
     #[serde(with = "feed_section")]
@@ -283,6 +285,7 @@ impl Config {
             sections: Sections::defaults(),
             nexus_url: "http://127.0.0.1:8080".into(),
             nexus_reach_set: false,
+            nexus: NexusConfig::default(),
             poll_secs: 5,
             ingest: IngestConfig::default(),
             grace_days: 7,
@@ -408,6 +411,15 @@ impl Default for EventConfig {
             held_retry_secs: 60,
         }
     }
+}
+/// `[nexus]`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NexusConfig {
+    /// Read the Nexus fork's app-post feed (`GET /v0/app-posts/changes`, `app_posts`): social
+    /// events and rsvps, maps routes, events availability, music listens. Off until the fork
+    /// serves it.
+    pub app_posts: bool,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]

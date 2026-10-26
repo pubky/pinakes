@@ -126,6 +126,11 @@ const NEXUS_NAMESPACES: &[&str] = &["pubky.app", "social"];
 /// `/pub/` (`resolver::pubky_app`'s reading). `None` for the objects Nexus describes
 /// (`NEXUS_NAMESPACES`).
 pub fn route(segments: &[String]) -> Option<Route> {
+    // An app post (`/pub/<ns>/v1/posts/…`) is read from the app-post feed (`app_posts`), its
+    // versionless path never fetched.
+    if matches!(segments, [_, version, posts, ..] if version == "v1" && posts == "posts") {
+        return None;
+    }
     for profile in REGISTRY {
         for namespace in profile.namespaces {
             let prefix: Vec<&str> = namespace.split('/').collect();

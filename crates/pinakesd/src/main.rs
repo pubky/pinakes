@@ -71,6 +71,14 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
         state.metrics.clone(),
         egress.clone(),
     )?;
+    // The app-post feed fetches each line's version through the Pubky resolver's fetch.
+    let app_posts = config
+        .nexus
+        .app_posts
+        .then(|| {
+            pinakes_core::resolver::pubky::PubkyResolver::new(config.pubky.clone(), egress.clone())
+        })
+        .transpose()?;
     let also_on_task = tokio::spawn(pinakes_core::also_on::run(
         pool.clone(),
         pinakes_core::also_on::Context {
@@ -108,6 +116,39 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
                 }
             }
             tokio::select! { _=ingest_shutdown.changed()=>break,_=tokio::time::sleep(Duration::from_secs(ingest_state.config.poll_secs))=>{} }
+        }
+    });
+    let app_posts_state = state.clone();
+    let app_posts_pool = pool.clone();
+    let mut app_posts_shutdown = shutdown_rx.clone();
+    let app_posts_task = tokio::spawn(async move {
+        let Some(versions) = app_posts else {
+            return;
+        };
+        let mut attempts = pinakes_core::app_posts::Attempts::default();
+        loop {
+            let poll = std::panic::AssertUnwindSafe(pinakes_core::app_posts::poll_once(
+                &app_posts_pool,
+                &app_posts_state.config.nexus_url,
+                &app_posts_state.nexus,
+                &versions,
+                &app_posts_state.metrics,
+                &mut attempts,
+            ))
+            .catch_unwind();
+            let applied = tokio::select! { _=app_posts_shutdown.changed()=>break,result=poll=>result.unwrap_or_else(|_| Err(anyhow::anyhow!("app-post ingestion panicked"))) };
+            match applied {
+                Ok(n) if n > 0 => {
+                    tracing::info!(lines = n, "ingested Nexus app-post page");
+                    app_posts_state.wake.notify_waiters();
+                    continue;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(error=%pinakes_core::resolver::log_error(&e),"app-post ingestion will retry")
+                }
+            }
+            tokio::select! { _=app_posts_shutdown.changed()=>break,_=tokio::time::sleep(Duration::from_secs(app_posts_state.config.poll_secs))=>{} }
         }
     });
     let group_pool = pool.clone();
@@ -176,6 +217,7 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
     .await?;
     admin_task.await??;
     ingest_task.await?;
+    app_posts_task.await?;
     maintenance_task.await?;
     also_on_task.await?;
     dump_task.await?;

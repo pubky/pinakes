@@ -117,12 +117,22 @@ pub async fn apply(
     store::lock_writers(&mut tx, order).await?;
     crate::alias::lock(&mut tx).await?;
     if reset {
-        sqlx::query("TRUNCATE reference, resource_score")
+        // The resource feed's references go; the app-post feed's stay (`reference.feed`), and
+        // so do the scores and the life of what they reference.
+        sqlx::query("DELETE FROM reference WHERE feed='resources'")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("TRUNCATE resource_score")
             .execute(&mut *tx)
             .await?;
         sqlx::query("UPDATE resource SET orphaned_at=coalesce(orphaned_at,now())")
             .execute(&mut *tx)
             .await?;
+        let kept: Vec<String> =
+            sqlx::query_scalar("SELECT DISTINCT resource_id FROM reference WHERE feed='app_posts'")
+                .fetch_all(&mut *tx)
+                .await?;
+        store::recompute_scores(&mut tx, &kept).await?;
         sqlx::query("UPDATE feed_cursor SET cursor=0, epoch=$2, feed_length=$3, updated_at=now(),resets=resets+1 WHERE nexus=$1")
             .bind(nexus).bind(epoch).bind(feed.length).execute(&mut *tx).await?;
         tx.commit().await?;

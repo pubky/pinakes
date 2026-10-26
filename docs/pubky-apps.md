@@ -92,6 +92,29 @@ A record must name its owner (`ownerPubky`) and kind (`recordType`), and a listi
 own ID. Every other path in the namespace (media files, reviews, encrypted deliverables, keys,
 proofs) is never fetched.
 
+## App posts
+
+Apps write their own kinds as posts on the social post envelope, under their own namespace:
+`/pub/<namespace>/v1/posts/{id}/{editId}.json`, each edit a new version. Pinakes reads them from
+the Nexus fork's app-post feed (`[nexus] app_posts`, [operations](operations.md#the-app-post-feed)),
+never by fetching a tagged link: a `/pub/<namespace>/v1/posts/…` path is never routed to the
+resolver. Each version is checked with pubky-social-specs' `PostEnvelope<K>` (acde362; the kind's
+content is the profile's to read), then read by its namespace and kind:
+
+| namespace, kind | what Pinakes keeps |
+| --- | --- |
+| `social` `event` | One event reference per location and occurrence, as a tagged event's: its JSCalendar `start` in its `timeZone`, its `duration` (a day when `showWithoutTime` and no duration), its `status` (`confirmed` and `tentative` are `scheduled`), its one `recurrenceRules` rule expanded under the spec's caps (1,000 occurrences, three years) less its `excludedDates`, at each `locations[].uri` (at the post itself when it names none). An override (`recurrenceOf` a master by the same author, `recurrenceId`) replaces that occurrence, and the master's later versions leave it replaced |
+| `social` `rsvp` | A reply on the page its `parent` names, its `status` as the label. An rsvp to a Pubky object (a social event post) is Nexus's to count and is not kept (`foreign`) |
+| `maps` `route` | The post's card: a `Trip` with its `name`, `description`, its first waypoint as the point, the box of its `geo:` waypoints, and `activity`, `distance_m`, `duration_s`, `elevation_gain_m`, `elevation_loss_m` and the number of waypoints as facts; and an embed on each waypoint, so a place lists the routes through it |
+| `events` `availability` | The post's card: a `Schedule` named by its first available block's `title`, from that block's start for its `duration`, in its `timeZone`, with its horizon, its numbers of available and busy blocks and its `for` as facts |
+| `music` `listen` | A play on the track the post `embed`s, at the line's time: a `listen` reference, which no score, filter or count reads |
+
+A deleted post's references go and its card is `missing` at once. Every other namespace and kind
+(music `session` and `listening`, the social specs' own kinds) is skipped and counted.
+**Assumed, without a published spec:** a music `listen` names its track in the envelope's `embed`
+(pubky-music-specs is not public); `route` and `availability` are read as the social specs' v1.1
+branch defines them, since Maps' and Eventky's own spec crates do not exist yet.
+
 ## Adding a Pubky app
 
 1. Copy the smallest profile (`resolver/pubky_apps/rooms.rs`) to
