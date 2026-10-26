@@ -613,6 +613,12 @@ pub fn by_name(name: &str) -> Option<&'static dyn Source> {
 pub fn reading(uri: &str) -> Option<&'static dyn Source> {
     REGISTRY.iter().copied().find(|s| s.reads(uri))
 }
+/// Whether the source that reads `uri` is registered but switched off: what it merged before
+/// stays merged.
+pub fn switched_off(uri: &str) -> bool {
+    let switches = SWITCHES.read().unwrap_or_else(|e| e.into_inner());
+    reading(uri).is_some_and(|s| switches.as_ref().is_some_and(|c| !c.enabled(s.name())))
+}
 /// The switched-on source that reads `uri`.
 pub fn enabled_source(uri: &str, config: &Config) -> Option<&'static dyn Source> {
     reading(uri).filter(|s| config.sources.enabled(s.name()))

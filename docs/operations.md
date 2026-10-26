@@ -144,8 +144,12 @@ say) becomes an alias of it. A selected alias (by the route its URI classifies t
 rule now gives another root moves to that root. One that no rule names any more (a source that
 read it as another object's spelling now reads it at its own address) answers for itself again:
 it is re-queued on its route, regrouped and rescored with its old root, and its `aliased` change
-line names its own ID. An alias a page's canonical made is no rule of its URI and stays; one an
-official API's answer made is re-read, and becomes an alias again if the API still names its root. The selected rows' [also-on](#also-on) lookups are
+line names its own ID. An alias a page's canonical made (basis `canonical`) or an official API's answer made
+(basis `source`) is no rule of its URI and stays, as does the alias of a link whose source is
+switched off (`[sources.x] enabled = false` silences its rule; what it merged before stays
+merged). To fix the aliases an earlier build made, run `reextract all`: the links concerned
+classify to several routes (a Reddit comment's link to `media`, a LinkedIn post's to
+`official`). The selected rows' [also-on](#also-on) lookups are
 queued too: a card that comes back unchanged would not run them again, so results read by an
 older version would stay until they expire. `reextract also-on` queues every resource's also-on
 lookups without re-reading any card; it can be combined with routes.

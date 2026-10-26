@@ -151,7 +151,7 @@ pub async fn reextract(pool: &PgPool, routes: &[String]) -> Result<u64> {
             // An alias has no route of its own. A selected one whose URI a rule now gives another
             // root moves to it; one no rule names any more (a source that read it as another
             // object's spelling reads it at its own address now) answers for itself again and is
-            // re-queued on its route. A page's own canonical is no rule of its URI: it stays.
+            // re-queued on its route.
             if let Some(root) = root {
                 let route = crate::resolver::classify(&uri).map(str::to_owned);
                 let selected = all || route.as_ref().is_some_and(|r| routes.contains(r));
@@ -163,7 +163,14 @@ pub async fn reextract(pool: &PgPool, routes: &[String]) -> Result<u64> {
                     {
                         aliases.push((id, alias))
                     }
-                    (None, Some(route)) if selected && basis.as_deref() != Some("canonical") => {
+                    // Only what a rule of this build would name: never a page's canonical or
+                    // an official API's answer (no rule of the URI), nor a link of a source
+                    // switched off, whose rule is only silent.
+                    (None, Some(route))
+                        if selected
+                            && !matches!(basis.as_deref(), Some("canonical" | "source"))
+                            && !crate::sources::switched_off(&uri) =>
+                    {
                         released.push(id.clone());
                         ids.push(id);
                         new_routes.push(route);

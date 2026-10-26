@@ -24,7 +24,8 @@ const PLATFORM_TRACKING: &[(&[&str], &[&str])] = &[
 pub struct Alias {
     pub root: String,
     /// `cursor`, `osm`, `identifier`, `service` (a music service's, Wikipedia's or a Wikidata
-    /// item's URL forms), `tracking` or `canonical`.
+    /// item's URL forms), `tracking`, `canonical` (the page's own canonical) or `source` (an
+    /// official API's answer). The last two are no rule of the URI.
     pub basis: &'static str,
 }
 /// The root of a URI known from the URI alone, when it differs from the URI itself.
@@ -118,13 +119,14 @@ pub fn canonical(uri: &str, canonical: &str) -> Option<Alias> {
     })
 }
 /// The root an official API named for `uri` (`ResourceMeta::source_root`), when it is another
-/// URI. The API's own record is the evidence, as an identifier is.
+/// URI. The API's own record is the evidence, as an identifier is; its basis is `source`, since
+/// no rule of the URI names it (`reextract` keeps it).
 pub fn source(uri: &str, root: &str) -> Option<Alias> {
     let (_, uri, _) = crate::model::identity(uri).ok()?;
     let (_, root, _) = crate::model::identity(root).ok()?;
     (root != uri).then_some(Alias {
         root,
-        basis: "identifier",
+        basis: "source",
     })
 }
 /// The lock every alias assignment takes, so an alias never commits against a root that has
@@ -260,7 +262,14 @@ pub async fn assign(
         .bind(id)
         .execute(&mut **tx)
         .await?;
-    crate::store::recompute_scores(tx, &[id.to_owned(), root_id]).await?;
+    // The root it left (when it moved) no longer counts its references either.
+    let mut rescored: Vec<String> = [Some(id.to_owned()), Some(root_id), previous]
+        .into_iter()
+        .flatten()
+        .collect();
+    rescored.sort_unstable();
+    rescored.dedup();
+    crate::store::recompute_scores(tx, &rescored).await?;
     Ok(line)
 }
 /// Make an alias answer for itself again, when no rule names its root any more (a source that
@@ -324,7 +333,7 @@ mod tests {
         let named = source("https://example.org/a/", "https://example.org/b/").unwrap();
         assert_eq!(
             (named.root.as_str(), named.basis),
-            ("https://example.org/b/", "identifier")
+            ("https://example.org/b/", "source")
         );
         assert_eq!(
             source("https://example.org/a", "HTTPS://EXAMPLE.ORG/a"),

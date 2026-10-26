@@ -1338,9 +1338,12 @@ async fn reextract_moves_or_releases_the_aliases_rules_no_longer_make(pool: PgPo
     let short = "https://redd.it/1k3d0pk";
     let page = "https://example.org/a/";
     let canonical = "https://example.org/a";
+    // A link an official API named as another object's (no rule of its URI names that root).
+    let named = "https://example.org/release/1";
+    let record = "https://example.org/record/1";
     let mut ids = std::collections::BTreeMap::new();
     for uri in [
-        post, stale, posts, activity, comment, spelling, short, page, canonical,
+        post, stale, posts, activity, comment, spelling, short, page, canonical, named, record,
     ] {
         ids.insert(uri, store::ensure_resource(&pool, uri).await.unwrap());
     }
@@ -1351,6 +1354,7 @@ async fn reextract_moves_or_releases_the_aliases_rules_no_longer_make(pool: PgPo
         (spelling, stale, "identifier"),
         (short, post, "identifier"),
         (page, canonical, "canonical"),
+        (named, record, "source"),
     ] {
         sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,$3) ON CONFLICT(alias_id) DO UPDATE SET root_id=excluded.root_id,basis=excluded.basis")
             .bind(&ids[alias])
@@ -1374,6 +1378,18 @@ async fn reextract_moves_or_releases_the_aliases_rules_no_longer_make(pool: PgPo
                 .unwrap()
         }
     };
+    // The stale root counts the spelling's reference, as an earlier build scored it.
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','x','/pub/app/tags/stale',now())")
+        .bind(&ids[spelling])
+        .bind(author("stale"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO resource_score(resource_id,score,updated_at,newest_at) VALUES($1,1,now(),now())")
+        .bind(&ids[stale])
+        .execute(&pool)
+        .await
+        .unwrap();
     // A route none of them is on leaves them all.
     queue::reextract(&pool, &["osm".into()]).await.unwrap();
     assert_eq!(root_of(posts).await, Some(ids[activity].clone()));
@@ -1406,6 +1422,29 @@ async fn reextract_moves_or_releases_the_aliases_rules_no_longer_make(pool: PgPo
     assert_eq!(root_of(spelling).await, Some(ids[post].clone()));
     assert_eq!(root_of(short).await, Some(ids[post].clone()));
     assert_eq!(root_of(page).await, Some(ids[canonical].clone()));
+    assert_eq!(
+        root_of(named).await,
+        Some(ids[record].clone()),
+        "an API's answer is no rule of the URI: it stays"
+    );
+    // The spelling moved: its reference counts for the post, no longer for the stale root.
+    let scored = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM resource_score WHERE resource_id=$1)",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert!(
+        !scored(ids[stale].clone()).await,
+        "the old root is rescored"
+    );
+    assert!(scored(ids[post].clone()).await);
     let dirty: i64 =
         sqlx::query_scalar("SELECT count(*) FROM group_dirty WHERE resource_id=ANY($1)")
             .bind(vec![ids[posts].clone(), ids[activity].clone()])
