@@ -282,10 +282,13 @@ fn post_rejection(line: &Change, uri: &str) -> Option<&'static str> {
         _ => Some("object_path"),
     }
 }
-/// A post's card is due now: a new version, or one deleted, changes it whatever its TTL. A line
-/// older than the card's last read changes nothing.
+/// A post's card is due now: a new version, or one deleted, changes it whatever its TTL, and
+/// whatever its earlier reads did (a post never read, dead-lettered after its homeserver failed,
+/// is read again too). A read in flight is fenced as `reextract` fences it (the generation bump):
+/// its answer, which may be the older version, is never saved over the newer one's due time. A
+/// line older than the card's last read changes nothing.
 async fn expedite(tx: &mut Transaction<'_, Postgres>, id: &str, at: i64) -> Result<()> {
-    sqlx::query("UPDATE resource SET final=false,refresh_at=now(),next_attempt_at=now(),dead_letter=false,attempts=0 WHERE id=$1 AND resolved_at IS NOT NULL AND $2>resolved_at")
+    sqlx::query("UPDATE resource SET final=false,refresh_at=now(),next_attempt_at=now(),dead_letter=false,attempts=0,timeout_streak=0,lease_until=NULL,priority_at=NULL,generation=generation+1 WHERE id=$1 AND (resolved_at IS NULL OR $2>resolved_at)")
         .bind(id)
         .bind(timestamp(Some(at))?)
         .execute(&mut **tx)

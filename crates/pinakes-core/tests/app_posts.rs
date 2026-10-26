@@ -3,11 +3,13 @@
 //! version by its namespace and kind. Every URI and identity here is made up.
 use chrono::{DateTime, Duration, Utc};
 use pinakes_core::{
-    config::IngestConfig,
+    config::{IngestConfig, QueueConfig},
     event::EventStatus,
     ingest,
     model::{identity, ResourceMeta, Status},
     nexus::{Change, Changes, FeedPage, Kind, Op},
+    queue,
+    resolver::Resolver,
     resolver::{classify, pubky_apps::card_with, pubky_apps::posts::AppKind},
     telemetry::Metrics,
 };
@@ -425,4 +427,141 @@ fn content_references_are_gated_and_text_is_storable() {
         json!({"timeZone": "Europe/Zurich", "horizonDays": 7, "for": private, "available": []}),
     );
     assert!(no_card(&card(&post("events", &id()), &availability)));
+}
+
+/// A Pubky resolver standing in for the homeserver: it reads the post as `name`, or fails.
+struct Homeserver(Option<&'static str>);
+#[async_trait::async_trait]
+impl Resolver for Homeserver {
+    fn refresh_after(&self, _: &ResourceMeta) -> std::time::Duration {
+        std::time::Duration::from_secs(7 * 86_400)
+    }
+    fn name(&self) -> &'static str {
+        "pubky"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, uri: &str) -> anyhow::Result<ResourceMeta> {
+        let name = self
+            .0
+            .ok_or_else(|| anyhow::anyhow!("homeserver unreachable"))?;
+        let mut doc = ResourceMeta::new(uri, "pubky", 7 * 86_400);
+        doc.set_type("Trip");
+        doc.name = Some(name.into());
+        Ok(doc)
+    }
+}
+async fn card_name(pool: &PgPool, uri: &str) -> Option<String> {
+    let (id, _, _) = identity(uri).unwrap();
+    sqlx::query_scalar("SELECT doc->>'name' FROM resource WHERE id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// A post whose every read failed (its homeserver down) until it was dead-lettered, never
+/// resolved: a new version line makes it due again, and it resolves (review of f275248).
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_dead_lettered_post_is_read_again_at_a_new_version(pool: PgPool) {
+    let metrics = Metrics::new().unwrap();
+    let cfg = QueueConfig::default();
+    let route = post("maps", &id());
+    batch(
+        &pool,
+        vec![line(Op::Put, &route, "0034A", Utc::now())],
+        &metrics,
+    )
+    .await;
+    let (rid, _, _) = identity(&route).unwrap();
+    // Its first reads all failed: dead-lettered, never resolved.
+    sqlx::query("UPDATE resource SET dead_letter=true,attempts=$2,resolved_at=NULL,last_error='unreachable',next_attempt_at=now()+interval '7 days' WHERE id=$1")
+        .bind(&rid)
+        .bind(cfg.max_failures as i32)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(queue::claim(&pool, "pubky", &cfg).await.unwrap().is_none());
+    batch(
+        &pool,
+        vec![line(Op::Put, &route, "0034B", Utc::now())],
+        &metrics,
+    )
+    .await;
+    let job = queue::claim(&pool, "pubky", &cfg)
+        .await
+        .unwrap()
+        .expect("the post is due again");
+    queue::run_job(&pool, &Homeserver(Some("Aare walk")), &cfg, &job)
+        .await
+        .unwrap();
+    assert_eq!(card_name(&pool, &route).await.as_deref(), Some("Aare walk"));
+}
+
+/// A read in flight when a newer version arrives is fenced: what it read (the older version) is
+/// not saved with the card's normal TTL over the newer version's "due now"; the post is read
+/// again at once and keeps the newer version (review of f275248).
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_read_in_flight_never_undoes_a_newer_version(pool: PgPool) {
+    let metrics = Metrics::new().unwrap();
+    let cfg = QueueConfig::default();
+    let route = post("maps", &id());
+    batch(
+        &pool,
+        vec![line(
+            Op::Put,
+            &route,
+            "0034A",
+            Utc::now() - Duration::hours(2),
+        )],
+        &metrics,
+    )
+    .await;
+    let first = queue::claim(&pool, "pubky", &cfg).await.unwrap().unwrap();
+    queue::run_job(&pool, &Homeserver(Some("Version A")), &cfg, &first)
+        .await
+        .unwrap();
+    assert_eq!(card_name(&pool, &route).await.as_deref(), Some("Version A"));
+    assert!(!due(&pool, &route).await);
+    // A refresh starts reading version A again…
+    let (rid, _, _) = identity(&route).unwrap();
+    sqlx::query("UPDATE resource SET next_attempt_at=now(),refresh_at=now() WHERE id=$1")
+        .bind(&rid)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let in_flight = queue::claim(&pool, "pubky", &cfg).await.unwrap().unwrap();
+    // …when the feed brings version B (written a second after that read began).
+    batch(
+        &pool,
+        vec![line(
+            Op::Put,
+            &route,
+            "0034B",
+            Utc::now() + Duration::seconds(1),
+        )],
+        &metrics,
+    )
+    .await;
+    // The read in flight answers with version A: not saved, the post stays due now.
+    queue::run_job(
+        &pool,
+        &Homeserver(Some("Version A, again")),
+        &cfg,
+        &in_flight,
+    )
+    .await
+    .unwrap();
+    assert_eq!(card_name(&pool, &route).await.as_deref(), Some("Version A"));
+    assert!(due(&pool, &route).await);
+    let next = queue::claim(&pool, "pubky", &cfg)
+        .await
+        .unwrap()
+        .expect("the post is read again at once");
+    queue::run_job(&pool, &Homeserver(Some("Version B")), &cfg, &next)
+        .await
+        .unwrap();
+    assert_eq!(card_name(&pool, &route).await.as_deref(), Some("Version B"));
+    assert!(!due(&pool, &route).await);
 }
