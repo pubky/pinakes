@@ -331,6 +331,15 @@ async fn the_mcp_handshake_and_every_tool(pool: PgPool) {
     assert!(!error, "{read}");
     assert_eq!(read["card"]["id"], ids[1]);
     assert_eq!(read["card"]["name"], "An article");
+    // A read is flat: the card tool carries its fields, such as the keys `lookup` takes.
+    let (error, book) = call(
+        &app,
+        "card",
+        json!({"uri": "https://openlibrary.org/books/OL7353617M/Matilda"}),
+    )
+    .await;
+    assert!(!error, "{book}");
+    assert_eq!(book["card"]["keys"], json!(["isbn:9780140328721"]));
     let (error, unknown) = call(&app, "card", json!({"uri": "https://example.org/nobody"})).await;
     assert!(error);
     assert_eq!(unknown["status"], 404);

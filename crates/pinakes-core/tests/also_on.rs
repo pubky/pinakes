@@ -829,6 +829,71 @@ async fn search_by_key_finds_the_same_object_on_every_service(pool: PgPool) {
     }
 }
 
+/// Every key a resource read lists (`keys`, as stored) searches back to that resource:
+/// `GET /v1/search?key=` takes each exactly as listed (review of d6d0aeb: MusicBrainz and podcast
+/// keys did not).
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn every_key_a_read_lists_searches_back(pool: PgPool) {
+    let uri = "https://example.org/a-show";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut doc = ResourceMeta::new(uri, "jsonld", 86400);
+    doc.set_type("PodcastSeries");
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) VALUES($1,repeat('a',52),'tag','/pub/test/tags/1','listen',now())")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // One key of each form the core and the hubs store (a source's own namespaces round-trip
+    // through its `search_key`, tested with it).
+    let keys = [
+        "mb:recording:0f2b3d4e-1111-4222-8333-444455556666",
+        "mb:release-group:0f2b3d4e-1111-4222-8333-444455556667",
+        "mb:artist:0f2b3d4e-1111-4222-8333-444455556668",
+        "podcast:guid:917393e3-1b1e-5cef-ace4-edaa54e1f810",
+        "podcast:apple:1234567890",
+        "podcast:apple_episode:1000123456789",
+        "podcast:item:917393e3-1b1e-5cef-ace4-edaa54e1f810:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "isrc:GBUM71029604",
+        "upc:0602557656527",
+        "wikidata:Q42",
+        "imdb:tt0111161",
+        "osm:node/1",
+        "doi:10.1000/xyz123",
+    ];
+    for key in keys {
+        sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) VALUES($1,$2,'test','test',now()+interval '1 day')")
+            .bind(&id)
+            .bind(key)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let read = get(&app, &format!("/v1/resources/{id}")).await;
+    let listed: Vec<&str> = read["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k.as_str().unwrap())
+        .collect();
+    assert_eq!(listed.len(), keys.len(), "{read}");
+    for key in listed {
+        let path = format!(
+            "/v1/search?key={}",
+            url::form_urlencoded::byte_serialize(key.as_bytes()).collect::<String>()
+        );
+        let page = get(&app, &path).await;
+        let found: Vec<&str> = page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(found, [id.as_str()], "{key}");
+    }
+}
+
 /// `sort=trending` ranks by the references made inside the window (7 days by default), shows
 /// only links referenced in it, combines with tags and `collapse=group` (one song across
 /// services is one row), and refuses windows outside 1h–90d.

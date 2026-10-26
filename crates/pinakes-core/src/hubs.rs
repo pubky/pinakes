@@ -35,7 +35,7 @@ impl MbKind {
             Self::Artist => "artist",
         }
     }
-    fn parse(s: &str) -> Option<Self> {
+    pub(crate) fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "recording" => Self::Recording,
             "release" => Self::Release,

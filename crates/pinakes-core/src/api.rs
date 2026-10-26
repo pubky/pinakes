@@ -537,8 +537,8 @@ pub struct SearchQuery {
     /// MusicBrainz page was merged from),
     /// `wikidata:{Q-id}`, `isrc:{code}`, `upc:{barcode}`, `isbn:{ISBN-10 or ISBN-13}`,
     /// `imdb:{tt…}` (an IMDb title), `podcast:{GUID}` (a podcast's `podcast:guid`),
-    /// `osm:{type}/{id}`, `doi:{DOI}`, or another namespace a source records (its page in
-    /// docs/sources names it).
+    /// `osm:{type}/{id}`, `doi:{DOI}`, any key exactly as a resource read lists it in `keys`,
+    /// or another namespace a source records (its page in docs/sources names it).
     pub key: Option<String>,
     /// Resource ID: what the people who tagged it also referenced, ranked by how many of them
     /// did, then by the newest of those references (not with `sort`). A resource in a group
@@ -1357,7 +1357,7 @@ pub(crate) struct KeyFilter {
 }
 pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
     let bad = || {
-        ApiError::bad("key is mbid:{uuid}, wikidata:{Q-id}, isrc:{ISRC}, upc:{UPC, EAN or GTIN with its check digit}, isbn:{ISBN-10 or ISBN-13}, imdb:{tt and 7–8 digits}, podcast:{GUID}, osm:{type}/{id}, doi:{DOI} or another namespace a source records (docs/sources)")
+        ApiError::bad("key is mbid:{uuid}, wikidata:{Q-id}, isrc:{ISRC}, upc:{UPC, EAN or GTIN with its check digit}, isbn:{ISBN-10 or ISBN-13}, imdb:{tt and 7–8 digits}, podcast:{GUID}, osm:{type}/{id}, doi:{DOI}, any key as a resource read lists it (keys), or another namespace a source records (docs/sources)")
     };
     let (kind, value) = key.split_once(':').ok_or_else(bad)?;
     let keys = |keys: Vec<String>| KeyFilter { keys, fact: None };
@@ -1393,9 +1393,31 @@ pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
             .map(|n| both("isbn", crate::resolver::cards::isbn13(&n)))
             .ok_or_else(bad),
         "imdb" if crate::also_on::media::imdb(value) => Ok(keys(vec![format!("imdb:{value}")])),
-        "podcast" => crate::also_on::media::guid(value)
-            .map(|g| keys(vec![format!("podcast:guid:{g}")]))
-            .ok_or_else(bad),
+        // A MusicBrainz key as stored: `mb:{recording|release|release-group|artist}:{mbid}`.
+        "mb" => {
+            let (kind, id) = value.split_once(':').ok_or_else(bad)?;
+            let kind = crate::hubs::MbKind::parse(kind).ok_or_else(bad)?;
+            Ok(keys(vec![crate::hubs::key::mb(kind, id).ok_or_else(bad)?]))
+        }
+        // A show's GUID, or a podcast key as stored: `podcast:guid:…`, `podcast:apple:…`,
+        // `podcast:apple_episode:…`, `podcast:item:{show GUID}:{SHA-256 of the item GUID}`.
+        "podcast" => {
+            let guid = crate::also_on::media::guid;
+            let key = match value.split_once(':') {
+                Some(("guid", g)) => guid(g).map(|g| format!("podcast:guid:{g}")),
+                Some((kind @ ("apple" | "apple_episode"), id)) if crate::lookups::digits(id) => {
+                    Some(format!("podcast:{kind}:{id}"))
+                }
+                Some(("item", rest)) => rest.split_once(':').and_then(|(g, hash)| {
+                    let hash = hash.to_ascii_lowercase();
+                    (hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+                        .then(|| Some(format!("podcast:item:{}:{hash}", guid(g)?)))
+                        .flatten()
+                }),
+                _ => guid(value).map(|g| format!("podcast:guid:{g}")),
+            };
+            key.map(|k| keys(vec![k])).ok_or_else(bad)
+        }
         // The lookups' keys: places, papers, packages, repositories, games, documents.
         _ => crate::lookups::search_key(kind, value)
             .map(|key| keys(vec![key]))
