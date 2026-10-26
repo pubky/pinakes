@@ -128,7 +128,10 @@ async fn ranked_by_shared_taggers_then_recency(pool: PgPool) {
     let faceted = related(&pool, &seed, "&facet=type").await;
     assert_eq!(
         faceted["facets"]["type"],
-        serde_json::json!([{"type":"MusicAlbum","count":2},{"type":"MusicRecording","count":1}]),
+        serde_json::json!([
+            {"type":"MusicAlbum","type_path":["Thing","CreativeWork","MusicPlaylist","MusicAlbum"],"count":2},
+            {"type":"MusicRecording","type_path":["Thing","CreativeWork","MusicRecording"],"count":1}
+        ]),
         "facets count the related rows"
     );
     // A page and the next one keep the ranking (one daemon: cursors are its own).

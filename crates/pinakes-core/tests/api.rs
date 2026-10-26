@@ -269,11 +269,40 @@ async fn search_filters_facets_true_keyset_and_invalid_options(pool: PgPool) {
     assert!(page["facets"].get("type").is_none());
     // Card types over the whole filtered set, most frequent first; both facets at once.
     let (_, page) = call(&app, "GET", "/v1/search?facet=type&limit=1", None).await;
+    // Each entry says where its type sits, from Thing down, for a client's type tree.
     assert_eq!(
         page["facets"]["type"],
-        json!([{"type":"Article","count":4},{"type":"MusicEvent","count":1}])
+        json!([
+            {"type":"Article","type_path":["Thing","CreativeWork","Article"],"count":4},
+            {"type":"MusicEvent","type_path":["Thing","Event","MusicEvent"],"count":1}
+        ])
     );
     assert!(page["facets"].get("tags").is_none());
+    // Several types: any of them, each with its subtypes; one type as before.
+    for (types, found) in [
+        ("MusicEvent,Article", 5),
+        ("Event,Book", 1),
+        ("CreativeWork", 4),
+        ("Article, Article", 4),
+        ("Book,Place", 0),
+    ] {
+        let (code, page) = call(
+            &app,
+            "GET",
+            &format!("/v1/search?type={}&limit=50", types.replace(' ', "%20")),
+            None,
+        )
+        .await;
+        assert_eq!(code, 200, "{types}: {page}");
+        assert_eq!(page["items"].as_array().unwrap().len(), found, "{types}");
+    }
+    let eleven = ["Article"; 11].join(",");
+    for bad in [eleven.as_str(), "Article,", "Article,NotAType", ","] {
+        let (code, page) = call(&app, "GET", &format!("/v1/search?type={bad}"), None).await;
+        assert_eq!(code, 400, "{bad}: {page}");
+    }
+    let (_, page) = call(&app, "GET", "/v1/search?type=Article,NotAType", None).await;
+    assert!(page["error"].as_str().unwrap().contains("NotAType"));
     let (_, page) = call(&app, "GET", "/v1/search?facet=type,tags", None).await;
     assert!(page["facets"]["type"].is_array() && page["facets"]["tags"].is_array());
     assert_eq!(

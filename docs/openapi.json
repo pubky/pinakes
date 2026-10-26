@@ -1341,10 +1341,18 @@
           },
           "type": {
             "type": "string"
+          },
+          "type_path": {
+            "description": "Where the type sits in schema.org, from `Thing` down to the type itself\n(`[\"Thing\", \"CreativeWork\", \"MusicRecording\"]`): enough to build the tree and roll\ncounts up into families.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "required": [
           "type",
+          "type_path",
           "count"
         ],
         "type": "object"
@@ -2780,6 +2788,7 @@
             }
           },
           {
+            "description": "One schema.org type, or up to 10 comma-separated: any of them (OR), each with its\nsubtypes (`Event` matches `MusicEvent`).",
             "examples": {
               "(none)": {
                 "summary": "(none)",

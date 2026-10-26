@@ -365,7 +365,7 @@ pub fn tools() -> Vec<Tool> {
             "Search the links people referenced on Pubky. Every filter is optional and they combine: text, a schema.org type (Event includes MusicEvent; Place includes cafés), tags, a circle on the map, a time window, one exact identifier. Returns compact cards (id, uri, type, name, description, site, point, start, end, group, also_on) and a cursor for the next page.",
             json!({"type":"object","additionalProperties":false,"properties":{
                 "q":{"type":"string","description":"Words in the name or description, at most 256 bytes."},
-                "type":{"type":"string","description":"A schema.org type, e.g. Place, Event, Book, MusicRecording, ScholarlyArticle, VideoObject."},
+                "type":{"type":"array","items":{"type":"string"},"maxItems":10,"description":"Schema.org types, any of them, each with its subtypes: e.g. [\"Place\"], [\"Event\"], [\"MusicRecording\", \"MusicAlbum\", \"MusicGroup\"]. A single type as a string is accepted too."},
                 "tags":{"type":"array","items":{"type":"string"},"maxItems":5,"description":"Labels people tagged the links with; any of them unless match is all."},
                 "match":{"type":"string","enum":["any","all"],"description":"With tags: any (default) or all (at most 3 tags)."},
                 "near":{"type":"object","required":["lat","lon","radius"],"additionalProperties":false,"properties":{"lat":{"type":"number"},"lon":{"type":"number"},"radius":{"type":"number","description":"Metres, at most 200000 by default."}},"description":"A circle on the map."},
@@ -447,7 +447,6 @@ fn encode(pairs: &[(&str, String)]) -> String {
 fn search_query(args: &JsonObject) -> Result<String, Failure> {
     const TEXT: &[(&str, &str)] = &[
         ("q", "q"),
-        ("type", "type"),
         ("match", "match"),
         ("from", "from"),
         ("to", "to"),
@@ -474,17 +473,21 @@ fn search_query(args: &JsonObject) -> Result<String, Failure> {
             pairs.push((param, value));
         }
     }
-    match args.get("tags") {
-        None | Some(Value::Null) => {}
-        Some(Value::Array(tags)) => {
-            let tags: Option<Vec<&str>> = tags.iter().map(Value::as_str).collect();
-            let tags = tags.ok_or_else(|| Failure::bad("`tags` is an array of strings"))?;
-            if !tags.is_empty() {
-                pairs.push(("tags", tags.join(",")));
+    // `type` and `tags`: an array, or the route's comma-separated string.
+    for key in ["type", "tags"] {
+        match args.get(key) {
+            None | Some(Value::Null) => {}
+            Some(Value::Array(items)) => {
+                let items: Option<Vec<&str>> = items.iter().map(Value::as_str).collect();
+                let items =
+                    items.ok_or_else(|| Failure::bad(format!("`{key}` is an array of strings")))?;
+                if !items.is_empty() {
+                    pairs.push((key, items.join(",")));
+                }
             }
+            Some(Value::String(value)) => pairs.push((key, value.clone())),
+            Some(_) => return Err(Failure::bad(format!("`{key}` is an array of strings"))),
         }
-        Some(Value::String(tags)) => pairs.push(("tags", tags.clone())),
-        Some(_) => return Err(Failure::bad("`tags` is an array of strings")),
     }
     match args.get("near") {
         None | Some(Value::Null) => {}
@@ -654,16 +657,21 @@ mod tests {
         .unwrap();
         assert_eq!(
             query,
-            "q=caf%C3%A9&type=Place&match=all&from=now&to=now%2B7d&sort=distance&tags=coffee%2Cwifi&near=47.3769%2C8.5417&radius=2000&limit=10"
+            "q=caf%C3%A9&match=all&from=now&to=now%2B7d&sort=distance&type=Place&tags=coffee%2Cwifi&near=47.3769%2C8.5417&radius=2000&limit=10"
         );
         assert_eq!(
             search_query(&args(json!({"bbox": [8.45, 47.33, 8.62, 47.42]}))).unwrap(),
             "bbox=8.45%2C47.33%2C8.62%2C47.42"
         );
+        assert_eq!(
+            search_query(&args(json!({"type": ["MusicRecording", "MusicAlbum"]}))).unwrap(),
+            "type=MusicRecording%2CMusicAlbum"
+        );
         for bad in [
             json!({"admin": true}),
             json!({"q": 1}),
             json!({"tags": [1]}),
+            json!({"type": [1]}),
             json!({"near": {"lat": 1}}),
             json!({"bbox": [1, 2, 3]}),
             json!({"limit": "ten"}),

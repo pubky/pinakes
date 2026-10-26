@@ -249,6 +249,16 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
         }, timeout, signal);
       }
       report.assertions.push(`${tags.length} SDK tags reached Nexus and resolved with expected types`);
+      // Several types in one search are any of them, and the type facet places each type.
+      const kinds = [...new Set(tags.map(tag => tag.type))].slice(0, 10);
+      const anyKind = await search({ type: kinds.join(','), facet: 'type', limit: '500' });
+      for (const tag of tags.filter(t => kinds.includes(t.type))) {
+        assert(anyKind.items.some(row => row.id === docs.get(tag.kind).id), `type=${kinds.join(',')} finds ${tag.kind}`);
+      }
+      for (const entry of anyKind.facets.type) {
+        assert(entry.type_path.length > 0 && entry.type_path.at(-1) === entry.type, `facet type_path ends at ${entry.type}`);
+      }
+      report.assertions.push(`type list (${kinds.length} types) and the type facet's type_path`);
       // A sample may already be resolved from an older public reference while
       // Pinakes is still ingesting this run's new tag. Wait for the scoped rows too.
       const results = await waitFor('Pinakes tagged search', async () => {
