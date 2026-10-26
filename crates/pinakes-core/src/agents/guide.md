@@ -95,8 +95,9 @@ curl -s '{{BASE}}/v1/search?type=JobPosting&remote=true&from=now-30d'
 ```
 
 A job posting's `start` is the date it was posted and its `end` its closing date; `from` and
-`to` select by the date posted. `remote=false` keeps the postings with a workplace, which
-`near` or `bbox` find on the map. A closed posting is left out unless you add `closed=true`.
+`to` select by the date posted. `remote=false` keeps the postings that may not be done
+remotely, with or without a workplace; `near` or `bbox` find those with one on the map. A closed
+posting is left out unless you add `closed=true`.
 `facts` holds the employer, employment type, salary, remote regions, apply link and
 `job_status` (`open` or `closed`).
 

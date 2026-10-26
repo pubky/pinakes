@@ -318,3 +318,80 @@ async fn postings_are_placed_found_and_close(pool: PgPool) {
     let (code, v) = call(&app, "/v1/search?remote=maybe").await;
     assert_eq!(code, 400, "{v}");
 }
+
+/// A Nominatim settlement hit, shaped like its jsonv2 answer.
+fn settlement(id: i64, name: &str, country: &str, code: &str) -> Value {
+    json!({"osm_type": "relation", "osm_id": id, "lat": "51.5", "lon": "-0.12",
+        "category": "boundary", "type": "administrative", "addresstype": "city", "name": name,
+        "display_name": format!("{name}, {country}"), "namedetails": {"name": name},
+        "address": {"city": name, "country": country, "country_code": code}})
+}
+
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_workplace_is_never_an_ambiguous_or_other_settlement(pool: PgPool) {
+    // Two Springfields; one settlement under another name than the posting's town; and London,
+    // United Kingdom for a posting in London, Canada.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = Router::new().route(
+        "/search",
+        get(|Query(q): Query<HashMap<String, String>>| async move {
+            assert_eq!(q["featureType"], "settlement");
+            let hits = match q["city"].as_str() {
+                "Springfield" => json!([
+                    settlement(1, "Springfield", "United States", "us"),
+                    settlement(2, "Springfield", "United States", "us")
+                ]),
+                "Philly" => json!([settlement(3, "Philadelphia", "United States", "us")]),
+                "London" => json!([settlement(4, "London", "United Kingdom", "gb")]),
+                other => panic!("asked for {other}"),
+            };
+            axum::Json(hits)
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let service = pinakes_core::event::service::EventService {
+        pool: pool.clone(),
+        // Even with a lenient score, a contradicting country never places a posting.
+        config: EventConfig {
+            geocode_score: 0.5,
+            ..Default::default()
+        },
+        osm: Arc::new(
+            OsmResolver::new(
+                pool.clone(),
+                OsmConfig {
+                    nominatim_url: format!("http://{addr}"),
+                    requests_per_second: 1000.0,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        ),
+    };
+    for (town, country) in [
+        ("Springfield", "United States"),
+        ("Philly", "United States"),
+        ("London", "Canada"),
+    ] {
+        let base: url::Url = "https://jobs.example/p".parse().unwrap();
+        let mut doc = ResourceMeta::new(base.as_str(), "jsonld", 3600);
+        pinakes_core::kinds::jobs::from_jsonld(
+            &json!({"@type": "JobPosting", "title": "Role",
+                "jobLocation": {"address": {"addressLocality": town, "addressCountry": country}}}),
+            &base,
+        )
+        .apply(&mut doc);
+        assert!(doc.event.venue.is_some(), "{town}");
+        service.workplace(&mut doc).await.unwrap();
+        let venue = doc.event.venue.as_ref().unwrap();
+        assert_eq!(venue.osm_id, None, "{town}, {country} is not placed");
+        assert!(doc.location.is_none(), "{town}");
+    }
+    let saved: i64 = sqlx::query_scalar("SELECT count(*) FROM osm_place")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(saved, 0, "nothing geocoded is saved");
+    server.abort();
+}

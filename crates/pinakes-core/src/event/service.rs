@@ -674,7 +674,12 @@ impl EventService {
         });
         let total = 1 + usize::from(same_country.is_some());
         let matching = usize::from(named) + usize::from(same_country == Some(true));
-        if !named || (matching as f64 / total as f64) < self.config.geocode_score {
+        // A settlement of another name, or in a country the posting contradicts, is never
+        // placed, whatever `geocode_score` allows.
+        if !named
+            || same_country == Some(false)
+            || (matching as f64 / total as f64) < self.config.geocode_score
+        {
             return Ok(());
         }
         let venue = doc.event.venue.as_mut().expect("a venue");

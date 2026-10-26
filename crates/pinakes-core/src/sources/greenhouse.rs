@@ -291,5 +291,22 @@ mod tests {
         )
         .is_err());
         assert!(doc.clone().bounded(crate::sources::attributes()).is_ok());
+
+        // A pay range with a maximum only is no salary, as on the JSON-LD route.
+        let mut v: Value =
+            serde_json::from_slice(&read("greenhouse-gitlab-8638232002.json")).unwrap();
+        v["pay_input_ranges"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("min_cents");
+        let doc = card(
+            base("gitlab", 8638232002),
+            8638232002,
+            200,
+            &serde_json::to_vec(&v).unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!doc.attributes.keys().any(|k| k.starts_with("salary_")));
     }
 }

@@ -105,7 +105,11 @@ impl Posting {
             ("remote", self.remote.then(|| "true".to_owned())),
             ("remote_regions", joined(&self.regions)),
             ("salary_min", salary.min.map(amount)),
-            ("salary_max", salary.max.map(amount)),
+            // A range needs its minimum: a maximum alone says too little.
+            (
+                "salary_max",
+                salary.max.filter(|_| salary.min.is_some()).map(amount),
+            ),
             (
                 "salary_currency",
                 salary.currency.filter(|_| salary.min.is_some()),
@@ -373,7 +377,10 @@ pub fn posted_at(s: &str) -> Option<DateTime<Utc>> {
 pub fn closes_at(s: &str) -> Option<DateTime<Utc>> {
     let s = s.trim();
     let at = posted_at(s)?;
-    if s.len() == 10 {
+    let date_only = ["%Y-%m-%d", "%Y%m%d"]
+        .iter()
+        .any(|f| chrono::NaiveDate::parse_from_str(s, f).is_ok());
+    if date_only {
         crate::event::time::bounded(at + chrono::Duration::days(1))
     } else {
         Some(at)
@@ -614,5 +621,30 @@ mod tests {
             "2026-11-01T11:00:00+00:00"
         );
         assert_eq!(closes_at("soon"), None);
+        // Every date-only form is valid through its whole day.
+        for date in ["2026-11-07", "20261107"] {
+            assert_eq!(
+                closes_at(date).unwrap().to_rfc3339(),
+                "2026-11-08T00:00:00+00:00",
+                "{date}"
+            );
+        }
+        assert_eq!(
+            closes_at("2026-11-07T00:00:00Z").unwrap().to_rfc3339(),
+            "2026-11-07T00:00:00+00:00"
+        );
+        // A salary maximum alone, from any route, is no salary.
+        let mut doc = ResourceMeta::new("https://jobs.example/p", "greenhouse", 60);
+        Posting {
+            salary: Salary {
+                min: None,
+                max: Some(235200.0),
+                currency: Some("USD".into()),
+                unit: None,
+            },
+            ..Default::default()
+        }
+        .apply(&mut doc);
+        assert!(!doc.attributes.keys().any(|k| k.starts_with("salary_")));
     }
 }

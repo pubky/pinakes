@@ -125,7 +125,8 @@ pub fn hiring_thread(thread: &Value) -> bool {
 }
 
 /// A top-level comment of a hiring thread as the job posting it is, when its first line is a
-/// header in the thread's convention ("Company | Role | Place | REMOTE (US) | Full Time"): it is
+/// header in the thread's convention ("Company | Role | Place | REMOTE (US) | Full Time", parts
+/// separated by `|`, `—` or `–`; an ASCII `-` is part of a word such as "Full-time"): it is
 /// named by that line; the employer is its first part; a part saying REMOTE makes it remote (with
 /// the regions in its parentheses), and one naming an employment type gives it.
 pub fn hiring_comment(doc: &mut ResourceMeta, comment: &Value) {

@@ -26,7 +26,8 @@ Two kinds of item are `JobPosting`s ([Jobs](../api.md#jobs)), posted at their ti
 - a job item ("9 Mothers (YC P26) Is Hiring in Austin, TX"), named by its title; its employer is
   the name before " (YC …", and its `link` is where to apply;
 - a top-level comment of a monthly "Ask HN: Who is hiring?" thread (a story by `whoishiring`)
-  whose first line is a header in the thread's convention, parts separated by `|` or a dash
+  whose first line is a header in the thread's convention, parts separated by `|`, `—` or `–`
+  (an ASCII `-` is not a separator: it is part of words such as "Full-time")
   ("FUTO | https://futo.tech/ | Austin, TX | REMOTE(Worldwide) or ONSITE | Full Time"). It is
   named by that line; its employer is the first part (without its parentheses); a part saying
   REMOTE makes it remote, with the regions in its parentheses ("REMOTE (US)"); a part naming
