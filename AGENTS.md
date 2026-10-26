@@ -26,7 +26,7 @@ export DATABASE_URL='postgresql:///postgres?host=/var/run/postgresql'
 | `scripts/verify-osm-boundary [out.sql]` | OSM-derived facts are only in `osm_place` (run by the tests; needs `psql`, `pg_dump`, `rg`). |
 | `scripts/verify-no-capability-urls` | No private calendar share URL in any tracked file (run by the tests). |
 | `scripts/check-removals [--tests] [NAME…]` | Removes each source (every registered one, or the named ones) on a scratch worktree by the checklist below, checks nothing of the source's is left (its id, display name and page links, searched independently of the deletion), and builds every test target with warnings as errors; with `--tests`, also runs the workspace's tests; `--self-test` checks the leftover check. A source whose removal needs any other edit fails. Half a minute per source to build, minutes more with the tests; run it for the sources a change touches. |
-| `scripts/lock-waits COMMAND…` | Samples the database every 50 ms while COMMAND runs and prints which locks backends waited on; fails, without repeating any part of `DATABASE_URL`, when it could not sample. Needs `psql` and `python3`. |
+| `scripts/lock-waits COMMAND…` | Samples the database every 50 ms while COMMAND runs (COMMAND starts once the sampler has its first sample, or has stopped) and prints which locks backends waited on; fails, without repeating any part of `DATABASE_URL`, when it could not sample. Needs `psql` and `python3`. |
 
 Tests use local servers, injected transports and recorded fixtures instead of public services.
 
