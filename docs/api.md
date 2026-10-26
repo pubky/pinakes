@@ -853,7 +853,7 @@ seeing the keys the ones before it found: `service`, `tidal`, `musicbrainz`,
 `musicbrainz_entity`, `wikidata`, `discogs`, `deezer`, `itunes`, `wikipedia`, `wikidata_item`,
 `books`, `films`, `podcasts`, `titles`, `osm_wikidata`, `wikidata_osm`, `btcmap`,
 `federal_register`, `unpaywall`, `ncbi`, `datacite`, `huggingface`, `crates`, `npm`, `pypi`,
-`software_heritage`, `steam`, `wikidata_stores`, `wayback`; `[also_on.sources.<id>] enabled =
+`software_heritage`, `steam`, `wikidata_stores`, `app_stores`, `wayback`; `[also_on.sources.<id>] enabled =
 false` turns one off. A MusicBrainz or Wikidata answer over 8 MB is no answer: the source
 records only what the link's URL proves (a MusicBrainz page's MBID or ISRC, a Wikidata item
 link's Q-id, the Q-id an article's own Wikipedia names), else nothing, until its next run. A

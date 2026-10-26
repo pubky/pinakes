@@ -75,16 +75,6 @@
     "status": 200,
     "url": "https://www.protondb.com/api/v1/reports/summaries/620.json"
   },
-  "wikidata-q16927599": {
-    "bytes": 163686,
-    "content_type": "application/json; charset=utf-8",
-    "file": "wikidata-q16927599.json.gz",
-    "note": "AntennaPod.",
-    "recorded_at": "2026-10-19T23:09:40+00:00",
-    "sha256": "aa4bd38e9dd2e1c5ddd2a9e8215f717b73032238ba23f6dc34b41bfea78d3427",
-    "status": 200,
-    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q16927599&props=claims%7Csitelinks%2Furls&format=json"
-  },
   "wikidata-q279446": {
     "bytes": 241093,
     "content_type": "application/json; charset=utf-8",
@@ -104,15 +94,5 @@
     "sha256": "29fb340b339e7609aa7c406c8caaa3bef7ae65258d7b7cb4b6077031f1f1094d",
     "status": 200,
     "url": "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP1733%3D620&srlimit=5&format=json"
-  },
-  "wikidata-search-p3418-antennapod": {
-    "bytes": 360,
-    "content_type": "application/json; charset=utf-8",
-    "file": "wikidata-search-p3418-antennapod.json",
-    "note": "The item with Google Play ID de.danoeh.antennapod (AntennaPod).",
-    "recorded_at": "2026-10-19T23:09:39+00:00",
-    "sha256": "13811f7e24d156f63ac01973d680e62a3b00f7ddb219ca4ae215525eb056e95b",
-    "status": 200,
-    "url": "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP3418%3Dde.danoeh.antennapod&srlimit=5&format=json"
   }
 }

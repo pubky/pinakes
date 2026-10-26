@@ -183,6 +183,12 @@ pub const APP: &[Property] = &[
     p("P4655", "Flathub", T("https://flathub.org/apps/$1"), slug),
     p("P4435", "Snap Store", T("https://snapcraft.io/$1"), slug),
     p(
+        "P5885",
+        "Microsoft Store",
+        T("https://apps.microsoft.com/detail/$1"),
+        |v| v.len() == 12 && v.bytes().all(|b| b.is_ascii_alphanumeric()),
+    ),
+    p(
         "P8443",
         "Homebrew",
         T("https://formulae.brew.sh/formula/$1"),

@@ -133,7 +133,8 @@ on the same page.
   PubMed records and preprint.
 - [`packages`](packages.md): `crates`, `npm`, `pypi` and `software_heritage`, a package's registry
   pages, provenance and archive.
-- [`games`](games.md): `steam` and `wikidata_stores`, a game's and an app's other stores.
+- [`games`](games.md): `steam` and `wikidata_stores`, a game's other stores.
+- [`apps`](apps.md): `app_stores`, an app's other stores, bridged by Wikidata.
 - [`archive`](archive.md): `wayback`, an archived copy of a gone page.
 
 ## Removing a source
