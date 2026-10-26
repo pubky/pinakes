@@ -470,9 +470,16 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
             entity_priority(v)
         }
     };
-    // Among equals, the script holding the page's own node (an event whose url is the page
-    // over another event the page lists).
-    let rank = |v: &Value| (subject(v), has_own_node(v, &fetched.url));
+    // A site's own node (its WebSite, its publisher) ranks below any other: it never names the
+    // page. Among equals, the script holding the page's own node (an event whose url is the
+    // page over another event the page lists).
+    let rank = |v: &Value| {
+        (
+            !site_script(v, &fetched.url),
+            subject(v),
+            has_own_node(v, &fetched.url),
+        )
+    };
     if let Some(best) = (1..scripts.len()).fold((!scripts.is_empty()).then_some(0), |best, i| {
         best.filter(|b| rank(&scripts[i].0) <= rank(&scripts[*b].0))
             .or(Some(i))
@@ -560,8 +567,37 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
     if let Some(isbn) = meta.get("citation_isbn") {
         crate::group_keys::add(&mut out.doc, "cites_isbn", isbn);
     }
+    // What names the page may also come from a `<meta>` that is a child of `<body>` itself:
+    // frameworks that stream a page's metadata (React 19, Next.js) put it there, while user
+    // content always sits inside the body's elements. It fills what the head left out, and never
+    // claims an identity (an alias, a cited DOI): those stay the head's.
+    let mut meta_card = meta.clone();
+    for el in html.select(&selector("body > meta")) {
+        if let (Some(k), Some(v)) = (
+            el.value()
+                .attr("property")
+                .or_else(|| el.value().attr("name")),
+            el.value().attr("content"),
+        ) {
+            let k = k.to_ascii_lowercase();
+            if BODY_META.contains(&k.as_str()) {
+                meta_card.entry(k).or_insert_with(|| v.to_string());
+            }
+        }
+    }
+    let meta_head = meta;
+    let meta = meta_card;
+    // The site's names, for the site suffix of the page's titles.
+    let site_names: Vec<String> = [meta.get("og:site_name"), meta.get("application-name")]
+        .into_iter()
+        .flatten()
+        .cloned()
+        .chain(std::iter::once(out.doc.site.clone()))
+        .collect();
+    let root = matches!(fetched.url.path(), "" | "/");
+    let titled = |t: &String| without_site_suffix(t, &site_names, &fetched.url, root);
     for key in ["og:title", "twitter:title"] {
-        fill(&mut out.doc.name, meta.get(key).cloned());
+        fill(&mut out.doc.name, meta.get(key).map(titled));
     }
     for key in ["og:description", "twitter:description"] {
         fill(&mut out.doc.description, meta.get(key).cloned());
@@ -584,7 +620,10 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
     if let Some(site) = meta.get("og:site_name") {
         out.doc.site = site.chars().take(128).collect();
     }
-    if let Some(alias) = meta.get("og:url").and_then(|s| origin_url(&fetched.url, s)) {
+    if let Some(alias) = meta_head
+        .get("og:url")
+        .and_then(|s| origin_url(&fetched.url, s))
+    {
         add_alias(&mut out.doc, alias);
     }
     // canonical, alternate and oEmbed links belong in the head (they are not body-ok); a body
@@ -635,11 +674,83 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
     out.title = html
         .select(&selector("title"))
         .next()
-        .map(|el| el.text().collect::<String>().trim().to_owned());
+        .map(|el| el.text().collect::<String>().trim().to_owned())
+        .map(|t| titled(&t));
     out.description = meta.get("description").cloned();
     // The performers' provenance is this fetch's, whatever base the parsers were handed.
     out.doc.event.read_from(fetched);
     Ok(out)
+}
+/// The `<meta>` names a child of `<body>` may give (they name and describe the page; none
+/// claims an identity).
+const BODY_META: &[&str] = &[
+    "og:title",
+    "og:description",
+    "og:image",
+    "og:type",
+    "og:site_name",
+    "twitter:title",
+    "twitter:description",
+    "twitter:image",
+    "twitter:image:src",
+    "description",
+    "application-name",
+];
+
+/// Title separators before a site suffix.
+const TITLE_SEPARATORS: &[&str] = &[" • ", " | ", " - ", " – ", " — ", " · "];
+
+/// A page title without its site suffix: the part after its last separator, when that part
+/// names the site as a whole word (one of `sites`, such as its `og:site_name` or its own JSON-LD
+/// name, or the head of one before a `:`, `-` or `|`; or a label of its host), e.g. "TFTC: A
+/// Bitcoin Podcast • Listen on Fountain". A site's root page keeps its title, and so does a
+/// title that would be left empty.
+pub(crate) fn without_site_suffix(title: &str, sites: &[String], url: &Url, root: bool) -> String {
+    let title = title.trim();
+    if root {
+        return title.to_owned();
+    }
+    let Some((head, suffix)) = TITLE_SEPARATORS
+        .iter()
+        .filter_map(|sep| title.rfind(sep).map(|at| (at, sep.len())))
+        .max_by_key(|(at, _)| *at)
+        .map(|(at, len)| (title[..at].trim_end(), title[at + len..].trim()))
+    else {
+        return title.to_owned();
+    };
+    let mut names: Vec<String> = vec![];
+    for site in sites {
+        let site = site.trim().to_lowercase();
+        let short = site
+            .split([':', '|'])
+            .next()
+            .and_then(|s| s.split(" - ").next())
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        names.extend([site, short]);
+    }
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    let labels: Vec<&str> = host.trim_start_matches("www.").split('.').collect();
+    names.extend(
+        labels[..labels.len().saturating_sub(1)]
+            .iter()
+            .map(|l| (*l).to_owned()),
+    );
+    let suffix_lower = suffix.to_lowercase();
+    let word = |name: &str| {
+        name.chars().count() >= 3
+            && suffix_lower.match_indices(name).any(|(at, m)| {
+                let before = suffix_lower[..at].chars().next_back();
+                let after = suffix_lower[at + m.len()..].chars().next();
+                !before.is_some_and(char::is_alphanumeric)
+                    && !after.is_some_and(char::is_alphanumeric)
+            })
+    };
+    if head.is_empty() || !names.iter().any(|n| word(n)) {
+        return title.to_owned();
+    }
+    head.to_owned()
 }
 fn cited_doi(value: &str) -> Option<String> {
     let value = value.trim();
@@ -862,6 +973,44 @@ fn type_priority(v: &Value) -> u8 {
     };
     own
 }
+/// Whether a JSON-LD node is the site's own rather than the page's: its `WebSite` node, its
+/// breadcrumbs, or an organization or person whose `url` (else `@id`) is a site's root while the
+/// page is not (the publisher, the same on every page). Such a node never names, describes,
+/// illustrates or types the page; its name may name the site.
+fn site_node(v: &Value, base: &Url) -> bool {
+    let path = schema_type(v)
+        .map(crate::model::type_path)
+        .unwrap_or_default();
+    if path
+        .iter()
+        .any(|t| matches!(t.as_str(), "WebSite" | "BreadcrumbList"))
+    {
+        return true;
+    }
+    if !path
+        .iter()
+        .any(|t| matches!(t.as_str(), "Organization" | "Person"))
+    {
+        return false;
+    }
+    let named = ["url", "@id"]
+        .into_iter()
+        .filter_map(|f| v.get(f).and_then(Value::as_str))
+        .find_map(|u| origin_url(base, u))
+        .and_then(|u| Url::parse(&u).ok());
+    named.is_some_and(|u| {
+        matches!(u.path(), "" | "/")
+            && u.query().is_none()
+            && crate::event::page::names_page(v, base) != Some(true)
+    })
+}
+/// Whether a script's JSON-LD is one site node alone (no graph, no main entity).
+fn site_script(v: &Value, base: &Url) -> bool {
+    v.is_object()
+        && v.get("@graph").is_none()
+        && v.get("mainEntity").is_none()
+        && site_node(v, base)
+}
 /// The `url`/`@id` values of a JSON-LD node (or array of nodes), its main entity and its
 /// graph nodes.
 fn entity_urls(v: &Value) -> impl Iterator<Item = &str> {
@@ -952,7 +1101,13 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url, claims: bool, vou
         // A page's article/event outranks its publisher or breadcrumb helper nodes, and among
         // equals the page's own node (its url is the page) outranks another event it lists.
         // Extract one entity so unrelated graph nodes cannot donate misleading fields.
-        let rank = |v: &Value| (entity_priority(v), crate::event::page::owns_page(v, base));
+        let rank = |v: &Value| {
+            (
+                !site_node(v, base),
+                entity_priority(v),
+                crate::event::page::owns_page(v, base),
+            )
+        };
         if let Some(mut best) = values.first() {
             for value in values.iter().skip(1) {
                 if rank(value) > rank(best) {
@@ -978,6 +1133,16 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url, claims: bool, vou
         if doc.source != "web" {
             return;
         }
+    }
+    // The site's own node names at most the site, never the page (its og: tags or title do).
+    if site_node(v, base) {
+        let host = base.host_str().unwrap_or_default();
+        if doc.site == host {
+            if let Some(name) = v.get("name").and_then(string) {
+                doc.site = name.chars().take(128).collect();
+            }
+        }
+        return;
     }
     let Some(kind) = schema_type(v) else {
         return;
@@ -1520,6 +1685,167 @@ mod tests {
             .doc;
         assert_eq!(names(&doc), ["Radiohead"]);
     }
+    /// A site's own JSON-LD (its publisher at the site's root, its WebSite, its breadcrumbs) never
+    /// names, describes, illustrates or types a page: the page's og: tags (in the head, or
+    /// streamed as children of `<body>`) do, less the site's suffix, and the publisher may name
+    /// the site. A node about the page still wins over og:.
+    #[test]
+    fn a_sites_own_json_ld_never_names_the_page() {
+        let read = |url: &str, html: &str| {
+            let fetched = crate::sources::fixture::page(url, "text/html", html.into(), None);
+            extract(url, &fetched, 100).unwrap()
+        };
+        let site = r#"<script type="application/ld+json">{"@type":"Organization","name":"Pods","url":"https://pods.example","logo":"https://pods.example/logo.png","description":"The podcast app."}</script><script type="application/ld+json">{"@type":"WebSite","name":"Pods","url":"https://pods.example"}</script>"#;
+        let og = r#"<meta property="og:title" content="A Show • Listen on Pods"><meta property="og:description" content="About the show."><meta property="og:image" content="https://cdn.example/cover.jpg">"#;
+        let card = |out: &Extracted| {
+            (
+                out.doc.name.clone(),
+                out.doc.description.clone(),
+                out.doc.image.clone(),
+            )
+        };
+        let expected = (
+            Some("A Show".to_owned()),
+            Some("About the show.".to_owned()),
+            Some("https://cdn.example/cover.jpg".to_owned()),
+        );
+        // og: in the head, and og: a framework streamed into the body itself.
+        for html in [
+            format!("<html><head>{site}{og}</head><body></body></html>"),
+            format!("<html><head>{site}</head><body><div hidden></div>{og}</body></html>"),
+        ] {
+            let out = read("https://pods.example/show/1", &html);
+            assert_eq!(card(&out), expected, "{html}");
+            assert_ne!(out.doc.type_name, "Organization");
+            assert_eq!(out.doc.site, "Pods");
+        }
+        // A `<meta>` inside the body's content is not the page's.
+        let nested = format!(
+            "<html><head>{site}</head><body><div><meta property=\"og:title\" content=\"Injected\"></div></body></html>"
+        );
+        assert_eq!(read("https://pods.example/show/1", &nested).doc.name, None);
+        // Only the head claims an identity: a body og:url is no alias.
+        let claimed = format!(
+            "<html><head></head><body>{og}<meta property=\"og:url\" content=\"https://other.example/\"></body></html>"
+        );
+        assert!(read("https://pods.example/show/1", &claimed)
+            .doc
+            .aliases
+            .iter()
+            .all(|a| !a.contains("other.example")));
+        // The site's root page is the organization's own: it names it.
+        let home = read(
+            "https://pods.example/",
+            &format!("<html><head>{site}</head><body></body></html>"),
+        );
+        assert_eq!(home.doc.name.as_deref(), Some("Pods"));
+        // A node about the page (a product whose url is the page, an event with no url) wins.
+        for (url, node, name) in [
+            (
+                "https://shop.example/p/42",
+                r#"{"@type":"Product","url":"https://shop.example/p/42","name":"Lamp","image":"https://shop.example/lamp.jpg"}"#,
+                "Lamp",
+            ),
+            (
+                "https://pods.example/live/1",
+                r#"{"@type":"Event","name":"Live show","startDate":"2026-11-01T19:00:00Z"}"#,
+                "Live show",
+            ),
+        ] {
+            let html = format!(
+                "<html><head>{site}<script type=\"application/ld+json\">{node}</script>{og}</head></html>"
+            );
+            assert_eq!(read(url, &html).doc.name.as_deref(), Some(name), "{url}");
+        }
+    }
+
+    /// A title loses its site suffix only when the suffix names the site.
+    #[test]
+    fn site_suffixes() {
+        let url = Url::parse("https://fountain.fm/show/1").unwrap();
+        let sites = ["Fountain: Podcasts & Music".to_owned()];
+        for (title, clean) in [
+            (
+                "TFTC: A Bitcoin Podcast • Listen on Fountain",
+                "TFTC: A Bitcoin Podcast",
+            ),
+            (
+                "TFTC: A Bitcoin Podcast • Ten31 Timestamp • Watch on Fountain",
+                "TFTC: A Bitcoin Podcast • Ten31 Timestamp",
+            ),
+            ("A Show | Fountain", "A Show"),
+            ("A Show - fountain.fm", "A Show"),
+            // The suffix names something else, or a word that only contains the site's name.
+            (
+                "Water - The Fountains of Rome",
+                "Water - The Fountains of Rome",
+            ),
+            ("A Show - Season 2", "A Show - Season 2"),
+            ("• Listen on Fountain", "• Listen on Fountain"),
+            ("No separator Fountain", "No separator Fountain"),
+        ] {
+            assert_eq!(
+                without_site_suffix(title, &sites, &url, false),
+                clean,
+                "{title}"
+            );
+        }
+        // A host label names the site without any site name.
+        let play = Url::parse("https://play.google.com/store/apps/details?id=a.b").unwrap();
+        assert_eq!(
+            without_site_suffix("Signal - Apps on Google Play", &[], &play, false),
+            "Signal"
+        );
+        // A site's root page keeps its title.
+        assert_eq!(
+            without_site_suffix("Podcasts • Fountain", &sites, &url, true),
+            "Podcasts • Fountain"
+        );
+    }
+
+    /// Fountain's show and episode pages (recorded, trimmed to their metadata): the show is
+    /// named by its og: tags, which Next.js streams into the body, not by Fountain's own
+    /// Organization; the episode by its VideoObject. Both are typed by their address.
+    #[test]
+    fn fountain_pages_are_named_by_their_own_metadata() {
+        let read = |url: &str, file: &str| {
+            let path = format!("{}/tests/fixtures/web/{file}", env!("CARGO_MANIFEST_DIR"));
+            let fetched =
+                crate::sources::fixture::page(url, "text/html", std::fs::read(path).unwrap(), None);
+            let mut doc = extract(url, &fetched, 100).unwrap().doc;
+            doc.status = crate::model::Status::Ok;
+            crate::also_on::media::type_card(url, &Default::default(), &mut doc);
+            doc
+        };
+        let show = read(
+            "https://fountain.fm/show/V71wG3DhMtF9fDqaJRWX",
+            "fountain-show-V71wG3DhMtF9fDqaJRWX.html",
+        );
+        assert_eq!(show.type_name, "PodcastSeries");
+        assert_eq!(show.name.as_deref(), Some("TFTC: A Bitcoin Podcast"));
+        assert!(show
+            .description
+            .as_deref()
+            .is_some_and(|d| d.starts_with("TFTC is a podcast hosted by Marty Bent")));
+        assert!(show.image.as_deref().is_some_and(
+            |i| i.starts_with("https://feeds.fountain.fm/ZwwaDULvAj0yZvJ5kdB9/files/COVER_ART")
+        ));
+        assert_eq!(show.site, "Fountain: Podcasts & Music");
+        let episode = read(
+            "https://fountain.fm/episode/Yj4aqLaHXcVmxgXbMLHb",
+            "fountain-episode-Yj4aqLaHXcVmxgXbMLHb.html",
+        );
+        assert_eq!(episode.type_name, "PodcastEpisode");
+        assert_eq!(
+            episode.name.as_deref(),
+            Some("Ten31 Timestamp: Spirit of '63")
+        );
+        assert!(episode
+            .image
+            .as_deref()
+            .is_some_and(|i| i.contains("/items/r1808W019H3baERCQAWo/")));
+    }
+
     #[test]
     fn extraction_precedence_and_promoted_facets() {
         let body = r#"<title>Title fallback</title><meta property="og:title" content="OG"><meta property="og:image" content="/pic.png"><link rel="alternate" type="application/json+oembed" href="/embed"><link rel="canonical" href="/canonical"><div class="h-event"><span class="p-name">MF</span><span class="p-summary">MF summary</span></div><script type="application/ld+json">{"@type":"MusicEvent","name":"JSON first","startDate":"2026-10-01T12:00:00Z","location":{"geo":{"latitude":46.0,"longitude":8.0}}}</script>"#;
@@ -1813,12 +2139,15 @@ mod tests {
             "{keys:?}"
         );
         assert!(keys.iter().all(|k| !k.contains("wikidata")), "{keys:?}");
-        // As the chosen entity (no body script), the same head node keeps its claims.
+        // Alone, the same head node is still the site's publisher (its url is the site's root,
+        // the page is a story): it claims nothing for the page, neither the homepage nor the
+        // publisher's Wikidata item.
         let (_, keys) = extract_keys(
             r#"<head><title>Story</title><script type="application/ld+json">{"@type":"Organization","url":"https://news.example/","sameAs":"https://www.wikidata.org/wiki/Q42"}</script></head><body><p>Text</p></body>"#,
         );
+        assert!(keys.iter().all(|k| !k.contains("wikidata")), "{keys:?}");
         assert!(
-            keys.contains(&"https://www.wikidata.org/wiki/Q42".to_owned()),
+            !keys.contains(&"https://news.example/".to_owned()),
             "{keys:?}"
         );
     }

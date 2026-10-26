@@ -394,8 +394,18 @@ only for calendars, where they commit with the parsed snapshot.
 Generic web resolution reads JSON-LD, microformats, OpenGraph, oEmbed and the title, then the
 page hooks of switched-on sources (WordPress and Ghost records a page names on its own origin, a
 media page's object by its exact record; see [docs/sources](sources/README.md)). A hook that
-fails or runs out of its three seconds leaves the page's card and logs its source at debug. Canonical, alternate and oEmbed links come from the
-document head only. Media pages use the pinned 390-provider oEmbed registry (`data/`, with
+fails or runs out of its three seconds leaves the page's card and logs its source at debug.
+A site's own JSON-LD never names a page: its `WebSite` node, its breadcrumbs, and an
+organization or person whose `url` (else `@id`) is the site's root while the page is not (the
+publisher, the same on every page). Such a node ranks below every other, gives the page no name,
+description, image, type or identity claim, and may only name the site. Without a node about the
+page, the og:/twitter: tags and the title name it. Those may also be children of `<body>` itself,
+where frameworks such as Next.js stream a page's metadata; a `<meta>` inside the body's content
+never counts. A title loses its site suffix (the part after its last `•`, `|`, `-`, `–`, `—` or
+`·`) when that part names the site as a whole word: its `og:site_name` or the head of it, its
+JSON-LD name, or a label of its host. So "TFTC: A Bitcoin Podcast • Listen on Fountain" is "TFTC:
+A Bitcoin Podcast". A site's root page keeps its title. Canonical, alternate and oEmbed links,
+`og:url` and citation meta come from the document head only. Media pages use the pinned 390-provider oEmbed registry (`data/`, with
 SoundCloud, TikTok, Facebook and Instagram skipped; `scripts/oembed-providers` updates it):
 `media.oembed = "when_needed"` (default) asks path-specific providers first and broad patterns
 only for an incomplete, failed or truncated page; `"always"` also fetches every matching
