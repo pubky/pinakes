@@ -8,6 +8,51 @@
     "status": 200,
     "url": "https://hacker-news.firebaseio.com/v0/item/2921983.json"
   },
+  "hn-item-49922569": {
+    "bytes": 4580,
+    "content_type": "application/json; charset=utf-8",
+    "file": "hn-item-49922569.json",
+    "recorded_at": "2026-10-26T19:27:40+00:00",
+    "sha256": "82205c07428fcdb3129ddb7c1460a60b6fe98268a8299e39307acf5602903418",
+    "status": 200,
+    "url": "https://hacker-news.firebaseio.com/v0/item/49922569.json"
+  },
+  "hn-item-49922584": {
+    "bytes": 1736,
+    "content_type": "application/json; charset=utf-8",
+    "file": "hn-item-49922584.json",
+    "recorded_at": "2026-10-26T19:27:41+00:00",
+    "sha256": "3f612fb9559a88a37aba47cfbee265625421808ef0fbc4df2c876df5dae68f9e",
+    "status": 200,
+    "url": "https://hacker-news.firebaseio.com/v0/item/49922584.json"
+  },
+  "hn-item-49925643": {
+    "bytes": 397,
+    "content_type": "application/json; charset=utf-8",
+    "file": "hn-item-49925643.json",
+    "recorded_at": "2026-10-26T19:27:41+00:00",
+    "sha256": "7882fc27ed09af6affc2500a009fe9730279ccd2288de889b2376032ccc96236",
+    "status": 200,
+    "url": "https://hacker-news.firebaseio.com/v0/item/49925643.json"
+  },
+  "hn-item-49926618": {
+    "bytes": 1317,
+    "content_type": "application/json; charset=utf-8",
+    "file": "hn-item-49926618.json",
+    "recorded_at": "2026-10-26T19:27:41+00:00",
+    "sha256": "e73e24e39ead4e07321f43a5a264d00a10c29244237c69031edee4d960bb9e70",
+    "status": 200,
+    "url": "https://hacker-news.firebaseio.com/v0/item/49926618.json"
+  },
+  "hn-item-50179455": {
+    "bytes": 158,
+    "content_type": "application/json; charset=utf-8",
+    "file": "hn-item-50179455.json",
+    "recorded_at": "2026-10-26T19:27:42+00:00",
+    "sha256": "9be7f493810ebf7c244289e405efaba22e27372abcd511e2add3c1b6b08e4485",
+    "status": 200,
+    "url": "https://hacker-news.firebaseio.com/v0/item/50179455.json"
+  },
   "hn-item-8863": {
     "bytes": 375,
     "content_type": "application/json; charset=utf-8",

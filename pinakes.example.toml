@@ -109,6 +109,8 @@ enabled = true
 enabled = true
 [sources.govinfo]
 enabled = true
+[sources.greenhouse]
+enabled = true
 [sources.hacker_news]
 enabled = true
 [sources.huggingface]

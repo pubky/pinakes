@@ -12,13 +12,26 @@ same id) and the API's `https://hacker-news.firebaseio.com/v0/item/{id}.json` ar
 
 ## What it reads
 
-`GET https://hacker-news.firebaseio.com/v0/item/{id}.json` (well under 1 KB). An item that does
-not exist or was deleted is `missing`.
+`GET https://hacker-news.firebaseio.com/v0/item/{id}.json` (well under 1 KB), and for a comment
+its parent the same way, to see whether it answers a hiring thread (a failed read leaves it a
+comment). An item that does not exist or was deleted is `missing`.
 
 ## Card
 
-A story, job or poll is a `DiscussionForumPosting` named by its title; a comment is a `Comment`
+A story or poll is a `DiscussionForumPosting` named by its title; a comment is a `Comment`
 named after its author ("Comment by …"). The description is an excerpt of its text.
+
+Two kinds of item are `JobPosting`s ([Jobs](../api.md#jobs)), posted at their time (`start`):
+
+- a job item ("9 Mothers (YC P26) Is Hiring in Austin, TX"), named by its title; its employer is
+  the name before " (YC …", and its `link` is where to apply;
+- a top-level comment of a monthly "Ask HN: Who is hiring?" thread (a story by `whoishiring`)
+  whose first line is a header in the thread's convention, parts separated by `|` or a dash
+  ("FUTO | https://futo.tech/ | Austin, TX | REMOTE(Worldwide) or ONSITE | Full Time"). It is
+  named by that line; its employer is the first part (without its parentheses); a part saying
+  REMOTE makes it remote, with the regions in its parentheses ("REMOTE (US)"); a part naming
+  full time, part time, contract or intern gives its employment type; one applies through the
+  comment's page. The free-text place is not placed on the map.
 
 | Fact | Meaning |
 | --- | --- |
@@ -29,8 +42,11 @@ named after its author ("Comment by …"). The description is an excerpt of its 
 | `link` | The link a story discusses (another object, not this one) |
 | `parent` | For a comment, the item it answers |
 | `page_url` | Its page on Hacker News |
+| `hiring_organization`, `employment_type`, `remote`, `remote_regions`, `date_posted`, `apply_url` | A job posting's ([Jobs](../api.md#jobs)) |
 
 ## Examples
 
 - `https://news.ycombinator.com/item?id=8863`
 - `https://hnsignals.com/signal/2921983` (a comment, by its hnsignals page)
+- `https://news.ycombinator.com/item?id=49926618` (a job posting in the October 2026 hiring
+  thread)

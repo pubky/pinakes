@@ -1,7 +1,12 @@
 //! Hacker News stories, comments, jobs and polls, read from the official Firebase API by item id.
-//! hnsignals.com names items by the same id. No key; no published limit.
+//! hnsignals.com names items by the same id. No key; no published limit. A job item, and a
+//! top-level comment of a monthly "Ask HN: Who is hiring?" thread, is a job posting.
 use super::{text, web_url, Context, Example, Source};
-use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
+use crate::{
+    kinds::jobs::{self, Posting},
+    model::ResourceMeta,
+    resolver::egress::FetchOptions,
+};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use serde_json::Value;
@@ -79,7 +84,7 @@ pub fn card(
         .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
     for (key, value) in [
         ("author", by),
-        ("item_type", Some(kind).filter(|k| !k.is_empty())),
+        ("item_type", Some(kind.clone()).filter(|k| !k.is_empty())),
         ("published", published),
         ("score", v["score"].as_u64().map(|n| n.to_string())),
         (
@@ -94,7 +99,128 @@ pub fn card(
             doc.attributes.insert(key.into(), value);
         }
     }
+    if kind == "job" {
+        // "9 Mothers (YC P26) Is Hiring in Austin, TX".
+        let title = text(&v["title"]).unwrap_or_default();
+        Posting {
+            organization: title
+                .split_once(" (YC ")
+                .map(|(org, _)| org.trim().to_owned())
+                .filter(|org| !org.is_empty()),
+            posted: doc.attributes.get("published").cloned(),
+            apply_url: doc.attributes.get("link").cloned(),
+            ..Default::default()
+        }
+        .apply(&mut doc);
+    }
     Ok(Some(doc))
+}
+
+/// Whether `thread` is a monthly "Ask HN: Who is hiring?" story, whose top-level comments are
+/// job postings.
+pub fn hiring_thread(thread: &Value) -> bool {
+    thread["type"] == "story"
+        && thread["by"] == "whoishiring"
+        && text(&thread["title"]).is_some_and(|t| t.starts_with("Ask HN: Who is hiring?"))
+}
+
+/// A top-level comment of a hiring thread as the job posting it is, when its first line is a
+/// header in the thread's convention ("Company | Role | Place | REMOTE (US) | Full Time"): it is
+/// named by that line; the employer is its first part; a part saying REMOTE makes it remote (with
+/// the regions in its parentheses), and one naming an employment type gives it.
+pub fn hiring_comment(doc: &mut ResourceMeta, comment: &Value) {
+    let Some(html) = text(&comment["text"]) else {
+        return;
+    };
+    let first = html.split("<p>").next().unwrap_or_default();
+    let Some(header) = crate::resolver::pubky_apps::read::html_text(first) else {
+        return;
+    };
+    let header = header.split_whitespace().collect::<Vec<_>>().join(" ");
+    let parts: Vec<&str> = header
+        .split(['|', '—', '–'])
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    if parts.len() < 2 || header.chars().count() > 300 {
+        return;
+    }
+    // Each part, its parenthesised asides, and its alternatives ("REMOTE or ONSITE").
+    let mut fragments: Vec<String> = vec![];
+    for part in &parts {
+        let (outside, asides) = parenthesised(part);
+        for piece in std::iter::once(outside).chain(asides) {
+            fragments.extend(
+                piece
+                    .split(" or ")
+                    .flat_map(|p| p.split(" OR "))
+                    .flat_map(|p| p.split('/'))
+                    .map(|p| p.trim().to_owned())
+                    .filter(|p| !p.is_empty()),
+            );
+        }
+    }
+    // "REMOTE(Worldwide) or ONSITE": a part saying REMOTE, with the regions it names.
+    let regions: Vec<Vec<String>> = parts
+        .iter()
+        .copied()
+        .chain(fragments.iter().map(String::as_str))
+        .filter_map(jobs::remote_place)
+        .collect();
+    let employment_types = fragments
+        .iter()
+        .filter_map(|f| jobs::employment_type(f))
+        .filter(|t| {
+            matches!(
+                t.as_str(),
+                "FULL_TIME" | "PART_TIME" | "CONTRACTOR" | "INTERN" | "TEMPORARY"
+            )
+        })
+        .collect();
+    let organization = Some(parenthesised(parts[0]).0)
+        .map(|o| o.trim().to_owned())
+        .filter(|o| !o.is_empty());
+    doc.name = None;
+    Posting {
+        title: Some(header.chars().take(200).collect()),
+        organization,
+        remote: !regions.is_empty(),
+        regions: regions.into_iter().flatten().collect(),
+        employment_types,
+        posted: doc.attributes.get("published").cloned(),
+        apply_url: doc.attributes.get("page_url").cloned(),
+        ..Default::default()
+    }
+    .apply(doc);
+}
+/// `text` without its parenthesised asides, and the asides.
+fn parenthesised(text: &str) -> (String, Vec<String>) {
+    let (mut outside, mut asides, mut depth, mut aside) =
+        (String::new(), vec![], 0usize, String::new());
+    for c in text.chars() {
+        match c {
+            '(' => {
+                depth += 1;
+                if depth > 1 {
+                    aside.push(c);
+                }
+            }
+            ')' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    asides.push(std::mem::take(&mut aside).trim().to_owned());
+                } else {
+                    aside.push(c);
+                }
+            }
+            c if depth > 0 => aside.push(c),
+            c => outside.push(c),
+        }
+    }
+    (
+        outside.split_whitespace().collect::<Vec<_>>().join(" "),
+        asides.into_iter().filter(|a| !a.is_empty()).collect(),
+    )
 }
 
 #[async_trait]
@@ -139,6 +265,13 @@ impl Source for HackerNews {
             "link",
             "parent",
             "page_url",
+            // A job item's and a hiring thread's posting (`kinds::jobs`).
+            "hiring_organization",
+            "employment_type",
+            "remote",
+            "remote_regions",
+            "date_posted",
+            "apply_url",
         ]
     }
     fn social(&self, _doc: &ResourceMeta) -> bool {
@@ -154,6 +287,10 @@ impl Source for HackerNews {
                 uri: "https://hnsignals.com/signal/2921983",
                 card_type: "Comment",
             },
+            Example {
+                uri: "https://news.ycombinator.com/item?id=49926618",
+                card_type: "JobPosting",
+            },
         ]
     }
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
@@ -168,11 +305,35 @@ impl Source for HackerNews {
             )
             .await?;
         let doc = cx.card(uri, self);
-        Ok(
-            crate::resolver::html::blocking(move || card(doc, id, f.status, &f.body))
-                .await??
-                .unwrap_or_else(|| cx.missing(uri, self)),
-        )
+        let body = f.body.clone();
+        let Some(mut doc) =
+            crate::resolver::html::blocking(move || card(doc, id, f.status, &body)).await??
+        else {
+            return Ok(cx.missing(uri, self));
+        };
+        // A comment's thread, when its parent is one: a failed read leaves it a comment.
+        let item: Value = serde_json::from_slice(&f.body)?;
+        if let Some(parent) = item["parent"]
+            .as_u64()
+            .filter(|_| item["type"] == "comment")
+        {
+            let thread = cx
+                .fetch(
+                    &format!("https://hacker-news.firebaseio.com/v0/item/{parent}.json"),
+                    &FetchOptions {
+                        accept: Some("application/json".into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .ok()
+                .filter(|t| t.status == 200)
+                .and_then(|t| serde_json::from_slice::<Value>(&t.body).ok());
+            if thread.as_ref().is_some_and(hiring_thread) {
+                hiring_comment(&mut doc, &item);
+            }
+        }
+        Ok(doc)
     }
 }
 
@@ -251,5 +412,72 @@ mod tests {
         .unwrap()
         .is_none());
         assert!(card(base(1), 1, 200, &read("hn-item-8863.json")).is_err());
+    }
+
+    #[test]
+    fn job_items_and_hiring_threads_are_postings() {
+        let doc = card(
+            base(50179455),
+            50179455,
+            200,
+            &read("hn-item-50179455.json"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(doc.type_name, "JobPosting");
+        assert_eq!(
+            doc.name.as_deref(),
+            Some("9 Mothers (YC P26) Is Hiring in Austin, TX")
+        );
+        let a = &doc.attributes;
+        assert_eq!(a["hiring_organization"], "9 Mothers");
+        assert_eq!(a["apply_url"], "https://9mothers.com/careers");
+        assert_eq!(
+            doc.start.map(|t| t.to_rfc3339()),
+            a.get("published").map(|p| {
+                p.parse::<chrono::DateTime<chrono::Utc>>()
+                    .unwrap()
+                    .to_rfc3339()
+            })
+        );
+
+        let item = |id: u64| -> Value {
+            serde_json::from_slice(&read(&format!("hn-item-{id}.json"))).unwrap()
+        };
+        let thread = item(49922569);
+        assert!(hiring_thread(&thread));
+        assert!(!hiring_thread(&item(8863)));
+        let comment = |id: u64| {
+            let mut doc = card(base(id), id, 200, &read(&format!("hn-item-{id}.json")))
+                .unwrap()
+                .unwrap();
+            hiring_comment(&mut doc, &item(id));
+            doc
+        };
+        let doc = comment(49926618);
+        assert_eq!(doc.type_name, "JobPosting");
+        assert_eq!(
+            doc.name.as_deref(),
+            Some(
+                "FUTO | https://futo.tech/ | Austin, TX | REMOTE(Worldwide) or ONSITE | Full Time"
+            )
+        );
+        let a = &doc.attributes;
+        assert_eq!(a["hiring_organization"], "FUTO");
+        assert_eq!(a["remote"], "true");
+        assert_eq!(a["remote_regions"], "Worldwide");
+        assert_eq!(a["employment_type"], "FULL_TIME");
+        assert_eq!(a["apply_url"], root(49926618));
+        assert_eq!(a["author"], "futohq");
+
+        let doc = comment(49922584);
+        assert_eq!(doc.attributes["hiring_organization"], "PrairieLearn");
+        assert_eq!(doc.attributes["remote_regions"], "US");
+        assert!(!doc.attributes.contains_key("employment_type"));
+        // A comment that is no header stays a comment.
+        let doc = comment(49925643);
+        assert_eq!(doc.type_name, "Comment");
+        assert!(!doc.attributes.contains_key("hiring_organization"));
+        assert!(doc.bounded(crate::sources::attributes()).is_ok());
     }
 }

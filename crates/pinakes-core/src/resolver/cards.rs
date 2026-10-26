@@ -461,7 +461,12 @@ impl Resolver for CardResolver {
                 }
                 "media" => self.media(uri,ttl).await,
                 "official" => match crate::sources::resolve(&self.web.egress, &self.config, uri, ttl).await? {
-                    Some(doc) => Ok(doc),
+                    Some(mut doc) => {
+                        // A job board's posting is placed as a page's is.
+                        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                        self.web.place_workplace(&mut doc, deadline).await;
+                        Ok(doc)
+                    }
                     // Queued before its source was switched off.
                     None if uri.starts_with("http") => self.web.resolve(uri).await,
                     None => Err(super::RetryLater { class: "disabled", seconds: 3600 }.into()),

@@ -547,20 +547,7 @@ impl EventService {
         if score < self.config.geocode_score {
             return Ok(());
         }
-        let mut place = crate::resolver::osm::map_place(hit, self.osm.config.ttl_secs)?;
-        // Nominatim name can be separate from namedetails on search responses.
-        if place.name.is_none() {
-            place.name = hit["name"].as_str().map(str::to_owned);
-        }
-        let key = crate::resolver::osm::parse_id(&place.url).expect("mapped OSM id");
-        let version = self
-            .osm
-            .save(&key, &place, hit["display_name"].as_str())
-            .await?;
-        venue.osm_id = Some(key.key());
-        venue.osm_version = Some(version);
-        venue.location = None;
-        venue.location_source = Some(crate::model::LocationSource::Geocoded);
+        let place = self.geocoded(venue, hit).await?;
         if matching == total
             && venue
                 .name
@@ -581,6 +568,117 @@ impl EventService {
                 doc.event.timezone_attribution = Some(super::time::ATTRIBUTION.into());
             }
         }
+        Ok(())
+    }
+    /// Place `venue` at Nominatim's `hit`: the place is saved to `osm_place` and the venue names
+    /// it (its point is read from there, never stored with the card).
+    async fn geocoded(
+        &self,
+        venue: &mut super::Venue,
+        hit: &serde_json::Value,
+    ) -> Result<ResourceMeta> {
+        let mut place = crate::resolver::osm::map_place(hit, self.osm.config.ttl_secs)?;
+        // Nominatim name can be separate from namedetails on search responses.
+        if place.name.is_none() {
+            place.name = hit["name"].as_str().map(str::to_owned);
+        }
+        let key = crate::resolver::osm::parse_id(&place.url).expect("mapped OSM id");
+        let version = self
+            .osm
+            .save(&key, &place, hit["display_name"].as_str())
+            .await?;
+        venue.osm_id = Some(key.key());
+        venue.osm_version = Some(version);
+        venue.location = None;
+        venue.location_source = Some(crate::model::LocationSource::Geocoded);
+        Ok(place)
+    }
+    /// A job posting's workplace (`kinds::jobs`), placed as an event's venue is when it names a
+    /// street, else at its town: the one settlement Nominatim finds for it whose name (and
+    /// country, when the posting names one) is the posting's, at `geocode_score` or above.
+    pub async fn workplace(&self, doc: &mut ResourceMeta) -> Result<()> {
+        if !self.config.geocoding || doc.location.is_some() {
+            return Ok(());
+        }
+        doc.event.bound();
+        let Some(venue) = &doc.event.venue else {
+            return Ok(());
+        };
+        if venue.location.is_some() || venue.osm_id.is_some() {
+            return Ok(());
+        }
+        let address = venue.address.clone();
+        if address.contains_key("street")
+            && (address.contains_key("city") || address.contains_key("postalcode"))
+        {
+            return self.venue(doc).await;
+        }
+        let Some(line) = address.get("city").cloned() else {
+            return Ok(());
+        };
+        let mut url: url::Url = format!(
+            "{}/search",
+            self.osm.config.nominatim_url.trim_end_matches('/')
+        )
+        .parse()?;
+        url.query_pairs_mut()
+            .append_pair("format", "jsonv2")
+            .append_pair("addressdetails", "1")
+            .append_pair("namedetails", "1")
+            .append_pair("limit", "2")
+            .append_pair("accept-language", "en")
+            .append_pair("featureType", "settlement");
+        // "Singapore, Singapore", "San Francisco, CA": a town and what holds it, in one line.
+        let (town, country) = match line.split_once(',') {
+            Some((town, _)) if !address.contains_key("country") => {
+                url.query_pairs_mut().append_pair("q", &line);
+                (town.trim().to_owned(), None)
+            }
+            _ => {
+                for (k, param) in [
+                    ("city", "city"),
+                    ("region", "state"),
+                    ("postalcode", "postalcode"),
+                    ("country", "country"),
+                ] {
+                    if let Some(v) = address.get(k) {
+                        url.query_pairs_mut().append_pair(param, v);
+                    }
+                }
+                (line.clone(), address.get("country").cloned())
+            }
+        };
+        let Some(value) = self.osm.request(url).await? else {
+            return Ok(());
+        };
+        let [hit] = value.as_array().map(Vec::as_slice).unwrap_or_default() else {
+            return Ok(());
+        };
+        let normalize = |s: &str| {
+            s.chars()
+                .filter(|c| c.is_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        };
+        let found = &hit["address"];
+        let named = ["city", "town", "village", "municipality", "hamlet"]
+            .iter()
+            .filter_map(|k| found[k].as_str())
+            .chain(hit["name"].as_str())
+            .any(|name| normalize(name) == normalize(&town));
+        let same_country = country.as_deref().map(|country| {
+            ["country_code", "country"]
+                .iter()
+                .filter_map(|k| found[k].as_str())
+                .any(|v| normalize(v) == normalize(country))
+        });
+        let total = 1 + usize::from(same_country.is_some());
+        let matching = usize::from(named) + usize::from(same_country == Some(true));
+        if !named || (matching as f64 / total as f64) < self.config.geocode_score {
+            return Ok(());
+        }
+        let venue = doc.event.venue.as_mut().expect("a venue");
+        self.geocoded(venue, hit).await?;
         Ok(())
     }
 }

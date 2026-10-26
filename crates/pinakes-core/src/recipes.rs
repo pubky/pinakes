@@ -226,6 +226,10 @@ pub fn apply(doc: &mut Value) {
                 || parameter["schema"]["type"]
                     .as_array()
                     .is_some_and(|t| t.iter().any(|t| t == "integer"));
+            let boolean = parameter["schema"]["type"] == "boolean"
+                || parameter["schema"]["type"]
+                    .as_array()
+                    .is_some_and(|t| t.iter().any(|t| t == "boolean"));
             let mut examples = serde_json::Map::new();
             if using.len() < parameter_recipes.len() {
                 optional = true;
@@ -235,6 +239,8 @@ pub fn apply(doc: &mut Value) {
                 let v = value(recipe).expect("used");
                 let v = if integer {
                     Value::from(v.parse::<i64>().expect("integer recipe value"))
+                } else if boolean {
+                    Value::from(v.parse::<bool>().expect("boolean recipe value"))
                 } else {
                     Value::from(v)
                 };
