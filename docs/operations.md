@@ -428,8 +428,10 @@ that is the card. Its last accepted document, event dates and feed occurrences s
 toward a disappearance. Fetches that hit one count as outcome `blocked` in
 `pinakes_fetch_total`.
 
-The markers are the built-in `data/interstitial-markers.json` (text markers, captcha selectors,
-wall host prefixes, sign-in paths). Visible text excludes `script`, `style`, `noscript` and
+The markers are the built-in `data/interstitial-markers.json` (text markers, placeholder
+titles, captcha selectors, wall host prefixes, sign-in paths). A page titled only with its
+site's name (`- YouTube`, `YouTube`: a placeholder title) for a link below the site's root is
+the service's stand-in for the object, a wall, at any length. Visible text excludes `script`, `style`, `noscript` and
 `template`. Title, heading and captcha markers count only on short pages (under 2,000 visible
 bytes) or challenge statuses (403, 429, 503). An HTML answer with status 202 that is empty or
 has no visible text is a challenge (AWS WAF answers bots so); an empty 202 of another type is

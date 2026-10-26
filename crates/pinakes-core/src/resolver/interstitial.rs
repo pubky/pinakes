@@ -25,6 +25,9 @@ pub enum Page {
 #[serde(deny_unknown_fields)]
 struct Walls {
     text: Vec<String>,
+    /// Whole page titles that name only the site, never an object: the page a service shows
+    /// in place of the object (YouTube's regional or consent page is titled "- YouTube").
+    placeholder_titles: Vec<String>,
     captcha_selectors: Vec<String>,
     wall_host_prefixes: Vec<String>,
     wall_paths: Vec<String>,
@@ -161,6 +164,15 @@ pub fn inspect(requested: &Url, f: &Fetched) -> anyhow::Result<Page> {
     let short = visible.trim().len() < 2000;
     // Titles and headings are only evidence on short or challenge pages: a film called
     // "Just a Moment" is not a wall. Captcha widgets in comment forms need the same context.
+    // A page titled only with its site's name, for a link below the site's root, is the
+    // service's stand-in for the object.
+    let placeholder = walls
+        .placeholder_titles
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case(title.trim()));
+    if placeholder && !requested.path().trim_end_matches('/').is_empty() {
+        return Ok(Page::Blocked);
+    }
     let title_marked = walls.marked(&title);
     if ((challenge || short) && (title_marked || (heading.len() < 200 && walls.marked(&heading))))
         || (short && walls.marked(&visible))

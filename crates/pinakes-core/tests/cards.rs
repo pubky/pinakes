@@ -1230,3 +1230,124 @@ async fn body_links_advertise_no_feeds_or_actors() {
         "{seen:?}"
     );
 }
+
+/// A YouTube link is named by YouTube's oEmbed answer: a regional page titled only "- YouTube"
+/// (with the site's own description) is the site's stand-in for the video, a wall, and a page
+/// with another title yields to the answer for name, author and thumbnail. The site's root,
+/// titled "YouTube", is a page like any other.
+#[tokio::test]
+async fn youtube_is_named_by_its_oembed_answer_not_a_regional_page() {
+    struct YouTube;
+    #[async_trait]
+    impl Transport for YouTube {
+        async fn get(&self, u: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+            let (content_type, body) = if u.path() == "/oembed" {
+                let video = Url::parse(
+                    &u.query_pairs()
+                        .find(|(k, _)| k == "url")
+                        .map(|(_, v)| v.into_owned())
+                        .unwrap(),
+                )?;
+                let id = video
+                    .query_pairs()
+                    .find(|(k, _)| k == "v")
+                    .map(|(_, v)| v.into_owned())
+                    .unwrap_or_default();
+                (
+                    "application/json",
+                    json!({"type": "video", "title": format!("Queen – Bohemian Rhapsody ({id})"),
+                           "author_name": "Queen Official", "provider_name": "YouTube",
+                           "thumbnail_url": format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg")})
+                    .to_string(),
+                )
+            } else {
+                let v = u
+                    .query_pairs()
+                    .find(|(k, _)| k == "v")
+                    .map(|(_, v)| v.into_owned());
+                let title = match v.as_deref() {
+                    Some("fJ9rUzIMcZQ") => "- YouTube",
+                    Some(_) => "Queen - Bohemian Rhapsody (old upload) - YouTube",
+                    None => "YouTube",
+                };
+                (
+                    "text/html",
+                    format!(
+                        "<html><head><title>{title}</title>\
+                         <meta property=\"og:title\" content=\"{title}\">\
+                         <meta property=\"og:description\" content=\"Nauti videoista ja musiikista, jota rakastat.\">\
+                         </head><body>{}</body></html>",
+                        "<p>YouTube</p>".repeat(400)
+                    ),
+                )
+            };
+            Ok(Fetched {
+                permanent_redirect: false,
+                truncated: false,
+                validators: Default::default(),
+                url: u.clone(),
+                content_type: content_type.into(),
+                status: 200,
+                retry_after_secs: 60,
+                location: None,
+                body: body.into_bytes(),
+            })
+        }
+    }
+    let resolver = CardResolver {
+        kind: "media",
+        config: Arc::new(Config::default()),
+        web: WebResolver {
+            oembed_policy: Default::default(),
+            cards: None,
+            events: None,
+            egress: Egress::with_backends(
+                Default::default(),
+                Arc::new(PublicDns),
+                Arc::new(YouTube),
+            ),
+            config: Default::default(),
+        },
+    };
+    // The regional page: a wall, so the card is the answer's, with no stray site description.
+    let doc = resolver
+        .resolve("https://www.youtube.com/watch?v=fJ9rUzIMcZQ")
+        .await
+        .unwrap();
+    assert_eq!(doc.status, pinakes_core::model::Status::Ok);
+    assert_eq!(doc.type_name, "VideoObject");
+    assert_eq!(
+        doc.name.as_deref(),
+        Some("Queen – Bohemian Rhapsody (fJ9rUzIMcZQ)")
+    );
+    assert_eq!(
+        doc.image.as_deref(),
+        Some("https://i.ytimg.com/vi/fJ9rUzIMcZQ/hqdefault.jpg")
+    );
+    assert_eq!(doc.attributes["author"], "Queen Official");
+    assert_eq!(doc.description, None);
+    // A page with a title of its own: the answer names the video, the page keeps the rest.
+    let doc = resolver
+        .resolve("https://www.youtube.com/watch?v=old")
+        .await
+        .unwrap();
+    assert_eq!(doc.name.as_deref(), Some("Queen – Bohemian Rhapsody (old)"));
+    assert_eq!(doc.attributes["author"], "Queen Official");
+    assert_eq!(
+        doc.description.as_deref(),
+        Some("Nauti videoista ja musiikista, jota rakastat.")
+    );
+    // The site's root titled "YouTube" is the page it is, not a stand-in.
+    use pinakes_core::resolver::interstitial::{inspect, Page};
+    for (link, expected) in [
+        ("https://www.youtube.com/", Page::Content),
+        ("https://www.youtube.com/watch?v=fJ9rUzIMcZQ", Page::Blocked),
+    ] {
+        let link = Url::parse(link).unwrap();
+        let page = YouTube.get(&link, &[]).await.unwrap();
+        let seen = pinakes_core::resolver::html::blocking(move || inspect(&link, &page).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(seen, expected);
+    }
+}

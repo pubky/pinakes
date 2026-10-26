@@ -1312,6 +1312,26 @@ fn mapped_type(vocab: &str, name: &str) -> Option<&'static str> {
     .get(name)?
     .as_str()
 }
+/// A provider's own oEmbed answer for a link it names exactly (its scheme has a path, as
+/// YouTube's `watch` and `shorts` do): its title, author and thumbnail are the object's, ahead
+/// of what the page says (a regional or consent page names the site, not the video). The page
+/// keeps what the answer lacks.
+pub fn apply_oembed_first(doc: &mut ResourceMeta, v: &Value, base: &Url) {
+    if let Some(title) = v.get("title").and_then(string) {
+        doc.name = Some(title);
+    }
+    if let Some(image) = v
+        .get("thumbnail_url")
+        .and_then(string)
+        .and_then(|s| origin_url(base, &s))
+    {
+        doc.image = Some(image);
+    }
+    if let Some(author) = v.get("author_name").and_then(string) {
+        doc.attributes.insert("author".into(), author);
+    }
+    apply_oembed(doc, v, base);
+}
 pub fn apply_oembed(doc: &mut ResourceMeta, v: &Value, base: &Url) {
     fill(&mut doc.name, v.get("title").and_then(string));
     fill(
