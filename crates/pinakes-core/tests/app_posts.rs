@@ -1,20 +1,19 @@
-//! The app-post feed (`app_posts`): a mock Nexus serving `/v0/app-posts/changes` by cursor, and
-//! a mock homeserver serving version files. Every URI and identity here is made up.
-use axum::{extract::Query, routing::get, Json, Router};
+//! App posts and the social specs' events and rsvps (TASK-app-posts.md, its second amendment):
+//! `post` lines on the resource feed name a post, which the Pubky resolver reads in its latest
+//! version by its namespace and kind. Every URI and identity here is made up.
+use chrono::{DateTime, Duration, Utc};
 use pinakes_core::{
-    app_posts::{self, Attempts, Versions},
-    nexus::Nexus,
-    resolver::egress::{Fetched, Validators},
+    config::IngestConfig,
+    event::EventStatus,
+    ingest,
+    model::{identity, ResourceMeta, Status},
+    nexus::{Change, Changes, FeedPage, Kind, Op},
+    resolver::{classify, pubky_apps::card_with, pubky_apps::posts::AppKind},
     telemetry::Metrics,
 };
 use pubky_social_specs::{traits::TimestampId, PostEnvelope};
 use serde_json::{json, Value};
 use sqlx::PgPool;
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
-use url::Url;
 
 /// The z32 key of a made-up keypair (`pkarr::Keypair::from_secret_key(&[7; 32])`): a canonical
 /// Pubky key, as the envelope's reference gate requires.
@@ -22,534 +21,375 @@ const AUTHOR: &str = "7jfgaa9nutjyixzikb7tgmsf9gkwq7iqz498zr1nd5ig1fng4esy";
 
 /// A fresh post id, as an app mints it.
 fn id() -> String {
-    PostEnvelope::<app_posts::AppKind>::default().create_id()
+    PostEnvelope::<AppKind>::default().create_id()
 }
-
-/// The mock homeserver: version files by path; a path in `down` fails as unreachable.
-#[derive(Default)]
-struct Homeserver {
-    files: Mutex<HashMap<String, (u16, Vec<u8>)>>,
-    down: Mutex<Vec<String>>,
-}
-#[async_trait::async_trait]
-impl Versions for Homeserver {
-    async fn fetch(&self, object: &Url) -> anyhow::Result<Fetched> {
-        assert_eq!(object.host_str(), Some(AUTHOR));
-        if self
-            .down
-            .lock()
-            .unwrap()
-            .contains(&object.path().to_owned())
-        {
-            anyhow::bail!("homeserver unreachable");
-        }
-        let (status, body) = self
-            .files
-            .lock()
-            .unwrap()
-            .get(object.path())
-            .cloned()
-            .unwrap_or((404, vec![]));
-        Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Validators::default(),
-            url: object.clone(),
-            content_type: "application/octet-stream".into(),
-            status,
-            retry_after_secs: 0,
-            location: None,
-            body,
-        })
-    }
-}
-
-/// The mock Nexus: the app-post feed's lines, its epoch, served by cursor.
-#[derive(Clone, Default)]
-struct Feed {
-    lines: Arc<Mutex<Vec<Value>>>,
-    epoch: Arc<Mutex<String>>,
-}
-async fn nexus(feed: Feed) -> (String, tokio::task::JoinHandle<()>) {
-    let app = Router::new().route(
-        "/v0/app-posts/changes",
-        get(move |Query(q): Query<HashMap<String, i64>>| {
-            let feed = feed.clone();
-            async move {
-                let lines = feed.lines.lock().unwrap().clone();
-                let start = (q["cursor"] as usize).min(lines.len());
-                let end = (start + q["limit"] as usize).min(lines.len());
-                (
-                    [
-                        ("x-events-epoch", feed.epoch.lock().unwrap().clone()),
-                        ("x-events-length", lines.len().to_string()),
-                    ],
-                    Json(json!({"lines": lines[start..end], "next_cursor": end})),
-                )
-            }
-        }),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    (
-        url,
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() }),
-    )
-}
-
-struct Run {
-    pool: PgPool,
-    url: String,
-    nexus: Nexus,
-    feed: Feed,
-    home: Homeserver,
-    metrics: Metrics,
-    attempts: Attempts,
-    _server: tokio::task::JoinHandle<()>,
-}
-impl Run {
-    async fn new(pool: PgPool) -> Self {
-        let feed = Feed::default();
-        *feed.epoch.lock().unwrap() = "e1".into();
-        let (url, server) = nexus(feed.clone()).await;
-        Self {
-            nexus: Nexus::new(&url).unwrap(),
-            pool,
-            url,
-            feed,
-            home: Homeserver::default(),
-            metrics: Metrics::new().unwrap(),
-            attempts: Attempts::default(),
-            _server: server,
-        }
-    }
-    /// A post written: its version file on the homeserver and its line on the feed. The post's
-    /// versionless path.
-    fn put(&self, namespace: &str, kind: &str, envelope: Value) -> String {
-        let (post_id, edit) = (id(), id());
-        let post = format!("/pub/{namespace}/v1/posts/{post_id}");
-        self.put_version(&post, &edit, namespace, kind, envelope);
-        post
-    }
-    fn put_version(&self, post: &str, edit: &str, namespace: &str, kind: &str, envelope: Value) {
-        let version = format!("{post}/{edit}.json");
-        self.home
-            .files
-            .lock()
-            .unwrap()
-            .insert(version.clone(), (200, envelope.to_string().into_bytes()));
-        self.line("put", post, &version, namespace, kind);
-    }
-    fn line(&self, op: &str, post: &str, version: &str, namespace: &str, kind: &str) {
-        self.feed.lines.lock().unwrap().push(json!({
-            "op": op, "author": AUTHOR, "post": post, "version": version,
-            "namespace": namespace, "post_kind": kind, "at": 1_790_000_000_000i64,
-        }));
-    }
-    /// Every page read.
-    async fn drain(&mut self) {
-        for _ in 0..20 {
-            let n = app_posts::poll_once(
-                &self.pool,
-                &self.url,
-                &self.nexus,
-                &self.home,
-                &self.metrics,
-                &mut self.attempts,
-            )
-            .await
-            .unwrap();
-            if n == 0 {
-                return;
-            }
-        }
-        panic!("the feed did not drain");
-    }
-    fn count(&self, outcome: &str) -> u64 {
-        self.metrics.app_posts.with_label_values(&[outcome]).get()
-    }
-    async fn refs(&self, kind: &str) -> Vec<(String, Option<String>, Option<String>)> {
-        sqlx::query_as(
-            "SELECT r.uri,f.recurrence_id,f.label FROM reference f JOIN resource r ON r.id=f.resource_id WHERE f.kind=$1 AND f.feed='app_posts' ORDER BY f.start_at,r.uri,f.recurrence_id",
-        )
-        .bind(kind)
-        .fetch_all(&self.pool)
-        .await
-        .unwrap()
-    }
+fn post(namespace: &str, id: &str) -> String {
+    format!("pubky://{AUTHOR}/pub/{namespace}/v1/posts/{id}")
 }
 fn envelope(kind: &str, content: Value) -> Value {
     json!({"content": content.to_string(), "kind": kind, "parent": null, "embed": null, "attachments": []})
 }
-
-/// A social event's occurrences become event references at its location, each with its
-/// instant in the event's zone, its end and status; an override of one occurrence replaces it,
-/// and the master's later edit does not bring it back.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
-async fn a_social_event_is_its_occurrences_at_its_location(pool: PgPool) {
-    let mut run = Run::new(pool).await;
-    let event = |extra: Value| {
-        let mut c = json!({"title": "Evening", "start": "2027-01-05T18:30:00", "timeZone": "Europe/Zurich",
-            "duration": "PT2H", "locations": [{"uri": "https://venue.example/hall"}],
-            "recurrenceRules": [{"frequency": "weekly", "count": 3}]});
-        c.as_object_mut()
-            .unwrap()
-            .extend(extra.as_object().unwrap().clone());
-        envelope("event", c)
-    };
-    let master = run.put("social", "event", event(json!({})));
-    run.drain().await;
-    let rows: Vec<(String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>, String)> =
-        sqlx::query_as("SELECT recurrence_id,start_at,end_at,event_status FROM reference WHERE kind='event' ORDER BY start_at")
-            .fetch_all(&run.pool)
-            .await
-            .unwrap();
-    assert_eq!(rows.len(), 3);
-    assert_eq!(rows[0].0, "2027-01-05T18:30:00");
-    // 18:30 in Zurich in January is 17:30 UTC; two hours long.
-    assert_eq!(rows[0].1.to_rfc3339(), "2027-01-05T17:30:00+00:00");
-    assert_eq!((rows[0].2 - rows[0].1).num_hours(), 2);
-    assert!(rows.iter().all(|r| r.3 == "scheduled"));
-    // Search shows each occurrence as an event at the venue.
-    let app = pinakes_core::api::router(
-        pinakes_core::api::AppState::new(run.pool.clone(), Default::default()).unwrap(),
-    );
-    let (code, page) = call(&app, "/v1/search?type=Event&from=2027-01-01T00:00:00Z").await;
-    assert_eq!(code, 200, "{page}");
-    let mine: Vec<&Value> = page["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|c| c["event"]["object_path"] == master.as_str())
-        .collect();
-    assert_eq!(mine.len(), 3, "{page}");
-    assert_eq!(mine[0]["event"]["author"], AUTHOR);
-    // An override moves the second occurrence an hour on.
-    run.put(
-        "social",
-        "event",
-        envelope(
-            "event",
-            json!({"title": "Evening, later", "start": "2027-01-12T19:30:00", "timeZone": "Europe/Zurich",
-                "duration": "PT2H", "locations": [{"uri": "https://venue.example/hall"}],
-                "recurrenceOf": format!("pubky://{AUTHOR}{master}"), "recurrenceId": "2027-01-12T18:30:00"}),
-        ),
-    );
-    run.drain().await;
-    let starts = |run: &Run| {
-        let pool = run.pool.clone();
-        async move {
-            sqlx::query_scalar::<_, String>("SELECT to_char(start_at AT TIME ZONE 'UTC','MM-DD HH24:MI') FROM reference WHERE kind='event' ORDER BY start_at")
-                .fetch_all(&pool)
-                .await
-                .unwrap()
-        }
-    };
-    assert_eq!(
-        starts(&run).await,
-        ["01-05 17:30", "01-12 18:30", "01-19 17:30"]
-    );
-    // The master edited: the overridden occurrence stays the override's.
-    run.put_version(
-        &master,
-        &id(),
-        "social",
-        "event",
-        event(json!({"title": "Evening (edited)"})),
-    );
-    run.drain().await;
-    assert_eq!(
-        starts(&run).await,
-        ["01-05 17:30", "01-12 18:30", "01-19 17:30"]
-    );
-    // Deleted, the master's occurrences go; the override's stays.
-    run.line(
-        "del",
-        &master,
-        &format!("{master}/x.json"),
-        "social",
-        "event",
-    );
-    run.drain().await;
-    assert_eq!(starts(&run).await, ["01-12 18:30"]);
-    assert_eq!(run.count("deleted"), 1);
+fn now() -> DateTime<Utc> {
+    "2026-10-16T12:00:00Z".parse().unwrap()
 }
-
-async fn call(app: &Router, path: &str) -> (u16, Value) {
-    use tower::ServiceExt;
-    let mut request = axum::http::Request::builder()
-        .uri(path)
-        .body(axum::body::Body::empty())
-        .unwrap();
-    request.extensions_mut().insert(axum::extract::ConnectInfo(
-        "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
-    ));
-    let response = app.clone().oneshot(request).await.unwrap();
-    let status = response.status().as_u16();
-    let bytes = http_body_util::BodyExt::collect(response.into_body())
-        .await
-        .unwrap()
-        .to_bytes();
-    (
-        status,
-        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+/// The card of a post's latest version, read at `now()`.
+fn card(uri: &str, version: &Value) -> ResourceMeta {
+    card_with(
+        uri,
+        "application/octet-stream",
+        &serde_json::to_vec(version).unwrap(),
+        3600,
+        now(),
+        pinakes_core::event::time::MAX_PERIOD_DATES,
     )
 }
-
-/// An rsvp to a page is a reply on it, its status the label; one to a Pubky object is
-/// Nexus's. A route is its card (its box from its coordinate waypoints, its measures as facts)
-/// with an embed on each waypoint, never queued for a resolver. An availability is a
-/// `Schedule` card. A listen is a play on the track it embeds, which no score counts.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
-async fn rsvps_routes_availability_and_listens(pool: PgPool) {
-    let mut run = Run::new(pool).await;
-    let mut answer = envelope("rsvp", json!({"status": "accepted", "guests": 1}));
-    answer["parent"] = "https://events.example/meetup".into();
-    run.put("social", "rsvp", answer.clone());
-    answer["parent"] = format!("pubky://{AUTHOR}/pub/social/v1/posts/0032SSN7Q4EVG").into();
-    run.put("social", "rsvp", answer);
-    let route = run.put(
-        "maps",
-        "route",
-        envelope(
-            "route",
-            json!({"name": "Lakeside loop", "activity": "running", "distance_m": 5200,
-                "waypoints": [{"uri": "geo:46.00547,8.95186"}, {"uri": "geo:46.1,9"}, {"uri": "https://places.example/cafe"}]}),
-        ),
-    );
-    run.put(
-        "events",
-        "availability",
-        envelope(
-            "availability",
-            json!({"timeZone": "Europe/Zurich", "horizonDays": 60,
-                "available": [{"title": "Office hours", "start": "2027-01-04T09:00:00", "duration": "PT8H"}]}),
-        ),
-    );
-    let mut play = envelope("listen", json!({}));
-    play["embed"] = "https://tracks.example/track/1".into();
-    run.put("music", "listen", play);
-    run.drain().await;
-    assert_eq!(
-        run.refs("reply").await,
-        [(
-            "https://events.example/meetup".into(),
-            None,
-            Some("accepted".into())
-        )]
-    );
-    let embeds: Vec<String> = run.refs("embed").await.into_iter().map(|r| r.0).collect();
-    assert_eq!(
-        embeds,
-        [
-            "geo:46.00547,8.95186",
-            "geo:46.1,9",
-            "https://places.example/cafe"
-        ]
-    );
-    // The route's card, read by its link.
-    let app = pinakes_core::api::router(
-        pinakes_core::api::AppState::new(run.pool.clone(), Default::default()).unwrap(),
-    );
-    let uri = format!("pubky://{AUTHOR}{route}");
-    let (code, card) = call(
-        &app,
-        &format!("/v1/resources/by-uri?uri={}", urlencoding(&uri)),
-    )
-    .await;
-    assert_eq!(code, 200, "{card}");
-    assert_eq!(card["type"], "Trip");
-    assert_eq!(card["name"], "Lakeside loop");
-    // A read's fields, in `details` or beside the card's (`api_shape` 2).
-    let read = card.get("details").unwrap_or(&card);
-    assert_eq!(read["bbox"], json!([8.95186, 46.00547, 9.0, 46.1]));
-    assert_eq!(read["facts"]["distance_m"], "5200");
-    assert_eq!(read["facts"]["activity"], "running");
-    let resolver: Option<String> = sqlx::query_scalar("SELECT resolver FROM resource WHERE uri=$1")
-        .bind(&uri)
-        .fetch_one(&run.pool)
-        .await
-        .unwrap();
-    assert_eq!(resolver, None, "an app post is never fetched");
-    let schedule: String = sqlx::query_scalar(
-        "SELECT doc->>'type' FROM resource WHERE uri LIKE '%/pub/events/v1/posts/%'",
-    )
-    .fetch_one(&run.pool)
-    .await
-    .unwrap();
-    assert_eq!(schedule, "Schedule");
-    assert_eq!(
-        run.refs("listen").await,
-        [("https://tracks.example/track/1".into(), None, None)]
-    );
-    let counted: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM effective_reference f JOIN resource r ON r.id=f.resource_id WHERE r.uri='https://tracks.example/track/1'",
-    )
-    .fetch_one(&run.pool)
-    .await
-    .unwrap();
-    assert_eq!(counted, 0, "a play counts toward no score or filter");
-    assert_eq!((run.count("indexed"), run.count("foreign")), (4, 1));
-    // Deleted, the route's card is gone and its embeds with it.
-    run.line("del", &route, &format!("{route}/x.json"), "maps", "route");
-    run.drain().await;
-    assert!(run.refs("embed").await.is_empty());
-    let status: String = sqlx::query_scalar("SELECT status FROM resource WHERE uri=$1")
-        .bind(&uri)
-        .fetch_one(&run.pool)
-        .await
-        .unwrap();
-    assert_eq!(status, "missing");
+fn no_card(doc: &ResourceMeta) -> bool {
+    doc.status == Status::Missing && doc.withheld && doc.name.is_none()
 }
-fn urlencoding(s: &str) -> String {
-    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+fn fact<'a>(doc: &'a ResourceMeta, key: &str) -> Option<&'a str> {
+    doc.attributes.get(key).map(String::as_str)
 }
 
-/// Lines that are not read are skipped and counted, and the cursor moves past them: a kind no
-/// profile reads, a malformed line, an envelope that fails pubky-social-specs' checks, a
-/// version the homeserver no longer has. A homeserver that cannot be reached holds the page for
-/// `MAX_ATTEMPTS` polls, then its line is skipped.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
-async fn unread_lines_are_skipped_and_an_unreachable_homeserver_does_not_stop_the_feed(
-    pool: PgPool,
-) {
-    let mut run = Run::new(pool).await;
-    run.put("music", "session", envelope("session", json!({})));
-    run.feed
-        .lines
-        .lock()
-        .unwrap()
-        .push(json!({"op": "put", "author": AUTHOR}));
-    let mut bad = envelope("listen", json!({}));
-    bad["unknown_member"] = 1.into();
-    run.put("music", "listen", bad);
-    let gone = format!("/pub/music/v1/posts/{}", id());
-    run.line(
-        "put",
-        &gone,
-        &format!("{gone}/{}.json", id()),
-        "music",
-        "listen",
-    );
-    let mut play = envelope("listen", json!({}));
-    play["embed"] = "https://tracks.example/track/2".into();
-    let down = run.put("music", "listen", play);
-    let version = run
-        .home
-        .files
-        .lock()
-        .unwrap()
-        .keys()
-        .find(|k| k.starts_with(&down))
-        .cloned()
-        .unwrap();
-    run.home.down.lock().unwrap().push(version);
-    let key = app_posts::cursor_key(&run.url);
-    for _ in 1..app_posts::MAX_ATTEMPTS {
-        let polled = app_posts::poll_once(
-            &run.pool,
-            &run.url,
-            &run.nexus,
-            &run.home,
-            &run.metrics,
-            &mut run.attempts,
-        )
-        .await;
-        assert!(polled.is_err());
-        assert_eq!(
-            pinakes_core::ingest::cursor(&run.pool, &key)
-                .await
-                .unwrap()
-                .cursor,
-            0
-        );
+/// A post line: the versionless post as its URI, a version file as its object path.
+fn line(op: Op, uri: &str, version: &str, at: DateTime<Utc>) -> Change {
+    let path = uri.strip_prefix(&format!("pubky://{AUTHOR}")).unwrap();
+    Change {
+        op,
+        uri: uri.into(),
+        kind: Kind::Post,
+        author: AUTHOR.into(),
+        object_path: format!("{path}/{version}.json"),
+        label: None,
+        at: at.timestamp_millis(),
     }
-    run.drain().await;
-    assert_eq!(
-        pinakes_core::ingest::cursor(&run.pool, &key)
-            .await
-            .unwrap()
-            .cursor,
-        5
-    );
-    for (outcome, n) in [
-        ("unprofiled", 1),
-        ("malformed", 1),
-        ("invalid", 1),
-        ("gone", 1),
-        ("unreachable", 1),
-    ] {
-        assert_eq!(run.count(outcome), n, "{outcome}");
-    }
-    assert!(run.refs("listen").await.is_empty());
 }
-
-/// Each feed's reset drops its own references alone: a new epoch of the app-post feed leaves the
-/// resource feed's tags, and the resource feed's reset leaves the app posts'.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
-async fn each_feed_resets_its_own_references(pool: PgPool) {
-    let mut run = Run::new(pool).await;
-    let mut play = envelope("listen", json!({}));
-    play["embed"] = "https://tracks.example/track/3".into();
-    run.put("music", "listen", play);
-    run.drain().await;
-    // A tag from the resource feed.
-    let tagged = pinakes_core::store::ensure_resource(&run.pool, "https://example.org/tagged")
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO reference(resource_id,kind,author,object_path,created_at) VALUES($1,'tag',$2,'/pub/pubky.app/tags/1',now())")
-        .bind(&tagged)
-        .bind(AUTHOR)
-        .execute(&run.pool)
-        .await
-        .unwrap();
-    let count = |feed: &'static str, pool: PgPool| async move {
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM reference WHERE feed=$1")
-            .bind(feed)
-            .fetch_one(&pool)
-            .await
-            .unwrap()
-    };
-    // The app-post feed's new epoch: its references go, the tag stays, and it reads again.
-    *run.feed.epoch.lock().unwrap() = "e2".into();
-    run.drain().await;
-    run.drain().await;
-    assert_eq!(count("resources", run.pool.clone()).await, 1);
-    assert_eq!(count("app_posts", run.pool.clone()).await, 1);
-    // The resource feed's reset (a new epoch): the tag goes, the play stays.
-    sqlx::query("INSERT INTO feed_cursor(nexus,cursor,epoch) VALUES('fixture',0,'r1') ON CONFLICT(nexus) DO UPDATE SET epoch='r1'")
-        .execute(&run.pool)
-        .await
-        .unwrap();
-    let saved = pinakes_core::ingest::cursor(&run.pool, "fixture")
-        .await
-        .unwrap();
-    let page = pinakes_core::nexus::FeedPage {
-        page: pinakes_core::nexus::Changes {
-            lines: vec![],
-            next_cursor: 0,
+async fn batch(pool: &PgPool, lines: Vec<Change>, metrics: &Metrics) {
+    let saved = ingest::cursor(pool, "fixture").await.unwrap();
+    let next = saved.cursor + lines.len() as i64;
+    let page = FeedPage {
+        page: Changes {
+            lines,
+            next_cursor: next,
             skipped: Default::default(),
         },
-        epoch: Some("r2".into()),
-        length: 0,
+        epoch: None,
+        length: next,
     };
-    pinakes_core::ingest::apply(
-        &run.pool,
+    let applied = ingest::apply(
+        pool,
         "fixture",
         &saved,
         &page,
-        &Default::default(),
-        &run.metrics,
+        &IngestConfig::default(),
+        metrics,
     )
     .await
     .unwrap();
-    assert_eq!(count("resources", run.pool.clone()).await, 0);
-    assert_eq!(count("app_posts", run.pool.clone()).await, 1);
-    let orphaned: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-        "SELECT orphaned_at FROM resource WHERE uri='https://tracks.example/track/3'",
+    assert!(applied);
+}
+/// The references of a resource: (kind, object path).
+async fn refs(pool: &PgPool, uri: &str) -> Vec<(String, String)> {
+    let (id, _, _) = identity(uri).unwrap();
+    sqlx::query_as(
+        "SELECT kind,object_path FROM reference WHERE resource_id=$1 ORDER BY object_path",
     )
-    .fetch_one(&run.pool)
+    .bind(id)
+    .fetch_all(pool)
     .await
-    .unwrap();
-    assert_eq!(orphaned, None, "a resource the app posts reference stays");
+    .unwrap()
+}
+/// Whether the resource is due for resolution now.
+async fn due(pool: &PgPool, uri: &str) -> bool {
+    let (id, _, _) = identity(uri).unwrap();
+    sqlx::query_scalar(
+        "SELECT refresh_at<=now() AND next_attempt_at<=now() FROM resource WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+/// The resource read at `at`, its next read a day on, as the queue leaves a card.
+async fn resolved(pool: &PgPool, uri: &str, at: DateTime<Utc>) {
+    let (id, _, _) = identity(uri).unwrap();
+    sqlx::query("UPDATE resource SET resolved_at=$2,refresh_at=now()+interval '1 day',next_attempt_at=now()+interval '1 day' WHERE id=$1")
+        .bind(id)
+        .bind(at)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// A post line is a reference of the post to itself, keyed by its version file: queued for the
+/// Pubky resolver, counted nowhere, read again at each new version and at a deletion.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn post_lines_queue_the_post_and_each_version_reads_it_again(pool: PgPool) {
+    let metrics = Metrics::new().unwrap();
+    let route = post("maps", &id());
+    let start = Utc::now() - Duration::hours(2);
+    batch(&pool, vec![line(Op::Put, &route, "0034A", start)], &metrics).await;
+    let path = route.strip_prefix(&format!("pubky://{AUTHOR}")).unwrap();
+    assert_eq!(
+        refs(&pool, &route).await,
+        [("post".into(), format!("{path}/0034A.json"))]
+    );
+    let (id, _, _) = identity(&route).unwrap();
+    let (resolver, orphaned): (Option<String>, Option<DateTime<Utc>>) =
+        sqlx::query_as("SELECT resolver,orphaned_at FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(resolver.as_deref(), Some("pubky"));
+    // Its own row keeps the card alive and counts nowhere.
+    assert_eq!(orphaned, None);
+    let counted: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM effective_reference WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(counted, 0);
+
+    // Read an hour ago: a line from before then changes nothing, a new version is read now.
+    resolved(&pool, &route, start + Duration::hours(1)).await;
+    batch(&pool, vec![line(Op::Put, &route, "0034B", start)], &metrics).await;
+    assert!(!due(&pool, &route).await);
+    batch(
+        &pool,
+        vec![line(Op::Put, &route, "0034C", Utc::now())],
+        &metrics,
+    )
+    .await;
+    assert!(due(&pool, &route).await);
+    assert_eq!(refs(&pool, &route).await.len(), 3);
+
+    // A deleted version drops its row, and the post is read again: in its latest remaining
+    // version, or gone.
+    resolved(&pool, &route, Utc::now() - Duration::minutes(1)).await;
+    batch(
+        &pool,
+        vec![line(Op::Del, &route, "0034C", Utc::now())],
+        &metrics,
+    )
+    .await;
+    assert!(due(&pool, &route).await);
+    assert_eq!(refs(&pool, &route).await.len(), 2);
+}
+
+/// A post line must name a post in its author's storage and a version file directly in it.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_post_line_outside_its_post_is_rejected(pool: PgPool) {
+    let metrics = Metrics::new().unwrap();
+    let good = post("events", &id());
+    let other = "ybndrfg8ejkmcpqxot1uwisza345h769ybndrfg8ejkmcpqxot1u";
+    let mut elsewhere = line(Op::Put, &good, "0034A", Utc::now());
+    elsewhere.uri = good.replace(AUTHOR, other);
+    let mut not_a_post = line(Op::Put, &good, "0034A", Utc::now());
+    not_a_post.uri = format!("pubky://{AUTHOR}/pub/events/v1/calendars/1");
+    let mut nested = line(Op::Put, &good, "0034A", Utc::now());
+    nested.object_path = nested.object_path.replace("/0034A.json", "/x/0034A.json");
+    let mut other_post = line(Op::Put, &good, "0034A", Utc::now());
+    other_post.object_path = other_post.object_path.replace("/v1/posts/", "/v1/posts/0");
+    batch(
+        &pool,
+        vec![
+            elsewhere,
+            not_a_post,
+            nested,
+            other_post,
+            line(Op::Put, &good, "0034A", Utc::now()),
+        ],
+        &metrics,
+    )
+    .await;
+    let rejected = |reason: &str| metrics.ingest_rejected.with_label_values(&[reason]).get();
+    assert_eq!((rejected("uri"), rejected("object_path")), (2, 2));
+    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM reference")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(total, 1);
+}
+
+/// The posts of the profiled namespaces go to the Pubky resolver; every other social object, and
+/// the posts of namespaces no profile reads, are never fetched.
+#[test]
+fn posts_route_by_namespace() {
+    let id = id();
+    for namespace in ["social", "maps", "events", "music"] {
+        assert_eq!(
+            classify(&post(namespace, &id)),
+            Some("pubky"),
+            "{namespace}"
+        );
+        // A version file is the resolver's to fetch, never a resource of its own.
+        assert_eq!(
+            classify(&format!("{}/0034A.json", post(namespace, &id))),
+            None
+        );
+    }
+    for uri in [
+        post("chess", &id),
+        format!("pubky://{AUTHOR}/pub/social/v1/tags/{id}"),
+        format!("pubky://{AUTHOR}/pub/social/v1.1/posts/{id}"),
+        format!("pubky://{AUTHOR}/pub/pubky.app/posts/{id}"),
+    ] {
+        assert_eq!(classify(&uri), None, "{uri}");
+    }
+}
+
+/// A social event: its JSCalendar time in its zone, status and first location as its venue; a
+/// recurring one shows its next occurrence.
+#[test]
+fn a_social_event_is_an_event_card() {
+    let uri = post("social", &id());
+    let content = json!({
+        "title": "Bern meetup", "description": "Monthly.",
+        "start": "2026-10-20T18:30:00", "timeZone": "Europe/Zurich", "duration": "PT2H",
+        "locations": [{"name": "Café Fédéral", "uri": "https://www.openstreetmap.org/node/1"}],
+    });
+    let doc = card(&uri, &envelope("event", content.clone()));
+    assert_eq!(doc.name.as_deref(), Some("Bern meetup"));
+    assert_eq!(doc.type_path.last().map(String::as_str), Some("Event"));
+    assert_eq!(doc.start, Some("2026-10-20T16:30:00Z".parse().unwrap()));
+    assert_eq!(doc.end, Some("2026-10-20T18:30:00Z".parse().unwrap()));
+    assert_eq!(doc.event.tz.as_deref(), Some("Europe/Zurich"));
+    assert_eq!(
+        doc.event.venue.as_ref().map(|v| v.text.as_str()),
+        Some("Café Fédéral")
+    );
+    assert_eq!(
+        fact(&doc, "location_uri"),
+        Some("https://www.openstreetmap.org/node/1")
+    );
+    assert_eq!(doc.event.event_status, None);
+
+    // Weekly from 6 October: on 16 October (`now`) the next is the 20th.
+    let mut weekly = content.clone();
+    weekly["start"] = "2026-10-06T18:30:00".into();
+    weekly["recurrenceRules"] = json!([{"frequency": "weekly", "count": 10}]);
+    let doc = card(&uri, &envelope("event", weekly.clone()));
+    assert_eq!(doc.start, Some("2026-10-20T16:30:00Z".parse().unwrap()));
+    // An excluded date is skipped (the next is after the change to winter time).
+    weekly["excludedDates"] = json!(["2026-10-20T18:30:00"]);
+    let doc = card(&uri, &envelope("event", weekly.clone()));
+    assert_eq!(doc.start, Some("2026-10-27T17:30:00Z".parse().unwrap()));
+    // A series that has ended shows its last occurrence.
+    weekly["recurrenceRules"] = json!([{"frequency": "weekly", "count": 2}]);
+    let doc = card(&uri, &envelope("event", weekly));
+    assert_eq!(doc.start, Some("2026-10-13T16:30:00Z".parse().unwrap()));
+
+    let mut cancelled = content.clone();
+    cancelled["status"] = "cancelled".into();
+    let doc = card(&uri, &envelope("event", cancelled));
+    assert_eq!(doc.event.event_status, Some(EventStatus::Cancelled));
+
+    // A geo location is its point.
+    let mut at = content.clone();
+    at["locations"] = json!([{"uri": "geo:46.948,7.447"}]);
+    let doc = card(&uri, &envelope("event", at));
+    assert_eq!(
+        doc.location.as_ref().map(|p| (p.lat, p.lon)),
+        Some((46.948, 7.447))
+    );
+
+    for (key, value) in [
+        ("status", json!("postponed")),
+        ("timeZone", json!("Mars/Olympus")),
+        ("start", json!("tomorrow")),
+        ("duration", json!("-PT1H")),
+    ] {
+        let mut bad = content.clone();
+        bad[key] = value;
+        assert!(no_card(&card(&uri, &envelope("event", bad))), "{key}");
+    }
+}
+
+/// An rsvp answers an event; every other social post is Nexus's and has no card.
+#[test]
+fn an_rsvp_is_a_card_and_other_social_posts_have_none() {
+    let uri = post("social", &id());
+    let event = post("social", &id());
+    let mut answer = envelope("rsvp", json!({"status": "accepted", "guests": 2}));
+    answer["parent"] = event.clone().into();
+    let doc = card(&uri, &answer);
+    assert_eq!(doc.type_path.last().map(String::as_str), Some("RsvpAction"));
+    assert_eq!(fact(&doc, "status"), Some("accepted"));
+    assert_eq!(fact(&doc, "guests"), Some("2"));
+    assert_eq!(fact(&doc, "event"), Some(event.as_str()));
+    let mut unknown = answer.clone();
+    unknown["content"] = json!({"status": "maybe"}).to_string().into();
+    assert!(no_card(&card(&uri, &unknown)));
+    assert!(no_card(&card(
+        &uri,
+        &envelope("short", json!({"text": "hello"}))
+    )));
+    assert!(no_card(&card(
+        &uri,
+        &envelope("article", json!({"title": "A"}))
+    )));
+}
+
+/// Maps routes, events availability and music listens and sessions: each its own card; a kind
+/// its namespace does not read, and an envelope the specs refuse, have none.
+#[test]
+fn app_kinds_by_namespace() {
+    let route = envelope(
+        "route",
+        json!({
+            "name": "Aare walk", "activity": "hiking", "distance_m": 12000,
+            "waypoints": [{"uri": "geo:46.95,7.44"}, {"uri": "geo:46.90,7.50", "name": "Bridge"}],
+        }),
+    );
+    let doc = card(&post("maps", &id()), &route);
+    assert_eq!(doc.type_path.last().map(String::as_str), Some("Trip"));
+    assert_eq!(doc.bbox, Some([7.44, 46.90, 7.50, 46.95]));
+    assert_eq!(fact(&doc, "distance_m"), Some("12000"));
+    assert_eq!(fact(&doc, "waypoints"), Some("2"));
+
+    let availability = envelope(
+        "availability",
+        json!({
+            "timeZone": "Europe/Zurich", "horizonDays": 30, "for": "coaching",
+            "available": [{"title": "Office hours", "start": "2026-10-19T09:00:00", "duration": "PT3H"}],
+            "busy": [],
+        }),
+    );
+    let doc = card(&post("events", &id()), &availability);
+    assert_eq!(doc.type_path.last().map(String::as_str), Some("Schedule"));
+    assert_eq!(doc.name.as_deref(), Some("Office hours"));
+    assert_eq!(doc.start, Some("2026-10-19T07:00:00Z".parse().unwrap()));
+    assert_eq!(doc.end, Some("2026-10-19T10:00:00Z".parse().unwrap()));
+    assert_eq!(fact(&doc, "for"), Some("coaching"));
+
+    let mut listen = envelope("listen", json!({}));
+    listen["embed"] = "https://tracks.example/track/1".into();
+    let doc = card(&post("music", &id()), &listen);
+    assert_eq!(
+        doc.type_path.last().map(String::as_str),
+        Some("ListenAction")
+    );
+    assert_eq!(fact(&doc, "track"), Some("https://tracks.example/track/1"));
+    // At the post's own time, its id.
+    let written = doc.start.unwrap();
+    assert!((Utc::now() - written).num_minutes().abs() < 5, "{written}");
+
+    let session = envelope("session", json!({"name": "Late jam"}));
+    assert_eq!(
+        card(&post("music", &id()), &session).name.as_deref(),
+        Some("Late jam")
+    );
+
+    // A route in the events namespace, a listen without a track, an id the specs refuse, an
+    // explicit `null` where the envelope wants a list.
+    assert!(no_card(&card(&post("events", &id()), &route)));
+    assert!(no_card(&card(
+        &post("music", &id()),
+        &envelope("listen", json!({}))
+    )));
+    assert!(no_card(&card(&post("maps", "0000000000000"), &route)));
+    let mut null = route.clone();
+    null["attachments"] = Value::Null;
+    assert!(no_card(&card(&post("maps", &id()), &null)));
 }

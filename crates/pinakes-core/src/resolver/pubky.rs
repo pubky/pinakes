@@ -1,5 +1,5 @@
 use super::{
-    egress::{Egress, FetchOptions},
+    egress::{Egress, FetchOptions, Fetched},
     pkarr_relays::Relays,
     ErrorClass, Resolver,
 };
@@ -29,8 +29,7 @@ pub struct PubkyResolver {
 impl PubkyResolver {
     /// One object of an owner's homeserver, fetched as the resolver fetches it: the owner's
     /// canonical z32 key as the host, its homeserver from the pkarr relays, the path unchanged as
-    /// an HTTPS path, through the egress policy. For the app-post feed's version files too
-    /// (`app_posts`), which the resolver itself never routes.
+    /// an HTTPS path (its query kept: a folder's listing options), through the egress policy.
     pub async fn fetch_object(&self, object: &Url) -> Result<super::egress::Fetched> {
         let host = object.host_str().context("missing Pubky owner")?;
         // One spelling per object: the owner's key as the whole host, in z32.
@@ -56,6 +55,7 @@ impl PubkyResolver {
         url.set_port(port)
             .map_err(|_| anyhow::Error::new(ErrorClass("policy")))?;
         url.set_path(object.path());
+        url.set_query(object.query());
         // In a `pubky:` URL a backslash or a dot segment is literal, in an `https:` one it is
         // not: the path fetched must be the path classified, or the namespace check is moot.
         if url.path() != object.path() {
@@ -74,6 +74,46 @@ impl PubkyResolver {
             ..Default::default()
         };
         self.egress.fetch_with(url.as_str(), &options).await
+    }
+
+    /// The latest version of a post (`pubky_apps::Kind::versions`): its folder listed newest
+    /// first, one entry, a version file directly in it. `Err` with the listing when the folder
+    /// answers no version (a listing that fails, or holds none, as 404).
+    async fn latest(&self, post: &Url) -> Result<std::result::Result<Url, Fetched>> {
+        let mut folder = post.clone();
+        folder.set_path(&format!("{}/", post.path().trim_end_matches('/')));
+        folder.set_query(Some("reverse=true&limit=1"));
+        let mut listed = self.fetch_object(&folder).await?;
+        if !(200..=299).contains(&listed.status) {
+            return Ok(Err(listed));
+        }
+        let owner = post.host_str().unwrap_or_default();
+        let version = std::str::from_utf8(&listed.body)
+            .ok()
+            .and_then(|body| body.lines().next())
+            .map(str::trim)
+            .and_then(|line| {
+                line.strip_prefix("pubky://")
+                    .or_else(|| line.strip_prefix("pubky"))
+            })
+            .and_then(|rest| rest.strip_prefix(owner))
+            .and_then(|path| path.strip_prefix(folder.path()))
+            .filter(|file| {
+                file.ends_with(".json")
+                    && file.len() > ".json".len()
+                    && file
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_')
+            })
+            .map(|file| {
+                let mut version = post.clone();
+                version.set_path(&format!("{}{file}", folder.path()));
+                version
+            });
+        Ok(version.ok_or_else(|| {
+            listed.status = 404;
+            listed
+        }))
     }
 
     pub fn new(config: ResolverConfig, egress: Egress) -> Result<Self> {
@@ -110,7 +150,15 @@ impl Resolver for PubkyResolver {
                 return Err(anyhow::Error::new(ErrorClass("policy"))
                     .context("not a Pubky object of another app"));
             }
-            let fetched = self.fetch_object(&object).await?;
+            // A post is read in its latest version.
+            let fetched = if super::pubky_apps::versioned(uri) {
+                match self.latest(&object).await? {
+                    Ok(version) => self.fetch_object(&version).await?,
+                    Err(listed) => listed,
+                }
+            } else {
+                self.fetch_object(&object).await?
+            };
             let mut doc = ResourceMeta::new(uri, "pubky", self.config.ttl_secs);
             doc.set_type("CreativeWork");
             match fetched.status {
@@ -173,9 +221,10 @@ mod tests {
             crate::resolver::classify(&uri.replace("other.app", "pubky.app")),
             None
         );
-        // The social specs' objects are Nexus's too, in any version: never fetched.
+        // The social specs' objects are Nexus's too, in any version, but their v1 posts (whose
+        // events and rsvps are read): never fetched.
         for path in [
-            "social/v1/posts/0034A0X7NJ52G",
+            "social/v1/posts/0034A0X7NJ52G/0034A0X7NJ52H.json",
             "social/v1.1/ratings/1",
             "social/item",
         ] {
@@ -624,6 +673,115 @@ mod tests {
                 crate::resolver::error_class(&error),
                 "policy",
                 "{content_type}: {error:#}"
+            );
+        }
+    }
+
+    /// A homeserver's files by path and query (a folder's listing as `text/plain`), read by the
+    /// real egress rules; every request recorded.
+    #[derive(Default)]
+    struct Folder {
+        files: Mutex<HashMap<String, (u16, &'static str, String)>>,
+        requests: Mutex<Vec<String>>,
+    }
+    #[async_trait]
+    impl Transport for Folder {
+        async fn get(&self, _: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+            unreachable!("Pubky fetches carry the pubky-host header")
+        }
+        async fn get_with(
+            &self,
+            url: &Url,
+            _: &[SocketAddr],
+            options: &FetchOptions,
+        ) -> Result<Fetched> {
+            let key = match url.query() {
+                Some(query) => format!("{}?{query}", url.path()),
+                None => url.path().to_owned(),
+            };
+            self.requests.lock().unwrap().push(key.clone());
+            let (status, content_type, body) =
+                self.files.lock().unwrap().get(&key).cloned().unwrap_or((
+                    404,
+                    "text/plain",
+                    String::new(),
+                ));
+            let response = axum::http::Response::builder()
+                .status(status)
+                .header("content-type", content_type)
+                .body(body.into_bytes())
+                .unwrap();
+            crate::resolver::egress::read_response_with(url.clone(), response.into(), options).await
+        }
+    }
+
+    /// A post is read in its latest version: its folder listed newest first, one entry, then that
+    /// version fetched; a folder without a version file is a missing post.
+    #[tokio::test]
+    async fn a_post_is_read_in_its_latest_version() {
+        use pubky_social_specs::{traits::TimestampId, PostEnvelope};
+        let owner = Keypair::random();
+        let packet = https(&owner, "_pubky", "homeserver.example", 9443, &[]);
+        let homeserver = Arc::new(Folder::default());
+        let resolver = resolver(&[packet], &["8.8.8.8"], homeserver.clone());
+        let id = PostEnvelope::<crate::resolver::pubky_apps::posts::AppKind>::default().create_id();
+        let post = format!("/pub/maps/v1/posts/{id}");
+        let uri = format!("pubky://{}{post}", owner.public_key());
+        let listing = format!("{post}/?reverse=true&limit=1");
+        let content = serde_json::json!({"name": "Aare walk", "waypoints": [{"uri": "geo:46.95,7.44"}, {"uri": "geo:46.90,7.50"}]});
+        let version = serde_json::json!({"content": content.to_string(), "kind": "route", "parent": null, "embed": null, "attachments": []});
+        let serve = |path: &str, status, content_type, body: String| {
+            homeserver
+                .files
+                .lock()
+                .unwrap()
+                .insert(path.to_owned(), (status, content_type, body));
+        };
+        serve(
+            &listing,
+            200,
+            "text/plain",
+            format!("pubky://{}{post}/0034B.json\n", owner.public_key()),
+        );
+        serve(
+            &format!("{post}/0034B.json"),
+            200,
+            "application/octet-stream",
+            version.to_string(),
+        );
+        let doc = resolver.resolve(&uri).await.unwrap();
+        assert_eq!(doc.name.as_deref(), Some("Aare walk"));
+        assert_eq!(doc.url, uri);
+        assert_eq!(
+            *homeserver.requests.lock().unwrap(),
+            [listing.clone(), format!("{post}/0034B.json")]
+        );
+
+        // An empty folder, one gone, and one listing a file outside it: missing, nothing more
+        // fetched.
+        for (status, body) in [
+            (200, String::new()),
+            (404, String::new()),
+            (
+                200,
+                format!(
+                    "pubky://{}/pub/maps/v1/posts/other/0034B.json",
+                    owner.public_key()
+                ),
+            ),
+            (
+                200,
+                format!("pubky://{}{post}/sub/0034B.json", owner.public_key()),
+            ),
+        ] {
+            homeserver.requests.lock().unwrap().clear();
+            serve(&listing, status, "text/plain", body.clone());
+            let doc = resolver.resolve(&uri).await.unwrap();
+            assert_eq!(doc.status, Status::Missing, "{body}");
+            assert_eq!(
+                *homeserver.requests.lock().unwrap(),
+                std::slice::from_ref(&listing),
+                "{body}"
             );
         }
     }

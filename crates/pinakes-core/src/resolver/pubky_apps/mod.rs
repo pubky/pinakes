@@ -12,6 +12,7 @@ use url::Url;
 
 pub mod loopky;
 pub mod marketplace;
+pub mod posts;
 pub mod rooms;
 
 /// Every app profile, one line each, in alphabetical order of module.
@@ -19,6 +20,10 @@ pub mod rooms;
 pub static REGISTRY: &[&Profile] = &[
     &loopky::PROFILE,
     &marketplace::PROFILE,
+    &posts::EVENTS,
+    &posts::MAPS,
+    &posts::MUSIC,
+    &posts::SOCIAL,
     &rooms::PROFILE,
 ];
 
@@ -52,6 +57,9 @@ pub struct Kind {
     pub read: fn(&Object, &Value, &mut ResourceMeta) -> Read,
     /// The clients that open it: `url` is a template filled with `{owner}` and the path's names.
     pub open_in: &'static [Client],
+    /// Whether the path is a folder of versions (a post, `{id}/{editId}.json`) read in its
+    /// latest one, rather than the object itself.
+    pub versions: bool,
 }
 pub struct Client {
     pub client: &'static str,
@@ -115,20 +123,16 @@ pub enum Route {
     /// An app no profile knows: the general card.
     General,
 }
-/// The namespaces whose objects Pinakes never fetches: those Nexus describes (pubky.app's own, and
-/// the social specs', `/pub/social/v1/…` in any version), and the old Mapky and Eventky layouts
-/// (`mapky.app`, `eventky.app`), whose data the owner disregards: Maps and Events write app posts
-/// now (`app_posts`).
-const NEVER_FETCHED: &[&str] = &["pubky.app", "social", "mapky.app", "eventky.app"];
+/// The namespaces whose objects Pinakes never fetches: pubky.app's own, which Nexus describes, and
+/// the old Mapky and Eventky layouts (`mapky.app`, `eventky.app`), whose data the owner
+/// disregards: Maps and Events write posts now (`posts`). The social specs' namespace is a
+/// profile's (`posts::SOCIAL`): its events and rsvps are read, every other social object is
+/// Nexus's and excluded.
+const NEVER_FETCHED: &[&str] = &["pubky.app", "mapky.app", "eventky.app"];
 /// The route of a `pubky://` object of another app, from its decoded path segments below
 /// `/pub/` (`resolver::pubky_app`'s reading). `None` for the objects Nexus describes
-/// (`NEVER_FETCHED`).
+/// (`NEVER_FETCHED`) and for the posts of a namespace no profile reads.
 pub fn route(segments: &[String]) -> Option<Route> {
-    // An app post (`/pub/<ns>/v1/posts/…`) is read from the app-post feed (`app_posts`), its
-    // versionless path never fetched.
-    if matches!(segments, [_, version, posts, ..] if version == "v1" && posts == "posts") {
-        return None;
-    }
     for profile in REGISTRY {
         for namespace in profile.namespaces {
             let prefix: Vec<&str> = namespace.split('/').collect();
@@ -143,6 +147,10 @@ pub fn route(segments: &[String]) -> Option<Route> {
             }
             return Some(Route::Excluded);
         }
+    }
+    // A post in a namespace no profile reads (`/pub/<ns>/v1/posts/…`) is its app's own.
+    if matches!(segments, [_, version, posts, ..] if version == "v1" && posts == "posts") {
+        return None;
     }
     match segments.first() {
         Some(app) if NEVER_FETCHED.contains(&app.as_str()) => None,
@@ -335,6 +343,11 @@ pub fn open_in(uri: &str) -> Vec<OpenIn> {
 /// Whether a `pubky://` object is in a known app's namespace, of a kind its profile reads or not.
 pub fn known(uri: &str) -> bool {
     segments(uri).is_some_and(|(_, s)| matches!(route(&s), Some(Route::Kind(..) | Route::Excluded)))
+}
+/// Whether a `pubky://` object is a folder of versions (`Kind::versions`).
+pub fn versioned(uri: &str) -> bool {
+    segments(uri)
+        .is_some_and(|(_, s)| matches!(route(&s), Some(Route::Kind(_, kind, _)) if kind.versions))
 }
 /// Whether a `pubky://` object is in a known app's namespace but of no kind its profile reads.
 pub fn excluded(uri: &str) -> bool {

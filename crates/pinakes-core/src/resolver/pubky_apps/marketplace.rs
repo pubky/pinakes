@@ -12,6 +12,7 @@ pub static PROFILE: Profile = Profile {
         Kind {
             path: "v1/shop.json",
             read: shop,
+            versions: false,
             open_in: &[Client {
                 client: "Pubky Shop",
                 url: "https://pubky.app/shop/marketplace/shop/{owner}",
@@ -20,6 +21,7 @@ pub static PROFILE: Profile = Profile {
         Kind {
             path: "v1/listings/{listing}",
             read: listing,
+            versions: false,
             open_in: &[Client {
                 client: "Pubky Shop",
                 url: "https://pubky.app/shop/marketplace/listing/{owner}/{listing}",
@@ -28,6 +30,7 @@ pub static PROFILE: Profile = Profile {
         Kind {
             path: "v1/drops/{drop}",
             read: drop,
+            versions: false,
             open_in: &[Client {
                 client: "Pubky Shop",
                 url: "https://pubky.app/shop/marketplace/drop/{owner}/{drop}",

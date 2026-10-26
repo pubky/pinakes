@@ -371,11 +371,12 @@ fn other_apps_get_the_general_card() {
     );
     assert_eq!(doc.image.as_deref(), Some("https://example.org/pic.png"));
     // A known app's path that no kind matches is never fetched; pubky.app's own objects and the
-    // social specs' are Nexus's, and the old Mapky and Eventky layouts are disregarded.
+    // social specs' other than posts are Nexus's, and the old Mapky and Eventky layouts are
+    // disregarded.
     never_fetched(&[
         "loopky/settings.json",
         "pubky.app/profile.json",
-        "social/v1/posts/0034A0X7NJ52G",
+        "social/v1/tags/0034A0X7NJ52G",
         "mapky.app/routes/00351MV7WF0WG",
         "eventky.app/events/0035DS0K1ZTEG",
     ]);

@@ -1187,9 +1187,7 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
             }),
             from: crate::sources::from(d).map(str::to_owned),
             facts: merge_facts(
-                crate::sources::facts(d)
-                    .or_else(|| crate::resolver::pubky_apps::facts(d))
-                    .or_else(|| crate::app_posts::facts(d)),
+                crate::sources::facts(d).or_else(|| crate::resolver::pubky_apps::facts(d)),
                 facts.clone(),
             ),
             keys: keys.clone(),
@@ -1592,7 +1590,7 @@ pub async fn search(
         scope(&mut sql, &q, &reach);
         sql.push(" GROUP BY f.author ORDER BY at DESC,f.author LIMIT ")
             .push_bind(search.related_taggers as i64)
-            .push("), related_refs AS (SELECT a.root AS resource_id,t.author,max(x.created_at) AS at FROM related_taggers t CROSS JOIN LATERAL (SELECT f.resource_id,f.created_at FROM reference f WHERE f.author=t.author AND f.kind NOT IN ('listen','post') AND f.created_at>=")
+            .push("), related_refs AS (SELECT a.root AS resource_id,t.author,max(x.created_at) AS at FROM related_taggers t CROSS JOIN LATERAL (SELECT f.resource_id,f.created_at FROM reference f WHERE f.author=t.author AND f.kind<>'post' AND f.created_at>=")
             .push_bind(since)
             .push(" AND f.created_at<=")
             .push_bind(at)
@@ -1820,7 +1818,7 @@ pub async fn search(
         let cap = state.config.search.collapse_refs_per_member as i64;
         sql.push("), grouped AS (SELECT DISTINCT x.id FROM eligible x JOIN group_unit g ON g.unit_id=x.unit_id AND g.group_id IS NOT NULL), grouped_ids AS (SELECT id AS root,id AS base FROM grouped UNION ALL SELECT a.root_id,a.alias_id FROM resource_alias a WHERE a.root_id IN (SELECT id FROM grouped)), grouped_refs AS (SELECT gi.root AS resource_id,least(sum(c.n),")
             .push_bind(cap)
-            .push(") AS refs FROM grouped_ids gi CROSS JOIN LATERAL (SELECT count(*) AS n FROM (SELECT 1 FROM reference f WHERE f.resource_id=gi.base AND f.kind NOT IN ('listen','post') LIMIT ")
+            .push(") AS refs FROM grouped_ids gi CROSS JOIN LATERAL (SELECT count(*) AS n FROM (SELECT 1 FROM reference f WHERE f.resource_id=gi.base AND f.kind<>'post' LIMIT ")
             .push_bind(cap)
             .push(") x) c GROUP BY gi.root), filtered AS (SELECT DISTINCT ON(coalesce(u.group_id,e.unit_id)) e.* FROM eligible e LEFT JOIN group_unit u ON u.unit_id=e.unit_id AND u.group_id IS NOT NULL LEFT JOIN grouped_refs c ON c.resource_id=e.id ORDER BY coalesce(u.group_id,e.unit_id),coalesce(c.refs,0) DESC,e.id,e.unit_id");
     }

@@ -5,7 +5,6 @@ pub mod alias;
 pub mod also_on;
 pub mod api;
 pub mod app_ids;
-pub mod app_posts;
 pub mod canary;
 pub mod change_api;
 pub mod changes;

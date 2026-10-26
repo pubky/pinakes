@@ -117,14 +117,12 @@ CREATE TABLE resource_alias (
 );
 CREATE INDEX resource_alias_root ON resource_alias USING btree (root_id);
 
--- One reference (a tag, reply, embed, collection entry, event, listen, or an app post's own
--- card), keyed by the object that makes it; an event reference carries its own times and
--- status. `feed` says which Nexus feed it is a projection of: the resource feed (tags, replies,
--- embeds, collection entries) or the app-post feed (`app_posts`: social events and rsvps, maps
--- routes, events availability, music listens); a reset of one feed drops its rows alone.
+-- One reference from the Nexus feed (a tag, reply, embed, collection entry, event, or a post
+-- naming itself), keyed by the object that makes it; an event reference carries its own times
+-- and status.
 CREATE TABLE reference (
     resource_id text NOT NULL REFERENCES resource(id) ON DELETE CASCADE,
-    kind text NOT NULL CONSTRAINT reference_kind_check CHECK (kind IN ('tag', 'reply', 'embed', 'collection', 'event', 'listen', 'post')),
+    kind text NOT NULL CONSTRAINT reference_kind_check CHECK (kind IN ('tag', 'reply', 'embed', 'collection', 'event', 'post')),
     author text NOT NULL,
     label text,
     object_path text NOT NULL,
@@ -134,7 +132,6 @@ CREATE TABLE reference (
     created_at timestamp with time zone NOT NULL,
     unit_key text NOT NULL DEFAULT '',
     event_status text,
-    feed text NOT NULL DEFAULT 'resources' CONSTRAINT reference_feed_check CHECK (feed IN ('resources', 'app_posts')),
     PRIMARY KEY (author, object_path, unit_key),
     CONSTRAINT reference_event_status CHECK (event_status IS NULL OR event_status IN ('scheduled', 'cancelled', 'postponed', 'rescheduled', 'moved_online')),
     CONSTRAINT reference_start_at_range CHECK (start_at >= '0001-01-01 00:00:00+00' AND start_at < '10000-01-01 00:00:00+00'),
@@ -156,12 +153,12 @@ CREATE INDEX reference_resource_created_idx ON reference USING btree (resource_i
 CREATE INDEX reference_resource_tag_idx ON reference USING btree (resource_id, created_at) WHERE kind = 'tag';
 CREATE INDEX reference_start_idx ON reference USING btree (start_at);
 
--- References as they count: an alias's count for its root, plays and app posts' own rows left out.
+-- References as they count: an alias's count for its root, posts' own rows left out.
 CREATE VIEW effective_reference AS
     SELECT coalesce(a.root_id, f.resource_id) AS resource_id, f.author, f.object_path, f.kind, f.label, f.created_at
     FROM reference f LEFT JOIN resource_alias a ON a.alias_id = f.resource_id
-    -- A listen is a play, and an app post's own row only keeps its card: neither counts.
-    WHERE f.kind NOT IN ('listen', 'post');
+    -- A post's own row keeps its card alive; it references nothing else, so it does not count.
+    WHERE f.kind <> 'post';
 
 -- Resources a page derives (an event adapter's entries), each with its adapter and when the
 -- link lapses.

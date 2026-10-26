@@ -11,9 +11,6 @@ admin_listen = "127.0.0.1:9090"
 nexus_url = "http://127.0.0.1:8080"
 nexus_reach_set = false # The Nexus serves the reach-set route: search takes reach=wot_2 and boost=wot_2.
 
-[nexus]
-app_posts = false # The Nexus fork's app-post feed: social events and rsvps, routes, availability, listens.
-
 [web]
 enabled = true
 # Follow RSS alternates (podcast feeds) on pages without a typed card.

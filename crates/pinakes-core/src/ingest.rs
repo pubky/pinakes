@@ -104,22 +104,12 @@ pub async fn apply(
     store::lock_writers(&mut tx, order).await?;
     crate::alias::lock(&mut tx).await?;
     if reset {
-        // The resource feed's references go; the app-post feed's stay (`reference.feed`), and
-        // so do the scores and the life of what they reference.
-        sqlx::query("DELETE FROM reference WHERE feed='resources'")
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("TRUNCATE resource_score")
+        sqlx::query("TRUNCATE reference, resource_score")
             .execute(&mut *tx)
             .await?;
         sqlx::query("UPDATE resource SET orphaned_at=coalesce(orphaned_at,now())")
             .execute(&mut *tx)
             .await?;
-        let kept: Vec<String> =
-            sqlx::query_scalar("SELECT DISTINCT resource_id FROM reference WHERE feed='app_posts'")
-                .fetch_all(&mut *tx)
-                .await?;
-        store::recompute_scores(&mut tx, &kept).await?;
         sqlx::query("UPDATE feed_cursor SET cursor=0, epoch=$2, feed_length=$3, updated_at=now(),resets=resets+1 WHERE nexus=$1")
             .bind(nexus).bind(epoch).bind(feed.length).execute(&mut *tx).await?;
         tx.commit().await?;
@@ -211,6 +201,12 @@ async fn apply_line(
     let Ok((id, uri, _)) = crate::model::identity(&line.uri) else {
         return Ok(Some("uri"));
     };
+    let post = matches!(line.kind, crate::nexus::Kind::Post);
+    if post {
+        if let Some(reason) = post_rejection(line, &uri) {
+            return Ok(Some(reason));
+        }
+    }
     // One reference per object: the resource feed's lines carry no occurrences.
     let unit_key = String::new();
     let old: Option<String> = sqlx::query_scalar(
@@ -232,6 +228,9 @@ async fn apply_line(
             if old.as_deref() != Some(&id) {
                 sqlx::query("UPDATE resource SET final=false,refresh_at=now(),next_attempt_at=now(),dead_letter=false,attempts=0 WHERE id=$1 AND final AND resolver<>'geo' AND $2>resolved_at").bind(&id).bind(timestamp(Some(line.at))?).execute(&mut **tx).await?;
             }
+            if post {
+                expedite(tx, &id, line.at).await?;
+            }
             sqlx::query(r#"INSERT INTO reference(resource_id,kind,author,label,object_path,created_at,unit_key)
                 VALUES($1,$2,$3,$4,$5,$6,$7)
                 ON CONFLICT(author,object_path,unit_key) DO UPDATE SET resource_id=excluded.resource_id, kind=excluded.kind,
@@ -248,9 +247,50 @@ async fn apply_line(
                 .bind(&unit_key)
                 .execute(&mut **tx)
                 .await?;
+            // The post's card is read again: in its latest remaining version, or gone.
+            if post {
+                expedite(tx, &id, line.at).await?;
+            }
         }
     }
     Ok(None)
+}
+/// Why a `post` line is rejected: its URI must be a post in its author's storage
+/// (`pubky://<author>/pub/<namespace>/v1/posts/{id}`), its object path a version file directly in
+/// that post (`…/{id}/{editId}.json`).
+fn post_rejection(line: &Change, uri: &str) -> Option<&'static str> {
+    let Some(path) = uri
+        .strip_prefix("pubky://")
+        .and_then(|rest| rest.strip_prefix(line.author.as_str()))
+        .filter(|path| {
+            matches!(path.split('/').collect::<Vec<_>>()[..],
+                ["", "pub", namespace, "v1", "posts", id] if !namespace.is_empty() && !id.is_empty())
+        })
+    else {
+        return Some("uri");
+    };
+    let file = line
+        .object_path
+        .strip_prefix(path)
+        .and_then(|rest| rest.strip_prefix('/'));
+    match file {
+        Some(file)
+            if file.len() > ".json".len() && file.ends_with(".json") && !file.contains('/') =>
+        {
+            None
+        }
+        _ => Some("object_path"),
+    }
+}
+/// A post's card is due now: a new version, or one deleted, changes it whatever its TTL. A line
+/// older than the card's last read changes nothing.
+async fn expedite(tx: &mut Transaction<'_, Postgres>, id: &str, at: i64) -> Result<()> {
+    sqlx::query("UPDATE resource SET final=false,refresh_at=now(),next_attempt_at=now(),dead_letter=false,attempts=0 WHERE id=$1 AND resolved_at IS NOT NULL AND $2>resolved_at")
+        .bind(id)
+        .bind(timestamp(Some(at))?)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 fn timestamp(ms: Option<i64>) -> Result<Option<DateTime<Utc>>> {
     ms.map(|ms| DateTime::from_timestamp_millis(ms).context("invalid feed timestamp"))

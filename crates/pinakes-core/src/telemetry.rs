@@ -54,8 +54,6 @@ pub struct Metrics {
     /// Nexus polls whose batch work panicked outside a feed line (the cursor holds; retried).
     pub ingest_panics: IntCounter,
     pub ingest_rejected: IntCounterVec,
-    /// App-post feed lines by outcome (`app_posts::OUTCOMES`).
-    pub app_posts: IntCounterVec,
     /// Requests a source's service answered 401 or 403 to its configured token (it then reads
     /// without it).
     pub token_refusals: IntCounterVec,
@@ -113,12 +111,6 @@ impl Metrics {
                 "pinakes_ingest_rejected_total",
                 "Rejected feed lines in committed batches by bounded reason",
                 &["reason"]
-            ),
-            app_posts: metric!(
-                IntCounterVec,
-                "pinakes_app_posts_total",
-                "App-post feed lines in committed pages by outcome",
-                &["outcome"]
             ),
             token_refusals: metric!(
                 IntCounterVec,
@@ -215,9 +207,6 @@ impl Metrics {
         };
         for reason in crate::ingest::REJECT_REASONS {
             out.ingest_rejected.with_label_values(&[reason]);
-        }
-        for outcome in crate::app_posts::OUTCOMES {
-            out.app_posts.with_label_values(&[outcome]);
         }
         for manifest in crate::adapter::manifests() {
             for outcome in OUTCOMES {

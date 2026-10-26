@@ -395,29 +395,42 @@ async fn send(app: &Router, method: &str, path: &str, body: Option<Value>) -> (u
         parsed.unwrap_or(json!(String::from_utf8_lossy(&bytes))),
     )
 }
-/// A post's event occurrences at a venue, written as the app-post feed writes them
-/// (`app_posts::write`): each an hour long, scheduled; its previous occurrences replaced.
+/// A post's event occurrences at a venue, as event references: each an hour long, scheduled; its
+/// previous occurrences replaced. Written directly: no feed writes event references today.
 async fn occurrences_at(
     pool: &PgPool,
     venue: &str,
     path: &str,
     occurrences: &[(Option<&str>, DateTime<Utc>)],
 ) {
-    let refs = occurrences
-        .iter()
-        .map(|(rid, start)| pinakes_core::app_posts::Ref {
-            uri: venue.into(),
-            kind: "event",
-            label: None,
-            recurrence_id: rid.map(str::to_owned),
-            start: Some(*start),
-            end: Some(*start + Duration::hours(1)),
-            status: Some("scheduled"),
-        })
-        .collect();
-    pinakes_core::app_posts::write(pool, &"y".repeat(52), path, refs, Utc::now())
+    let (id, uri, _) = identity(venue).unwrap();
+    let author = "y".repeat(52);
+    let mut tx = pool.begin().await.unwrap();
+    let mut affected: Vec<String> = sqlx::query_scalar(
+        "DELETE FROM reference WHERE author=$1 AND object_path=$2 RETURNING resource_id",
+    )
+    .bind(&author)
+    .bind(path)
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap();
+    let aliased = pinakes_core::store::insert_resource(&mut tx, &id, &uri)
         .await
         .unwrap();
+    for (rid, start) in occurrences {
+        sqlx::query(r#"INSERT INTO reference(resource_id,kind,author,object_path,recurrence_id,start_at,end_at,created_at,unit_key,event_status)
+            VALUES($1,'event',$2,$3,$4,$5,$6,now(),$7,'scheduled')"#)
+            .bind(&id).bind(&author).bind(path).bind(rid).bind(start).bind(*start + Duration::hours(1))
+            .bind(format!("{id}:{}", rid.unwrap_or(""))).execute(&mut *tx).await.unwrap();
+    }
+    affected.push(id);
+    pinakes_core::store::recompute_scores(&mut tx, &affected)
+        .await
+        .unwrap();
+    pinakes_core::alias::record(&mut tx, aliased.into_iter().collect())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
 }
 async fn reference(pool: &PgPool, uri: &str, path: &str, kind: Kind, op: Op) {
     let (_, uri, _) = identity(uri).unwrap();

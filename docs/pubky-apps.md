@@ -3,9 +3,10 @@
 People tag objects that Pubky apps other than pubky.app keep in their public storage: a Loopky
 deck, a room, a marketplace listing. Pinakes fetches such a `pubky://` object from its owner's
 homeserver and gives it a card. pubky.app's own objects (posts, profiles) and the social specs'
-objects (`/pub/social/v1/…`, any version: posts, tags, ratings) are Nexus's and never fetched.
-Neither are the old Mapky and Eventky layouts (`/pub/mapky.app/…`, `/pub/eventky.app/…`), whose
-data is disregarded: routes, availability and events now come as [app posts](#app-posts).
+objects (`/pub/social/…`, any version: tags, ratings, posts other than events and rsvps) are
+Nexus's: never fetched, or, for a social post, fetched and given no card. Neither are the old
+Mapky and Eventky layouts (`/pub/mapky.app/…`, `/pub/eventky.app/…`) fetched, whose data is
+disregarded: routes, availability and events now come as [posts](#posts).
 
 For an app Pinakes has a profile for, the card is that app's: a schema.org type, the name,
 description, image and a few facts the app's format holds, and `open_in`, the clients that open
@@ -69,28 +70,33 @@ A record must name its owner (`ownerPubky`) and kind (`recordType`), and a listi
 own ID. Every other path in the namespace (media files, reviews, encrypted deliverables, keys,
 proofs) is never fetched.
 
-## App posts
+## Posts
 
 Apps write their own kinds as posts on the social post envelope, under their own namespace:
-`/pub/<namespace>/v1/posts/{id}/{editId}.json`, each edit a new version. Pinakes reads them from
-the Nexus fork's app-post feed (`[nexus] app_posts`, [operations](operations.md#the-app-post-feed)),
-never by fetching a tagged link: a `/pub/<namespace>/v1/posts/…` path is never routed to the
-resolver. Each version is checked with pubky-social-specs' `PostEnvelope<K>` (acde362; the kind's
-content is the profile's to read), then read by its namespace and kind:
+`/pub/<namespace>/v1/posts/{id}/{editId}.json`, each edit a new version; the social specs' events
+and rsvps are posts too (`/pub/social/v1/posts/…`). A post is one resource, its versionless URI
+(`pubky://<author>/pub/<namespace>/v1/posts/{id}`), like any other `pubky://` object: it comes on
+the resource feed as a `post` line ([operations](operations.md#posts)), or is tagged, and the Pubky
+resolver reads it. It lists the post's folder newest first (`…/{id}/?reverse=true&limit=1`),
+fetches that version, checks it with pubky-social-specs' `PostEnvelope<K>` (acde362, the pin
+Nexus and the music node use; the kind's content is the profile's to read), and reads it by its
+namespace and kind (`resolver/pubky_apps/posts.rs`):
 
-| namespace, kind | what Pinakes keeps |
+| namespace, kind | card |
 | --- | --- |
-| `social` `event` | One event reference per location and occurrence, as a tagged event's: its JSCalendar `start` in its `timeZone`, its `duration` (a day when `showWithoutTime` and no duration), its `status` (`confirmed` and `tentative` are `scheduled`), its one `recurrenceRules` rule expanded under the spec's caps (1,000 occurrences, three years) less its `excludedDates`, at each `locations[].uri` (at the post itself when it names none). An override (`recurrenceOf` a master by the same author, `recurrenceId`) replaces that occurrence, and the master's later versions leave it replaced |
-| `social` `rsvp` | A reply on the page its `parent` names, its `status` as the label. An rsvp to a Pubky object (a social event post) is Nexus's to count and is not kept (`foreign`) |
-| `maps` `route` | The post's card: a `Trip` with its `name`, `description`, its first waypoint as the point, the box of its `geo:` waypoints, and `activity`, `distance_m`, `duration_s`, `elevation_gain_m`, `elevation_loss_m` and the number of waypoints as facts; and an embed on each waypoint, so a place lists the routes through it |
-| `events` `availability` | The post's card: a `Schedule` named by its first available block's `title`, from that block's start for its `duration`, in its `timeZone`, with its horizon, its numbers of available and busy blocks and its `for` as facts |
-| `music` `listen` | A play on the track the post `embed`s, at the line's time: a `listen` reference, which no score, filter or count reads |
+| `social` `event` | An `Event`: its `title` and `description`; its JSCalendar `start` in its `timeZone` for its `duration` (a day when `showWithoutTime` has none); a recurring one (one `recurrenceRules` rule, under the spec's caps of 1,000 occurrences and three years, less its `excludedDates`) at its next or current occurrence, else its last; `status` `cancelled` as the event's status; its first location as the venue (`name`, a `geo:` point, its link as the `location_uri` fact) |
+| `social` `rsvp` | An `RsvpAction`: its `status`, `guests` and the event it answers (`parent`) as facts |
+| `maps` `route` | A `Trip`: its `name`, `description`, its first waypoint as the point, the box of its `geo:` waypoints, and `activity`, `distance_m`, `duration_s`, `elevation_gain_m`, `elevation_loss_m` and the number of waypoints as facts |
+| `events` `availability` | A `Schedule` named by its first available block's `title`, from that block's start for its `duration` in its `timeZone`, with its horizon, its numbers of available and busy blocks and its `for` as facts |
+| `music` `listen` | A `ListenAction`: the track it `embed`s as a fact, at the post's own time (its id) |
+| `music` `session` | A `CreativeWork` by its `name` (or `title`) and `description` |
 
-A deleted post's references go and its card is `missing` at once. Every other namespace and kind
-(music `session` and `listening`, the social specs' own kinds) is skipped and counted.
-**Assumed, without a published spec:** a music `listen` names its track in the envelope's `embed`
-(pubky-music-specs is not public); `route` and `availability` are read as the social specs' v1.1
-branch defines them, since Maps' and Eventky's own spec crates do not exist yet.
+Any other kind in these namespaces (the social specs' own, music `listening`), and a version the
+envelope refuses, has no card. Posts of other namespaces are their apps' own and never fetched.
+**Assumed, without a published spec:** a music `listen` names its track in the envelope's `embed`,
+and a `session` is named by `name` or `title` (pubky-music-specs is not public); `route` and
+`availability` are read as the social specs' v1.1 branch defines them, since Maps' and Eventky's
+own spec crates do not exist yet.
 
 ## Adding a Pubky app
 
