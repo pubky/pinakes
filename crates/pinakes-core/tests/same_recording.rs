@@ -329,3 +329,61 @@ async fn the_switch_removes_the_field_and_stops_the_pass(pool: PgPool) {
     .unwrap();
     assert!(!field(&both_off));
 }
+
+/// A pass stopped after claiming loses nothing: its claim runs out and the next pass reads the
+/// recording again, dropping the pair its old length made. A change marked while a claim is held
+/// is read too.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_stopped_pass_leaves_no_pair_stale(pool: PgPool) {
+    let config = Config::default();
+    let take_five = |pool: &PgPool, uri: &'static str, length: &'static str| {
+        let pool = pool.clone();
+        async move {
+            recording(
+                &pool,
+                uri,
+                "Take Five",
+                Some("The Dave Brubeck Quartet"),
+                Some(length),
+            )
+            .await
+        }
+    };
+    let a = take_five(&pool, "https://tidal.com/track/1", "PT1M40S").await;
+    let b = take_five(&pool, "https://www.deezer.com/track/1031007", "PT1M40S").await;
+    pass(&pool, &config).await;
+    assert_eq!(named(&card(&config, &pool, &a).await), [b.as_str()]);
+    let pairs = || {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM same_recording")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    // The first track is now 3:20; a pass claims it and stops before reading it.
+    take_five(&pool, "https://tidal.com/track/1", "PT3M20S").await;
+    let claimed = same_recording::claim(&pool, 25, Duration::ZERO)
+        .await
+        .unwrap();
+    assert!(claimed.iter().any(|(id, _)| id == &a), "{claimed:?}");
+    // The claim has run out: the next pass reads the track and the 1:40 pair goes.
+    pass(&pool, &config).await;
+    assert_eq!(pairs().await, 0);
+    assert!(named(&card(&config, &pool, &a).await).is_empty());
+    // A claim is held (another pass is reading the track) when it changes back to 1:40: the
+    // change moves the entry back to now, and the next pass pairs the two again.
+    let held = same_recording::claim(&pool, 25, Duration::from_secs(300))
+        .await
+        .unwrap();
+    assert!(held.is_empty(), "nothing is due: {held:?}");
+    take_five(&pool, "https://tidal.com/track/1", "PT3M21S").await;
+    let held = same_recording::claim(&pool, 25, Duration::from_secs(300))
+        .await
+        .unwrap();
+    assert!(held.iter().any(|(id, _)| id == &a));
+    take_five(&pool, "https://tidal.com/track/1", "PT1M40S").await;
+    pass(&pool, &config).await;
+    assert_eq!(named(&card(&config, &pool, &a).await), [b.as_str()]);
+}

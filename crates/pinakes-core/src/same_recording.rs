@@ -14,7 +14,8 @@
 //!
 //! The pass reads the resources whose recording may have changed (`same_recording_dirty`,
 //! marked by triggers on the resource and its facts, and by the sweep), bounded per pass and
-//! going on at once while more is due; an hourly sweep marks the recordings never read and those
+//! going on at once while more is due; an entry is claimed for a while and dropped once read, so
+//! a stopped pass loses nothing; an hourly sweep marks the recordings never read and those
 //! that are no longer recordings (an alias, a retyped or gone page). Cards only read the stored
 //! pairs (`same_recording_hint`).
 use crate::config::{Config, SameEventHint};
@@ -91,24 +92,58 @@ pub async fn sweep(pool: &PgPool) -> Result<u64> {
     Ok(entered.rows_affected() + stale.rows_affected())
 }
 
+/// How long a claimed resource is the pass's: one that is not done by then (the pass was
+/// stopped, the process ended) is due again.
+const LEASE: Duration = Duration::from_secs(300);
+
+/// Claims up to `n` due resources for `lease`: each one's entry stays, moved `lease` ahead, and
+/// the time it was moved to is the claim. Exposed for the interruption test; `drain` claims with
+/// [`LEASE`].
+pub async fn claim(
+    pool: &PgPool,
+    n: i64,
+    lease: Duration,
+) -> Result<Vec<(String, chrono::DateTime<chrono::Utc>)>> {
+    let rows = sqlx::query("UPDATE same_recording_dirty d SET next_attempt_at=now()+$2*interval '1 millisecond' \
+        WHERE d.resource_id IN (SELECT resource_id FROM same_recording_dirty WHERE next_attempt_at<=now() ORDER BY next_attempt_at,resource_id LIMIT $1 FOR UPDATE SKIP LOCKED) \
+        RETURNING d.resource_id,d.next_attempt_at")
+        .bind(n)
+        .bind(lease.as_millis() as f64)
+        .fetch_all(pool)
+        .await?;
+    rows.iter()
+        .map(|r| Ok((r.try_get("resource_id")?, r.try_get("next_attempt_at")?)))
+        .collect()
+}
+
 /// One pass: claims up to `CLAIMED` due resources (at most `budget`) and reads each one's
-/// recording; a failed read is marked again for a minute later. Returns the resources claimed.
+/// recording. A read entry is dropped only if it is still the claim: a change marked meanwhile
+/// moved it back to now (the trigger), and the next pass reads the resource again. A failed read
+/// is due again a minute later; an interrupted pass leaves its claims to run out. Returns the
+/// resources claimed.
 pub async fn drain(pool: &PgPool, config: &Config, budget: i64) -> Result<usize> {
     if !enabled(config) {
         return Ok(0);
     }
-    let due: Vec<String> = sqlx::query_scalar("DELETE FROM same_recording_dirty WHERE resource_id IN (SELECT resource_id FROM same_recording_dirty WHERE next_attempt_at<=now() ORDER BY next_attempt_at,resource_id LIMIT $1 FOR UPDATE SKIP LOCKED) RETURNING resource_id")
-        .bind(CLAIMED.min(budget.max(1)))
-        .fetch_all(pool)
-        .await?;
+    let due = claim(pool, CLAIMED.min(budget.max(1)), LEASE).await?;
     let mut changed = false;
-    for id in &due {
+    for (id, claimed) in &due {
         match resource(pool, id).await {
-            Ok(moved) => changed |= moved,
+            Ok(moved) => {
+                changed |= moved;
+                sqlx::query(
+                    "DELETE FROM same_recording_dirty WHERE resource_id=$1 AND next_attempt_at=$2",
+                )
+                .bind(id)
+                .bind(claimed)
+                .execute(pool)
+                .await?;
+            }
             Err(error) => {
                 tracing::warn!(resource_id = %id, error = %crate::resolver::log_error(&error), "same-recording pairs will retry");
-                sqlx::query("INSERT INTO same_recording_dirty(resource_id,next_attempt_at) SELECT id,now()+interval '60 seconds' FROM resource WHERE id=$1 ON CONFLICT DO NOTHING")
+                sqlx::query("UPDATE same_recording_dirty SET next_attempt_at=now()+interval '60 seconds' WHERE resource_id=$1 AND next_attempt_at=$2")
                     .bind(id)
+                    .bind(claimed)
                     .execute(pool)
                     .await?;
             }
