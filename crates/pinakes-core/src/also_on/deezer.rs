@@ -87,10 +87,17 @@ impl Source for DeezerSource {
                 return Ok(found);
             };
             if let Some(value) = v[field].as_str().and_then(normal) {
-                found.keys.push(Key {
-                    key: format!("{namespace}:{value}"),
-                    via: "deezer".into(),
-                });
+                if kind == "track" {
+                    // Its ISRC names its recording as the track's length tells (`isrc_match`).
+                    let duration = v["duration"].as_i64();
+                    let named = isrc_match(cx, &value, duration).await?;
+                    found.keys.extend(isrc_key(&value, &named, "deezer"));
+                } else {
+                    found.keys.push(Key {
+                        key: format!("{namespace}:{value}"),
+                        via: "deezer".into(),
+                    });
+                }
                 found
                     .facts
                     .push(crate::also_on::Fact::new(namespace, value));

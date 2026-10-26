@@ -7,8 +7,9 @@ One of the music sources of [also on](../api.md#also-on): links on music service
 [operations](#operations)): a TIDAL album's barcode and a track's ISRC from TIDAL's
 own API, as the keys `upc:…` and `isrc:…` (`via` `tidal`) and as facts, and no links;
 `musicbrainz`, `deezer` and `itunes` then find the
-same album or track by them. An ISRC MusicBrainz gives to several recordings is a fact only, as
-with `service`. TIDAL's catalogue is read in one country (`[tidal] country`,
+same album or track by them. An ISRC MusicBrainz gives to several recordings is decided as with
+[`service`](service.md): by the track's duration, the one recording within 3 s of it keyed by its
+MBID, else the ISRC a fact only. TIDAL's catalogue is read in one country (`[tidal] country`,
 `US`); an item TIDAL does not offer there gives nothing. TIDAL's answers are cached per
 credential pair, so a new token keeps them; a 401 or 403 is never cached, and refused
 credentials are asked again after five minutes.

@@ -489,8 +489,18 @@ pub mod musicbrainz {
             .min()
             .map(|(_, title)| title.to_owned())
     }
+    /// A recording an ISRC is on, with its length when MusicBrainz states one.
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct IsrcRecording {
+        pub mbid: String,
+        pub length_ms: Option<u64>,
+    }
     /// The recordings an ISRC is on; `None` when MusicBrainz does not know the ISRC.
-    pub async fn isrc(egress: &Egress, base: &str, isrc: &str) -> Result<Option<Vec<String>>> {
+    pub async fn isrc(
+        egress: &Egress,
+        base: &str,
+        isrc: &str,
+    ) -> Result<Option<Vec<IsrcRecording>>> {
         let Some(isrc) = crate::music::isrc(isrc) else {
             return Ok(None);
         };
@@ -545,17 +555,24 @@ pub mod musicbrainz {
         ids.dedup();
         ids
     }
-    /// `GET /isrc/{ISRC}`: the recordings' MBIDs, each once.
-    pub fn parse_isrc(v: &Value) -> Vec<String> {
-        let mut ids: Vec<String> = v["recordings"]
+    /// `GET /isrc/{ISRC}`: the recordings, each once, by MBID.
+    pub fn parse_isrc(v: &Value) -> Vec<IsrcRecording> {
+        let mut recordings: Vec<IsrcRecording> = v["recordings"]
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|r| mbid(r["id"].as_str()?))
+            .filter_map(|r| {
+                Some(IsrcRecording {
+                    mbid: mbid(r["id"].as_str()?)?,
+                    length_ms: r["length"]
+                        .as_u64()
+                        .filter(|ms| (1..=86_400_000).contains(ms)),
+                })
+            })
             .collect();
-        ids.sort();
-        ids.dedup();
-        ids
+        recordings.sort();
+        recordings.dedup_by(|a, b| a.mbid == b.mbid);
+        recordings
     }
     /// One entity with its URL relations; `None` when the MBID is unknown.
     pub async fn entity(

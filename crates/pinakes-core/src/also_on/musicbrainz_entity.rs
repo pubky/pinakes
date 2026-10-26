@@ -87,7 +87,7 @@ impl MusicBrainzEntitySource {
                     cx,
                     base,
                     MbKind::Recording,
-                    &recordings,
+                    &[recordings[0].mbid.clone()],
                     Level::Track,
                     false,
                 )

@@ -85,13 +85,12 @@ impl MusicBrainzSource {
             },
         };
         // A track MusicBrainz does not relate the URL to: the one recording its page's own ISRC
-        // is on.
+        // is on, or the one of several its length picks (`isrc_match`).
         if kind == MbKind::Recording && ids.is_empty() {
             if let Some(isrc) = own_isrc(subject) {
-                if let Some(recordings) = musicbrainz::isrc(&cx.egress, base, &isrc).await? {
-                    if recordings.len() == 1 {
-                        ids = recordings;
-                    }
+                match isrc_match(cx, &isrc, page_duration(subject)).await? {
+                    IsrcMatch::One(mbid) | IsrcMatch::Picked(mbid) => ids = vec![mbid],
+                    IsrcMatch::Unknown | IsrcMatch::Shared => {}
                 }
             }
         }

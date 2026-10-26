@@ -1,6 +1,6 @@
 //! The `service` also-on source.
 use crate::{
-    also_on::{Context, Found, Key, Source, Subject},
+    also_on::{Context, Found, Source, Subject},
     music::{self, Level},
 };
 use anyhow::Result;
@@ -28,12 +28,9 @@ impl Source for ServiceSource {
         };
         let mut found = Found::default();
         if let Some((service, isrc)) = page_isrc(subject) {
-            let shared = service.vouches_isrc() && shared_isrc(cx, &isrc).await?;
-            if service.vouches_isrc() && !shared {
-                found.keys.push(Key {
-                    key: format!("isrc:{isrc}"),
-                    via: service.token().into(),
-                });
+            if service.vouches_isrc() {
+                let named = isrc_match(cx, &isrc, page_duration(subject)).await?;
+                found.keys.extend(isrc_key(&isrc, &named, service.token()));
             }
             found.facts.push(crate::also_on::Fact::new("isrc", isrc));
         }

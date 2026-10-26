@@ -67,14 +67,75 @@ pub(crate) fn own_isrc(subject: &Subject) -> Option<String> {
         .map(|(_, isrc)| isrc)
 }
 
-/// Whether MusicBrainz gives `isrc` to several recordings: such an ISRC names none of them, so
-/// it is a fact, never a key.
-pub(crate) async fn shared_isrc(cx: &Context, isrc: &str) -> Result<bool> {
-    Ok(
-        musicbrainz::isrc(&cx.egress, cx.config.also_on.musicbrainz_base(), isrc)
-            .await?
-            .is_some_and(|recordings| recordings.len() > 1),
-    )
+/// The length of a track as its service's page or record states it, in seconds (`duration`,
+/// an ISO 8601 duration in the document's attributes).
+pub(crate) fn page_duration(subject: &Subject) -> Option<i64> {
+    duration_secs(subject.doc.as_ref()?.attributes.get("duration")?)
+}
+/// An ISO 8601 duration as seconds, when it is a track's length (a second to a day).
+pub(crate) fn duration_secs(iso: &str) -> Option<i64> {
+    crate::event::time::duration(iso)
+        .map(|d| d.num_seconds())
+        .filter(|s| (1..=86_400).contains(s))
+}
+/// How far a service's duration may be from a recording's length for the recording to be the
+/// track's, in seconds.
+pub const LENGTH_WINDOW_SECS: u64 = 3;
+/// What an ISRC a service states for its own track names on MusicBrainz.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IsrcMatch {
+    /// MusicBrainz knows no recording with it: the ISRC is the track's own key.
+    Unknown,
+    /// Exactly one recording has it: the ISRC is a key, and names that recording.
+    One(String),
+    /// Several recordings have it, and the service's duration picks one: the recording whose
+    /// length is within [`LENGTH_WINDOW_SECS`] of it while every other's is known and is not.
+    /// The recording's MBID is the key; the ISRC stays a fact.
+    Picked(String),
+    /// Several recordings have it and nothing tells them apart: the ISRC is a fact only, as a
+    /// key would join whichever of their groups took it first.
+    Shared,
+}
+/// Which recording `isrc`, a service's own record of its track, names: see [`IsrcMatch`].
+/// `duration` is the track's length by the service, in seconds.
+pub(crate) async fn isrc_match(
+    cx: &Context,
+    isrc: &str,
+    duration: Option<i64>,
+) -> Result<IsrcMatch> {
+    let recordings =
+        musicbrainz::isrc(&cx.egress, cx.config.also_on.musicbrainz_base(), isrc).await?;
+    Ok(match recordings.as_deref() {
+        None | Some([]) => IsrcMatch::Unknown,
+        Some([one]) => IsrcMatch::One(one.mbid.clone()),
+        Some(several) => picked(several, duration).map_or(IsrcMatch::Shared, IsrcMatch::Picked),
+    })
+}
+/// Of several recordings, the one a track's `duration` picks: its length is within
+/// [`LENGTH_WINDOW_SECS`] of it, and every other recording's length is known and is not.
+pub fn picked(recordings: &[musicbrainz::IsrcRecording], duration: Option<i64>) -> Option<String> {
+    let secs = u64::try_from(duration?).ok()?;
+    let close = |r: &musicbrainz::IsrcRecording| {
+        r.length_ms
+            .map(|ms| ms.abs_diff(secs * 1000) <= LENGTH_WINDOW_SECS * 1000)
+    };
+    let mut near = recordings.iter().filter(|r| close(r) == Some(true));
+    let one = near.next()?;
+    (near.next().is_none() && recordings.iter().all(|r| close(r).is_some()))
+        .then(|| one.mbid.clone())
+}
+/// The key a service's own ISRC gives its track (`via` the service): the ISRC itself, or the
+/// recording a shared ISRC's duration picked; none for a shared ISRC nothing tells apart.
+pub(crate) fn isrc_key(isrc: &str, found: &IsrcMatch, via: &str) -> Option<crate::also_on::Key> {
+    let key = match found {
+        IsrcMatch::Unknown | IsrcMatch::One(_) => format!("isrc:{isrc}"),
+        IsrcMatch::Picked(mbid) => hubs::key::mb(MbKind::Recording, mbid)?,
+        IsrcMatch::Shared => return None,
+    };
+    Some(crate::also_on::Key {
+        key,
+        via: via.into(),
+    })
 }
 
 /// A MusicBrainz page's card, from the entity MusicBrainz serves (`musicbrainz_entity` reads the
