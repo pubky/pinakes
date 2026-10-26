@@ -209,7 +209,7 @@ derive_links = true # Off: keys and facts only; no derived links on cards, nor j
 country = "US" # The TIDAL catalogue's country (ISO 3166-1 alpha-2, upper case).
 
 [api]
-# Applied to every public /v1 route using the direct peer IP.
+# Applied to every public route (/v1, the agents' guide and /mcp) using the direct peer IP.
 requests_per_minute = 120
 # Browser origins allowed to call the public listener (CORS). ["*"] allows any origin (the public
 # API takes no cookies or tokens); list exact origins such as "https://pubky.app" to restrict;
@@ -217,6 +217,8 @@ requests_per_minute = 120
 cors_allow_origins = ["*"]
 # Swagger UI for the public OpenAPI document at /swagger-ui; /v1/openapi.json stays either way.
 swagger_ui = true
+# The MCP endpoint for AI agents at POST /mcp (docs/api.md, Agents); /llms.txt stays either way.
+mcp = true
 
 [canary]
 enabled = true # Periodic event-platform canaries, reported in metrics.

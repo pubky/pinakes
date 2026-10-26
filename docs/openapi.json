@@ -624,6 +624,66 @@
         ],
         "type": "object"
       },
+      "Index": {
+        "description": "`GET /`: where an agent starts.",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "links": {
+            "$ref": "#/components/schemas/IndexLinks"
+          },
+          "service": {
+            "type": "string"
+          },
+          "start_here": {
+            "description": "The usage guide: read it first.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "service",
+          "description",
+          "start_here",
+          "links"
+        ],
+        "type": "object"
+      },
+      "IndexLinks": {
+        "properties": {
+          "guide": {
+            "type": "string"
+          },
+          "info": {
+            "type": "string"
+          },
+          "mcp": {
+            "description": "The MCP endpoint; absent when `api.mcp` is off.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "openapi": {
+            "type": "string"
+          },
+          "skill": {
+            "type": "string"
+          },
+          "social_graph": {
+            "description": "Graph questions (who follows whom, trust, threads): nexus-scout.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "guide",
+          "skill",
+          "openapi",
+          "info",
+          "social_graph"
+        ],
+        "type": "object"
+      },
       "Info": {
         "description": "What a client needs: the version, the User-Agent this instance sends, what it resolves, the\nlimits a client must respect, and the licence of the OSM-derived values its cards carry.",
         "properties": {
@@ -1318,6 +1378,67 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/": {
+      "get": {
+        "description": "Where an agent starts: the guide, the skill, the MCP endpoint, the OpenAPI document and nexus-scout for graph questions.",
+        "operationId": "index",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Index"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "Agents"
+        ]
+      }
+    },
+    "/llms.txt": {
+      "get": {
+        "operationId": "llms_txt",
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The usage guide for agents: what Pinakes indexes, a quickstart, recipes, joining with Nexus, MCP, limits and errors. Its base URL is the host that served it."
+          }
+        },
+        "tags": [
+          "Agents"
+        ]
+      }
+    },
+    "/skill.md": {
+      "get": {
+        "operationId": "skill_md",
+        "responses": {
+          "200": {
+            "content": {
+              "text/markdown": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The guide as an agent skill: front matter named `pinakes`, then the guide."
+          }
+        },
+        "tags": [
+          "Agents"
+        ]
+      }
+    },
     "/v1/changes/lookup": {
       "post": {
         "operationId": "lookup_changes",
@@ -3334,6 +3455,10 @@
     {
       "description": "The ODbL share-alike download of the OpenStreetMap-derived data.",
       "name": "Licensing"
+    },
+    {
+      "description": "The usage guide for AI agents (also as a skill) and the index that links it and the MCP endpoint, `POST /mcp`, which docs/api.md describes.",
+      "name": "Agents"
     }
   ]
 }
