@@ -86,6 +86,7 @@ or got plain web cards before are read by their source.
 - [`inaturalist`](inaturalist.md): iNaturalist observations and taxa by id.
 - [`internet_archive`](internet_archive.md): Internet Archive items (books, films, audio, software…) by identifier.
 - [`legislation_gov_uk`](legislation_gov_uk.md): UK Acts, statutory instruments and retained EU law.
+- [`linkedin`](linkedin.md): LinkedIn profiles, company pages and posts.
 - [`lobsters`](lobsters.md): Lobsters stories by short id.
 - [`mastodon`](mastodon.md): Mastodon posts on any server.
 - [`media_records`](media_records.md): page and wall hook: a film's, series', book's or podcast's page named after its object, from its exact record (Wikidata by the page's ID, Open Library, TVmaze, iTunes)

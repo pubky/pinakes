@@ -119,6 +119,8 @@ enabled = true
 enabled = true
 [sources.legislation_gov_uk]
 enabled = true
+[sources.linkedin]
+enabled = true
 [sources.lobsters]
 enabled = true
 [sources.mastodon]

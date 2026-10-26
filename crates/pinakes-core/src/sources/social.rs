@@ -134,6 +134,72 @@ pub async fn oembed(cx: &Context<'_>, endpoint: &str, url: &str) -> Result<Oembe
     }
 }
 
+/// What a platform answered for one of its pages, as text, for a source that reads the page's
+/// tags itself.
+pub enum Body {
+    Read { body: String, url: url::Url },
+    Missing,
+    Blocked,
+}
+
+/// Fetch a platform's public page as text.
+pub async fn page_body(cx: &Context<'_>, url: &str) -> Result<Body> {
+    let fetched = match cx.fetch(url, &FetchOptions::default()).await {
+        Ok(fetched) => fetched,
+        Err(e) if e.is::<Blocked>() => return Ok(Body::Blocked),
+        Err(e) => return Err(e),
+    };
+    Ok(match fetched.status {
+        200 => Body::Read {
+            body: String::from_utf8_lossy(&fetched.body).into_owned(),
+            url: fetched.url,
+        },
+        404 | 410 | 451 => Body::Missing,
+        401 | 403 | 999 => Body::Blocked,
+        s => bail!("the site answered {s}"),
+    })
+}
+
+/// A page's Open Graph tags as written, for a platform whose JSON-LD describes other things
+/// than the page (LinkedIn's lists recent posts).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct OpenGraph {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub image: Option<String>,
+    pub kind: Option<String>,
+}
+
+/// The Open Graph tags of a page. Run under a parse slot (`html::blocking`).
+pub fn open_graph(body: &str) -> Result<OpenGraph> {
+    let html = html::document(body)?;
+    let selector = scraper::Selector::parse("meta[property]").expect("static selector");
+    let mut tags = OpenGraph::default();
+    for meta in html.select(&selector) {
+        let (Some(property), Some(content)) =
+            (meta.value().attr("property"), meta.value().attr("content"))
+        else {
+            continue;
+        };
+        let content = content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        let slot = match property {
+            "og:title" => &mut tags.title,
+            "og:description" => &mut tags.description,
+            "og:image" => &mut tags.image,
+            "og:type" => &mut tags.kind,
+            _ => continue,
+        };
+        if slot.is_none() {
+            *slot = Some(content.to_owned());
+        }
+    }
+    tags.image = tags.image.filter(|i| crate::sources::web_url(i).is_some());
+    Ok(tags)
+}
+
 /// At most `max` characters of `text`, its whitespace flattened, with an ellipsis when cut.
 pub fn excerpt(text: &str, max: usize) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -243,6 +309,23 @@ mod tests {
         assert_eq!(doc.attributes["blocked"], "true");
         assert_eq!(doc.site, "instagram.com");
         assert_eq!(Shape::Video.type_name(), "VideoObject");
+    }
+
+    #[test]
+    fn open_graph_tags_as_written() {
+        let tags = open_graph(
+            r#"<title>T</title><meta property="og:title" content=" A &amp; B "><meta property="og:title" content="second"><meta property="og:description" content=""><meta property="og:image" content="/relative.png"><meta property="og:type" content="profile"><script type="application/ld+json">{"@type":"Article","name":"Other"}</script>"#,
+        )
+        .unwrap();
+        assert_eq!(
+            tags,
+            OpenGraph {
+                title: Some("A & B".into()),
+                description: None,
+                image: None,
+                kind: Some("profile".into()),
+            }
+        );
     }
 
     #[test]

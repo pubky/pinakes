@@ -58,6 +58,7 @@ pub mod inaturalist;
 pub mod internet_archive;
 pub mod kit;
 pub mod legislation_gov_uk;
+pub mod linkedin;
 pub mod lobsters;
 pub mod mastodon;
 pub mod media_records;
@@ -121,6 +122,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &inaturalist::Inaturalist,
     &internet_archive::InternetArchive,
     &legislation_gov_uk::LegislationGovUk,
+    &linkedin::LinkedIn,
     &lobsters::Lobsters,
     &mastodon::Mastodon,
     &media_records::MediaRecords,
