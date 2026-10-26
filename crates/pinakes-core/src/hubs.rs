@@ -589,6 +589,10 @@ pub mod wikidata {
         pub ids: BTreeMap<String, Vec<String>>,
         /// Sitelinks: site (`enwiki`, `dewiki`, `commonswiki`, …) → page URL.
         pub sitelinks: BTreeMap<String, String>,
+        /// The items this one says replaced it (P1366, "replaced by") and that it replaces
+        /// (P1365), at their best rank: a discontinued product and its successor.
+        pub replaced_by: Vec<String>,
+        pub replaces: Vec<String>,
     }
     impl Item {
         pub fn id(&self, property: &str) -> &[String] {
@@ -648,11 +652,28 @@ pub mod wikidata {
                     qid,
                     ids,
                     sitelinks,
+                    replaced_by: item_values(&e["claims"]["P1366"]),
+                    replaces: item_values(&e["claims"]["P1365"]),
                 })
             })
             .collect();
         items.sort_by(|a, b| a.qid.cmp(&b.qid));
         items
+    }
+    /// The items an item-valued property names, at its best rank (preferred if any, else
+    /// normal; deprecated never).
+    fn item_values(claims: &Value) -> Vec<String> {
+        let claims = claims.as_array().map_or(&[][..], Vec::as_slice);
+        let rank = if claims.iter().any(|c| c["rank"] == "preferred") {
+            "preferred"
+        } else {
+            "normal"
+        };
+        claims
+            .iter()
+            .filter(|c| c["rank"] == rank && c["mainsnak"]["snaktype"] == "value")
+            .filter_map(|c| qid(c["mainsnak"]["datavalue"]["value"]["id"].as_str()?))
+            .collect()
     }
     /// The item a Wikidata item link names, with the link's canonical form
     /// (`https://www.wikidata.org/wiki/{Q-id}`): `/wiki/Q…`, `/entity/Q…` and
@@ -780,12 +801,28 @@ pub mod wikidata {
         };
         Ok(verified(read, property, value))
     }
-    /// The verification step of [`item_with`].
+    /// The verification step of [`item_with`]. Of several items carrying the ID, one that
+    /// another of them replaces (its "replaced by", or the other's "replaces": TextSecure and
+    /// Signal share Signal's Android package) is the past and gives way to its successor.
     pub fn verified(items: Vec<Item>, property: &str, value: &str) -> Found {
         let mut matching: Vec<Item> = items
             .into_iter()
             .filter(|i| i.id(property).iter().any(|v| v == value))
             .collect();
+        if matching.len() > 1 {
+            let succeeded = |old: &Item| {
+                matching.iter().any(|new| {
+                    new.qid != old.qid
+                        && (old.replaced_by.contains(&new.qid) || new.replaces.contains(&old.qid))
+                })
+            };
+            let past: Vec<String> = matching
+                .iter()
+                .filter(|i| succeeded(i))
+                .map(|i| i.qid.clone())
+                .collect();
+            matching.retain(|i| !past.contains(&i.qid));
+        }
         match matching.len() {
             0 => Found::None,
             1 => Found::One(Box::new(matching.remove(0))),
@@ -797,6 +834,53 @@ pub mod wikidata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two items carrying one Android package: TextSecure, "replaced by" Signal, and Signal,
+    /// which "replaces" it. The successor is the package's item; either statement alone is
+    /// enough, and two items unrelated by succession stay ambiguous.
+    #[test]
+    fn a_successor_wins_over_the_item_it_replaces() {
+        let package = "org.thoughtcrime.securesms";
+        let entity = |q: &str, extra: serde_json::Value| {
+            let mut claims = serde_json::json!({"P3418": [{"rank": "normal", "mainsnak": {
+                "snaktype": "value", "datatype": "external-id", "datavalue": {"value": package}}}]});
+            for (p, v) in extra.as_object().unwrap() {
+                claims[p] = serde_json::json!([{"rank": "normal", "mainsnak": {"snaktype": "value",
+                    "datatype": "wikibase-item", "datavalue": {"value": {"entity-type": "item", "id": v}}}}]);
+            }
+            (
+                q.to_owned(),
+                serde_json::json!({"type": "item", "id": q, "claims": claims}),
+            )
+        };
+        let found = |old: serde_json::Value, new: serde_json::Value| {
+            let (a, b) = (entity("Q15871857", old), entity("Q19718090", new));
+            let v = serde_json::json!({"entities": {a.0: a.1, b.0: b.1}});
+            wikidata::verified(wikidata::parse_entities(&v), "P3418", package)
+        };
+        let signal =
+            |f: &wikidata::Found| matches!(f, wikidata::Found::One(i) if i.qid == "Q19718090");
+        let both = found(
+            serde_json::json!({"P1366": "Q19718090"}),
+            serde_json::json!({"P1365": "Q15871857"}),
+        );
+        assert!(signal(&both), "{both:?}");
+        let replaced_by = found(
+            serde_json::json!({"P1366": "Q19718090"}),
+            serde_json::json!({}),
+        );
+        assert!(signal(&replaced_by), "{replaced_by:?}");
+        let replaces = found(
+            serde_json::json!({}),
+            serde_json::json!({"P1365": "Q15871857"}),
+        );
+        assert!(signal(&replaces), "{replaces:?}");
+        let unrelated = found(serde_json::json!({}), serde_json::json!({}));
+        assert_eq!(unrelated, wikidata::Found::Ambiguous(2));
+        // A successor named outside the candidates decides nothing.
+        let elsewhere = found(serde_json::json!({"P1366": "Q42"}), serde_json::json!({}));
+        assert_eq!(elsewhere, wikidata::Found::Ambiguous(2));
+    }
 
     /// Items over the cap together are read one by one, so one never sinks the other's answer;
     /// one over it alone is no answer (its refusal).

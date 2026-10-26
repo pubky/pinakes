@@ -337,6 +337,7 @@ mod tests {
                 .map(|(p, v)| (p.to_string(), v.iter().map(|s| s.to_string()).collect()))
                 .collect::<BTreeMap<_, _>>(),
             sitelinks: BTreeMap::new(),
+            ..Default::default()
         }
     }
 
