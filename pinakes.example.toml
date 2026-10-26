@@ -147,6 +147,8 @@ enabled = true
 enabled = true
 [sources.stacker_news]
 enabled = true
+[sources.substack]
+enabled = true
 [sources.swiss_parliament]
 enabled = true
 [sources.telegram]
