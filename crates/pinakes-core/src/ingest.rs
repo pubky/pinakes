@@ -8,9 +8,11 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use futures_util::FutureExt;
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 pub const REJECT_REASONS: &[&str] = &[
+    "unknown_kind",
+    "malformed",
     "author",
     "label",
     "object_path",
@@ -127,15 +129,17 @@ pub async fn apply(
         tracing::warn!(nexus, "Nexus feed reset; rebuilding references");
         return Ok(false);
     }
-    if feed.page.lines.len() > 1000
-        || feed.page.next_cursor != requested.cursor + feed.page.lines.len() as i64
+    // The page's lines, those skipped while parsing included: the cursor moves past them all.
+    let read = feed.page.read();
+    if read > 1000
+        || feed.page.next_cursor != requested.cursor + read as i64
         || feed.page.next_cursor > feed.length
     {
         bail!("invalid Nexus cursor progression");
     }
     let mut affected = BTreeSet::new();
     let mut aliased = vec![];
-    let mut rejected = BTreeMap::<&'static str, u64>::new();
+    let mut rejected = feed.page.skipped.clone();
     for (i, line) in feed.page.lines.iter().enumerate() {
         let mut savepoint = sqlx::Connection::begin(&mut *tx).await?;
         let mut touched = BTreeSet::new();
@@ -327,6 +331,7 @@ mod tests {
             page: Changes {
                 next_cursor: lines.len() as i64,
                 lines,
+                skipped: Default::default(),
             },
             epoch: None,
             length: 4,
@@ -353,6 +358,67 @@ mod tests {
         assert_eq!(panics, 2);
     }
 
+    /// A page that mixes lines this build reads with a line of an unknown kind and malformed ones
+    /// is applied: the good lines land, the others are skipped and counted, and the cursor moves
+    /// past them all, so one line never stops the feed. Through the real client and parser.
+    #[sqlx::test(
+        migrations = "../../migrations",
+        fixtures("../tests/fixtures/require_h3.sql")
+    )]
+    async fn a_page_with_unknown_and_malformed_lines_moves_the_cursor_past_them(pool: PgPool) {
+        use axum::{routing::get, Router};
+        let good = |uri: &str, path: &str| serde_json::to_value(line(uri, path)).unwrap();
+        let mut unknown = good("https://example.org/listen", "/pub/music/v1/posts/1");
+        unknown["kind"] = "listen".into();
+        let mut no_author = good("https://example.org/no-author", "/x");
+        no_author.as_object_mut().unwrap().remove("author");
+        let mut bad_op = good("https://example.org/bad-op", "/y");
+        bad_op["op"] = "upsert".into();
+        let page = serde_json::json!({
+            "lines": [
+                good("https://example.org/first", "/a"),
+                unknown,
+                no_author,
+                "not an object",
+                bad_op,
+                good("https://example.org/last", "/b"),
+            ],
+            "next_cursor": 6,
+        });
+        let app = Router::new().route(
+            "/v0/resources/changes",
+            get(move || {
+                let page = page.clone();
+                async move {
+                    (
+                        [("x-events-epoch", "e1"), ("x-events-length", "6")],
+                        axum::Json(page),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let nexus = Nexus::new(&url).unwrap();
+        let metrics = Metrics::new().unwrap();
+        let limits = IngestConfig::default();
+        let applied = poll_once(&pool, &url, &nexus, &limits, &metrics)
+            .await
+            .unwrap();
+        assert_eq!(applied, 2);
+        let paths: Vec<String> =
+            sqlx::query_scalar("SELECT object_path FROM reference ORDER BY object_path")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(paths, ["/a", "/b"]);
+        assert_eq!(cursor(&pool, &url).await.unwrap().cursor, 6);
+        let skipped = |reason| metrics.ingest_rejected.with_label_values(&[reason]).get();
+        assert_eq!((skipped("unknown_kind"), skipped("malformed")), (1, 3));
+        server.abort();
+    }
+
     /// A panic in the batch's work after its lines is an error: counted, the batch rolled back
     /// and the cursor held, so the operator sees a stalled feed instead of a silent retry loop.
     #[sqlx::test(
@@ -369,6 +435,7 @@ mod tests {
             page: Changes {
                 next_cursor: lines.len() as i64,
                 lines,
+                skipped: Default::default(),
             },
             epoch: None,
             length: 2,

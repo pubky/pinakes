@@ -352,9 +352,13 @@ the guide stays.
 `uri`, normalized and hashed into its own ID (Nexus's `resource_id` is not read); a URI that does
 not normalize is rejected (`uri`). A line's author must be 52
 lowercase z-base-32 characters; labels and object paths must be non-empty, NUL-free and within
-`limits.max_label_bytes` and `limits.max_object_path_bytes`. A bad line is skipped and counted in
-`pinakes_ingest_rejected_total{reason}` (`author`, `label`, `object_path`, `uri`, `timestamp`,
-`event`, `panic`) after the batch commits; the cursor still advances. Each line runs in a
+`limits.max_label_bytes` and `limits.max_object_path_bytes`. A page is parsed line by line: a line
+of a kind this build does not read (`unknown_kind`, a newer Nexus's) or one it cannot parse
+(`malformed`) is skipped without its content in any log, and only the page's envelope (`lines`,
+`next_cursor`) must be well formed. A bad line is skipped and counted in
+`pinakes_ingest_rejected_total{reason}` (`unknown_kind`, `malformed`, `author`, `label`,
+`object_path`, `uri`, `timestamp`, `event`, `panic`) after the batch commits; the cursor still
+advances past it. Each line runs in a
 savepoint: a line whose processing panics is rolled back alone and skipped (`panic`; the log
 line names its feed position only, never its content). A panic anywhere else in a poll (the
 batch's score update or cursor write, say) is an error: the batch rolls back, the cursor holds,

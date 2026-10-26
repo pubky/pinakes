@@ -257,6 +257,7 @@ async fn concurrent_writers_never_wait_on_the_search_revision(pool: PgPool) {
                         page: Changes {
                             lines,
                             next_cursor: next,
+                            skipped: Default::default(),
                         },
                         epoch: Some("load".into()),
                         length: next,

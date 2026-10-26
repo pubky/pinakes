@@ -974,6 +974,7 @@ async fn cards_carry_their_client_links_and_facts(pool: PgPool) {
             page: Changes {
                 lines: vec![line],
                 next_cursor: cursor.cursor + 1,
+                skipped: Default::default(),
             },
             epoch: Some("1".into()),
             length: cursor.cursor + 1,

@@ -299,6 +299,7 @@ async fn feed(
         Json(Changes {
             lines: b.lines[start..end].to_vec(),
             next_cursor: end as i64,
+            skipped: Default::default(),
         }),
     )
 }

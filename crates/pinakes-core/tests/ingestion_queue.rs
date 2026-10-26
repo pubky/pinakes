@@ -50,6 +50,7 @@ async fn batch(pool: &PgPool, lines: Vec<Change>, epoch: Option<&str>) -> bool {
             page: Changes {
                 lines,
                 next_cursor: next,
+                skipped: Default::default(),
             },
             epoch: epoch.map(str::to_owned),
             length: next,
@@ -129,6 +130,7 @@ async fn epoch_headers_length_reset_and_transaction_rollback(pool: PgPool) {
         page: Changes {
             lines: vec![],
             next_cursor: saved.cursor,
+            skipped: Default::default(),
         },
         epoch: None,
         length: 0,
@@ -160,6 +162,7 @@ async fn epoch_headers_length_reset_and_transaction_rollback(pool: PgPool) {
         page: Changes {
             lines: vec![a.clone(), foreign, bad_uri],
             next_cursor: 3,
+            skipped: Default::default(),
         },
         epoch: None,
         length: 3,
@@ -193,6 +196,7 @@ async fn concurrent_pollers_only_commit_a_batch_once(pool: PgPool) {
         page: Changes {
             lines: vec![change("https://example.org", "a", "/pub/a")],
             next_cursor: 1,
+            skipped: Default::default(),
         },
         epoch: Some("a".into()),
         length: 1,
@@ -250,6 +254,7 @@ async fn rejects_oversized_feed_fields_without_stalling_or_truncating_keys(pool:
         page: Changes {
             lines,
             next_cursor: end,
+            skipped: Default::default(),
         },
         epoch: None,
         length: end,
@@ -303,6 +308,7 @@ async fn rejected_counts_follow_commit_and_concurrent_cursor_fencing(pool: PgPoo
         page: Changes {
             lines: vec![rejected, invalid],
             next_cursor: 2,
+            skipped: Default::default(),
         },
         epoch: None,
         length: 2,
@@ -1240,6 +1246,7 @@ async fn invalid_non_event_feed_clock_has_its_own_rejection_reason(pool: PgPool)
         page: pinakes_core::nexus::Changes {
             lines: vec![line],
             next_cursor: 1,
+            skipped: Default::default(),
         },
         length: 1,
         epoch: Some("one".into()),

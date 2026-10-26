@@ -60,6 +60,7 @@ async fn seed(pool: &PgPool) -> Vec<String> {
             page: Changes {
                 lines,
                 next_cursor: next,
+                skipped: Default::default(),
             },
             epoch: Some("fixture".into()),
             length: next,
