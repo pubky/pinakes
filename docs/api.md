@@ -649,7 +649,8 @@ Classes are `created`, `rescheduled` (start or end), `relocated` (location or ve
 change at once one class is chosen in this order: lifecycle, time, location, name, details;
 `fields` still lists them all. Orphan expiry emits `deleted`. A resource that becomes an
 [alias](#aliases) emits `aliased` with `fields: ["root"]` and `root`, the ID that answers for it
-from then on; the changes of an alias's ID are its own and its root's. A fetch failure emits nothing and never cancels a resource.
+from then on: its own ID when an alias answers for itself again (no rule names its root any more,
+after an upgrade's `reextract`); the changes of an alias's ID are its own and its root's. A fetch failure emits nothing and never cancels a resource.
 A calendar snapshot with more than `limits.feed_max_changes` (100) occurrence changes emits one
 feed-level `details` line with `fields: ["occurrence_changes"]` (and `"resource_change"` when
 the feed's own card changed too): re-read the occurrence window.

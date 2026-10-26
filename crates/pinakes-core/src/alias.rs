@@ -263,6 +263,40 @@ pub async fn assign(
     crate::store::recompute_scores(tx, &[id.to_owned(), root_id]).await?;
     Ok(line)
 }
+/// Make an alias answer for itself again, when no rule names its root any more (a source that
+/// read its URI as another object's spelling now reads it at its own address): its row and its
+/// old root are regrouped and rescored, and its line names its own ID as the root that answers
+/// for it. `None` when it was no alias. It takes `lock`; the caller re-queues it on its route and
+/// passes the line to `record` before committing.
+pub async fn release(tx: &mut Transaction<'_, Postgres>, id: &str) -> Result<Option<Line>> {
+    lock(tx).await?;
+    let root: Option<String> =
+        sqlx::query_scalar("DELETE FROM resource_alias WHERE alias_id=$1 RETURNING root_id")
+            .bind(id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    let Some(root) = root else {
+        return Ok(None);
+    };
+    let both = vec![id.to_owned(), root];
+    sqlx::query(
+        "INSERT INTO group_dirty(resource_id) SELECT unnest($1::text[]) ON CONFLICT DO NOTHING",
+    )
+    .bind(&both)
+    .execute(&mut **tx)
+    .await?;
+    crate::store::recompute_scores(tx, &both).await?;
+    let type_path: Vec<String> =
+        sqlx::query_scalar("SELECT coalesce(type_path,'{}') FROM resource WHERE id=$1")
+            .bind(id)
+            .fetch_one(&mut **tx)
+            .await?;
+    Ok(Some(Line {
+        id: id.to_owned(),
+        root: id.to_owned(),
+        type_path,
+    }))
+}
 /// The root of a resource ID, or the ID itself.
 pub async fn resolve_id(pool: &PgPool, id: &str) -> Result<String> {
     Ok(sqlx::query_scalar(

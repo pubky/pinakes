@@ -62,7 +62,9 @@ pub async fn claim_sources(
 /// Leases are fenced by the generation bump. The re-queued rows' also-on lookups are queued too:
 /// a card that comes back unchanged would not run them, and their results may predate a source
 /// or a key the upgrade added. `also-on` queues every resource's also-on lookups, without a
-/// fetch. The daemon must not be running (the caller holds the instance lock).
+/// fetch. A selected alias whose URI a rule now gives another root moves to it, and one no rule
+/// names any more answers for itself again and is re-queued (`alias::release`). The daemon must
+/// not be running (the caller holds the instance lock).
 /// `reextract`'s arguments: `all`, `also-on`, or route and card-kind names.
 pub fn check_routes(routes: &[String]) -> Result<()> {
     anyhow::ensure!(
@@ -94,6 +96,14 @@ async fn queue_also_on(
         .await?;
     Ok(())
 }
+/// A row `reextract` reads: its ID, URI and route, and its alias's root and basis.
+type ReextractRow = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
 pub async fn reextract(pool: &PgPool, routes: &[String]) -> Result<u64> {
     check_routes(routes)?;
     if routes.iter().any(|r| r == "also-on") {
@@ -124,8 +134,8 @@ pub async fn reextract(pool: &PgPool, routes: &[String]) -> Result<u64> {
     let all = routes.iter().any(|r| r == "all");
     let (mut last, mut total) = (String::new(), 0u64);
     loop {
-        let rows: Vec<(String, String, Option<String>, bool)> = sqlx::query_as(
-            "SELECT id,uri,resolver,EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=resource.id) FROM resource WHERE id>$1 ORDER BY id LIMIT 1000",
+        let rows: Vec<ReextractRow> = sqlx::query_as(
+            "SELECT r.id,r.uri,r.resolver,a.root_id,a.basis FROM resource r LEFT JOIN resource_alias a ON a.alias_id=r.id WHERE r.id>$1 ORDER BY r.id LIMIT 1000",
         )
         .bind(&last)
         .fetch_all(pool)
@@ -136,10 +146,32 @@ pub async fn reextract(pool: &PgPool, routes: &[String]) -> Result<u64> {
         let (mut ids, mut new_routes, mut types, mut osm_ids) = (vec![], vec![], vec![], vec![]);
         let mut aliases = vec![];
         let mut alias_rows = vec![];
-        for (id, uri, stored, is_alias) in rows {
-            // An alias has no route of its own; a URI that now has a static root becomes one.
-            if is_alias {
-                alias_rows.push(id);
+        let mut released = vec![];
+        for (id, uri, stored, root, basis) in rows {
+            // An alias has no route of its own. A selected one whose URI a rule now gives another
+            // root moves to it; one no rule names any more (a source that read it as another
+            // object's spelling reads it at its own address now) answers for itself again and is
+            // re-queued on its route. A page's own canonical is no rule of its URI: it stays.
+            if let Some(root) = root {
+                let route = crate::resolver::classify(&uri).map(str::to_owned);
+                let selected = all || route.as_ref().is_some_and(|r| routes.contains(r));
+                match (crate::alias::root(&uri), route) {
+                    (Some(alias), _)
+                        if selected
+                            && crate::model::identity(&alias.root)
+                                .is_ok_and(|(named, _, _)| named != root) =>
+                    {
+                        aliases.push((id, alias))
+                    }
+                    (None, Some(route)) if selected && basis.as_deref() != Some("canonical") => {
+                        released.push(id.clone());
+                        ids.push(id);
+                        new_routes.push(route);
+                        types.push(None);
+                        osm_ids.push(None);
+                    }
+                    _ => alias_rows.push(id),
+                }
                 continue;
             }
             if let Some(alias) = crate::alias::root(&uri) {
@@ -180,13 +212,16 @@ pub async fn reextract(pool: &PgPool, routes: &[String]) -> Result<u64> {
                 .execute(pool)
                 .await?;
         }
-        if !aliases.is_empty() {
+        if !aliases.is_empty() || !released.is_empty() {
             let mut tx = pool.begin().await?;
             crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
             crate::alias::lock(&mut tx).await?;
             let mut lines = vec![];
             for (id, alias) in &aliases {
                 lines.extend(crate::alias::assign(&mut tx, id, alias).await?);
+            }
+            for id in &released {
+                lines.extend(crate::alias::release(&mut tx, id).await?);
             }
             crate::alias::record(&mut tx, lines).await?;
             tx.commit().await?;
