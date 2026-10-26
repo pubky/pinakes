@@ -13,7 +13,8 @@ A post is named by its id, a subreddit and a user by their names:
 m., none), a post's subreddit and slug (`/r/{sub}/comments/{id}/{slug}/`), `redd.it/{id}`,
 `/u/{name}` and a capitalised name are aliases of them. Share links (`/r/{sub}/s/{code}`) name
 nothing without a fetch and are not read. A comment's permalink
-(`…/comments/{id}/{slug}/{comment}/`) is not read either: a comment is its own thing, never its
+(`…/comments/{id}/{slug}/{comment}/`) and a post's link that selects one comment
+(`…/comments/{id}/?comment={comment}`) are not read either: a comment is its own thing, never its
 post.
 
 ## What it reads

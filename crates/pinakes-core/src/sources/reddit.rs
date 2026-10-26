@@ -43,9 +43,13 @@ impl Target {
     /// `https://www.reddit.com/r/{sub}/comments/{id}[/slug]`, `/comments/{id}[/slug]`,
     /// `/r/{sub}`, `/user/{name}` (also `/u/`), on reddit.com with any of its hosts (www., old.,
     /// new., np., m., none), and `https://redd.it/{id}`. A comment's permalink (a segment after
-    /// the slug) is not read: a comment is its own thing, never its post.
+    /// the slug, or a `comment` parameter, which selects one comment) is not read: a comment is
+    /// its own thing, never its post.
     pub fn of_uri(uri: &str) -> Option<Self> {
         let url = web_url(uri)?;
+        if url.query_pairs().any(|(k, _)| k == "comment") {
+            return None;
+        }
         let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
         match url.host_str()? {
             "redd.it" | "www.redd.it" => match segments.as_slice() {
@@ -366,6 +370,10 @@ mod tests {
             "https://www.reddit.com/r/announcements/comments/1k3d0pk/a_title/abcdefg/",
             "https://old.reddit.com/r/announcements/comments/1k3d0pk/a_title/abcdefg",
             "https://www.reddit.com/comments/1k3d0pk/a_title/abcdefg/",
+            // So is a post's link that selects one comment.
+            "https://www.reddit.com/r/announcements/comments/1k3d0pk/a_title/?comment=abcdefg",
+            "https://www.reddit.com/comments/1k3d0pk/?context=3&comment=abcdefg",
+            "https://redd.it/1k3d0pk?comment=abcdefg",
             "https://www.reddit.com/r/announcements/s/AbCdEf",
             "https://www.reddit.com/r/announcements/wiki/index",
             "https://www.reddit.com/comments/",
@@ -383,6 +391,15 @@ mod tests {
         assert_eq!(
             Reddit.alias_root("https://www.reddit.com/comments/1k3d0pk/"),
             None
+        );
+        assert_eq!(
+            Reddit.alias_root("https://www.reddit.com/comments/1k3d0pk/a_title/?comment=abcdefg"),
+            None
+        );
+        // Other parameters (a share's tracking, the comment sort) leave the post.
+        assert_eq!(
+            Target::of_uri("https://www.reddit.com/comments/1k3d0pk/?sort=new&share_id=x"),
+            Some(Target::Post("1k3d0pk".into()))
         );
     }
 
