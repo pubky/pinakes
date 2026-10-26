@@ -195,3 +195,20 @@ async fn an_id_two_items_carry_joins_nothing() {
     assert!(found.keys.is_empty(), "{:?}", found.keys);
     assert!(found.links.is_empty(), "{:?}", found.links);
 }
+
+/// An item over its read's cap is no answer: the page finds no title, and the lookup succeeds
+/// rather than failing and coming back to read the same megabytes.
+#[tokio::test]
+async fn an_item_over_its_cap_is_no_answer() {
+    let cx = cx(
+        Recorded::with_too_large(&["action=wbgetentities"]),
+        Config::default(),
+    );
+    let s = subject(
+        "https://www.rottentomatoes.com/m/1009113-halloween",
+        None,
+        None,
+    );
+    let found = Films.lookup(&cx, &s).await.unwrap();
+    assert!(found.keys.is_empty() && found.links.is_empty(), "{found:?}");
+}

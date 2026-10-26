@@ -224,3 +224,20 @@ async fn a_goodreads_book_reaches_its_work_through_wikidata() {
         assert!(!sites(&found).contains(&"Goodreads"), "{uri}");
     }
 }
+
+/// An item over its read's cap is no answer: the Goodreads page finds no work, and the lookup
+/// succeeds rather than failing and coming back to read the same megabytes.
+#[tokio::test]
+async fn an_item_over_its_cap_is_no_answer() {
+    let cx = cx(
+        Recorded::with_too_large(&["action=wbgetentities"]),
+        Config::default(),
+    );
+    let s = subject(
+        "https://www.goodreads.com/book/show/5907.The_Hobbit",
+        None,
+        None,
+    );
+    let found = Books.lookup(&cx, &s).await.unwrap();
+    assert!(found.keys.is_empty() && found.links.is_empty(), "{found:?}");
+}

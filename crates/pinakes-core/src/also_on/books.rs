@@ -519,8 +519,13 @@ impl Books {
     /// it is an edition of), as from an Open Library link; the Open Library page is a link, and
     /// the link's own service is the card itself.
     async fn by_item(cx: &Context, pid: &str, value: &str, own: &str) -> Result<Found> {
-        let wikidata::Found::One(item) = wikidata::item_with(&cx.egress, pid, value).await? else {
-            return Ok(Found::default());
+        // An answer over its read's cap is no answer: asking again would read the same megabytes.
+        let over_cap = |e: &anyhow::Error| crate::resolver::egress::over_cap(e);
+        let item = match wikidata::item_with(&cx.egress, pid, value).await {
+            Ok(wikidata::Found::One(item)) => item,
+            Ok(_) => return Ok(Found::default()),
+            Err(error) if over_cap(&error) => return Ok(Found::default()),
+            Err(error) => return Err(error),
         };
         let open_library = |item: &wikidata::Item| match item.id("P648") {
             [id] => ol_id(id, 'W')
@@ -530,7 +535,10 @@ impl Books {
         };
         let mut book = open_library(&item);
         if let (None, [work]) = (&book, item.edition_of.as_slice()) {
-            let works = wikidata::items(&cx.egress, std::slice::from_ref(work)).await?;
+            let works = match wikidata::items(&cx.egress, std::slice::from_ref(work)).await {
+                Err(error) if over_cap(&error) => vec![],
+                works => works?,
+            };
             book = works.iter().find(|w| &w.qid == work).and_then(open_library);
         }
         let (mut found, page) = match book {

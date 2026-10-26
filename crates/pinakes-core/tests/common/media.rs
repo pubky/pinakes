@@ -39,6 +39,8 @@ pub struct Recorded {
     pub seen: Mutex<Vec<String>>,
     /// The Podcast Index key each Podcast Index request carried.
     pub signed_with: Mutex<Vec<Option<String>>>,
+    /// URLs (by a part of them) whose answer is over its read's cap.
+    pub too_large: Vec<String>,
 }
 pub fn read(family: &str, file: &str) -> Vec<u8> {
     let path = format!(
@@ -99,7 +101,14 @@ impl Recorded {
             answers,
             seen: Mutex::new(Vec::new()),
             signed_with: Mutex::new(Vec::new()),
+            too_large: vec![],
         })
+    }
+    /// The same, with the URLs holding one of `parts` answering over their read's cap.
+    pub fn with_too_large(parts: &[&str]) -> Arc<Self> {
+        let mut recorded = Arc::into_inner(Self::new()).unwrap();
+        recorded.too_large = parts.iter().map(|p| (*p).to_owned()).collect();
+        Arc::new(recorded)
     }
     /// The same, with recorded answers not served by default, each in place of its URL's.
     pub fn with_recorded(more: &[(&str, &str)]) -> Arc<Self> {
@@ -174,6 +183,17 @@ impl Transport for Recorded {
         options: &FetchOptions,
     ) -> anyhow::Result<Fetched> {
         self.seen.lock().unwrap().push(url.to_string());
+        if self
+            .too_large
+            .iter()
+            .any(|p| url.as_str().contains(p.as_str()))
+        {
+            return Err(anyhow::Error::new(
+                pinakes_core::resolver::egress::BodyTooLarge {
+                    cap: 8 * 1024 * 1024,
+                },
+            ));
+        }
         if url.host_str() == Some("unreadable.example") {
             anyhow::bail!("body over the cap");
         }

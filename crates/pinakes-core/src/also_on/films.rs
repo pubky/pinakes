@@ -281,10 +281,14 @@ fn item_imdb(item: &wikidata::Item) -> Option<String> {
 pub struct Films;
 
 impl Films {
+    /// The one item with this ID. An answer over its read's cap is no answer: asking again
+    /// would read the same megabytes.
     async fn item(cx: &Context, property: &str, id: &str) -> Result<Option<wikidata::Item>> {
-        Ok(match wikidata::item_with(&cx.egress, property, id).await? {
-            wikidata::Found::One(item) => Some(*item),
-            _ => None,
+        Ok(match wikidata::item_with(&cx.egress, property, id).await {
+            Ok(wikidata::Found::One(item)) => Some(*item),
+            Ok(_) => None,
+            Err(error) if crate::resolver::egress::over_cap(&error) => None,
+            Err(error) => return Err(error),
         })
     }
     async fn tvmaze(cx: &Context, url: &str) -> Result<Option<Show>> {
