@@ -1038,7 +1038,7 @@ layers, with the caller's address:
 
 | Tool | Request | Answer |
 | --- | --- | --- |
-| `search` | `GET /v1/search` with `q`, `type`, `tags` (array), `match`, `near` (`{lat, lon, radius}`), `bbox` (`[west, south, east, north]`), `from`, `to`, `key`, `sort`, `window`, `collapse`, `reach`, `viewer`, `limit`, `cursor` | Compact cards, `cursor`, `facets` |
+| `search` | `GET /v1/search` with `q`, `type`, `tags` (array), `match`, `near` (`{lat, lon, radius}`), `bbox` (`[west, south, east, north]`), `from`, `to`, `key`, `sort`, `window`, `collapse`, `reach`, `boost`, `viewer`, `limit`, `cursor` | Compact cards, `cursor`, `facets` |
 | `card` | `GET /v1/resources/by-uri`; with `resolve: true` and an unknown link, `POST /v1/resolve` | One compact card with `category`, `address`, `facts`, `aliases` (at most 10) and the event fields |
 | `lookup` | `GET /v1/search?key=` | Compact cards |
 | `group` | `GET /v1/groups/{id}` | `id`, `type`, `keys`, every member's compact card, and `best`: the most complete readable member of the group's type |

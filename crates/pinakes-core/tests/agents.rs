@@ -386,6 +386,13 @@ async fn the_mcp_handshake_and_every_tool(pool: PgPool) {
     let (error, wrong) = call(&app, "search", json!({"radius": 5})).await;
     assert!(error);
     assert!(wrong["error"].as_str().unwrap().contains("`radius`"));
+    // boost is search's too: without a viewer the route refuses it, as it would over REST.
+    let (error, boost) = call(&app, "search", json!({"boost": "friends"})).await;
+    assert!(error);
+    assert!(
+        boost["error"].as_str().unwrap().contains("requires viewer"),
+        "{boost}"
+    );
     let (_, answer) = mcp(
         &app,
         json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
