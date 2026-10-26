@@ -436,18 +436,25 @@ pub mod also_on {
             };
             let mut found = crate::lookups::Found::default();
             found.push_key(items::key(&hub.qid));
-            let objects = places::objects(&raw);
-            let mut links = vec![];
-            if let [object] = objects.iter().collect::<Vec<_>>().as_slice() {
-                if let Some((kind, id)) = object.split_once('/') {
-                    let osm = crate::model::OsmId {
+            // The item's OSM objects with a valid id (a malformed statement names none): its one
+            // object, when it names exactly one, is a key and a link.
+            let objects: Vec<crate::model::OsmId> = places::objects(&raw)
+                .iter()
+                .filter_map(|object| {
+                    let (kind, id) = object.split_once('/')?;
+                    let valid = crate::lookups::plain(id, 20, |c| c.is_ascii_digit())
+                        && !id.starts_with('0');
+                    Some(crate::model::OsmId {
                         osm_type: kind.to_owned(),
-                        id: id.parse()?,
-                    };
-                    found.push_key(places::key(&osm));
-                }
+                        id: id.parse().ok().filter(|_| valid)?,
+                    })
+                })
+                .collect();
+            let mut links = vec![];
+            if let [osm] = objects.as_slice() {
+                found.push_key(places::key(osm));
                 links.push(also_on::Link::new(
-                    format!("https://www.openstreetmap.org/{object}"),
+                    format!("https://www.openstreetmap.org/{}", osm.key()),
                     "OpenStreetMap",
                     "wikidata",
                 ));
@@ -623,6 +630,37 @@ pub mod also_on {
 
         fn entity(q: &str) -> String {
             crate::hubs::wikidata::entities_lookup(&[q.to_owned()])
+        }
+
+        /// A malformed OSM statement names no object: it costs only that, the Q-id is still a key,
+        /// and a valid OSM statement beside it still names the item's one object.
+        #[tokio::test(start_paused = true)]
+        async fn a_malformed_osm_statement_costs_only_the_osm_key() {
+            let search = "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP3134%3D188151&srlimit=5&format=json";
+            let item = |keep_way: bool| {
+                let mut v: serde_json::Value =
+                    serde_json::from_slice(&read("wikidata-q243.json")).unwrap();
+                let claims = &mut v["entities"]["Q243"]["claims"];
+                claims["P402"] = serde_json::json!([{"mainsnak": {"snaktype": "value", "property": "P402",
+                    "datavalue": {"value": "12a", "type": "string"}, "datatype": "external-id"},
+                    "type": "statement", "rank": "normal"}]);
+                if !keep_way {
+                    claims.as_object_mut().unwrap().remove("P10689");
+                }
+                serde_json::to_vec(&v).unwrap()
+            };
+            let page = at("https://www.tripadvisor.com/Attraction_Review-g187147-d188151-Reviews-Eiffel_Tower-Paris_Ile_de_France.html");
+            for (keep_way, expected) in [
+                (false, vec!["wikidata:Q243"]),
+                (true, vec!["wikidata:Q243", "osm:way/5013364"]),
+            ] {
+                let cx = context(vec![
+                    (search, 200, JSON, read("wikidata-search-p3134-188151.json")),
+                    (&entity("Q243"), 200, JSON, item(keep_way)),
+                ]);
+                let found = WikidataPlaces.lookup(&cx, &page).await.unwrap();
+                assert_eq!(keys(&found), expected, "{keep_way}");
+            }
         }
 
         /// The Eiffel Tower's Tripadvisor page on the German site finds its item by the location
