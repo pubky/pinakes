@@ -57,10 +57,6 @@ async fn seed(pool: &PgPool) -> Vec<String> {
                 object_path: format!("/pub/app/tags/{i}-{label}"),
                 label: Some(label.into()),
                 at: 1_790_000_000_000,
-                recurrence_id: None,
-                status: None,
-                start: None,
-                end: None,
             });
         }
     }
@@ -566,10 +562,6 @@ async fn polls_the_http_feed_and_replays_without_duplicates(pool: PgPool) {
         object_path: "/pub/app/tags/one".into(),
         label: None,
         at: Utc::now().timestamp_millis(),
-        recurrence_id: None,
-        status: None,
-        start: None,
-        end: None,
     };
     let (url, _, task) = mock_nexus(vec![line.clone(), line]).await;
     let nexus = Nexus::new(&url).unwrap();

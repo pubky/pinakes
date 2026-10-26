@@ -6,12 +6,9 @@ use http_body_util::BodyExt;
 use pinakes_core::{
     api::{self, AppState},
     config::Config,
-    ingest,
     model::{identity, ResourceMeta, Status},
-    nexus::{Change, Changes, FeedPage, Kind, Op},
     resolver::{classify, pubky_apps},
     store,
-    telemetry::Metrics,
 };
 use serde_json::{json, Value};
 use sqlx::PgPool;
@@ -951,36 +948,21 @@ async fn cards_carry_their_client_links_and_facts(pool: PgPool) {
     let venue = "geo:47.37,8.54";
     let (_, venue_uri, _) = identity(venue).unwrap();
     let author = "51da3n5m8s6oaq38uqs7jznp6ezbc3qbtmic8oy6fj3g6mokdyco";
-    let cursor = ingest::cursor(&pool, "events").await.unwrap();
     let start = Utc::now() + Duration::days(3);
-    let line = Change {
-        op: Op::Put,
-        uri: venue_uri,
-        kind: Kind::Event,
-        author: author.into(),
-        object_path: "/pub/eventky.app/events/0035DS0K1ZTEG".into(),
-        label: None,
-        at: Utc::now().timestamp_millis(),
-        recurrence_id: None,
-        start: Some(start.timestamp_millis()),
-        end: Some((start + Duration::hours(2)).timestamp_millis()),
-        status: None,
-    };
-    ingest::apply(
+    pinakes_core::app_posts::write(
         &pool,
-        "events",
-        &cursor,
-        &FeedPage {
-            page: Changes {
-                lines: vec![line],
-                next_cursor: cursor.cursor + 1,
-                skipped: Default::default(),
-            },
-            epoch: Some("1".into()),
-            length: cursor.cursor + 1,
-        },
-        &Config::default().ingest,
-        &Metrics::new().unwrap(),
+        author,
+        "/pub/eventky.app/events/0035DS0K1ZTEG",
+        vec![pinakes_core::app_posts::Ref {
+            uri: venue_uri,
+            kind: "event",
+            label: None,
+            recurrence_id: None,
+            start: Some(start),
+            end: Some(start + Duration::hours(2)),
+            status: Some("scheduled"),
+        }],
+        Utc::now(),
     )
     .await
     .unwrap();

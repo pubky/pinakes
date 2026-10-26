@@ -357,8 +357,8 @@ of a kind this build does not read (`unknown_kind`, a newer Nexus's) or one it c
 (`malformed`) is skipped without its content in any log, and only the page's envelope (`lines`,
 `next_cursor`) must be well formed. A bad line is skipped and counted in
 `pinakes_ingest_rejected_total{reason}` (`unknown_kind`, `malformed`, `author`, `label`,
-`object_path`, `uri`, `timestamp`, `event`, `panic`) after the batch commits; the cursor still
-advances past it. Each line runs in a
+`object_path`, `uri`, `timestamp`, `panic`) after the batch commits; the cursor still advances
+past it. Events are not on this feed: social `event` posts come on the app-post feed, below. Each line runs in a
 savepoint: a line whose processing panics is rolled back alone and skipped (`panic`; the log
 line names its feed position only, never its content). A panic anywhere else in a poll (the
 batch's score update or cursor write, say) is an error: the batch rolls back, the cursor holds,

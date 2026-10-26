@@ -17,7 +17,6 @@ pub const REJECT_REASONS: &[&str] = &[
     "label",
     "object_path",
     "timestamp",
-    "event",
     "uri",
     "panic",
 ];
@@ -35,18 +34,6 @@ fn rejection_reason(line: &Change, limits: &IngestConfig) -> Option<&'static str
         Some("object_path")
     } else if invalid_timestamp(line.at) {
         Some("timestamp")
-    } else if line
-        .recurrence_id
-        .as_ref()
-        .is_some_and(|s| s.len() > 128 || s.contains('\0'))
-        || line
-            .start
-            .into_iter()
-            .chain(line.end)
-            .any(invalid_timestamp)
-        || line.start.zip(line.end).is_some_and(|(a, b)| b < a)
-    {
-        Some("event")
     } else {
         None
     }
@@ -224,11 +211,8 @@ async fn apply_line(
     let Ok((id, uri, _)) = crate::model::identity(&line.uri) else {
         return Ok(Some("uri"));
     };
-    let unit_key = if matches!(line.kind, crate::nexus::Kind::Event) {
-        format!("{}:{}", id, line.recurrence_id.as_deref().unwrap_or(""))
-    } else {
-        String::new()
-    };
+    // One reference per object: the resource feed's lines carry no occurrences.
+    let unit_key = String::new();
     let old: Option<String> = sqlx::query_scalar(
         "SELECT resource_id FROM reference WHERE author=$1 AND object_path=$2 AND unit_key=$3",
     )
@@ -248,13 +232,12 @@ async fn apply_line(
             if old.as_deref() != Some(&id) {
                 sqlx::query("UPDATE resource SET final=false,refresh_at=now(),next_attempt_at=now(),dead_letter=false,attempts=0 WHERE id=$1 AND final AND resolver<>'geo' AND $2>resolved_at").bind(&id).bind(timestamp(Some(line.at))?).execute(&mut **tx).await?;
             }
-            sqlx::query(r#"INSERT INTO reference(resource_id,kind,author,label,object_path,recurrence_id,start_at,end_at,created_at,unit_key,event_status)
-                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+            sqlx::query(r#"INSERT INTO reference(resource_id,kind,author,label,object_path,created_at,unit_key)
+                VALUES($1,$2,$3,$4,$5,$6,$7)
                 ON CONFLICT(author,object_path,unit_key) DO UPDATE SET resource_id=excluded.resource_id, kind=excluded.kind,
-                label=excluded.label, recurrence_id=excluded.recurrence_id, start_at=excluded.start_at,
-                end_at=excluded.end_at, created_at=excluded.created_at,event_status=excluded.event_status"#)
-                .bind(&id).bind(line.kind.as_str()).bind(&line.author).bind(&line.label).bind(&line.object_path).bind(&line.recurrence_id)
-                .bind(timestamp(line.start)?).bind(timestamp(line.end)?).bind(timestamp(Some(line.at))?).bind(&unit_key).bind(line.status.as_deref().and_then(crate::event::EventStatus::parse).map(|s|s.as_str()))
+                label=excluded.label, created_at=excluded.created_at"#)
+                .bind(&id).bind(line.kind.as_str()).bind(&line.author).bind(&line.label).bind(&line.object_path)
+                .bind(timestamp(Some(line.at))?).bind(&unit_key)
                 .execute(&mut **tx).await?;
             affected.insert(id.clone());
         }
@@ -316,10 +299,6 @@ mod tests {
             object_path: path.into(),
             label: Some("rust".into()),
             at: Utc::now().timestamp_millis(),
-            recurrence_id: None,
-            status: None,
-            start: None,
-            end: None,
         }
     }
 

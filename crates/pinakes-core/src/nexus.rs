@@ -21,7 +21,6 @@ pub enum Kind {
     Reply,
     Embed,
     Collection,
-    Event,
 }
 impl Kind {
     pub fn as_str(&self) -> &'static str {
@@ -30,7 +29,6 @@ impl Kind {
             Self::Reply => "reply",
             Self::Embed => "embed",
             Self::Collection => "collection",
-            Self::Event => "event",
         }
     }
 }
@@ -45,11 +43,6 @@ pub struct Change {
     pub object_path: String,
     pub label: Option<String>,
     pub at: i64,
-    pub recurrence_id: Option<String>,
-    #[serde(default)]
-    pub status: Option<String>,
-    pub start: Option<i64>,
-    pub end: Option<i64>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Changes {
@@ -63,8 +56,9 @@ pub struct Changes {
 }
 /// The reasons a feed line is skipped while parsing a page (`Changes::skipped`).
 pub const SKIP_REASONS: &[&str] = &["unknown_kind", "malformed"];
-/// The kinds of the reference feed this build reads.
-const KINDS: &[&str] = &["tag", "reply", "embed", "collection", "event"];
+/// The kinds of the reference feed this build reads. Social events and rsvps come on the
+/// app-post feed (`app_posts`); a `kind:event` line, which Nexus reserves, is `unknown_kind`.
+const KINDS: &[&str] = &["tag", "reply", "embed", "collection"];
 impl Changes {
     /// The lines the page held: those read and those skipped. The cursor moves by this many.
     pub fn read(&self) -> usize {

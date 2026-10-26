@@ -96,7 +96,7 @@ An IMDb title keeps the type its page gives (it can be either).
 | `open_in` | The clients that open a Pubky app's object, `[{client, url}]` (`url` is `https:`): from the app's profile ([Pubky apps](pubky-apps.md)), e.g. Loopky for a deck, Mapky for a route or for a review's place; on a Pubky event reference's card, those of the event object. `[]` on every other card |
 | `attribution` | Present on OSM cards, events placed at an OSM venue and events whose zone came from coordinates; display it with the card |
 | `occurrence` | Occurrence cards only: `{feed_id, feed_uri, uid, recurrence_id, status}`; `feed_uri` is the feed's URI, the link people tagged |
-| `event` | Pubky event references only: `{author, object_path, recurrence_id, start, end, status}` |
+| `event` | Pubky event references only (a social `event` post's occurrence at a place, from the [app-post feed](operations.md#the-app-post-feed)): `{author, object_path, recurrence_id, start, end, status}`; `object_path` is the post's versionless path, `recurrence_id` the occurrence's local start (`YYYY-MM-DDTHH:MM:SS`) or null for a one-off |
 | `maybe_same` | Event and occurrence cards: other events that are [possibly the same event](#possibly-the-same-event), best first, each `{id, uri, site, start, score}` (`[]` when there are none). An app's store card: store cards that are [possibly the same app](#possibly-the-same-app). Up to three on a search, lookup or group card, up to ten on a resource read. A hint only, like `group`. Absent on other cards, and on every card with `[event] same_event_hint = "off"` |
 
 A `pubky://` object of an app Pinakes has a profile for (Loopky, Mapky, Eventky, Pubky Rooms,
@@ -447,8 +447,9 @@ Search lists only resources with at least one public reference.
 **Events.** `type=Event` with `from`/`to` and `sort=start` covers Event pages with a start,
 calendar occurrences and located Pubky event references. Each of these is one result unit, so
 a calendar with three matching dates counts three times. `start` sorts exclude units without a
-start. A Pubky event result carries `event` for Nexus post hydration and no name: Pinakes does
-not fetch the post. Author and reach filters also constrain that post's author.
+start. A Pubky event result carries `event` for Nexus post hydration and no name: Pinakes keeps
+the post's time, status and place, not its text. Author and reach filters also constrain that
+post's author.
 
 **Ranking.** `activity` combines distinct taggers and references with a 30-day decay:
 
@@ -716,11 +717,13 @@ held or pending and more than half the forward window left; otherwise an uncondi
 fetches a body. A 304 renews the TTL but neither confirms a disappearance nor extends the
 horizon. Mixed dated and undated RSS, Atom and JSON feeds keep their dated items.
 
-**Pubky event references.** Nexus `kind:event` references carry `recurrence_id`, start and end
-(Unix milliseconds) and an optional lifecycle. The reference key includes the author, object
-path, venue and recurrence, so deleting one instance leaves the others. Invalid keys or
-timestamps and an end before the start are skipped and counted in
-`pinakes_ingest_rejected_total{reason="event"}`.
+**Pubky event references.** A social `event` post (pubky-social-specs v1.1) comes on the
+[app-post feed](operations.md#the-app-post-feed): Pinakes reads its JSCalendar `start`,
+`timeZone`, `duration`, `status` and one `recurrenceRules` rule, and keeps one event reference
+per location (`locations[].uri`) and occurrence, keyed by the author, the post's path, the place
+and the occurrence. A new version of the post replaces them; an override of one occurrence
+(`recurrenceOf`, `recurrenceId`) replaces that occurrence; deleting the post removes them all.
+The resource feed carries no event lines: a `kind:event` line is skipped as `unknown_kind`.
 
 **NIP-52 calendars.** A calendar waits (`calendar_members_pending`) for members not yet
 resolved, at most `limits.calendar_member_wait_hours` (48) after it first listed them. A member
