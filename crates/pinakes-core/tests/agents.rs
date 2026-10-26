@@ -678,7 +678,7 @@ async fn typed_cards_name_the_links_people_wrote_and_social_joins_by_them(pool: 
         nexus_url: nexus().await,
         ..Config::default()
     };
-    let app = api::router(AppState::new(pool, config).unwrap());
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
     let get = |path: String| {
         let app = app.clone();
         async move {
@@ -733,4 +733,32 @@ async fn typed_cards_name_the_links_people_wrote_and_social_joins_by_them(pool: 
     let (error, unknown) = call(&app, "social", json!({"ids": ["0".repeat(32)]})).await;
     assert!(!error, "{unknown}");
     assert_eq!(unknown["unknown_ids"], json!(["0".repeat(32)]));
+    // An alias's id (the mempool page's) is answered under the id asked, with the root card
+    // that answers for it; so is a card that became an alias after a client cached its id.
+    let (mempool, _, _) = identity(MEMPOOL).unwrap();
+    let old = store::ensure_resource(&pool, "https://example.org/an-old-card")
+        .await
+        .unwrap();
+    let mut doc = ResourceMeta::new("https://example.org/an-old-card", "web", 86400);
+    doc.name = Some("An old card".into());
+    store::save_document(&pool, &old, 0, &doc).await.unwrap();
+    sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'canonical')")
+        .bind(&old)
+        .bind(&ids[1])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (error, aliased) = call(&app, "social", json!({"ids": [mempool, old]})).await;
+    assert!(!error, "{aliased}");
+    assert!(aliased.get("unknown_ids").is_none(), "{aliased}");
+    let items = aliased["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["id"], json!(mempool));
+    assert_eq!(items[0]["root"], ids[0]);
+    assert_eq!(items[0]["asked"], json!([BLOCK, MEMPOOL]));
+    assert_eq!(items[1]["id"], json!(old));
+    assert_eq!(items[1]["root"], ids[1]);
+    assert_eq!(items[1]["found"], json!([UNIPROT_PAGE]));
+    // A card asked by its own id names no root.
+    assert!(social["items"][0].get("root").is_none());
 }

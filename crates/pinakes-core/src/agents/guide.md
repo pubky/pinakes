@@ -158,7 +158,7 @@ the full result:
 | `lookup` | Every card with one identifier (`isbn:…`, `doi:…`, `isrc:…`, `osm:…`, …) |
 | `group` | A group's members by group id |
 | `types` | The card types this instance holds, with counts, and the kinds of links it resolves |
-| `social` | Tags and taggers per card, from the Nexus this instance reads: card `ids` (asked by their `uri` and `refs`, merged) or plain `uris`, 1–100 together |
+| `social` | Tags and taggers per card, from the Nexus this instance reads: card `ids` (asked by their `uri` and `refs`, merged; an alias's id answers with its `root`) or plain `uris`, 1–100 together |
 
 Add it to a client as a remote (HTTP) MCP server at `{{BASE}}/mcp`.
 

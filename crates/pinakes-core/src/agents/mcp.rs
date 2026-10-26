@@ -292,12 +292,29 @@ impl Tools {
                     Some(json!({ "ids": ids })),
                 )
                 .await?;
+            // Lookup answers an alias (a spelling, or a card that became one after it was
+            // read) with its root's card: match each id asked through its root.
+            let roots: Vec<(String, String)> = sqlx::query_as(
+                "SELECT wanted.id,coalesce(a.root_id,wanted.id) FROM unnest($1::text[]) AS wanted(id) LEFT JOIN resource_alias a ON a.alias_id=wanted.id",
+            )
+            .bind(&ids)
+            .fetch_all(&self.state.pool)
+            .await
+            .map_err(|_| Failure {
+                status: 500,
+                error: "the card ids could not be read".into(),
+                url: None,
+            })?;
             for id in &ids {
+                let root = roots
+                    .iter()
+                    .find(|(asked, _)| asked == id)
+                    .map_or(id.as_str(), |(_, root)| root.as_str());
                 let Some(card) = cards
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .find(|c| c["id"] == id.as_str())
+                    .find(|c| c["id"] == root)
                 else {
                     unknown_ids.push(id.clone());
                     continue;
@@ -312,6 +329,7 @@ impl Tools {
                 }
                 asks.push(Ask {
                     id: Some(id.clone()),
+                    root: (root != id).then(|| root.to_owned()),
                     uri: asked[0].clone(),
                     asked,
                 });
@@ -320,6 +338,7 @@ impl Tools {
         for uri in uris {
             asks.push(Ask {
                 id: None,
+                root: None,
                 uri: uri.clone(),
                 asked: vec![uri],
             });
@@ -357,9 +376,11 @@ impl Tools {
     }
 }
 
-/// What `social` asks Nexus about one card (or one link): the URIs, the card's own first.
+/// What `social` asks Nexus about one card (or one link): the URIs, the card's own first. `id`
+/// is the card id asked, `root` the card answering for it when it is an alias.
 struct Ask {
     id: Option<String>,
+    root: Option<String>,
     uri: String,
     asked: Vec<String>,
 }
@@ -771,6 +792,9 @@ fn social_answer(asks: &[Ask], views: &[Value]) -> Value {
         if let Some(id) = &ask.id {
             item["id"] = id.clone().into();
         }
+        if let Some(root) = &ask.root {
+            item["root"] = root.clone().into();
+        }
         items.push(item);
     }
     json!({ "items": items })
@@ -862,6 +886,7 @@ mod tests {
             // A btc: card asked by its own link and the mempool page people tagged.
             Ask {
                 id: Some("c1".into()),
+                root: None,
                 uri: "btc:block/0000aa".into(),
                 asked: vec![
                     "btc:block/0000aa".into(),
@@ -871,6 +896,7 @@ mod tests {
             },
             Ask {
                 id: None,
+                root: None,
                 uri: "https://example.org/unknown".into(),
                 asked: vec!["https://example.org/unknown".into()],
             },
