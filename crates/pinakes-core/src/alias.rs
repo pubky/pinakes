@@ -374,6 +374,19 @@ mod tests {
             r("https://osm.org/node/240109189/"),
             Some(("https://www.openstreetmap.org/node/240109189".into(), "osm"))
         );
+        // An Apple Music link in any storefront, or none: one object.
+        for uri in [
+            "https://music.apple.com/ch/song/bohemian-rhapsody/6781024437",
+            "https://music.apple.com/us/album/a-night-at-the-opera/6781024026?i=6781024437",
+            "https://itunes.apple.com/gb/album/id6781024026?i=6781024437",
+        ] {
+            assert_eq!(
+                r(uri),
+                Some(("https://music.apple.com/song/6781024437".into(), "service")),
+                "{uri}"
+            );
+        }
+        assert_eq!(r("https://music.apple.com/song/6781024437"), None);
         assert_eq!(r("https://www.openstreetmap.org/node/240109189"), None);
         // A MusicBrainz page in any spelling, its web service record too.
         let recording = "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69";

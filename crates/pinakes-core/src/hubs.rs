@@ -380,11 +380,19 @@ pub mod musicbrainz {
     /// Ask MusicBrainz about many links at once and cache each link's answer as its own lookup's
     /// (`url` then asks nothing). An answer applies only to the URL MusicBrainz echoes, byte for
     /// byte; a link left out is unknown (its 404 cached) only when the answer is whole
-    /// (`url-count` answers) and every echo matched a link asked. Best effort: a failed batch
-    /// caches nothing, and its links ask alone; a busy MusicBrainz stops the batches.
+    /// (`url-count` answers) and every echo matched a link asked. A link a hub may store under
+    /// several spellings (an Apple Music link's storefronts, `music::hub_spellings`) is asked
+    /// under each. Best effort: a failed batch caches nothing, and its links ask alone; a busy
+    /// MusicBrainz stops the batches.
     pub async fn prefetch_urls(egress: &Egress, base: &str, links: &[String]) -> Result<usize> {
         let mut seeded = 0;
-        for chunk in links.chunks(URL_BATCH) {
+        let spellings: Vec<String> = links
+            .iter()
+            .flat_map(|l| crate::music::hub_spellings(l))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        for chunk in spellings.chunks(URL_BATCH) {
             let v = match get(egress, &urls_lookup(base, chunk), "musicbrainz").await {
                 Ok(Some(v)) => v,
                 Ok(None) => continue,
@@ -395,10 +403,12 @@ pub mod musicbrainz {
         }
         Ok(seeded)
     }
-    /// What each of `links` (at most [`URL_BATCH`]) is linked to, in one request and nothing
-    /// more: `None` for a link MusicBrainz doesn't know or leaves out of its answer. Its error
-    /// is the request's (a busy MusicBrainz's among them); no link asks again alone. Answers are
-    /// cached as each link's own lookup's, as [`prefetch_urls`] does.
+    /// What each of `links` (at most [`URL_BATCH`]) is linked to, in as few requests as their
+    /// spellings allow (`music::hub_spellings`, at most [`URL_BATCH`] a request) and nothing
+    /// more: `None` for a link MusicBrainz doesn't know or leaves out of its answer, the union of
+    /// its spellings' targets otherwise. An error is a request's (a busy MusicBrainz's among
+    /// them); no link asks again alone. Answers are cached as each spelling's own lookup's, as
+    /// [`prefetch_urls`] does.
     pub async fn urls(
         egress: &Egress,
         base: &str,
@@ -408,11 +418,38 @@ pub mod musicbrainz {
             links.len() <= URL_BATCH,
             "at most {URL_BATCH} links a request"
         );
-        let Some(v) = get(egress, &urls_lookup(base, links), "musicbrainz").await? else {
-            return Ok(links.iter().map(|_| None).collect());
-        };
-        let (answers, _) = read_batch(egress, base, links, &v).await?;
-        Ok(answers.iter().map(|a| a.map(parse_url)).collect())
+        // Each spelling with the link it spells, in request-sized runs.
+        let asked: Vec<(usize, String)> = links
+            .iter()
+            .enumerate()
+            .flat_map(|(n, l)| {
+                crate::music::hub_spellings(l)
+                    .into_iter()
+                    .map(move |s| (n, s))
+            })
+            .collect();
+        let mut out: Vec<Option<UrlTargets>> = links.iter().map(|_| None).collect();
+        for chunk in asked.chunks(URL_BATCH) {
+            let spellings: Vec<String> = chunk.iter().map(|(_, s)| s.clone()).collect();
+            let Some(v) = get(egress, &urls_lookup(base, &spellings), "musicbrainz").await? else {
+                continue;
+            };
+            let (answers, _) = read_batch(egress, base, &spellings, &v).await?;
+            for ((n, _), answer) in chunk.iter().zip(answers) {
+                if let Some(found) = answer.map(parse_url) {
+                    out[*n] = Some(merged(out[*n].take(), found));
+                }
+            }
+        }
+        Ok(out)
+    }
+    /// Two answers for spellings of one link: every target, each once.
+    fn merged(a: Option<UrlTargets>, b: UrlTargets) -> UrlTargets {
+        let mut targets = a.map(|a| a.targets).unwrap_or_default();
+        targets.extend(b.targets);
+        targets.sort();
+        targets.dedup();
+        UrlTargets { targets }
     }
     /// A batch answer `v` to `chunk`: each link's answer (`None` when left out), and how many
     /// links it caches as their own lookup's: an echoed answer, and a link left out when the
@@ -447,12 +484,21 @@ pub mod musicbrainz {
         }
         Ok((out, seeded))
     }
-    /// What `link` is linked to; `None` when MusicBrainz does not know the URL. `base` is the
-    /// web service ([`BASE`] or a mirror).
+    /// What `link` is linked to; `None` when MusicBrainz does not know the URL. A link a hub may
+    /// store under several spellings (an Apple Music link's storefronts) is asked under each, in
+    /// one request, and takes every spelling's targets. `base` is the web service ([`BASE`] or a
+    /// mirror).
     pub async fn url(egress: &Egress, base: &str, link: &str) -> Result<Option<UrlTargets>> {
-        Ok(get(egress, &url_lookup(base, link), "musicbrainz")
+        let spellings = crate::music::hub_spellings(link);
+        if let [one] = spellings.as_slice() {
+            return Ok(get(egress, &url_lookup(base, one), "musicbrainz")
+                .await?
+                .map(|v| parse_url(&v)));
+        }
+        Ok(urls(egress, base, std::slice::from_ref(&link.to_owned()))
             .await?
-            .map(|v| parse_url(&v)))
+            .pop()
+            .flatten())
     }
     /// A recording's original album: of its official albums, the earliest release of a release
     /// group that is an Album with no secondary type (not a compilation, live or remix album);

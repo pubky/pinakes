@@ -377,7 +377,7 @@ pub(crate) fn facts(entity: &musicbrainz::Entity) -> Vec<crate::also_on::Fact> {
 }
 
 /// The Wikidata properties of music services, by service and level, and how each value makes
-/// a URL (`{sf}` is the Apple storefront).
+/// a URL (an Apple Music link has no storefront).
 pub(crate) const PROPERTIES: &[(&str, Service, Level, &str)] = &[
     (
         "P2207",
@@ -401,19 +401,19 @@ pub(crate) const PROPERTIES: &[(&str, Service, Level, &str)] = &[
         "P10110",
         Service::AppleMusic,
         Level::Track,
-        "https://music.apple.com/{sf}/song/{}",
+        "https://music.apple.com/song/{}",
     ),
     (
         "P2281",
         Service::AppleMusic,
         Level::Album,
-        "https://music.apple.com/{sf}/album/{}",
+        "https://music.apple.com/album/{}",
     ),
     (
         "P2850",
         Service::AppleMusic,
         Level::Artist,
-        "https://music.apple.com/{sf}/artist/{}",
+        "https://music.apple.com/artist/{}",
     ),
     (
         "P2724",
@@ -651,7 +651,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             (link.uri.as_str(), link.site.as_str()),
-            ("https://music.apple.com/gb/album/1097861387", "Apple Music")
+            ("https://music.apple.com/album/1097861387", "Apple Music")
         );
     }
 
@@ -728,10 +728,14 @@ mod tests {
         assert!(super::found(&item(&[spotify, work]), Level::Track, "us")
             .links
             .is_empty());
-        // Property values become valid URLs: the Apple storefront fills its place.
+        // Property values become valid URLs: a storefront fills its place where a template has one.
         assert_eq!(
-            property_url("https://music.apple.com/{sf}/album/{}", "1097861387", "gb"),
-            "https://music.apple.com/gb/album/1097861387"
+            property_url("https://books.apple.com/{sf}/book/id{}", "721429965", "gb"),
+            "https://books.apple.com/gb/book/id721429965"
+        );
+        assert_eq!(
+            property_url("https://music.apple.com/album/{}", "1097861387", "gb"),
+            "https://music.apple.com/album/1097861387"
         );
     }
     /// A performer's links name the artist only where a hub or MusicBrainz can: a MusicBrainz

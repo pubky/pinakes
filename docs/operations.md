@@ -614,8 +614,8 @@ service keeps failing, or the wait the service named when longer. A run in which
 answers resets it.
 The sources run in the order [docs/sources](sources/README.md#also-on) lists them (each page says
 what its source reads and costs); `[also_on] apple_storefront` (`us`, a
-two-letter country code) is the Apple Music, Apple Books and Apple Podcasts storefront of the
-Apple links they build. `[also_on.sources.musicbrainz] base_url`
+two-letter country code) is the storefront the iTunes lookups ask and the Apple Books and Apple
+Podcasts links carry (Apple Music links carry none). `[also_on.sources.musicbrainz] base_url`
 (`https://musicbrainz.org/ws/2`) points every MusicBrainz read at a mirror's web service instead
 (every source that reads MusicBrainz, and the cards of MusicBrainz pages), an http(s) URL without a
 trailing slash and reached through the egress policy;

@@ -547,10 +547,10 @@ async fn music_links_join_through_the_hubs_and_list_each_other(pool: sqlx::PgPoo
         })
         .collect();
     // Both editions' derived links, each URL once (the same Apple album came through
-    // iTunes for the first and through Wikidata for the second).
+    // iTunes for the first, in the US storefront, and through Wikidata for the second: one
+    // link, as the storefront is no part of it).
     for expected in [
-        ("Apple Music", "https://music.apple.com/us/album/1097861387"),
-        ("Apple Music", "https://music.apple.com/gb/album/1097861387"),
+        ("Apple Music", "https://music.apple.com/album/1097861387"),
         (
             "Bandcamp",
             "https://radiohead.bandcamp.com/album/ok-computer",
@@ -569,17 +569,28 @@ async fn music_links_join_through_the_hubs_and_list_each_other(pool: sqlx::PgPoo
     let mut once = uris.clone();
     once.dedup();
     assert_eq!(uris.len(), once.len());
-    // iTunes answers the barcode MusicBrainz named: one album, keyed by the barcode.
-    let itunes: String = sqlx::query_scalar(
-        "SELECT uri||' '||key FROM derived_link WHERE resource_id=$1 AND via='itunes'",
+    // iTunes answers the barcode MusicBrainz named with the one album MusicBrainz itself
+    // relates to the release: one link, kept by the source that found it first (`musicbrainz`,
+    // keyed by the release), and iTunes was asked.
+    let apple: Vec<String> = sqlx::query_scalar(
+        "SELECT via||' '||key FROM derived_link WHERE resource_id=$1 AND uri='https://music.apple.com/album/1097861387'",
     )
     .bind(&ids[0])
-    .fetch_one(&pool)
+    .fetch_all(&pool)
     .await
     .unwrap();
     assert_eq!(
-        itunes,
-        "https://music.apple.com/us/album/1097861387 upc:0634904078164"
+        apple,
+        ["musicbrainz mb:release:30702389-5c67-4438-9ea0-2351c8de0f1d"]
+    );
+    assert!(
+        t.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.contains("/lookup?upc=0634904078164")),
+        "{:?}",
+        t.seen.lock().unwrap()
     );
     // Album level only: no track, no artist, and never a non-music page.
     for (_, uri, _) in &derived {
@@ -830,7 +841,7 @@ async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
     assert_eq!(
         rows("SELECT site||' '||uri FROM derived_link WHERE resource_id=$1 AND source='musicbrainz' ORDER BY site COLLATE \"C\"").await,
         [
-            "Apple Music https://music.apple.com/au/album/1874125260",
+            "Apple Music https://music.apple.com/album/1874125260",
             "Deezer https://www.deezer.com/album/910510411",
             "Qobuz https://open.qobuz.com/album/l048fnzy555c8",
             "Spotify https://open.spotify.com/album/6KFq3hJB6JnNvDbEHRvPoK",
@@ -1051,7 +1062,8 @@ async fn a_deezer_barcode_names_the_apple_album_that_joins(pool: sqlx::PgPool) {
         return;
     }
     let deezer = "https://www.deezer.com/album/41839661";
-    let apple = "https://music.apple.com/us/album/1445304934";
+    // Tagged in any storefront, the album's resource is its storefront-less root.
+    let apple = "https://music.apple.com/album/1445304934";
     let tidal = "https://tidal.com/track/534050211";
     let mut ids = vec![];
     for (uri, kind) in [
@@ -1135,7 +1147,7 @@ async fn a_deezer_barcode_names_the_apple_album_that_joins(pool: sqlx::PgPool) {
             ids[0].clone()
         )
         .await,
-        ["https://music.apple.com/us/album/1445304934 itunes upc:0602557656527"]
+        ["https://music.apple.com/album/1445304934 itunes upc:0602557656527"]
     );
     let group = "SELECT coalesce(group_id,'-') FROM group_unit WHERE resource_id=$1";
     let album = rows(group, ids[0].clone()).await;
@@ -2159,7 +2171,7 @@ async fn discogs_joins_at_its_level(pool: sqlx::PgPool) {
     assert_eq!(
         rows(album_pages, ids[0].clone()).await,
         [
-            "Apple Music https://music.apple.com/us/album/1097861387",
+            "Apple Music https://music.apple.com/album/1097861387",
             "Deezer https://www.deezer.com/album/14879699",
             "Qobuz https://open.qobuz.com/album/0634904078164",
             "Spotify https://open.spotify.com/album/2fGCAYUMssLKiUAoNdxGLx",

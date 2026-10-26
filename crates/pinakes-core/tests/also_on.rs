@@ -207,12 +207,13 @@ async fn hub_keys_join_and_derived_links_reach_the_cards(pool: PgPool) {
     assert_eq!(
         derived,
         [
+            // Each under its root spelling.
             (
                 "Apple Music",
-                "https://music.apple.com/us/song/1",
+                "https://music.apple.com/song/1",
                 "musicbrainz"
             ),
-            ("TIDAL", "https://tidal.com/browse/track/9", "musicbrainz"),
+            ("TIDAL", "https://tidal.com/track/9", "musicbrainz"),
             ("YouTube", "https://www.youtube.com/watch?v=x1", "wikidata"),
         ],
         "derived by service name, the member's links too: {card}"
@@ -353,7 +354,7 @@ async fn runs_replace_their_rows_failures_keep_them_and_rows_expire(pool: PgPool
         (
             vec!["music mb:recording:aa".into(), "wiki wikidata:Q1".into()],
             vec![
-                "music https://tidal.com/browse/track/1".into(),
+                "music https://tidal.com/track/1".into(),
                 "wiki https://en.wikipedia.org/wiki/T".into()
             ]
         )
@@ -377,7 +378,7 @@ async fn runs_replace_their_rows_failures_keep_them_and_rows_expire(pool: PgPool
     assert_eq!(
         links,
         [
-            "music https://music.apple.com/us/song/2",
+            "music https://music.apple.com/song/2",
             "wiki https://en.wikipedia.org/wiki/T"
         ]
     );
@@ -2266,7 +2267,7 @@ impl Source for ByBarcode {
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_link_an_exact_lookup_names_joins_by_its_key(pool: PgPool) {
     let deezer = "https://www.deezer.com/album/41839661";
-    let apple = "https://music.apple.com/gb/album/1445304934";
+    let apple = "https://music.apple.com/album/1445304934";
     let x = page(&pool, deezer, "Cut to the Feeling").await;
     let y = page(&pool, apple, "Cut to the Feeling").await;
     let hub = Fake::new("music");
@@ -2367,8 +2368,8 @@ async fn a_card_shows_one_link_per_service(pool: PgPool) {
     let deezer = "https://www.deezer.com/track/4329888262";
     let tagged = "https://tidal.com/track/534050211";
     let regional = "https://tidal.com/track/567396540";
-    let pending = "https://music.apple.com/us/song/1";
-    let pending_too = "https://music.apple.com/us/song/3";
+    let pending = "https://music.apple.com/song/1";
+    let pending_too = "https://music.apple.com/song/3";
     let pending_tidal = "https://tidal.com/track/999";
     let mut ids = vec![];
     for (uri, site) in [(deezer, "Deezer"), (tagged, "TIDAL")] {

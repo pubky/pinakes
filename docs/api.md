@@ -600,8 +600,10 @@ root, and a read, lookup, change query or occurrence read of the alias answers w
 - **Music service links**: every spelling of one track, album, artist or playlist on one service
   is an alias of its canonical URL: Spotify (`intl-xx` paths, `spotify:{kind}:{id}`, the old
   `user/…/playlist/…` form) → `https://open.spotify.com/{kind}/{id}`; Apple Music →
-  `https://music.apple.com/{country}/{kind}/{id}` without the name slug, an album URL with
-  `?i={id}` naming that track (`/song/{id}`), the iTunes Store's `itunes.apple.com/…/id{N}` too; YouTube and YouTube Music (`youtu.be`,
+  `https://music.apple.com/{kind}/{id}` without the storefront (the catalogue ID is global, and
+  Apple answers the storefront-less URL with the viewer's storefront) and without the name slug,
+  an album URL with `?i={id}` naming that track (`/song/{id}`), the iTunes Store's
+  `itunes.apple.com/…/id{N}` too; YouTube and YouTube Music (`youtu.be`,
   `m.`/`music.youtube.com`, `/shorts/`, `/embed/`) → `https://www.youtube.com/watch?v={id}` and
   `…/playlist?list={id}`; Deezer without the language path → `https://www.deezer.com/{kind}/{id}`;
   TIDAL (`/browse/`, `listen.tidal.com`, the `/u` share suffix; tracks, albums, artists, videos, playlists) →
@@ -911,6 +913,9 @@ source's exact keys
 an exact ID (a MusicBrainz relation, a Wikidata item's claim or sitelink, a service's answer to
 a lookup by barcode or ISRC) carries that ID: a tagged resource that is that link (the same URL
 after its aliases) takes it too and joins the group, even when its own lookup finds nothing.
+A derived link is stored under its root spelling ([aliases](#aliases): without tracking
+parameters, an Apple Music link without its storefront), so one object found through two
+spellings is one link, kept by the source that found it first.
 
 **The sources.** Each source's page in [docs/sources](sources/README.md#also-on) says what it reads
 and finds and what it costs; the index lists them in the order they run. A music link (a track,
@@ -921,8 +926,10 @@ fact at most. ISRCs are stored in upper case and barcodes as GTIN-13 (a 12-digit
 leading zero), by every source. The level is exact: a track lists tracks and videos of the
 recording, an album lists albums and YouTube's album playlists, an artist lists artist pages and
 channels. Album links group by their release group, while two editions (two MusicBrainz releases)
-stay apart. Apple Music, Apple Books and Apple Podcasts links use the storefront `[also_on]
-apple_storefront` (`us`).
+stay apart. Apple Music links carry no storefront; Apple Books and Apple Podcasts links, and the
+iTunes lookups, use the storefront `[also_on] apple_storefront` (`us`). MusicBrainz stores an
+Apple Music link under the storefront an editor browsed, so a hub lookup of one asks every
+common storefront's spelling in one request.
 
 An article's card comes from its Wikipedia's REST summary (`Article`, the title, the first
 paragraph up to 600 characters, the thumbnail, `site` `Wikipedia ({lang})`), so a long article

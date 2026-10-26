@@ -49,7 +49,8 @@ pub struct AlsoOnConfig {
     /// `[also_on.sources.<id>] enabled = false` turns one source off; the IDs are
     /// [`registry`]'s.
     pub sources: BTreeMap<String, SourceOptions>,
-    /// The Apple Music storefront (country) of the Apple links sources build, `us` by default.
+    /// The iTunes storefront (country) the album and book lookups ask, `us` by default. Apple
+    /// Music links carry no storefront (`music::parse`).
     pub apple_storefront: String,
     #[serde(skip)]
     pub links_per_source: usize,
@@ -522,7 +523,14 @@ fn checked(
             {
                 continue;
             }
-            let Ok((id, uri, scheme)) = crate::model::identity(&link.uri) else {
+            // A link is stored under its root spelling (`alias::root`, when that is a URL): a
+            // tagged resource that is the same object under another spelling is its root, and
+            // the link names that root.
+            let root = crate::alias::root(&link.uri)
+                .map(|a| a.root)
+                .filter(|r| r.starts_with("http"))
+                .unwrap_or_else(|| link.uri.clone());
+            let Ok((id, uri, scheme)) = crate::model::identity(&root) else {
                 continue;
             };
             if !matches!(scheme.as_str(), "http" | "https") || id == resource_id || uri.len() > 2048

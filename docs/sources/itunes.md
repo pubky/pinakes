@@ -7,5 +7,5 @@ when exactly one album answers, keyed by that barcode (so a tagged link to that 
 
 ## Operations
 
-Up to two iTunes lookups for an album with barcodes. The Apple Music links use the storefront
-`[also_on] apple_storefront` (`us`).
+Up to two iTunes lookups for an album with barcodes, in the storefront `[also_on]
+apple_storefront` (`us`); the Apple Music links carry no storefront.

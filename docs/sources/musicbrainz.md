@@ -34,4 +34,6 @@ Each music link costs one MusicBrainz request for its entity (up to four when th
 several releases; one more for a track found by its ISRC, up to two barcode searches for an album
 found by its barcode keys (only those another source found) and up to four release reads for what
 they name, and one for a track's original album). The worker asks MusicBrainz about a batch's
-links' URLs together ([operations](../operations.md#also-on)).
+links' URLs together ([operations](../operations.md#also-on)); an Apple Music link, which
+MusicBrainz stores under the storefront an editor browsed, is asked under twenty storefronts'
+spellings in one request.

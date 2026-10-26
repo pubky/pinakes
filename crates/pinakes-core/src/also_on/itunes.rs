@@ -133,7 +133,7 @@ mod tests {
     #[test]
     fn itunes_counts_only_one_album() {
         let link = itunes_parse(&fixture("itunes-upc.json")).unwrap();
-        assert_eq!(link.uri, "https://music.apple.com/us/album/1097861387");
+        assert_eq!(link.uri, "https://music.apple.com/album/1097861387");
         assert_eq!(link.via, "itunes");
         assert!(itunes_parse(&fixture("itunes-upc-many.json")).is_none());
     }

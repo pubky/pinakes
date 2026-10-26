@@ -317,9 +317,10 @@ async fn a_tidal_barcode_joins_apple_music_and_deezer(pool: sqlx::PgPool) {
     let hydra = save(&pool, "https://tidal.com/album/199574241", "MusicAlbum").await;
     let dracula = save(&pool, "https://tidal.com/album/495402659", "MusicAlbum").await;
     let track = save(&pool, "https://tidal.com/track/199574242", "MusicRecording").await;
+    // Tagged in any storefront, the album's resource is its storefront-less root.
     let apple = save(
         &pool,
-        "https://music.apple.com/us/album/1680053261",
+        "https://music.apple.com/album/1680053261",
         "MusicAlbum",
     )
     .await;
@@ -358,7 +359,7 @@ async fn a_tidal_barcode_joins_apple_music_and_deezer(pool: sqlx::PgPool) {
         )
         .await,
         [
-            "https://music.apple.com/us/album/1680053261 itunes upc:4018939306052",
+            "https://music.apple.com/album/1680053261 itunes upc:4018939306052",
             "https://www.deezer.com/album/320429237 deezer upc:4018939306052",
         ]
     );
