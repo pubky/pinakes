@@ -71,6 +71,7 @@ pub mod pinterest;
 pub mod podcast_index;
 pub mod pubchem;
 pub mod public_inbox;
+pub mod reddit;
 pub mod ror;
 pub mod sec;
 pub mod snap_store;
@@ -138,6 +139,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &podcast_index::PodcastIndex,
     &pubchem::Pubchem,
     &public_inbox::PublicInbox,
+    &reddit::Reddit,
     &ror::Ror,
     &sec::Sec,
     &snap_store::SnapStore,

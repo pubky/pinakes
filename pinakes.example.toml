@@ -145,6 +145,8 @@ enabled = true
 enabled = true
 [sources.public_inbox]
 enabled = true
+[sources.reddit]
+enabled = true
 [sources.ror]
 enabled = true
 [sources.sec]

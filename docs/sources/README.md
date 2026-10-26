@@ -100,6 +100,7 @@ or got plain web cards before are read by their source.
 - [`podcast_index`](podcast_index.md): Podcast Index shows and episodes by feed and episode id (needs the Podcast Index key).
 - [`pubchem`](pubchem.md): PubChem compounds by compound id.
 - [`public_inbox`](public_inbox.md): mailing-list messages in public-inbox archives (gnusha.org, lore.kernel.org, others), and old bitcoin-dev pipermail addresses
+- [`reddit`](reddit.md): Reddit posts, subreddits and users.
 - [`ror`](ror.md): research organizations by ROR id.
 - [`sec`](sec.md): SEC EDGAR filings, their documents and companies.
 - [`snap_store`](snap_store.md): Snap Store apps by snap name, from the snapcraft.io info API.

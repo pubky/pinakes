@@ -1,0 +1,12 @@
+[
+  {
+    "kind": "reddit",
+    "uri": "https://www.reddit.com/r/announcements/comments/1k3d0pk/",
+    "type": "DiscussionForumPosting"
+  },
+  {
+    "kind": "reddit_subreddit",
+    "uri": "https://old.reddit.com/r/announcements",
+    "type": "Organization"
+  }
+]
