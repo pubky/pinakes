@@ -30,6 +30,10 @@ snapshot; a test fails when it is stale.
 | `GET /v1/dumps/osm_place.ndjson.gz` | None | The ODbL derivative database as a daily gzip file ([OSM](#openstreetmap-and-locations)) |
 | `GET /v1/openapi.json` | None | OpenAPI 3.1 |
 | `GET /swagger-ui` | None | Swagger UI (when `api.swagger_ui`) |
+| `GET /` | None | The index for agents: the guide, the skill, the MCP endpoint, this document and nexus-scout ([Agents](#agents)) |
+| `GET /llms.txt` | None | The usage guide for agents, plain text ([Agents](#agents)) |
+| `GET /skill.md` | None | The guide as an agent skill named `pinakes` ([Agents](#agents)) |
+| `POST /mcp` | One MCP JSON-RPC message | The MCP endpoint (when `api.mcp`; [Agents](#agents)); not in the OpenAPI document |
 
 URIs are normalized and IDs computed by Pinakes itself: lowercase scheme and host, no default
 port, userinfo or fragment, then BLAKE3. Each URI is at most 2048 bytes; IDs are 32 lowercase hex
@@ -977,7 +981,7 @@ Coordinate-derived time zones use ODbL boundary data too; see `data/README.md`.
 
 ## Limits and errors
 
-Every public `/v1` route and Swagger UI share a per-IP budget on the direct peer address
+Every public route (`/v1`, Swagger UI, the agents' guide and index, and `/mcp`) shares a per-IP budget on the direct peer address
 (`api.requests_per_minute`, 120; forwarded headers are not trusted). A reach search costs
 `limits.reach_cost` (6) units, charged before any Nexus call, a related search
 `limits.related_cost` (6), and a search with both the two together; every other request costs
@@ -994,6 +998,55 @@ Internal errors return 500 without database details, and a handler panic is answ
 backstop layer (logged with its path, counted in `pinakes_api_panics_total`), never a dropped
 connection. There are no resource write, social-state, reverse-geocoding or place-search
 routes.
+
+## Agents
+
+AI agents read Pinakes as nexus-scout serves the social graph: a usage guide, and an MCP endpoint.
+Both are on the public listener under the same per-IP budget, and neither needs a key.
+
+**The guide.** `GET /llms.txt` (plain text) explains what Pinakes indexes, then a quickstart,
+recipes for the questions agents ask (what is this link; places near a point with a tag; events in
+a city this week; every link with one ISBN, DOI, ISRC or OSM id; what else is the same thing),
+how to join with Nexus by URI, the MCP tools, the limits and what to do on each error. It names
+nexus-scout for graph questions. `GET /skill.md` is the same guide with skill front matter
+(`name: pinakes`). The base URL in both is the host that served them: the request's `Host`, with
+`X-Forwarded-Proto` when a proxy names the scheme, else `http` for a loopback host and `https`
+for any other. `GET /` links the guide, the skill, the MCP endpoint (when on), the OpenAPI document,
+`/v1/info` and nexus-scout's guide.
+
+**MCP.** `POST /mcp` (`api.mcp`, default on) is a Model Context Protocol server over Streamable
+HTTP, stateless and read-only, built on the official Rust SDK (`rmcp`). Messages are answered as
+JSON (`application/json`); there are no sessions and no server-to-client requests. Each tool is a
+request to the public routes above, answered by their handlers under the public listener's
+layers, with the caller's address:
+
+| Tool | Request | Answer |
+| --- | --- | --- |
+| `search` | `GET /v1/search` with `q`, `type`, `tags` (array), `match`, `near` (`{lat, lon, radius}`), `bbox` (`[west, south, east, north]`), `from`, `to`, `key`, `sort`, `window`, `collapse`, `reach`, `viewer`, `limit`, `cursor` | Compact cards, `cursor`, `facets` |
+| `card` | `GET /v1/resources/by-uri`; with `resolve: true` and an unknown link, `POST /v1/resolve` | One compact card with `category`, `address`, `facts`, `aliases` (at most 10) and the event fields |
+| `lookup` | `GET /v1/search?key=` | Compact cards |
+| `group` | `GET /v1/groups/{id}` | `id`, `type`, `keys`, every member's compact card, and `best`: the most complete readable member of the group's type |
+| `types` | `GET /v1/search?facet=type&limit=1` and `GET /v1/info` | The card types with their counts, and `resolves` |
+| `social` | Nexus `POST /v0/stream/resources/by_ids` for 1–100 URIs, with an optional `viewer` | Per URI the tags (`label`, `taggers_count`, `viewer_tagged`) and `taggers_count`; `unknown` lists the URIs Nexus does not know |
+
+A compact card keeps `id`, `uri`, `status`, `type`, `name`, `description` (at most 300
+characters), `image`, `site`, `point`, `start`, `end`, `group`, `also_on` (`uri`, `site`),
+`occurrence`, `event` and `attribution`, and adds `url`, the card's full read
+(`GET /v1/resources/{id}`); every answer names the REST URL of its full result. A failed request
+is the tool's error (`isError`), its text `{error, status, hint, url}` with the route's status
+and message; an unknown tool is a JSON-RPC error.
+
+**Budget.** An MCP message spends one unit of the per-IP budget, and a tool call what its
+requests cost on top (a `reach` search 6, `types` two requests, `social` one). Bodies are capped
+at 2 MB, as for every route; the routes keep their statement timeout, and `social` the Nexus
+client's 10-second timeout. When Nexus does not answer the batch view, `social` is the error
+`502`.
+
+**No admin operation.** The tools' requests go to the public routes only, built afresh with no
+header of the MCP request, so the admin listener's routes and its token are out of reach. Any
+`Host` is accepted: the endpoint takes no credentials and changes nothing, so rmcp's DNS-rebinding
+guard for local servers protects nothing here, and the public host names are the reverse proxy's
+to know.
 
 ## Admin listener
 

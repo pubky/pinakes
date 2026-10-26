@@ -339,6 +339,13 @@ and a CSP of `default-src 'self'` with no inline script; the bundle's one inline
 allowed by its SHA-256 hash, which a test recomputes from the served bundle. The validator badge
 is off. Swagger UI shares the `/v1` per-IP budget.
 
+The agents' guide (`/llms.txt`, `/skill.md`, the index at `/`) and the MCP endpoint (`POST /mcp`,
+`api.mcp`, default on) are on the public listener under the same per-IP budget
+([api](api.md#agents)). The MCP endpoint is stateless and read-only, takes no credentials and
+accepts any `Host`; terminate TLS at the reverse proxy and pass `X-Forwarded-Proto`, so the guide
+names the public `https` URL. Turning `api.mcp` off removes `/mcp` and its link from the index;
+the guide stays.
+
 ## Ingestion
 
 `pinakesd` polls the Nexus reference feed every `limits.poll_secs`. Pinakes keys each line on its

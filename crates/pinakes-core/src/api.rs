@@ -107,6 +107,17 @@ impl AppState {
         }
         Ok(())
     }
+    /// `cost` units of the per-IP budget of the public routes for `ip`: what a request that
+    /// does not pass `public_budget` costs (an MCP tool's call to Nexus).
+    pub(crate) async fn charge(&self, ip: std::net::IpAddr, cost: usize) -> Result<(), ApiError> {
+        self.budget(
+            &[(format!("api-ip:{ip}"), self.config.api.requests_per_minute)],
+            self.config.api.cache_capacity,
+            "API rate limit exceeded",
+            cost,
+        )
+        .await
+    }
     /// One ODbL dump download for `ip` in its current hour, at most
     /// `limits.osm_dump_downloads_per_hour`.
     async fn download_budget(&self, ip: std::net::IpAddr) -> Result<(), ApiError> {
@@ -321,7 +332,18 @@ async fn swagger_headers(
 }
 pub fn router(state: AppState) -> Router {
     std::sync::LazyLock::force(&PUBLIC_DOCUMENT);
-    let routes = Router::new()
+    let routes = rest_routes();
+    let mut all = routes.clone().merge(crate::agents::routes());
+    if state.config.api.mcp {
+        // The tools answer through the REST routes, under the same layers.
+        let rest = with_public_layers(routes, state.clone());
+        all = all.route_service("/mcp", crate::agents::mcp::service(rest, state.clone()));
+    }
+    with_public_layers(all.merge(swagger_ui(&state.config.api)), state)
+}
+/// The public `/v1` routes.
+fn rest_routes() -> Router<AppState> {
+    Router::new()
         .route("/v1/info", get(info))
         .route("/v1/changes/lookup", post(crate::change_api::lookup))
         .route("/v1/search", get(search))
@@ -340,8 +362,6 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/resolve", post(resolve))
         .route("/v1/openapi.json", get(openapi))
         .route("/v1/dumps/osm_place.ndjson.gz", get(osm_dump))
-        .merge(swagger_ui(&state.config.api));
-    with_public_layers(routes, state)
 }
 /// The public listener's layer stack around `routes`: the panic backstop innermost, then CORS
 /// preflights, the per-IP budget, CORS headers, the body limit and, outermost, the path-scoped
@@ -405,6 +425,7 @@ fn rejection_message(method: &axum::http::Method, path: &str, status: StatusCode
         return "the path or a query parameter could not be read; /v1/openapi.json lists what this route takes";
     }
     match path {
+        "/mcp" => "an MCP message is one JSON-RPC body (content-type: application/json) from a client that accepts application/json and text/event-stream",
         "/v1/resolve" => "the body must be a JSON object with a `uri` string",
         "/v1/resources/lookup" => {
             "the body must be a JSON object with `ids` or `uris`, arrays of strings"
@@ -2144,7 +2165,8 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         (name = "Groups", description = "Links to the same thing on several services: a hint on each card, never a merge."),
         (name = "Changes", description = "Freshness: what changed for the links a client keeps."),
         (name = "Service", description = "Version, resolvers, licence and this document."),
-        (name = "Licensing", description = "The ODbL share-alike download of the OpenStreetMap-derived data.")
+        (name = "Licensing", description = "The ODbL share-alike download of the OpenStreetMap-derived data."),
+        (name = "Agents", description = "The usage guide for AI agents (also as a skill) and the index that links it and the MCP endpoint, `POST /mcp`, which docs/api.md describes.")
     ),
     paths(
         group,
@@ -2158,7 +2180,10 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         info,
         openapi,
         osm_dump,
-        crate::change_api::lookup
+        crate::change_api::lookup,
+        crate::agents::index,
+        crate::agents::llms_txt,
+        crate::agents::skill_md
     ),
     components(schemas(
         CollapseMode,
@@ -2188,7 +2213,9 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         Facets,
         OsmDumpLine,
         OsmDumpNotice,
-        OsmDumpPlace
+        OsmDumpPlace,
+        crate::agents::Index,
+        crate::agents::IndexLinks
     ))
 )]
 pub struct ApiDoc;

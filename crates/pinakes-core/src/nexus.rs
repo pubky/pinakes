@@ -122,6 +122,33 @@ impl Nexus {
             length,
         })
     }
+    /// Nexus's batch resource view of `uris` (`POST /v0/stream/resources/by_ids`, 1–100), for
+    /// `viewer` when given: one view per URI it knows, in request order, with its tags and tagger
+    /// count. A Nexus that knows none of them answers an empty list (an older one, 404).
+    pub async fn resources_by_uris(
+        &self,
+        uris: &[String],
+        viewer: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let mut body = serde_json::json!({ "uris": uris });
+        if let Some(viewer) = viewer {
+            body["viewer_id"] = viewer.into();
+        }
+        let response = self
+            .client
+            .post(format!("{}/v0/stream/resources/by_ids", self.base))
+            .json(&body)
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(vec![]);
+        }
+        let response = response
+            .error_for_status()
+            .map_err(reqwest::Error::without_url)?;
+        bounded_json(response).await
+    }
     pub async fn reach(&self, viewer: &str, reach: &str) -> Result<ReachSet> {
         if !valid_author(viewer) || !matches!(reach, "following" | "friends") {
             bail!("invalid reach request");

@@ -8,6 +8,29 @@ export async function json(url, body, method = body === undefined ? 'GET' : 'POS
   assert(response.ok, `${method} ${new URL(url).pathname}: HTTP ${response.status}`);
   return response.status === 204 ? null : response.json();
 }
+/** The JSON-RPC answer in an MCP response body: the body itself (`application/json`), or the
+ * last `data:` event of an event stream. */
+export function mcpAnswer(text, contentType) {
+  if (!contentType?.startsWith('text/event-stream')) return JSON.parse(text);
+  const events = text.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trim()).filter(Boolean);
+  assert(events.length > 0, 'an MCP event stream with no data');
+  return JSON.parse(events.at(-1));
+}
+/** One message to an MCP endpoint, as a client sends it; a tool call's answer is its JSON text. */
+export async function mcp(url, message) {
+  const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-06-18' }, body: JSON.stringify(message), signal: AbortSignal.timeout(15000) });
+  assert(response.ok, `POST /mcp ${message.method}: HTTP ${response.status}`);
+  const answer = mcpAnswer(await response.text(), response.headers.get('content-type'));
+  assert(!answer.error, `${message.method}: ${JSON.stringify(answer.error)}`);
+  return answer.result;
+}
+/** A tool's answer as JSON; a tool error fails the run with its text. */
+export async function tool(url, name, args) {
+  const result = await mcp(url, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name, arguments: args } });
+  const text = result.content?.[0]?.text;
+  assert(!result.isError, `tool ${name}: ${text}`);
+  return JSON.parse(text);
+}
 /** The newest item's link in an RSS feed: the first `<item>`'s `<link>`. */
 export function newestLink(rss) {
   const item = /<item\b[\s\S]*?<\/item>/.exec(rss)?.[0];
@@ -306,6 +329,23 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
       }
       const confirmed = await ownTags(hydrated, uris, label, author, id => json(`${nexus}/v0/resource/${id}/tags?limit_tags=100&viewer_id=${author}`));
       report.assertions.push(confirmed ? `Nexus hydration by URIs and own tags (${confirmed} through the resource tag route)` : 'Nexus hydration by URIs and own tags');
+      // Agents: the guide, and MCP's tools answering as the routes do, `social` through the
+      // Nexus this instance reads.
+      const guide = await fetch(`${pinakes}/llms.txt`, { signal: AbortSignal.timeout(15000) });
+      assert(guide.ok && guide.headers.get('content-type').startsWith('text/plain'), 'GET /llms.txt is the plain-text guide');
+      const guideText = await guide.text();
+      assert(guideText.includes('/mcp') && !guideText.includes('{{BASE}}'), 'the guide names this host');
+      const initialized = await mcp(`${pinakes}/mcp`, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'pinakes-e2e', version: '1' } } });
+      assert.equal(initialized.serverInfo.name, 'pinakes');
+      const [firstKind, firstDoc] = [...docs.entries()][0];
+      const firstUri = tags.find(t => t.kind === firstKind).uri;
+      const read = await tool(`${pinakes}/mcp`, 'card', { uri: firstUri });
+      assert.equal(read.card.id, firstDoc.id, 'the card tool reads the tagged link');
+      const found = await tool(`${pinakes}/mcp`, 'search', { tags: [label], limit: 500 });
+      for (const doc of docs.values()) assert(found.items.some(card => card.id === doc.id), `the search tool lists ${doc.uri}`);
+      const social = await tool(`${pinakes}/mcp`, 'social', { uris: [firstUri], viewer: author });
+      assert(social.items[0]?.tags.some(t => t.label === label), 'the social tool returns the run\'s tag from Nexus');
+      report.assertions.push('agents: the guide, and the MCP card, search and social tools');
       await waitFor('group hints', async () => {
         // Samples naming `group_with` must be one resource (an alias: ISBN-10 and -13, OSM
         // spellings) or share one group (a publisher page with the DOI/ISBN resource whose

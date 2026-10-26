@@ -710,6 +710,8 @@ pub struct ApiConfig {
     pub cors_allow_origins: Vec<String>,
     /// Serve Swagger UI for the public document at `/swagger-ui` (as pubky-nexus does).
     pub swagger_ui: bool,
+    /// Serve the MCP endpoint, `POST /mcp`, on the public listener (docs/api.md, Agents).
+    pub mcp: bool,
 }
 impl Default for ApiConfig {
     fn default() -> Self {
@@ -720,6 +722,7 @@ impl Default for ApiConfig {
             related_cost: 6,
             cors_allow_origins: vec!["*".into()],
             swagger_ui: true,
+            mcp: true,
         }
     }
 }

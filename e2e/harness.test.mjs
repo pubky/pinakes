@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { dropRefusedPages, expectCard, freshen, instanceAgent, newestLink, ownTags, rereadMoved, userAgent, withTags } from './harness.mjs';
+import { dropRefusedPages, expectCard, freshen, instanceAgent, mcpAnswer, newestLink, ownTags, rereadMoved, userAgent, withTags } from './harness.mjs';
 test('a PUT that commits then times out is included in cleanup', async () => {
   const stored = new Set(), report = {}, journal = [];
   const storage = { exists: async p => stored.has(p), putJson: async p => { stored.add(p); if (p === 'second') throw new Error('timeout'); }, delete: async p => stored.delete(p) };
@@ -159,4 +159,11 @@ test('a running instance\'s preflight sends the User-Agent its /v1/info reports'
   assert.equal(instanceAgent({ version: '0.1.0', user_agent: 'pinakes/0.1.0 (+https://pubky.app; ops@example.org)' }), 'pinakes/0.1.0 (+https://pubky.app; ops@example.org)');
   assert.throws(() => instanceAgent({ version: '0.1.0' }), /user_agent/);
   assert.throws(() => instanceAgent({ version: '0.1.0', user_agent: 'curl/8' }), /user_agent/);
+});
+
+test('an MCP answer is the JSON body, or the last data event of a stream', () => {
+  assert.deepEqual(mcpAnswer('{"jsonrpc":"2.0","id":1,"result":{}}', 'application/json'), { jsonrpc: '2.0', id: 1, result: {} });
+  const stream = 'event: message\ndata: {"jsonrpc":"2.0","method":"notifications/progress"}\n\nevent: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}\n\n';
+  assert.deepEqual(mcpAnswer(stream, 'text/event-stream'), { jsonrpc: '2.0', id: 1, result: { ok: true } });
+  assert.throws(() => mcpAnswer('event: ping\n\n', 'text/event-stream'), /no data/);
 });
