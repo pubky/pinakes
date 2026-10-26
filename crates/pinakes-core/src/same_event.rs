@@ -128,9 +128,10 @@ pub async fn claim(
 
 /// One pass: claims up to `CLAIMED` due resources and pairs their new or changed units, at most
 /// `budget` of them; a resource with more, or one the budget did not reach, is due again at once.
-/// A claim is settled only while it is still the claim: a change marked meanwhile moved the entry
-/// back to now (the trigger), and the next pass reads the resource again. An interrupted pass
-/// leaves its claims to run out. Returns the resources claimed.
+/// A claim is settled only while it is valid (see `settle`): a change marked meanwhile moved the
+/// entry back to now (the trigger), and a claim that ran out is left due; either way the next pass
+/// reads the resource again. An interrupted pass leaves its claims to run out. Returns the
+/// resources claimed.
 pub async fn drain(pool: &PgPool, config: &Config, budget: i64) -> Result<usize> {
     if !enabled(config) {
         return Ok(0);
@@ -150,13 +151,7 @@ pub async fn drain(pool: &PgPool, config: &Config, budget: i64) -> Result<usize>
                 if more {
                     release(pool, id, claimed, 0).await?;
                 } else {
-                    sqlx::query(
-                        "DELETE FROM same_event_dirty WHERE resource_id=$1 AND next_attempt_at=$2",
-                    )
-                    .bind(id)
-                    .bind(claimed)
-                    .execute(pool)
-                    .await?;
+                    settle(pool, id, claimed).await?;
                 }
             }
             Err(error) => {
@@ -171,14 +166,33 @@ pub async fn drain(pool: &PgPool, config: &Config, budget: i64) -> Result<usize>
     Ok(due.len())
 }
 
-/// A claimed resource due again `after_secs` from now, if the entry is still the claim.
+// A claim is settled only while it is still valid: the entry holds it and it has not run out.
+// A change saved after it ran out leaves the entry's time as it was (the trigger only moves it
+// earlier), so an expired claim is left due and the resource is read again.
+
+/// A claimed resource read in full: its entry goes, if the claim is still valid. Exposed for the
+/// expiry test.
+pub async fn settle(
+    pool: &PgPool,
+    id: &str,
+    claimed: &chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    sqlx::query("DELETE FROM same_event_dirty WHERE resource_id=$1 AND next_attempt_at=$2 AND next_attempt_at>now()")
+        .bind(id)
+        .bind(claimed)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// A claimed resource due again `after_secs` from now, if the claim is still valid.
 async fn release(
     pool: &PgPool,
     id: &str,
     claimed: &chrono::DateTime<chrono::Utc>,
     after_secs: i64,
 ) -> Result<()> {
-    sqlx::query("UPDATE same_event_dirty SET next_attempt_at=now()+$3*interval '1 second' WHERE resource_id=$1 AND next_attempt_at=$2")
+    sqlx::query("UPDATE same_event_dirty SET next_attempt_at=now()+$3*interval '1 second' WHERE resource_id=$1 AND next_attempt_at=$2 AND next_attempt_at>now()")
         .bind(id)
         .bind(claimed)
         .bind(after_secs)
