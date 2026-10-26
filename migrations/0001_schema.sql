@@ -976,7 +976,9 @@ CREATE TABLE same_recording_unit (
     artist_key text NOT NULL,
     length_secs integer
 );
-CREATE INDEX same_recording_unit_name_idx ON same_recording_unit USING btree (title_key, artist_key);
+-- In (title, artist, length, id) order, so a recording's candidates are read from the length
+-- window (or the lengths unknown) and the read stops at the pairs kept.
+CREATE INDEX same_recording_unit_name_idx ON same_recording_unit USING btree (title_key, artist_key, length_secs, resource_id);
 
 -- One row per direction of a pair: `score` is 1 when both lengths are known and within 3 s,
 -- 0.7 when one is unknown.

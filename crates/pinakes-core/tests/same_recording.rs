@@ -387,3 +387,61 @@ async fn a_stopped_pass_leaves_no_pair_stale(pool: PgPool) {
     pass(&pool, &config).await;
     assert_eq!(named(&card(&config, &pool, &a).await), [b.as_str()]);
 }
+
+/// A crowd of recordings with one title and artist: each keeps at most twenty pairs, its own and
+/// those others gave it, the lengths that agree before the ones unknown.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_crowd_of_one_recording_keeps_twenty_pairs_each(pool: PgPool) {
+    let config = Config::default();
+    for i in 0..101 {
+        recording(
+            &pool,
+            &format!("https://tidal.com/track/{}", 1000 + i),
+            "Take Five",
+            Some("The Dave Brubeck Quartet"),
+            Some("PT5M24S"),
+        )
+        .await;
+    }
+    let unknown = recording(
+        &pool,
+        "https://www.deezer.com/track/1031007",
+        "Take Five",
+        Some("The Dave Brubeck Quartet"),
+        None,
+    )
+    .await;
+    pass(&pool, &config).await;
+    let most: i64 = sqlx::query_scalar(
+        "SELECT max(n) FROM (SELECT count(*) AS n FROM same_recording GROUP BY resource_id) c",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(most, 20);
+    let fewest: i64 = sqlx::query_scalar(
+        "SELECT min(n) FROM (SELECT count(*) AS n FROM same_recording GROUP BY resource_id) c",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(fewest >= 1, "every recording keeps a pair");
+    // A recording with a length keeps twenty whose lengths agree, never the one without.
+    let first: String =
+        sqlx::query_scalar("SELECT id FROM resource WHERE uri='https://tidal.com/track/1000'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let kept: Vec<(String, f32)> =
+        sqlx::query_as("SELECT other_id,score FROM same_recording WHERE resource_id=$1")
+            .bind(&first)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(kept.len(), 20);
+    assert!(
+        kept.iter()
+            .all(|(other, score)| other != &unknown && *score > 0.9),
+        "{kept:?}"
+    );
+}

@@ -257,21 +257,67 @@ async fn resource(pool: &PgPool, id: &str) -> Result<bool> {
         .execute(&mut *tx)
         .await?;
     // The other recordings already read, on the values they were read with (a change marks a
-    // recording to be read again); a recording read later finds this one in turn.
+    // recording to be read again); a recording read later finds this one in turn. The best
+    // `KEPT`: those whose lengths agree (score 1), then those with a length unknown (0.7). Each
+    // half reads the index in order and stops at `KEPT`, so a crowd of recordings with one title
+    // costs no more than twenty.
+    let candidates = "SELECT u.resource_id FROM same_recording_unit u \
+        WHERE u.title_key=$2 AND u.artist_key=$3 AND u.resource_id<>$1";
+    let mut best: Vec<(String, f32)> = vec![];
+    if !unit.artist_key.is_empty() {
+        if let Some(len) = unit.length_secs {
+            let agree: Vec<String> = sqlx::query_scalar(&format!(
+                "{candidates} AND u.length_secs BETWEEN $4 AND $5 ORDER BY u.length_secs,u.resource_id LIMIT $6"
+            ))
+            .bind(id)
+            .bind(&unit.title_key)
+            .bind(&unit.artist_key)
+            .bind((len - LENGTH_WINDOW_SECS) as i32)
+            .bind((len + LENGTH_WINDOW_SECS) as i32)
+            .bind(KEPT)
+            .fetch_all(&mut *tx)
+            .await?;
+            best.extend(agree.into_iter().map(|r| (r, SCORE_LENGTHS_AGREE)));
+        }
+        let room = KEPT - best.len() as i64;
+        if room > 0 {
+            let unknown_len = if unit.length_secs.is_some() {
+                " AND u.length_secs IS NULL"
+            } else {
+                ""
+            };
+            let unknown: Vec<String> = sqlx::query_scalar(&format!(
+                "{candidates}{unknown_len} ORDER BY u.length_secs,u.resource_id LIMIT $4"
+            ))
+            .bind(id)
+            .bind(&unit.title_key)
+            .bind(&unit.artist_key)
+            .bind(room)
+            .fetch_all(&mut *tx)
+            .await?;
+            best.extend(unknown.into_iter().map(|r| (r, SCORE_LENGTH_UNKNOWN)));
+        }
+    }
+    let (others, scores): (Vec<String>, Vec<f32>) = best.into_iter().unzip();
     sqlx::query(
-        "WITH me AS (SELECT * FROM same_recording_unit WHERE resource_id=$1), best AS (\
-         SELECT u.resource_id,CASE WHEN me.length_secs IS NULL OR u.length_secs IS NULL THEN $4 ELSE $3 END AS score \
-         FROM me,same_recording_unit u WHERE u.resource_id<>me.resource_id AND me.artist_key<>'' \
-         AND u.title_key=me.title_key AND u.artist_key=me.artist_key \
-         AND (me.length_secs IS NULL OR u.length_secs IS NULL OR abs(me.length_secs-u.length_secs)<=$2) \
-         ORDER BY score DESC,u.resource_id LIMIT $5) \
-         INSERT INTO same_recording(resource_id,other_id,score) SELECT $1,resource_id,score FROM best UNION ALL SELECT resource_id,$1,score FROM best \
+        "INSERT INTO same_recording(resource_id,other_id,score) \
+         SELECT $1,o,s FROM unnest($2::text[],$3::real[]) AS t(o,s) \
+         UNION ALL SELECT o,$1,s FROM unnest($2::text[],$3::real[]) AS t(o,s) \
          ON CONFLICT(resource_id,other_id) DO UPDATE SET score=excluded.score",
     )
     .bind(id)
-    .bind(LENGTH_WINDOW_SECS as i32)
-    .bind(SCORE_LENGTHS_AGREE)
-    .bind(SCORE_LENGTH_UNKNOWN)
+    .bind(&others)
+    .bind(&scores)
+    .execute(&mut *tx)
+    .await?;
+    // Each other recording keeps its best `KEPT` too: this one may push its last one out.
+    sqlx::query(
+        "DELETE FROM same_recording p USING (SELECT resource_id,other_id,\
+         row_number() OVER (PARTITION BY resource_id ORDER BY score DESC,other_id) AS n \
+         FROM same_recording WHERE resource_id=ANY($1)) r \
+         WHERE p.resource_id=r.resource_id AND p.other_id=r.other_id AND r.n>$2",
+    )
+    .bind(&others)
     .bind(KEPT)
     .execute(&mut *tx)
     .await?;
