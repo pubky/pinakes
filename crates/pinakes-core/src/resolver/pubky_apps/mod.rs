@@ -20,7 +20,6 @@ pub mod rooms;
 pub static REGISTRY: &[&Profile] = &[
     &loopky::PROFILE,
     &marketplace::PROFILE,
-    &posts::EVENTS,
     &posts::MAPS,
     &posts::MUSIC,
     &rooms::PROFILE,

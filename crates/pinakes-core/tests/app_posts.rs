@@ -183,12 +183,12 @@ async fn post_lines_queue_the_post_and_each_version_reads_it_again(pool: PgPool)
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_post_line_outside_its_post_is_rejected(pool: PgPool) {
     let metrics = Metrics::new().unwrap();
-    let good = post("events", &id());
+    let good = post("maps", &id());
     let other = "ybndrfg8ejkmcpqxot1uwisza345h769ybndrfg8ejkmcpqxot1u";
     let mut elsewhere = line(Op::Put, &good, "0034A", Utc::now());
     elsewhere.uri = good.replace(AUTHOR, other);
     let mut not_a_post = line(Op::Put, &good, "0034A", Utc::now());
-    not_a_post.uri = format!("pubky://{AUTHOR}/pub/events/v1/calendars/1");
+    not_a_post.uri = format!("pubky://{AUTHOR}/pub/maps/v1/calendars/1");
     let mut nested = line(Op::Put, &good, "0034A", Utc::now());
     nested.object_path = nested.object_path.replace("/0034A.json", "/x/0034A.json");
     let mut other_post = line(Op::Put, &good, "0034A", Utc::now());
@@ -215,12 +215,12 @@ async fn a_post_line_outside_its_post_is_rejected(pool: PgPool) {
 }
 
 /// The posts of the profiled namespaces go to the Pubky resolver; the social specs' objects
-/// (their posts, events and rsvps included), and the posts of namespaces no profile reads, are
-/// never fetched.
+/// (their posts, events, rsvps and availability included), and the posts of namespaces no
+/// profile reads (`events`, whose availability is now social's), are never fetched.
 #[test]
 fn posts_route_by_namespace() {
     let id = id();
-    for namespace in ["maps", "events", "music"] {
+    for namespace in ["maps", "music"] {
         assert_eq!(
             classify(&post(namespace, &id)),
             Some("pubky"),
@@ -234,6 +234,7 @@ fn posts_route_by_namespace() {
     }
     for uri in [
         post("chess", &id),
+        post("events", &id),
         post("social", &id),
         format!("pubky://{AUTHOR}/pub/social/v1/tags/{id}"),
         format!("pubky://{AUTHOR}/pub/social/v1.1/posts/{id}"),
@@ -243,8 +244,8 @@ fn posts_route_by_namespace() {
     }
 }
 
-/// Maps routes, events availability and music listens and sessions: each its own card; a kind
-/// its namespace does not read, and an envelope the specs refuse, have none.
+/// Maps routes and music sessions: each its own card; a music listen, a kind its namespace does
+/// not read, and an envelope the specs refuse, have none.
 #[test]
 fn app_kinds_by_namespace() {
     let route = envelope(
@@ -260,48 +261,58 @@ fn app_kinds_by_namespace() {
     assert_eq!(fact(&doc, "distance_m"), Some("12000"));
     assert_eq!(fact(&doc, "waypoints"), Some("2"));
 
-    // `for`: the resource the schedule belongs to, as in the spec's example.
-    let listing = format!("pubky://{AUTHOR}/pub/shop/v1/listings/0032SSN7Q4EVG");
-    let availability = envelope(
-        "availability",
+    // A session: the track it embeds, from `started_at` to `expires_at` (microseconds), its host
+    // and service. A `name` its content does not define names nothing.
+    let host = format!("pubky://{AUTHOR}");
+    let mut session = envelope(
+        "session",
         json!({
-            "timeZone": "Europe/Zurich", "horizonDays": 30, "for": listing,
-            "available": [{"title": "Office hours", "start": "2026-10-19T09:00:00", "duration": "PT3H"}],
-            "busy": [],
+            "started_at": 1_792_152_000_000_000_i64, "expires_at": 1_792_155_600_000_000_i64,
+            "host": host, "source": {"service": "tidal"}, "name": "Late jam",
         }),
     );
-    let doc = card(&post("events", &id()), &availability);
-    assert_eq!(doc.type_path.last().map(String::as_str), Some("Schedule"));
-    assert_eq!(doc.name.as_deref(), Some("Office hours"));
-    assert_eq!(doc.start, Some("2026-10-19T07:00:00Z".parse().unwrap()));
-    assert_eq!(doc.end, Some("2026-10-19T10:00:00Z".parse().unwrap()));
-    assert_eq!(fact(&doc, "for"), Some(listing.as_str()));
-
-    let mut listen = envelope("listen", json!({}));
-    listen["embed"] = "https://tracks.example/track/1".into();
-    let doc = card(&post("music", &id()), &listen);
+    session["embed"] = "https://tracks.example/track/1".into();
+    let doc = card(&post("music", &id()), &session);
     assert_eq!(
         doc.type_path.last().map(String::as_str),
-        Some("ListenAction")
+        Some("BroadcastEvent")
     );
+    assert_eq!(doc.name, None);
+    assert_eq!(doc.start, Some("2026-10-16T12:00:00Z".parse().unwrap()));
+    assert_eq!(doc.end, Some("2026-10-16T13:00:00Z".parse().unwrap()));
     assert_eq!(fact(&doc, "track"), Some("https://tracks.example/track/1"));
-    // At the post's own time, its id.
-    let written = doc.start.unwrap();
-    assert!((Utc::now() - written).num_minutes().abs() < 5, "{written}");
+    assert_eq!(fact(&doc, "host"), Some(host.as_str()));
+    assert_eq!(fact(&doc, "service"), Some("tidal"));
+    // Without an expiry it is open-ended; without a track, a start, or with an expiry before
+    // its start, it has no card.
+    let mut open = session.clone();
+    open["content"] = json!({"started_at": 1_792_152_000_000_000_i64, "host": host})
+        .to_string()
+        .into();
+    assert_eq!(card(&post("music", &id()), &open).end, None);
+    let mut trackless = session.clone();
+    trackless["embed"] = Value::Null;
+    let mut unstarted = session.clone();
+    unstarted["content"] = json!({"name": "Late jam", "host": host}).to_string().into();
+    let mut backwards = session.clone();
+    backwards["content"] = json!({
+        "started_at": 1_792_155_600_000_000_i64, "expires_at": 1_792_152_000_000_000_i64,
+        "host": host,
+    })
+    .to_string()
+    .into();
+    for version in [&trackless, &unstarted, &backwards] {
+        assert!(no_card(&card(&post("music", &id()), version)), "{version}");
+    }
 
-    let session = envelope("session", json!({"name": "Late jam"}));
-    assert_eq!(
-        card(&post("music", &id()), &session).name.as_deref(),
-        Some("Late jam")
-    );
+    // A listen counts at most on its track: no card of its own, one per play.
+    let mut listen = envelope("listen", json!({"played_at": 1_792_152_000_000_000_i64}));
+    listen["embed"] = "https://tracks.example/track/1".into();
+    assert!(no_card(&card(&post("music", &id()), &listen)));
 
-    // A route in the events namespace, a listen without a track, an id the specs refuse, an
-    // explicit `null` where the envelope wants a list.
-    assert!(no_card(&card(&post("events", &id()), &route)));
-    assert!(no_card(&card(
-        &post("music", &id()),
-        &envelope("listen", json!({}))
-    )));
+    // A route in the music namespace, an id the specs refuse, an explicit `null` where the
+    // envelope wants a list.
+    assert!(no_card(&card(&post("music", &id()), &route)));
     assert!(no_card(&card(&post("maps", "0000000000000"), &route)));
     let mut null = route.clone();
     null["attachments"] = Value::Null;
@@ -326,11 +337,12 @@ fn content_references_are_gated_and_text_is_storable() {
     };
     assert!(!no_card(&card(&post("maps", &id()), &named("Aare walk"))));
     assert!(no_card(&card(&post("maps", &id()), &named("Aare\0walk"))));
-    let availability = envelope(
-        "availability",
-        json!({"timeZone": "Europe/Zurich", "horizonDays": 7, "for": private, "available": []}),
+    let mut session = envelope(
+        "session",
+        json!({"started_at": 1_792_152_000_000_000_i64, "host": private}),
     );
-    assert!(no_card(&card(&post("events", &id()), &availability)));
+    session["embed"] = "https://tracks.example/track/1".into();
+    assert!(no_card(&card(&post("music", &id()), &session)));
 }
 
 /// A Pubky resolver standing in for the homeserver: it reads the post as `name`, or fails.

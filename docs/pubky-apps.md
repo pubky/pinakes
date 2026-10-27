@@ -3,10 +3,11 @@
 People tag objects that Pubky apps other than pubky.app keep in their public storage: a Loopky
 deck, a room, a marketplace listing. Pinakes fetches such a `pubky://` object from its owner's
 homeserver and gives it a card. pubky.app's own objects (posts, profiles) and the social specs'
-objects (`/pub/social/…`, any version: posts, events, rsvps, tags, ratings) are Nexus's and
-never fetched: social events come from Nexus (owner decision, 2026-10-26). Neither are the old
-Mapky and Eventky layouts (`/pub/mapky.app/…`, `/pub/eventky.app/…`) fetched, whose data is
-disregarded: routes, availability and events now come as [posts](#posts).
+objects (`/pub/social/…`, any version: posts, events, rsvps, availability, tags, ratings) are
+Nexus's and never fetched: social events and availability come from Nexus (owner decisions,
+2026-10-26 and 2026-10-27). Neither are the old Mapky and Eventky layouts (`/pub/mapky.app/…`,
+`/pub/eventky.app/…`) fetched, whose data is disregarded: routes now come as [posts](#posts),
+events and availability as social posts.
 
 For an app Pinakes has a profile for, the card is that app's: a schema.org type, the name,
 description, image and a few facts the app's format holds, and `open_in`, the clients that open
@@ -78,23 +79,24 @@ posts, events and rsvps included, are Nexus's: never fetched.) A post is one res
 (`pubky://<author>/pub/<namespace>/v1/posts/{id}`), like any other `pubky://` object: it comes on
 the resource feed as a `post` line ([operations](operations.md#posts)), or is tagged, and the Pubky
 resolver reads it. It lists the post's folder newest first (`…/{id}/?reverse=true&limit=1`),
-fetches that version, checks it with pubky-social-specs' `PostEnvelope<K>` (acde362, the pin
-Nexus and the music node use; the kind's content is the profile's to read), and reads it by its
+fetches that version, checks it with pubky-social-specs' `PostEnvelope<K>` (`=1.0.0-rc.1`; the
+kind's content is the profile's to read), and reads it by its
 namespace and kind (`resolver/pubky_apps/posts.rs`):
 
 | namespace, kind | card |
 | --- | --- |
 | `maps` `route` | A `Trip`: its `name`, `description`, its first waypoint as the point, the box of its `geo:` waypoints, and `activity`, `distance_m`, `duration_s`, `elevation_gain_m`, `elevation_loss_m` and the number of waypoints as facts |
-| `events` `availability` | A `Schedule` named by its first available block's `title`, from that block's start for its `duration` in its `timeZone`, with its horizon, its numbers of available and busy blocks and its `for` as facts |
-| `music` `listen` | A `ListenAction`: the track it `embed`s as a fact, at the post's own time (its id) |
-| `music` `session` | A `CreativeWork` by its `name` (or `title`) and `description` |
+| `music` `session` | A `BroadcastEvent` from `started_at` to `expires_at` (open-ended without one), with the track it `embed`s, its `host` and its `source`'s `service` as facts. Its content has no name, so neither has the card (the sub-spec manifest will name it by the track's card) |
 
-Any other kind in these namespaces (music `listening`, for one), and a version the envelope
-refuses, has no card. Posts of other namespaces are their apps' own and never fetched.
-**Assumed, without a published spec:** a music `listen` names its track in the envelope's `embed`,
-and a `session` is named by `name` or `title` (pubky-music-specs is not public); `route` and
-`availability` are read as the social specs' v1.1 branch defines them, since Maps' and Eventky's
-own spec crates do not exist yet.
+Any other kind in these namespaces has no card, and neither has a version the envelope refuses:
+- a music `listen`: one card per play would be noise, and a play-by-play history in a second
+  index; at most it counts on its track (owner decision, 2026-10-27);
+- a music `listening` ("now playing"), which clients read from the Nexus stream.
+
+Posts of other namespaces, `events` among them (its availability is now a social kind), are their
+apps' own and never fetched. The music kinds follow `pubky-music-specs` (`session`:
+`{started_at, expires_at?, host, source?}`, the track in the envelope's `embed`); `route` is read
+as the social specs' v1.1 branch defines it, since Maps' own spec crate does not exist yet.
 
 ## Adding a Pubky app
 
