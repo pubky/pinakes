@@ -140,9 +140,10 @@ curl -s "$NEXUS/v0/stream/resources/by_ids" -H 'content-type: application/json' 
 
 Each answer has `details.uri`, `tags` (`label`, `taggers_count`, and with `viewer_id`
 `relationship`: whether the viewer used that label) and `taggers_count`, in request order;
-unknown URIs are skipped. Through MCP, the `social` tool does the whole join with the Nexus
-this instance reads: give it card ids, and it asks by each card's `uri` and `refs` and merges
-the answers per card (each tagger counted once per label).
+unknown URIs are skipped. Through MCP, the `social` tool does the whole join with the Nexus this
+instance reads: give it card ids, and it asks by each card's `uri` and `refs` and merges the
+answers per card (each tagger counted once per label; `at_least: true` marks a count that is a
+lower bound, when several links' views count taggers they do not list).
 
 For graph questions (who follows whom, trust, threads, a user's tags) use **nexus-scout**
 (`https://nexus-scout.pubky.app/llms.txt`): read-only Cypher over the Pubky social graph. To keep

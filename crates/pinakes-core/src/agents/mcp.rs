@@ -508,7 +508,7 @@ pub fn tools() -> Vec<Tool> {
         ),
         tool(
             "social",
-            "Tags and taggers per card, from the Nexus this instance reads. Give the ids of cards from search: each card is asked about by its own uri and by every link people referenced for it (its refs, such as the mempool.space page of a btc: block, or an occurrence's feed, occurrence.feed_uri), and the answers are merged per card. Links that are not Pinakes cards, or a card's other spellings (details.aliases on its full read), can be given as uris. With viewer, each tag says whether that user used it.",
+            "Tags and taggers per card, from the Nexus this instance reads. Give the ids of cards from search: each card is asked about by its own uri and by every link people referenced for it (its refs, such as the mempool.space page of a btc: block, or an occurrence's feed, occurrence.feed_uri), and the answers are merged per card. Links that are not Pinakes cards, or a card's other spellings (details.aliases on its full read), can be given as uris. Taggers are counted once each; a count marked at_least is a lower bound (Nexus counts taggers it does not list, who may be the same on several links). With viewer, each tag says whether that user used it.",
             json!({"type":"object","additionalProperties":false,"properties":{
                 "ids":{"type":"array","items":{"type":"string"},"maxItems":100,"description":"Card ids from search, card or lookup."},
                 "uris":{"type":"array","items":{"type":"string"},"maxItems":100,"description":"Links to ask about as they are."},
@@ -721,28 +721,37 @@ fn view_of<'a>(views: &'a [Value], uri: &str) -> Option<&'a Value> {
     })
 }
 
-/// A count of taggers over several views: the taggers they list, once each, plus those a view
-/// counts but does not list (Nexus lists a bounded number).
+/// A count of taggers over several views: the taggers they list, once each, or the most one
+/// view counts, whichever is more. A view counts taggers it does not list (Nexus lists a bounded
+/// number), and those may be the ones another view lists, so over several such views the count
+/// is a lower bound (`at_least`), never a sum that counts one person twice.
 #[derive(Default)]
 struct Taggers {
     listed: std::collections::BTreeSet<String>,
-    unlisted: u64,
+    most: u64,
+    views: usize,
+    unlisted: bool,
 }
 impl Taggers {
-    fn add(&mut self, listed: &Value, count: &Value) {
-        let names: Vec<&str> = listed
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .collect();
-        let count = count.as_u64().unwrap_or(names.len() as u64);
-        self.unlisted += count.saturating_sub(names.len() as u64);
+    fn add<'a>(&mut self, listed: impl IntoIterator<Item = &'a Value>, count: &Value) {
+        let names: std::collections::BTreeSet<&str> =
+            listed.into_iter().filter_map(Value::as_str).collect();
+        let count = count.as_u64().unwrap_or_default().max(names.len() as u64);
+        self.unlisted |= count > names.len() as u64;
+        self.most = self.most.max(count);
+        self.views += 1;
         self.listed.extend(names.into_iter().map(str::to_owned));
     }
     fn count(&self) -> u64 {
-        self.listed.len() as u64 + self.unlisted
+        (self.listed.len() as u64).max(self.most)
     }
+    fn at_least(&self) -> bool {
+        self.unlisted && self.views > 1
+    }
+}
+/// A tag line's listed taggers.
+fn taggers(tag: &Value) -> impl Iterator<Item = &Value> {
+    tag["taggers"].as_array().into_iter().flatten()
 }
 
 /// What `social` answers: per card (or link), the URIs asked and those Nexus knew, and the tags
@@ -759,7 +768,10 @@ fn social_answer(asks: &[Ask], views: &[Value]) -> Value {
         let mut labels: Vec<(String, Taggers, bool)> = vec![];
         let mut everyone = Taggers::default();
         for (_, view) in &found {
-            for tag in view["tags"].as_array().into_iter().flatten() {
+            // A view counts its taggers over all labels (`taggers_count`), each once.
+            let tags = view["tags"].as_array().into_iter().flatten();
+            everyone.add(tags.clone().flat_map(taggers), &view["taggers_count"]);
+            for tag in tags {
                 let Some(label) = tag["label"].as_str() else {
                     continue;
                 };
@@ -770,25 +782,28 @@ fn social_answer(asks: &[Ask], views: &[Value]) -> Value {
                         labels.len() - 1
                     }
                 };
-                labels[at].1.add(&tag["taggers"], &tag["taggers_count"]);
+                labels[at].1.add(taggers(tag), &tag["taggers_count"]);
                 labels[at].2 |= tag["relationship"] == true;
-                everyone.add(&tag["taggers"], &tag["taggers_count"]);
             }
         }
-        let mut tags: Vec<(String, u64, bool)> = labels
-            .into_iter()
-            .map(|(label, taggers, mine)| (label, taggers.count(), mine))
-            .collect();
-        tags.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let mut tags: Vec<(String, Taggers, bool)> = labels;
+        tags.sort_by(|a, b| b.1.count().cmp(&a.1.count()).then_with(|| a.0.cmp(&b.0)));
         let mut item = json!({
             "uri": ask.uri,
             "asked": ask.asked,
             "found": found.iter().map(|(u, _)| u.as_str()).collect::<Vec<_>>(),
             "taggers_count": everyone.count(),
-            "tags": tags.into_iter().map(|(label, count, mine)| {
-                json!({"label": label, "taggers_count": count, "viewer_tagged": mine})
+            "tags": tags.into_iter().map(|(label, taggers, mine)| {
+                let mut tag = json!({"label": label, "taggers_count": taggers.count(), "viewer_tagged": mine});
+                if taggers.at_least() {
+                    tag["at_least"] = true.into();
+                }
+                tag
             }).collect::<Vec<_>>(),
         });
+        if everyone.at_least() {
+            item["at_least"] = true.into();
+        }
         if let Some(id) = &ask.id {
             item["id"] = id.clone().into();
         }
@@ -905,7 +920,8 @@ mod tests {
             json!({"details": {"uri": "https://www.mempool.space/block/0000aa"}, "taggers_count": 2,
                    "tags": [{"label": "halving", "taggers_count": 2, "relationship": true, "taggers": ["t1", "t2"]},
                             {"label": "bitcoin", "taggers_count": 1, "taggers": ["t1"]}]}),
-            // The same tagger on another link counts once; a third counted but not listed adds one.
+            // The same tagger on another link counts once. One counted but not listed may be one
+            // the other link lists: the count is a lower bound, never a sum.
             json!({"details": {"uri": "https://blockstream.info/block/0000aa"}, "taggers_count": 2,
                    "tags": [{"label": "halving", "taggers_count": 2, "taggers": ["t2"]}]}),
         ];
@@ -915,13 +931,51 @@ mod tests {
                 {"id": "c1", "uri": "btc:block/0000aa",
                  "asked": ["btc:block/0000aa", "https://WWW.Mempool.space/block/0000aa", "https://blockstream.info/block/0000aa"],
                  "found": ["https://WWW.Mempool.space/block/0000aa", "https://blockstream.info/block/0000aa"],
-                 "taggers_count": 3,
-                 "tags": [{"label": "halving", "taggers_count": 3, "viewer_tagged": true},
+                 "taggers_count": 2, "at_least": true,
+                 "tags": [{"label": "halving", "taggers_count": 2, "viewer_tagged": true, "at_least": true},
                           {"label": "bitcoin", "taggers_count": 1, "viewer_tagged": false}]},
                 {"uri": "https://example.org/unknown", "asked": ["https://example.org/unknown"],
                  "found": [], "taggers_count": 0, "tags": []}
             ]})
         );
+    }
+
+    /// The same two people tag two of a card's links; each link's view lists one of them and
+    /// counts both. They are two at least, never four; one view alone is exact.
+    #[test]
+    fn unlisted_taggers_are_never_summed_over_views() {
+        let ask = |asked: &[&str]| Ask {
+            id: Some("c1".into()),
+            root: None,
+            uri: asked[0].into(),
+            asked: asked.iter().map(|u| u.to_string()).collect(),
+        };
+        let view = |uri: &str, listed: &str| {
+            json!({"details": {"uri": uri}, "taggers_count": 2,
+                   "tags": [{"label": "halving", "taggers_count": 2, "taggers": [listed]}]})
+        };
+        let views = [
+            view("https://mempool.space/block/0000aa", "t1"),
+            view("https://blockstream.info/block/0000aa", "t2"),
+        ];
+        let both = social_answer(
+            &[ask(&[
+                "https://mempool.space/block/0000aa",
+                "https://blockstream.info/block/0000aa",
+            ])],
+            &views,
+        );
+        let item = &both["items"][0];
+        assert_eq!(item["taggers_count"], 2);
+        assert_eq!(item["at_least"], true);
+        assert_eq!(
+            item["tags"],
+            json!([{"label": "halving", "taggers_count": 2, "viewer_tagged": false, "at_least": true}])
+        );
+        let one = social_answer(&[ask(&["https://mempool.space/block/0000aa"])], &views);
+        assert_eq!(one["items"][0]["taggers_count"], 2);
+        assert!(one["items"][0].get("at_least").is_none());
+        assert!(one["items"][0]["tags"][0].get("at_least").is_none());
     }
 
     #[test]
