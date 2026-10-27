@@ -532,10 +532,14 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
                 .filter_map(|u| origin_url(&fetched.url, u).and_then(|u| entity_identity(&u)))
                 .any(|id| page.contains(&id))
         };
-        if v.is_object() && type_priority(v) == 20 && fetched.url.path() != "/" && named() {
+        if v.is_object()
+            && type_priority(v, &fetched.url) == 20
+            && fetched.url.path() != "/"
+            && named()
+        {
             100
         } else {
-            entity_priority(v)
+            entity_priority(v, &fetched.url)
         }
     };
     // A site's own node (its WebSite, its publisher) ranks below any other: it never names the
@@ -565,7 +569,11 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
                 .iter()
                 .filter(|(_, head)| *head)
                 .fold(None, |best, (v, _)| match best {
-                    Some(b) if entity_priority(v) <= entity_priority(b) => Some(b),
+                    Some(b)
+                        if entity_priority(v, &fetched.url) <= entity_priority(b, &fetched.url) =>
+                    {
+                        Some(b)
+                    }
                     _ => Some(v),
                 });
             if let Some(v) = head_best {
@@ -1000,32 +1008,51 @@ fn schema_type(v: &Value) -> Option<&str> {
         .filter_map(Value::as_str)
         .find(|s| !crate::model::type_path(s).is_empty())
 }
-fn entity_priority(v: &Value) -> u8 {
+fn entity_priority(v: &Value, base: &Url) -> u8 {
     if let Some(values) = v.as_array() {
-        return values.iter().map(entity_priority).max().unwrap_or(0);
+        return values
+            .iter()
+            .map(|v| entity_priority(v, base))
+            .max()
+            .unwrap_or(0);
     }
     let nested = v
         .get("mainEntity")
         .or_else(|| v.get("@graph"))
-        .map(entity_priority)
+        .map(|v| entity_priority(v, base))
         .unwrap_or(0);
-    type_priority(v).max(nested)
+    type_priority(v, base).max(nested)
 }
-/// A node's own priority, ignoring nested entities: 110 for a recipe, 100 for other content, 80
-/// for WebPage, 20 for publisher and navigation helpers.
-fn type_priority(v: &Value) -> u8 {
+/// A node's own priority, ignoring nested entities: 110 for the page's own recipe, 100 for other
+/// content, 80 for WebPage, 20 for publisher and navigation helpers.
+fn type_priority(v: &Value, base: &Url) -> u8 {
     let path = schema_type(v)
         .map(crate::model::type_path)
         .unwrap_or_default();
-    // A recipe page's article or video wraps its recipe, never the other way round.
-    let own = if path.iter().any(|s| s == "Recipe") {
+    // A recipe page's article or video wraps its recipe, never the other way round; a recipe
+    // about another page (one an article recommends) is content like the article, so it never
+    // displaces the page's own node. The page's own: it names the page (url, else @id), or it
+    // names none and wraps nothing else.
+    let recipe = path.iter().any(|s| s == "Recipe");
+    let own = if recipe
+        && crate::event::page::names_page(v, base)
+            .unwrap_or_else(|| v.get("mainEntity").is_none() && v.get("@graph").is_none())
+    {
         110
-    } else if path.iter().any(|s| {
-        matches!(
-            s.as_str(),
-            "Article" | "Event" | "Product" | "Place" | "MediaObject" | "JobPosting" | "Question"
-        )
-    }) {
+    } else if recipe
+        || path.iter().any(|s| {
+            matches!(
+                s.as_str(),
+                "Article"
+                    | "Event"
+                    | "Product"
+                    | "Place"
+                    | "MediaObject"
+                    | "JobPosting"
+                    | "Question"
+            )
+        })
+    {
         100
     } else if path.iter().any(|s| s == "WebPage") {
         80
@@ -1171,7 +1198,7 @@ fn entity_identity(url: &str) -> Option<String> {
 fn jsonld_claims(doc: &mut ResourceMeta, v: &Value, base: &Url) -> bool {
     if let Some(values) = v.as_array() {
         let best = values.iter().fold(None, |best, v| match best {
-            Some(b) if entity_priority(v) <= entity_priority(b) => Some(b),
+            Some(b) if entity_priority(v, base) <= entity_priority(b, base) => Some(b),
             _ => Some(v),
         });
         return best.is_some_and(|b| jsonld_claims(doc, b, base));
@@ -1181,7 +1208,7 @@ fn jsonld_claims(doc: &mut ResourceMeta, v: &Value, base: &Url) -> bool {
             return true;
         }
     }
-    if schema_type(v).is_none() || type_priority(v) < 80 {
+    if schema_type(v).is_none() || type_priority(v, base) < 80 {
         return false;
     }
     for field in ["url", "@id", "sameAs"] {
@@ -1218,7 +1245,7 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url, claims: bool, vou
         let rank = |v: &Value| {
             (
                 !site_node(v, base),
-                entity_priority(v),
+                entity_priority(v, base),
                 crate::event::page::owns_page(v, base),
             )
         };

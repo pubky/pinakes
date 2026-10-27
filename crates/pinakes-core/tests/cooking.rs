@@ -74,6 +74,60 @@ fn recipe_pages_become_recipes_with_their_facts() {
     assert_eq!(bounded.attributes, doc.attributes, "facts kept");
 }
 
+#[test]
+fn only_the_pages_own_recipe_outranks_its_article() {
+    // An article page recommending a recipe of another page (in its graph, or a script of its
+    // own) stays the article; the same recipe naming the page is the page's card.
+    let page = "https://food.example/blog/autumn";
+    let article = r#"{"@type": "Article", "headline": "Autumn evenings", "url": "https://food.example/blog/autumn"}"#;
+    let recipe = |url: &str| {
+        format!(
+            r#"{{"@type": "Recipe", "name": "Recommended soup", "url": "{url}", "totalTime": "PT30M", "recipeIngredient": ["1 tsp cloves"]}}"#
+        )
+    };
+    let extract = |scripts: Vec<String>| {
+        let body = format!(
+            "<html><head><title>Autumn evenings</title>{}</head><body></body></html>",
+            scripts
+                .iter()
+                .map(|s| format!(r#"<script type="application/ld+json">{s}</script>"#))
+                .collect::<String>()
+        );
+        let fetched = Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            url: page.parse().unwrap(),
+            status: 200,
+            content_type: "text/html".into(),
+            body: body.into_bytes(),
+            location: None,
+            retry_after_secs: 60,
+            validators: Default::default(),
+        };
+        web::extract(page, &fetched, 3600).unwrap().doc
+    };
+    let other = recipe("https://food.example/recipes/soup");
+    for scripts in [
+        vec![format!(r#"{{"@graph": [{other}, {article}]}}"#)],
+        vec![format!(r#"{{"@graph": [{article}, {other}]}}"#)],
+        vec![other.clone(), article.to_owned()],
+        vec![article.to_owned(), other.clone()],
+    ] {
+        let doc = extract(scripts.clone());
+        assert_eq!(doc.type_name, "Article", "{scripts:?}");
+        assert_eq!(doc.name.as_deref(), Some("Autumn evenings"), "{scripts:?}");
+    }
+    let own = recipe(page);
+    for scripts in [
+        vec![format!(r#"{{"@graph": [{article}, {own}]}}"#)],
+        vec![article.to_owned(), own.clone()],
+    ] {
+        let doc = extract(scripts.clone());
+        assert_eq!(doc.type_name, "Recipe", "{scripts:?}");
+        assert_eq!(doc.attributes["ingredients"], "cloves", "{scripts:?}");
+    }
+}
+
 async fn call(app: &Router, path: &str) -> (u16, Value) {
     let mut request = Request::builder().uri(path).body(Body::empty()).unwrap();
     request

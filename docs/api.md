@@ -1055,13 +1055,14 @@ every group is), where its site's source says so.
 ## Recipes
 
 A page whose JSON-LD is a `Recipe` is a recipe card; on a recipe page the recipe outranks the
-article or video that wraps it.
+article or video that wraps it. Only the page's own recipe does (it names the page, or names
+none): a recipe of another page that an article recommends never displaces the article.
 
 | Fact | Meaning |
 | --- | --- |
 | `total_minutes` | From `totalTime`, else `prepTime` plus `cookTime` |
 | `recipe_yield` | As the recipe gives it (`4`, `6 servings`) |
-| `ingredients` | Each `recipeIngredient` without its amount, unit, notes in parentheses, preparation after a comma (`beaten`, `chopped`, …) and alternatives (`plus …`, `or …`), lower case, joined with `; `, as many whole ones as 256 bytes hold |
+| `ingredients` | Each `recipeIngredient` without its amount, unit (a unit word that ends the line is the ingredient: `2 cloves`), notes in parentheses, preparation after a comma (`beaten`, `chopped`, …) and alternatives (`plus …`, `or …`), lower case, joined with `; `, as many whole ones as 256 bytes hold |
 | `cuisine`, `recipe_category` | As the recipe names them, joined with `; ` |
 | `diet` | `gluten_free`, `vegan`, `vegetarian`, … (schema.org's `RestrictedDiet` in snake case) |
 | `rating`, `rating_count` | Its aggregate rating |

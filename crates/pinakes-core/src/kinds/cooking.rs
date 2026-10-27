@@ -223,10 +223,10 @@ pub fn ingredient(line: &str) -> Option<String> {
     let mut start = 0;
     while start < words.len() {
         let w = words[start].trim_end_matches('.');
-        if amount(w) || glued(w) || (start > 0 && UNITS.contains(&w)) || matches!(w, "x" | "of") {
-            start += 1;
-        } else if start == 0 && UNITS.contains(&w) && words.len() > 1 {
-            // "pinch salt".
+        // A unit word is one only before what it measures: "2 cloves garlic", "pinch salt";
+        // the last word is the ingredient ("2 cloves", "1 tsp cloves").
+        let unit = UNITS.contains(&w) && start + 1 < words.len();
+        if amount(w) || glued(w) || unit || matches!(w, "x" | "of") {
             start += 1;
         } else {
             break;
@@ -364,6 +364,10 @@ mod tests {
             ("3 oz. cream cheese* ($0.80)", "cream cheese"),
             ("pinch salt", "salt"),
             ("500 g Mehl", "mehl"),
+            // A unit word that ends the line is what it measures.
+            ("2 cloves", "cloves"),
+            ("1 tsp cloves", "cloves"),
+            ("2 cloves garlic", "garlic"),
         ] {
             assert_eq!(ingredient(line).as_deref(), Some(name), "{line}");
         }
