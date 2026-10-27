@@ -13,7 +13,9 @@
 //! day ago to a year ahead), bounded per pass and going on at once while more is due; an entry
 //! is claimed for a while and dropped once read, so a stopped pass loses nothing; an hourly
 //! sweep drops units that left the window and marks those that entered it, changed unseen or
-//! became an alias. Cards only read the stored pairs (`same_event_hint`).
+//! became an alias. A unit that changes or goes takes its pairs from the units that named it,
+//! and those are read again to refill their lists (see `refill`). Cards only read the stored
+//! pairs (`same_event_hint`).
 use crate::config::{Config, SameEventHint};
 use anyhow::Result;
 use sqlx::{PgPool, Row};
@@ -28,6 +30,8 @@ pub const METRES: f64 = 500.0;
 pub const SIMILARITY: f64 = 0.5;
 /// Pairs kept per unit, best first (a card shows three, its details ten).
 const KEPT: i64 = 20;
+/// The most units that may name one unit, so a change to it marks at most this many for a refill.
+const INCOMING_KEPT: i64 = 2 * KEPT;
 /// Resources claimed per pass.
 const CLAIMED: i64 = 25;
 /// The window of starts: from a day ago to a year ahead.
@@ -72,18 +76,17 @@ pub async fn run(pool: PgPool, config: Config, mut shutdown: watch::Receiver<boo
     }
 }
 
-/// Drops the units that left the window (their pairs go with them) and marks the resources whose
-/// units entered it or changed without a mark, and those of stored units that are no longer
-/// events: an alias, a missing feed, a gone occurrence. Returns the resources marked.
+/// Drops the units that left the window (their pairs go with them, and the units that named them
+/// refill) and marks the resources whose units entered it or changed without a mark (a unit still
+/// marked for a refill among them), and those of stored units that are no longer events: an
+/// alias, a missing feed, a gone occurrence. Returns the resources marked.
 pub async fn sweep(pool: &PgPool) -> Result<u64> {
-    let mut tx = pool.begin().await?;
-    let dropped = sqlx::query("DELETE FROM same_event_unit WHERE start_at<now()-interval '1 day'")
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-    if dropped > 0 {
-        commit_changed(tx, pool).await?;
-    }
+    drop_units(
+        pool,
+        "SELECT unit_id FROM same_event_unit WHERE start_at<now()-interval '1 day'",
+        None,
+    )
+    .await?;
     let entered = sqlx::query(&format!(
         "INSERT INTO same_event_dirty(resource_id) SELECT DISTINCT s.id FROM search_unit s \
          WHERE {EVENT} AND {WINDOW} AND NOT EXISTS(SELECT 1 FROM same_event_unit x WHERE x.unit_id=s.unit_id AND x.fingerprint={FINGERPRINT}) \
@@ -214,29 +217,77 @@ async fn commit_changed(
     Ok(())
 }
 
-/// One resource: drops its units that are gone or out of the window, then pairs up to `budget`
-/// of its new or changed units. Returns the units paired and whether more are left.
-async fn resource(pool: &PgPool, id: &str, budget: i64) -> Result<(usize, bool)> {
-    let mut tx = pool.begin().await?;
-    let dropped = sqlx::query(&format!(
-        "WITH current AS (SELECT s.unit_id FROM search_unit s WHERE s.id=$1 AND {EVENT} AND {WINDOW}) \
-         DELETE FROM same_event_unit WHERE resource_id=$1 AND unit_id NOT IN (SELECT unit_id FROM current)"
-    ))
-    .bind(id)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    if dropped > 0 {
-        commit_changed(tx, pool).await?;
+/// Units whose lists lost a pair are read again: their fingerprint is marked `refill:` (so the
+/// read recomputes their list instead of finding it current, and still knows their values) and
+/// their resources are due now. The sweep marks a unit still marked, as one whose fingerprint
+/// differs.
+async fn refill(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, units: &[String]) -> Result<()> {
+    if units.is_empty() {
+        return Ok(());
     }
+    sqlx::query("UPDATE same_event_unit SET fingerprint='refill:'||fingerprint WHERE unit_id=ANY($1) AND fingerprint NOT LIKE 'refill:%'")
+        .bind(units)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("INSERT INTO same_event_dirty(resource_id) SELECT DISTINCT resource_id FROM same_event_unit WHERE unit_id=ANY($1) \
+        ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=excluded.next_attempt_at WHERE same_event_dirty.next_attempt_at>excluded.next_attempt_at")
+        .bind(units)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Drops the units `which` selects (SQL over `$1`, the resource, when given): their pairs go with
+/// them, and the units that named them, other than those dropped, refill. Returns whether any
+/// was dropped.
+async fn drop_units(pool: &PgPool, which: &str, resource: Option<&str>) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let select =
+        format!("SELECT unit_id FROM same_event_unit WHERE unit_id IN ({which}) FOR UPDATE");
+    let mut select = sqlx::query_scalar(&select);
+    if let Some(resource) = resource {
+        select = select.bind(resource);
+    }
+    let dropped: Vec<String> = select.fetch_all(&mut *tx).await?;
+    if dropped.is_empty() {
+        return Ok(false);
+    }
+    let owners: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT unit_id FROM same_event WHERE other_id=ANY($1) AND NOT unit_id=ANY($1)",
+    )
+    .bind(&dropped)
+    .fetch_all(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM same_event_unit WHERE unit_id=ANY($1)")
+        .bind(&dropped)
+        .execute(&mut *tx)
+        .await?;
+    refill(&mut tx, &owners).await?;
+    commit_changed(tx, pool).await?;
+    Ok(true)
+}
+
+/// One resource: drops its units that are gone or out of the window, then pairs up to `budget`
+/// of its new, changed or refilled units. Returns the units paired and whether more are left.
+async fn resource(pool: &PgPool, id: &str, budget: i64) -> Result<(usize, bool)> {
+    drop_units(
+        pool,
+        &format!(
+            "SELECT unit_id FROM same_event_unit WHERE resource_id=$1 AND unit_id NOT IN \
+             (SELECT s.unit_id FROM search_unit s WHERE s.id=$1 AND {EVENT} AND {WINDOW})"
+        ),
+        Some(id),
+    )
+    .await?;
     // Each unit with what pairs are matched on: its normalised name and the numbers it keeps, its
     // place, venue and organizer, computed once here.
     let units = sqlx::query(&format!(
         "SELECT * FROM (SELECT s.unit_id,s.occurrence->>'uid' AS uid,coalesce(s.occurrence->>'recurrence_id','') AS rid,s.start_at,{FINGERPRINT} AS fingerprint,\
          same_event_name(s.name) AS name_key,same_event_numbers(s.name) AS numbers,ST_AsEWKT(s.point) AS point,s.venue_id,s.doc#>>'{{venue,osm_id}}' AS osm_venue,\
          lower(rtrim(s.doc#>>'{{organizer,url}}','/')) AS organizer,coalesce(s.doc->>'all_day','false')='true' AS all_day,s.doc->>'tz' AS tz \
+         ,(SELECT x.fingerprint FROM same_event_unit x WHERE x.unit_id=s.unit_id) AS stored \
          FROM search_unit s WHERE s.id=$1 AND {EVENT} AND {WINDOW}) u \
-         WHERE NOT EXISTS(SELECT 1 FROM same_event_unit x WHERE x.unit_id=u.unit_id AND x.fingerprint=u.fingerprint) ORDER BY start_at,unit_id LIMIT $2"
+         WHERE stored IS DISTINCT FROM fingerprint ORDER BY start_at,unit_id LIMIT $2"
     ))
     .bind(id)
     .bind(budget + 1)
@@ -246,6 +297,15 @@ async fn resource(pool: &PgPool, id: &str, budget: i64) -> Result<(usize, bool)>
     let mut paired = 0;
     for u in units.iter().take(budget as usize) {
         let unit: String = u.try_get("unit_id")?;
+        // A refill (marked `refill:{fingerprint}` because a unit it named changed or went) whose
+        // values are still those replaces its own list only: what names it stays right, and
+        // nothing else is marked, so refills never cascade. A unit whose values changed (a
+        // refill's too) drops the pairs naming it.
+        let fingerprint: String = u.try_get("fingerprint")?;
+        let stored: Option<String> = u.try_get("stored")?;
+        let values_changed = stored
+            .as_deref()
+            .is_some_and(|f| f.strip_prefix("refill:").unwrap_or(f) != fingerprint);
         let mut tx = pool.begin().await?;
         sqlx::query("INSERT INTO same_event_unit(unit_id,resource_id,uid,recurrence_id,fingerprint,start_at,name_key,numbers,point,venue_id,osm_venue,organizer,all_day,tz) \
             SELECT unit_id,$2,uid,CASE WHEN uid IS NULL THEN NULL ELSE rid END,fingerprint,start_at,name_key,numbers,ST_GeomFromEWKT(point),venue_id,osm_venue,organizer,all_day,tz \
@@ -256,15 +316,27 @@ async fn resource(pool: &PgPool, id: &str, budget: i64) -> Result<(usize, bool)>
             .bind(id)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("DELETE FROM same_event WHERE unit_id=$1 OR other_id=$1")
+        sqlx::query("DELETE FROM same_event WHERE unit_id=$1")
             .bind(&unit)
             .execute(&mut *tx)
             .await?;
+        if values_changed {
+            // The pairs naming it go, and their units refill their lists (at most INCOMING_KEPT
+            // of them, the cap below).
+            let owners: Vec<String> =
+                sqlx::query_scalar("DELETE FROM same_event WHERE other_id=$1 RETURNING unit_id")
+                    .bind(&unit)
+                    .fetch_all(&mut *tx)
+                    .await?;
+            refill(&mut tx, &owners).await?;
+        }
         // The other units already read, on the values they were read with (a change marks a unit
         // to be read again); a unit read later finds this one in turn. Two located units must be
-        // near each other; a venue or organizer counts only when one has no place. A candidate
-        // another transaction holds (an orphan delete) is skipped, never waited for.
-        sqlx::query(
+        // near each other; a venue or organizer counts only when one has no place. Equal scores
+        // are taken round the units in ID order, starting just after this one, so a crowd of
+        // one event's pages spreads its pairs instead of all naming its first twenty. A
+        // candidate another transaction holds (an orphan delete) is skipped, never waited for.
+        let others: Vec<String> = sqlx::query_scalar(
             "WITH me AS (SELECT * FROM same_event_unit WHERE unit_id=$1), best AS (SELECT x.unit_id,similarity(me.name_key,x.name_key) AS score FROM me,same_event_unit x \
              WHERE x.resource_id<>me.resource_id AND me.name_key<>'' AND x.name_key<>'' \
              AND x.start_at BETWEEN me.start_at-interval '36 hours' AND me.start_at+interval '36 hours' \
@@ -274,15 +346,41 @@ async fn resource(pool: &PgPool, id: &str, budget: i64) -> Result<(usize, bool)>
               OR ((x.point IS NULL OR me.point IS NULL) AND (x.venue_id=me.venue_id OR x.osm_venue=me.osm_venue OR x.organizer=me.organizer))) \
              AND similarity(me.name_key,x.name_key)>=$4 \
              AND (cardinality(me.numbers)=0 OR cardinality(x.numbers)=0 OR x.numbers=me.numbers) \
-             ORDER BY score DESC,x.unit_id LIMIT $5 FOR KEY SHARE OF x SKIP LOCKED) \
-             INSERT INTO same_event(unit_id,other_id,score) SELECT $1,unit_id,score FROM best UNION ALL SELECT unit_id,$1,score FROM best \
-             ON CONFLICT(unit_id,other_id) DO UPDATE SET score=excluded.score",
+             ORDER BY score DESC,x.unit_id<=me.unit_id,x.unit_id LIMIT $5 FOR KEY SHARE OF x SKIP LOCKED), \
+             added AS (INSERT INTO same_event(unit_id,other_id,score) SELECT $1,unit_id,score FROM best UNION ALL SELECT unit_id,$1,score FROM best \
+             ON CONFLICT(unit_id,other_id) DO UPDATE SET score=excluded.score) \
+             SELECT unit_id FROM best",
         )
         .bind(&unit)
         .bind(SECONDS as f64)
         .bind(METRES)
         .bind(SIMILARITY as f32)
         .bind(KEPT)
+        .fetch_all(&mut *tx)
+        .await?;
+        // Each other unit keeps its best `KEPT` too: this one may push its last one out.
+        sqlx::query(
+            "DELETE FROM same_event p USING (SELECT unit_id,other_id,\
+             row_number() OVER (PARTITION BY unit_id ORDER BY score DESC,other_id) AS n \
+             FROM same_event WHERE unit_id=ANY($1)) r \
+             WHERE p.unit_id=r.unit_id AND p.other_id=r.other_id AND r.n>$2",
+        )
+        .bind(&others)
+        .bind(KEPT)
+        .execute(&mut *tx)
+        .await?;
+        // And no unit is named by more than INCOMING_KEPT others, so a change to it marks at most
+        // that many for a refill.
+        let mut named = others;
+        named.push(unit.clone());
+        sqlx::query(
+            "DELETE FROM same_event p USING (SELECT unit_id,other_id,\
+             row_number() OVER (PARTITION BY other_id ORDER BY score DESC,unit_id) AS n \
+             FROM same_event WHERE other_id=ANY($1)) r \
+             WHERE p.unit_id=r.unit_id AND p.other_id=r.other_id AND r.n>$2",
+        )
+        .bind(&named)
+        .bind(INCOMING_KEPT)
         .execute(&mut *tx)
         .await?;
         commit_changed(tx, pool).await?;

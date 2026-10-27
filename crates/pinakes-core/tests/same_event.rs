@@ -953,3 +953,112 @@ async fn each_read_that_changes_pairs_moves_the_revision(pool: PgPool) {
     assert_eq!(same_event::read(&pool, &b).await.unwrap(), 0);
     assert_eq!(revision().await, after);
 }
+
+/// How many pairs each unit names (`by` unit_id) or is named by (`by` other_id): the most.
+async fn most(pool: &PgPool, by: &str) -> i64 {
+    sqlx::query_scalar(&format!(
+        "SELECT coalesce(max(n),0) FROM (SELECT count(*) AS n FROM same_event GROUP BY {by}) c"
+    ))
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// The units one unit's stored list names (a card shows three).
+async fn stored(pool: &PgPool, id: &str) -> Vec<String> {
+    sqlx::query_scalar("SELECT other_id FROM same_event WHERE unit_id=$1")
+        .bind(id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+/// A unit that changes takes its pairs from the units that named it, and those are read again, so
+/// none is left without the hint. A crowd's pairs spread over it, and no unit is named by more
+/// than forty, which bounds the units one change marks.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_changed_event_leaves_no_neighbour_without_a_hint(pool: PgPool) {
+    let start = soon();
+    let mut crowd = vec![];
+    for n in 0..101 {
+        crowd.push(
+            event(
+                &pool,
+                &format!("https://example.org/crowd/{n}"),
+                "Bitcoin Meetup Wattwil",
+                start,
+                Some(WATTWIL),
+            )
+            .await,
+        );
+    }
+    pass(&pool, &Config::default()).await;
+    assert_eq!(most(&pool, "unit_id").await, 20);
+    assert!(most(&pool, "other_id").await <= 40);
+    // The twenty the first one names move three hours later.
+    let picked = stored(&pool, &crowd[0]).await;
+    assert_eq!(picked.len(), 20);
+    for id in &picked {
+        let n = crowd.iter().position(|c| c == id).unwrap();
+        event(
+            &pool,
+            &format!("https://example.org/crowd/{n}"),
+            "Bitcoin Meetup Wattwil",
+            start + Duration::hours(3),
+            Some(WATTWIL),
+        )
+        .await;
+    }
+    pass(&pool, &Config::default()).await;
+    for id in crowd.iter().filter(|id| !picked.contains(id)) {
+        assert!(!stored(&pool, id).await.is_empty(), "{id} lost its hint");
+    }
+    for id in &picked {
+        let names = stored(&pool, id).await;
+        assert_eq!(names.len(), 19, "the moved ones pair among themselves");
+        assert!(names.iter().all(|n| picked.contains(n)));
+    }
+    assert!(most(&pool, "unit_id").await <= 20);
+    assert!(most(&pool, "other_id").await <= 40);
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM same_event_dirty")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0, "the refills settled");
+}
+
+/// A unit that goes (out of the window) leaves the units that named it to refill their lists.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_unit_that_goes_leaves_its_neighbours_to_refill(pool: PgPool) {
+    let start = soon();
+    let mut crowd = vec![];
+    for n in 0..22 {
+        crowd.push(
+            event(
+                &pool,
+                &format!("https://example.org/crowd/{n}"),
+                "Bitcoin Meetup Wattwil",
+                start,
+                Some(WATTWIL),
+            )
+            .await,
+        );
+    }
+    pass(&pool, &Config::default()).await;
+    let first = stored(&pool, &crowd[0]).await;
+    assert_eq!(first.len(), 20);
+    // One the first names moves out of the window (more than a year ahead): its unit goes.
+    let n = crowd.iter().position(|c| *c == first[0]).unwrap();
+    event(
+        &pool,
+        &format!("https://example.org/crowd/{n}"),
+        "Bitcoin Meetup Wattwil",
+        Utc::now() + Duration::days(400),
+        Some(WATTWIL),
+    )
+    .await;
+    pass(&pool, &Config::default()).await;
+    let now = stored(&pool, &crowd[0]).await;
+    assert!(!now.contains(&first[0]));
+    assert_eq!(now.len(), 20, "it refilled from the one it did not name");
+}
