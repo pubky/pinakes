@@ -593,6 +593,7 @@ async fn a_browser_opening_mcp_sees_how_to_connect(pool: PgPool) {
         let (code, response, body) = raw(&app, "GET", "/mcp", &headers, None).await;
         assert_eq!(code, 405, "{accept:?}");
         assert_eq!(response["allow"], "POST");
+        assert_eq!(response["vary"], "accept");
         assert!(response["content-type"]
             .to_str()
             .unwrap()
@@ -601,6 +602,12 @@ async fn a_browser_opening_mcp_sees_how_to_connect(pool: PgPool) {
         assert_eq!(text.lines().count(), 1, "{text}");
         assert!(text.contains("MCP clients POST"), "{text}");
     }
+    // A HEAD is a GET's: the browser's page or the 405, never MCP's.
+    let (code, response, _) = raw(&app, "HEAD", "/mcp", &[("host", "pinakes.example")], None).await;
+    assert_eq!(code, 405);
+    assert_eq!(response["allow"], "POST");
+    let (code, _, _) = raw(&app, "HEAD", "/mcp", &browser, None).await;
+    assert_eq!(code, 200);
     // MCP clients are unchanged: a POST is still MCP's.
     let (status, answer) = mcp(
         &app,

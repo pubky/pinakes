@@ -341,7 +341,8 @@ pub fn router(state: AppState) -> Router {
     if state.config.api.mcp {
         // The tools answer through the REST routes, under the same layers.
         let rest = with_public_layers(routes, state.clone());
-        // A GET is a browser's or a probe's (`agents::mcp_get`); every other method is MCP's.
+        // A GET (and so a HEAD) is a browser's or a probe's (`agents::mcp_get`); every other
+        // method is MCP's.
         let mcp = crate::agents::mcp::service(rest, state.clone());
         all = all.route(
             "/mcp",
