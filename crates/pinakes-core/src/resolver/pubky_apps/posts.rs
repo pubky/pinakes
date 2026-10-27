@@ -9,7 +9,9 @@
 //! - `maps` `route`: a `Trip` card, its box from its coordinate waypoints.
 //! - `music` `session`: a `BroadcastEvent` card of the track it embeds, from its start to its
 //!   expiry; `music` `listening` (now playing): a `ListenAction` card of the track until its
-//!   expiry. A card with an expiry is read again when it passes, and then has none. A `listen`
+//!   expiry. Each is named by its optional `name`, or nameless (clients fall back to "<name>'s
+//!   listening session"). A card with an expiry is read again when it passes (`refresh_by`), and
+//!   then has none. A `listen`
 //!   has no card: it counts on its track, and one card per play would be noise and a
 //!   play-by-play history in a second index (owner decision, 2026-10-27).
 //! - Any other namespace (`ANY`): the general card from the content's standard fields, with the
@@ -165,8 +167,14 @@ fn music(object: &Object, v: &Value, doc: &mut ResourceMeta) -> Read {
     }
 }
 /// A post of a namespace no profile reads: the general card (`super::general`) of its content,
-/// a JSON object's standard fields or a text's excerpt, with its namespace and kind.
+/// a JSON object's standard fields or a text's excerpt, with its namespace and kind. A namespace
+/// no stored text may hold (decoded from the path: a control character, a NUL among them) or
+/// over 100 characters gives no card.
 fn any(object: &Object, v: &Value, doc: &mut ResourceMeta) -> Read {
+    let namespace = object.var("namespace");
+    if namespace.chars().count() > 100 || namespace.chars().any(char::is_control) {
+        return Read::NoCard;
+    }
     let Some(envelope) = checked(object, v) else {
         return Read::NoCard;
     };
@@ -175,7 +183,7 @@ fn any(object: &Object, v: &Value, doc: &mut ResourceMeta) -> Read {
         .filter(Value::is_object)
         .unwrap_or_else(|| json!({ "content": envelope.content }));
     super::general(object.uri, &content, doc);
-    fact(doc, "namespace", Some(object.var("namespace").into()));
+    fact(doc, "namespace", Some(namespace.into()));
     fact(doc, "kind", Some(envelope.kind.0));
     Read::Card
 }
@@ -234,25 +242,22 @@ fn instant_us(v: &Value) -> Option<DateTime<Utc>> {
     DateTime::from_timestamp_micros(v.as_i64()?)
 }
 /// Whether a card ending at `end` is still current at the read; if so, it is read again when it
-/// ends (its TTL shortened to that), and then has none.
+/// ends (`refresh_by`, which the queue keeps over its usual TTL, at least a minute away), and
+/// then has none.
 fn current(object: &Object, end: DateTime<Utc>, doc: &mut ResourceMeta) -> bool {
-    let Ok(left) = (end - object.now).to_std() else {
-        return false;
-    };
-    if left.is_zero() {
+    if end <= object.now {
         return false;
     }
-    let secs = left.as_secs() + u64::from(left.subsec_nanos() > 0);
-    doc.ttl_secs = doc.ttl_secs.min(secs);
+    doc.refresh_by = Some(end);
     true
 }
-/// The longest a `listening` is current **(arbitrary)**: "now playing" for longer is no longer
-/// now.
+/// The longest a `listening` is current: "now playing" for longer is no longer now (the music
+/// specs cap a listening at a day; owner decision, 2026-10-27).
 const LISTENING_MAX: chrono::TimeDelta = chrono::TimeDelta::days(1);
 /// A session: a broadcast of the track it embeds, from `started_at` until `expires_at`, with its
-/// host and the service it plays on as facts. Its content holds no name: the card has none of
-/// its own (the sub-spec manifest names it by the track's card, `ref_name`, which profiles cannot
-/// read yet). Once `expires_at` passes it has no card.
+/// host and the service it plays on as facts. Named by its optional `name`; without one the card
+/// is nameless, and clients name it (owner decision, 2026-10-27). Once `expires_at` passes it
+/// has no card.
 fn session(
     object: &Object,
     envelope: &PostEnvelope<AppKind>,
@@ -273,6 +278,7 @@ fn session(
         },
     };
     doc.set_type("BroadcastEvent");
+    doc.name = text(content, "name", 100);
     doc.start = Some(start);
     doc.end = end;
     fact(doc, "track", Some(track.into()));
@@ -282,8 +288,9 @@ fn session(
     Read::Card
 }
 /// A listening (now playing): the track it embeds, from `started_at` until `expires_at`, with the
-/// service it plays on. No name of its own, as a session. It is current only until `expires_at`,
-/// at most `LISTENING_MAX` after its start: then it has no card.
+/// service it plays on, named as a session is. It is current from `started_at` (a minute's grace
+/// for the writer's clock) until `expires_at`, at most `LISTENING_MAX` after its start: before
+/// and after, it has no card.
 fn listening(
     object: &Object,
     envelope: &PostEnvelope<AppKind>,
@@ -297,10 +304,15 @@ fn listening(
     ) else {
         return Read::NoCard;
     };
-    if end < start || end - start > LISTENING_MAX || !current(object, end, doc) {
+    if end < start
+        || end - start > LISTENING_MAX
+        || start > object.now + chrono::TimeDelta::minutes(1)
+        || !current(object, end, doc)
+    {
         return Read::NoCard;
     }
     doc.set_type("ListenAction");
+    doc.name = text(content, "name", 100);
     doc.start = Some(start);
     doc.end = Some(end);
     fact(doc, "track", Some(track.into()));

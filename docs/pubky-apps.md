@@ -33,6 +33,8 @@ the first of `name`, `title`, `summary`, `topic`, `caption`, whose description i
 or `bio`, and whose image is `image`, `image_uri`, `imageUrl`, `cover` or `avatarUrl` (relative
 to the object's folder). An object with none of those names or descriptions but a `content` or
 `text` is a `SocialMediaPosting`: social content, a 200-character excerpt. It has no client link.
+A field the database cannot store (one with a NUL) or longer than its cap (a name 200
+characters, a description 2,000, an image URL 2,048) is left out; the card stays.
 
 ## The profiles
 
@@ -87,12 +89,13 @@ namespace and kind (`resolver/pubky_apps/posts.rs`):
 | namespace, kind | card |
 | --- | --- |
 | `maps` `route` | A `Trip`: its `name`, `description`, its first waypoint as the point, the box of its `geo:` waypoints, and `activity`, `distance_m`, `duration_s`, `elevation_gain_m`, `elevation_loss_m` and the number of waypoints as facts |
-| `music` `session` | A `BroadcastEvent` from `started_at` to `expires_at` (open-ended without one), with the track it `embed`s, its `host` and its `source`'s `service` as facts. Its content has no name, so neither has the card (the sub-spec manifest will name it by the track's card) |
-| `music` `listening` | Now playing: a `ListenAction` from `started_at` to `expires_at`, with the track it `embed`s and its `source`'s `service` as facts, and no name, as a session. Current for at most a day **(arbitrary)** |
-| any other namespace, any kind | The general card ([any other app](#any-other-app)) of its content: a JSON object's standard fields, or a text's excerpt; with its `namespace` and `kind` as facts. `events` is one (its availability is now a social kind) |
+| `music` `session` | A `BroadcastEvent` from `started_at` to `expires_at` (open-ended without one), with the track it `embed`s, its `host` and its `source`'s `service` as facts. Named by its optional `name` (100 characters); without one the card is nameless and clients name it ("<name>'s listening session") |
+| `music` `listening` | Now playing: a `ListenAction` from `started_at` to `expires_at`, with the track it `embed`s and its `source`'s `service` as facts, named as a session. Current from `started_at` (a minute's grace for the writer's clock), for at most a day |
+| any other namespace, any kind | The general card ([any other app](#any-other-app)) of its content: a JSON object's standard fields, or a text's excerpt; with its `namespace` and `kind` as facts (a namespace with a control character, a NUL among them, or over 100 characters has no card). `events` is one (its availability is now a social kind) |
 
 **Expiry.** A card with an expiry (a session's or a listening's `expires_at`) is read again when
-it passes, its TTL shortened to the time left. Once it has passed, the post has no card.
+it passes (`refresh_by`, which the queue keeps over its usual TTL, at least a minute away). Once
+it has passed, the post has no card.
 
 Any other kind in `maps` or `music` has no card, and neither has a version the envelope refuses.
 A music `listen` is one: it counts on its track (an `embed` reference, once Nexus sends one for
@@ -100,7 +103,7 @@ the post), and one card per play would be noise and a play-by-play history in a 
 (owner decision, 2026-10-27).
 
 The music kinds follow `pubky-music-specs` (`session`: `{started_at, expires_at?, host,
-source?}`; `listening`: `{started_at, expires_at, duration_ms?, source?}`; the track in the
+source?, name?}`; `listening`: `{started_at, expires_at, duration_ms?, source?, name?}`; the track in the
 envelope's `embed`). `route` is read as the social specs' v1.1 branch defines it, since Maps'
 own spec crate does not exist yet.
 

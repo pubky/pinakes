@@ -268,24 +268,30 @@ pub fn card_with(
     doc
 }
 /// The general card of an app no profile knows: the common names for a title, a text and an
-/// image; a text-only object is a post.
+/// image; a text-only object is a post. A field no stored text may hold (a NUL) or longer than
+/// its cap is left out, not the card.
 pub fn general(uri: &str, v: &Value, doc: &mut ResourceMeta) {
-    let text = |keys: &[&str]| {
+    let text = |keys: &[&str], max: usize| {
         keys.iter()
             .find_map(|k| v.get(*k).and_then(Value::as_str))
             .map(str::trim)
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty() && s.chars().count() <= max && !s.contains('\0'))
             .map(str::to_owned)
     };
-    doc.name = text(&["name", "title", "summary", "topic", "caption"]);
-    doc.description = text(&["description", "bio"]);
-    doc.image =
-        text(&["image", "image_uri", "imageUrl", "cover", "avatarUrl"]).and_then(|s| link(uri, &s));
+    doc.name = text(&["name", "title", "summary", "topic", "caption"], 200);
+    doc.description = text(&["description", "bio"], 2000);
+    doc.image = text(
+        &["image", "image_uri", "imageUrl", "cover", "avatarUrl"],
+        2048,
+    )
+    .and_then(|s| link(uri, &s))
+    .filter(|l| l.len() <= 2048);
     // An object without a title or description (a post, a note) is described by its content:
     // social content (`cards::social`), so a short excerpt that refreshes within the hour and is
     // purged with its history once the object is gone.
     if doc.name.is_none() && doc.description.is_none() {
-        doc.description = text(&["content", "text"]).map(|s| s.chars().take(200).collect());
+        doc.description =
+            text(&["content", "text"], usize::MAX).map(|s| s.chars().take(200).collect());
         if doc.description.is_some() {
             doc.set_type("SocialMediaPosting");
         }

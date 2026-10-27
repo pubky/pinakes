@@ -260,7 +260,7 @@ fn app_kinds_by_namespace() {
     assert_eq!(fact(&doc, "waypoints"), Some("2"));
 
     // A session: the track it embeds, from `started_at` to `expires_at` (microseconds), its host
-    // and service. A `name` its content does not define names nothing.
+    // and service, named by its optional `name`.
     let host = format!("pubky://{AUTHOR}");
     let mut session = envelope(
         "session",
@@ -275,7 +275,7 @@ fn app_kinds_by_namespace() {
         doc.type_path.last().map(String::as_str),
         Some("BroadcastEvent")
     );
-    assert_eq!(doc.name, None);
+    assert_eq!(doc.name.as_deref(), Some("Late jam"));
     assert_eq!(doc.start, Some("2026-10-16T12:00:00Z".parse().unwrap()));
     assert_eq!(doc.end, Some("2026-10-16T13:00:00Z".parse().unwrap()));
     assert_eq!(fact(&doc, "track"), Some("https://tracks.example/track/1"));
@@ -287,7 +287,18 @@ fn app_kinds_by_namespace() {
     open["content"] = json!({"started_at": 1_792_152_000_000_000_i64, "host": host})
         .to_string()
         .into();
-    assert_eq!(card(&post("music", &id()), &open).end, None);
+    let doc = card(&post("music", &id()), &open);
+    // Without a name it is nameless: clients name it ("<name>'s listening session").
+    assert_eq!((doc.end, doc.name), (None, None));
+    // A name it could not store is no name; the card stays.
+    let mut unstorable = session.clone();
+    unstorable["content"] = json!({
+        "started_at": 1_792_152_000_000_000_i64, "host": host, "name": "Late\0jam",
+    })
+    .to_string()
+    .into();
+    let doc = card(&post("music", &id()), &unstorable);
+    assert_eq!((doc.status, doc.name), (Status::Ok, None));
     let mut trackless = session.clone();
     trackless["embed"] = Value::Null;
     let mut unstarted = session.clone();
@@ -304,7 +315,11 @@ fn app_kinds_by_namespace() {
     }
 
     // Once its expiry has passed, a session has no card; until then it is read again when it
-    // passes (its TTL, 3600 here, shortened to the time left).
+    // passes (the queue's scheduling of it: `an_expiring_card_is_read_again_when_it_expires`).
+    assert_eq!(
+        card(&post("music", &id()), &session).refresh_by,
+        Some("2026-10-16T13:00:00Z".parse().unwrap())
+    );
     let mut ended = session.clone();
     ended["content"] = json!({
         "started_at": 1_792_144_800_000_000_i64, "expires_at": 1_792_148_400_000_000_i64,
@@ -328,12 +343,15 @@ fn app_kinds_by_namespace() {
         doc.type_path.last().map(String::as_str),
         Some("ListenAction")
     );
-    assert_eq!((doc.name.as_deref(), doc.ttl_secs), (None, 1800));
+    assert_eq!(doc.name, None);
     assert_eq!(doc.end, Some("2026-10-16T12:30:00Z".parse().unwrap()));
+    assert_eq!(doc.refresh_by, doc.end);
     assert_eq!(fact(&doc, "track"), Some("https://tracks.example/track/1"));
     assert_eq!(fact(&doc, "service"), Some("tidal"));
-    // No longer current, current for more than a day, or without an expiry: no card.
+    // No longer current, current for more than a day, without an expiry, or not yet started
+    // (beyond a minute's grace for the writer's clock): no card.
     for (start, end) in [
+        (1_792_152_120_000_000_i64, Some(1_792_153_800_000_000_i64)),
         (1_792_144_800_000_000_i64, Some(1_792_148_400_000_000_i64)),
         (
             1_792_151_000_000_000_i64,
@@ -347,6 +365,27 @@ fn app_kinds_by_namespace() {
             .into();
         assert!(no_card(&card(&post("music", &id()), &stale)), "{stale}");
     }
+
+    // Started thirty seconds from now, within the grace: current.
+    let mut early = listening.clone();
+    early["content"] = json!({
+        "started_at": 1_792_152_030_000_000_i64, "expires_at": 1_792_153_800_000_000_i64,
+    })
+    .to_string()
+    .into();
+    assert!(!no_card(&card(&post("music", &id()), &early)));
+    // Named by its optional `name`, as a session.
+    let mut named = listening.clone();
+    named["content"] = json!({
+        "started_at": 1_792_151_000_000_000_i64, "expires_at": 1_792_153_800_000_000_i64,
+        "name": "Sunday records",
+    })
+    .to_string()
+    .into();
+    assert_eq!(
+        card(&post("music", &id()), &named).name.as_deref(),
+        Some("Sunday records")
+    );
 
     // A listen counts on its track: no card of its own, one per play.
     let mut listen = envelope("listen", json!({"played_at": 1_792_152_000_000_000_i64}));
@@ -380,6 +419,41 @@ fn app_kinds_by_namespace() {
         (doc.start, fact(&doc, "kind")),
         (None, Some("availability"))
     );
+    // A field it could not store (a NUL) or longer than its cap is left out, not the card.
+    let unstorable = envelope(
+        "game",
+        json!({"title": "Sicilian\0Najdorf", "description": "Round 3"}),
+    );
+    let doc = card(&post("chess", &id()), &unstorable);
+    assert_eq!(
+        (doc.name.as_deref(), doc.description.as_deref()),
+        (None, Some("Round 3"))
+    );
+    let long = envelope(
+        "game",
+        json!({"title": "N".repeat(201), "description": "D".repeat(2001), "image": "https://img.example/a.png"}),
+    );
+    let doc = card(&post("chess", &id()), &long);
+    assert_eq!(
+        (doc.name.as_deref(), doc.description.as_deref()),
+        (None, None)
+    );
+    assert_eq!(doc.image.as_deref(), Some("https://img.example/a.png"));
+    // A text, in JSON or raw, with a NUL is no excerpt; the card stays, with its facts.
+    let json_text = envelope("note", json!({"text": "Blitz\0tonight"}));
+    let mut raw_text = envelope("note", json!({}));
+    raw_text["content"] = "Blitz\0tonight".into();
+    for version in [&json_text, &raw_text] {
+        let doc = card(&post("chess", &id()), version);
+        assert_eq!(
+            (&doc.status, doc.description.as_deref(), fact(&doc, "kind")),
+            (&Status::Ok, None, Some("note"))
+        );
+    }
+    // A namespace a stored text cannot hold (an encoded NUL in the path) or over 100
+    // characters: no card.
+    assert!(no_card(&card(&post("ch%00ess", &id()), &move_)));
+    assert!(no_card(&card(&post(&"c".repeat(101), &id()), &move_)));
     // The envelope's checks hold for these too.
     assert!(no_card(&card(&post("chess", "0000000000000"), &move_)));
 
@@ -584,4 +658,121 @@ async fn a_social_post_line_queues_nothing_and_fetches_nothing(pool: PgPool) {
     .unwrap();
     assert_eq!(rows, (0, 0));
     assert_eq!(classify(&event), None);
+}
+
+/// A Pubky resolver standing in for the homeserver that reads the post's version `body` as the
+/// Pubky resolver does, now, with its usual TTL (a week).
+struct Version(Value);
+#[async_trait::async_trait]
+impl Resolver for Version {
+    fn refresh_after(&self, doc: &ResourceMeta) -> std::time::Duration {
+        std::time::Duration::from_secs(doc.ttl_secs)
+    }
+    fn name(&self) -> &'static str {
+        "pubky"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, uri: &str) -> anyhow::Result<ResourceMeta> {
+        Ok(card_with(
+            uri,
+            "application/octet-stream",
+            &serde_json::to_vec(&self.0).unwrap(),
+            7 * 86_400,
+            Utc::now(),
+            pinakes_core::event::time::MAX_PERIOD_DATES,
+        ))
+    }
+}
+/// The post's line queued, then read once by `version`.
+async fn read_once(pool: &PgPool, uri: &str, version: Value) {
+    let metrics = Metrics::new().unwrap();
+    let cfg = QueueConfig::default();
+    batch(
+        pool,
+        vec![line(Op::Put, uri, "0034A", Utc::now())],
+        &metrics,
+    )
+    .await;
+    let job = queue::claim(pool, "pubky", &cfg).await.unwrap().unwrap();
+    queue::run_job(pool, &Version(version), &cfg, &job)
+        .await
+        .unwrap();
+}
+/// Seconds from now to the resource's next refresh and next attempt.
+async fn next_read(pool: &PgPool, uri: &str) -> (f64, f64) {
+    let (id, _, _) = identity(uri).unwrap();
+    sqlx::query_as("SELECT extract(epoch FROM refresh_at-now())::float8,extract(epoch FROM next_attempt_at-now())::float8 FROM resource WHERE id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+fn us(at: DateTime<Utc>) -> i64 {
+    at.timestamp_micros()
+}
+
+/// A listening or a session is read again when it expires, not at the queue's usual hour or
+/// more after: its card never outlives `expires_at` by more than the queue's minute (review of
+/// d8e4ceb, M1).
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_expiring_card_is_read_again_when_it_expires(pool: PgPool) {
+    let now = Utc::now();
+    // Now playing for another half hour: read again then.
+    let mut listening = envelope(
+        "listening",
+        json!({"started_at": us(now - Duration::minutes(5)), "expires_at": us(now + Duration::minutes(30))}),
+    );
+    listening["embed"] = "https://tracks.example/track/1".into();
+    let uri = post("music", &id());
+    read_once(&pool, &uri, listening).await;
+    let (refresh, attempt) = next_read(&pool, &uri).await;
+    assert!((1700.0..=1800.0).contains(&refresh), "{refresh}");
+    assert!((1700.0..=1800.0).contains(&attempt), "{attempt}");
+    // A session thirty seconds from its end: read again in a minute.
+    let mut session = envelope(
+        "session",
+        json!({"started_at": us(now - Duration::hours(1)), "expires_at": us(now + Duration::seconds(30))}),
+    );
+    session["embed"] = "https://tracks.example/track/1".into();
+    let uri = post("music", &id());
+    read_once(&pool, &uri, session).await;
+    let (refresh, attempt) = next_read(&pool, &uri).await;
+    assert!((0.0..=60.0).contains(&refresh), "{refresh}");
+    assert!((0.0..=60.0).contains(&attempt), "{attempt}");
+    // A session without an expiry keeps its usual schedule (the queue's, a day here).
+    let mut open = envelope("session", json!({"started_at": us(now)}));
+    open["embed"] = "https://tracks.example/track/1".into();
+    let uri = post("music", &id());
+    read_once(&pool, &uri, open).await;
+    let open = next_read(&pool, &uri).await.0;
+    assert!(open > 3600.0, "{open}");
+}
+
+/// A post of an unprofiled namespace with a title no stored text may hold (a NUL), or one too
+/// long, is saved with its card, without that title, on its first read (review of d8e4ceb, M2:
+/// it used to fail to save and dead-letter).
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_general_card_with_unstorable_text_is_saved_without_it(pool: PgPool) {
+    for title in ["Sicilian\0Najdorf".to_owned(), "N".repeat(100_000)] {
+        let uri = post("chess", &id());
+        read_once(
+            &pool,
+            &uri,
+            envelope("game", json!({"title": title, "description": "Round 3"})),
+        )
+        .await;
+        let (id, _, _) = identity(&uri).unwrap();
+        let (status, name, description, dead): (String, Option<String>, Option<String>, bool) =
+            sqlx::query_as("SELECT status,doc->>'name',doc->>'description',dead_letter FROM resource WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            (status.as_str(), name, description.as_deref(), dead),
+            ("ok", None, Some("Round 3"), false)
+        );
+    }
 }
