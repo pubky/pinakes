@@ -153,6 +153,13 @@ pub async fn reextract(pool: &PgPool, routes: &[String]) -> Result<u64> {
             // object's spelling reads it at its own address now) answers for itself again and is
             // re-queued on its route.
             if let Some(root) = root {
+                // A link whose source is switched off keeps what that source merged: its rule
+                // is only silent, so a weaker one (a tracking parameter) must not move it, and
+                // nothing releases it.
+                if crate::sources::switched_off(&uri) {
+                    alias_rows.push(id);
+                    continue;
+                }
                 let route = crate::resolver::classify(&uri).map(str::to_owned);
                 let selected = all || route.as_ref().is_some_and(|r| routes.contains(r));
                 match (crate::alias::root(&uri), route) {
@@ -164,12 +171,11 @@ pub async fn reextract(pool: &PgPool, routes: &[String]) -> Result<u64> {
                         aliases.push((id, alias))
                     }
                     // Only what a rule of this build would name: never a page's canonical or
-                    // an official API's answer (no rule of the URI), nor a link of a source
-                    // switched off, whose rule is only silent.
+                    // an official API's answer (no rule of the URI). A rule that names a root
+                    // moves those too (above), as a fresh read would follow it.
                     (None, Some(route))
                         if selected
-                            && !matches!(basis.as_deref(), Some("canonical" | "source"))
-                            && !crate::sources::switched_off(&uri) =>
+                            && !matches!(basis.as_deref(), Some("canonical" | "source")) =>
                     {
                         released.push(id.clone());
                         ids.push(id);
