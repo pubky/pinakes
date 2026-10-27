@@ -801,3 +801,105 @@ async fn map_points_keep_their_group_with_the_hint_on_or_off(pool: PgPool) {
         }
     }
 }
+
+/// A pass stopped after claiming loses nothing, without waiting for the sweep: its claim runs
+/// out and the next pass reads the event again, dropping the pair its old start made. A change
+/// marked while a claim is held is read too.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_stopped_pass_leaves_no_pair_stale(pool: PgPool) {
+    let config = Config::default();
+    let start = soon();
+    let a = event(
+        &pool,
+        "https://example.org/a",
+        "Bitcoin Meetup Wattwil",
+        start,
+        Some(WATTWIL),
+    )
+    .await;
+    let b_uri = "https://example.org/b";
+    let b = event(&pool, b_uri, "Bitcoin Meetup Wattwil", start, Some(WATTWIL)).await;
+    pass(&pool, &config).await;
+    assert_eq!(named(&card(&pool, &a).await), [b.as_str()]);
+    // The other page moves its start three hours; a pass claims it and stops before reading it.
+    let moved = start + Duration::hours(3);
+    event(&pool, b_uri, "Bitcoin Meetup Wattwil", moved, Some(WATTWIL)).await;
+    let claimed = same_event::claim(&pool, 25, std::time::Duration::ZERO)
+        .await
+        .unwrap();
+    assert!(claimed.iter().any(|(id, _)| id == &b), "{claimed:?}");
+    // The claim has run out: the next pass (no sweep) reads it, and the pair goes.
+    pass(&pool, &config).await;
+    assert!(named(&card(&pool, &a).await).is_empty());
+    assert!(named(&card(&pool, &b).await).is_empty());
+    // A claim is held (another pass is reading the page) when it moves back: the change moves
+    // the entry back to now, and the next pass pairs the two again.
+    event(
+        &pool,
+        b_uri,
+        "Bitcoin Meetup Wattwil",
+        moved + Duration::minutes(1),
+        Some(WATTWIL),
+    )
+    .await;
+    let held = same_event::claim(&pool, 25, std::time::Duration::from_secs(300))
+        .await
+        .unwrap();
+    assert!(held.iter().any(|(id, _)| id == &b), "{held:?}");
+    event(&pool, b_uri, "Bitcoin Meetup Wattwil", start, Some(WATTWIL)).await;
+    pass(&pool, &config).await;
+    assert_eq!(named(&card(&pool, &a).await), [b.as_str()]);
+}
+
+/// A claim that ran out never settles: a change saved after it ran out leaves the entry's time
+/// as it was (the trigger only moves it earlier), so the old pass finishing late must not drop
+/// the entry; the next pass reads the change.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_expired_claim_never_drops_a_later_change(pool: PgPool) {
+    let config = Config::default();
+    let start = soon();
+    let a = event(
+        &pool,
+        "https://example.org/a",
+        "Bitcoin Meetup Wattwil",
+        start,
+        Some(WATTWIL),
+    )
+    .await;
+    let b_uri = "https://example.org/b";
+    let b = event(&pool, b_uri, "Bitcoin Meetup Wattwil", start, Some(WATTWIL)).await;
+    pass(&pool, &config).await;
+    assert_eq!(named(&card(&pool, &a).await), [b.as_str()]);
+    // A pass claims b (the lease already over), then b moves three hours, then that pass finishes.
+    event(
+        &pool,
+        b_uri,
+        "Bitcoin Meetup Wattwil",
+        start + Duration::minutes(1),
+        Some(WATTWIL),
+    )
+    .await;
+    let claimed = same_event::claim(&pool, 25, std::time::Duration::ZERO)
+        .await
+        .unwrap();
+    let (_, claim) = claimed.iter().find(|(id, _)| id == &b).unwrap().clone();
+    event(
+        &pool,
+        b_uri,
+        "Bitcoin Meetup Wattwil",
+        start + Duration::hours(3),
+        Some(WATTWIL),
+    )
+    .await;
+    same_event::settle(&pool, &b, &claim).await.unwrap();
+    let due: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM same_event_dirty WHERE resource_id=$1 AND next_attempt_at<=now()",
+    )
+    .bind(&b)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(due, 1, "the expired claim left the entry due");
+    pass(&pool, &config).await;
+    assert!(named(&card(&pool, &a).await).is_empty());
+}
