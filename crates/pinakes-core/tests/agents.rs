@@ -418,20 +418,27 @@ async fn the_mcp_handshake_and_every_tool(pool: PgPool) {
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn social_without_a_nexus_is_a_plain_error(pool: PgPool) {
-    // Nothing listens there.
+    // Nothing listens at the first; the second is a Nexus without the batch resource view, whose
+    // 404 is no answer either, never an empty one (every URI "unknown").
     let free = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
         .unwrap();
-    let config = Config {
-        nexus_url: format!("http://{free}"),
-        ..Config::default()
-    };
-    let app = api::router(AppState::new(pool, config).unwrap());
-    let (error, answer) = call(&app, "social", json!({"uris": ["https://example.org/"]})).await;
-    assert!(error);
-    assert_eq!(answer["status"], 502);
-    assert!(answer["error"].as_str().unwrap().contains("by_ids"));
+    let older = Router::new().route("/v0/info", axum::routing::get(|| async { "{}" }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let older_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, older).await.unwrap() });
+    for nexus_url in [format!("http://{free}"), older_url] {
+        let config = Config {
+            nexus_url: nexus_url.clone(),
+            ..Config::default()
+        };
+        let app = api::router(AppState::new(pool.clone(), config).unwrap());
+        let (error, answer) = call(&app, "social", json!({"uris": ["https://example.org/"]})).await;
+        assert!(error, "{nexus_url}: {answer}");
+        assert_eq!(answer["status"], 502, "{nexus_url}");
+        assert!(answer["error"].as_str().unwrap().contains("by_ids"));
+    }
 }
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
