@@ -905,9 +905,6 @@ END $$;
 CREATE TRIGGER same_event_resource_dirty AFTER INSERT OR UPDATE OF name, start_at, point, venue_id, type_path, doc ON resource FOR EACH ROW EXECUTE FUNCTION mark_same_event_dirty();
 CREATE TRIGGER same_event_occurrence_dirty AFTER INSERT OR DELETE OR UPDATE ON occurrence FOR EACH ROW EXECUTE FUNCTION mark_same_event_dirty();
 
--- Bumped whenever the pass or the sweep changes pairs: search pages hash it into their ETag.
-CREATE SEQUENCE same_event_revision;
-
 -- An event name as the hint compares it: lower case; without dates, times and years
 -- (`21.10.2026`, `2026-10-21`, `6.11.`, `21.`, `19:00`, `7pm`, `2026`, a month name with its
 -- day: `Oct 21`, `6th November`); without punctuation, symbols and emoji; without weekday names
@@ -1029,9 +1026,6 @@ BEGIN
 END $$;
 CREATE TRIGGER same_recording_resource_dirty AFTER INSERT OR UPDATE OF name, type_path, status, doc ON resource FOR EACH ROW EXECUTE FUNCTION mark_same_recording_dirty();
 CREATE TRIGGER same_recording_fact_dirty AFTER INSERT OR DELETE OR UPDATE ON resource_fact FOR EACH ROW EXECUTE FUNCTION mark_same_recording_dirty();
-
--- Bumped whenever the pass or the sweep changes pairs: search pages hash it into their ETag.
-CREATE SEQUENCE same_recording_revision;
 
 -- The hint on a recording's card: up to `n` recordings that are possibly the same one, best
 -- first, each as {id, uri, host, site, start (null), score}, the shape of the event hint. A

@@ -679,11 +679,16 @@ within 3 s), which no key joins. A background pass in the daemon computes it: tr
 recording when its name, type, status, page artist or duration changes, or an artist or duration
 fact of it is read or expires; each pass takes up to 25 queued resources, and the next follows at
 once while there was work, else after five seconds. A recording's normalised title and artist and
-its length are stored once read, and its pairs are matched among the recordings already read. An
-hourly sweep, which also runs at startup, queues recordings never read (a database from before the
+its length are stored once read, and its pairs are matched among the recordings already read. A
+recording keeps its best twenty pairs and is named by at most forty, and never names one whose
+forty all rank above it; one that changes or goes (no longer a recording, or deleted as an orphan)
+takes its pairs from the recordings that named it, and those are queued to refill their lists, as
+is one whose pair the caps pushed out. Each change to the pairs moves the search revision in its
+own transaction, so a search page's `ETag` covers the hints it shows. An hourly sweep, which also
+runs at startup, queues recordings never read (a database from before the
 hint) and drops the units of resources that are no longer recordings. Requests only read the
 stored pairs, leaving out the card's own group members. `"off"` stops the pass and removes the
-field from recording cards and details (and from `/v1/openapi.json` when the event hint is off
+field from recording cards (and from `/v1/openapi.json` when the event hint is off
 too); the stored pairs stay.
 
 Tenant rules (`data/multi-tenant-hosts.json`) say which part of a multi-tenant host is one

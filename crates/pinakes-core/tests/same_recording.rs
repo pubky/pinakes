@@ -5,6 +5,7 @@ use http_body_util::BodyExt;
 use pinakes_core::{
     also_on::{self, Fact, Found, Key},
     api::{self, AppState},
+    changes,
     config::{Config, SameEventHint},
     groups,
     model::ResourceMeta,
@@ -214,13 +215,8 @@ async fn recordings_nothing_exact_joins_name_the_ones_they_may_be(pool: PgPool) 
         "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69"
     );
     assert_eq!(tidal_card["maybe_same"][2]["score"], 0.7);
-    assert_eq!(
-        tidal_card["details"]["maybe_same"]
-            .as_array()
-            .unwrap()
-            .len(),
-        3
-    );
+    // A read lists up to ten in the card itself (#52); here there are three.
+    assert_eq!(tidal_card["maybe_same"].as_array().unwrap().len(), 3);
     // A member of the card's own group is never listed.
     let mb_card = card(&config, &pool, &mb).await;
     assert_eq!(
@@ -569,7 +565,7 @@ async fn each_read_that_changes_pairs_moves_the_revision(pool: PgPool) {
     let revision = || {
         let pool = pool.clone();
         async move {
-            sqlx::query_scalar::<_, i64>("SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM same_recording_revision")
+            sqlx::query_scalar::<_, i64>("SELECT revision FROM search_revision")
                 .fetch_one(&pool)
                 .await
                 .unwrap()
@@ -670,4 +666,291 @@ async fn a_changed_recording_leaves_no_neighbour_without_a_hint(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(left, 0, "the refills settled");
+}
+
+/// A search page reads the pairs and the revision its ETag hashes in one snapshot: a page that
+/// read before a change carries the old revision with the old pairs, never the new revision (a
+/// sequence moves outside the snapshot, and the next page would be answered 304 with old hints).
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_page_reads_the_pairs_and_the_revision_from_one_snapshot(pool: PgPool) {
+    let config = Config::default();
+    let take_five = |uri: &'static str, length: &'static str| {
+        let pool = pool.clone();
+        async move {
+            recording(
+                &pool,
+                uri,
+                "Take Five",
+                Some("The Dave Brubeck Quartet"),
+                Some(length),
+            )
+            .await
+        }
+    };
+    let a = take_five("https://tidal.com/track/1", "PT1M40S").await;
+    take_five("https://www.deezer.com/track/1031007", "PT1M40S").await;
+    pass(&pool, &config).await;
+    let seen = format!(
+        "SELECT (SELECT count(*) FROM same_recording),{}",
+        api::REVISION
+    );
+    // A page's snapshot, taken before the change.
+    let mut page = pool.begin().await.unwrap();
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *page)
+        .await
+        .unwrap();
+    let before: (i64, Value) = sqlx::query_as(&seen).fetch_one(&mut *page).await.unwrap();
+    assert_eq!(before.0, 2);
+    // The first track is now 3:20 and is read: its pairs go, the revision moves.
+    take_five("https://tidal.com/track/1", "PT3M20S").await;
+    assert!(same_recording::read(&pool, &a).await.unwrap());
+    let again: (i64, Value) = sqlx::query_as(&seen).fetch_one(&mut *page).await.unwrap();
+    assert_eq!(again, before, "the old pairs come with the old revision");
+    page.commit().await.unwrap();
+    let after: (i64, Value) = sqlx::query_as(&seen).fetch_one(&pool).await.unwrap();
+    assert_eq!(after.0, 0);
+    assert_ne!(after.1, before.1);
+}
+
+/// A crowd of one recording's pages, with or without a length.
+async fn crowd(pool: &PgPool, title: &str, length: Option<&str>, n: usize) -> Vec<String> {
+    let mut ids = vec![];
+    for i in 0..n {
+        ids.push(
+            recording(
+                pool,
+                &format!("https://tidal.com/track/{}", title.len() * 100_000 + i),
+                title,
+                Some("The Dave Brubeck Quartet"),
+                length,
+            )
+            .await,
+        );
+    }
+    ids
+}
+
+/// How many recordings name no other.
+async fn without_a_hint(pool: &PgPool, ids: &[String]) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT id FROM unnest($1::text[]) AS t(id) WHERE NOT EXISTS(SELECT 1 FROM same_recording p WHERE p.resource_id=t.id)",
+    )
+    .bind(ids)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// Every recording of a crowd without lengths has a hint once the crowd is read, whatever the
+/// order: one read late passes over the recordings already named by forty and names those with
+/// room (round the index from just after itself), so the cap pushes nothing out that is not
+/// replaced, and what it pushes out is refilled.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_crowd_without_lengths_read_in_any_order_leaves_none_without_a_hint(pool: PgPool) {
+    let config = Config::default();
+    let mut ascending = crowd(&pool, "Take Five", None, 101).await;
+    ascending.sort();
+    let mut descending = crowd(&pool, "Blue Rondo à la Turk", None, 101).await;
+    descending.sort();
+    descending.reverse();
+    let mut shuffled = crowd(&pool, "Unsquare Dance", None, 101).await;
+    shuffled.sort();
+    // A fixed shuffle (an LCG), so a failure is reproducible.
+    let mut seed = 42u64;
+    for i in (1..shuffled.len()).rev() {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        shuffled.swap(i, (seed >> 33) as usize % (i + 1));
+    }
+    for order in [&ascending, &descending, &shuffled] {
+        for id in order.iter() {
+            same_recording::read(&pool, id).await.unwrap();
+        }
+    }
+    // The queue settles the refills.
+    pass(&pool, &config).await;
+    for (name, order) in [
+        ("ascending", &ascending),
+        ("descending", &descending),
+        ("shuffled", &shuffled),
+    ] {
+        let none = without_a_hint(&pool, order).await;
+        assert!(none.is_empty(), "{name}: without a hint: {none:?}");
+    }
+    assert_eq!(spread(&pool, "resource_id").await.0, 20);
+    assert!(spread(&pool, "other_id").await.0 <= 40);
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM same_recording_dirty")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0, "the refills settled");
+}
+
+/// Resources deleted as orphans take their units and pairs with them (the cascade); the
+/// recordings that named them are marked before, and refill.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn deleted_orphans_leave_their_neighbours_to_refill(pool: PgPool) {
+    let config = Config::default();
+    let crowd = crowd(&pool, "Take Five", Some("PT5M24S"), 101).await;
+    pass(&pool, &config).await;
+    let picked: Vec<String> =
+        sqlx::query_scalar("SELECT other_id FROM same_recording WHERE resource_id=$1")
+            .bind(&crowd[0])
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(picked.len(), 20);
+    sqlx::query("DELETE FROM reference WHERE resource_id=ANY($1)")
+        .bind(&picked)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET orphaned_at=now()-interval '30 days' WHERE id=ANY($1)")
+        .bind(&picked)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(changes::delete_orphans(&pool, 7).await.unwrap(), 20);
+    let units: i64 = sqlx::query_scalar("SELECT count(*) FROM same_recording_unit")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(units, 81);
+    pass(&pool, &config).await;
+    let survivors: Vec<String> = crowd
+        .iter()
+        .filter(|id| !picked.contains(id))
+        .cloned()
+        .collect();
+    let none = without_a_hint(&pool, &survivors).await;
+    assert!(none.is_empty(), "lost their hint: {none:?}");
+    assert!(spread(&pool, "other_id").await.0 <= 40);
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM same_recording_dirty")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0, "the refills settled");
+}
+
+/// A database damaged before the fix (recordings whose lists the old trimming or a cascade
+/// emptied, with current fingerprints and no dirty row) is repaired by the upgrade's step: every
+/// recording with fewer than twenty pairs is marked to refill and queued, once.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn the_upgrade_requeues_recordings_left_with_short_lists(pool: PgPool) {
+    let config = Config::default();
+    let ids = crowd(&pool, "Take Five", Some("PT5M24S"), 30).await;
+    pass(&pool, &config).await;
+    assert_eq!(spread(&pool, "resource_id").await, (20, 20));
+    // The damage: five recordings lose their lists, as the old cap trimmed them, and nothing marks them.
+    sqlx::query("DELETE FROM same_recording WHERE resource_id=ANY($1)")
+        .bind(&ids[..5])
+        .execute(&pool)
+        .await
+        .unwrap();
+    pass(&pool, &config).await;
+    assert_eq!(
+        without_a_hint(&pool, &ids).await.len(),
+        5,
+        "nothing queued them"
+    );
+    // The upgrade's step (upgrade-matching-6.sql, upgrade-matching-4-to-6.sql).
+    sqlx::query("UPDATE same_recording_unit u SET fingerprint='refill:'||fingerprint WHERE fingerprint NOT LIKE 'refill:%' AND (SELECT count(*) FROM same_recording p WHERE p.resource_id=u.resource_id)<20")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO same_recording_dirty(resource_id) SELECT resource_id FROM same_recording_unit WHERE fingerprint LIKE 'refill:%' ON CONFLICT DO NOTHING")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM same_recording_dirty")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(queued, 5, "the five, not the full lists");
+    pass(&pool, &config).await;
+    assert!(without_a_hint(&pool, &ids).await.is_empty());
+    assert_eq!(spread(&pool, "resource_id").await, (20, 20));
+}
+
+/// A pass that pairs with an orphan's recording while the orphan is being deleted: the delete
+/// locks the orphan's unit before it collects the namers, so the pass's pair (committed while the
+/// delete waits for it) is seen and its owner marked; without the lock the cascade would take the
+/// pair unseen and the owner would keep an empty list for good.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_orphan_deleted_while_a_pass_pairs_with_it_leaves_the_partner_to_refill(pool: PgPool) {
+    let config = Config::default();
+    // Two recordings that do not pair (different titles), each with a unit.
+    let live = recording(
+        &pool,
+        "https://tidal.com/track/1",
+        "Take Five",
+        Some("The Dave Brubeck Quartet"),
+        Some("PT5M24S"),
+    )
+    .await;
+    let orphan = recording(
+        &pool,
+        "https://tidal.com/track/2",
+        "Blue Rondo à la Turk",
+        Some("The Dave Brubeck Quartet"),
+        Some("PT6M44S"),
+    )
+    .await;
+    pass(&pool, &config).await;
+    assert_eq!(
+        without_a_hint(&pool, std::slice::from_ref(&live))
+            .await
+            .len(),
+        1
+    );
+    sqlx::query("DELETE FROM reference WHERE resource_id=$1")
+        .bind(&orphan)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET orphaned_at=now()-interval '30 days' WHERE id=$1")
+        .bind(&orphan)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // A pass mid-flight: it has written the pair both ways and not committed yet (its FK checks
+    // hold the orphan's unit FOR KEY SHARE).
+    let mut pairing = pool.begin().await.unwrap();
+    sqlx::query(
+        "INSERT INTO same_recording(resource_id,other_id,score) VALUES($1,$2,0.7),($2,$1,0.7)",
+    )
+    .bind(&live)
+    .bind(&orphan)
+    .execute(&mut *pairing)
+    .await
+    .unwrap();
+    let deleting = {
+        let pool = pool.clone();
+        tokio::spawn(async move { changes::delete_orphans(&pool, 7).await.unwrap() })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    assert!(!deleting.is_finished(), "the delete waits for the pass");
+    pairing.commit().await.unwrap();
+    assert_eq!(deleting.await.unwrap(), 1);
+    let (fingerprint, queued): (String, bool) = sqlx::query_as(
+        "SELECT fingerprint,EXISTS(SELECT 1 FROM same_recording_dirty d WHERE d.resource_id=u.resource_id) FROM same_recording_unit u WHERE resource_id=$1",
+    )
+    .bind(&live)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        fingerprint.starts_with("refill:"),
+        "the partner is marked: {fingerprint}"
+    );
+    assert!(queued);
+    assert_eq!(
+        without_a_hint(&pool, std::slice::from_ref(&live))
+            .await
+            .len(),
+        1,
+        "the pair went with the orphan"
+    );
 }

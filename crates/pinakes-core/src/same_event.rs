@@ -201,12 +201,12 @@ async fn release(
     Ok(())
 }
 
-/// Search pages hash this into their ETag, so a changed hint is never answered with a 304.
+/// Moves the search revision, which search pages hash into their ETag, so a changed hint is not
+/// answered with a 304 (`store::note_search_write`; the pass's own transactions move it in
+/// same-event-refill).
 async fn bump(pool: &PgPool) -> Result<()> {
-    sqlx::query("SELECT nextval('same_event_revision')")
-        .execute(pool)
-        .await?;
-    Ok(())
+    let tx = pool.begin().await?;
+    crate::hints::commit_changed(tx).await
 }
 
 /// One resource: drops its units that are gone or out of the window, then pairs up to `budget`

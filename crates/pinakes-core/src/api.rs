@@ -1586,6 +1586,12 @@ fn scope(
             .push(")");
     }
 }
+/// What a search page's ETag hashes besides its query, read in the page's own snapshot: the
+/// Nexus feed cursors and the search revision (`search_write`), which every write that can change
+/// a page moves, the hint passes' pairs included (`store::note_search_write`). A page that has not
+/// seen a change never carries the revision that includes it.
+pub const REVISION: &str = "jsonb_build_array((SELECT jsonb_agg(jsonb_build_array(cursor,epoch) ORDER BY nexus) FROM feed_cursor),(SELECT revision FROM search_revision WHERE id=1))";
+
 #[utoipa::path(get,tag="Search",path="/v1/search",params(SearchQuery),responses((status=200,body=SearchResult),(status=304,description="ETag unchanged"),(status=400,description="Invalid or unavailable filter"),(status=501,description="wot_2 asked of an instance whose Nexus serves no reach set"),(status=502,description="Nexus reach unavailable")))]
 pub async fn search(
     State(state): State<AppState>,
@@ -2051,7 +2057,7 @@ pub async fn search(
     } else {
         sql.push("NULL");
     }
-    sql.push(") AS facets, jsonb_build_array((SELECT jsonb_agg(jsonb_build_array(cursor,epoch) ORDER BY nexus) FROM feed_cursor),(SELECT revision FROM search_revision WHERE id=1),(SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM same_event_revision),(SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM same_recording_revision)) AS revision");
+    sql.push(format!(") AS facets, {REVISION} AS revision"));
     // A related page is planned for its own parameters every time: a cached generic plan
     // guesses its sets hold a row or two and nests loops over thousands.
     let row = sql

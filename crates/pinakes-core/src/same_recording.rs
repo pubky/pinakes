@@ -19,6 +19,7 @@
 //! that are no longer recordings (an alias, a retyped or gone page). Cards only read the stored
 //! pairs (`same_recording_hint`).
 use crate::config::{Config, SameEventHint};
+use crate::hints::commit_changed;
 use anyhow::Result;
 use sqlx::{PgPool, Row};
 use std::time::Duration;
@@ -244,17 +245,12 @@ async fn resource(pool: &PgPool, id: &str) -> Result<bool> {
                 return Ok(false);
             }
             let mut tx = pool.begin().await?;
-            let owners: Vec<String> =
-                sqlx::query_scalar("SELECT resource_id FROM same_recording WHERE other_id=$1")
-                    .bind(id)
-                    .fetch_all(&mut *tx)
-                    .await?;
+            before_delete(&mut tx, id).await?;
             sqlx::query("DELETE FROM same_recording_unit WHERE resource_id=$1")
                 .bind(id)
                 .execute(&mut *tx)
                 .await?;
-            refill(&mut tx, &owners).await?;
-            commit_changed(tx, pool).await?;
+            commit_changed(tx).await?;
             return Ok(true);
         }
     };
@@ -300,9 +296,15 @@ async fn resource(pool: &PgPool, id: &str) -> Result<bool> {
     // `KEPT`: those whose lengths agree (score 1), then those with a length unknown (0.7). Each
     // half reads the index in order, starting just after this recording and wrapping round, and
     // stops at `KEPT`: a crowd of recordings with one title costs no more than twenty each, and
-    // its pairs spread over the crowd instead of all naming its first twenty.
-    let candidates = "SELECT u.resource_id FROM same_recording_unit u \
-        WHERE u.title_key=$2 AND u.artist_key=$3 AND u.resource_id<>$1";
+    // its pairs spread over the crowd instead of all naming its first twenty. A recording already
+    // named by INCOMING_KEPT that all rank above this one has no room and is passed over
+    // (`has_room`), so the cap below pushes out only a pair this one displaces.
+    let candidates = |score: &str, cap: &str| {
+        format!(
+            "SELECT u.resource_id FROM same_recording_unit u WHERE u.title_key=$2 AND u.artist_key=$3 AND u.resource_id<>$1 AND {}",
+            crate::hints::has_room("same_recording", "resource_id", "u.resource_id", "$1", score, cap)
+        )
+    };
     let mut best: Vec<(String, f32)> = vec![];
     if !unit.artist_key.is_empty() {
         if let Some(len) = unit.length_secs {
@@ -315,7 +317,8 @@ async fn resource(pool: &PgPool, id: &str) -> Result<bool> {
                     break;
                 }
                 let agree: Vec<String> = sqlx::query_scalar(&format!(
-                    "{candidates} AND u.length_secs BETWEEN $4 AND $5 AND {half} ORDER BY u.length_secs,u.resource_id LIMIT $7"
+                    "{} AND u.length_secs BETWEEN $4 AND $5 AND {half} ORDER BY u.length_secs,u.resource_id LIMIT $7",
+                    candidates("$8", "$9")
                 ))
                 .bind(id)
                 .bind(&unit.title_key)
@@ -324,20 +327,29 @@ async fn resource(pool: &PgPool, id: &str) -> Result<bool> {
                 .bind((len + LENGTH_WINDOW_SECS) as i32)
                 .bind(len as i32)
                 .bind(room)
+                .bind(SCORE_LENGTHS_AGREE)
+                .bind(INCOMING_KEPT)
                 .fetch_all(&mut *tx)
                 .await?;
                 best.extend(agree.into_iter().map(|r| (r, SCORE_LENGTHS_AGREE)));
             }
         }
         // Lengths unknown: the ring by id where this one has a length (they all sit at the
-        // index's end); in index order where it has none.
+        // index's end). Where it has none, every candidate scores the same, so the ring runs
+        // through the whole index from just after this one: the lengths unknown after it, every
+        // length known, then the lengths unknown before it; a crowd without lengths spreads its
+        // pairs instead of all naming the index's first twenty.
         let unknown_halves: &[&str] = if unit.length_secs.is_some() {
             &[
                 " AND u.length_secs IS NULL AND u.resource_id>$1",
                 " AND u.length_secs IS NULL AND u.resource_id<$1",
             ]
         } else {
-            &[""]
+            &[
+                " AND u.length_secs IS NULL AND u.resource_id>$1",
+                " AND u.length_secs IS NOT NULL",
+                " AND u.length_secs IS NULL AND u.resource_id<$1",
+            ]
         };
         for half in unknown_halves {
             let room = KEPT - best.len() as i64;
@@ -345,12 +357,15 @@ async fn resource(pool: &PgPool, id: &str) -> Result<bool> {
                 break;
             }
             let unknown: Vec<String> = sqlx::query_scalar(&format!(
-                "{candidates}{half} ORDER BY u.length_secs,u.resource_id LIMIT $4"
+                "{}{half} ORDER BY u.length_secs,u.resource_id LIMIT $4",
+                candidates("$5", "$6")
             ))
             .bind(id)
             .bind(&unit.title_key)
             .bind(&unit.artist_key)
             .bind(room)
+            .bind(SCORE_LENGTH_UNKNOWN)
+            .bind(INCOMING_KEPT)
             .fetch_all(&mut *tx)
             .await?;
             best.extend(unknown.into_iter().map(|r| (r, SCORE_LENGTH_UNKNOWN)));
@@ -380,21 +395,49 @@ async fn resource(pool: &PgPool, id: &str) -> Result<bool> {
     .execute(&mut *tx)
     .await?;
     // And no recording is named by more than INCOMING_KEPT others, so a change to it marks at
-    // most that many for a refill.
+    // most that many for a refill. A recording whose pair is pushed out refills its list (never
+    // this one: it took only places it had room for).
     let mut named = others.clone();
     named.push(id.to_owned());
-    sqlx::query(
+    let pushed_out: Vec<String> = sqlx::query_scalar(
         "DELETE FROM same_recording p USING (SELECT resource_id,other_id,\
          row_number() OVER (PARTITION BY other_id ORDER BY score DESC,resource_id) AS n \
          FROM same_recording WHERE other_id=ANY($1)) r \
-         WHERE p.resource_id=r.resource_id AND p.other_id=r.other_id AND r.n>$2",
+         WHERE p.resource_id=r.resource_id AND p.other_id=r.other_id AND r.n>$2 RETURNING p.resource_id",
     )
     .bind(&named)
     .bind(INCOMING_KEPT)
-    .execute(&mut *tx)
+    .fetch_all(&mut *tx)
     .await?;
-    commit_changed(tx, pool).await?;
+    let pushed_out: Vec<String> = pushed_out.into_iter().filter(|r| r != id).collect();
+    refill(&mut tx, &pushed_out).await?;
+    commit_changed(tx).await?;
     Ok(true)
+}
+
+/// Before a recording's unit goes, with its resource (an orphan, `changes::delete_orphans`) or
+/// alone (no longer a recording): its pairs go with it, so the recordings that named it are marked
+/// to refill. Done in the code before the delete, never by a trigger on it: a trigger that
+/// updated a row the same statement deletes aborts the statement (PostgreSQL: "tuple to be
+/// updated was already modified by an operation triggered by the current command"). Nothing
+/// happens for a resource without a unit.
+pub async fn before_delete(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    resource_id: &str,
+) -> Result<()> {
+    // The unit is locked first, so a pass that would pair with it meanwhile waits for the delete
+    // (its pair's FK check needs the unit): a pair added between the namers' collection and the
+    // cascade would go unmarked.
+    sqlx::query("SELECT resource_id FROM same_recording_unit WHERE resource_id=$1 FOR UPDATE")
+        .bind(resource_id)
+        .execute(&mut **tx)
+        .await?;
+    let owners: Vec<String> =
+        sqlx::query_scalar("SELECT resource_id FROM same_recording WHERE other_id=$1")
+            .bind(resource_id)
+            .fetch_all(&mut **tx)
+            .await?;
+    refill(tx, &owners).await
 }
 
 /// Recordings whose lists lost a pair are read again: their fingerprint is marked `refill:` (so
@@ -408,27 +451,11 @@ async fn refill(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, ids: &[String]) 
         .bind(ids)
         .execute(&mut **tx)
         .await?;
-    sqlx::query("INSERT INTO same_recording_dirty(resource_id) SELECT unnest($1::text[]) \
+    // Distinct: a recording pushed out of two lists at once is one row.
+    sqlx::query("INSERT INTO same_recording_dirty(resource_id) SELECT DISTINCT x FROM unnest($1::text[]) AS t(x) \
         ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=excluded.next_attempt_at WHERE same_recording_dirty.next_attempt_at>excluded.next_attempt_at")
         .bind(ids)
         .execute(&mut **tx)
-        .await?;
-    Ok(())
-}
-
-/// Commits a change to the pairs with the revision search pages hash into their ETag: moved in
-/// the transaction (a pass stopped right after the commit still leaves it moved) and again after
-/// it (a page that read the revision before the commit is not answered 304 with the old pairs).
-async fn commit_changed(
-    mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
-    pool: &PgPool,
-) -> Result<()> {
-    sqlx::query("SELECT nextval('same_recording_revision')")
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    sqlx::query("SELECT nextval('same_recording_revision')")
-        .execute(pool)
         .await?;
     Ok(())
 }

@@ -859,7 +859,7 @@ MusicBrainz does not know, a service page that states no identifier. Such pages 
 [group](#groups) (a group needs a key a hub or the service vouches for). Instead a
 `MusicRecording` card names other recordings that are possibly the same one, in `maybe_same`:
 `{id, uri, site, start, score}` as for events, with `start` `null`, best first, up to three on a
-card and ten in its `details`.
+card and ten on a read (`GET /v1/resources/{id}`).
 
 Two recordings are possibly the same when all of these hold:
 
@@ -884,7 +884,7 @@ A background pass computes the pairs, again whenever a recording's name, type, a
 changes (its page or the sources' facts); a request only reads them. An hourly sweep, which also
 runs at startup, reads recordings saved before the hint existed or while it was off. Search pages
 change their `ETag` when a hint on them changes. `[groups] same_recording_hint = "off"`
-([operations](operations.md#groups)) removes the field from recording cards and details and stops
+([operations](operations.md#groups)) removes the field from recording cards and stops
 the pass.
 
 ## Possibly the same app
