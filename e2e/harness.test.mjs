@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { dropRefusedPages, expectCard, findsEvery, freshen, instanceAgent, mcpAnswer, newestLink, ownTags, rereadMoved, userAgent, withTags, withoutStackSkipped } from './harness.mjs';
+import { dropRefusedPages, expectCard, findsEvery, freshen, instanceAgent, mcpAnswer, newestLink, ownTags, rereadMoved, socialAgrees, userAgent, withTags, withoutStackSkipped } from './harness.mjs';
 test('a PUT that commits then times out is included in cleanup', async () => {
   const stored = new Set(), report = {}, journal = [];
   const storage = { exists: async p => stored.has(p), putJson: async p => { stored.add(p); if (p === 'second') throw new Error('timeout'); }, delete: async p => stored.delete(p) };
@@ -28,6 +28,21 @@ test('a full by-URI tag list is confirmed through the resource tag route', async
   await assert.rejects(ownTags([short], ['https://example.org/short'], 'run', 'me', tagsOf), /Missing Nexus hydration: https:\/\/example.org\/short/);
   await assert.rejects(ownTags([own], ['https://example.org/own', 'https://example.org/absent'], 'run', 'me', tagsOf), /Missing Nexus hydration: https:\/\/example.org\/absent/);
   await assert.rejects(ownTags([full], ['https://example.org/full'], 'run', 'someone', tagsOf), /Missing own tag on Nexus: https:\/\/example.org\/full/);
+});
+test('the social tool is judged against the batch view, five tags at most', () => {
+  const tag = label => ({ label, taggers: ['me'] });
+  const five = ['a', 'b', 'c', 'd', 'e'].map(tag);
+  const row = (uri, tags) => ({ details: { id: 'n', uri }, tags });
+  const item = tags => ({ uri: 'x', tags: tags.map(t => ({ label: t.label, taggers_count: 1 })) });
+  const [listed, full] = ['https://example.org/listed', 'https://example.org/full'];
+  const hydrated = [row(listed, [tag('run'), ...five.slice(1)]), row(full, five)];
+  socialAgrees(item([tag('run')]), hydrated, listed, 'run');
+  // Five established tags push the run's out of both answers: the tool agrees with the view.
+  socialAgrees(item([...five].reverse()), hydrated, full, 'run');
+  assert.throws(() => socialAgrees(item(five), hydrated, listed, 'run'), /returns the run's tag/);
+  assert.throws(() => socialAgrees(item(five.slice(1)), hydrated, full, 'run'), /answers as Nexus's batch view/);
+  assert.throws(() => socialAgrees(undefined, hydrated, full, 'run'), /Missing social answer/);
+  assert.throws(() => socialAgrees(item(five), hydrated, 'https://example.org/absent', 'run'), /Missing Nexus hydration/);
 });
 test('a latest_in sample takes its feed\'s newest item', async () => {
   const rss = '<rss><channel><link>https://x.example</link><item><title>New</title><link><![CDATA[https://x.example/news/new]]></link></item><item><link>https://x.example/news/old</link></item></channel></rss>';
