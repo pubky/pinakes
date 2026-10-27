@@ -427,6 +427,15 @@ async fn run(pool: sqlx::PgPool, f: Fixture) -> Result<()> {
             )
             .route("/v0/resources/changes", get(feed))
             .route("/v0/stream/resources/by_ids", post(hydrate))
+            // The run's author follows and befriends itself: a reach or boost set of one.
+            .route(
+                "/v0/user/{id}/following",
+                get(|| async { Json(vec![AUTHOR]) }),
+            )
+            .route(
+                "/v0/user/{id}/friends",
+                get(|| async { Json(vec![AUTHOR]) }),
+            )
             .with_state(f.clone()),
     );
     let (shutdown, rx) = tokio::sync::watch::channel(false);
