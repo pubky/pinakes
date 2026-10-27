@@ -232,6 +232,12 @@ async fn hub_keys_join_and_derived_links_reach_the_cards(pool: PgPool) {
     assert_eq!(resources, 2);
 }
 
+/// The card as `POST /v1/resources/lookup` shows it: one `also_on` entry per service, where a
+/// resource read lists every link.
+async fn lookup_card(app: &axum::Router, id: &str) -> Value {
+    let cards = post(app, "/v1/resources/lookup", json!({"ids": [id]})).await;
+    cards.as_array().unwrap()[0].clone()
+}
 async fn post(app: &axum::Router, path: &str, body: Value) -> Value {
     let mut request = Request::builder()
         .method("POST")
@@ -689,7 +695,7 @@ async fn facts_are_shown_checked_and_never_join(pool: PgPool) {
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let read = get(&app, &format!("/v1/resources/{ia}")).await;
     assert_eq!(
-        read["details"]["facts"],
+        read["facts"],
         json!({"artist": "Radiohead", "isrc": "GBAYE9701376; GBBKS1700108"})
     );
     // The same ISRC on both links joins nothing: a fact is not a key.
@@ -707,7 +713,7 @@ async fn facts_are_shown_checked_and_never_join(pool: PgPool) {
     assert_eq!(grouped, 0);
     // A link without facts has none.
     let other = page(&pool, "https://tidal.com/track/9", "Song").await;
-    assert!(get(&app, &format!("/v1/resources/{other}")).await["details"]["facts"].is_null());
+    assert!(get(&app, &format!("/v1/resources/{other}")).await["facts"].is_null());
 }
 
 /// `key` finds every tagged link carrying one exact identifier, on any service: an MBID at any
@@ -820,6 +826,80 @@ async fn search_by_key_finds_the_same_object_on_every_service(pool: PgPool) {
     ] {
         let plan: Vec<String> = sqlx::query_scalar(query).fetch_all(&mut *tx).await.unwrap();
         assert!(plan.join("\n").contains(index), "{index}: {plan:?}");
+    }
+}
+
+/// Every key a resource read lists (`keys`, as stored) searches back to that resource:
+/// `GET /v1/search?key=` takes each exactly as listed (review of d6d0aeb: MusicBrainz and podcast
+/// keys did not; of e48807e: Open Library keys did not).
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn every_key_a_read_lists_searches_back(pool: PgPool) {
+    let uri = "https://example.org/a-show";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut doc = ResourceMeta::new(uri, "jsonld", 86400);
+    doc.set_type("PodcastSeries");
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) VALUES($1,repeat('a',52),'tag','/pub/test/tags/1','listen',now())")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // One key of each form the core and the hubs store, and one of each form every registered
+    // source lists (`Source::key_forms`: the books source's Open Library keys among them).
+    let core = [
+        "mb:recording:0f2b3d4e-1111-4222-8333-444455556666",
+        "mb:release-group:0f2b3d4e-1111-4222-8333-444455556667",
+        "mb:artist:0f2b3d4e-1111-4222-8333-444455556668",
+        "podcast:guid:917393e3-1b1e-5cef-ace4-edaa54e1f810",
+        "podcast:apple:1234567890",
+        "podcast:apple_episode:1000123456789",
+        "podcast:item:917393e3-1b1e-5cef-ace4-edaa54e1f810:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "isrc:GBUM71029604",
+        "upc:0602557656527",
+        "wikidata:Q42",
+        "imdb:tt0111161",
+        "osm:node/1",
+        "doi:10.1000/xyz123",
+    ];
+    let mut keys: Vec<String> = core.iter().map(|k| k.to_string()).collect();
+    for source in also_on::registered() {
+        for (namespace, example) in source.key_forms() {
+            let key = format!("{namespace}:{example}");
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+    }
+    for key in &keys {
+        sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) VALUES($1,$2,'test','test',now()+interval '1 day')")
+            .bind(&id)
+            .bind(key)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let read = get(&app, &format!("/v1/resources/{id}")).await;
+    let listed: Vec<&str> = read["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k.as_str().unwrap())
+        .collect();
+    assert_eq!(listed.len(), keys.len(), "{read}");
+    for key in listed {
+        let path = format!(
+            "/v1/search?key={}",
+            url::form_urlencoded::byte_serialize(key.as_bytes()).collect::<String>()
+        );
+        let page = get(&app, &path).await;
+        let found: Vec<&str> = page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(found, [id.as_str()], "{key}");
     }
 }
 
@@ -1507,7 +1587,7 @@ async fn a_tagged_member_and_a_derived_link_of_one_service_show_once(pool: PgPoo
         .await
         .unwrap();
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
-    let read = get(&app, &format!("/v1/resources/{card}")).await;
+    let read = lookup_card(&app, &card).await;
     let mut shown: Vec<String> = read["also_on"]
         .as_array()
         .unwrap()
@@ -1530,9 +1610,11 @@ async fn a_tagged_member_and_a_derived_link_of_one_service_show_once(pool: PgPoo
             "Steam https://store.steampowered.com/app/1127400/ true".to_owned(),
         ]
     );
-    // The tagged F-Droid page is the derived F-Droid link itself (its own address, which every
-    // other spelling is an alias of): the details list it once, beside Steam and the blog.
-    assert_eq!(read["details"]["also_on"].as_array().unwrap().len(), 3);
+    // A resource read lists every link. The tagged F-Droid page is the derived F-Droid link
+    // itself (its own address, which every other spelling is an alias of): it is listed once,
+    // beside Steam and the blog.
+    let read = get(&app, &format!("/v1/resources/{card}")).await;
+    assert_eq!(read["also_on"].as_array().unwrap().len(), 3);
 }
 
 /// `key=doi:` finds the DOI card by its own DOI, and the preprint its publisher names, as the
@@ -1655,7 +1737,7 @@ async fn two_tagged_spellings_of_a_derived_link_show_once(pool: PgPool) {
         .await
         .unwrap();
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
-    let read = get(&app, &format!("/v1/resources/{card}")).await;
+    let read = lookup_card(&app, &card).await;
     let sites: Vec<&str> = read["also_on"]
         .as_array()
         .unwrap()
@@ -2075,7 +2157,7 @@ async fn a_shared_repository_link_with_a_tab_is_the_repository_once(pool: PgPool
         .await
         .unwrap();
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
-    let read = get(&app, &format!("/v1/resources/{}", ids[0])).await;
+    let read = lookup_card(&app, &ids[0]).await;
     let entries: Vec<(String, String, bool)> = read["also_on"]
         .as_array()
         .unwrap()
@@ -2391,22 +2473,23 @@ async fn a_card_shows_one_link_per_service(pool: PgPool) {
         sorted(vec![pending.into(), pending_too.into()]),
         "{card}"
     );
-    // The read shows the card's view; its details list every link.
+    // A lookup card shows the card's view; a resource read lists every link.
+    let looked_up = lookup_card(&app, &ids[0]).await;
+    assert_eq!(
+        sorted(of(&looked_up["also_on"], "TIDAL")),
+        sorted(vec![tagged.into(), pending_tidal.into()])
+    );
     let read = get(&app, &format!("/v1/resources/{}", ids[0])).await;
     assert_eq!(
         sorted(of(&read["also_on"], "TIDAL")),
-        sorted(vec![tagged.into(), pending_tidal.into()])
-    );
-    assert_eq!(
-        sorted(of(&read["details"]["also_on"], "TIDAL")),
         sorted(vec![tagged.into(), regional.into(), pending_tidal.into()])
     );
-    assert_eq!(of(&read["details"]["also_on"], "Spotify").len(), 2);
+    assert_eq!(of(&read["also_on"], "Spotify").len(), 2);
     assert_eq!(
-        sorted(of(&read["also_on"], "Apple Music")),
+        sorted(of(&looked_up["also_on"], "Apple Music")),
         sorted(vec![pending.into(), pending_too.into()])
     );
-    assert_eq!(of(&read["details"]["also_on"], "Apple Music").len(), 3);
+    assert_eq!(of(&read["also_on"], "Apple Music").len(), 3);
 }
 
 /// A card's own service has its link, the card: Radiohead's Discogs artist never shows "On A
@@ -2444,8 +2527,9 @@ async fn a_card_shows_no_other_page_of_its_own_service(pool: PgPool) {
             .map(|e| e["uri"].as_str().unwrap().to_owned())
             .collect()
     };
-    assert_eq!(uris(&read["also_on"]), [spotify], "{read}");
-    assert_eq!(uris(&read["details"]["also_on"]), [earlier, spotify]);
+    let looked_up = lookup_card(&app, &id).await;
+    assert_eq!(uris(&looked_up["also_on"]), [spotify], "{looked_up}");
+    assert_eq!(uris(&read["also_on"]), [earlier, spotify]);
 }
 
 /// A run takes the write order before the resource rows, as saves do: a save holding its

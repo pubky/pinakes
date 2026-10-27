@@ -24,7 +24,7 @@ leaves the page's own card.
 
 The page's card with the post's title, excerpt (the custom excerpt, else Ghost's; at most 300
 characters) and feature image. A page typed as an article keeps its type; any other becomes
-`BlogPosting`. `details.from` is `ghost`.
+`BlogPosting`. `from` is `ghost`.
 
 | Fact | Meaning |
 | --- | --- |

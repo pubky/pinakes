@@ -648,6 +648,14 @@ impl super::Family for Lookups {
     }
 }
 
+/// The forms of key the packages sources record (`also_on::Source::key_forms`).
+pub const KEY_FORMS: &[(&str, &str)] = &[
+    ("crate", "serde-json"),
+    ("npm", "left-pad"),
+    ("pypi", "requests"),
+    ("repo", "github.com/pubky/pinakes"),
+    ("wikidata", "Q42"),
+];
 /// The also-on sources that run these lookups: each fetches through the egress (its policy,
 /// budgets and shared discovery cache), hands the answer to this module's parsers, and reports
 /// keys and derived links.
@@ -685,6 +693,9 @@ pub mod also_on {
 
     #[async_trait]
     impl Source for Packages {
+        fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+            crate::lookups::packages::KEY_FORMS
+        }
         fn budgets(&self) -> &'static [(&'static str, f64)] {
             match self.0 {
                 // crates.io: 1 request/s.
@@ -851,6 +862,9 @@ pub mod also_on {
 
     #[async_trait]
     impl Source for SoftwareHeritage {
+        fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+            crate::lookups::packages::KEY_FORMS
+        }
         fn budgets(&self) -> &'static [(&'static str, f64)] {
             // Software Heritage: 120 requests/hour anonymous.
             &[("archive.softwareheritage.org", 120.0 / 3600.0)]

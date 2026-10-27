@@ -3,7 +3,7 @@
 Pinakes returns link metadata (cards), search and ranking over the links people reference on
 Pubky, calendar dates, groups of links to the same thing, and the changes to the links a client
 keeps. Clients hydrate social state (posts, tags, users) from Nexus in a separate call, by URI:
-a card's `uri` (and `details.aliases`), never its `id`, which is Pinakes's own. Paths are
+a card's `uri` (and `aliases`), never its `id`, which is Pinakes's own. Paths are
 relative to the Pinakes origin.
 
 The public listener (`listen`) serves its OpenAPI document at **`GET /v1/openapi.json`**
@@ -18,15 +18,15 @@ snapshot; a test fails when it is stale.
 | Method and path | Input | Response |
 | --- | --- | --- |
 | `GET /v1/search` | Query parameters ([Search](#search)) | `{items: [card], cursor, reach_truncated, facets?}`, or a map page with `cluster` |
-| `GET /v1/resources/{id}` | 32-character resource ID | Card plus `details`; 404 if unknown |
+| `GET /v1/resources/{id}` | 32-character resource ID | The card with the [read's fields](#resource-read); 404 if unknown |
 | `GET /v1/resources/by-uri` | `uri`: any spelling of a link | As `GET /v1/resources/{id}` for the URI's ID (an alias answers with its root); 404 if unknown, nothing is fetched |
 | `POST /v1/resources/lookup` | Exactly one of `{"ids":[…]}` (alias `resource_ids`) or `{"uris":[…]}`, 1–500 entries | `[card]` in request order, duplicates kept, unknowns skipped |
-| `POST /v1/resolve` | `{"uri":"https://example.org/"}` | Card plus `details` now or within 3 seconds; 202 with `status: "pending"` while queued |
+| `POST /v1/resolve` | `{"uri":"https://example.org/"}` | The card with the read's fields now or within 3 seconds; 202 with `status: "pending"` while queued |
 | `GET /v1/resources/{id}/occurrences` | Optional RFC 3339 `from`, `to`, `limit` (1–500, default 100), signed `cursor` | `{items: [occurrence card], cursor}` |
 | `POST /v1/occurrences/lookup` | `{resource_ids?, uris?, from?, to?, limit?, cursor?}`: 1–500 feed IDs and links together | `{items: [occurrence card], cursor}` across the feeds, by start |
 | `GET /v1/groups/{id}` | 32-character group ID | `{id, type, curated, keys, members: [card]}`; 404 if unknown |
 | `POST /v1/changes/lookup` | `{resource_ids?, uris?, since?, cursor?, limit?}`: 1–500 IDs and links together | Change page for those resources |
-| `GET /v1/info` | None | `{version, user_agent, resolves, limits, osm_licence}`: what this instance resolves, the limits a client must respect, and the User-Agent its requests carry |
+| `GET /v1/info` | None | `{version, api_shape, user_agent, resolves, limits, osm_licence}`: the shape of its cards (`api_shape: 2`, one flat object per card), what this instance resolves, the limits a client must respect, and the User-Agent its requests carry |
 | `GET /v1/dumps/osm_place.ndjson.gz` | None | The ODbL derivative database as a daily gzip file ([OSM](#openstreetmap-and-locations)) |
 | `GET /v1/openapi.json` | None | OpenAPI 3.1 |
 | `GET /swagger-ui` | None | Swagger UI (when `api.swagger_ui`) |
@@ -46,7 +46,7 @@ moves to the front of the refresh queue without bypassing its TTL, backoff or fi
 
 Every route returns the same card for a resource, an occurrence or a Pubky event reference.
 Absent values are `null`, never `""`. Text fields (`name`, `description`, `site`, and every
-text in `details`) are plain text, decoded from the source's HTML entities once: escape them
+text a read adds) are plain text, decoded from the source's HTML entities once: escape them
 before rendering them as HTML.
 
 A music link is typed by what it is, whatever the service's page or player calls it: a track is a
@@ -59,7 +59,7 @@ any page language. A Bandcamp root or `/music` page features an album but is the
 page names the artist (JSON-LD `byArtist`, as TIDAL's do), the description says what the page
 does instead of its share text: a track's `Queen · A Night At The Opera (Deluxe Edition) · 5:55`
 (artist, album, length), an album's `Tame Impala & JENNIE · 2025` (artist, year); the
-`service` source adds `artist`, `album` and `duration` (seconds) to `details.facts`.
+`service` source adds `artist`, `album` and `duration` (seconds) to `facts`.
 
 A media link is typed the same way: a TMDB, Letterboxd or Trakt movie is a `Movie`; a TMDB,
 Trakt or TVmaze series a `TVSeries`; an Open Library work or edition and a Goodreads work or book
@@ -86,18 +86,18 @@ An IMDb title keeps the type its page gives (it can be either).
 | `id` | Resource ID; for an occurrence, the feed's ID |
 | `uri` | The resource URI; for an occurrence, its own URL when it has one, else the feed's. To combine with Nexus, send `uri`, and for an occurrence `occurrence.feed_uri` (its own URL was never tagged) |
 | `status` | Fetch health: `ok`, `pending`, `missing`, `unreachable` or `error` |
-| `type` | schema.org type (`MusicEvent`, `Book`, `Place`, …), or one of Pinakes's own types for what schema.org has no class for: `BitcoinBlock`, `BitcoinTransaction`, `BitcoinAddress`, `LightningNode` and `LightningChannel` (not schema.org; each a child of `Thing`) |
+| `type`, `type_path` | schema.org type (`MusicEvent`, `Book`, `Place`, …), or one of Pinakes's own types for what schema.org has no class for: `BitcoinBlock`, `BitcoinTransaction`, `BitcoinAddress`, `LightningNode` and `LightningChannel` (not schema.org; each a child of `Thing`); `type_path` is the type's ancestors, root first (`["Thing", "Event", "MusicEvent"]`), the types a `type=` search matches it by |
 | `name`, `description`, `image` | Display metadata; images point to the origin and are never proxied |
 | `site` | The publishing site: the page's own site name (`og:site_name`), else its host; for `pubky://` objects the app path segment (`mapky.app`), not the public key; for a link whose URL names a known service (a music service, a Wikipedia edition, MusicBrainz, Wikidata, a service the also-on lookups know), that service's name (`Apple Music`, `Wikipedia (de)`, `OpenStreetMap`), whatever the page calls itself and even before its card is read; for a card read from an official API without a host of its own, the service's name (`Federal Register`) |
 | `point` | `{lat, lon}` |
 | `start`, `end` | RFC 3339 instants for events and occurrences |
 | `group` | `{id, size}` when the resource or occurrence is in a [group](#groups), else `null` |
-| `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; one per service, at most 8 on a card and 256 on `GET /v1/resources/{id}`, whose `details.also_on` lists every link (up to 256). A hint only: every member keeps its own card |
+| `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; one per service, at most 8 on a search, lookup or group card; on a resource read every link, several of one service too, up to 256. A hint only: every member keeps its own card |
 | `open_in` | The clients that open a Pubky app's object, `[{client, url}]` (`url` is `https:`): from the app's profile ([Pubky apps](pubky-apps.md)), e.g. Loopky for a deck, Mapky for a route or for a review's place; on a Pubky event reference's card, those of the event object. `[]` on every other card |
 | `attribution` | Present on OSM cards, events placed at an OSM venue and events whose zone came from coordinates; display it with the card |
 | `occurrence` | Occurrence cards only: `{feed_id, feed_uri, uid, recurrence_id, status}`; `feed_uri` is the feed's URI, the link people tagged |
 | `event` | Pubky event references only: `{author, object_path, recurrence_id, start, end, status}` |
-| `maybe_same` | Event and occurrence cards: up to three other events that are [possibly the same event](#possibly-the-same-event), best first, each `{id, uri, site, start, score}` (`[]` when there are none). An app's store card: up to three store cards that are [possibly the same app](#possibly-the-same-app). A hint only, like `group`. Absent on other cards, and on every card with `[event] same_event_hint = "off"` |
+| `maybe_same` | Event and occurrence cards: other events that are [possibly the same event](#possibly-the-same-event), best first, each `{id, uri, site, start, score}` (`[]` when there are none). An app's store card: store cards that are [possibly the same app](#possibly-the-same-app). Up to three on a search, lookup or group card, up to ten on a resource read. A hint only, like `group`. Absent on other cards, and on every card with `[event] same_event_hint = "off"` |
 
 A `pubky://` object of an app Pinakes has a profile for (Loopky, Mapky, Eventky, Pubky Rooms,
 the Pubky marketplace) gets that app's card; any other app's object gets a general one. Each is
@@ -106,11 +106,13 @@ description from a content-like member (`content`, `text`): such a card is a
 `SocialMediaPosting`, social content like a note, with a 200-character excerpt that refreshes
 within the hour and is removed once the object is gone.
 
-### Resource detail
+### Resource read
 
-`GET /v1/resources/{id}`, `GET /v1/resources/by-uri` and `POST /v1/resolve` return the card's
-fields plus `details`. The two reads carry `Cache-Control: public, max-age=30` and an `ETag` of the
-body, and answer `If-None-Match` with 304.
+`GET /v1/resources/{id}`, `GET /v1/resources/by-uri` and `POST /v1/resolve` return the card with
+these fields beside the card's: one flat object (`api_shape: 2` in `/v1/info`; there is no
+`details` object). The read's `also_on` lists every link, up to 256, and its `maybe_same` up to
+ten. The two reads carry `Cache-Control: public, max-age=30` and an `ETag` of the body, and
+answer `If-None-Match` with 304.
 
 | Field | Meaning |
 | --- | --- |
@@ -125,13 +127,13 @@ body, and answer `If-None-Match` with 304.
 | `organizer` | `{name, url}` |
 | `from` | Where the card's metadata came from when it is not the page itself: the [source](#sources) whose official API answered, e.g. `federal_register` |
 | `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …), or the facts a [Pubky app's](pubky-apps.md) profile reads (`card_count`, `price`, `rating`, …), then the facts the [also-on](#also-on) sources read for it (such as a music link's `isrc`, `upc` and `mbid`); several values of one name are joined with `; `. Each source keeps at most `limits.also_on_facts_per_source` (32, at least 8) facts per resource, cutting the many values of one name (a recording's ISRCs) before a name's one value (its MBID, artist). Each source's page lists its facts. `null` when there are none. Facts never join anything |
-| `also_on` | Every link of the card's [also on](#also-on), up to 256, several of one service too (the card shows one per service) |
-| `aliases` | Other spellings of this link that resolve to it ([aliases](#aliases)), at most 50; a page's own `url`, `@id`, `sameAs` or canonical claims are not aliases and are not listed |
+| `keys` | The public identifiers the resource is keyed by, as `GET /v1/search?key=` takes them (`isrc:…`, `upc:…`, `doi:…`, `isbn:…`, `mb:recording:…`, `wikidata:Q…`, `osm:node/…`): the keys its sources vouch for ([Also on](#also-on)), sorted; `[]` when there are none |
+| `aliases` | Other spellings of this link that resolve to it ([aliases](#aliases)), at most 50; a page's own `url`, `@id`, `sameAs` or canonical claims are not aliases and are not listed. The card's `uri` is the canonical one: an alias is answered with its root's card |
 | `updated_at` | When the current metadata was accepted |
-| `maybe_same` | An event's card: up to ten events that are [possibly the same event](#possibly-the-same-event), best first (the card's `maybe_same` is the first three); an app's store card: up to ten [possibly the same app](#possibly-the-same-app) |
 
-Internal fields (the resolver, TTL, group keys, raw attributes, parser warnings) are not public;
-operators read the stored document with `GET /v1/resources/{id}/document` on the admin listener.
+Nothing that describes the fetch rather than the thing is public (the resolver, TTL, group keys,
+raw attributes, parser warnings, content type and length): operators read the stored document
+with `GET /v1/resources/{id}/document` on the admin listener.
 
 ### Occurrence
 
@@ -416,10 +418,10 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 
 | Parameter | Meaning |
 | --- | --- |
-| `q` | Full-text name/description search with a trigram/partial-name fallback; at most 256 bytes. A post whose author opted out of search indexing (`details.facts.opted_out`: Mastodon's `indexable: false` or `noindex`, Bluesky's `!no-unauthenticated`) never matches |
+| `q` | Full-text name/description search with a trigram/partial-name fallback; at most 256 bytes. A post whose author opted out of search indexing (a read's `facts.opted_out`: Mastodon's `indexable: false` or `noindex`, Bluesky's `!no-unauthenticated`) never matches |
 | `type` | A schema.org type, ancestors included (`Event` matches `MusicEvent`; `Place` matches cafés and other `LocalBusiness` types), or up to 10 comma-separated: any of them (`type=MusicRecording,MusicAlbum,MusicGroup`). An unknown type is a 400 that names it (only a name of letters and digits is repeated; anything else, such as a URL, gets a general message) |
 | `category`, `host` | Exact filters |
-| `key` | Links carrying one exact identifier, on any service and in any spelling: `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist), `wikidata:{Q-id}`, `isrc:{code}` (any letter case, hyphens allowed), `upc:{barcode}` (a UPC, EAN or GTIN in any of its lengths, check digit verified), `isbn:{ISBN-10 or ISBN-13}` (an edition), `imdb:{tt…}` (a film or series), `podcast:{GUID}` (a show), `osm:{node|way|relation}/{id}`, `doi:{DOI}`, or another namespace a source records (its page in [docs/sources](sources/README.md#also-on) names its namespaces and how each is normalized), as the [also-on](#also-on) sources found them as keys or facts (`mbid:` also the MBID a MusicBrainz page was merged from, its `mbid_was` fact, and with `type=MusicEvent` an artist's events, by their performers), or as an exact lookup by that key named the link; anything else is 400 |
+| `key` | Links carrying one exact identifier, on any service and in any spelling: `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist), `wikidata:{Q-id}`, `isrc:{code}` (any letter case, hyphens allowed), `upc:{barcode}` (a UPC, EAN or GTIN in any of its lengths, check digit verified), `isbn:{ISBN-10 or ISBN-13}` (an edition), `imdb:{tt…}` (a film or series), `podcast:{GUID}` (a show), `osm:{node|way|relation}/{id}`, `doi:{DOI}`, any key exactly as a resource read lists it in `keys` (`mb:recording:{mbid}`, `podcast:guid:{GUID}`, `podcast:apple:{id}`, …), or another namespace a source records (its page in [docs/sources](sources/README.md#also-on) names its namespaces and how each is normalized), as the [also-on](#also-on) sources found them as keys or facts (`mbid:` also the MBID a MusicBrainz page was merged from, its `mbid_was` fact, and with `type=MusicEvent` an artist's events, by their performers), or as an exact lookup by that key named the link; anything else is 400 |
 | `related` | A resource ID: what the people who tagged it also referenced, ranked by how many of them did ([Related](#related)); not with `sort` |
 | `tags` | Comma-separated labels; at most 5, each 1–128 bytes |
 | `match` | `any` (default) or `all` (at most 3 tags) |
@@ -791,7 +793,7 @@ reads, writes and collapse; stored membership stays for when it is turned back o
 One meetup is often listed on several sites (Meetup, Luma, its organiser's page). These pages
 share no identifier, so they never [group](#groups). Instead an event's card names other events
 that are possibly the same one, in `maybe_same`: `{id, uri, site, start, score}`, best first, up
-to three on a card and ten in its `details`. An entry is an event resource, or one occurrence of
+to three on a search, lookup or group card and ten on a resource read. An entry is an event resource, or one occurrence of
 a feed (`id` is then the feed's ID and `uri` the occurrence's own page, else the feed's; a feed
 read from a service's API is named by that service's page, never the API endpoint).
 
@@ -871,8 +873,8 @@ Wikidata, OpenStreetMap, DOI and the services each source's page names (the ones
 links name). Only an object's own page is on the service, in the forms its source recognizes
 (its page says which). Any other page on those hosts (a topic list, a search, a user's page, a
 page under an object) takes no service's place; its card keeps the name it gives itself, or its
-host. `GET /v1/resources/{id}` shows the same, up to 256 entries, and lists every link in
-`details.also_on` (several of one service too, up to 256). A derived link can be unavailable in
+host. `GET /v1/resources/{id}` lists every link in its `also_on` (several of one service too,
+up to 256). A derived link can be unavailable in
 some countries (a regional release on a streaming service); nothing public says where, so prefer
 a tagged member.
 
@@ -956,7 +958,7 @@ links a card.
 
 Where a service's page is walled, thin or moved, Pinakes reads the service's own API for its
 links instead (keyless, except GitHub, which needs `[sources.github] token` or
-`PINAKES_GITHUB_TOKEN` and is off without one): the card's `details.from` names the source and `details.facts` holds the
+`PINAKES_GITHUB_TOKEN` and is off without one): the read's `from` names the source and `facts` holds the
 API's fields. [docs/sources](sources/README.md) lists every source with the links it reads,
 what it fetches, its card, its facts, its limits and licence, and its examples; each can be
 switched off in `[sources.<name>]`.

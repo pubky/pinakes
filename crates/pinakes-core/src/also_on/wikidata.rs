@@ -26,6 +26,9 @@ const DISCOGS_RELEASE: &str = "P2206";
 pub struct WikidataSource;
 #[async_trait]
 impl Source for WikidataSource {
+    fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+        crate::music_sources::KEY_FORMS
+    }
     fn id(&self) -> &'static str {
         "wikidata"
     }

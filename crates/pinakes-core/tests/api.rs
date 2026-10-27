@@ -149,7 +149,14 @@ async fn every_read_route_and_document_projection(pool: PgPool) {
     let keys: Vec<&String> = info.as_object().unwrap().keys().collect();
     assert_eq!(
         keys,
-        ["limits", "osm_licence", "resolves", "user_agent", "version"],
+        [
+            "api_shape",
+            "limits",
+            "osm_licence",
+            "resolves",
+            "user_agent",
+            "version"
+        ],
         "{info}"
     );
     // The User-Agent its requests carry, so a harness can send the same: with no contact set,
@@ -191,7 +198,16 @@ async fn every_read_route_and_document_projection(pool: PgPool) {
     assert_eq!(item["type"], "MusicEvent");
     assert!(item.get("score").is_none());
     assert!(item.get("document").is_none());
-    assert!(item["details"].is_object(), "{item}");
+    // One flat object: the read's fields beside the card's, no `details`.
+    assert!(item.get("details").is_none(), "{item}");
+    assert!(
+        item["aliases"].is_array() && item["keys"].is_array(),
+        "{item}"
+    );
+    assert_eq!(
+        item["type_path"].as_array().unwrap().last().unwrap(),
+        "MusicEvent"
+    );
     assert_eq!(call(&app, "GET", "/v1/resources/bad", None).await.0, 400);
     assert_eq!(
         call(
@@ -214,7 +230,8 @@ async fn every_read_route_and_document_projection(pool: PgPool) {
     assert_eq!(code, 200);
     assert_eq!(items.as_array().unwrap().len(), 2);
     assert_eq!(items[0]["id"], ids[0]);
-    assert!(items[0].get("details").is_none());
+    // A lookup card has the card's fields alone.
+    assert!(items[0].get("aliases").is_none() && items[0].get("details").is_none());
     assert!(items
         .as_array()
         .unwrap()
@@ -2115,8 +2132,8 @@ async fn cards_carry_the_timezone_boundary_attribution(pool: PgPool) {
     let (code, card) = call(&app, "GET", &format!("/v1/resources/{id}"), None).await;
     assert_eq!(code, 200, "{card}");
     assert_eq!(card["attribution"], pinakes_core::event::time::ATTRIBUTION);
-    assert_eq!(card["details"]["tz"], "Europe/Zurich");
-    assert!(card["details"]["organizer"].is_null(), "{card}");
+    assert_eq!(card["tz"], "Europe/Zurich");
+    assert!(card["organizer"].is_null(), "{card}");
     // A venue that is an OSM place supplies its own credit; both are kept.
     let mut placed = doc.clone();
     placed.attribution = Some("© OpenStreetMap contributors (ODbL)".into());
@@ -2150,12 +2167,17 @@ async fn the_stored_document_is_an_admin_read(pool: PgPool) {
     assert!(!common::validate(&[common::document()], "GET", &path, 200, &doc).is_empty());
     assert_eq!(call(&public, "GET", &path, None).await.0, 404);
     let (_, card) = call(&public, "GET", &format!("/v1/resources/{}", ids[0]), None).await;
-    for internal in ["source", "ttl_secs", "group_keys", "attributes", "warnings"] {
+    for internal in [
+        "source",
+        "ttl_secs",
+        "group_keys",
+        "attributes",
+        "warnings",
+        "content_type",
+        "content_length",
+        "details",
+    ] {
         assert!(card.get(internal).is_none(), "{internal}: {card}");
-        assert!(
-            card["details"].get(internal).is_none(),
-            "{internal}: {card}"
-        );
     }
     let unknown = "/v1/resources/00000000000000000000000000000000/document";
     assert_eq!(admin_call(&admin, "GET", unknown, None).await.0, 404);
@@ -2216,7 +2238,7 @@ async fn an_alias_reads_as_its_root_everywhere(pool: PgPool) {
         (Some(root.as_str()), Some("Talk"))
     );
     // Its aliases are the spellings that resolve to it, never the page's claims.
-    assert_eq!(card["details"]["aliases"], json!([variant]), "{card}");
+    assert_eq!(card["aliases"], json!([variant]), "{card}");
     for claimed in [
         "https://www.wikidata.org/entity/Q7024",
         "https://www.lugano.ch/",

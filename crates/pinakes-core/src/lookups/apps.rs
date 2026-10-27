@@ -216,6 +216,15 @@ impl super::Family for Lookups {
     }
 }
 
+/// The forms of key the app stores source records (`also_on::Source::key_forms`).
+pub const KEY_FORMS: &[(&str, &str)] = &[
+    ("android", "org.thoughtcrime.securesms"),
+    ("appstore", "874139669"),
+    ("flathub", "org.signal.Signal"),
+    ("snap", "signal-desktop"),
+    ("msstore", "9NBLGGH4N8RD"),
+    ("wikidata", "Q42"),
+];
 pub mod also_on {
     use super::{app_from_uri, app_match, item_keys, Store};
     use crate::{
@@ -234,6 +243,9 @@ pub mod also_on {
 
     #[async_trait]
     impl Source for AppStores {
+        fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+            crate::lookups::apps::KEY_FORMS
+        }
         fn single_namespaces(&self) -> &'static [&'static str] {
             &["android", "appstore", "flathub", "snap", "msstore"]
         }

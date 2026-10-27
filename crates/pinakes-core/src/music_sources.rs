@@ -81,6 +81,17 @@ pub(crate) async fn shared_isrc(cx: &Context, isrc: &str) -> Result<bool> {
 /// same answer): its title, its type (a recording, an album, an artist that is a person or a
 /// group), the artist credit and a recording's length. An ISRC's page is its one recording's card
 /// under the ISRC's own link, or the ISRC's when several recordings or none have it.
+/// The forms of key the music sources record (`also_on::Source::key_forms`): ISRCs, barcodes,
+/// MusicBrainz IDs at each level, Wikidata items.
+pub const KEY_FORMS: &[(&str, &str)] = &[
+    ("isrc", "USIR10211559"),
+    ("upc", "0602498688373"),
+    ("mb:recording", "8f3471b5-7e6a-48da-86a9-c1c07a0f47ae"),
+    ("mb:release", "8f3471b5-7e6a-48da-86a9-c1c07a0f47ae"),
+    ("mb:release-group", "8f3471b5-7e6a-48da-86a9-c1c07a0f47ae"),
+    ("mb:artist", "8f3471b5-7e6a-48da-86a9-c1c07a0f47ae"),
+    ("wikidata", "Q42"),
+];
 pub fn musicbrainz_card(
     uri: &str,
     entity: Option<&musicbrainz::Entity>,

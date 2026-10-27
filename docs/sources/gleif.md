@@ -23,7 +23,7 @@ links all name the same page and are not read as records.
 ## Card
 
 An `Organization` named by its legal name, described by its LEI, legal seat and entity status, with
-the legal address in `details.address`.
+the legal address in `address`.
 
 | Fact | Meaning |
 | --- | --- |

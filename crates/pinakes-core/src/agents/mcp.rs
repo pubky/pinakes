@@ -172,22 +172,23 @@ impl Tools {
             }
             answer => answer?,
         };
+        // A read is one flat object: the card's fields and the read's beside them.
         let mut card = compact(&caller.base, &detail);
-        let details = &detail["details"];
         for key in [
             "category",
             "address",
             "facts",
+            "keys",
             "tz",
             "event_status",
             "venue",
             "organizer",
         ] {
-            if !details[key].is_null() {
-                card[key] = details[key].clone();
+            if !detail[key].is_null() {
+                card[key] = detail[key].clone();
             }
         }
-        let aliases: Vec<Value> = details["aliases"]
+        let aliases: Vec<Value> = detail["aliases"]
             .as_array()
             .map(|a| a.iter().take(10).cloned().collect())
             .unwrap_or_default();
@@ -549,10 +550,14 @@ fn compact(base: &str, card: &Value) -> Value {
     if card["group"].is_object() {
         out.insert("group".into(), card["group"].clone());
     }
+    // One link per service, at most eight, as a search card has them: a read lists every link.
+    let mut sites = std::collections::HashSet::new();
     let also_on: Vec<Value> = card["also_on"]
         .as_array()
         .into_iter()
         .flatten()
+        .filter(|a| sites.insert(a["site"].to_string()))
+        .take(8)
         .map(|a| json!({"uri": a["uri"], "site": a["site"]}))
         .collect();
     if !also_on.is_empty() {

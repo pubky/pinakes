@@ -25,6 +25,9 @@ fn service_host(url: &str) -> Option<String> {
 pub struct PerformersSource;
 #[async_trait]
 impl Source for PerformersSource {
+    fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+        crate::music_sources::KEY_FORMS
+    }
     fn id(&self) -> &'static str {
         "performers"
     }

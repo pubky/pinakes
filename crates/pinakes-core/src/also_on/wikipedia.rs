@@ -13,6 +13,9 @@ use crate::wikipedia::*;
 pub struct WikipediaSource;
 #[async_trait]
 impl Source for WikipediaSource {
+    fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+        &[("wikidata", "Q42")]
+    }
     fn id(&self) -> &'static str {
         "wikipedia"
     }

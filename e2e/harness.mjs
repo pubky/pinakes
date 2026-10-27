@@ -314,11 +314,11 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
       assert.deepEqual(looked.items.map(o => [o.id, o.start, o.occurrence.uid]), occurrences.items.map(o => [o.id, o.start, o.occurrence.uid]),
         'the occurrence lookup of the feed and an unknown ID answers the feed\'s occurrences');
       report.assertions.push('ICS occurrences');
-      positiveVenue ||= !!event.details.venue?.id;
-      const venue = event.details.venue?.id ?? docs.get('osm').id;
+      positiveVenue ||= !!event.venue?.id;
+      const venue = event.venue?.id ?? docs.get('osm').id;
       const atVenue = await search({ type: 'Event', venue });
       for (const row of atVenue.items.filter(row => !row.occurrence)) {
-        assert.equal((await json(`${pinakes}/v1/resources/${row.id}`)).details.venue?.id, venue);
+        assert.equal((await json(`${pinakes}/v1/resources/${row.id}`)).venue?.id, venue);
       }
       if (positiveVenue) assert(atVenue.items.some(row => row.id === event.id), 'Fixture venue must match');
       report.assertions.push(positiveVenue ? 'positive venue match' : `venue filter (${atVenue.items.length} matches)`);
@@ -342,11 +342,11 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
       assert(byLinks.lines.every(line => byId.has(line.seq) || aliases.has(line.resource_id)), 'a change lookup by links adds only aliases\' own lines');
       report.assertions.push('change lookup by IDs and by links, and its pages');
       // Pinakes and Nexus combine by URI, as a client does: each card's own `uri` and its
-      // `details.aliases`, and for an occurrence `occurrence.feed_uri` (its own URL was never
+      // `aliases`, and for an occurrence `occurrence.feed_uri` (its own URL was never
       // tagged). Those links cover every tagged one, and Nexus hydrates each.
       const occurrence = occurrences.items[0];
       assert.equal(occurrence.occurrence.feed_uri, docs.get('ics').uri, 'an occurrence names its feed\'s URI');
-      const asked = [...new Set([...docs.values()].flatMap(d => [d.uri, ...d.details.aliases]).concat(occurrence.occurrence.feed_uri))];
+      const asked = [...new Set([...docs.values()].flatMap(d => [d.uri, ...d.aliases]).concat(occurrence.occurrence.feed_uri))];
       for (const uri of uris) assert(asked.includes(uri), `A card's links must cover the tagged link ${uri}`);
       const hydrated = [];
       for (let i = 0; i < asked.length; i += 100) {
@@ -383,8 +383,8 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
           // An alias (another spelling) reads as its root: one resource, no group needed.
           if (ids[0] === ids[1]) continue;
           const card = await json(`${pinakes}/v1/resources/${ids[0]}`);
-          // Every member is in `details.also_on` (the card shows one per music service).
-          if (!card.details.also_on.some(entry => entry.id === ids[1])) return false;
+          // Every member is in a read's `also_on` (a search card shows one per music service).
+          if (!card.also_on.some(entry => entry.id === ids[1])) return false;
           const detail = await json(`${pinakes}/v1/groups/${card.group.id}`);
           assert(!('best' in detail), 'a group has no best card');
           assert(ids.every(id => detail.members.some(member => member.id === id)), 'the group lists both members');
@@ -420,7 +420,7 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
           const card = await json(`${pinakes}/v1/resources/${a}`);
           if (!card.maybe_same?.some(entry => entry.id === b)) return false;
           if (!(await json(`${pinakes}/v1/resources/${b}`)).maybe_same?.some(entry => entry.id === a)) return false;
-          assert(card.maybe_same.length <= 3 && card.details.maybe_same.length <= 10);
+          assert(card.maybe_same.length <= 10);
           for (const entry of card.maybe_same) {
             assert(entry.uri && entry.start && entry.score >= 0.5 && entry.score <= 1, 'a same-event entry is {id, uri, site, start, score}');
           }
@@ -472,12 +472,12 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
         assert(card.also_on.every(e => !e.derived || (e.via && e.uri !== card.uri)), 'a derived link names its hub and is never the card');
         report.assertions.push(`also on: ${sample.kind} derived ${sample.derived.join(', ')} (${card.also_on.filter(e => e.derived).length} derived links)`);
       }
-      // A sample naming `facts` shows each in its details (a TIDAL track's own ISRC, also when no
+      // A sample naming `facts` shows each in its read (a TIDAL track's own ISRC, also when no
       // other link shares it).
       for (const sample of samples.filter(s => s.facts)) {
         await waitFor(`facts for ${sample.kind}`, async () => {
           const card = await json(`${pinakes}/v1/resources/${docs.get(sample.kind).id}`);
-          const facts = card.details?.facts || {};
+          const facts = card.facts || {};
           return Object.entries(sample.facts).every(([name, value]) => String(facts[name] || '').split('; ').includes(value));
         }, timeout, signal);
         report.assertions.push(`facts: ${sample.kind} ${Object.entries(sample.facts).map(([k, v]) => `${k}=${v}`).join(', ')}`);

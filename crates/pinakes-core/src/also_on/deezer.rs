@@ -45,6 +45,9 @@ async fn deezer(cx: &Context, path: &str) -> Result<Option<Value>> {
 pub struct DeezerSource;
 #[async_trait]
 impl Source for DeezerSource {
+    fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+        crate::music_sources::KEY_FORMS
+    }
     fn budgets(&self) -> &'static [(&'static str, f64)] {
         // Deezer's public API: 50 requests per 5 seconds.
         &[("api.deezer.com", 10.0)]

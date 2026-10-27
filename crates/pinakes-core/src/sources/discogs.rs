@@ -320,6 +320,14 @@ pub mod also_on {
 
     #[async_trait]
     impl Source for Discogs {
+        fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+            &[
+                ("discogs:artist", "1"),
+                ("discogs:master", "21491"),
+                ("discogs:release", "249504"),
+                ("upc", "0602498688373"),
+            ]
+        }
         fn single_namespaces(&self) -> &'static [&'static str] {
             &["discogs:artist", "discogs:master", "discogs:release"]
         }

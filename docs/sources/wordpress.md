@@ -27,7 +27,7 @@ leaves the page's own card.
 
 The page's card with the post's title, excerpt (at most 300 characters) and featured image. A
 page typed as an article keeps its type (`NewsArticle`, `BlogPosting`…); any other becomes
-`BlogPosting`. `details.from` is `wordpress`.
+`BlogPosting`. `from` is `wordpress`.
 
 | Fact | Meaning |
 | --- | --- |

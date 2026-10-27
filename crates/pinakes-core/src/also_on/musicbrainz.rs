@@ -15,6 +15,9 @@ const MAX_EDITIONS: usize = 4;
 pub struct MusicBrainzSource;
 #[async_trait]
 impl Source for MusicBrainzSource {
+    fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+        crate::music_sources::KEY_FORMS
+    }
     fn id(&self) -> &'static str {
         "musicbrainz"
     }

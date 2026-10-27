@@ -327,6 +327,9 @@ impl Films {
 
 #[async_trait]
 impl Source for Films {
+    fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+        &[("imdb", "tt0077651"), ("wikidata", "Q42")]
+    }
     fn link_type(&self, uri: &str) -> Option<Option<&'static str>> {
         let kind = match film(uri)? {
             Film::Tmdb { tv: false, .. } | Film::Letterboxd(_) => Some("Movie"),

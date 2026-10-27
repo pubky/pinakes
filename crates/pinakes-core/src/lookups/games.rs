@@ -226,6 +226,12 @@ fn wiki_namespace(title: &str) -> bool {
         .contains(&namespace.as_str())
 }
 
+/// The forms of key the games sources record (`also_on::Source::key_forms`).
+pub const KEY_FORMS: &[(&str, &str)] = &[
+    ("steam", "1127400"),
+    ("gog", "1207658924"),
+    ("wikidata", "Q42"),
+];
 pub mod also_on {
     use crate::{
         also_on::{self, Context, Source, Subject},
@@ -242,6 +248,9 @@ pub mod also_on {
 
     #[async_trait]
     impl Source for Steam {
+        fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+            crate::lookups::games::KEY_FORMS
+        }
         fn single_namespaces(&self) -> &'static [&'static str] {
             &["steam", "gog"]
         }
@@ -414,6 +423,9 @@ pub mod also_on {
 
     #[async_trait]
     impl Source for WikidataStores {
+        fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+            crate::lookups::games::KEY_FORMS
+        }
         fn id(&self) -> &'static str {
             "wikidata_stores"
         }

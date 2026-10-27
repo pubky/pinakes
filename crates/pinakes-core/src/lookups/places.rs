@@ -244,6 +244,8 @@ fn editions(hub: &crate::hubs::wikidata::Item) -> Vec<crate::also_on::Link> {
     wikipedia
 }
 
+/// The forms of key the places sources record (`also_on::Source::key_forms`).
+pub const KEY_FORMS: &[(&str, &str)] = &[("osm", "node/240109189"), ("wikidata", "Q42")];
 pub mod also_on {
     use super::editions;
     use crate::{
@@ -268,6 +270,9 @@ pub mod also_on {
 
     #[async_trait]
     impl Source for OsmWikidata {
+        fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+            crate::lookups::places::KEY_FORMS
+        }
         fn id(&self) -> &'static str {
             "osm_wikidata"
         }
@@ -370,6 +375,9 @@ pub mod also_on {
 
     #[async_trait]
     impl Source for WikidataOsm {
+        fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+            crate::lookups::places::KEY_FORMS
+        }
         fn id(&self) -> &'static str {
             "wikidata_osm"
         }
@@ -411,6 +419,9 @@ pub mod also_on {
 
     #[async_trait]
     impl Source for WikidataPlaces {
+        fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+            crate::lookups::places::KEY_FORMS
+        }
         fn id(&self) -> &'static str {
             "wikidata_places"
         }
@@ -559,6 +570,9 @@ pub mod also_on {
 
     #[async_trait]
     impl Source for Btcmap {
+        fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+            crate::lookups::places::KEY_FORMS
+        }
         /// A merchant page only: `/merchant/{node|way|relation}:{id}`.
         fn service_name(&self, host: &str, url: &url::Url) -> Option<&'static str> {
             let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();

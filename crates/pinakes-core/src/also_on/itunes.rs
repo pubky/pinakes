@@ -13,6 +13,9 @@ use crate::music_sources::*;
 pub struct ItunesSource;
 #[async_trait]
 impl Source for ItunesSource {
+    fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+        crate::music_sources::KEY_FORMS
+    }
     fn id(&self) -> &'static str {
         "itunes"
     }

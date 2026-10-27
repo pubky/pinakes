@@ -278,7 +278,7 @@ async fn fifty_one_jobs_two_calls_cache_refresh_and_separation(pool: PgPool) {
     assert_eq!(view["name"], "Berlin");
     assert_eq!(view["attribution"], osm::ATTRIBUTION);
     assert!(view["point"].is_object(), "{view}");
-    assert_eq!(view["details"]["category"], "place/city");
+    assert_eq!(view["category"], "place/city");
     // The table carries its licence, so a pg_dump of it does too.
     let notice: String = sqlx::query_scalar("SELECT obj_description('osm_place'::regclass)")
         .fetch_one(&pool)

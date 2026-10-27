@@ -140,7 +140,7 @@ async fn one_meetup_on_three_sites_names_the_others(pool: PgPool) {
         .map(|m| m["score"].as_f64().unwrap())
         .collect();
     assert!(scores.windows(2).all(|w| w[0] >= w[1]), "best first");
-    assert_eq!(c["details"]["maybe_same"], c["maybe_same"]);
+    assert_eq!(c["maybe_same"], c["maybe_same"]);
     // Symmetric: each names the meetup.
     for id in [&luma, &site] {
         assert!(named(&card(&pool, id).await).contains(&meetup.as_str()));
@@ -180,12 +180,19 @@ async fn a_card_shows_three_and_its_details_ten(pool: PgPool) {
         .await;
     }
     pass(&pool, &Config::default()).await;
+    // A resource read names up to ten; a search card up to three.
     let c = card(&pool, &first).await;
-    assert_eq!(c["maybe_same"].as_array().unwrap().len(), 3);
-    assert_eq!(c["details"]["maybe_same"].as_array().unwrap().len(), 10);
+    assert_eq!(c["maybe_same"].as_array().unwrap().len(), 10);
     // Nothing is counted: no group, and search lists every page.
     let page = get(&Config::default(), &pool, "/v1/search?type=Event").await;
     assert_eq!(page["items"].as_array().unwrap().len(), 12);
+    let row = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == first.as_str())
+        .unwrap();
+    assert_eq!(row["maybe_same"].as_array().unwrap().len(), 3);
 }
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
@@ -496,7 +503,7 @@ async fn off_removes_the_field_and_computes_nothing(pool: PgPool) {
     .await;
     assert_eq!(same_event::drain(&pool, &off, 200).await.unwrap(), 0);
     let c = get(&off, &pool, &format!("/v1/resources/{a}")).await;
-    assert!(c.get("maybe_same").is_none() && c["details"].get("maybe_same").is_none());
+    assert!(c.get("maybe_same").is_none());
     let page = get(&off, &pool, "/v1/search?type=Event").await;
     assert!(page["items"]
         .as_array()

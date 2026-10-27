@@ -63,8 +63,9 @@ curl -s '{{BASE}}/v1/resources/by-uri?uri=https://www.imdb.com/title/tt0111161/'
 ```
 
 Any spelling works (`http`, `www.`, a trailing slash, tracking parameters, a short link the
-index knows as an alias). `details` adds the address, facts from official APIs, every
-`also_on` link and the other spellings (`aliases`). To have an unknown link read, see
+index knows as an alias). A read is one flat object: the card's fields, and beside them the
+address, facts from official APIs, every `also_on` link, the keys `key=` takes (`keys`) and the
+other spellings (`aliases`). To have an unknown link read, see
 `POST /v1/resolve` under Limits.
 
 **Places near a point, tagged something.**
