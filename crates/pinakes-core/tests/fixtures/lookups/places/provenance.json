@@ -29,6 +29,16 @@
     "status": 200,
     "url": "https://nominatim.openstreetmap.org/lookup?osm_ids=R2888417,N9984134345,W70417858&format=jsonv2&extratags=1"
   },
+  "wikidata-q243": {
+    "bytes": 32447,
+    "content_type": "application/json; charset=utf-8",
+    "file": "wikidata-q243.json",
+    "note": "Trimmed from the recorded answer (155334 bytes, sha256 ec32a7a81e6e46c9093333819587ae47f44e0d0247c381aaee3bec3688042eca): each item keeps only its id, type, sitelinks and the claims the places lookups read (P31, P402, P856, P3108, P3134, P3749, P10046, P10689, P11693).",
+    "recorded_at": "2026-10-26T19:02:27+00:00",
+    "sha256": "18ee976942adbd33a78381a240b242abac4305fe21717e4ebcd505bb2b707e4e",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q243&props=claims%7Csitelinks%2Furls&format=json"
+  },
   "wikidata-q64": {
     "bytes": 438666,
     "content_type": "application/json; charset=utf-8",
@@ -48,5 +58,14 @@
     "sha256": "4a5fad501bb84fc0a6ee7485a9702946aac7a6c2f65e04e1a52f47edee6e3bdc",
     "status": 200,
     "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q90&props=claims%7Csitelinks%2Furls&format=json"
+  },
+  "wikidata-search-p3134-188151": {
+    "bytes": 544,
+    "content_type": "application/json; charset=utf-8",
+    "file": "wikidata-search-p3134-188151.json",
+    "recorded_at": "2026-10-26T19:02:27+00:00",
+    "sha256": "ff44814903c9302d01b39726b48c9d2420f76bfb10cccf1f1c3e01e746e799f6",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP3134%3D188151&srlimit=5&format=json"
   }
 }

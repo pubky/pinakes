@@ -23,12 +23,18 @@ use serde_json::Value;
 const OPEN_LIBRARY: &str = "https://openlibrary.org";
 
 /// What a link names: an edition by ISBN-13, or by its Open Library edition ID, or a work by
-/// its Open Library work ID.
+/// its Open Library work ID; or a book's page on another service its Wikidata item names, by
+/// the property and the value the link holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Book {
     Isbn(String),
     Edition(String),
     Work(String),
+    Wikidata {
+        pid: &'static str,
+        site: &'static str,
+        value: String,
+    },
 }
 
 /// An Open Library ID of one kind: `OL`, digits, then `M` (edition) or `W` (work).
@@ -38,8 +44,42 @@ fn ol_id(value: &str, kind: char) -> Option<String> {
 }
 
 /// The book a link names: `isbn:…`, `openlibrary.org/isbn/{isbn}`,
-/// `openlibrary.org/books/{OL…M}` or `openlibrary.org/works/{OL…W}` (any title slug after it).
+/// `openlibrary.org/books/{OL…M}` or `openlibrary.org/works/{OL…W}` (any title slug after it);
+/// else a Goodreads book (`goodreads.com/book/show/{id}`, an edition: P2969) or any page of the
+/// work [`WIKIDATA`] links to (`goodreads.com/work/editions/{id}`, LibraryThing, Project
+/// Gutenberg, …), by the value it holds.
 pub fn book(uri: &str) -> Option<Book> {
+    named(uri).or_else(|| goodreads_book(uri)).or_else(|| {
+        WIKIDATA.iter().find_map(|p| {
+            p.value_in(uri).map(|value| Book::Wikidata {
+                pid: p.pid,
+                site: p.site,
+                value,
+            })
+        })
+    })
+}
+/// A Goodreads book page (`book/show/{id}`, with the title after the ID or not): an edition,
+/// whose Wikidata property is P2969.
+fn goodreads_book(uri: &str) -> Option<Book> {
+    let url = url::Url::parse(uri).ok()?;
+    if !matches!(url.scheme(), "https" | "http")
+        || !matches!(url.host_str()?, "goodreads.com" | "www.goodreads.com")
+    {
+        return None;
+    }
+    let s: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
+    let ["book", "show", id] = s.as_slice() else {
+        return None;
+    };
+    let id = id.split(['.', '-']).next()?;
+    digits(id).then(|| Book::Wikidata {
+        pid: "P2969",
+        site: "Goodreads",
+        value: id.to_owned(),
+    })
+}
+fn named(uri: &str) -> Option<Book> {
     if uri.starts_with("isbn:") {
         return cards::isbn(uri).map(|n| Book::Isbn(cards::isbn13(&n)));
     }
@@ -105,12 +145,14 @@ pub fn parse_work(status: u16, raw: &[u8], id: &str) -> Result<WorkRecord> {
     })
 }
 
-/// The edition's Open Library record (a by-ISBN request redirects to it).
+/// The edition's Open Library record (a by-ISBN request redirects to it); none for another
+/// service's page, whose Wikidata item is read first (`Books::by_item`).
 pub fn edition_request(book: &Book) -> String {
     match book {
         Book::Isbn(isbn) => format!("{OPEN_LIBRARY}/isbn/{isbn}.json"),
         Book::Edition(id) => format!("{OPEN_LIBRARY}/books/{id}.json"),
         Book::Work(id) => work_request(id),
+        Book::Wikidata { .. } => String::new(),
     }
 }
 
@@ -184,7 +226,7 @@ pub fn parse_edition(status: u16, raw: &[u8], book: &Book) -> Result<Option<Edit
     let theirs = match book {
         Book::Isbn(isbn) => isbns.contains(isbn),
         Book::Edition(asked) => *asked == id,
-        Book::Work(_) => false,
+        Book::Work(_) | Book::Wikidata { .. } => false,
     };
     anyhow::ensure!(theirs, "Open Library answered for another edition");
     let works: Vec<String> = v["works"]
@@ -385,6 +427,7 @@ impl Source for Books {
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
         match book(&subject.uri) {
             Some(Book::Work(id)) => Self::work(cx, &id).await,
+            Some(Book::Wikidata { pid, site, value }) => Self::by_item(cx, pid, &value, site).await,
             Some(book) => Self::edition(cx, &book).await,
             None => Ok(Found::default()),
         }
@@ -471,6 +514,61 @@ impl Books {
     }
     /// A work: its Open Library record (following merges to the work it is now), then its
     /// Wikidata item.
+    /// A book's page on another service: the one Wikidata item carrying the link's value, then
+    /// the Open Library work or edition that item names (an edition item without one, the work
+    /// it is an edition of), as from an Open Library link; the Open Library page is a link, and
+    /// the link's own service is the card itself.
+    async fn by_item(cx: &Context, pid: &str, value: &str, own: &str) -> Result<Found> {
+        // An answer over its read's cap is no answer: asking again would read the same megabytes.
+        let over_cap = |e: &anyhow::Error| crate::resolver::egress::over_cap(e);
+        let item = match wikidata::item_with(&cx.egress, pid, value).await {
+            Ok(wikidata::Found::One(item)) => item,
+            Ok(_) => return Ok(Found::default()),
+            Err(error) if over_cap(&error) => return Ok(Found::default()),
+            Err(error) => return Err(error),
+        };
+        let open_library = |item: &wikidata::Item| match item.id("P648") {
+            [id] => ol_id(id, 'W')
+                .map(Book::Work)
+                .or_else(|| ol_id(id, 'M').map(Book::Edition)),
+            _ => None,
+        };
+        let mut book = open_library(&item);
+        if let (None, [work]) = (&book, item.edition_of.as_slice()) {
+            let works = match wikidata::items(&cx.egress, std::slice::from_ref(work)).await {
+                Err(error) if over_cap(&error) => vec![],
+                works => works?,
+            };
+            book = works.iter().find(|w| &w.qid == work).and_then(open_library);
+        }
+        let (mut found, page) = match book {
+            Some(Book::Work(id)) => (
+                Self::work(cx, &id).await?,
+                (
+                    format!("{OPEN_LIBRARY}/works/{id}"),
+                    format!("openlibrary:work:{id}"),
+                ),
+            ),
+            Some(Book::Edition(id)) => {
+                let found = Self::edition(cx, &Book::Edition(id.clone())).await?;
+                let key = found
+                    .keys
+                    .first()
+                    .map(|k| k.key.clone())
+                    .unwrap_or_default();
+                (found, (format!("{OPEN_LIBRARY}/books/{id}"), key))
+            }
+            _ => return Ok(Found::default()),
+        };
+        if !found.links.iter().any(|l| l.uri == page.0) && !page.1.is_empty() {
+            found.links.insert(
+                0,
+                Link::new(page.0, "Open Library", "wikidata").keyed(page.1),
+            );
+        }
+        found.links.retain(|l| l.site != own);
+        Ok(found)
+    }
     async fn work(cx: &Context, asked: &str) -> Result<Found> {
         let mut id = asked.to_owned();
         for _ in 0..3 {

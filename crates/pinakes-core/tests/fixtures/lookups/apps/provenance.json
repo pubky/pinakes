@@ -1,0 +1,87 @@
+{
+  "wikidata-q15871857-q19718090": {
+    "bytes": 25296,
+    "content_type": "application/json; charset=utf-8",
+    "file": "wikidata-q15871857-q19718090.json",
+    "note": "Trimmed from the recorded answer (4994897 bytes, sha256 f5e613fed4c0685cd0f87f85c106261972d1400909e45632476adfd25e550a05): each item keeps only its id, type, sitelinks and the claims the apps lookup reads (store IDs, P1365, P1366, P856, P31).",
+    "recorded_at": "2026-10-26T18:19:16+00:00",
+    "sha256": "19b159acd95dd9ec65b56b3999fedf49b2c62f149ff5c2fd7fe29fbc25a70bf4",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q15871857%7CQ19718090&props=claims%7Csitelinks%2Furls&format=json"
+  },
+  "wikidata-q16927599": {
+    "bytes": 163686,
+    "content_type": "application/json; charset=utf-8",
+    "file": "wikidata-q16927599.json.gz",
+    "note": "AntennaPod.",
+    "recorded_at": "2026-10-19T23:09:40+00:00",
+    "sha256": "aa4bd38e9dd2e1c5ddd2a9e8215f717b73032238ba23f6dc34b41bfea78d3427",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q16927599&props=claims%7Csitelinks%2Furls&format=json"
+  },
+  "wikidata-q19718090": {
+    "bytes": 18103,
+    "content_type": "application/json; charset=utf-8",
+    "file": "wikidata-q19718090.json",
+    "note": "Trimmed from the recorded answer (2669870 bytes, sha256 2dbf28423e6d21181c4329b466a0588de1a0b877752d2faef5df65c4e3004a16): each item keeps only its id, type, sitelinks and the claims the apps lookup reads (store IDs, P1365, P1366, P856, P31).",
+    "recorded_at": "2026-10-26T18:19:27+00:00",
+    "sha256": "baab76782650fb25587978195cb128ab2a044b87b0b0883449fbf2f94d2b6662",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q19718090&props=claims%7Csitelinks%2Furls&format=json"
+  },
+  "wikidata-search-p3418-antennapod": {
+    "bytes": 360,
+    "content_type": "application/json; charset=utf-8",
+    "file": "wikidata-search-p3418-antennapod.json",
+    "note": "The item with Google Play ID de.danoeh.antennapod (AntennaPod).",
+    "recorded_at": "2026-10-19T23:09:39+00:00",
+    "sha256": "13811f7e24d156f63ac01973d680e62a3b00f7ddb219ca4ae215525eb056e95b",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP3418%3Dde.danoeh.antennapod&srlimit=5&format=json"
+  },
+  "wikidata-search-p3418-securesms": {
+    "bytes": 1261,
+    "content_type": "application/json; charset=utf-8",
+    "file": "wikidata-search-p3418-securesms.json",
+    "recorded_at": "2026-10-26T18:19:15+00:00",
+    "sha256": "f925b1b98885055da5931b87e3b83f8faada0e2587db42942601bde998391a9b",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP3418%3Dorg.thoughtcrime.securesms&srlimit=5&format=json"
+  },
+  "wikidata-search-p3597-unlisted": {
+    "bytes": 71,
+    "content_type": "application/json; charset=utf-8",
+    "file": "wikidata-search-p3597-unlisted.json",
+    "recorded_at": "2026-10-26T18:19:16+00:00",
+    "sha256": "688d401ed6447a04b61b8b5aea327e975f2f69ec5596d800d49a0b230236ea4b",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP3597%3Dorg.example.unlisted&srlimit=5&format=json"
+  },
+  "wikidata-search-p3861-874139669": {
+    "bytes": 919,
+    "content_type": "application/json; charset=utf-8",
+    "file": "wikidata-search-p3861-874139669.json",
+    "recorded_at": "2026-10-26T18:19:16+00:00",
+    "sha256": "bb86cfbfa30eac5adb568ec6d647e85f7ebd560eaad20fcf386f6713da894878",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP3861%3D874139669&srlimit=5&format=json"
+  },
+  "wikidata-search-p4435-signal-desktop": {
+    "bytes": 919,
+    "content_type": "application/json; charset=utf-8",
+    "file": "wikidata-search-p4435-signal-desktop.json",
+    "recorded_at": "2026-10-26T18:22:21+00:00",
+    "sha256": "bb86cfbfa30eac5adb568ec6d647e85f7ebd560eaad20fcf386f6713da894878",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP4435%3Dsignal-desktop&srlimit=5&format=json"
+  },
+  "wikidata-search-p4655-signal": {
+    "bytes": 919,
+    "content_type": "application/json; charset=utf-8",
+    "file": "wikidata-search-p4655-signal.json",
+    "recorded_at": "2026-10-26T18:22:21+00:00",
+    "sha256": "bb86cfbfa30eac5adb568ec6d647e85f7ebd560eaad20fcf386f6713da894878",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP4655%3Dorg.signal.Signal&srlimit=5&format=json"
+  }
+}

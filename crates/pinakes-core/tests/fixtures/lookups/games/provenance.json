@@ -75,16 +75,6 @@
     "status": 200,
     "url": "https://www.protondb.com/api/v1/reports/summaries/620.json"
   },
-  "wikidata-q16927599": {
-    "bytes": 163686,
-    "content_type": "application/json; charset=utf-8",
-    "file": "wikidata-q16927599.json.gz",
-    "note": "AntennaPod.",
-    "recorded_at": "2026-10-19T23:09:40+00:00",
-    "sha256": "aa4bd38e9dd2e1c5ddd2a9e8215f717b73032238ba23f6dc34b41bfea78d3427",
-    "status": 200,
-    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q16927599&props=claims%7Csitelinks%2Furls&format=json"
-  },
   "wikidata-q279446": {
     "bytes": 241093,
     "content_type": "application/json; charset=utf-8",
@@ -94,6 +84,16 @@
     "sha256": "007aee78ff0c4f91932b1790d9b09ada02e08666a1f6bae5a737c00a88633f56",
     "status": 200,
     "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q279446&props=claims%7Csitelinks%2Furls&format=json"
+  },
+  "wikidata-q4267401": {
+    "bytes": 13459,
+    "content_type": "application/json; charset=utf-8",
+    "file": "wikidata-q4267401.json",
+    "note": "Trimmed from the recorded answer (265307 bytes, sha256 7c0ae62e46c6c36309c1206e94dd5516524017adddb374af2fb080d7974736c7): each item keeps only its id, type, sitelinks and the claims the games lookups read (P31, P1365, P1366, P1733, P2725, P2816, P5794, P6278, P6337, P7294, P11688).",
+    "recorded_at": "2026-10-26T19:03:24+00:00",
+    "sha256": "4cd1fc791e51ecf4c0fc5fa79bb3fae16e2c11b0993a5562156ec906798fa27b",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q4267401&props=claims%7Csitelinks%2Furls&format=json"
   },
   "wikidata-search-p1733-620": {
     "bytes": 719,
@@ -105,14 +105,13 @@
     "status": 200,
     "url": "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP1733%3D620&srlimit=5&format=json"
   },
-  "wikidata-search-p3418-antennapod": {
-    "bytes": 360,
+  "wikidata-search-p2725-witcher-3": {
+    "bytes": 631,
     "content_type": "application/json; charset=utf-8",
-    "file": "wikidata-search-p3418-antennapod.json",
-    "note": "The item with Google Play ID de.danoeh.antennapod (AntennaPod).",
-    "recorded_at": "2026-10-19T23:09:39+00:00",
-    "sha256": "13811f7e24d156f63ac01973d680e62a3b00f7ddb219ca4ae215525eb056e95b",
+    "file": "wikidata-search-p2725-witcher-3.json",
+    "recorded_at": "2026-10-26T19:03:24+00:00",
+    "sha256": "da260af440861a533373b7adbb89bf7f414bd5b4b874b2c98fc45c9cdb72da57",
     "status": 200,
-    "url": "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP3418%3Dde.danoeh.antennapod&srlimit=5&format=json"
+    "url": "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP2725%3Dgame%2Fthe_witcher_3_wild_hunt&srlimit=5&format=json"
   }
 }

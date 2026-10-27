@@ -4,6 +4,7 @@ pub mod agents;
 pub mod alias;
 pub mod also_on;
 pub mod api;
+pub mod app_ids;
 pub mod canary;
 pub mod change_api;
 pub mod changes;

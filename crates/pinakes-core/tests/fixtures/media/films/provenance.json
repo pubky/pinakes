@@ -36,6 +36,15 @@
     "status": 404,
     "url": "https://api.tvmaze.com/lookup/shows?imdb=tt0111161"
   },
+  "tvmaze-imdb-tt0077651": {
+    "bytes": 4,
+    "content_type": "application/json; charset=UTF-8",
+    "file": "tvmaze-imdb-tt0077651.json",
+    "recorded_at": "2026-10-26T19:03:09+00:00",
+    "sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+    "status": 404,
+    "url": "https://api.tvmaze.com/lookup/shows?imdb=tt0077651"
+  },
   "tvmaze-imdb-tt0903747": {
     "bytes": 4,
     "content_type": "application/json",

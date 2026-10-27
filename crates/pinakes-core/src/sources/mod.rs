@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::OnceLock};
 
+pub mod app_store;
 pub mod artic;
 pub mod biodiversity;
 pub mod bluesky;
@@ -36,16 +37,19 @@ pub mod discourse;
 pub mod docker_hub;
 pub mod ecfr;
 pub mod eur_lex;
+pub mod fdroid;
 pub mod federal_register;
 pub mod fedlex;
 pub mod feed;
 pub mod figshare;
+pub mod flathub;
 pub mod forgejo;
 pub mod gbif;
 pub mod ghost;
 pub mod github;
 pub mod gitlab;
 pub mod gleif;
+pub mod google_play;
 pub mod govinfo;
 pub mod hacker_news;
 pub mod huggingface;
@@ -64,6 +68,7 @@ pub mod pubchem;
 pub mod public_inbox;
 pub mod ror;
 pub mod sec;
+pub mod snap_store;
 pub mod stacker_news;
 pub mod swiss_parliament;
 pub mod uk_parliament_bills;
@@ -76,6 +81,7 @@ pub mod zenodo;
 /// Every source, one line each, in alphabetical order of name.
 #[rustfmt::skip]
 pub static REGISTRY: &[&dyn Source] = &[
+    &app_store::AppStore,
     &artic::Artic,
     &bluesky::Bluesky,
     &cleveland::Cleveland,
@@ -87,16 +93,19 @@ pub static REGISTRY: &[&dyn Source] = &[
     &docker_hub::DockerHub,
     &ecfr::Ecfr,
     &eur_lex::EurLex,
+    &fdroid::FDroid,
     &federal_register::FederalRegister,
     &fedlex::Fedlex,
     &feed::Feed,
     &figshare::Figshare,
+    &flathub::Flathub,
     &forgejo::Forgejo,
     &gbif::Gbif,
     &ghost::Ghost,
     &github::Github,
     &gitlab::Gitlab,
     &gleif::Gleif,
+    &google_play::GooglePlay,
     &govinfo::Govinfo,
     &hacker_news::HackerNews,
     &huggingface::HuggingFace,
@@ -114,6 +123,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &public_inbox::PublicInbox,
     &ror::Ror,
     &sec::Sec,
+    &snap_store::SnapStore,
     &stacker_news::StackerNews,
     &swiss_parliament::SwissParliament,
     &uk_parliament_bills::UkParliamentBills,

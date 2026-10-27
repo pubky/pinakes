@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+
+ 
+<html lang="en">
+ 
+
+
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <meta name="robots" content="DisallowAITraining">
+
+  <title>AntennaPod - Podcast Player | F-Droid - Free and Open Source Android App Repository</title>
+  <meta property="og:title" content="AntennaPod - Podcast Player | F-Droid - Free and Open Source Android App Repository">
+
+  <meta name="description" content="Easy-to-use, flexible and open-source podcast manager and player">
+  <meta property="og:description" content="Easy-to-use, flexible and open-source podcast manager and player">
+
+  <meta property="og:image" content="https://f-droid.org/repo/de.danoeh.antennapod/en-US/icon_w44b41PyuNt3pI7Gh8zYHJrWgu__3HT7YSWZtttfenk=.png">
+  
+
+  <link rel="preload" href="/assets/roboto_ln5c7Pv79kCZw8EjInNILddDbwVxQmaVPE0sjunCivU=.ttf" as="font" type="font/ttf" crossorigin>
+  <link rel="preload" as="style" href="/css/main.css">
+  <link rel="dns-prefetch" href="https://search.f-droid.org">
+  <link rel="stylesheet" href="/css/main.css">
+
+  <link rel="canonical" href='https://f-droid.org/packages/de.danoeh.antennapod/'>
+  <meta property="og:url" content="https://f-droid.org/packages/de.danoeh.antennapod/">
+  <link rel="alternate" type="application/rss+xml" title="F-Droid - Free and Open Source Android App Repository" href="/feed.xml">
+
+  <link href="/en/osd.xml" rel="search" title="F-Droid" type="application/opensearchdescription+xml">
+
+  <link rel="apple-touch-icon" sizes="180x180" href="/assets/apple-touch-icon_ypJwtCrcixeH_qV6LdcMYk1anFIR9o-_ufR__1wNdJY=.png">
+  <link rel="icon" type="image/png" sizes="48x48" href="/assets/favicon_AfYQ36xPEzFjJiCTyBFVmfWkajkehilUd2geASywhxM=.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32x32_Dk3aeG3k_A20gYe5zAlPSBx_CEcpJaCI89K2X2z6CFY=.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="/assets/favicon-16x16_7yyppfDSTAVyGb3ycHY84PYjHUwP96NKICAibLRpnXw=.png">
+  <link rel="manifest" href="/assets/site_J9OLInBmO2hLlutzRFC4mdstNJjL44B6NzBbT0ecmA0=.webmanifest">
+  <link rel="mask-icon" href="/assets/safari-pinned-tab_jVj0QIYK2TEAcXlrhjrienjgRnccBVzvX22tYumPb9Q=.svg" color="#5bbad5">
+  <link rel="shortcut icon" href="/assets/favicon_yJPr4UNteJc-cseeq16P0Hvl1kDbJjTVYcj-KA6-_Fs=.ico">
+  <meta name="msapplication-TileColor" content="#ffffff">
+  <meta name="msapplication-config" content="/assets/browserconfig_sI0d7L-NQ2rondQpLn2DRSqXxvj7iPI0-WPzXn-uLZA=.xml">
+  <meta name="theme-color" content="#ffffff">
+  <link rel="alternate" hreflang="ar" href='https://f-droid.org/ar/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="bo" href='https://f-droid.org/bo/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="ca" href='https://f-droid.org/ca/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="cs" href='https://f-droid.org/cs/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="de" href='https://f-droid.org/de/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="en" href='https://f-droid.org/en/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="es" href='https://f-droid.org/es/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="eu" href='https://f-droid.org/eu/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="fa" href='https://f-droid.org/fa/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="fr" href='https://f-droid.org/fr/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="he" href='https://f-droid.org/he/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="hr" href='https://f-droid.org/hr/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="hu" href='https://f-droid.org/hu/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="id" href='https://f-droid.org/id/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="is" href='https://f-droid.org/is/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="it" href='https://f-droid.org/it/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="ja" href='https://f-droid.org/ja/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="ko" href='https://f-droid.org/ko/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="pl" href='https://f-droid.org/pl/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="pt" href='https://f-droid.org/pt/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="pt-BR" href='https://f-droid.org/pt_BR/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="ro" href='https://f-droid.org/ro/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="ru" href='https://f-droid.org/ru/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="sq" href='https://f-droid.org/sq/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="tr" href='https://f-droid.org/tr/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="uk" href='https://f-droid.org/uk/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="zh-Hans" href='https://f-droid.org/zh_Hans/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="zh-Hant" href='https://f-droid.org/zh_Hant/packages/de.danoeh.antennapod/'>
+  <link rel="alternate" hreflang="x-default" href='https://f-droid.org/packages/de.danoeh.antennapod/'>
+</head>
+
+
+  <body>
+
+    <div class="site-wrapper">
+
+      <header class="site-header">
+
+  <a class="site-title" href="/en/">
+    <img src="/assets/fdroid-logo-text_S0MUfk_FsnAYL7n2MQye-34IoSNm6QM6xYjDnMqkufo=.svg" alt="F-Droid" />
+  </a>
+
+  <nav class="site-nav">
+          <a class="page-link current" aria-current="page" href="/en/packages/">Apps</a>
+          <a class="page-link" href="/en/news/">News</a>
+          <a class="page-link" href="/en/docs/">Docs</a>
+          <a class="page-link" href="/en/issues/">Issues</a>
+          <a class="page-link" href="/en/contribute/">Contribute</a>
+          <a class="page-link" href="/en/about/">About</a>
+  </nav>
+
+</header>
+
+
+      <div class="main-content with-sidebar">
+
+        <div class="article-area">
+          <article class="package">
+	<header class="package-header">
+		<img class="package-icon" src="https://f-droid.org/repo/de.danoeh.antennapod/en-US/icon_w44b41PyuNt3pI7Gh8zYHJrWgu__3HT7YSWZtttfenk=.png" alt="package icon" />
+		<div class="package-title">
+			<h3 class="package-name">
+				AntennaPod - Podcast Player
+			</h3>
+			<div class="package-summary">
+				Easy-to-use, flexible and open-source podcast manager and player
+			</div>
+		</div>
+	</header>
+	<div class="package-whats-new" id="whats_new">
+		<div class="new-in-version">New in version 3.12.3</div>
+		<div dir="auto">
+			∙ Rewrite playback service (@ByteHamster, @Sarnyxq and others) - this fixes many playback issues, but do report any regressions!<br>∙ UI changes: rename “delete podcast” to “unsubscribe” (@ByteHamster); move Statistics screen to navigation (@amanjn38)<br>∙ Multi-select: directly enter multi-select when long-pressing subscriptions; add more actions to (multi-)select menu (@ByteHamster)<br>∙ Add Android Auto “For You” recommendations (@brianjcohen)<br>∙ Plus an assortment of bug fixes &amp; improvements!<br>
+		</div>
+	</div>
+	<div class="package-description" dir="auto">
+		AntennaPod is a podcast manager and player that gives you instant access to millions of free and paid podcasts, from independent podcasters to large publishing houses such as the BBC, NPR and CNN. Add, import and export their feeds hassle-free using the Apple Podcasts database, OPML files or simple RSS URLs.<br>Download, stream or queue episodes and enjoy them the way you like with adjustable playback speeds, chapter support and a sleep timer.<br>Save effort, battery power and mobile data usage with powerful automation controls for downloading episodes (specify times, intervals and WiFi networks) and deleting episodes (based on your favourites and delay settings).<br><br>Made by podcast-enthusiasts, AntennaPod is free in all senses of the word: open source, no costs, no ads.<br><br><b>Import, organize and play</b><br>• Manage playback from anywhere: homescreen widget, system notification and earplug and bluetooth controls<br>• Add and import feeds via the Apple Podcasts, gPodder.net, fyyd or Podcast Index directories, OPML files and RSS or Atom links<br>• Enjoy listening your way with adjustable playback speed, chapter support, remembered playback position and an advanced sleep timer (shake to reset, lower volume)<br>• Access password-protected feeds and episodes<br><br><b>Keep track, share &amp; appreciate</b><br>• Keep track of the best of the best by marking episodes as favourites<br>• Find that one episode through the playback history or by searching titles and shownotes<br>• Share episodes and feeds through advanced social media and email options, the gPodder.net services and via OPML export<br><br><b>Control the system</b><br>• Take control over automated downloading: choose feeds, exclude mobile networks, select specific WiFi networks, require the phone to be charging and set times or intervals<br>• Manage storage by setting the amount of cached episodes, smart deletion and selecting your preferred location<br>• Adapt to your environment using the light and dark theme<br>• Back-up your subscriptions with the gPodder.net integration and OPML export<br><br><b>Join the AntennaPod community!</b><br>AntennaPod is under active development by volunteers. You can contribute too, with code or with comment!<br><br>Our friendly forum members are happy to help with every question you have. You are invited to discuss features and podcasting in general, too.<br>https://forum.antennapod.org/<br><br>AntennaPod is translated on Weblate by volunteers like you:<br>https://hosted.weblate.org/engage/antennapod<br>
+	</div>
+	<ul class="package-links" id="links">
+		<li class="package-link" id="author">
+			Author:
+			<a href="mailto:info@antennapod.org?subject=F-Droid - Free and Open Source Android App Repository%20on%20">
+				info@antennapod.org
+			</a>
+		</li>
+		<li class="package-link" id="license">
+			License:
+				<a href="https://spdx.org/licenses/GPL-3.0-only.html">GNU General Public License v3.0 only</a>
+		</li>
+		<li class="package-link" id="website">
+			<a href="https://antennapod.org">Website</a>
+		</li>
+		<li class="package-link" id="issue_tracker">
+			<a href="https://github.com/AntennaPod/AntennaPod/issues">Issue Tracker</a>
+		</li>
+		<li class="package-link" id="translation">
+			<a href="https://hosted.weblate.org/engage/antennapod">Translation</a>
+		</li>
+		<li class="package-link" id="source_code">
+			<a href="https://github.com/AntennaPod/AntennaPod">Source Code</a>
+		</li>
+		<li class="package-link" id="changelog">
+			<a href="https://github.com/AntennaPod/AntennaPod/releases">Changelog</a>
+		</li>
+		<li class="package-link" id="build_metadata">
+			<a href="https://gitlab.com/fdroid/fdroiddata/tree/master/metadata/de.danoeh.antennapod.yml">Build Metadata</a>
+		</li>
+		<li class="package-link" id="reproducibility_status">
+			<a href="https://verification.f-droid.org/packages/de.danoeh.antennapod/">Reproducibility Status</a>
+		</li>
+	</ul>
+
+	
+
+	<div id="screenshots" class="js_slides screenshots">
+		<div class="frame js_frame">
+			<ul class="slides js_slides gallery">
+				<li class="js_slide screenshot"><img src="https://f-droid.org/repo/de.danoeh.antennapod/en-US/phoneScreenshots/00.png" alt="app screenshot" /></li>
+				<li class="js_slide screenshot"><img src="https://f-droid.org/repo/de.danoeh.antennapod/en-US/phoneScreenshots/01.png" alt="app screenshot" /></li>
+				<li class="js_slide screenshot"><img src="https://f-droid.org/repo/de.danoeh.antennapod/en-US/phoneScreenshots/02.png" alt="app screenshot" /></li>
+				<li class="js_slide screenshot"><img src="https://f-droid.org/repo/de.danoeh.antennapod/en-US/phoneScreenshots/03.png" alt="app screenshot" /></li>
+				<li class="js_slide screenshot"><img src="https://f-droid.org/repo/de.danoeh.antennapod/en-US/phoneScreenshots/04.png" alt="app screenshot" /></li>
+				<li class="js_slide screenshot"><img src="https://f-droid.org/repo/de.danoeh.antennapod/en-US/phoneScreenshots/05.png" alt="app screenshot" /></li>
+				<li class="js_slide screenshot"><img src="https://f-droid.org/repo/de.danoeh.antennapod/en-US/sevenInchScreenshots/00.png" alt="app screenshot" /></li>
+				<li class="js_slide screenshot"><img src="https://f-droid.org/repo/de.danoeh.antennapod/en-US/sevenInchScreenshots/01.png" alt="app screenshot" /></li>
+				<li class="js_slide screenshot"><img src="https://f-droid.org/repo/de.danoeh.antennapod/en-US/sevenInchScreenshots/02.png" alt="app screenshot" /></li>
+				<li class="js_slide screenshot"><img src="https://f-droid.org/repo/de.danoeh.antennapod/en-US/sevenInchScreenshots/03.png" alt="app screenshot" /></li>
+				<li class="js_slide screenshot"><img src="https://f-droid.org/repo/de.danoeh.antennapod/en-US/sevenInchScreenshots/04.png" alt="app screenshot" /></li>
+				<li class="js_slide screenshot"><img src="https://f-droid.org/repo/de.danoeh.antennapod/en-US/sevenInchScreenshots/05.png" alt="app screenshot" /></li>
+				<li class="js_slide screenshot"><img src="https://f-droid.org/repo/de.danoeh.antennapod/en-US/tenInchScreenshots/00.png" alt="app screenshot" /></li>
+				<li class="js_slide screenshot"><img src="https://f-droid.org/repo/de.danoeh.antennapod/en-US/tenInchScreenshots/01.png" alt="app screenshot" /></li>
+				<li class="js_slide screenshot"><img src="https://f-droid.org/repo/de.danoeh.antennapod/en-US/tenInchScreenshots/02.png" alt="app screenshot" /></li>
+				<li class="js_slide screenshot"><img src="https://f-droid.org/repo/de.danoeh.antennapod/en-US/tenInchScreenshots/03.png" alt="app screenshot" /></li>
+				<li class="js_slide screenshot"><img src="https://f-droid.org/repo/de.danoeh.antennapod/en-US/tenInchScreenshots/04.png" alt="app screenshot" /></li>
+				<li class="js_slide screenshot"><img src="https://f-droid.org/repo/de.danoeh.antennapod/en-US/tenInchScreenshots/05.png" alt="app screenshot" /></li>
+				<li class="js_slide screenshot"><img src="https://f-droid.org/repo/de.danoeh.antennapod/en-US/tenInchScreenshots/tablet.png" alt="app screenshot" /></li>
+			</ul>
+		</div>
+		<span class="js_prev slider_nav prev" style="display: none">
+			<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50" viewBox="0 0 501.5 501.5"><g><path fill="#2E435A" d="M302.67 90.877l55.77 55.508L254.575 250.75 358.44 355.116l-55.77 55.506L143.56 250.75z"/></g></svg>
+		</span>
+		<span class="js_next slider_nav next" style="display: none">
+			<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50" viewBox="0 0 501.5 501.5"><g><path fill="#2E435A" d="M199.33 410.622l-55.77-55.508L247.425 250.75 143.56 146.384l55.77-55.507L358.44 250.75z"/></g></svg>
+		</span>
+	</div>
+
+	
+	<div class="package-versions">
+		<a name="versions"></a>
+		<h3>Versions</h3>
+		<p>
+			Although APK downloads are available below to give you the choice, you should be aware that by installing that way you will not receive update notifications and it's a less secure way to download. We recommend that you install the F-Droid client and use that.
+		</p>
+		<a href="https://f-droid.org/F-Droid.apk" class="material-button">Download F-Droid</a>
+		<ul class="package-versions-list">
+			
+			<li class="package-version" id="latest"><a name="suggested"></a>
+				<div class="package-version-header">
+					<a name="3.12.3"></a>
+					<a name="3120395"></a>
+					<b>Version 3.12.3</b> (3120395)
+					<span class="suggested-badge">suggested</span>
+					Added on Oct 15, 2026
+				</div>
+				<p class="package-version-nativecode">
+					<code class="package-nativecode">arm64-v8a</code>
+					<code class="package-nativecode">armeabi-v7a</code>
+					<code class="package-nativecode">x86</code>
+					<code class="package-nativecode">x86_64</code>
+				</p>
+				<p class="package-version-requirement">
+					This version requires Android 6.0 or newer.
+				</p>
+
+				<p class="package-version-source">It is built and signed by F-Droid, and guaranteed to correspond to <a href="https://f-droid.org/repo/de.danoeh.antennapod_3120395_src.tar.gz">this source tarball</a>.
+				</p>
+
+				
+				<div class="package-version-permissions">
+					<details open>
+						<summary class="package-version-permissions-summary">
+							Permissions
+						</summary>
+						<ul class="package-version-permissions-list">
+							<li class="permission">
+								<div class="permission-label">
+									view network connections
+								</div>
+								<div class="permission-description">Allows the app to view information about network connections such as which networks exist and are connected.</div></li><li class="permission">
+								<div class="permission-label">
+									view Wi-Fi connections
+								</div>
+								<div class="permission-description">Allows the app to view information about Wi-Fi networking, such as whether Wi-Fi is enabled and name of connected Wi-Fi devices.</div></li><li class="permission">
+								<div class="permission-label">
+									pair with Bluetooth devices
+								</div>
+								<div class="permission-description">Allows the app to view the configuration of the Bluetooth on the phone, and to make and accept connections with paired devices.</div></li><li class="permission">
+								<div class="permission-label">
+									run foreground service
+								</div>
+								<div class="permission-description">Allows the app to make use of foreground services.</div></li><li class="permission">
+								<div class="permission-label">
+									run foreground service with the type "mediaPlayback"
+								</div>
+								<div class="permission-description">Allows the app to make use of foreground services with the type "mediaPlayback"</div></li><li class="permission">
+								<div class="permission-label">
+									have full network access
+								</div>
+								<div class="permission-description">Allows the app to create network sockets and use custom network protocols. The browser and other applications provide means to send data to the internet, so this permission is not required to send data to the internet.</div></li><li class="permission">
+								<div class="permission-label">
+									show notifications
+								</div>
+								<div class="permission-description">Allows the app to show notifications</div></li><li class="permission">
+								<div class="permission-label">
+									run at startup
+								</div>
+								<div class="permission-description">Allows the app to have itself started as soon as the system has finished booting. This can make it take longer to start the phone and allow the app to slow down the overall phone by always running.</div></li><li class="permission">
+								<div class="permission-label">
+									control vibration
+								</div>
+								<div class="permission-description">Allows the app to control the vibrator.</div></li><li class="permission">
+								<div class="permission-label">
+									prevent phone from sleeping
+								</div>
+								<div class="permission-description">Allows the app to prevent the phone from going to sleep.</div></li><li class="permission">
+								<div class="permission-label">de.danoeh.antennapod.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION</div></li>
+						</ul>
+					</details>
+				</div>
+
+				<p class="package-version-download">
+					<b>
+						<a href="https://f-droid.org/repo/de.danoeh.antennapod_3120395.apk">
+							Download APK
+						</a>
+					</b>
+					16 MiB
+					<a href="https://f-droid.org/repo/de.danoeh.antennapod_3120395.apk.asc">PGP Signature</a>
+					&#124;
+					<a href="https://f-droid.org/repo/de.danoeh.antennapod_3120395.log.gz">Build Log</a>
+				</p>
+
+			</li>
+			
+			<li class="package-version" >
+				<div class="package-version-header">
+					<a name="3.12.2"></a>
+					<a name="3120295"></a>
+					<b>Version 3.12.2</b> (3120295)
+					 - 
+					Added on Sep 20, 2026
+				</div>
+				<p class="package-version-nativecode">
+					<code class="package-nativecode">arm64-v8a</code>
+					<code class="package-nativecode">armeabi-v7a</code>
+					<code class="package-nativecode">x86</code>
+					<code class="package-nativecode">x86_64</code>
+				</p>
+				<p class="package-version-requirement">
+					This version requires Android 6.0 or newer.
+				</p>
+
+				<p class="package-version-source">It is built and signed by F-Droid, and guaranteed to correspond to <a href="https://f-droid.org/repo/de.danoeh.antennapod_3120295_src.tar.gz">this source tarball</a>.
+				</p>
+
+				
+				<div class="package-version-permissions">
+					<details >
+						<summary class="package-version-permissions-summary">
+							Permissions
+						</summary>
+						<ul class="package-version-permissions-list">
+							<li class="permission">
+								<div class="permission-label">
+									view network connections
+								</div>
+								<div class="permission-description">Allows the app to view information about network connections such as which networks exist and are connected.</div></li><li class="permission">
+								<div class="permission-label">
+									view Wi-Fi connections
+								</div>
+								<div class="permission-description">Allows the app to view information about Wi-Fi networking, such as whether Wi-Fi is enabled and name of connected Wi-Fi devices.</div></li><li class="permission">
+								<div class="permission-label">
+									pair with Bluetooth devices
+								</div>
+								<div class="permission-description">Allows the app to view the configuration of the Bluetooth on the phone, and to make and accept connections with paired devices.</div></li><li class="permission">
+								<div class="permission-label">
+									run foreground service
+								</div>
+								<div class="permission-description">Allows the app to make use of foreground services.</div></li><li class="permission">
+								<div class="permission-label">
+									run foreground service with the type "mediaPlayback"
+								</div>
+								<div class="permission-description">Allows the app to make use of foreground services with the type "mediaPlayback"</div></li><li class="permission">
+								<div class="permission-label">
+									have full network access
+								</div>
+								<div class="permission-description">Allows the app to create network sockets and use custom network protocols. The browser and other applications provide means to send data to the internet, so this permission is not required to send data to the internet.</div></li><li class="permission">
+								<div class="permission-label">
+									show notifications
+								</div>
+								<div class="permission-description">Allows the app to show notifications</div></li><li class="permission">
+								<div class="permission-label">
+									run at startup
+								</div>
+								<div class="permission-description">Allows the app to have itself started as soon as the system has finished booting. This can make it take longer to start the phone and allow the app to slow down the overall phone by always running.</div></li><li class="permission">
+								<div class="permission-label">
+									control vibration
+								</div>
+								<div class="permission-description">Allows the app to control the vibrator.</div></li><li class="permission">
+								<div class="permission-label">
+									prevent phone from sleeping
+								</div>
+								<div class="permission-description">Allows the app to prevent the phone from going to sleep.</div></li><li class="permission">
+								<div class="permission-label">de.danoeh.antennapod.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION</div></li>
+						</ul>
+					</details>
+				</div>
+
+				<p class="package-version-download">
+					<b>
+						<a href="https://f-droid.org/repo/de.danoeh.antennapod_3120295.apk">
+							Download APK
+						</a>
+					</b>
+					16 MiB
+					<a href="https://f-droid.org/repo/de.danoeh.antennapod_3120295.apk.asc">PGP Signature</a>
+					&#124;
+					<a href="https://f-droid.org/repo/de.danoeh.antennapod_3120295.log.gz">Build Log</a>
+				</p>
+
+			</li>
+			
+			<li class="package-version" >
+				<div class="package-version-header">
+					<a name="3.12.1"></a>
+					<a name="3120195"></a>
+					<b>Version 3.12.1</b> (3120195)
+					 - 
+					Added on Sep 09, 2026
+				</div>
+				<p class="package-version-nativecode">
+					<code class="package-nativecode">arm64-v8a</code>
+					<code class="package-nativecode">armeabi-v7a</code>
+					<code class="package-nativecode">x86</code>
+					<code class="package-nativecode">x86_64</code>
+				</p>
+				<p class="package-version-requirement">
+					This version requires Android 6.0 or newer.
+				</p>
+
+				<p class="package-version-source">It is built and signed by F-Droid, and guaranteed to correspond to <a href="https://f-droid.org/repo/de.danoeh.antennapod_3120195_src.tar.gz">this source tarball</a>.
+				</p>
+
+				
+				<div class="package-version-permissions">
+					<details >
+						<summary class="package-version-permissions-summary">
+							Permissions
+						</summary>
+						<ul class="package-version-permissions-list">
+							<li class="permission">
+								<div class="permission-label">
+									view network connections
+								</div>
+								<div class="permission-description">Allows the app to view information about network connections such as which networks exist and are connected.</div></li><li class="permission">
+								<div class="permission-label">
+									view Wi-Fi connections
+								</div>
+								<div class="permission-description">Allows the app to view information about Wi-Fi networking, such as whether Wi-Fi is enabled and name of connected Wi-Fi devices.</div></li><li class="permission">
+								<div class="permission-label">
+									pair with Bluetooth devices
+								</div>
+								<div class="permission-description">Allows the app to view the configuration of the Bluetooth on the phone, and to make and accept connections with paired devices.</div></li><li class="permission">
+								<div class="permission-label">
+									run foreground service
+								</div>
+								<div class="permission-description">Allows the app to make use of foreground services.</div></li><li class="permission">
+								<div class="permission-label">
+									run foreground service with the type "mediaPlayback"
+								</div>
+								<div class="permission-description">Allows the app to make use of foreground services with the type "mediaPlayback"</div></li><li class="permission">
+								<div class="permission-label">
+									have full network access
+								</div>
+								<div class="permission-description">Allows the app to create network sockets and use custom network protocols. The browser and other applications provide means to send data to the internet, so this permission is not required to send data to the internet.</div></li><li class="permission">
+								<div class="permission-label">
+									show notifications
+								</div>
+								<div class="permission-description">Allows the app to show notifications</div></li><li class="permission">
+								<div class="permission-label">
+									run at startup
+								</div>
+								<div class="permission-description">Allows the app to have itself started as soon as the system has finished booting. This can make it take longer to start the phone and allow the app to slow down the overall phone by always running.</div></li><li class="permission">
+								<div class="permission-label">
+									control vibration
+								</div>
+								<div class="permission-description">Allows the app to control the vibrator.</div></li><li class="permission">
+								<div class="permission-label">
+									prevent phone from sleeping
+								</div>
+								<div class="permission-description">Allows the app to prevent the phone from going to sleep.</div></li><li class="permission">
+								<div class="permission-label">de.danoeh.antennapod.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION</div></li>
+						</ul>
+					</details>
+				</div>
+
+				<p class="package-version-download">
+					<b>
+						<a href="https://f-droid.org/repo/de.danoeh.antennapod_3120195.apk">
+							Download APK
+						</a>
+					</b>
+					16 MiB
+					<a href="https://f-droid.org/repo/de.danoeh.antennapod_3120195.apk.asc">PGP Signature</a>
+					&#124;
+					<a href="https://f-droid.org/repo/de.danoeh.antennapod_3120195.log.gz">Build Log</a>
+				</p>
+
+			</li>
+		</ul>
+	</div>
+</article>
+
+<script src="/assets/lory.min_OaktEa_IE1cqFYLsDaFgRzumQ-2V78rnwaWt6g4I2gE=.js" async></script>
+<script src="/assets/package_VaovpUKD2zvazIPjOxsnE2QDGaK4nhQF6oFrjx2ZvO8=.js" async></script>
+
+        </div>
+
+        <div class="sidebar">
+          <div class="sidebar-widget language">
+            
+
+
+
+<form action="/packages/de.danoeh.antennapod/index.html" method="get">
+
+  <select id="language-chooser-select" name="lang" autocomplete="off">
+    
+      <option value="ar" >
+        العربية
+      </option>
+    
+      <option value="bo" >
+        བོད་སྐད་
+      </option>
+    
+      <option value="ca" >
+        català
+      </option>
+    
+      <option value="cs" >
+        Čeština
+      </option>
+    
+      <option value="de" >
+        Deutsch
+      </option>
+    
+      <option value="en" selected="selected">
+        English
+      </option>
+    
+      <option value="es" >
+        Español
+      </option>
+    
+      <option value="eu" >
+        euskara
+      </option>
+    
+      <option value="fa" >
+        فارسی
+      </option>
+    
+      <option value="fr" >
+        Français
+      </option>
+    
+      <option value="he" >
+        עברית
+      </option>
+    
+      <option value="hr" >
+        Hrvatski
+      </option>
+    
+      <option value="hu" >
+        magyar
+      </option>
+    
+      <option value="id" >
+        Indonesia
+      </option>
+    
+      <option value="is" >
+        íslenska
+      </option>
+    
+      <option value="it" >
+        Italiano
+      </option>
+    
+      <option value="ja" >
+        日本語
+      </option>
+    
+      <option value="ko" >
+        한국어
+      </option>
+    
+      <option value="pl" >
+        polski
+      </option>
+    
+      <option value="pt" >
+        Português
+      </option>
+    
+      <option value="pt_BR" >
+        Português do Brasil
+      </option>
+    
+      <option value="ro" >
+        română
+      </option>
+    
+      <option value="ru" >
+        Русский
+      </option>
+    
+      <option value="sq" >
+        shqip
+      </option>
+    
+      <option value="tr" >
+        Türkçe
+      </option>
+    
+      <option value="uk" >
+        Українська
+      </option>
+    
+      <option value="zh_Hans" >
+        简体中文
+      </option>
+    
+      <option value="zh_Hant" >
+        繁體中文
+      </option>
+    
+  </select>
+
+  <script src="/assets/sidebar-lang_j4kvB8VghKUiWGs4HpqMvN0Ucx0tTmJ_lRfuoUmiaqc=.js" async></script>
+
+  <noscript>
+    <input id="language-chooser-submit" type="submit" value="Change" />
+  </noscript>
+
+</form>
+
+          </div>
+
+          <div class="sidebar-widget">
+            <h3>Find Apps</h3>
+
+<div>
+  <form method="get" class="search-form" action="https://search.f-droid.org/">
+    <div class="search-input-wrp">
+      <input type="search" class="search-input" name="q">
+    </div>
+    <input type="hidden" name="lang" value="en">
+    <input type="submit" value="Search" class="material-button" />
+  </form>
+</div>
+
+          </div>
+        </div>
+
+      </div>
+
+      <footer class="site-footer">
+
+  <div class="wrapper">
+
+    <div class="site-description">
+      <p>
+	<span class="edit-this-page-area"><a href="https://gitlab.com/fdroid/fdroid-website/edit/master/" target="_blank">
+	    Edit on GitLab
+	  </a></span>
+      </p>
+    </div>
+  </div>
+
+</footer>
+
+
+    </div>
+
+  </body>
+
+</html>

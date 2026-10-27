@@ -1,0 +1,20 @@
+{
+  "lookup-874139669": {
+    "bytes": 9903,
+    "content_type": "text/javascript; charset=utf-8",
+    "file": "lookup-874139669.json",
+    "recorded_at": "2026-10-26T18:29:27+00:00",
+    "sha256": "21497433e2d782ac8fde7c1d884d538c00e5feafbb0f993f62f2348e068b7809",
+    "status": 200,
+    "url": "https://itunes.apple.com/lookup?id=874139669"
+  },
+  "lookup-missing": {
+    "bytes": 42,
+    "content_type": "text/javascript; charset=utf-8",
+    "file": "lookup-missing.json",
+    "recorded_at": "2026-10-26T18:29:27+00:00",
+    "sha256": "7f5ce663b726607eae2fde2a6dc438052ac0d1681e636de7cc3377c0bb77e047",
+    "status": 200,
+    "url": "https://itunes.apple.com/lookup?id=1"
+  }
+}

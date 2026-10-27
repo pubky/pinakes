@@ -589,6 +589,12 @@ pub mod wikidata {
         pub ids: BTreeMap<String, Vec<String>>,
         /// Sitelinks: site (`enwiki`, `dewiki`, `commonswiki`, …) → page URL.
         pub sitelinks: BTreeMap<String, String>,
+        /// The items this one says replaced it (P1366, "replaced by") and that it replaces
+        /// (P1365), at their best rank: a discontinued product and its successor.
+        pub replaced_by: Vec<String>,
+        pub replaces: Vec<String>,
+        /// The works this one is an edition or translation of (P629), at their best rank.
+        pub edition_of: Vec<String>,
     }
     impl Item {
         pub fn id(&self, property: &str) -> &[String] {
@@ -648,11 +654,29 @@ pub mod wikidata {
                     qid,
                     ids,
                     sitelinks,
+                    replaced_by: item_values(&e["claims"]["P1366"]),
+                    edition_of: item_values(&e["claims"]["P629"]),
+                    replaces: item_values(&e["claims"]["P1365"]),
                 })
             })
             .collect();
         items.sort_by(|a, b| a.qid.cmp(&b.qid));
         items
+    }
+    /// The items an item-valued property names, at its best rank (preferred if any, else
+    /// normal; deprecated never).
+    fn item_values(claims: &Value) -> Vec<String> {
+        let claims = claims.as_array().map_or(&[][..], Vec::as_slice);
+        let rank = if claims.iter().any(|c| c["rank"] == "preferred") {
+            "preferred"
+        } else {
+            "normal"
+        };
+        claims
+            .iter()
+            .filter(|c| c["rank"] == rank && c["mainsnak"]["snaktype"] == "value")
+            .filter_map(|c| qid(c["mainsnak"]["datavalue"]["value"]["id"].as_str()?))
+            .collect()
     }
     /// The item a Wikidata item link names, with the link's canonical form
     /// (`https://www.wikidata.org/wiki/{Q-id}`): `/wiki/Q…`, `/entity/Q…` and
@@ -730,6 +754,8 @@ pub mod wikidata {
             });
         (property_ok && value_ok).then(|| format!("haswbstatement:{property}={value}"))
     }
+    /// The most items one `haswbstatement` search returns (and `item_with` reads back).
+    pub const SEARCH_LIMIT: usize = 5;
     pub fn search_lookup(property: &str, value: &str) -> Option<String> {
         let query = statement(property, value)?;
         let mut url = url::Url::parse(API).expect("constant URL");
@@ -737,9 +763,61 @@ pub mod wikidata {
             .append_pair("action", "query")
             .append_pair("list", "search")
             .append_pair("srsearch", &query)
-            .append_pair("srlimit", "5")
+            .append_pair("srlimit", &SEARCH_LIMIT.to_string())
             .append_pair("format", "json");
         Some(url.into())
+    }
+    /// The value a page's link holds for a property whose formatter is `template` (`$1` for the
+    /// value): the inverse of the URL a property table builds, so a page any table links to is
+    /// also a starting point (`item_with`). Host case, `www.` and the scheme never matter. In the
+    /// path, the value is what lies between the template's text around `$1` (decoded; a trailing
+    /// `/` is the page's); in the query, the named parameter's value, whatever else the query
+    /// holds (`hl=`). The caller validates the value as the property's.
+    pub fn template_value(template: &str, uri: &str) -> Option<String> {
+        let (head, tail) = template.split_once("$1")?;
+        let url = url::Url::parse(uri).ok()?;
+        if !matches!(url.scheme(), "https" | "http")
+            || url.port().is_some()
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            return None;
+        }
+        let (_, rest) = head.split_once("://")?;
+        let (host, path_head) = rest.split_once('/').unwrap_or((rest, ""));
+        let bare = |h: &str| h.trim_start_matches("www.").to_ascii_lowercase();
+        if bare(url.host_str()?) != bare(host) {
+            return None;
+        }
+        let decode = |v: &str| {
+            percent_encoding::percent_decode_str(v)
+                .decode_utf8()
+                .ok()
+                .map(|v| v.into_owned())
+        };
+        let value = match path_head.split_once('?') {
+            // `/path?name=$1`: the same path, the named parameter.
+            Some((path, query)) => {
+                let name = query.strip_suffix('=')?;
+                if !tail.is_empty()
+                    || url.path().trim_end_matches('/') != format!("/{path}").trim_end_matches('/')
+                {
+                    return None;
+                }
+                url.query_pairs()
+                    .find(|(k, _)| k == name)
+                    .map(|(_, v)| v.into_owned())?
+            }
+            None => {
+                let rest = url.path().strip_prefix(&format!("/{path_head}"))?;
+                let rest = rest.trim_end_matches('/');
+                let rest = rest
+                    .strip_suffix(tail.trim_end_matches('/'))
+                    .unwrap_or(rest);
+                decode(rest)?
+            }
+        };
+        (!value.is_empty()).then_some(value)
     }
     /// Up to 50 items by ID; unknown or redirected-away IDs are left out.
     pub async fn items(egress: &Egress, qids: &[String]) -> Result<Vec<Item>> {
@@ -762,10 +840,17 @@ pub mod wikidata {
         let Some(lookup) = search_lookup(property, value) else {
             return Ok(Found::None);
         };
-        let hits = get(egress, &lookup, "wikidata")
-            .await?
-            .map(|v| parse_search(&v))
-            .unwrap_or_default();
+        let answer = get(egress, &lookup, "wikidata").await?;
+        // More items carry the value than the search returned: whichever one verifies, others
+        // went unread, so no item is chosen.
+        let total = answer
+            .as_ref()
+            .and_then(|v| v["query"]["searchinfo"]["totalhits"].as_u64())
+            .unwrap_or(0);
+        if total > SEARCH_LIMIT as u64 {
+            return Ok(Found::Ambiguous(total as usize));
+        }
+        let hits = answer.map(|v| parse_search(&v)).unwrap_or_default();
         let read = match items(egress, &hits).await {
             // Items over the cap together: each alone. One over it alone can't be verified, so
             // the search has no answer (its refusal).
@@ -780,12 +865,28 @@ pub mod wikidata {
         };
         Ok(verified(read, property, value))
     }
-    /// The verification step of [`item_with`].
+    /// The verification step of [`item_with`]. Of several items carrying the ID, one that
+    /// another of them replaces (its "replaced by", or the other's "replaces": TextSecure and
+    /// Signal share Signal's Android package) is the past and gives way to its successor.
     pub fn verified(items: Vec<Item>, property: &str, value: &str) -> Found {
         let mut matching: Vec<Item> = items
             .into_iter()
             .filter(|i| i.id(property).iter().any(|v| v == value))
             .collect();
+        if matching.len() > 1 {
+            let succeeded = |old: &Item| {
+                matching.iter().any(|new| {
+                    new.qid != old.qid
+                        && (old.replaced_by.contains(&new.qid) || new.replaces.contains(&old.qid))
+                })
+            };
+            let past: Vec<String> = matching
+                .iter()
+                .filter(|i| succeeded(i))
+                .map(|i| i.qid.clone())
+                .collect();
+            matching.retain(|i| !past.contains(&i.qid));
+        }
         match matching.len() {
             0 => Found::None,
             1 => Found::One(Box::new(matching.remove(0))),
@@ -797,6 +898,118 @@ pub mod wikidata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A page's link holds the value its property's URL template has in place of `$1`: in the
+    /// path (decoded, with or without a trailing slash, on either scheme, with or without
+    /// `www.`) or in a named query parameter (whatever else the query holds).
+    #[test]
+    fn a_template_gives_back_the_value_a_link_holds() {
+        let value = wikidata::template_value;
+        let rotten = "https://www.rottentomatoes.com/$1";
+        for uri in [
+            "https://www.rottentomatoes.com/m/1009113-halloween",
+            "http://rottentomatoes.com/m/1009113-halloween/",
+            "https://WWW.RottenTomatoes.com/m/1009113-halloween?utm_source=x",
+        ] {
+            assert_eq!(
+                value(rotten, uri).as_deref(),
+                Some("m/1009113-halloween"),
+                "{uri}"
+            );
+        }
+        assert_eq!(
+            value(
+                "https://www.mobygames.com/game/$1/",
+                "https://www.mobygames.com/game/73001/"
+            )
+            .as_deref(),
+            Some("73001")
+        );
+        assert_eq!(
+            value(
+                "https://www.pcgamingwiki.com/wiki/$1",
+                "https://www.pcgamingwiki.com/wiki/The_Witcher_3:_Wild_Hunt"
+            )
+            .as_deref(),
+            Some("The_Witcher_3:_Wild_Hunt")
+        );
+        assert_eq!(
+            value(
+                "https://www.google.com/maps?cid=$1",
+                "https://www.google.com/maps?hl=de&cid=10222232094831998944"
+            )
+            .as_deref(),
+            Some("10222232094831998944")
+        );
+        for (template, uri) in [
+            (rotten, "https://www.rottentomatoes.com/"),
+            (rotten, "https://rottentomatoes.example/m/x"),
+            (rotten, "https://www.rottentomatoes.com:8443/m/x"),
+            (rotten, "https://:secret@www.rottentomatoes.com/m/x"),
+            (
+                "https://www.google.com/maps?cid=$1",
+                "https://www.google.com/maps?q=Paris",
+            ),
+            (
+                "https://www.google.com/maps?cid=$1",
+                "https://www.google.com/search?cid=1",
+            ),
+            ("https://mubi.com/films/$1", "https://mubi.com/en/films/1"),
+            (
+                "https://letterboxd.com/film/$1/",
+                "ftp://letterboxd.com/film/x/",
+            ),
+        ] {
+            assert_eq!(value(template, uri), None, "{uri}");
+        }
+    }
+
+    /// Two items carrying one Android package: TextSecure, "replaced by" Signal, and Signal,
+    /// which "replaces" it. The successor is the package's item; either statement alone is
+    /// enough, and two items unrelated by succession stay ambiguous.
+    #[test]
+    fn a_successor_wins_over_the_item_it_replaces() {
+        let package = "org.thoughtcrime.securesms";
+        let entity = |q: &str, extra: serde_json::Value| {
+            let mut claims = serde_json::json!({"P3418": [{"rank": "normal", "mainsnak": {
+                "snaktype": "value", "datatype": "external-id", "datavalue": {"value": package}}}]});
+            for (p, v) in extra.as_object().unwrap() {
+                claims[p] = serde_json::json!([{"rank": "normal", "mainsnak": {"snaktype": "value",
+                    "datatype": "wikibase-item", "datavalue": {"value": {"entity-type": "item", "id": v}}}}]);
+            }
+            (
+                q.to_owned(),
+                serde_json::json!({"type": "item", "id": q, "claims": claims}),
+            )
+        };
+        let found = |old: serde_json::Value, new: serde_json::Value| {
+            let (a, b) = (entity("Q15871857", old), entity("Q19718090", new));
+            let v = serde_json::json!({"entities": {a.0: a.1, b.0: b.1}});
+            wikidata::verified(wikidata::parse_entities(&v), "P3418", package)
+        };
+        let signal =
+            |f: &wikidata::Found| matches!(f, wikidata::Found::One(i) if i.qid == "Q19718090");
+        let both = found(
+            serde_json::json!({"P1366": "Q19718090"}),
+            serde_json::json!({"P1365": "Q15871857"}),
+        );
+        assert!(signal(&both), "{both:?}");
+        let replaced_by = found(
+            serde_json::json!({"P1366": "Q19718090"}),
+            serde_json::json!({}),
+        );
+        assert!(signal(&replaced_by), "{replaced_by:?}");
+        let replaces = found(
+            serde_json::json!({}),
+            serde_json::json!({"P1365": "Q15871857"}),
+        );
+        assert!(signal(&replaces), "{replaces:?}");
+        let unrelated = found(serde_json::json!({}), serde_json::json!({}));
+        assert_eq!(unrelated, wikidata::Found::Ambiguous(2));
+        // A successor named outside the candidates decides nothing.
+        let elsewhere = found(serde_json::json!({"P1366": "Q42"}), serde_json::json!({}));
+        assert_eq!(elsewhere, wikidata::Found::Ambiguous(2));
+    }
 
     /// Items over the cap together are read one by one, so one never sinks the other's answer;
     /// one over it alone is no answer (its refusal).
@@ -840,6 +1053,43 @@ mod tests {
             .await
             .unwrap_err();
         assert!(crate::resolver::egress::over_cap(&error), "{error:#}");
+    }
+
+    /// A search that found more items than it returned is ambiguous, even when only one of the
+    /// returned items verifies: the others went unread.
+    #[tokio::test(start_paused = true)]
+    async fn more_hits_than_returned_are_ambiguous() {
+        let search = wikidata::search_lookup("P4983", "1396").unwrap();
+        let one = wikidata::entities_lookup(&["Q1".into()]);
+        let item = serde_json::to_vec(&serde_json::json!({"entities": {"Q1": {"type": "item",
+            "id": "Q1", "claims": {"P4983": [{"rank": "normal", "mainsnak": {"snaktype": "value",
+            "datatype": "external-id", "datavalue": {"value": "1396"}}}]}}}}))
+        .unwrap();
+        let answer = |total: usize| {
+            serde_json::to_vec(
+                &serde_json::json!({"query": {"searchinfo": {"totalhits": total},
+                "search": [{"title": "Q1"}]}}),
+            )
+            .unwrap()
+        };
+        for (total, expected) in [
+            (1, None),
+            (wikidata::SEARCH_LIMIT, None),
+            (wikidata::SEARCH_LIMIT + 1, Some(wikidata::SEARCH_LIMIT + 1)),
+        ] {
+            let (egress, _) = crate::sources::fixture::egress(vec![
+                (&search, 200, "application/json", answer(total)),
+                (&one, 200, "application/json", item.clone()),
+            ]);
+            let found = wikidata::item_with(&egress, "P4983", "1396").await.unwrap();
+            match expected {
+                None => assert!(
+                    matches!(&found, wikidata::Found::One(i) if i.qid == "Q1"),
+                    "{total}: {found:?}"
+                ),
+                Some(n) => assert_eq!(found, wikidata::Found::Ambiguous(n), "{total}"),
+            }
+        }
     }
 
     /// Wikidata's `maxlag` comes with 200: the answer is busy, and the next ask fetches again

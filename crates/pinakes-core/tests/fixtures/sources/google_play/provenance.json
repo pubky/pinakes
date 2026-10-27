@@ -1,0 +1,20 @@
+{
+  "page-missing": {
+    "bytes": 1673,
+    "content_type": "text/html; charset=utf-8",
+    "file": "page-missing.html",
+    "recorded_at": "2026-10-26T18:29:29+00:00",
+    "sha256": "1f3333b1baa9e1c31af50c0e96feeccf7a33ecc424b3913ad69c17ee63e322ba",
+    "status": 404,
+    "url": "https://play.google.com/store/apps/details?id=org.example.unlisted&hl=en"
+  },
+  "page-signal": {
+    "bytes": 1279163,
+    "content_type": "text/html; charset=utf-8",
+    "file": "page-signal.html.gz",
+    "recorded_at": "2026-10-26T18:29:29+00:00",
+    "sha256": "c6d12d218e120383472f1bb717f2c497e812ed16b07f3074b400070b966fb6a9",
+    "status": 200,
+    "url": "https://play.google.com/store/apps/details?id=org.thoughtcrime.securesms&hl=en"
+  }
+}

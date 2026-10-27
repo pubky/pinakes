@@ -115,7 +115,7 @@
             ]
           },
           "maybe_same": {
-            "description": "On an event card: up to three other events that are possibly the same one, best first\n(the rule: \"Possibly the same event\" in docs/api.md). A hint only: never a group, never counted, and never a member of this card's own group.\nAbsent on other cards, and everywhere when `[event] same_event_hint = \"off\"`.",
+            "description": "On an event card: up to three other events that are possibly the same one, best first\n(the rule: \"Possibly the same event\" in docs/api.md); on an app's store card, up to three\nother store cards that are possibly the same app (\"Possibly the same app\"). A hint only:\nnever a group, never counted, and never a member of this card's own group.\nAbsent on other cards, and everywhere when `[event] same_event_hint = \"off\"`.",
             "items": {
               "$ref": "#/components/schemas/SameEvent"
             },
@@ -492,7 +492,7 @@
             ]
           },
           "maybe_same": {
-            "description": "On an event card: up to ten events that are possibly the same one, best first (the card's\n`maybe_same` is the first three).",
+            "description": "On an event card: up to ten events that are possibly the same one, best first (the card's\n`maybe_same` is the first three); on an app's store card, up to ten store cards that are\npossibly the same app.",
             "items": {
               "$ref": "#/components/schemas/SameEvent"
             },
@@ -1238,14 +1238,14 @@
         "description": "`GET /v1/resources/{id}` and `/v1/resolve`: the card plus the resource's details."
       },
       "SameEvent": {
-        "description": "Another event that is possibly the same one: it starts together with this one, near it (or,\nwhen either has no place, at the same venue or under the same organizer), under a similar\nname, on another page.",
+        "description": "Another event that is possibly the same one: it starts together with this one, near it (or,\nwhen either has no place, at the same venue or under the same organizer), under a similar\nname, on another page. On an app's store card: another store card with the same website host\nand name (`start` is absent, `score` 1).",
         "properties": {
           "id": {
             "description": "Its card's ID (a feed's, for an occurrence).",
             "type": "string"
           },
           "score": {
-            "description": "How alike the two names are, from 0.5 to 1 (pg_trgm similarity of the normalised names).",
+            "description": "How alike the two names are, from 0.5 to 1 (pg_trgm similarity of the normalised names);\n1 for an app.",
             "format": "double",
             "type": "number"
           },

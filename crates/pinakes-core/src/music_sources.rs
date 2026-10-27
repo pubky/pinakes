@@ -643,6 +643,7 @@ mod tests {
                 .map(|(p, v)| (p.to_string(), vec![v.to_string()]))
                 .collect(),
             sitelinks: Default::default(),
+            ..Default::default()
         };
         let spotify = ("P2207", "6LgJvl0Xdtc73RJ1mmpotq");
         let recording = ("P4404", "b1a9c0e9-d987-4042-ae91-78d6a3267d69");

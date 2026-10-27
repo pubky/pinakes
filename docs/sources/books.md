@@ -21,6 +21,14 @@ exactly, never by title:
   `wikidata` fact and its LibraryThing, Goodreads (the work's editions), Google Books, Project
   Gutenberg and BookBrainz pages, each with `kind: "work"` on an edition's card. A book's
   details can therefore list two Goodreads pages: its edition and its work's editions.
+- A book's page on another service is a starting point too: a Goodreads book
+  (`goodreads.com/book/show/{id}`, an edition, Wikidata's P2969) and any page the work's item
+  lists (Goodreads' `work/editions/{id}`, LibraryThing, Google Books, Project Gutenberg,
+  BookBrainz). Each finds the one Wikidata item carrying its value (read back and compared
+  exactly; an ID two items carry is ambiguous and gives nothing). The item's Open Library work or
+  edition ID (P648) is then looked up as above, or, for an edition's item without one, the ID of
+  the work it is an edition of (P629). The Open Library page is a link, and its key joins the
+  page with the work's or edition's other links.
 - A failing iTunes or Wikidata request leaves what Open Library said.
 - Each link carries the key it was found through: the edition's pages (Amazon and Apple Books
   too) its edition key, the work's pages its work key. A tagged Goodreads or LibraryThing link

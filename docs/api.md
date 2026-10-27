@@ -97,7 +97,7 @@ An IMDb title keeps the type its page gives (it can be either).
 | `attribution` | Present on OSM cards, events placed at an OSM venue and events whose zone came from coordinates; display it with the card |
 | `occurrence` | Occurrence cards only: `{feed_id, feed_uri, uid, recurrence_id, status}`; `feed_uri` is the feed's URI, the link people tagged |
 | `event` | Pubky event references only: `{author, object_path, recurrence_id, start, end, status}` |
-| `maybe_same` | Event and occurrence cards only: up to three other events that are [possibly the same event](#possibly-the-same-event), best first, each `{id, uri, site, start, score}` (`[]` when there are none). A hint only, like `group`. Absent on other cards, and on every card with `[event] same_event_hint = "off"` |
+| `maybe_same` | Event and occurrence cards: up to three other events that are [possibly the same event](#possibly-the-same-event), best first, each `{id, uri, site, start, score}` (`[]` when there are none). An app's store card: up to three store cards that are [possibly the same app](#possibly-the-same-app). A hint only, like `group`. Absent on other cards, and on every card with `[event] same_event_hint = "off"` |
 
 A `pubky://` object of an app Pinakes has a profile for (Loopky, Mapky, Eventky, Pubky Rooms,
 the Pubky marketplace) gets that app's card; any other app's object gets a general one. Each is
@@ -128,7 +128,7 @@ body, and answer `If-None-Match` with 304.
 | `also_on` | Every link of the card's [also on](#also-on), up to 256, several of one service too (the card shows one per service) |
 | `aliases` | Other spellings of this link that resolve to it ([aliases](#aliases)), at most 50; a page's own `url`, `@id`, `sameAs` or canonical claims are not aliases and are not listed |
 | `updated_at` | When the current metadata was accepted |
-| `maybe_same` | An event's card only: up to ten events that are [possibly the same event](#possibly-the-same-event), best first (the card's `maybe_same` is the first three) |
+| `maybe_same` | An event's card: up to ten events that are [possibly the same event](#possibly-the-same-event), best first (the card's `maybe_same` is the first three); an app's store card: up to ten [possibly the same app](#possibly-the-same-app) |
 
 Internal fields (the resolver, TTL, group keys, raw attributes, parser warnings) are not public;
 operators read the stored document with `GET /v1/resources/{id}/document` on the admin listener.
@@ -832,6 +832,20 @@ pages change their `ETag` when a hint on them changes. `[event] same_event_hint 
 ([operations](operations.md#calendars-and-events)) removes the field from cards, details and the
 OpenAPI document and stops the pass.
 
+## Possibly the same app
+
+An app's pages on different stores join one group when a Wikidata item names them (the `apps`
+lookup family). Without such an item, an app's store card (App Store, Google Play, F-Droid,
+Flathub, Snap Store) names the other store cards that are possibly the same app in `maybe_same`:
+`{id, uri, site, score}` by URI, up to three on a card and ten in its `details`. Two store cards
+are possibly the same app when their official websites have the same host (without `www.`) and
+their names are the same once both are in lower case with every run of other characters than
+letters and digits read as one space ("Signal - Private Messenger" and "Signal Private
+Messenger"). The pair is the `app_match` fact the apps family records for each card (the host and
+the name: `signal.org signal private messenger`); `score` is 1. A member of the card's own group,
+an alias and a missing card are never listed. Like the event hint, it merges, counts and ranks
+nothing, and `[event] same_event_hint = "off"` removes it too.
+
 ## Also on
 
 A card's `also_on` says where else the same thing is: first the other members of its
@@ -868,9 +882,9 @@ source's lifetime: 30 days, `btcmap` 7); a source's links and keys live twice th
 failed refresh keeps them, and they go when the source stops returning them. The sources run in this order, each
 seeing the keys the ones before it found: `service`, `tidal`, `musicbrainz`,
 `musicbrainz_entity`, `wikidata`, `discogs`, `deezer`, `itunes`, `wikipedia`, `wikidata_item`,
-`books`, `films`, `podcasts`, `titles`, `osm_wikidata`, `wikidata_osm`, `btcmap`,
+`books`, `films`, `podcasts`, `titles`, `osm_wikidata`, `wikidata_osm`, `wikidata_places`, `btcmap`,
 `federal_register`, `unpaywall`, `ncbi`, `datacite`, `huggingface`, `crates`, `npm`, `pypi`,
-`software_heritage`, `steam`, `wikidata_stores`, `wayback`; `[also_on.sources.<id>] enabled =
+`software_heritage`, `steam`, `wikidata_stores`, `app_stores`, `wayback`; `[also_on.sources.<id>] enabled =
 false` turns one off. A MusicBrainz or Wikidata answer over 8 MB is no answer: the source
 records only what the link's URL proves (a MusicBrainz page's MBID or ISRC, a Wikidata item
 link's Q-id, the Q-id an article's own Wikipedia names), else nothing, until its next run. A

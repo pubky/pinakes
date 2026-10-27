@@ -54,6 +54,8 @@ enabled = true
 enabled = true
 
 # Official-API sources, in alphabetical order (docs/sources/README.md).
+[sources.app_store]
+enabled = true
 [sources.artic]
 enabled = true
 [sources.bluesky]
@@ -76,6 +78,8 @@ enabled = true
 enabled = true
 [sources.eur_lex]
 enabled = true
+[sources.fdroid]
+enabled = true
 [sources.federal_register]
 enabled = true
 [sources.fedlex]
@@ -83,6 +87,8 @@ enabled = true
 [sources.feed]
 enabled = true
 [sources.figshare]
+enabled = true
+[sources.flathub]
 enabled = true
 [sources.forgejo]
 enabled = true
@@ -96,6 +102,8 @@ enabled = true
 [sources.gitlab]
 enabled = true
 [sources.gleif]
+enabled = true
+[sources.google_play]
 enabled = true
 [sources.govinfo]
 enabled = true
@@ -130,6 +138,8 @@ enabled = true
 [sources.ror]
 enabled = true
 [sources.sec]
+enabled = true
+[sources.snap_store]
 enabled = true
 [sources.stacker_news]
 enabled = true

@@ -1451,7 +1451,7 @@ async fn a_tagged_member_and_a_derived_link_of_one_service_show_once(pool: PgPoo
     }
     named(&[
         "https://play.google.com/store/apps/details?id=io.anuke.mindustry",
-        "https://f-droid.org/en/packages/io.anuke.mindustry/",
+        "https://f-droid.org/packages/io.anuke.mindustry",
         "https://store.steampowered.com/app/1127400/",
     ]);
     let app_page = |uri: &'static str, site: &'static str| {
@@ -1469,7 +1469,8 @@ async fn a_tagged_member_and_a_derived_link_of_one_service_show_once(pool: PgPoo
         }
     };
     let play = "https://play.google.com/store/apps/details?id=io.anuke.mindustry";
-    let fdroid = "https://f-droid.org/en/packages/io.anuke.mindustry/";
+    // The F-Droid page's own address: its other spellings are aliases of it.
+    let fdroid = "https://f-droid.org/packages/io.anuke.mindustry";
     let blog = "https://example.org/mindustry";
     let card = app_page(play, "Google Play").await;
     app_page(fdroid, "F-Droid").await;
@@ -1529,8 +1530,9 @@ async fn a_tagged_member_and_a_derived_link_of_one_service_show_once(pool: PgPoo
             "Steam https://store.steampowered.com/app/1127400/ true".to_owned(),
         ]
     );
-    // The details list both F-Droid pages.
-    assert_eq!(read["details"]["also_on"].as_array().unwrap().len(), 4);
+    // The tagged F-Droid page is the derived F-Droid link itself (its own address, which every
+    // other spelling is an alias of): the details list it once, beside Steam and the blog.
+    assert_eq!(read["details"]["also_on"].as_array().unwrap().len(), 3);
 }
 
 /// `key=doi:` finds the DOI card by its own DOI, and the preprint its publisher names, as the

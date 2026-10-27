@@ -54,6 +54,7 @@ or got plain web cards before are read by their source.
 
 ## Sources
 
+- [`app_store`](app_store.md): App Store apps by ID, from the iTunes Lookup API.
 - [`artic`](artic.md): Art Institute of Chicago artworks by id.
 - [`bluesky`](bluesky.md): Bluesky posts and profiles.
 - [`cleveland`](cleveland.md): Cleveland Museum of Art artworks by accession number.
@@ -65,16 +66,19 @@ or got plain web cards before are read by their source.
 - [`docker_hub`](docker_hub.md): Docker Hub image repositories by namespace and name.
 - [`ecfr`](ecfr.md): sections and parts of the Code of Federal Regulations.
 - [`eur_lex`](eur_lex.md): EU law by CELEX number, ELI or Official Journal id.
+- [`fdroid`](fdroid.md): F-Droid apps by package, from its package API and page.
 - [`federal_register`](federal_register.md): Federal Register documents by document number.
 - [`fedlex`](fedlex.md): Swiss federal law in the classified compilation, by ELI.
 - [`feed`](feed.md): wall hook: a walled page's card from the exact item in its site's RSS/Atom feed or news sitemap
 - [`figshare`](figshare.md): Figshare articles (datasets, figures, papers) by article id.
+- [`flathub`](flathub.md): Flathub apps by app ID, from its AppStream API.
 - [`forgejo`](forgejo.md): repositories, branches, tags, releases and files on Forgejo and Gitea instances (Codeberg, gitea.com, others)
 - [`gbif`](gbif.md): GBIF species and occurrence records by key.
 - [`ghost`](ghost.md): page hook: a Ghost post's title, excerpt, image, dates, authors and tags from the Content API
 - [`github`](github.md): repositories on github.com, with the operator's token (off without one)
 - [`gitlab`](gitlab.md): projects, branches, tags, releases and files on gitlab.com and other GitLab instances
 - [`gleif`](gleif.md): Legal Entity Identifier records.
+- [`google_play`](google_play.md): page hook: a Google Play app's name, icon, developer and category from its page.
 - [`govinfo`](govinfo.md): US public laws, bills, US Code sections and the Statutes at Large.
 - [`hacker_news`](hacker_news.md): Hacker News items by id (and hnsignals.com pages).
 - [`huggingface`](huggingface.md): Hugging Face models, datasets and Spaces by repo id.
@@ -93,6 +97,7 @@ or got plain web cards before are read by their source.
 - [`public_inbox`](public_inbox.md): mailing-list messages in public-inbox archives (gnusha.org, lore.kernel.org, others), and old bitcoin-dev pipermail addresses
 - [`ror`](ror.md): research organizations by ROR id.
 - [`sec`](sec.md): SEC EDGAR filings, their documents and companies.
+- [`snap_store`](snap_store.md): Snap Store apps by snap name, from the snapcraft.io info API.
 - [`stacker_news`](stacker_news.md): Stacker News posts and comments by item id.
 - [`swiss_parliament`](swiss_parliament.md): Swiss Parliament business items (Curia Vista) by affair id.
 - [`uk_parliament_bills`](uk_parliament_bills.md): UK Parliament bills and Acts by bill id.
@@ -127,13 +132,15 @@ on the same page.
   could not name in time.
 - [`federal_register`](federal_register.md#also-on): a Federal Register document's GovInfo,
   regulations.gov and public-inspection copies.
-- [`places`](places.md): `osm_wikidata`, `wikidata_osm` and `btcmap`, OpenStreetMap objects and
-  Wikidata items that name each other.
+- [`places`](places.md): `osm_wikidata`, `wikidata_osm`, `wikidata_places` and `btcmap`,
+  OpenStreetMap objects and Wikidata items that name each other, and a place's map and review
+  pages through its item.
 - [`papers`](papers.md): `unpaywall`, `ncbi`, `datacite` and `huggingface`, a paper's open copies,
   PubMed records and preprint.
 - [`packages`](packages.md): `crates`, `npm`, `pypi` and `software_heritage`, a package's registry
   pages, provenance and archive.
-- [`games`](games.md): `steam` and `wikidata_stores`, a game's and an app's other stores.
+- [`games`](games.md): `steam` and `wikidata_stores`, a game's other stores.
+- [`apps`](apps.md): `app_stores`, an app's other stores, bridged by Wikidata.
 - [`archive`](archive.md): `wayback`, an archived copy of a gone page.
 
 ## Removing a source

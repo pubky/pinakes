@@ -90,6 +90,18 @@ pub struct Property {
     valid: fn(&str) -> bool,
 }
 
+impl Property {
+    /// The value a link to this property's page holds (the inverse of the page `links` makes),
+    /// valid as the property's: such a link is a starting point too. A property whose value is a
+    /// whole URL (an official website, an itch.io page) is no starting point.
+    pub fn value_in(&self, uri: &str) -> Option<String> {
+        let Format::Template(template) = self.format else {
+            return None;
+        };
+        crate::hubs::wikidata::template_value(template, uri).filter(|v| (self.valid)(v))
+    }
+}
+
 fn digits(v: &str) -> bool {
     plain(v, 20, |c| c.is_ascii_digit()) && !v.starts_with('0')
 }
@@ -183,6 +195,12 @@ pub const APP: &[Property] = &[
     p("P4655", "Flathub", T("https://flathub.org/apps/$1"), slug),
     p("P4435", "Snap Store", T("https://snapcraft.io/$1"), slug),
     p(
+        "P5885",
+        "Microsoft Store",
+        T("https://apps.microsoft.com/detail/$1"),
+        |v| v.len() == 12 && v.bytes().all(|b| b.is_ascii_alphanumeric()),
+    ),
+    p(
         "P8443",
         "Homebrew",
         T("https://formulae.brew.sh/formula/$1"),
@@ -247,6 +265,10 @@ pub fn links(item: &Value, properties: &[Property]) -> Vec<Link> {
             let value = single(item, property)?;
             let uri = match property.format {
                 Format::Url => web_url(value)?.to_string(),
+                // A value that walks out of its path (`..`) names another page.
+                Format::Template(_) if value.split('/').any(|seg| seg == "." || seg == "..") => {
+                    return None
+                }
                 Format::Template(t) => t.replace("$1", &encode_path(value)),
             };
             Some(Link::new(property.site, uri, VIA))
@@ -441,6 +463,13 @@ mod tests {
             links(&encoded, PLACE)[0].uri,
             "https://www.yelp.com/biz/caf%C3%A9-z%C3%BCrich"
         );
+        // A value that walks out of its path names another page: no link.
+        for value in ["..", "a/../b", "."] {
+            let walking: Value = serde_json::json!({"claims": {"P3108": [
+                {"rank": "normal", "mainsnak": {"snaktype": "value", "datavalue": {"value": value}}}
+            ]}});
+            assert!(links(&walking, PLACE).is_empty(), "{value}");
+        }
     }
 
     #[test]

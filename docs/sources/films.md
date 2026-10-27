@@ -3,10 +3,15 @@
 An [also on](../api.md#also-on) source.
 
 `films`: an IMDb title (`imdb.com/title/tt…`), a TMDB movie or series, a
-Letterboxd film, a TVmaze show or a Netflix title is looked up exactly, never by title:
+Letterboxd film, a TVmaze show, a Netflix title, or a title's page on any other service the item
+lists below (Rotten Tomatoes `rottentomatoes.com/m/{name}` or `/tv/{name}`, Trakt, Apple TV, MUBI,
+MyAnimeList, AniList, TheTVDB) is looked up exactly, never by title:
 - The IMDb title ID is the join, as the key `imdb:{tt…}`. An IMDb link names it, TVmaze's record
-  of a show names it, and a TMDB, Letterboxd or Netflix link reaches it through the one Wikidata
-  item with that link's ID.
+  of a show names it, and any other link reaches it through the one Wikidata item with that
+  link's ID (`haswbstatement:P1258=m/1009113-halloween`, read back and compared exactly; an ID
+  two items carry is ambiguous and gives nothing). A page of another service is recognized by
+  the address the item's own link to it has (the property's URL with the value in place), less
+  its trailing slash.
 - The title's Wikidata item (by its IMDb ID) gives its IMDb, TMDB, Letterboxd, Trakt, Rotten
   Tomatoes, TheTVDB, Apple TV, Netflix, MUBI, TVmaze, MyAnimeList and AniList pages, its Q-id as
   the `wikidata` fact, and `title_type` (`Movie` or `TVSeries`) when its IDs are a movie's or a
@@ -18,8 +23,9 @@ Letterboxd film, a TVmaze show or a Netflix title is looked up exactly, never by
 - Every link of a title with an IMDb ID carries `imdb:{tt…}`, so a tagged Netflix, Trakt or
   Letterboxd link joins the title.
 
-A title never lists its own service. A Trakt link is typed (a `Movie` or a `TVSeries`) but not
-looked up itself; it joins as one of a title's links, by the title's IMDb ID.
+A title never lists its own service. A Trakt link is typed (a `Movie` or a `TVSeries`) by its
+address; a page found through the item keeps the card its page makes, and joins by the title's
+IMDb ID.
 
 ## Operations
 

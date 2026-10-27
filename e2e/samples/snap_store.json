@@ -1,0 +1,7 @@
+[
+  {
+    "kind": "snap_store",
+    "uri": "https://snapcraft.io/signal-desktop",
+    "type": "SoftwareApplication"
+  }
+]

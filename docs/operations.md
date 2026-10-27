@@ -462,7 +462,9 @@ venue link also needs the name and full address to match. Geocoded facts stay in
 documents store versioned references and compose coordinates at read time.
 
 `event.same_event_hint` (default `"on"`; `"off"`) puts `maybe_same` on event cards: other events
-that are possibly the same one ([the rule](api.md#possibly-the-same-event)). A background pass in
+that are possibly the same one ([the rule](api.md#possibly-the-same-event)). It covers the app
+hint too ([possibly the same app](api.md#possibly-the-same-app)), which needs no pass: a request
+compares the cards' `app_match` facts. A background pass in
 the daemon computes it for events starting from a day ago to a year ahead. Triggers queue an event
 resource (or a feed) when an event's start, place, name or document changes. Each pass takes up to
 25 queued resources and up to 200 of their new or changed events, and the next pass follows at once

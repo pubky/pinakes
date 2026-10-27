@@ -1,8 +1,9 @@
 //! Films and series: a title by its IMDb, TMDB, Letterboxd or TVmaze link, and where else it is.
 //!
 //! The IMDb title ID (`tt…`) is the join: an IMDb link names it, TVmaze's record of a show names
-//! it, and a TMDB or Letterboxd link reaches it through the one Wikidata item with that link's
-//! ID. The item (by its IMDb ID) gives the title's other pages. Letterboxd's `imdb/{tt}/`
+//! it, and a TMDB or Letterboxd link, or a page on any service the item links to (Rotten
+//! Tomatoes, Trakt, MUBI, …), reaches it through the one Wikidata item with that link's ID. The
+//! item (by its IMDb ID) gives the title's other pages. Letterboxd's `imdb/{tt}/`
 //! redirect names its film exactly (an unknown ID answers a page, not a redirect), and TVmaze's
 //! `lookup/shows?imdb=` its show (TVmaze's data is CC BY-SA: its links say `via: "tvmaze"`);
 //! each is asked only when the item has no link there.
@@ -27,12 +28,31 @@ pub enum Film {
     Tvmaze(u64),
     /// A Netflix title (a movie or a series).
     Netflix(String),
+    /// A title's page on another service its Wikidata item links to (Rotten Tomatoes, Trakt,
+    /// MUBI, …): the property and the value the link holds.
+    Wikidata {
+        pid: &'static str,
+        site: &'static str,
+        value: String,
+    },
 }
 
 /// The title a link names: `imdb.com/title/{tt}`, `themoviedb.org/movie/{id}` or `/tv/{id}`
 /// (with or without the slug after the ID), `letterboxd.com/film/{slug}/` and
-/// `tvmaze.com/shows/{id}`.
+/// `tvmaze.com/shows/{id}`; else any page of the title [`WIKIDATA`] links to
+/// (`rottentomatoes.com/m/{name}`, `mubi.com/films/{id}`, …), by the value it holds.
 pub fn film(uri: &str) -> Option<Film> {
+    named(uri).or_else(|| {
+        WIKIDATA.iter().find_map(|p| {
+            p.value_in(uri).map(|value| Film::Wikidata {
+                pid: p.pid,
+                site: p.site,
+                value,
+            })
+        })
+    })
+}
+fn named(uri: &str) -> Option<Film> {
     let url = url::Url::parse(uri).ok()?;
     if !matches!(url.scheme(), "https" | "http")
         || url.port().is_some()
@@ -74,6 +94,7 @@ fn site(film: &Film) -> &'static str {
         Film::Letterboxd(_) => "Letterboxd",
         Film::Tvmaze(_) => "TVmaze",
         Film::Netflix(_) => "Netflix",
+        Film::Wikidata { site, .. } => site,
     }
 }
 
@@ -86,6 +107,7 @@ fn property_of(film: &Film) -> (&'static str, String) {
         Film::Letterboxd(name) => ("P6127", name.clone()),
         Film::Tvmaze(id) => ("P8600", id.to_string()),
         Film::Netflix(id) => ("P1874", id.clone()),
+        Film::Wikidata { pid, value, .. } => (pid, value.clone()),
     }
 }
 
@@ -259,10 +281,14 @@ fn item_imdb(item: &wikidata::Item) -> Option<String> {
 pub struct Films;
 
 impl Films {
+    /// The one item with this ID. An answer over its read's cap is no answer: asking again
+    /// would read the same megabytes.
     async fn item(cx: &Context, property: &str, id: &str) -> Result<Option<wikidata::Item>> {
-        Ok(match wikidata::item_with(&cx.egress, property, id).await? {
-            wikidata::Found::One(item) => Some(*item),
-            _ => None,
+        Ok(match wikidata::item_with(&cx.egress, property, id).await {
+            Ok(wikidata::Found::One(item)) => Some(*item),
+            Ok(_) => None,
+            Err(error) if crate::resolver::egress::over_cap(&error) => None,
+            Err(error) => return Err(error),
         })
     }
     async fn tvmaze(cx: &Context, url: &str) -> Result<Option<Show>> {
@@ -309,6 +335,8 @@ impl Source for Films {
             Film::Netflix(_) => Some("CreativeWork"),
             // An IMDb title can be either.
             Film::Imdb(_) => None,
+            // Another service's page is typed by its address, if at all (`media::link_type`).
+            Film::Wikidata { .. } => return None,
         };
         Some(kind.filter(|_| super::media::exact_page(uri)))
     }
@@ -536,9 +564,33 @@ mod tests {
             film("https://www.netflix.com/gb/title/70143836"),
             Some(Film::Netflix("70143836".into()))
         );
+        // A page of another service the item links to is looked up by the value it holds.
+        for (uri, pid, value) in [
+            (
+                "https://trakt.tv/shows/breaking-bad",
+                "P8013",
+                "shows/breaking-bad",
+            ),
+            (
+                "https://www.rottentomatoes.com/m/1009113-halloween/",
+                "P1258",
+                "m/1009113-halloween",
+            ),
+            ("https://mubi.com/films/1", "P7299", "1"),
+            ("https://anilist.co/anime/1", "P8729", "1"),
+        ] {
+            match film(uri) {
+                Some(Film::Wikidata {
+                    pid: p, value: v, ..
+                }) => {
+                    assert_eq!((p, v.as_str()), (pid, value), "{uri}")
+                }
+                other => panic!("{uri}: {other:?}"),
+            }
+        }
         for uri in [
-            // A Trakt link is typed, not looked up; it joins as one of a title's links.
-            "https://trakt.tv/shows/breaking-bad",
+            "https://www.rottentomatoes.com/m/1009113-halloween/reviews",
+            "https://www.rottentomatoes.com/celebrity/john_carpenter",
             "https://www.netflix.com/browse",
             "https://www.imdb.com/name/nm0000151/",
             "https://www.imdb.com/title/tt011116/",

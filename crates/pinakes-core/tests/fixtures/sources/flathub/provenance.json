@@ -1,0 +1,20 @@
+{
+  "appstream-missing": {
+    "bytes": 26,
+    "content_type": "application/json",
+    "file": "appstream-missing.json",
+    "recorded_at": "2026-10-26T18:29:28+00:00",
+    "sha256": "4928a4d4c31e11bf34573141e560ee0c4f30ed4f723f910c4c34ee3cc7368ebf",
+    "status": 404,
+    "url": "https://flathub.org/api/v2/appstream/org.example.NoSuchApp"
+  },
+  "appstream-org.signal.Signal": {
+    "bytes": 4811,
+    "content_type": "application/json",
+    "file": "appstream-org.signal.Signal.json",
+    "recorded_at": "2026-10-26T18:29:27+00:00",
+    "sha256": "cf9e5ea8a8b353719cfcbba23015f81a589722e3643e61c85e4fcb12460211e8",
+    "status": 200,
+    "url": "https://flathub.org/api/v2/appstream/org.signal.Signal"
+  }
+}

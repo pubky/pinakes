@@ -191,3 +191,53 @@ async fn an_unknown_isbn_finds_nothing() {
     assert_eq!(found, Found::default());
     assert_eq!(recorded.seen().len(), 1);
 }
+
+/// A Goodreads book page names an edition (P2969): its Wikidata item has no Open Library ID, so
+/// the work it is an edition of (P629, The Hobbit) is read, and its Open Library work is looked
+/// up as from an Open Library link. Goodreads' work page reaches the same work directly (P8383).
+/// The Open Library work is a link, and no Goodreads page is (the card is Goodreads').
+#[tokio::test]
+async fn a_goodreads_book_reaches_its_work_through_wikidata() {
+    let cx = cx(Recorded::new(), Config::default());
+    for uri in [
+        "https://www.goodreads.com/book/show/5907.The_Hobbit",
+        "https://www.goodreads.com/work/editions/1540236",
+    ] {
+        let s = subject(uri, None, None);
+        assert!(Books.applies(&s), "{uri}");
+        let found = Books.lookup(&cx, &s).await.unwrap();
+        assert_eq!(keys(&found), ["openlibrary:work:OL27482W"], "{uri}");
+        assert_eq!(found.facts, [Fact::new("wikidata", "Q74287")], "{uri}");
+        assert_eq!(
+            links(&found)[0],
+            (
+                "Open Library",
+                "https://openlibrary.org/works/OL27482W",
+                "wikidata"
+            ),
+            "{uri}"
+        );
+        assert_eq!(
+            key_of(&found, "https://openlibrary.org/works/OL27482W"),
+            Some("openlibrary:work:OL27482W")
+        );
+        assert!(!sites(&found).contains(&"Goodreads"), "{uri}");
+    }
+}
+
+/// An item over its read's cap is no answer: the Goodreads page finds no work, and the lookup
+/// succeeds rather than failing and coming back to read the same megabytes.
+#[tokio::test]
+async fn an_item_over_its_cap_is_no_answer() {
+    let cx = cx(
+        Recorded::with_too_large(&["action=wbgetentities"]),
+        Config::default(),
+    );
+    let s = subject(
+        "https://www.goodreads.com/book/show/5907.The_Hobbit",
+        None,
+        None,
+    );
+    let found = Books.lookup(&cx, &s).await.unwrap();
+    assert!(found.keys.is_empty() && found.links.is_empty(), "{found:?}");
+}

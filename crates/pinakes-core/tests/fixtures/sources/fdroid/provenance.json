@@ -1,0 +1,38 @@
+{
+  "api-antennapod": {
+    "bytes": 223,
+    "content_type": "application/json; charset=utf-8",
+    "file": "api-antennapod.json",
+    "recorded_at": "2026-10-26T18:29:29+00:00",
+    "sha256": "8988eaa9faee8410e72947bd95497a8e7bf40b4ef73414ce624aa77ea1aabc98",
+    "status": 200,
+    "url": "https://f-droid.org/api/v1/packages/de.danoeh.antennapod"
+  },
+  "api-missing": {
+    "bytes": 21,
+    "content_type": "application/json; charset=utf-8",
+    "file": "api-missing.json",
+    "recorded_at": "2026-10-26T18:40:15+00:00",
+    "sha256": "540028bbd229cc8ce0f531f84e11296870f9b54faa231abb6f5da8557ae3df31",
+    "status": 404,
+    "url": "https://f-droid.org/api/v1/packages/org.example.unlisted"
+  },
+  "page-antennapod": {
+    "bytes": 31974,
+    "content_type": "text/html",
+    "file": "page-antennapod.html",
+    "recorded_at": "2026-10-26T18:29:29+00:00",
+    "sha256": "cae5ad6ad110dbcc59053e13d7c0dc18d17e9cffd9fe5fe9add9515a74f33c77",
+    "status": 200,
+    "url": "https://f-droid.org/en/packages/de.danoeh.antennapod/"
+  },
+  "page-missing": {
+    "bytes": 12799,
+    "content_type": "text/html",
+    "file": "page-missing.html",
+    "recorded_at": "2026-10-26T18:40:15+00:00",
+    "sha256": "e620c2c32c3d6b3644b5753d4690f8ce8bedcec3ee197cf0060d09b7b6496eac",
+    "status": 404,
+    "url": "https://f-droid.org/en/packages/org.example.unlisted/"
+  }
+}
