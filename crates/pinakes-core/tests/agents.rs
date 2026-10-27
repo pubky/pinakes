@@ -210,7 +210,7 @@ async fn initialize(app: &Router) {
         "nexus-scout",
         "`refs`",
         "`occurrence.feed_uri`",
-        "`details.aliases`",
+        "`aliases`",
     ] {
         assert!(instructions.contains(text), "{text}");
     }
@@ -249,7 +249,7 @@ async fn the_guide_and_the_index_name_the_host_that_asked(pool: PgPool) {
     assert!(guide.contains("https://nexus-scout.pubky.app/llms.txt"));
     assert!(!guide.contains("{{BASE}}"));
     // The join with Nexus names every link a card's tags can be on.
-    for field in ["`refs`", "`occurrence.feed_uri`", "`details.aliases`"] {
+    for field in ["`refs`", "`occurrence.feed_uri`", "`aliases`"] {
         assert!(guide.contains(field), "{field}");
     }
 
@@ -328,7 +328,7 @@ async fn the_mcp_handshake_and_every_tool(pool: PgPool) {
         ["search", "card", "lookup", "group", "types", "social"]
     );
     let social = &listed["result"]["tools"][5]["description"];
-    for field in ["refs", "occurrence.feed_uri", "details.aliases"] {
+    for field in ["refs", "occurrence.feed_uri", "aliases on its full read"] {
         assert!(social.as_str().unwrap().contains(field), "{field}");
     }
 

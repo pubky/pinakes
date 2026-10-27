@@ -660,7 +660,7 @@ pub struct Card {
     /// up to 256. A hint: every member keeps its own card.
     pub also_on: Vec<AlsoOn>,
     /// The links people referenced on Pubky that resolve to this card: its own `uri` and its
-    /// aliases (`details.aliases`) that carry references, most referenced first (counted up to
+    /// `aliases` that carry references, most referenced first (counted up to
     /// 1,000 each, then by URI), at most 5, normalized as every URI is. A typed card's `uri` is often not a link anyone wrote
     /// (`btc:block/…`, `isbn:…`): ask Nexus by these to find the tags (docs/api.md, Joining
     /// with Nexus). An occurrence's are its feed's. Empty when nothing references the card.
