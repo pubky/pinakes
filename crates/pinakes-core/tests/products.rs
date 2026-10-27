@@ -64,6 +64,44 @@ fn a_shop_page_names_its_barcode_and_dated_offer() {
     assert_eq!(facts["gtin"], "0840440422266");
 }
 
+#[test]
+fn only_the_pages_own_product_gives_its_barcode() {
+    // A category page's body script lists another product (its own page elsewhere): the page
+    // takes none of its identity, which would join it to that product's group.
+    let listed = |url: &str| {
+        format!(
+            r#"<html><head><title>Spreads</title></head><body><script type="application/ld+json">{{"@type": "Product", "name": "Nutella 400 g", "url": "{url}", "gtin13": "3017620422003", "sku": "N-400", "offers": {{"price": "4.95", "priceCurrency": "CHF"}}}}</script></body></html>"#
+        )
+    };
+    let extract = |page: &str, body: String| {
+        let fetched = Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            url: page.parse().unwrap(),
+            status: 200,
+            content_type: "text/html".into(),
+            body: body.into_bytes(),
+            location: None,
+            retry_after_secs: 60,
+            validators: Default::default(),
+        };
+        web::extract(page, &fetched, 3600).unwrap().doc
+    };
+    let doc = extract(
+        "https://shop.example/c/spreads",
+        listed("https://shop.example/p/nutella"),
+    );
+    assert!(!doc.attributes.contains_key("gtin"), "{:?}", doc.attributes);
+    assert!(!doc.attributes.contains_key("sku"));
+    // The same script naming the page is the page's own product.
+    let doc = extract(
+        "https://shop.example/p/nutella",
+        listed("https://shop.example/p/nutella"),
+    );
+    assert_eq!(doc.attributes["gtin"], "3017620422003");
+    assert_eq!(doc.attributes["sku"], "N-400");
+}
+
 struct AnyDns;
 #[async_trait::async_trait]
 impl Dns for AnyDns {
@@ -88,6 +126,34 @@ impl Transport for Never {
     }
 }
 
+/// A link shortener answering with a redirect to Amazon; asked for Amazon itself, it panics.
+struct ToAmazon;
+#[async_trait::async_trait]
+impl Transport for ToAmazon {
+    async fn get(&self, url: &url::Url, a: &[SocketAddr]) -> anyhow::Result<Fetched> {
+        self.get_with(url, a, &FetchOptions::default()).await
+    }
+    async fn get_with(
+        &self,
+        url: &url::Url,
+        _: &[SocketAddr],
+        _: &FetchOptions,
+    ) -> anyhow::Result<Fetched> {
+        assert_eq!(url.host_str(), Some("link.example"), "fetched {url}");
+        Ok(Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            url: url.clone(),
+            status: 302,
+            content_type: "text/html".into(),
+            body: vec![],
+            location: Some("https://www.amazon.de/dp/B08N5WRWNW".into()),
+            retry_after_secs: 60,
+            validators: Default::default(),
+        })
+    }
+}
+
 #[tokio::test]
 async fn amazon_is_never_fetched() {
     let resolver = WebResolver {
@@ -106,4 +172,23 @@ async fn amazon_is_never_fetched() {
     assert_eq!(doc.attributes["asin"], "0140328726");
     let doc = resolver.resolve("https://amzn.to/3xyzabc").await.unwrap();
     assert_eq!(doc.type_name, "WebPage");
+    // Nor where another link redirects to it: the egress refuses the redirect's target.
+    let resolver = WebResolver {
+        egress: Egress::with_backends(
+            EgressConfig::default(),
+            Arc::new(AnyDns),
+            Arc::new(ToAmazon),
+        ),
+        ..resolver
+    };
+    let error = resolver
+        .resolve("https://link.example/item")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        pinakes_core::resolver::error_class(&error),
+        "policy",
+        "{error:#}"
+    );
+    assert!(format!("{error:#}").contains("Amazon is never fetched"));
 }

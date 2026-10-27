@@ -902,6 +902,10 @@ impl Egress {
                 return Err(anyhow::Error::new(super::ErrorClass("policy"))
                     .context("host denied by operator/OSM policy"));
             }
+            // Amazon is never fetched, also where another link redirects to it.
+            if crate::kinds::products::on_amazon(&url) {
+                return Err(refused("Amazon is never fetched"));
+            }
             let port = url.port_or_known_default().context("missing port")?;
             let addresses = match url.host().context("missing host")? {
                 Host::Ipv4(v) => vec![SocketAddr::new(IpAddr::V4(v), port)],

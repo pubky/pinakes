@@ -1261,9 +1261,16 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url, claims: bool, vou
     {
         crate::kinds::jobs::from_jsonld(v, base).apply(doc);
     }
-    // A product's barcode, brand and offer.
+    // A product's barcode, brand and offer. Its identity (barcode, article and part number)
+    // only from the page's own product, as other claims: another product a page lists (a
+    // category page's) would join the page to that product.
     if schema_type(v).is_some_and(|k| crate::model::type_path(k).iter().any(|t| t == "Product")) {
-        crate::kinds::products::from_jsonld(v, base).apply(doc);
+        let product = crate::kinds::products::from_jsonld(v, base);
+        if claims && own {
+            product.apply(doc);
+        } else {
+            product.without_identity().apply(doc);
+        }
     }
     for (field, attribute) in [("duration", "duration"), ("isrcCode", "isrc")] {
         if let Some(value) = v.get(field).and_then(Value::as_str) {

@@ -6,8 +6,8 @@
 //! sources make it the key `gtin:` that groups the same product on several shops. A price and an
 //! availability are facts with the time they were read (`price_at`), never identity.
 //!
-//! Amazon pages are never fetched: an Amazon product link's card comes from the link alone
-//! (`amazon`).
+//! Amazon pages are never fetched (the egress refuses them, a redirect's target too): an Amazon
+//! product link's card comes from the link alone (`amazon`).
 use crate::model::ResourceMeta;
 use serde_json::Value;
 use url::Url;
@@ -22,9 +22,10 @@ pub const FACTS: &[&str] = &[
     // The shop's own article number and the maker's part number.
     "sku",
     "mpn",
-    // The lowest price the page offers, its ISO 4217 currency, its availability (`in_stock`,
-    // `out_of_stock`, `pre_order`, `back_order`, `discontinued`, `limited_availability`,
-    // `sold_out`, `in_store_only`, `online_only`) and when they were read (RFC 3339).
+    // The price of the page's cheapest offer, and that one offer's ISO 4217 currency,
+    // availability (`in_stock`, `out_of_stock`, `pre_order`, `back_order`, `discontinued`,
+    // `limited_availability`, `sold_out`, `in_store_only`, `online_only`) and seller; when they
+    // were read (RFC 3339).
     "price",
     "price_currency",
     "availability",
@@ -54,24 +55,38 @@ pub struct Product {
 }
 impl Product {
     /// Record these facts on `doc` in place of what it holds for them: a more exact record (one
-    /// variant's) than the page's.
+    /// variant's) than the page's. The record's identity (barcode, article and part number) is
+    /// all there is of it: one it lacks, or gives wrong, is not taken from another variant the
+    /// page names. An offer is one: its price, currency, time, availability and seller go
+    /// together.
     pub fn replace(self, doc: &mut ResourceMeta) {
-        for (key, given) in [
-            ("gtin", self.gtin.is_some()),
+        let offer = self.price.is_some() || self.availability.is_some();
+        for (key, replaced) in [
+            ("gtin", true),
+            ("sku", true),
+            ("mpn", true),
             ("brand", self.brand.is_some()),
-            ("sku", self.sku.is_some()),
-            ("mpn", self.mpn.is_some()),
-            ("price", self.price.is_some()),
-            ("price_currency", self.price.is_some()),
-            ("price_at", self.price.is_some()),
-            ("availability", self.availability.is_some()),
-            ("seller", self.seller.is_some()),
+            ("price", offer),
+            ("price_currency", offer),
+            ("price_at", offer),
+            ("availability", offer),
+            ("seller", offer),
         ] {
-            if given {
+            if replaced {
                 doc.attributes.remove(key);
             }
         }
         self.apply(doc);
+    }
+    /// This product without its identity (barcode, article and part number): what a product
+    /// that is not the page's own says, which must not join the page to that product's group.
+    pub fn without_identity(self) -> Product {
+        Product {
+            gtin: None,
+            sku: None,
+            mpn: None,
+            ..self
+        }
     }
     /// Record these facts on `doc`, keeping what it already holds; prices are dated with the
     /// card's read.
@@ -105,12 +120,12 @@ impl Product {
 
 /// The product a JSON-LD `Product` node describes on the page at `page`: for a `ProductGroup`,
 /// the variant the page's address names (its `url` or `@id`, or Shopify's `?variant=`), else its
-/// only variant.
+/// only variant. A variant's barcode, article numbers and offers are its own, never the group's
+/// (the group's offers give its lowest price, or another variant's barcode).
 pub fn from_jsonld(v: &Value, page: &Url) -> Product {
     let variant = variant(v, page);
     let node = variant.unwrap_or(v);
     let offers: Vec<&Value> = all(&node["offers"])
-        .chain(variant.map_or_else(Vec::new, |_| all(&v["offers"]).collect()))
         .flat_map(|o| std::iter::once(o).chain(all(&o["offers"])))
         .collect();
     let gtin = gtin(node).or_else(|| {
@@ -118,45 +133,48 @@ pub fn from_jsonld(v: &Value, page: &Url) -> Product {
         let codes: Vec<String> = offers.iter().filter_map(|o| gtin(o)).collect();
         (!codes.is_empty() && codes.iter().all(|c| *c == codes[0])).then(|| codes[0].clone())
     });
-    let prices: Vec<(f64, Option<String>)> = offers
+    // Price, currency, availability and seller come from one offer: the cheapest, a concrete
+    // price before an aggregate's low price; without a price, the first naming an availability.
+    let priced = |o: &Value| {
+        number(&o["price"])
+            .or_else(|| number(&o["priceSpecification"]["price"]))
+            .map(|p| (p, false))
+            .or_else(|| number(&o["lowPrice"]).map(|p| (p, true)))
+    };
+    let available = |o: &Value| text(&o["availability"]).and_then(|a| availability(&a));
+    let cheapest = offers
         .iter()
-        .filter_map(|o| {
-            number(&o["price"])
-                .or_else(|| number(&o["lowPrice"]))
-                .or_else(|| number(&o["priceSpecification"]["price"]))
-                .map(|p| {
-                    let currency = text(&o["priceCurrency"])
-                        .or_else(|| text(&o["priceSpecification"]["priceCurrency"]));
-                    (p, currency)
-                })
-        })
-        .collect();
-    let lowest = prices
-        .iter()
-        .cloned()
+        .copied()
+        .filter_map(|o| priced(o).map(|p| (p, o)))
         .reduce(|a, b| if b.0 < a.0 { b } else { a });
+    let (price, offer) = match cheapest {
+        Some(((price, _), offer)) => (Some(price), Some(offer)),
+        None => (
+            None,
+            offers.iter().copied().find(|o| available(o).is_some()),
+        ),
+    };
     let brand = first(&node["brand"]);
     let brand = text(brand).or_else(|| text(&brand["name"])).or_else(|| {
         let brand = first(&v["brand"]);
         text(brand).or_else(|| text(&brand["name"]))
     });
-    let seller = offers
-        .iter()
-        .find_map(|o| text(&o["seller"]["name"]).or_else(|| text(&o["seller"])));
     Product {
         gtin,
         brand,
-        sku: text(&node["sku"]).or_else(|| text(&v["sku"])),
-        mpn: text(&node["mpn"]).or_else(|| text(&v["mpn"])),
-        price: lowest.as_ref().map(|l| l.0),
-        currency: lowest
-            .and_then(|l| l.1)
+        sku: text(&node["sku"]),
+        mpn: text(&node["mpn"]),
+        price,
+        currency: offer
+            .filter(|_| price.is_some())
+            .and_then(|o| {
+                text(&o["priceCurrency"])
+                    .or_else(|| text(&o["priceSpecification"]["priceCurrency"]))
+            })
             .map(|c| c.to_ascii_uppercase())
             .filter(|c| c.len() == 3 && c.bytes().all(|b| b.is_ascii_uppercase())),
-        availability: offers
-            .iter()
-            .find_map(|o| text(&o["availability"]).and_then(|a| availability(&a))),
-        seller,
+        availability: offer.and_then(available),
+        seller: offer.and_then(|o| text(&o["seller"]["name"]).or_else(|| text(&o["seller"]))),
         description: text(&node["description"])
             .or_else(|| text(&v["description"]))
             .filter(|d| d.contains('<'))
@@ -239,9 +257,7 @@ pub fn availability(s: &str) -> Option<String> {
 /// page is a plain `WebPage`. `None` for a link that is not on Amazon's shop.
 pub fn amazon(uri: &str, ttl: u64) -> Option<ResourceMeta> {
     let url = Url::parse(uri).ok()?;
-    let host = url.host_str()?.to_ascii_lowercase();
-    let host = host.strip_prefix("www.").unwrap_or(&host);
-    if !AMAZON.contains(&host) {
+    if !on_amazon(&url) {
         return None;
     }
     let mut doc = ResourceMeta::new(uri, "web", ttl);
@@ -263,6 +279,14 @@ pub fn amazon(uri: &str, ttl: u64) -> Option<ResourceMeta> {
         }
     }
     Some(doc)
+}
+/// Whether `url` is on Amazon's shop, which is never fetched: the egress refuses it at every
+/// step, a redirect's target too.
+pub fn on_amazon(url: &Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        AMAZON.contains(&host.strip_prefix("www.").unwrap_or(&host))
+    })
 }
 /// Amazon's shops (without `www.`).
 const AMAZON: &[&str] = &[
@@ -337,9 +361,9 @@ mod tests {
         let p = from_jsonld(
             &json!({"@type": "Product", "name": "Nutella 400 g", "gtin13": "3017620422003",
                 "brand": {"@type": "Brand", "name": "Ferrero"}, "sku": "123", "mpn": "N-400",
-                "offers": [{"@type": "Offer", "price": "4.95", "priceCurrency": "chf",
-                    "availability": "https://schema.org/InStock", "seller": {"name": "Shop"}},
-                    {"@type": "Offer", "price": 3.5, "priceCurrency": "CHF"}]}),
+                "offers": [{"@type": "Offer", "price": "4.95", "priceCurrency": "CHF"},
+                    {"@type": "Offer", "price": 3.5, "priceCurrency": "chf",
+                    "availability": "https://schema.org/InStock", "seller": {"name": "Shop"}}]}),
             &page("https://shop.example/p/1"),
         );
         assert_eq!(p.gtin.as_deref(), Some("3017620422003"));
@@ -359,6 +383,99 @@ mod tests {
         assert_eq!(a["price"], "3.50");
         assert_eq!(a["price_currency"], "CHF");
         assert!(a["price_at"].ends_with('Z'));
+    }
+
+    #[test]
+    fn price_seller_and_availability_are_one_offers() {
+        let p = from_jsonld(
+            &json!({"@type": "Product", "offers": [
+                {"@type": "Offer", "price": "100", "priceCurrency": "CHF",
+                    "availability": "https://schema.org/OutOfStock",
+                    "seller": {"name": "Expensive shop"}},
+                {"@type": "Offer", "price": "50", "priceCurrency": "CHF",
+                    "availability": "https://schema.org/InStock", "seller": {"name": "Cheap shop"}}]}),
+            &page("https://shop.example/p/1"),
+        );
+        assert_eq!(p.price, Some(50.0));
+        assert_eq!(p.availability.as_deref(), Some("in_stock"));
+        assert_eq!(p.seller.as_deref(), Some("Cheap shop"));
+        // An aggregate's low price gives way to the same price of a concrete offer, with its
+        // seller; without a price, the offer naming an availability.
+        let p = from_jsonld(
+            &json!({"@type": "Product", "offers": {"@type": "AggregateOffer", "lowPrice": "50",
+                "priceCurrency": "EUR", "offers": [
+                    {"price": "70", "priceCurrency": "EUR", "seller": "A"},
+                    {"price": "50", "priceCurrency": "EUR", "seller": "B"}]}}),
+            &page("https://shop.example/p/1"),
+        );
+        assert_eq!(
+            (p.price, p.currency.as_deref(), p.seller.as_deref()),
+            (Some(50.0), Some("EUR"), Some("B"))
+        );
+        let p = from_jsonld(
+            &json!({"@type": "Product", "offers": [{"seller": "A"},
+                {"availability": "SoldOut", "seller": "B"}]}),
+            &page("https://shop.example/p/1"),
+        );
+        assert_eq!(
+            (p.price, p.availability.as_deref(), p.seller.as_deref()),
+            (None, Some("sold_out"), Some("B"))
+        );
+    }
+
+    #[test]
+    fn a_variant_keeps_its_own_barcode_and_offers() {
+        // The group's offers are its aggregate (the lowest price of any variant, and that
+        // variant's barcode): the variant the page names takes neither, nor the group's sku.
+        let group = json!({"@type": "ProductGroup", "name": "Runner", "sku": "RUNNER",
+            "offers": {"@type": "AggregateOffer", "lowPrice": "10", "priceCurrency": "USD",
+                "offers": [{"price": "10", "priceCurrency": "USD", "gtin": "0602557656527"}]},
+            "hasVariant": [
+                {"@type": "Product", "url": "/products/runner?variant=1", "gtin": "0602557656527",
+                    "sku": "R-1", "offers": {"price": "10", "priceCurrency": "USD"}},
+                {"@type": "Product", "url": "/products/runner?variant=2", "sku": "R-2",
+                    "offers": {"price": "20", "priceCurrency": "USD"}}]});
+        let p = from_jsonld(
+            &group,
+            &page("https://shop.example/products/runner?variant=2"),
+        );
+        assert_eq!(p.gtin, None);
+        assert_eq!(p.sku.as_deref(), Some("R-2"));
+        assert_eq!((p.price, p.currency.as_deref()), (Some(20.0), Some("USD")));
+        // The group's own page: the group's facts.
+        let p = from_jsonld(&group, &page("https://shop.example/products/runner"));
+        assert_eq!((p.price, p.sku.as_deref()), (Some(10.0), Some("RUNNER")));
+    }
+
+    #[test]
+    fn a_variants_record_replaces_the_pages_identity_and_offer() {
+        let mut doc = ResourceMeta::new("https://shop.example/products/runner", "jsonld", 3600);
+        doc.set_type("Product");
+        Product {
+            gtin: Some("0602557656527".into()),
+            sku: Some("R-1".into()),
+            mpn: Some("M-1".into()),
+            brand: Some("Birds".into()),
+            price: Some(10.0),
+            currency: Some("USD".into()),
+            availability: Some("in_stock".into()),
+            seller: Some("Shop".into()),
+            ..Default::default()
+        }
+        .apply(&mut doc);
+        Product {
+            sku: Some("R-2".into()),
+            price: Some(20.0),
+            currency: Some("USD".into()),
+            ..Default::default()
+        }
+        .replace(&mut doc);
+        let a = &doc.attributes;
+        assert!(!a.contains_key("gtin") && !a.contains_key("mpn"), "{a:?}");
+        assert_eq!(a["sku"], "R-2");
+        assert_eq!(a["price"], "20");
+        assert!(!a.contains_key("availability") && !a.contains_key("seller"));
+        assert_eq!(a["brand"], "Birds");
     }
 
     #[test]

@@ -254,4 +254,33 @@ mod tests {
         assert!(card(&doc, Some(1), &body).unwrap().is_none());
         assert!(improved.bounded(crate::sources::attributes()).is_ok());
     }
+
+    #[test]
+    fn a_variant_without_a_barcode_keeps_none_of_another() {
+        // The page's card names its default variant (1); variant 2's record has an empty, then
+        // an invalid barcode: the card takes variant 2's article number and price, no barcode.
+        let mut doc = ResourceMeta::new("https://shop.example/products/runner", "jsonld", 3600);
+        doc.set_type(products::TYPE);
+        Product {
+            gtin: Some("0602557656527".into()),
+            sku: Some("R-1".into()),
+            price: Some(10.0),
+            currency: Some("USD".into()),
+            ..Default::default()
+        }
+        .apply(&mut doc);
+        for barcode in ["", "4006381333932"] {
+            let body = serde_json::json!({"product": {"title": "Runner", "vendor": "Birds",
+                "variants": [
+                    {"id": 1, "barcode": "0602557656527", "sku": "R-1", "price": "10.00"},
+                    {"id": 2, "barcode": barcode, "sku": "R-2", "price": "20.00",
+                        "price_currency": "USD"}]}});
+            let improved = card(&doc, Some(2), &serde_json::to_vec(&body).unwrap())
+                .unwrap()
+                .unwrap();
+            let a = &improved.attributes;
+            assert!(!a.contains_key("gtin"), "{barcode:?}: {a:?}");
+            assert_eq!((&*a["sku"], &*a["price"]), ("R-2", "20"), "{barcode:?}");
+        }
+    }
 }

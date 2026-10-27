@@ -1007,16 +1007,20 @@ record or a product database (their pages say which).
 
 - Its barcode, `facts.gtin`, is the product's own GTIN as GTIN-13: from its `gtin13`,
   `gtin`, `gtin12`, `gtin14`, `gtin8` or `isbn` (a book's), or its one offer's, with the check
-  digit verified. A `ProductGroup` names the barcode of the variant its address picks (its
-  `url`, or `?variant=`), else of its only variant. A product's barcode is the key `gtin:`, so
+  digit verified. The barcode, `sku` and `mpn` come only from the page's own product (in the
+  page's head, or naming the page), never from another product a page lists. A `ProductGroup`
+  names the barcode, article numbers and offers of the variant its address picks (its `url`, or
+  `?variant=`), else of its only variant, never the group's. A product's barcode is the key `gtin:`, so
   the same product on several shops is [one group](#groups), and `key=gtin:{barcode}` finds them
   all.
-- Its price and availability are facts with the time they were read, never identity: the lowest
-  offer's `price` and `price_currency`, `availability`, `seller` and `price_at`.
+- Its price and availability are facts with the time they were read, never identity: the cheapest
+  offer's `price`, `price_currency`, `availability` and `seller` (all four of that one offer),
+  and `price_at`.
 - Open product databases ([sources](sources/README.md)) answer for a barcode with a derived link
   and their facts, under the ODbL: show `facts.attribution` (or the card's
   `attribution`) with them.
-- Amazon pages are never fetched: an Amazon product link (`/dp/{ASIN}`, `/gp/product/{ASIN}`) is a
+- Amazon pages are never fetched, also where another link redirects to one (refused, class
+  `policy`): an Amazon product link (`/dp/{ASIN}`, `/gp/product/{ASIN}`) is a
   `Product` from the link alone, with its `asin` (and `isbn`, for a book's ISBN-10), and any other
   Amazon link a `WebPage`.
 
@@ -1024,7 +1028,7 @@ record or a product database (their pages say which).
 | --- | --- |
 | `gtin` | GTIN-13 |
 | `brand`, `sku`, `mpn` | The brand, the shop's article number, the maker's part number |
-| `price`, `price_currency`, `availability`, `seller`, `price_at` | The lowest offer, its ISO 4217 currency, its availability (`in_stock`, `out_of_stock`, `pre_order`, `back_order`, `discontinued`, `limited_availability`, `sold_out`, `in_store_only`, `online_only`, `reserved`, `made_to_order`), who sells it, and when that was read (RFC 3339) |
+| `price`, `price_currency`, `availability`, `seller`, `price_at` | The cheapest offer's price, its ISO 4217 currency, its availability (`in_stock`, `out_of_stock`, `pre_order`, `back_order`, `discontinued`, `limited_availability`, `sold_out`, `in_store_only`, `online_only`, `reserved`, `made_to_order`), who sells it, and when that was read (RFC 3339) |
 | `asin` | An Amazon link's ASIN |
 
 ## Sources

@@ -20,7 +20,9 @@ only.
 The page's own card (`Product` or `ProductGroup`, from its JSON-LD), as a
 [product](../api.md#products) of the variant the link picks (`?variant=`), or of the product's
 only variant. Without one variant picked, the hook adds nothing. The record's values replace the
-page's for that variant.
+page's for that variant: its barcode, article and part number entirely (a variant without a
+valid barcode has none, never the page's other variant's), and its price with the offer's other
+facts.
 
 | Fact | Meaning |
 | --- | --- |
