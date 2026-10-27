@@ -373,13 +373,15 @@ fn apply_url(v: &Value, base: &Url) -> Option<String> {
 pub fn posted_at(s: &str) -> Option<DateTime<Utc>> {
     crate::event::time::parse(s.trim(), None).and_then(crate::event::time::bounded)
 }
-/// When a posting closes: a date alone is valid through its whole day (UTC).
+/// When a posting closes: a date alone (with or without a `Z`) is valid through its whole day
+/// (UTC).
 pub fn closes_at(s: &str) -> Option<DateTime<Utc>> {
     let s = s.trim();
     let at = posted_at(s)?;
+    let date = s.strip_suffix(['Z', 'z']).unwrap_or(s);
     let date_only = ["%Y-%m-%d", "%Y%m%d"]
         .iter()
-        .any(|f| chrono::NaiveDate::parse_from_str(s, f).is_ok());
+        .any(|f| chrono::NaiveDate::parse_from_str(date, f).is_ok());
     if date_only {
         crate::event::time::bounded(at + chrono::Duration::days(1))
     } else {
@@ -622,7 +624,7 @@ mod tests {
         );
         assert_eq!(closes_at("soon"), None);
         // Every date-only form is valid through its whole day.
-        for date in ["2026-11-07", "20261107"] {
+        for date in ["2026-11-07", "20261107", "2026-11-07Z", "20261107Z"] {
             assert_eq!(
                 closes_at(date).unwrap().to_rfc3339(),
                 "2026-11-08T00:00:00+00:00",
