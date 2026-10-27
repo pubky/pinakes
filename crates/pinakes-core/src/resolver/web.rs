@@ -1041,9 +1041,17 @@ fn site_script(v: &Value, base: &Url) -> bool {
     if v.get("mainEntity").is_some() {
         return false;
     }
-    match v.get("@graph").and_then(Value::as_array) {
+    match graph_nodes(v) {
         Some(graph) => (schema_type(v).is_none() || site_node(v, base)) && all_site(graph),
         None => site_node(v, base),
+    }
+}
+/// A node's `@graph`: an array of nodes, or one node object, which JSON-LD allows in its place.
+fn graph_nodes(v: &Value) -> Option<&[Value]> {
+    match v.get("@graph")? {
+        Value::Array(nodes) => Some(nodes),
+        node @ Value::Object(_) => Some(std::slice::from_ref(node)),
+        _ => None,
     }
 }
 /// The `url`/`@id` values of a JSON-LD node (or array of nodes), its main entity and its
@@ -1053,7 +1061,7 @@ fn entity_urls(v: &Value) -> impl Iterator<Item = &str> {
         .map_or_else(|| vec![v], |a| a.iter().take(16).collect())
         .into_iter()
         .flat_map(|v| {
-            let graph = v.get("@graph").and_then(Value::as_array);
+            let graph = graph_nodes(v);
             std::iter::once(v)
                 .chain(v.get("mainEntity").filter(|m| m.is_object()))
                 .chain(graph.into_iter().flatten().take(16))
@@ -1825,6 +1833,24 @@ mod tests {
             assert_eq!(out.doc.name.as_deref(), Some("Actual story"), "{n}");
             assert_eq!(out.doc.description.as_deref(), Some("What happened."));
             assert_eq!(out.doc.type_name, "WebPage");
+        }
+        // A `@graph` may be one node object. The page's Article there is page content, in a head
+        // or a body script, and its url names the page: its @id is an alias.
+        let generic = r#"<script type="application/ld+json">{"@type":"WebPage","url":"https://example.org/story","name":"Generic page"}</script>"#;
+        let single = r#"<script type="application/ld+json">{"@type":"WebSite","url":"https://example.org/","@graph":{"@type":"Article","name":"Actual story","description":"What happened.","url":"https://example.org/story","@id":"https://example.org/s/42"}}</script>"#;
+        for html in [
+            format!("<html><head>{single}{generic}</head></html>"),
+            format!("<html><head>{generic}</head><body>{single}</body></html>"),
+        ] {
+            let out = read("https://example.org/story", &html);
+            assert_eq!(out.doc.name.as_deref(), Some("Actual story"), "{html}");
+            assert_eq!(out.doc.description.as_deref(), Some("What happened."));
+            assert_eq!(out.doc.type_name, "Article");
+            assert!(out
+                .doc
+                .aliases
+                .iter()
+                .any(|a| a == "https://example.org/s/42"));
         }
         // A node about the page (a product whose url is the page, an event with no url) wins.
         for (url, node, name) in [
