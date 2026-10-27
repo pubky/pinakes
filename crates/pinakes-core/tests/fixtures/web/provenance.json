@@ -1,0 +1,22 @@
+{
+  "fountain-episode-Yj4aqLaHXcVmxgXbMLHb": {
+    "bytes": 13349,
+    "content_type": "text/html; charset=utf-8",
+    "file": "fountain-episode-Yj4aqLaHXcVmxgXbMLHb.html",
+    "note": "Trimmed from the recorded page (102618 bytes, sha256 fb59d8406d00937a60a5b21e5d1aedbf5441351297971ffda3cc1dd8f08df631): its <head> without scripts, styles and asset links, then, as children of <body> where the page has them, its <title>, <meta>, canonical and alternate links and JSON-LD scripts, in their order.",
+    "recorded_at": "2026-10-26T22:05:14+00:00",
+    "sha256": "dd645708318fe470446a2b1102c3356fba9da3ebee7d8a1ce0bdf27b7a7fe322",
+    "status": 200,
+    "url": "https://fountain.fm/episode/Yj4aqLaHXcVmxgXbMLHb"
+  },
+  "fountain-show-V71wG3DhMtF9fDqaJRWX": {
+    "bytes": 2601,
+    "content_type": "text/html; charset=utf-8",
+    "file": "fountain-show-V71wG3DhMtF9fDqaJRWX.html",
+    "note": "Trimmed from the recorded page (80824 bytes, sha256 5a9b3365cb290227dd41cb197909850c5fce60246c1421c061a1149bf5c887db): its <head> without scripts, styles and asset links, then, as children of <body> where the page has them, its <title>, <meta>, canonical and alternate links and JSON-LD scripts, in their order.",
+    "recorded_at": "2026-10-26T22:04:12+00:00",
+    "sha256": "2cacbf0000b747d447a45dded9f8f9ef09016450342b971b520bd347d9c0ca13",
+    "status": 200,
+    "url": "https://fountain.fm/show/V71wG3DhMtF9fDqaJRWX"
+  }
+}

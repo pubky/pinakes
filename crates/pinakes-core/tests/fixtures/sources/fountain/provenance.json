@@ -1,0 +1,20 @@
+{
+  "episode-Yj4aqLaHXcVmxgXbMLHb": {
+    "bytes": 102618,
+    "content_type": "text/html; charset=utf-8",
+    "file": "episode-Yj4aqLaHXcVmxgXbMLHb.html.gz",
+    "recorded_at": "2026-10-26T22:05:14+00:00",
+    "sha256": "fb59d8406d00937a60a5b21e5d1aedbf5441351297971ffda3cc1dd8f08df631",
+    "status": 200,
+    "url": "https://fountain.fm/episode/Yj4aqLaHXcVmxgXbMLHb"
+  },
+  "show-V71wG3DhMtF9fDqaJRWX": {
+    "bytes": 80824,
+    "content_type": "text/html; charset=utf-8",
+    "file": "show-V71wG3DhMtF9fDqaJRWX.html.gz",
+    "recorded_at": "2026-10-26T22:04:12+00:00",
+    "sha256": "5a9b3365cb290227dd41cb197909850c5fce60246c1421c061a1149bf5c887db",
+    "status": 200,
+    "url": "https://fountain.fm/show/V71wG3DhMtF9fDqaJRWX"
+  }
+}

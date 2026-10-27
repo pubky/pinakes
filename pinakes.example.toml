@@ -92,6 +92,8 @@ enabled = true
 enabled = true
 [sources.forgejo]
 enabled = true
+[sources.fountain]
+enabled = true
 [sources.gbif]
 enabled = true
 [sources.ghost]
