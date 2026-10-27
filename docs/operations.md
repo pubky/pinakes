@@ -399,10 +399,10 @@ never names a page: its breadcrumbs, its `WebSite` node, and an organization or 
 (else `@id`) is the site's root while the page is not (the publisher, the same on every page). The
 root must be this site's (the page's host, `www.` aside, or a parent domain of it): a node naming
 another site's root, such as a directory page's restaurant, is about the page. A script holding only
-such nodes, in an array or a `@graph` too (of at most 16 nodes, none with a `mainEntity`), ranks
-below every other, gives the page no name, description, image, type or identity claim, and may only
-name the site. Without a node about the page, the og:/twitter: tags and the title name it. Those may
-also be children of `<body>` itself, where frameworks such as Next.js stream a page's metadata; a
+such nodes, in an array or a `@graph` too (of any length, none with a `mainEntity`), ranks below
+every other, gives the page no name, description, image, type or identity claim, and may only name
+the site. Without a node about the page, the og:/twitter: tags and the title name it. Those may also
+be children of `<body>` itself, where frameworks such as Next.js stream a page's metadata; a
 `<meta>` inside the body's content never counts. A title loses its site suffix (the part after its
 last `•`, `|`, `-`, `–`, `—` or `·`) when that part names the site as a whole word: its
 `og:site_name` or the head of it, its JSON-LD name, or its host's registrable label (`fountain` in

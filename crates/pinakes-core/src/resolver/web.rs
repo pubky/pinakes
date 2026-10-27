@@ -1021,12 +1021,9 @@ fn site_node(v: &Value, base: &Url) -> bool {
 /// Whether a script's JSON-LD holds only site nodes (`site_node`): one node, or every typed
 /// node of its array or `@graph`, and no main entity of the page.
 fn site_script(v: &Value, base: &Url) -> bool {
-    // A list of more than 16 nodes is never site-only: no partial scan decides it. A node with a
-    // main entity counts, typed or not.
+    // Every node of the list decides, however many there are. A node with a main entity counts,
+    // typed or not.
     let all_site = |nodes: &[Value]| {
-        if nodes.len() > 16 {
-            return false;
-        }
         let counted: Vec<&Value> = nodes
             .iter()
             .filter(|n| {
@@ -1798,12 +1795,14 @@ mod tests {
         assert_eq!(out.doc.name.as_deref(), Some("Note one"));
         assert_eq!(out.doc.type_name, "WebPage");
         // A graph holding the page's Article, through an untyped wrapper's mainEntity or after
-        // 16 site nodes, is not site-only: the Article names the page over a generic WebPage.
+        // 16 or 40 site nodes, is not site-only: the Article names the page over a generic
+        // WebPage.
         let site = r#"{"@type":"WebSite","name":"Publisher","url":"https://example.org/"}"#;
         let story = r#"{"@type":"Article","name":"Actual story","description":"What happened."}"#;
         for graph in [
             format!(r#"[{site},{{"mainEntity":{story}}}]"#),
             format!("[{}{story}]", format!("{site},").repeat(16)),
+            format!("[{}{story}]", format!("{site},").repeat(40)),
         ] {
             let html = format!(
                 r#"<html><head><script type="application/ld+json">{{"@graph":{graph}}}</script><script type="application/ld+json">{{"@type":"WebPage","url":"https://example.org/story","name":"Generic page"}}</script></head></html>"#
@@ -1812,6 +1811,20 @@ mod tests {
             assert_eq!(out.doc.name.as_deref(), Some("Actual story"), "{graph}");
             assert_eq!(out.doc.description.as_deref(), Some("What happened."));
             assert_eq!(out.doc.type_name, "Article");
+        }
+        // A graph of site nodes alone stays site-only however long it is: a separate WebPage
+        // names the page.
+        let publisher =
+            r#"{"@type":"LocalBusiness","name":"Publisher","url":"https://example.org/"}"#;
+        for n in [16, 17, 40] {
+            let graph = vec![publisher; n].join(",");
+            let html = format!(
+                r#"<html><head><script type="application/ld+json">{{"@graph":[{graph}]}}</script><script type="application/ld+json">{{"@type":"WebPage","url":"https://example.org/story","name":"Actual story","description":"What happened."}}</script></head></html>"#
+            );
+            let out = read("https://example.org/story", &html);
+            assert_eq!(out.doc.name.as_deref(), Some("Actual story"), "{n}");
+            assert_eq!(out.doc.description.as_deref(), Some("What happened."));
+            assert_eq!(out.doc.type_name, "WebPage");
         }
         // A node about the page (a product whose url is the page, an event with no url) wins.
         for (url, node, name) in [
