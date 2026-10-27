@@ -1402,3 +1402,88 @@ async fn youtube_is_named_by_its_oembed_answer_not_a_regional_page() {
         assert_eq!(seen, expected, "{landed}");
     }
 }
+
+/// A media page's healthy JSON-LD names the object, and oEmbed only fills gaps, unless the
+/// provider names the link exactly (YouTube's `watch`): then its title, author and thumbnail
+/// come first, and a field it leaves blank keeps the page's.
+#[tokio::test]
+async fn json_ld_names_the_object_unless_its_provider_names_the_link_exactly() {
+    struct Media;
+    #[async_trait]
+    impl Transport for Media {
+        async fn get(&self, u: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+            let host = u.host_str().unwrap_or_default().to_owned();
+            let (content_type, body) = if u.path().ends_with("/oembed") {
+                // YouTube's answer leaves its thumbnail and author blank.
+                let youtube = host == "www.youtube.com";
+                let blank = |s: &str| if youtube { "" } else { s }.to_owned();
+                (
+                    "application/json",
+                    json!({"type": "video", "title": "Provider title",
+                           "author_name": blank("Provider author"),
+                           "thumbnail_url": blank("https://cdn.example/provider.jpg")})
+                    .to_string(),
+                )
+            } else {
+                (
+                    "text/html",
+                    format!(
+                        "<html><head><title>Page title</title>\
+                         <script type=\"application/ld+json\">{}</script>\
+                         </head><body>{}</body></html>",
+                        json!({"@type": "VideoObject", "name": "Page title",
+                               "description": "The page's own description.",
+                               "image": format!("https://{host}/page.jpg"),
+                               "author": {"@type": "Person", "name": "Page author"}}),
+                        "<p>Video</p>".repeat(400)
+                    ),
+                )
+            };
+            Ok(Fetched {
+                permanent_redirect: false,
+                truncated: false,
+                validators: Default::default(),
+                url: u.clone(),
+                content_type: content_type.into(),
+                status: 200,
+                retry_after_secs: 60,
+                location: None,
+                body: body.into_bytes(),
+            })
+        }
+    }
+    let resolver = CardResolver {
+        kind: "media",
+        config: Arc::new(Config::default()),
+        web: WebResolver {
+            oembed_policy: Default::default(),
+            cards: None,
+            events: None,
+            egress: Egress::with_backends(Default::default(), Arc::new(PublicDns), Arc::new(Media)),
+            config: Default::default(),
+        },
+    };
+    // audio.com's scheme (`https://audio.com/*`) names no path: the page's JSON-LD names it.
+    let doc = resolver
+        .resolve("https://audio.com/someone/audio/a-track")
+        .await
+        .unwrap();
+    assert_eq!(doc.name.as_deref(), Some("Page title"));
+    assert_eq!(doc.image.as_deref(), Some("https://audio.com/page.jpg"));
+    assert_eq!(doc.attributes["author"], "Page author");
+    // YouTube's scheme names the link: its title comes first, its blank fields keep the page's.
+    let doc = resolver
+        .resolve("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        .await
+        .unwrap();
+    assert_eq!(doc.name.as_deref(), Some("Provider title"));
+    assert_eq!(
+        doc.image.as_deref(),
+        Some("https://www.youtube.com/page.jpg")
+    );
+    assert_eq!(doc.attributes["author"], "Page author");
+    assert_eq!(
+        doc.description.as_deref(),
+        Some("The page's own description.")
+    );
+}

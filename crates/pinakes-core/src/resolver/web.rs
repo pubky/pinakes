@@ -1315,30 +1315,24 @@ fn mapped_type(vocab: &str, name: &str) -> Option<&'static str> {
 /// A provider's own oEmbed answer for a link it names exactly (its scheme has a path, as
 /// YouTube's `watch` and `shorts` do): its title, author and thumbnail are the object's, ahead
 /// of what the page says (a regional or consent page names the site, not the video). The page
-/// keeps what the answer lacks.
+/// keeps what the answer lacks or leaves blank.
 pub fn apply_oembed_first(doc: &mut ResourceMeta, v: &Value, base: &Url) {
-    if let Some(title) = v.get("title").and_then(string) {
+    if let Some(title) = oembed_field(v, "title") {
         doc.name = Some(title);
     }
-    if let Some(image) = v
-        .get("thumbnail_url")
-        .and_then(string)
-        .and_then(|s| origin_url(base, &s))
-    {
+    if let Some(image) = oembed_field(v, "thumbnail_url").and_then(|s| origin_url(base, &s)) {
         doc.image = Some(image);
     }
-    if let Some(author) = v.get("author_name").and_then(string) {
+    if let Some(author) = oembed_field(v, "author_name") {
         doc.attributes.insert("author".into(), author);
     }
     apply_oembed(doc, v, base);
 }
 pub fn apply_oembed(doc: &mut ResourceMeta, v: &Value, base: &Url) {
-    fill(&mut doc.name, v.get("title").and_then(string));
+    fill(&mut doc.name, oembed_field(v, "title"));
     fill(
         &mut doc.image,
-        v.get("thumbnail_url")
-            .and_then(string)
-            .and_then(|s| origin_url(base, &s)),
+        oembed_field(v, "thumbnail_url").and_then(|s| origin_url(base, &s)),
     );
     if doc.source == "web" {
         if let Some(kind) = v
@@ -1351,10 +1345,17 @@ pub fn apply_oembed(doc: &mut ResourceMeta, v: &Value, base: &Url) {
         }
     }
     for (key, field) in [("author", "author_name"), ("provider", "provider_name")] {
-        if let Some(v) = v.get(field).and_then(string) {
+        if let Some(v) = oembed_field(v, field) {
             doc.attributes.entry(key.into()).or_insert(v);
         }
     }
+}
+/// An oEmbed answer's text field, unless blank: a blank thumbnail would resolve to the page
+/// itself, and a blank title or author names nothing.
+fn oembed_field(v: &Value, field: &str) -> Option<String> {
+    v.get(field)
+        .and_then(string)
+        .filter(|s| !s.trim().is_empty())
 }
 #[cfg(test)]
 mod tests {

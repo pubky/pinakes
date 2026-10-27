@@ -413,10 +413,13 @@ document head only. Media pages use the pinned 390-provider oEmbed registry (`da
 SoundCloud, TikTok, Facebook and Instagram skipped; `scripts/oembed-providers` updates it):
 `media.oembed = "when_needed"` (default) asks path-specific providers first and broad patterns only
 for an incomplete, failed or truncated page; `"always"` also fetches every matching provider and
-trusted page-advertised endpoints, which must share the page's origin or its registry provider.
-Healthy page JSON-LD stays authoritative and oEmbed fills gaps. `web.discover_feeds` (web pages) and
-`cards.media.discover_feeds` (media pages: podcast feed scanning) follow RSS alternates on pages
-without a typed card. Discovery decisions are counted in
+trusted page-advertised endpoints, which must share the page's origin or its registry provider. The
+page's own metadata (its JSON-LD first) names the object and oEmbed fills what it lacks, except
+where the answer comes first: from a provider whose scheme names the link exactly (it has a path, as
+YouTube's `watch` and `shorts` do), or from any matching provider under `"always"`, its title,
+author and thumbnail come ahead of the page's. A blank field in an answer is no value.
+`web.discover_feeds` (web pages) and `cards.media.discover_feeds` (media pages: podcast feed
+scanning) follow RSS alternates on pages without a typed card. Discovery decisions are counted in
 `pinakes_discovery_decisions_total{kind,decision}`.
 
 A challenge page (a bot wall, captcha or sign-in redirect) is a failed fetch: the resource turns
