@@ -126,7 +126,11 @@ by id. Who tagged a link, with which labels, and what your own follows think of 
    a link anyone wrote: the card of a Bitcoin block is `btc:block/…`, a protein's `uniprot:…`,
    a book's `isbn:…`, while people tagged the mempool.space, UniProt or Open Library page.
    `refs` lists those links, the ones that carry references, most referenced first (at most
-   5). Ask Nexus about all of them, and add up a card's tags over its links.
+   5). An occurrence's `uri` is the event's own page, which nobody tagged: people tagged its
+   feed, `occurrence.feed_uri`, and its `refs` are the feed's. A full read
+   (`GET /v1/resources/{id}`) lists every other spelling of a card's link in `details.aliases`
+   (at most 50); add those for a complete join. Ask Nexus about all of them, and add up a
+   card's tags over its links.
 2. Send those URIs, 100 at a time, to the Nexus batch resource view:
 
 ```sh

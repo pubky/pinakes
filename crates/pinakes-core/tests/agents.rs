@@ -205,10 +205,15 @@ async fn initialize(app: &Router) {
     assert_eq!(status, 200, "{answer}");
     assert_eq!(answer["result"]["serverInfo"]["name"], "pinakes");
     assert!(answer["result"]["capabilities"]["tools"].is_object());
-    assert!(answer["result"]["instructions"]
-        .as_str()
-        .unwrap()
-        .contains("nexus-scout"));
+    let instructions = answer["result"]["instructions"].as_str().unwrap();
+    for text in [
+        "nexus-scout",
+        "`refs`",
+        "`occurrence.feed_uri`",
+        "`details.aliases`",
+    ] {
+        assert!(instructions.contains(text), "{text}");
+    }
 }
 
 /// A tool's answer: whether it is an error, and its JSON text.
@@ -243,6 +248,10 @@ async fn the_guide_and_the_index_name_the_host_that_asked(pool: PgPool) {
     assert!(guide.contains("POST https://pinakes.example/mcp"));
     assert!(guide.contains("https://nexus-scout.pubky.app/llms.txt"));
     assert!(!guide.contains("{{BASE}}"));
+    // The join with Nexus names every link a card's tags can be on.
+    for field in ["`refs`", "`occurrence.feed_uri`", "`details.aliases`"] {
+        assert!(guide.contains(field), "{field}");
+    }
 
     let (code, headers, body) = raw(
         &app,
@@ -318,6 +327,10 @@ async fn the_mcp_handshake_and_every_tool(pool: PgPool) {
         names,
         ["search", "card", "lookup", "group", "types", "social"]
     );
+    let social = &listed["result"]["tools"][5]["description"];
+    for field in ["refs", "occurrence.feed_uri", "details.aliases"] {
+        assert!(social.as_str().unwrap().contains(field), "{field}");
+    }
 
     // search: the event near Zürich in its week, as a compact card with its full read's URL.
     let (error, page) = call(
