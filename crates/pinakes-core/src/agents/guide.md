@@ -101,6 +101,17 @@ posting is left out unless you add `closed=true`.
 `facts` holds the employer, employment type, salary, remote regions, apply link and
 `job_status` (`open` or `closed`).
 
+**Recipes with an ingredient.**
+
+```sh
+curl -s '{{BASE}}/v1/search?type=Recipe&ingredient=chickpeas,lemon'
+```
+
+`ingredient` takes up to three comma-separated words; each must be a whole word of an
+ingredient's name as the recipe's card records it, without amounts (`flour` matches
+"all-purpose flour"). `facts` holds the time in minutes, yield, cuisine, category,
+diets, rating and the ingredient list.
+
 **Everything with one identifier.**
 
 ```sh
@@ -171,7 +182,7 @@ the full result:
 
 | tool | does |
 | --- | --- |
-| `search` | `GET /v1/search`: `q`, `type` (one or several), `tags`, `match`, `near` + `radius`, `bbox`, `from`, `to`, `key`, `remote`, `closed`, `sort`, `collapse`, `reach` or `boost` + `viewer`, `limit`, `cursor` |
+| `search` | `GET /v1/search`: `q`, `type` (one or several), `tags`, `match`, `near` + `radius`, `bbox`, `from`, `to`, `key`, `remote`, `closed`, `ingredient`, `sort`, `collapse`, `reach` or `boost` + `viewer`, `limit`, `cursor` |
 | `card` | One link's card by URI (`GET /v1/resources/by-uri`); `resolve: true` asks `POST /v1/resolve` for an unknown link |
 | `lookup` | Every card with one identifier (`isbn:…`, `doi:…`, `isrc:…`, `osm:…`, …) |
 | `group` | A group's members by group id |

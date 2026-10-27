@@ -1,18 +1,24 @@
 //! Kinds of card that carry facts of their own whatever route read them: a job posting from a
 //! career page's JSON-LD or from a job board's API holds the same facts under the same names, and
-//! so does a product from a shop's page or its own product record, and a question from a Q&A
-//! page or a Q&A site's API.
+//! so does a product from a shop's page or its own product record, a question from a Q&A
+//! page or a Q&A site's API, and a recipe (`cooking`: `crate::recipes` is the API's examples).
 //! Each module names its type, its facts (`FACTS`, published in `facts`) and reads
 //! them from JSON-LD.
 use crate::model::ResourceMeta;
 use std::collections::BTreeMap;
 
+pub mod cooking;
 pub mod jobs;
 pub mod products;
 pub mod questions;
 
 /// Every attribute a kind's card may store.
-pub const ATTRIBUTES: &[&[&str]] = &[jobs::FACTS, products::FACTS, questions::FACTS];
+pub const ATTRIBUTES: &[&[&str]] = &[
+    jobs::FACTS,
+    products::FACTS,
+    questions::FACTS,
+    cooking::FACTS,
+];
 
 /// `facts` for a card of one of these kinds: `own` (its source's facts, if any) with the
 /// kind's facts and what follows from them at `now` (a job posting's `job_status`).
@@ -27,6 +33,8 @@ pub fn facts(
         products::FACTS
     } else if questions::is_question(doc) {
         questions::FACTS
+    } else if cooking::is_recipe(doc) {
+        cooking::FACTS
     } else {
         return own;
     };

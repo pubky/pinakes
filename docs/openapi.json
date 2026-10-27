@@ -2786,6 +2786,10 @@
                 "summary": "JobPosting, remote=true",
                 "value": "JobPosting"
               },
+              "recipe-ingredient": {
+                "summary": "Recipe, ingredient=mozzarella",
+                "value": "Recipe"
+              },
               "type-article": {
                 "summary": "Article",
                 "value": "Article"
@@ -2829,6 +2833,10 @@
               "type-question": {
                 "summary": "Question",
                 "value": "Question"
+              },
+              "type-recipe": {
+                "summary": "Recipe",
+                "value": "Recipe"
               },
               "type-scholarlyarticle": {
                 "summary": "ScholarlyArticle",
@@ -3435,6 +3443,28 @@
             "schema": {
               "type": [
                 "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Recipes with these ingredients: up to three, comma-separated, each of letters, digits,\nspaces and hyphens. Each must match a whole word (or words) of an ingredient's name as the\nrecipe's card records it, without amounts (`flour` matches \"all-purpose flour\").",
+            "examples": {
+              "(none)": {
+                "summary": "(none)",
+                "value": ""
+              },
+              "recipe-ingredient": {
+                "summary": "mozzarella, type=Recipe",
+                "value": "mozzarella"
+              }
+            },
+            "in": "query",
+            "name": "ingredient",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
                 "null"
               ]
             }

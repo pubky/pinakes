@@ -139,6 +139,18 @@ async fn fixture(pool: &PgPool) {
     );
     wiki.location = Some(lugano.clone());
     docs.push(wiki);
+    // A recipe with its ingredients.
+    let mut lasagne = card(
+        "https://www.bbcgoodfood.com/recipes/classic-lasagne-0",
+        "jsonld",
+        "Recipe",
+        "Classic lasagne",
+    );
+    lasagne.attributes.insert(
+        "ingredients".into(),
+        "olive oil; lean beef mince; passata; ball mozzarella".into(),
+    );
+    docs.push(lasagne);
     // Two job postings: a remote one, and one on site in Lugano.
     for (uri, name, remote) in [
         (
@@ -649,6 +661,10 @@ async fn fixture(pool: &PgPool) {
         ),
         ("https://www.imdb.com/title/tt0111161/", &["film"]),
         (ALTERNATE, &["shop"]),
+        (
+            "https://www.bbcgoodfood.com/recipes/classic-lasagne-0",
+            &["food"],
+        ),
         (
             "https://bitcoinerjobs.com/job/1682142-staff-software-engineer-river",
             &["jobs"],

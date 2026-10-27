@@ -346,6 +346,15 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
         assert(onSiteOnes.items.some(row => row.id === onSite.id) && !onSiteOnes.items.some(row => row.id === remote.id), 'remote=false lists the on-site posting only');
         report.assertions.push('job postings: workplace, remote filter');
       }
+      // A recipe is found by whole words of its ingredients, not by part of one.
+      if (docs.has('recipe')) {
+        const recipe = docs.get('recipe');
+        const withBoth = await search({ ingredient: 'potatoes,butter' });
+        const byPart = await search({ ingredient: 'potato' });
+        assert(withBoth.items.some(row => row.id === recipe.id), 'ingredient=potatoes,butter lists the recipe');
+        assert(!byPart.items.some(row => row.id === recipe.id), 'ingredient=potato matches no part of a word');
+        report.assertions.push('recipes: ingredient search');
+      }
       // An alias reads as its root, so these are the cards' (root) IDs.
       const ids = [...new Set(report.samples.map(s => s.resource_id))];
       const changes = await json(`${pinakes}/v1/changes/lookup`, { resource_ids: ids, since: 0, limit: 500 });

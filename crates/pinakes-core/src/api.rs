@@ -589,6 +589,10 @@ pub struct SearchQuery {
     /// `true`: job postings past their `validThrough` (closed) are listed too; they are left out
     /// otherwise.
     pub closed: Option<bool>,
+    /// Recipes with these ingredients: up to three, comma-separated, each of letters, digits,
+    /// spaces and hyphens. Each must match a whole word (or words) of an ingredient's name as the
+    /// recipe's card records it, without amounts (`flour` matches "all-purpose flour").
+    pub ingredient: Option<String>,
     /// A list view with one row per group: the matching member with the most references, as its
     /// own card; links in no group stay rows of their own. Not with `cluster`.
     #[param(value_type = Option<CollapseMode>)]
@@ -1306,7 +1310,36 @@ fn search_types(types: &str) -> Result<Vec<String>, ApiError> {
     }
     Ok(known)
 }
+
+/// Search's `ingredient` terms, lower case.
+fn ingredient_terms(q: &SearchQuery) -> Result<Vec<String>, ApiError> {
+    let Some(raw) = &q.ingredient else {
+        return Ok(vec![]);
+    };
+    let terms: Vec<String> = raw
+        .split(',')
+        .map(|t| {
+            t.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase()
+        })
+        .collect();
+    let valid = |t: &String| {
+        (1..=64).contains(&t.len())
+            && t.chars().any(char::is_alphanumeric)
+            && t.chars()
+                .all(|c| c.is_alphanumeric() || c == ' ' || c == '-')
+    };
+    if terms.is_empty() || terms.len() > 3 || !terms.iter().all(valid) {
+        return Err(ApiError::bad(
+            "ingredient is up to 3 comma-separated words of letters, digits, spaces and hyphens",
+        ));
+    }
+    Ok(terms)
+}
 fn validate_search(q: &SearchQuery) -> Result<Vec<String>, ApiError> {
+    ingredient_terms(q)?;
     if q.venue.as_deref().is_some_and(|v| !model::valid_id(v)) {
         return Err(ApiError::bad("venue must be a resource ID"));
     }
@@ -1797,6 +1830,11 @@ pub async fn search(
     if let Some(remote) = q.remote {
         sql.push(" AND r.type_path @> ARRAY['JobPosting'] AND (coalesce(r.doc->'attributes'->>'remote','')='true')=")
             .push_bind(remote);
+    }
+    for term in ingredient_terms(&q)? {
+        // Whole words of the recipe's ingredient names (letters, digits, spaces, hyphens only).
+        sql.push(" AND r.type_path @> ARRAY['Recipe'] AND coalesce(r.doc->'attributes'->>'ingredients','') ~* ")
+            .push_bind(format!("\\m{term}\\M"));
     }
     if q.closed != Some(true) {
         // A job posting past its end is closed: listed only on request.

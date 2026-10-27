@@ -62,6 +62,15 @@ pub const ATTRIBUTES: &[&str] = &[
     "score",
     "closed_reason",
     "duplicate_of",
+    // A recipe's facts (`kinds::cooking::FACTS`).
+    "total_minutes",
+    "recipe_yield",
+    "ingredients",
+    "cuisine",
+    "recipe_category",
+    "diet",
+    "rating",
+    "rating_count",
 ];
 pub struct WebResolver {
     pub oembed_policy: super::cards::OembedPolicy,
@@ -1002,13 +1011,16 @@ fn entity_priority(v: &Value) -> u8 {
         .unwrap_or(0);
     type_priority(v).max(nested)
 }
-/// A node's own priority, ignoring nested entities: 100 for content, 80 for WebPage, 20 for
-/// publisher and navigation helpers.
+/// A node's own priority, ignoring nested entities: 110 for a recipe, 100 for other content, 80
+/// for WebPage, 20 for publisher and navigation helpers.
 fn type_priority(v: &Value) -> u8 {
     let path = schema_type(v)
         .map(crate::model::type_path)
         .unwrap_or_default();
-    let own = if path.iter().any(|s| {
+    // A recipe page's article or video wraps its recipe, never the other way round.
+    let own = if path.iter().any(|s| s == "Recipe") {
+        110
+    } else if path.iter().any(|s| {
         matches!(
             s.as_str(),
             "Article" | "Event" | "Product" | "Place" | "MediaObject" | "JobPosting" | "Question"
@@ -1270,6 +1282,10 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url, claims: bool, vou
     // A question's answers, votes and accepted answer.
     if schema_type(v).is_some_and(|k| crate::model::type_path(k).iter().any(|t| t == "Question")) {
         crate::kinds::questions::from_jsonld(v, base).apply(doc);
+    }
+    // A recipe's time, yield, ingredients and rating.
+    if schema_type(v).is_some_and(|k| crate::model::type_path(k).iter().any(|t| t == "Recipe")) {
+        crate::kinds::cooking::apply_jsonld(v, doc);
     }
     // A product's barcode, brand and offer. Its identity (barcode, article and part number)
     // only from the page's own product, as other claims: another product a page lists (a
