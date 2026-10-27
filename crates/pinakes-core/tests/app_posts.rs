@@ -288,9 +288,12 @@ fn app_kinds_by_namespace() {
         .to_string()
         .into();
     let doc = card(&post("music", &id()), &open);
-    // Without a name it is nameless: clients name it ("<name>'s listening session").
-    assert_eq!((doc.end, doc.name), (None, None));
-    // A name it could not store is no name; the card stays.
+    // Without a name it is named generically, as clients name it, with its author shown.
+    assert_eq!(
+        (doc.end, doc.name.as_deref(), fact(&doc, "author")),
+        (None, Some("Listening session"), Some(AUTHOR))
+    );
+    // A name it could not store is no name: the generic one; the card stays.
     let mut unstorable = session.clone();
     unstorable["content"] = json!({
         "started_at": 1_792_152_000_000_000_i64, "host": host, "name": "Late\0jam",
@@ -298,7 +301,10 @@ fn app_kinds_by_namespace() {
     .to_string()
     .into();
     let doc = card(&post("music", &id()), &unstorable);
-    assert_eq!((doc.status, doc.name), (Status::Ok, None));
+    assert_eq!(
+        (doc.status, doc.name.as_deref()),
+        (Status::Ok, Some("Listening session"))
+    );
     let mut trackless = session.clone();
     trackless["embed"] = Value::Null;
     let mut unstarted = session.clone();
@@ -343,7 +349,8 @@ fn app_kinds_by_namespace() {
         doc.type_path.last().map(String::as_str),
         Some("ListenAction")
     );
-    assert_eq!(doc.name, None);
+    assert_eq!(doc.name.as_deref(), Some("Now playing"));
+    assert_eq!(fact(&doc, "author"), Some(AUTHOR));
     assert_eq!(doc.end, Some("2026-10-16T12:30:00Z".parse().unwrap()));
     assert_eq!(doc.refresh_by, doc.end);
     assert_eq!(fact(&doc, "track"), Some("https://tracks.example/track/1"));

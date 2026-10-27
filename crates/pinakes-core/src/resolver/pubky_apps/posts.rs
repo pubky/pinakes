@@ -9,8 +9,9 @@
 //! - `maps` `route`: a `Trip` card, its box from its coordinate waypoints.
 //! - `music` `session`: a `BroadcastEvent` card of the track it embeds, from its start to its
 //!   expiry; `music` `listening` (now playing): a `ListenAction` card of the track until its
-//!   expiry. Each is named by its optional `name`, or nameless (clients fall back to "<name>'s
-//!   listening session"). A card with an expiry is read again when it passes (`refresh_by`), and
+//!   expiry. Each is named by its optional `name`, else generically ("Listening session", "Now
+//!   playing"), with its author as a fact, as clients name them (owner rule, 2026-10-27). A card
+//!   with an expiry is read again when it passes (`refresh_by`), and
 //!   then has none. A `listen`
 //!   has no card: it counts on its track, and one card per play would be noise and a
 //!   play-by-play history in a second index (owner decision, 2026-10-27).
@@ -56,6 +57,7 @@ const FACTS: &[&str] = &[
     "track",
     "host",
     "service",
+    "author",
 ];
 pub static MAPS: Profile = Profile {
     namespaces: &["maps"],
@@ -251,13 +253,18 @@ fn current(object: &Object, end: DateTime<Utc>, doc: &mut ResourceMeta) -> bool 
     doc.refresh_by = Some(end);
     true
 }
+/// A music card's title: its optional `name`, else `generic`, as clients name it; never empty.
+/// Its author (the owner's key) is a fact, so a card shows whose session it is either way.
+fn named(object: &Object, content: &Value, generic: &str, doc: &mut ResourceMeta) {
+    doc.name = Some(text(content, "name", 100).unwrap_or_else(|| generic.into()));
+    fact(doc, "author", Some(object.owner.into()));
+}
 /// The longest a `listening` is current: "now playing" for longer is no longer now (the music
 /// specs cap a listening at a day; owner decision, 2026-10-27).
 const LISTENING_MAX: chrono::TimeDelta = chrono::TimeDelta::days(1);
 /// A session: a broadcast of the track it embeds, from `started_at` until `expires_at`, with its
-/// host and the service it plays on as facts. Named by its optional `name`; without one the card
-/// is nameless, and clients name it (owner decision, 2026-10-27). Once `expires_at` passes it
-/// has no card.
+/// host and the service it plays on as facts. Named by its optional `name`, else "Listening
+/// session" (`named`). Once `expires_at` passes it has no card.
 fn session(
     object: &Object,
     envelope: &PostEnvelope<AppKind>,
@@ -278,7 +285,7 @@ fn session(
         },
     };
     doc.set_type("BroadcastEvent");
-    doc.name = text(content, "name", 100);
+    named(object, content, "Listening session", doc);
     doc.start = Some(start);
     doc.end = end;
     fact(doc, "track", Some(track.into()));
@@ -288,9 +295,9 @@ fn session(
     Read::Card
 }
 /// A listening (now playing): the track it embeds, from `started_at` until `expires_at`, with the
-/// service it plays on, named as a session is. It is current from `started_at` (a minute's grace
-/// for the writer's clock) until `expires_at`, at most `LISTENING_MAX` after its start: before
-/// and after, it has no card.
+/// service it plays on, named by its optional `name`, else "Now playing" (`named`). It is current
+/// from `started_at` (a minute's grace for the writer's clock) until `expires_at`, at most
+/// `LISTENING_MAX` after its start: before and after, it has no card.
 fn listening(
     object: &Object,
     envelope: &PostEnvelope<AppKind>,
@@ -312,7 +319,7 @@ fn listening(
         return Read::NoCard;
     }
     doc.set_type("ListenAction");
-    doc.name = text(content, "name", 100);
+    named(object, content, "Now playing", doc);
     doc.start = Some(start);
     doc.end = Some(end);
     fact(doc, "track", Some(track.into()));

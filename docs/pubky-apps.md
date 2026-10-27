@@ -89,8 +89,8 @@ namespace and kind (`resolver/pubky_apps/posts.rs`):
 | namespace, kind | card |
 | --- | --- |
 | `maps` `route` | A `Trip`: its `name`, `description`, its first waypoint as the point, the box of its `geo:` waypoints, and `activity`, `distance_m`, `duration_s`, `elevation_gain_m`, `elevation_loss_m` and the number of waypoints as facts |
-| `music` `session` | A `BroadcastEvent` from `started_at` to `expires_at` (open-ended without one), with the track it `embed`s, its `host` and its `source`'s `service` as facts. Named by its optional `name` (100 characters); without one the card is nameless and clients name it ("<name>'s listening session") |
-| `music` `listening` | Now playing: a `ListenAction` from `started_at` to `expires_at`, with the track it `embed`s and its `source`'s `service` as facts, named as a session. Current from `started_at` (a minute's grace for the writer's clock), for at most a day |
+| `music` `session` | A `BroadcastEvent` from `started_at` to `expires_at` (open-ended without one), with the track it `embed`s, its `host` and its `source`'s `service` as facts. Named by its optional `name` (100 characters), else "Listening session"; its author (the owner's key) is the `author` fact, so the card shows whose it is, as clients name it. Never untitled |
+| `music` `listening` | Now playing: a `ListenAction` from `started_at` to `expires_at`, with the track it `embed`s and its `source`'s `service` as facts, named by its optional `name`, else "Now playing", with the `author` fact, as a session. Current from `started_at` (a minute's grace for the writer's clock), for at most a day |
 | any other namespace, any kind | The general card ([any other app](#any-other-app)) of its content: a JSON object's standard fields, or a text's excerpt; with its `namespace` and `kind` as facts (a namespace with a control character, a NUL among them, or over 100 characters has no card). `events` is one (its availability is now a social kind) |
 
 **Expiry.** A card with an expiry (a session's or a listening's `expires_at`) is read again when
