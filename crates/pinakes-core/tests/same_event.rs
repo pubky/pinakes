@@ -3,6 +3,7 @@
 use axum::{body::Body, extract::ConnectInfo, http::Request};
 use chrono::{DateTime, Duration, DurationRound, Utc};
 use http_body_util::BodyExt;
+use pinakes_core::changes;
 use pinakes_core::{
     api::{self, AppState},
     config::{Config, SameEventHint},
@@ -929,12 +930,10 @@ async fn each_read_that_changes_pairs_moves_the_revision(pool: PgPool) {
     pass(&pool, &Config::default()).await;
     assert_eq!(named(&card(&pool, &a).await), [b.as_str()]);
     let revision = || async {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM same_event_revision",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap()
+        sqlx::query_scalar::<_, i64>("SELECT revision FROM search_revision")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
     };
     let before = revision().await;
     event(
@@ -1061,4 +1060,245 @@ async fn a_unit_that_goes_leaves_its_neighbours_to_refill(pool: PgPool) {
     let now = stored(&pool, &crowd[0]).await;
     assert!(!now.contains(&first[0]));
     assert_eq!(now.len(), 20, "it refilled from the one it did not name");
+}
+
+/// A search page reads the pairs and the revision its ETag hashes in one snapshot: a page that
+/// read before a change carries the old revision with the old pairs, never the new revision (a
+/// sequence moves outside the snapshot, and the next page would be answered 304 with old hints).
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_page_reads_the_pairs_and_the_revision_from_one_snapshot(pool: PgPool) {
+    let start = soon();
+    event(
+        &pool,
+        "https://example.org/a",
+        "Bitcoin Meetup Wattwil",
+        start,
+        Some(WATTWIL),
+    )
+    .await;
+    let b_uri = "https://example.org/b";
+    let b = event(&pool, b_uri, "Bitcoin Meetup Wattwil", start, Some(WATTWIL)).await;
+    pass(&pool, &Config::default()).await;
+    let seen = format!("SELECT (SELECT count(*) FROM same_event),{}", api::REVISION);
+    // A page's snapshot, taken before the change.
+    let mut page = pool.begin().await.unwrap();
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *page)
+        .await
+        .unwrap();
+    let before: (i64, Value) = sqlx::query_as(&seen).fetch_one(&mut *page).await.unwrap();
+    assert_eq!(before.0, 2);
+    // The second event moves three hours and is read: its pairs go, the revision moves.
+    event(
+        &pool,
+        b_uri,
+        "Bitcoin Meetup Wattwil",
+        start + Duration::hours(3),
+        Some(WATTWIL),
+    )
+    .await;
+    assert_eq!(same_event::read(&pool, &b).await.unwrap(), 1);
+    let again: (i64, Value) = sqlx::query_as(&seen).fetch_one(&mut *page).await.unwrap();
+    assert_eq!(again, before, "the old pairs come with the old revision");
+    page.commit().await.unwrap();
+    let after: (i64, Value) = sqlx::query_as(&seen).fetch_one(&pool).await.unwrap();
+    assert_eq!(after.0, 0);
+    assert_ne!(after.1, before.1);
+}
+
+/// A crowd of one event's pages, saved and read in any order.
+async fn crowd(
+    pool: &PgPool,
+    name: &str,
+    start: DateTime<Utc>,
+    at: &Point,
+    n: usize,
+) -> Vec<String> {
+    let mut ids = vec![];
+    for i in 0..n {
+        ids.push(
+            event(
+                pool,
+                &format!("https://example.org/{}/{i}", name.replace(' ', "-")),
+                name,
+                start,
+                Some(at.clone()),
+            )
+            .await,
+        );
+    }
+    ids
+}
+
+/// Every unit of a crowd has a hint once the crowd is read, whatever the order the units were read
+/// in: a unit read early names the few already there; one read late passes over the units already
+/// named by forty and names those with room, so the cap pushes nothing out that is not replaced,
+/// and what it pushes out is refilled.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_crowd_read_in_any_order_leaves_no_unit_without_a_hint(pool: PgPool) {
+    let config = Config::default();
+    let start = soon();
+    let zurich = Point {
+        lat: 47.3769,
+        lon: 8.5417,
+    };
+    let mut ascending = crowd(&pool, "Bitcoin Meetup Wattwil", start, &WATTWIL, 101).await;
+    ascending.sort();
+    let mut descending = crowd(
+        &pool,
+        "Lightning Meetup Zurich",
+        start + Duration::days(1),
+        &zurich,
+        101,
+    )
+    .await;
+    descending.sort();
+    descending.reverse();
+    let mut shuffled = crowd(
+        &pool,
+        "Nostr Meetup Zurich",
+        start + Duration::days(2),
+        &zurich,
+        101,
+    )
+    .await;
+    shuffled.sort();
+    // A fixed shuffle (an LCG), so a failure is reproducible.
+    let mut seed = 42u64;
+    for i in (1..shuffled.len()).rev() {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        shuffled.swap(i, (seed >> 33) as usize % (i + 1));
+    }
+    for order in [&ascending, &descending, &shuffled] {
+        for id in order.iter() {
+            same_event::read(&pool, id).await.unwrap();
+        }
+    }
+    // The queue settles the refills.
+    pass(&pool, &config).await;
+    for (name, order) in [
+        ("ascending", &ascending),
+        ("descending", &descending),
+        ("shuffled", &shuffled),
+    ] {
+        for id in order.iter() {
+            let hints = stored(&pool, id).await.len();
+            assert!(hints >= 1, "{name}: {id} has no hint");
+        }
+    }
+    assert_eq!(most(&pool, "unit_id").await, 20);
+    assert!(most(&pool, "other_id").await <= 40);
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM same_event_dirty")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0, "the refills settled");
+}
+
+/// Resources deleted as orphans take their units and pairs with them (the cascade); the units that
+/// named them are marked before, and refill.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn deleted_orphans_leave_their_neighbours_to_refill(pool: PgPool) {
+    let config = Config::default();
+    let crowd = crowd(&pool, "Bitcoin Meetup Wattwil", soon(), &WATTWIL, 101).await;
+    pass(&pool, &config).await;
+    let picked = stored(&pool, &crowd[0]).await;
+    assert_eq!(picked.len(), 20);
+    sqlx::query("DELETE FROM reference WHERE resource_id=ANY($1)")
+        .bind(&picked)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET orphaned_at=now()-interval '30 days' WHERE id=ANY($1)")
+        .bind(&picked)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(changes::delete_orphans(&pool, 7).await.unwrap(), 20);
+    let units: i64 = sqlx::query_scalar("SELECT count(*) FROM same_event_unit")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(units, 81);
+    pass(&pool, &config).await;
+    for id in crowd.iter().filter(|id| !picked.contains(id)) {
+        assert!(!stored(&pool, id).await.is_empty(), "{id} lost its hint");
+    }
+    assert!(most(&pool, "other_id").await <= 40);
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM same_event_dirty")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0, "the refills settled");
+}
+
+/// The sweep drops expired units a batch at a time, each batch its own transaction, and the units
+/// that named them are marked to refill.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn expired_units_are_dropped_in_bounded_batches(pool: PgPool) {
+    let live = event(
+        &pool,
+        "https://example.org/live",
+        "Bitcoin Meetup Wattwil",
+        soon(),
+        Some(WATTWIL),
+    )
+    .await;
+    // Another page, far away: ten of its units started three days ago, all named by the live one.
+    let old = event(
+        &pool,
+        "https://example.org/old",
+        "Bitcoin Meetup Berlin",
+        soon(),
+        Some(Point {
+            lat: 52.52,
+            lon: 13.405,
+        }),
+    )
+    .await;
+    pass(&pool, &Config::default()).await;
+    sqlx::query("INSERT INTO same_event_unit(unit_id,resource_id,fingerprint,start_at,name_key,numbers,all_day) \
+        SELECT 'expired/'||i,$1,'f',now()-interval '3 days','bitcoin meetup wattwil','{}',false FROM generate_series(1,10) i")
+        .bind(&old)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO same_event(unit_id,other_id,score) SELECT $1,'expired/'||i,1 FROM generate_series(1,10) i")
+        .bind(&live)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let revision = || async {
+        sqlx::query_scalar::<_, i64>("SELECT revision FROM search_revision")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let before = revision().await;
+    assert_eq!(same_event::drop_expired(&pool, 3).await.unwrap(), 10);
+    assert_eq!(revision().await - before, 4, "3+3+3+1: four transactions");
+    let units: i64 = sqlx::query_scalar("SELECT count(*) FROM same_event_unit")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(units, 2, "the live one and the old page's own unit stay");
+    let pool_ref = &pool;
+    let marked = |id: String| async move {
+        sqlx::query_as::<_, (String, bool)>("SELECT fingerprint,EXISTS(SELECT 1 FROM same_event_dirty d WHERE d.resource_id=u.resource_id) FROM same_event_unit u WHERE resource_id=$1")
+            .bind(id)
+            .fetch_one(pool_ref)
+            .await
+            .unwrap()
+    };
+    let (fingerprint, queued) = marked(live.clone()).await;
+    assert!(fingerprint.starts_with("refill:"), "{fingerprint}");
+    assert!(queued, "the live one's resource is queued");
+    let (fingerprint, queued) = marked(old.clone()).await;
+    assert!(
+        !fingerprint.starts_with("refill:") && !queued,
+        "the old page named nothing"
+    );
+    assert_eq!(same_event::drop_expired(&pool, 3).await.unwrap(), 0);
 }

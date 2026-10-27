@@ -13,6 +13,7 @@ pub mod config;
 pub mod event;
 pub mod group_keys;
 pub mod groups;
+pub mod hints;
 pub mod hubs;
 pub mod identity;
 pub mod ingest;

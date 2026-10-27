@@ -866,6 +866,21 @@ CREATE TABLE same_event (
 );
 CREATE INDEX same_event_other_idx ON same_event USING btree (other_id);
 
+-- A unit that goes (dropped by the pass, or with its resource: an orphan deleted) takes its pairs
+-- with it: before they go, the units that named it are marked to refill their lists (`refill:`)
+-- and their resources queued.
+CREATE FUNCTION same_event_unit_gone() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$ BEGIN
+ UPDATE same_event_unit SET fingerprint='refill:'||fingerprint
+  WHERE fingerprint NOT LIKE 'refill:%' AND unit_id IN (SELECT unit_id FROM same_event WHERE other_id=OLD.unit_id);
+ INSERT INTO same_event_dirty(resource_id)
+  SELECT DISTINCT u.resource_id FROM same_event p JOIN same_event_unit u ON u.unit_id=p.unit_id WHERE p.other_id=OLD.unit_id AND u.resource_id<>OLD.resource_id
+  ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=excluded.next_attempt_at WHERE same_event_dirty.next_attempt_at>excluded.next_attempt_at;
+ RETURN OLD;
+END $$;
+CREATE TRIGGER same_event_unit_gone BEFORE DELETE ON same_event_unit FOR EACH ROW EXECUTE FUNCTION same_event_unit_gone();
+
 -- Resources whose event units may have changed (start, place or name), entered the window, or
 -- lost a pair.
 CREATE TABLE same_event_dirty (
@@ -907,9 +922,6 @@ BEGIN
 END $$;
 CREATE TRIGGER same_event_resource_dirty AFTER INSERT OR UPDATE OF name, start_at, point, venue_id, type_path, doc ON resource FOR EACH ROW EXECUTE FUNCTION mark_same_event_dirty();
 CREATE TRIGGER same_event_occurrence_dirty AFTER INSERT OR DELETE OR UPDATE ON occurrence FOR EACH ROW EXECUTE FUNCTION mark_same_event_dirty();
-
--- Bumped whenever the pass or the sweep changes pairs: search pages hash it into their ETag.
-CREATE SEQUENCE same_event_revision;
 
 -- An event name as the hint compares it: lower case; without dates, times and years
 -- (`21.10.2026`, `2026-10-21`, `6.11.`, `21.`, `19:00`, `7pm`, `2026`, a month name with its
