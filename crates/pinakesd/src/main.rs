@@ -18,13 +18,9 @@ fn main() -> Result<()> {
     tokio::runtime::Runtime::new()?.block_on(serve(config, command))
 }
 async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "pinakes=info,pinakes_core=info,sqlx=warn".into()),
-        )
-        .init();
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "pinakes=info,pinakes_core=info,sqlx=warn".into());
+    tracing_subscriber::util::SubscriberInitExt::try_init(subscriber(filter, std::io::stdout))?;
     let (migrate_only, reextract) = match command {
         Command::Serve => (false, None),
         Command::Migrate => (true, None),
@@ -199,6 +195,30 @@ fn warn_admin_listener(address: std::net::SocketAddr) {
     }
 }
 
+/// The daemon's JSON log: `filter` (`RUST_LOG`, else the default), except that the MCP library
+/// logs nothing below warn whatever the filter says. rmcp logs whole requests and results at debug
+/// and trace, and notifications at info: a tool's arguments, such as a private calendar URL, before
+/// any validation.
+fn subscriber<W>(
+    filter: tracing_subscriber::EnvFilter,
+    writer: W,
+) -> impl tracing::Subscriber + Send + Sync
+where
+    W: for<'w> tracing_subscriber::fmt::MakeWriter<'w> + Send + Sync + 'static,
+{
+    use tracing_subscriber::{filter::FilterExt as _, layer::SubscriberExt as _, Layer as _};
+    let quiet_mcp = tracing_subscriber::filter::filter_fn(|meta| {
+        let target = meta.target();
+        !(target == "rmcp" || target.starts_with("rmcp::")) || *meta.level() <= tracing::Level::WARN
+    });
+    tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(writer)
+            .with_filter(filter.and(quiet_mcp)),
+    )
+}
+
 enum Command {
     Serve,
     Migrate,
@@ -309,6 +329,40 @@ mod tests {
         }
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
+        }
+    }
+    /// Whatever RUST_LOG says, the MCP library's request, result and notification logs (which
+    /// carry a tool's arguments) stay out; its warnings and the daemon's own debug logs stay in.
+    #[test]
+    fn mcp_payloads_are_never_logged() {
+        for env in [
+            "debug",
+            "trace",
+            "rmcp=trace",
+            "rmcp::service=debug,pinakes_core=debug",
+        ] {
+            let output = Arc::new(Mutex::new(Vec::new()));
+            let writer = LogWriter(output.clone());
+            let filter = tracing_subscriber::EnvFilter::new(env);
+            tracing::subscriber::with_default(subscriber(filter, move || writer.clone()), || {
+                let request = "CallToolRequest { arguments: {\"url\": \"https://calendar.example/private/s3cret.ics\"} }";
+                // The calls rmcp makes (service.rs, the streamable HTTP server), by its targets.
+                tracing::debug!(target: "rmcp::service", id = 1, request, "received request");
+                tracing::debug!(target: "rmcp::service", id = 1, result = request, "response message");
+                tracing::info!(target: "rmcp::service", notification = request, "received notification");
+                tracing::trace!(target: "rmcp::transport::streamable_http_server::tower", message = request);
+                tracing::trace!(target: "rmcp", message = request);
+                tracing::warn!(target: "rmcp::service", "mcp warning stays");
+                tracing::debug!(target: "pinakes_core::agents", "own debug stays");
+            });
+            let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+            assert!(!logs.contains("s3cret"), "{env}: {logs}");
+            assert!(logs.contains("mcp warning stays"), "{env}: {logs}");
+            assert_eq!(
+                logs.contains("own debug stays"),
+                env != "rmcp=trace",
+                "{env}: {logs}"
+            );
         }
     }
     #[test]

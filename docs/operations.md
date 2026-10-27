@@ -642,7 +642,9 @@ a link only by its host (a calendar's token or a user's name in a link never rea
 errors carry no URL (a fetch error or a Nexus request error names none, an upstream service's
 error text is not repeated, the API answers an invalid link with the reason, not the link, and
 a query or body it cannot read with what the route takes, never the parameter name or value it
-could not read). Admin info and database metrics are cached for 15 seconds.
+could not read). The MCP library logs only its warnings, whatever `RUST_LOG` asks for: at debug,
+trace and info it would print whole requests, results and notifications, a tool's arguments among
+them. Admin info and database metrics are cached for 15 seconds.
 
 Canaries (`canary.enabled`) run every `limits.canary_interval_secs`, first one interval after
 startup, on the ordinary workers and host budgets; their state survives restarts and they never
