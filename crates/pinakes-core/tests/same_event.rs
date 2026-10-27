@@ -910,3 +910,46 @@ async fn an_expired_claim_never_drops_a_later_change(pool: PgPool) {
     pass(&pool, &config).await;
     assert!(named(&card(&pool, &a).await).is_empty());
 }
+
+/// Each read that changes pairs moves the revision search pages hash into their ETag, in its own
+/// commit: a pass stopped after one resource leaves no cached page answering with old hints.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn each_read_that_changes_pairs_moves_the_revision(pool: PgPool) {
+    let start = soon();
+    let a = event(
+        &pool,
+        "https://example.org/a",
+        "Bitcoin Meetup Wattwil",
+        start,
+        Some(WATTWIL),
+    )
+    .await;
+    let b_uri = "https://example.org/b";
+    let b = event(&pool, b_uri, "Bitcoin Meetup Wattwil", start, Some(WATTWIL)).await;
+    pass(&pool, &Config::default()).await;
+    assert_eq!(named(&card(&pool, &a).await), [b.as_str()]);
+    let revision = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM same_event_revision",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let before = revision().await;
+    event(
+        &pool,
+        b_uri,
+        "Bitcoin Meetup Wattwil",
+        start + Duration::hours(3),
+        Some(WATTWIL),
+    )
+    .await;
+    assert_eq!(same_event::read(&pool, &b).await.unwrap(), 1);
+    assert!(revision().await > before);
+    assert!(named(&card(&pool, &a).await).is_empty());
+    // A read that changes nothing leaves it.
+    let after = revision().await;
+    assert_eq!(same_event::read(&pool, &b).await.unwrap(), 0);
+    assert_eq!(revision().await, after);
+}

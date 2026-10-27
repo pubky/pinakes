@@ -76,12 +76,13 @@ pub async fn run(pool: PgPool, config: Config, mut shutdown: watch::Receiver<boo
 /// units entered it or changed without a mark, and those of stored units that are no longer
 /// events: an alias, a missing feed, a gone occurrence. Returns the resources marked.
 pub async fn sweep(pool: &PgPool) -> Result<u64> {
+    let mut tx = pool.begin().await?;
     let dropped = sqlx::query("DELETE FROM same_event_unit WHERE start_at<now()-interval '1 day'")
-        .execute(pool)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
     if dropped > 0 {
-        bump(pool).await?;
+        commit_changed(tx, pool).await?;
     }
     let entered = sqlx::query(&format!(
         "INSERT INTO same_event_dirty(resource_id) SELECT DISTINCT s.id FROM search_unit s \
@@ -138,16 +139,14 @@ pub async fn drain(pool: &PgPool, config: &Config, budget: i64) -> Result<usize>
     }
     let due = claim(pool, CLAIMED, LEASE).await?;
     let mut read = 0;
-    let mut changed = false;
     for (id, claimed) in &due {
         if read as i64 >= budget {
             release(pool, id, claimed, 0).await?;
             continue;
         }
         match resource(pool, id, budget - read as i64).await {
-            Ok((n, dropped, more)) => {
+            Ok((n, more)) => {
                 read += n;
-                changed |= n > 0 || dropped;
                 if more {
                     release(pool, id, claimed, 0).await?;
                 } else {
@@ -159,9 +158,6 @@ pub async fn drain(pool: &PgPool, config: &Config, budget: i64) -> Result<usize>
                 release(pool, id, claimed, 60).await?;
             }
         }
-    }
-    if changed {
-        bump(pool).await?;
     }
     Ok(due.len())
 }
@@ -201,8 +197,17 @@ async fn release(
     Ok(())
 }
 
-/// Search pages hash this into their ETag, so a changed hint is never answered with a 304.
-async fn bump(pool: &PgPool) -> Result<()> {
+/// Commits a change to the pairs with the revision search pages hash into their ETag: moved in
+/// the transaction (a pass stopped right after the commit still leaves it moved) and again after
+/// it (a page that read the revision before the commit is not answered 304 with the old pairs).
+async fn commit_changed(
+    mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    pool: &PgPool,
+) -> Result<()> {
+    sqlx::query("SELECT nextval('same_event_revision')")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     sqlx::query("SELECT nextval('same_event_revision')")
         .execute(pool)
         .await?;
@@ -210,18 +215,20 @@ async fn bump(pool: &PgPool) -> Result<()> {
 }
 
 /// One resource: drops its units that are gone or out of the window, then pairs up to `budget`
-/// of its new or changed units. Returns the units paired, whether any was dropped and whether
-/// more are left.
-async fn resource(pool: &PgPool, id: &str, budget: i64) -> Result<(usize, bool, bool)> {
+/// of its new or changed units. Returns the units paired and whether more are left.
+async fn resource(pool: &PgPool, id: &str, budget: i64) -> Result<(usize, bool)> {
+    let mut tx = pool.begin().await?;
     let dropped = sqlx::query(&format!(
         "WITH current AS (SELECT s.unit_id FROM search_unit s WHERE s.id=$1 AND {EVENT} AND {WINDOW}) \
          DELETE FROM same_event_unit WHERE resource_id=$1 AND unit_id NOT IN (SELECT unit_id FROM current)"
     ))
     .bind(id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?
-    .rows_affected()
-        > 0;
+    .rows_affected();
+    if dropped > 0 {
+        commit_changed(tx, pool).await?;
+    }
     // Each unit with what pairs are matched on: its normalised name and the numbers it keeps, its
     // place, venue and organizer, computed once here.
     let units = sqlx::query(&format!(
@@ -278,10 +285,16 @@ async fn resource(pool: &PgPool, id: &str, budget: i64) -> Result<(usize, bool, 
         .bind(KEPT)
         .execute(&mut *tx)
         .await?;
-        tx.commit().await?;
+        commit_changed(tx, pool).await?;
         paired += 1;
     }
-    Ok((paired, dropped, more))
+    Ok((paired, more))
+}
+
+/// Reads one resource's units now, as a pass does (without its claim or budget). Returns the
+/// units paired. Exposed for tests.
+pub async fn read(pool: &PgPool, id: &str) -> Result<usize> {
+    Ok(resource(pool, id, i64::from(i32::MAX)).await?.0)
 }
 
 /// A unit row as JSON for `jsonb_to_record` (its point as EWKT).
