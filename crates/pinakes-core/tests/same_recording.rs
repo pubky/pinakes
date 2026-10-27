@@ -489,3 +489,57 @@ async fn an_expired_claim_never_drops_a_later_change(pool: PgPool) {
     pass(&pool, &config).await;
     assert!(named(&card(&config, &pool, &a).await).is_empty());
 }
+
+/// An artist or duration fact that had expired and is found again (its expiry extended, the row
+/// kept) marks its recording: the pairs follow the fact's value again.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_fact_found_again_after_it_expired_moves_the_pairs(pool: PgPool) {
+    let config = Config::default();
+    let a = recording(
+        &pool,
+        "https://tidal.com/track/1",
+        "Take Five",
+        Some("The Dave Brubeck Quartet"),
+        Some("PT1M40S"),
+    )
+    .await;
+    let b = recording(
+        &pool,
+        "https://www.deezer.com/track/1031007",
+        "Take Five",
+        Some("The Dave Brubeck Quartet"),
+        Some("PT1M40S"),
+    )
+    .await;
+    // MusicBrainz once read the first track as 3:20; that fact has expired, so the page's 1:40
+    // counts and the two pair.
+    sqlx::query("INSERT INTO resource_fact(resource_id,name,value,source,seen_at,expires_at) VALUES($1,'duration','200','musicbrainz',now()-interval '2 days',now()-interval '1 day')")
+        .bind(&a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    pass(&pool, &config).await;
+    assert_eq!(named(&card(&config, &pool, &a).await), [b.as_str()]);
+    // MusicBrainz finds it again: the row stays, its expiry moves ahead, and the pair goes.
+    found(&pool, &a, "musicbrainz", &[], &[("duration", "200")]).await;
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM resource_fact WHERE resource_id=$1 AND expires_at>now()",
+    )
+    .bind(&a)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
+    pass(&pool, &config).await;
+    assert!(named(&card(&config, &pool, &a).await).is_empty());
+    assert!(named(&card(&config, &pool, &b).await).is_empty());
+    // A plain refresh of the valid fact marks nothing.
+    found(&pool, &a, "musicbrainz", &[], &[("duration", "200")]).await;
+    let due: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM same_recording_dirty WHERE resource_id=$1")
+            .bind(&a)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(due, 0);
+}

@@ -1000,8 +1000,9 @@ CREATE TABLE same_recording_dirty (
 CREATE INDEX same_recording_dirty_due_idx ON same_recording_dirty USING btree (next_attempt_at, resource_id);
 
 -- Changes that can move a pair: a recording's (or a former recording's) name, type, status,
--- page artist or duration, and an artist or duration fact of a recording. A fact row's key
--- never changes, so a refreshed fact marks nothing; a deleted one (expired) does.
+-- page artist or duration, and an artist or duration fact of a recording: added, deleted, its
+-- value changed, or valid again after it had expired (its expiry extended). A plain refresh of a
+-- valid fact marks nothing.
 CREATE FUNCTION mark_same_recording_dirty() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -1014,7 +1015,8 @@ BEGIN
      IS NOT DISTINCT FROM (OLD.name,OLD.type_path,OLD.status,OLD.doc#>>'{attributes,artist}',OLD.doc#>>'{attributes,duration}') THEN RETURN NULL; END IF;
   target:=NEW.id;
  ELSE
-  IF TG_OP='UPDATE' THEN RETURN NULL; END IF;
+  IF TG_OP='UPDATE' AND NEW.value IS NOT DISTINCT FROM OLD.value
+     AND NOT (OLD.expires_at<=now() AND NEW.expires_at>now()) THEN RETURN NULL; END IF;
   IF TG_OP='DELETE' THEN target:=OLD.resource_id; ELSE target:=NEW.resource_id; END IF;
   IF coalesce(NEW.name,OLD.name) NOT IN ('artist','duration') THEN RETURN NULL; END IF;
   IF NOT EXISTS (SELECT 1 FROM resource WHERE id=target AND type_path @> ARRAY['MusicRecording']) THEN RETURN NULL; END IF;
