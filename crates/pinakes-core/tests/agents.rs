@@ -495,3 +495,56 @@ async fn no_admin_route_is_reachable_through_mcp(pool: PgPool) {
         "{text}"
     );
 }
+
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_browser_opening_mcp_sees_how_to_connect(pool: PgPool) {
+    let app = api::router(AppState::new(pool, Config::default()).unwrap());
+    let browser = [
+        ("host", "pinakes.example"),
+        ("accept", "text/html,application/xhtml+xml,*/*;q=0.8"),
+    ];
+    let (code, headers, body) = raw(&app, "GET", "/mcp", &browser, None).await;
+    assert_eq!(code, 200);
+    assert_eq!(headers["content-type"], "text/html; charset=utf-8");
+    assert_eq!(headers["content-security-policy"], "default-src 'none'");
+    let page = String::from_utf8(body).unwrap();
+    assert!(page.contains("This is the Pinakes MCP endpoint. Add it to your MCP client."));
+    assert!(page.contains("claude mcp add --transport http pinakes https://pinakes.example/mcp"));
+    assert!(page.contains(r#""url": "https://pinakes.example/mcp""#));
+    for tool in ["search", "card", "lookup", "group", "types", "social"] {
+        assert!(page.contains(&format!("<code>{tool}</code>")), "{tool}");
+    }
+    assert!(page.contains(r#"<a href="https://pinakes.example/llms.txt">"#));
+    assert!(page.contains(r#"<a href="https://pinakes.example/skill.md">"#));
+
+    // Any other GET keeps the 405 MCP allows, naming POST, in one line of plain text.
+    for accept in [
+        None,
+        Some("application/json, text/event-stream"),
+        Some("*/*"),
+    ] {
+        let mut headers = vec![("host", "pinakes.example")];
+        if let Some(accept) = accept {
+            headers.push(("accept", accept));
+        }
+        let (code, response, body) = raw(&app, "GET", "/mcp", &headers, None).await;
+        assert_eq!(code, 405, "{accept:?}");
+        assert_eq!(response["allow"], "POST");
+        assert!(response["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/plain"));
+        let text = String::from_utf8(body).unwrap();
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(text.contains("MCP clients POST"), "{text}");
+    }
+    // MCP clients are unchanged: a POST is still MCP's.
+    let (status, answer) = mcp(
+        &app,
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+        &[],
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(answer["result"]["tools"].as_array().unwrap().len(), 6);
+}

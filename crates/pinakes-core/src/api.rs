@@ -341,7 +341,12 @@ pub fn router(state: AppState) -> Router {
     if state.config.api.mcp {
         // The tools answer through the REST routes, under the same layers.
         let rest = with_public_layers(routes, state.clone());
-        all = all.route_service("/mcp", crate::agents::mcp::service(rest, state.clone()));
+        // A GET is a browser's or a probe's (`agents::mcp_get`); every other method is MCP's.
+        let mcp = crate::agents::mcp::service(rest, state.clone());
+        all = all.route(
+            "/mcp",
+            axum::routing::get(crate::agents::mcp_get).fallback_service(mcp),
+        );
     }
     with_public_layers(all.merge(swagger_ui(&state.config.api)), state)
 }
@@ -390,6 +395,10 @@ pub fn with_public_layers(routes: Router<AppState>, state: AppState) -> Router {
     }
     router.with_state(state)
 }
+/// Marks a plain-text answer a handler wrote itself, which quotes no input: the rejection layer
+/// leaves it as it is.
+#[derive(Clone, Copy)]
+pub(crate) struct OwnText;
 /// Marks a response the panic backstop produced, so the layer around it can log the path.
 #[derive(Clone, Copy)]
 struct CaughtPanic;
@@ -404,6 +413,9 @@ async fn rejection_without_input(
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
     let response = next.run(request).await;
+    if response.extensions().get::<OwnText>().is_some() {
+        return response;
+    }
     let plain = response
         .headers()
         .get(header::CONTENT_TYPE)
