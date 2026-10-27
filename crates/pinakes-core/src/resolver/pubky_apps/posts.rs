@@ -4,12 +4,16 @@
 //! latest (`Kind::versions`), checks it with pubky-social-specs' `PostEnvelope<K>`, and reads it
 //! by its namespace and kind. The social specs' own posts (`/pub/social/…`: events, rsvps and the
 //! rest) are Nexus's and never fetched (owner decision, 2026-10-26), availability included, now
-//! a social kind: the `events` namespace defines no kind, and no profile reads it.
+//! a social kind.
 //!
 //! - `maps` `route`: a `Trip` card, its box from its coordinate waypoints.
 //! - `music` `session`: a `BroadcastEvent` card of the track it embeds, from its start to its
-//!   expiry. A `listen` has no card: one card per play would be noise and a play-by-play history
-//!   in a second index (owner decision, 2026-10-27).
+//!   expiry; `music` `listening` (now playing): a `ListenAction` card of the track until its
+//!   expiry. A card with an expiry is read again when it passes, and then has none. A `listen`
+//!   has no card: it counts on its track, and one card per play would be noise and a
+//!   play-by-play history in a second index (owner decision, 2026-10-27).
+//! - Any other namespace (`ANY`): the general card from the content's standard fields, with the
+//!   namespace and kind (owner decision, 2026-10-27).
 use super::{Client, Kind, Object, Profile, Read};
 use crate::model::ResourceMeta;
 use chrono::{DateTime, Utc};
@@ -18,7 +22,7 @@ use pubky_social_specs::{
     PUB_CTX, VALIDATION_LIMITS,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// The posts of a namespace: one path, a folder of versions.
 const fn posts(read: fn(&Object, &Value, &mut ResourceMeta) -> Read) -> [Kind; 1] {
@@ -31,8 +35,15 @@ const fn posts(read: fn(&Object, &Value, &mut ResourceMeta) -> Read) -> [Kind; 1
 }
 const MAPS_KINDS: [Kind; 1] = posts(maps);
 const MUSIC_KINDS: [Kind; 1] = posts(music);
+const ANY_KINDS: [Kind; 1] = [Kind {
+    path: "{namespace}/v1/posts/{id}",
+    read: any,
+    open_in: &[] as &[Client],
+    versions: true,
+}];
 /// The facts the post cards publish.
 const FACTS: &[&str] = &[
+    "namespace",
     "kind",
     "activity",
     "distance_m",
@@ -53,6 +64,14 @@ pub static MAPS: Profile = Profile {
 pub static MUSIC: Profile = Profile {
     namespaces: &["music"],
     kinds: &MUSIC_KINDS,
+    facts: FACTS,
+    links_off: None,
+};
+/// The posts of every namespace no profile reads: not in the registry, the route of last resort
+/// for a post (`super::route`), its path from below `/pub/`.
+pub static ANY: Profile = Profile {
+    namespaces: &[],
+    kinds: &ANY_KINDS,
     facts: FACTS,
     links_off: None,
 };
@@ -106,13 +125,14 @@ impl PostKind for AppKind {
     }
 }
 
-/// The post's envelope, checked as pubky-social-specs checks it (its id the path's), and its
-/// content as JSON.
-fn envelope(object: &Object, v: &Value) -> Option<(PostEnvelope<AppKind>, Value)> {
+/// The post's envelope, checked as pubky-social-specs checks it (its id the path's).
+fn checked(object: &Object, v: &Value) -> Option<PostEnvelope<AppKind>> {
     let bytes = serde_json::to_vec(v).ok()?;
-    let envelope =
-        <PostEnvelope<AppKind> as Validatable>::try_from(&bytes, object.var("id"), &PUB_CTX)
-            .ok()?;
+    <PostEnvelope<AppKind> as Validatable>::try_from(&bytes, object.var("id"), &PUB_CTX).ok()
+}
+/// The post's checked envelope and its content as JSON.
+fn envelope(object: &Object, v: &Value) -> Option<(PostEnvelope<AppKind>, Value)> {
+    let envelope = checked(object, v)?;
     let content = serde_json::from_str(&envelope.content).ok()?;
     Some((envelope, content))
 }
@@ -139,9 +159,25 @@ fn maps(object: &Object, v: &Value, doc: &mut ResourceMeta) -> Read {
 }
 fn music(object: &Object, v: &Value, doc: &mut ResourceMeta) -> Read {
     match envelope(object, v) {
-        Some((e, content)) if e.kind.0 == "session" => session(&e, &content, doc),
+        Some((e, content)) if e.kind.0 == "session" => session(object, &e, &content, doc),
+        Some((e, content)) if e.kind.0 == "listening" => listening(object, &e, &content, doc),
         _ => Read::NoCard,
     }
+}
+/// A post of a namespace no profile reads: the general card (`super::general`) of its content,
+/// a JSON object's standard fields or a text's excerpt, with its namespace and kind.
+fn any(object: &Object, v: &Value, doc: &mut ResourceMeta) -> Read {
+    let Some(envelope) = checked(object, v) else {
+        return Read::NoCard;
+    };
+    let content = serde_json::from_str::<Value>(&envelope.content)
+        .ok()
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({ "content": envelope.content }));
+    super::general(object.uri, &content, doc);
+    fact(doc, "namespace", Some(object.var("namespace").into()));
+    fact(doc, "kind", Some(envelope.kind.0));
+    Read::Card
 }
 
 /// A point from a `geo:` URI.
@@ -197,11 +233,32 @@ fn route(content: &Value, doc: &mut ResourceMeta) -> Read {
 fn instant_us(v: &Value) -> Option<DateTime<Utc>> {
     DateTime::from_timestamp_micros(v.as_i64()?)
 }
+/// Whether a card ending at `end` is still current at the read; if so, it is read again when it
+/// ends (its TTL shortened to that), and then has none.
+fn current(object: &Object, end: DateTime<Utc>, doc: &mut ResourceMeta) -> bool {
+    let Ok(left) = (end - object.now).to_std() else {
+        return false;
+    };
+    if left.is_zero() {
+        return false;
+    }
+    let secs = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+    doc.ttl_secs = doc.ttl_secs.min(secs);
+    true
+}
+/// The longest a `listening` is current **(arbitrary)**: "now playing" for longer is no longer
+/// now.
+const LISTENING_MAX: chrono::TimeDelta = chrono::TimeDelta::days(1);
 /// A session: a broadcast of the track it embeds, from `started_at` until `expires_at`, with its
 /// host and the service it plays on as facts. Its content holds no name: the card has none of
 /// its own (the sub-spec manifest names it by the track's card, `ref_name`, which profiles cannot
-/// read yet).
-fn session(envelope: &PostEnvelope<AppKind>, content: &Value, doc: &mut ResourceMeta) -> Read {
+/// read yet). Once `expires_at` passes it has no card.
+fn session(
+    object: &Object,
+    envelope: &PostEnvelope<AppKind>,
+    content: &Value,
+    doc: &mut ResourceMeta,
+) -> Read {
     let (Some(track), Some(start)) = (
         envelope.embed.as_deref(),
         instant_us(&content["started_at"]),
@@ -211,7 +268,7 @@ fn session(envelope: &PostEnvelope<AppKind>, content: &Value, doc: &mut Resource
     let end = match &content["expires_at"] {
         Value::Null => None,
         expires => match instant_us(expires) {
-            Some(end) if end >= start => Some(end),
+            Some(end) if end >= start && current(object, end, doc) => Some(end),
             _ => return Read::NoCard,
         },
     };
@@ -222,5 +279,32 @@ fn session(envelope: &PostEnvelope<AppKind>, content: &Value, doc: &mut Resource
     fact(doc, "host", text(content, "host", 1024));
     fact(doc, "service", text(&content["source"], "service", 100));
     fact(doc, "kind", Some("session".into()));
+    Read::Card
+}
+/// A listening (now playing): the track it embeds, from `started_at` until `expires_at`, with the
+/// service it plays on. No name of its own, as a session. It is current only until `expires_at`,
+/// at most `LISTENING_MAX` after its start: then it has no card.
+fn listening(
+    object: &Object,
+    envelope: &PostEnvelope<AppKind>,
+    content: &Value,
+    doc: &mut ResourceMeta,
+) -> Read {
+    let (Some(track), Some(start), Some(end)) = (
+        envelope.embed.as_deref(),
+        instant_us(&content["started_at"]),
+        instant_us(&content["expires_at"]),
+    ) else {
+        return Read::NoCard;
+    };
+    if end < start || end - start > LISTENING_MAX || !current(object, end, doc) {
+        return Read::NoCard;
+    }
+    doc.set_type("ListenAction");
+    doc.start = Some(start);
+    doc.end = Some(end);
+    fact(doc, "track", Some(track.into()));
+    fact(doc, "service", text(&content["source"], "service", 100));
+    fact(doc, "kind", Some("listening".into()));
     Read::Card
 }

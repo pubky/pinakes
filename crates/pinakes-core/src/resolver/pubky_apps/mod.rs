@@ -124,12 +124,13 @@ pub enum Route {
 /// The namespaces whose objects Pinakes never fetches: those Nexus describes (pubky.app's own, and
 /// the social specs', `/pub/social/…` in any version, their posts, events and rsvps included:
 /// social events are Nexus's, owner decision 2026-10-26), and the old Mapky and Eventky layouts
-/// (`mapky.app`, `eventky.app`), whose data the owner disregards: Maps and Events write posts now
-/// (`posts`).
+/// (`mapky.app`, `eventky.app`), whose data the owner disregards: Maps writes posts now
+/// (`posts`), and events and availability are social posts.
 const NEVER_FETCHED: &[&str] = &["pubky.app", "social", "mapky.app", "eventky.app"];
 /// The route of a `pubky://` object of another app, from its decoded path segments below
 /// `/pub/` (`resolver::pubky_app`'s reading). `None` for the objects Nexus describes
-/// (`NEVER_FETCHED`) and for the posts of a namespace no profile reads.
+/// (`NEVER_FETCHED`) and for any path inside a post of a namespace no profile reads, whose post
+/// itself is `posts::ANY`'s.
 pub fn route(segments: &[String]) -> Option<Route> {
     for profile in REGISTRY {
         for namespace in profile.namespaces {
@@ -146,12 +147,20 @@ pub fn route(segments: &[String]) -> Option<Route> {
             return Some(Route::Excluded);
         }
     }
-    // A post in a namespace no profile reads (`/pub/<ns>/v1/posts/…`) is its app's own.
-    if matches!(segments, [_, version, posts, ..] if version == "v1" && posts == "posts") {
+    if segments
+        .first()
+        .is_some_and(|app| NEVER_FETCHED.contains(&app.as_str()))
+    {
         return None;
     }
+    // A post in a namespace no profile reads (`/pub/<ns>/v1/posts/{id}`) has the general card,
+    // with its namespace and kind (owner decision, 2026-10-27); a path inside one (a version
+    // file) is the resolver's to fetch, never an object of its own.
+    if matches!(segments, [_, version, posts, ..] if version == "v1" && posts == "posts") {
+        let any = &posts::ANY.kinds[0];
+        return matches(any.path, segments).map(|vars| Route::Kind(&posts::ANY, any, vars));
+    }
     match segments.first() {
-        Some(app) if NEVER_FETCHED.contains(&app.as_str()) => None,
         Some(app) if !app.is_empty() => Some(Route::General),
         _ => None,
     }

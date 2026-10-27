@@ -214,13 +214,13 @@ async fn a_post_line_outside_its_post_is_rejected(pool: PgPool) {
     assert_eq!(total, 1);
 }
 
-/// The posts of the profiled namespaces go to the Pubky resolver; the social specs' objects
-/// (their posts, events, rsvps and availability included), and the posts of namespaces no
-/// profile reads (`events`, whose availability is now social's), are never fetched.
+/// The posts of every namespace go to the Pubky resolver, those no profile reads (`events`, whose
+/// availability is now social's, among them) for the general card; the social specs' objects
+/// (their posts, events, rsvps and availability included) and pubky.app's are never fetched.
 #[test]
 fn posts_route_by_namespace() {
     let id = id();
-    for namespace in ["maps", "music"] {
+    for namespace in ["maps", "music", "chess", "events"] {
         assert_eq!(
             classify(&post(namespace, &id)),
             Some("pubky"),
@@ -233,8 +233,6 @@ fn posts_route_by_namespace() {
         );
     }
     for uri in [
-        post("chess", &id),
-        post("events", &id),
         post("social", &id),
         format!("pubky://{AUTHOR}/pub/social/v1/tags/{id}"),
         format!("pubky://{AUTHOR}/pub/social/v1.1/posts/{id}"),
@@ -305,10 +303,85 @@ fn app_kinds_by_namespace() {
         assert!(no_card(&card(&post("music", &id()), version)), "{version}");
     }
 
-    // A listen counts at most on its track: no card of its own, one per play.
+    // Once its expiry has passed, a session has no card; until then it is read again when it
+    // passes (its TTL, 3600 here, shortened to the time left).
+    let mut ended = session.clone();
+    ended["content"] = json!({
+        "started_at": 1_792_144_800_000_000_i64, "expires_at": 1_792_148_400_000_000_i64,
+        "host": host,
+    })
+    .to_string()
+    .into();
+    assert!(no_card(&card(&post("music", &id()), &ended)));
+
+    // Now playing: the track until its expiry, half an hour away, when it is read again.
+    let mut listening = envelope(
+        "listening",
+        json!({
+            "started_at": 1_792_151_000_000_000_i64, "expires_at": 1_792_153_800_000_000_i64,
+            "source": {"service": "tidal"},
+        }),
+    );
+    listening["embed"] = "https://tracks.example/track/1".into();
+    let doc = card(&post("music", &id()), &listening);
+    assert_eq!(
+        doc.type_path.last().map(String::as_str),
+        Some("ListenAction")
+    );
+    assert_eq!((doc.name.as_deref(), doc.ttl_secs), (None, 1800));
+    assert_eq!(doc.end, Some("2026-10-16T12:30:00Z".parse().unwrap()));
+    assert_eq!(fact(&doc, "track"), Some("https://tracks.example/track/1"));
+    assert_eq!(fact(&doc, "service"), Some("tidal"));
+    // No longer current, current for more than a day, or without an expiry: no card.
+    for (start, end) in [
+        (1_792_144_800_000_000_i64, Some(1_792_148_400_000_000_i64)),
+        (
+            1_792_151_000_000_000_i64,
+            Some(1_792_151_000_000_000_i64 + 90_000_000_000),
+        ),
+        (1_792_151_000_000_000_i64, None),
+    ] {
+        let mut stale = listening.clone();
+        stale["content"] = json!({"started_at": start, "expires_at": end})
+            .to_string()
+            .into();
+        assert!(no_card(&card(&post("music", &id()), &stale)), "{stale}");
+    }
+
+    // A listen counts on its track: no card of its own, one per play.
     let mut listen = envelope("listen", json!({"played_at": 1_792_152_000_000_000_i64}));
     listen["embed"] = "https://tracks.example/track/1".into();
     assert!(no_card(&card(&post("music", &id()), &listen)));
+
+    // A namespace no profile reads: the general card of its content's standard fields, or of a
+    // text's excerpt, with its namespace and kind.
+    let move_ = envelope(
+        "game",
+        json!({"title": "Sicilian, Najdorf", "description": "Round 3", "moves": 41}),
+    );
+    let doc = card(&post("chess", &id()), &move_);
+    assert_eq!(doc.name.as_deref(), Some("Sicilian, Najdorf"));
+    assert_eq!(doc.description.as_deref(), Some("Round 3"));
+    assert_eq!(fact(&doc, "namespace"), Some("chess"));
+    assert_eq!(fact(&doc, "kind"), Some("game"));
+    let mut note = envelope("note", json!({}));
+    note["content"] = "Blitz tonight at eight".into();
+    let doc = card(&post("chess", &id()), &note);
+    assert_eq!(
+        doc.type_path.last().map(String::as_str),
+        Some("SocialMediaPosting")
+    );
+    assert_eq!(doc.description.as_deref(), Some("Blitz tonight at eight"));
+    assert_eq!(fact(&doc, "kind"), Some("note"));
+    // An availability in the events namespace is no longer read as one: it is any post.
+    let availability = envelope("availability", json!({"timeZone": "Europe/Zurich"}));
+    let doc = card(&post("events", &id()), &availability);
+    assert_eq!(
+        (doc.start, fact(&doc, "kind")),
+        (None, Some("availability"))
+    );
+    // The envelope's checks hold for these too.
+    assert!(no_card(&card(&post("chess", "0000000000000"), &move_)));
 
     // A route in the music namespace, an id the specs refuse, an explicit `null` where the
     // envelope wants a list.
