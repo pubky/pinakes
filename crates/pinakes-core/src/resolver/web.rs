@@ -702,7 +702,7 @@ const TITLE_SEPARATORS: &[&str] = &[" • ", " | ", " - ", " – ", " — ", " �
 
 /// A page title without its site suffix: the part after its last separator, when that part
 /// names the site as a whole word (one of `sites`, such as its `og:site_name` or its own JSON-LD
-/// name, or the head of one before a `:`, `-` or `|`; or a label of its host), e.g. "TFTC: A
+/// name, or the head of one before a `:`, `-` or `|`; or its host's registrable label), e.g. "TFTC: A
 /// Bitcoin Podcast • Listen on Fountain". A site's root page keeps its title, and so does a
 /// title that would be left empty.
 pub(crate) fn without_site_suffix(title: &str, sites: &[String], url: &Url, root: bool) -> String {
@@ -730,13 +730,12 @@ pub(crate) fn without_site_suffix(title: &str, sites: &[String], url: &Url, root
             .to_owned();
         names.extend([site, short]);
     }
+    // The host's registrable label (`fountain` in fountain.fm, `google` in play.google.com),
+    // never a subdomain's (`open`, `news`, `blog` are words).
     let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
-    let labels: Vec<&str> = host.trim_start_matches("www.").split('.').collect();
-    names.extend(
-        labels[..labels.len().saturating_sub(1)]
-            .iter()
-            .map(|l| (*l).to_owned()),
-    );
+    if let Some(label) = psl::domain_str(&host).and_then(|d| d.split('.').next()) {
+        names.push(label.to_owned());
+    }
     let suffix_lower = suffix.to_lowercase();
     let word = |name: &str| {
         name.chars().count() >= 3
@@ -973,23 +972,24 @@ fn type_priority(v: &Value) -> u8 {
     };
     own
 }
-/// Whether a JSON-LD node is the site's own rather than the page's: its `WebSite` node, its
-/// breadcrumbs, or an organization or person whose `url` (else `@id`) is a site's root while the
-/// page is not (the publisher, the same on every page). Such a node never names, describes,
+/// Whether a JSON-LD node is the site's own rather than the page's: its breadcrumbs, its
+/// `WebSite`, or an organization or person whose `url` (else `@id`) is the site's root while the
+/// page is not (the publisher, the same on every page). The root must be this site's: the page's
+/// host (`www.` aside) or a parent domain of it; a node naming another site's root (a directory's
+/// restaurant, an author's own homepage) is about the page. Such a node never names, describes,
 /// illustrates or types the page; its name may name the site.
 fn site_node(v: &Value, base: &Url) -> bool {
     let path = schema_type(v)
         .map(crate::model::type_path)
         .unwrap_or_default();
-    if path
-        .iter()
-        .any(|t| matches!(t.as_str(), "WebSite" | "BreadcrumbList"))
-    {
+    if path.iter().any(|t| t == "BreadcrumbList") {
         return true;
     }
-    if !path
-        .iter()
-        .any(|t| matches!(t.as_str(), "Organization" | "Person"))
+    let website = path.iter().any(|t| t == "WebSite");
+    if !website
+        && !path
+            .iter()
+            .any(|t| matches!(t.as_str(), "Organization" | "Person"))
     {
         return false;
     }
@@ -998,18 +998,47 @@ fn site_node(v: &Value, base: &Url) -> bool {
         .filter_map(|f| v.get(f).and_then(Value::as_str))
         .find_map(|u| origin_url(base, u))
         .and_then(|u| Url::parse(&u).ok());
-    named.is_some_and(|u| {
-        matches!(u.path(), "" | "/")
-            && u.query().is_none()
-            && crate::event::page::names_page(v, base) != Some(true)
-    })
+    let ours = |u: &Url| {
+        let bare = |h: &str| h.trim_start_matches("www.").to_ascii_lowercase();
+        let (node, page) = (
+            bare(u.host_str().unwrap_or_default()),
+            bare(base.host_str().unwrap_or_default()),
+        );
+        !node.is_empty() && (page == node || page.ends_with(&format!(".{node}")))
+    };
+    match named {
+        // A WebSite that names no URL is the site's own.
+        None => website,
+        Some(u) => {
+            ours(&u)
+                && (website
+                    || (matches!(u.path(), "" | "/")
+                        && u.query().is_none()
+                        && crate::event::page::names_page(v, base) != Some(true)))
+        }
+    }
 }
-/// Whether a script's JSON-LD is one site node alone (no graph, no main entity).
+/// Whether a script's JSON-LD holds only site nodes (`site_node`): one node, or every typed
+/// node of its array or `@graph`, and no main entity of the page.
 fn site_script(v: &Value, base: &Url) -> bool {
-    v.is_object()
-        && v.get("@graph").is_none()
-        && v.get("mainEntity").is_none()
-        && site_node(v, base)
+    let all_site = |nodes: &[Value]| {
+        let typed: Vec<&Value> = nodes
+            .iter()
+            .take(16)
+            .filter(|n| schema_type(n).is_some() || n.get("@graph").is_some() || n.is_array())
+            .collect();
+        !typed.is_empty() && typed.iter().all(|n| site_script(n, base))
+    };
+    if let Some(all) = v.as_array() {
+        return all_site(all);
+    }
+    if v.get("mainEntity").is_some() {
+        return false;
+    }
+    match v.get("@graph").and_then(Value::as_array) {
+        Some(graph) => (schema_type(v).is_none() || site_node(v, base)) && all_site(graph),
+        None => site_node(v, base),
+    }
 }
 /// The `url`/`@id` values of a JSON-LD node (or array of nodes), its main entity and its
 /// graph nodes.
@@ -1739,6 +1768,26 @@ mod tests {
             &format!("<html><head>{site}</head><body></body></html>"),
         );
         assert_eq!(home.doc.name.as_deref(), Some("Pods"));
+        // A node naming another site's root is about the page: a directory's restaurant keeps
+        // its name, type and place, and an author page its author; neither names the site.
+        let directory = r#"<html><head><script type="application/ld+json">{"@type":"Restaurant","name":"The Olive Tree","url":"https://olivetree.example/","geo":{"latitude":46.0,"longitude":8.95}}</script><meta property="og:title" content="Restaurants | Directory"></head></html>"#;
+        let out = read("https://directory.example/restaurants/42", directory);
+        assert_eq!(out.doc.name.as_deref(), Some("The Olive Tree"));
+        assert_eq!(out.doc.type_name, "Restaurant");
+        assert!(out.doc.location.is_some());
+        assert_ne!(out.doc.site, "The Olive Tree");
+        let author = r#"<html><head><script type="application/ld+json">{"@type":"Person","name":"Ada Writer","url":"https://ada.example/"}</script></head></html>"#;
+        let out = read("https://magazine.example/authors/ada", author);
+        assert_eq!(out.doc.name.as_deref(), Some("Ada Writer"));
+        // The publisher on a parent domain is still the site's own.
+        let parent = r#"<html><head><script type="application/ld+json">{"@type":"Organization","name":"Pods","url":"https://pods.example/"}</script><meta property="og:title" content="A Show"></head></html>"#;
+        let out = read("https://play.pods.example/show/1", parent);
+        assert_eq!(out.doc.name.as_deref(), Some("A Show"));
+        // A script whose @graph holds only site nodes ranks below a WebPage naming the page.
+        let graph = r#"<html><head><script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"LocalBusiness","name":"Publisher","url":"https://example.org/"},{"@type":"WebSite","name":"Publisher","url":"https://example.org/"}]}</script><script type="application/ld+json">{"@type":"WebPage","url":"https://example.org/notes/1","name":"Note one"}</script></head></html>"#;
+        let out = read("https://example.org/notes/1", graph);
+        assert_eq!(out.doc.name.as_deref(), Some("Note one"));
+        assert_eq!(out.doc.type_name, "WebPage");
         // A node about the page (a product whose url is the page, an event with no url) wins.
         for (url, node, name) in [
             (
@@ -1795,6 +1844,16 @@ mod tests {
         assert_eq!(
             without_site_suffix("Signal - Apps on Google Play", &[], &play, false),
             "Signal"
+        );
+        // A subdomain's word is no site name: an open letter on open.example.com keeps it.
+        let open = Url::parse("https://open.example.com/letters/1").unwrap();
+        assert_eq!(
+            without_site_suffix("Foo - Open Letter", &[], &open, false),
+            "Foo - Open Letter"
+        );
+        assert_eq!(
+            without_site_suffix("Foo - Example", &[], &open, false),
+            "Foo"
         );
         // A site's root page keeps its title.
         assert_eq!(
