@@ -1454,6 +1454,83 @@ async fn reextract_moves_or_releases_the_aliases_rules_no_longer_make(pool: PgPo
     assert_eq!(dirty, 2, "the released alias and its old root regroup");
 }
 
+/// A spelling whose rule names a link that is itself a stale alias moves to that link once it is
+/// released, never to the link's old root, in one batch of `reextract` and across two (the
+/// spelling's batch read first). Here, LinkedIn's `/posts/` link and its `?utm_source=` spelling
+/// were both aliases of the activity.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn reextract_releases_a_link_before_moving_its_spellings(pool: PgPool) {
+    if pinakes_core::sources::by_name("linkedin").is_none() {
+        return;
+    }
+    let activity = "https://www.linkedin.com/feed/update/urn:li:activity:7517918134654218241";
+    let posts = "https://www.linkedin.com/posts/linkedin_activity-7517918134654218241-7OWA";
+    let id = |uri: &str| identity(uri).unwrap().0;
+    let (activity_id, posts_id) = (id(activity), id(posts));
+    // The share spelling whose ID sorts before the link's.
+    let spelling = (0..64)
+        .map(|n| format!("{posts}?utm_source=share{n}"))
+        .find(|u| id(u) < posts_id)
+        .unwrap();
+    assert_eq!(
+        pinakes_core::alias::root(&spelling)
+            .map(|a| a.root)
+            .as_deref(),
+        Some(posts),
+        "the spelling's rule names the link"
+    );
+    let spelling_id = id(&spelling);
+    for uri in [activity, posts, spelling.as_str()] {
+        store::ensure_resource(&pool, uri).await.unwrap();
+    }
+    let root_of = |alias: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>("SELECT root_id FROM resource_alias WHERE alias_id=$1")
+                .bind(alias)
+                .fetch_optional(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    for batches in [1, 2] {
+        if batches == 2 {
+            // A thousand rows between the two IDs: the spelling's batch ends before the link.
+            let low = u128::from_str_radix(&spelling_id, 16).unwrap();
+            assert!(u128::from_str_radix(&posts_id, 16).unwrap() - low > 1000);
+            let fillers: Vec<String> = (1..=1000u128)
+                .map(|n| format!("{:032x}", low + n))
+                .collect();
+            sqlx::query("INSERT INTO resource(id,uri) SELECT f, 'https://example.org/filler/'||f FROM unnest($1::text[]) f")
+                .bind(&fillers)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        // As an earlier build left them: both aliases of the activity.
+        for alias in [&posts_id, &spelling_id] {
+            sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'identifier') ON CONFLICT(alias_id) DO UPDATE SET root_id=excluded.root_id,basis=excluded.basis")
+                .bind(alias)
+                .bind(&activity_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE resource SET resolver=NULL WHERE id=ANY($1)")
+            .bind([&posts_id, &spelling_id])
+            .execute(&pool)
+            .await
+            .unwrap();
+        queue::reextract(&pool, &["all".into()]).await.unwrap();
+        assert_eq!(root_of(posts_id.clone()).await, None, "{batches} batches");
+        assert_eq!(
+            root_of(spelling_id.clone()).await,
+            Some(posts_id.clone()),
+            "{batches} batches: the spelling follows the released link"
+        );
+    }
+}
+
 /// `pinakesd` holds the instance lock for its whole life, `reextract` included: no writer waits
 /// on it, shared or exclusive, and a second daemon is refused.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]

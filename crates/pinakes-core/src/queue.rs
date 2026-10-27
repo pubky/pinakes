@@ -132,6 +132,18 @@ pub async fn reextract(pool: &PgPool, routes: &[String]) -> Result<u64> {
         });
     }
     let all = routes.iter().any(|r| r == "all");
+    // Two passes over every row: the first releases the aliases no rule names any more and
+    // re-queues, the second moves aliases. A move follows its new root's own alias
+    // (`alias::assign`), so it must never meet one the first pass is still to release, in its
+    // batch or a later one.
+    let mut total = 0u64;
+    for moves in [false, true] {
+        total += reextract_pass(pool, routes, all, moves).await?;
+    }
+    Ok(total)
+}
+/// One pass of `reextract`: with `moves`, only its alias moves; without, everything else.
+async fn reextract_pass(pool: &PgPool, routes: &[String], all: bool, moves: bool) -> Result<u64> {
     let (mut last, mut total) = (String::new(), 0u64);
     loop {
         let rows: Vec<ReextractRow> = sqlx::query_as(
@@ -157,7 +169,9 @@ pub async fn reextract(pool: &PgPool, routes: &[String]) -> Result<u64> {
                 // is only silent, so a weaker one (a tracking parameter) must not move it, and
                 // nothing releases it.
                 if crate::sources::switched_off(&uri) {
-                    alias_rows.push(id);
+                    if !moves {
+                        alias_rows.push(id);
+                    }
                     continue;
                 }
                 let route = crate::resolver::classify(&uri).map(str::to_owned);
@@ -168,13 +182,16 @@ pub async fn reextract(pool: &PgPool, routes: &[String]) -> Result<u64> {
                             && crate::model::identity(&alias.root)
                                 .is_ok_and(|(named, _, _)| named != root) =>
                     {
-                        aliases.push((id, alias))
+                        if moves {
+                            aliases.push((id, alias))
+                        }
                     }
                     // Only what a rule of this build would name: never a page's canonical or
                     // an official API's answer (no rule of the URI). A rule that names a root
                     // moves those too (above), as a fresh read would follow it.
                     (None, Some(route))
-                        if selected
+                        if !moves
+                            && selected
                             && !matches!(basis.as_deref(), Some("canonical" | "source")) =>
                     {
                         released.push(id.clone());
@@ -183,14 +200,18 @@ pub async fn reextract(pool: &PgPool, routes: &[String]) -> Result<u64> {
                         types.push(None);
                         osm_ids.push(None);
                     }
-                    _ => alias_rows.push(id),
+                    _ if !moves => alias_rows.push(id),
+                    _ => {}
                 }
                 continue;
             }
             if let Some(alias) = crate::alias::root(&uri) {
-                if all || stored.as_ref().is_some_and(|s| routes.contains(s)) {
+                if moves && (all || stored.as_ref().is_some_and(|s| routes.contains(s))) {
                     aliases.push((id, alias));
                 }
+                continue;
+            }
+            if moves {
                 continue;
             }
             // A page its own card promoted to media or activitypub stays on that route: the
