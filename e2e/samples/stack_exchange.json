@@ -1,0 +1,14 @@
+[
+  {
+    "kind": "stack_exchange",
+    "uri": "https://stackoverflow.com/questions/663171/how-do-i-get-a-substring-of-a-string-in-python",
+    "type": "Question",
+    "facts": {"closed_reason": "Duplicate"}
+  },
+  {
+    "kind": "stack_exchange_original",
+    "uri": "https://stackoverflow.com/questions/509211/how-slicing-in-python-works",
+    "type": "Question",
+    "group_with": "stack_exchange"
+  }
+]

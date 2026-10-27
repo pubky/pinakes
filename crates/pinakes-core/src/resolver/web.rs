@@ -56,6 +56,12 @@ pub const ATTRIBUTES: &[&str] = &[
     "price_at",
     "seller",
     "asin",
+    // A question's facts (`kinds::questions::FACTS`).
+    "answer_count",
+    "accepted_answer",
+    "score",
+    "closed_reason",
+    "duplicate_of",
 ];
 pub struct WebResolver {
     pub oembed_policy: super::cards::OembedPolicy,
@@ -1005,7 +1011,7 @@ fn type_priority(v: &Value) -> u8 {
     let own = if path.iter().any(|s| {
         matches!(
             s.as_str(),
-            "Article" | "Event" | "Product" | "Place" | "MediaObject" | "JobPosting"
+            "Article" | "Event" | "Product" | "Place" | "MediaObject" | "JobPosting" | "Question"
         )
     }) {
         100
@@ -1260,6 +1266,10 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url, claims: bool, vou
     if schema_type(v).is_some_and(|k| crate::model::type_path(k).iter().any(|t| t == "JobPosting"))
     {
         crate::kinds::jobs::from_jsonld(v, base).apply(doc);
+    }
+    // A question's answers, votes and accepted answer.
+    if schema_type(v).is_some_and(|k| crate::model::type_path(k).iter().any(|t| t == "Question")) {
+        crate::kinds::questions::from_jsonld(v, base).apply(doc);
     }
     // A product's barcode, brand and offer. Its identity (barcode, article and part number)
     // only from the page's own product, as other claims: another product a page lists (a

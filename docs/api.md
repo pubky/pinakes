@@ -309,6 +309,7 @@ GET /v1/search?type=SocialMediaPosting
 GET /v1/search?type=DataFeed
 GET /v1/search?type=CreativeWork
 GET /v1/search?type=Product
+GET /v1/search?type=Question
 GET /v1/search?type=JobPosting
 GET /v1/search?remote=true&type=JobPosting
 GET /v1/search?remote=false&type=JobPosting
@@ -1030,6 +1031,23 @@ record or a product database (their pages say which).
 | `brand`, `sku`, `mpn` | The brand, the shop's article number, the maker's part number |
 | `price`, `price_currency`, `availability`, `seller`, `price_at` | The cheapest offer's price, its ISO 4217 currency, its availability (`in_stock`, `out_of_stock`, `pre_order`, `back_order`, `discontinued`, `limited_availability`, `sold_out`, `in_store_only`, `online_only`, `reserved`, `made_to_order`), who sells it, and when that was read (RFC 3339) |
 | `asin` | An Amazon link's ASIN |
+
+## Questions
+
+A page whose JSON-LD is a `Question` (a `QAPage`'s main entity), and the questions
+[sources](sources/README.md) read from a Q&A site's API or a forum topic marked solved, are
+`Question` cards: named by the question's title, described by the start of its text (200
+characters, as a quoted post is), with its asker as `author` and when it was asked as
+`published`.
+
+| Fact | Meaning |
+| --- | --- |
+| `answer_count`, `score` | Its answers and votes, as its site counts them |
+| `accepted_answer` | The address of the answer its asker accepted |
+| `closed_reason`, `duplicate_of` | Why it was closed, and the question it repeats (a link; several joined with `; `) |
+
+A question closed as a duplicate of one other question is in that question's group (a hint, as
+every group is), where its site's source says so.
 
 ## Sources
 

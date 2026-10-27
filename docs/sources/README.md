@@ -108,6 +108,7 @@ or got plain web cards before are read by their source.
 - [`shopify`](shopify.md): Shopify stores' product pages, from the store's own product record (a page
   hook).
 - [`snap_store`](snap_store.md): Snap Store apps by snap name, from the snapcraft.io info API.
+- [`stack_exchange`](stack_exchange.md): Stack Exchange questions (Stack Overflow and the network's sites) by id.
 - [`stacker_news`](stacker_news.md): Stacker News posts and comments by item id.
 - [`substack`](substack.md): Substack publications, posts and profiles.
 - [`swiss_parliament`](swiss_parliament.md): Swiss Parliament business items (Curia Vista) by affair id.
@@ -149,6 +150,7 @@ registered source), and in a debug build a source records no other form.
 - [`product_keys`](product_keys.md): a product's own barcode as its key.
 - [`open_food_facts`](open_food_facts.md#also-on): a product's barcode on Open Food, Beauty,
   Products and Pet Food Facts.
+- [`stack_exchange`](stack_exchange.md#also-on): a question's id, and the original of a duplicate.
 - [`media_records`](media_records.md#also-on): `titles`, the title of a media page the page hook
   could not name in time.
 - [`federal_register`](federal_register.md#also-on): a Federal Register document's GovInfo,

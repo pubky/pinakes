@@ -1178,6 +1178,16 @@
       "expect": "items"
     },
     {
+      "name": "type-question",
+      "summary": "type=Question",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "type": "Question"
+      },
+      "expect": "items"
+    },
+    {
       "name": "type-jobposting",
       "summary": "type=JobPosting",
       "method": "GET",

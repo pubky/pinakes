@@ -36,6 +36,15 @@
     "status": 200,
     "url": "https://delvingbitcoin.org/t/304/2.json"
   },
+  "topic-meta-413333": {
+    "bytes": 33178,
+    "content_type": "application/json; charset=utf-8",
+    "file": "topic-meta-413333.json",
+    "recorded_at": "2026-10-26T23:53:21+00:00",
+    "sha256": "e0019c7ac606c1575546b5f9d3bfa1890933e8c51edbda475f2da8eda2ac5f85",
+    "status": 200,
+    "url": "https://meta.discourse.org/t/413333.json"
+  },
   "topic-missing": {
     "bytes": 16823,
     "content_type": "application/json; charset=utf-8",

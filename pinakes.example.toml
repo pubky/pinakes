@@ -159,6 +159,8 @@ enabled = true
 enabled = true
 [sources.snap_store]
 enabled = true
+[sources.stack_exchange]
+enabled = true
 [sources.stacker_news]
 enabled = true
 [sources.substack]

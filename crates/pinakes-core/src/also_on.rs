@@ -362,6 +362,7 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         Arc::new(podcasts::Podcasts),
         Arc::new(product_keys::ProductKeys),
         Arc::new(crate::sources::open_food_facts::also_on::OpenFoodFacts),
+        Arc::new(crate::sources::stack_exchange::also_on::StackExchange),
         Arc::new(crate::sources::media_records::titles::Titles),
         Arc::new(crate::sources::federal_register::also_on::FederalRegister),
     ];

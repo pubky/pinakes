@@ -2826,6 +2826,10 @@
                 "summary": "Product",
                 "value": "Product"
               },
+              "type-question": {
+                "summary": "Question",
+                "value": "Question"
+              },
               "type-scholarlyarticle": {
                 "summary": "ScholarlyArticle",
                 "value": "ScholarlyArticle"

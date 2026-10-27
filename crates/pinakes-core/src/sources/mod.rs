@@ -79,6 +79,7 @@ pub mod sec;
 pub mod shopify;
 pub mod snap_store;
 pub mod social;
+pub mod stack_exchange;
 pub mod stacker_news;
 pub mod substack;
 pub mod swiss_parliament;
@@ -149,6 +150,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &sec::Sec,
     &shopify::Shopify,
     &snap_store::SnapStore,
+    &stack_exchange::StackExchange,
     &stacker_news::StackerNews,
     &substack::Substack,
     &swiss_parliament::SwissParliament,
