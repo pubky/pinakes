@@ -1021,13 +1021,22 @@ fn site_node(v: &Value, base: &Url) -> bool {
 /// Whether a script's JSON-LD holds only site nodes (`site_node`): one node, or every typed
 /// node of its array or `@graph`, and no main entity of the page.
 fn site_script(v: &Value, base: &Url) -> bool {
+    // A list of more than 16 nodes is never site-only: no partial scan decides it. A node with a
+    // main entity counts, typed or not.
     let all_site = |nodes: &[Value]| {
-        let typed: Vec<&Value> = nodes
+        if nodes.len() > 16 {
+            return false;
+        }
+        let counted: Vec<&Value> = nodes
             .iter()
-            .take(16)
-            .filter(|n| schema_type(n).is_some() || n.get("@graph").is_some() || n.is_array())
+            .filter(|n| {
+                schema_type(n).is_some()
+                    || n.get("@graph").is_some()
+                    || n.get("mainEntity").is_some()
+                    || n.is_array()
+            })
             .collect();
-        !typed.is_empty() && typed.iter().all(|n| site_script(n, base))
+        !counted.is_empty() && counted.iter().all(|n| site_script(n, base))
     };
     if let Some(all) = v.as_array() {
         return all_site(all);
@@ -1788,6 +1797,22 @@ mod tests {
         let out = read("https://example.org/notes/1", graph);
         assert_eq!(out.doc.name.as_deref(), Some("Note one"));
         assert_eq!(out.doc.type_name, "WebPage");
+        // A graph holding the page's Article, through an untyped wrapper's mainEntity or after
+        // 16 site nodes, is not site-only: the Article names the page over a generic WebPage.
+        let site = r#"{"@type":"WebSite","name":"Publisher","url":"https://example.org/"}"#;
+        let story = r#"{"@type":"Article","name":"Actual story","description":"What happened."}"#;
+        for graph in [
+            format!(r#"[{site},{{"mainEntity":{story}}}]"#),
+            format!("[{}{story}]", format!("{site},").repeat(16)),
+        ] {
+            let html = format!(
+                r#"<html><head><script type="application/ld+json">{{"@graph":{graph}}}</script><script type="application/ld+json">{{"@type":"WebPage","url":"https://example.org/story","name":"Generic page"}}</script></head></html>"#
+            );
+            let out = read("https://example.org/story", &html);
+            assert_eq!(out.doc.name.as_deref(), Some("Actual story"), "{graph}");
+            assert_eq!(out.doc.description.as_deref(), Some("What happened."));
+            assert_eq!(out.doc.type_name, "Article");
+        }
         // A node about the page (a product whose url is the page, an event with no url) wins.
         for (url, node, name) in [
             (
