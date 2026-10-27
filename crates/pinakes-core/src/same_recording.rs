@@ -31,6 +31,9 @@ pub const SCORE_LENGTHS_AGREE: f32 = 1.0;
 pub const SCORE_LENGTH_UNKNOWN: f32 = 0.7;
 /// Pairs kept per recording, best first (a card shows three, its details ten).
 const KEPT: i64 = 20;
+/// The most recordings that may name one recording, so a change to it marks at most this many
+/// for a refill.
+const INCOMING_KEPT: i64 = 2 * KEPT;
 /// Resources claimed per pass.
 const CLAIMED: i64 = 25;
 
@@ -70,8 +73,9 @@ pub async fn run(pool: PgPool, config: Config, mut shutdown: watch::Receiver<boo
 }
 
 /// Marks the recordings never read (a database from before the hint, a recording saved while
-/// the hint was off) and the stored units whose resource is no longer a recording root: an
-/// alias, a page that is not ok, a retyped page. Returns the resources marked.
+/// the hint was off), the stored units whose resource is no longer a recording root (an alias,
+/// a page that is not ok, a retyped page) and those still waiting for a refill (see `refill`).
+/// Returns the resources marked.
 pub async fn sweep(pool: &PgPool) -> Result<u64> {
     let entered = sqlx::query(
         "INSERT INTO same_recording_dirty(resource_id) SELECT r.id FROM resource r \
@@ -85,6 +89,7 @@ pub async fn sweep(pool: &PgPool) -> Result<u64> {
     let stale = sqlx::query(
         "INSERT INTO same_recording_dirty(resource_id) SELECT u.resource_id FROM same_recording_unit u JOIN resource r ON r.id=u.resource_id \
          WHERE EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id) OR r.status<>'ok' OR NOT coalesce(r.type_path @> ARRAY['MusicRecording'],false) \
+         OR u.fingerprint LIKE 'refill:%' \
          ON CONFLICT DO NOTHING",
     )
     .execute(pool)
@@ -229,26 +234,42 @@ async fn resource(pool: &PgPool, id: &str) -> Result<bool> {
                 .as_deref(),
         )
     });
+    let stored: Option<String> = row.try_get("fingerprint")?;
     let unit = match unit {
         Some(unit) if !unit.title_key.is_empty() => unit,
         _ => {
-            let mut tx = pool.begin().await?;
-            let dropped = sqlx::query("DELETE FROM same_recording_unit WHERE resource_id=$1")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?
-                .rows_affected();
-            if dropped == 0 {
+            // No longer a recording: its unit goes, its pairs with it (on both sides), and the
+            // recordings that named it are read again to refill their lists.
+            if stored.is_none() {
                 return Ok(false);
             }
+            let mut tx = pool.begin().await?;
+            let owners: Vec<String> =
+                sqlx::query_scalar("SELECT resource_id FROM same_recording WHERE other_id=$1")
+                    .bind(id)
+                    .fetch_all(&mut *tx)
+                    .await?;
+            sqlx::query("DELETE FROM same_recording_unit WHERE resource_id=$1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            refill(&mut tx, &owners).await?;
             commit_changed(tx, pool).await?;
             return Ok(true);
         }
     };
     let fingerprint = unit.fingerprint();
-    if row.try_get::<Option<String>, _>("fingerprint")? == Some(fingerprint.clone()) {
+    if stored.as_deref() == Some(fingerprint.as_str()) {
         return Ok(false);
     }
+    // A refill (marked `refill:{fingerprint}` because a recording it named changed) whose values
+    // are still those replaces its own list only: what names it stays right, and nothing else is
+    // marked, so refills never cascade. A recording whose values changed (a refill's too) drops
+    // the pairs naming it.
+    let previous = stored
+        .as_deref()
+        .map(|f| f.strip_prefix("refill:").unwrap_or(f));
+    let values_changed = previous.is_some_and(|f| f != fingerprint);
     let mut tx = pool.begin().await?;
     sqlx::query("INSERT INTO same_recording_unit(resource_id,fingerprint,title_key,artist_key,length_secs) VALUES($1,$2,$3,$4,$5) \
         ON CONFLICT(resource_id) DO UPDATE SET fingerprint=excluded.fingerprint,title_key=excluded.title_key,artist_key=excluded.artist_key,length_secs=excluded.length_secs")
@@ -259,42 +280,72 @@ async fn resource(pool: &PgPool, id: &str) -> Result<bool> {
         .bind(unit.length_secs.map(|s| s as i32))
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM same_recording WHERE resource_id=$1 OR other_id=$1")
+    sqlx::query("DELETE FROM same_recording WHERE resource_id=$1")
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    if values_changed {
+        // The pairs naming it go, and their recordings refill their lists (at most
+        // INCOMING_KEPT of them, the cap below).
+        let owners: Vec<String> = sqlx::query_scalar(
+            "DELETE FROM same_recording WHERE other_id=$1 RETURNING resource_id",
+        )
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await?;
+        refill(&mut tx, &owners).await?;
+    }
     // The other recordings already read, on the values they were read with (a change marks a
     // recording to be read again); a recording read later finds this one in turn. The best
     // `KEPT`: those whose lengths agree (score 1), then those with a length unknown (0.7). Each
-    // half reads the index in order and stops at `KEPT`, so a crowd of recordings with one title
-    // costs no more than twenty.
+    // half reads the index in order, starting just after this recording and wrapping round, and
+    // stops at `KEPT`: a crowd of recordings with one title costs no more than twenty each, and
+    // its pairs spread over the crowd instead of all naming its first twenty.
     let candidates = "SELECT u.resource_id FROM same_recording_unit u \
         WHERE u.title_key=$2 AND u.artist_key=$3 AND u.resource_id<>$1";
     let mut best: Vec<(String, f32)> = vec![];
     if !unit.artist_key.is_empty() {
         if let Some(len) = unit.length_secs {
-            let agree: Vec<String> = sqlx::query_scalar(&format!(
-                "{candidates} AND u.length_secs BETWEEN $4 AND $5 ORDER BY u.length_secs,u.resource_id LIMIT $6"
-            ))
-            .bind(id)
-            .bind(&unit.title_key)
-            .bind(&unit.artist_key)
-            .bind((len - LENGTH_WINDOW_SECS) as i32)
-            .bind((len + LENGTH_WINDOW_SECS) as i32)
-            .bind(KEPT)
-            .fetch_all(&mut *tx)
-            .await?;
-            best.extend(agree.into_iter().map(|r| (r, SCORE_LENGTHS_AGREE)));
+            for half in [
+                "(u.length_secs,u.resource_id)>($6,$1)",
+                "(u.length_secs,u.resource_id)<($6,$1)",
+            ] {
+                let room = KEPT - best.len() as i64;
+                if room <= 0 {
+                    break;
+                }
+                let agree: Vec<String> = sqlx::query_scalar(&format!(
+                    "{candidates} AND u.length_secs BETWEEN $4 AND $5 AND {half} ORDER BY u.length_secs,u.resource_id LIMIT $7"
+                ))
+                .bind(id)
+                .bind(&unit.title_key)
+                .bind(&unit.artist_key)
+                .bind((len - LENGTH_WINDOW_SECS) as i32)
+                .bind((len + LENGTH_WINDOW_SECS) as i32)
+                .bind(len as i32)
+                .bind(room)
+                .fetch_all(&mut *tx)
+                .await?;
+                best.extend(agree.into_iter().map(|r| (r, SCORE_LENGTHS_AGREE)));
+            }
         }
-        let room = KEPT - best.len() as i64;
-        if room > 0 {
-            let unknown_len = if unit.length_secs.is_some() {
-                " AND u.length_secs IS NULL"
-            } else {
-                ""
-            };
+        // Lengths unknown: the ring by id where this one has a length (they all sit at the
+        // index's end); in index order where it has none.
+        let unknown_halves: &[&str] = if unit.length_secs.is_some() {
+            &[
+                " AND u.length_secs IS NULL AND u.resource_id>$1",
+                " AND u.length_secs IS NULL AND u.resource_id<$1",
+            ]
+        } else {
+            &[""]
+        };
+        for half in unknown_halves {
+            let room = KEPT - best.len() as i64;
+            if room <= 0 {
+                break;
+            }
             let unknown: Vec<String> = sqlx::query_scalar(&format!(
-                "{candidates}{unknown_len} ORDER BY u.length_secs,u.resource_id LIMIT $4"
+                "{candidates}{half} ORDER BY u.length_secs,u.resource_id LIMIT $4"
             ))
             .bind(id)
             .bind(&unit.title_key)
@@ -328,8 +379,41 @@ async fn resource(pool: &PgPool, id: &str) -> Result<bool> {
     .bind(KEPT)
     .execute(&mut *tx)
     .await?;
+    // And no recording is named by more than INCOMING_KEPT others, so a change to it marks at
+    // most that many for a refill.
+    let mut named = others.clone();
+    named.push(id.to_owned());
+    sqlx::query(
+        "DELETE FROM same_recording p USING (SELECT resource_id,other_id,\
+         row_number() OVER (PARTITION BY other_id ORDER BY score DESC,resource_id) AS n \
+         FROM same_recording WHERE other_id=ANY($1)) r \
+         WHERE p.resource_id=r.resource_id AND p.other_id=r.other_id AND r.n>$2",
+    )
+    .bind(&named)
+    .bind(INCOMING_KEPT)
+    .execute(&mut *tx)
+    .await?;
     commit_changed(tx, pool).await?;
     Ok(true)
+}
+
+/// Recordings whose lists lost a pair are read again: their fingerprint is marked `refill:` (so
+/// the read recomputes their list instead of finding it current, and still knows their values)
+/// and their entry is due now.
+async fn refill(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, ids: &[String]) -> Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query("UPDATE same_recording_unit SET fingerprint='refill:'||fingerprint WHERE resource_id=ANY($1) AND fingerprint NOT LIKE 'refill:%'")
+        .bind(ids)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("INSERT INTO same_recording_dirty(resource_id) SELECT unnest($1::text[]) \
+        ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=excluded.next_attempt_at WHERE same_recording_dirty.next_attempt_at>excluded.next_attempt_at")
+        .bind(ids)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 /// Commits a change to the pairs with the revision search pages hash into their ETag: moved in

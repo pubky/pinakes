@@ -589,3 +589,85 @@ async fn each_read_that_changes_pairs_moves_the_revision(pool: PgPool) {
     assert!(!same_recording::read(&pool, &a).await.unwrap());
     assert_eq!(revision().await, still);
 }
+
+/// How many pairs each recording names (`by` resource_id) or is named by (`by` other_id): the
+/// most and the fewest among those with any.
+async fn spread(pool: &PgPool, by: &str) -> (i64, i64) {
+    sqlx::query_as(&format!(
+        "SELECT max(n),min(n) FROM (SELECT count(*) AS n FROM same_recording GROUP BY {by}) c"
+    ))
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// A recording that changes takes its pairs from the recordings that named it, and those are read
+/// again, so none is left without the hint (no sweep needed). Its pairs spread over the crowd, and
+/// no recording is named by more than forty, which bounds the recordings one change marks.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_changed_recording_leaves_no_neighbour_without_a_hint(pool: PgPool) {
+    let config = Config::default();
+    let mut crowd = vec![];
+    for i in 0..101 {
+        crowd.push(
+            recording(
+                &pool,
+                &format!("https://tidal.com/track/{}", 1000 + i),
+                "Take Five",
+                Some("The Dave Brubeck Quartet"),
+                Some("PT5M24S"),
+            )
+            .await,
+        );
+    }
+    pass(&pool, &config).await;
+    assert_eq!(spread(&pool, "resource_id").await.0, 20);
+    assert!(spread(&pool, "other_id").await.0 <= 40);
+    // The twenty the first recording names are renamed.
+    let picked: Vec<String> =
+        sqlx::query_scalar("SELECT other_id FROM same_recording WHERE resource_id=$1")
+            .bind(&crowd[0])
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(picked.len(), 20);
+    for id in &picked {
+        let uri: String = sqlx::query_scalar("SELECT uri FROM resource WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        recording(
+            &pool,
+            &uri,
+            "Blue Rondo à la Turk",
+            Some("The Dave Brubeck Quartet"),
+            Some("PT6M44S"),
+        )
+        .await;
+    }
+    pass(&pool, &config).await;
+    for id in crowd.iter().filter(|id| !picked.contains(id)) {
+        let left = named(&card(&config, &pool, id).await).len();
+        assert!(left >= 1, "{id} lost its hint");
+    }
+    for id in &picked {
+        // A card shows three; the stored list holds them all.
+        let names: Vec<String> =
+            sqlx::query_scalar("SELECT other_id FROM same_recording WHERE resource_id=$1")
+                .bind(id)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(names.len(), 19, "the renamed ones pair among themselves");
+        assert!(names.iter().all(|n| picked.contains(n)));
+    }
+    let (most, _) = spread(&pool, "resource_id").await;
+    assert!(most <= 20);
+    assert!(spread(&pool, "other_id").await.0 <= 40);
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM same_recording_dirty")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0, "the refills settled");
+}

@@ -969,6 +969,8 @@ $$;
 
 -- A recording the pass has read, with what pairs are matched on: its title and artist keys and
 -- its length; and the `fingerprint` of the values they came from, so a change is read again.
+-- `refill:{fingerprint}` marks one whose list lost a pair to another's change: it is read again
+-- to refill its list.
 CREATE TABLE same_recording_unit (
     resource_id text PRIMARY KEY REFERENCES resource(id) ON DELETE CASCADE,
     fingerprint text NOT NULL,
@@ -981,7 +983,7 @@ CREATE TABLE same_recording_unit (
 CREATE INDEX same_recording_unit_name_idx ON same_recording_unit USING btree (title_key, artist_key, length_secs, resource_id);
 
 -- One row per direction of a pair: `score` is 1 when both lengths are known and within 3 s,
--- 0.7 when one is unknown.
+-- 0.7 when one is unknown. A recording names at most 20 and is named by at most 40.
 CREATE TABLE same_recording (
     resource_id text NOT NULL REFERENCES same_recording_unit(resource_id) ON DELETE CASCADE,
     other_id text NOT NULL REFERENCES same_recording_unit(resource_id) ON DELETE CASCADE,
@@ -992,7 +994,7 @@ CREATE TABLE same_recording (
 CREATE INDEX same_recording_other_idx ON same_recording USING btree (other_id);
 
 -- Resources whose recording may have changed (its name, type, status, or the artist and
--- length its page or the sources state), or that the sweep found unread.
+-- length its page or the sources state), whose list lost a pair, or that the sweep found unread.
 CREATE TABLE same_recording_dirty (
     resource_id text PRIMARY KEY REFERENCES resource(id) ON DELETE CASCADE,
     next_attempt_at timestamp with time zone DEFAULT now() NOT NULL
