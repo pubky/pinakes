@@ -29,6 +29,9 @@ pub fn item_found(item: &wikidata::Item, storefront: &str) -> Found {
 pub struct WikidataItemSource;
 #[async_trait]
 impl Source for WikidataItemSource {
+    fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+        &[("wikidata", "Q42")]
+    }
     fn id(&self) -> &'static str {
         "wikidata_item"
     }

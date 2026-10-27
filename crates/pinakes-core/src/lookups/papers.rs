@@ -422,6 +422,13 @@ impl super::Family for Lookups {
     }
 }
 
+/// The forms of key the papers sources record (`also_on::Source::key_forms`).
+pub const KEY_FORMS: &[(&str, &str)] = &[
+    ("doi", "10.1038/nature12373"),
+    ("arxiv", "2302.04668"),
+    ("pmid", "23903748"),
+    ("pmcid", "PMC3814474"),
+];
 /// The also-on sources that run these lookups: each fetches through the egress (its policy,
 /// budgets and shared discovery cache), hands the answer to this module's parsers, and reports
 /// keys and derived links.
@@ -454,6 +461,9 @@ pub mod also_on {
 
     #[async_trait]
     impl Source for Unpaywall {
+        fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+            crate::lookups::papers::KEY_FORMS
+        }
         fn id(&self) -> &'static str {
             "unpaywall"
         }
@@ -482,6 +492,9 @@ pub mod also_on {
 
     #[async_trait]
     impl Source for Ncbi {
+        fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+            crate::lookups::papers::KEY_FORMS
+        }
         fn budgets(&self) -> &'static [(&'static str, f64)] {
             // NCBI's E-utilities and ID Converter: 3 requests/s without an API key.
             &[("pmc.ncbi.nlm.nih.gov", 3.0)]
@@ -557,6 +570,9 @@ pub mod also_on {
 
     #[async_trait]
     impl Source for Datacite {
+        fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+            crate::lookups::papers::KEY_FORMS
+        }
         fn budgets(&self) -> &'static [(&'static str, f64)] {
             // Crossref: 10 requests/s on the polite pool.
             &[("api.crossref.org", 10.0)]
@@ -658,6 +674,9 @@ pub mod also_on {
 
     #[async_trait]
     impl Source for HuggingFacePapers {
+        fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+            crate::lookups::papers::KEY_FORMS
+        }
         /// A paper's own page: `/papers/{arXiv id}`.
         fn service_name(&self, host: &str, url: &url::Url) -> Option<&'static str> {
             let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();

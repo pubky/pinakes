@@ -2939,6 +2939,28 @@ pub async fn curate_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Every form of key a registered source records (`also_on::Source::key_forms`) searches
+    /// back exactly as recorded: `key=` with the key a read lists finds that key.
+    #[test]
+    fn every_key_form_searches_back() {
+        for source in crate::also_on::registered() {
+            let id = source.id();
+            for (namespace, example) in source.key_forms() {
+                let key = format!("{namespace}:{example}");
+                assert!(crate::also_on::valid_key(&key), "{id}: {key}");
+                let filter = key_filter(&key).unwrap_or_else(|_| panic!("{id}: {key} is a 400"));
+                assert!(
+                    filter.keys.contains(&key),
+                    "{id}: {key} searches {:?}",
+                    filter.keys
+                );
+            }
+        }
+        let apple = [("podcast:apple", "1")];
+        assert!(crate::also_on::of_form(&apple, "podcast:apple:1"));
+        assert!(!crate::also_on::of_form(&apple, "podcast:apple:"));
+        assert!(!crate::also_on::of_form(&apple, "podcast:apple_episode:1"));
+    }
     /// A request axum could not read is answered with what its route takes.
     #[test]
     fn a_rejection_says_what_the_route_takes() {

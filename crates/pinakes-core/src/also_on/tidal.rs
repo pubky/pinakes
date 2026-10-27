@@ -142,6 +142,9 @@ impl Kind {
 pub struct Tidal;
 #[async_trait]
 impl Source for Tidal {
+    fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+        crate::music_sources::KEY_FORMS
+    }
     fn budgets(&self) -> &'static [(&'static str, f64)] {
         // TIDAL's developer API publishes no figure and answers 429 with a time to wait: a cautious
         // 2/s (a batch asks for 20 items).

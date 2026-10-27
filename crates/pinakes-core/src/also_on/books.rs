@@ -415,6 +415,25 @@ pub struct Books;
 
 #[async_trait]
 impl Source for Books {
+    fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+        &[
+            ("openlibrary:work", "OL468431W"),
+            ("openlibrary:edition", "OL23109860M"),
+        ]
+    }
+    /// An Open Library key as it records them: `openlibrary:work:{OL…W}` or
+    /// `openlibrary:edition:{OL…M}`.
+    fn search_key(&self, namespace: &str, value: &str) -> Option<String> {
+        let (kind, id) = value
+            .split_once(':')
+            .filter(|_| namespace == "openlibrary")?;
+        let id = match kind {
+            "work" => ol_id(id, 'W'),
+            "edition" => ol_id(id, 'M'),
+            _ => None,
+        }?;
+        Some(format!("openlibrary:{kind}:{id}"))
+    }
     fn link_type(&self, uri: &str) -> Option<Option<&'static str>> {
         book(uri).map(|_| Some("Book"))
     }

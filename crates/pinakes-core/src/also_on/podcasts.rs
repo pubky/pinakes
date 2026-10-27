@@ -787,6 +787,19 @@ impl Podcasts {
 
 #[async_trait]
 impl Source for Podcasts {
+    fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+        &[
+            ("podcast:guid", "917393e3-1b1e-5cef-ace4-edaa54e1f810"),
+            ("podcast:apple", "1200361736"),
+            ("podcast:apple_episode", "1000634224580"),
+            (
+                "podcast:item",
+                "917393e3-1b1e-5cef-ace4-edaa54e1f810:\
+                 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            ),
+            ("wikidata", "Q42"),
+        ]
+    }
     fn link_type(&self, uri: &str) -> Option<Option<&'static str>> {
         let episode = |e: Option<u64>| {
             if e.is_some() {

@@ -249,6 +249,13 @@ pub trait Source: Send + Sync {
     fn search_key(&self, _namespace: &str, _value: &str) -> Option<String> {
         None
     }
+    /// Every form of key it records, on its resource or on a derived link: the namespace (the key
+    /// up to its value, `openlibrary:work`) and an example value. A source that records keys
+    /// lists them: each searches back as recorded (`key=`, tested by `api`'s
+    /// `every_key_form_searches_back`), and in a debug build it may record no other form.
+    fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+        &[]
+    }
     /// The plain name of a service it reads or links to, by a link's host (lower case, without
     /// `www.`) and URL: the name its derived links carry (`lookups::service_name`). Only for an
     /// object's own page in a form it recognizes; any other page on that host is on no service.
@@ -374,6 +381,34 @@ pub fn budgets() -> impl Iterator<Item = (&'static str, f64)> {
 /// The source IDs `[also_on.sources]` may name.
 pub fn source_ids() -> Vec<&'static str> {
     registry().iter().map(|s| s.id()).collect()
+}
+
+/// Whether a key is of one of `forms` (`Source::key_forms`): its namespace, then `:` and a value.
+pub fn of_form(forms: &[(&str, &str)], key: &str) -> bool {
+    forms.iter().any(|(namespace, _)| {
+        key.strip_prefix(namespace)
+            .and_then(|rest| rest.strip_prefix(':'))
+            .is_some_and(|value| !value.is_empty())
+    })
+}
+/// In a debug build, every key a source that lists its forms (`Source::key_forms`) records, on
+/// its resource or on a derived link, is of one of them: a form it does not list might not
+/// search back.
+fn check_key_forms(source: &dyn Source, found: &Found) {
+    let forms = source.key_forms();
+    if !cfg!(debug_assertions) || forms.is_empty() {
+        return;
+    }
+    let links = found.links.iter().filter_map(|l| l.key.as_deref());
+    for key in found.keys.iter().map(|k| k.key.as_str()).chain(links) {
+        if let Some(key) = normal_key(key).filter(|k| valid_key(k)) {
+            assert!(
+                of_form(forms, &key),
+                "{} records {key}, a form its key_forms does not list",
+                source.id()
+            );
+        }
+    }
 }
 
 fn token(s: &str) -> bool {
@@ -839,6 +874,7 @@ async fn one(
                     partial = Some(partial.map_or(asked, |p| p.max(asked)));
                 }
                 let lifetime = source.ttl();
+                check_key_forms(source.as_ref(), &found);
                 record(pool, id, source.id(), found, source.ttl(), cfg)
                     .await
                     .with_context(|| format!("record {}", source.id()))?;

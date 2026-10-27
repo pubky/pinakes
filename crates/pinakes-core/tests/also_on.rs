@@ -831,7 +831,7 @@ async fn search_by_key_finds_the_same_object_on_every_service(pool: PgPool) {
 
 /// Every key a resource read lists (`keys`, as stored) searches back to that resource:
 /// `GET /v1/search?key=` takes each exactly as listed (review of d6d0aeb: MusicBrainz and podcast
-/// keys did not).
+/// keys did not; of e48807e: Open Library keys did not).
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn every_key_a_read_lists_searches_back(pool: PgPool) {
     let uri = "https://example.org/a-show";
@@ -844,9 +844,9 @@ async fn every_key_a_read_lists_searches_back(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    // One key of each form the core and the hubs store (a source's own namespaces round-trip
-    // through its `search_key`, tested with it).
-    let keys = [
+    // One key of each form the core and the hubs store, and one of each form every registered
+    // source lists (`Source::key_forms`: the books source's Open Library keys among them).
+    let core = [
         "mb:recording:0f2b3d4e-1111-4222-8333-444455556666",
         "mb:release-group:0f2b3d4e-1111-4222-8333-444455556667",
         "mb:artist:0f2b3d4e-1111-4222-8333-444455556668",
@@ -861,7 +861,16 @@ async fn every_key_a_read_lists_searches_back(pool: PgPool) {
         "osm:node/1",
         "doi:10.1000/xyz123",
     ];
-    for key in keys {
+    let mut keys: Vec<String> = core.iter().map(|k| k.to_string()).collect();
+    for source in also_on::registered() {
+        for (namespace, example) in source.key_forms() {
+            let key = format!("{namespace}:{example}");
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+    }
+    for key in &keys {
         sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) VALUES($1,$2,'test','test',now()+interval '1 day')")
             .bind(&id)
             .bind(key)

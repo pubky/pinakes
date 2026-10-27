@@ -112,7 +112,9 @@ or got plain web cards before are read by their source.
 The [also-on](../api.md#also-on) sources, in the order they run: each reads a resource after it
 is saved and adds keys, facts and derived links (the API says how they show). A lookup family is
 one module with its sources; a name that is also an official source above has its also-on part
-on the same page.
+on the same page. A source that records keys lists their forms (`Source::key_forms`, with an
+example each): every form searches back as recorded (`GET /v1/search?key=`, tested for every
+registered source), and in a debug build a source records no other form.
 
 - [`service`](service.md): the ISRC a music service's own track page states.
 - [`tidal`](tidal.md): TIDAL's own barcodes and ISRCs (with the operator's TIDAL credentials).

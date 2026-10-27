@@ -390,6 +390,9 @@ pub mod also_on {
 
     #[async_trait]
     impl Source for FederalRegister {
+        fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+            &[("fr", "2024-12345")]
+        }
         fn single_namespaces(&self) -> &'static [&'static str] {
             &["fr"]
         }

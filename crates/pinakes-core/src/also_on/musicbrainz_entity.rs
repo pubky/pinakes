@@ -17,6 +17,9 @@ use crate::music_sources::*;
 pub struct MusicBrainzEntitySource;
 #[async_trait]
 impl Source for MusicBrainzEntitySource {
+    fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+        crate::music_sources::KEY_FORMS
+    }
     fn id(&self) -> &'static str {
         "musicbrainz_entity"
     }
