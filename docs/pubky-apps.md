@@ -73,7 +73,8 @@ Images are Pubky file records, not images, and are not read. Never fetched: `att
 | `rooms/{room}` | `Conversation`: `name`, `topic`. Only a listed room (`visibility: public`); an unlisted one has no card |
 
 No client link until rooms.pubky.app is live (the client's address today is a hosting
-provider's subdomain). Never fetched: `members/`, `messages/`, `reactions/`,
+provider's subdomain): the profile's `links_off` says so, and pinakesd logs it at startup
+("open_in links are off") while the pubky resolver is on. Never fetched: `members/`, `messages/`, `reactions/`,
 `bans/`, `mutes/`, `tags/`, `profile.json`.
 
 ### Pubky marketplace (`app.marketplace/`)
@@ -95,7 +96,8 @@ proofs) is never fetched.
 1. Copy the smallest profile (`resolver/pubky_apps/rooms.rs`) to
    `resolver/pubky_apps/<app>.rs`. Set its namespaces, one `Kind` per object that gets a card
    (a path pattern with `{name}` segments, a `read` function, the client links), and the fact
-   names its cards publish. Read the app's format leniently: members may be missing, `null` or
+   names its cards publish. `links_off` is `None`, or, while the app's client has no address
+   Pinakes can link to, why (the kinds then open in no client). Read the app's format leniently: members may be missing, `null` or
    in an older shape. Return `Read::NoCard` for an object its owner did not mean to list.
 2. Add `pub mod <app>;` and one line in `REGISTRY` (`resolver/pubky_apps/mod.rs`).
 3. Record a few real public objects in `tests/fixtures/pubky_apps/<app>/` (`<name>.json` as

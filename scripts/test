@@ -15,4 +15,7 @@ fi
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test --workspace
+# The e2e driver's own tests (sample selection, preflight, Nexus hydration): Node alone.
+if [[ ! -d e2e/node_modules ]]; then npm ci --prefix e2e; fi
+npm test --prefix e2e
 scripts/check-ops

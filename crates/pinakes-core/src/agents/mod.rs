@@ -106,6 +106,94 @@ pub async fn skill_md(headers: HeaderMap) -> Response {
     )
 }
 
+/// `GET /mcp`. MCP clients POST; a GET is a person's browser or a probe. A browser (one that
+/// accepts `text/html`) gets a short page on how to connect, any other GET the 405 the protocol
+/// allows, naming `POST`.
+pub async fn mcp_get(headers: HeaderMap) -> Response {
+    let html = headers
+        .get(header::ACCEPT)
+        .and_then(|a| a.to_str().ok())
+        .is_some_and(|a| a.contains("text/html"));
+    if !html {
+        let mut response = (
+            axum::http::StatusCode::METHOD_NOT_ALLOWED,
+            [
+                (header::ALLOW, HeaderValue::from_static("POST")),
+                (
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/plain; charset=utf-8"),
+                ),
+            ],
+            "This is the Pinakes MCP endpoint: MCP clients POST to it (GET /llms.txt for the guide).\n",
+        )
+            .into_response();
+        response.extensions_mut().insert(crate::api::OwnText);
+        return response;
+    }
+    let base = html_escape(&base_url(&headers));
+    let tools = mcp::tools()
+        .iter()
+        .map(|t| format!("<li><code>{}</code></li>", html_escape(&t.name)))
+        .collect::<String>();
+    let page = format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pinakes MCP endpoint</title>
+</head>
+<body>
+<h1>Pinakes MCP endpoint</h1>
+<p>This is the Pinakes MCP endpoint. Add it to your MCP client.</p>
+<h2>Claude Code</h2>
+<pre>claude mcp add --transport http pinakes {base}/mcp</pre>
+<h2>Other clients</h2>
+<pre>{{
+  "mcpServers": {{
+    "pinakes": {{ "type": "http", "url": "{base}/mcp" }}
+  }}
+}}</pre>
+<h2>Tools</h2>
+<ul>{tools}</ul>
+<p>The guide: <a href="{base}/llms.txt">{base}/llms.txt</a>, also as a skill: <a href="{base}/skill.md">{base}/skill.md</a>.</p>
+</body>
+</html>
+"#
+    );
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/html; charset=utf-8"),
+            ),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                HeaderValue::from_static("default-src 'none'"),
+            ),
+            (
+                header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            ),
+            (
+                header::VARY,
+                HeaderValue::from_static("accept, host, x-forwarded-proto"),
+            ),
+        ],
+        page,
+    )
+        .into_response()
+}
+
+/// `text` for HTML text and attribute values.
+fn html_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
 /// `GET /`: where an agent starts.
 #[derive(Serialize, ToSchema)]
 pub struct Index {

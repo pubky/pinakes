@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { dropRefusedPages, expectCard, findsEvery, freshen, instanceAgent, mcpAnswer, newestLink, ownTags, rereadMoved, userAgent, withTags } from './harness.mjs';
+import { dropRefusedPages, expectCard, findsEvery, freshen, instanceAgent, mcpAnswer, newestLink, ownTags, rereadMoved, userAgent, withTags, withoutStackSkipped } from './harness.mjs';
 test('a PUT that commits then times out is included in cleanup', async () => {
   const stored = new Set(), report = {}, journal = [];
   const storage = { exists: async p => stored.has(p), putJson: async p => { stored.add(p); if (p === 'second') throw new Error('timeout'); }, delete: async p => stored.delete(p) };
@@ -166,6 +166,21 @@ test('an MCP answer is the JSON body, or the last data event of a stream', () =>
   const stream = 'event: message\ndata: {"jsonrpc":"2.0","method":"notifications/progress"}\n\nevent: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}\n\n';
   assert.deepEqual(mcpAnswer(stream, 'text/event-stream'), { jsonrpc: '2.0', id: 1, result: { ok: true } });
   assert.throws(() => mcpAnswer('event: ping\n\n', 'text/event-stream'), /no data/);
+});
+
+test('a live sample whose needed source the build lacks is not tagged and is named under skipped', () => {
+  const samples = [
+    { kind: 'tidal', uri: 'https://tidal.com/album/1', needs: 'tidal' },
+    { kind: 'web', uri: 'https://web.example/' },
+    { kind: 'isbn_page', uri: 'https://openlibrary.org/books/OL1M', needs: 'books' },
+  ];
+  const preflight = [{ kind: 'index', uri: 'https://index.example/', reason: 'HTTP 403' }];
+  const stack = [{ kind: 'tidal', uri: 'https://tidal.com/album/1', reason: 'needs tidal, which this build does not have' }];
+  const { samples: kept, skipped } = withoutStackSkipped(samples, preflight, stack);
+  assert.deepEqual(kept.map(s => s.kind), ['web', 'isbn_page']);
+  assert.deepEqual(skipped.map(s => [s.kind, s.reason]), [['index', 'HTTP 403'], ['tidal', 'needs tidal, which this build does not have']]);
+  // A stack that left nothing out keeps every sample and adds nothing.
+  assert.deepEqual(withoutStackSkipped(samples, [], undefined), { samples, skipped: [] });
 });
 
 test('a search check re-reads a card that became an alias and finds its root', async () => {

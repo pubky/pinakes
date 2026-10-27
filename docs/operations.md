@@ -50,7 +50,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `h3_resolutions` | `[0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 11, 11, 11, 11, 11, 11, 11]` | H3 resolution per map zoom level. |
 | `max_cluster_cells` | `10000` | Most cells one cluster query returns. |
 | `api_cache_capacity` | `10000` | API response cache entries. |
-| `reach_cost` | `6` | Budget units a reach search costs. |
+| `reach_cost` | `6` | Budget units a search costs for each of `reach` and `boost`. |
 | `related_cost` | `6` | Budget units a related search costs. |
 | `preview_requests_per_minute` | `30` | Preview requests per minute per client. |
 | `preview_uri_requests_per_minute` | `30` | Preview requests per minute per URI. |
@@ -363,6 +363,12 @@ cursor beyond the feed's length, clears the reference projection and scores and 
 zero; resource documents stay through the grace period. A resource without references is
 deleted `limits.grace_days` after it became orphaned, previews included. A Nexus outage leaves
 cached data served and polling retries.
+
+Search's `reach` and `boost` read the viewer's `following` and `friends` lists from the same
+Nexus. `nexus_reach_set` (default `false`) says that Nexus also serves the reach-set route
+(`GET /v0/user/{viewer}/reach-set?depth=2`), which `wot_2` reads; while it is off, `wot_2`
+answers 501 and Nexus is never asked for it. Sets are kept in memory only, per viewer, five
+minutes (a `wot_2` set up to an hour, re-validated by its `ETag`).
 
 ## Queue and refresh
 

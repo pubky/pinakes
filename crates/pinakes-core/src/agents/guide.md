@@ -137,7 +137,7 @@ instance reads.
 For graph questions (who follows whom, trust, threads, a user's tags) use **nexus-scout**
 (`https://nexus-scout.pubky.app/llms.txt`): read-only Cypher over the Pubky social graph. To keep
 only links your network referenced, search here with `reach=following&viewer=<pubky key>` (or
-`friends`).
+`friends`); to rank them first and keep the rest, use `boost` instead of `reach`.
 
 ## MCP
 
@@ -147,7 +147,7 @@ the full result:
 
 | tool | does |
 | --- | --- |
-| `search` | `GET /v1/search`: `q`, `type` (one or several), `tags`, `match`, `near` + `radius`, `bbox`, `from`, `to`, `key`, `sort`, `collapse`, `reach` + `viewer`, `limit`, `cursor` |
+| `search` | `GET /v1/search`: `q`, `type` (one or several), `tags`, `match`, `near` + `radius`, `bbox`, `from`, `to`, `key`, `sort`, `collapse`, `reach` or `boost` + `viewer`, `limit`, `cursor` |
 | `card` | One link's card by URI (`GET /v1/resources/by-uri`); `resolve: true` asks `POST /v1/resolve` for an unknown link |
 | `lookup` | Every card with one identifier (`isbn:…`, `doi:…`, `isrc:…`, `osm:…`, …) |
 | `group` | A group's members by group id |

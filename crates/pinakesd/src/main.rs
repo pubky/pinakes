@@ -164,6 +164,9 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
     });
     let listener = tokio::net::TcpListener::bind(&config.listen).await?;
     tracing::info!(listen=%config.listen,"Pinakes started");
+    if config.pubky.enabled {
+        pinakes_core::resolver::pubky_apps::log_links_off();
+    }
     axum::serve(
         listener,
         api::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),

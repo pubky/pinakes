@@ -35,6 +35,7 @@ pub static PROFILE: Profile = Profile {
         },
     ],
     facts: &["price", "condition", "category", "country"],
+    links_off: None,
 };
 
 /// A record of the marketplace's own kind, written by the path's owner.

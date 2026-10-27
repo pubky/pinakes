@@ -34,6 +34,7 @@ snapshot; a test fails when it is stale.
 | `GET /llms.txt` | None | The usage guide for agents, plain text ([Agents](#agents)) |
 | `GET /skill.md` | None | The guide as an agent skill named `pinakes` ([Agents](#agents)) |
 | `POST /mcp` | One MCP JSON-RPC message | The MCP endpoint (when `api.mcp`; [Agents](#agents)); not in the OpenAPI document |
+| `GET /mcp` | None | A browser (`Accept: text/html`): a short page on how to connect; any other GET: 405 with `Allow: POST` ([Agents](#agents)) |
 
 URIs are normalized and IDs computed by Pinakes itself: lowercase scheme and host, no default
 port, userinfo or fragment, then BLAKE3. Each URI is at most 2048 bytes; IDs are 32 lowercase hex
@@ -347,6 +348,8 @@ GET /v1/search?bbox=8.45,47.33,8.62,47.42&cluster=10
 GET /v1/search?bbox=13.25,52.45,13.55,52.58&cluster=14
 GET /v1/search?reach=following&viewer=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
 GET /v1/search?reach=friends&viewer=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+GET /v1/search?boost=following&viewer=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+GET /v1/search?sort=trending&type=MusicRecording&boost=friends&viewer=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
 ```
 
 ### GET /v1/resources/{id}
@@ -421,7 +424,8 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 | `tags` | Comma-separated labels; at most 5, each 1–128 bytes |
 | `match` | `any` (default) or `all` (at most 3 tags) |
 | `author` | Resources referenced by this 52-character z-base-32 public key |
-| `reach`, `viewer` | `following` or `friends` of the Nexus user `viewer`: only their references and tags count |
+| `reach`, `viewer` | `following`, `friends` or `wot_2` of the Nexus user `viewer`: only their references and tags count (a filter) |
+| `boost`, `viewer` | `following`, `friends` or `wot_2` of the Nexus user `viewer`: cards they referenced rank higher, the more of them and the more recently they did, and nothing is left out ([Reach](#search)); with the default ranking or `sort=trending` |
 | `venue` | Events at this venue resource ID |
 | `sort` | `activity` (default), `recent`, `distance` (requires `near`), `start` or `trending` (by the references made inside `window`; only links referenced in it; with `collapse=group` one song across services is one row, ranked by the references all its links got in the window) |
 | `window` | With `sort=trending` or `related`: `{n}h` or `{n}d`, from `1h` to `90d` (default `7d` for trending, `limits.related_window_days` for related), counted back from the first page's instant |
@@ -478,13 +482,26 @@ every matching link either way; clusters always count links, so `collapse` is re
 `cluster`.
 
 **Reach.** Following and friends lists come from Nexus in pages of 200, at most 1,000 authors,
-cached per viewer for five minutes. `reach_truncated: true` warns that the list was capped. All
-pages share `limits.reach_timeout_secs` (5 s); an incomplete list is not cached. An unknown
-Nexus user has an empty reach; a Nexus error or the deadline returns 502.
+cached per viewer for five minutes. `wot_2` (two steps of the follow graph) comes from Nexus's
+reach-set route, `GET /v0/user/{viewer}/reach-set?depth=2` (`{authors, truncated}`, at most 1,000,
+with an `ETag`), only where the operator says the Nexus serves it (`nexus_reach_set = true`;
+else `wot_2` answers 501): it is kept five minutes, then asked again with its `ETag` and kept
+while Nexus answers 304. `reach_truncated: true` warns that the `reach` or `boost` set was
+capped. All pages share `limits.reach_timeout_secs` (5 s); an incomplete list is not cached. An
+unknown Nexus user has an empty reach; a Nexus error or the deadline returns 502. Sets live in the
+daemon's memory only; nothing per viewer is stored.
+
+`reach` filters: only references by authors in the set count, for the rows and every count.
+`boost` ranks and never filters: with the default ranking a card gains `2 · ln(1 + n)` for the
+`n` authors in the set who referenced it, halved every 30 days since the newest of their
+references (the card's own score decays the same way, and one recent reference from the set
+weighs about as much as three taggers in it); with `sort=trending` a reference in the window by
+an author in the set counts twice. `boost` takes no other `sort` and no `related`. Both may be
+given, each with its own set.
 
 **Caching.** Responses carry `Cache-Control: public, max-age=30` and an `ETag` over the
 parameters, the resolved time window, the ingestion cursors and epochs, a write revision, the
-same-event revision and the reach set's hash and truncation; `If-None-Match` returns 304 when nothing changed.
+same-event revision and the reach and boost sets' hashes and truncation; `If-None-Match` returns 304 when nothing changed.
 
 ## Related
 
@@ -982,10 +999,10 @@ Coordinate-derived time zones use ODbL boundary data too; see `data/README.md`.
 ## Limits and errors
 
 Every public route (`/v1`, Swagger UI, the agents' guide and index, and `/mcp`) shares a per-IP budget on the direct peer address
-(`api.requests_per_minute`, 120; forwarded headers are not trusted). A reach search costs
-`limits.reach_cost` (6) units, charged before any Nexus call, a related search
-`limits.related_cost` (6), and a search with both the two together; every other request costs
-one.
+(`api.requests_per_minute`, 120; forwarded headers are not trusted). A search costs
+`limits.reach_cost` (6) units for each of `reach` and `boost` (each reads a set from Nexus),
+charged before any Nexus call, `limits.related_cost` (6) for `related`, all of them together
+when it has several; every other request costs one.
 Over budget returns 429 with `Retry-After: 60`. The public and admin listeners share a
 ten-connection pool, apart from the workers', with a five-second statement and acquisition
 timeout. The dump is written by the daemon,
@@ -1022,7 +1039,7 @@ layers, with the caller's address:
 
 | Tool | Request | Answer |
 | --- | --- | --- |
-| `search` | `GET /v1/search` with `q`, `type` (array), `tags` (array), `match`, `near` (`{lat, lon, radius}`), `bbox` (`[west, south, east, north]`), `from`, `to`, `key`, `sort`, `window`, `collapse`, `reach`, `viewer`, `limit`, `cursor` | Compact cards, `cursor`, `facets` |
+| `search` | `GET /v1/search` with `q`, `type` (array), `tags` (array), `match`, `near` (`{lat, lon, radius}`), `bbox` (`[west, south, east, north]`), `from`, `to`, `key`, `sort`, `window`, `collapse`, `reach`, `boost`, `viewer`, `limit`, `cursor` | Compact cards, `cursor`, `facets` |
 | `card` | `GET /v1/resources/by-uri`; with `resolve: true` and an unknown link, `POST /v1/resolve` | One compact card with `category`, `address`, `facts`, `aliases` (at most 10) and the event fields |
 | `lookup` | `GET /v1/search?key=` | Compact cards |
 | `group` | `GET /v1/groups/{id}` | `id`, `type`, `keys`, every member's compact card, and `best`: the most complete readable member of the group's type |
@@ -1035,6 +1052,12 @@ characters), `image`, `site`, `point`, `start`, `end`, `group`, `also_on` (`uri`
 (`GET /v1/resources/{id}`); every answer names the REST URL of its full result. A failed request
 is the tool's error (`isError`), its text `{error, status, hint, url}` with the route's status
 and message; an unknown tool is a JSON-RPC error.
+
+**A browser on `/mcp`.** A `GET /mcp` that accepts `text/html` answers a short HTML page: what
+the endpoint is, the Claude Code line (`claude mcp add --transport http pinakes {base}/mcp`),
+the JSON configuration other clients take, the tools' names and links to `/llms.txt` and
+`/skill.md`, with the base as the guide's. Any other GET is the 405 the protocol allows, with
+`Allow: POST` and one line of plain text; every other method is MCP's.
 
 **Budget.** An MCP message spends one unit of the per-IP budget, and a tool call what its
 requests cost on top (a `reach` search 6, `types` two requests, `social` one). Bodies are capped

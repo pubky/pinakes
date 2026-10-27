@@ -62,12 +62,25 @@ pub struct FeedPage {
     pub epoch: Option<String>,
     pub length: i64,
 }
-#[derive(Clone, Debug, Default, Serialize, ToSchema)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
 pub struct ReachSet {
     pub authors: Vec<String>,
     pub truncated: bool,
 }
-type ReachCache = Arc<Mutex<HashMap<(String, String), (Instant, ReachSet)>>>;
+/// A viewer's set, cached by viewer and kind: when it was read, the set, and the reach-set
+/// route's `ETag` it came with (`wot_2` only).
+type ReachCache = Arc<Mutex<HashMap<(String, String), (Instant, ReachSet, Option<String>)>>>;
+/// How long a set answers searches before it is read again.
+const REACH_FRESH: Duration = Duration::from_secs(300);
+/// How long a `wot_2` set and its `ETag` are kept to ask Nexus whether it changed.
+const REACH_KEPT: Duration = Duration::from_secs(3600);
+/// The most authors a reach set holds; Nexus flags a longer one as truncated.
+pub const REACH_MAX_AUTHORS: usize = 1000;
+/// The reach kinds: the viewer's `following` and `friends` lists, and `wot_2`, the authors the
+/// Nexus reach-set route names (two steps of the follow graph).
+pub fn reach_kind(kind: &str) -> bool {
+    matches!(kind, "following" | "friends" | "wot_2")
+}
 #[derive(Clone)]
 pub struct Nexus {
     base: String,
@@ -149,35 +162,104 @@ impl Nexus {
             .map_err(reqwest::Error::without_url)?;
         bounded_json(response).await
     }
+    /// A viewer's reach set of one kind (`reach_kind`), cached in memory per viewer and kind for
+    /// five minutes; a `wot_2` set is then asked again with its `ETag`, and an unchanged answer
+    /// (304) keeps it. Nothing is stored beyond this process.
     pub async fn reach(&self, viewer: &str, reach: &str) -> Result<ReachSet> {
-        if !valid_author(viewer) || !matches!(reach, "following" | "friends") {
+        if !valid_author(viewer) || !reach_kind(reach) {
             bail!("invalid reach request");
         }
         let key = (viewer.to_owned(), reach.to_owned());
-        {
+        let held = {
             let mut cache = self.cache.lock().await;
-            cache.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(300));
-            if let Some((_, value)) = cache.get(&key) {
-                return Ok(value.clone());
+            cache.retain(|_, (at, _, etag)| {
+                at.elapsed()
+                    < if etag.is_some() {
+                        REACH_KEPT
+                    } else {
+                        REACH_FRESH
+                    }
+            });
+            match cache.get(&key) {
+                Some((at, value, _)) if at.elapsed() < REACH_FRESH => return Ok(value.clone()),
+                Some((_, value, Some(etag))) => Some((value.clone(), etag.clone())),
+                _ => None,
             }
-        }
+        };
         // Never hold the shared cache lock during network I/O. Concurrent misses
         // may duplicate work; the API prices each reach search for all six pages.
-        let result = tokio::time::timeout(self.reach_timeout, self.fetch_reach(viewer, reach))
+        let fetch = async {
+            if reach == "wot_2" {
+                self.fetch_reach_set(viewer, held).await
+            } else {
+                Ok((self.fetch_reach(viewer, reach).await?, None))
+            }
+        };
+        let (result, etag) = tokio::time::timeout(self.reach_timeout, fetch)
             .await
             .context("Nexus reach deadline exceeded")??;
         let mut cache = self.cache.lock().await;
         if cache.len() >= 1024 && !cache.contains_key(&key) {
             if let Some(oldest) = cache
                 .iter()
-                .min_by_key(|(_, (at, _))| *at)
+                .min_by_key(|(_, (at, ..))| *at)
                 .map(|(k, _)| k.clone())
             {
                 cache.remove(&oldest);
             }
         }
-        cache.insert(key, (Instant::now(), result.clone()));
+        cache.insert(key, (Instant::now(), result.clone(), etag));
         Ok(result)
+    }
+    /// The `wot_2` set from Nexus's reach-set route (`GET /v0/user/{viewer}/reach-set?depth=2`:
+    /// `{authors, truncated}` with an `ETag`), asked with the `ETag` of the set `held`, which a
+    /// 304 keeps. An unknown viewer has an empty set.
+    async fn fetch_reach_set(
+        &self,
+        viewer: &str,
+        held: Option<(ReachSet, String)>,
+    ) -> Result<(ReachSet, Option<String>)> {
+        let mut request = self
+            .client
+            .get(format!("{}/v0/user/{viewer}/reach-set", self.base))
+            .query(&[("depth", 2)]);
+        if let Some((_, etag)) = &held {
+            request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+        }
+        let response = request.send().await.map_err(reqwest::Error::without_url)?;
+        match (response.status(), held) {
+            (reqwest::StatusCode::NOT_MODIFIED, Some((set, etag))) => return Ok((set, Some(etag))),
+            (reqwest::StatusCode::NOT_FOUND, _) => return Ok((ReachSet::default(), None)),
+            _ => {}
+        }
+        let response = response
+            .error_for_status()
+            .map_err(reqwest::Error::without_url)?;
+        let etag = response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .filter(|v| v.len() <= 256)
+            .map(str::to_owned);
+        let mut set: ReachSet = bounded_json(response).await?;
+        if set.authors.len() > REACH_MAX_AUTHORS || set.authors.iter().any(|id| !valid_author(id)) {
+            bail!("invalid Nexus reach set");
+        }
+        set.authors.sort();
+        set.authors.dedup();
+        Ok((set, etag))
+    }
+    /// Ages a cached set by `by`, so a test reads it as stale.
+    #[cfg(test)]
+    async fn age(&self, viewer: &str, reach: &str, by: Duration) {
+        if let Some((at, ..)) = self
+            .cache
+            .lock()
+            .await
+            .get_mut(&(viewer.to_owned(), reach.to_owned()))
+        {
+            *at = at.checked_sub(by).unwrap();
+        }
     }
     async fn fetch_reach(&self, viewer: &str, reach: &str) -> Result<ReachSet> {
         let mut result = ReachSet::default();
@@ -357,5 +439,63 @@ mod tests {
         assert!((2..=3).contains(&calls.load(Ordering::SeqCst)));
         assert!(nexus.cache.lock().await.is_empty());
         server.abort();
+    }
+
+    /// The `wot_2` set comes from the reach-set route, is kept five minutes, then asked again
+    /// with its `ETag`: a 304 keeps it, a changed set replaces it. An invalid set is refused.
+    #[tokio::test]
+    async fn a_wot_2_set_is_asked_again_with_its_etag() {
+        use axum::http::{HeaderMap, StatusCode};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let app = Router::new().route(
+            "/v0/user/{viewer}/reach-set",
+            get(move |Path(viewer): Path<String>, headers: HeaderMap| {
+                let n = seen.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if viewer.starts_with('b') {
+                        return (
+                            StatusCode::OK,
+                            [("etag", "\"bad\"")],
+                            Json(serde_json::json!({"authors": ["not-an-author"], "truncated": false})),
+                        );
+                    }
+                    let asked = headers.get("if-none-match").map(|v| v.to_str().unwrap().to_owned());
+                    if n == 1 {
+                        assert_eq!(asked.as_deref(), Some("\"v1\""));
+                        return (StatusCode::NOT_MODIFIED, [("etag", "\"v1\"")], Json(serde_json::json!(null)));
+                    }
+                    let (etag, author) = if n == 0 { ("\"v1\"", "y") } else { ("\"v2\"", "o") };
+                    (
+                        StatusCode::OK,
+                        [("etag", etag)],
+                        Json(serde_json::json!({"authors": [author.repeat(52)], "truncated": n > 0})),
+                    )
+                }
+            }),
+        );
+        let (url, task) = server(app).await;
+        let nexus = Nexus::new(&url).unwrap();
+        let viewer = "y".repeat(52);
+        let first = nexus.reach(&viewer, "wot_2").await.unwrap();
+        assert_eq!(
+            (first.authors.clone(), first.truncated),
+            (vec!["y".repeat(52)], false)
+        );
+        nexus.reach(&viewer, "wot_2").await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "fresh for five minutes");
+        nexus.age(&viewer, "wot_2", REACH_FRESH).await;
+        let kept = nexus.reach(&viewer, "wot_2").await.unwrap();
+        assert_eq!(kept.authors, first.authors);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        nexus.age(&viewer, "wot_2", REACH_FRESH).await;
+        let changed = nexus.reach(&viewer, "wot_2").await.unwrap();
+        assert_eq!(
+            (changed.authors, changed.truncated),
+            (vec!["o".repeat(52)], true)
+        );
+        assert!(nexus.reach(&"b".repeat(52), "wot_2").await.is_err());
+        assert!(nexus.reach(&viewer, "strangers").await.is_err());
+        task.abort();
     }
 }

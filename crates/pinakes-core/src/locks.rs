@@ -64,13 +64,16 @@ mod tests {
     /// `scripts/lock-waits` never repeats any part of `DATABASE_URL` when it cannot sample:
     /// libpq's parse errors quote the token they could not read, and psql's connection errors
     /// name the host, user or database. A canary in each place never reaches its output, which
-    /// is the script's fixed lines only.
+    /// is the script's fixed lines only. COMMAND ends at once (`true`): the script waits for the
+    /// sampler to stop before it runs COMMAND, so the refusal does not depend on how fast the
+    /// sampler starts on this machine.
     #[test]
     fn lock_waits_never_prints_the_database_url() {
         let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/lock-waits");
-        // Which of the script's two refusals a URL gets is libpq's to decide (a version that
-        // cannot read a URL says so, another tries it and cannot connect): the test holds the
-        // script to its own words, either of them, and never the URL's parts.
+        // Which of the script's refusals a URL gets is libpq's to decide (a version that cannot
+        // read a URL says so, another tries it and cannot connect, one may read a parameter it
+        // takes from no variable): the test holds the script to its own words, any of them,
+        // and never the URL's parts.
         for url in [
             // An unescaped `%` in the password.
             "postgresql://review:CANARY_PASSWORD%zz@localhost/postgres",
@@ -82,7 +85,7 @@ mod tests {
             "postgresql:///postgres?host=/nonexistent%0Alock-waits:%20CANARY_HOST",
         ] {
             let run = std::process::Command::new("bash")
-                .args([script, "sleep", "0.5"])
+                .args([script, "true"])
                 .env("DATABASE_URL", url)
                 .output()
                 .unwrap();
@@ -92,6 +95,7 @@ mod tests {
             assert!(!output.contains("CANARY"), "{url}: {output}");
             assert!(
                 output.contains("lock-waits: DATABASE_URL is not a connection string")
+                    || output.contains("lock-waits: DATABASE_URL sets ")
                     || output.contains("lock-waits: cannot connect to the database"),
                 "{url}: {output}"
             );

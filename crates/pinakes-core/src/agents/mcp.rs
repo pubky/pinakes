@@ -377,7 +377,8 @@ pub fn tools() -> Vec<Tool> {
                 "window":{"type":"string","description":"With sort trending: how far back, 1h to 90d, default 7d."},
                 "collapse":{"type":"string","enum":["group"],"description":"group: one row per group of links that are the same thing."},
                 "reach":{"type":"string","enum":["following","friends"],"description":"Only links that the viewer's follows (or friends) referenced. Needs viewer."},
-                "viewer":{"type":"string","description":"With reach: a 52-character pubky public key."},
+                "boost":{"type":"string","enum":["following","friends","wot_2"],"description":"Rank first the links the viewer's follows (or friends, or two steps of follows) referenced, leaving nothing out. Needs viewer; with the default sort or trending. wot_2 only where the instance has it."},
+                "viewer":{"type":"string","description":"With reach or boost: a 52-character pubky public key."},
                 "limit":{"type":"integer","minimum":1,"maximum":500,"description":"Cards per page, default 50."},
                 "cursor":{"type":"string","description":"The cursor of the previous page, with the same filters."}
             }}),
@@ -455,12 +456,13 @@ fn search_query(args: &JsonObject) -> Result<String, Failure> {
         ("window", "window"),
         ("collapse", "collapse"),
         ("reach", "reach"),
+        ("boost", "boost"),
         ("viewer", "viewer"),
         ("cursor", "cursor"),
     ];
     let known = [
         "q", "type", "tags", "match", "near", "bbox", "from", "to", "key", "sort", "window",
-        "collapse", "reach", "viewer", "limit", "cursor",
+        "collapse", "reach", "boost", "viewer", "limit", "cursor",
     ];
     if let Some(unknown) = args.keys().find(|k| !known.contains(&k.as_str())) {
         return Err(Failure::bad(format!(

@@ -389,6 +389,7 @@
             "type": "array"
           },
           "reach_truncated": {
+            "description": "The `reach` or `boost` set was capped at 1,000 authors.",
             "type": "boolean"
           },
           "resolution": {
@@ -1298,6 +1299,7 @@
             "type": "array"
           },
           "reach_truncated": {
+            "description": "The `reach` or `boost` set was capped at 1,000 authors.",
             "type": "boolean"
           }
         },
@@ -3011,6 +3013,7 @@
             }
           },
           {
+            "description": "`following`, `friends` or `wot_2` of `viewer`: only references by authors in that set\ncount (a filter). `wot_2` needs a Nexus that serves the reach-set route (else 501).",
             "examples": {
               "(none)": {
                 "summary": "(none)",
@@ -3027,6 +3030,18 @@
             },
             "in": "query",
             "name": "reach",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "`following`, `friends` or `wot_2` of `viewer`: cards that authors in that set referenced\nrank higher, the more of them and the more recently they did, and nothing is left out\n(with the default ranking or `sort=trending`).",
+            "in": "query",
+            "name": "boost",
             "required": false,
             "schema": {
               "type": [
@@ -3425,6 +3440,9 @@
           },
           "400": {
             "description": "Invalid or unavailable filter"
+          },
+          "501": {
+            "description": "wot_2 asked of an instance whose Nexus serves no reach set"
           },
           "502": {
             "description": "Nexus reach unavailable"
