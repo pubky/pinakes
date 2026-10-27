@@ -126,13 +126,9 @@ pub async fn drain(pool: &PgPool, config: &Config, budget: i64) -> Result<usize>
         return Ok(0);
     }
     let due = claim(pool, CLAIMED.min(budget.max(1)), LEASE).await?;
-    let mut changed = false;
     for (id, claimed) in &due {
         match resource(pool, id).await {
-            Ok(moved) => {
-                changed |= moved;
-                settle(pool, id, claimed).await?;
-            }
+            Ok(_) => settle(pool, id, claimed).await?,
             Err(error) => {
                 tracing::warn!(resource_id = %id, error = %crate::resolver::log_error(&error), "same-recording pairs will retry");
                 sqlx::query("UPDATE same_recording_dirty SET next_attempt_at=now()+interval '60 seconds' WHERE resource_id=$1 AND next_attempt_at=$2 AND next_attempt_at>now()")
@@ -142,11 +138,6 @@ pub async fn drain(pool: &PgPool, config: &Config, budget: i64) -> Result<usize>
                     .await?;
             }
         }
-    }
-    if changed {
-        sqlx::query("SELECT nextval('same_recording_revision')")
-            .execute(pool)
-            .await?;
     }
     Ok(due.len())
 }
@@ -241,12 +232,17 @@ async fn resource(pool: &PgPool, id: &str) -> Result<bool> {
     let unit = match unit {
         Some(unit) if !unit.title_key.is_empty() => unit,
         _ => {
+            let mut tx = pool.begin().await?;
             let dropped = sqlx::query("DELETE FROM same_recording_unit WHERE resource_id=$1")
                 .bind(id)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?
                 .rows_affected();
-            return Ok(dropped > 0);
+            if dropped == 0 {
+                return Ok(false);
+            }
+            commit_changed(tx, pool).await?;
+            return Ok(true);
         }
     };
     let fingerprint = unit.fingerprint();
@@ -332,8 +328,30 @@ async fn resource(pool: &PgPool, id: &str) -> Result<bool> {
     .bind(KEPT)
     .execute(&mut *tx)
     .await?;
-    tx.commit().await?;
+    commit_changed(tx, pool).await?;
     Ok(true)
+}
+
+/// Commits a change to the pairs with the revision search pages hash into their ETag: moved in
+/// the transaction (a pass stopped right after the commit still leaves it moved) and again after
+/// it (a page that read the revision before the commit is not answered 304 with the old pairs).
+async fn commit_changed(
+    mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    pool: &PgPool,
+) -> Result<()> {
+    sqlx::query("SELECT nextval('same_recording_revision')")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    sqlx::query("SELECT nextval('same_recording_revision')")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Reads one resource's recording now, as a pass does (without its claim). Exposed for tests.
+pub async fn read(pool: &PgPool, id: &str) -> Result<bool> {
+    resource(pool, id).await
 }
 
 #[cfg(test)]

@@ -543,3 +543,49 @@ async fn a_fact_found_again_after_it_expired_moves_the_pairs(pool: PgPool) {
             .unwrap();
     assert_eq!(due, 0);
 }
+
+/// Each read that changes pairs moves the revision search pages hash into their ETag, in its own
+/// commit: a pass stopped after one recording leaves no cached page answering with old hints.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn each_read_that_changes_pairs_moves_the_revision(pool: PgPool) {
+    let config = Config::default();
+    let take_five = |pool: &PgPool, uri: &'static str, length: &'static str| {
+        let pool = pool.clone();
+        async move {
+            recording(
+                &pool,
+                uri,
+                "Take Five",
+                Some("The Dave Brubeck Quartet"),
+                Some(length),
+            )
+            .await
+        }
+    };
+    let a = take_five(&pool, "https://tidal.com/track/1", "PT1M40S").await;
+    let b = take_five(&pool, "https://www.deezer.com/track/1031007", "PT1M40S").await;
+    pass(&pool, &config).await;
+    assert_eq!(named(&card(&config, &pool, &a).await), [b.as_str()]);
+    let revision = || {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM same_recording_revision")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let (_, etag) = response(&config, &pool, "/v1/search?q=take+five").await;
+    let before = revision().await;
+    // The first track is now 3:20 and is read alone, as by a pass stopped right after it.
+    take_five(&pool, "https://tidal.com/track/1", "PT3M20S").await;
+    assert!(same_recording::read(&pool, &a).await.unwrap());
+    assert!(revision().await > before);
+    assert!(named(&card(&config, &pool, &b).await).is_empty());
+    let (_, after) = response(&config, &pool, "/v1/search?q=take+five").await;
+    assert_ne!(etag, after);
+    // A read that changes nothing leaves it.
+    let still = revision().await;
+    assert!(!same_recording::read(&pool, &a).await.unwrap());
+    assert_eq!(revision().await, still);
+}
