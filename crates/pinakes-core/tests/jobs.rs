@@ -238,10 +238,24 @@ async fn postings_are_placed_found_and_close(pool: PgPool) {
             ),
         })),
     };
+    // Battery's posting is valid through 2026-11-19; the search and the card read it against
+    // the real clock, so it is stored closing 30 days from now, whenever the test runs.
+    let open_until = (chrono::Utc::now() + chrono::Duration::days(30))
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc();
     let mut saved = HashMap::new();
     for uri in [BATTERY, ASHBY, "https://jobs.example/closed"] {
-        let doc = resolver.resolve(uri).await.unwrap();
+        let mut doc = resolver.resolve(uri).await.unwrap();
         assert_eq!(doc.type_name, "JobPosting", "{uri}");
+        if uri == BATTERY {
+            assert_eq!(
+                doc.end.map(|e| e.to_rfc3339()).as_deref(),
+                Some("2026-11-20T00:00:00+00:00")
+            );
+            doc.end = Some(open_until);
+        }
         let id = store::ensure_resource(&pool, uri).await.unwrap();
         store::save_document(&pool, &id, 0, &doc).await.unwrap();
         sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','jobs',$3,now())")
@@ -273,7 +287,10 @@ async fn postings_are_placed_found_and_close(pool: PgPool) {
         .unwrap()
         .contains("OpenStreetMap"));
     assert_eq!(card["start"], "2026-10-05T00:00:00Z");
-    assert_eq!(card["end"], "2026-11-20T00:00:00Z");
+    assert_eq!(
+        card["end"],
+        open_until.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    );
     let facts = &card["facts"];
     assert_eq!(facts["hiring_organization"], "Battery");
     assert_eq!(facts["employment_type"], "FULL_TIME");
@@ -393,5 +410,84 @@ async fn a_workplace_is_never_an_ambiguous_or_other_settlement(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(saved, 0, "nothing geocoded is saved");
+    server.abort();
+}
+
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_workplace_is_never_in_another_region_or_postal_region(pool: PgPool) {
+    // Nominatim's sole Springfield is Springfield, Missouri: a posting in Springfield, Illinois
+    // (by name or code) or with a postcode of another postal region is not placed there, even
+    // at a lenient score; one in Missouri is.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = Router::new().route(
+        "/search",
+        get(|Query(q): Query<HashMap<String, String>>| async move {
+            assert_eq!(q["featureType"], "settlement");
+            assert_eq!(q["city"], "Springfield");
+            let mut hit = settlement(5, "Springfield", "United States", "us");
+            hit["address"]["state"] = "Missouri".into();
+            hit["address"]["ISO3166-2-lvl4"] = "US-MO".into();
+            hit["address"]["postcode"] = "65801".into();
+            axum::Json(json!([hit]))
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let service = pinakes_core::event::service::EventService {
+        pool: pool.clone(),
+        config: EventConfig {
+            geocode_score: 0.5,
+            ..Default::default()
+        },
+        osm: Arc::new(
+            OsmResolver::new(
+                pool.clone(),
+                OsmConfig {
+                    nominatim_url: format!("http://{addr}"),
+                    requests_per_second: 1000.0,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        ),
+    };
+    let placed = |address: Value| {
+        let service = &service;
+        async move {
+            let base: url::Url = "https://jobs.example/p".parse().unwrap();
+            let mut doc = ResourceMeta::new(base.as_str(), "jsonld", 3600);
+            pinakes_core::kinds::jobs::from_jsonld(
+                &json!({"@type": "JobPosting", "title": "Role",
+                    "jobLocation": {"address": address}}),
+                &base,
+            )
+            .apply(&mut doc);
+            service.workplace(&mut doc).await.unwrap();
+            doc.event.venue.unwrap().osm_id
+        }
+    };
+    for address in [
+        json!({"addressLocality": "Springfield", "addressRegion": "Illinois", "addressCountry": "US"}),
+        json!({"addressLocality": "Springfield", "addressRegion": "IL", "addressCountry": "US"}),
+        json!({"addressLocality": "Springfield", "postalCode": "90210", "addressCountry": "US"}),
+    ] {
+        assert_eq!(placed(address.clone()).await, None, "{address}");
+    }
+    let saved: i64 = sqlx::query_scalar("SELECT count(*) FROM osm_place")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(saved, 0, "nothing geocoded is saved");
+    for address in [
+        json!({"addressLocality": "Springfield", "addressRegion": "Missouri", "addressCountry": "US"}),
+        json!({"addressLocality": "Springfield", "addressRegion": "MO", "postalCode": "65806", "addressCountry": "US"}),
+        json!({"addressLocality": "Springfield", "addressCountry": "US"}),
+    ] {
+        assert_eq!(
+            placed(address.clone()).await.as_deref(),
+            Some("relation/5"),
+            "{address}"
+        );
+    }
     server.abort();
 }

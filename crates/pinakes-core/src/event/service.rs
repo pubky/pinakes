@@ -595,7 +595,8 @@ impl EventService {
     }
     /// A job posting's workplace (`kinds::jobs`), placed as an event's venue is when it names a
     /// street, else at its town: the one settlement Nominatim finds for it whose name (and
-    /// country, when the posting names one) is the posting's, at `geocode_score` or above.
+    /// country, when the posting names one) is the posting's, at `geocode_score` or above, and
+    /// whose region and postal region contradict none the posting names.
     pub async fn workplace(&self, doc: &mut ResourceMeta) -> Result<()> {
         if !self.config.geocoding || doc.location.is_some() {
             return Ok(());
@@ -672,12 +673,45 @@ impl EventService {
                 .filter_map(|k| found[k].as_str())
                 .any(|v| normalize(v) == normalize(country))
         });
+        // The region the posting names is one of the settlement's regions, by name or by its
+        // ISO 3166-2 code ("Illinois", "IL", "US-IL"); a settlement whose address names no
+        // region cannot contradict it.
+        let regions: Vec<String> = ["state", "province", "region", "state_district", "county"]
+            .iter()
+            .filter_map(|k| found[k].as_str())
+            .map(normalize)
+            .chain(
+                found
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .filter(|(k, _)| k.starts_with("ISO3166-2"))
+                    .filter_map(|(_, v)| v.as_str())
+                    .flat_map(|code| [code, code.rsplit('-').next().unwrap_or(code)])
+                    .map(normalize),
+            )
+            .collect();
+        let other_region = address
+            .get("region")
+            .is_some_and(|r| !regions.is_empty() && !regions.contains(&normalize(r)));
+        // A numeric postcode's first digit is its postal region (US, DE, FR, CH, …); more
+        // digits are not compared, as a city's one postcode in Nominatim stands for many
+        // (Berlin's run from 10 to 14).
+        let other_postcode = address
+            .get("postalcode")
+            .zip(found["postcode"].as_str())
+            .is_some_and(|(ours, theirs)| {
+                let first = |s: &str| s.trim().chars().next().filter(char::is_ascii_digit);
+                matches!((first(ours), first(theirs)), (Some(a), Some(b)) if a != b)
+            });
         let total = 1 + usize::from(same_country.is_some());
         let matching = usize::from(named) + usize::from(same_country == Some(true));
-        // A settlement of another name, or in a country the posting contradicts, is never
-        // placed, whatever `geocode_score` allows.
+        // A settlement of another name, or in a country, region or postal region the posting
+        // contradicts, is never placed, whatever `geocode_score` allows.
         if !named
             || same_country == Some(false)
+            || other_region
+            || other_postcode
             || (matching as f64 / total as f64) < self.config.geocode_score
         {
             return Ok(());

@@ -44,6 +44,10 @@ pub const FACTS: &[&str] = &[
 
 /// The longest a posting's description is kept, in characters.
 const EXCERPT: usize = 300;
+/// How many regions (or other listed values) a posting keeps, and how much of a place's text is
+/// read for its regions: a page cannot make the split or the dedup cost more.
+pub const LISTED: usize = 32;
+const PLACE_TEXT: usize = 1024;
 
 pub fn is_posting(doc: &ResourceMeta) -> bool {
     doc.type_path.iter().any(|t| t == TYPE)
@@ -238,6 +242,18 @@ pub fn workplace(address: &Value, place: &Value) -> Option<Venue> {
 /// the regions it names after that word.
 pub fn remote_place(text: &str) -> Option<Vec<String>> {
     let text = text.trim();
+    let mut end = text.len().min(PLACE_TEXT);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    // A cut text ends at its last separator, so no region is cut short.
+    let text = if end < text.len() {
+        text[..end]
+            .rsplit_once([',', '/', ';', '|', '(', ')'])
+            .map_or(&text[..end], |(head, _)| head)
+    } else {
+        text
+    };
     let head = text.get(..6)?;
     if !head.eq_ignore_ascii_case("remote") {
         return None;
@@ -273,6 +289,7 @@ pub fn remote_place(text: &str) -> Option<Vec<String>> {
                         .iter()
                         .any(|w| lower.contains(w))
             })
+            .take(LISTED)
             .map(str::to_owned)
             .collect(),
     )
@@ -437,15 +454,14 @@ fn amount(n: f64) -> String {
         format!("{n}")
     }
 }
+/// The first `LISTED` distinct values (ignoring ASCII case), in order.
 fn dedup(values: Vec<String>) -> Vec<String> {
-    let mut out: Vec<String> = vec![];
-    for v in values {
-        if !out.iter().any(|o| o.eq_ignore_ascii_case(&v)) {
-            out.push(v);
-        }
-    }
-    out.truncate(32);
-    out
+    let mut seen = std::collections::HashSet::new();
+    values
+        .into_iter()
+        .filter(|v| seen.insert(v.to_ascii_lowercase()))
+        .take(LISTED)
+        .collect()
 }
 /// Values joined with "; ", as many whole ones as an attribute holds (256 bytes).
 fn joined(values: &[String]) -> Option<String> {
@@ -590,6 +606,39 @@ mod tests {
         assert!(p.remote);
         assert_eq!(p.regions, ["US"]);
         assert!(p.workplace.is_none());
+    }
+
+    #[test]
+    fn a_long_list_of_regions_costs_little() {
+        // "Remote,R00000,R00001,…": 40,000 regions in one locality (280 KB) give the first 32,
+        // read from the start of the text only, whole, and deduplicated in one pass.
+        let many = (0..40_000)
+            .map(|i| format!("R{i:05}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let regions = remote_place(&format!("Remote,{many}")).unwrap();
+        assert_eq!(regions.len(), LISTED);
+        assert_eq!((&*regions[0], &*regions[31]), ("R00000", "R00031"));
+        let p = from_jsonld(
+            &json!({"@type": "JobPosting", "title": "Role",
+                "jobLocation": {"address": {"addressLocality": format!("Remote,{many}")}}}),
+            &base(),
+        );
+        assert!(p.remote);
+        assert_eq!(p.regions.len(), LISTED);
+        // A cut ends at a separator: no region is a part of one.
+        let long = format!("Remote, {}", ["Region"; 400].join(", "));
+        assert_eq!(
+            remote_place(&long).unwrap(),
+            vec!["Region".to_owned(); LISTED]
+        );
+        let words = format!("Remote, {}", "Somewhere ".repeat(200));
+        assert_eq!(remote_place(&words), Some(vec![]));
+        // The dedup keeps the first of each value, ignoring case, and stops at 32.
+        let values: Vec<String> = (0..40_000).map(|i| format!("v{}", i % 50)).collect();
+        let kept = dedup([vec!["V1".to_owned()], values].concat());
+        assert_eq!(kept.len(), LISTED);
+        assert_eq!((&*kept[0], &*kept[1], &*kept[2]), ("V1", "v0", "v2"));
     }
 
     #[test]

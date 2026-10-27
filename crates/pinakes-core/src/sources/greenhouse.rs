@@ -76,7 +76,12 @@ pub fn card(
     // "London, UK; Remote-Friendly, United States": the first place that is not remote is the
     // workplace; a remote one names its regions.
     let places: Vec<String> = text(&v["location"]["name"])
-        .map(|l| l.split(';').map(|p| p.trim().to_owned()).collect())
+        .map(|l| {
+            l.split(';')
+                .take(jobs::LISTED)
+                .map(|p| p.trim().to_owned())
+                .collect()
+        })
         .unwrap_or_default();
     let remote: Vec<Vec<String>> = places
         .iter()
