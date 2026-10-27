@@ -312,6 +312,32 @@ async fn an_app_wikidata_lacks_is_only_possibly_the_same(pool: sqlx::PgPool) {
     assert_eq!(store_card["maybe_same"][0]["score"], 1.0);
     assert_eq!(named(&read(&ids[1]).await), [ids[0].clone()]);
     assert!(named(&read(&ids[2]).await).is_empty());
+    // The app hint goes with the same-event switch, whatever the same-recording one says.
+    for (settings, hinted) in [
+        ("[groups]\nsame_recording_hint = \"off\"\n", true),
+        ("[event]\nsame_event_hint = \"off\"\n", false),
+    ] {
+        let config: Config = toml::from_str(settings).unwrap();
+        let app = api::router(AppState::new(pool.clone(), config).unwrap());
+        let mut request = axum::http::Request::get(format!("/v1/resources/{}", ids[0]))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
+        ));
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 200);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let card: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            named(&card).len(),
+            usize::from(hinted),
+            "{settings}: {card}"
+        );
+    }
     let group = |id: &String| {
         let (pool, id) = (pool.clone(), id.clone());
         async move {
