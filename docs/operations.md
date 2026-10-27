@@ -686,7 +686,10 @@ is logged at warn as `resolution failed`, with the resource id (`resource_id`), 
 upstream HTTP status when one was answered (`status`), never the error's text. No log line about
 a fetch, a lookup or a parse prints an error's text (what an upstream answered may hold a link);
 the lines about the daemon's own services (the database, Nexus, the dump) print theirs through
-a last guard that cuts every URL before its query or fragment and drops its user info. Logs name
+a last guard that cuts every URL before its query or fragment and drops its user info. The
+configured upstream URLs hold no secret: `nexus_url` and `osm.nominatim_url` with user info, a
+query or a fragment are refused at startup, and a Nexus feed reset is logged by the Nexus's host
+(`nexus`). Logs name
 a link only by its host (a calendar's token or a user's name in a link never reaches a log line),
 errors carry no URL (a fetch error or a Nexus request error names none, an upstream service's
 error text is not repeated, the API answers an invalid link with the reason, not the link, and

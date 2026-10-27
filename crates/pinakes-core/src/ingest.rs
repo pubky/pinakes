@@ -114,7 +114,11 @@ pub async fn apply(
         sqlx::query("UPDATE feed_cursor SET cursor=0, epoch=$2, feed_length=$3, updated_at=now(),resets=resets+1 WHERE nexus=$1")
             .bind(nexus).bind(epoch).bind(feed.length).execute(&mut *tx).await?;
         tx.commit().await?;
-        tracing::warn!(nexus, "Nexus feed reset; rebuilding references");
+        // The host only, as every log line names a URL (docs/operations.md).
+        tracing::warn!(
+            nexus = %crate::resolver::log_host(nexus),
+            "Nexus feed reset; rebuilding references"
+        );
         return Ok(false);
     }
     // The page's lines, those skipped while parsing included: the cursor moves past them all.
