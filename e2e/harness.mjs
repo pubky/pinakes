@@ -145,6 +145,20 @@ export async function ownTags(hydrated, uris, label, author, tagsOf) {
   }
   return confirmed;
 }
+/** The MCP social tool's `item` for `uri` answers as Nexus's batch view (`hydrated`, asked by
+ * URI just before): the run's label when that view lists it, and the view's own labels when its
+ * five are full without it (`ownTags` confirmed the tag through the resource tag route). */
+export function socialAgrees(item, hydrated, uri, label) {
+  const row = hydrated.find(r => r.details.uri === uri);
+  assert(row, `Missing Nexus hydration: ${uri}`);
+  assert(item, `Missing social answer: ${uri}`);
+  const labels = tags => tags.map(t => t.label).sort();
+  if (row.tags.some(t => t.label === label)) {
+    assert(item.tags.some(t => t.label === label), `the social tool returns the run's tag from Nexus: ${uri}`);
+  } else {
+    assert.deepEqual(labels(item.tags), labels(row.tags), `the social tool answers as Nexus's batch view: ${uri}`);
+  }
+}
 /** The fields the report keeps of a sample's card. */
 const reported = card => ({ resource_id: card.id, type: card.type, status: card.status, site: card.site });
 /** A sample's card meets the sample's expectations: a music link is typed and named by what it is,
@@ -369,7 +383,7 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
       const found = await tool(`${pinakes}/mcp`, 'search', { tags: [label], limit: 500 });
       for (const doc of docs.values()) assert(found.items.some(card => card.id === doc.id), `the search tool lists ${doc.uri}`);
       const social = await tool(`${pinakes}/mcp`, 'social', { uris: [firstUri], viewer: author });
-      assert(social.items[0]?.tags.some(t => t.label === label), 'the social tool returns the run\'s tag from Nexus');
+      socialAgrees(social.items[0], hydrated, firstUri, label);
       report.assertions.push('agents: the guide, and the MCP card, search and social tools');
       await waitFor('group hints', async () => {
         // Samples naming `group_with` must be one resource (an alias: ISBN-10 and -13, OSM

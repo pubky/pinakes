@@ -13,7 +13,8 @@ cards' own `uri` and `details.aliases`, and an occurrence's `occurrence.feed_uri
 `details.uri`; Pinakes is read by URI too, its IDs being its own), then deletes
 its tags and waits for both indexes to remove their references. `by_ids` lists at most five
 tags per resource, so when a shared live resource already carries five other tags the
-run's own tag is confirmed through `/v0/resource/{id}/tags` instead.
+run's own tag is confirmed through `/v0/resource/{id}/tags` instead, and the MCP `social` tool,
+which reads the same batch view, is held to that view's labels.
 
 Requires Node >=20, Rust, and PostgreSQL 16 with PostGIS and h3 extensions installed
 as described in the main README. `npm ci --prefix e2e` installs the pinned SDKs.
