@@ -15,6 +15,7 @@ pub static PROFILE: Profile = Profile {
         }],
     }],
     facts: &["card_count", "front_lang", "back_lang", "topics"],
+    links_off: None,
 };
 
 /// A deck: its title, description and cover. A manifest another key claims, or one still being

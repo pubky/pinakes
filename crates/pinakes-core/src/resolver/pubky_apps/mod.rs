@@ -35,6 +35,17 @@ pub struct Profile {
     pub kinds: &'static [Kind],
     /// The attribute keys its cards publish as `details.facts`.
     pub facts: &'static [&'static str],
+    /// Why its objects open in no client yet, while a client link is held back: logged at
+    /// startup ([`log_links_off`]) so that switching it on is not forgotten.
+    pub links_off: Option<&'static str>,
+}
+/// Logs each app whose client links are held back, and why: once, at startup.
+pub fn log_links_off() {
+    for profile in REGISTRY {
+        if let Some(why) = profile.links_off {
+            tracing::info!(app = profile.namespaces[0], "open_in links are off: {why}");
+        }
+    }
 }
 /// One kind of object an app publishes.
 pub struct Kind {

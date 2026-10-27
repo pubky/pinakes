@@ -172,6 +172,20 @@ fn loopky_decks() {
     ]);
 }
 
+/// An app whose client links are held back opens in no client, and one with a link has no
+/// held-back note: switching a link on means removing the note the startup log reads.
+#[test]
+fn held_back_links_are_off_and_said_so() {
+    for profile in pubky_apps::REGISTRY {
+        let linked = profile.kinds.iter().any(|kind| !kind.open_in.is_empty());
+        assert!(
+            !(linked && profile.links_off.is_some()),
+            "{:?} opens in a client and says its links are off",
+            profile.namespaces
+        );
+    }
+}
+
 #[test]
 fn rooms() {
     let doc = card("rooms/0035SFYCGVBV2-introductions");
@@ -181,8 +195,11 @@ fn rooms() {
         doc.description.as_deref(),
         Some("Who you are and what you are building.")
     );
-    // No client link until rooms.pubky.app is live.
+    // No client link until rooms.pubky.app is live; the startup log says why.
     assert!(doc.open_in.is_empty(), "{:?}", doc.open_in);
+    assert!(pubky_apps::rooms::PROFILE
+        .links_off
+        .is_some_and(|why| why.contains("rooms.pubky.app")));
     assert_eq!(card("rooms/0035TNXH48JYE-null-topic").description, None);
     // An unlisted room, or one in a format this build doesn't know, has no card.
     no_card(&edited(

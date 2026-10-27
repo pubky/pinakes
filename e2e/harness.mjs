@@ -31,6 +31,13 @@ export async function tool(url, name, args) {
   assert(!result.isError, `tool ${name}: ${text}`);
   return JSON.parse(text);
 }
+/** The samples a run tags once the stack has started: a sample the stack left out (one that
+ * `needs` an also-on source this build does not have) is not tagged, and is named under
+ * `skipped` with the stack's reason, after the samples the preflight left out. */
+export function withoutStackSkipped(samples, skipped, stackSkipped = []) {
+  const left = new Set(stackSkipped.map(s => s.kind));
+  return { samples: samples.filter(s => !left.has(s.kind)), skipped: [...skipped, ...stackSkipped] };
+}
 /** The newest item's link in an RSS feed: the first `<item>`'s `<link>`. */
 export function newestLink(rss) {
   const item = /<item\b[\s\S]*?<\/item>/.exec(rss)?.[0];

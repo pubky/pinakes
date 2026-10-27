@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { E2E_CONTACT, dropRefusedPages, freshen, instanceAgent, json, preflight, runFlow, userAgent } from './harness.mjs';
+import { E2E_CONTACT, dropRefusedPages, freshen, instanceAgent, json, preflight, runFlow, userAgent, withoutStackSkipped } from './harness.mjs';
 
 const mock = process.argv.includes('--mock');
 let child, session, liveSamples, skipped = [];
@@ -52,8 +52,8 @@ try {
     pinakes = startup.pinakes; nexus = startup.nexus;
     // Samples that need a source this build does not have are left out by the stack, as named.
     for (const s of startup.skipped ?? []) console.error(`left out: ${s.kind} (${s.uri}): ${s.reason}`);
-    if (!mock) samples = samples.filter(s => !(startup.skipped ?? []).some(k => k.kind === s.kind));
-    skipped.push(...(startup.skipped ?? []));
+    // The mock's samples come from the stack itself (`/mock/config`), without those it left out.
+    ({ samples, skipped } = withoutStackSkipped(samples ?? [], skipped, startup.skipped));
   }
   if (mock) {
     const config = await json(`${pinakes}/mock/config`);
