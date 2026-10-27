@@ -526,6 +526,8 @@ impl IntoResponse for ApiError {
 #[serde(deny_unknown_fields)]
 pub struct SearchQuery {
     pub q: Option<String>,
+    /// One schema.org type, or up to 10 comma-separated: any of them (OR), each with its
+    /// subtypes (`Event` matches `MusicEvent`).
     #[serde(rename = "type")]
     pub type_name: Option<String>,
     pub category: Option<String>,
@@ -791,6 +793,10 @@ pub struct TagFacet {
 pub struct TypeFacet {
     #[serde(rename = "type")]
     pub type_name: String,
+    /// Where the type sits in schema.org, from `Thing` down to the type itself
+    /// (`["Thing", "CreativeWork", "MusicRecording"]`): enough to build the tree and roll
+    /// counts up into families.
+    pub type_path: Vec<String>,
     pub count: i64,
 }
 /// The facets `facet` asked for, over the whole filtered set.
@@ -1186,6 +1192,34 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
         details,
     })
 }
+/// The types a search's `type` names (1–10, comma-separated), each as its vocabulary spells it.
+fn search_types(types: &str) -> Result<Vec<String>, ApiError> {
+    let names: Vec<&str> = types.split(',').map(str::trim).collect();
+    if names.len() > 10 || names.iter().any(|n| n.is_empty()) {
+        return Err(ApiError::bad(
+            "type takes 1–10 schema.org types, comma-separated",
+        ));
+    }
+    let mut known = Vec::with_capacity(names.len());
+    for name in names {
+        let mut path = model::type_path(name);
+        let Some(leaf) = path.pop() else {
+            // Only a type's name is echoed: a URL or anything else given as a type is not
+            // repeated back (it may hold credentials, a query or a fragment).
+            let a_name =
+                (1..=64).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_alphanumeric());
+            return Err(ApiError::bad(if a_name {
+                format!("unknown schema.org type: {name}")
+            } else {
+                "type names schema.org types (letters and digits, comma-separated)".to_owned()
+            }));
+        };
+        if !known.contains(&leaf) {
+            known.push(leaf);
+        }
+    }
+    Ok(known)
+}
 fn validate_search(q: &SearchQuery) -> Result<Vec<String>, ApiError> {
     if q.venue.as_deref().is_some_and(|v| !model::valid_id(v)) {
         return Err(ApiError::bad("venue must be a resource ID"));
@@ -1242,11 +1276,8 @@ fn validate_search(q: &SearchQuery) -> Result<Vec<String>, ApiError> {
             return Err(ApiError::bad("invalid author/viewer ID"));
         }
     }
-    if q.type_name
-        .as_ref()
-        .is_some_and(|t| model::type_path(t).is_empty())
-    {
-        return Err(ApiError::bad("unknown schema.org type"));
+    if let Some(types) = &q.type_name {
+        search_types(types)?;
     }
     for text in [&q.q, &q.category, &q.host].into_iter().flatten() {
         if text.len() > 256 {
@@ -1648,9 +1679,10 @@ pub async fn search(
     if q.sort.as_deref() == Some("start") {
         sql.push(" AND r.start_at IS NOT NULL");
     }
-    if let Some(t) = &q.type_name {
-        let name = model::type_path(t).pop().unwrap();
-        sql.push(" AND r.type_path @> ").push_bind(vec![name]);
+    if let Some(types) = &q.type_name {
+        // Any of the types, each with its subtypes: a path that holds one of them.
+        sql.push(" AND r.type_path && ")
+            .push_bind(search_types(types)?);
     }
     for (column, value) in [("r.category", &q.category), ("r.host", &q.host)] {
         if let Some(value) = value {
@@ -1868,9 +1900,13 @@ pub async fn search(
             }),
             types: list("type").map(|v| {
                 v.into_iter()
-                    .map(|v| TypeFacet {
-                        type_name: v["type"].as_str().unwrap_or_default().into(),
-                        count: v["count"].as_i64().unwrap_or(0),
+                    .map(|v| {
+                        let type_name = v["type"].as_str().unwrap_or_default();
+                        TypeFacet {
+                            type_path: model::type_path(type_name),
+                            type_name: type_name.into(),
+                            count: v["count"].as_i64().unwrap_or(0),
+                        }
                     })
                     .collect()
             }),

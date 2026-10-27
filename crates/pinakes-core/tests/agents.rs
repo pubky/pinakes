@@ -320,10 +320,11 @@ async fn the_mcp_handshake_and_every_tool(pool: PgPool) {
         card["url"],
         format!("https://pinakes.example/v1/resources/{}", ids[0])
     );
-    assert!(page["url"]
-        .as_str()
-        .unwrap()
-        .starts_with("https://pinakes.example/v1/search?type=Event&"));
+    let url = page["url"].as_str().unwrap();
+    assert!(
+        url.starts_with("https://pinakes.example/v1/search?") && url.contains("type=Event"),
+        "{url}"
+    );
 
     // card: a known link in another spelling; an unknown one is a 404 with a hint.
     let (error, read) = call(&app, "card", json!({"uri": "HTTPS://Example.org/article"})).await;
@@ -334,6 +335,18 @@ async fn the_mcp_handshake_and_every_tool(pool: PgPool) {
     assert!(error);
     assert_eq!(unknown["status"], 404);
     assert!(unknown["hint"].as_str().unwrap().contains("resolve"));
+
+    // search with several types: any of them.
+    let (error, kinds) = call(&app, "search", json!({"type": ["Book", "Article"]})).await;
+    assert!(!error, "{kinds}");
+    let mut found: Vec<&str> = kinds["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["type"].as_str().unwrap())
+        .collect();
+    found.sort_unstable();
+    assert_eq!(found, ["Article", "Book"]);
 
     // lookup: every link with one identifier.
     let (error, books) = call(&app, "lookup", json!({"key": "isbn:0140328726"})).await;

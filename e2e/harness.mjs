@@ -189,6 +189,16 @@ export async function rereadMoved(tags, docs, report, readByUri, check) {
     Object.assign(report.samples.find(s => s.kind === tag.kind), reported(kept));
   }
 }
+/** Search until every tag's card is among the results, re-reading the cards that moved (an
+ * alias now answered by its root) between tries; the last result. */
+export async function findsEvery(label, query, tags, docs, reread, timeout, signal) {
+  return waitFor(label, async () => {
+    const result = await query();
+    const missing = tags.filter(tag => !result.items.some(row => row.id === docs.get(tag.kind).id));
+    await reread(missing);
+    return missing.length === 0 && result;
+  }, timeout, signal);
+}
 export async function runFlow({ storage, author, samples, pinakes, nexus, positiveVenue = false, timeout = 120000, journal, signal }) {
   const report = { at: new Date().toISOString(), run: randomUUID(), author, samples: [], assertions: [], cleanup: [] };
   const label = `e2e-${report.run.replaceAll("-", "").slice(0, 16)}`;
@@ -256,6 +266,14 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
         }, timeout, signal);
       }
       report.assertions.push(`${tags.length} SDK tags reached Nexus and resolved with expected types`);
+      // Several types in one search are any of them, and the type facet places each type.
+      const kinds = [...new Set(tags.map(tag => tag.type))].slice(0, 10);
+      const anyKind = await findsEvery(`Pinakes type=${kinds.join(',')}`, () => search({ type: kinds.join(','), facet: 'type', limit: '500' }),
+        tags.filter(t => kinds.includes(t.type)), docs, reread, timeout, signal);
+      for (const entry of anyKind.facets.type) {
+        assert(entry.type_path.length > 0 && entry.type_path.at(-1) === entry.type, `facet type_path ends at ${entry.type}`);
+      }
+      report.assertions.push(`type list (${kinds.length} types) and the type facet's type_path`);
       // A sample may already be resolved from an older public reference while
       // Pinakes is still ingesting this run's new tag. Wait for the scoped rows too.
       const results = await waitFor('Pinakes tagged search', async () => {

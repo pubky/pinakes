@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { dropRefusedPages, expectCard, freshen, instanceAgent, mcpAnswer, newestLink, ownTags, rereadMoved, userAgent, withTags, withoutStackSkipped } from './harness.mjs';
+import { dropRefusedPages, expectCard, findsEvery, freshen, instanceAgent, mcpAnswer, newestLink, ownTags, rereadMoved, userAgent, withTags, withoutStackSkipped } from './harness.mjs';
 test('a PUT that commits then times out is included in cleanup', async () => {
   const stored = new Set(), report = {}, journal = [];
   const storage = { exists: async p => stored.has(p), putJson: async p => { stored.add(p); if (p === 'second') throw new Error('timeout'); }, delete: async p => stored.delete(p) };
@@ -181,4 +181,22 @@ test('a live sample whose needed source the build lacks is not tagged and is nam
   assert.deepEqual(skipped.map(s => [s.kind, s.reason]), [['index', 'HTTP 403'], ['tidal', 'needs tidal, which this build does not have']]);
   // A stack that left nothing out keeps every sample and adds nothing.
   assert.deepEqual(withoutStackSkipped(samples, [], undefined), { samples, skipped: [] });
+});
+
+test('a search check re-reads a card that became an alias and finds its root', async () => {
+  // The run cached event `a`; it became an alias, and searches now answer its root `b`.
+  const tag = { kind: 'event', uri: 'https://events.example/a', type: 'Event' };
+  const docs = new Map([['event', { id: 'a' }]]);
+  const results = [{ items: [{ id: 'b' }] }, { items: [{ id: 'b' }] }];
+  let reads = 0;
+  const reread = async missing => {
+    for (const t of missing) { reads++; docs.set(t.kind, { id: 'b' }); }
+  };
+  const found = await findsEvery('type=Event', async () => results.shift(), [tag], docs, reread, 5000);
+  assert.deepEqual(found, { items: [{ id: 'b' }] });
+  assert.equal(reads, 1);
+  assert.equal(docs.get('event').id, 'b');
+  // A card that is never found fails the check at its timeout.
+  const stuck = new Map([['event', { id: 'a' }]]);
+  await assert.rejects(findsEvery('type=Event', async () => ({ items: [] }), [tag], stuck, async () => {}, 300), /type=Event/);
 });

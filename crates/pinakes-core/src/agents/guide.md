@@ -50,7 +50,9 @@ A link this instance does not know is a 404 there: nobody referenced it, or it h
 - **Other Pubky apps.** `pubky://` objects of apps such as Mapky and Eventky are cards too, with
   `open_in` naming the clients that open them.
 
-`GET {{BASE}}/v1/search?facet=type&limit=1` counts the card types this instance holds.
+`GET {{BASE}}/v1/search?facet=type&limit=1` counts the card types this instance holds; each
+entry's `type_path` (`["Thing", "CreativeWork", "MusicRecording"]`) places it in the schema.org
+tree. `type` takes several types, any of them: `type=MusicRecording,MusicAlbum,MusicGroup`.
 
 ## Recipes
 
@@ -145,7 +147,7 @@ the full result:
 
 | tool | does |
 | --- | --- |
-| `search` | `GET /v1/search`: `q`, `type`, `tags`, `match`, `near` + `radius`, `bbox`, `from`, `to`, `key`, `sort`, `collapse`, `reach` or `boost` + `viewer`, `limit`, `cursor` |
+| `search` | `GET /v1/search`: `q`, `type` (one or several), `tags`, `match`, `near` + `radius`, `bbox`, `from`, `to`, `key`, `sort`, `collapse`, `reach` or `boost` + `viewer`, `limit`, `cursor` |
 | `card` | One link's card by URI (`GET /v1/resources/by-uri`); `resolve: true` asks `POST /v1/resolve` for an unknown link |
 | `lookup` | Every card with one identifier (`isbn:…`, `doi:…`, `isrc:…`, `osm:…`, …) |
 | `group` | A group's members by group id |
