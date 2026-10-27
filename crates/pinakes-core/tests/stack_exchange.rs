@@ -30,11 +30,63 @@ fn question(uri: &str, file: &str) -> ResourceMeta {
     .unwrap()
 }
 
+fn api(id: u64) -> String {
+    format!("https://api.stackexchange.com/2.3/questions/{id}?site=stackoverflow&filter=!)4meWwcO75JCcyGuJACpWc-xLmMU")
+}
+
+/// Store each question's card, run the source's also-on half on it and reconcile its group;
+/// each is tagged once. Their ids, in order.
+async fn recorded(
+    pool: &PgPool,
+    cx: &also_on::Context,
+    questions: Vec<(&str, ResourceMeta)>,
+) -> Vec<String> {
+    let mut ids = vec![];
+    for (uri, doc) in questions {
+        let id = store::ensure_resource(pool, uri).await.unwrap();
+        store::save_document(pool, &id, 0, &doc).await.unwrap();
+        let s = subject(uri, Some("Question"), Some(doc));
+        assert!(StackExchange.applies(&s));
+        let found = StackExchange.lookup(cx, &s).await.unwrap();
+        also_on::record(
+            pool,
+            &id,
+            "stack_exchange",
+            found,
+            std::time::Duration::from_secs(86400),
+            &AlsoOnConfig::default(),
+        )
+        .await
+        .unwrap();
+        pinakes_core::groups::reconcile(pool, &id, &Default::default()).await;
+        sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','qa',$3,now())")
+            .bind(&id)
+            .bind("a".repeat(52))
+            .bind(format!("/pub/app/tags/{id}"))
+            .execute(pool)
+            .await
+            .unwrap();
+        ids.push(id);
+    }
+    pinakes_core::groups::drain(pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    ids
+}
+
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_duplicate_joins_its_original(pool: PgPool) {
-    let cx = cx(Recorded::new(), Config::default());
-    let mut ids = vec![];
-    for (uri, file) in [
+    // The duplicate's lookup asks whether its original repeats another in turn: it does not.
+    let original = std::fs::read_to_string(format!(
+        "{}/tests/fixtures/sources/stack_exchange/se-stackoverflow-509211.json",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    let cx = cx(
+        Recorded::with_bodies(&[(api(509211).as_str(), "application/json", original)]),
+        Config::default(),
+    );
+    let questions = [
         (
             "https://stackoverflow.com/questions/663171",
             "se-stackoverflow-663171.json",
@@ -48,36 +100,9 @@ async fn a_duplicate_joins_its_original(pool: PgPool) {
             "https://stackoverflow.com/questions/11227809",
             "se-stackoverflow-11227809.json",
         ),
-    ] {
-        let doc = question(uri, file);
-        let id = store::ensure_resource(&pool, uri).await.unwrap();
-        store::save_document(&pool, &id, 0, &doc).await.unwrap();
-        let s = subject(uri, Some("Question"), Some(doc));
-        assert!(StackExchange.applies(&s));
-        let found = StackExchange.lookup(&cx, &s).await.unwrap();
-        also_on::record(
-            &pool,
-            &id,
-            "stack_exchange",
-            found,
-            std::time::Duration::from_secs(86400),
-            &AlsoOnConfig::default(),
-        )
-        .await
-        .unwrap();
-        pinakes_core::groups::reconcile(&pool, &id, &Default::default()).await;
-        sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','qa',$3,now())")
-            .bind(&id)
-            .bind("a".repeat(52))
-            .bind(format!("/pub/app/tags/{id}"))
-            .execute(&pool)
-            .await
-            .unwrap();
-        ids.push(id);
-    }
-    pinakes_core::groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    ]
+    .map(|(uri, file)| (uri, question(uri, file)));
+    let ids = recorded(&pool, &cx, Vec::from(questions)).await;
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let duplicate: Value = get(&app, &format!("/v1/resources/{}", ids[0])).await;
     assert_eq!(duplicate["group"]["size"], 2, "{duplicate}");
@@ -118,4 +143,55 @@ async fn get(app: &axum::Router, path: &str) -> Value {
     let r = app.clone().oneshot(request).await.unwrap();
     assert_eq!(r.status(), 200, "{path}");
     serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes()).unwrap()
+}
+
+/// The API's answer for question `id` on Stack Overflow, closed as a duplicate of `original`.
+fn answer(id: u64, original: Option<u64>) -> String {
+    let mut q = serde_json::json!({"question_id": id, "title": format!("Question {id}"),
+        "answer_count": 1, "score": 1, "tags": ["rust"], "creation_date": 1700000000});
+    if let Some(original) = original {
+        q["closed_reason"] = "Duplicate".into();
+        q["closed_details"] =
+            serde_json::json!({"original_questions": [{"question_id": original}]});
+    }
+    serde_json::json!({"items": [q], "has_more": false}).to_string()
+}
+
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_chain_of_duplicates_is_one_group(pool: PgPool) {
+    // A repeats B, which repeats C: all three carry C's key (the chain's end), so A joins B.
+    let (a, b, c) = (1001, 1002, 1003);
+    let cx = cx(
+        Recorded::with_bodies(&[
+            (api(b).as_str(), "application/json", answer(b, Some(c))),
+            (api(c).as_str(), "application/json", answer(c, None)),
+        ]),
+        Config::default(),
+    );
+    let uri = |id| format!("https://stackoverflow.com/questions/{id}");
+    let uris = [uri(a), uri(b), uri(c)];
+    let questions = [(a, Some(b)), (b, Some(c)), (c, None)]
+        .into_iter()
+        .zip(&uris)
+        .map(|((id, original), uri)| {
+            let target = of_uri(uri).unwrap();
+            let doc = card(
+                ResourceMeta::new(uri, "stack_exchange", 3600),
+                &target,
+                200,
+                answer(id, original).as_bytes(),
+            )
+            .unwrap()
+            .unwrap();
+            (uri.as_str(), doc)
+        })
+        .collect();
+    let ids = recorded(&pool, &cx, questions).await;
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    for id in &ids {
+        let card: Value = get(&app, &format!("/v1/resources/{id}")).await;
+        assert_eq!(card["group"]["size"], 3, "{card}");
+    }
+    let found: Value = get(&app, "/v1/search?key=stackexchange:stackoverflow/1003").await;
+    assert_eq!(found["items"].as_array().unwrap().len(), 3, "{found}");
 }

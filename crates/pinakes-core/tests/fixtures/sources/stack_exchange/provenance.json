@@ -8,6 +8,25 @@
     "status": 200,
     "url": "https://api.stackexchange.com/2.3/questions/336?site=bitcoin&filter=!)4meWwcO75JCcyGuJACpWc-xLmMU"
   },
+  "se-no-such-site": {
+    "bytes": 101,
+    "content_type": "application/json; charset=utf-8",
+    "file": "se-no-such-site.json",
+    "recorded_at": "2026-10-27T08:36:28+00:00",
+    "sha256": "11007b29e19b8575ee996e7793a7ba0c2c59595c7efa1962cd61c4453423b284",
+    "status": 400,
+    "url": "https://api.stackexchange.com/2.3/questions/1?site=no-such-site&filter=!)4meWwcO75JCcyGuJACpWc-xLmMU"
+  },
+  "se-sites": {
+    "bytes": 37482,
+    "content_type": "application/json; charset=utf-8",
+    "file": "se-sites.json",
+    "recorded_at": "2026-10-27T08:36:38+00:00",
+    "sha256": "7237da49ddb7da5fdca20d19e50b12bb32913012bbf0f73872e808f890d4066a",
+    "status": 200,
+    "url": "https://api.stackexchange.com/2.3/sites?page=1..4&pagesize=100&filter=default",
+    "note": "Four pages joined, reduced to each site's api_site_parameter and site_url, sorted."
+  },
   "se-stackoverflow-1": {
     "bytes": 67,
     "content_type": "application/json; charset=utf-8",

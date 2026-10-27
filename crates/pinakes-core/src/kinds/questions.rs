@@ -73,8 +73,11 @@ pub fn from_jsonld(v: &Value, base: &Url) -> Question {
         title: text(&v["name"]).or_else(|| text(&v["headline"])),
         description: text(&v["text"])
             .map(|t| {
+                // HTML is stripped first, then cut at a question's length.
                 if t.contains('<') {
-                    crate::kinds::jobs::excerpt(&t).unwrap_or_default()
+                    crate::resolver::pubky_apps::read::html_text(&t)
+                        .map(|t| excerpt(&t))
+                        .unwrap_or_default()
                 } else {
                     excerpt(&t)
                 }
@@ -144,5 +147,11 @@ mod tests {
         assert_eq!(doc.attributes["answer_count"], "3");
         assert_eq!(doc.attributes["published"], "2026-01-02T03:04:05Z");
         assert_eq!(excerpt(&"word ".repeat(100)).chars().count(), 201);
+        // HTML text is cut at a question's length too, after its markup is gone.
+        let long = from_jsonld(
+            &json!({"@type": "Question", "text": format!("<p>{}</p>", "word ".repeat(100))}),
+            &base,
+        );
+        assert_eq!(long.description.unwrap().chars().count(), 201);
     }
 }

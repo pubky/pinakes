@@ -8,7 +8,7 @@ use super::{text, web_url, Context, Example, Source};
 use crate::{
     kinds::questions::{self, Question},
     model::ResourceMeta,
-    resolver::egress::FetchOptions,
+    resolver::egress::{FetchOptions, Fetched},
 };
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -27,46 +27,55 @@ pub struct Target {
     pub id: u64,
 }
 
-/// The API's name of the site at `host`, if it is a Stack Exchange site.
-fn site(host: &str) -> Option<String> {
+/// The site at `host`: its canonical host and the API's name for it (as the API's `/sites`
+/// answer names them, `api_site_parameter`), if it is a Stack Exchange site.
+fn site(host: &str) -> Option<(String, String)> {
     let host = host.strip_prefix("www.").unwrap_or(host);
     let name = |s: &str| {
         !s.is_empty()
             && s.len() <= 40
+            && s != "meta"
+            && s != "api"
             && s.bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
     };
     if let Some(sub) = host.strip_suffix(".stackexchange.com") {
-        return match sub.split_once('.') {
-            Some(("meta", s)) if name(s) => Some(format!("meta.{s}")),
-            None if name(sub) && sub != "api" && sub != "meta" => Some(sub.to_owned()),
-            _ => None,
+        // A site's meta is `{site}.meta` (its older host `meta.{site}` redirects there);
+        // Meta Stack Exchange itself is `meta`.
+        let api = match sub.split_once('.') {
+            Some((s, "meta")) | Some(("meta", s)) if name(s) => format!("{s}.meta"),
+            None if sub == "meta" || name(sub) => sub.to_owned(),
+            _ => return None,
         };
+        return Some((format!("{api}.stackexchange.com"), api));
     }
-    match host {
-        "stackoverflow.com" => Some("stackoverflow".into()),
-        "meta.stackoverflow.com" => Some("meta.stackoverflow".into()),
+    let api = match host {
+        "stackoverflow.com" | "meta.stackoverflow.com" => host.trim_end_matches(".com"),
         "pt.stackoverflow.com"
         | "ru.stackoverflow.com"
         | "es.stackoverflow.com"
-        | "ja.stackoverflow.com" => Some(host.trim_end_matches(".com").to_owned()),
+        | "ja.stackoverflow.com" => host.trim_end_matches(".com"),
+        "pt.meta.stackoverflow.com"
+        | "ru.meta.stackoverflow.com"
+        | "es.meta.stackoverflow.com"
+        | "ja.meta.stackoverflow.com"
+        | "agents.meta.stackoverflow.com" => host.trim_end_matches(".com"),
         "superuser.com" | "serverfault.com" | "askubuntu.com" | "stackapps.com" => {
-            Some(host.trim_end_matches(".com").to_owned())
+            host.trim_end_matches(".com")
         }
         "meta.superuser.com" | "meta.serverfault.com" | "meta.askubuntu.com" => {
-            Some(host.trim_end_matches(".com").to_owned())
+            host.trim_end_matches(".com")
         }
-        "mathoverflow.net" => Some("mathoverflow.net".into()),
-        "meta.mathoverflow.net" => Some("meta.mathoverflow.net".into()),
-        _ => None,
-    }
+        "mathoverflow.net" | "meta.mathoverflow.net" => host,
+        _ => return None,
+    };
+    Some((host.to_owned(), api.to_owned()))
 }
 
 /// The question of `https://{site}/questions/{id}[/{slug}]` or its short link `/q/{id}`.
 pub fn of_uri(uri: &str) -> Option<Target> {
     let url = web_url(uri)?;
-    let host = url.host_str()?.to_ascii_lowercase();
-    let site = site(&host)?;
+    let (host, site) = site(&url.host_str()?.to_ascii_lowercase())?;
     let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
     let id = match segments.as_slice() {
         ["questions", id, ..] | ["q", id, ..] => *id,
@@ -76,11 +85,7 @@ pub fn of_uri(uri: &str) -> Option<Target> {
         .then(|| id.parse::<u64>().ok())
         .flatten()
         .filter(|n| *n > 0)?;
-    Some(Target {
-        host: host.strip_prefix("www.").unwrap_or(&host).to_owned(),
-        site,
-        id,
-    })
+    Some(Target { host, site, id })
 }
 impl Target {
     pub fn root(&self) -> String {
@@ -103,6 +108,101 @@ fn plain(v: &Value) -> Option<String> {
     text(v).map(|t| crate::resolver::web::decoded(&t))
 }
 
+/// The pause, in seconds, that an answer of the API asks for before the next call to its method:
+/// its `backoff` (on any answer), else an hour after its quota error (502) and a minute after
+/// "too many requests" (503).
+fn pause(v: &Value) -> Option<u64> {
+    v["backoff"]
+        .as_u64()
+        .or(match v["error_id"].as_u64() {
+            Some(502) => Some(3600),
+            Some(503) => Some(60),
+            _ => None,
+        })
+        .filter(|s| *s > 0)
+        .map(|s| s.min(86400))
+}
+
+/// The API's pause: it holds for the method (every question on every site), so no call is made
+/// before it ends. One for the process, kept by both halves of the source.
+pub struct Pause(std::sync::Mutex<Option<tokio::time::Instant>>);
+static PAUSE: Pause = Pause::new();
+impl Pause {
+    pub const fn new() -> Self {
+        Self(std::sync::Mutex::new(None))
+    }
+    /// `RetryLater` while a pause lasts.
+    fn wait(&self) -> Result<()> {
+        let until = *self.0.lock().unwrap_or_else(|e| e.into_inner());
+        match until.map(|u| u.saturating_duration_since(tokio::time::Instant::now())) {
+            Some(left) if !left.is_zero() => Err(crate::resolver::RetryLater {
+                class: "stack_exchange_quota",
+                seconds: left.as_secs().max(1),
+            }
+            .into()),
+            _ => Ok(()),
+        }
+    }
+    fn hold(&self, seconds: u64) {
+        let until = tokio::time::Instant::now() + std::time::Duration::from_secs(seconds);
+        let mut held = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if held.is_none_or(|h| h < until) {
+            *held = Some(until);
+        }
+    }
+    /// Ask the API (`fetch`, not started before the pause ends), keeping the pause its answer
+    /// asks for.
+    async fn ask(
+        &self,
+        fetch: impl std::future::Future<Output = Result<Fetched>>,
+    ) -> Result<Fetched> {
+        self.wait()?;
+        let f = fetch.await?;
+        if let Some(seconds) = serde_json::from_slice::<Value>(&f.body)
+            .ok()
+            .and_then(|v| pause(&v))
+        {
+            self.hold(seconds);
+        }
+        Ok(f)
+    }
+}
+impl Default for Pause {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The error an answer of the API is, if it is one. Only the API's own trouble passes (500, its
+/// 502 quota, its 503 too many requests): ask again after its pause. Any other error
+/// (`bad_parameter` for a site there is not, `no_method`, …) is the request's: a failure, never
+/// asked again sooner.
+fn refusal(v: &Value) -> Option<anyhow::Error> {
+    let error = v["error_id"].as_u64()?;
+    Some(if matches!(error, 500 | 502 | 503) {
+        crate::resolver::RetryLater {
+            class: "stack_exchange_quota",
+            seconds: pause(v).unwrap_or(60),
+        }
+        .into()
+    } else {
+        anyhow::Error::new(crate::resolver::ErrorClass("http_4xx")).context(format!(
+            "Stack Exchange refused the request (error {error})"
+        ))
+    })
+}
+
+/// The ids of the questions a question repeats (closed as their duplicate).
+fn originals(q: &Value) -> Vec<u64> {
+    q["closed_details"]["original_questions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|o| o["question_id"].as_u64())
+        .take(8)
+        .collect()
+}
+
 /// The card of a question, or `None` when the site has no such question (or it was deleted).
 pub fn card(
     mut doc: ResourceMeta,
@@ -111,16 +211,8 @@ pub fn card(
     body: &[u8],
 ) -> Result<Option<ResourceMeta>> {
     let v: Value = serde_json::from_slice(body).context("not the API's answer")?;
-    if let Some(error) = v["error_id"].as_u64() {
-        // 502: the address used up its quota; 503 (or a backoff): too many requests.
-        let seconds = v["backoff"]
-            .as_u64()
-            .unwrap_or(if error == 502 { 3600 } else { 60 });
-        return Err(crate::resolver::RetryLater {
-            class: "stack_exchange_quota",
-            seconds: seconds.clamp(60, 86400),
-        }
-        .into());
+    if let Some(error) = refusal(&v) {
+        return Err(error);
     }
     anyhow::ensure!(status == 200, "Stack Exchange answered {status}");
     let Some(q) = v["items"].as_array().and_then(|items| items.first()) else {
@@ -130,12 +222,8 @@ pub fn card(
         q["question_id"].as_u64() == Some(target.id),
         "Stack Exchange answered for another question"
     );
-    let originals: Vec<String> = q["closed_details"]["original_questions"]
-        .as_array()
+    let originals: Vec<String> = originals(q)
         .into_iter()
-        .flatten()
-        .filter_map(|o| o["question_id"].as_u64())
-        .take(8)
         .map(|id| format!("https://{}/questions/{id}", target.host))
         .collect();
     Question {
@@ -228,38 +316,86 @@ impl Source for StackExchange {
         })
     }
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
-        let target = of_uri(uri).context("not a Stack Exchange question")?;
-        let f = cx
-            .fetch(
-                &target.api(),
-                &FetchOptions {
-                    accept: Some("application/json".into()),
-                    ..Default::default()
-                },
-            )
-            .await?;
-        let doc = cx.card(uri, self);
-        let t = target.clone();
-        Ok(
-            crate::resolver::html::blocking(move || card(doc, &t, f.status, &f.body))
-                .await??
-                .unwrap_or_else(|| cx.missing(uri, self)),
-        )
+        resolve(&PAUSE, cx, uri).await
     }
+}
+
+/// The card of the question at `uri`, asked within `pause`.
+pub async fn resolve(pause: &Pause, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
+    let target = of_uri(uri).context("not a Stack Exchange question")?;
+    let f = pause
+        .ask(cx.fetch(
+            &target.api(),
+            &FetchOptions {
+                accept: Some("application/json".into()),
+                ..Default::default()
+            },
+        ))
+        .await?;
+    let doc = cx.card(uri, &StackExchange);
+    Ok(
+        crate::resolver::html::blocking(move || card(doc, &target, f.status, &f.body))
+            .await??
+            .unwrap_or_else(|| cx.missing(uri, &StackExchange)),
+    )
 }
 
 pub mod also_on {
     //! The `stack_exchange` also-on source: a question's own key, and its original's.
-    use super::of_uri;
-    use crate::also_on::{Context, Found, Key, Source, Subject};
-    use anyhow::Result;
+    use super::{of_uri, originals, refusal, Target, PAUSE};
+    use crate::{
+        also_on::{Context, Found, Key, Source, Subject},
+        resolver::egress::FetchOptions,
+    };
+    use anyhow::{Context as _, Result};
     use async_trait::async_trait;
+    use serde_json::Value;
 
     /// A question's id on its site as the key `stackexchange:{site}/{id}`; a question closed as
-    /// a duplicate carries its original's key instead, so the two are one group. One closed as a
-    /// duplicate of several carries several, and joins none (a group holds one question of this
-    /// namespace).
+    /// a duplicate carries its original's key instead, so the two are one group, and a chain of
+    /// duplicates (A of B, B of C) carries the key of its end (C), so all are one group. One
+    /// closed as a duplicate of several carries several, and joins none (a group holds one
+    /// question of this namespace).
     pub struct StackExchange;
+
+    /// How many questions past a duplicate's original a chain is followed.
+    const HOPS: usize = 3;
+
+    /// The question a chain of duplicates from `original` ends at on `target`'s site: each
+    /// question closed as a duplicate of exactly one other, asked of the API (within its pause),
+    /// at most `HOPS` of them. A loop, or a question repeating several, ends it.
+    async fn end(cx: &Context, target: &Target, original: u64) -> Result<u64> {
+        let mut seen = vec![target.id, original];
+        for _ in 0..HOPS {
+            let at = Target {
+                id: *seen.last().unwrap(),
+                ..target.clone()
+            };
+            let f = PAUSE
+                .ask(cx.egress.fetch_with(
+                    &at.api(),
+                    &FetchOptions {
+                        accept: Some("application/json".into()),
+                        ..Default::default()
+                    },
+                ))
+                .await?;
+            let v: Value = serde_json::from_slice(&f.body).context("not the API's answer")?;
+            if let Some(error) = refusal(&v) {
+                return Err(error);
+            }
+            anyhow::ensure!(f.status == 200, "Stack Exchange answered {}", f.status);
+            let next = match v["items"].as_array().and_then(|items| items.first()) {
+                Some(q) if q["question_id"].as_u64() == Some(at.id) => originals(q),
+                _ => vec![],
+            };
+            match next.as_slice() {
+                [next] if !seen.contains(next) => seen.push(*next),
+                _ => break,
+            }
+        }
+        Ok(*seen.last().unwrap())
+    }
 
     #[async_trait]
     impl Source for StackExchange {
@@ -287,7 +423,7 @@ pub mod also_on {
                 && crate::lookups::digits(id))
             .then(|| format!("stackexchange:{value}"))
         }
-        async fn lookup(&self, _cx: &Context, subject: &Subject) -> Result<Found> {
+        async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
             let mut found = Found::default();
             let (Some(target), Some(doc)) = (of_uri(&subject.uri), subject.doc.as_ref()) else {
                 return Ok(found);
@@ -302,10 +438,10 @@ pub mod also_on {
                 .filter(|o| o.site == target.site)
                 .map(|o| o.id)
                 .collect();
-            let ids = if originals.is_empty() {
-                vec![target.id]
-            } else {
-                originals
+            let ids = match originals.as_slice() {
+                [] => vec![target.id],
+                [original] => vec![end(cx, &target, *original).await?],
+                several => several.to_vec(),
             };
             for id in ids {
                 found.keys.push(Key {
@@ -344,10 +480,37 @@ mod tests {
                 "bitcoin",
                 "https://bitcoin.stackexchange.com/questions/336",
             ),
+            // A meta's canonical host, its older spelling, Meta Stack Exchange itself, and the
+            // metas of Stack Overflow, as the API's `/sites` names them.
+            (
+                "https://bitcoin.meta.stackexchange.com/questions/7",
+                "bitcoin.meta",
+                "https://bitcoin.meta.stackexchange.com/questions/7",
+            ),
             (
                 "https://meta.bitcoin.stackexchange.com/questions/7",
-                "meta.bitcoin",
-                "https://meta.bitcoin.stackexchange.com/questions/7",
+                "bitcoin.meta",
+                "https://bitcoin.meta.stackexchange.com/questions/7",
+            ),
+            (
+                "https://meta.stackexchange.com/questions/8",
+                "meta",
+                "https://meta.stackexchange.com/questions/8",
+            ),
+            (
+                "https://meta.stackoverflow.com/questions/9",
+                "meta.stackoverflow",
+                "https://meta.stackoverflow.com/questions/9",
+            ),
+            (
+                "https://pt.meta.stackoverflow.com/questions/10",
+                "pt.meta.stackoverflow",
+                "https://pt.meta.stackoverflow.com/questions/10",
+            ),
+            (
+                "https://meta.superuser.com/questions/11",
+                "meta.superuser",
+                "https://meta.superuser.com/questions/11",
             ),
             (
                 "https://pt.stackoverflow.com/questions/5",
@@ -372,15 +535,39 @@ mod tests {
             StackExchange.alias_root("https://stackoverflow.com/questions/11227809"),
             None
         );
+        assert_eq!(
+            StackExchange
+                .alias_root("https://meta.bitcoin.stackexchange.com/questions/7")
+                .as_deref(),
+            Some("https://bitcoin.meta.stackexchange.com/questions/7")
+        );
         for uri in [
             "https://stackoverflow.com/questions/tagged/rust",
             "https://stackoverflow.com/a/11227902",
             "https://stackoverflow.com/users/87234",
             "https://api.stackexchange.com/questions/1",
             "https://a.b.c.stackexchange.com/questions/1",
+            "https://meta.meta.stackexchange.com/questions/1",
+            "https://bitcoin.other.stackexchange.com/questions/1",
             "https://stackoverflow.com.example/questions/1",
         ] {
             assert!(!StackExchange.reads(uri), "{uri}");
+        }
+    }
+
+    #[test]
+    fn every_site_the_api_lists() {
+        // The API's `/sites` (recorded): each site's address gives its API name.
+        let sites: Value = serde_json::from_slice(&read("se-sites.json")).unwrap();
+        let sites = sites["items"].as_array().unwrap();
+        assert!(sites.len() > 300);
+        for site in sites {
+            let uri = format!("{}/questions/1", site["site_url"].as_str().unwrap());
+            assert_eq!(
+                of_uri(&uri).map(|t| t.site),
+                site["api_site_parameter"].as_str().map(str::to_owned),
+                "{uri}"
+            );
         }
     }
 
@@ -438,8 +625,90 @@ mod tests {
         assert!(card(base(&t), &t, 200, &read("se-stackoverflow-11227809.json")).is_err());
         let quota = br#"{"error_id":502,"error_message":"too many requests from this IP, more requests available in 82800 seconds","error_name":"throttle_violation"}"#;
         let error = card(base(&t), &t, 400, quota).unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<crate::resolver::RetryLater>()
+                .map(|r| r.seconds),
+            Some(3600)
+        );
+        // A site there is not is the request's error: a failure, not asked again sooner.
+        let error = card(base(&t), &t, 400, &read("se-no-such-site.json")).unwrap_err();
         assert!(error
             .downcast_ref::<crate::resolver::RetryLater>()
-            .is_some());
+            .is_none());
+        assert_eq!(crate::resolver::error_class(&error), "http_4xx");
+    }
+}
+
+#[cfg(test)]
+mod pause_tests {
+    use super::*;
+    use crate::sources::fixture;
+
+    const JSON: &str = "application/json";
+    fn api(id: u64) -> String {
+        format!("https://api.stackexchange.com/2.3/questions/{id}?site=bitcoin&filter={FILTER}")
+    }
+    fn uri(id: u64) -> String {
+        format!("https://bitcoin.stackexchange.com/questions/{id}")
+    }
+    /// The recorded question 336 as question `id`, with the API's `backoff` if given.
+    fn answer(id: u64, backoff: Option<u64>) -> Vec<u8> {
+        let mut v: Value =
+            serde_json::from_slice(&fixture::read("stack_exchange", "se-bitcoin-336.json"))
+                .unwrap();
+        v["items"][0]["question_id"] = id.into();
+        if let Some(seconds) = backoff {
+            v["backoff"] = seconds.into();
+        }
+        serde_json::to_vec(&v).unwrap()
+    }
+    fn retry(error: anyhow::Error) -> Option<u64> {
+        error
+            .downcast_ref::<crate::resolver::RetryLater>()
+            .map(|r| r.seconds)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_backoff_holds_every_question() {
+        // A 200 asking for 120 s: the next question, another one, is not asked before.
+        let (egress, recorded) = fixture::egress(vec![
+            (&api(336), 200, JSON, answer(336, Some(120))),
+            (&api(1), 200, JSON, answer(1, None)),
+        ]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let pause = Pause::new();
+        let doc = resolve(&pause, &cx, &uri(336)).await.unwrap();
+        assert_eq!(doc.type_name, "Question");
+        let error = resolve(&pause, &cx, &uri(1)).await.unwrap_err();
+        assert_eq!(retry(error), Some(120));
+        assert_eq!(recorded.asked().len(), 1);
+        tokio::time::advance(std::time::Duration::from_secs(121)).await;
+        assert!(resolve(&pause, &cx, &uri(1)).await.is_ok());
+        assert_eq!(recorded.asked().len(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_errors_backoff_holds_every_question() {
+        let busy = br#"{"error_id":503,"error_message":"too many requests","error_name":"temporarily_unavailable","backoff":30}"#;
+        let (egress, recorded) = fixture::egress(vec![
+            (&api(336), 400, JSON, busy.to_vec()),
+            (&api(1), 200, JSON, answer(1, None)),
+        ]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let pause = Pause::new();
+        let error = resolve(&pause, &cx, &uri(336)).await.unwrap_err();
+        assert_eq!(retry(error), Some(30));
+        let error = resolve(&pause, &cx, &uri(1)).await.unwrap_err();
+        assert!(retry(error).is_some_and(|s| s <= 30));
+        assert_eq!(recorded.asked().len(), 1);
+        tokio::time::advance(std::time::Duration::from_secs(31)).await;
+        assert!(resolve(&pause, &cx, &uri(1)).await.is_ok());
     }
 }
