@@ -15,7 +15,7 @@
 //! sweep drops units that left the window and marks those that entered it, changed unseen or
 //! became an alias. A unit that changes or goes (out of the window, or with its resource) takes
 //! its pairs from the units that named it, and those are read again to refill their lists (see
-//! `refill` and the `same_event_unit_gone` trigger), as is a unit whose pair a cap pushed out.
+//! `refill` and `units_going`), as is a unit whose pair a cap pushed out.
 //! Cards only read the stored pairs (`same_event_hint`).
 use crate::config::{Config, SameEventHint};
 use crate::hints::commit_changed;
@@ -219,29 +219,73 @@ async fn refill(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, units: &[String]
     Ok(())
 }
 
+/// Marks the units that name `units`, other than those among them, to refill: their pairs go
+/// with the units when these are deleted. Done in the code before the delete, never by a trigger
+/// on it: a trigger that updated a row the same statement deletes aborted a batch dropping two
+/// paired units (PostgreSQL: "tuple to be updated was already modified by an operation triggered
+/// by the current command").
+async fn units_going(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    units: &[String],
+) -> Result<()> {
+    if units.is_empty() {
+        return Ok(());
+    }
+    let owners: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT unit_id FROM same_event WHERE other_id=ANY($1) AND NOT unit_id=ANY($1)",
+    )
+    .bind(units)
+    .fetch_all(&mut **tx)
+    .await?;
+    refill(tx, &owners).await
+}
+
+/// Before a resource's row is deleted (an orphan, `changes::delete_orphans`): its units go with
+/// it (the cascade), so the units that named them are marked to refill. The units are locked
+/// first (FOR UPDATE, in id order, as `drop_units` locks its batch), so a pass that would pair
+/// with them meanwhile skips them (its candidates are taken FOR KEY SHARE … SKIP LOCKED) or waits
+/// for the delete: a pair added between the namers' collection and the cascade would go unmarked.
+/// Nothing happens for a resource without units.
+pub async fn before_delete(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    resource_id: &str,
+) -> Result<()> {
+    let units: Vec<String> = sqlx::query_scalar(
+        "SELECT unit_id FROM same_event_unit WHERE resource_id=$1 ORDER BY unit_id FOR UPDATE",
+    )
+    .bind(resource_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    units_going(tx, &units).await
+}
+
 /// Drops the units `which` selects (SQL over `$1`, the resource, when given), `batch` to a
 /// transaction until none is left, so a long backlog (the sweep after a long stop) is never
-/// read or locked whole: their pairs go with them, and the units that named them refill (the
-/// `same_event_unit_gone` trigger). Returns how many were dropped.
+/// read or locked whole: their pairs go with them, and the units that named them refill
+/// (`units_going`). Returns how many were dropped.
 async fn drop_units(pool: &PgPool, which: &str, resource: Option<&str>, batch: i64) -> Result<u64> {
     let limit = if resource.is_some() { "$2" } else { "$1" };
-    let sql = format!(
-        "DELETE FROM same_event_unit WHERE unit_id IN \
-         (SELECT unit_id FROM same_event_unit WHERE unit_id IN ({which}) ORDER BY unit_id LIMIT {limit} FOR UPDATE)"
+    let select = format!(
+        "SELECT unit_id FROM same_event_unit WHERE unit_id IN ({which}) ORDER BY unit_id LIMIT {limit} FOR UPDATE"
     );
     let mut dropped = 0;
     loop {
         let mut tx = pool.begin().await?;
-        let mut delete = sqlx::query(&sql);
+        let mut query = sqlx::query_scalar::<_, String>(&select);
         if let Some(resource) = resource {
-            delete = delete.bind(resource);
+            query = query.bind(resource);
         }
-        let n = delete.bind(batch).execute(&mut *tx).await?.rows_affected();
-        if n > 0 {
+        let units = query.bind(batch).fetch_all(&mut *tx).await?;
+        if !units.is_empty() {
+            units_going(&mut tx, &units).await?;
+            sqlx::query("DELETE FROM same_event_unit WHERE unit_id=ANY($1)")
+                .bind(&units)
+                .execute(&mut *tx)
+                .await?;
             commit_changed(tx).await?;
         }
-        dropped += n;
-        if (n as i64) < batch {
+        dropped += units.len() as u64;
+        if (units.len() as i64) < batch {
             return Ok(dropped);
         }
     }

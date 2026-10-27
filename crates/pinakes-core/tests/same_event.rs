@@ -1270,6 +1270,11 @@ async fn expired_units_are_dropped_in_bounded_batches(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
+    // And paired among themselves (a ring), as a crowd's pages are: a batch drops paired units.
+    sqlx::query("INSERT INTO same_event(unit_id,other_id,score) SELECT 'expired/'||i,'expired/'||(i%10+1),1 FROM generate_series(1,10) i")
+        .execute(&pool)
+        .await
+        .unwrap();
     let revision = || async {
         sqlx::query_scalar::<_, i64>("SELECT revision FROM search_revision")
             .fetch_one(&pool)
@@ -1295,10 +1300,162 @@ async fn expired_units_are_dropped_in_bounded_batches(pool: PgPool) {
     let (fingerprint, queued) = marked(live.clone()).await;
     assert!(fingerprint.starts_with("refill:"), "{fingerprint}");
     assert!(queued, "the live one's resource is queued");
-    let (fingerprint, queued) = marked(old.clone()).await;
-    assert!(
-        !fingerprint.starts_with("refill:") && !queued,
-        "the old page named nothing"
-    );
+    // The old page's own unit named nothing (its expired units named each other round a ring,
+    // so a batch may queue the page for one dropped in an earlier batch).
+    let (fingerprint, _) = marked(old.clone()).await;
+    assert!(!fingerprint.starts_with("refill:"), "{fingerprint}");
     assert_eq!(same_event::drop_expired(&pool, 3).await.unwrap(), 0);
+}
+
+/// Two events paired with each other that expire together are both dropped by the sweep (one
+/// statement; a trigger that updated the one while the statement deleted the other aborted it),
+/// and the units that named them refill.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn paired_units_that_expire_together_are_dropped_by_the_sweep(pool: PgPool) {
+    let start = soon();
+    let ids = crowd(&pool, "Bitcoin Meetup Wattwil", start, &WATTWIL, 3).await;
+    for id in &ids {
+        same_event::read(&pool, id).await.unwrap();
+    }
+    assert_eq!(most(&pool, "unit_id").await, 2, "each names the two others");
+    // Time passes for two of them (their stored start is three days back), unseen by the pass.
+    let gone: Vec<String> = ids[..2].to_vec();
+    sqlx::query(
+        "UPDATE same_event_unit SET start_at=now()-interval '3 days' WHERE resource_id=ANY($1)",
+    )
+    .bind(&gone)
+    .execute(&pool)
+    .await
+    .unwrap();
+    same_event::sweep(&pool).await.unwrap();
+    let left: Vec<String> = sqlx::query_scalar("SELECT resource_id FROM same_event_unit")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, vec![ids[2].clone()], "both expired units went");
+    assert!(
+        stored(&pool, &ids[2]).await.is_empty(),
+        "its pairs went with them"
+    );
+    let (fingerprint, queued): (String, bool) = sqlx::query_as("SELECT fingerprint,EXISTS(SELECT 1 FROM same_event_dirty d WHERE d.resource_id=u.resource_id) FROM same_event_unit u")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        fingerprint.starts_with("refill:") && queued,
+        "the survivor refills: {fingerprint}"
+    );
+}
+
+/// A database damaged before the fix (units whose lists the old trimming or a cascade emptied,
+/// with current fingerprints and no dirty row) is repaired by the upgrade's step: every unit with
+/// fewer than twenty pairs is marked to refill and its resource queued, once.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn the_upgrade_requeues_units_left_with_short_lists(pool: PgPool) {
+    let ids = crowd(&pool, "Bitcoin Meetup Wattwil", soon(), &WATTWIL, 30).await;
+    pass(&pool, &Config::default()).await;
+    assert_eq!(most(&pool, "unit_id").await, 20);
+    // The damage: five units lose their lists, as the old cap trimmed them, and nothing marks them.
+    sqlx::query("DELETE FROM same_event WHERE unit_id=ANY($1)")
+        .bind(&ids[..5])
+        .execute(&pool)
+        .await
+        .unwrap();
+    pass(&pool, &Config::default()).await;
+    for id in &ids[..5] {
+        assert!(stored(&pool, id).await.is_empty(), "nothing queued them");
+    }
+    // The upgrade's step (upgrade-same-event-refill-3.sql).
+    sqlx::query("UPDATE same_event_unit u SET fingerprint='refill:'||fingerprint WHERE fingerprint NOT LIKE 'refill:%' AND (SELECT count(*) FROM same_event p WHERE p.unit_id=u.unit_id)<20")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO same_event_dirty(resource_id) SELECT DISTINCT resource_id FROM same_event_unit WHERE fingerprint LIKE 'refill:%' ON CONFLICT DO NOTHING")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM same_event_dirty")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(queued, 5, "the five, not the full lists");
+    pass(&pool, &Config::default()).await;
+    for id in &ids[..5] {
+        assert_eq!(stored(&pool, id).await.len(), 20, "{id} refilled");
+    }
+}
+
+/// A pass that pairs with an orphan's unit while the orphan is being deleted: the delete locks the
+/// orphan's units before it collects their namers, so the pass's pair (committed while the delete
+/// waits for it) is seen and its owner marked; without the lock the cascade would take the pair
+/// unseen and the owner would keep an empty list for good.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_orphan_deleted_while_a_pass_pairs_with_it_leaves_the_partner_to_refill(pool: PgPool) {
+    let start = soon();
+    // Two events that do not pair (different names), each with a unit.
+    let live = event(
+        &pool,
+        "https://example.org/live",
+        "Bitcoin Meetup Wattwil",
+        start,
+        Some(WATTWIL),
+    )
+    .await;
+    let orphan = event(
+        &pool,
+        "https://example.org/orphan",
+        "Chess Evening Bern",
+        start,
+        Some(Point {
+            lat: 46.948,
+            lon: 7.447,
+        }),
+    )
+    .await;
+    pass(&pool, &Config::default()).await;
+    assert!(stored(&pool, &live).await.is_empty());
+    sqlx::query("DELETE FROM reference WHERE resource_id=$1")
+        .bind(&orphan)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET orphaned_at=now()-interval '30 days' WHERE id=$1")
+        .bind(&orphan)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // A pass mid-flight: it has written the pair both ways and not committed yet (its FK checks
+    // hold the orphan's unit FOR KEY SHARE).
+    let mut pairing = pool.begin().await.unwrap();
+    sqlx::query("INSERT INTO same_event(unit_id,other_id,score) VALUES($1,$2,1),($2,$1,1)")
+        .bind(&live)
+        .bind(&orphan)
+        .execute(&mut *pairing)
+        .await
+        .unwrap();
+    // The orphan delete starts and waits on that lock.
+    let deleting = {
+        let pool = pool.clone();
+        tokio::spawn(async move { changes::delete_orphans(&pool, 7).await.unwrap() })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    assert!(!deleting.is_finished(), "the delete waits for the pass");
+    pairing.commit().await.unwrap();
+    assert_eq!(deleting.await.unwrap(), 1);
+    let (fingerprint, queued): (String, bool) = sqlx::query_as(
+        "SELECT fingerprint,EXISTS(SELECT 1 FROM same_event_dirty d WHERE d.resource_id=u.resource_id) FROM same_event_unit u WHERE resource_id=$1",
+    )
+    .bind(&live)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        fingerprint.starts_with("refill:"),
+        "the partner is marked: {fingerprint}"
+    );
+    assert!(queued);
+    assert!(
+        stored(&pool, &live).await.is_empty(),
+        "the pair went with the orphan"
+    );
 }
