@@ -762,3 +762,26 @@ async fn typed_cards_name_the_links_people_wrote_and_social_joins_by_them(pool: 
     // A card asked by its own id names no root.
     assert!(social["items"][0].get("root").is_none());
 }
+
+/// `refs` ranks a card's links by their references counted only up to a bound, so a read never
+/// counts every reference of a much-referenced link: links past the bound rank by URI.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn refs_count_each_link_only_up_to_a_bound(pool: PgPool) {
+    let ids = seed_typed(&pool).await;
+    // Counted in full, the book's own isbn: link (1,501 references) would lead its Open Library
+    // page (1,202); both are past the bound, so the page leads by URI.
+    for (uri, n) in [(BOOK, 1500), (OPENLIBRARY, 1200)] {
+        sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) SELECT $1,$2,'tag','bulk','/pub/app/tags/bulk-'||$1||'-'||n,now() FROM generate_series(1,$3) n")
+            .bind(identity(uri).unwrap().0)
+            .bind(AUTHOR)
+            .bind(n)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (code, _, body) = raw(&app, "GET", &format!("/v1/resources/{}", ids[2]), &[], None).await;
+    assert_eq!(code, 200);
+    let card: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(card["refs"], json!([OPENLIBRARY, BOOK]));
+}

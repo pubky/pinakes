@@ -659,8 +659,8 @@ pub struct Card {
     /// up to 256. A hint: every member keeps its own card.
     pub also_on: Vec<AlsoOn>,
     /// The links people referenced on Pubky that resolve to this card: its own `uri` and its
-    /// aliases (`details.aliases`) that carry references, most referenced first, at most 5,
-    /// normalized as every URI is. A typed card's `uri` is often not a link anyone wrote
+    /// aliases (`details.aliases`) that carry references, most referenced first (counted up to
+    /// 1,000 each, then by URI), at most 5, normalized as every URI is. A typed card's `uri` is often not a link anyone wrote
     /// (`btc:block/…`, `isbn:…`): ask Nexus by these to find the tags (docs/api.md, Joining
     /// with Nexus). An occurrence's are its feed's. Empty when nothing references the card.
     pub refs: Vec<String>,
@@ -1034,8 +1034,12 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
 }
 /// The most links one card names as `refs`.
 const REFS: usize = 5;
+/// The most references counted for one link when ranking `refs`: a link past it ranks with the
+/// others past it, by URI, and a read never scans a link's every reference.
+const REFS_COUNTED: i64 = 1000;
 /// Fills each card's `refs`: the referenced links among its own and its aliases', most
-/// referenced first (then by URI), at most [`REFS`]. One query for every card of a response.
+/// referenced first (counted up to [`REFS_COUNTED`], then by URI), at most [`REFS`]. One query
+/// for every card of a response.
 pub(crate) async fn with_refs<'a>(
     pool: &PgPool,
     cards: impl IntoIterator<Item = &'a mut Card>,
@@ -1048,14 +1052,15 @@ pub(crate) async fn with_refs<'a>(
     let rows: Vec<(String, String)> = sqlx::query_as(
         "WITH links AS (SELECT id AS card, id FROM unnest($1::text[]) id \
          UNION SELECT a.root_id, a.alias_id FROM resource_alias a WHERE a.root_id = ANY($1)), \
-         counted AS (SELECT l.card, x.uri, count(*) AS n FROM links l \
-           JOIN reference f ON f.resource_id = l.id JOIN resource x ON x.id = l.id \
-           GROUP BY l.card, x.uri) \
+         counted AS (SELECT l.card, x.uri, c.n FROM links l JOIN resource x ON x.id = l.id \
+           CROSS JOIN LATERAL (SELECT count(*) AS n FROM \
+             (SELECT 1 FROM reference f WHERE f.resource_id = l.id LIMIT $3) f) c WHERE c.n > 0) \
          SELECT card, uri FROM (SELECT card, uri, row_number() OVER (PARTITION BY card ORDER BY n DESC, uri) AS k FROM counted) s \
          WHERE k <= $2 ORDER BY card, k",
     )
     .bind(&ids)
     .bind(REFS as i64)
+    .bind(REFS_COUNTED)
     .fetch_all(pool)
     .await?;
     let mut by_card: BTreeMap<String, Vec<String>> = BTreeMap::new();
