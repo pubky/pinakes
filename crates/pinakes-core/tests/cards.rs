@@ -1359,16 +1359,46 @@ async fn youtube_is_named_by_its_oembed_answer_not_a_regional_page() {
         )
         .await
         .unwrap();
-    for (link, expected) in [
-        ("https://m.youtube.com/watch?v=fJ9rUzIMcZQ", Page::Blocked),
-        ("https://youtu.be/fJ9rUzIMcZQ", Page::Blocked),
-        ("https://example.org/articles/youtube", Page::Content),
-        ("https://notyoutube.com/watch?v=fJ9rUzIMcZQ", Page::Content),
+    // Where the fetch ended decides, not where it began: a short link that redirected to
+    // YouTube's placeholder is a wall, and the placeholder's title on another site (after a
+    // redirect away from YouTube) is a page's title.
+    for (asked, landed, expected) in [
+        (
+            "https://m.youtube.com/watch?v=fJ9rUzIMcZQ",
+            "https://m.youtube.com/watch?v=fJ9rUzIMcZQ",
+            Page::Blocked,
+        ),
+        (
+            "https://youtu.be/fJ9rUzIMcZQ",
+            "https://youtu.be/fJ9rUzIMcZQ",
+            Page::Blocked,
+        ),
+        (
+            "https://t.co/abc123",
+            "https://www.youtube.com/watch?v=fJ9rUzIMcZQ",
+            Page::Blocked,
+        ),
+        (
+            "https://example.org/articles/youtube",
+            "https://example.org/articles/youtube",
+            Page::Content,
+        ),
+        (
+            "https://notyoutube.com/watch?v=fJ9rUzIMcZQ",
+            "https://notyoutube.com/watch?v=fJ9rUzIMcZQ",
+            Page::Content,
+        ),
+        (
+            "https://www.youtube.com/redirect?q=https%3A%2F%2Fexample.org%2Farticles%2Fyoutube",
+            "https://example.org/articles/youtube",
+            Page::Content,
+        ),
     ] {
-        let (link, page) = (Url::parse(link).unwrap(), regional.clone());
-        let seen = pinakes_core::resolver::html::blocking(move || inspect(&link, &page).unwrap())
+        let (asked, mut page) = (Url::parse(asked).unwrap(), regional.clone());
+        page.url = Url::parse(landed).unwrap();
+        let seen = pinakes_core::resolver::html::blocking(move || inspect(&asked, &page).unwrap())
             .await
             .unwrap();
-        assert_eq!(seen, expected, "{expected:?}");
+        assert_eq!(seen, expected, "{landed}");
     }
 }
