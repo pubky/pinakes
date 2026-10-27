@@ -117,18 +117,31 @@ fn image(v: &Value) -> Option<String> {
         .map(|u| u.split('?').next().unwrap_or(&u).to_owned())
 }
 
-/// The card of a post from its listing, or `None` when the listing holds no such post.
+/// Whether a listing's post is Reddit's stub of a post its author deleted or a moderator or
+/// Reddit removed: a removal it records, or its text replaced by `[deleted]` or `[removed]`.
+fn gone(post: &Value) -> bool {
+    !post["removed_by_category"].is_null()
+        || matches!(post["selftext"].as_str(), Some("[deleted]" | "[removed]"))
+}
+
+/// The card of a post from its listing, or `None` when the listing holds no such post or only
+/// the stub of a deleted or removed one (the post is gone).
 pub fn post_card(doc: ResourceMeta, id: &str, v: &Value) -> Result<Option<ResourceMeta>> {
     let Some(post) = v[0]["data"]["children"][0]["data"].as_object() else {
         return Ok(None);
     };
     let post = Value::Object(post.clone());
     anyhow::ensure!(post["id"] == id, "Reddit answered for another post");
+    if gone(&post) {
+        return Ok(None);
+    }
     let mut doc = Shape::Post.card(doc, SITE);
     doc.set_type("DiscussionForumPosting");
     let title = text(&post["title"]).unwrap_or_default();
     let body = text(&post["selftext"]).unwrap_or_default();
-    social::post_text(&mut doc, &title, text(&post["author"]).as_deref());
+    // A deleted account's posts stay up, under `[deleted]`: no author.
+    let author = text(&post["author"]).filter(|a| a != "[deleted]");
+    social::post_text(&mut doc, &title, author.as_deref());
     doc.description = Some(social::excerpt(
         if body.is_empty() { &title } else { &body },
         200,
@@ -138,7 +151,7 @@ pub fn post_card(doc: ResourceMeta, id: &str, v: &Value) -> Result<Option<Resour
             text(&post["url"]).filter(|u| post["post_hint"] == "image" && web_url(u).is_some())
         });
     }
-    social::fact(&mut doc, "author", text(&post["author"]));
+    social::fact(&mut doc, "author", author);
     social::fact(&mut doc, "subreddit", text(&post["subreddit"]));
     social::fact(&mut doc, "score", count(&post["score"]));
     social::fact(&mut doc, "comments", count(&post["num_comments"]));
@@ -438,7 +451,35 @@ mod tests {
         assert_eq!(doc.attributes["score"], "1234");
         assert_eq!(doc.attributes["comments"], "567");
         assert_eq!(doc.attributes["published"], "2026-04-20T16:00:00Z");
-        assert!(post_card(base, "other", &read("post-1k3d0pk.json")).is_err());
+        assert!(post_card(base.clone(), "other", &read("post-1k3d0pk.json")).is_err());
+        // Reddit's stub of a deleted or removed post is no post: a self post its author deleted,
+        // one a moderator removed, a link post with no text whose removal Reddit records.
+        assert!(
+            post_card(base.clone(), "1k3d0pk", &read("post-1k3d0pk-deleted.json"))
+                .unwrap()
+                .is_none()
+        );
+        let edited = |edit: &dyn Fn(&mut Value)| {
+            let mut v = read("post-1k3d0pk.json");
+            edit(&mut v[0]["data"]["children"][0]["data"]);
+            post_card(base.clone(), "1k3d0pk", &v).unwrap()
+        };
+        assert!(edited(&|p| p["selftext"] = "[removed]".into()).is_none());
+        assert!(edited(&|p| {
+            p["selftext"] = "".into();
+            p["is_self"] = false.into();
+            p["removed_by_category"] = "moderator".into();
+        })
+        .is_none());
+        // A deleted account's post is still up: its card names no author.
+        let doc = edited(&|p| p["author"] = "[deleted]".into()).unwrap();
+        assert!(!doc.attributes.contains_key("author"));
+        assert!(!doc.name.as_deref().unwrap().contains("[deleted]"));
+        assert!(doc
+            .description
+            .as_deref()
+            .unwrap()
+            .starts_with("Hi everyone"));
 
         let base = ResourceMeta::new("https://www.reddit.com/r/announcements/", "reddit", 3600);
         let doc = subreddit_card(

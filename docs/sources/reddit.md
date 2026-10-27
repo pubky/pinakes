@@ -24,11 +24,13 @@ post.
 - A subreddit: `GET https://www.reddit.com/r/{name}/about.json?raw_json=1`.
 - A user: `GET https://www.reddit.com/user/{name}/about.json?raw_json=1`.
 
-A 404 is `missing`; an answer for another object is an error. Reddit refuses many requests
-without a browser with its network-security page (403): the card of the link's shape alone,
-"Post on reddit.com" or "Profile on reddit.com", with the `blocked` fact. The link still
-resolves, groups and counts. A refused post keeps the post's type, so it stays social content:
-once the post is gone, its text leaves the change history.
+A 404 is `missing`, and so is the stub Reddit answers for a deleted or removed post: a removal it
+records (`removed_by_category`), or the text replaced by `[deleted]` or `[removed]`. A deleted
+account's post stays up under `[deleted]`, and its card names no author. An answer for another
+object is an error. Reddit refuses many requests without a browser with its network-security page
+(403): the card of the link's shape alone, "Post on reddit.com" or "Profile on reddit.com", with the
+`blocked` fact. The link still resolves, groups and counts. A refused post keeps the post's type, so
+it stays social content: once the post is gone, its text leaves the change history.
 
 The recorded fixtures hold Reddit's refusals; the JSON fixtures are written by hand after
 Reddit's public JSON, as their provenance says.
