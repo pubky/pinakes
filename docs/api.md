@@ -312,6 +312,10 @@ GET /v1/search?type=WebPage
 GET /v1/search?type=SocialMediaPosting
 GET /v1/search?type=DataFeed
 GET /v1/search?type=CreativeWork
+GET /v1/search?type=JobPosting
+GET /v1/search?remote=true&type=JobPosting
+GET /v1/search?remote=false&type=JobPosting
+GET /v1/search?closed=true&type=JobPosting
 GET /v1/search?q=lugano
 GET /v1/search?q=bitcoin
 GET /v1/search?q=berlin
@@ -429,6 +433,8 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 | `reach`, `viewer` | `following`, `friends` or `wot_2` of the Nexus user `viewer`: only their references and tags count (a filter) |
 | `boost`, `viewer` | `following`, `friends` or `wot_2` of the Nexus user `viewer`: cards they referenced rank higher, the more of them and the more recently they did, and nothing is left out ([Reach](#search)); with the default ranking or `sort=trending` |
 | `venue` | Events at this venue resource ID |
+| `remote` | `true`: [job postings](#jobs) that may be done remotely; `false`: job postings that may not |
+| `closed` | `true`: list [job postings](#jobs) past their closing date too; they are left out otherwise |
 | `sort` | `activity` (default), `recent`, `distance` (requires `near`), `start` or `trending` (by the references made inside `window`; only links referenced in it; with `collapse=group` one song across services is one row, ranked by the references all its links got in the window) |
 | `window` | With `sort=trending` or `related`: `{n}h` or `{n}d`, from `1h` to `90d` (default `7d` for trending, `limits.related_window_days` for related), counted back from the first page's instant |
 | `limit` | 1–500, default 50 |
@@ -449,6 +455,11 @@ calendar occurrences and located Pubky event references. Each of these is one re
 a calendar with three matching dates counts three times. `start` sorts exclude units without a
 start. A Pubky event result carries `event` for Nexus post hydration and no name: Pinakes does
 not fetch the post. Author and reach filters also constrain that post's author.
+
+**Jobs.** `type=JobPosting` with `near` or `bbox` finds postings by their workplace,
+`remote=true` the remote ones, and `from`/`to` select by the date posted (a posting's `start`).
+A posting past its closing date is left out of every search unless it sets `closed=true`
+([Jobs](#jobs)).
 
 **Ranking.** `activity` combines distinct taggers and references with a 30-day decay:
 
@@ -953,6 +964,39 @@ counts by status.
 
 Disabled identifier routes wait in the queue; an enabled web resolver still gives ordinary HTTP
 links a card.
+
+## Jobs
+
+A page whose JSON-LD is a `JobPosting` (most job boards and career pages publish one) gets a
+`JobPosting` card, and so do the postings that [sources](sources/README.md) read from a job
+board's or forum's API (their pages say which). The card is named by the posting's title and
+described by the start of its text, as plain text.
+
+- `start` is the date posted (`datePosted`; a date alone is its midnight UTC) and `end` the end
+  of `validThrough` (a date alone is valid through that whole day, UTC). Search's `from` and `to`
+  select by the date posted.
+- A posting past its `end` is closed: `facts.job_status` says `closed` (else `open`), and
+  search leaves it out unless it sets `closed=true`. Its page is read again a day after it
+  closes, then no more.
+- The workplace (`jobLocation`) is the card's venue (`venue`), placed on the map as an
+  event's venue is ([OpenStreetMap and locations](#openstreetmap-and-locations)): from the
+  page's own coordinates; else, with a street, the address geocoded; else the town, when
+  Nominatim finds exactly one settlement of that name (and country, when the posting names one),
+  in no other region (state, by name or ISO code) and postal region (a numeric postcode's first
+  digit) than the posting names. The card's `point` is then that place's, with OpenStreetMap's attribution.
+- A posting is remote when its `jobLocationType` is `TELECOMMUTE` or its place says "Remote"
+  ("Remote - US"); it then names the regions it accepts applicants from
+  (`applicantLocationRequirements`), up to 32. A posting can be remote and have a workplace.
+
+| Fact | Meaning |
+| --- | --- |
+| `hiring_organization`, `hiring_organization_url` | The employer and its own site |
+| `employment_type` | `FULL_TIME`, `PART_TIME`, `CONTRACTOR`, `TEMPORARY`, `INTERN`, `VOLUNTEER`, `PER_DIEM`, `OTHER` (or the posting's own word in that form); several joined with `; ` |
+| `remote`, `remote_regions` | `true`, and the regions it accepts applicants from, joined with `; ` |
+| `salary_min`, `salary_max`, `salary_currency`, `salary_unit` | The base salary: a range or one amount in both, its ISO 4217 currency, per `HOUR`, `DAY`, `WEEK`, `MONTH` or `YEAR` |
+| `date_posted`, `valid_through` | As the posting gives them |
+| `apply_url` | Where to apply: its ApplyAction, else its own `url`, else the page when one applies there (`directApply`) |
+| `job_status` | `open` or `closed`, at the time of the read |
 
 ## Sources
 

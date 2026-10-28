@@ -2802,6 +2802,18 @@
                 "summary": "ScholarlyArticle, collapse=group",
                 "value": "ScholarlyArticle"
               },
+              "jobposting-closed-too": {
+                "summary": "JobPosting, closed=true",
+                "value": "JobPosting"
+              },
+              "jobposting-on-site": {
+                "summary": "JobPosting, remote=false",
+                "value": "JobPosting"
+              },
+              "jobposting-remote": {
+                "summary": "JobPosting, remote=true",
+                "value": "JobPosting"
+              },
               "type-article": {
                 "summary": "Article",
                 "value": "Article"
@@ -2821,6 +2833,10 @@
               "type-event": {
                 "summary": "Event",
                 "value": "Event"
+              },
+              "type-jobposting": {
+                "summary": "JobPosting",
+                "value": "JobPosting"
               },
               "type-musicevent": {
                 "summary": "MusicEvent",
@@ -3387,6 +3403,54 @@
             "schema": {
               "type": [
                 "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "`true`: job postings that may be done remotely; `false`: job postings that may not.",
+            "examples": {
+              "(none)": {
+                "summary": "(none)",
+                "value": ""
+              },
+              "jobposting-on-site": {
+                "summary": "false, type=JobPosting",
+                "value": false
+              },
+              "jobposting-remote": {
+                "summary": "true, type=JobPosting",
+                "value": true
+              }
+            },
+            "in": "query",
+            "name": "remote",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "`true`: job postings past their `validThrough` (closed) are listed too; they are left out\notherwise.",
+            "examples": {
+              "(none)": {
+                "summary": "(none)",
+                "value": ""
+              },
+              "jobposting-closed-too": {
+                "summary": "true, type=JobPosting",
+                "value": true
+              }
+            },
+            "in": "query",
+            "name": "closed",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
                 "null"
               ]
             }

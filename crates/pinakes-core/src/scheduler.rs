@@ -11,7 +11,9 @@ pub fn next(
     now: DateTime<Utc>,
     config: &RefreshConfig,
 ) -> Option<DateTime<Utc>> {
-    next_times(manifest, doc.start, doc.end, now, config)
+    // A job posting's date posted is past from the start: only its closing ends its refreshes.
+    let start = doc.start.filter(|_| !crate::kinds::jobs::is_posting(doc));
+    next_times(manifest, start, doc.end, now, config)
 }
 fn next_times(
     manifest: &Manifest,
@@ -131,6 +133,24 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(next(&manifest, &past, now, &config), None);
+        // A job posting posted a month ago refreshes as a dateless page until it closes, and once
+        // more a day after.
+        let mut posting = ResourceMeta {
+            start: Some(now - Duration::days(30)),
+            ..Default::default()
+        };
+        posting.set_type("JobPosting");
+        assert_eq!(
+            next(&manifest, &posting, now, &config),
+            Some(now + Duration::hours(168))
+        );
+        posting.end = Some(now + Duration::days(2));
+        assert_eq!(
+            next(&manifest, &posting, now, &config),
+            Some(now + Duration::hours(72))
+        );
+        posting.end = Some(now - Duration::days(2));
+        assert_eq!(next(&manifest, &posting, now, &config), None);
         let running = ResourceMeta {
             start: Some(now - Duration::days(2)),
             end: Some(now + Duration::days(10)),

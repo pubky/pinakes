@@ -336,6 +336,16 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
       }
       if (positiveVenue) assert(atVenue.items.some(row => row.id === event.id), 'Fixture venue must match');
       report.assertions.push(positiveVenue ? 'positive venue match' : `venue filter (${atVenue.items.length} matches)`);
+      // Job postings: the on-site one is placed at its workplace; `remote` tells the two apart.
+      if (docs.has('job') && docs.has('job_remote')) {
+        const [onSite, remote] = [docs.get('job'), docs.get('job_remote')];
+        assert(onSite.point, 'an on-site posting is placed at its workplace');
+        const remoteOnes = await search({ type: 'JobPosting', remote: 'true' });
+        const onSiteOnes = await search({ type: 'JobPosting', remote: 'false' });
+        assert(remoteOnes.items.some(row => row.id === remote.id) && !remoteOnes.items.some(row => row.id === onSite.id), 'remote=true lists the remote posting only');
+        assert(onSiteOnes.items.some(row => row.id === onSite.id) && !onSiteOnes.items.some(row => row.id === remote.id), 'remote=false lists the on-site posting only');
+        report.assertions.push('job postings: workplace, remote filter');
+      }
       // An alias reads as its root, so these are the cards' (root) IDs.
       const ids = [...new Set(report.samples.map(s => s.resource_id))];
       const changes = await json(`${pinakes}/v1/changes/lookup`, { resource_ids: ids, since: 0, limit: 500 });

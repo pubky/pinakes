@@ -23,5 +23,7 @@
   {"kind": "podcast_apple", "uri": "https://podcasts.apple.com/us/podcast/the-daily/id1200361736", "type": "CreativeWork", "status": "ok", "derived": ["Apple Podcasts", "Pocket Casts", "Spotify"]},
   {"kind": "podcast_feed", "uri": "https://einundzwanzig.space/feed.xml", "type": "PodcastSeries", "status": "ok"},
   {"kind": "film_imdb", "uri": "https://www.imdb.com/title/tt0111161/", "type": "CreativeWork", "status": "ok", "derived": ["TMDB", "Letterboxd"]},
-  {"kind": "series_tvmaze", "uri": "https://www.tvmaze.com/shows/169/breaking-bad", "type": "CreativeWork", "status": "ok", "derived": ["IMDb", "TMDB"]}
+  {"kind": "series_tvmaze", "uri": "https://www.tvmaze.com/shows/169/breaking-bad", "type": "CreativeWork", "status": "ok", "derived": ["IMDb", "TMDB"]},
+  {"kind": "job_ashby", "uri": "https://jobs.ashbyhq.com/ashby/7458d4e9-da2e-47bd-98cb-adfda43d42b2", "type": "JobPosting", "status": "ok"},
+  {"kind": "job_hn_hiring", "uri": "https://news.ycombinator.com/item?id=49926618", "type": "JobPosting", "status": "ok"}
 ]

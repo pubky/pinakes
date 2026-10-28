@@ -43,6 +43,8 @@ Tests use local servers, injected transports and recorded fixtures instead of pu
     says how to add one.
   - `event/`: event pages, calendar feeds, event platforms (`adapters/`).
   - `sources/`: official-API sources, one module per service (`kit.rs` holds shared helpers).
+  - `kinds/`: kinds of card with facts of their own whichever route reads them (job postings),
+    their JSON-LD readers and their `FACTS`.
   - `also_on.rs` and `also_on/` (one module per also-on source), `lookups/` (one module per
     lookup family: places, papers, packages, games, archived copies), and the code they share:
     `hubs.rs` (MusicBrainz, Wikidata), `music.rs`, `music_sources.rs`, `wikipedia.rs`.

@@ -136,6 +136,29 @@ async fn fixture(pool: &PgPool) {
     );
     wiki.location = Some(lugano.clone());
     docs.push(wiki);
+    // Two job postings: a remote one, and one on site in Lugano.
+    for (uri, name, remote) in [
+        (
+            "https://bitcoinerjobs.com/job/1682142-staff-software-engineer-river",
+            "Staff Software Engineer",
+            true,
+        ),
+        (
+            "https://bitcoinerjobs.com/job/2563734-investment-associateanalyst-battery",
+            "Investment Associate/Analyst",
+            false,
+        ),
+    ] {
+        let mut job = card(uri, "web", "JobPosting", name);
+        job.start = Some(now - chrono::Duration::days(20));
+        job.end = Some(now + chrono::Duration::days(20));
+        if remote {
+            job.attributes.insert("remote".into(), "true".into());
+        } else {
+            job.location = Some(lugano.clone());
+        }
+        docs.push(job);
+    }
     for doc in &docs {
         save(pool, doc).await;
     }
@@ -601,6 +624,14 @@ async fn fixture(pool: &PgPool) {
             &["podcast", "news"],
         ),
         ("https://www.imdb.com/title/tt0111161/", &["film"]),
+        (
+            "https://bitcoinerjobs.com/job/1682142-staff-software-engineer-river",
+            &["jobs"],
+        ),
+        (
+            "https://bitcoinerjobs.com/job/2563734-investment-associateanalyst-battery",
+            &["jobs"],
+        ),
     ] {
         let id = identity(uri).unwrap().0;
         for label in labels {

@@ -374,6 +374,8 @@ pub fn tools() -> Vec<Tool> {
                 "from":{"type":"string","description":"Earliest start: RFC 3339, or relative such as now, now+7d, now-12h."},
                 "to":{"type":"string","description":"Latest start, same forms as from."},
                 "key":{"type":"string","description":"One exact identifier: isbn:…, doi:…, isrc:…, upc:…, mbid:…, wikidata:Q…, imdb:tt…, podcast:…, osm:node/…"},
+                "remote":{"type":"boolean","description":"true: job postings that may be done remotely; false: job postings that may not."},
+                "closed":{"type":"boolean","description":"true: list job postings past their closing date too (left out by default)."},
                 "sort":{"type":"string","enum":["activity","recent","distance","start","trending"],"description":"activity (default), recent, distance (needs near), start (earliest first), trending (with window)."},
                 "window":{"type":"string","description":"With sort trending: how far back, 1h to 90d, default 7d."},
                 "collapse":{"type":"string","enum":["group"],"description":"group: one row per group of links that are the same thing."},
@@ -463,7 +465,7 @@ fn search_query(args: &JsonObject) -> Result<String, Failure> {
     ];
     let known = [
         "q", "type", "tags", "match", "near", "bbox", "from", "to", "key", "sort", "window",
-        "collapse", "reach", "boost", "viewer", "limit", "cursor",
+        "collapse", "reach", "boost", "viewer", "limit", "cursor", "remote", "closed",
     ];
     if let Some(unknown) = args.keys().find(|k| !known.contains(&k.as_str())) {
         return Err(Failure::bad(format!(
@@ -490,6 +492,13 @@ fn search_query(args: &JsonObject) -> Result<String, Failure> {
             }
             Some(Value::String(value)) => pairs.push((key, value.clone())),
             Some(_) => return Err(Failure::bad(format!("`{key}` is an array of strings"))),
+        }
+    }
+    for flag in ["remote", "closed"] {
+        match args.get(flag) {
+            None | Some(Value::Null) => {}
+            Some(Value::Bool(b)) => pairs.push((flag, b.to_string())),
+            Some(_) => return Err(Failure::bad(format!("`{flag}` is a boolean"))),
         }
     }
     match args.get("near") {
@@ -674,7 +683,15 @@ mod tests {
             search_query(&args(json!({"type": ["MusicRecording", "MusicAlbum"]}))).unwrap(),
             "type=MusicRecording%2CMusicAlbum"
         );
+        assert_eq!(
+            search_query(&args(
+                json!({"type": "JobPosting", "remote": true, "closed": false})
+            ))
+            .unwrap(),
+            "type=JobPosting&remote=true&closed=false"
+        );
         for bad in [
+            json!({"remote": "yes"}),
             json!({"admin": true}),
             json!({"q": 1}),
             json!({"tags": [1]}),

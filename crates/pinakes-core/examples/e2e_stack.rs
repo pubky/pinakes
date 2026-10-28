@@ -92,6 +92,9 @@ impl Fixture {
             {"kind":"isbn_page","uri":"https://openlibrary.org/books/OL7353617M","type":"Book","group_with":"isbn","needs":"books"},
             {"kind":"media","uri":"https://www.youtube.com/watch?v=fixture","type":"VideoObject"},
             {"kind":"web","uri":"https://web.example/e2e","type":"WebPage"},
+            // Job postings: one on site (its workplace geocoded to the fixture place), one remote.
+            {"kind":"job","uri":"https://jobs.example/e2e","type":"JobPosting","facts":{"hiring_organization":"Fixture Co","job_status":"open"}},
+            {"kind":"job_remote","uri":"https://jobs.example/e2e/remote","type":"JobPosting","facts":{"remote":"true","remote_regions":"Europe"}},
         ]);
         // A sample that needs an also-on source (`needs`) runs only in a build that has it.
         let (kept, skipped) = by_needs(
@@ -142,6 +145,7 @@ impl Dns for FixtureDns {
                 | "publisher.example"
                 | "www.youtube.com"
                 | "web.example"
+                | "jobs.example"
         ) || source_answers().any(|(_, a)| a.host == host)
         {
             "93.184.216.34"
@@ -168,6 +172,8 @@ impl Transport for Fixture {
             "openlibrary.org"=>("application/json",json!({"ISBN:9780140328721":{"title":"Matilda","authors":[{"name":"Roald Dahl"}],"url":"https://openlibrary.org/books/OL7353617M/Matilda","key":"/books/OL7353617M"},"ISBN:0140328726":{"title":"Matilda","authors":[{"name":"Roald Dahl"}],"url":"https://openlibrary.org/books/OL7353617M/Matilda","key":"/books/OL7353617M"}}).to_string()),
             "www.youtube.com"=>("application/json",json!({"type":"video","title":"Fixture video","thumbnail_url":"https://image.example/a.jpg"}).to_string()),
             "web.example"=>("text/html","<title>Fixture page</title>".into()),
+            "jobs.example" if u.path()=="/e2e/remote"=>("text/html",format!("<script type='application/ld+json'>{}</script>",json!({"@type":"JobPosting","title":"Fixture remote engineer","datePosted":(self.start-chrono::Duration::days(14)).format("%Y-%m-%d").to_string(),"hiringOrganization":{"@type":"Organization","name":"Fixture Co"},"jobLocationType":"TELECOMMUTE","applicantLocationRequirements":{"@type":"AdministrativeArea","name":"Europe"}}))),
+            "jobs.example"=>("text/html",format!("<script type='application/ld+json'>{}</script>",json!({"@type":"JobPosting","title":"Fixture barista","datePosted":(self.start-chrono::Duration::days(14)).format("%Y-%m-%d").to_string(),"employmentType":"PART_TIME","hiringOrganization":{"@type":"Organization","name":"Fixture Co"},"jobLocation":{"@type":"Place","address":{"@type":"PostalAddress","streetAddress":"1 Main Street","addressLocality":"Zurich","postalCode":"8000","addressCountry":"CH"}}}))),
             _=>match source_answers().find(|(_,a)|a.matches(u,&o.headers)) {
                 // An official source's recorded answer (its `Source::e2e`).
                 Some((source,a))=>(a.content_type,fixture(source,a.file)?),

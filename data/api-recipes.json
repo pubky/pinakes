@@ -1224,6 +1224,61 @@
       "expect": "items"
     },
     {
+      "name": "type-jobposting",
+      "summary": "type=JobPosting",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "type": "JobPosting"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "jobposting-remote",
+      "summary": "type=JobPosting&remote=true",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "type": "JobPosting",
+        "remote": "true"
+      },
+      "expect": "items",
+      "labels": {
+        "type": "JobPosting, remote=true",
+        "remote": "true, type=JobPosting"
+      }
+    },
+    {
+      "name": "jobposting-on-site",
+      "summary": "type=JobPosting&remote=false",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "type": "JobPosting",
+        "remote": "false"
+      },
+      "expect": "items",
+      "labels": {
+        "type": "JobPosting, remote=false",
+        "remote": "false, type=JobPosting"
+      }
+    },
+    {
+      "name": "jobposting-closed-too",
+      "summary": "type=JobPosting&closed=true",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "type": "JobPosting",
+        "closed": "true"
+      },
+      "expect": "items",
+      "labels": {
+        "type": "JobPosting, closed=true",
+        "closed": "true, type=JobPosting"
+      }
+    },
+    {
       "name": "q-lugano",
       "summary": "q=lugano",
       "method": "GET",

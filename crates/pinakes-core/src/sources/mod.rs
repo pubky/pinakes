@@ -52,6 +52,7 @@ pub mod gitlab;
 pub mod gleif;
 pub mod google_play;
 pub mod govinfo;
+pub mod greenhouse;
 pub mod hacker_news;
 pub mod huggingface;
 pub mod inaturalist;
@@ -109,6 +110,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &gleif::Gleif,
     &google_play::GooglePlay,
     &govinfo::Govinfo,
+    &greenhouse::Greenhouse,
     &hacker_news::HackerNews,
     &huggingface::HuggingFace,
     &inaturalist::Inaturalist,

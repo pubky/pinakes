@@ -582,6 +582,11 @@ pub struct SearchQuery {
     pub cluster: Option<String>,
     /// Resource ID of the accepted event venue; filters event units.
     pub venue: Option<String>,
+    /// `true`: job postings that may be done remotely; `false`: job postings that may not.
+    pub remote: Option<bool>,
+    /// `true`: job postings past their `validThrough` (closed) are listed too; they are left out
+    /// otherwise.
+    pub closed: Option<bool>,
     /// A list view with one row per group: the matching member with the most references, as its
     /// own card; links in no group stay rows of their own. Not with `cluster`.
     #[param(value_type = Option<CollapseMode>)]
@@ -1187,7 +1192,11 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
             }),
             from: crate::sources::from(d).map(str::to_owned),
             facts: merge_facts(
-                crate::sources::facts(d).or_else(|| crate::resolver::pubky_apps::facts(d)),
+                crate::kinds::facts(
+                    crate::sources::facts(d).or_else(|| crate::resolver::pubky_apps::facts(d)),
+                    d,
+                    Utc::now(),
+                ),
                 facts.clone(),
             ),
             keys: keys.clone(),
@@ -1731,6 +1740,16 @@ pub async fn search(
         // Any of the types, each with its subtypes: a path that holds one of them.
         sql.push(" AND r.type_path && ")
             .push_bind(search_types(types)?);
+    }
+    if let Some(remote) = q.remote {
+        sql.push(" AND r.type_path @> ARRAY['JobPosting'] AND (coalesce(r.doc->'attributes'->>'remote','')='true')=")
+            .push_bind(remote);
+    }
+    if q.closed != Some(true) {
+        // A job posting past its end is closed: listed only on request.
+        sql.push(" AND NOT coalesce(r.type_path @> ARRAY['JobPosting'] AND r.end_at<=")
+            .push_bind(at)
+            .push(",false)");
     }
     for (column, value) in [("r.category", &q.category), ("r.host", &q.host)] {
         if let Some(value) = value {

@@ -1,0 +1,38 @@
+{
+  "greenhouse-anthropic-5183044008": {
+    "bytes": 23776,
+    "content_type": "application/json",
+    "file": "greenhouse-anthropic-5183044008.json",
+    "recorded_at": "2026-10-26T19:25:21+00:00",
+    "sha256": "d20ced32baa17b0a486841d40d98f8573393301f876fe72d8203c7bc74adb785",
+    "status": 200,
+    "url": "https://boards-api.greenhouse.io/v1/boards/anthropic/jobs/5183044008?pay_transparency=true"
+  },
+  "greenhouse-figma-5783812004": {
+    "bytes": 9198,
+    "content_type": "application/json",
+    "file": "greenhouse-figma-5783812004.json",
+    "recorded_at": "2026-10-26T19:25:21+00:00",
+    "sha256": "b5ccc538cdb2acce06c0a346f2abf65c93b9b78e55166943d4c23fd3f234c8db",
+    "status": 200,
+    "url": "https://boards-api.greenhouse.io/v1/boards/figma/jobs/5783812004?pay_transparency=true"
+  },
+  "greenhouse-gitlab-8638232002": {
+    "bytes": 20720,
+    "content_type": "application/json",
+    "file": "greenhouse-gitlab-8638232002.json",
+    "recorded_at": "2026-10-26T19:25:21+00:00",
+    "sha256": "a7f616e8ad6fd08b4e89c962ada3a6b8c278f82198bdc77ce33818e492a8853b",
+    "status": 200,
+    "url": "https://boards-api.greenhouse.io/v1/boards/gitlab/jobs/8638232002?pay_transparency=true"
+  },
+  "greenhouse-missing": {
+    "bytes": 38,
+    "content_type": "application/json",
+    "file": "greenhouse-missing.json",
+    "recorded_at": "2026-10-26T19:25:22+00:00",
+    "sha256": "76fe0d64c21edde1aa258ae01c07a04323d95ab31b21822348d9e3f1f400dffe",
+    "status": 404,
+    "url": "https://boards-api.greenhouse.io/v1/boards/gitlab/jobs/1?pay_transparency=true"
+  }
+}
