@@ -299,6 +299,17 @@ async fn a_deleted_posts_aliases_keep_none_of_its_text(pool: sqlx::PgPool) {
     let (_, read) = call(&app, "GET", &format!("/v1/resources/{id}"), None).await;
     assert_eq!(read["facts"]["author"], "reddit_admin", "{read}");
     assert_eq!(read["type"], "DiscussionForumPosting", "{read}");
+    for (target, path) in [(&id, "/pub/app/tags/a"), (&alias_id, "/pub/app/tags/b")] {
+        sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,'author','tag','news',$2,now())")
+            .bind(target)
+            .bind(path)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let (_, read) = call(&app, "GET", &format!("/v1/resources/{id}"), None).await;
+    assert_eq!(read["aliases"], json!([SUBREDDIT_SPELLING]), "{read}");
+    assert_eq!(read["refs"].as_array().map(Vec::len), Some(2), "{read}");
 
     delete(&pool, &reddit, &resolver, &id, at).await;
     assert_eq!(texts(&pool, &[&id, &alias_id]).await, 0);
@@ -315,6 +326,9 @@ async fn a_deleted_posts_aliases_keep_none_of_its_text(pool: sqlx::PgPool) {
     assert_eq!(read["status"], "missing", "{read}");
     // Not the post's own type either: the one every gone post has.
     assert_eq!(read["type"], "SocialMediaPosting", "{read}");
+    // Nor its spellings, whose links carry its title, in `aliases` or `refs`.
+    assert_eq!(read["aliases"], json!([]), "{read}");
+    assert_eq!(read["refs"], json!([POST]), "{read}");
     assert!(
         read["facts"].as_object().is_none_or(|f| f.is_empty()),
         "{read}"

@@ -160,7 +160,7 @@
             ]
           },
           "refs": {
-            "description": "The links people referenced on Pubky that resolve to this card: its own `uri` and its\n`aliases` that carry references (the 31 most recently referenced), most referenced first\n(counted up to 1,000 each, then by URI), at most 5, normalized as every URI is. A typed\ncard's `uri` is often not a link anyone wrote (`btc:block/…`, `isbn:…`): ask Nexus by\nthese to find the tags (docs/api.md, Joining with Nexus). An occurrence's are its feed's.\nEmpty when nothing references the card.",
+            "description": "The links people referenced on Pubky that resolve to this card: its own `uri` and its\n`aliases` that carry references (the 31 most recently referenced), most referenced first\n(counted up to 1,000 each, then by URI), at most 5, normalized as every URI is. A typed\ncard's `uri` is often not a link anyone wrote (`btc:block/…`, `isbn:…`): ask Nexus by\nthese to find the tags (docs/api.md, Joining with Nexus). An occurrence's are its feed's.\nA gone social post's are its own link's alone.\nEmpty when nothing references the card.",
             "items": {
               "type": "string"
             },
@@ -447,7 +447,7 @@
             ]
           },
           "aliases": {
-            "description": "Other spellings of this link that resolve to it (its aliases), by URI, at most 50. A\npage's own claims (`url`, `@id`, `sameAs`, canonical links) are not aliases and are not\nlisted. The card's `uri` is the canonical one: an alias is answered with its root's card.",
+            "description": "Other spellings of this link that resolve to it (its aliases), by URI, at most 50. A\npage's own claims (`url`, `@id`, `sameAs`, canonical links) are not aliases and are not\nlisted. The card's `uri` is the canonical one: an alias is answered with its root's card.\nA gone social post lists none: a spelling's link can carry the post's title.",
             "items": {
               "type": "string"
             },

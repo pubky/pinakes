@@ -85,7 +85,7 @@ An IMDb title keeps the type its page gives (it can be either).
 | --- | --- |
 | `id` | Resource ID; for an occurrence, the feed's ID |
 | `uri` | The resource URI; for an occurrence, its own URL when it has one, else the feed's. To combine with Nexus, send `uri` and `refs`, and for an occurrence `occurrence.feed_uri` (its own URL was never tagged) |
-| `refs` | The links people referenced on Pubky that resolve to this card, most referenced first (counted up to 1,000 each, then by URI), at most 5: its own `uri` and its aliases that carry references (the 31 most recently referenced), normalized as every URI is. A typed card's `uri` is often a link nobody wrote (`btc:block/…`, `uniprot:…`, `isbn:…`) while people tagged the mempool.space, UniProt or Open Library page: ask Nexus about each of `refs` too and add up the card's tags over them. An occurrence's are its feed's. `[]` when nothing references the card |
+| `refs` | The links people referenced on Pubky that resolve to this card, most referenced first (counted up to 1,000 each, then by URI), at most 5: its own `uri` and its aliases that carry references (the 31 most recently referenced), normalized as every URI is. A typed card's `uri` is often a link nobody wrote (`btc:block/…`, `uniprot:…`, `isbn:…`) while people tagged the mempool.space, UniProt or Open Library page: ask Nexus about each of `refs` too and add up the card's tags over them. An occurrence's are its feed's; a gone social post's, its own link alone. `[]` when nothing references the card |
 | `status` | Fetch health: `ok`, `pending`, `missing`, `unreachable` or `error` |
 | `type`, `type_path` | schema.org type (`MusicEvent`, `Book`, `Place`, …), or one of Pinakes's own types for what schema.org has no class for: `BitcoinBlock`, `BitcoinTransaction`, `BitcoinAddress`, `LightningNode` and `LightningChannel` (not schema.org; each a child of `Thing`); `type_path` is the type's ancestors, root first (`["Thing", "Event", "MusicEvent"]`), the types a `type=` search matches it by |
 | `name`, `description`, `image` | Display metadata; images point to the origin and are never proxied |
@@ -110,7 +110,9 @@ within the hour and is removed once the object is gone.
 A social post found gone (a note, or a post or comment an official-API source reads) keeps
 nothing of itself. Its card is `status: "missing"` with its `uri`, `site` and `from`, and the
 type every gone post has, `SocialMediaPosting`, whatever the post was (a Reddit thread, a TikTok
-video): no name, description, image or facts, no also-on links and no change history.
+video): no name, description, image or facts, no also-on links and no change history. Its read
+lists no `aliases`, and its `refs` name its own link alone: a spelling's link can carry the post's
+title.
 
 ### Resource read
 
