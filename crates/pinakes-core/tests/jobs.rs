@@ -505,3 +505,93 @@ async fn a_workplace_is_never_in_another_region_or_postal_region(pool: PgPool) {
     }
     server.abort();
 }
+
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_one_line_place_is_compared_by_its_region_code_and_postcode(pool: PgPool) {
+    // Each town has one settlement. A state's or province's code after the town contradicts
+    // one in another country or with another code; a qualifier ("EU", "HQ") or a district's
+    // number is no region or postcode.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = Router::new().route(
+        "/search",
+        get(|Query(q): Query<HashMap<String, String>>| async move {
+            let town = q["q"].split(',').next().unwrap().to_owned();
+            let (id, country, code, region, postcode) = match town.as_str() {
+                "London" => (11, "United Kingdom", "gb", "GB-ENG", "SW1A 1AA"),
+                "Berlin" => (12, "Germany", "de", "DE-BE", "10117"),
+                "New York" => (13, "United States", "us", "US-NY", "10001"),
+                "Ho Chi Minh City" => (14, "Vietnam", "vn", "VN-SG", "70000"),
+                "Toronto" => (15, "Canada", "ca", "CA-ON", "M5H 2N2"),
+                "Perth" => (16, "Australia", "au", "AU-WA", "6000"),
+                other => panic!("asked for {other}"),
+            };
+            let mut hit = settlement(id, &town, country, code);
+            hit["address"]["ISO3166-2-lvl4"] = region.into();
+            hit["address"]["postcode"] = postcode.into();
+            axum::Json(json!([hit]))
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let service = pinakes_core::event::service::EventService {
+        pool: pool.clone(),
+        config: EventConfig {
+            geocode_score: 0.5,
+            ..Default::default()
+        },
+        osm: Arc::new(
+            OsmResolver::new(
+                pool.clone(),
+                OsmConfig {
+                    nominatim_url: format!("http://{addr}"),
+                    requests_per_second: 1000.0,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        ),
+    };
+    let placed = |line: &str| {
+        let service = &service;
+        let line = line.to_owned();
+        async move {
+            let base: url::Url = "https://jobs.example/p".parse().unwrap();
+            let mut doc = ResourceMeta::new(base.as_str(), "jsonld", 3600);
+            pinakes_core::kinds::jobs::from_jsonld(
+                &json!({"@type": "JobPosting", "title": "Role",
+                    "jobLocation": {"address": {"addressLocality": line}}}),
+                &base,
+            )
+            .apply(&mut doc);
+            service.workplace(&mut doc).await.unwrap();
+            doc.event.venue.unwrap().osm_id
+        }
+    };
+    for line in [
+        "London, ON N6A 3K7",
+        "London, ON",
+        "Toronto, NY",
+        "Perth, TX",
+        "New York, NY 90210",
+        "Berlin, 20095",
+        "Perth, WA 2000",
+    ] {
+        assert_eq!(placed(line).await, None, "{line}");
+    }
+    for (line, id) in [
+        ("Berlin, EU", 12),
+        ("New York, HQ", 13),
+        ("Ho Chi Minh City, District 1", 14),
+        ("Ho Chi Minh City, 2nd floor", 14),
+        ("Berlin, DE", 12),
+        ("Toronto, CA", 15),
+        ("Toronto, ON M5H 2N2", 15),
+        ("Perth, WA", 16),
+        ("New York, NY 10001, US", 13),
+        ("London, UK", 11),
+        ("London, England", 11),
+    ] {
+        assert_eq!(placed(line).await, Some(format!("relation/{id}")), "{line}");
+    }
+    server.abort();
+}

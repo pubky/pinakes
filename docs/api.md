@@ -991,8 +991,10 @@ described by the start of its text, as plain text.
   Nominatim finds exactly one settlement of that name (and country, when the posting names one),
   in no other region (state, by name or ISO code) and postal region (a numeric postcode's first
   digit) than the posting names. A one-line place ("Springfield, IL", "Austin, TX 78701") is
-  checked the same way for the region code and postcode after its town; a region named there in
-  full is left to Nominatim, which reads the whole line. The card's `point` is then that place's,
+  checked too: a US state's, Canadian province's or Australian state's code after the town must
+  be the settlement's ("London, ON" is not London, England), and a numeric postcode there (four
+  digits or more, or three and two: "114 55") its postal region. Other words after a town ("UK",
+  "EU", "HQ", "District 1", a region in full) are left to Nominatim, which reads the whole line. The card's `point` is then that place's,
   with OpenStreetMap's attribution.
 - A posting is remote when its `jobLocationType` is `TELECOMMUTE` or its place says "Remote"
   ("Remote - US"); it then names the regions it accepts applicants from
