@@ -1001,8 +1001,8 @@ counts by status.
   characters; unlisted content is omitted.
 - **Media**: oEmbed (`media.oembed`) and page JSON-LD, which wins when healthy, except over a
   provider whose scheme names the link exactly (YouTube's `watch` and `shorts`) or any matching
-  provider under `"always"`: their title, author and thumbnail come first. An oEmbed answer
-  survives a failed or truncated page. Podcast types need a namespace or an audio/video
+  provider under `"always"`: their title, author and thumbnail come first. A blank field in an
+  answer is no value, so the page's stays. An oEmbed answer survives a failed or truncated page. Podcast types need a namespace or an audio/video
   enclosure; plain RSS is a DataFeed. Direct podcast feeds are PodcastSeries; `?guid=` or the
   episode page's RSS link selects an episode. A feed longer than the page cap is read up to its
   last whole item within the first megabyte (the newest come first), so an episode past that is
