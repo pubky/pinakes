@@ -28,7 +28,9 @@ forum says does not exist is `missing`.
 
 A topic is a `DiscussionForumPosting` named by its title and described by the start of its first
 post, with its image; a post after the first is a `Comment` ("Comment on “…”"). `site` is the
-forum's host.
+forum's host. A topic its asker marked solved (the Solved plugin's `accepted_answers`) is a
+`Question` ([Questions](../api.md#questions)) with the link to its first accepted answer and its
+number of replies.
 
 | Fact | Meaning |
 | --- | --- |
@@ -36,8 +38,10 @@ forum's host.
 | `published` | RFC 3339 |
 | `post_count`, `tags` | For a topic |
 | `thread` | For a post, its topic |
+| `accepted_answer`, `answer_count` | For a solved topic: the accepted answer's address and the replies |
 
 ## Examples
 
 - `https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304`
 - `https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304/2` (a reply)
+- `https://meta.discourse.org/t/how-to-clear-missing-unread-messages/413333` (a solved topic)

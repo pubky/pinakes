@@ -166,6 +166,31 @@ pub fn topic_card(
         doc.set_type("DiscussionForumPosting");
         doc.name = Some(title);
         doc.image = text(&v["image_url"]).filter(|u| web_url(u).is_some());
+        // A topic its asker marked solved (the Solved plugin) is a question with its answer.
+        if let Some(answer) = v["accepted_answers"].as_array().and_then(|a| a.first()) {
+            doc.set_type(crate::kinds::questions::TYPE);
+            let link = text(&answer["url"])
+                .filter(|u| u.starts_with("/t/"))
+                .map(|u| format!("https://{host}{u}"))
+                .or_else(|| {
+                    answer["post_number"]
+                        .as_u64()
+                        .map(|n| root(host, &slug, id, Some(n)))
+                });
+            for (key, value) in [
+                ("accepted_answer", link),
+                (
+                    "answer_count",
+                    v["posts_count"]
+                        .as_u64()
+                        .map(|n| n.saturating_sub(1).to_string()),
+                ),
+            ] {
+                if let Some(value) = value {
+                    doc.attributes.insert(key.into(), value);
+                }
+            }
+        }
     }
     doc.description = shown
         .and_then(|p| text(&p["cooked"]))
@@ -263,7 +288,16 @@ impl Source for Discourse {
         Target::of_uri(uri).is_some_and(|t| FORUMS.get(t.host()) != Some(false))
     }
     fn facts(&self) -> &'static [&'static str] {
-        &["author", "published", "post_count", "tags", "thread"]
+        &[
+            "author",
+            "published",
+            "post_count",
+            "tags",
+            "thread",
+            // A solved topic's (`kinds::questions`).
+            "accepted_answer",
+            "answer_count",
+        ]
     }
     fn social(&self, _doc: &ResourceMeta) -> bool {
         true
@@ -277,6 +311,10 @@ impl Source for Discourse {
             Example {
                 uri: "https://delvingbitcoin.org/t/unspendable-keys-in-descriptors/304/2",
                 card_type: "Comment",
+            },
+            Example {
+                uri: "https://meta.discourse.org/t/how-to-clear-missing-unread-messages/413333",
+                card_type: "Question",
             },
         ]
     }
@@ -391,6 +429,36 @@ mod tests {
             );
             assert!(answer.is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_solved_topic_is_a_question_with_its_answer() {
+        let host = "meta.discourse.org";
+        let doc = topic_card(
+            ResourceMeta::new("https://meta.discourse.org/t/413333", "discourse", 3600),
+            host,
+            413333,
+            None,
+            200,
+            &read("topic-meta-413333.json"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(doc.type_name, "Question");
+        assert_eq!(
+            doc.name.as_deref(),
+            Some("How to clear missing unread messages?")
+        );
+        assert_eq!(
+            doc.attributes["accepted_answer"],
+            "https://meta.discourse.org/t/how-to-clear-missing-unread-messages/413333/2"
+        );
+        assert_eq!(doc.attributes["answer_count"], "4");
+        // A topic nobody marked solved stays a discussion.
+        let doc = topic_card(base(), HOST, 304, None, 200, &read("topic-304.json"))
+            .unwrap()
+            .unwrap();
+        assert!(!doc.attributes.contains_key("accepted_answer"));
     }
 
     #[test]

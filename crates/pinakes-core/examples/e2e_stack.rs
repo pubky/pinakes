@@ -98,6 +98,8 @@ impl Fixture {
             // A shop's product page: its barcode and offer (the barcode's key is an also-on
             // source's, which this run does not run).
             {"kind":"shop_product","uri":"https://shop.example/e2e/nutella","type":"Product","facts":{"gtin":"3017620422003","price_currency":"CHF","availability":"in_stock"}},
+            // A Q&A page's question, its answers and the accepted one.
+            {"kind":"qa_question","uri":"https://qa.example/e2e/q/1","type":"Question","facts":{"answer_count":"2","accepted_answer":"https://qa.example/e2e/q/1#a2"}},
         ]);
         // A sample that needs an also-on source (`needs`) runs only in a build that has it.
         let (kept, skipped) = by_needs(
@@ -150,6 +152,7 @@ impl Dns for FixtureDns {
                 | "web.example"
                 | "jobs.example"
                 | "shop.example"
+                | "qa.example"
         ) || source_answers().any(|(_, a)| a.host == host)
         {
             "93.184.216.34"
@@ -176,6 +179,7 @@ impl Transport for Fixture {
             "openlibrary.org"=>("application/json",json!({"ISBN:9780140328721":{"title":"Matilda","authors":[{"name":"Roald Dahl"}],"url":"https://openlibrary.org/books/OL7353617M/Matilda","key":"/books/OL7353617M"},"ISBN:0140328726":{"title":"Matilda","authors":[{"name":"Roald Dahl"}],"url":"https://openlibrary.org/books/OL7353617M/Matilda","key":"/books/OL7353617M"}}).to_string()),
             "www.youtube.com"=>("application/json",json!({"type":"video","title":"Fixture video","thumbnail_url":"https://image.example/a.jpg"}).to_string()),
             "web.example"=>("text/html","<title>Fixture page</title>".into()),
+            "qa.example"=>("text/html",format!("<script type='application/ld+json'>{}</script>",json!({"@type":"QAPage","mainEntity":{"@type":"Question","name":"Fixture question?","text":"Why is the fixture blue?","answerCount":2,"upvoteCount":5,"author":{"@type":"Person","name":"Fixture asker"},"acceptedAnswer":{"@type":"Answer","url":"https://qa.example/e2e/q/1#a2","text":"Because."}}}))),
             "shop.example"=>("text/html",format!("<script type='application/ld+json'>{}</script>",json!({"@type":"Product","name":"Nutella 400 g","gtin13":"3017620422003","brand":{"@type":"Brand","name":"Ferrero"},"offers":{"@type":"Offer","price":"4.95","priceCurrency":"CHF","availability":"https://schema.org/InStock"}}))),
             "jobs.example" if u.path()=="/e2e/remote"=>("text/html",format!("<script type='application/ld+json'>{}</script>",json!({"@type":"JobPosting","title":"Fixture remote engineer","datePosted":(self.start-chrono::Duration::days(14)).format("%Y-%m-%d").to_string(),"hiringOrganization":{"@type":"Organization","name":"Fixture Co"},"jobLocationType":"TELECOMMUTE","applicantLocationRequirements":{"@type":"AdministrativeArea","name":"Europe"}}))),
             "jobs.example"=>("text/html",format!("<script type='application/ld+json'>{}</script>",json!({"@type":"JobPosting","title":"Fixture barista","datePosted":(self.start-chrono::Duration::days(14)).format("%Y-%m-%d").to_string(),"employmentType":"PART_TIME","hiringOrganization":{"@type":"Organization","name":"Fixture Co"},"jobLocation":{"@type":"Place","address":{"@type":"PostalAddress","streetAddress":"1 Main Street","addressLocality":"Zurich","postalCode":"8000","addressCountry":"CH"}}}))),
