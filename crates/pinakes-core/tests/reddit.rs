@@ -543,3 +543,47 @@ async fn a_failed_refresh_of_a_gone_post_brings_nothing_back(pool: sqlx::PgPool)
     assert_eq!(texts(&pool, &[&id, &alias_id]).await, 0);
     assert_eq!(pinakes_core::changes::scrub_stored(&pool).await.unwrap(), 0);
 }
+
+/// A post with more spellings than one statement names (500) has every one scrubbed.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn the_repair_scrubs_every_spelling_of_a_post_with_many(pool: sqlx::PgPool) {
+    if pinakes_core::sources::by_name("reddit").is_none() {
+        return;
+    }
+    let (_, _, id, _) = post(&pool).await;
+    sqlx::query("UPDATE resource SET status='missing',doc=jsonb_set(doc,'{status}','\"missing\"') WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // 1,201 spellings with the post's full card, as a build before the scrub left them.
+    sqlx::query("INSERT INTO resource(id,uri,name,doc) SELECT md5('spelling'||n),$2||'?n='||n,r.name,r.doc FROM resource r, generate_series(1,1201) n WHERE r.id=$1")
+        .bind(&id)
+        .bind(POST)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) SELECT md5('spelling'||n),$1,'identifier' FROM generate_series(1,1201) n")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let spellings: Vec<String> =
+        sqlx::query_scalar("SELECT alias_id FROM resource_alias WHERE root_id=$1")
+            .bind(&id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let ids: Vec<&str> = spellings.iter().map(String::as_str).collect();
+    assert!(texts(&pool, &ids).await >= 1201);
+
+    assert_eq!(pinakes_core::changes::scrub_stored(&pool).await.unwrap(), 1);
+    assert_eq!(texts(&pool, &ids).await, 0);
+    let kept: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM resource WHERE id=ANY($1) AND doc<>'{}'::jsonb")
+            .bind(&spellings)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(kept, 0);
+}

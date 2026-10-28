@@ -99,6 +99,8 @@ async fn unqueue_also_on(tx: &mut Transaction<'_, Postgres>, id: &str) -> Result
         .await?;
     Ok(())
 }
+/// The most spellings one statement of `scrub_spellings` names.
+const SPELLINGS_PER_STATEMENT: usize = 500;
 /// Delete what spellings of a scrubbed post (`scrubbed`) kept of it, as when they were saved
 /// before they became its aliases: every change line but the `aliased` one naming its root,
 /// their stored cards (`{}`, as an OSM spelling's; an alias's card is never served, its root's
@@ -108,21 +110,23 @@ pub(crate) async fn scrub_spellings(
     tx: &mut Transaction<'_, Postgres>,
     ids: &[String],
 ) -> Result<u64> {
-    if ids.is_empty() {
-        return Ok(0);
-    }
-    let lines =
-        sqlx::query("DELETE FROM resource_change WHERE class<>'aliased' AND resource_id=ANY($1)")
-            .bind(ids)
-            .execute(&mut **tx)
-            .await?
-            .rows_affected();
-    let cards = sqlx::query("UPDATE resource SET name=NULL,category=NULL,point=NULL,doc='{}'::jsonb WHERE id=ANY($1) AND (doc<>'{}'::jsonb OR name IS NOT NULL)")
+    let mut changed = 0;
+    for ids in ids.chunks(SPELLINGS_PER_STATEMENT) {
+        changed += sqlx::query(
+            "DELETE FROM resource_change WHERE class<>'aliased' AND resource_id=ANY($1)",
+        )
         .bind(ids)
         .execute(&mut **tx)
         .await?
         .rows_affected();
-    Ok(lines + cards + forget_derived(tx, ids).await?)
+        changed += sqlx::query("UPDATE resource SET name=NULL,category=NULL,point=NULL,doc='{}'::jsonb WHERE id=ANY($1) AND (doc<>'{}'::jsonb OR name IS NOT NULL)")
+            .bind(ids)
+            .execute(&mut **tx)
+            .await?
+            .rows_affected();
+        changed += forget_derived(tx, ids).await?;
+    }
+    Ok(changed)
 }
 fn cancelled(v: &Value) -> bool {
     v["status"] == "missing" || v["event_status"] == "cancelled"
