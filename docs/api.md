@@ -982,10 +982,15 @@ described by the start of its text, as plain text.
   page's own coordinates; else, with a street, the address geocoded; else the town, when
   Nominatim finds exactly one settlement of that name (and country, when the posting names one),
   in no other region (state, by name or ISO code) and postal region (a numeric postcode's first
-  digit) than the posting names. The card's `point` is then that place's, with OpenStreetMap's attribution.
+  digit) than the posting names. A one-line place ("Springfield, IL", "Austin, TX 78701") is
+  checked the same way for the region code and postcode after its town; a region named there in
+  full is left to Nominatim, which reads the whole line. The card's `point` is then that place's,
+  with OpenStreetMap's attribution.
 - A posting is remote when its `jobLocationType` is `TELECOMMUTE` or its place says "Remote"
   ("Remote - US"); it then names the regions it accepts applicants from
-  (`applicantLocationRequirements`), up to 32. A posting can be remote and have a workplace.
+  (`applicantLocationRequirements`, or those its place names after "Remote"), up to 32. A place
+  is read from its first 1,024 bytes; a region the cut falls in is left out. A posting can be
+  remote and have a workplace.
 
 | Fact | Meaning |
 | --- | --- |
