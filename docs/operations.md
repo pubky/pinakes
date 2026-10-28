@@ -154,7 +154,13 @@ classify to several routes (a Reddit comment's link to `media`, a LinkedIn post'
 `official`). The selected rows' [also-on](#also-on) lookups are
 queued too: a card that comes back unchanged would not run them again, so results read by an
 older version would stay until they expire. `reextract also-on` queues every resource's also-on
-lookups without re-reading any card; it can be combined with routes.
+lookups without re-reading any card; it can be combined with routes. Every run first scrubs
+what rows stored before a scrub ran still keep of a social post that is gone or whose author
+opted out, even when its refetch keeps failing. A gone post's card keeps nothing of the post
+(only its link, type, source, status and times), its change lines and also-on results are
+deleted, and it is regrouped. An opted-out post's lines lose their documents. The aliases of
+either keep only their `aliased` line: their cards, other lines and also-on results are deleted.
+It prints `scrubbed N posts gone or opted out`, then the re-queued count.
 
 **Dead letters.** To retry one by hand:
 

@@ -466,6 +466,87 @@ pub async fn save(
     crate::groups::reconcile(pool, id, &cfg.groups).await;
     Ok(())
 }
+/// Scrub what rows stored before a scrub ran still keep of posts gone or opted out
+/// (`scrubbed`), in batches of 500 roots, as a save would have: a gone post's change lines and
+/// also-on results are deleted, its card becomes `gone_card` and it is regrouped; an opted-out
+/// post's lines lose their documents (its card stays, as a save leaves it); either one's aliases
+/// keep nothing of it (`scrub_spellings`). Run by `pinakesd reextract`, as a post whose refetch
+/// fails never reaches `save`. The posts it changed.
+pub async fn scrub_stored(pool: &PgPool) -> Result<u64> {
+    let (mut last, mut scrubbed_posts) = (String::new(), 0u64);
+    loop {
+        let rows: Vec<(String, Value)> = sqlx::query_as("SELECT r.id,r.doc FROM resource r WHERE r.id>$1 AND (r.status='missing' OR r.doc->'attributes'->>'opted_out'='true') AND NOT EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id) ORDER BY r.id LIMIT 500")
+            .bind(&last)
+            .fetch_all(pool)
+            .await?;
+        let Some((end, _)) = rows.last() else {
+            return Ok(scrubbed_posts);
+        };
+        last = end.clone();
+        let scrubbed_doc = |doc: Value| {
+            serde_json::from_value::<ResourceMeta>(doc)
+                .ok()
+                .filter(scrubbed)
+        };
+        for (id, doc) in rows {
+            if scrubbed_doc(doc).is_none() {
+                continue;
+            }
+            let mut tx = pool.begin().await?;
+            crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+            crate::alias::lock(&mut tx).await?;
+            // Read again under its lock: a save may have revived it since.
+            let doc: Option<Value> =
+                sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1 FOR UPDATE")
+                    .bind(&id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            let Some(doc) = doc.and_then(scrubbed_doc) else {
+                continue;
+            };
+            let ids = [id.clone()];
+            let mut changed = if opted_out(&doc) {
+                sqlx::query("UPDATE resource_change SET before=NULL,after=NULL WHERE resource_id=$1 AND (before IS NOT NULL OR after IS NOT NULL)")
+                    .bind(&id)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected()
+            } else {
+                let lines = sqlx::query("DELETE FROM resource_change WHERE resource_id=$1")
+                    .bind(&id)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected();
+                let kept = serde_json::to_value(gone_card(&doc))?;
+                let card = sqlx::query("UPDATE resource SET name=NULL,category=NULL,point=NULL,doc=$2 WHERE id=$1 AND (doc IS DISTINCT FROM $2 OR name IS NOT NULL)")
+                    .bind(&id)
+                    .bind(&kept)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected();
+                let derived = forget_derived(&mut tx, &ids).await?;
+                if card + derived > 0 {
+                    // Its group was formed from the card it no longer has.
+                    sqlx::query(
+                        "INSERT INTO group_dirty(resource_id) VALUES($1) ON CONFLICT DO NOTHING",
+                    )
+                    .bind(&id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                lines + card + derived
+            };
+            let aliases: Vec<String> =
+                sqlx::query_scalar("SELECT alias_id FROM resource_alias WHERE root_id=$1")
+                    .bind(&id)
+                    .fetch_all(&mut *tx)
+                    .await?;
+            changed += scrub_spellings(&mut tx, &aliases).await?;
+            tx.commit().await?;
+            scrubbed_posts += u64::from(changed > 0);
+        }
+    }
+}
 /// Delete resources orphaned for `grace_days`. A derived child's grace counts from its link's
 /// expiry, not from its creation: a lapsed link (a calendar that failed for a day, an event link
 /// past its cap) keeps its child, and its row for a later revival, through the same grace.

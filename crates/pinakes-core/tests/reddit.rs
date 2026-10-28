@@ -354,3 +354,77 @@ async fn a_spelling_that_joins_a_deleted_post_keeps_none_of_its_text(pool: sqlx:
         (vec!["aliased".to_owned()], json!({}))
     );
 }
+
+/// Rows stored before the scrub ran (a gone post whose card, history and also-on facts stayed,
+/// an alias with its own full card and history) are scrubbed by the repair `pinakesd reextract`
+/// runs, even though the post is never fetched again: the post keeps nothing of itself and is
+/// regrouped, the alias only its line naming the post. A missing page that is no social post
+/// keeps its card, and a second run changes nothing.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn the_repair_scrubs_posts_stored_before_their_scrub(pool: sqlx::PgPool) {
+    if pinakes_core::sources::by_name("reddit").is_none() {
+        return;
+    }
+    let (_, _, id, at) = post(&pool).await;
+    let alias_id = spelling(&pool, SUBREDDIT_SPELLING, at - 1).await;
+    // The post's deletion as an earlier build stored it: missing, with its card and history.
+    sqlx::query("UPDATE resource SET status='missing',doc=jsonb_set(doc,'{status}','\"missing\"') WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let page = store::ensure_resource(&pool, "https://example.org/gone-page")
+        .await
+        .unwrap();
+    let mut gone_page = ResourceMeta::new("https://example.org/gone-page", "web", 3600);
+    gone_page.name = Some("A page that is gone".into());
+    gone_page.status = Status::Missing;
+    sqlx::query("UPDATE resource SET status='missing',name=$2,doc=$3 WHERE id=$1")
+        .bind(&page)
+        .bind(&gone_page.name)
+        .bind(serde_json::to_value(&gone_page).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    // What an also-on lookup found for it.
+    sqlx::query("INSERT INTO resource_fact(resource_id,name,value,source,expires_at) VALUES($1,'title','Reddit''s 2025 Transparency Report','titles',now()+interval '1 day')")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(texts(&pool, &[&id, &alias_id]).await > 2);
+
+    assert_eq!(pinakes_core::changes::scrub_stored(&pool).await.unwrap(), 1);
+    let facts: i64 = sqlx::query_scalar("SELECT count(*) FROM resource_fact WHERE resource_id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(facts, 0);
+    let regroup: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM group_dirty WHERE resource_id=$1)")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(regroup);
+    assert_eq!(
+        left_of_alias(&pool, &alias_id).await,
+        (vec!["aliased".to_owned()], json!({}))
+    );
+    assert_eq!(texts(&pool, &[&id, &alias_id]).await, 0);
+    let attributes: Value =
+        sqlx::query_scalar("SELECT doc->'attributes' FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(attributes, json!({}));
+    let name: Option<String> = sqlx::query_scalar("SELECT name FROM resource WHERE id=$1")
+        .bind(&page)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(name.as_deref(), Some("A page that is gone"));
+    assert_eq!(pinakes_core::changes::scrub_stored(&pool).await.unwrap(), 0);
+}

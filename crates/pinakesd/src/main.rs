@@ -53,6 +53,8 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
     let _ = api::openapi_document();
     let instance_lock = pinakes_core::locks::own_database(&pool).await?;
     if let Some(routes) = reextract {
+        let scrubbed = pinakes_core::changes::scrub_stored(&pool).await?;
+        println!("scrubbed {scrubbed} posts gone or opted out");
         let requeued = queue::reextract(&pool, &routes).await?;
         println!("re-queued {requeued} resources");
         return Ok(());
