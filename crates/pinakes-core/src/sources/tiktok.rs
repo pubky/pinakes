@@ -178,7 +178,7 @@ impl Source for TikTok {
     }
     /// A video's card quotes its author's caption (`title`).
     fn social(&self, doc: &ResourceMeta) -> bool {
-        doc.type_name == "VideoObject"
+        doc.type_name == "VideoObject" || crate::changes::gone_post_type(doc)
     }
     fn examples(&self) -> &'static [Example] {
         &[

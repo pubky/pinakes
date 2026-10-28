@@ -159,7 +159,8 @@ what rows stored before a scrub ran still keep of a social post that is gone or 
 opted out, even when its refetch keeps failing. A post is gone when its stored card says
 `missing`, whatever status a failed refresh gave its row since, and a gone post is treated as
 gone even when its author had opted out. A gone post's card keeps nothing of the post
-(only its link, type, source, status and times), its change lines and also-on results are
+(only its link, source, status and times, and the one type every gone post has,
+`SocialMediaPosting`), its change lines and also-on results are
 deleted, and it is regrouped. An opted-out post's lines lose their documents. The aliases of
 either keep only their `aliased` line: their cards, other lines and also-on results are deleted.
 It prints `scrubbed N posts gone or opted out`, then the re-queued count.

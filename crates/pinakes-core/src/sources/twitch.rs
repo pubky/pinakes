@@ -197,7 +197,7 @@ impl Source for Twitch {
     }
     /// A video's title is its creator's own text, as a TikTok's or a reel's is.
     fn social(&self, doc: &ResourceMeta) -> bool {
-        doc.type_name == "VideoObject"
+        doc.type_name == "VideoObject" || crate::changes::gone_post_type(doc)
     }
     fn e2e(&self) -> Option<super::E2e> {
         use super::{E2e, E2eAnswer, E2eSample};

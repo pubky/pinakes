@@ -50,14 +50,21 @@ pub(crate) fn gone_social(doc: &ResourceMeta) -> bool {
 pub(crate) fn scrubbed(doc: &ResourceMeta) -> bool {
     opted_out(doc) || gone_social(doc)
 }
+/// The one type of every gone social post's card, whatever the post was (owner decision,
+/// 2026-10-28): its type was the post's read too.
+pub const GONE_POST_TYPE: &str = "SocialMediaPosting";
+/// Whether `doc` has a gone social post's own type (`gone_card`): each source's social rule
+/// accepts it, so the card stays known as a gone social post.
+pub(crate) fn gone_post_type(doc: &ResourceMeta) -> bool {
+    doc.status == Status::Missing && doc.type_name == GONE_POST_TYPE
+}
 /// What a gone social post's card keeps: nothing of the post. Only its link (URL, site, the
-/// service the URL names), the source that read it, its type, its status and when it was last
-/// read. The type and source are what keep it known as a gone social post (`cards::social`
-/// reads only those), so a spelling that joins it later is scrubbed too (`alias::assign`).
+/// service the URL names), the source that read it, its status and when it was last read, with
+/// the one type every gone post has (`GONE_POST_TYPE`). The source and that type are what keep
+/// it known as a gone social post (`cards::social` reads only those), so a spelling that joins
+/// it later is scrubbed too (`alias::assign`).
 pub(crate) fn gone_card(doc: &ResourceMeta) -> ResourceMeta {
-    ResourceMeta {
-        type_name: doc.type_name.clone(),
-        type_path: doc.type_path.clone(),
+    let mut card = ResourceMeta {
         url: doc.url.clone(),
         site: doc.site.clone(),
         service: doc.service.clone(),
@@ -66,7 +73,9 @@ pub(crate) fn gone_card(doc: &ResourceMeta) -> ResourceMeta {
         ttl_secs: doc.ttl_secs,
         status: doc.status.clone(),
         ..Default::default()
-    }
+    };
+    card.set_type(GONE_POST_TYPE);
+    card
 }
 /// Delete what the also-on lookups of `ids` found from their cards: facts, keys and links. The
 /// rows deleted.
@@ -524,10 +533,13 @@ pub async fn scrub_stored(pool: &PgPool) -> Result<u64> {
                     .execute(&mut *tx)
                     .await?
                     .rows_affected();
-                let kept = serde_json::to_value(gone_card(&doc))?;
-                let card = sqlx::query("UPDATE resource SET name=NULL,category=NULL,point=NULL,doc=$2 WHERE id=$1 AND (doc IS DISTINCT FROM $2 OR name IS NOT NULL)")
+                let card = gone_card(&doc);
+                let kept = serde_json::to_value(&card)?;
+                let card = sqlx::query("UPDATE resource SET type=$3,type_path=$4,name=NULL,category=NULL,point=NULL,start_at=NULL,end_at=NULL,venue_id=NULL,doc=$2 WHERE id=$1 AND (doc IS DISTINCT FROM $2 OR name IS NOT NULL OR type IS DISTINCT FROM $3)")
                     .bind(&id)
                     .bind(&kept)
+                    .bind(&card.type_name)
+                    .bind(&card.type_path)
                     .execute(&mut *tx)
                     .await?
                     .rows_affected();
@@ -669,6 +681,50 @@ async fn retain_occurrences(pool: &PgPool) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Every social card, of every type its source gives, has the one gone type once gone and
+    /// stays known as a gone social post, so a spelling that joins it later is scrubbed.
+    #[test]
+    fn a_gone_social_card_has_one_type_and_stays_social() {
+        let mut cards: Vec<ResourceMeta> = crate::sources::REGISTRY
+            .iter()
+            .flat_map(|source| {
+                source.examples().iter().map(|example| {
+                    let mut doc = ResourceMeta::new(example.uri, source.name(), 3600);
+                    doc.set_type(example.card_type);
+                    doc
+                })
+            })
+            .collect();
+        for (source, type_name) in [
+            ("nostr", "Article"),
+            ("activitypub", "CreativeWork"),
+            ("pubky", "SocialMediaPosting"),
+        ] {
+            let mut doc = ResourceMeta::new("https://example.social/1", source, 3600);
+            doc.set_type(type_name);
+            cards.push(doc);
+        }
+        let mut social = Vec::new();
+        for mut doc in cards.into_iter().filter(crate::resolver::cards::social) {
+            doc.name = Some("A post".into());
+            doc.status = Status::Missing;
+            let gone = gone_card(&doc);
+            assert_eq!(
+                (gone.type_name.as_str(), gone.name.as_deref()),
+                (GONE_POST_TYPE, None),
+                "{}",
+                doc.url
+            );
+            assert!(
+                gone_social(&gone),
+                "{} {} once gone",
+                doc.source,
+                doc.type_name
+            );
+            social.push(doc.type_name);
+        }
+        assert!(social.iter().any(|t| t == "VideoObject"), "{social:?}");
+    }
     #[test]
     fn normalized_diff_classes_and_fetch_noise() {
         let mut before = ResourceMeta::new("https://example.org", "web", 10);

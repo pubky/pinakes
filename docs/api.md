@@ -107,6 +107,11 @@ description from a content-like member (`content`, `text`): such a card is a
 `SocialMediaPosting`, social content like a note, with a 200-character excerpt that refreshes
 within the hour and is removed once the object is gone.
 
+A social post found gone (a note, or a post or comment an official-API source reads) keeps
+nothing of itself. Its card is `status: "missing"` with its `uri`, `site` and `from`, and the
+type every gone post has, `SocialMediaPosting`, whatever the post was (a Reddit thread, a TikTok
+video): no name, description, image or facts, no also-on links and no change history.
+
 ### Resource read
 
 `GET /v1/resources/{id}`, `GET /v1/resources/by-uri` and `POST /v1/resolve` return the card with

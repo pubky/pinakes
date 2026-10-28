@@ -298,6 +298,7 @@ async fn a_deleted_posts_aliases_keep_none_of_its_text(pool: sqlx::PgPool) {
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (_, read) = call(&app, "GET", &format!("/v1/resources/{id}"), None).await;
     assert_eq!(read["facts"]["author"], "reddit_admin", "{read}");
+    assert_eq!(read["type"], "DiscussionForumPosting", "{read}");
 
     delete(&pool, &reddit, &resolver, &id, at).await;
     assert_eq!(texts(&pool, &[&id, &alias_id]).await, 0);
@@ -312,6 +313,8 @@ async fn a_deleted_posts_aliases_keep_none_of_its_text(pool: sqlx::PgPool) {
     let (code, read) = call(&app, "GET", &format!("/v1/resources/{id}"), None).await;
     assert_eq!(code, 200, "{read}");
     assert_eq!(read["status"], "missing", "{read}");
+    // Not the post's own type either: the one every gone post has.
+    assert_eq!(read["type"], "SocialMediaPosting", "{read}");
     assert!(
         read["facts"].as_object().is_none_or(|f| f.is_empty()),
         "{read}"
@@ -426,6 +429,26 @@ async fn the_repair_scrubs_posts_stored_before_their_scrub(pool: sqlx::PgPool) {
         .await
         .unwrap();
     assert_eq!(name.as_deref(), Some("A page that is gone"));
+    assert_eq!(pinakes_core::changes::scrub_stored(&pool).await.unwrap(), 0);
+
+    // A gone card that kept the post's type, as the build before the one gone type stored it,
+    // takes that type.
+    let types = || {
+        sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            "SELECT type,doc->>'type' FROM resource WHERE id=$1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+    };
+    let gone = Some("SocialMediaPosting".to_owned());
+    assert_eq!(types().await.unwrap(), (gone.clone(), gone.clone()));
+    sqlx::query("UPDATE resource SET type='DiscussionForumPosting',type_path=ARRAY['Thing','CreativeWork','Article','SocialMediaPosting','DiscussionForumPosting'],doc=doc||'{\"type\":\"DiscussionForumPosting\",\"type_path\":[\"Thing\",\"CreativeWork\",\"Article\",\"SocialMediaPosting\",\"DiscussionForumPosting\"]}' WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(pinakes_core::changes::scrub_stored(&pool).await.unwrap(), 1);
+    assert_eq!(types().await.unwrap(), (gone.clone(), gone));
     assert_eq!(pinakes_core::changes::scrub_stored(&pool).await.unwrap(), 0);
 }
 
