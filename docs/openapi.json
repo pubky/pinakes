@@ -159,6 +159,13 @@
               }
             ]
           },
+          "refs": {
+            "description": "The links people referenced on Pubky that resolve to this card: its own `uri` and its\n`aliases` that carry references, most referenced first (counted up to\n1,000 each, then by URI), at most 5, normalized as every URI is. A typed card's `uri` is often not a link anyone wrote\n(`btc:block/…`, `isbn:…`): ask Nexus by these to find the tags (docs/api.md, Joining\nwith Nexus). An occurrence's are its feed's. Empty when nothing references the card.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "site": {
             "description": "The publishing site: the app for `pubky://` objects (e.g. `loopky`); the service a\nlink's URL names (`Apple Music`, `Wikipedia (de)`, `MusicBrainz`, `Wikidata`,\n`OpenStreetMap`); else the site name the document gives, else the host. Plain text, like\nevery text field.",
             "type": [
@@ -199,6 +206,7 @@
           "status",
           "type_path",
           "also_on",
+          "refs",
           "open_in"
         ],
         "type": "object"

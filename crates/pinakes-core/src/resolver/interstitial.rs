@@ -25,6 +25,10 @@ pub enum Page {
 #[serde(deny_unknown_fields)]
 struct Walls {
     text: Vec<String>,
+    /// Whole page titles that name only the site, never an object, by the site's domain: the
+    /// page a service shows in place of the object (YouTube's regional or consent page is titled
+    /// "- YouTube"). A title counts only on its domain and the domain's subdomains.
+    placeholder_titles: std::collections::BTreeMap<String, Vec<String>>,
     captcha_selectors: Vec<String>,
     wall_host_prefixes: Vec<String>,
     wall_paths: Vec<String>,
@@ -161,6 +165,20 @@ pub fn inspect(requested: &Url, f: &Fetched) -> anyhow::Result<Page> {
     let short = visible.trim().len() < 2000;
     // Titles and headings are only evidence on short or challenge pages: a film called
     // "Just a Moment" is not a wall. Captcha widgets in comment forms need the same context.
+    // A page titled only with its site's name, below the site's root, is the service's
+    // stand-in for the object. Where the page is is where the fetch ended (a short link that
+    // redirected to YouTube lands there), not where it began.
+    let landed = &f.url;
+    let host = landed.host_str().unwrap_or_default().to_ascii_lowercase();
+    let placeholder = walls
+        .placeholder_titles
+        .iter()
+        .filter(|(domain, _)| host == **domain || host.ends_with(&format!(".{domain}")))
+        .flat_map(|(_, titles)| titles)
+        .any(|t| t.eq_ignore_ascii_case(title.trim()));
+    if placeholder && !landed.path().trim_end_matches('/').is_empty() {
+        return Ok(Page::Blocked);
+    }
     let title_marked = walls.marked(&title);
     if ((challenge || short) && (title_marked || (heading.len() < 200 && walls.marked(&heading))))
         || (short && walls.marked(&visible))

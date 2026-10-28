@@ -599,7 +599,14 @@ async fn curation_sets_members_only_and_invalid_curation_is_refused(pool: PgPool
     assert_eq!(curated["members"][0]["id"], a.as_str());
     let app = api::router(state);
     tag(&pool, &a, &"t".repeat(52), "curated").await;
-    assert_eq!(get(&app, &format!("/v1/groups/{id}")).await, curated);
+    // The tag reaches the member's `refs`; the group is otherwise the curated one.
+    let mut tagged = get(&app, &format!("/v1/groups/{id}")).await;
+    assert_eq!(
+        tagged["members"][0]["refs"],
+        serde_json::json!(["https://example.org/member"])
+    );
+    tagged["members"][0]["refs"] = serde_json::json!([]);
+    assert_eq!(tagged, curated);
     let collapsed = get(&app, "/v1/search?collapse=group&tags=curated").await;
     assert_eq!(collapsed["items"][0]["name"], "member", "{collapsed}");
     for invalid in [

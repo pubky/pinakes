@@ -341,7 +341,8 @@ pub fn router(state: AppState) -> Router {
     if state.config.api.mcp {
         // The tools answer through the REST routes, under the same layers.
         let rest = with_public_layers(routes, state.clone());
-        // A GET is a browser's or a probe's (`agents::mcp_get`); every other method is MCP's.
+        // A GET (and so a HEAD) is a browser's or a probe's (`agents::mcp_get`); every other
+        // method is MCP's.
         let mcp = crate::agents::mcp::service(rest, state.clone());
         all = all.route(
             "/mcp",
@@ -663,6 +664,12 @@ pub struct Card {
     /// `GET /v1/resources/by-uri`, `POST /v1/resolve`) every link, several of one service too,
     /// up to 256. A hint: every member keeps its own card.
     pub also_on: Vec<AlsoOn>,
+    /// The links people referenced on Pubky that resolve to this card: its own `uri` and its
+    /// `aliases` that carry references, most referenced first (counted up to
+    /// 1,000 each, then by URI), at most 5, normalized as every URI is. A typed card's `uri` is often not a link anyone wrote
+    /// (`btc:block/…`, `isbn:…`): ask Nexus by these to find the tags (docs/api.md, Joining
+    /// with Nexus). An occurrence's are its feed's. Empty when nothing references the card.
+    pub refs: Vec<String>,
     /// The clients that open a Pubky app's object, from the app's profile (docs/pubky-apps.md);
     /// on an event card, those of the event object it names. Empty for every other card.
     pub open_in: Vec<model::OpenIn>,
@@ -1015,6 +1022,7 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
                 size: g["size"].as_i64().unwrap_or(1),
             }),
         also_on,
+        refs: vec![],
         open_in,
         attribution: credits(
             row["osm_id"]
@@ -1029,6 +1037,48 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
         event,
         maybe_same: same_events(row).map(|all| all.into_iter().take(3).collect()),
     })
+}
+/// The most links one card names as `refs`.
+const REFS: usize = 5;
+/// The most references counted for one link when ranking `refs`: a link past it ranks with the
+/// others past it, by URI, and a read never scans a link's every reference.
+const REFS_COUNTED: i64 = 1000;
+/// Fills each card's `refs`: the referenced links among its own and its aliases', most
+/// referenced first (counted up to [`REFS_COUNTED`], then by URI), at most [`REFS`]. One query
+/// for every card of a response.
+pub(crate) async fn with_refs<'a>(
+    pool: &PgPool,
+    cards: impl IntoIterator<Item = &'a mut Card>,
+) -> Result<(), ApiError> {
+    let mut cards: Vec<&mut Card> = cards.into_iter().collect();
+    let ids: Vec<String> = cards.iter().map(|c| c.id.clone()).collect();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "WITH links AS (SELECT id AS card, id FROM unnest($1::text[]) id \
+         UNION SELECT a.root_id, a.alias_id FROM resource_alias a WHERE a.root_id = ANY($1)), \
+         counted AS (SELECT l.card, x.uri, c.n FROM links l JOIN resource x ON x.id = l.id \
+           CROSS JOIN LATERAL (SELECT count(*) AS n FROM \
+             (SELECT 1 FROM reference f WHERE f.resource_id = l.id LIMIT $3) f) c WHERE c.n > 0) \
+         SELECT card, uri FROM (SELECT card, uri, row_number() OVER (PARTITION BY card ORDER BY n DESC, uri) AS k FROM counted) s \
+         WHERE k <= $2 ORDER BY card, k",
+    )
+    .bind(&ids)
+    .bind(REFS as i64)
+    .bind(REFS_COUNTED)
+    .fetch_all(pool)
+    .await?;
+    let mut by_card: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (card, uri) in rows {
+        by_card.entry(card).or_default().push(uri);
+    }
+    for card in cards.iter_mut() {
+        if let Some(refs) = by_card.get(&card.id) {
+            card.refs.clone_from(refs);
+        }
+    }
+    Ok(())
 }
 /// Whether event cards carry the same-event hint.
 /// A card's `maybe_same` as SQL, over a unit's ID and type path (SQL expressions): the
@@ -2028,6 +2078,7 @@ pub async fn search(
                 points.push(card(item)?);
             }
         }
+        with_refs(&state.pool, points.iter_mut()).await?;
         Json(ClusterResponse {
             resolution: u8::from(spatial.resolution.expect("cluster mode")),
             clusters,
@@ -2041,8 +2092,10 @@ pub async fn search(
         })
         .into_response()
     } else {
+        let mut cards = items.iter().map(card).collect::<Result<Vec<_>, _>>()?;
+        with_refs(&state.pool, cards.iter_mut()).await?;
         Json(SearchResponse {
-            items: items.iter().map(card).collect::<Result<_, _>>()?,
+            items: cards,
             cursor: next,
             reach_truncated: [&reach, &boost]
                 .iter()
@@ -2085,7 +2138,11 @@ async fn read(
             .bind(same_event(config))
             .fetch_optional(pool)
             .await?;
-    value.as_ref().map(detail).transpose()
+    let Some(mut detail) = value.as_ref().map(detail).transpose()? else {
+        return Ok(None);
+    };
+    with_refs(pool, std::iter::once(&mut detail.card)).await?;
+    Ok(Some(detail))
 }
 /// A read's JSON, cacheable for 30 seconds like a search page, with an ETag of its content; 304
 /// when `If-None-Match` names it.
@@ -2186,7 +2243,9 @@ pub async fn lookup(
             " END,'also_on',also_on(r.id,r.id,8,$2)) FROM unnest($1::text[]) WITH ORDINALITY AS wanted(id,n) LEFT JOIN resource_alias a ON a.alias_id=wanted.id JOIN resource_document r ON r.id=coalesce(a.root_id,wanted.id) ORDER BY wanted.n",
         ]
         .concat()).bind(ids).bind(state.config.groups.enabled).bind(same_event(&state.config)).fetch_all(&state.pool).await?;
-    Ok(Json(rows.iter().map(card).collect::<Result<_, _>>()?))
+    let mut cards = rows.iter().map(card).collect::<Result<Vec<_>, _>>()?;
+    with_refs(&state.pool, cards.iter_mut()).await?;
+    Ok(Json(cards))
 }
 #[utoipa::path(post,tag="Previews",path="/v1/resolve",request_body=ResolveRequest,responses((status=200,body=ResourceDetail),(status=202,body=ResourceDetail,description="Queued; poll resource by ID"),(status=400,description="Unsupported URI or disabled resolver"),(status=429,description="Preview rate limit")))]
 pub async fn resolve(
@@ -2909,7 +2968,8 @@ async fn group_detail(
     .bind(same)
     .fetch_all(pool)
     .await?;
-    let members = rows.iter().map(card).collect::<Result<Vec<_>, _>>()?;
+    let mut members = rows.iter().map(card).collect::<Result<Vec<_>, _>>()?;
+    with_refs(pool, members.iter_mut()).await?;
     let mut types = BTreeMap::<&str, usize>::new();
     for t in members.iter().filter_map(|m| m.type_name.as_deref()) {
         *types.entry(t).or_default() += 1;

@@ -106,9 +106,9 @@ pub async fn skill_md(headers: HeaderMap) -> Response {
     )
 }
 
-/// `GET /mcp`. MCP clients POST; a GET is a person's browser or a probe. A browser (one that
-/// accepts `text/html`) gets a short page on how to connect, any other GET the 405 the protocol
-/// allows, naming `POST`.
+/// `GET /mcp` (and `HEAD`). MCP clients POST; a GET is a person's browser or a probe. A browser
+/// (one that accepts `text/html`) gets a short page on how to connect, any other GET the 405 the
+/// protocol allows, naming `POST`.
 pub async fn mcp_get(headers: HeaderMap) -> Response {
     let html = headers
         .get(header::ACCEPT)
@@ -123,6 +123,8 @@ pub async fn mcp_get(headers: HeaderMap) -> Response {
                     header::CONTENT_TYPE,
                     HeaderValue::from_static("text/plain; charset=utf-8"),
                 ),
+                // The browser's page answers the same URL: a cache keeps the two apart.
+                (header::VARY, HeaderValue::from_static("accept")),
             ],
             "This is the Pinakes MCP endpoint: MCP clients POST to it (GET /llms.txt for the guide).\n",
         )

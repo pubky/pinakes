@@ -5,7 +5,8 @@
 //! and a tool call what its REST request costs on top. The admin routes are not in that router,
 //! and no header of the MCP request reaches it, so the admin token is never read here. The
 //! answer is compact JSON text: the card fields an agent needs and the REST URL of the full
-//! answer. `social` asks the Nexus this instance reads for tags per URI, charged one unit.
+//! answer. `social` asks the Nexus this instance reads for tags per card, by the card's `uri`
+//! and `refs`, charged one unit per 100 URIs.
 use super::base_url;
 use crate::api::AppState;
 use axum::{
@@ -247,18 +248,30 @@ impl Tools {
     }
 
     async fn social(&self, caller: &Caller, args: &JsonObject) -> Result<Value, Failure> {
-        let uris: Vec<String> = match args.get("uris") {
-            Some(Value::Array(items)) => items
-                .iter()
-                .map(|v| v.as_str().map(str::to_owned))
-                .collect::<Option<_>>()
-                .ok_or_else(|| Failure::bad("`uris` is an array of strings"))?,
-            _ => return Err(Failure::bad("`uris` is required: an array of 1–100 links")),
+        let list = |key: &str| -> Result<Vec<String>, Failure> {
+            match args.get(key) {
+                None | Some(Value::Null) => Ok(vec![]),
+                Some(Value::Array(items)) => items
+                    .iter()
+                    .map(|v| v.as_str().map(str::to_owned))
+                    .collect::<Option<_>>()
+                    .ok_or_else(|| Failure::bad(format!("`{key}` is an array of strings"))),
+                Some(_) => Err(Failure::bad(format!("`{key}` is an array of strings"))),
+            }
         };
-        if !(1..=100).contains(&uris.len()) || uris.iter().any(|u| u.is_empty() || u.len() > 2048) {
+        let (ids, uris) = (list("ids")?, list("uris")?);
+        if !(1..=100).contains(&(ids.len() + uris.len())) {
             return Err(Failure::bad(
-                "`uris` takes 1–100 links of at most 2048 bytes",
+                "`ids` (card ids) and `uris` (links) take 1–100 entries together",
             ));
+        }
+        if ids.iter().any(|id| !crate::model::valid_id(id)) {
+            return Err(Failure::bad(
+                "`ids` are card ids: 32 lowercase hex characters",
+            ));
+        }
+        if uris.iter().any(|u| u.is_empty() || u.len() > 2048) {
+            return Err(Failure::bad("`uris` are links of at most 2048 bytes"));
         }
         let viewer = string(args, "viewer")?;
         if viewer
@@ -267,28 +280,109 @@ impl Tools {
         {
             return Err(Failure::bad("`viewer` is a 52-character pubky public key"));
         }
-        if let Some(peer) = caller.peer {
-            self.state
-                .charge(peer.0.ip(), 1)
-                .await
-                .map_err(|e| Failure {
-                    status: e.0.as_u16(),
-                    error: e.1,
-                    url: None,
-                })?;
-        }
-        let views = self
-            .state
-            .nexus
-            .resources_by_uris(&uris, viewer.as_deref())
+        // Each card is asked about by its own link and every link people referenced for it.
+        let mut asks: Vec<Ask> = vec![];
+        let mut unknown_ids = vec![];
+        if !ids.is_empty() {
+            let cards = self
+                .rest(
+                    caller,
+                    Method::POST,
+                    "/v1/resources/lookup",
+                    Some(json!({ "ids": ids })),
+                )
+                .await?;
+            // Lookup answers an alias (a spelling, or a card that became one after it was
+            // read) with its root's card: match each id asked through its root.
+            let roots: Vec<(String, String)> = sqlx::query_as(
+                "SELECT wanted.id,coalesce(a.root_id,wanted.id) FROM unnest($1::text[]) AS wanted(id) LEFT JOIN resource_alias a ON a.alias_id=wanted.id",
+            )
+            .bind(&ids)
+            .fetch_all(&self.state.pool)
             .await
             .map_err(|_| Failure {
-                status: 502,
-                error: "the Nexus this instance reads did not answer the batch resource view (POST /v0/stream/resources/by_ids)".into(),
+                status: 500,
+                error: "the card ids could not be read".into(),
                 url: None,
             })?;
-        Ok(social_answer(&uris, &views))
+            for id in &ids {
+                let root = roots
+                    .iter()
+                    .find(|(asked, _)| asked == id)
+                    .map_or(id.as_str(), |(_, root)| root.as_str());
+                let Some(card) = cards
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|c| c["id"] == root)
+                else {
+                    unknown_ids.push(id.clone());
+                    continue;
+                };
+                let mut asked = vec![card["uri"].as_str().unwrap_or_default().to_owned()];
+                for r in card["refs"].as_array().into_iter().flatten() {
+                    if let Some(r) = r.as_str() {
+                        if !asked.iter().any(|a| a == r) {
+                            asked.push(r.to_owned());
+                        }
+                    }
+                }
+                asks.push(Ask {
+                    id: Some(id.clone()),
+                    root: (root != id).then(|| root.to_owned()),
+                    uri: asked[0].clone(),
+                    asked,
+                });
+            }
+        }
+        for uri in uris {
+            asks.push(Ask {
+                id: None,
+                root: None,
+                uri: uri.clone(),
+                asked: vec![uri],
+            });
+        }
+        let all: Vec<String> = asks.iter().flat_map(|a| a.asked.iter().cloned()).collect();
+        let mut views = vec![];
+        for batch in all.chunks(100) {
+            if let Some(peer) = caller.peer {
+                self.state
+                    .charge(peer.0.ip(), 1)
+                    .await
+                    .map_err(|e| Failure {
+                        status: e.0.as_u16(),
+                        error: e.1,
+                        url: None,
+                    })?;
+            }
+            views.extend(
+                self.state
+                    .nexus
+                    .resources_by_uris(batch, viewer.as_deref())
+                    .await
+                    .map_err(|_| Failure {
+                        status: 502,
+                        error: "the Nexus this instance reads did not answer the batch resource view (POST /v0/stream/resources/by_ids)".into(),
+                        url: None,
+                    })?,
+            );
+        }
+        let mut answer = social_answer(&asks, &views);
+        if !unknown_ids.is_empty() {
+            answer["unknown_ids"] = unknown_ids.into();
+        }
+        Ok(answer)
     }
+}
+
+/// What `social` asks Nexus about one card (or one link): the URIs, the card's own first. `id`
+/// is the card id asked, `root` the card answering for it when it is an alias.
+struct Ask {
+    id: Option<String>,
+    root: Option<String>,
+    uri: String,
+    asked: Vec<String>,
 }
 
 impl ServerHandler for Tools {
@@ -343,7 +437,7 @@ impl ServerHandler for Tools {
     }
 }
 
-const INSTRUCTIONS: &str = "Pinakes indexes the external links people reference on Pubky as typed cards (schema.org types): places, events, books, music, papers, posts on other networks. Search it with `search`, read one link with `card`, find every link with one identifier (isbn:, doi:, isrc:, osm:, …) with `lookup`, list the same thing on several services with `group`, see what kinds of cards exist with `types`. Pinakes ids are its own: join with Nexus by URI. `social` returns tags and tagger counts per URI from Nexus. For the social graph (follows, trust, threads) use nexus-scout. Each answer names the REST URL with the full result. The guide is GET /llms.txt on this host.";
+const INSTRUCTIONS: &str = "Pinakes indexes the external links people reference on Pubky as typed cards (schema.org types): places, events, books, music, papers, posts on other networks. Search it with `search`, read one link with `card`, find every link with one identifier (isbn:, doi:, isrc:, osm:, …) with `lookup`, list the same thing on several services with `group`, see what kinds of cards exist with `types`. Pinakes ids are its own: join with Nexus by URI, the card's `uri` and its `refs` (the links people wrote for it; a typed card's `uri`, such as btc: or isbn:, is often not one, and an occurrence's refs are its feed's, `occurrence.feed_uri`, not its event page). A full read's `aliases` lists every other spelling of the link. `social` does that join: tags and tagger counts per card, merged over its links. For the social graph (follows, trust, threads) use nexus-scout. Each answer names the REST URL with the full result. The guide is GET /llms.txt on this host.";
 
 /// The tools and their input schemas.
 pub fn tools() -> Vec<Tool> {
@@ -416,9 +510,10 @@ pub fn tools() -> Vec<Tool> {
         ),
         tool(
             "social",
-            "Tags and tagger counts per link, from the Nexus this instance reads (its batch resource view). Give the uris of cards from search; with viewer, each tag says whether that user used it. Links Nexus does not know are listed under unknown.",
-            json!({"type":"object","required":["uris"],"additionalProperties":false,"properties":{
-                "uris":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":100},
+            "Tags and taggers per card, from the Nexus this instance reads. Give the ids of cards from search: each card is asked about by its own uri and by every link people referenced for it (its refs, such as the mempool.space page of a btc: block, or an occurrence's feed, occurrence.feed_uri), and the answers are merged per card. Links that are not Pinakes cards, or a card's other spellings (aliases on its full read), can be given as uris. Taggers are counted once each; a count marked at_least is a lower bound (Nexus counts taggers it does not list, who may be the same on several links). With viewer, each tag says whether that user used it.",
+            json!({"type":"object","additionalProperties":false,"properties":{
+                "ids":{"type":"array","items":{"type":"string"},"maxItems":100,"description":"Card ids from search, card or lookup."},
+                "uris":{"type":"array","items":{"type":"string"},"maxItems":100,"description":"Links to ask about as they are."},
                 "viewer":{"type":"string","description":"A 52-character pubky public key."}
             }}),
         ),
@@ -572,6 +667,9 @@ fn compact(base: &str, card: &Value) -> Value {
     if !also_on.is_empty() {
         out.insert("also_on".into(), also_on.into());
     }
+    if card["refs"].as_array().is_some_and(|r| !r.is_empty()) {
+        out.insert("refs".into(), card["refs"].clone());
+    }
     for key in ["occurrence", "event", "attribution"] {
         if !card[key].is_null() {
             out.insert(key.into(), card[key].clone());
@@ -620,39 +718,110 @@ fn best_member(group_type: Option<&str>, members: &[Value]) -> Value {
         .map_or(Value::Null, |(_, m)| m.clone())
 }
 
-/// What `social` answers: per URI asked, the tags and tagger count Nexus gave, and the URIs
-/// it did not know.
-fn social_answer(uris: &[String], views: &[Value]) -> Value {
+/// Whether a Nexus view is the one for `uri`, in any spelling the two normalize alike.
+fn view_of<'a>(views: &'a [Value], uri: &str) -> Option<&'a Value> {
+    let normalized = crate::model::identity(uri).map(|(_, u, _)| u).ok();
+    views.iter().find(|v| {
+        v["details"]["uri"].as_str().is_some_and(|u| {
+            u == uri
+                || normalized.as_deref() == Some(u)
+                || crate::model::identity(u).is_ok_and(|(_, n, _)| Some(n) == normalized)
+        })
+    })
+}
+
+/// A count of taggers over several views: the taggers they list, once each, or the most one
+/// view counts, whichever is more. A view counts taggers it does not list (Nexus lists a bounded
+/// number), and those may be the ones another view lists, so over several such views the count
+/// is a lower bound (`at_least`), never a sum that counts one person twice.
+#[derive(Default)]
+struct Taggers {
+    listed: std::collections::BTreeSet<String>,
+    most: u64,
+    views: usize,
+    unlisted: bool,
+}
+impl Taggers {
+    fn add<'a>(&mut self, listed: impl IntoIterator<Item = &'a Value>, count: &Value) {
+        let names: std::collections::BTreeSet<&str> =
+            listed.into_iter().filter_map(Value::as_str).collect();
+        let count = count.as_u64().unwrap_or_default().max(names.len() as u64);
+        self.unlisted |= count > names.len() as u64;
+        self.most = self.most.max(count);
+        self.views += 1;
+        self.listed.extend(names.into_iter().map(str::to_owned));
+    }
+    fn count(&self) -> u64 {
+        (self.listed.len() as u64).max(self.most)
+    }
+    fn at_least(&self) -> bool {
+        self.unlisted && self.views > 1
+    }
+}
+/// A tag line's listed taggers.
+fn taggers(tag: &Value) -> impl Iterator<Item = &Value> {
+    tag["taggers"].as_array().into_iter().flatten()
+}
+
+/// What `social` answers: per card (or link), the URIs asked and those Nexus knew, and the tags
+/// of all of them merged: per label, its taggers once each; `viewer_tagged` when the viewer used
+/// the label on any of them.
+fn social_answer(asks: &[Ask], views: &[Value]) -> Value {
     let mut items = vec![];
-    let mut unknown = vec![];
-    for uri in uris {
-        let normalized = crate::model::identity(uri).map(|(_, u, _)| u).ok();
-        let view = views.iter().find(|v| {
-            v["details"]["uri"].as_str().is_some_and(|u| {
-                u == uri
-                    || normalized.as_deref() == Some(u)
-                    || crate::model::identity(u).is_ok_and(|(_, n, _)| Some(n) == normalized)
-            })
-        });
-        let Some(view) = view else {
-            unknown.push(Value::from(uri.as_str()));
-            continue;
-        };
-        let tags: Vec<Value> = view["tags"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|t| {
-                let mut tag = json!({"label": t["label"], "taggers_count": t["taggers_count"]});
-                if t["relationship"].is_boolean() {
-                    tag["viewer_tagged"] = t["relationship"].clone();
+    for ask in asks {
+        let found: Vec<(&String, &Value)> = ask
+            .asked
+            .iter()
+            .filter_map(|u| view_of(views, u).map(|v| (u, v)))
+            .collect();
+        let mut labels: Vec<(String, Taggers, bool)> = vec![];
+        let mut everyone = Taggers::default();
+        for (_, view) in &found {
+            // A view counts its taggers over all labels (`taggers_count`), each once.
+            let tags = view["tags"].as_array().into_iter().flatten();
+            everyone.add(tags.clone().flat_map(taggers), &view["taggers_count"]);
+            for tag in tags {
+                let Some(label) = tag["label"].as_str() else {
+                    continue;
+                };
+                let at = match labels.iter().position(|(l, _, _)| l == label) {
+                    Some(at) => at,
+                    None => {
+                        labels.push((label.to_owned(), Taggers::default(), false));
+                        labels.len() - 1
+                    }
+                };
+                labels[at].1.add(taggers(tag), &tag["taggers_count"]);
+                labels[at].2 |= tag["relationship"] == true;
+            }
+        }
+        let mut tags: Vec<(String, Taggers, bool)> = labels;
+        tags.sort_by(|a, b| b.1.count().cmp(&a.1.count()).then_with(|| a.0.cmp(&b.0)));
+        let mut item = json!({
+            "uri": ask.uri,
+            "asked": ask.asked,
+            "found": found.iter().map(|(u, _)| u.as_str()).collect::<Vec<_>>(),
+            "taggers_count": everyone.count(),
+            "tags": tags.into_iter().map(|(label, taggers, mine)| {
+                let mut tag = json!({"label": label, "taggers_count": taggers.count(), "viewer_tagged": mine});
+                if taggers.at_least() {
+                    tag["at_least"] = true.into();
                 }
                 tag
-            })
-            .collect();
-        items.push(json!({"uri": uri, "taggers_count": view["taggers_count"], "tags": tags}));
+            }).collect::<Vec<_>>(),
+        });
+        if everyone.at_least() {
+            item["at_least"] = true.into();
+        }
+        if let Some(id) = &ask.id {
+            item["id"] = id.clone().into();
+        }
+        if let Some(root) = &ask.root {
+            item["root"] = root.clone().into();
+        }
+        items.push(item);
     }
-    json!({"items": items, "unknown": unknown})
+    json!({ "items": items })
 }
 
 #[cfg(test)]
@@ -744,24 +913,86 @@ mod tests {
     }
 
     #[test]
-    fn social_matches_views_by_uri_in_any_spelling() {
-        let uris = vec![
-            "https://WWW.Example.org/a".to_owned(),
-            "https://example.org/unknown".to_owned(),
+    fn social_merges_a_cards_links_and_counts_each_tagger_once() {
+        let asks = vec![
+            // A btc: card asked by its own link and the mempool page people tagged.
+            Ask {
+                id: Some("c1".into()),
+                root: None,
+                uri: "btc:block/0000aa".into(),
+                asked: vec![
+                    "btc:block/0000aa".into(),
+                    "https://WWW.Mempool.space/block/0000aa".into(),
+                    "https://blockstream.info/block/0000aa".into(),
+                ],
+            },
+            Ask {
+                id: None,
+                root: None,
+                uri: "https://example.org/unknown".into(),
+                asked: vec!["https://example.org/unknown".into()],
+            },
         ];
-        let views = vec![json!({
-            "details": {"id": "x", "uri": "https://www.example.org/a"},
-            "taggers_count": 2,
-            "tags": [{"label": "cafe", "taggers_count": 2, "relationship": true, "taggers": ["k"]}]
-        })];
+        let views = vec![
+            json!({"details": {"uri": "https://www.mempool.space/block/0000aa"}, "taggers_count": 2,
+                   "tags": [{"label": "halving", "taggers_count": 2, "relationship": true, "taggers": ["t1", "t2"]},
+                            {"label": "bitcoin", "taggers_count": 1, "taggers": ["t1"]}]}),
+            // The same tagger on another link counts once. One counted but not listed may be one
+            // the other link lists: the count is a lower bound, never a sum.
+            json!({"details": {"uri": "https://blockstream.info/block/0000aa"}, "taggers_count": 2,
+                   "tags": [{"label": "halving", "taggers_count": 2, "taggers": ["t2"]}]}),
+        ];
         assert_eq!(
-            social_answer(&uris, &views),
-            json!({
-                "items": [{"uri": "https://WWW.Example.org/a", "taggers_count": 2,
-                           "tags": [{"label": "cafe", "taggers_count": 2, "viewer_tagged": true}]}],
-                "unknown": ["https://example.org/unknown"]
-            })
+            social_answer(&asks, &views),
+            json!({"items": [
+                {"id": "c1", "uri": "btc:block/0000aa",
+                 "asked": ["btc:block/0000aa", "https://WWW.Mempool.space/block/0000aa", "https://blockstream.info/block/0000aa"],
+                 "found": ["https://WWW.Mempool.space/block/0000aa", "https://blockstream.info/block/0000aa"],
+                 "taggers_count": 2, "at_least": true,
+                 "tags": [{"label": "halving", "taggers_count": 2, "viewer_tagged": true, "at_least": true},
+                          {"label": "bitcoin", "taggers_count": 1, "viewer_tagged": false}]},
+                {"uri": "https://example.org/unknown", "asked": ["https://example.org/unknown"],
+                 "found": [], "taggers_count": 0, "tags": []}
+            ]})
         );
+    }
+
+    /// The same two people tag two of a card's links; each link's view lists one of them and
+    /// counts both. They are two at least, never four; one view alone is exact.
+    #[test]
+    fn unlisted_taggers_are_never_summed_over_views() {
+        let ask = |asked: &[&str]| Ask {
+            id: Some("c1".into()),
+            root: None,
+            uri: asked[0].into(),
+            asked: asked.iter().map(|u| u.to_string()).collect(),
+        };
+        let view = |uri: &str, listed: &str| {
+            json!({"details": {"uri": uri}, "taggers_count": 2,
+                   "tags": [{"label": "halving", "taggers_count": 2, "taggers": [listed]}]})
+        };
+        let views = [
+            view("https://mempool.space/block/0000aa", "t1"),
+            view("https://blockstream.info/block/0000aa", "t2"),
+        ];
+        let both = social_answer(
+            &[ask(&[
+                "https://mempool.space/block/0000aa",
+                "https://blockstream.info/block/0000aa",
+            ])],
+            &views,
+        );
+        let item = &both["items"][0];
+        assert_eq!(item["taggers_count"], 2);
+        assert_eq!(item["at_least"], true);
+        assert_eq!(
+            item["tags"],
+            json!([{"label": "halving", "taggers_count": 2, "viewer_tagged": false, "at_least": true}])
+        );
+        let one = social_answer(&[ask(&["https://mempool.space/block/0000aa"])], &views);
+        assert_eq!(one["items"][0]["taggers_count"], 2);
+        assert!(one["items"][0].get("at_least").is_none());
+        assert!(one["items"][0]["tags"][0].get("at_least").is_none());
     }
 
     #[test]

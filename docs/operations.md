@@ -441,10 +441,13 @@ document head only. Media pages use the pinned 390-provider oEmbed registry (`da
 SoundCloud, TikTok, Facebook and Instagram skipped; `scripts/oembed-providers` updates it):
 `media.oembed = "when_needed"` (default) asks path-specific providers first and broad patterns only
 for an incomplete, failed or truncated page; `"always"` also fetches every matching provider and
-trusted page-advertised endpoints, which must share the page's origin or its registry provider.
-Healthy page JSON-LD stays authoritative and oEmbed fills gaps. `web.discover_feeds` (web pages) and
-`cards.media.discover_feeds` (media pages: podcast feed scanning) follow RSS alternates on pages
-without a typed card. Discovery decisions are counted in
+trusted page-advertised endpoints, which must share the page's origin or its registry provider. The
+page's own metadata (its JSON-LD first) names the object and oEmbed fills what it lacks, except
+where the answer comes first: from a provider whose scheme names the link exactly (it has a path, as
+YouTube's `watch` and `shorts` do), or from any matching provider under `"always"`, its title,
+author and thumbnail come ahead of the page's. A blank field in an answer is no value.
+`web.discover_feeds` (web pages) and `cards.media.discover_feeds` (media pages: podcast feed
+scanning) follow RSS alternates on pages without a typed card. Discovery decisions are counted in
 `pinakes_discovery_decisions_total{kind,decision}`.
 
 A challenge page (a bot wall, captcha or sign-in redirect) is a failed fetch: the resource turns
@@ -456,8 +459,12 @@ that is the card. Its last accepted document, event dates and feed occurrences s
 toward a disappearance. Fetches that hit one count as outcome `blocked` in
 `pinakes_fetch_total`.
 
-The markers are the built-in `data/interstitial-markers.json` (text markers, captcha selectors,
-wall host prefixes, sign-in paths). Visible text excludes `script`, `style`, `noscript` and
+The markers are the built-in `data/interstitial-markers.json` (text markers, placeholder
+titles, captcha selectors, wall host prefixes, sign-in paths). A page on a site's own
+host titled only with its name (`- YouTube`, `YouTube` on `youtube.com`, `youtu.be` and their
+subdomains: placeholder titles are listed per domain), below the site's root, is the service's
+stand-in for the object, a wall, at any length. Where the fetch ended decides: a short link that
+redirects to such a page is a wall, and the same title on any other host is just a title. Visible text excludes `script`, `style`, `noscript` and
 `template`. Title, heading and captcha markers count only on short pages (under 2,000 visible
 bytes) or challenge statuses (403, 429, 503). An HTML answer with status 202 that is empty or
 has no visible text is a challenge (AWS WAF answers bots so); an empty 202 of another type is

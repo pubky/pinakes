@@ -1222,7 +1222,12 @@ impl CardResolver {
                     && !page.event.warnings.iter().any(|w| w == "truncated") =>
             {
                 if let Some((_, v, base)) = embed {
-                    web::apply_oembed(&mut page, &v, &base);
+                    // A provider that names this link exactly answers for the object first.
+                    if first {
+                        web::apply_oembed_first(&mut page, &v, &base);
+                    } else {
+                        web::apply_oembed(&mut page, &v, &base);
+                    }
                 }
                 media_type(&mut page, uri);
                 page.bounded(web::ATTRIBUTES)

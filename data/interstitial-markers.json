@@ -15,6 +15,10 @@
     "press & hold",
     "checking your browser"
   ],
+  "placeholder_titles": {
+    "youtube.com": ["- YouTube", "YouTube"],
+    "youtu.be": ["- YouTube", "YouTube"]
+  },
   "captcha_selectors": [
     ".g-recaptcha",
     ".h-captcha",
