@@ -544,7 +544,45 @@ async fn a_failed_refresh_of_a_gone_post_brings_nothing_back(pool: sqlx::PgPool)
     assert_eq!(pinakes_core::changes::scrub_stored(&pool).await.unwrap(), 0);
 }
 
-/// A post with more spellings than one statement names (500) has every one scrubbed.
+/// 1,201 spellings of the post with its full card, as a build before the scrub left them: more
+/// than two pages of the 500 a scrub reads and names at a time.
+async fn many_spellings(pool: &sqlx::PgPool, id: &str) -> Vec<String> {
+    sqlx::query("INSERT INTO resource(id,uri,name,doc) SELECT md5('spelling'||n),$2||'?n='||n,r.name,r.doc FROM resource r, generate_series(1,1201) n WHERE r.id=$1")
+        .bind(id)
+        .bind(POST)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) SELECT md5('spelling'||n),$1,'identifier' FROM generate_series(1,1201) n")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    let spellings: Vec<String> =
+        sqlx::query_scalar("SELECT alias_id FROM resource_alias WHERE root_id=$1")
+            .bind(id)
+            .fetch_all(pool)
+            .await
+            .unwrap();
+    let ids: Vec<&str> = spellings.iter().map(String::as_str).collect();
+    assert!(texts(pool, &ids).await >= 1201);
+    spellings
+}
+/// None of `spellings` keeps any of the post: no text and no card.
+async fn assert_scrubbed(pool: &sqlx::PgPool, spellings: &[String]) {
+    let ids: Vec<&str> = spellings.iter().map(String::as_str).collect();
+    assert_eq!(texts(pool, &ids).await, 0);
+    let kept: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM resource WHERE id=ANY($1) AND doc<>'{}'::jsonb")
+            .bind(spellings)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!(kept, 0);
+}
+
+/// A post with more spellings than one page of the scrub (500) has every one scrubbed by the
+/// repair.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn the_repair_scrubs_every_spelling_of_a_post_with_many(pool: sqlx::PgPool) {
     if pinakes_core::sources::by_name("reddit").is_none() {
@@ -556,34 +594,19 @@ async fn the_repair_scrubs_every_spelling_of_a_post_with_many(pool: sqlx::PgPool
         .execute(&pool)
         .await
         .unwrap();
-    // 1,201 spellings with the post's full card, as a build before the scrub left them.
-    sqlx::query("INSERT INTO resource(id,uri,name,doc) SELECT md5('spelling'||n),$2||'?n='||n,r.name,r.doc FROM resource r, generate_series(1,1201) n WHERE r.id=$1")
-        .bind(&id)
-        .bind(POST)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) SELECT md5('spelling'||n),$1,'identifier' FROM generate_series(1,1201) n")
-        .bind(&id)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let spellings: Vec<String> =
-        sqlx::query_scalar("SELECT alias_id FROM resource_alias WHERE root_id=$1")
-            .bind(&id)
-            .fetch_all(&pool)
-            .await
-            .unwrap();
-    let ids: Vec<&str> = spellings.iter().map(String::as_str).collect();
-    assert!(texts(&pool, &ids).await >= 1201);
-
+    let spellings = many_spellings(&pool, &id).await;
     assert_eq!(pinakes_core::changes::scrub_stored(&pool).await.unwrap(), 1);
-    assert_eq!(texts(&pool, &ids).await, 0);
-    let kept: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM resource WHERE id=ANY($1) AND doc<>'{}'::jsonb")
-            .bind(&spellings)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(kept, 0);
+    assert_scrubbed(&pool, &spellings).await;
+}
+
+/// And by the save that confirms the post deleted.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_deleted_post_scrubs_every_spelling_of_many(pool: sqlx::PgPool) {
+    if pinakes_core::sources::by_name("reddit").is_none() {
+        return;
+    }
+    let (reddit, resolver, id, at) = post(&pool).await;
+    let spellings = many_spellings(&pool, &id).await;
+    delete(&pool, &reddit, &resolver, &id, at).await;
+    assert_scrubbed(&pool, &spellings).await;
 }

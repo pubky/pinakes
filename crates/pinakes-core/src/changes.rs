@@ -128,6 +128,28 @@ pub(crate) async fn scrub_spellings(
     }
     Ok(changed)
 }
+/// `scrub_spellings` of every alias of `root`, read SPELLINGS_PER_STATEMENT at a time in alias
+/// order, so a post with very many spellings never holds them all. The caller holds the alias
+/// lock, so none joins or leaves meanwhile. The rows changed.
+async fn scrub_aliases_of(tx: &mut Transaction<'_, Postgres>, root: &str) -> Result<u64> {
+    let mut changed = 0;
+    let mut last = String::new();
+    loop {
+        let ids: Vec<String> = sqlx::query_scalar(
+            "SELECT alias_id FROM resource_alias WHERE root_id=$1 AND alias_id>$2 ORDER BY alias_id LIMIT $3",
+        )
+        .bind(root)
+        .bind(&last)
+        .bind(SPELLINGS_PER_STATEMENT as i64)
+        .fetch_all(&mut **tx)
+        .await?;
+        let Some(next) = ids.last() else {
+            return Ok(changed);
+        };
+        last = next.clone();
+        changed += scrub_spellings(tx, &ids).await?;
+    }
+}
 fn cancelled(v: &Value) -> bool {
     v["status"] == "missing" || v["event_status"] == "cancelled"
 }
@@ -357,12 +379,7 @@ pub async fn save(
     }
     if social_missing || opted_out {
         // Spellings saved before they became aliases of this post kept its text too.
-        let aliases: Vec<String> =
-            sqlx::query_scalar("SELECT alias_id FROM resource_alias WHERE root_id=$1")
-                .bind(id)
-                .fetch_all(&mut *tx)
-                .await?;
-        scrub_spellings(&mut tx, &aliases).await?;
+        scrub_aliases_of(&mut tx, id).await?;
     }
     if social_missing {
         forget_derived(&mut tx, &[id.to_owned()]).await?;
@@ -572,12 +589,7 @@ pub async fn scrub_stored(pool: &PgPool) -> Result<u64> {
                 }
                 lines + card + derived
             };
-            let aliases: Vec<String> =
-                sqlx::query_scalar("SELECT alias_id FROM resource_alias WHERE root_id=$1")
-                    .bind(&id)
-                    .fetch_all(&mut *tx)
-                    .await?;
-            changed += scrub_spellings(&mut tx, &aliases).await?;
+            changed += scrub_aliases_of(&mut tx, &id).await?;
             tx.commit().await?;
             scrubbed_posts += u64::from(changed > 0);
         }
