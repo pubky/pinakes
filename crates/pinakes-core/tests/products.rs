@@ -145,6 +145,128 @@ fn only_the_pages_own_product_gives_its_barcode() {
     );
     let doc = extract(page, head(&[format!("[{a}, {other}]")]));
     assert_eq!(doc.attributes["gtin"], "3017620422003");
+    // Listed after it, in one array or as an earlier script: still the own one's.
+    for scripts in [
+        vec![format!("[{other}, {a}]")],
+        vec![other.clone(), a.clone()],
+    ] {
+        let doc = extract(page, head(&scripts));
+        assert_eq!(doc.attributes["gtin"], "3017620422003", "{scripts:?}");
+        assert_eq!(doc.attributes["sku"], "S-3017620422003", "{scripts:?}");
+        assert_eq!(doc.attributes["price"], "4.95", "{scripts:?}");
+    }
+}
+
+/// The page's card from `body`, served at `page`.
+fn extracted(page: &str, body: &str) -> ResourceMeta {
+    let fetched = Fetched {
+        permanent_redirect: false,
+        truncated: false,
+        url: page.parse().unwrap(),
+        status: 200,
+        content_type: "text/html".into(),
+        body: body.as_bytes().to_vec(),
+        location: None,
+        retry_after_secs: 60,
+        validators: Default::default(),
+    };
+    web::extract(page, &fetched, 3600).unwrap().doc
+}
+
+fn scripts(head: &[&str], body: &[&str]) -> String {
+    let tags = |all: &[&str]| {
+        all.iter()
+            .map(|s| format!(r#"<script type="application/ld+json">{s}</script>"#))
+            .collect::<String>()
+    };
+    format!(
+        "<html><head><title>Shop</title>{}</head><body>{}</body></html>",
+        tags(head),
+        tags(body)
+    )
+}
+
+#[test]
+fn one_product_described_twice_keeps_its_barcode() {
+    // A shop's theme and a plugin both describe the page's product: one product, so its
+    // barcode stays. Two products naming the page by other fragments, or one naming none
+    // beside it, are two.
+    let page = "https://shop.example/p/nutella";
+    let product = |id: &str, url: Option<&str>, gtin: &str| {
+        let url = url
+            .map(|u| format!(r#""url": "{u}", "#))
+            .unwrap_or_default();
+        format!(
+            r#"{{"@type": "Product", "@id": "{id}", {url}"name": "Nutella", "gtin13": "{gtin}", "sku": "S-{gtin}"}}"#
+        )
+    };
+    let nutella = product(&format!("{page}#product"), Some(page), "3017620422003");
+    let relative = product("#product", None, "3017620422003");
+    for (head, body) in [
+        (vec![nutella.as_str(), nutella.as_str()], vec![]),
+        (vec![nutella.as_str()], vec![nutella.as_str()]),
+        (vec![relative.as_str()], vec![relative.as_str()]),
+    ] {
+        let doc = extracted(page, &scripts(&head, &body));
+        assert_eq!(doc.attributes["gtin"], "3017620422003", "{head:?} {body:?}");
+        assert_eq!(
+            doc.attributes["sku"], "S-3017620422003",
+            "{head:?} {body:?}"
+        );
+    }
+    let (a, b) = (
+        product("#a", None, "3017620422003"),
+        product("#b", None, "4006381333931"),
+    );
+    let unnamed = r#"{"@type": "Product", "name": "Pen", "gtin13": "4006381333931"}"#;
+    for (head, body) in [
+        (vec![a.as_str(), b.as_str()], vec![]),
+        (vec![], vec![a.as_str(), b.as_str()]),
+        (vec![nutella.as_str(), unnamed], vec![]),
+    ] {
+        let doc = extracted(page, &scripts(&head, &body));
+        for key in ["gtin", "sku"] {
+            assert!(!doc.attributes.contains_key(key), "{key} {head:?} {body:?}");
+        }
+    }
+}
+
+#[test]
+fn a_product_a_category_page_lists_by_a_fragment_is_not_its_own() {
+    // The head says the page is a collection (or about another entity); a body product named
+    // only by a fragment of the page is one it lists. A product page's `#product`, declared as
+    // its main entity or with nothing declared, is its own.
+    let nutella = |id: &str| {
+        format!(
+            r##"{{"@type": "Product", "@id": "{id}", "name": "Nutella", "gtin13": "3017620422003", "sku": "N-400", "offers": {{"price": "4.95", "priceCurrency": "CHF"}}}}"##
+        )
+    };
+    let category = "https://shop.example/c/spreads";
+    for head in [
+        format!(r#"{{"@type": "CollectionPage", "url": "{category}", "name": "Spreads"}}"#),
+        r#"{"@graph": [{"@type": "CollectionPage", "name": "Spreads"}]}"#.to_owned(),
+        r##"{"@type": "WebPage", "mainEntity": {"@id": "#list"}}"##.to_owned(),
+    ] {
+        let doc = extracted(category, &scripts(&[&head], &[&nutella("#nutella")]));
+        for key in ["gtin", "sku", "mpn"] {
+            assert!(!doc.attributes.contains_key(key), "{key} {head}");
+        }
+        assert_eq!(doc.attributes["price"], "4.95", "{head}");
+    }
+    let page = "https://shop.example/p/nutella";
+    for head in [
+        vec![r##"{"@type": "ItemPage", "mainEntity": {"@id": "#product"}}"##.to_owned()],
+        vec![format!(
+            r##"{{"@type": "WebPage", "url": "{page}", "mainEntity": {{"@id": "{page}#product"}}}}"##
+        )],
+        vec![r#"{"@type": "WebPage", "name": "Nutella"}"#.to_owned()],
+        vec![],
+    ] {
+        let head: Vec<&str> = head.iter().map(String::as_str).collect();
+        let doc = extracted(page, &scripts(&head, &[&nutella("#product")]));
+        assert_eq!(doc.attributes["gtin"], "3017620422003", "{head:?}");
+        assert_eq!(doc.attributes["sku"], "N-400", "{head:?}");
+    }
 }
 
 struct AnyDns;

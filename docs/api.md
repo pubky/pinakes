@@ -1069,7 +1069,13 @@ record or a product database (their pages say which).
   `gtin`, `gtin12`, `gtin14`, `gtin8` or `isbn` (a book's), or its one offer's, with the check
   digit verified. The barcode, `sku` and `mpn` come only from the page's own product (in the
   page's head, or naming the page), never from another product a page lists; a page with
-  several products of its own (a category page's head list) states the barcode of none. A
+  several products of its own (a category page's head list) states the barcode of none. One
+  product described twice (by the same `url`, else `@id`) is one product. A product naming the
+  page only by a fragment (`"@id": "#nutella"`) is one the page lists when the page's head
+  declares the page to be a `CollectionPage` or `SearchResultsPage`, or names another main
+  entity; a product page's `#product`, which its head names as its `mainEntity` or declares
+  nothing about, is its own. Among products otherwise alike, one naming no page (the page's
+  own, in its head) is the card over one naming another page. A
   `ProductGroup`
   names the barcode, article numbers and offers of the variant its address picks (its `url`, or
   `?variant=`), else of its only variant, never the group's. A product's barcode is the key `gtin:`, so
