@@ -686,7 +686,12 @@ is logged at warn as `resolution failed`, with the resource id (`resource_id`), 
 upstream HTTP status when one was answered (`status`), never the error's text. No log line about
 a fetch, a lookup or a parse prints an error's text (what an upstream answered may hold a link);
 the lines about the daemon's own services (the database, Nexus, the dump) print theirs through
-a last guard that cuts every URL before its query or fragment and drops its user info. Logs name
+a last guard that cuts every URL before its query or fragment and drops its user info. A
+`nexus_url` or `osm.nominatim_url` with user info, a query or a fragment is refused at startup. A
+path is allowed, and may hold a token, so the feed's log lines (a reset, a skipped line that
+panicked) name the Nexus by its host alone (`nexus`), and a Nominatim request is logged by its
+path below the configured base (`path`: `lookup`, `search`); only admin `GET /v1/info` shows the
+Nexus URL, in its ingestion cursors. Logs name
 a link only by its host (a calendar's token or a user's name in a link never reaches a log line),
 errors carry no URL (a fetch error or a Nexus request error names none, an upstream service's
 error text is not repeated, the API answers an invalid link with the reason, not the link, and

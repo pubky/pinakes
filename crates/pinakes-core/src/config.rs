@@ -1000,21 +1000,11 @@ impl Config {
         {
             bail!("invalid refresh, canary or admin configuration");
         }
-        let nexus = url::Url::parse(&self.nexus_url)?;
-        if !matches!(nexus.scheme(), "http" | "https") || nexus.host_str().is_none() {
+        if !plain_upstream(&self.nexus_url)? {
             bail!("invalid Nexus URL");
         }
-        {
-            let url = url::Url::parse(&self.osm.nominatim_url)?;
-            if !matches!(url.scheme(), "http" | "https")
-                || url.host_str().is_none()
-                || !url.username().is_empty()
-                || url.password().is_some()
-                || url.query().is_some()
-                || url.fragment().is_some()
-            {
-                bail!("invalid OSM upstream URL");
-            }
+        if !plain_upstream(&self.osm.nominatim_url)? {
+            bail!("invalid OSM upstream URL");
         }
         if !self.osm.requests_per_second.is_finite()
             || !(0.001..=1000.0).contains(&self.osm.requests_per_second)
@@ -1095,6 +1085,18 @@ fn merge(dst: &mut serde_json::Value, src: serde_json::Value) {
         }
         (dst, src) => *dst = src,
     }
+}
+
+/// An upstream service's URL is a web URL with a host, and holds no secret: no user info, query
+/// or fragment, which logs and errors would otherwise carry.
+fn plain_upstream(raw: &str) -> Result<bool> {
+    let url = url::Url::parse(raw)?;
+    Ok(matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none())
 }
 
 #[cfg(test)]
@@ -1425,6 +1427,32 @@ mod tests {
             crate::groups::CrossContainerOccurrences::Off
         );
         assert!(!Config::default().web.discover_feeds);
+    }
+    /// The Nexus and OSM URLs hold no secret: user info, a query or a fragment is refused.
+    #[test]
+    fn upstream_urls_with_user_info_query_or_fragment_are_refused() {
+        let nexus = |url: &str| with(serde_json::json!({ "nexus_url": url }));
+        let osm = |url: &str| with(serde_json::json!({"osm":{ "nominatim_url": url }}));
+        for url in [
+            "http://u:p@nexus.example.org",
+            "http://u@nexus.example.org",
+            "http://:p@nexus.example.org",
+            "http://nexus.example.org/?token=x",
+            "http://nexus.example.org/?",
+            "http://nexus.example.org/#x",
+            "ftp://nexus.example.org",
+            "unix:/run/nexus",
+        ] {
+            assert!(nexus(url).is_err(), "{url}");
+            assert!(osm(url).is_err(), "{url}");
+        }
+        for url in [
+            "http://nexus.example.org",
+            "https://nexus.example.org:8443/base/",
+        ] {
+            assert!(nexus(url).is_ok(), "{url}");
+            assert!(osm(url).is_ok(), "{url}");
+        }
     }
     /// The facts cap has a floor: a recording's single-valued facts fit beside its ISRCs.
     #[test]
