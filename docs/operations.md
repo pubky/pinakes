@@ -527,9 +527,14 @@ resource (or a feed) when an event's start, place, name or document changes. Eac
 25 queued resources and up to 200 of their new or changed events, and the next pass follows at once
 while there was work, else after five seconds. An event's normalised name, place and identifiers
 are stored once read, and its pairs are matched among the events already read through their start
-and geography indexes. An hourly sweep drops events that started over a day ago and queues those
-that entered the window, changed unseen, or are no longer events (an alias, a missing feed, a gone
-occurrence). Requests only read the stored pairs. `"off"` stops the pass and removes the field from
+and geography indexes. An event keeps its best twenty pairs and is named by at most forty, and
+never names one whose forty all rank above it; one that changes or goes (out of the window, or
+deleted as an orphan) takes its pairs from the events that named it, and those are queued to
+refill their lists, as is one whose pair the caps pushed out. An hourly sweep drops events that
+started over a day ago, 500 a transaction, and queues those that entered the window, changed
+unseen, or are no longer events (an alias, a missing feed, a gone occurrence). Each change to the
+pairs moves the search revision in its own transaction, so a search page's `ETag` covers the
+hints it shows. Requests only read the stored pairs. `"off"` stops the pass and removes the field from
 cards, details and `/v1/openapi.json`; the stored pairs stay, and changes made meanwhile are read
 when it is turned back on.
 

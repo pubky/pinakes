@@ -833,7 +833,8 @@ $$;
 -- A unit the pass has read, with what pairs are matched on: its start, normalised name
 -- (`same_event_name`) and the numbers it keeps, place, venue (resource or OSM object), organizer
 -- URL and zone; and the `fingerprint` of the values they came from, so a change is read again.
--- Pairs are matched in this table, through its start and geography indexes.
+-- `refill:{fingerprint}` marks one whose list lost a pair to another's change: it is read again
+-- to refill its list. Pairs are matched in this table, through its start and geography indexes.
 CREATE TABLE same_event_unit (
     unit_id text PRIMARY KEY,
     resource_id text NOT NULL REFERENCES resource(id) ON DELETE CASCADE,
@@ -854,7 +855,8 @@ CREATE INDEX same_event_unit_resource_idx ON same_event_unit USING btree (resour
 CREATE INDEX same_event_unit_start_idx ON same_event_unit USING btree (start_at);
 CREATE INDEX same_event_unit_geography_idx ON same_event_unit USING gist (((point)::geography));
 
--- One row per direction of a pair: `score` is the similarity of the two normalised names.
+-- One row per direction of a pair: `score` is the similarity of the two normalised names. A unit
+-- names at most 20 and is named by at most 40.
 CREATE TABLE same_event (
     unit_id text NOT NULL REFERENCES same_event_unit(unit_id) ON DELETE CASCADE,
     other_id text NOT NULL REFERENCES same_event_unit(unit_id) ON DELETE CASCADE,
@@ -864,7 +866,8 @@ CREATE TABLE same_event (
 );
 CREATE INDEX same_event_other_idx ON same_event USING btree (other_id);
 
--- Resources whose event units may have changed (start, place or name), or entered the window.
+-- Resources whose event units may have changed (start, place or name), entered the window, or
+-- lost a pair.
 CREATE TABLE same_event_dirty (
     resource_id text PRIMARY KEY REFERENCES resource(id) ON DELETE CASCADE,
     next_attempt_at timestamp with time zone DEFAULT now() NOT NULL
