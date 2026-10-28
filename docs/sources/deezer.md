@@ -4,9 +4,9 @@ One of the music sources of [also on](../api.md#also-on): links on music service
 
 `deezer` (off unless the operator turns it on: Deezer's API terms allow non-commercial use
 only): a Deezer track's or album's own ISRC or barcode from Deezer's API as a key (an ISRC
-MusicBrainz gives to several recordings is decided as with [`service`](service.md): by the
-track's duration, the one recording within 3 s of it keyed by its MBID, else the ISRC a fact
-only), and for another service's track or album with an ISRC or barcode key, the one Deezer
+MusicBrainz gives to several recordings is decided by the track's duration, the one recording
+within 3 s of it keyed by its MBID, else the ISRC a fact only: [an ISRC on several
+recordings](README.md#an-isrc-on-several-recordings)), and for another service's track or album with an ISRC or barcode key, the one Deezer
 track or album the API names for it, keyed by it.
 
 ## Operations
