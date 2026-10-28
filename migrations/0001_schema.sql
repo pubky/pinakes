@@ -970,16 +970,18 @@ $$;
 -- A recording the pass has read, with what pairs are matched on: its title and artist keys and
 -- its length; and the `fingerprint` of the values they came from, so a change is read again.
 -- `refill:{fingerprint}` marks one whose list lost a pair to another's change: it is read again
--- to refill its list. `scan_after` is where a read that examined its most candidates
--- (same_recording::SCAN) with room left stopped: the candidate it examined last, so the next read
--- goes on from there (NULL once a read ends with its list full or the candidates run out).
+-- to refill its list. `scan_after` and `scan_after_length` are the position where a read that
+-- examined its most candidates (hints::SCAN) with room left stopped: the id and the length, as
+-- the index orders candidates, of the one it examined last, so the next read goes on from that
+-- position (NULL once a read ends with its list full or the candidates run out).
 CREATE TABLE same_recording_unit (
     resource_id text PRIMARY KEY REFERENCES resource(id) ON DELETE CASCADE,
     fingerprint text NOT NULL,
     title_key text NOT NULL,
     artist_key text NOT NULL,
     length_secs integer,
-    scan_after text
+    scan_after text,
+    scan_after_length integer
 );
 -- In (title, artist, length, id) order, so a recording's candidates are read from the length
 -- window (or the lengths unknown) and the read stops at the pairs kept, or at the candidates it

@@ -2,6 +2,12 @@
 //! committed, and how a pass picks candidates with room.
 use anyhow::Result;
 
+/// Candidates a read examines at most, in both hints: those passed over for having no room
+/// (`has_room`) count, so a read in a crowd of one recording's or one event's pages is bounded
+/// however dense the crowd. A read that runs out with room left stores the position it stopped
+/// at and is read again from there.
+pub const SCAN: i64 = 100;
+
 /// Commits a change to the pairs with the search revision moved in the same transaction: a
 /// search page reads the revision and the pairs in one snapshot (`api::REVISION`), so a page that
 /// has not seen the pairs is never answered 304 (`store::note_search_write`).

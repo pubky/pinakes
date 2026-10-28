@@ -844,7 +844,10 @@ It is a hint, like a group, and less: nothing is merged, counted or ranked by it
 keeps its own card.
 
 A background pass computes the pairs for events starting from a day ago to a year ahead, again
-whenever an event's start, place or name changes; a request only reads them. A new or changed
+whenever an event's start, place or name changes; a request only reads them. Each event keeps
+its best twenty pairs and is named by at most forty others, so a change marks a bounded number
+of events to refill their lists; a read examines at most a hundred candidates, and one that runs
+out with room left goes on from where it stopped in a later read. A new or changed
 event is paired within about five seconds of its save, once the events before it in the queue
 are read; an hourly sweep, which also runs at startup, queues events that entered the window or
 changed unseen. Search
@@ -884,7 +887,7 @@ A background pass computes the pairs, again whenever a recording's name, type, a
 changes (its page or the sources' facts); a request only reads them. Each recording keeps its
 best twenty pairs and is named by at most forty others, so a change marks a bounded number of
 recordings to refill their lists; a read examines at most a hundred candidates, and one that
-runs out with room left goes on from where it stopped in a later read. An hourly sweep, which also
+runs out with room left goes on from the position it stopped at in a later read. An hourly sweep, which also
 runs at startup, reads recordings saved before the hint existed or while it was off. Search pages
 change their `ETag` when a hint on them changes. `[groups] same_recording_hint = "off"`
 ([operations](operations.md#groups)) removes the field from recording cards and stops
