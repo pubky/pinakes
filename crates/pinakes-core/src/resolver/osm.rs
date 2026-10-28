@@ -347,11 +347,16 @@ impl OsmResolver {
                 })?;
         observation.status(response.status().as_u16());
         let status = response.status();
-        // The path of our own OSM API request (`/api/0.6/node/{id}`): no query, no user's link.
-        let api_path = url.path();
+        // The request's path below the configured base (`lookup`, `search`): never the query, a
+        // user's link or the base's own path, which may hold a token.
+        let base = url::Url::parse(&self.config.nominatim_url).ok();
+        let below = base
+            .as_ref()
+            .and_then(|base| url.path().strip_prefix(base.path().trim_end_matches('/')))
+            .map_or("", |path| path.trim_start_matches('/'));
         tracing::info!(
             source = "osm",
-            path = api_path,
+            path = below,
             status = status.as_u16(),
             "OSM upstream request"
         );

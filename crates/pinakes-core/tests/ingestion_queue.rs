@@ -183,6 +183,42 @@ async fn epoch_headers_length_reset_and_transaction_rollback(pool: PgPool) {
     );
     assert_eq!(metrics.ingest_rejected.with_label_values(&["uri"]).get(), 1);
 }
+/// A feed reset is logged by the Nexus's host: its user info, path and query stay out of the
+/// line, whatever the URL holds.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_feed_reset_logs_only_the_nexus_host(pool: PgPool) {
+    let lines = log_lines();
+    let nexus = "https://user:SECRET@reset.nexus.example.org/BASEPATH?token=CANARY";
+    let limits = IngestConfig::default();
+    let metrics = Metrics::new().unwrap();
+    for (epoch, applied) in [("first", true), ("second", false)] {
+        let saved = ingest::cursor(&pool, nexus).await.unwrap();
+        let page = FeedPage {
+            page: Changes {
+                lines: vec![change("https://example.org/a", "a", "/pub/app/tags/a")],
+                next_cursor: saved.cursor + 1,
+                skipped: Default::default(),
+            },
+            epoch: Some(epoch.into()),
+            length: saved.cursor + 1,
+        };
+        let done = ingest::apply(&pool, nexus, &saved, &page, &limits, &metrics);
+        assert_eq!(done.await.unwrap(), applied, "{epoch}");
+    }
+    let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+    let line: serde_json::Value = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|l| {
+            l["fields"]["message"] == "Nexus feed reset; rebuilding references"
+                && l["fields"]["nexus"] == "reset.nexus.example.org"
+        })
+        .unwrap_or_else(|| panic!("{text}"));
+    let line = line.to_string();
+    for secret in ["user", "SECRET", "BASEPATH", "CANARY", "https"] {
+        assert!(!line.contains(secret), "{secret}: {line}");
+    }
+}
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn concurrent_pollers_only_commit_a_batch_once(pool: PgPool) {
     let limits = IngestConfig::default();

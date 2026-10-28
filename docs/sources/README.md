@@ -133,6 +133,16 @@ on the same page. A source that records keys lists their forms (`Source::key_for
 example each): every form searches back as recorded (`GET /v1/search?key=`, tested for every
 registered source), and in a debug build a source records no other form.
 
+### An ISRC on several recordings
+
+MusicBrainz gives one ISRC to several recordings at times. A source that reads a track's own
+ISRC names none of them by the ISRC alone: the track's duration decides. The one recording whose
+length is within 3 s of it, while every other's length is known and is not, is the track's: its
+MBID is the key (`mb:recording:…`, `via` the source) and the ISRC a fact. When none or two are
+that close, or the page states no duration, the ISRC is a fact only (a key would join whichever
+recording's group took it first). Each music source that reads ISRCs follows this rule, so one
+goes without the others needing a change.
+
 - [`service`](service.md): the ISRC a music service's own track page states.
 - [`tidal`](tidal.md): TIDAL's own barcodes and ISRCs (with the operator's TIDAL credentials).
 - [`musicbrainz`](musicbrainz.md): what MusicBrainz relates a music link to.

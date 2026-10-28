@@ -114,7 +114,11 @@ pub async fn apply(
         sqlx::query("UPDATE feed_cursor SET cursor=0, epoch=$2, feed_length=$3, updated_at=now(),resets=resets+1 WHERE nexus=$1")
             .bind(nexus).bind(epoch).bind(feed.length).execute(&mut *tx).await?;
         tx.commit().await?;
-        tracing::warn!(nexus, "Nexus feed reset; rebuilding references");
+        // The host only, as every log line names a URL (docs/operations.md).
+        tracing::warn!(
+            nexus = %crate::resolver::log_host(nexus),
+            "Nexus feed reset; rebuilding references"
+        );
         return Ok(false);
     }
     // The page's lines, those skipped while parsing included: the cursor moves past them all.
@@ -154,7 +158,7 @@ pub async fn apply(
                 savepoint.rollback().await?;
                 *rejected.entry("panic").or_default() += 1;
                 tracing::error!(
-                    nexus,
+                    nexus = %crate::resolver::log_host(nexus),
                     position = requested.cursor + i as i64,
                     "a Nexus feed line panicked; skipped"
                 );
@@ -355,6 +359,9 @@ mod tests {
         fixtures("../tests/fixtures/require_h3.sql")
     )]
     async fn a_line_that_panics_is_skipped_and_the_cursor_moves_past_it(pool: PgPool) {
+        use tracing::instrument::WithSubscriber;
+        // A Nexus URL with a token in its path: only its host may reach the log.
+        let nexus = "https://u:SECRET@panic.nexus.example.org/private-token?CANARY";
         let bad = "https://panic.example/ingest";
         PANICS_ON.lock().unwrap().push(bad.into());
         let lines = vec![
@@ -363,7 +370,7 @@ mod tests {
             line("https://example.org/after", "/c"),
             line(bad, "/d"),
         ];
-        let saved = cursor(&pool, "fixture").await.unwrap();
+        let saved = cursor(&pool, nexus).await.unwrap();
         let feed = FeedPage {
             page: Changes {
                 next_cursor: lines.len() as i64,
@@ -375,8 +382,40 @@ mod tests {
         };
         let metrics = Metrics::new().unwrap();
         let limits = IngestConfig::default();
-        let applied = apply(&pool, "fixture", &saved, &feed, &limits, &metrics).await;
+        #[derive(Clone, Default)]
+        struct Lines(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Lines {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let logs = Lines::default();
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(move || writer.clone())
+            .finish();
+        let applied = apply(&pool, nexus, &saved, &feed, &limits, &metrics)
+            .with_subscriber(subscriber)
+            .await;
         assert!(applied.unwrap());
+        let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        let panicked: Vec<serde_json::Value> = text
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|l| l["fields"]["message"] == "a Nexus feed line panicked; skipped")
+            .collect();
+        assert_eq!(panicked.len(), 2, "{text}");
+        for line in &panicked {
+            assert_eq!(line["fields"]["nexus"], "panic.nexus.example.org", "{line}");
+        }
+        for secret in ["SECRET", "private-token", "CANARY", "https"] {
+            assert!(!text.contains(secret), "{secret}: {text}");
+        }
         let paths: Vec<String> =
             sqlx::query_scalar("SELECT object_path FROM reference ORDER BY object_path")
                 .fetch_all(&pool)
@@ -390,7 +429,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(kept, 0);
-        assert_eq!(cursor(&pool, "fixture").await.unwrap().cursor, 4);
+        assert_eq!(cursor(&pool, nexus).await.unwrap().cursor, 4);
         let panics = metrics.ingest_rejected.with_label_values(&["panic"]).get();
         assert_eq!(panics, 2);
     }

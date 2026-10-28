@@ -692,28 +692,34 @@ pub struct Card {
     pub event: Option<Value>,
     /// On an event card: other events that are possibly the same one, best first (the rule:
     /// "Possibly the same event" in docs/api.md); on an app's store card, other store cards that
-    /// are possibly the same app ("Possibly the same app"). Up to three on a search, lookup or
-    /// group card and up to ten on a resource read. A hint only: never a group, never counted, and
-    /// never a member of this card's own group. Absent on other cards, and everywhere when
-    /// `[event] same_event_hint = "off"`.
+    /// are possibly the same app ("Possibly the same app"); on a MusicRecording card, other
+    /// recordings that are possibly the same one ("Possibly the same recording"). Up to three on
+    /// a search, lookup or group card and up to ten on a resource read. A hint only: never a
+    /// group, never counted, and never a member of this card's own group. Absent on other cards,
+    /// and on a kind's cards when its hint is off (`[event] same_event_hint` for events and apps,
+    /// `[groups] same_recording_hint`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub maybe_same: Option<Vec<SameEvent>>,
 }
-/// Another event that is possibly the same one: it starts together with this one, near it (or,
-/// when either has no place, at the same venue or under the same organizer), under a similar
-/// name, on another page. On an app's store card: another store card with the same website host
-/// and name (`start` is absent, `score` 1).
+/// Another event, app or recording that is possibly the same one. An event: it starts together
+/// with this one, near it (or, when either has no place, at the same venue or under the same
+/// organizer), under a similar name, on another page. On an app's store card: another store card
+/// with the same website host and name (`start` is absent, `score` 1). A recording: the same title
+/// and first artist, and a length within 3 s when both are known, on another page, with no key
+/// that joins them.
 #[derive(Clone, Serialize, ToSchema)]
 pub struct SameEvent {
     /// Its card's ID (a feed's, for an occurrence).
     pub id: String,
     /// Its page: the occurrence's own page, or the feed's or event's link (for a feed read from a
-    /// service's API, that service's page).
+    /// service's API, that service's page); a recording's link.
     pub uri: String,
     pub site: Option<String>,
+    /// An event's start; absent for a recording.
     pub start: Option<DateTime<Utc>>,
-    /// How alike the two names are, from 0.5 to 1 (pg_trgm similarity of the normalised names);
-    /// 1 for an app.
+    /// An event: how alike the two names are, from 0.5 to 1 (pg_trgm similarity of the normalised
+    /// names). An app: 1. A recording: 1 when both lengths are known and within 3 s, 0.7 when one
+    /// is unknown.
     pub score: f64,
 }
 /// The group this card is in (its other members are in `also_on`). Nothing is merged; every
@@ -1095,25 +1101,42 @@ pub(crate) async fn with_refs<'a>(
     }
     Ok(())
 }
-/// Whether event cards carry the same-event hint.
-/// A card's `maybe_same` as SQL, over a unit's ID and type path (SQL expressions): the
-/// same-event hint for an event; for an app's store card, up to `n` other store cards with its
-/// `app_match` fact (the same website host and name), each with score 1, by URI; else `NULL`. An
-/// alias, a missing card and a member of the card's own group are never named.
-pub(crate) fn maybe_same_sql(unit: &str, type_path: &str, n: u32) -> String {
+/// A card's `maybe_same` as SQL, over a unit's ID and type path and the two hints' switches (SQL
+/// expressions): with `events`, the same-event hint for an event and, for an app's store card, up
+/// to `n` other store cards with its `app_match` fact (the same website host and name), each with
+/// score 1, by URI; with `recordings`, the same-recording hint for a recording (`maybe_same_hint`);
+/// else `NULL`. An alias, a missing card and a member of the card's own group are never named.
+pub(crate) fn maybe_same_sql(
+    unit: &str,
+    type_path: &str,
+    n: u32,
+    events: &str,
+    recordings: &str,
+) -> String {
     format!(
-        "coalesce(same_event_hint({unit},{type_path},{n}),(SELECT jsonb_agg(jsonb_build_object('id',same_app.id,'uri',same_app.uri,'host',same_app.host,'site',same_app.site,'start',NULL,'score',1) ORDER BY same_app.uri) \
+        "coalesce(maybe_same_hint({unit},{type_path},{n},{events},{recordings}),CASE WHEN {events} THEN (SELECT jsonb_agg(jsonb_build_object('id',same_app.id,'uri',same_app.uri,'host',same_app.host,'site',same_app.site,'start',NULL,'score',1) ORDER BY same_app.uri) \
          FROM (SELECT DISTINCT same_r.id,same_r.uri,same_r.host,same_r.doc->>'site' AS site FROM resource_fact same_f \
          JOIN resource_fact same_g ON same_g.name='app_match' AND same_g.value=same_f.value AND same_g.resource_id<>same_f.resource_id AND same_g.expires_at>now() \
          JOIN resource same_r ON same_r.id=same_g.resource_id \
          WHERE same_f.resource_id={unit} AND same_f.name='app_match' AND same_f.expires_at>now() AND same_r.status<>'missing' \
          AND NOT EXISTS (SELECT 1 FROM resource_alias same_alias WHERE same_alias.alias_id=same_r.id) \
          AND NOT EXISTS (SELECT 1 FROM group_unit same_a JOIN group_unit same_b ON same_b.group_id=same_a.group_id WHERE same_a.unit_id={unit} AND same_b.unit_id=same_r.id AND same_a.group_id IS NOT NULL) \
-         ORDER BY same_r.uri LIMIT {n}) same_app))"
+         ORDER BY same_r.uri LIMIT {n}) same_app) END)"
     )
 }
+/// Whether event cards (and apps' store cards) carry the same-event hint.
 pub(crate) fn same_event(config: &Config) -> bool {
     config.event.same_event_hint == crate::config::SameEventHint::On
+}
+/// Whether recording cards carry the same-recording hint.
+pub(crate) fn same_recording(config: &Config) -> bool {
+    config.groups.same_recording_hint == crate::config::SameEventHint::On
+}
+/// The two hints' switches as SQL literals for `maybe_same_sql`, when either hint is on.
+fn hint_flags(config: &Config) -> Option<(&'static str, &'static str)> {
+    let literal = |on: bool| if on { "true" } else { "false" };
+    (same_event(config) || same_recording(config))
+        .then(|| (literal(same_event(config)), literal(same_recording(config))))
 }
 /// The same-event hint a row carries (`same_event_hint` in SQL): absent for a card that is no
 /// event, or when the hint is off.
@@ -1969,13 +1992,15 @@ pub async fn search(
         } else {
             sql.push("||jsonb_build_object('also_on',also_on(p.unit_id,p.unit_id,8,false))");
         }
-        if same_event(&state.config) {
+        if let Some((events, recordings)) = hint_flags(&state.config) {
             sql.push(format!(
                 "||jsonb_build_object('maybe_same',{})",
                 maybe_same_sql(
                     "p.unit_id",
                     "ARRAY(SELECT jsonb_array_elements_text(p.item->'type_path'))",
-                    3
+                    3,
+                    events,
+                    recordings
                 )
             ));
         }
@@ -1998,10 +2023,10 @@ pub async fn search(
         } else {
             sql.push(" || jsonb_build_object('also_on',also_on(p.unit_id,p.unit_id,8,false))");
         }
-        if same_event(&state.config) {
+        if let Some((events, recordings)) = hint_flags(&state.config) {
             sql.push(format!(
                 " || jsonb_build_object('maybe_same',{})",
-                maybe_same_sql("p.unit_id", "p.type_path", 3)
+                maybe_same_sql("p.unit_id", "p.type_path", 3, events, recordings)
             ));
         }
         sql.push(" ORDER BY rank DESC,unit_id DESC) FROM page p),'[]') AS items, ");
@@ -2185,14 +2210,15 @@ async fn read(
 ) -> Result<Option<ResourceDetail>, ApiError> {
     let value: Option<Value> =
         sqlx::query_scalar(&[
-            "SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',CASE WHEN $3 THEN ",
-            &maybe_same_sql("r.id", "r.type_path", 10),
-            " END,'also_on',also_on(r.id,r.id,256,$2),'also_on_all',also_on(r.id,r.id,256,$2,false),'aliases',coalesce((SELECT jsonb_agg(uri ORDER BY uri) FROM (SELECT x.uri FROM resource_alias a JOIN resource x ON x.id=a.alias_id WHERE a.root_id=r.id ORDER BY x.uri LIMIT 50) s),'[]'),'keys',coalesce((SELECT jsonb_agg(key ORDER BY key COLLATE \"C\") FROM resource_key WHERE resource_id=r.id AND expires_at>now()),'[]'),'facts',(SELECT jsonb_object_agg(name,vals) FROM (SELECT name,string_agg(value,'; ' ORDER BY value) AS vals FROM resource_fact WHERE resource_id=r.id AND expires_at>now() GROUP BY name) f)) FROM resource_document r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)",
+            "SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',",
+            &maybe_same_sql("r.id", "r.type_path", 10, "$3", "$4"),
+            ",'also_on',also_on(r.id,r.id,256,$2),'also_on_all',also_on(r.id,r.id,256,$2,false),'aliases',coalesce((SELECT jsonb_agg(uri ORDER BY uri) FROM (SELECT x.uri FROM resource_alias a JOIN resource x ON x.id=a.alias_id WHERE a.root_id=r.id ORDER BY x.uri LIMIT 50) s),'[]'),'keys',coalesce((SELECT jsonb_agg(key ORDER BY key COLLATE \"C\") FROM resource_key WHERE resource_id=r.id AND expires_at>now()),'[]'),'facts',(SELECT jsonb_object_agg(name,vals) FROM (SELECT name,string_agg(value,'; ' ORDER BY value) AS vals FROM resource_fact WHERE resource_id=r.id AND expires_at>now() GROUP BY name) f)) FROM resource_document r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)",
         ]
         .concat())
             .bind(id)
             .bind(config.groups.enabled)
             .bind(same_event(config))
+            .bind(same_recording(config))
             .fetch_optional(pool)
             .await?;
     let Some(mut detail) = value.as_ref().map(detail).transpose()? else {
@@ -2295,11 +2321,11 @@ pub async fn lookup(
     store::expedite(&state.pool, &roots).await?;
     state.wake.notify_waiters();
     let rows:Vec<Value>=sqlx::query_scalar(&[
-            "SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',CASE WHEN $3 THEN ",
-            &maybe_same_sql("r.id", "r.type_path", 3),
-            " END,'also_on',also_on(r.id,r.id,8,$2)) FROM unnest($1::text[]) WITH ORDINALITY AS wanted(id,n) LEFT JOIN resource_alias a ON a.alias_id=wanted.id JOIN resource_document r ON r.id=coalesce(a.root_id,wanted.id) ORDER BY wanted.n",
+            "SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',",
+            &maybe_same_sql("r.id", "r.type_path", 3, "$3", "$4"),
+            ",'also_on',also_on(r.id,r.id,8,$2)) FROM unnest($1::text[]) WITH ORDINALITY AS wanted(id,n) LEFT JOIN resource_alias a ON a.alias_id=wanted.id JOIN resource_document r ON r.id=coalesce(a.root_id,wanted.id) ORDER BY wanted.n",
         ]
-        .concat()).bind(ids).bind(state.config.groups.enabled).bind(same_event(&state.config)).fetch_all(&state.pool).await?;
+        .concat()).bind(ids).bind(state.config.groups.enabled).bind(same_event(&state.config)).bind(same_recording(&state.config)).fetch_all(&state.pool).await?;
     let mut cards = rows.iter().map(card).collect::<Result<Vec<_>, _>>()?;
     with_refs(&state.pool, cards.iter_mut()).await?;
     Ok(Json(cards))
@@ -2576,37 +2602,47 @@ static PUBLIC_DOCUMENT: std::sync::LazyLock<Value> = std::sync::LazyLock::new(||
     declare_rejections(&mut doc);
     doc
 });
-/// The document with `[event] same_event_hint = "off"`: no `maybe_same` field and no example
-/// of it.
-static PUBLIC_DOCUMENT_WITHOUT_SAME_EVENT: std::sync::LazyLock<Value> =
-    std::sync::LazyLock::new(|| {
+/// The document for each setting of the two hints (`[event] same_event_hint`, `[groups]
+/// same_recording_hint`), by `events * 2 + recordings`: without the `maybe_same` field when both
+/// are off, and without a hint's examples when it is off.
+static PUBLIC_DOCUMENTS: std::sync::LazyLock<[Value; 4]> = std::sync::LazyLock::new(|| {
+    std::array::from_fn(|n| {
         let mut doc = PUBLIC_DOCUMENT.clone();
-        without_same_event(&mut doc);
+        without_hints(&mut doc, n & 2 != 0, n & 1 != 0);
         doc
-    });
-fn without_same_event(doc: &mut Value) {
-    if let Some(schemas) = doc["components"]["schemas"].as_object_mut() {
-        schemas.remove("SameEvent");
-        for schema in schemas.values_mut() {
-            if let Some(properties) = schema["properties"].as_object_mut() {
-                properties.remove("maybe_same");
+    })
+});
+fn without_hints(doc: &mut Value, events: bool, recordings: bool) {
+    if !events && !recordings {
+        if let Some(schemas) = doc["components"]["schemas"].as_object_mut() {
+            schemas.remove("SameEvent");
+            for schema in schemas.values_mut() {
+                if let Some(properties) = schema["properties"].as_object_mut() {
+                    properties.remove("maybe_same");
+                }
             }
         }
     }
-    // Examples are keyed by recipe name; the hint's are `same-event-…`.
-    fn examples(v: &mut Value) {
+    // Examples are keyed by recipe name; a hint's are `same-event-…` and `same-recording-…`.
+    fn examples(v: &mut Value, events: bool, recordings: bool) {
         match v {
             Value::Object(map) => {
                 if let Some(Value::Object(named)) = map.get_mut("examples") {
-                    named.retain(|name, _| !name.starts_with("same-event-"));
+                    named.retain(|name, _| {
+                        (events || !name.starts_with("same-event-"))
+                            && (recordings || !name.starts_with("same-recording-"))
+                    });
                 }
-                map.values_mut().for_each(examples);
+                map.values_mut()
+                    .for_each(|v| examples(v, events, recordings));
             }
-            Value::Array(items) => items.iter_mut().for_each(examples),
+            Value::Array(items) => items
+                .iter_mut()
+                .for_each(|v| examples(v, events, recordings)),
             _ => {}
         }
     }
-    examples(&mut doc["paths"]);
+    examples(&mut doc["paths"], events, recordings);
 }
 /// Every operation that takes a body answers a body it cannot read with an error object
 /// (`rejection_without_input`): declared once here for all of them.
@@ -2638,11 +2674,7 @@ fn declare_rejections(doc: &mut Value) {
 }
 /// The public document as an instance with `config` serves it.
 pub fn openapi_document_for(config: &Config) -> &'static Value {
-    if same_event(config) {
-        &PUBLIC_DOCUMENT
-    } else {
-        &PUBLIC_DOCUMENT_WITHOUT_SAME_EVENT
-    }
+    &PUBLIC_DOCUMENTS[usize::from(same_event(config)) * 2 + usize::from(same_recording(config))]
 }
 pub fn openapi_document() -> Value {
     PUBLIC_DOCUMENT.clone()
@@ -2991,15 +3023,19 @@ pub async fn group(
     if !model::valid_id(&id) || !state.config.groups.enabled {
         return Err(ApiError::bad("invalid or disabled group"));
     }
-    group_detail(&state.pool, &id, same_event(&state.config))
-        .await?
-        .map(Json)
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "group not found".into()))
+    group_detail(
+        &state.pool,
+        &id,
+        (same_event(&state.config), same_recording(&state.config)),
+    )
+    .await?
+    .map(Json)
+    .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "group not found".into()))
 }
 async fn group_detail(
     pool: &PgPool,
     id: &str,
-    same: bool,
+    hints: (bool, bool),
 ) -> Result<Option<GroupDetail>, ApiError> {
     let curated: Option<bool> = sqlx::query_scalar("SELECT curated FROM \"group\" WHERE id=$1")
         .bind(id)
@@ -3015,14 +3051,15 @@ async fn group_detail(
     .fetch_all(pool)
     .await?;
     let rows: Vec<Value> = sqlx::query_scalar(&[
-            "SELECT to_jsonb(d)||jsonb_build_object('group',group_hint(d.unit_id),'maybe_same',CASE WHEN $2 THEN ",
-            &maybe_same_sql("d.unit_id", "d.type_path", 3),
-            " END,'also_on',also_on(d.unit_id,d.unit_id,8,true)) FROM group_unit u CROSS JOIN LATERAL (SELECT * FROM group_member_document WHERE unit_id=u.unit_id OFFSET 0) d WHERE u.group_id=$1 ORDER BY d.id,d.unit_id",
+            "SELECT to_jsonb(d)||jsonb_build_object('group',group_hint(d.unit_id),'maybe_same',",
+            &maybe_same_sql("d.unit_id", "d.type_path", 3, "$2", "$3"),
+            ",'also_on',also_on(d.unit_id,d.unit_id,8,true)) FROM group_unit u CROSS JOIN LATERAL (SELECT * FROM group_member_document WHERE unit_id=u.unit_id OFFSET 0) d WHERE u.group_id=$1 ORDER BY d.id,d.unit_id",
         ]
         .concat(),
     )
     .bind(id)
-    .bind(same)
+    .bind(hints.0)
+    .bind(hints.1)
     .fetch_all(pool)
     .await?;
     let mut members = rows.iter().map(card).collect::<Result<Vec<_>, _>>()?;
@@ -3067,10 +3104,14 @@ pub async fn curate_group(
                 ApiError::bad("invalid group curation")
             }
         })?;
-    group_detail(&state.pool, &id, same_event(&state.config))
-        .await?
-        .map(Json)
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "group not found".into()))
+    group_detail(
+        &state.pool,
+        &id,
+        (same_event(&state.config), same_recording(&state.config)),
+    )
+    .await?
+    .map(Json)
+    .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "group not found".into()))
 }
 #[cfg(test)]
 mod tests {

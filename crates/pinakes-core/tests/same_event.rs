@@ -511,9 +511,16 @@ async fn off_removes_the_field_and_computes_nothing(pool: PgPool) {
         .unwrap()
         .iter()
         .all(|r| r.get("maybe_same").is_none()));
+    // The event hint's examples go; the field stays while the recording hint is on, and goes
+    // with both off.
     let doc = get(&off, &pool, "/v1/openapi.json").await;
     let text = doc.to_string();
-    assert!(!text.contains("maybe_same") && !text.contains("same-event-"));
+    assert!(!text.contains("same-event-"));
+    assert!(doc["components"]["schemas"]["Card"]["properties"]["maybe_same"].is_object());
+    let mut both_off = off.clone();
+    both_off.groups.same_recording_hint = SameEventHint::Off;
+    let doc = get(&both_off, &pool, "/v1/openapi.json").await;
+    assert!(!doc.to_string().contains("maybe_same"));
     let on = get(&Config::default(), &pool, "/v1/openapi.json").await;
     assert!(on["components"]["schemas"]["Card"]["properties"]["maybe_same"].is_object());
     // An event card with the hint on and nothing found says so with an empty list; a card that

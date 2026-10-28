@@ -556,6 +556,7 @@ mod tests {
             "/osm_dump.rs",
             "/queue.rs",
             "/same_event.rs",
+            "/same_recording.rs",
             "/resolver/mod.rs",
             "pinakesd/src/main.rs",
         ];

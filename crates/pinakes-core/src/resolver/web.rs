@@ -206,8 +206,13 @@ impl WebResolver {
                 .unwrap_or_default();
             let entity = match recordings.as_slice() {
                 [one] => {
-                    musicbrainz::entity(&self.egress, base, crate::hubs::MbKind::Recording, one)
-                        .await?
+                    musicbrainz::entity(
+                        &self.egress,
+                        base,
+                        crate::hubs::MbKind::Recording,
+                        &one.mbid,
+                    )
+                    .await?
                 }
                 _ => None,
             };

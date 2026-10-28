@@ -447,7 +447,8 @@ async fn delete_orphan_batch(pool: &PgPool, grace_days: u32, limit: i64) -> Resu
             )
             .await?;
         }
-        // Its hint pairs cascade away with it: the units that named them refill.
+        // Its hint pairs cascade away with it: the recordings and units that named them refill.
+        crate::same_recording::before_delete(&mut tx, &id).await?;
         crate::same_event::before_delete(&mut tx, &id).await?;
         sqlx::query("DELETE FROM resource WHERE id=$1")
             .bind(id)
