@@ -45,6 +45,17 @@ pub const ATTRIBUTES: &[&str] = &[
     "date_posted",
     "valid_through",
     "apply_url",
+    // A product's facts (`kinds::products::FACTS`).
+    "gtin",
+    "brand",
+    "sku",
+    "mpn",
+    "price",
+    "price_currency",
+    "availability",
+    "price_at",
+    "seller",
+    "asin",
 ];
 pub struct WebResolver {
     pub oembed_policy: super::cards::OembedPolicy,
@@ -209,6 +220,10 @@ impl WebResolver {
             && crate::event::adapters::detect(uri).is_none()
         {
             return Err(super::ErrorClass("policy").into());
+        }
+        // Amazon is never fetched: its links' cards come from the link alone.
+        if let Some(doc) = crate::kinds::products::amazon(uri, self.config.ttl_secs) {
+            return Ok(doc);
         }
         if let Some(article) = crate::wikipedia::parse(uri) {
             if let Some(doc) = self.wikipedia_card(uri, &article).await {
@@ -1245,6 +1260,17 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url, claims: bool, vou
     if schema_type(v).is_some_and(|k| crate::model::type_path(k).iter().any(|t| t == "JobPosting"))
     {
         crate::kinds::jobs::from_jsonld(v, base).apply(doc);
+    }
+    // A product's barcode, brand and offer. Its identity (barcode, article and part number)
+    // only from the page's own product, as other claims: another product a page lists (a
+    // category page's) would join the page to that product.
+    if schema_type(v).is_some_and(|k| crate::model::type_path(k).iter().any(|t| t == "Product")) {
+        let product = crate::kinds::products::from_jsonld(v, base);
+        if claims && own {
+            product.apply(doc);
+        } else {
+            product.without_identity().apply(doc);
+        }
     }
     for (field, attribute) in [("duration", "duration"), ("isrcCode", "isrc")] {
         if let Some(value) = v.get(field).and_then(Value::as_str) {

@@ -137,6 +137,8 @@ enabled = true
 enabled = true
 [sources.met]
 enabled = true
+[sources.open_food_facts]
+enabled = true
 [sources.pdb]
 enabled = true
 [sources.pinterest]
@@ -152,6 +154,8 @@ enabled = true
 [sources.ror]
 enabled = true
 [sources.sec]
+enabled = true
+[sources.shopify]
 enabled = true
 [sources.snap_store]
 enabled = true

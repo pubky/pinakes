@@ -106,26 +106,6 @@ pub fn isrc(code: &str) -> Option<String> {
         && b[5..].iter().all(u8::is_ascii_digit))
     .then_some(code)
 }
-/// A barcode as keys and facts store it: GTIN-13, so a UPC-A (12 digits), an EAN-13, an EAN-8
-/// and a GTIN-14 with a leading zero are one value each (zero-padded or the leading zero
-/// dropped), with the check digit verified.
-pub fn gtin13(code: &str) -> Option<String> {
-    let code = code.trim();
-    if !matches!(code.len(), 8 | 12 | 13 | 14) || !code.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let padded = format!("{code:0>14}");
-    let gtin = padded.strip_prefix('0')?;
-    let (body, check) = gtin.split_at(12);
-    // Weights 3 and 1 from the right of the body.
-    let sum: u32 = body
-        .bytes()
-        .rev()
-        .enumerate()
-        .map(|(i, b)| u32::from(b - b'0') * if i % 2 == 0 { 3 } else { 1 })
-        .sum();
-    ((10 - sum % 10) % 10 == u32::from(check.as_bytes()[0] - b'0')).then(|| gtin.to_owned())
-}
 fn link(service: Service, level: Level, id: &str, canonical: String) -> Option<Link> {
     Some(Link {
         service,
@@ -698,23 +678,7 @@ pub mod discogs {
 mod tests {
     use super::*;
     #[test]
-    fn barcodes_and_isrcs_have_one_form() {
-        // UPC-A, its EAN-13 and GTIN-14 spellings, and Deezer's 13-digit form are one value.
-        for code in ["602557656527", "0602557656527", "00602557656527"] {
-            assert_eq!(gtin13(code).as_deref(), Some("0602557656527"), "{code}");
-        }
-        assert_eq!(gtin13("196874054246").as_deref(), Some("0196874054246"));
-        assert_eq!(gtin13("4006381333931").as_deref(), Some("4006381333931"));
-        assert_eq!(gtin13("96385074").as_deref(), Some("0000096385074"));
-        for bad in [
-            "602557656528",
-            "10602557656527",
-            "60255765652",
-            "60255765652a",
-            "",
-        ] {
-            assert_eq!(gtin13(bad), None, "{bad}");
-        }
+    fn isrcs_have_one_form() {
         assert_eq!(isrc("gb-um7-10-29604").as_deref(), Some("GBUM71029604"));
         assert_eq!(isrc("USIR20400274").as_deref(), Some("USIR20400274"));
         for bad in [

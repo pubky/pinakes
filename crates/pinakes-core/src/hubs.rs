@@ -507,7 +507,7 @@ pub mod musicbrainz {
     /// each once; empty when MusicBrainz has none. The search matches the barcode field alone,
     /// and the answer is checked against it.
     pub async fn barcode(egress: &Egress, base: &str, upc: &str) -> Result<Vec<String>> {
-        let Some(upc) = crate::music::gtin13(upc) else {
+        let Some(upc) = crate::barcode::gtin13(upc) else {
             return Ok(vec![]);
         };
         Ok(get(egress, &barcode_lookup(base, &upc), "musicbrainz")
@@ -536,7 +536,7 @@ pub mod musicbrainz {
             .filter(|r| {
                 r["barcode"]
                     .as_str()
-                    .and_then(crate::music::gtin13)
+                    .and_then(crate::barcode::gtin13)
                     .is_some_and(|b| b == upc)
             })
             .filter_map(|r| mbid(r["id"].as_str()?))

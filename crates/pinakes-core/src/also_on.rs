@@ -23,6 +23,7 @@ pub mod musicbrainz;
 pub mod musicbrainz_entity;
 pub mod performers;
 pub mod podcasts;
+pub mod product_keys;
 pub mod service;
 pub mod tidal;
 pub mod wikidata;
@@ -359,6 +360,8 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         Arc::new(books::Books),
         Arc::new(films::Films),
         Arc::new(podcasts::Podcasts),
+        Arc::new(product_keys::ProductKeys),
+        Arc::new(crate::sources::open_food_facts::also_on::OpenFoodFacts),
         Arc::new(crate::sources::media_records::titles::Titles),
         Arc::new(crate::sources::federal_register::also_on::FederalRegister),
     ];
@@ -540,11 +543,11 @@ fn checked(
     (keys, links, facts)
 }
 
-/// ISRCs and barcodes have one stored form (`music::isrc`, `music::gtin13`), as keys and facts.
+/// ISRCs and barcodes have one stored form (`music::isrc`, `barcode::gtin13`), as keys and facts.
 fn identifier(namespace: &str) -> Option<fn(&str) -> Option<String>> {
     match namespace {
         "isrc" => Some(crate::music::isrc),
-        "upc" => Some(crate::music::gtin13),
+        "upc" => Some(crate::barcode::gtin13),
         _ => None,
     }
 }

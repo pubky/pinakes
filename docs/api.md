@@ -308,6 +308,7 @@ GET /v1/search?type=WebPage
 GET /v1/search?type=SocialMediaPosting
 GET /v1/search?type=DataFeed
 GET /v1/search?type=CreativeWork
+GET /v1/search?type=Product
 GET /v1/search?type=JobPosting
 GET /v1/search?remote=true&type=JobPosting
 GET /v1/search?remote=false&type=JobPosting
@@ -343,6 +344,7 @@ GET /v1/search?key=isbn:9780140328721
 GET /v1/search?key=imdb:tt0111161
 GET /v1/search?key=podcast:304b84f0-07b0-5265-b6b7-da5cf5aeb56e
 GET /v1/search?key=osm:node%2F240109189
+GET /v1/search?key=gtin:0840440422266
 GET /v1/search?collapse=group&type=Book
 GET /v1/search?collapse=group&type=ScholarlyArticle
 GET /v1/search?bbox=8.90,45.98,9.00,46.03&cluster=12
@@ -420,7 +422,7 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 | `q` | Full-text name/description search with a trigram/partial-name fallback; at most 256 bytes. A post whose author opted out of search indexing (a read's `facts.opted_out`: Mastodon's `indexable: false` or `noindex`, Bluesky's `!no-unauthenticated`) never matches |
 | `type` | A schema.org type, ancestors included (`Event` matches `MusicEvent`; `Place` matches cafés and other `LocalBusiness` types), or up to 10 comma-separated: any of them (`type=MusicRecording,MusicAlbum,MusicGroup`). An unknown type is a 400 that names it (only a name of letters and digits is repeated; anything else, such as a URL, gets a general message) |
 | `category`, `host` | Exact filters |
-| `key` | Links carrying one exact identifier, on any service and in any spelling: `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist), `wikidata:{Q-id}`, `isrc:{code}` (any letter case, hyphens allowed), `upc:{barcode}` (a UPC, EAN or GTIN in any of its lengths, check digit verified), `isbn:{ISBN-10 or ISBN-13}` (an edition), `imdb:{tt…}` (a film or series), `podcast:{GUID}` (a show), `osm:{node|way|relation}/{id}`, `doi:{DOI}`, any key exactly as a resource read lists it in `keys` (`mb:recording:{mbid}`, `podcast:guid:{GUID}`, `podcast:apple:{id}`, …), or another namespace a source records (its page in [docs/sources](sources/README.md#also-on) names its namespaces and how each is normalized), as the [also-on](#also-on) sources found them as keys or facts (`mbid:` also the MBID a MusicBrainz page was merged from, its `mbid_was` fact, and with `type=MusicEvent` an artist's events, by their performers), or as an exact lookup by that key named the link; anything else is 400 |
+| `key` | Links carrying one exact identifier, on any service and in any spelling: `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist), `wikidata:{Q-id}`, `isrc:{code}` (any letter case, hyphens allowed), `upc:{barcode}` (a UPC, EAN or GTIN in any of its lengths, check digit verified), `isbn:{ISBN-10 or ISBN-13}` (an edition), `imdb:{tt…}` (a film or series), `podcast:{GUID}` (a show), `osm:{node|way|relation}/{id}`, `doi:{DOI}`, `gtin:{barcode}` (a [product](#products), in any of its lengths), any key exactly as a resource read lists it in `keys` (`mb:recording:{mbid}`, `podcast:guid:{GUID}`, `podcast:apple:{id}`, …), or another namespace a source records (its page in [docs/sources](sources/README.md#also-on) names its namespaces and how each is normalized), as the [also-on](#also-on) sources found them as keys or facts (`mbid:` also the MBID a MusicBrainz page was merged from, its `mbid_was` fact, and with `type=MusicEvent` an artist's events, by their performers), or as an exact lookup by that key named the link; anything else is 400 |
 | `related` | A resource ID: what the people who tagged it also referenced, ranked by how many of them did ([Related](#related)); not with `sort` |
 | `tags` | Comma-separated labels; at most 5, each 1–128 bytes |
 | `match` | `any` (default) or `all` (at most 3 tags) |
@@ -1003,6 +1005,38 @@ described by the start of its text, as plain text.
 | `date_posted`, `valid_through` | As the posting gives them |
 | `apply_url` | Where to apply: its ApplyAction, else its own `url`, else the page when one applies there (`directApply`) |
 | `job_status` | `open` or `closed`, at the time of the read |
+
+## Products
+
+A page whose JSON-LD is a `Product` (or a subtype: `ProductGroup`, `IndividualProduct`, …) is a
+product card, and so are the products [sources](sources/README.md) read from a shop's own product
+record or a product database (their pages say which).
+
+- Its barcode, `facts.gtin`, is the product's own GTIN as GTIN-13: from its `gtin13`,
+  `gtin`, `gtin12`, `gtin14`, `gtin8` or `isbn` (a book's), or its one offer's, with the check
+  digit verified. The barcode, `sku` and `mpn` come only from the page's own product (in the
+  page's head, or naming the page), never from another product a page lists. A `ProductGroup`
+  names the barcode, article numbers and offers of the variant its address picks (its `url`, or
+  `?variant=`), else of its only variant, never the group's. A product's barcode is the key `gtin:`, so
+  the same product on several shops is [one group](#groups), and `key=gtin:{barcode}` finds them
+  all.
+- Its price and availability are facts with the time they were read, never identity: the cheapest
+  offer's `price`, `price_currency`, `availability` and `seller` (all four of that one offer),
+  and `price_at`.
+- Open product databases ([sources](sources/README.md)) answer for a barcode with a derived link
+  and their facts, under the ODbL: show `facts.attribution` (or the card's
+  `attribution`) with them.
+- Amazon pages are never fetched, also where another link redirects to one (refused, class
+  `policy`): an Amazon product link (`/dp/{ASIN}`, `/gp/product/{ASIN}`) is a
+  `Product` from the link alone, with its `asin` (and `isbn`, for a book's ISBN-10), and any other
+  Amazon link a `WebPage`.
+
+| Fact | Meaning |
+| --- | --- |
+| `gtin` | GTIN-13 |
+| `brand`, `sku`, `mpn` | The brand, the shop's article number, the maker's part number |
+| `price`, `price_currency`, `availability`, `seller`, `price_at` | The cheapest offer's price, its ISO 4217 currency, its availability (`in_stock`, `out_of_stock`, `pre_order`, `back_order`, `discontinued`, `limited_availability`, `sold_out`, `in_store_only`, `online_only`, `reserved`, `made_to_order`), who sells it, and when that was read (RFC 3339) |
+| `asin` | An Amazon link's ASIN |
 
 ## Sources
 

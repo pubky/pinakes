@@ -149,21 +149,11 @@ pub fn format(v: &Value) -> Option<String> {
     parts.extend(super::texts(&f["descriptions"]));
     Some(parts.join(", "))
 }
-/// A barcode as GTIN-13: an EAN-8, UPC-A or EAN-13 (spaces and dashes dropped) whose check
-/// digit is right.
+/// A barcode as GTIN-13 (`barcode::gtin13`), spaces and dashes dropped: Discogs gives barcodes
+/// as printed.
 pub fn gtin13(code: &str) -> Option<String> {
     let digits: String = code.chars().filter(|c| !matches!(c, ' ' | '-')).collect();
-    if !matches!(digits.len(), 8 | 12 | 13) || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let code = format!("{digits:0>13}");
-    let d: Vec<u32> = code.bytes().map(|b| u32::from(b - b'0')).collect();
-    let sum: u32 = d[..12]
-        .iter()
-        .enumerate()
-        .map(|(i, n)| if i % 2 == 0 { *n } else { n * 3 })
-        .sum();
-    ((10 - sum % 10) % 10 == d[12]).then_some(code)
+    crate::barcode::gtin13(&digits)
 }
 /// A release's barcodes, as GTIN-13.
 pub fn barcodes(v: &Value) -> Vec<String> {

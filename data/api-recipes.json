@@ -1168,6 +1168,16 @@
       "expect": "items"
     },
     {
+      "name": "type-product",
+      "summary": "type=Product",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "type": "Product"
+      },
+      "expect": "items"
+    },
+    {
       "name": "type-jobposting",
       "summary": "type=JobPosting",
       "method": "GET",
@@ -1537,6 +1547,16 @@
       "path": "/v1/search",
       "query": {
         "key": "osm:node/240109189"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "key-0840440422266",
+      "summary": "key=gtin:0840440422266",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "key": "gtin:0840440422266"
       },
       "expect": "items"
     },

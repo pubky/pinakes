@@ -1,14 +1,16 @@
 //! Kinds of card that carry facts of their own whatever route read them: a job posting from a
-//! career page's JSON-LD or from a job board's API holds the same facts under the same names.
+//! career page's JSON-LD or from a job board's API holds the same facts under the same names, and
+//! so does a product from a shop's page or its own product record.
 //! Each module names its type, its facts (`FACTS`, published in `facts`) and reads
 //! them from JSON-LD.
 use crate::model::ResourceMeta;
 use std::collections::BTreeMap;
 
 pub mod jobs;
+pub mod products;
 
 /// Every attribute a kind's card may store.
-pub const ATTRIBUTES: &[&[&str]] = &[jobs::FACTS];
+pub const ATTRIBUTES: &[&[&str]] = &[jobs::FACTS, products::FACTS];
 
 /// `facts` for a card of one of these kinds: `own` (its source's facts, if any) with the
 /// kind's facts and what follows from them at `now` (a job posting's `job_status`).
@@ -17,17 +19,23 @@ pub fn facts(
     doc: &ResourceMeta,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<BTreeMap<String, String>> {
-    if !jobs::is_posting(doc) {
+    let kind = if jobs::is_posting(doc) {
+        jobs::FACTS
+    } else if products::is_product(doc) {
+        products::FACTS
+    } else {
         return own;
-    }
+    };
     let mut facts = own.unwrap_or_default();
     for (k, v) in &doc.attributes {
-        if jobs::FACTS.contains(&k.as_str()) && !v.trim().is_empty() {
+        if kind.contains(&k.as_str()) && !v.trim().is_empty() {
             facts.entry(k.clone()).or_insert_with(|| v.clone());
         }
     }
-    facts.insert("job_status".into(), jobs::status(doc, now).into());
-    Some(facts)
+    if jobs::is_posting(doc) {
+        facts.insert("job_status".into(), jobs::status(doc, now).into());
+    }
+    (!facts.is_empty()).then_some(facts)
 }
 
 #[cfg(test)]
