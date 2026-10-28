@@ -496,7 +496,9 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
     if fetched.content_type.ends_with("json") {
         if let Ok(v) = serde_json::from_str::<Value>(&text) {
             apply_jsonld(&mut out.doc, &v, &fetched.url, true, true);
-            if own_products(&v, &fetched.url, true, true) > 1 {
+            let mut own = Vec::new();
+            own_products(&v, &fetched.url, true, true, &mut own);
+            if own.len() > 1 {
                 crate::kinds::products::drop_identity(&mut out.doc);
             }
         }
@@ -552,12 +554,14 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
     };
     // A site's own node (its WebSite, its publisher) ranks below any other: it never names the
     // page. Among equals, the script holding the page's own node (an event whose url is the
-    // page over another event the page lists).
-    let rank = |v: &Value| {
+    // page over another event the page lists), then a head script naming no other page over
+    // one that does.
+    let rank = |(v, head): &(Value, bool)| {
         (
             !site_script(v, &fetched.url),
             subject(v),
             has_own_node(v, &fetched.url),
+            crate::event::page::names_page(v, &fetched.url).unwrap_or(*head),
         )
     };
     let claims = |entity: &Value, head: bool| {
@@ -566,7 +570,7 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
             .any(|id| page.contains(&id))
     };
     if let Some(best) = (1..scripts.len()).fold((!scripts.is_empty()).then_some(0), |best, i| {
-        best.filter(|b| rank(&scripts[i].0) <= rank(&scripts[*b].0))
+        best.filter(|b| rank(&scripts[i]) <= rank(&scripts[*b]))
             .or(Some(i))
     }) {
         let (entity, head) = &scripts[best];
@@ -597,12 +601,20 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
         }
     }
     // A page with several products of its own (a category page's head list) states the
-    // barcode of none: any one would join the page to that product.
-    let own: usize = scripts
-        .iter()
-        .map(|(v, head)| own_products(v, &fetched.url, claims(v, *head), *head))
-        .sum();
-    if own > 1 {
+    // barcode of none: any one would join the page to that product. Nor does a product naming
+    // the page only by a fragment ("#nutella") when the head declares the page to be another
+    // entity (a `CollectionPage`, or a main entity of another `@id`): it is one the page lists.
+    let mut own = Vec::new();
+    for (v, head) in &scripts {
+        own_products(v, &fetched.url, claims(v, *head), *head, &mut own);
+    }
+    let main = declared_main(&scripts, &fetched.url);
+    let listed = |key: &Option<String>| {
+        key.as_ref().is_some_and(|key| {
+            key.contains('#') && main.as_ref().is_some_and(|main| !main.contains(key))
+        })
+    };
+    if own.len() > 1 || own.first().is_some_and(listed) {
         crate::kinds::products::drop_identity(&mut out.doc);
     }
     for (class, kind) in [
@@ -1251,29 +1263,99 @@ fn jsonld_claims(doc: &mut ResourceMeta, v: &Value, base: &Url) -> bool {
     }
     true
 }
-/// Whether `v` holds a node whose url (else @id) is the page (`event::page::owns_page`).
-/// How many `Product` nodes in `v` could give the page their identity, as `apply_jsonld`
-/// reads them (with `claims`, and the page's own: naming it, or `vouched`); 2 at most.
-fn own_products(v: &Value, base: &Url, claims: bool, vouched: bool) -> usize {
-    if !claims {
-        return 0;
+/// The `Product` nodes in `v` that could give the page their identity, as `apply_jsonld` reads
+/// them (with `claims`, and the page's own: naming it, or `vouched`), added to `out` by the
+/// page each names (`node_key`; `None` for one naming none). A repeated description of one
+/// product is added once; two naming no page are two. Stops at two.
+fn own_products(v: &Value, base: &Url, claims: bool, vouched: bool, out: &mut Vec<Option<String>>) {
+    if !claims || out.len() > 1 {
+        return;
     }
     if let Some(values) = v.as_array() {
-        return values
-            .iter()
-            .map(|v| own_products(v, base, claims, vouched))
-            .fold(0, |n, more| (n + more).min(2));
+        for v in values {
+            if out.len() > 1 {
+                break;
+            }
+            own_products(v, base, claims, vouched, out);
+        }
+        return;
     }
     let own = crate::event::page::names_page(v, base).unwrap_or(vouched);
     let product =
         schema_type(v).is_some_and(|k| crate::model::type_path(k).iter().any(|t| t == "Product"));
-    let nested = v
-        .get("mainEntity")
-        .map_or(0, |m| own_products(m, base, claims, own))
-        + v.get("@graph")
-            .map_or(0, |g| own_products(g, base, claims, vouched));
-    (usize::from(product && own) + nested).min(2)
+    if product && own {
+        let key = node_key(v, base);
+        if key.is_none() || !out.contains(&key) {
+            out.push(key);
+        }
+    }
+    if let Some(m) = v.get("mainEntity") {
+        own_products(m, base, claims, own, out);
+    }
+    if let Some(g) = v.get("@graph") {
+        own_products(g, base, claims, vouched, out);
+    }
 }
+/// The page a node names (its `url`, else its `@id`), as an identity with its fragment kept:
+/// `#nutella` and `#pen` on one page are two nodes.
+fn node_key(v: &Value, base: &Url) -> Option<String> {
+    let named = ["url", "@id"]
+        .into_iter()
+        .filter_map(|f| v.get(f).and_then(Value::as_str))
+        .find_map(|u| origin_url(base, u))?;
+    let fragment = Url::parse(&named)
+        .ok()?
+        .fragment()
+        .filter(|f| !f.is_empty())
+        .map(str::to_owned);
+    let id = entity_identity(&named)?;
+    Some(fragment.map_or_else(|| id.clone(), |f| format!("{id}#{f}")))
+}
+/// What the head says the page is about, from its page nodes (a `WebPage` naming the page or
+/// none): the nodes their main entity names (`node_key`: `{"@id": "#product"}`), or none for a
+/// collection (`CollectionPage`, `SearchResultsPage`) naming no main entity. `None` when the
+/// head says neither.
+fn declared_main(scripts: &[(Value, bool)], base: &Url) -> Option<Vec<String>> {
+    fn visit(v: &Value, base: &Url, out: &mut Option<Vec<String>>) {
+        if let Some(values) = v.as_array() {
+            return values.iter().take(16).for_each(|v| visit(v, base, out));
+        }
+        for node in graph_nodes(v).into_iter().flatten().take(16) {
+            visit(node, base, out);
+        }
+        let path = schema_type(v)
+            .map(crate::model::type_path)
+            .unwrap_or_default();
+        if !path.iter().any(|t| t == "WebPage")
+            || crate::event::page::names_page(v, base) == Some(false)
+        {
+            return;
+        }
+        let main: Vec<String> = v
+            .get("mainEntity")
+            .map_or_else(Vec::new, |m| {
+                m.as_array()
+                    .map_or_else(|| vec![m], |a| a.iter().take(16).collect())
+            })
+            .into_iter()
+            .filter_map(|m| node_key(m, base))
+            .collect();
+        if !main.is_empty() {
+            out.get_or_insert_with(Vec::new).extend(main);
+        } else if path
+            .iter()
+            .any(|t| matches!(t.as_str(), "CollectionPage" | "SearchResultsPage"))
+        {
+            out.get_or_insert_with(Vec::new);
+        }
+    }
+    let mut out = None;
+    for (v, _) in scripts.iter().filter(|(_, head)| *head) {
+        visit(v, base, &mut out);
+    }
+    out
+}
+/// Whether `v` holds a node whose url (else @id) is the page (`event::page::owns_page`).
 fn has_own_node(v: &Value, base: &Url) -> bool {
     if let Some(values) = v.as_array() {
         return values.iter().take(16).any(|v| has_own_node(v, base));
@@ -1291,13 +1373,15 @@ fn has_own_node(v: &Value, base: &Url) -> bool {
 fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url, claims: bool, vouched: bool) {
     if let Some(values) = v.as_array() {
         // A page's article/event outranks its publisher or breadcrumb helper nodes, and among
-        // equals the page's own node (its url is the page) outranks another event it lists.
+        // equals the page's own node (its url is the page) outranks another event it lists,
+        // and one naming no page, when vouched for, outranks one naming another page.
         // Extract one entity so unrelated graph nodes cannot donate misleading fields.
         let rank = |v: &Value| {
             (
                 !site_node(v, base),
                 entity_priority(v, base),
                 crate::event::page::owns_page(v, base),
+                crate::event::page::names_page(v, base).unwrap_or(vouched),
             )
         };
         if let Some(mut best) = values.first() {

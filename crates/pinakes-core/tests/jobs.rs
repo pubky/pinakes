@@ -509,8 +509,9 @@ async fn a_workplace_is_never_in_another_region_or_postal_region(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_one_line_place_is_compared_by_its_region_code_and_postcode(pool: PgPool) {
     // Each town has one settlement. A state's or province's code after the town contradicts
-    // one in another country or with another code; a qualifier ("EU", "HQ") or a district's
-    // number is no region or postcode.
+    // one in another country or with another code, unless it is the settlement's own code
+    // (Tamil Nadu's TN, which the table gives Tennessee); a qualifier ("EU", "HQ") or a
+    // district's number is no region or postcode.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = Router::new().route(
@@ -524,6 +525,7 @@ async fn a_one_line_place_is_compared_by_its_region_code_and_postcode(pool: PgPo
                 "Ho Chi Minh City" => (14, "Vietnam", "vn", "VN-SG", "70000"),
                 "Toronto" => (15, "Canada", "ca", "CA-ON", "M5H 2N2"),
                 "Perth" => (16, "Australia", "au", "AU-WA", "6000"),
+                "Chennai" => (17, "India", "in", "IN-TN", "600001"),
                 other => panic!("asked for {other}"),
             };
             let mut hit = settlement(id, &town, country, code);
@@ -575,6 +577,7 @@ async fn a_one_line_place_is_compared_by_its_region_code_and_postcode(pool: PgPo
         "New York, NY 90210",
         "Berlin, 20095",
         "Perth, WA 2000",
+        "Chennai, TX",
     ] {
         assert_eq!(placed(line).await, None, "{line}");
     }
@@ -590,6 +593,8 @@ async fn a_one_line_place_is_compared_by_its_region_code_and_postcode(pool: PgPo
         ("New York, NY 10001, US", 13),
         ("London, UK", 11),
         ("London, England", 11),
+        ("Chennai, TN", 17),
+        ("Chennai, TN 600001", 17),
     ] {
         assert_eq!(placed(line).await, Some(format!("relation/{id}")), "{line}");
     }

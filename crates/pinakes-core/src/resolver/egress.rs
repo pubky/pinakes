@@ -174,6 +174,10 @@ pub struct FetchOptions {
     /// Answer a redirect as it came (its status and `location`) instead of following it: where
     /// a lookup redirects is the answer (PCGamingWiki's appid lookup).
     pub keep_redirect: bool,
+    /// An error answer in JSON keeps a bounded prefix of its body, and a 429 is answered as it
+    /// came instead of as `RetryLater`: for an API whose error names its own wait (Stack
+    /// Exchange's `backoff`).
+    pub error_json: bool,
     /// Content types this fetch also admits, within the page cap (`""`: no content type). The
     /// caller parses them: Pubky objects (`pubky::OBJECT_TYPES`), PKARR relay payloads
     /// (`pkarr_relays::PAYLOAD_TYPES`).
@@ -227,6 +231,7 @@ impl std::fmt::Debug for FetchOptions {
             .field("body_cap", &self.body_cap)
             .field("feed_hint", &self.feed_hint)
             .field("head_cap", &self.head_cap)
+            .field("error_json", &self.error_json)
             .field("extra_types", &self.extra_types)
             .field("validators", &self.validators)
             .finish()
@@ -467,14 +472,17 @@ pub async fn read_response_with(
         if !ALLOWED_TYPES.contains(&content_type.as_str()) && !feed_type && !sniff && !extra {
             return Err(refused("content type is not allowed"));
         }
-    } else if matches!(status, 403 | 429 | 503)
+    } else if (matches!(status, 403 | 429 | 503)
         && matches!(
             content_type.as_str(),
             "text/html" | "application/xhtml+xml" | "text/plain" | ""
-        )
+        ))
+        || (options.error_json
+            && status >= 400
+            && (content_type == "application/json" || content_type.ends_with("+json")))
     {
         // An error page keeps a bounded prefix of its body, so the interstitial classifier sees a
-        // challenge; the status is preserved.
+        // challenge (and an API its error); the status is preserved.
         const ERROR_BODY_CAP: usize = 64 * 1024;
         while let Some(chunk) = response
             .chunk()
@@ -998,7 +1006,7 @@ impl Egress {
                 url = url.join(&target)?;
                 continue;
             }
-            if response.status == 429 {
+            if response.status == 429 && !options.error_json {
                 return Err(super::RetryLater {
                     class: "http_4xx",
                     seconds: response.retry_after_secs,
