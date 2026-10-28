@@ -939,11 +939,12 @@ anything. Sources read a resource after it is saved and again when their results
 source's lifetime: 30 days, `btcmap` 7); a source's links and keys live twice that, so one
 failed refresh keeps them, and they go when the source stops returning them. The sources run in this order, each
 seeing the keys the ones before it found: `service`, `tidal`, `musicbrainz`,
-`musicbrainz_entity`, `wikidata`, `discogs`, `deezer`, `itunes`, `wikipedia`, `wikidata_item`,
-`books`, `films`, `podcasts`, `titles`, `osm_wikidata`, `wikidata_osm`, `wikidata_places`, `btcmap`,
-`federal_register`, `unpaywall`, `ncbi`, `datacite`, `huggingface`, `crates`, `npm`, `pypi`,
-`software_heritage`, `steam`, `wikidata_stores`, `app_stores`, `wayback`; `[also_on.sources.<id>] enabled =
-false` turns one off. A MusicBrainz or Wikidata answer over 8 MB is no answer: the source
+`musicbrainz_entity`, `performers`, `wikidata`, `discogs`, `deezer`, `itunes`, `wikipedia`,
+`wikidata_item`, `books`, `films`, `podcasts`, `product_keys`, `open_food_facts`,
+`stack_exchange`, `titles`, `federal_register`, `osm_wikidata`, `wikidata_osm`,
+`wikidata_places`, `btcmap`, `unpaywall`, `ncbi`, `datacite`, `huggingface`, `crates`, `npm`,
+`pypi`, `software_heritage`, `steam`, `wikidata_stores`, `app_stores`, `wayback`;
+`[also_on.sources.<id>] enabled = false` turns one off. A MusicBrainz or Wikidata answer over 8 MB is no answer: the source
 records only what the link's URL proves (a MusicBrainz page's MBID or ISRC, a Wikidata item
 link's Q-id, the Q-id an article's own Wikipedia names), else nothing, until its next run. A
 source's exact keys
@@ -1036,8 +1037,10 @@ described by the start of its text, as plain text.
   Nominatim finds exactly one settlement of that name (and country, when the posting names one),
   in no other region (state, by name or ISO code) and postal region (a numeric postcode's first
   digit) than the posting names. A one-line place ("Springfield, IL", "Austin, TX 78701") is
-  checked the same way for the region code and postcode after its town; a region named there in
-  full is left to Nominatim, which reads the whole line. The card's `point` is then that place's,
+  checked too: a US state's, Canadian province's or Australian state's code after the town must
+  be the settlement's ("London, ON" is not London, England), and a numeric postcode there (four
+  digits or more, or three and two: "114 55") its postal region. Other words after a town ("UK",
+  "EU", "HQ", "District 1", a region in full) are left to Nominatim, which reads the whole line. The card's `point` is then that place's,
   with OpenStreetMap's attribution.
 - A posting is remote when its `jobLocationType` is `TELECOMMUTE` or its place says "Remote"
   ("Remote - US"); it then names the regions it accepts applicants from
@@ -1064,7 +1067,9 @@ record or a product database (their pages say which).
 - Its barcode, `facts.gtin`, is the product's own GTIN as GTIN-13: from its `gtin13`,
   `gtin`, `gtin12`, `gtin14`, `gtin8` or `isbn` (a book's), or its one offer's, with the check
   digit verified. The barcode, `sku` and `mpn` come only from the page's own product (in the
-  page's head, or naming the page), never from another product a page lists. A `ProductGroup`
+  page's head, or naming the page), never from another product a page lists; a page with
+  several products of its own (a category page's head list) states the barcode of none. A
+  `ProductGroup`
   names the barcode, article numbers and offers of the variant its address picks (its `url`, or
   `?variant=`), else of its only variant, never the group's. A product's barcode is the key `gtin:`, so
   the same product on several shops is [one group](#groups), and `key=gtin:{barcode}` finds them
@@ -1075,8 +1080,9 @@ record or a product database (their pages say which).
 - Open product databases ([sources](sources/README.md)) answer for a barcode with a derived link
   and their facts, under the ODbL: show `facts.attribution` (or the card's
   `attribution`) with them.
-- Amazon pages are never fetched, also where another link redirects to one (refused, class
-  `policy`): an Amazon product link (`/dp/{ASIN}`, `/gp/product/{ASIN}`) is a
+- Amazon pages are never fetched, on any of its shops (`amazon.com`, `amazon.ie`,
+  `amazon.co.za`, …) or short links (`amzn.to`, `a.co`, …), also where another link redirects
+  to one (refused, class `policy`): an Amazon product link (`/dp/{ASIN}`, `/gp/product/{ASIN}`) is a
   `Product` from the link alone, with its `asin` (and `isbn`, for a book's ISBN-10), and any other
   Amazon link a `WebPage`.
 
@@ -1108,7 +1114,8 @@ every group is), where its site's source says so.
 
 A page whose JSON-LD is a `Recipe` is a recipe card; on a recipe page the recipe outranks the
 article or video that wraps it. Only the page's own recipe does (it names the page, or names
-none): a recipe of another page that an article recommends never displaces the article.
+none): a recipe of another page that an article recommends never displaces the article,
+whichever comes first and whether or not the article names its URL.
 
 | Fact | Meaning |
 | --- | --- |

@@ -77,7 +77,8 @@ fn recipe_pages_become_recipes_with_their_facts() {
 #[test]
 fn only_the_pages_own_recipe_outranks_its_article() {
     // An article page recommending a recipe of another page (in its graph, or a script of its
-    // own) stays the article; the same recipe naming the page is the page's card.
+    // own, listed before the article or after it) stays the article, also when the article names
+    // no URL; the same recipe naming the page is the page's card.
     let page = "https://food.example/blog/autumn";
     let article = r#"{"@type": "Article", "headline": "Autumn evenings", "url": "https://food.example/blog/autumn"}"#;
     let recipe = |url: &str| {
@@ -106,12 +107,15 @@ fn only_the_pages_own_recipe_outranks_its_article() {
         };
         web::extract(page, &fetched, 3600).unwrap().doc
     };
+    let unnamed = r#"{"@type": "Article", "headline": "Autumn evenings"}"#;
     let other = recipe("https://food.example/recipes/soup");
     for scripts in [
         vec![format!(r#"{{"@graph": [{other}, {article}]}}"#)],
         vec![format!(r#"{{"@graph": [{article}, {other}]}}"#)],
         vec![other.clone(), article.to_owned()],
         vec![article.to_owned(), other.clone()],
+        vec![format!(r#"{{"@graph": [{other}, {unnamed}]}}"#)],
+        vec![other.clone(), unnamed.to_owned()],
     ] {
         let doc = extract(scripts.clone());
         assert_eq!(doc.type_name, "Article", "{scripts:?}");

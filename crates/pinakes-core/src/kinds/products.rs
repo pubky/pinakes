@@ -118,6 +118,14 @@ impl Product {
     }
 }
 
+/// Remove a product's identity (barcode, article and part number) from `doc`: a page that
+/// names several products of its own states none.
+pub fn drop_identity(doc: &mut ResourceMeta) {
+    for key in ["gtin", "sku", "mpn"] {
+        doc.attributes.remove(key);
+    }
+}
+
 /// The product a JSON-LD `Product` node describes on the page at `page`: for a `ProductGroup`,
 /// the variant the page's address names (its `url` or `@id`, or Shopify's `?variant=`), else its
 /// only variant. A variant's barcode, article numbers and offers are its own, never the group's
@@ -288,13 +296,14 @@ pub fn on_amazon(url: &Url) -> bool {
         AMAZON.contains(&host.strip_prefix("www.").unwrap_or(&host))
     })
 }
-/// Amazon's shops (without `www.`).
+/// Amazon's shops (without `www.`) and its short links, as of 2026.
 const AMAZON: &[&str] = &[
     "amazon.com",
     "amazon.ca",
     "amazon.com.mx",
     "amazon.com.br",
     "amazon.co.uk",
+    "amazon.ie",
     "amazon.de",
     "amazon.fr",
     "amazon.it",
@@ -307,12 +316,15 @@ const AMAZON: &[&str] = &[
     "amazon.ae",
     "amazon.sa",
     "amazon.eg",
+    "amazon.co.za",
     "amazon.in",
     "amazon.co.jp",
+    "amazon.cn",
     "amazon.sg",
     "amazon.com.au",
     "amzn.to",
     "amzn.eu",
+    "amzn.asia",
     "a.co",
 ];
 

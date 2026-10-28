@@ -195,3 +195,48 @@ async fn a_chain_of_duplicates_is_one_group(pool: PgPool) {
     let found: Value = get(&app, "/v1/search?key=stackexchange:stackoverflow/1003").await;
     assert_eq!(found["items"].as_array().unwrap().len(), 3, "{found}");
 }
+
+#[tokio::test]
+async fn a_chain_of_duplicates_ends_at_a_loop_or_after_three_hops() {
+    // The key a duplicate carries, and the questions asked for it: a loop (A of B, B of A) ends
+    // at B, asked once; a chain A, B, C, D, E, F ends three hops past B, at E, never asking E.
+    let key = |chain: &[u64], bodies: Vec<(String, String)>| {
+        let chain = chain.to_vec();
+        async move {
+            let transport = Recorded::with_bodies(
+                &bodies
+                    .iter()
+                    .map(|(url, body)| (url.as_str(), "application/json", body.clone()))
+                    .collect::<Vec<_>>(),
+            );
+            let cx = cx(transport.clone(), Config::default());
+            let uri = format!("https://stackoverflow.com/questions/{}", chain[0]);
+            let doc = card(
+                ResourceMeta::new(&uri, "stack_exchange", 3600),
+                &of_uri(&uri).unwrap(),
+                200,
+                answer(chain[0], Some(chain[1])).as_bytes(),
+            )
+            .unwrap()
+            .unwrap();
+            let s = subject(&uri, Some("Question"), Some(doc));
+            let found = StackExchange.lookup(&cx, &s).await.unwrap();
+            let keys: Vec<String> = found.keys.into_iter().map(|k| k.key).collect();
+            let seen = transport.seen.lock().unwrap().clone();
+            (keys, seen)
+        }
+    };
+    let (a, b) = (2001, 2002);
+    let (keys, seen) = key(&[a, b], vec![(api(b), answer(b, Some(a)))]).await;
+    assert_eq!(keys, ["stackexchange:stackoverflow/2002"]);
+    assert_eq!(seen, [api(b)]);
+
+    let chain = [3001, 3002, 3003, 3004, 3005, 3006];
+    let bodies = chain
+        .windows(2)
+        .map(|w| (api(w[0]), answer(w[0], Some(w[1]))))
+        .collect();
+    let (keys, seen) = key(&chain, bodies).await;
+    assert_eq!(keys, ["stackexchange:stackoverflow/3005"]);
+    assert_eq!(seen, [api(3002), api(3003), api(3004)]);
+}

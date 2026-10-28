@@ -284,6 +284,9 @@ pub mod also_on {
         fn id(&self) -> &'static str {
             "open_food_facts"
         }
+        fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+            &[("gtin", "3017620422003")]
+        }
         fn applies(&self, subject: &Subject) -> bool {
             barcode(subject).is_some()
         }

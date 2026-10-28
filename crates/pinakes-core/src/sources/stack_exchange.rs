@@ -8,7 +8,7 @@ use super::{text, web_url, Context, Example, Source};
 use crate::{
     kinds::questions::{self, Question},
     model::ResourceMeta,
-    resolver::egress::{FetchOptions, Fetched},
+    resolver::egress::{Egress, FetchOptions, Fetched},
 };
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -124,16 +124,23 @@ fn pause(v: &Value) -> Option<u64> {
 }
 
 /// The API's pause: it holds for the method (every question on every site), so no call is made
-/// before it ends. One for the process, kept by both halves of the source.
-pub struct Pause(std::sync::Mutex<Option<tokio::time::Instant>>);
+/// before it ends. One for the process, kept by both halves of the source. Calls take turns, so
+/// each is asked only after the answer before it, and its pause, is in.
+pub struct Pause {
+    until: std::sync::Mutex<Option<tokio::time::Instant>>,
+    turn: tokio::sync::Mutex<()>,
+}
 static PAUSE: Pause = Pause::new();
 impl Pause {
     pub const fn new() -> Self {
-        Self(std::sync::Mutex::new(None))
+        Self {
+            until: std::sync::Mutex::new(None),
+            turn: tokio::sync::Mutex::const_new(()),
+        }
     }
     /// `RetryLater` while a pause lasts.
     fn wait(&self) -> Result<()> {
-        let until = *self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let until = *self.until.lock().unwrap_or_else(|e| e.into_inner());
         match until.map(|u| u.saturating_duration_since(tokio::time::Instant::now())) {
             Some(left) if !left.is_zero() => Err(crate::resolver::RetryLater {
                 class: "stack_exchange_quota",
@@ -145,25 +152,43 @@ impl Pause {
     }
     fn hold(&self, seconds: u64) {
         let until = tokio::time::Instant::now() + std::time::Duration::from_secs(seconds);
-        let mut held = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut held = self.until.lock().unwrap_or_else(|e| e.into_inner());
         if held.is_none_or(|h| h < until) {
             *held = Some(until);
         }
     }
-    /// Ask the API (`fetch`, not started before the pause ends), keeping the pause its answer
-    /// asks for.
-    async fn ask(
-        &self,
-        fetch: impl std::future::Future<Output = Result<Fetched>>,
-    ) -> Result<Fetched> {
+    /// Ask the API for `url` (in its turn, not before the pause ends), keeping the pause its
+    /// answer asks for: its `backoff` or error, else a 429's or 503's `Retry-After` (a minute at
+    /// least). Then rate limits and server errors are `RetryLater`, as for any source.
+    async fn ask(&self, egress: &Egress, url: &str) -> Result<Fetched> {
+        let _turn = self.turn.lock().await;
         self.wait()?;
-        let f = fetch.await?;
+        let options = FetchOptions {
+            accept: Some("application/json".into()),
+            ..Default::default()
+        };
+        let f = match egress.fetch_with(url, &options).await {
+            Ok(f) => f,
+            Err(error) => {
+                // A 429 comes as egress's own `RetryLater`, with the answer's wait.
+                if let Some(busy) = error
+                    .downcast_ref::<crate::resolver::RetryLater>()
+                    .filter(|r| r.class == "http_4xx")
+                {
+                    self.hold(busy.seconds.max(60));
+                }
+                return Err(error);
+            }
+        };
+        let busy = (f.status == 503).then(|| f.retry_after_secs.max(60));
         if let Some(seconds) = serde_json::from_slice::<Value>(&f.body)
             .ok()
             .and_then(|v| pause(&v))
+            .or(busy)
         {
             self.hold(seconds);
         }
+        super::retry(&f)?;
         Ok(f)
     }
 }
@@ -323,15 +348,7 @@ impl Source for StackExchange {
 /// The card of the question at `uri`, asked within `pause`.
 pub async fn resolve(pause: &Pause, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
     let target = of_uri(uri).context("not a Stack Exchange question")?;
-    let f = pause
-        .ask(cx.fetch(
-            &target.api(),
-            &FetchOptions {
-                accept: Some("application/json".into()),
-                ..Default::default()
-            },
-        ))
-        .await?;
+    let f = pause.ask(cx.egress, &target.api()).await?;
     let doc = cx.card(uri, &StackExchange);
     Ok(
         crate::resolver::html::blocking(move || card(doc, &target, f.status, &f.body))
@@ -343,10 +360,7 @@ pub async fn resolve(pause: &Pause, cx: &Context<'_>, uri: &str) -> Result<Resou
 pub mod also_on {
     //! The `stack_exchange` also-on source: a question's own key, and its original's.
     use super::{of_uri, originals, refusal, Target, PAUSE};
-    use crate::{
-        also_on::{Context, Found, Key, Source, Subject},
-        resolver::egress::FetchOptions,
-    };
+    use crate::also_on::{Context, Found, Key, Source, Subject};
     use anyhow::{Context as _, Result};
     use async_trait::async_trait;
     use serde_json::Value;
@@ -371,15 +385,7 @@ pub mod also_on {
                 id: *seen.last().unwrap(),
                 ..target.clone()
             };
-            let f = PAUSE
-                .ask(cx.egress.fetch_with(
-                    &at.api(),
-                    &FetchOptions {
-                        accept: Some("application/json".into()),
-                        ..Default::default()
-                    },
-                ))
-                .await?;
+            let f = PAUSE.ask(&cx.egress, &at.api()).await?;
             let v: Value = serde_json::from_slice(&f.body).context("not the API's answer")?;
             if let Some(error) = refusal(&v) {
                 return Err(error);
@@ -411,6 +417,9 @@ pub mod also_on {
         }
         fn single_namespaces(&self) -> &'static [&'static str] {
             &["stackexchange"]
+        }
+        fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+            &[("stackexchange", "stackoverflow/11227809")]
         }
         fn search_key(&self, namespace: &str, value: &str) -> Option<String> {
             let (site, id) = value
@@ -710,5 +719,52 @@ mod pause_tests {
         assert_eq!(recorded.asked().len(), 1);
         tokio::time::advance(std::time::Duration::from_secs(31)).await;
         assert!(resolve(&pause, &cx, &uri(1)).await.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_429_or_503_holds_every_question() {
+        // An HTTP 503 with the API's backoff, and a bare 429 (its Retry-After, a minute at
+        // least): both are retried later, and the next question is not asked before.
+        let busy = br#"{"error_id":503,"error_message":"too many requests","error_name":"temporarily_unavailable","backoff":30}"#;
+        for (status, body, seconds) in [(503, busy.to_vec(), 30), (429, vec![], 60)] {
+            let (egress, recorded) = fixture::egress(vec![
+                (&api(336), status, JSON, body),
+                (&api(1), 200, JSON, answer(1, None)),
+            ]);
+            let cx = Context {
+                egress: &egress,
+                ttl: 3600,
+            };
+            let pause = Pause::new();
+            let error = resolve(&pause, &cx, &uri(336)).await.unwrap_err();
+            assert!(retry(error).is_some(), "{status}");
+            let error = resolve(&pause, &cx, &uri(1))
+                .await
+                .expect_err(&format!("{status}"));
+            assert!(retry(error).is_some_and(|s| s <= seconds), "{status}");
+            assert_eq!(recorded.asked().len(), 1, "{status}");
+            tokio::time::advance(std::time::Duration::from_secs(seconds + 1)).await;
+            assert!(resolve(&pause, &cx, &uri(1)).await.is_ok(), "{status}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn overlapping_questions_take_turns() {
+        // Two questions at once: the second is asked only after the first's answer, whose
+        // backoff then holds it.
+        let (egress, recorded) = fixture::egress(vec![
+            (&api(336), 200, JSON, answer(336, Some(120))),
+            (&api(1), 200, JSON, answer(1, None)),
+        ]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let pause = Pause::new();
+        let (a, b) = (uri(336), uri(1));
+        let (first, second) = tokio::join!(resolve(&pause, &cx, &a), resolve(&pause, &cx, &b));
+        assert_eq!(first.unwrap().type_name, "Question");
+        assert!(retry(second.unwrap_err()).is_some_and(|s| s > 100));
+        assert_eq!(recorded.asked(), vec![api(336)]);
     }
 }

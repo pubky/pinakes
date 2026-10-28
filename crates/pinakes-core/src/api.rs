@@ -3122,6 +3122,13 @@ mod tests {
     fn every_key_form_searches_back() {
         for source in crate::also_on::registered() {
             let id = source.id();
+            // A namespace a source keeps one object of is one it records keys in.
+            for namespace in source.single_namespaces() {
+                assert!(
+                    source.key_forms().iter().any(|(n, _)| n == namespace),
+                    "{id}: no key form for {namespace}"
+                );
+            }
             for (namespace, example) in source.key_forms() {
                 let key = format!("{namespace}:{example}");
                 assert!(crate::also_on::valid_key(&key), "{id}: {key}");
@@ -3132,6 +3139,15 @@ mod tests {
                     filter.keys
                 );
             }
+        }
+        // The sources recording a product's barcode (on its card or a derived link), while
+        // they are in this build.
+        for source in crate::also_on::registered()
+            .iter()
+            .filter(|s| ["product_keys", "open_food_facts"].contains(&s.id()))
+        {
+            let id = source.id();
+            assert!(source.key_forms().iter().any(|(n, _)| *n == "gtin"), "{id}");
         }
         let apple = [("podcast:apple", "1")];
         assert!(crate::also_on::of_form(&apple, "podcast:apple:1"));

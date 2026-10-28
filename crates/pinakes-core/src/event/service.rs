@@ -650,20 +650,20 @@ impl EventService {
                 (line.clone(), address.get("country").cloned(), "")
             }
         };
-        // What holds the town in one line: in each part, the words before one that starts
-        // with a digit are a region ("IL", "CA"), that word a postcode ("CA 94105", "90210").
-        let mut held_regions = Vec::new();
+        // What holds the town in one line: in each part, a first word that is a state's,
+        // province's or territory's code is a region ("IL", "ON N6A 3K7"), and a word shaped
+        // like a numeric postcode is the postcode ("CA 94105", "90210"); "District 1" has none.
+        let mut held_codes = Vec::new();
         let mut held_postcode = None;
         for part in held.split(',') {
             let words: Vec<&str> = part.split_whitespace().collect();
-            let at = words
-                .iter()
-                .position(|w| w.starts_with(|c: char| c.is_ascii_digit()))
-                .unwrap_or(words.len());
-            if at > 0 {
-                held_regions.push(words[..at].join(" "));
-            }
-            held_postcode = held_postcode.or(words.get(at).copied());
+            held_codes.extend(
+                words
+                    .first()
+                    .copied()
+                    .filter(|w| REGION_CODES.iter().any(|(c, _)| c == w)),
+            );
+            held_postcode = held_postcode.or_else(|| numeric_postcode(&words));
         }
         let Some(value) = self.osm.request(url).await? else {
             return Ok(());
@@ -711,25 +711,21 @@ impl EventService {
             )
             .map(normalize)
             .collect();
-        // In one line a region is compared only when it is written like the settlement's own
-        // code ("IL" beside "US-MO") and is not its country ("Berlin, DE"): there "UK", "USA"
-        // or "Europe" may follow a town too. A region in full is left to Nominatim, which
-        // reads the whole line.
-        let coded = |r: &str| {
-            r.chars().all(|c| c.is_ascii_alphabetic())
-                && codes.iter().any(|code| {
-                    code.rsplit_once('-').is_some_and(|(_, own)| {
-                        own.len() == r.len() && own.chars().all(|c| c.is_ascii_alphabetic())
-                    })
-                })
-                && !countries.contains(&normalize(r))
-        };
         let other_region = address
             .get("region")
-            .map(String::as_str)
-            .into_iter()
-            .chain(held_regions.iter().map(String::as_str).filter(|r| coded(r)))
-            .any(|r| !regions.is_empty() && !regions.contains(&normalize(r)));
+            .is_some_and(|r| !regions.is_empty() && !regions.contains(&normalize(r)));
+        // In one line, a region code contradicts a settlement in none of its countries
+        // ("London, ON" in England), or one in its country with another code ("Springfield,
+        // IL" in US-MO). A code that is the settlement's country is its country ("Toronto, CA",
+        // "Berlin, DE"); other words after a town ("UK", "EU", "HQ", a region in full) are left
+        // to Nominatim, which reads the whole line.
+        let country_code = found["country_code"].as_str().map(str::to_ascii_lowercase);
+        let other_code = held_codes.iter().any(|code| match &country_code {
+            _ if countries.contains(&normalize(code)) => false,
+            None => false,
+            Some(cc) if !REGION_CODES.iter().any(|(c, land)| c == code && land == cc) => true,
+            Some(_) => !codes.is_empty() && !regions.contains(&normalize(code)),
+        });
         // A numeric postcode's first digit is its postal region (US, DE, FR, CH, …); more
         // digits are not compared, as a city's one postcode in Nominatim stands for many
         // (Berlin's run from 10 to 14).
@@ -749,6 +745,7 @@ impl EventService {
         if !named
             || same_country == Some(false)
             || other_region
+            || other_code
             || other_postcode
             || (matching as f64 / total as f64) < self.config.geocode_score
         {
@@ -758,6 +755,49 @@ impl EventService {
         self.geocoded(venue, hit).await?;
         Ok(())
     }
+}
+/// The state, province and territory codes a one-line place writes after its town ("Austin,
+/// TX"), with their countries: the United States', Canada's and Australia's.
+#[rustfmt::skip]
+const REGION_CODES: &[(&str, &str)] = &[
+    ("AL", "us"), ("AK", "us"), ("AZ", "us"), ("AR", "us"), ("CA", "us"), ("CO", "us"),
+    ("CT", "us"), ("DE", "us"), ("FL", "us"), ("GA", "us"), ("HI", "us"), ("ID", "us"),
+    ("IL", "us"), ("IN", "us"), ("IA", "us"), ("KS", "us"), ("KY", "us"), ("LA", "us"),
+    ("ME", "us"), ("MD", "us"), ("MA", "us"), ("MI", "us"), ("MN", "us"), ("MS", "us"),
+    ("MO", "us"), ("MT", "us"), ("NE", "us"), ("NV", "us"), ("NH", "us"), ("NJ", "us"),
+    ("NM", "us"), ("NY", "us"), ("NC", "us"), ("ND", "us"), ("OH", "us"), ("OK", "us"),
+    ("OR", "us"), ("PA", "us"), ("RI", "us"), ("SC", "us"), ("SD", "us"), ("TN", "us"),
+    ("TX", "us"), ("UT", "us"), ("VT", "us"), ("VA", "us"), ("WA", "us"), ("WV", "us"),
+    ("WI", "us"), ("WY", "us"), ("DC", "us"),
+    ("AB", "ca"), ("BC", "ca"), ("MB", "ca"), ("NB", "ca"), ("NL", "ca"), ("NS", "ca"),
+    ("NT", "ca"), ("NU", "ca"), ("ON", "ca"), ("PE", "ca"), ("QC", "ca"), ("SK", "ca"),
+    ("YT", "ca"),
+    ("ACT", "au"), ("NSW", "au"), ("NT", "au"), ("QLD", "au"), ("SA", "au"), ("TAS", "au"),
+    ("VIC", "au"), ("WA", "au"),
+];
+/// The numeric postcode among a place's words: four digits or more ("90210", "10115",
+/// "94105-1234", "1012" of "1012 AB"), or three and two ("114 55").
+fn numeric_postcode<'a>(words: &[&'a str]) -> Option<&'a str> {
+    let digits = |w: &str| {
+        let (a, b) = w.split_once('-').unwrap_or((w, "1"));
+        [a, b]
+            .iter()
+            .all(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+            .then_some(a.len() + if w.contains('-') { b.len() } else { 0 })
+    };
+    words
+        .iter()
+        .enumerate()
+        .find_map(|(i, w)| match digits(w)? {
+            n if n >= 4 => Some(*w),
+            3 if words
+                .get(i + 1)
+                .is_some_and(|next| digits(next) == Some(2) && !next.contains('-')) =>
+            {
+                Some(*w)
+            }
+            _ => None,
+        })
 }
 pub fn is_feed(uri: &str) -> bool {
     uri.starts_with("webcal:")

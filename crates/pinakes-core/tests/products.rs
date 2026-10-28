@@ -100,6 +100,51 @@ fn only_the_pages_own_product_gives_its_barcode() {
     );
     assert_eq!(doc.attributes["gtin"], "3017620422003");
     assert_eq!(doc.attributes["sku"], "N-400");
+
+    // Products of the page's own that name no page, in the head: one gives its barcode; two (an
+    // array, a graph, or two scripts) give none, but the card keeps the first one's offer.
+    let unnamed = |gtin: &str, price: &str| {
+        format!(
+            r#"{{"@type": "Product", "name": "Spread {gtin}", "gtin13": "{gtin}", "sku": "S-{gtin}", "offers": {{"price": "{price}", "priceCurrency": "CHF"}}}}"#
+        )
+    };
+    let (a, b) = (
+        unnamed("3017620422003", "4.95"),
+        unnamed("4006381333931", "3.50"),
+    );
+    let head = |scripts: &[String]| {
+        format!(
+            "<html><head><title>Spreads</title>{}</head><body></body></html>",
+            scripts
+                .iter()
+                .map(|s| format!(r#"<script type="application/ld+json">{s}</script>"#))
+                .collect::<String>()
+        )
+    };
+    let page = "https://shop.example/c/spreads";
+    let doc = extract(page, head(std::slice::from_ref(&a)));
+    assert_eq!(doc.attributes["gtin"], "3017620422003");
+    assert_eq!(doc.attributes["sku"], "S-3017620422003");
+    for scripts in [
+        vec![format!("[{a}, {b}]")],
+        vec![format!(r#"{{"@graph": [{a}, {b}]}}"#)],
+        vec![a.clone(), b.clone()],
+    ] {
+        let doc = extract(page, head(&scripts));
+        assert_eq!(doc.type_name, "Product", "{scripts:?}");
+        for key in ["gtin", "sku", "mpn"] {
+            assert!(!doc.attributes.contains_key(key), "{key} {scripts:?}");
+        }
+        assert_eq!(doc.attributes["price"], "4.95", "{scripts:?}");
+    }
+    // One of the page's own beside another product's (named elsewhere): the own one's.
+    let other = unnamed("4006381333931", "3.50").replacen(
+        r#""@type": "Product","#,
+        r#""@type": "Product", "url": "https://shop.example/p/pen","#,
+        1,
+    );
+    let doc = extract(page, head(&[format!("[{a}, {other}]")]));
+    assert_eq!(doc.attributes["gtin"], "3017620422003");
 }
 
 struct AnyDns;
@@ -126,8 +171,9 @@ impl Transport for Never {
     }
 }
 
-/// A link shortener answering with a redirect to Amazon; asked for Amazon itself, it panics.
-struct ToAmazon;
+/// A link shortener answering with a redirect to its Amazon address; asked for Amazon itself,
+/// it panics.
+struct ToAmazon(&'static str);
 #[async_trait::async_trait]
 impl Transport for ToAmazon {
     async fn get(&self, url: &url::Url, a: &[SocketAddr]) -> anyhow::Result<Fetched> {
@@ -147,7 +193,7 @@ impl Transport for ToAmazon {
             status: 302,
             content_type: "text/html".into(),
             body: vec![],
-            location: Some("https://www.amazon.de/dp/B08N5WRWNW".into()),
+            location: Some(self.0.into()),
             retry_after_secs: 60,
             validators: Default::default(),
         })
@@ -172,23 +218,41 @@ async fn amazon_is_never_fetched() {
     assert_eq!(doc.attributes["asin"], "0140328726");
     let doc = resolver.resolve("https://amzn.to/3xyzabc").await.unwrap();
     assert_eq!(doc.type_name, "WebPage");
+    // Every shop of Amazon's, and its short links.
+    for uri in [
+        "https://www.amazon.ie/dp/B08N5WRWNW",
+        "https://www.amazon.co.za/dp/B08N5WRWNW",
+        "https://www.amazon.cn/dp/B08N5WRWNW",
+        "https://AMAZON.IE./dp/B08N5WRWNW",
+        "https://amzn.asia/d/3xyzabc",
+    ] {
+        resolver.resolve(uri).await.unwrap();
+    }
     // Nor where another link redirects to it: the egress refuses the redirect's target.
-    let resolver = WebResolver {
-        egress: Egress::with_backends(
-            EgressConfig::default(),
-            Arc::new(AnyDns),
-            Arc::new(ToAmazon),
-        ),
-        ..resolver
-    };
-    let error = resolver
-        .resolve("https://link.example/item")
-        .await
-        .unwrap_err();
-    assert_eq!(
-        pinakes_core::resolver::error_class(&error),
-        "policy",
-        "{error:#}"
-    );
-    assert!(format!("{error:#}").contains("Amazon is never fetched"));
+    for target in [
+        "https://www.amazon.de/dp/B08N5WRWNW",
+        "https://www.amazon.ie/dp/B08N5WRWNW",
+    ] {
+        let resolver = WebResolver {
+            oembed_policy: Default::default(),
+            cards: None,
+            egress: Egress::with_backends(
+                EgressConfig::default(),
+                Arc::new(AnyDns),
+                Arc::new(ToAmazon(target)),
+            ),
+            config: Default::default(),
+            events: None,
+        };
+        let error = resolver
+            .resolve("https://link.example/item")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            pinakes_core::resolver::error_class(&error),
+            "policy",
+            "{target} {error:#}"
+        );
+        assert!(format!("{error:#}").contains("Amazon is never fetched"));
+    }
 }

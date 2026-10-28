@@ -74,14 +74,11 @@ pub fn card(
         "Greenhouse answered for another posting"
     );
     // "London, UK; Remote-Friendly, United States": the first place that is not remote is the
-    // workplace; a remote one names its regions.
-    let places: Vec<String> = text(&v["location"]["name"])
-        .map(|l| {
-            l.split(';')
-                .take(jobs::LISTED)
-                .map(|p| p.trim().to_owned())
-                .collect()
-        })
+    // workplace; a remote one names its regions. Places are read untrimmed: remote_place cuts
+    // a place before it trims it.
+    let places: Vec<&str> = v["location"]["name"]
+        .as_str()
+        .map(|l| l.split(';').take(jobs::LISTED).collect())
         .unwrap_or_default();
     let remote: Vec<Vec<String>> = places
         .iter()
@@ -89,8 +86,8 @@ pub fn card(
         .collect();
     let workplace = places
         .iter()
-        .find(|p| !p.is_empty() && jobs::remote_place(p).is_none())
-        .and_then(|p| jobs::workplace(&Value::String(p.clone()), &Value::Null));
+        .find(|p| !p.trim().is_empty() && jobs::remote_place(p).is_none())
+        .and_then(|p| jobs::workplace(&Value::String((*p).to_owned()), &Value::Null));
     let pay = &v["pay_input_ranges"][0];
     let cents = |k: &str| pay[k].as_f64().map(|c| c / 100.0);
     Posting {
@@ -349,5 +346,13 @@ mod tests {
         );
         assert!(doc.event.venue.is_none());
         assert_eq!(doc.attributes["remote_regions"], regions.join("; "));
+        // A place reaches remote_place untrimmed: the cut falls in its trailing spaces.
+        let doc = with(format!(
+            "Remote, Europe{}; Berlin, Germany",
+            " ".repeat(2000)
+        ));
+        assert_eq!(doc.attributes["remote"], "true");
+        assert!(!doc.attributes.contains_key("remote_regions"));
+        assert_eq!(doc.event.venue.as_ref().unwrap().text, "Berlin, Germany");
     }
 }

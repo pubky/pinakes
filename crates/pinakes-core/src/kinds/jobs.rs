@@ -167,12 +167,24 @@ pub fn from_jsonld(v: &Value, base: &Url) -> Posting {
         workplace: None,
     };
     let place = first(&v["jobLocation"]);
-    posting.workplace = workplace(place.get("address").unwrap_or(place), place);
+    let address = place.get("address").unwrap_or(place);
+    posting.workplace = workplace(address, place);
+    // The town's text as the page gives it, untrimmed: remote_place cuts it before it trims.
+    let town = [
+        &address["addressLocality"],
+        &address["addressLocality"]["name"],
+        address,
+    ]
+    .into_iter()
+    .find_map(|v| {
+        crate::event::page::string(v).filter(|s| s.contains(|c: char| !c.is_whitespace()))
+    });
     if let Some(rest) = posting
         .workplace
         .as_ref()
-        .and_then(|w| w.address.get("city"))
-        .and_then(|city| remote_place(city))
+        .filter(|w| w.address.contains_key("city"))
+        .and(town.as_deref())
+        .and_then(remote_place)
     {
         // "Remote", "Remote - US": a remote posting, not a town.
         posting.remote = true;
@@ -642,6 +654,21 @@ mod tests {
         assert_eq!(remote_place(&spaced), Some(vec![]));
         let short = format!("Remote, Europe{}", " ".repeat(500));
         assert_eq!(remote_place(&short), Some(vec!["Europe".to_owned()]));
+        // A posting's place reaches remote_place as the page gives it, not trimmed first.
+        for locality in [json!(spaced), json!({"name": spaced})] {
+            let p = from_jsonld(
+                &json!({"@type": "JobPosting", "title": "Role",
+                    "jobLocation": {"address": {"addressLocality": locality}}}),
+                &base(),
+            );
+            assert!(p.remote && p.workplace.is_none(), "{locality}");
+            assert_eq!(p.regions, Vec::<String>::new(), "{locality}");
+        }
+        let p = from_jsonld(
+            &json!({"@type": "JobPosting", "title": "Role", "jobLocation": {"address": short}}),
+            &base(),
+        );
+        assert_eq!(p.regions, vec!["Europe".to_owned()]);
         // The dedup keeps the first of each value, ignoring case, and stops at 32.
         let values: Vec<String> = (0..40_000).map(|i| format!("v{}", i % 50)).collect();
         let kept = dedup([vec!["V1".to_owned()], values].concat());
