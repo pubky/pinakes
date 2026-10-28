@@ -35,10 +35,11 @@ const KEPT: i64 = 20;
 /// The most recordings that may name one recording, so a change to it marks at most this many
 /// for a refill.
 const INCOMING_KEPT: i64 = 2 * KEPT;
-/// Candidates examined per read at most: those passed over for having no room count, so a read
-/// in a crowd of recordings with one title is bounded however dense it is. A read that runs out
-/// with room left goes on from where it stopped in a later one (`scan_after`).
-pub const SCAN: i64 = 5 * KEPT;
+/// Candidates examined per read at most (`hints::SCAN`): those passed over for having no room
+/// count, so a read in a crowd of recordings with one title is bounded however dense it is. A
+/// read that runs out with room left goes on from the position it stopped at in a later one
+/// (`scan_after`, `scan_after_length`).
+pub const SCAN: i64 = crate::hints::SCAN;
 /// Resources claimed per pass.
 const CLAIMED: i64 = 25;
 
@@ -209,20 +210,36 @@ pub struct Read {
     pub examined: usize,
 }
 
-/// One resource: its unit is dropped (with its pairs) when it is no longer a recording root
-/// with a title, else written when its values changed, and its pairs computed anew (or, for a
-/// read that stopped short, from where it stopped).
+/// One resource, in its own transaction: committed with the search revision when it changed
+/// anything, else rolled back.
 async fn resource(pool: &PgPool, id: &str) -> Result<Read> {
+    let mut tx = pool.begin().await?;
+    let read = read_in(&mut tx, id).await?;
+    if read.changed {
+        commit_changed(tx).await?;
+    } else {
+        tx.rollback().await?;
+    }
+    Ok(read)
+}
+
+/// One resource read in `tx`: its unit is dropped (with its pairs) when it is no longer a
+/// recording root with a title, else written when its values changed, and its pairs computed
+/// anew (or, for a read that stopped short, from where it stopped). The caller commits a read
+/// that `changed` with `commit_changed`. Its candidates are taken `FOR KEY SHARE … SKIP LOCKED`,
+/// so it never waits for a unit another transaction holds (an orphan being deleted, whose
+/// `before_delete` may be waiting for this unit in turn). Exposed for the lock test.
+pub async fn read_in(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, id: &str) -> Result<Read> {
     let row = sqlx::query(
         "SELECT r.name,(r.type_path @> ARRAY['MusicRecording'] AND r.status='ok' AND NOT EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id)) AS recording,\
          r.doc#>>'{attributes,artist}' AS page_artist,r.doc#>>'{attributes,duration}' AS page_duration,\
          (SELECT min(f.value) FROM resource_fact f WHERE f.resource_id=r.id AND f.name='artist' AND f.expires_at>now()) AS artist,\
          (SELECT min(f.value) FROM resource_fact f WHERE f.resource_id=r.id AND f.name='duration' AND f.expires_at>now()) AS duration,\
-         u.fingerprint,c.resource_id AS stopped_at,c.length_secs AS stopped_at_length \
-         FROM resource r LEFT JOIN same_recording_unit u ON u.resource_id=r.id LEFT JOIN same_recording_unit c ON c.resource_id=u.scan_after WHERE r.id=$1",
+         u.fingerprint,u.scan_after AS stopped_at,u.scan_after_length AS stopped_at_length \
+         FROM resource r LEFT JOIN same_recording_unit u ON u.resource_id=r.id WHERE r.id=$1",
     )
     .bind(id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut **tx)
     .await?;
     let Some(row) = row else {
         return Ok(Read::default());
@@ -256,13 +273,11 @@ async fn resource(pool: &PgPool, id: &str) -> Result<Read> {
             if stored.is_none() {
                 return Ok(Read::default());
             }
-            let mut tx = pool.begin().await?;
-            before_delete(&mut tx, id).await?;
+            before_delete(tx, id).await?;
             sqlx::query("DELETE FROM same_recording_unit WHERE resource_id=$1")
                 .bind(id)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
-            commit_changed(tx).await?;
             return Ok(Read {
                 changed: true,
                 examined: 0,
@@ -292,10 +307,11 @@ async fn resource(pool: &PgPool, id: &str) -> Result<Read> {
     let mut ring = Ring::of(&unit, id);
     // A read examines at most `SCAN` candidates (a dense crowd's full ones are examined and
     // passed over, so a read of it is bounded all the same). One that ran out with room left
-    // stored the candidate it stopped at (`scan_after`) and marked itself to be read again: that
-    // read keeps the pairs it has and goes on from there, while the values are the same and the
-    // recording it stopped at is still in the ring (one that went, or whose length moved it,
-    // starts the read over).
+    // stored the position it stopped at (`scan_after` with its length then, as the index orders
+    // candidates) and marked itself to be read again: that read keeps the pairs it has and goes
+    // on from that position, while the values are the same. The position is a place in the
+    // index, not the candidate: one that went, or whose length moved it, changes nothing; a
+    // position no segment holds (a length window that moved) starts the read over.
     let stopped_at = match row.try_get::<Option<String>, _>("stopped_at")? {
         Some(id) => Some(Pos {
             length: row.try_get("stopped_at_length")?,
@@ -304,27 +320,27 @@ async fn resource(pool: &PgPool, id: &str) -> Result<Read> {
         None => None,
     };
     let resumed = !values_changed && stopped_at.is_some_and(|at| ring.resume_after(at));
-    let mut tx = pool.begin().await?;
-    sqlx::query("INSERT INTO same_recording_unit(resource_id,fingerprint,title_key,artist_key,length_secs,scan_after) VALUES($1,$2,$3,$4,$5,NULL) \
-        ON CONFLICT(resource_id) DO UPDATE SET fingerprint=excluded.fingerprint,title_key=excluded.title_key,artist_key=excluded.artist_key,length_secs=excluded.length_secs,scan_after=NULL")
+    sqlx::query("INSERT INTO same_recording_unit(resource_id,fingerprint,title_key,artist_key,length_secs,scan_after,scan_after_length) VALUES($1,$2,$3,$4,$5,NULL,NULL) \
+        ON CONFLICT(resource_id) DO UPDATE SET fingerprint=excluded.fingerprint,title_key=excluded.title_key,artist_key=excluded.artist_key,length_secs=excluded.length_secs,scan_after=NULL,scan_after_length=NULL")
         .bind(id)
         .bind(&fingerprint)
         .bind(&unit.title_key)
         .bind(&unit.artist_key)
         .bind(unit.length_secs.map(|s| s as i32))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    // The pairs a resumed read keeps; any other read starts from none.
+    // The pairs a resumed read keeps (left out of the candidates, so they take no place among
+    // those a read may still take); any other read starts from none.
     let mut existing: Vec<String> = vec![];
     if resumed {
         existing = sqlx::query_scalar("SELECT other_id FROM same_recording WHERE resource_id=$1")
             .bind(id)
-            .fetch_all(&mut *tx)
+            .fetch_all(&mut **tx)
             .await?;
     } else {
         sqlx::query("DELETE FROM same_recording WHERE resource_id=$1")
             .bind(id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         if values_changed {
             // The pairs naming it go, and their recordings refill their lists (at most
@@ -333,15 +349,15 @@ async fn resource(pool: &PgPool, id: &str) -> Result<Read> {
                 "DELETE FROM same_recording WHERE other_id=$1 RETURNING resource_id",
             )
             .bind(id)
-            .fetch_all(&mut *tx)
+            .fetch_all(&mut **tx)
             .await?;
-            refill(&mut tx, &owners).await?;
+            refill(tx, &owners).await?;
         }
     }
     let mut best: Vec<(String, f32)> = vec![];
     let mut scan_left = SCAN;
     let mut examined = 0usize;
-    let mut last_examined: Option<String> = None;
+    let mut last_examined: Option<(String, Option<i32>)> = None;
     if !unit.artist_key.is_empty() {
         for segment in &ring.segments {
             let room = KEPT - (existing.len() + best.len()) as i64;
@@ -352,19 +368,23 @@ async fn resource(pool: &PgPool, id: &str) -> Result<Read> {
                 Arg::Text(id.to_owned()),
                 Arg::Text(unit.title_key.clone()),
                 Arg::Text(unit.artist_key.clone()),
+                Arg::TextArray(existing.clone()),
             ];
-            // The segment's next candidates, as many as may still be examined, in index order.
+            // The segment's next candidates, as many as may still be examined, in index order;
+            // one another transaction holds (an orphan being deleted) is skipped, never waited
+            // for, so a pass holding its own unit and a delete waiting for that unit never wait
+            // for each other.
             let slice_sql = format!(
-                "SELECT u.resource_id,u.length_secs FROM same_recording_unit u WHERE u.title_key=$2 AND u.artist_key=$3 AND u.resource_id<>$1 AND {} \
-                 ORDER BY u.length_secs,u.resource_id LIMIT {scan_left}",
+                "SELECT u.resource_id,u.length_secs FROM same_recording_unit u WHERE u.title_key=$2 AND u.artist_key=$3 AND u.resource_id<>$1 AND NOT u.resource_id=ANY($4) AND {} \
+                 ORDER BY u.length_secs,u.resource_id LIMIT {scan_left} FOR KEY SHARE OF u SKIP LOCKED",
                 segment.predicate(&mut args)
             );
-            let slice: Vec<String> = bind_all(sqlx::query(&slice_sql), &args)
-                .fetch_all(&mut *tx)
+            let slice: Vec<(String, Option<i32>)> = bind_all(sqlx::query(&slice_sql), &args)
+                .fetch_all(&mut **tx)
                 .await?
                 .iter()
-                .map(|r| r.try_get(0))
-                .collect::<Result<_, _>>()?;
+                .map(|r| Ok((r.try_get(0)?, r.try_get(1)?)))
+                .collect::<Result<_, sqlx::Error>>()?;
             if slice.is_empty() {
                 continue;
             }
@@ -377,7 +397,7 @@ async fn resource(pool: &PgPool, id: &str) -> Result<Read> {
                 crate::hints::has_room("same_recording", "resource_id", "c.resource_id", "$1", &score, &cap)
             );
             let taken: Vec<String> = bind_all(sqlx::query(&room_sql), &args)
-                .fetch_all(&mut *tx)
+                .fetch_all(&mut **tx)
                 .await?
                 .iter()
                 .map(|r| r.try_get(0))
@@ -385,7 +405,7 @@ async fn resource(pool: &PgPool, id: &str) -> Result<Read> {
             let up_to = match taken.last() {
                 Some(last) if taken.len() as i64 == room => slice
                     .iter()
-                    .position(|r| r == last)
+                    .position(|r| r.0 == *last)
                     .map_or(slice.len(), |i| i + 1),
                 _ => slice.len(),
             };
@@ -401,15 +421,16 @@ async fn resource(pool: &PgPool, id: &str) -> Result<Read> {
         }
     }
     // Out of candidates to examine with room left: this read stops here and is read again from
-    // here (due now, after what is due already).
+    // this position (due now, after what is due already).
     if KEPT - (existing.len() + best.len()) as i64 > 0 && scan_left <= 0 {
-        if let Some(at) = &last_examined {
-            sqlx::query("UPDATE same_recording_unit SET scan_after=$2 WHERE resource_id=$1")
+        if let Some((at, length)) = &last_examined {
+            sqlx::query("UPDATE same_recording_unit SET scan_after=$2,scan_after_length=$3 WHERE resource_id=$1")
                 .bind(id)
                 .bind(at)
-                .execute(&mut *tx)
+                .bind(length)
+                .execute(&mut **tx)
                 .await?;
-            refill(&mut tx, std::slice::from_ref(&id.to_owned())).await?;
+            refill(tx, std::slice::from_ref(&id.to_owned())).await?;
         }
     }
     let (others, scores): (Vec<String>, Vec<f32>) = best.into_iter().unzip();
@@ -422,7 +443,7 @@ async fn resource(pool: &PgPool, id: &str) -> Result<Read> {
     .bind(id)
     .bind(&others)
     .bind(&scores)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     // Each other recording keeps its best `KEPT` too: this one may push its last one out.
     sqlx::query(
@@ -433,7 +454,7 @@ async fn resource(pool: &PgPool, id: &str) -> Result<Read> {
     )
     .bind(&others)
     .bind(KEPT)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     // And no recording is named by more than INCOMING_KEPT others, so a change to it marks at
     // most that many for a refill. A recording whose pair is pushed out refills its list (never
@@ -448,11 +469,10 @@ async fn resource(pool: &PgPool, id: &str) -> Result<Read> {
     )
     .bind(&named)
     .bind(INCOMING_KEPT)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
     let pushed_out: Vec<String> = pushed_out.into_iter().filter(|r| r != id).collect();
-    refill(&mut tx, &pushed_out).await?;
-    commit_changed(tx).await?;
+    refill(tx, &pushed_out).await?;
     Ok(Read {
         changed: true,
         examined,
@@ -641,6 +661,7 @@ impl Segment {
 /// A bound value of a query built from segments, in the order the placeholders number them.
 enum Arg {
     Text(String),
+    TextArray(Vec<String>),
     Int(i32),
     Int8(i64),
     Real(f32),
@@ -659,6 +680,7 @@ fn bind_all<'q>(
     for value in args {
         query = match value {
             Arg::Text(s) => query.bind(s.as_str()),
+            Arg::TextArray(v) => query.bind(v.as_slice()),
             Arg::Int(i) => query.bind(*i),
             Arg::Int8(i) => query.bind(*i),
             Arg::Real(f) => query.bind(*f),

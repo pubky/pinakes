@@ -1061,3 +1061,259 @@ async fn an_orphan_deleted_while_a_pass_pairs_with_it_leaves_the_partner_to_refi
         "the pair went with the orphan"
     );
 }
+
+/// A crowd of `n` recordings of one length, every one of them full: named by forty others at
+/// score 1, so a recording of a lower score (one without a length) finds no room in any of them.
+/// The namers are forty recordings of the same title by another artist, so they are candidates
+/// for nobody in the crowd and their lists are never trimmed (their own reads find no candidate);
+/// the pairs are written as the pass would leave them, with the crowd's own lists empty.
+async fn full_crowd(pool: &PgPool, title: &str, length: &str, n: usize) -> Vec<String> {
+    let mut ids = crowd(pool, title, Some(length), n).await;
+    ids.sort();
+    let mut namers = vec![];
+    for i in 0..40 {
+        namers.push(
+            recording(
+                pool,
+                &format!("https://tidal.com/track/88{i:04}"),
+                title,
+                Some("Another Quartet"),
+                Some(length),
+            )
+            .await,
+        );
+    }
+    for id in ids.iter().chain(&namers) {
+        same_recording::read(pool, id).await.unwrap();
+    }
+    sqlx::query("DELETE FROM same_recording")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO same_recording(resource_id,other_id,score) SELECT n,c,1 FROM unnest($1::text[]) AS a(n),unnest($2::text[]) AS b(c)")
+        .bind(&namers)
+        .bind(&ids)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM same_recording_dirty")
+        .execute(pool)
+        .await
+        .unwrap();
+    ids
+}
+
+/// `n` recordings of one length arriving after a crowd (their pages are their own, not the
+/// crowd's), sorted by id.
+async fn arrivals(pool: &PgPool, length: &str, n: usize) -> Vec<String> {
+    let mut ids = vec![];
+    for i in 0..n {
+        ids.push(
+            recording(
+                pool,
+                &format!("https://tidal.com/track/77{i:04}"),
+                "Take Five",
+                Some("The Dave Brubeck Quartet"),
+                Some(length),
+            )
+            .await,
+        );
+    }
+    ids.sort();
+    ids
+}
+
+async fn pairs_of(pool: &PgPool, id: &str) -> Vec<String> {
+    sqlx::query_scalar("SELECT other_id FROM same_recording WHERE resource_id=$1 ORDER BY other_id")
+        .bind(id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+/// A read that stopped goes on from the position it stopped at, not from where the candidate it
+/// stopped at is now: a recording without a length examines a full crowd of 120 at 101 s, stops
+/// at the hundredth; that one's length moves to 103 s, and twenty recordings at 102 s arrive
+/// with room. The resumed read passes the last twenty of the crowd and names the twenty at 102 s.
+/// (Resumed from the candidate's new position, it would skip them, end with no hints and never
+/// look again, its fingerprint current.)
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_resumed_read_goes_on_from_the_position_it_stopped_at(pool: PgPool) {
+    let full = full_crowd(&pool, "Take Five", "PT1M41S", 120).await;
+    let me = recording(
+        &pool,
+        "https://tidal.com/track/999999",
+        "Take Five",
+        Some("The Dave Brubeck Quartet"),
+        None,
+    )
+    .await;
+    let read = same_recording::read(&pool, &me).await.unwrap();
+    assert_eq!(read.examined as i64, same_recording::SCAN);
+    assert!(pairs_of(&pool, &me).await.is_empty(), "the crowd is full");
+    let (stopped_at, length): (Option<String>, Option<i32>) = sqlx::query_as(
+        "SELECT scan_after,scan_after_length FROM same_recording_unit WHERE resource_id=$1",
+    )
+    .bind(&me)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (stopped_at.as_deref(), length),
+        (Some(full[99].as_str()), Some(101))
+    );
+    // The candidate it stopped at moves (as a duration fact read later would move it).
+    sqlx::query("UPDATE same_recording_unit SET length_secs=103 WHERE resource_id=$1")
+        .bind(&full[99])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let later = arrivals(&pool, "PT1M42S", 20).await;
+    for id in &later {
+        same_recording::read(&pool, id).await.unwrap();
+    }
+    let read = same_recording::read(&pool, &me).await.unwrap();
+    assert!(read.changed);
+    let now = pairs_of(&pool, &me).await;
+    assert_eq!(
+        now, later,
+        "the twenty at 102 s, after the crowd's last twenty"
+    );
+    assert_eq!(
+        read.examined, 40,
+        "the crowd's last twenty, then the twenty"
+    );
+    let stopped: Option<String> =
+        sqlx::query_scalar("SELECT scan_after FROM same_recording_unit WHERE resource_id=$1")
+            .bind(&me)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stopped, None, "the read ended");
+}
+
+/// A pair added to a stopped read's list before it resumes (a recording ahead of its position
+/// named it back) takes no place among the candidates the resumed read may still take: the
+/// recording ends with twenty, not nineteen.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_pair_kept_from_before_takes_no_place_from_a_resumed_read(pool: PgPool) {
+    let full = full_crowd(&pool, "Take Five", "PT1M41S", 120).await;
+    let me = recording(
+        &pool,
+        "https://tidal.com/track/999999",
+        "Take Five",
+        Some("The Dave Brubeck Quartet"),
+        None,
+    )
+    .await;
+    same_recording::read(&pool, &me).await.unwrap();
+    assert!(pairs_of(&pool, &me).await.is_empty());
+    // Twenty-one recordings at 102 s arrive and read: each names the twenty others, so none
+    // names this one; then one of them does (as a read with a place to spare would).
+    let later = arrivals(&pool, "PT1M42S", 21).await;
+    for id in &later {
+        same_recording::read(&pool, id).await.unwrap();
+    }
+    let friend = &later[7];
+    sqlx::query(
+        "INSERT INTO same_recording(resource_id,other_id,score) VALUES($1,$2,0.7),($2,$1,0.7)",
+    )
+    .bind(friend)
+    .bind(&me)
+    .execute(&pool)
+    .await
+    .unwrap();
+    same_recording::read(&pool, &me).await.unwrap();
+    let now = pairs_of(&pool, &me).await;
+    assert_eq!(now.len(), 20, "twenty, the kept pair among them: {now:?}");
+    assert!(now.contains(friend));
+    let _ = full;
+}
+
+/// A pass reading one recording (holding its unit) and an orphan delete taking the other
+/// recording of a pair (holding that unit, then marking the first to refill) never wait for each
+/// other: the pass takes its candidates with `SKIP LOCKED`, so the orphan's unit is passed over,
+/// the pass commits, and the delete goes on and marks the first recording, which is read again
+/// without the orphan. (Waiting for the orphan's unit, the two would deadlock, and one would fail.)
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_pass_and_an_orphan_delete_holding_each_others_unit_never_deadlock(pool: PgPool) {
+    let config = Config::default();
+    let a = recording(
+        &pool,
+        "https://tidal.com/track/1",
+        "Take Five",
+        Some("The Dave Brubeck Quartet"),
+        Some("PT5M24S"),
+    )
+    .await;
+    let b = recording(
+        &pool,
+        "https://tidal.com/track/2",
+        "Take Five",
+        Some("The Dave Brubeck Quartet"),
+        Some("PT5M24S"),
+    )
+    .await;
+    pass(&pool, &config).await;
+    assert_eq!(pairs_of(&pool, &a).await, vec![b.clone()]);
+    // The pass: it holds A's unit (marked to refill, as a lost pair marks it) and has not taken
+    // its candidates yet.
+    let mut reading = pool.begin().await.unwrap();
+    sqlx::query(
+        "UPDATE same_recording_unit SET fingerprint='refill:'||fingerprint WHERE resource_id=$1",
+    )
+    .bind(&a)
+    .execute(&mut *reading)
+    .await
+    .unwrap();
+    // The delete of B: it holds B's unit and waits to mark A.
+    let deleting = {
+        let pool = pool.clone();
+        let b = b.clone();
+        tokio::spawn(async move {
+            let mut tx = pool.begin().await.unwrap();
+            same_recording::before_delete(&mut tx, &b).await.unwrap();
+            sqlx::query("DELETE FROM resource WHERE id=$1")
+                .bind(&b)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(!deleting.is_finished(), "the delete waits for A");
+    // The pass takes its candidates: B is held, so it is passed over, and the pass commits.
+    let read = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        same_recording::read_in(&mut reading, &a),
+    )
+    .await
+    .expect("the pass never waits for the delete")
+    .unwrap();
+    assert!(read.changed);
+    reading.commit().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), deleting)
+        .await
+        .expect("the delete goes on once the pass committed")
+        .unwrap();
+    let (fingerprint, queued, units): (String, bool, i64) = sqlx::query_as(
+        "SELECT fingerprint,EXISTS(SELECT 1 FROM same_recording_dirty d WHERE d.resource_id=u.resource_id),(SELECT count(*) FROM same_recording_unit) FROM same_recording_unit u WHERE resource_id=$1",
+    )
+    .bind(&a)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        fingerprint.starts_with("refill:"),
+        "A is marked by the delete: {fingerprint}"
+    );
+    assert!(queued);
+    assert_eq!(units, 1, "B's unit went with it");
+    assert!(pairs_of(&pool, &a).await.is_empty());
+    pass(&pool, &config).await;
+    assert!(
+        pairs_of(&pool, &a).await.is_empty(),
+        "nothing left to pair with"
+    );
+}
