@@ -158,37 +158,36 @@ impl Pause {
         }
     }
     /// Ask the API for `url` (in its turn, not before the pause ends), keeping the pause its
-    /// answer asks for: its `backoff` or error, else a 429's or 503's `Retry-After` (a minute at
-    /// least). Then rate limits and server errors are `RetryLater`, as for any source.
+    /// answer asks for: its `backoff` or error (read from an error answer too), else a 429's or
+    /// 503's `Retry-After` (a minute at least). Then rate limits and server errors are
+    /// `RetryLater`, as for any source, for as long as the pause.
     async fn ask(&self, egress: &Egress, url: &str) -> Result<Fetched> {
         let _turn = self.turn.lock().await;
         self.wait()?;
         let options = FetchOptions {
             accept: Some("application/json".into()),
+            error_json: true,
             ..Default::default()
         };
-        let f = match egress.fetch_with(url, &options).await {
-            Ok(f) => f,
-            Err(error) => {
-                // A 429 comes as egress's own `RetryLater`, with the answer's wait.
-                if let Some(busy) = error
-                    .downcast_ref::<crate::resolver::RetryLater>()
-                    .filter(|r| r.class == "http_4xx")
-                {
-                    self.hold(busy.seconds.max(60));
-                }
-                return Err(error);
-            }
-        };
-        let busy = (f.status == 503).then(|| f.retry_after_secs.max(60));
-        if let Some(seconds) = serde_json::from_slice::<Value>(&f.body)
+        let f = egress.fetch_with(url, &options).await?;
+        let busy = matches!(f.status, 429 | 503).then(|| f.retry_after_secs.max(60));
+        let held = serde_json::from_slice::<Value>(&f.body)
             .ok()
             .and_then(|v| pause(&v))
-            .or(busy)
-        {
+            .or(busy);
+        if let Some(seconds) = held {
             self.hold(seconds);
         }
-        super::retry(&f)?;
+        super::retry(&f).map_err(|error| {
+            match (held, error.downcast_ref::<crate::resolver::RetryLater>()) {
+                (Some(seconds), Some(retry)) => crate::resolver::RetryLater {
+                    class: retry.class,
+                    seconds: retry.seconds.max(seconds),
+                }
+                .into(),
+                _ => error,
+            }
+        })?;
         Ok(f)
     }
 }
@@ -653,6 +652,7 @@ mod tests {
 mod pause_tests {
     use super::*;
     use crate::sources::fixture;
+    use std::sync::Arc;
 
     const JSON: &str = "application/json";
     fn api(id: u64) -> String {
@@ -745,6 +745,92 @@ mod pause_tests {
             assert_eq!(recorded.asked().len(), 1, "{status}");
             tokio::time::advance(std::time::Duration::from_secs(seconds + 1)).await;
             assert!(resolve(&pause, &cx, &uri(1)).await.is_ok(), "{status}");
+        }
+    }
+
+    /// A transport sending every request over HTTP to `0`, its answer read as any is.
+    struct Loopback(std::net::SocketAddr);
+    #[async_trait::async_trait]
+    impl crate::resolver::egress::Transport for Loopback {
+        async fn get(&self, url: &url::Url, a: &[std::net::SocketAddr]) -> Result<Fetched> {
+            self.get_with(url, a, &FetchOptions::default()).await
+        }
+        async fn get_with(
+            &self,
+            url: &url::Url,
+            _: &[std::net::SocketAddr],
+            options: &FetchOptions,
+        ) -> Result<Fetched> {
+            let mut local = url.clone();
+            local.set_scheme("http").unwrap();
+            local.set_port(Some(self.0.port())).unwrap();
+            let mut f = crate::resolver::egress::PinnedTransport
+                .get_with(&local, &[self.0], options)
+                .await?;
+            f.url = url.clone();
+            Ok(f)
+        }
+    }
+
+    #[tokio::test]
+    async fn an_error_answers_backoff_holds_every_question() {
+        // The API's 503 and 429 in JSON, asking for more than a minute, as served: the next
+        // question is not asked before the backoff ends.
+        for (status, backoff) in [(503, 120), (429, 150)] {
+            let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counted = asked.clone();
+            let app = axum::Router::new().fallback(move |uri: axum::http::Uri| {
+                let counted = counted.clone();
+                async move {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let busy = format!(r#"{{"error_id":503,"error_name":"temporarily_unavailable","backoff":{backoff}}}"#);
+                    let (status, body) = if uri.path().ends_with("/336") {
+                        (status, busy.into_bytes())
+                    } else {
+                        (200, answer(1, None))
+                    };
+                    (
+                        axum::http::StatusCode::from_u16(status).unwrap(),
+                        [("content-type", "application/json; charset=utf-8")],
+                        body,
+                    )
+                }
+            });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let egress = crate::resolver::egress::Egress::with_backends(
+                Default::default(),
+                Arc::new(fixture::PublicDns),
+                Arc::new(Loopback(addr)),
+            );
+            let cx = Context {
+                egress: &egress,
+                ttl: 3600,
+            };
+            let pause = Pause::new();
+            let error = resolve(&pause, &cx, &uri(336)).await.unwrap_err();
+            assert!(retry(error).is_some_and(|s| s >= backoff), "{status}");
+            tokio::time::pause();
+            tokio::time::advance(std::time::Duration::from_secs(61)).await;
+            let error = resolve(&pause, &cx, &uri(1))
+                .await
+                .expect_err(&format!("{status}"));
+            assert!(retry(error).is_some_and(|s| s <= backoff - 61), "{status}");
+            assert_eq!(
+                asked.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "{status}"
+            );
+            tokio::time::advance(std::time::Duration::from_secs(backoff - 60)).await;
+            tokio::time::resume();
+            assert!(resolve(&pause, &cx, &uri(1)).await.is_ok(), "{status}");
+            assert_eq!(
+                asked.load(std::sync::atomic::Ordering::SeqCst),
+                2,
+                "{status}"
+            );
+            server.abort();
         }
     }
 
