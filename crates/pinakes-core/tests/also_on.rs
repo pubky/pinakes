@@ -3021,6 +3021,52 @@ impl Source for GoneMeanwhile {
         Ok(archived(&subject.uri))
     }
 }
+/// A source whose lookup runs while its resource becomes another link's alias.
+struct AliasedMeanwhile(PgPool);
+#[async_trait]
+impl Source for AliasedMeanwhile {
+    fn id(&self) -> &'static str {
+        "aliased"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        subject.status == "ok"
+    }
+    async fn lookup(&self, _: &Context, subject: &Subject) -> anyhow::Result<Found> {
+        let mut tx = self.0.begin().await?;
+        let line = pinakes_core::alias::assign(
+            &mut tx,
+            &subject.id,
+            &pinakes_core::alias::Alias {
+                root: "https://example.social/@alice/root".into(),
+                basis: "identifier",
+            },
+        )
+        .await?;
+        pinakes_core::alias::record(&mut tx, line.into_iter().collect()).await?;
+        tx.commit().await?;
+        Ok(archived(&subject.uri))
+    }
+}
+/// A source whose lookup runs while the repair scrubs its post, which an earlier build stored
+/// as gone with its card.
+struct ScrubbedMeanwhile(PgPool);
+#[async_trait]
+impl Source for ScrubbedMeanwhile {
+    fn id(&self) -> &'static str {
+        "scrubbed"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        subject.status == "ok"
+    }
+    async fn lookup(&self, _: &Context, subject: &Subject) -> anyhow::Result<Found> {
+        sqlx::query("UPDATE resource SET status='missing',doc=jsonb_set(doc,'{status}','\"missing\"') WHERE id=$1")
+            .bind(&subject.id)
+            .execute(&self.0)
+            .await?;
+        assert_eq!(pinakes_core::changes::scrub_stored(&self.0).await?, 1);
+        Ok(archived(&subject.uri))
+    }
+}
 /// A social post (an ActivityPub note) read and saved. Its ID.
 async fn social_post(pool: &PgPool, uri: &str) -> String {
     let id = store::ensure_resource(pool, uri).await.unwrap();
@@ -3068,6 +3114,20 @@ async fn a_gone_social_post_gets_no_also_on_results(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
+    // Its deletion's save leaves it unqueued.
+    let queued = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM also_on_dirty WHERE resource_id=$1)",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert!(!queued(id.clone()).await);
     let archives = Arc::new(Archives::default());
     let sources: Vec<Arc<dyn Source>> = vec![archives.clone()];
     drain(&pool, &cx(Config::default()), &sources).await;
@@ -3085,5 +3145,32 @@ async fn a_gone_social_post_gets_no_also_on_results(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(status, "missing");
+    assert_eq!(derived(&pool, &id).await, 0);
+    assert!(!queued(id.clone()).await);
+
+    // A lookup across the repair's scrub writes nothing either.
+    let uri = "https://example.social/@alice/3";
+    let id = social_post(&pool, uri).await;
+    let sources: Vec<Arc<dyn Source>> = vec![Arc::new(ScrubbedMeanwhile(pool.clone()))];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    assert_eq!(derived(&pool, &id).await, 0);
+    assert!(!queued(id).await);
+}
+
+/// A lookup whose resource became another link's alias while it ran writes nothing: an alias
+/// runs no lookups, its root's do.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_lookup_whose_resource_became_an_alias_writes_nothing(pool: PgPool) {
+    social_post(&pool, "https://example.social/@alice/root").await;
+    let id = page(&pool, "https://example.org/spelling", "A spelling").await;
+    let sources: Vec<Arc<dyn Source>> = vec![Arc::new(AliasedMeanwhile(pool.clone()))];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    let alias: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource_alias WHERE alias_id=$1)")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(alias);
     assert_eq!(derived(&pool, &id).await, 0);
 }

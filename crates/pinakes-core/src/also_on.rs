@@ -605,13 +605,18 @@ pub async fn record(
         .bind(source)
         .execute(&mut *tx)
         .await?;
-    // A lookup that ran while its social post was found gone writes nothing: its rows go.
-    let doc: Option<Value> = sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1")
+    // Read again under the locks, for a lookup that ran while its resource changed. One that
+    // became an alias meanwhile gets nothing: an alias is read as its root and runs no lookups
+    // (`subject`). A social post found gone meanwhile writes nothing, and its rows go.
+    let now: Option<(Value, bool)> = sqlx::query_as("SELECT doc,EXISTS(SELECT 1 FROM resource_alias WHERE alias_id=$1) FROM resource WHERE id=$1")
         .bind(resource_id)
         .fetch_optional(&mut *tx)
         .await?;
-    if doc
-        .and_then(|doc| serde_json::from_value::<ResourceMeta>(doc).ok())
+    if now.as_ref().is_some_and(|(_, alias)| *alias) {
+        return Ok(());
+    }
+    if now
+        .and_then(|(doc, _)| serde_json::from_value::<ResourceMeta>(doc).ok())
         .is_some_and(|doc| crate::changes::gone_social(&doc))
     {
         (keys, links, facts) = Default::default();

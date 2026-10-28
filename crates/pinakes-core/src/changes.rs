@@ -90,6 +90,15 @@ async fn forget_derived(tx: &mut Transaction<'_, Postgres>, ids: &[String]) -> R
     }
     Ok(deleted)
 }
+/// Drop a gone social post's also-on mark, which the write of its card just set: it runs no
+/// lookups (`also_on`), so it is never queued.
+async fn unqueue_also_on(tx: &mut Transaction<'_, Postgres>, id: &str) -> Result<()> {
+    sqlx::query("DELETE FROM also_on_dirty WHERE resource_id=$1")
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
 /// Delete what spellings of a scrubbed post (`scrubbed`) kept of it, as when they were saved
 /// before they became its aliases: every change line but the `aliased` one naming its root,
 /// their stored cards (`{}`, as an OSM spelling's; an alias's card is never served, its root's
@@ -455,6 +464,9 @@ pub async fn save(
         .transpose()?;
     let after = normalize(&doc);
     crate::store::write_document(&mut tx, id, generation, &doc).await?;
+    if social_missing {
+        unqueue_also_on(&mut tx, id).await?;
+    }
     let diff = diff(before.as_ref(), Some(&after))
         .filter(|_| !social_missing && (before.is_some() || doc.status != Status::Missing));
     if let Some(plan) = prepared
@@ -544,6 +556,7 @@ pub async fn scrub_stored(pool: &PgPool) -> Result<u64> {
                     .await?
                     .rows_affected();
                 let derived = forget_derived(&mut tx, &ids).await?;
+                unqueue_also_on(&mut tx, &id).await?;
                 if card + derived > 0 {
                     // Its group was formed from the card it no longer has.
                     sqlx::query(
