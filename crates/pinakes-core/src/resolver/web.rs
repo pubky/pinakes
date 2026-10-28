@@ -554,14 +554,15 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
     };
     // A site's own node (its WebSite, its publisher) ranks below any other: it never names the
     // page. Among equals, the script holding the page's own node (an event whose url is the
-    // page over another event the page lists), then a head script naming no other page over
-    // one that does.
+    // page over another event the page lists), then a script whose card would be the page's
+    // own (a head node naming no page) over one whose card names another page, however the
+    // script wraps it.
     let rank = |(v, head): &(Value, bool)| {
         (
             !site_script(v, &fetched.url),
             subject(v),
             has_own_node(v, &fetched.url),
-            crate::event::page::names_page(v, &fetched.url).unwrap_or(*head),
+            selected(v, &fetched.url, *head).is_some_and(|(_, own)| own),
         )
     };
     let claims = |entity: &Value, head: bool| {
@@ -609,10 +610,11 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
         own_products(v, &fetched.url, claims(v, *head), *head, &mut own);
     }
     let main = declared_main(&scripts, &fetched.url);
-    let listed = |key: &Option<String>| {
-        key.as_ref().is_some_and(|key| {
-            key.contains('#') && main.as_ref().is_some_and(|main| !main.contains(key))
-        })
+    let listed = |(key, by_fragment): &(Option<String>, bool)| {
+        *by_fragment
+            && key
+                .as_ref()
+                .is_some_and(|key| main.as_ref().is_some_and(|main| !main.contains(key)))
     };
     if own.len() > 1 || own.first().is_some_and(listed) {
         crate::kinds::products::drop_identity(&mut out.doc);
@@ -1264,10 +1266,17 @@ fn jsonld_claims(doc: &mut ResourceMeta, v: &Value, base: &Url) -> bool {
     true
 }
 /// The `Product` nodes in `v` that could give the page their identity, as `apply_jsonld` reads
-/// them (with `claims`, and the page's own: naming it, or `vouched`), added to `out` by the
-/// page each names (`node_key`; `None` for one naming none). A repeated description of one
-/// product is added once; two naming no page are two. Stops at two.
-fn own_products(v: &Value, base: &Url, claims: bool, vouched: bool, out: &mut Vec<Option<String>>) {
+/// them (with `claims`, and the page's own: naming it, or `vouched`), added to `out` by their
+/// key (`node_key`; `None` for one naming none) and whether they name the page only by a
+/// fragment (`by_fragment`). A repeated description of one product is added once, by a
+/// fragment only if every description is; two naming no page are two. Stops at two.
+fn own_products(
+    v: &Value,
+    base: &Url,
+    claims: bool,
+    vouched: bool,
+    out: &mut Vec<(Option<String>, bool)>,
+) {
     if !claims || out.len() > 1 {
         return;
     }
@@ -1284,9 +1293,10 @@ fn own_products(v: &Value, base: &Url, claims: bool, vouched: bool, out: &mut Ve
     let product =
         schema_type(v).is_some_and(|k| crate::model::type_path(k).iter().any(|t| t == "Product"));
     if product && own {
-        let key = node_key(v, base);
-        if key.is_none() || !out.contains(&key) {
-            out.push(key);
+        let (key, fragment) = (node_key(v, base), by_fragment(v, base));
+        match out.iter_mut().find(|(k, _)| key.is_some() && *k == key) {
+            Some((_, only)) => *only &= fragment,
+            None => out.push((key, fragment)),
         }
     }
     if let Some(m) = v.get("mainEntity") {
@@ -1296,10 +1306,11 @@ fn own_products(v: &Value, base: &Url, claims: bool, vouched: bool, out: &mut Ve
         own_products(g, base, claims, vouched, out);
     }
 }
-/// The page a node names (its `url`, else its `@id`), as an identity with its fragment kept:
-/// `#nutella` and `#pen` on one page are two nodes.
+/// A node's identity: its `@id`, else its `url`, with its fragment kept. `#nutella` and `#pen`
+/// on one page are two nodes, whatever `url` they share; `#product` with a `url` and without is
+/// one.
 fn node_key(v: &Value, base: &Url) -> Option<String> {
-    let named = ["url", "@id"]
+    let named = ["@id", "url"]
         .into_iter()
         .filter_map(|f| v.get(f).and_then(Value::as_str))
         .find_map(|u| origin_url(base, u))?;
@@ -1310,6 +1321,53 @@ fn node_key(v: &Value, base: &Url) -> Option<String> {
         .map(str::to_owned);
     let id = entity_identity(&named)?;
     Some(fragment.map_or_else(|| id.clone(), |f| format!("{id}#{f}")))
+}
+/// Whether a node names the page only by a fragment of it: no `url`, and an `@id` with a
+/// fragment (`#nutella`).
+fn by_fragment(v: &Value, base: &Url) -> bool {
+    let url = |f: &str| {
+        v.get(f)
+            .and_then(Value::as_str)
+            .and_then(|u| origin_url(base, u))
+    };
+    url("url").is_none()
+        && url("@id")
+            .and_then(|u| Url::parse(&u).ok())
+            .is_some_and(|u| u.fragment().is_some_and(|f| !f.is_empty()))
+}
+/// The node `apply_jsonld` takes the card from in `v`, and whether it is the page's own (it
+/// names the page, or names none and is `vouched` for); `None` when no node would type the
+/// card.
+fn selected<'a>(v: &'a Value, base: &Url, vouched: bool) -> Option<(&'a Value, bool)> {
+    if let Some(values) = v.as_array() {
+        return selected(best_node(values, base, vouched)?, base, vouched);
+    }
+    let own = crate::event::page::names_page(v, base).unwrap_or(vouched);
+    v.get("mainEntity")
+        .and_then(|m| selected(m, base, own))
+        .or_else(|| v.get("@graph").and_then(|g| selected(g, base, vouched)))
+        .or_else(|| (schema_type(v).is_some() && !site_node(v, base)).then_some((v, own)))
+}
+/// The node of an array `apply_jsonld` reads. A page's article/event outranks its publisher or
+/// breadcrumb helper nodes, and among equals the page's own node (its url is the page)
+/// outranks another event it lists, and one naming no page, when vouched for, outranks one
+/// naming another page; the first of equals.
+fn best_node<'a>(values: &'a [Value], base: &Url, vouched: bool) -> Option<&'a Value> {
+    let rank = |v: &Value| {
+        (
+            !site_node(v, base),
+            entity_priority(v, base),
+            crate::event::page::owns_page(v, base),
+            crate::event::page::names_page(v, base).unwrap_or(vouched),
+        )
+    };
+    let mut best = values.first()?;
+    for value in values.iter().skip(1) {
+        if rank(value) > rank(best) {
+            best = value;
+        }
+    }
+    Some(best)
 }
 /// What the head says the page is about, from its page nodes (a `WebPage` naming the page or
 /// none): the nodes their main entity names (`node_key`: `{"@id": "#product"}`), or none for a
@@ -1372,24 +1430,9 @@ fn has_own_node(v: &Value, base: &Url) -> bool {
 /// come from such a node or one naming the page itself, never through a sibling's claims.
 fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url, claims: bool, vouched: bool) {
     if let Some(values) = v.as_array() {
-        // A page's article/event outranks its publisher or breadcrumb helper nodes, and among
-        // equals the page's own node (its url is the page) outranks another event it lists,
-        // and one naming no page, when vouched for, outranks one naming another page.
-        // Extract one entity so unrelated graph nodes cannot donate misleading fields.
-        let rank = |v: &Value| {
-            (
-                !site_node(v, base),
-                entity_priority(v, base),
-                crate::event::page::owns_page(v, base),
-                crate::event::page::names_page(v, base).unwrap_or(vouched),
-            )
-        };
-        if let Some(mut best) = values.first() {
-            for value in values.iter().skip(1) {
-                if rank(value) > rank(best) {
-                    best = value;
-                }
-            }
+        // Extract one entity (`best_node`) so unrelated graph nodes cannot donate misleading
+        // fields.
+        if let Some(best) = best_node(values, base, vouched) {
             apply_jsonld(doc, best, base, claims, vouched);
         }
         return;
