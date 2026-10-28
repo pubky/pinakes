@@ -916,44 +916,69 @@ async fn deleted_orphans_leave_their_neighbours_to_refill(pool: PgPool) {
     assert_eq!(left, 0, "the refills settled");
 }
 
-/// A database damaged before the fix (recordings whose lists the old trimming or a cascade
-/// emptied, with current fingerprints and no dirty row) is repaired by the upgrade's step: every
-/// recording with fewer than twenty pairs is marked to refill and queued, once.
+/// A database from before the caps and the refills (matching-4 and -5) is repaired by the
+/// upgrade's steps: lists the old pass left over the caps (it trimmed its own to twenty, but
+/// nothing bounded the namers of one recording) are cut to the best twenty and forty as the pass
+/// ranks them, and every recording with fewer than twenty pairs (its list emptied by the old cap
+/// or a cascade, or a pair cut now) is marked to refill and queued, once.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
-async fn the_upgrade_requeues_recordings_left_with_short_lists(pool: PgPool) {
+async fn the_upgrade_cuts_the_old_lists_and_requeues_recordings_left_with_short_lists(
+    pool: PgPool,
+) {
     let config = Config::default();
-    let ids = crowd(&pool, "Take Five", Some("PT5M24S"), 30).await;
+    let mut ids = crowd(&pool, "Take Five", Some("PT5M24S"), 50).await;
+    ids.sort();
     pass(&pool, &config).await;
     assert_eq!(spread(&pool, "resource_id").await, (20, 20));
-    // The damage: five recordings lose their lists, as the old cap trimmed them, and nothing marks them.
+    // The damage: the last five lose their lists, as the old cap trimmed them, and nothing marks
+    // them; the first is named by the 44 others and names them all back (the old pass had no cap
+    // on the namers). The first by id, so nothing cut from a list of twenty-one is its pair.
     sqlx::query("DELETE FROM same_recording WHERE resource_id=ANY($1)")
-        .bind(&ids[..5])
+        .bind(&ids[45..])
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::query(
+        "INSERT INTO same_recording(resource_id,other_id,score) \
+         SELECT o,$1,1 FROM unnest($2::text[]) AS t(o) UNION ALL SELECT $1,o,1 FROM unnest($2::text[]) AS t(o) \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(&ids[0])
+    .bind(&ids[1..45])
+    .execute(&pool)
+    .await
+    .unwrap();
     pass(&pool, &config).await;
     assert_eq!(
         without_a_hint(&pool, &ids).await.len(),
         5,
         "nothing queued them"
     );
-    // The upgrade's step (upgrade-matching-6.sql, upgrade-matching-4-to-6.sql).
-    sqlx::query("UPDATE same_recording_unit u SET fingerprint='refill:'||fingerprint WHERE fingerprint NOT LIKE 'refill:%' AND (SELECT count(*) FROM same_recording p WHERE p.resource_id=u.resource_id)<20")
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO same_recording_dirty(resource_id) SELECT resource_id FROM same_recording_unit WHERE fingerprint LIKE 'refill:%' ON CONFLICT DO NOTHING")
-        .execute(&pool)
-        .await
-        .unwrap();
-    let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM same_recording_dirty")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(queued, 5, "the five, not the full lists");
+    assert!(spread(&pool, "resource_id").await.0 >= 44);
+    assert_eq!(spread(&pool, "other_id").await.0, 44);
+    // The upgrade's steps (upgrade-matching-7.sql, upgrade-matching-4-to-7.sql).
+    for step in [
+        "DELETE FROM same_recording p USING (SELECT resource_id,other_id,row_number() OVER (PARTITION BY resource_id ORDER BY score DESC,other_id) AS n FROM same_recording) r WHERE p.resource_id=r.resource_id AND p.other_id=r.other_id AND r.n>20",
+        "DELETE FROM same_recording p USING (SELECT resource_id,other_id,row_number() OVER (PARTITION BY other_id ORDER BY score DESC,resource_id) AS n FROM same_recording) r WHERE p.resource_id=r.resource_id AND p.other_id=r.other_id AND r.n>40",
+        "UPDATE same_recording_unit u SET fingerprint='refill:'||fingerprint WHERE fingerprint NOT LIKE 'refill:%' AND (SELECT count(*) FROM same_recording p WHERE p.resource_id=u.resource_id)<20",
+        "INSERT INTO same_recording_dirty(resource_id) SELECT resource_id FROM same_recording_unit WHERE fingerprint LIKE 'refill:%' ON CONFLICT DO NOTHING",
+    ] {
+        sqlx::query(step).execute(&pool).await.unwrap();
+    }
+    assert_eq!(spread(&pool, "resource_id").await.0, 20, "cut to twenty");
+    assert_eq!(spread(&pool, "other_id").await.0, 40, "cut to forty");
+    let (queued, short): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM same_recording_dirty),\
+         (SELECT count(*) FROM same_recording_unit u WHERE (SELECT count(*) FROM same_recording p WHERE p.resource_id=u.resource_id)<20)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((queued, short), (9, 9), "the five, and the four namers cut");
     pass(&pool, &config).await;
     assert!(without_a_hint(&pool, &ids).await.is_empty());
     assert_eq!(spread(&pool, "resource_id").await, (20, 20));
+    assert!(spread(&pool, "other_id").await.0 <= 40);
 }
 
 /// A pass that pairs with an orphan's recording while the orphan is being deleted: the delete
