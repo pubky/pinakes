@@ -91,7 +91,7 @@ async fn forget_derived(tx: &mut Transaction<'_, Postgres>, ids: &[String]) -> R
     Ok(deleted)
 }
 /// Drop a gone social post's also-on mark, which the write of its card just set: it runs no
-/// lookups (`also_on`), so it is never queued.
+/// lookups (`also_on`). Reextract and a failed refresh queue it again; the worker then skips it.
 async fn unqueue_also_on(tx: &mut Transaction<'_, Postgres>, id: &str) -> Result<()> {
     sqlx::query("DELETE FROM also_on_dirty WHERE resource_id=$1")
         .bind(id)
