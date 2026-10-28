@@ -368,7 +368,7 @@ of a kind this build does not read (`unknown_kind`, a newer Nexus's) or one it c
 (`malformed`) is skipped without its content in any log, and only the page's envelope (`lines`,
 `next_cursor`) must be well formed. A bad line is skipped and counted in
 `pinakes_ingest_rejected_total{reason}` (`unknown_kind`, `malformed`, `author`, `label`,
-`object_path`, `uri`, `timestamp`, `social`, `panic`) after the batch commits; the cursor still advances
+`object_path`, `uri`, `timestamp`, `never_fetched`, `panic`) after the batch commits; the cursor still advances
 past it. Each line runs in a savepoint: a line whose processing panics is rolled back alone and skipped (`panic`; the log
 line names its feed position only, never its content). A panic anywhere else in a poll (the
 batch's score update or cursor write, say) is an error: the batch rolls back, the cursor holds,
@@ -384,8 +384,10 @@ Apps' posts come on the same feed as `post` lines: the line's `uri` is the post 
 versionless (`pubky://<author>/pub/<namespace>/v1/posts/{id}`), and its `object_path` the version
 file written (`…/{id}/{editId}.json`). The URI must be a post in its author's own storage (else
 `uri`) and the object path a version file directly in it (else `object_path`). Social events and
-rsvps are Nexus's (owner decision, 2026-10-26): Nexus indexes them, and a `post` line for a
-social specs' post (`/pub/social/…`) is rejected (`social`), queuing and fetching nothing. A post line is a reference of the post to itself, keyed by its version file like
+rsvps are Nexus's (owner decision, 2026-10-26): Nexus indexes them. A `post` line in a namespace
+Pinakes never fetches (`social`, `pubky.app`, and the old `mapky.app` and `eventky.app`, read
+decoded, so `%73ocial` is `social`) is rejected (`never_fetched`), creating no resource or
+reference and fetching nothing. A post line is a reference of the post to itself, keyed by its version file like
 any reference: it keeps the post's card alive and counts nowhere (scores, trending, reference
 filters). The post is queued as any `pubky://` object; a new version, or a deleted one, makes its
 card due at once whatever its TTL. The Pubky resolver lists the post's folder newest first and reads
